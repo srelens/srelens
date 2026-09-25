@@ -54,11 +54,14 @@
  * keystroke that built this list and the pick that runs one of its commands,
  * and the write must still reach the cluster the reader read this list on.
  */
-import { K8S_KIND } from "@srelens/core";
+import { K8S_KIND, appPaletteCommands, extensionClusterRoute, parseExtensionRoute, type PaletteApp } from "@srelens/core";
+import type { ExtensionActionRequest } from "../extensions/actionRequests";
 import { parseDetailRoute } from "./detailRoute";
 import { descriptorFor } from "./kinds/descriptors";
 
-export type CommandGroup = "Action" | "Go" | "Cluster" | "Workspace";
+/** `Apps` holds installed apps' page commands (#544): app-scoped screens, which
+ *  `Go` deliberately is not (see the module doc). */
+export type CommandGroup = "Action" | "Go" | "Apps" | "Cluster" | "Workspace";
 
 export interface Command {
   id: string;
@@ -120,6 +123,20 @@ export interface CommandDeps {
     context: string;
     as: "logs" | "shell" | "forward";
   }) => void;
+  /** The context key of the cluster in focus, which app routes carry (#544, #695). */
+  contextKey?: string;
+  /** The enabled apps allowed on a cluster, by its context key, named as the host names them. */
+  apps?: (contextKey: string) => readonly PaletteApp[];
+  /**
+   * The pinned ID the host is asked by for the context with this key, as an app resource tab
+   * asks it (#695); `undefined` when that context is not listed with one.
+   */
+  hostContext?: (contextKey: string) => string | undefined;
+  /**
+   * Asks the app resource tab at `route` for its own review of one declared
+   * action. Never the write: the inspector there owns the host confirmation.
+   */
+  openAppAction?: (a: { route: string; request: ExtensionActionRequest }) => void;
 }
 
 /**
@@ -282,8 +299,56 @@ function workspaceCommands(deps: CommandDeps): Command[] {
   ];
 }
 
+/**
+ * Installed apps' commands (#544), from `appPaletteCommands` in core — which is
+ * what names each one `<app>: <title>` and decides where an action applies.
+ *
+ * Page commands open on the cluster in focus, as the sidebar's Apps entries do.
+ * Action commands are offered only on an app resource tab, and read that
+ * resource's cluster from its ROUTE: the tab pins the cluster it was opened on,
+ * and the rail may have moved since. Running one asks that tab's inspector for
+ * its review; it is not `danger`, for the same reason `restart` is not — the
+ * review it lands on is where the danger is. Only a route that names its
+ * cluster by context key offers one: a legacy `/extensions/` route names it by
+ * display name, and one from before #695 by a stable ID two contexts can share.
+ */
+function appCommands(deps: CommandDeps): Command[] {
+  if (!deps.apps) return [];
+  const commands: Command[] = [];
+  if (deps.contextKey) {
+    const contextKey = deps.contextKey;
+    for (const app of deps.apps(contextKey)) {
+      for (const c of appPaletteCommands(app, null)) {
+        if (c.target.kind !== "page") continue;
+        const route = extensionClusterRoute(contextKey, app.id, c.target.page);
+        commands.push({ id: c.id, group: "Apps", label: c.label, hint: "app page",
+          run: () => deps.openTab(route, { clusterName: deps.context }) });
+      }
+    }
+  }
+  const open = parseExtensionRoute(deps.route);
+  const host = open?.contextKey ? deps.hostContext?.(open.contextKey) : undefined;
+  if (open?.contextKey && host && open.resourceName && deps.openAppAction) {
+    const { contextKey, id, page: pageId, namespace, resourceName: name } = open;
+    const app = deps.apps(contextKey).find((a) => a.id === id);
+    const page = app?.manifest.contributions.pages.find((p) => p.id === pageId);
+    if (app && page) {
+      for (const c of appPaletteCommands(app, { capability: page.capability })) {
+        if (c.target.kind !== "action") continue;
+        // Named as the resource tab asks the host, by pinned ID, so its review takes this request.
+        const request = { id, capability: page.capability, context: host, namespace, name, action: c.target.action };
+        const route = deps.route;
+        const openAppAction = deps.openAppAction;
+        commands.push({ id: c.id, group: "Action", label: c.label, hint: `${name} · review first`,
+          run: () => openAppAction({ route, request }) });
+      }
+    }
+  }
+  return commands;
+}
+
 export function commandsFor(deps: CommandDeps): readonly Command[] {
-  return [...resourceCommands(deps), ...clusterCommands(deps), ...workspaceCommands(deps)];
+  return [...resourceCommands(deps), ...appCommands(deps), ...clusterCommands(deps), ...workspaceCommands(deps)];
 }
 
 /** Case-insensitive substring match on the label — nothing else, so a match

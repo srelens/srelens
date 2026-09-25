@@ -1,5 +1,14 @@
 [
   {
+    "id": "extension.secretStore",
+    "readOnly": false,
+    "destructive": false,
+    "requiresConfirm": true,
+    "sensitive": true,
+    "impact": "medium",
+    "confirm": "Change a secret an app keeps in srelens's secrets vault[ ({action})]?"
+  },
+  {
     "id": "extensions.action",
     "readOnly": false,
     "destructive": false,
@@ -54,7 +63,52 @@
     "confirm": null
   },
   {
+    "id": "extensions.resolveCards",
+    "readOnly": true,
+    "destructive": false,
+    "requiresConfirm": false,
+    "sensitive": false,
+    "impact": "low",
+    "confirm": null
+  },
+  {
+    "id": "extensions.resolveColumns",
+    "readOnly": true,
+    "destructive": false,
+    "requiresConfirm": false,
+    "sensitive": false,
+    "impact": "low",
+    "confirm": null
+  },
+  {
+    "id": "extensions.resolveLinks",
+    "readOnly": true,
+    "destructive": false,
+    "requiresConfirm": false,
+    "sensitive": false,
+    "impact": "low",
+    "confirm": null
+  },
+  {
+    "id": "extensions.resolvePanels",
+    "readOnly": true,
+    "destructive": false,
+    "requiresConfirm": false,
+    "sensitive": false,
+    "impact": "low",
+    "confirm": null
+  },
+  {
     "id": "extensions.resource",
+    "readOnly": true,
+    "destructive": false,
+    "requiresConfirm": false,
+    "sensitive": false,
+    "impact": "low",
+    "confirm": null
+  },
+  {
+    "id": "extensions.streams",
     "readOnly": true,
     "destructive": false,
     "requiresConfirm": false,

@@ -2542,6 +2542,133 @@ fn item_names(list: &Value) -> Vec<&str> {
 /// against the fixture CRDs. Each payload is the one
 /// `packages/core/src/lib/extensions.ts` sends, spelled as it spells it, so a
 /// renamed field fails here instead of in the app (AGENTS.md).
+/// App streams (#565) against the live cluster: a `read` stream on the Flux
+/// app's Kustomization reader delivers the reader's rows, `extensions.streams`
+/// counts it, and closing the view ends it with `viewClosed`.
+///
+/// The host's handle comes from a second build over the same settings path:
+/// the streams are shared per inventory in a process, which is also what lets
+/// a lifecycle change made through any registry end them.
+async fn app_stream(h: &mut Harness, ctx: &str, settings: &TempSettings, flux_revision: u64) {
+    println!("=== extensions: app streams ===");
+    let (_, streams) = srelens_desktop_lib::capabilities::build_registry_and_app_streams(
+        cache(),
+        kubeconfig_paths(),
+        Some(settings.0.clone()),
+    );
+    let streams = streams.expect("a build with settings has app streams");
+    let sink = Arc::new(srelens_streams::test_util::TestSink::default());
+    let channel = "extstream:e2e-1";
+    let opened = streams
+        .open(
+            sink.clone(),
+            json!({
+                "id": "org.example.flux", "revision": flux_revision, "view": "e2e/page#1",
+                "channel": channel, "context": ctx, "namespace": NS,
+                "source": {"kind": "read", "capability": "kustomizations", "intervalSeconds": 5},
+            }),
+        )
+        .await
+        .expect("the stream opens");
+    let mut data = None;
+    for _ in 0..100 {
+        if let Some(frame) = sink.payloads_for(channel).into_iter().find(|f| f["type"] != "open") {
+            data = Some(frame);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let data = data.expect("a first frame within ten seconds");
+    assert_eq!(data["type"], "data", "the first tick must be data, not a failure: {data}");
+    assert!(
+        data["data"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["name"] == KUSTOMIZATION),
+        "{data}"
+    );
+    let metrics = h.ok("extensions.streams", json!({})).await;
+    let flux = metrics["apps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|app| app["app"] == "org.example.flux")
+        .unwrap_or_else(|| panic!("the harness registry sees the stream: {metrics}"))
+        .clone();
+    assert_eq!(flux["openStreams"], 1, "{metrics}");
+    assert_eq!(flux["streams"][0]["stream"], json!(opened.stream), "{metrics}");
+    assert_eq!(streams.close_view("e2e/page#1"), 1);
+    let last = sink.payloads_for(channel).pop().unwrap();
+    assert_eq!(last, json!({"type": "close", "stream": opened.stream, "reason": "viewClosed"}));
+}
+
+/// #566: a `watch` stream on the Flux app's Kustomization reader lists the
+/// kind, then reports a change to the fixture Kustomization — and nothing of
+/// the object itself. Run after the actions, whose reviews hold the object's
+/// `resourceVersion`: the annotation here moves it.
+async fn app_watch_stream(ctx: &str, settings: &TempSettings, flux_revision: u64) {
+    println!("=== extensions: watch stream ===");
+    let (_, streams) = srelens_desktop_lib::capabilities::build_registry_and_app_streams(
+        cache(),
+        kubeconfig_paths(),
+        Some(settings.0.clone()),
+    );
+    let streams = streams.expect("a build with settings has app streams");
+    let sink = Arc::new(srelens_streams::test_util::TestSink::default());
+    let channel = "extstream:e2e-watch";
+    let watch = streams
+        .open(
+            sink.clone(),
+            json!({
+                "id": "org.example.flux", "revision": flux_revision, "view": "e2e/page#2",
+                "channel": channel, "context": ctx, "namespace": NS,
+                "source": {"kind": "watch", "capability": "kustomizations"},
+            }),
+        )
+        .await
+        .expect("the watch opens");
+    let events = |sink: &srelens_streams::test_util::TestSink| -> Vec<Value> {
+        sink.payloads_for(channel)
+            .into_iter()
+            .filter(|f| f["type"] == "data")
+            .map(|f| f["data"].clone())
+            .collect()
+    };
+    let wait_for = |event: &'static str, count: usize| {
+        let sink = sink.clone();
+        async move {
+            for _ in 0..200 {
+                if events(&sink).iter().filter(|e| e["event"] == event).count() >= count {
+                    return;
+                }
+                assert!(
+                    !sink.payloads_for(channel).iter().any(|f| f["type"] == "error"),
+                    "the watch failed: {:?}",
+                    sink.payloads_for(channel)
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            panic!("no {event} within twenty seconds: {:?}", sink.payloads_for(channel));
+        }
+    };
+    wait_for("synced", 1).await;
+    let annotated = tokio::process::Command::new("kubectl")
+        .args(["--context", ctx, "-n", NS, "annotate", "--overwrite"])
+        .arg(format!("kustomizations.kustomize.toolkit.fluxcd.io/{KUSTOMIZATION}"))
+        .arg("srelens.io/e2e-watch=1")
+        .output()
+        .await
+        .expect("run kubectl");
+    assert!(annotated.status.success(), "{}", String::from_utf8_lossy(&annotated.stderr));
+    wait_for("changed", 1).await;
+    let wire = serde_json::to_string(&sink.payloads_for(channel)).unwrap();
+    assert!(!wire.contains(KUSTOMIZATION), "a watch frame names no object: {wire}");
+    assert_eq!(streams.close_view("e2e/page#2"), 1);
+    let last = sink.payloads_for(channel).pop().unwrap();
+    assert_eq!(last, json!({"type": "close", "stream": watch.stream, "reason": "viewClosed"}));
+}
+
 async fn extensions_and_gitops(h: &mut Harness, ctx: &str, settings: &TempSettings) {
     println!("=== extensions: validate, catalog, install ===");
     // As shipped, the examples carry reserved IDs. Unsigned, that is refused, and
@@ -2642,6 +2769,120 @@ async fn extensions_and_gitops(h: &mut Harness, ctx: &str, settings: &TempSettin
     }
     let revision = |app: &Value| app["revision"].as_u64().expect("revision");
 
+    // #543. This registry is built with no secret store (the desktop hands
+    // its vault to the GUI's): clearing is always allowed, and a set is
+    // refused — here because the app declares no secret setting — never kept
+    // anywhere else, and the refusal does not repeat the value.
+    println!("=== extensions: secret store ===");
+    let cleared = h
+        .ok("extension.secretStore", json!({"action": "clear", "id": "org.example.flux"}))
+        .await;
+    assert_eq!(cleared, json!({"set": false}), "{cleared}");
+    let err = h
+        .err(
+            "extension.secretStore",
+            json!({"action": "set", "id": "org.example.flux", "setting": "token", "secret": "e2e-secret-value"}),
+        )
+        .await;
+    // Absence first, with a message that prints nothing of the refusal; then
+    // the cause, which the refusal may be printed for once the value is known
+    // not to be in it.
+    assert!(!err.contains("e2e-secret-value"), "the refusal repeated the secret");
+    assert!(
+        err.contains("declares no secret setting"),
+        "refused for another reason than an undeclared secret setting: {err}"
+    );
+
+    // #568. A network.http app reaching a one-request HTTP server on this
+    // machine's loopback: the per-app switch as `@srelens/core` sends it, and the
+    // request through `extensions.read`, the one path that sends one.
+    println!("=== extensions: network.http ===");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+    let port = listener.local_addr().unwrap().port();
+    let served = std::thread::spawn(move || {
+        use std::io::{BufRead, BufReader, Write};
+        let (stream, _) = listener.accept().expect("accept");
+        let mut reader = BufReader::new(stream);
+        let mut request_line = String::new();
+        reader.read_line(&mut request_line).unwrap();
+        loop {
+            let mut header = String::new();
+            if reader.read_line(&mut header).unwrap() == 0 || header.trim().is_empty() {
+                break;
+            }
+        }
+        let body = r#"{"status":"success"}"#;
+        write!(
+            reader.get_mut(),
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+        request_line
+    });
+    let metrics = json!({
+        "id": "org.example.metrics", "name": "Metrics", "version": "0.1.0",
+        "srelensApiVersion": "^0.4", "kind": "declarative",
+        "permissions": [{"capability": "network.http", "hosts": ["${settings.prometheusUrl}"]}],
+        "settings": [{"id": "prometheusUrl", "type": "url", "title": "Prometheus URL", "required": true}],
+        "capabilities": [{"name": "up", "title": "Targets up", "target": "network.http", "inputs": [],
+            "arguments": {"url": "${settings.prometheusUrl}", "path": "/api/v1/query", "query": {"query": "up"}}}],
+        "contributions": {"pages": [], "detailTabs": [], "detailLinks": []}
+    });
+    h.ok(
+        "extensions.configure",
+        json!({"action": "install", "manifest": metrics.to_string(), "grants": ["network.http"]}),
+    )
+    .await;
+    h.ok(
+        "extensions.configure",
+        json!({"action": "settings", "id": "org.example.metrics",
+               "settings": {"prometheusUrl": format!("http://127.0.0.1:{port}")}}),
+    )
+    .await;
+    let listed = h.ok("extensions.list", json!({})).await;
+    let metrics_revision = listed["plugins"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["manifest"]["id"] == "org.example.metrics")
+        .and_then(|p| p["revision"].as_u64())
+        .unwrap_or_else(|| panic!("the metrics app is installed: {listed}"));
+    let request = json!({"id": "org.example.metrics", "revision": metrics_revision,
+                         "capability": "up", "context": ctx});
+    // Plain HTTP to this computer is off until a person turns it on for the app.
+    let err = h.err("extensions.read", request.clone()).await;
+    assert!(err.contains("Allow plain HTTP"), "{err}");
+    // The wrapper's camelCase is what the host reads; the Rust spelling is refused.
+    let snake = h
+        .err(
+            "extensions.configure",
+            json!({"action": "loopbackHttp", "id": "org.example.metrics", "allow_loopback_http": true}),
+        )
+        .await;
+    assert!(snake.contains("allow_loopback_http"), "{snake}");
+    h.ok(
+        "extensions.configure",
+        json!({"action": "loopbackHttp", "id": "org.example.metrics", "allowLoopbackHttp": true}),
+    )
+    .await;
+    let out = h.ok("extensions.read", request).await;
+    assert_eq!(
+        out,
+        json!({"status": 200, "contentType": "application/json", "body": {"status": "success"}}),
+        "{out}"
+    );
+    let request_line = served.join().expect("the server thread");
+    assert!(
+        request_line.starts_with("GET /api/v1/query?query=up "),
+        "{request_line}"
+    );
+    h.ok(
+        "extensions.configure",
+        json!({"action": "remove", "id": "org.example.metrics"}),
+    )
+    .await;
+
     println!("=== extensions: read ===");
     let out = h
         .ok(
@@ -2653,6 +2894,71 @@ async fn extensions_and_gitops(h: &mut Harness, ctx: &str, settings: &TempSettin
         )
         .await;
     assert!(item_names(&out).contains(&KUSTOMIZATION), "{out}");
+    let columns = h
+        .ok(
+            "extensions.resolveColumns",
+            json!({
+                "id": "org.example.flux", "revision": revision(&flux_app),
+                "context": ctx, "namespace": NS,
+                "kind": "kustomize.toolkit.fluxcd.io/Kustomization",
+                "uids": [{ "name": KUSTOMIZATION, "namespace": NS,
+                    "row": { "name": KUSTOMIZATION } }],
+            }),
+        )
+        .await;
+    assert_eq!(columns["columns"], json!([]), "{columns}");
+    assert_eq!(columns["cells"][0]["name"], KUSTOMIZATION, "{columns}");
+    // The dashboard card and its target page answer from one snapshot, so the
+    // page shows exactly as many rows as the card counted, whatever it counted.
+    let cards = h
+        .ok(
+            "extensions.resolveCards",
+            json!({
+                "id": "org.example.flux", "revision": revision(&flux_app),
+                "context": ctx, "namespaces": [NS],
+            }),
+        )
+        .await;
+    let suspended = cards["cards"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|card| card["id"] == "suspended-kustomizations")
+        .unwrap_or_else(|| panic!("the Flux example declares its card: {cards}"))
+        .clone();
+    assert_eq!(suspended["state"], "count", "{cards}");
+    // Counted by the example's own status resolver (#541): every object once.
+    let by_status = cards["cards"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|card| card["id"] == "kustomizations-by-status")
+        .unwrap_or_else(|| panic!("the Flux example declares its status card: {cards}"))
+        .clone();
+    assert_eq!(by_status["state"], "countByStatus", "{cards}");
+    let per_status: u64 = by_status["statuses"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["count"].as_u64().unwrap())
+        .sum();
+    assert_eq!(per_status, by_status["total"].as_u64().unwrap(), "{cards}");
+    assert!(by_status["total"].as_u64().unwrap() >= 1, "{cards}");
+    let counted = h
+        .ok(
+            "extensions.read",
+            json!({
+                "id": "org.example.flux", "revision": revision(&flux_app),
+                "capability": "kustomizations", "context": ctx, "namespace": NS,
+                "card": "suspended-kustomizations",
+            }),
+        )
+        .await;
+    assert_eq!(
+        counted["items"].as_array().unwrap().len() as u64,
+        suspended["count"].as_u64().unwrap(),
+        "{counted}"
+    );
     for app in [&argocd_app] {
         let out = h
             .ok(
@@ -2676,6 +2982,52 @@ async fn extensions_and_gitops(h: &mut Harness, ctx: &str, settings: &TempSettin
         detail["resource"]["metadata"]["name"], KUSTOMIZATION,
         "{detail}"
     );
+    let panels = h
+        .ok(
+            "extensions.resolvePanels",
+            json!({
+                "id": "org.example.flux", "revision": revision(&flux_app),
+                "context": ctx, "namespace": NS,
+                "kind": "kustomize.toolkit.fluxcd.io/Kustomization",
+                "resource": detail["resource"],
+            }),
+        )
+        .await;
+    assert_eq!(
+        panels["panels"][0]["id"], "kustomization-summary",
+        "{panels}"
+    );
+    assert_eq!(
+        panels["panels"][0]["sections"][0]["fields"][0]["label"],
+        "Source reference",
+        "{panels}"
+    );
+    // A Deployment Flux applied carries the Kustomization's name and
+    // namespace as labels; the link finds that Kustomization in the granted
+    // list (#545). The Deployment is the caller's, as the Inspector's is.
+    let links = h
+        .ok(
+            "extensions.resolveLinks",
+            json!({
+                "id": "org.example.flux", "revision": revision(&flux_app),
+                "context": ctx, "namespace": NS, "kind": "apps/Deployment",
+                "resource": {"apiVersion": "apps/v1", "kind": "Deployment",
+                    "metadata": {"name": "e2e-flux-managed", "namespace": NS, "labels": {
+                        "kustomize.toolkit.fluxcd.io/name": KUSTOMIZATION,
+                        "kustomize.toolkit.fluxcd.io/namespace": NS}}},
+            }),
+        )
+        .await;
+    let kustomization = links["links"]
+        .as_array()
+        .and_then(|links| links.iter().find(|link| link["id"] == "kustomization"))
+        .unwrap_or_else(|| panic!("no kustomization link: {links}"));
+    assert_eq!(
+        kustomization["targets"],
+        json!([{"namespace": NS, "name": KUSTOMIZATION, "exists": true}]),
+        "{links}"
+    );
+    app_stream(h, ctx, settings, revision(&flux_app)).await;
     assert_eq!(
         detail["actions"],
         json!(["kustomizations-suspend", "kustomizations-resume", "kustomizations-reconcile"]),
@@ -2902,6 +3254,8 @@ async fn extensions_and_gitops(h: &mut Harness, ctx: &str, settings: &TempSettin
     assert_eq!(issuing["status"], "True", "{issuing}");
     assert_eq!(issuing["reason"], "ManuallyTriggered", "{issuing}");
     assert!(issuing["lastTransitionTime"].is_string(), "{issuing}");
+
+    app_watch_stream(ctx, settings, revision(&flux_app)).await;
 
     println!("=== extensions: disable and remove ===");
     // A disabled app's views stop reading, and say why.

@@ -21,7 +21,7 @@ struct Action {
     resource_version: String,
 }
 async fn resolve(
-    path: PathBuf,
+    path: Store,
     core: Arc<Registry>,
     cache: Arc<srelens_kube::client_cache::ClientCache>,
     selection: Selection,
@@ -65,7 +65,7 @@ async fn resolve(
             .unwrap_or_default()
             .to_owned()
     };
-    let resource = ResourceIn {
+    let mut resource = ResourceIn {
         // The pinned ID of the context scope was checked as (see `request_context`).
         context: resolved
             .ok()
@@ -74,7 +74,12 @@ async fn resolve(
         namespace: selection.namespace,
         name: selection.name,
         group: field("group"),
-        version: field("version"),
+        // Chosen below, once the selection itself is known to be well formed.
+        version: binding
+            .accepted_versions()
+            .first()
+            .cloned()
+            .unwrap_or_default(),
         plural: field("plural"),
         kind: field("kind"),
         namespaced: binding.arguments["namespaced"] == true,
@@ -82,12 +87,23 @@ async fn resolve(
     resource.validate().map_err(CapabilityError::InvalidInput)?;
     // Before `k8s.getCustomResource` or a declared action sees it: a whole built-in object,
     // such as a Deployment with its environment, must not come back through an app (#601).
-    crd::require(&core, &resource.context, binding).await?;
-    Ok((resource, plugin.clone()))
+    // The object, the action's fresh read and its patch, and the preconditions and
+    // `availableWhen` paths all follow the version this cluster serves (#547).
+    let (manifest, version) = crd::resolved(
+        &core,
+        &resource.context,
+        &plugin.manifest,
+        &selection.capability,
+    )
+    .await?;
+    resource.version = version;
+    let mut plugin = plugin.clone();
+    plugin.manifest = manifest;
+    Ok((resource, plugin))
 }
 pub(super) fn register(
     reg: &mut Registry,
-    path: PathBuf,
+    path: Store,
     core: Arc<Registry>,
     cache: Arc<srelens_kube::client_cache::ClientCache>,
 ) {
@@ -130,7 +146,8 @@ pub(super) fn register(
             }
             let id = format!("plugin/{}/{}", plugin.manifest.id, input.action);
             let mut registry = Registry::new();
-            let _registration = PluginHost::new(c).register(&mut registry, plugin.manifest, &plugin.grants).map_err(CapabilityError::Handler)?;
+            // The settings as saved now, read with the app above (#542).
+            let _registration = PluginHost::new(c).register_with_settings(&mut registry, plugin.manifest, &plugin.grants, &plugin.settings).map_err(CapabilityError::Handler)?;
             registry.invoke(&id, json!({"context":resource.context,"namespace":resource.namespace,"name":resource.name,"uid":input.uid,"resourceVersion":input.resource_version})).await
         }
     }));
@@ -150,7 +167,7 @@ mod tests {
         let mut payload = payload;
         payload["capability"] = json!(state.plugins[0].manifest.capabilities[0].name);
         let resolved = resolve(
-            path.clone(),
+            Arc::new(path.clone()),
             core.clone(),
             srelens_kube::client_cache::ClientCache::new_many(vec![]),
             serde_json::from_value(payload.clone()).unwrap(),
@@ -173,7 +190,7 @@ mod tests {
         )
         .unwrap();
         assert!(resolve(
-            path,
+            Arc::new(path),
             core,
             srelens_kube::client_cache::ClientCache::new_many(vec![]),
             serde_json::from_value(payload).unwrap()
@@ -193,7 +210,7 @@ mod tests {
             .clone();
         let selection = json!({"id":"org.example.argocd","revision":revision,"capability":binding,"context":"default","namespace":"team","name":"app"});
         let resolved = resolve(
-            path,
+            Arc::new(path),
             core,
             srelens_kube::client_cache::ClientCache::new_many(vec![config.clone()]),
             serde_json::from_value(selection).unwrap(),
@@ -235,6 +252,7 @@ mod tests {
                 signature: None,
                 manifest: source.to_string(),
                 grants: vec!["k8s.listCustomResource".into()],
+                reviewed_revision: None,
             },
         )
         .unwrap();
@@ -243,7 +261,7 @@ mod tests {
         let mut reg = Registry::new();
         register(
             &mut reg,
-            path.clone(),
+            Arc::new(path.clone()),
             core.clone(),
             srelens_kube::client_cache::ClientCache::new_many(vec![]),
         );
@@ -314,6 +332,7 @@ mod tests {
                     "k8s.annotate".into(),
                     "k8s.mergePatch".into(),
                 ],
+                reviewed_revision: None,
             },
         )
         .unwrap();
@@ -324,7 +343,7 @@ mod tests {
         let mut reg = Registry::new();
         register(
             &mut reg,
-            path.clone(),
+            Arc::new(path.clone()),
             core.clone(),
             srelens_kube::client_cache::ClientCache::new_many(vec![]),
         );
@@ -370,7 +389,7 @@ mod tests {
         )
         .unwrap();
         assert!(resolve(
-            path,
+            Arc::new(path),
             core,
             srelens_kube::client_cache::ClientCache::new_many(vec![]),
             serde_json::from_value(selected).unwrap()
@@ -400,7 +419,7 @@ mod migration_tests {
                 "{} must declare its actions",
                 manifest.id
             );
-            validate_app(&manifest, &manifest.permissions, core.clone()).unwrap();
+            validate_app(&manifest, &manifest.permission_names(), core.clone()).unwrap();
             assert!(
                 validate_app(&manifest, &["k8s.listCustomResource".into()], core.clone()).is_err()
             );
@@ -423,7 +442,7 @@ mod migration_tests {
         let mut reg = Registry::new();
         register(
             &mut reg,
-            path,
+            Arc::new(path),
             core,
             srelens_kube::client_cache::ClientCache::new_many(vec![]),
         );
@@ -482,9 +501,14 @@ mod declaration_tests {
                     serde_json::to_value(&action.preconditions).unwrap(),
                     serde_json::to_value(&action.available_when).unwrap()
                 );
-                let binding = flux.action_binding(action).unwrap();
-                for field in ["group", "version", "plural", "kind", "namespaced"] {
-                    assert_eq!(binding.arguments[field], reader.arguments[field]);
+                // An action binds the version its reader resolved to, whichever it is.
+                for version in reader.accepted_versions() {
+                    let at = flux.at_version(&reader.name, &version).unwrap();
+                    let binding = at.action_binding(action).unwrap();
+                    assert_eq!(binding.arguments["version"], version.as_str());
+                    for field in ["group", "plural", "kind", "namespaced"] {
+                        assert_eq!(binding.arguments[field], reader.arguments[field]);
+                    }
                 }
                 match verb {
                     "suspend" | "resume" => assert_eq!(

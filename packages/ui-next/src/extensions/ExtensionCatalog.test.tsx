@@ -60,3 +60,19 @@ it("passes the backend-verified signature into installation review",async()=>{
  fireEvent.click(await screen.findByText("Review installation"));
  await waitFor(()=>expect(review).toHaveBeenCalledWith('{"name":"Flux","permissions":[]}',[1,2,3]));
 });
+
+/** On the web the catalog is the server's shared copy (#515): a Refresh there reads it, never fetches. */
+it("says on the web that the server keeps and fetches the one shared catalog", async () => {
+  const shared = /one catalog for everyone who signs in/;
+  render(<ExtensionCatalog onReview={vi.fn()} installed={[]} autoLoad />);
+  expect(await screen.findByText(shared)).toBeTruthy();
+  (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__ = {};
+  try {
+    const { unmount } = render(<ExtensionCatalog onReview={vi.fn()} installed={[]} autoLoad />);
+    await waitFor(() => expect(screen.getAllByText("Flux")).toHaveLength(2));
+    expect(screen.getAllByText(shared)).toHaveLength(1);
+    unmount();
+  } finally {
+    delete (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__;
+  }
+});

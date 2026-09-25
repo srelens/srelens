@@ -1,4 +1,5 @@
 import { ExtensionDetails } from "./ExtensionDetails";
+import { ExtensionSettingsForm } from "./ExtensionSettingsForm";
 import { ExtensionBindings, ReviewManifest } from "./ExtensionBindings";
 import { plainText } from "./displayText";
 import { ExtensionRequirements } from "./ExtensionRequirements";
@@ -6,13 +7,17 @@ import { refreshContextIds, useContextLookup } from "./contextIds";
 import { ExtensionLogo } from "./ExtensionLogo";
 import { useContext, useRef, useState } from "react";
 import {
+  clearExtensionSecret,
   configureExtensions,
   contributionKind,
+  setExtensionSecret,
   extensionEnabledFor,
   isTauri,
+  permissionName,
   validateExtension,
   type ExtensionChange,
   type ExtensionValidationError,
+  type ExtensionPermissionDiff,
   type InstalledExtension,
 } from "@srelens/core";
 
@@ -51,6 +56,7 @@ export function ExtensionManager() {
     id: number;
     /** Undefined while the host is still checking the manifest. */
     errors?: ExtensionValidationError[];
+    permissionDiff?: ExtensionPermissionDiff;
     /** Why the check itself failed, as opposed to the problems it found. */
     checkError?: string;
     /**
@@ -60,9 +66,22 @@ export function ExtensionManager() {
     request: object;
   } | null>(null);
   const reviews = useRef(0);
-  const [settings, setSettings] = useState<{ id: string; text: string } | null>(
-    null,
-  );
+  /** The ID of the app whose settings form is open. */
+  const [settingsFor, setSettingsFor] = useState<string | null>(null);
+  /** Saves through the host, which checks every value; rejects with its reason (#542). */
+  async function saveSettings(id: string, settings: Record<string, unknown>) {
+    await configureExtensions({ action: "settings", id, settings });
+    inventory.reload();
+  }
+  /** Keeps a secret in the host's store (#543); the host answers only whether it is set. */
+  async function setSecret(id: string, setting: string, secret: string) {
+    await setExtensionSecret(id, setting, secret);
+    inventory.reload();
+  }
+  async function clearSecret(id: string, setting: string) {
+    await clearExtensionSecret(id, setting);
+    inventory.reload();
+  }
   async function change(action: ExtensionChange) {
     setBusy(true);
     setError("");
@@ -93,10 +112,10 @@ export function ExtensionManager() {
     } catch {
       // The host reports invalid JSON with a code and path, like any other problem.
     }
-    const permissions =
-      Array.isArray(parsed.permissions) && parsed.permissions.every((p) => typeof p === "string")
-        ? (parsed.permissions as string[])
-        : [];
+    // What an install grants: each entry's capability, `network.http` included (#568),
+    // whose hosts the review shows and the host diffs.
+    const names = Array.isArray(parsed.permissions) ? parsed.permissions.map(permissionName) : [];
+    const permissions = names.every((name) => name !== undefined) ? (names as string[]) : [];
     const name = typeof parsed.name === "string" ? parsed.name : "This manifest";
     const request = {};
     setError("");
@@ -111,8 +130,8 @@ export function ExtensionManager() {
       text,
     });
     try {
-      const { errors } = await validateExtension(manifest, permissions, signature);
-      setReview((current) => (current?.request === request ? { ...current, errors } : current));
+      const { errors, permissionDiff } = await validateExtension(manifest, permissions, signature);
+      setReview((current) => (current?.request === request ? { ...current, errors, permissionDiff } : current));
     } catch (e) {
       // The check did not run, which says nothing about the manifest: keep the review
       // open with the reason and a retry, and do not offer to install.
@@ -120,12 +139,6 @@ export function ExtensionManager() {
       setReview((current) => (current?.request === request ? { ...current, checkError } : current));
     }
   }
-  if (!isTauri())
-    return (
-      <p className="extension-message">
-        Local apps are available in the desktop app.
-      </p>
-    );
   if (inventory.status === "loading")
     return (
       <p role="status" className="extension-message">
@@ -143,6 +156,16 @@ export function ExtensionManager() {
           Refresh
         </Button>
       </div>
+      {!isTauri() && (
+        <p className="extension-message">
+          The apps you install here are yours: everyone who signs in to this server has their own.
+        </p>
+      )}
+      {inventory.updates?.mode === "polling" && (
+        <p role="status" className="extension-message">
+          Live updates to this list are unavailable ({inventory.updates.reason}); a change made elsewhere shows within five seconds.
+        </p>
+      )}
       <div className="extension-install">
         <label>
           <input type="checkbox" checked={state.allowUnsignedApps ?? false} disabled={busy}
@@ -170,9 +193,7 @@ export function ExtensionManager() {
                   then either. */}
               {review.errors?.length === 0 ? (
                 <>
-                  <strong>{plainText(review.name)}</strong> ({review.signature ? "Signature verified · srelens" : "Unsigned manifest"}) requests:{" "}
-                  {review.permissions.map(plainText).join(", ") || "no permissions"}. Installing an existing ID
-                  replaces its manifest and refreshes its open pages.
+                  <strong>{plainText(review.name)}</strong> ({review.signature ? "Signature verified · srelens" : "Unsigned manifest"}) {!review.permissionDiff ? "could not have its access changes compared" : review.permissionDiff.previousRevision == null ? "requests a new installation" : "updates the installed app"}.
                 </>
               ) : (
                 <>
@@ -181,11 +202,32 @@ export function ExtensionManager() {
                 </>
               )}
             </p>
-            {/* What each permission covers, under the same rule as the name: drawn only once
-                the host has accepted the manifest. The full text can be read at any time,
-                with its invisible characters escaped. */}
-            {review.errors?.length === 0 && (
-              <ExtensionBindings manifest={review.manifest} permissions={review.permissions} />
+            {review.errors?.length === 0 && review.permissionDiff && (
+              <div aria-label="Access changes" className="extension-access-diff">
+                <strong>{review.permissionDiff.previousRevision == null ? "Requested access" : "Access changes"}</strong>
+                <ul aria-label="Added access">
+                  {review.permissionDiff.added.map((entry) => <li key={entry}>Added: {plainText(entry)}</li>)}
+                </ul>
+                {review.permissionDiff.removed.length > 0 && <ul aria-label="Removed access">
+                  {review.permissionDiff.removed.map((entry) => <li key={entry}>Removed: {plainText(entry)}</li>)}
+                </ul>}
+                {review.permissionDiff.unchanged.length > 0 && <details>
+                  <summary>{review.permissionDiff.unchanged.length} unchanged access item{review.permissionDiff.unchanged.length === 1 ? "" : "s"}</summary>
+                  <ul>{review.permissionDiff.unchanged.map((entry) => <li key={entry}>{plainText(entry)}</li>)}</ul>
+                </details>}
+              </div>
+            )}
+            {/* The incoming bindings follow the change summary, so an update's
+                new and removed access is visible before the full permission list. */}
+            {review.errors?.length === 0 && review.permissionDiff && (
+              review.permissionDiff.previousRevision == null ? (
+                <ExtensionBindings manifest={review.manifest} permissions={review.permissions} />
+              ) : (
+                <details>
+                  <summary>Complete incoming bindings</summary>
+                  <ExtensionBindings manifest={review.manifest} permissions={review.permissions} />
+                </details>
+              )
             )}
             <ReviewManifest key={review.id} text={review.text} />
             {review.checkError ? (
@@ -210,6 +252,8 @@ export function ExtensionManager() {
                   ))}
                 </ul>
               </div>
+            ) : !review.permissionDiff ? (
+              <ErrorNotice title="Could not review access changes" message="The host did not return an access comparison. Review this manifest again." retry={() => void reviewManifest(review.source, review.signature)} />
             ) : (
               <Button
                 disabled={busy}
@@ -219,10 +263,11 @@ export function ExtensionManager() {
                     manifest: review.source,
                     ...(review.signature ? {signature: review.signature} : {}),
                     grants: review.permissions,
+                    ...(review.permissionDiff?.previousRevision == null ? {} : { reviewedRevision: review.permissionDiff.previousRevision }),
                   })
                 }
               >
-                Install and grant permissions
+                {review.permissionDiff.previousRevision == null ? "Install and grant permissions" : "Update and grant permissions"}
               </Button>
             )}
             <Button variant="secondary" onClick={() => setReview(null)}>
@@ -299,12 +344,9 @@ export function ExtensionManager() {
             <Button
               variant="secondary"
               disabled={busy}
-              onClick={() =>
-                setSettings({
-                  id: plugin.manifest.id,
-                  text: JSON.stringify(plugin.settings, null, 2),
-                })
-              }
+              aria-label={`Settings for ${label(plugin)}`}
+              aria-expanded={settingsFor === plugin.manifest.id}
+              onClick={() => setSettingsFor(settingsFor === plugin.manifest.id ? null : plugin.manifest.id)}
             >
               Settings
             </Button>
@@ -330,6 +372,20 @@ export function ExtensionManager() {
               Disabled: {plugin.quarantined}. Remove it or reinstall it from the Catalog.
             </p>
           )}
+          {settingsFor === plugin.manifest.id && (
+            <ExtensionSettingsForm
+              // Keyed by what it draws, not by revision: a save rolls the revision
+              // too, and remounting then would drop "Settings saved." An update
+              // that declares other settings starts again from what it kept.
+              key={JSON.stringify(plugin.manifest.settings ?? [])}
+              plugin={plugin}
+              secretStore={state.secretStore}
+              onSave={(settings) => saveSettings(plugin.manifest.id, settings)}
+              onSetSecret={(setting, secret) => setSecret(plugin.manifest.id, setting, secret)}
+              onClearSecret={(setting) => clearSecret(plugin.manifest.id, setting)}
+              onClose={() => setSettingsFor(null)}
+            />
+          )}
           {details === plugin.manifest.id && (
             <ExtensionDetails plugin={plugin} busy={busy} change={change} onError={setError} />
           )}
@@ -338,44 +394,14 @@ export function ExtensionManager() {
       {removing && (
         <section className="extension-install" role="alertdialog" aria-label="Remove app" onKeyDown={e=>{if(e.key==="Escape" && !busy)setRemoving(null);}}>
           <strong>Remove {label(removing)}?</strong>
-          <p>This removes the app and its saved settings.</p>
+          <p>
+            This removes the app and its saved settings
+            {(removing.manifest.settings ?? []).some((setting) => setting.type === "secret-reference")
+              ? ", and deletes its secrets from srelens's secrets vault."
+              : "."}
+          </p>
           <Button variant="secondary" autoFocus disabled={busy} onClick={()=>setRemoving(null)}>Cancel</Button>
           <Button variant="danger" disabled={busy} onClick={()=>{void change({action:"remove",id:removing.manifest.id}).then(removed=>{if(removed)setRemoving(null);});}}>Remove app</Button>
-        </section>
-      )}
-      {settings && (
-        <section className="extension-install">
-          <label htmlFor="extension-settings">
-            App settings (JSON object)
-          </label>
-          <textarea
-            id="extension-settings"
-            rows={4}
-            value={settings.text}
-            onChange={(e) => setSettings({ ...settings, text: e.target.value })}
-          />
-          <Button
-            disabled={busy}
-            onClick={() => {
-              try {
-                const value = JSON.parse(settings.text);
-                if (!value || Array.isArray(value) || typeof value !== "object")
-                  throw new Error("Settings must be a JSON object");
-                void change({
-                  action: "settings",
-                  id: settings.id,
-                  settings: value,
-                });
-              } catch (e) {
-                setError(e instanceof Error ? e.message : String(e));
-              }
-            }}
-          >
-            Save settings
-          </Button>
-          <Button variant="secondary" onClick={() => setSettings(null)}>
-            Close
-          </Button>
         </section>
       )}
       </div>

@@ -11,3 +11,5 @@
 # Signed release bytes. Tests verify a published Ed25519 signature over this exact
 # file, so its line endings must never be converted on checkout.
 crates/registry/tests/fixtures/argocd-manifest.json -text
+crates/registry/tests/fixtures/argocd-0.3.0-manifest.json -text
+crates/registry/tests/fixtures/flux-0.4.0-manifest.json -text

@@ -1004,6 +1004,13 @@ macro_rules! primitive {
     }};
 }
 
+/// The setting types a free-text argument takes (#542): text a person typed
+/// or picked from the app's options. A secret is never among them.
+const TEXT_SETTINGS: &[srelens_capability::settings::SettingType] = &[
+    srelens_capability::settings::SettingType::String,
+    srelens_capability::settings::SettingType::Select,
+];
+
 /// Every host action primitive, in [`PRIMITIVES`] order.
 pub fn capabilities(cache: Arc<ClientCache>) -> Vec<Capability> {
     vec![
@@ -1013,7 +1020,12 @@ pub fn capabilities(cache: Arc<ClientCache>) -> Vec<Capability> {
             AnnotateIn,
             annotate,
             cache.clone()
-        ),
+        )
+        // What is written may come from an app setting (#542), such as Argo
+        // CD's refresh mode; where it is written — the key, the object —
+        // stays the reviewed access. The value is held to `resolve_value` on
+        // save and on every request, as a literal is.
+        .with_settable("value", TEXT_SETTINGS, json!("setting")),
         primitive!(
             SET_FIELDS,
             "Set fixed spec fields on the reviewed resource, as an app's action declares them; requires confirmation",
@@ -1027,7 +1039,10 @@ pub fn capabilities(cache: Arc<ClientCache>) -> Vec<Capability> {
             SetStatusConditionIn,
             set_status_condition,
             cache.clone()
-        ),
+        )
+        // The human-readable message only; the condition's type, status and
+        // reason are what controllers act on and stay fixed (#542).
+        .with_settable("message", TEXT_SETTINGS, json!("setting")),
         primitive!(
             MERGE_PATCH,
             "Send the fixed merge patch an app's action declares, past the host deny-list, to the reviewed resource; requires confirmation",
@@ -1145,6 +1160,10 @@ mod tests {
                         let mut input = action["arguments"].clone();
                         for field in ["group", "version", "plural", "kind", "namespaced"] {
                             input[field] = reader["arguments"][field].clone();
+                        }
+                        // A reader listing versions (#547) is bound to one per cluster.
+                        if let Some(preferred) = reader["versions"].get(0) {
+                            input["version"] = preferred.clone();
                         }
                         merge(
                             &mut input,
@@ -1907,6 +1926,44 @@ mod tests {
         }
     }
 
+    /// #542: a setting may fill only an annotation's value and a condition's
+    /// message, each from a string or select setting. Every other argument
+    /// fixes what or where the write goes, which is the reviewed access, so
+    /// no setting may move it. Each stand-in passes the primitive's own rule,
+    /// so a binding is checked around it at install.
+    #[test]
+    fn only_an_annotation_value_and_a_condition_message_take_a_setting() {
+        use srelens_capability::settings::SettingType;
+        let caps = capabilities(ClientCache::new(std::path::PathBuf::from("/dev/null")));
+        let text = vec![SettingType::String, SettingType::Select];
+        for cap in &caps {
+            let marked: Vec<(&str, &Vec<SettingType>)> = cap
+                .settable
+                .iter()
+                .map(|position| (position.argument.as_str(), &position.accepts))
+                .collect();
+            let expected: Vec<(&str, &Vec<SettingType>)> = match cap.id.as_str() {
+                ANNOTATE => vec![("value", &text)],
+                SET_STATUS_CONDITION => vec![("message", &text)],
+                _ => vec![],
+            };
+            assert_eq!(marked, expected, "{}", cap.id);
+        }
+        let check = |id: &str, mut binding: Value| {
+            let cap = caps.iter().find(|c| c.id == id).unwrap();
+            for position in &cap.settable {
+                binding[&position.argument] = position.stand_in.clone();
+            }
+            (cap.bound_arguments.as_ref().unwrap())(binding.as_object().unwrap())
+        };
+        check(ANNOTATE, json!({"key": "a.io/b"})).expect("the stand-in is a value annotate takes");
+        check(
+            SET_STATUS_CONDITION,
+            json!({"conditionType": "Issuing", "conditionStatus": "True", "reason": "ManuallyTriggered"}),
+        )
+        .expect("the stand-in is a message setStatusCondition takes");
+    }
+
     #[tokio::test]
     async fn a_primitive_refuses_a_binding_its_own_rules_reject_before_any_request() {
         let caps = capabilities(ClientCache::new(std::path::PathBuf::from("/dev/null")));
@@ -2067,8 +2124,10 @@ mod tests {
     async fn a_predicate_the_host_cannot_evaluate_never_reaches_the_cluster() {
         let (client, requests) = mock(object(json!({})));
         let mut input = reconcile();
+        // `[?(@.type=='Ready')]` is the one filter form the host evaluates
+        // (#541); any other filter addresses a set of values and is refused.
         input["preconditions"] = json!([{
-            "jsonPath": ".status.conditions[?(@.type=='Ready')].status",
+            "jsonPath": ".status.conditions[?(@.type!='Ready')].status",
             "equals": "True", "reason": "Wait for readiness"
         }]);
         let refused = annotate(client, annotate_in(input))

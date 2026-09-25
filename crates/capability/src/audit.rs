@@ -183,6 +183,43 @@ pub fn describe_target(args: &Value) -> (Option<AppRef>, Option<String>, Option<
     (app, cluster, resource)
 }
 
+/// An install manifest is opaque in `args`, but a checked app ID still makes
+/// its audit record useful. Keep it in `resource`: an `AppRef` needs the new
+/// installed revision, which the install request does not carry.
+pub fn describe_call_target(
+    tool: &str,
+    original: &Value,
+    redacted: &Value,
+) -> (Option<AppRef>, Option<String>, Option<String>) {
+    let (app, cluster, resource) = describe_target(redacted);
+    let install_id = if tool == "extensions.configure" && original["action"] == "install" {
+        original["manifest"]
+            .as_str()
+            .and_then(|text| serde_json::from_str::<Value>(text).ok())
+            .and_then(|manifest| manifest["id"].as_str().map(str::to_owned))
+            .filter(|id| {
+                id.len() <= 128
+                    && id.contains('.')
+                    && id.split('.').all(|segment| {
+                        !segment.is_empty()
+                            && segment.len() <= 64
+                            && segment
+                                .bytes()
+                                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                    })
+            })
+    } else {
+        None
+    };
+    // For an install, the checked manifest ID is authoritative. A caller may
+    // attach an unrelated top-level `name` to the request; it is not the app.
+    if tool == "extensions.configure" && original["action"] == "install" {
+        (app, cluster, install_id)
+    } else {
+        (app, cluster, resource)
+    }
+}
+
 /// Redact argument VALUES while keeping keys, so an operator can see the shape
 /// of a call without its secrets. Sensitive-annotated tools redact everything;
 /// otherwise a value goes only if its key names a credential, holds a
@@ -197,14 +234,15 @@ pub fn redact(args: &Value, sensitive: bool) -> Value {
     /// secret material with no credential-shaped key inside it to catch:
     /// `data`/`stringData` on a Secret write (`k8s.updateConfigData` — a
     /// Secret's own keys are things like `username` and `ca.crt`), `yaml` on
-    /// `k8s.applyManifest` (one opaque string holding a whole manifest), and
+    /// `k8s.applyManifest` and `manifest` on `extensions.configure` (opaque
+    /// strings holding whole manifests), and
     /// `values` on the helm install/upgrade/template capabilities (user YAML
     /// that routinely holds registry credentials and database passwords).
     ///
     /// Matched EXACTLY, not as substrings, so `metadata` stays readable — the
     /// point is to keep the shape of a call auditable while dropping the part
     /// that carries secrets.
-    const PAYLOAD_FIELDS: [&str; 4] = ["data", "stringdata", "yaml", "values"];
+    const PAYLOAD_FIELDS: [&str; 5] = ["data", "stringdata", "yaml", "values", "manifest"];
     /// Fields holding a map of caller-chosen names to caller-chosen values,
     /// where the NAMES are the auditable shape and every VALUE is treated as a
     /// secret: `settings` on `extensions.configure` (#605). An app's settings
@@ -456,16 +494,40 @@ pub fn redact_error(error: &str, args: &Value, redacted: &Value) -> String {
         patterns.push(value);
     }
 
+    // A value longer than the message cannot occur in it, so it is never
+    // compiled: a 4 MiB argument behind a one-line refusal costs nothing.
+    patterns.retain(|pattern| pattern.len() <= error.len());
+    if patterns.is_empty() {
+        return error.to_string();
+    }
     patterns.sort_by_key(|s| std::cmp::Reverse(s.len()));
     patterns.dedup();
 
     // A matcher that will not build drops the message rather than passing it
     // through — see `scrub_or_drop`, which takes the `Result` so that policy
     // has a test.
+    //
+    // An NFA, named rather than left to the builder (#543): for a few
+    // patterns the builder picks a DFA, whose construction grew with the
+    // square of one long pattern's length — 80 s in a debug build for a
+    // single 16 KiB secret. A contiguous NFA builds in time linear in the
+    // patterns' total length and scans an error message of a few hundred
+    // bytes no slower that matters.
     let built = aho_corasick::AhoCorasick::builder()
         .match_kind(aho_corasick::MatchKind::LeftmostFirst)
+        .kind(Some(aho_corasick::AhoCorasickKind::ContiguousNFA))
         .build(&patterns);
     scrub_or_drop(built, error, &patterns)
+}
+
+/// An install error can echo any substring of an opaque manifest, including
+/// values inside malformed JSON. The audit cannot prove such text is clean, so
+/// keep the result and target but omit the caller-derived error details.
+pub fn redact_call_error(tool: &str, error: &str, args: &Value, redacted: &Value) -> String {
+    if tool == "extensions.configure" && args.get("manifest").is_some() {
+        return "App install failed; details omitted from audit".into();
+    }
+    redact_error(error, args, redacted)
 }
 
 /// Replace every pattern in `error`, or drop the message if the matcher
@@ -1167,6 +1229,32 @@ mod tests {
         );
     }
 
+    #[test]
+    fn redacts_opaque_extension_manifest_text_before_any_audit_sink_sees_it() {
+        let args = json!({
+            "action": "install",
+            "manifest": "{\"credential\":\"hunter2\"}",
+            "grants": ["k8s.listCustomResource"]
+        });
+        let out = redact(&args, false);
+        assert_eq!(out["action"], "install");
+        assert_eq!(out["manifest"], REDACTED);
+        assert!(!out.to_string().contains("hunter2"));
+    }
+
+    #[test]
+    fn install_audit_target_accepts_only_a_manifest_id_with_valid_syntax() {
+        for (id, expected) in [
+            ("org.example.app", Some("org.example.app")),
+            ("org.example..app", None),
+            ("org.example.app\nforged", None),
+        ] {
+            let args = json!({"action":"install","name":"spoofed","manifest":json!({"id":id}).to_string()});
+            let (_, _, resource) = describe_call_target("extensions.configure", &args, &redact(&args, false));
+            assert_eq!(resource.as_deref(), expected);
+        }
+    }
+
     /// A denied call is audited before its arguments are ever deserialized, so
     /// `settings` need not be the object the capability's schema demands. A
     /// scalar or array there is blanked whole rather than walked, where the
@@ -1264,9 +1352,51 @@ mod tests {
         );
     }
 
-    /// The other `extensions.configure` actions carry no settings, and their
-    /// audit shape is unchanged: an operator can still read which app was
-    /// installed with which grants, enabled, or limited to which clusters.
+    /// #543. The same scrub, over ONE long value rather than many short ones.
+    /// `extension.secretStore` takes a secret of up to 16 KiB, and a refusal
+    /// may echo it; the automaton was built as a DFA whose cost grew with the
+    /// square of a pattern's length — 35 s in a debug build, 1.6 s in release,
+    /// for one 16 KiB value, on every audited error that carried one.
+    #[test]
+    fn redact_error_stays_near_linear_in_the_length_of_one_value() {
+        let secret = "s".repeat(16 * 1024);
+        let args = json!({ "action": "set", "id": "org.example.app", "secret": secret });
+        let redacted = redact(&args, true);
+        let error = format!("invalid value: string \"{secret}\", expected a token");
+
+        let started = std::time::Instant::now();
+        let out = redact_error(&error, &args, &redacted);
+        let took = started.elapsed();
+
+        // Facts only in the messages: were the scrub to miss, the message
+        // would otherwise print the value it failed to hide.
+        let (leaked, marked) = (out.contains(&secret), out.contains("<redacted>"));
+        drop(out);
+        assert!(!leaked, "the value leaked");
+        assert!(marked, "the scrub did not mark where the value was");
+        assert!(
+            took < std::time::Duration::from_secs(2),
+            "scrubbing one 16 KiB value took {took:?}; the build is not linear in its length"
+        );
+    }
+
+    /// A value longer than the message cannot appear in it, so it is not
+    /// compiled into the scrub at all: one value as large as an MCP request
+    /// (4 MiB) behind a short refusal costs nothing to record. Even as an
+    /// NFA, building it took over 2 s in a debug build under a parallel suite.
+    #[test]
+    fn a_value_longer_than_the_message_costs_nothing_to_scrub() {
+        let args = json!({ "secret": "x".repeat(4 * 1024 * 1024), "id": "org.example.app" });
+        let redacted = redact(&args, true);
+        let started = std::time::Instant::now();
+        let out = redact_error("the vault is locked", &args, &redacted);
+        assert!(out == "the vault is locked", "a message holding no value is changed by the scrub");
+        assert!(started.elapsed() < std::time::Duration::from_secs(2), "{:?}", started.elapsed());
+    }
+
+    /// The other `extensions.configure` actions carry no settings. Keep the
+    /// action and grants visible while treating install manifests as opaque;
+    /// enabled state and cluster limits remain visible too.
     #[test]
     fn other_configure_actions_keep_their_audit_shape() {
         let install = redact(
@@ -1274,10 +1404,7 @@ mod tests {
             false,
         );
         assert_eq!(install["action"], json!("install"));
-        assert_eq!(
-            install["manifest"],
-            json!("{\"id\":\"org.example.argocd\"}")
-        );
+        assert_eq!(install["manifest"], REDACTED);
         assert_eq!(install["grants"], json!(["k8s.listCustomResource"]));
 
         let enable = redact(

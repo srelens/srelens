@@ -1,15 +1,17 @@
 import { useEffect } from "react";
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import fluxManifest from "../../../../examples/extensions/flux.json";
+import { takeExtensionAction } from "../extensions/actionRequests";
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Console } from "./Console";
 import { ConsoleProvider, useConsole } from "../console";
-import { resetContexts, setContexts } from "../lib/clusters";
+import { pinContextKey, resetContexts, setContexts } from "../lib/clusters";
 import { defaultState } from "../lib/tabs";
 import { logsRoute } from "../screens/Logs";
 import * as tabsStore from "../lib/tabsStore";
 import { lockWorkspace, resetLock, __setKnownVaultMode } from "./LockGate";
-import type { ClusterContext } from "@srelens/core";
+import { extensionClusterResourceRoute, extensionClusterRoute, type ClusterContext } from "@srelens/core";
 
 const {
   useAgentRun,
@@ -86,6 +88,13 @@ vi.mock("@srelens/core", async (orig) => ({
   isApplePlatform,
 }));
 
+// Installed apps, for the palette's app commands (#544). Empty unless a test fills it.
+const installed = vi.hoisted(() => ({ plugins: [] as unknown[] }));
+vi.mock("../extensions/inventoryStore", async (orig) => ({
+  ...(await orig<typeof import("../extensions/inventoryStore")>()),
+  useExtensions: () => ({ status: "ready", data: { schemaVersion: 1, nextRevision: 2, plugins: installed.plugins }, reload: () => {} }),
+}));
+
 /** The store's shape, defaulted to idle-and-empty — every test overrides only
  *  the fields it cares about, the same convention `Composer.test.tsx` uses
  *  for the same store. */
@@ -130,6 +139,7 @@ const ctx = (stableId: string, name = stableId): ClusterContext => ({
   name,
   stableId,
   key: stableId,
+  pinnedId: `srelens-context:/work/${stableId}`,
   cluster: name,
   server: "",
   isCurrent: false,
@@ -1551,6 +1561,80 @@ describe("Console — header details", () => {
       setup();
       await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
       expect(screen.queryByRole("button", { name: /codex/i })).toBeNull();
+    });
+  });
+});
+
+describe("app commands in the palette (#544)", () => {
+  const flux = { id: fluxManifest.id, name: fluxManifest.name };
+  const plugin = { manifest: fluxManifest, enabled: true, revision: 1, grants: [], settings: {}, source: "local", installedAt: 0, history: [] };
+  beforeEach(() => {
+    setContexts([HARNESS_CTX]);
+    installed.plugins = [plugin];
+  });
+  afterEach(() => {
+    installed.plugins = [];
+    takeExtensionAction(helmReleaseSelection);
+  });
+  // The resource tab asks the host by the cluster's pinned ID, so its review is asked for by that.
+  const helmReleaseSelection = { id: flux.id, revision: 1, capability: "helmreleases", context: "srelens-context:/work/prod-eu-id", namespace: "team", name: "web" };
+
+  it("lists an installed app's pages under Apps and opens one on the cluster in focus", async () => {
+    const user = userEvent.setup();
+    setup();
+    await user.type(screen.getByRole("textbox", { name: "Console prompt" }), "/flux: open");
+    expect(await screen.findByText("Apps")).toBeTruthy();
+    expect(screen.getByText("Flux: Open Helm releases")).toBeTruthy();
+    await user.type(screen.getByRole("textbox", { name: "Console prompt" }), " helm{Enter}");
+    const route = extensionClusterRoute("prod-eu-id", flux.id, "helmreleases");
+    expect(tabsStore.currentWorkspace().tabs.some((t) => t.route === route)).toBe(true);
+    expect(askAgent).not.toHaveBeenCalled();
+  });
+
+  it("offers nothing from an app that is disabled", async () => {
+    installed.plugins = [{ ...plugin, enabled: false }];
+    const user = userEvent.setup();
+    setup();
+    await user.type(screen.getByRole("textbox", { name: "Console prompt" }), "/flux");
+    expect(await screen.findByText("No command matches. Press ⏎ to ask the agent instead.")).toBeTruthy();
+  });
+
+  it("on a Helm release, asks its tab for the host review rather than writing", async () => {
+    const route = extensionClusterResourceRoute("prod-eu-id", flux.id, "helmreleases", "team", "web");
+    tabsStore.openTab(route);
+    const user = userEvent.setup();
+    setup();
+    await user.type(screen.getByRole("textbox", { name: "Console prompt" }), "/reconcile helm{Enter}");
+    expect(takeExtensionAction(helmReleaseSelection)).toBe("helmreleases-reconcile");
+    expect(askAgent).not.toHaveBeenCalled();
+  });
+
+  describe("on two contexts that share a stable ID (#695)", () => {
+    // `/kube/a` declaring `b#c` and `/kube/a#b` declaring `c`; this window was opened for `c`.
+    const first = { ...ctx("/kube/a#b#c", "b#c"), key: "/kube/a#b%23c", pinnedId: "srelens-context:/kube/a#b%23c" };
+    const second = { ...ctx("/kube/a#b#c", "c"), key: "/kube/a%23b#c", pinnedId: "srelens-context:/kube/a%23b#c" };
+    beforeEach(() => {
+      setContexts([first, second]);
+      tabsStore.setState(defaultState([first, second]));
+      pinContextKey(second.key);
+    });
+    afterEach(() => pinContextKey(null));
+
+    it("opens a page on the context this window is for, not the first of the two", async () => {
+      const user = userEvent.setup();
+      setup();
+      await user.type(screen.getByRole("textbox", { name: "Console prompt" }), "/flux: open helm{Enter}");
+      const tab = tabsStore.currentWorkspace().tabs.find((t) => t.route === "/extension-contexts/%2Fkube%2Fa%2523b%23c/org.srelens.flux/helmreleases/");
+      expect(tab?.sub).toBe("c");
+    });
+
+    it("asks a resource tab's review by the pinned ID of the context its route names", async () => {
+      tabsStore.openTab(extensionClusterResourceRoute(first.key, flux.id, "helmreleases", "team", "web"));
+      const user = userEvent.setup();
+      setup();
+      await user.type(screen.getByRole("textbox", { name: "Console prompt" }), "/reconcile helm{Enter}");
+      expect(takeExtensionAction({ ...helmReleaseSelection, context: "srelens-context:/kube/a%23b#c" })).toBeNull();
+      expect(takeExtensionAction({ ...helmReleaseSelection, context: "srelens-context:/kube/a#b%23c" })).toBe("helmreleases-reconcile");
     });
   });
 });

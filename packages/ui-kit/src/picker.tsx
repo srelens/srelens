@@ -22,6 +22,10 @@ export interface PickerProps {
   /** What the trigger says about the current state — a value, a count, a stand-in. */
   summary: string;
   ariaLabel?: string;
+  /** Form-field state, when the picker is a field: announced like an input's. */
+  ariaInvalid?: boolean;
+  ariaRequired?: boolean;
+  ariaDescribedBy?: string;
   searchPlaceholder?: string;
   className?: string;
   /** The rows, given a way to close the popover — which single-select wants and multi-select does not. */
@@ -58,7 +62,7 @@ export interface PickerProps {
  * search box holds a filter rather than anything the reader would mind losing.
  * Outside a scope nothing changes at all. (#357)
  */
-export function Picker({ summary, ariaLabel, searchPlaceholder = "Search…", className, footer, children }: PickerProps) {
+export function Picker({ summary, ariaLabel, ariaInvalid, ariaRequired, ariaDescribedBy, searchPlaceholder = "Search…", className, footer, children }: PickerProps) {
   const [open, setOpen] = useState(false);
   const container = usePortalContainer();
 
@@ -70,7 +74,7 @@ export function Picker({ summary, ariaLabel, searchPlaceholder = "Search…", cl
             aria-expanded, aria-controls and data-state; the combobox role is
             ours, because a popover full of options is not the generic dialog
             Radix assumes. */}
-        <button type="button" role="combobox" aria-label={ariaLabel} className={cx("btn justify-between", className)} style={{ borderColor: "var(--control-line)" }}>
+        <button type="button" role="combobox" aria-label={ariaLabel} aria-invalid={ariaInvalid || undefined} aria-required={ariaRequired || undefined} aria-describedby={ariaDescribedBy} className={cx("btn justify-between", className)} style={{ borderColor: "var(--control-line)" }}>
           <span className="min-w-0 truncate">{summary}</span>
           {/* Inline rather than an icon-set import: the kit takes no dependency
               on lucide, and these are the only two glyphs it needs. */}

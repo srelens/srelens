@@ -35,9 +35,12 @@ import { logsRoute } from "../screens/Logs";
 import { Transcript } from "../screens/agent/Transcript";
 import { useWorkspaceSealed } from "./LockGate";
 import { isContextPaused } from "../lib/pausedContext";
+import { extensionLabel, useExtensions } from "../extensions/inventoryStore";
+import { requestExtensionAction } from "../extensions/actionRequests";
+import { extensionEnabledFor, type PaletteApp } from "@srelens/core";
 
 /** §F's four palette groups, in the order the mock lists them. */
-const GROUPS: readonly CommandGroup[] = ["Action", "Go", "Cluster", "Workspace"];
+const GROUPS: readonly CommandGroup[] = ["Action", "Go", "Apps", "Cluster", "Workspace"];
 
 /** §F's empty-palette line, verbatim. */
 const NO_COMMAND_MATCH = "No command matches. Press ⏎ to ask the agent instead.";
@@ -211,15 +214,12 @@ export function Console({ fullView }: { fullView?: boolean }) {
    */
   const isFullView = fullView === true || route === "/agent";
   const context = activeCtx?.name ?? "";
-  // The reader's standing namespace narrowing for THIS cluster — the picker on
-  // the list screens. Without it, a question asked from a list narrowed to one
-  // namespace had the agent sweep every namespace in the cluster.
   // What a question asked from here is ABOUT. Derived from the active route,
   // which is where a resource's identity lives — a cluster name alone left the
   // agent with no target for "summarise this stream" and it went searching
   // four namespaces for one.
-  // The reader's standing namespace narrowing for THIS cluster — the picker on
-  // the list screens. Without it, a question asked from a list narrowed to one
+  // The active tab's namespace narrowing for this cluster — the picker on the
+  // list screens. Without it, a question asked from a list narrowed to one
   // namespace had the agent sweep every namespace in the cluster.
   const selected = useNamespaces(activeCtx?.stableId);
   const about = useMemo(() => askContextFor(route, context, selected), [route, context, selected]);
@@ -274,10 +274,30 @@ export function Console({ fullView }: { fullView?: boolean }) {
   const shownClusterLabel = useContextLabel(shown?.about.cluster ?? "", contexts.find(c => c.name === shown?.about.cluster)?.stableId);
   const askScope = shown ? contextLabelFor(shown.route, shownClusterLabel) : scope;
 
+  // Installed apps' commands (#544). Scoped as the sidebar's Apps entries are:
+  // enabled and allowed on the cluster, found by the context key no two
+  // contexts share (#695). Named by `extensionLabel`, the host's name.
+  const plugins = useExtensions().data?.plugins;
+  const appsOn = useMemo(() => (contextKey: string): readonly PaletteApp[] => {
+    if (!plugins || !contexts.some((c) => c.key === contextKey)) return [];
+    return plugins
+      .filter((p) => p.enabled && !p.quarantined && extensionEnabledFor(p, contextKey))
+      .map((p) => ({ id: p.manifest.id, name: extensionLabel(p), manifest: p.manifest }));
+  }, [contexts, plugins]);
+
   const deps = useMemo<CommandDeps>(
     () => ({
       route,
       context,
+      contextKey: activeCtx?.key,
+      apps: appsOn,
+      hostContext: (contextKey) => contexts.find((c) => c.key === contextKey)?.pinnedId,
+      openAppAction: ({ route: target, request }) => {
+        // Held first, then the tab opened: a tab that mounts takes the request
+        // on mount, and one already showing hears it.
+        requestExtensionAction(request);
+        openTab(target, { clusterName: contexts.find((c) => c.pinnedId === request.context)?.name });
+      },
       // Only the clusters THIS workspace holds. `setActiveCluster` refuses an
       // id outside `workspace.clusters` and returns the workspace untouched
       // (`tabsStore.ts:426`), but the command went on to `openTab` regardless —
@@ -332,7 +352,7 @@ export function Console({ fullView }: { fullView?: boolean }) {
         openTab(r.as === "shell" ? "/terminals" : "/forwards", { clusterName: r.context });
       },
     }),
-    [route, context, contexts, workspace, workspaces, onToggleTheme],
+    [route, context, contexts, workspace, workspaces, onToggleTheme, activeCtx?.key, appsOn],
   );
 
   const commands = useMemo(() => commandsFor(deps), [deps]);

@@ -15,6 +15,11 @@ import {
 } from "@srelens/core";
 import { ExtensionControls } from "./ExtensionControls";
 import { useResource } from "../lib/useResource";
+import { useResolvedColumns } from "./useResolvedColumns";
+import { contributionKind } from "@srelens/core";
+import { useContextId } from "./contextIds";
+import { StatusBadge } from "./StatusBadge";
+import { LiveNotice, LiveStatus, useLiveReaders } from "./liveReaders";
 
 export function ErrorNotice({
   message,
@@ -95,6 +100,8 @@ export function ExtensionResults({
   refresh = 0,
   hideToolbar = false,
   actionAvailability,
+  card,
+  cardNamespaces,
 }: {
   plugin: InstalledExtension;
   capability: string;
@@ -108,14 +115,21 @@ export function ExtensionResults({
    * bulk bar evaluates the shared predicates against inspected resources.
    */
   actionAvailability?: BulkActionAvailability;
+  /** A dashboard card whose rows alone are read (#540). */
+  card?: string;
+  /** With a card and no namespace: the several namespaces it counted in. */
+  cardNamespaces?: string[];
 }) {
   const { Button } = useContext(ExtensionControls);
   const openResource = useContext(ExtensionResourceNavigation);
   const rowButtons = useRef(new Map<string,HTMLButtonElement>());
   const listRow = usePeekBounds();
   const peekWidth = clampPeekWidth(usePeekWidth(), listRow.bounds);
-  const scope = JSON.stringify([plugin.manifest.id,plugin.revision,capability,context,namespace]);
+  // The card is part of what is on screen: the filtered and whole lists keep no rows of each other.
+  const scope = JSON.stringify([plugin.manifest.id,plugin.revision,capability,context,namespace,card ?? "", cardNamespaces ?? []]);
   const [selected,setSelected] = useState<{scope:string;name:string;namespace:string}|null>(null);
+  const [columnSort, setColumnSort] = useState<{key:string;direction:"asc"|"desc"}|null>(null);
+  useEffect(() => setColumnSort(null), [scope]);
   // The rows a bulk action would run against, by key. Cleared whenever the
   // scope moves: a rail switch behind the bar must not leave prod's rows
   // selected on staging, and a key from another namespace's list resolves to
@@ -143,6 +157,8 @@ export function ExtensionResults({
             context,
             namespace,
             true,
+            // Only a card's target narrows the read; the whole list is called as before.
+            ...((card ? (cardNamespaces?.length ? [card, cardNamespaces] : [card]) : []) as [card?: string, namespaces?: string[]]),
           )
         : null,
     [
@@ -152,9 +168,16 @@ export function ExtensionResults({
       context,
       namespace,
       refresh,
+      card,
+      cardNamespaces?.join(","),
     ],
   );
-  const { reload } = data;
+  const { reload, refresh: reread } = data;
+  // Follow the reader's kind (#566): every change the watch reports reads the
+  // list again in place, through the same read Refresh makes.
+  const live = useLiveReaders({
+    plugin, capabilities: [capability], context, namespace, label: `page:${capability}`, onChange: reread,
+  });
   // Refresh when an action on one of this list's resources is accepted, from any view.
   useEffect(
     () =>
@@ -172,6 +195,21 @@ export function ExtensionResults({
   const binding = plugin.manifest.capabilities.find(
     (b) => b.name === capability,
   );
+  if (data.data?.items) lastRows.current = data.data.items;
+  const sourceRows = data.data?.items ?? lastRows.current;
+  const columnKind = contributionKind(
+    typeof binding?.arguments.kind === "string" ? binding.arguments.kind : "",
+    typeof binding?.arguments.group === "string" ? binding.arguments.group : "",
+  );
+  // The host resolves each row's status from the app's rules for this kind
+  // (#541); a kind without a resolver has no status column rather than one
+  // guessed from printer-column names.
+  const resolvesStatus = binding?.target === "k8s.listCustomResource" &&
+    !!plugin.manifest.contributions.statusResolvers?.some((resolver) => resolver.forKinds.includes(columnKind));
+  const contextId = useContextId(context);
+  const appColumns = useResolvedColumns({
+    plugins: [plugin], context, contextId, namespace, kind: columnKind, rows: sourceRows, refresh,
+  });
   const columns = data.data?.printerColumns ?? (Array.isArray(binding?.arguments.printerColumns)
     ? (binding.arguments.printerColumns as Array<{ name: string }>)
     : []);
@@ -181,7 +219,7 @@ export function ExtensionResults({
   const [visible, setVisible] = useState(PAGE);
   useEffect(() => {
     setVisible(PAGE);
-  }, [scope, search, refresh, data.status]);
+  }, [scope, search, refresh, data.status, columnSort]);
   useEffect(() => {
     if (data.status !== "loading") loaded.current = true;
   }, [data.status]);
@@ -199,15 +237,21 @@ export function ExtensionResults({
       /\bApiError:\s*404\b|\bcode:\s*404\b|\b404 page not found\b/i.test(
         data.error ?? "",
       );
+    // A reader fixes one version or accepts several, the first served (#547).
+    const versions = binding?.versions?.length
+      ? binding.versions
+      : typeof args?.version === "string"
+        ? [args.version]
+        : [];
     const guidance =
       notFound &&
       typeof args?.group === "string" &&
-      typeof args.version === "string" &&
+      versions.length > 0 &&
       typeof args.plural === "string" &&
       typeof args.kind === "string"
         ? {
             title: `${args.kind} API unavailable`,
-            detail: `This extension reads ${args.plural} from ${args.group}/${args.version}. Check that the selected cluster serves this API version. Installing an extension does not install its Kubernetes APIs.`,
+            detail: `This extension reads ${args.plural} from ${args.group}/${versions.join(" or ")}. Check that the selected cluster serves ${versions.length > 1 ? "one of these API versions" : "this API version"}. Installing an extension does not install its Kubernetes APIs.`,
           }
         : undefined;
     return (
@@ -231,14 +275,23 @@ export function ExtensionResults({
         Loading app resources…
       </p>
     );
-  if (data.data?.items) lastRows.current = data.data.items;
   const rows = (data.data?.items ?? lastRows.current).filter((row) =>
-    [row.name, row.namespace, ...row.columns]
+    [row.name, row.namespace, ...row.columns, ...(resolvesStatus && row.status ? [row.status.label] : []),
+      ...appColumns.columns.filter((column) => column.filterable === true).map((column) => column.getValue?.(row) ?? "")]
       .join(" ")
       .toLowerCase()
       .includes(search.toLowerCase()),
   );
-  const shown = rows.slice(0, visible);
+  const sortColumn = appColumns.columns.find((column) => column.key === columnSort?.key && column.sortable);
+  const collator = new Intl.Collator(undefined, {numeric:true,sensitivity:"base"});
+  const ordered = sortColumn && columnSort ? [...rows].sort((left, right) => {
+    const a = sortColumn.getSortValue?.(left) ?? sortColumn.getValue?.(left) ?? "";
+    const b = sortColumn.getSortValue?.(right) ?? sortColumn.getValue?.(right) ?? "";
+    const comparison = typeof a === "number" && typeof b === "number"
+      ? a - b : collator.compare(String(a), String(b));
+    return comparison * (columnSort.direction === "asc" ? 1 : -1);
+  }) : rows;
+  const shown = ordered.slice(0, visible);
   const hidden = Math.max(0, rows.length - shown.length);
   // Only a binding the host runs actions against gets a selection column:
   // checkboxes over a table with nothing to do on it are furniture.
@@ -267,6 +320,9 @@ export function ExtensionResults({
   return (
     <section className="extension-results" ref={listRow.ref}>
       <div className="extension-resource-list">
+      {appColumns.errors.map((error) => (
+        <ErrorNotice key={error.id} cluster title={`Couldn’t read ${error.title} columns`} message={error.message} retry={appColumns.reload} />
+      ))}
       {data.data?.columnsError && <p className="extension-message" role="status">Could not load CRD columns: {data.data.columnsError}. Showing app-defined columns.</p>}
       {data.data?.truncated && (
         <p className="extension-message" role="status">
@@ -282,11 +338,16 @@ export function ExtensionResults({
                 ? `Namespace: ${namespace}`
                 : "All namespaces"}
           </span>
+          <LiveStatus live={live} />
           <Button variant="secondary" onClick={data.reload}>
             Refresh
           </Button>
         </div>
       )}
+      {hideToolbar && <div className="extension-live-row"><LiveStatus live={live} /></div>}
+      <LiveNotice live={live} what="list" />
+      {/* One notice when both are down for one reason; the columns' own only when they differ. */}
+      {appColumns.live.state !== live.state && <LiveNotice live={appColumns.live} what="app column values" />}
       {selectable && (
         <ExtensionBulkActions
           key={scope}
@@ -297,7 +358,7 @@ export function ExtensionResults({
         />
       )}
       {data.status === "loading" ? <p className="extension-message" role="status">Refreshing resources…</p> : data.status === "error" ? <ErrorNotice cluster message={data.error} retry={data.reload}/> : shown.length ? (
-        <div className="extension-table-scroll">
+        <div className="extension-table-scroll" data-stale={live.state === "reconnecting" || undefined}>
           <table>
             <thead>
               <tr>
@@ -313,9 +374,16 @@ export function ExtensionResults({
                 )}
                 <th>Name</th>
                 <th>Namespace</th>
+                {resolvesStatus && <th>Status</th>}
                 {columns.map((c, i) => (
                   <th key={i}>{c.name}</th>
                 ))}
+                {appColumns.columns.map((column) => <th key={column.key} aria-sort={columnSort?.key === column.key ? (columnSort.direction === "asc" ? "ascending" : "descending") : undefined}>
+                  {column.sortable ? <button type="button" className="extension-column-sort" aria-label={`Sort by ${column.header}`}
+                    onClick={() => setColumnSort((current) => ({key:column.key,direction:current?.key === column.key && current.direction === "asc" ? "desc" : "asc"}))}>
+                    {column.header}{columnSort?.key === column.key && <span aria-hidden="true"> {columnSort.direction === "asc" ? "↑" : "↓"}</span>}
+                  </button> : column.header}
+                </th>)}
                 <th>Age</th>
               </tr>
             </thead>
@@ -339,6 +407,11 @@ export function ExtensionResults({
                   <td className="extension-namespace">
                     {row.namespace || "—"}
                   </td>
+                  {resolvesStatus && (
+                    <td className="extension-status-cell">
+                      {row.status ? <StatusBadge resolved={row.status} showReason /> : <span title="The host returned no status for this resource">—</span>}
+                    </td>
+                  )}
                   {columns.map((column, i) => (
                     <td key={i}>
                       <ResultValue
@@ -347,6 +420,7 @@ export function ExtensionResults({
                       />
                     </td>
                   ))}
+                  {appColumns.columns.map((column) => <td key={column.key}>{column.render?.(row)}</td>)}
                   <td><AgeCell created={row.created} age={row.age} /></td>
                 </tr>
               ))}

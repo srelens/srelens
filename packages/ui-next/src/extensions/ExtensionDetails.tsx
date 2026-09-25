@@ -1,14 +1,22 @@
 import { useContext, useState } from "react";
 import {
   CAPABILITY_CATALOG,
-  saveTextFile,
+  NETWORK_HTTP,
+  clearExtensionSecret,
+  isTauri,
+  networkHosts,
+  permissionName,
   type ExtensionChange,
   type ExtensionPreviousVersion,
   type ExtensionSource,
   type InstalledExtension,
 } from "@srelens/core";
 import { CodeEditor } from "@srelens/ui-kit";
+import { saveOrDownload } from "../lib/saveOrDownload";
 import { ExtensionClusters } from "./ExtensionClusters";
+import { ExtensionNetwork } from "./ExtensionNetwork";
+import { ExtensionBindings } from "./ExtensionBindings";
+import { networkReach, networkRequests, reachText } from "./networkText";
 import { ExtensionControls } from "./ExtensionControls";
 import { escapeFormatCharacters } from "./displayText";
 import { extensionLabel } from "./inventoryStore";
@@ -17,6 +25,9 @@ const facts = new Map(CAPABILITY_CATALOG.map((capability) => [capability.id, cap
 
 /** What a granted host capability can do, from the backend registry's own annotations. */
 function describeGrant(id: string): string {
+  // The broker's own capability (#568): never offered to MCP or the catalog, since
+  // called directly it would fetch any URL. That is not "not provided".
+  if (id === NETWORK_HTTP) return "Read-only · GET requests to this app's hosts only, sent by the host";
   const fact = facts.get(id);
   if (!fact) return "Not provided by this host";
   return [
@@ -49,6 +60,20 @@ function origin(version: InstalledExtension | ExtensionPreviousVersion) {
 
 const installedOn = (seconds: number) => new Date(seconds * 1000).toLocaleString();
 
+/**
+ * What a reset keeps: the saved values of required settings, which have no
+ * default to fall back to (the host refuses a save without them). A secret is
+ * never sent; the host keeps its reference.
+ */
+function requiredSettings(plugin: InstalledExtension): Record<string, unknown> {
+  const kept: Record<string, unknown> = {};
+  for (const setting of plugin.manifest.settings ?? []) {
+    if (setting.required && setting.type !== "secret-reference" && setting.id in plugin.settings)
+      kept[setting.id] = plugin.settings[setting.id];
+  }
+  return kept;
+}
+
 /** The manifest, grants, source, settings and kept versions of one installed app. */
 export function ExtensionDetails({
   plugin,
@@ -66,9 +91,31 @@ export function ExtensionDetails({
   const [rollback, setRollback] = useState<ExtensionPreviousVersion | null>(null);
   const { manifest } = plugin;
 
+  // The web host keeps no app secrets yet (#522): an app there has none for a reset to
+  // delete, and no vault to name.
+  const keepsSecrets =
+    isTauri() && (manifest.settings ?? []).some((setting) => setting.type === "secret-reference");
+  /**
+   * A reset deletes the app's secrets as well (#543): a token left in the
+   * keychain after "reset to defaults" is a default nobody chose. The secrets
+   * go first, so a reset whose settings save fails has still not left one.
+   */
+  async function reset() {
+    if (keepsSecrets) {
+      try {
+        await clearExtensionSecret(manifest.id);
+      } catch (e) {
+        onError(e instanceof Error ? e.message : String(e));
+        return;
+      }
+    }
+    if (await change({ action: "settings", id: manifest.id, settings: requiredSettings(plugin) })) setResetting(false);
+  }
+
   async function exportSettings() {
     try {
-      await saveTextFile(`${manifest.id}-settings.json`, `${JSON.stringify(plugin.settings, null, 2)}\n`);
+      // A browser download on the web, which has no `save_text_file` command.
+      await saveOrDownload(`${manifest.id}-settings.json`, `${JSON.stringify(plugin.settings, null, 2)}\n`);
     } catch (e) {
       onError(e instanceof Error ? e.message : String(e));
     }
@@ -76,10 +123,19 @@ export function ExtensionDetails({
 
   // Rolling back grants the older manifest's permissions again, so it is reviewed like an
   // install whenever those differ from what is granted now.
-  const requested = rollback?.manifest.permissions ?? [];
+  const requested = (rollback?.manifest.permissions ?? []).map((permission) => permissionName(permission) ?? "");
   const added = requested.filter((permission) => !plugin.grants.includes(permission));
   const dropped = plugin.grants.filter((grant) => !requested.includes(grant));
-  const changesGrants = added.length > 0 || dropped.length > 0;
+  // Another host under the same `network.http` grant is new access too (#568).
+  // Compared with each setting-backed host's declaration, so a default that points
+  // elsewhere under the same `${settings.<id>}` entry is a change too.
+  const reaches = rollback ? networkHosts(rollback.manifest) : [];
+  const changesHosts = rollback !== null && networkReach(rollback.manifest) !== networkReach(manifest);
+  // And another request under the same grant and hosts: a different path, or a secret
+  // sent in another header. The host diffs these for an update; a rollback's review
+  // shows what the restored version would send.
+  const changesRequests = rollback !== null && networkRequests(rollback.manifest) !== networkRequests(manifest);
+  const changesGrants = added.length > 0 || dropped.length > 0 || changesHosts || changesRequests;
 
   return (
     <section className="extension-details" aria-label={`${extensionLabel(plugin)} details`}>
@@ -89,6 +145,7 @@ export function ExtensionDetails({
       </p>
 
       <ExtensionClusters key={JSON.stringify(plugin.contexts ?? null)} plugin={plugin} busy={busy} change={change} />
+      <ExtensionNetwork plugin={plugin} busy={busy} change={change} />
 
       <h3>Granted capabilities</h3>
       <ul className="extension-grants" aria-label="Granted capabilities">
@@ -115,7 +172,7 @@ export function ExtensionDetails({
 
       <h3>Settings</h3>
       <p className="extension-message">
-        Settings are plain JSON and are exported as saved; apps must not keep secrets in them.
+        Settings are exported as saved. A secret is never saved in settings, so an export never holds one.
       </p>
       <div className="extension-toolbar">
         <Button variant="secondary" disabled={busy} onClick={() => void exportSettings()}>
@@ -134,18 +191,18 @@ export function ExtensionDetails({
             if (e.key === "Escape" && !busy) setResetting(false);
           }}
         >
-          <p>Reset {extensionLabel(plugin)} to its default settings? Its saved settings are removed.</p>
+          <p>
+            Reset {extensionLabel(plugin)} to its default settings? Its saved settings are removed, except the
+            required ones, which have no default
+            {keepsSecrets ? ", and its secrets are deleted from srelens's secrets vault." : "."}
+          </p>
           <Button variant="secondary" autoFocus disabled={busy} onClick={() => setResetting(false)}>
             Cancel
           </Button>
           <Button
             variant="danger"
             disabled={busy}
-            onClick={() =>
-              void change({ action: "settings", id: manifest.id, settings: {} }).then((done) => {
-                if (done) setResetting(false);
-              })
-            }
+            onClick={() => void reset()}
           >
             Reset to defaults
           </Button>
@@ -177,12 +234,16 @@ export function ExtensionDetails({
               <>
                 It requests: {requested.join(", ") || "no permissions"}.
                 {dropped.length > 0 && ` It no longer uses: ${dropped.join(", ")}.`}
+                {changesHosts &&
+                  ` It reaches: ${reaches.map((host) => reachText(rollback!.manifest, host)).join(", ") || "no hosts"}.`}
+                {changesRequests && " Its network requests differ from this version's; they are listed below."}
               </>
             ) : (
               "It uses the permissions granted now."
             )}{" "}
             Settings are kept, and the versions after it are discarded.
           </p>
+          {changesRequests && <ExtensionBindings manifest={rollback.manifest} permissions={[NETWORK_HTTP]} />}
           <Button
             disabled={busy}
             onClick={() =>

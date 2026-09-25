@@ -19,6 +19,7 @@ import {
   validateExtension,
 } from "@srelens/core";
 import { ExtensionManager } from "./Extensions";
+import { ExtensionBindings } from "./ExtensionBindings";
 import { plainText } from "./displayText";
 
 // Written by code point, so the source itself holds no invisible character.
@@ -112,7 +113,7 @@ beforeEach(() => {
   vi.resetAllMocks();
   vi.mocked(listExtensions).mockResolvedValue({ schemaVersion: 1, nextRevision: 1, plugins: [] } as any);
   vi.mocked(configureExtensions).mockResolvedValue({} as any);
-  vi.mocked(validateExtension).mockResolvedValue({ errors: [] });
+  vi.mocked(validateExtension).mockResolvedValue({ errors: [], permissionDiff: { previousRevision: null, added: ["Grant k8s.listCustomResource", "Grant k8s.listEvents"], removed: [], unchanged: [] } });
   vi.mocked(listContexts).mockResolvedValue({ contexts: [] });
   vi.mocked(listExtensionCatalog).mockResolvedValue(catalog as any);
 });
@@ -278,6 +279,26 @@ it("lists another capability's fixed arguments and inputs generically", async ()
   );
 });
 
+it("reviews the secret store as a permission: what it keeps, and the host's own words for it (#543)", async () => {
+  const keeping = manifest() as ReturnType<typeof manifest> & { settings?: unknown };
+  keeping.permissions = [...keeping.permissions, "extension.secretStore"];
+  keeping.settings = [
+    { id: "token", type: "secret-reference", title: "API token" },
+    { id: "hook", type: "secret-reference", title: `Webhook ${RLO}terces` },
+    { id: "team", type: "string", title: "Team" },
+  ];
+  const review = await reviewPasted(JSON.stringify(keeping));
+  const store = within(review).getByRole("listitem", { name: "extension.secretStore bindings" });
+  expect(store.textContent).not.toContain("No binding uses this permission");
+  expect(store.textContent).toContain("Keeps these secret settings in srelens's encrypted secrets vault: API token, Webhook");
+  expect(store.textContent).not.toContain(RLO);
+  expect(store.textContent).not.toContain("Team");
+  expect(store.textContent).toContain("The app never reads them");
+  // #548's host metadata, from the catalog, never from the manifest.
+  expect(store.textContent).toContain("Sensitive");
+  expect(store.textContent).toContain("medium impact");
+  expect(store.textContent).toContain("Change a secret an app keeps in srelens's secrets vault");
+});
 it("draws inline manifest text with invisible and control characters escaped", () => {
   const zeroWidth = String.fromCodePoint(0x200b);
   const tag = String.fromCodePoint(0xe0001);
@@ -315,4 +336,104 @@ it("lists a custom-resource reader's other fixed arguments in their own column",
   expect(within(review).getByRole("columnheader", { name: "Other fixed arguments" })).toBeTruthy();
   expect(cells(reader(review, "providers")).at(-1)).toBe("labelSelector team=platform");
   expect(cells(reader(review, "kustomizations")).at(-1)).toBe("none");
+});
+
+it("reviews every version a reader may read, and each path it reads elsewhere there (#547)", () => {
+  const manifest = {
+    capabilities: [{
+      name: "helmreleases", title: "List Helm releases", target: "k8s.listCustomResource",
+      versions: ["v2", "v2beta2"],
+      jsonPathOverrides: { v2beta2: { ".status.lastAttemptedRevision": ".status.lastReleaseRevision" } },
+      arguments: { group: "helm.toolkit.fluxcd.io", plural: "helmreleases", kind: "HelmRelease", namespaced: true },
+      inputs: ["context", "namespace"],
+    }],
+  };
+  render(<ExtensionBindings manifest={manifest} permissions={["k8s.listCustomResource"]} />);
+  const row = screen.getByRole("row", { name: "Binding helmreleases" });
+  // The version cell names each, in the order the host tries them; nothing is "Not set".
+  expect(cells(row).slice(0, 5)).toEqual([
+    "helm.toolkit.fluxcd.io",
+    "v2, v2beta2 (first served)",
+    "HelmRelease",
+    "helmreleases",
+    "Namespaced",
+  ]);
+  const overrides = within(row).getByRole("list", { name: "helmreleases path overrides" });
+  expect(within(overrides).getAllByRole("listitem").map((item) => item.textContent)).toEqual([
+    "At v2beta2, .status.lastAttemptedRevision is read from .status.lastReleaseRevision",
+  ]);
+  // Neither field is shown again as an unexplained fixed argument.
+  expect(screen.queryByRole("columnheader", { name: "Other fixed arguments" })).toBeNull();
+});
+
+/** A metrics app: its Prometheus URL a setting, its token a secret sent as a header (#568). */
+const metrics = () => ({
+  id: "org.test.metrics",
+  name: "Metrics",
+  version: "0.1.0",
+  srelensApiVersion: "^0.4",
+  kind: "declarative",
+  permissions: [
+    { capability: "network.http", hosts: ["${settings.prometheusUrl}", "*.grafana.net"] },
+    "extension.secretStore",
+  ],
+  settings: [
+    { id: "prometheusUrl", type: "url", title: "Prometheus URL", required: true },
+    { id: "token", type: "secret-reference", title: "API token" },
+  ],
+  capabilities: [
+    {
+      name: "up",
+      title: "Targets up",
+      target: "network.http",
+      arguments: {
+        url: "${settings.prometheusUrl}",
+        path: "/api/v1/query",
+        query: { query: "up" },
+        headers: { Accept: "application/json" },
+        secretHeaders: { Authorization: { secret: "token", prefix: "Bearer " } },
+      },
+      inputs: [],
+    },
+  ],
+  contributions: { pages: [], detailTabs: [], detailLinks: [] },
+});
+
+it("reviews network.http as the hosts it may reach and each request it sends (#568)", async () => {
+  const source = JSON.stringify(metrics());
+  const review = await reviewPasted(source);
+  // A grant names the capability; the hosts are the manifest's, shown here and diffed by the host.
+  expect(validateExtension).toHaveBeenCalledWith(source, ["network.http", "extension.secretStore"], undefined);
+  const network = within(review).getByRole("listitem", { name: "network.http bindings" });
+  expect(network.textContent).not.toContain("No binding uses this permission");
+  const hosts = within(network).getByRole("list", { name: "Hosts network.http may reach" });
+  expect(within(hosts).getAllByRole("listitem").map((host) => host.textContent)).toEqual([
+    "The host of the URL saved in Prometheus URL",
+    "*.grafana.net (one subdomain label)",
+  ]);
+  expect(network.textContent).toContain("HTTPS only");
+  const up = within(network).getByRole("listitem", { name: "Binding up" });
+  expect(up.textContent).toBe(
+    'Targets up: GET the URL saved in Prometheus URL, path /api/v1/query, query query=up; header Accept: application/json; sends secret API token as the Authorization header, after "Bearer ".',
+  );
+  fireEvent.click(screen.getByText("Install and grant permissions"));
+  await waitFor(() =>
+    expect(configureExtensions).toHaveBeenCalledWith({
+      action: "install",
+      manifest: source,
+      grants: ["network.http", "extension.secretStore"],
+    }),
+  );
+});
+
+it("draws a request's literal URL and headers as plain text", async () => {
+  const literal = metrics();
+  literal.permissions = [{ capability: "network.http", hosts: ["api.github.com"] }];
+  literal.settings = [];
+  literal.capabilities[0].arguments = { url: `https://api.github.com/${RLO}x`, headers: {} } as any;
+  const review = await reviewPasted(JSON.stringify(literal));
+  const up = within(review).getByRole("listitem", { name: "Binding up" });
+  expect(up.textContent).toContain("GET https://api.github.com/");
+  expect(up.textContent).not.toContain(RLO);
+  expect(within(review).getByRole("list", { name: "Hosts network.http may reach" }).textContent).toBe("api.github.com");
 });

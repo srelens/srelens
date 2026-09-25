@@ -29,7 +29,19 @@ fn error(status: StatusCode, message: &str) -> Response {
 /// as the shared UID and could read every other user's materialized
 /// kubeconfigs and sealed tokens. Web users get the RBAC-scoped in-pod
 /// `start_pod_exec` terminal instead; the host shell stays desktop-only.
-pub const WEB_DENIED_COMMANDS: &[&str] = &["start_terminal"];
+///
+/// The app stream commands (#565) are refused too. Each web user has their own
+/// apps now (#515), but the server does not run app streams for them: nothing
+/// here opens a user's `ExtensionStreams` or carries its frames over `/api/ws`.
+/// So on the web an app's page, columns and cards read once and again on
+/// Refresh, and say they are not live, rather than open a stream that would
+/// never send.
+pub const WEB_DENIED_COMMANDS: &[&str] = &[
+    "start_terminal",
+    "extension_stream_open",
+    "extension_stream_cancel",
+    "extension_stream_close_view",
+];
 
 /// Helm subcommands with no safe multi-user form on the shared server:
 /// `plugin install <url>` downloads and runs code (RCE as the shared UID) and
@@ -503,6 +515,27 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::FORBIDDEN);
         assert_eq!(body["error"], json!("command not available in web mode"));
+    }
+
+    /// App streams (#565) are refused while the server runs none for its users:
+    /// refused as not available here, not answered as an unknown command, so
+    /// the client can say which it is.
+    #[tokio::test]
+    async fn app_streams_are_denied_in_web_mode() {
+        let state = AppState::for_tests(Arc::new(Registry::new())).await;
+        for (command, body) in [
+            ("extension_stream_open", json!({ "input": {} })),
+            ("extension_stream_cancel", json!({ "stream": "s-1" })),
+            ("extension_stream_close_view", json!({ "view": "v" })),
+        ] {
+            let (status, body) = authed_post(&state, command, body).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{command}");
+            assert_eq!(
+                body["error"],
+                json!("command not available in web mode"),
+                "{command}"
+            );
+        }
     }
 
     #[test]

@@ -23,6 +23,10 @@ export interface ComboboxProps {
   placeholder?: string;
   searchPlaceholder?: string;
   ariaLabel?: string;
+  /** Form-field state, for a picker that is a form field: announced like an input's. */
+  ariaInvalid?: boolean;
+  ariaRequired?: boolean;
+  ariaDescribedBy?: string;
   className?: string;
 }
 
@@ -38,6 +42,9 @@ export function Combobox({
   placeholder = "Select…",
   searchPlaceholder = "Search…",
   ariaLabel,
+  ariaInvalid,
+  ariaRequired,
+  ariaDescribedBy,
   className,
 }: ComboboxProps) {
   const [open, setOpen] = useState(false);
@@ -51,6 +58,9 @@ export function Combobox({
           role="combobox"
           aria-expanded={open}
           aria-label={ariaLabel}
+          aria-invalid={ariaInvalid || undefined}
+          aria-required={ariaRequired || undefined}
+          aria-describedby={ariaDescribedBy}
           className={cn(
             "flex h-8 items-center justify-between gap-2 rounded-md border border-input bg-background px-3 text-sm shadow-xs outline-none hover:bg-accent/40 focus-visible:ring-2 focus-visible:ring-ring",
             className,

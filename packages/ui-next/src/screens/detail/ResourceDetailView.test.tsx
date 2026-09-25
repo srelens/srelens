@@ -31,6 +31,8 @@ vi.mock("@srelens/core", async (importOriginal) => ({
   listCrds,
   deleteResource,
   podsOnNode,
+  // The web server's answer for a user with no apps (#515): the app slot stays empty.
+  listExtensions: async () => ({ schemaVersion: 1, nextRevision: 1, plugins: [] }),
 }));
 
 // The shell asks the same descriptor the list screen resolves, only to read
@@ -41,6 +43,14 @@ const { descriptorFor } = vi.hoisted(() => ({
 }));
 
 vi.mock("../../lib/kinds/descriptors", () => ({ descriptorFor }));
+vi.mock("../../extensions/ExtensionPanelSlot", () => ({
+  ExtensionPanelSlot: ({resource}:{resource:K8sObject}) =>
+    <section className="section" data-testid="peek-extension-panel">{resource.kind} app panels</section>,
+}));
+vi.mock("../../extensions/ExtensionRelatedSlot", () => ({
+  ExtensionRelatedSlot: ({context,resource}:{context:string;resource:K8sObject}) =>
+    <section className="section" data-testid="peek-related">{resource.kind} related on {context}</section>,
+}));
 
 // The kit's `CodeEditor`, unchanged — wrapped only to record what the YAML
 // pane hands it. CodeMirror compiles its sizing into a generated stylesheet
@@ -231,6 +241,28 @@ describe("ResourceDetailView", () => {
     expect(getByRole("tab", { name: "Events" })).toBeDefined();
     expect(queryByRole("tab", { name: "Containers" })).toBeNull();
     expect(queryByRole("tab", { name: "Metrics" })).toBeNull();
+  });
+
+  it("places app panels after the peek's host facts only on Details", async () => {
+    getObject.mockResolvedValue({ object: POD });
+    render(<ResourceDetailView context="ctx" kind="Pod" namespace="default" name="web-1" />);
+    const panel = await screen.findByTestId("peek-extension-panel");
+    const facts = document.querySelector(".fact-list");
+    expect(facts).toBeTruthy();
+    expect(facts!.compareDocumentPosition(panel) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    await userEvent.click(screen.getByRole("tab", { name: "YAML" }));
+    expect(screen.queryByTestId("peek-extension-panel")).toBeNull();
+  });
+
+  it("places the Related section after the peek's host facts only on Details (#545)", async () => {
+    getObject.mockResolvedValue({ object: POD });
+    render(<ResourceDetailView context="ctx" kind="Pod" namespace="default" name="web-1" />);
+    const related = await screen.findByTestId("peek-related");
+    expect(related.textContent).toBe("Pod related on ctx");
+    const facts = document.querySelector(".fact-list");
+    expect(facts!.compareDocumentPosition(related) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    await userEvent.click(screen.getByRole("tab", { name: "YAML" }));
+    expect(screen.queryByTestId("peek-related")).toBeNull();
   });
 
   it("names the object in the error state", async () => {

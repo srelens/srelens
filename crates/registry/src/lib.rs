@@ -20,7 +20,15 @@ mod settings;
 #[cfg(feature = "fuzzing")]
 #[doc(hidden)]
 pub use extensions::fuzzing;
+pub use extensions::streams::{ExtensionStreams, OpenStreamOut, INVENTORY_CHANNEL};
+pub use extensions::{Apps, InventoryKey, InventoryLock, InventoryStore, SharedCatalog};
 pub use settings::default_settings_path;
+/// The secret store a host supplies for apps' secret settings (#543), so a
+/// host implements it against this crate alone.
+pub use srelens_plugin_host::{NoSecretStore, SecretStore, SecretValue, SECRET_STORE_PERMISSION};
+/// The host's metadata for `extension.secretStore`, for a host that renders
+/// its confirmation from names it has vetted (#543).
+pub use extensions::{declares_secret_setting, SECRET_STORE_ANNOTATIONS};
 
 // Test-only: every consumer of this module — `render_catalog` (regenerated via
 // `UPDATE_CATALOG=1 cargo test`), the doc-scan tests below, and mcp_docs.rs's
@@ -226,6 +234,29 @@ pub fn build_registry_with_paths(
     build_registry_with_paths_and_settings(cache, kubeconfig_paths, None)
 }
 
+/// Build one web user's registry (#515): the host capabilities over their own
+/// kubeconfig files, and the apps capabilities over `apps` — their own inventory
+/// and the catalog the server shares between its users.
+///
+/// No desktop settings: web settings are per-user SQLite rows, served by the
+/// server's own settings API rather than by a capability. No secret store
+/// either: the web host has none per user yet (#522), so `extension.secretStore`
+/// is not registered, and `extensions.list` reports the store unavailable.
+pub fn build_registry_for_user(
+    cache: Arc<ClientCache>,
+    kubeconfig_paths: Vec<PathBuf>,
+    apps: Apps,
+) -> Registry {
+    build_with(
+        cache,
+        kubeconfig_paths,
+        Some(apps),
+        None,
+        BrokeredNetwork::Off,
+    )
+    .0
+}
+
 /// Build a registry and optionally add the durable desktop settings surface.
 /// Web-server registries omit it because web settings are per-user SQLite
 /// rows; desktop GUI and MCP callers pass the stable desktop settings path.
@@ -234,6 +265,72 @@ pub fn build_registry_with_paths_and_settings(
     kubeconfig_paths: Vec<PathBuf>,
     settings_path: Option<PathBuf>,
 ) -> Registry {
+    build_registry_and_app_streams(cache, kubeconfig_paths, settings_path).0
+}
+
+/// [`build_registry_with_paths_and_settings`], with `secrets` keeping apps'
+/// secret settings (#543). The desktop passes its vault; a build with no
+/// store refuses to keep a secret, and says why.
+pub fn build_registry_with_paths_settings_and_secrets(
+    cache: Arc<ClientCache>,
+    kubeconfig_paths: Vec<PathBuf>,
+    settings_path: Option<PathBuf>,
+    secrets: Arc<dyn SecretStore>,
+) -> Registry {
+    build_registry_app_streams_and_secrets(cache, kubeconfig_paths, settings_path, secrets).0
+}
+
+/// The desktop build, plus the app streams (#565) its host opens streams
+/// through. `None` when there is no settings path, so no apps either.
+pub fn build_registry_and_app_streams(
+    cache: Arc<ClientCache>,
+    kubeconfig_paths: Vec<PathBuf>,
+    settings_path: Option<PathBuf>,
+) -> (Registry, Option<Arc<ExtensionStreams>>) {
+    build_registry_app_streams_and_secrets(
+        cache,
+        kubeconfig_paths,
+        settings_path,
+        Arc::new(srelens_plugin_host::NoSecretStore),
+    )
+}
+
+/// [`build_registry_and_app_streams`], with `secrets` keeping apps' secret
+/// settings (#543). A store the host does not have is
+/// [`srelens_plugin_host::NoSecretStore`], which stores and deletes nothing.
+pub fn build_registry_app_streams_and_secrets(
+    cache: Arc<ClientCache>,
+    kubeconfig_paths: Vec<PathBuf>,
+    settings_path: Option<PathBuf>,
+    secrets: Arc<dyn SecretStore>,
+) -> (Registry, Option<Arc<ExtensionStreams>>) {
+    // The desktop keeps its apps in one file beside its settings.
+    let apps = settings_path
+        .as_ref()
+        .map(|path| Apps::from(path.with_extension("extensions.json")));
+    let (mut reg, app_streams) = build_with(
+        cache,
+        kubeconfig_paths,
+        apps,
+        Some(secrets),
+        BrokeredNetwork::Desktop,
+    );
+    if let Some(path) = settings_path {
+        settings::register(&mut reg, path);
+    }
+    (reg, app_streams)
+}
+
+/// Every host capability, and the apps capabilities over `apps` when there are
+/// any: with `secrets` keeping their secret settings, or with no way to keep
+/// one when there is no store at all (`None`, the web host).
+fn build_with(
+    cache: Arc<ClientCache>,
+    kubeconfig_paths: Vec<PathBuf>,
+    apps: Option<Apps>,
+    secrets: Option<Arc<dyn SecretStore>>,
+    network: BrokeredNetwork,
+) -> (Registry, Option<Arc<ExtensionStreams>>) {
     let mut reg = Registry::new();
 
     reg.register(Capability::read_only(
@@ -492,21 +589,44 @@ pub fn build_registry_with_paths_and_settings(
         cache.clone(),
     ));
 
-    if let Some(path) = settings_path {
+    let mut app_streams = None;
+    if let Some(apps) = apps {
         let mut core = reg.clone();
-        // Broker-only: kept out of `reg`, so neither the catalog nor MCP offers it.
-        core.register(extensions::crd::check_capability(cache.clone()));
+        for capability in broker_only(cache.clone(), network) {
+            core.register(capability);
+        }
         let core = Arc::new(core);
-        extensions::register(
-            &mut reg,
-            path.with_extension("extensions.json"),
-            core,
-            cache,
-        );
-        settings::register(&mut reg, path);
+        app_streams = Some(match secrets {
+            Some(secrets) => {
+                extensions::register_with_secrets(&mut reg, apps, core, cache, secrets)
+            }
+            None => extensions::register_without_secrets(&mut reg, apps, core, cache),
+        });
     }
 
-    reg
+    (reg, app_streams)
+}
+
+/// Whether an apps registry's broker may send `network.http` requests (#568).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BrokeredNetwork {
+    /// The desktop: a request leaves from the person's own computer, as their browser's
+    /// would.
+    Desktop,
+    /// The web host: a request would leave from the shared server — from its network
+    /// position, and to its loopback — so there is none.
+    Off,
+}
+
+/// The capabilities only the extension broker calls. Kept out of the registry the
+/// catalog and MCP are built from, so neither offers them: the CRD check an app read
+/// makes first, and `network.http` (#568), which called directly would fetch any URL.
+fn broker_only(cache: Arc<ClientCache>, network: BrokeredNetwork) -> Vec<Capability> {
+    let mut capabilities = vec![extensions::crd::check_capability(cache)];
+    if network == BrokeredNetwork::Desktop {
+        capabilities.push(extensions::network::capability());
+    }
+    capabilities
 }
 
 /// Build the registry using a caller-provided client cache with the host's
@@ -676,8 +796,10 @@ mod tests {
         assert_eq!(ids, default_ids, "same capabilities regardless of paths");
     }
 
+    /// `build_registry_with_paths` has no settings path, so neither the desktop
+    /// settings nor any app capability: apps need an inventory to act on.
     #[test]
-    fn web_registry_omits_host_desktop_settings() {
+    fn a_registry_without_a_settings_path_has_no_settings_or_apps() {
         let cache = ClientCache::new_many(vec![]);
         let reg = build_registry_with_paths(cache, vec![]);
         assert!(!reg.ids().contains(&"settings.get"));
@@ -689,9 +811,205 @@ mod tests {
             "extensions.configure",
             "extensions.validate",
             "extensions.read",
+            "extensions.resolveColumns",
+            "extensions.resolveCards",
+            "extensions.streams",
+            // Web storage of app secrets is #522's; until then the web host
+            // has no secret store and registers no way to set one.
+            "extension.secretStore",
         ] {
             assert!(reg.get(id).is_none());
         }
+    }
+
+    /// A web user's registry (#515) has every capability the desktop's has except the
+    /// desktop settings file's, which the web keeps as per-user SQLite rows.
+    /// `HOST_ONLY_CAPABILITY_IDS` in `packages/core/src/lib/capabilities.ts` is this
+    /// difference, so the two are held to each other here.
+    #[test]
+    fn a_web_users_registry_has_apps_but_no_desktop_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let apps = Apps::with_shared_catalog(
+            Arc::new(dir.path().join("inventory.json")),
+            SharedCatalog::new(dir.path().join("catalog.json")),
+        );
+        let reg = build_registry_for_user(ClientCache::new_many(vec![]), vec![], apps);
+        let web: std::collections::BTreeSet<&str> = reg.ids().into_iter().collect();
+        let desktop_reg = build_registry();
+        let desktop: std::collections::BTreeSet<&str> = desktop_reg.ids().into_iter().collect();
+        let host_only: Vec<&str> = desktop.difference(&web).copied().collect();
+        // No secret store on the web yet (#522), so no way to hand one a secret.
+        assert_eq!(
+            host_only,
+            ["extension.secretStore", "settings.get", "settings.set"]
+        );
+        assert!(web.is_subset(&desktop));
+
+        let core = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../packages/core/src/lib/capabilities.ts"
+        ))
+        .unwrap();
+        let listed = core
+            .split("export const HOST_ONLY_CAPABILITY_IDS: readonly string[] = [")
+            .nth(1)
+            .and_then(|rest| rest.split("];").next())
+            .expect("capabilities.ts declares HOST_ONLY_CAPABILITY_IDS");
+        let listed: std::collections::BTreeSet<&str> = listed
+            .split(',')
+            .map(|id| id.trim().trim_matches('"'))
+            .filter(|id| !id.is_empty())
+            .collect();
+        assert_eq!(listed.into_iter().collect::<Vec<_>>(), host_only);
+    }
+
+    /// #568: on the web host a `network.http` request would leave from the shared
+    /// server, not from the person's own computer: from its network position, and to
+    /// its loopback. So a web user's registry has no `network.http`, and an app that
+    /// binds it is refused there as a target this host does not provide.
+    #[tokio::test]
+    async fn a_web_users_apps_cannot_send_network_requests() {
+        let dir = tempfile::tempdir().unwrap();
+        let apps = Apps::with_shared_catalog(
+            Arc::new(dir.path().join("inventory.json")),
+            SharedCatalog::new(dir.path().join("catalog.json")),
+        );
+        let reg = build_registry_for_user(ClientCache::new_many(vec![]), vec![], apps);
+        let manifest = json!({
+            "id": "org.example.releases", "name": "Releases", "version": "0.1.0",
+            "srelensApiVersion": "^0.4", "kind": "declarative",
+            "permissions": [{"capability": "network.http", "hosts": ["api.github.com"]}],
+            "capabilities": [{"name": "latest", "title": "Latest release", "target": "network.http",
+                "arguments": {"url": "https://api.github.com", "path": "/repos/srelens/srelens/releases/latest"},
+                "inputs": []}],
+            "contributions": {"pages": [], "detailTabs": [], "detailLinks": []}
+        })
+        .to_string();
+        let report = reg
+            .invoke(
+                "extensions.validate",
+                json!({"manifest": manifest, "grants": ["network.http"]}),
+            )
+            .await
+            .unwrap();
+        let refused = report["errors"].as_array().unwrap().iter().any(|error| {
+            error["code"] == "EXTENSION_UNSUPPORTED_TARGET"
+                && error["path"] == "capabilities[0].target"
+                && error["message"] == "This host does not provide network.http"
+        });
+        assert!(refused, "{report}");
+        let installed = reg
+            .invoke(
+                "extensions.configure",
+                json!({"action": "install", "manifest": manifest, "grants": ["network.http"]}),
+            )
+            .await;
+        assert!(installed.is_err(), "{installed:?}");
+        // The desktop's broker has it, and only the desktop's.
+        assert!(
+            broker_only(ClientCache::new_many(vec![]), BrokeredNetwork::Desktop)
+                .iter()
+                .any(|capability| capability.id == srelens_plugin_host::NETWORK_HTTP)
+        );
+        assert!(
+            !broker_only(ClientCache::new_many(vec![]), BrokeredNetwork::Off)
+                .iter()
+                .any(|capability| capability.id == srelens_plugin_host::NETWORK_HTTP)
+        );
+    }
+
+    /// #543, then #568: the one place the host may put an app's secret is the
+    /// `secretHeaders` of `network.http`, and that capability is the broker's
+    /// alone. Nothing the catalog or MCP offers declares a slot, and no
+    /// settable position anywhere takes a `secret-reference`. Another slot has
+    /// to change this test on purpose.
+    #[test]
+    fn only_the_brokers_network_http_takes_a_secret() {
+        let reg = build_registry();
+        let broker = broker_only(ClientCache::new_many(vec![]), BrokeredNetwork::Desktop);
+        for capability in reg.entries().chain(broker.iter()) {
+            let expected: &[&str] = if capability.id == srelens_plugin_host::NETWORK_HTTP {
+                &["secretHeaders"]
+            } else {
+                &[]
+            };
+            assert_eq!(
+                capability.secret_slots, expected,
+                "{} secret slots",
+                capability.id
+            );
+            for position in &capability.settable {
+                assert!(
+                    !position.accepts.contains(&srelens_capability::settings::SettingType::SecretReference),
+                    "{}.{} takes a secret",
+                    capability.id,
+                    position.argument
+                );
+            }
+        }
+        // Called directly, network.http would fetch any URL: neither the catalog
+        // nor MCP may offer it, on any build.
+        assert!(reg.get(srelens_plugin_host::NETWORK_HTTP).is_none());
+        assert!(capability_catalog()
+            .iter()
+            .all(|entry| entry.id != srelens_plugin_host::NETWORK_HTTP));
+        let dir = tempfile::tempdir().unwrap();
+        let desktop = build_registry_with_paths_and_settings(
+            ClientCache::new_many(vec![]),
+            vec![],
+            Some(dir.path().join("settings.json")),
+        );
+        assert!(desktop.get(srelens_plugin_host::NETWORK_HTTP).is_none());
+        let tools = srelens_mcp::McpServer::new(Arc::new(desktop)).list_tools();
+        assert!(tools
+            .iter()
+            .all(|tool| tool.name != srelens_plugin_host::NETWORK_HTTP));
+    }
+
+    /// The desktop hands its vault to the registry; every other build says
+    /// it has no store, and so refuses to keep a secret.
+    #[tokio::test]
+    async fn the_secret_store_a_host_supplies_is_the_one_the_apps_use() {
+        struct Open;
+        impl srelens_plugin_host::SecretStore for Open {
+            fn status(&self) -> Result<(), String> {
+                Ok(())
+            }
+            fn put(&self, _: &str, _: &srelens_plugin_host::SecretValue) -> Result<(), String> {
+                Ok(())
+            }
+            fn contains(&self, _: &str) -> Result<bool, String> {
+                Ok(false)
+            }
+            fn retain(&self, _: &std::collections::BTreeSet<String>) -> Result<(), String> {
+                Ok(())
+            }
+            fn reveal(
+                &self,
+                _: &str,
+            ) -> Result<Option<srelens_plugin_host::SecretValue>, String> {
+                Ok(None)
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let settings = dir.path().join("settings.json");
+        let with_store = build_registry_with_paths_settings_and_secrets(
+            ClientCache::new_many(vec![]),
+            vec![],
+            Some(settings.clone()),
+            Arc::new(Open),
+        );
+        let listed = with_store.invoke("extensions.list", json!({})).await.unwrap();
+        assert_eq!(listed["secretStore"], json!({"available": true}));
+
+        let without = build_registry_with_paths_and_settings(
+            ClientCache::new_many(vec![]),
+            vec![],
+            Some(settings),
+        );
+        let listed = without.invoke("extensions.list", json!({})).await.unwrap();
+        assert_eq!(listed["secretStore"]["available"], false);
+        assert!(without.get("extension.secretStore").is_some(), "its metadata is still the catalog's");
     }
 
     #[test]
@@ -960,6 +1278,57 @@ mod tests {
                 });
             }
         }
+    }
+
+    /// A `#fragment` that names no heading still renders as a link; it just
+    /// lands at the top of the page. `mcp-catalog.md#prompts` and `#resources`
+    /// did that from the day the catalog was generated, because its headings
+    /// carried counts and GitHub put the counts in the anchors.
+    #[test]
+    fn every_anchor_the_mcp_docs_link_to_exists() {
+        use crate::mcp_docs::tests_support::heading_anchors;
+        // The catalog as the generator renders it, not as committed:
+        // `mcp_catalog_md_is_in_sync` holds the two equal, and reading the
+        // file here would race that test rewriting it under `UPDATE_CATALOG=1`.
+        let page_of = |name: &str| {
+            if name == "mcp-catalog.md" {
+                crate::mcp_docs::render_catalog()
+            } else {
+                doc(name)
+            }
+        };
+        let mut checked = 0usize;
+        for name in ["MCP.md", "mcp-catalog.md"] {
+            let md = page_of(name);
+            let targets = md
+                .split("](")
+                .skip(1)
+                .filter_map(|rest| rest.split_once(')').map(|(target, _)| target));
+            for target in targets {
+                let Some((file, anchor)) = target.split_once('#') else {
+                    continue;
+                };
+                if file.contains("://") {
+                    continue;
+                }
+                let page = if file.is_empty() {
+                    md.clone()
+                } else {
+                    page_of(file)
+                };
+                let anchors = heading_anchors(&page);
+                assert!(
+                    anchors.contains(anchor),
+                    "docs/{name} links to `{target}`, but no heading there has that anchor; \
+                     it has {anchors:?}"
+                );
+                checked += 1;
+            }
+        }
+        assert!(
+            checked >= 3,
+            "expected MCP.md's links into the catalog to be checked, saw {checked}"
+        );
     }
 
     #[test]

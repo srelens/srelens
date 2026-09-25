@@ -5,14 +5,105 @@ vi.mock("@srelens/core", async (original) => ({
   listCrds: vi.fn(),
   readExtension: vi.fn(),
   listNamespaces: vi.fn(),
+  openExtensionView: vi.fn(),
+  isTauri: vi.fn(),
 }));
 import {
   listCrds,
   readExtension,
   listNamespaces,
+  openExtensionView,
+  isTauri,
   type InstalledExtension,
 } from "@srelens/core";
-import { ExtensionWorkspace, resourceStatus } from "./ExtensionWorkspace";
+import { ExtensionWorkspace, DONUT_COLORS, donutBackground, EMPTY_DONUT } from "./ExtensionWorkspace";
+
+it("draws Unknown in a readable ink, never the hairline an empty ring uses", () => {
+  // `--rule` is the subtle hairline role: an all-Unknown ring drawn in it
+  // looked exactly like an empty one.
+  expect(DONUT_COLORS.unknown).toMatch(/^var\(--ink-faint\b/);
+  expect(DONUT_COLORS.unknown).not.toContain("--rule");
+  expect(EMPTY_DONUT).toContain("--rule");
+  expect(new Set(Object.values(DONUT_COLORS)).size).toBe(6);
+  const allUnknown = donutBackground({ healthy: 0, warning: 0, error: 0, progressing: 0, suspended: 0, unknown: 4 });
+  expect(allUnknown).toContain(DONUT_COLORS.unknown);
+  expect(allUnknown).not.toBe(EMPTY_DONUT);
+  expect(donutBackground({ healthy: 0, warning: 0, error: 0, progressing: 0, suspended: 0, unknown: 0 })).toBe(EMPTY_DONUT);
+});
+
+/** The ring's stops as `{ colour, from, to }`, in order. */
+function ringStops(ring: string) {
+  return ring.replace(/^conic-gradient\(/, "").replace(/\)$/, "").split(/(?<=%),/).map((stop) => {
+    const match = /^(.*) (-?[\d.]+)% (-?[\d.]+)%$/.exec(stop.trim())!;
+    return { colour: match[1], from: Number(match[2]), to: Number(match[3]) };
+  });
+}
+
+it.each([
+  ["1 in 100", 99],
+  ["1 in 1000", 999],
+])("never lets a rare status vanish from the ring: %s", (_name, healthy) => {
+  // One error among many rows is exactly what an operator scans the ring
+  // for; a gap wider than its share used to leave it a zero-width stop.
+  const stops = ringStops(donutBackground({ healthy, warning: 0, error: 1, progressing: 0, suspended: 0, unknown: 0 }));
+  const error = stops.findIndex((stop) => stop.colour === DONUT_COLORS.error);
+  expect(error).toBeGreaterThanOrEqual(0);
+  expect(stops[error].to - stops[error].from).toBeGreaterThan(1);
+  // A mark the eye finds: its colour is wider than the gap beside it.
+  const gap = stops[error + 1] ? stops[error + 1].to - stops[error + 1].from : 0;
+  expect(stops[error].to - stops[error].from).toBeGreaterThanOrEqual(3 * gap - 1e-9);
+  // And it keeps its gap, so it is not merged into its neighbour.
+  expect(stops[error + 1]?.colour ?? stops[0].colour).toMatch(/^var\(--surface/);
+  // The ring still closes: every stop in order, ending at 100%.
+  stops.forEach((stop, i) => {
+    expect(stop.to).toBeGreaterThanOrEqual(stop.from);
+    if (i) expect(stop.from).toBeCloseTo(stops[i - 1].to, 6);
+  });
+  expect(stops[0].from).toBe(0);
+  expect(stops.at(-1)!.to).toBeCloseTo(100, 6);
+  // Every non-zero colour segment is visible.
+  for (const stop of stops.filter((s) => !s.colour.startsWith("var(--surface"))) expect(stop.to - stop.from).toBeGreaterThan(1);
+});
+
+it("keeps every one of six rare statuses visible beside a dominant one", () => {
+  const stops = ringStops(donutBackground({ healthy: 10_000, warning: 1, error: 1, progressing: 1, suspended: 1, unknown: 1 }));
+  const colours = stops.filter((stop) => !stop.colour.startsWith("var(--surface"));
+  expect(colours.map((stop) => stop.colour)).toEqual(Object.values(DONUT_COLORS));
+  for (const stop of colours) expect(stop.to - stop.from).toBeGreaterThan(1);
+  expect(stops.at(-1)!.to).toBeCloseTo(100, 6);
+});
+
+it("keeps the legend's counts exact when the ring exaggerates a sliver", async () => {
+  const items = [
+    ...Array.from({ length: 999 }, (_, i) => ({ name: `ok-${i}`, namespace: "flux-system", age: "1d", columns: [], status: { status: "healthy", label: "Ready" } })),
+    { name: "broken", namespace: "flux-system", age: "1d", columns: [], status: { status: "error", label: "Not ready" } },
+  ];
+  const migrated = {
+    ...plugin,
+    manifest: { ...plugin.manifest,
+      capabilities: [{ name: "apps", target: "k8s.listCustomResource", arguments: { group: "kustomize.toolkit.fluxcd.io", kind: "Kustomization" } }],
+      contributions: { ...plugin.manifest.contributions,
+        pages: plugin.manifest.contributions.pages.map(({ statusColumns: _unused, ...page }) => page),
+        statusResolvers: [{ forKinds: ["kustomize.toolkit.fluxcd.io/Kustomization"], rules: [] }] } },
+  } as unknown as InstalledExtension;
+  vi.mocked(readExtension).mockResolvedValue({ items } as never);
+  render(<ExtensionWorkspace plugin={migrated} page={migrated.manifest.contributions.pages[0]} context="staging" />);
+  expect(await screen.findByText("Healthy: 999")).toBeTruthy();
+  expect(screen.getByText("Error: 1")).toBeTruthy();
+});
+
+it("parts adjacent segments with the surface, so two neutrals never meet edge to edge", () => {
+  // Suspended and Unknown are both neutral inks, too close to tell apart by
+  // colour; a surface gap between them reads at 3:1 or better in every theme.
+  const ring = donutBackground({ healthy: 0, warning: 0, error: 0, progressing: 0, suspended: 2, unknown: 2 });
+  const stops = ring.replace(/^conic-gradient\(/, "").replace(/\)$/, "").split(/(?<=%),/).map((stop) => stop.trim());
+  const suspended = stops.findIndex((stop) => stop.startsWith(DONUT_COLORS.suspended));
+  const unknown = stops.findIndex((stop) => stop.startsWith(DONUT_COLORS.unknown));
+  expect(suspended).toBeGreaterThanOrEqual(0);
+  expect(stops.slice(suspended + 1, unknown).some((stop) => stop.startsWith("var(--surface"))).toBe(true);
+  // A single segment is a whole ring, with no gap cut out of it.
+  expect(donutBackground({ healthy: 3, warning: 0, error: 0, progressing: 0, suspended: 0, unknown: 0 })).not.toContain("--surface");
+});
 // jsdom omits the browser layout APIs used by the shared searchable picker.
 if (!("ResizeObserver" in globalThis)) {
   (globalThis as unknown as { ResizeObserver: unknown }).ResizeObserver =
@@ -79,15 +170,70 @@ beforeEach(async () => {
     ],
   });
 });
-it("classifies statuses without counting suspended or reconciling as ready", () => {
-  const columns = { ready: 0, suspended: 1, progressing: 2 };
-  expect(resourceStatus(["True", "true", "False"], columns)).toBe("Suspended");
-  expect(resourceStatus(["True", "false", "True"], columns)).toBe(
-    "In progress",
-  );
-  expect(resourceStatus(["True", "false", "False"], columns)).toBe("Ready");
-  expect(resourceStatus(["False"], columns)).toBe("Not ready");
-  expect(resourceStatus([], columns)).toBe("Unknown");
+it("watches each reader of a dashboard page once, for the page, and re-reads its counts on a change (#566)", async () => {
+  const { act } = await import("@testing-library/react");
+  vi.mocked(isTauri).mockReturnValue(true);
+  const opened: Array<{ capability: string; onData: (data: unknown, seq: number) => void; onEnd: (end: unknown) => void }> = [];
+  const close = vi.fn(async () => {});
+  vi.mocked(openExtensionView).mockImplementation((app, label) => ({
+    view: `${app}/${label}`,
+    close,
+    open: async (request, handlers) => {
+      opened.push({ capability: request.source.capability, onData: handlers.onData as never, onEnd: handlers.onEnd as never });
+      return { stream: `s-${opened.length}`, cancel: vi.fn(async () => {}) };
+    },
+  }));
+  const { unmount } = render(<ExtensionWorkspace plugin={plugin} page={plugin.manifest.contributions.pages[0]} context="staging" />);
+  expect(await screen.findByText("Healthy: 1")).toBeTruthy();
+  await waitFor(() => expect(opened.map((o) => o.capability)).toEqual(["apps"]));
+  expect(openExtensionView).toHaveBeenCalledTimes(1);
+  const reads = vi.mocked(readExtension).mock.calls.length;
+  vi.mocked(readExtension).mockResolvedValue({ items: [
+    { name: "apps", namespace: "flux-system", age: "1d", columns: ["True", "false", "False"] },
+    { name: "infra", namespace: "flux-system", age: "1d", columns: ["True", "false", "False"] },
+  ] });
+  act(() => opened[0].onData({ event: "changed" }, 1));
+  expect(await screen.findByText("Healthy: 2")).toBeTruthy();
+  expect(vi.mocked(readExtension).mock.calls.length).toBe(reads + 1);
+  // A dashboard page says its state in words, visibly, not by a tint or a tooltip.
+  act(() => opened[0].onData({ event: "synced" }, 2));
+  expect(screen.getByText("Live")).toBeTruthy();
+  act(() => opened[0].onData({ event: "reconnecting", message: "connection reset" }, 3));
+  expect(screen.getByText("Reconnecting…")).toBeTruthy();
+  expect(screen.getByText(/Reconnecting to the cluster \(connection reset\)\. The counts below may be out of date/)).toBeTruthy();
+  act(() => opened[0].onEnd({ type: "error", code: "source", message: "forbidden" }));
+  expect(screen.getByText("Not live")).toBeTruthy();
+  expect(screen.getByText(/Live updates stopped: The stream failed: forbidden/)).toBeTruthy();
+  unmount();
+  await waitFor(() => expect(close).toHaveBeenCalled());
+});
+it("counts a resolver-backed page by the host's resolved statuses, in words", async () => {
+  // Flux after #541: no statusColumns; the host resolves each row's status.
+  const migrated = {
+    ...plugin,
+    manifest: {
+      ...plugin.manifest,
+      capabilities: [{ name: "apps", target: "k8s.listCustomResource",
+        arguments: { group: "kustomize.toolkit.fluxcd.io", kind: "Kustomization" } }],
+      contributions: {
+        ...plugin.manifest.contributions,
+        pages: plugin.manifest.contributions.pages.map(({ statusColumns: _unused, ...page }) => page),
+        statusResolvers: [{ forKinds: ["kustomize.toolkit.fluxcd.io/Kustomization"], rules: [] }],
+      },
+    },
+  } as unknown as InstalledExtension;
+  vi.mocked(readExtension).mockResolvedValue({ items: [
+    { name: "a", namespace: "flux-system", age: "1d", columns: [], status: { status: "healthy", label: "Ready" } },
+    { name: "b", namespace: "flux-system", age: "1d", columns: [], status: { status: "suspended", label: "Suspended" } },
+    { name: "c", namespace: "flux-system", age: "1d", columns: [], status: { status: "error", label: "Not ready" } },
+    { name: "d", namespace: "flux-system", age: "1d", columns: [], status: { status: "error", label: "Not ready" } },
+  ] });
+  render(<ExtensionWorkspace plugin={migrated} page={migrated.manifest.contributions.pages[0]} context="staging" />);
+  expect(await screen.findByText("Healthy: 1")).toBeTruthy();
+  expect(screen.getByText("Error: 2")).toBeTruthy();
+  expect(screen.getByText("Suspended: 1")).toBeTruthy();
+  // Every status is listed, zero included, so an absent colour is never the answer.
+  for (const word of ["Warning: 0", "Progressing: 0", "Unknown: 0"]) expect(screen.getByText(word)).toBeTruthy();
 });
 it("shows dashboard counts and navigates to grouped resource pages on the pinned cluster", async () => {
   const onPage = vi.fn();
@@ -99,7 +245,7 @@ it("shows dashboard counts and navigates to grouped resource pages on the pinned
       onPage={onPage}
     />,
   );
-  expect(await screen.findByText("Ready: 1")).toBeTruthy();
+  expect(await screen.findByText("Healthy: 1")).toBeTruthy();
   expect(readExtension).toHaveBeenCalledWith(
     "org.test.flux",
     3,
@@ -119,7 +265,7 @@ it("refreshes dashboard counts when an action on one of their resources is accep
       context="staging"
     />,
   );
-  expect(await screen.findByText("Ready: 1")).toBeTruthy();
+  expect(await screen.findByText("Healthy: 1")).toBeTruthy();
   const before = vi.mocked(readExtension).mock.calls.length;
   const changed = (detail: object) =>
     window.dispatchEvent(new CustomEvent(EXTENSION_RESOURCE_CHANGED, { detail }));
@@ -143,7 +289,7 @@ it("reports failed summaries instead of displaying zero healthy resources", asyn
     />,
   );
   expect((await screen.findByRole("alert")).textContent).toContain("Forbidden");
-  expect(screen.queryByText("Ready: 0")).toBeNull();
+  expect(screen.queryByText("Healthy: 0")).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "Retry" }));
   await waitFor(() => expect(readExtension).toHaveBeenCalledTimes(2));
 });
@@ -302,6 +448,46 @@ it("retains a namespace discovery error and offers retry", async () => {
   await waitFor(() => expect(listNamespaces).toHaveBeenCalledTimes(2));
 });
 
+it("asks the host for only a dashboard card's rows on its target page", async () => {
+  render(
+    <ExtensionWorkspace
+      plugin={plugin}
+      page={plugin.manifest.contributions.pages[1]}
+      context="staging"
+      namespace="flux-system"
+      card="suspended"
+    />,
+  );
+  expect(await screen.findByRole("cell", { name: "apps" })).toBeTruthy();
+  expect(readExtension).toHaveBeenCalledWith("org.test.flux", 3, "apps", "staging", "flux-system", true, "suspended");
+});
+
+it("reads a card's rows over the several namespaces it counted in", async () => {
+  // Narrows like the host: only rows in the namespaces the read names.
+  const rows = [
+    { name: "in-prod", namespace: "prod", age: "1d", columns: [] },
+    { name: "in-team", namespace: "team", age: "1d", columns: [] },
+    { name: "in-other", namespace: "other", age: "1d", columns: [] },
+  ];
+  vi.mocked(readExtension).mockImplementation((async (...args: unknown[]) => {
+    const scope = (args[7] as string[] | undefined) ?? [];
+    return { items: rows.filter((row) => !scope.length || scope.includes(row.namespace)) };
+  }) as never);
+  render(
+    <ExtensionWorkspace
+      plugin={plugin}
+      page={plugin.manifest.contributions.pages[1]}
+      context="staging"
+      card="suspended"
+      cardNamespaces={["prod", "team"]}
+    />,
+  );
+  expect(await screen.findByRole("cell", { name: "in-prod" })).toBeTruthy();
+  expect(screen.getByRole("cell", { name: "in-team" })).toBeTruthy();
+  expect(screen.queryByRole("cell", { name: "in-other" })).toBeNull();
+  expect(readExtension).toHaveBeenCalledWith("org.test.flux", 3, "apps", "staging", "", true, "suspended", ["prod", "team"]);
+});
+
 it("filters resource rows without a second cluster read", async () => {
   render(
     <ExtensionWorkspace
@@ -354,6 +540,51 @@ it("uses the restricted namespace instead of an all-namespace resource read", as
   render(<ExtensionWorkspace plugin={plugin} page={plugin.manifest.contributions.pages[1]} context="staging" />);
   await waitFor(()=>expect(readExtension).toHaveBeenLastCalledWith(plugin.manifest.id,plugin.revision,"apps","staging","team",true));
   expect(vi.mocked(readExtension).mock.calls.every(call=>call[4]==="team")).toBe(true);
+});
+
+// A card route owns its scope, whatever the credential (#540 review): it reads
+// exactly the namespaces the card counted in, and the picker names them. A
+// credential restricted to another namespace gets the host's refusal for the
+// card's scope, never quietly its own namespace's rows under the card's banner.
+it.each([
+  ["one namespace", "an unrestricted credential", "prod", undefined, false, ["prod", true, "suspended"], "prod"],
+  ["one namespace", "a credential restricted to team", "prod", undefined, true, ["prod", true, "suspended"], "prod"],
+  ["several namespaces", "an unrestricted credential", "", ["prod", "team"], false, ["", true, "suspended", ["prod", "team"]], "prod, team"],
+  ["several namespaces", "a credential restricted to team", "", ["prod", "team"], true, ["", true, "suspended", ["prod", "team"]], "prod, team"],
+  ["every namespace", "an unrestricted credential", "", undefined, false, ["", true, "suspended"], "All namespaces"],
+  ["every namespace", "a credential restricted to team", "", undefined, true, ["", true, "suspended"], "All namespaces"],
+] as const)("a card target over %s, with %s, reads and shows exactly the card's scope", async (_scope, _credential, namespace, cardNamespaces, restricted, read, label) => {
+  if (restricted) {
+    vi.mocked(listNamespaces).mockResolvedValue({error:'Forbidden: User "system:serviceaccount:team:reader" cannot list namespaces'} as any);
+    vi.spyOn(await import("@srelens/core/lib/clusters"),"listContexts").mockResolvedValue({contexts:[{name:"staging",namespace:"team"}]} as any);
+  } else {
+    vi.mocked(listNamespaces).mockResolvedValue({namespaces:["prod","team","other"]} as any);
+  }
+  const onLeaveCard = vi.fn();
+  render(<ExtensionWorkspace plugin={plugin} page={plugin.manifest.contributions.pages[1]} context="staging"
+    namespace={namespace} card="suspended" cardNamespaces={cardNamespaces ? [...cardNamespaces] : undefined}
+    onLeaveCard={onLeaveCard} />);
+  // Settled once the credential's scope, if any, is known: the picker is drawn then.
+  const picker = await screen.findByRole("combobox",{name:"App namespace"});
+  await waitFor(()=>expect(picker.textContent).toContain(label));
+  const cardReads = vi.mocked(readExtension).mock.calls.filter(call=>call[6]==="suspended");
+  expect(cardReads.length).toBeGreaterThan(0);
+  for (const call of cardReads) expect(call.slice(4)).toEqual(read);
+  // Never the credential's own namespace in place of the card's.
+  if (restricted) expect(cardReads.some(call=>call[4]==="team")).toBe(false);
+  // One option per label: the card's scope is named once, so a reader never
+  // has two identical choices that do different things.
+  fireEvent.click(picker);
+  const labels = (await screen.findAllByRole("option")).map((option)=>option.textContent?.trim());
+  expect(labels.filter((text)=>text===label)).toHaveLength(1);
+  expect(new Set(labels).size).toBe(labels.length);
+  // Choosing the card's own scope stays on the card; any other namespace leaves it.
+  fireEvent.click(screen.getByRole("option",{name:label}));
+  expect(onLeaveCard).not.toHaveBeenCalled();
+  fireEvent.click(picker);
+  const other = restricted ? "team" : "other";
+  fireEvent.click(await screen.findByRole("option",{name:other}));
+  expect(onLeaveCard).toHaveBeenCalledWith(other);
 });
 
 it("carries the selected namespace into group navigation", async () => {

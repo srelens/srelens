@@ -31,7 +31,7 @@ live tool-list updates are not advertised yet.
 
 Both desktop designs manage apps through **Settings → Apps**, from the catalog or a
 pasted local manifest. The backend owns installation, grants, enable/disable,
-updates, removal and per-app JSON settings. Installation requires an explicit review
+updates, removal and per-app typed settings. Installation requires an explicit review
 of the requested permissions. There is no developer mode.
 
 Installation and enablement are app-wide, not per kubeconfig context. Enabled pages
@@ -45,7 +45,8 @@ extension replaced by `extensions.json`, so `settings.extensions.json`.
 
 - Saves use a private temporary file, sync and atomic replacement under a
   cross-process lock.
-- Updating an ID preserves its settings and assigns a new revision. The app keeps up to
+- Updating an ID keeps the settings the new version still declares and accepts, and
+  assigns a new revision. The app keeps up to
   the last three versions it replaced, fewer when they would take the inventory past
   1 MiB; restoring one grants its permissions again after
   review, keeps settings and assigns a new revision
@@ -66,9 +67,19 @@ extension replaced by `extensions.json`, so `settings.extensions.json`.
 - Every read checks the durable inventory and revision, so a disabled, removed or
   replaced installation cannot be invoked through an old registry instance. Calls
   already admitted may finish.
+- Streams do not finish: every inventory write ends the streams the new state no
+  longer authorizes — a disabled, updated or removed app's — and nothing else. See
+  [streams.md](streams.md#ownership).
 - Nothing is persisted in browser storage.
-- Stored settings are JSON data; this declarative version does not interpolate them
-  into capability arguments.
+- Stored settings are held to the typed `settings` the manifest declares (#542). A
+  setting reaches a capability only through a binding argument the capability marks
+  settable, checked at install, on save and on every request. A secret-reference
+  setting's value never enters the inventory; it holds only a reference, and the value is
+  one more entry in srelens's encrypted secrets vault (`secrets.enc`), whose one master
+  key is held by the OS keychain or derived from the master password. The registry sees
+  the vault only as a `SecretStore`, which follows the
+  inventory: whatever the inventory stops referencing is deleted (#543). See
+  [Secret settings](manifest.md#secret-settings).
 
 ## Quarantine
 
@@ -89,9 +100,10 @@ whole inventory, because no single entry can be trusted then.
 ## Hosts
 
 - **Desktop:** full support in both the new and classic designs.
-- **Web:** every `extensions.*` capability is refused until app state is kept per
-  user ([#515](https://github.com/srelens/srelens/issues/515)). See
-  [capabilities.md](capabilities.md#web-host).
+- **Web:** each signed-in user has their own inventory, kept in the server database,
+  and every user reads one shared catalog only the server writes
+  ([#515](https://github.com/srelens/srelens/issues/515)). App streams are not run
+  there, so views read on Refresh. See [capabilities.md](capabilities.md#web-host).
 
 ## Where it is heading
 

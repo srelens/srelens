@@ -64,11 +64,27 @@ describe("gatedCapabilityIds", () => {
     const web = gatedCapabilityIds("web");
     const desktop = gatedCapabilityIds("desktop");
     expect(web).not.toContain("settings.set");
-    expect(web).not.toContain("extensions.action");
-    expect(HOST_ONLY_CAPABILITY_IDS).toContain("extensions.resource");
-    expect(desktop).toContain("extensions.action");
     expect(desktop).toContain("settings.set");
     expect(desktop.filter((id) => !HOST_ONLY_CAPABILITY_IDS.includes(id))).toEqual(web);
+  });
+
+  // Each web user's registry has their own apps (#515, `build_registry_for_user`),
+  // so no `extensions.*` id is one only a desktop host has, and the gated app
+  // capabilities count on the web as they do there.
+  it("counts no app capability as host-only", () => {
+    const apps = entries.map((c) => c.id).filter((id) => id.startsWith("extensions."));
+    expect(apps.length).toBeGreaterThan(0);
+    expect(apps.filter((id) => HOST_ONLY_CAPABILITY_IDS.includes(id))).toEqual([]);
+    expect(gatedCapabilityIds("web")).toContain("extensions.action");
+    expect(gatedCapabilityIds("web")).toContain("extensions.configure");
+  });
+
+  // #543: the secret store is registered with the apps it serves, so the web
+  // host has none, and a web reader is never told it is one of their gates.
+  it("counts the app secret store as host-only", () => {
+    expect(entries.some((c) => c.id === "extension.secretStore")).toBe(true);
+    expect(gatedCapabilityIds("desktop")).toContain("extension.secretStore");
+    expect(gatedCapabilityIds("web")).not.toContain("extension.secretStore");
   });
 
   it("exposes the catalog it derives from, unchanged", () => {

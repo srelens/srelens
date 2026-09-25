@@ -234,20 +234,202 @@ fn gitops_examples_bind_to_the_real_host_contract() {
         include_str!("../../../examples/extensions/argocd.json"),
         include_str!("../../../examples/extensions/flux.json"),
     ] {
-        let manifest = Manifest::parse(source).unwrap();
-        let readers: std::collections::BTreeSet<_> = manifest.capabilities.iter().map(|binding| format!("plugin/{}/{}", manifest.id, binding.name)).collect();
-        let count = manifest.capabilities.len() + manifest.actions.len();
-        let grants = manifest.permissions.clone();
-        let mut reg = Registry::new();
-        let _installed = host.register(&mut reg, manifest, &grants).unwrap();
-        assert_eq!(reg.ids().len(), count);
-        for cap in reg.entries() {
-            assert_eq!(cap.annotations.read_only, readers.contains(&cap.id));
-            if !cap.annotations.read_only { assert!(cap.annotations.requires_confirm); }
-            assert!(cap.input_schema["properties"].get("group").is_none());
-            assert!(cap.input_schema["properties"].get("context").is_some());
+        let parsed = Manifest::parse(source).unwrap();
+        // A reader that lists versions is registered once a cluster resolves it to one
+        // (#547): every listed version binds to the real contract.
+        let most = parsed
+            .capabilities
+            .iter()
+            .map(|b| b.versions.len())
+            .max()
+            .unwrap_or(0)
+            .max(1);
+        for choice in 0..most {
+            let mut manifest = parsed.clone();
+            for binding in parsed
+                .capabilities
+                .iter()
+                .filter(|b| !b.versions.is_empty())
+            {
+                let version = &binding.versions[choice.min(binding.versions.len() - 1)];
+                manifest = manifest.at_version(&binding.name, version).unwrap();
+            }
+            let readers: std::collections::BTreeSet<_> = manifest
+                .capabilities
+                .iter()
+                .map(|binding| format!("plugin/{}/{}", manifest.id, binding.name))
+                .collect();
+            let count = manifest.capabilities.len() + manifest.actions.len();
+            let grants = manifest.permission_names();
+            let mut reg = Registry::new();
+            let _installed = host.register(&mut reg, manifest, &grants).unwrap();
+            assert_eq!(reg.ids().len(), count);
+            for cap in reg.entries() {
+                assert_eq!(cap.annotations.read_only, readers.contains(&cap.id));
+                if !cap.annotations.read_only {
+                    assert!(cap.annotations.requires_confirm);
+                }
+                assert!(cap.input_schema["properties"].get("group").is_none());
+                assert!(cap.input_schema["properties"].get("context").is_some());
+            }
         }
     }
+}
+
+#[test]
+fn gitops_examples_declare_curated_inspector_panels() {
+    let flux = Manifest::parse(include_str!("../../../examples/extensions/flux.json")).unwrap();
+    let argo = Manifest::parse(include_str!("../../../examples/extensions/argocd.json")).unwrap();
+    for kind in [
+        "kustomize.toolkit.fluxcd.io/Kustomization",
+        "helm.toolkit.fluxcd.io/HelmRelease",
+    ] {
+        assert!(
+            flux.contributions
+                .detail_panels
+                .iter()
+                .any(|panel| panel.for_kinds.iter().any(|candidate| candidate == kind)),
+            "missing Flux panel for {kind}"
+        );
+    }
+    assert!(argo.contributions.detail_panels.iter().any(|panel| panel
+        .for_kinds
+        .contains(&"argoproj.io/Application".to_owned())));
+}
+
+#[test]
+fn the_gitops_examples_resolve_status_with_rules_and_badge_workloads() {
+    use srelens_capability::status::{first_match, resolve_status, NormalizedStatus as S};
+    let flux = Manifest::parse(include_str!("../../../examples/extensions/flux.json")).unwrap();
+    let argo = Manifest::parse(include_str!("../../../examples/extensions/argocd.json")).unwrap();
+    for manifest in [&flux, &argo] {
+        // Migrated: no page counts by printer-column index any more, and
+        // every custom-resource reader's kind has a resolver.
+        assert!(manifest
+            .contributions
+            .pages
+            .iter()
+            .all(|page| page.status_columns.is_none()));
+        for binding in &manifest.capabilities {
+            if let Some(kind) = Manifest::reader_kind(binding) {
+                assert!(
+                    manifest.status_rules_for(&kind).is_some(),
+                    "{} has no resolver for {kind}",
+                    manifest.id
+                );
+            }
+        }
+    }
+    let flux_rules = flux
+        .status_rules_for("helm.toolkit.fluxcd.io/HelmRelease")
+        .unwrap();
+    let ready = |status: &str, message: &str| {
+        json!({"spec":{},"status":{"conditions":[
+            {"type":"Reconciling","status":"False","message":"idle"},
+            {"type":"Ready","status":status,"message":message}]}})
+    };
+    let resolved = |rules, object: Value| {
+        let got = resolve_status(rules, &object);
+        (got.status, got.label, got.reason)
+    };
+    assert_eq!(
+        resolved(
+            flux_rules,
+            ready("True", "Release reconciliation succeeded")
+        ),
+        (S::Healthy, "Ready".into(), None)
+    );
+    assert_eq!(
+        resolved(flux_rules, ready("False", "install retries exhausted")),
+        (
+            S::Error,
+            "Not ready".into(),
+            Some("install retries exhausted".into())
+        )
+    );
+    let mut suspended = ready("True", "ok");
+    suspended["spec"]["suspend"] = json!(true);
+    assert_eq!(resolved(flux_rules, suspended).0, S::Suspended);
+    assert_eq!(resolved(flux_rules, json!({})).0, S::Unknown);
+
+    let argo_rules = argo.status_rules_for("argoproj.io/Application").unwrap();
+    let app = |health: &str, sync: &str| {
+        json!({"status":{"health":{"status":health,"message":"waiting for rollout"},
+            "sync":{"status":sync,"revision":"abc123"}}})
+    };
+    assert_eq!(resolved(argo_rules, app("Healthy", "Synced")).0, S::Healthy);
+    assert_eq!(
+        resolved(argo_rules, app("Healthy", "OutOfSync")),
+        (S::Warning, "Out of sync".into(), Some("abc123".into()))
+    );
+    assert_eq!(resolved(argo_rules, app("Degraded", "Synced")).0, S::Error);
+    assert_eq!(
+        resolved(argo_rules, app("Progressing", "Synced")).0,
+        S::Progressing
+    );
+    assert_eq!(
+        resolved(argo_rules, app("Suspended", "Synced")).0,
+        S::Suspended
+    );
+
+    // GitOps ownership on built-in workloads: the exit criterion of #517.
+    // Shaped as the host's metadata read hands a Deployment `team/guestbook`
+    // to a direct badge: its identity plus the metadata the rule may read.
+    let owned_named = |manifest: &Manifest, name: &str, metadata: Value| {
+        let badge = &manifest.contributions.badges[0];
+        assert!(badge.for_kinds.iter().any(|kind| kind == "apps/Deployment"));
+        assert!(badge.join.is_none());
+        let mut metadata = metadata;
+        metadata["name"] = json!(name);
+        metadata["namespace"] = json!("team");
+        let object = json!({"apiVersion": "apps/v1", "kind": "Deployment", "metadata": metadata});
+        first_match(&badge.rules, &object).map(|b| (b.label, b.reason))
+    };
+    let owned = |manifest: &Manifest, metadata: Value| owned_named(manifest, "guestbook", metadata);
+    // A tracking id copied onto another workload names `team/guestbook`, not
+    // `team/clone`: Argo CD does not own `clone`, so it gets no badge.
+    assert_eq!(
+        owned_named(
+            &argo,
+            "clone",
+            json!({"annotations":{"argocd.argoproj.io/tracking-id":"guestbook:apps/Deployment:team/guestbook"}})
+        ),
+        None
+    );
+    assert_eq!(
+        owned(
+            &flux,
+            json!({"labels":{"kustomize.toolkit.fluxcd.io/name":"apps"}})
+        ),
+        Some(("Flux".into(), Some("apps".into())))
+    );
+    assert_eq!(
+        owned(
+            &flux,
+            json!({"labels":{"helm.toolkit.fluxcd.io/name":"podinfo"}})
+        ),
+        Some(("Flux".into(), Some("podinfo".into())))
+    );
+    assert_eq!(
+        owned(
+            &argo,
+            json!({"annotations":{"argocd.argoproj.io/tracking-id":"guestbook:apps/Deployment:team/guestbook"}})
+        ),
+        Some((
+            "Argo CD".into(),
+            Some("guestbook:apps/Deployment:team/guestbook".into())
+        ))
+    );
+    // `app.kubernetes.io/instance` alone is Helm's label too; it is not
+    // ownership by Argo CD.
+    assert_eq!(
+        owned(
+            &argo,
+            json!({"labels":{"app.kubernetes.io/instance":"guestbook"}})
+        ),
+        None
+    );
+    assert_eq!(owned(&flux, json!({})), None);
 }
 
 #[test]
@@ -389,7 +571,7 @@ fn api_ranges_negotiate_against_every_supported_version() {
 fn a_manifest_for_a_newer_api_is_told_the_version_it_needs_not_an_unknown_field() {
     let mut newer = manifest();
     newer["srelensApiVersion"] = json!("^0.9");
-    newer["contributions"]["dashboardCards"] = json!([]);
+    newer["contributions"]["notYetAContribution"] = json!([]);
     let error = Manifest::parse(&newer.to_string()).unwrap_err().to_string();
     assert!(error.contains("requires API ^0.9"), "{error}");
     assert!(
@@ -417,17 +599,20 @@ fn fields_must_exist_in_every_api_version_the_range_admits() {
             path: "contributions.dashboardCards",
             introduced: "0.2.0",
             removed: None,
+            form: None,
         },
         ApiField {
             path: "contributions.pages[].badges",
             introduced: "0.2.0",
             removed: None,
+            form: None,
         },
         // A 0.1 field a later line removed; a rename is this plus an addition.
         ApiField {
             path: "contributions.detailLinks",
             introduced: "0.1.0",
             removed: Some("0.2.0"),
+            form: None,
         },
     ];
     let with_detail_link = || {
@@ -507,6 +692,7 @@ fn stored_manifests_are_rechecked_against_the_hosts_api_fields() {
         path: "contributions.detailLinks",
         introduced: "0.1.0",
         removed: Some("0.3.0"),
+        form: None,
     }];
     assert!(stored
         .check_api_fields(&["0.1.0", "0.2.0"], &fields)

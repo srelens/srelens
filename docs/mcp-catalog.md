@@ -5,9 +5,9 @@
 
 Everything this server exposes over MCP, generated from the live registry so it cannot drift. Written for someone wiring an agent to srelens; the narrative reference is [MCP.md](MCP.md).
 
-## Tools (114)
+## Tools
 
-Argument schemas are not reproduced here — call `tools/list` for those, which cannot go stale.
+120 tools, grouped by area and then by how a call is gated. Argument schemas are not reproduced here — call `tools/list` for those, which cannot go stale.
 
 **Impact** is how much a successful call disturbs — `low`, `medium` or `high` — and is a different question from the section heading, which is how the call is gated. A capability that accepts several named operations carries the highest level any of them reaches; the per-operation level travels with the resource.
 
@@ -159,28 +159,36 @@ Argument schemas are not reproduced here — call `tools/list` for those, which 
 | `toolbox.removePlugin` | medium | remove an installed krew plugin |
 | `toolbox.upgradePlugin` | medium | upgrade an installed krew plugin |
 
-### Server — read-only (8)
+### Server — read-only (13)
 
 | Tool | Impact | Summary |
 | --- | --- | --- |
 | `extensions.catalog` | low | Browse the native extension catalog with a durable cache; never connects clusters |
 | `extensions.catalogManifest` | low | Download and checksum-verify a catalog manifest for permission review; does not install it |
 | `extensions.list` | low | List installed declarative extensions |
-| `extensions.read` | low | Read a declared custom-resource contribution from an enabled extension |
+| `extensions.read` | low | Read a declared custom-resource contribution, or send a declared network.http request, from an enabled extension |
+| `extensions.resolveCards` | low | Resolve the cluster dashboard cards an enabled extension declares, each to a figure or the reason it has none |
+| `extensions.resolveColumns` | low | Resolve native extension table columns and badges in one batch |
+| `extensions.resolveLinks` | low | Resolve an app's resource relationship links for a resource Inspector |
+| `extensions.resolvePanels` | low | Resolve declarative app panels for a resource Inspector |
 | `extensions.resource` | low | Inspect the selected resource of an enabled app |
+| `extensions.streams` | low | Report the open app streams in this process and the traffic each app has sent |
 | `extensions.validate` | low | Check a declarative extension manifest exactly as installing it would and return every problem; does not install it |
 | `ping` | low | health check; echoes the input back as { pong: <input> } |
 | `settings.get` | low | read durable desktop settings; omit key to return the complete map |
 
-### Server — needs confirmation (3)
+### Server — needs confirmation (4)
 
 | Tool | Impact | Summary |
 | --- | --- | --- |
+| `extension.secretStore` | medium | Set or clear a secret an app keeps in srelens's encrypted secrets vault; write-only, never returns a value; requires approval |
 | `extensions.action` | high | Run a declared action on an app resource; requires explicit confirmation |
 | `extensions.configure` | medium | Install, enable, remove or configure local extensions; requires approval |
 | `settings.set` | medium | atomically write or remove durable desktop settings |
 
-## Prompts (4)
+## Prompts
+
+4 built-in prompts:
 
 | Prompt | Description | Arguments |
 | --- | --- | --- |
@@ -189,16 +197,16 @@ Argument schemas are not reproduced here — call `tools/list` for those, which 
 | `pod-pending` | Work out why a pod will not schedule | context (required), namespace, pod |
 | `service-no-endpoints` | Work out why a service has no endpoints | context (required), namespace, service |
 
-## Resources (2 fixed, 4 templates)
+## Resources
 
-`resources/list` returns only these two:
+`resources/list` returns only these 2 fixed resources:
 
 | URI | Description |
 | --- | --- |
 | `k8s://contexts` | Contexts srelens can connect to, and which is current. |
 | `k8s://catalog` | Every tool, prompt and resource template this server exposes. |
 
-Object addressing is discovered through `resources/templates/list`:
+Object addressing is discovered through `resources/templates/list`, which returns these 4 URI templates:
 
 | URI template | Description |
 | --- | --- |

@@ -4,9 +4,14 @@ mod annotations;
 pub mod audit;
 mod error;
 mod predicate;
+pub mod settings;
+pub mod status;
 mod text;
 
-pub use predicate::{check_predicates, resolve, unmet, Predicate, MAX_PREDICATES};
+pub use predicate::{
+    check_path, check_predicates, path_uses_filter, resolve, unmet, CardPredicate, Condition,
+    Predicate, ReferenceFormat, MAX_PREDICATES,
+};
 
 pub use annotations::{
     check_confirm_template, confirm_fields, render_confirm, Annotations, ConfirmFields, Impact,
@@ -53,6 +58,20 @@ pub struct Capability {
     /// `None` for a capability with no such rule, which is all of them but the
     /// action primitives.
     pub bound_arguments: Option<BoundArguments>,
+    /// The arguments a manifest may fill from one of the app's settings
+    /// (#542), written `${settings.<id>}`, and the setting types each takes.
+    /// Empty for almost every capability: interpolation anywhere else is
+    /// refused at install. See [`settings`].
+    pub settable: Vec<settings::Settable>,
+    /// The top-level arguments into which the host may inject a secret an app
+    /// keeps in the host's secret store (#543), such as an HTTP header (#568).
+    ///
+    /// The mirror of `settable`, and deliberately separate from it: a setting
+    /// is written into the manifest's argument, while a secret is supplied by
+    /// the host at the moment of the call and never enters the manifest, the
+    /// inventory, an MCP response or a log. Empty for every capability today,
+    /// so no current consumer can receive a secret.
+    pub secret_slots: Vec<String>,
 }
 
 impl Capability {
@@ -70,6 +89,8 @@ impl Capability {
             output_schema: Value::Null,
             handler: Arc::new(move |v| Box::pin(f(v))),
             bound_arguments: None,
+            settable: Vec::new(),
+            secret_slots: Vec::new(),
         }
     }
 
@@ -104,6 +125,8 @@ impl Capability {
             output_schema,
             handler,
             bound_arguments: None,
+            settable: Vec::new(),
+            secret_slots: Vec::new(),
         }
     }
 
@@ -115,6 +138,52 @@ impl Capability {
     {
         self.bound_arguments = Some(Arc::new(check));
         self
+    }
+
+    /// The same capability, letting a manifest fill `argument` from a setting
+    /// of one of the `accepts` types. `stand_in` is a value this capability's
+    /// `bound_arguments` rule accepts there (see [`settings::Settable`]).
+    ///
+    /// # Panics
+    /// When `accepts` names [`settings::SettingType::SecretReference`]: a
+    /// secret is injected by the host's secret store (#543), never written
+    /// into an argument where a handler, a log line or a cluster object could
+    /// keep it. That is a host programming error, caught by the first test
+    /// that builds the capability.
+    pub fn with_settable(
+        mut self,
+        argument: &str,
+        accepts: &[settings::SettingType],
+        stand_in: Value,
+    ) -> Self {
+        assert!(
+            !accepts.contains(&settings::SettingType::SecretReference),
+            "{}: a secret-reference setting cannot be interpolated into `{argument}`",
+            self.id
+        );
+        self.settable.push(settings::Settable {
+            argument: argument.to_owned(),
+            accepts: accepts.to_vec(),
+            stand_in,
+        });
+        self
+    }
+
+    /// The settable position `argument`, if this capability marks one.
+    pub fn settable_argument(&self, argument: &str) -> Option<&settings::Settable> {
+        self.settable.iter().find(|s| s.argument == argument)
+    }
+
+    /// The same capability, letting the host inject an app's stored secret
+    /// into `argument` (see [`Capability::secret_slots`]).
+    pub fn with_secret_slot(mut self, argument: &str) -> Self {
+        self.secret_slots.push(argument.to_owned());
+        self
+    }
+
+    /// Whether the host may inject a secret into `argument`.
+    pub fn takes_secret(&self, argument: &str) -> bool {
+        self.secret_slots.iter().any(|slot| slot == argument)
     }
 }
 
@@ -208,7 +277,7 @@ impl Registry {
         let sensitive = annotations.is_some_and(|a| a.sensitive);
         let redacted = audit::redact(&input, sensitive);
         let called = self.invoke(id, input.clone()).await;
-        let (app, cluster, resource) = audit::describe_target(&redacted);
+        let (app, cluster, resource) = audit::describe_call_target(id, &input, &redacted);
         sink.record(audit::AuditRecord {
             source,
             tool: id.to_string(),
@@ -226,7 +295,7 @@ impl Registry {
             error: called
                 .as_ref()
                 .err()
-                .map(|e| audit::redact_error(&e.to_string(), &input, &redacted)),
+                .map(|e| audit::redact_call_error(id, &e.to_string(), &input, &redacted)),
             args: redacted,
         });
         called
@@ -307,6 +376,39 @@ mod registry_tests {
         write.annotations = Annotations::DESTRUCTIVE;
         reg.register(write);
         reg
+    }
+
+    #[tokio::test]
+    async fn install_audit_keeps_a_checked_app_id_without_manifest_values() {
+        let mut reg = Registry::new();
+        let mut install = Capability::read_only("extensions.configure", "install", |args| async move {
+            if args["fail"] == true {
+                Err(CapabilityError::InvalidInput("invalid credential hunter2".into()))
+            } else {
+                Ok(json!({}))
+            }
+        });
+        install.annotations = Annotations::MUTATING;
+        reg.register(install);
+        let spy = Spy::default();
+        for fail in [false, true] {
+            let _ = reg.invoke_audited(
+                "extensions.configure",
+                json!({"action":"install","manifest":"{\"id\":\"org.example.app\",\"credential\":\"hunter2\"}","grants":[],"fail":fail}),
+                &spy,
+                audit::Source::McpStdio,
+                "auto",
+            ).await;
+        }
+        let seen = spy.seen();
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[0].outcome, audit::OUTCOME_OK);
+        assert_eq!(seen[1].outcome, audit::OUTCOME_REJECTED);
+        for record in seen {
+            assert_eq!(record.resource.as_deref(), Some("org.example.app"));
+            assert_eq!(record.args["manifest"], "<redacted>");
+            assert!(!record.error.as_deref().unwrap_or("").contains("hunter2"));
+        }
     }
 
     /// The asymmetry #555 settles: MCP is a third party and every call it

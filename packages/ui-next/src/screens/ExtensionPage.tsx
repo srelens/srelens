@@ -1,7 +1,8 @@
 import { useState } from "react";
 import { ExtensionResourceDetails } from "../extensions/ExtensionResourceDetails";
 import { ErrorNotice } from "../extensions/ExtensionResults";
-import { SHARED_CONTEXT_ID_MESSAGE } from "../extensions/contextIds";
+import { NO_PINNED_ID_MESSAGE, SHARED_CONTEXT_ID_MESSAGE } from "../extensions/contextIds";
+import { plainText } from "../extensions/displayText";
 import { ExtensionResourceNavigation } from "../extensions/resourceNavigation";
 import { extensionEnabledFor, extensionClusterRoute as extensionRoute, extensionClusterResourceRoute as extensionResourceRoute, listContexts, parseExtensionRoute } from "@srelens/core";
 import { Button, Screen } from "@srelens/ui-kit";
@@ -21,7 +22,7 @@ async function relistContexts() {
 /** Extension destinations carry their cluster in the route, independent of the rail. */
 export function ExtensionPage({ route }: RoutedScreenProps) {
   const target = parseExtensionRoute(route);
-  const [legacyPin, setLegacyPin] = useState<{ route: string; id: string } | null>(null);
+  const [legacyPin, setLegacyPin] = useState<{ route: string; key: string } | null>(null);
   const inventory = useExtensions();
   const contexts = useContexts();
   const contextsStatus = useContextsStatus();
@@ -35,22 +36,39 @@ export function ExtensionPage({ route }: RoutedScreenProps) {
   const page = plugin?.manifest.contributions.pages.find(
     (p) => p.id === target.page,
   );
-  // An already-open legacy name route learns its identity once; a later rename or
-  // another context inheriting the old name must not move that tab.
-  const identity = target.clusterId ?? (legacyPin?.route === route ? legacyPin.id : undefined);
-  const cluster = identity
-    ? contexts.find((c) => c.stableId === identity)
-    : contexts.find((c) => c.name === target.context);
-  if (!target.clusterId && cluster && legacyPin?.route !== route) {
-    setLegacyPin({ route, id: cluster.stableId });
+  // The route names its cluster by context key (#695), which no two contexts share. A tab
+  // opened before names it by stable ID, which two can share (#623): that one resolves only
+  // while a single context carries it. Older still, a display name: an already-open legacy
+  // route learns its key once, so a later rename or another context inheriting the old name
+  // must not move that tab.
+  const key = target.contextKey ?? (legacyPin?.route === route ? legacyPin.key : undefined);
+  const holders = target.clusterId === undefined ? [] : contexts.filter((c) => c.stableId === target.clusterId);
+  const cluster = key !== undefined
+    ? contexts.find((c) => c.key === key)
+    : target.clusterId !== undefined
+      ? (holders.length === 1 ? holders[0] : undefined)
+      : contexts.find((c) => c.name === target.context);
+  if (target.contextKey === undefined && target.clusterId === undefined && cluster && legacyPin?.route !== route) {
+    setLegacyPin({ route, key: cluster.key });
   }
-  const clusterId = cluster?.stableId ?? target.context;
+  // What this page's own links carry: the route identity, the key. Without a cluster nothing
+  // below reads or links.
+  const contextKey = cluster?.key ?? "";
+  // What the host is asked: the pinned ID, which names this context alone. A key is not
+  // enough there: it can be spelled the same as another context's stable ID.
+  const hostContext = cluster?.pinnedId ?? "";
   // An app can only be opened once its cluster is listed, and a
   // listing that failed says nothing about whether the app is enabled there.
   const unchecked = Boolean(plugin) && !cluster;
-  // A stable ID two contexts share does not say which was chosen; the host refuses both.
-  const shared =
-    !!plugin && !!cluster && contexts.filter((c) => c.stableId === cluster.stableId).length > 1;
+  // A stable ID two contexts share does not say which this tab was opened for.
+  const shared = !!plugin && holders.length > 1;
+  // A dashboard card's target (#540): the same page, narrowed to what the card
+  // counted. Only a card that still names this page narrows it.
+  const card = target.card
+    ? plugin?.manifest.contributions.dashboardCards?.find((c) => c.id === target.card && c.target?.page === target.page)
+    : undefined;
+  const showAll = () =>
+    openTab(extensionRoute(contextKey, target.id, target.page, target.namespace), { clusterName: cluster?.name });
   return (
     <Screen
       title={target.resourceName ?? page?.title ?? "App"}
@@ -75,6 +93,8 @@ export function ExtensionPage({ route }: RoutedScreenProps) {
           />
         ) : shared ? (
           <p className="extension-message">{SHARED_CONTEXT_ID_MESSAGE}</p>
+        ) : plugin && cluster && !cluster.pinnedId ? (
+          <p className="extension-message">{NO_PINNED_ID_MESSAGE}</p>
         ) : unchecked ? (
           <p className="extension-message">
             This cluster is no longer in your kubeconfig files, so its apps cannot be opened here.
@@ -84,18 +104,39 @@ export function ExtensionPage({ route }: RoutedScreenProps) {
           <p className="extension-message">
             This app is not enabled for this cluster. Manage it in Settings → Apps.
           </p>
+        ) : plugin && page && target.card && !card ? (
+          // A card the app has since dropped: filtering by it is impossible, and
+          // showing every row would present the whole list as the card's answer.
+          <div className="extension-message">
+            <p>{plainText(plugin.manifest.name)} no longer declares this dashboard card, so there is nothing to narrow this list to.</p>
+            <Button variant="secondary" onClick={showAll}>Show all {plainText(page.title)}</Button>
+          </div>
         ) : plugin && page ? (
-          <ExtensionResourceNavigation.Provider value={resource=>openTab(extensionResourceRoute(clusterId,target.id,target.page,resource.namespace,resource.name),{clusterName:cluster?.name})}>
-          {target.resourceName ? <ExtensionResourceDetails fullPage key={route} selection={{id:target.id,revision:plugin.revision,capability:page.capability,context:clusterId,namespace:target.namespace,name:target.resourceName}}/> : <ExtensionWorkspace
+          <ExtensionResourceNavigation.Provider value={resource=>openTab(extensionResourceRoute(contextKey,target.id,target.page,resource.namespace,resource.name),{clusterName:cluster?.name})}>
+          {card && (
+            <div role="status" className="extension-card-filter">
+              <span>
+                Showing the {plainText(page.title)} counted by <strong>{plainText(card.title)}</strong>
+                {target.namespaces && ` in ${target.namespaces.slice(0, -1).join(", ")} and ${target.namespaces[target.namespaces.length - 1]}`}
+              </span>
+              <Button variant="ghost" size="sm" onClick={showAll}>Show all {plainText(page.title)}</Button>
+            </div>
+          )}
+          {target.resourceName ? <ExtensionResourceDetails fullPage key={route} selection={{id:target.id,revision:plugin.revision,capability:page.capability,context:hostContext,namespace:target.namespace,name:target.resourceName}}/> : <ExtensionWorkspace
+            card={card?.id}
+            cardNamespaces={target.namespaces}
+            onLeaveCard={(namespace) =>
+              openTab(extensionRoute(contextKey, target.id, target.page, namespace), { clusterName: cluster?.name })
+            }
             plugin={plugin}
             page={page}
             onPage={(id, namespace) =>
               openTab(
-                extensionRoute(clusterId, target.id, id, namespace),
+                extensionRoute(contextKey, target.id, id, namespace),
                 { clusterName: cluster?.name },
               )
             }
-            context={clusterId}
+            context={hostContext}
             namespace={target.namespace}
           />}
           </ExtensionResourceNavigation.Provider>

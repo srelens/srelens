@@ -207,9 +207,9 @@ limits do.
     perfectly ordinary (`username`, `ca.crt`), so matching key names alone
     would miss them;
   - `settings` on `extensions.configure` keeps its setting names but loses
-    every value. An app's settings are free-form and nothing marks one as
-    secret, so a value under `credential` or `certificate` would otherwise be
-    written verbatim — for a denied call too;
+    every value. A denied call is recorded before its values are checked
+    against the app's typed settings (#542), so a value under `credential` or
+    `certificate` would otherwise be written verbatim;
   - a URL loses its credentials and keeps the rest. `helm repo add` documents
     `https://user:token@host/charts` for a private repository, and
     `k8s.helmRepoAdd` is audited because it mutates, so the userinfo and any
@@ -324,11 +324,13 @@ merge-patch action can apply an Argo CD sync. The selected primitive's level
 comes back with the resource on `extensions.resource`.
 
 The host action primitives an extension binds as declared actions —
-`k8s.annotate`, `k8s.setFields`, `k8s.setStatusCondition` and
-`k8s.mergePatch` — publish one row each, and an app's bound action inherits
-its primitive's row and can only be raised above it. `k8s.mergePatch` is
-`high` because it is the one that can express an Argo CD sync; the three
-narrower ones are `medium`.
+`k8s.annotate`, `k8s.setFields`, `k8s.setStatusCondition`,
+`k8s.mergePatch`, `k8s.requestRolloutRestart` and `k8s.requestCordonNode` —
+publish one row each, and an app's bound action inherits its primitive's row
+and can only be raised above it. `k8s.mergePatch` is `high` because it is the
+one that can express an Argo CD sync, and `k8s.requestRolloutRestart` is
+`high` because it replaces a workload's running pods; the other four are
+`medium`.
 
 ## Client configuration
 

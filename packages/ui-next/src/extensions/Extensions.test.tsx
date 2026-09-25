@@ -1,18 +1,23 @@
 import { act, render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import { beforeEach, expect, it, vi } from "vitest";
+const host = vi.hoisted(() => ({ tauri: true }));
 vi.mock("@srelens/core", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@srelens/core")>()),
-  isTauri: () => true,
+  isTauri: () => host.tauri,
   listExtensionCatalog: vi.fn(),
   reviewCatalogExtension: vi.fn(),
   listExtensions: vi.fn(),
   configureExtensions: vi.fn(),
   validateExtension: vi.fn(),
   readExtension: vi.fn(),
+  resolveExtensionColumns: vi.fn(),
   inspectExtensionResource: vi.fn(),
   actOnExtensionResource: vi.fn(),
   saveTextFile: vi.fn(),
   listContexts: vi.fn(),
+  setExtensionSecret: vi.fn(),
+  clearExtensionSecret: vi.fn(),
+  onExtensionInventoryChanged: vi.fn(),
 }));
 import {
   listExtensionCatalog,
@@ -21,8 +26,12 @@ import {
   configureExtensions,
   validateExtension,
   readExtension,
+  resolveExtensionColumns,
   saveTextFile,
   listContexts,
+  setExtensionSecret,
+  clearExtensionSecret,
+  onExtensionInventoryChanged,
 } from "@srelens/core";
 import { ExtensionManager, ExtensionResults } from "./Extensions";
 
@@ -68,8 +77,127 @@ beforeEach(() => {
     plugins: [],
   } as any);
   vi.mocked(configureExtensions).mockResolvedValue({} as any);
-  vi.mocked(validateExtension).mockResolvedValue({ errors: [] });
+  vi.mocked(validateExtension).mockResolvedValue({ errors: [], permissionDiff: { previousRevision: null, added: ["Grant k8s.listCustomResource"], removed: [], unchanged: [] } });
   vi.mocked(listContexts).mockResolvedValue({ contexts: [] });
+  vi.mocked(resolveExtensionColumns).mockResolvedValue({ columns: [], cells: [] });
+  vi.mocked(onExtensionInventoryChanged).mockResolvedValue(() => {});
+});
+
+it("says when the app list cannot hear the host's announcements and is polling instead (#566)", async () => {
+  vi.mocked(onExtensionInventoryChanged).mockRejectedValue(new Error("no event channel"));
+  render(<ExtensionManager />);
+  expect(await screen.findByText(/Live updates to this list are unavailable \(no event channel\)/)).toBeTruthy();
+});
+
+it("shows a declared native table column on the app's own resource page", async () => {
+  const column = { id:"critical", title:"Critical CVEs", forKinds:["argoproj.io/Application"],
+    source:{ jsonPath:".critical" }, format:"number" as const, sortable:true };
+  const app = { ...plugin, manifest: { ...plugin.manifest,
+    capabilities:[{ name:"list", target:"k8s.listCustomResource", arguments:{ group:"argoproj.io", kind:"Application", namespaced:true } }],
+    contributions:{ ...plugin.manifest.contributions, tableColumns:[column] } } };
+  vi.mocked(readExtension).mockResolvedValue({ items:[{name:"apps",namespace:"team",age:"1d",columns:[]}], printerColumns:[] });
+  vi.mocked(resolveExtensionColumns).mockResolvedValue({ columns:[column], cells:[{uid:null,name:"apps",namespace:"team",values:{critical:"4"}}] });
+  render(<ExtensionResults plugin={app} capability="list" context="prod" namespace="team" />);
+  expect(await screen.findByRole("columnheader", {name:"Critical CVEs"})).toBeTruthy();
+  expect(await screen.findByText("4")).toBeTruthy();
+  expect(resolveExtensionColumns).toHaveBeenCalledTimes(1);
+});
+it("shows the host-resolved status as a word in its own column, searchable, when the kind has a resolver", async () => {
+  const app = { ...plugin, manifest: { ...plugin.manifest,
+    capabilities:[{ name:"list", target:"k8s.listCustomResource", arguments:{ group:"argoproj.io", kind:"Application", namespaced:true } }],
+    contributions:{ ...plugin.manifest.contributions, statusResolvers:[{ forKinds:["argoproj.io/Application"],
+      rules:[{ when:[], status:"unknown", label:"Unknown" }] }] } } };
+  vi.mocked(readExtension).mockResolvedValue({ items:[
+    { name:"guestbook", namespace:"team", age:"1d", columns:[], status:{ status:"healthy", label:"Healthy" } },
+    { name:"billing", namespace:"team", age:"1d", columns:[], status:{ status:"warning", label:"Out of sync", reason:"abc123" } },
+    { name:"legacy", namespace:"team", age:"1d", columns:[] },
+  ], printerColumns:[] });
+  const view = render(<ExtensionResults plugin={app} capability="list" context="prod" namespace="team" />);
+  expect(await screen.findByRole("columnheader", { name:"Status" })).toBeTruthy();
+  const rows = within(screen.getByRole("table")).getAllByRole("row").slice(1);
+  expect(within(rows[0]).getByText("Healthy")).toBeTruthy();
+  expect(within(rows[1]).getByText("Out of sync")).toBeTruthy();
+  expect(within(rows[1]).getByText("abc123")).toBeTruthy();
+  // A row the host returned no status for says so, rather than borrowing a word.
+  expect(within(rows[2]).getByText("—")).toBeTruthy();
+  view.rerender(<ExtensionResults plugin={app} capability="list" context="prod" namespace="team" search="out of sync" />);
+  expect(screen.getByText("billing")).toBeTruthy();
+  expect(screen.queryByText("guestbook")).toBeNull();
+});
+it("draws no status column for a kind without a resolver", async () => {
+  // A real custom-resource reader, and a resolver — for another kind. The
+  // only thing keeping the column away is that this kind has no resolver.
+  const app = { ...plugin, manifest: { ...plugin.manifest,
+    capabilities:[{ name:"list", target:"k8s.listCustomResource", arguments:{ group:"argoproj.io", kind:"Application", namespaced:true } }],
+    contributions:{ ...plugin.manifest.contributions, statusResolvers:[{ forKinds:["argoproj.io/AppProject"],
+      rules:[{ when:[], status:"unknown", label:"Unknown" }] }] } } };
+  vi.mocked(readExtension).mockResolvedValue({ items:[{ name:"apps", namespace:"team", age:"1d", columns:["True"] }], printerColumns:[{ name:"Ready", jsonPath:".r" }] });
+  render(<ExtensionResults plugin={app} capability="list" context="prod" namespace="team" />);
+  expect(await screen.findByText("apps")).toBeTruthy();
+  expect(screen.queryByRole("columnheader", { name:"Status" })).toBeNull();
+});
+it("sorts and searches opted-in app column values", async () => {
+  const column = { id:"score", title:"Score", forKinds:["argoproj.io/Application"],
+    source:{jsonPath:".score"}, format:"number" as const, sortable:true, filterable:true };
+  const app = { ...plugin, manifest: { ...plugin.manifest,
+    capabilities:[{name:"list", target:"k8s.listCustomResource", arguments:{group:"argoproj.io",kind:"Application",namespaced:true}}],
+    contributions:{...plugin.manifest.contributions, tableColumns:[column]} } };
+  vi.mocked(readExtension).mockResolvedValue({ items:[
+    {name:"alpha",namespace:"team",age:"1d",columns:[]},
+    {name:"beta",namespace:"team",age:"1d",columns:[]},
+  ], printerColumns:[] });
+  vi.mocked(resolveExtensionColumns).mockResolvedValue({ columns:[column], cells:[
+    {uid:null,name:"alpha",namespace:"team",values:{score:"12"}},
+    {uid:null,name:"beta",namespace:"team",values:{score:"4"}},
+  ] });
+  const view = render(<ExtensionResults plugin={app} capability="list" context="prod" namespace="team" />);
+  expect(await screen.findByText("12")).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", {name:"Sort by Score"}));
+  expect(within(screen.getByRole("table")).getAllByRole("row").slice(1).map((row) => row.textContent)).toEqual([
+    expect.stringContaining("beta"), expect.stringContaining("alpha"),
+  ]);
+  view.rerender(<ExtensionResults plugin={app} capability="list" context="prod" namespace="team" search="12" />);
+  expect(screen.getByText("alpha")).toBeTruthy();
+  expect(screen.queryByText("beta")).toBeNull();
+});
+it("shows update access additions and removals before unchanged access and installs the reviewed revision", async () => {
+  vi.mocked(listExtensions).mockResolvedValue({ schemaVersion: 1, nextRevision: 8, plugins: [{ ...plugin, revision: 7 }] } as any);
+  vi.mocked(validateExtension).mockResolvedValue({
+    errors: [],
+    permissionDiff: {
+      previousRevision: 7,
+      added: ["Action k8s.annotate on Deployment"],
+      removed: ["Read k8s.listEvents on Pod"],
+      unchanged: ["Grant k8s.listCustomResource"],
+    },
+  });
+  render(<ExtensionManager />);
+  const source = JSON.stringify({ ...plugin.manifest, version: "0.2.0" });
+  fireEvent.change(await screen.findByLabelText("Local app manifest (JSON)"), { target: { value: source } });
+  fireEvent.click(screen.getByText("Review manifest"));
+  const review = await screen.findByLabelText("Review app permissions");
+  expect(within(review).getByText(/Action k8s.annotate on Deployment/)).toBeTruthy();
+  expect(within(review).getByText(/Read k8s.listEvents on Pod/)).toBeTruthy();
+  const unchanged = within(review).getByText(/1 unchanged/).closest("details")!;
+  expect(unchanged.open).toBe(false);
+  const allBindings = within(review).getByText("Complete incoming bindings").closest("details")!;
+  expect(allBindings.open).toBe(false);
+  fireEvent.click(within(review).getByRole("button", { name: /Update and grant permissions/ }));
+  await waitFor(() => expect(configureExtensions).toHaveBeenCalledWith({ action: "install", manifest: source, grants: plugin.manifest.permissions, reviewedRevision: 7 }));
+});
+it("keeps a missing access comparison distinct from a new installation", async () => {
+  vi.mocked(listExtensions).mockResolvedValue({ schemaVersion: 1, nextRevision: 8, plugins: [{ ...plugin, revision: 7 }] } as any);
+  vi.mocked(validateExtension).mockResolvedValue({ errors: [] });
+  render(<ExtensionManager />);
+  fireEvent.change(await screen.findByLabelText("Local app manifest (JSON)"), {
+    target: { value: JSON.stringify({ ...plugin.manifest, version: "0.2.0" }) },
+  });
+  fireEvent.click(screen.getByText("Review manifest"));
+  const review = await screen.findByLabelText("Review app permissions");
+  expect(await within(review).findByText("Could not review access changes")).toBeTruthy();
+  expect(within(review).queryByText(/requests a new installation/)).toBeNull();
+  expect(within(review).queryByText("Complete incoming bindings")).toBeNull();
+  expect(within(review).queryByRole("button", { name: /grant permissions/ })).toBeNull();
 });
 it("shows backend errors and retries instead of claiming no apps", async () => {
   vi.mocked(listExtensions).mockRejectedValueOnce(new Error("disk unreadable"));
@@ -174,7 +302,7 @@ it("reviews the exact manifest and reports rejected installs without claiming su
     nextRevision: 1,
     plugins: [],
   });
-  vi.mocked(validateExtension).mockResolvedValue({ errors: [] });
+  vi.mocked(validateExtension).mockResolvedValue({ errors: [], permissionDiff: { previousRevision: null, added: ["Grant k8s.listCustomResource"], removed: [], unchanged: [] } });
   vi.mocked(configureExtensions).mockRejectedValueOnce(
     new Error("Unsupported API version"),
   );
@@ -258,7 +386,7 @@ it("does not show a pasted manifest's name until the host has accepted it", asyn
   expect(review.textContent).toContain("This manifest");
 });
 it("shows the name of a manifest the host accepted", async () => {
-  vi.mocked(validateExtension).mockResolvedValue({ errors: [] });
+  vi.mocked(validateExtension).mockResolvedValue({ errors: [], permissionDiff: { previousRevision: null, added: ["Grant k8s.listCustomResource"], removed: [], unchanged: [] } });
   render(<ExtensionManager />);
   fireEvent.change(
     await screen.findByLabelText("Local app manifest (JSON)"),
@@ -396,6 +524,98 @@ it("inspects an installed app's source, grants and manifest, and exports or rese
     expect(configureExtensions).toHaveBeenCalledWith({ action: "settings", id: "org.test.gitops", settings: {} }),
   );
 });
+it("resets settings to their defaults, keeps a required one, which has none, and deletes the app's secrets", async () => {
+  vi.mocked(clearExtensionSecret).mockResolvedValue({ set: false });
+  const app = {
+    ...updated(),
+    manifest: { ...updated().manifest, settings: [
+      { id: "url", type: "url", title: "URL", required: true },
+      { id: "team", type: "string", title: "Team", default: "ops" },
+      { id: "token", type: "secret-reference", title: "Token" },
+    ] },
+    settings: { url: "https://prom", team: "platform", token: { secretRef: "org.test.gitops/token" } },
+  };
+  const details = await openDetails(app as ReturnType<typeof updated>);
+  expect(details.textContent).toContain("A secret is never saved in settings, so an export never holds one.");
+  fireEvent.click(within(details).getByRole("button", { name: "Reset settings" }));
+  // Says what reset does: keeps required values, and deletes the secrets
+  // (#543): a reset that left a token in the keychain would not be one.
+  const confirm = within(details).getByRole("alertdialog", { name: "Reset settings" });
+  expect(confirm.textContent).toContain("except the required ones, which have no default");
+  expect(confirm.textContent).toContain("its secrets are deleted from srelens's secrets vault");
+  expect(confirm.textContent).not.toContain("Secrets stay set");
+  fireEvent.click(within(details).getByRole("button", { name: "Reset to defaults" }));
+  await waitFor(() => expect(clearExtensionSecret).toHaveBeenCalledWith("org.test.gitops"));
+  await waitFor(() =>
+    expect(configureExtensions).toHaveBeenCalledWith({ action: "settings", id: "org.test.gitops", settings: { url: "https://prom" } }),
+  );
+});
+/** The web host keeps no app secrets (#522), so a reset there has none to delete and names no vault. */
+it("resets an app with a secret setting on the web without asking the host to delete a secret", async () => {
+  host.tauri = false;
+  try {
+    const app = {
+      ...updated(),
+      manifest: { ...updated().manifest, settings: [
+        { id: "team", type: "string", title: "Team", default: "ops" },
+        { id: "token", type: "secret-reference", title: "Token" },
+      ] },
+      settings: { team: "platform" },
+    };
+    const details = await openDetails(app as ReturnType<typeof updated>);
+    fireEvent.click(within(details).getByRole("button", { name: "Reset settings" }));
+    const confirm = within(details).getByRole("alertdialog", { name: "Reset settings" });
+    expect(confirm.textContent).not.toContain("secrets vault");
+    fireEvent.click(within(details).getByRole("button", { name: "Reset to defaults" }));
+    await waitFor(() =>
+      expect(configureExtensions).toHaveBeenCalledWith({ action: "settings", id: "org.test.gitops", settings: {} }),
+    );
+    expect(clearExtensionSecret).not.toHaveBeenCalled();
+  } finally {
+    host.tauri = true;
+  }
+});
+it("keeps a secret through the host's store, never through settings, and shows why it cannot", async () => {
+  const secretApp = (settings: Record<string, unknown>) => ({
+    ...plugin, grants: ["k8s.listCustomResource", "extension.secretStore"],
+    manifest: { ...plugin.manifest, settings: [{ id: "token", type: "secret-reference", title: "API token" }] },
+    settings,
+  });
+  vi.mocked(listExtensions).mockResolvedValue({
+    schemaVersion: 1, nextRevision: 2, plugins: [secretApp({})], secretStore: { available: true },
+  } as any);
+  vi.mocked(setExtensionSecret).mockResolvedValue({ set: true });
+  render(<ExtensionManager />);
+  fireEvent.click(await screen.findByRole("button", { name: "Settings for GitOps" }));
+  const form = screen.getByRole("form", { name: "GitOps settings" });
+  const field = within(form).getByRole("group", { name: "API token" });
+  // After the save the host lists the reference, never the value.
+  vi.mocked(listExtensions).mockResolvedValue({
+    schemaVersion: 1, nextRevision: 2, plugins: [secretApp({ token: { secretRef: "org.test.gitops/token" } })],
+    secretStore: { available: true },
+  } as any);
+  fireEvent.change(within(field).getByLabelText("API token"), { target: { value: "typed-token" } });
+  fireEvent.click(within(field).getByRole("button", { name: "Save secret" }));
+  await waitFor(() => expect(setExtensionSecret).toHaveBeenCalledWith("org.test.gitops", "token", "typed-token"));
+  await waitFor(() => expect(listExtensions).toHaveBeenCalledTimes(2));
+  const again = within(await screen.findByRole("form", { name: "GitOps settings" })).getByRole("group", { name: "API token" });
+  await waitFor(() => expect(within(again).getByRole("button", { name: "Replace secret" })).toBeTruthy());
+  expect(configureExtensions).not.toHaveBeenCalled();
+  expect(document.body.textContent).not.toContain("typed-token");
+});
+it("tells a person the store is unavailable, in the host's words", async () => {
+  vi.mocked(listExtensions).mockResolvedValue({
+    schemaVersion: 1, nextRevision: 2,
+    plugins: [{ ...plugin, grants: ["extension.secretStore"],
+      manifest: { ...plugin.manifest, settings: [{ id: "token", type: "secret-reference", title: "API token" }] } }],
+    secretStore: { available: false, reason: "This system has no usable keychain, so srelens cannot protect an app's secret" },
+  } as any);
+  render(<ExtensionManager />);
+  fireEvent.click(await screen.findByRole("button", { name: "Settings for GitOps" }));
+  const field = within(screen.getByRole("form", { name: "GitOps settings" })).getByRole("group", { name: "API token" });
+  expect(field.textContent).toContain("no usable keychain");
+  expect((within(field).getByLabelText("API token") as HTMLInputElement).disabled).toBe(true);
+});
 it("reviews the permissions of a rollback whose grants differ", async () => {
   const details = await openDetails(updated());
   const versions = within(details).getByRole("list", { name: "Previous versions" });
@@ -409,6 +629,133 @@ it("reviews the permissions of a rollback whose grants differ", async () => {
       action: "rollback", id: "org.test.gitops", revision: 2, grants: ["k8s.listCustomResource"],
     }),
   );
+});
+/** A metrics app reaching its Prometheus through network.http (#568). */
+const networkApp = (allowLoopbackHttp?: boolean) => ({
+  ...updated(),
+  manifest: {
+    ...updated().manifest,
+    permissions: [{ capability: "network.http", hosts: ["${settings.prometheusUrl}", "api.github.com"] }],
+    settings: [{ id: "prometheusUrl", type: "url", title: "Prometheus URL", required: true }],
+  },
+  grants: ["network.http"],
+  ...(allowLoopbackHttp === undefined ? {} : { allowLoopbackHttp }),
+});
+it("lets a person allow an app's network.http requests plain HTTP to this computer (#568)", async () => {
+  const details = await openDetails(networkApp() as unknown as ReturnType<typeof updated>);
+  const network = within(details).getByRole("group", { name: "Network" });
+  expect(network.textContent).toContain("api.github.com");
+  expect(network.textContent).toContain("The host of the URL saved in Prometheus URL");
+  // network.http is the broker's alone, so the catalog does not list it; that is not
+  // "not provided".
+  const grants = within(details).getByRole("list", { name: "Granted capabilities" });
+  const grant = within(grants).getByText("network.http").closest("li")!.textContent;
+  expect(grant).not.toContain("Not provided by this host");
+  expect(grant).toContain("GET requests to this app's hosts only");
+  const box = within(network).getByRole("checkbox", { name: "Allow plain HTTP to this computer (loopback)" });
+  expect((box as HTMLInputElement).checked).toBe(false);
+  fireEvent.click(box);
+  await waitFor(() =>
+    expect(configureExtensions).toHaveBeenCalledWith({ action: "loopbackHttp", id: "org.test.gitops", allowLoopbackHttp: true }),
+  );
+});
+it("shows plain HTTP to this computer as allowed, and turns it off", async () => {
+  const details = await openDetails(networkApp(true) as unknown as ReturnType<typeof updated>);
+  const box = within(details).getByRole("checkbox", { name: "Allow plain HTTP to this computer (loopback)" });
+  expect((box as HTMLInputElement).checked).toBe(true);
+  fireEvent.click(box);
+  await waitFor(() =>
+    expect(configureExtensions).toHaveBeenCalledWith({ action: "loopbackHttp", id: "org.test.gitops", allowLoopbackHttp: false }),
+  );
+});
+it("offers no network switch to an app that makes no requests", async () => {
+  const details = await openDetails(updated());
+  expect(within(details).queryByRole("group", { name: "Network" })).toBeNull();
+});
+it("reviews a rollback that reaches other hosts under the same grant", async () => {
+  const app = {
+    ...networkApp(),
+    history: [
+      {
+        manifest: { ...networkApp().manifest, version: "0.1.0", permissions: [{ capability: "network.http", hosts: ["evil.example"] }] },
+        grants: ["network.http"], revision: 2, source: "local", installedAt: 1_690_000_000,
+      },
+    ],
+  };
+  const details = await openDetails(app as unknown as ReturnType<typeof updated>);
+  fireEvent.click(within(details).getByRole("button", { name: "Roll back to 0.1.0" }));
+  const review = screen.getByRole("region", { name: "Review rollback" });
+  expect(review.textContent).toContain("It requests: network.http.");
+  expect(review.textContent).toContain("It reaches: evil.example.");
+  expect(review.textContent).not.toContain("[object Object]");
+  fireEvent.click(within(review).getByRole("button", { name: "Roll back and grant permissions" }));
+  await waitFor(() =>
+    expect(configureExtensions).toHaveBeenCalledWith({ action: "rollback", id: "org.test.gitops", revision: 2, grants: ["network.http"] }),
+  );
+});
+it("reviews a rollback whose network.http request sends something else under the same grants and hosts", async () => {
+  const request = (args: Record<string, unknown>) => ({
+    name: "up", title: "Targets up", target: "network.http", inputs: [],
+    arguments: { url: "${settings.prometheusUrl}", path: "/api/v1/query", ...args },
+  });
+  const current = networkApp();
+  const app = {
+    ...current,
+    manifest: { ...current.manifest, capabilities: [request({})] },
+    history: [
+      {
+        manifest: {
+          ...current.manifest,
+          version: "0.1.0",
+          capabilities: [request({ secretHeaders: { Authorization: { secret: "token", prefix: "Bearer " } } })],
+        },
+        grants: ["network.http"], revision: 2, source: "local", installedAt: 1_690_000_000,
+      },
+    ],
+  };
+  const details = await openDetails(app as unknown as ReturnType<typeof updated>);
+  fireEvent.click(within(details).getByRole("button", { name: "Roll back to 0.1.0" }));
+  const review = screen.getByRole("region", { name: "Review rollback" });
+  expect(review.textContent).toContain("Its network requests differ from this version's");
+  // What the restored version would send, before anything is confirmed.
+  const up = within(review).getByRole("listitem", { name: "Binding up" });
+  expect(up.textContent).toContain("sends secret token as the Authorization header");
+  expect(within(review).getByRole("button", { name: "Roll back and grant permissions" })).toBeTruthy();
+});
+it("reviews a rollback whose host setting has another default under the same host entries", async () => {
+  // No saved value, so each version's default is where its requests go.
+  const withDefault = (url: string) => [{ id: "prometheusUrl", type: "url", title: "Prometheus URL", default: url }];
+  const current = networkApp();
+  const app = {
+    ...current,
+    settings: {},
+    manifest: { ...current.manifest, settings: withDefault("https://prometheus.example.com") },
+    history: [
+      {
+        manifest: { ...current.manifest, version: "0.1.0", settings: withDefault("https://prometheus.elsewhere.example") },
+        grants: ["network.http"], revision: 2, source: "local", installedAt: 1_690_000_000,
+      },
+    ],
+  };
+  const details = await openDetails(app as unknown as ReturnType<typeof updated>);
+  fireEvent.click(within(details).getByRole("button", { name: "Roll back to 0.1.0" }));
+  const review = screen.getByRole("region", { name: "Review rollback" });
+  expect(review.textContent).toContain(
+    "It reaches: The host of the URL saved in Prometheus URL (default https://prometheus.elsewhere.example), api.github.com.",
+  );
+  expect(within(review).getByRole("button", { name: "Roll back and grant permissions" })).toBeTruthy();
+});
+it("says a rollback with the same requests uses the permissions granted now", async () => {
+  const current = networkApp();
+  const app = {
+    ...current,
+    history: [{ manifest: { ...current.manifest, version: "0.1.0" }, grants: ["network.http"], revision: 2, source: "local", installedAt: 1_690_000_000 }],
+  };
+  const details = await openDetails(app as unknown as ReturnType<typeof updated>);
+  fireEvent.click(within(details).getByRole("button", { name: "Roll back to 0.1.0" }));
+  const review = screen.getByRole("region", { name: "Review rollback" });
+  expect(review.textContent).toContain("It uses the permissions granted now.");
+  expect(within(review).queryByRole("listitem", { name: "Binding up" })).toBeNull();
 });
 it("closes the reset confirmation with Escape without resetting", async () => {
   const details = await openDetails(updated());
@@ -558,18 +905,39 @@ it("only confirms a rollback whose grants are unchanged", async () => {
     }),
   );
 });
+it("says the settings were saved, though the save gives the app a new revision", async () => {
+  const typed = (revision: number) => ({
+    ...plugin, revision, manifest: { ...plugin.manifest, settings: [{ id: "team", type: "string", title: "Team" }] },
+  });
+  vi.mocked(listExtensions).mockResolvedValue({ schemaVersion: 1, nextRevision: 2, plugins: [typed(1)] } as any);
+  render(<ExtensionManager />);
+  fireEvent.click(await screen.findByRole("button", { name: "Settings for GitOps" }));
+  const settings = screen.getByRole("form", { name: "GitOps settings" });
+  fireEvent.change(within(settings).getByRole("textbox", { name: "Team" }), { target: { value: "platform" } });
+  // The host answers the save with the app at its next revision.
+  vi.mocked(listExtensions).mockResolvedValue({ schemaVersion: 1, nextRevision: 3, plugins: [{ ...typed(2), settings: { team: "platform" } }] } as any);
+  fireEvent.click(within(settings).getByRole("button", { name: "Save settings" }));
+  await waitFor(() => expect(listExtensions).toHaveBeenCalledTimes(2));
+  const form = await screen.findByRole("form", { name: "GitOps settings" });
+  expect(within(form).getByRole("status").textContent).toBe("Settings saved.");
+  expect((within(form).getByRole("textbox", { name: "Team" }) as HTMLInputElement).value).toBe("platform");
+});
 it("persists settings, disable and remove through the backend", async () => {
+  const typed = { ...plugin, manifest: { ...plugin.manifest, settings: [{ id: "team", type: "string", title: "Team" }] } };
   vi.mocked(listExtensions).mockResolvedValue({
     schemaVersion: 1,
     nextRevision: 2,
-    plugins: [plugin],
+    plugins: [typed],
   });
   render(<ExtensionManager />);
-  fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
-  fireEvent.change(screen.getByLabelText("App settings (JSON object)"), {
-    target: { value: '{"team":"platform"}' },
+  fireEvent.click(await screen.findByRole("button", { name: "Settings for GitOps" }));
+  // The app's declared settings, as a host form: no free-form JSON (#542).
+  expect(screen.queryByLabelText("App settings (JSON object)")).toBeNull();
+  const settings = screen.getByRole("form", { name: "GitOps settings" });
+  fireEvent.change(within(settings).getByRole("textbox", { name: "Team" }), {
+    target: { value: "platform" },
   });
-  fireEvent.click(screen.getByText("Save settings"));
+  fireEvent.click(within(settings).getByRole("button", { name: "Save settings" }));
   await waitFor(() =>
     expect(configureExtensions).toHaveBeenCalledWith({
       action: "settings",
@@ -603,6 +971,16 @@ it("persists settings, disable and remove through the backend", async () => {
       id: plugin.manifest.id,
     }),
   );
+});
+it("says removing an app deletes its secrets too", async () => {
+  vi.mocked(listExtensions).mockResolvedValue({
+    schemaVersion: 1, nextRevision: 2,
+    plugins: [{ ...plugin, manifest: { ...plugin.manifest, settings: [{ id: "token", type: "secret-reference", title: "Token" }] } }],
+  } as any);
+  render(<ExtensionManager />);
+  fireEvent.click(await screen.findByRole("button", { name: "Remove" }));
+  const dialog = screen.getByRole("alertdialog", { name: "Remove app" });
+  expect(dialog.textContent).toContain("deletes its secrets from srelens's secrets vault");
 });
 it("keeps reads idle until a cluster is chosen and shows successful empty results", async () => {
   vi.mocked(readExtension).mockResolvedValue({ items: [] });
@@ -851,6 +1229,17 @@ it("explains a missing app API and keeps the server error collapsed", async () =
     await screen.findByText("No resources returned by this app."),
   ).toBeTruthy();
 });
+it("explains a missing app API by every version a reader accepts (#547)", async () => {
+  const installed = structuredClone(plugin);
+  const binding = installed.manifest.capabilities[0];
+  binding.versions = ["v2", "v2beta2"];
+  delete binding.arguments.version;
+  Object.assign(binding.arguments, { group: "helm.toolkit.fluxcd.io", plural: "helmreleases", kind: "HelmRelease" });
+  vi.mocked(readExtension).mockRejectedValueOnce(new Error("ApiError: 404 page not found"));
+  render(<ExtensionResults plugin={installed} capability="list" context="M01" />);
+  expect(await screen.findByText("HelmRelease API unavailable")).toBeTruthy();
+  expect(screen.getByRole("alert").textContent).toContain("helm.toolkit.fluxcd.io/v2 or v2beta2");
+});
 it.each(["ApiError: Forbidden (code: 403)", "list custom resource timed out"])(
   "does not turn %s into an API absence",
   async (message) => {
@@ -894,6 +1283,8 @@ it("refreshes external lifecycle changes without unmounting enabled content", as
   const { useExtensions } = await import("./Extensions");
   const Consumer = () => <>{useExtensions().data?.plugins.map(p => <span key={p.manifest.id}>Installed plugin</span>)}</>;
   vi.mocked(listExtensions).mockResolvedValue({plugins:[plugin]} as any);
+  let announce: () => void = () => {};
+  vi.mocked(onExtensionInventoryChanged).mockImplementation(async (listener) => { announce = listener; return () => {}; });
   const {act}=await import("@testing-library/react");
   vi.useFakeTimers();
   let view: ReturnType<typeof render>;
@@ -901,7 +1292,10 @@ it("refreshes external lifecycle changes without unmounting enabled content", as
     await act(async()=>{view=render(<Consumer />);});
     expect(screen.getByText("Installed plugin")).toBeTruthy();
     vi.mocked(listExtensions).mockResolvedValue({plugins:[]} as any);
-    await act(async()=>{await vi.advanceTimersByTimeAsync(5000);});
+    // No poll: nothing changes until the host announces the write (#566).
+    await act(async()=>{await vi.advanceTimersByTimeAsync(30000);});
+    expect(screen.getByText("Installed plugin")).toBeTruthy();
+    await act(async()=>{announce(); await vi.advanceTimersByTimeAsync(0);});
     expect(screen.queryByText("Installed plugin")).toBeNull();
   } finally {view!.unmount();vi.useRealTimers();}
 });
@@ -969,24 +1363,22 @@ it("advances app resource ages without refreshing backend data", async () => {
   } finally {view!.unmount();vi.useRealTimers();}
 });
 
-it("shares one inventory poll and stops it after the last consumer unmounts", async () => {
+it("shares one inventory feed and stops it after the last consumer unmounts", async () => {
   const {useExtensions}=await import("./Extensions");
   const {act}=await import("@testing-library/react");
   const Consumer=()=>{useExtensions();return null;};
-  vi.useFakeTimers();
+  const stop=vi.fn();
+  vi.mocked(onExtensionInventoryChanged).mockResolvedValue(stop);
   let first:ReturnType<typeof render>,second:ReturnType<typeof render>;
   try {
     await act(async()=>{first=render(<Consumer/>);second=render(<Consumer/>);});
     expect(listExtensions).toHaveBeenCalledTimes(1);
-    await act(async()=>{await vi.advanceTimersByTimeAsync(5000);});
-    expect(listExtensions).toHaveBeenCalledTimes(2);
+    expect(onExtensionInventoryChanged).toHaveBeenCalledTimes(1);
     first!.unmount();
-    await act(async()=>{await vi.advanceTimersByTimeAsync(5000);});
-    expect(listExtensions).toHaveBeenCalledTimes(3);
+    expect(stop).not.toHaveBeenCalled();
     second!.unmount();
-    await act(async()=>{await vi.advanceTimersByTimeAsync(10000);});
-    expect(listExtensions).toHaveBeenCalledTimes(3);
-  } finally {first!?.unmount();second!?.unmount();vi.useRealTimers();}
+    expect(stop).toHaveBeenCalledTimes(1);
+  } finally {first!?.unmount();second!?.unmount();}
 });
 
 it("queues lifecycle refreshes behind one pending poll and discards its stale result", async () => {
@@ -1020,6 +1412,24 @@ it.each([undefined, [1,2,3]])("installs catalog bytes and signature %j only afte
   expect(readExtension).not.toHaveBeenCalled();
   fireEvent.click(install);
   await waitFor(() => expect(configureExtensions).toHaveBeenCalledWith({ action: "install", manifest: source, grants: plugin.manifest.permissions, ...(signature ? {signature} : {}) }));
+});
+it("reviews a signed catalog replacement against the installed revision before submitting it", async () => {
+  vi.mocked(listExtensions).mockResolvedValue({ schemaVersion: 1, nextRevision: 8, plugins: [{ ...plugin, revision: 7 }] } as any);
+  const source = JSON.stringify({ ...plugin.manifest, version: "0.2.0" });
+  const signature = [1, 2, 3];
+  vi.mocked(reviewCatalogExtension).mockResolvedValue({ manifest: source, signature });
+  vi.mocked(listExtensionCatalog).mockResolvedValue({ catalog: { extensions: [{ id: plugin.manifest.id, name: "GitOps", description: "", repository: "https://example.com", license: "MIT", release: { version: "0.2.0", sha256: "digest", srelensApiVersion: "^0.1", prerelease: true } }] }, fetchedAt: 1, stale: false, error: null, hostApiVersions: ["0.1.0"], incompatible: [] } as any);
+  vi.mocked(validateExtension).mockResolvedValue({ errors: [], permissionDiff: { previousRevision: 7, added: ["Action k8s.annotate on Widget"], removed: [], unchanged: ["Grant k8s.listCustomResource"] } });
+  render(<ExtensionManager />);
+  fireEvent.click(await screen.findByRole("tab", { name: "Catalog" }));
+  fireEvent.click(await screen.findByText("Review replacement"));
+  const review = await screen.findByLabelText("Review app permissions");
+  expect(within(review).getByText(/Action k8s.annotate on Widget/)).toBeTruthy();
+  fireEvent.click(within(review).getByRole("button", { name: "Cancel" }));
+  expect(configureExtensions).not.toHaveBeenCalled();
+  fireEvent.click(await screen.findByText("Review replacement"));
+  fireEvent.click(await screen.findByRole("button", { name: "Update and grant permissions" }));
+  await waitFor(() => expect(configureExtensions).toHaveBeenCalledWith({ action: "install", manifest: source, grants: plugin.manifest.permissions, signature, reviewedRevision: 7 }));
 });
 
 it("separates installed apps from the catalog and collapses local installation by default", async () => {

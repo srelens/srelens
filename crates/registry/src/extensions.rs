@@ -1,13 +1,33 @@
 //! Durable, native declarative extensions for desktop hosts.
+mod app_settings;
+#[cfg(test)]
+mod budget_tests;
+mod cards;
 mod catalog;
+mod columns;
 pub(crate) mod crd;
 #[cfg(any(test, feature = "fuzzing"))]
 pub mod fuzzing;
+mod http_policy;
 mod limits;
+mod links;
+pub(crate) mod network;
+mod panels;
 #[cfg(test)]
 mod policy_tests;
 mod resource;
+mod secret_store;
+pub use secret_store::{declares_secret_setting, SECRET_STORE_ANNOTATIONS};
+#[cfg(test)]
+mod secrets_tests;
+#[cfg(test)]
+mod settings_tests;
 mod signing;
+mod store;
+pub mod streams;
+#[cfg(test)]
+mod version_tests;
+use app_settings::{checked_settings, drop_secret_values, setting_scope};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -20,6 +40,41 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
+
+pub use catalog::SharedCatalog;
+pub use store::{InventoryKey, InventoryLock, InventoryStore};
+
+/// An inventory, as every capability that reads or changes one holds it.
+type Store = Arc<dyn InventoryStore>;
+
+/// Where one registry keeps its apps: the inventory, and the catalog cache that says
+/// which installed versions are catalog releases.
+#[derive(Clone)]
+pub struct Apps {
+    inventory: Store,
+    catalog: catalog::CatalogCache,
+}
+
+impl Apps {
+    /// One web user's apps (#515): their own inventory, and the catalog every user of the
+    /// server shares and none of them can write.
+    pub fn with_shared_catalog(inventory: Arc<dyn InventoryStore>, catalog: SharedCatalog) -> Self {
+        Self {
+            inventory,
+            catalog: catalog::CatalogCache::Shared(catalog),
+        }
+    }
+}
+
+/// The desktop's layout: the inventory file, and this host's own catalog cache beside it.
+impl From<PathBuf> for Apps {
+    fn from(path: PathBuf) -> Self {
+        Self {
+            catalog: catalog::CatalogCache::Owned(path.with_extension("catalog.json")),
+            inventory: Arc::new(path),
+        }
+    }
+}
 
 #[derive(Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -59,6 +114,15 @@ pub struct Installed {
     /// either: `a` + `b#c` and `a#b` + `c` share one (#623).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     contexts: Option<Vec<String>>,
+    /// Whether the app's `network.http` requests may use plain HTTP to this computer
+    /// (loopback), such as a Prometheus behind `kubectl port-forward` (#568). Off until
+    /// a person turns it on for this app; kept across updates, as `contexts` is.
+    #[serde(
+        default,
+        rename = "allowLoopbackHttp",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    allow_loopback_http: bool,
 }
 /// What the broker answers when an app is used on a cluster it is not enabled for.
 const NOT_ENABLED_FOR_CLUSTER: &str = "App is not enabled for this cluster";
@@ -160,7 +224,17 @@ pub struct Inventory {
     #[serde(default, rename = "allowUnsignedApps")]
     allow_unsigned_apps: bool,
     plugins: Vec<Installed>,
+    /// Whether the host can store an app's secret now (#543), as
+    /// `extensions.list` reports it. Recomputed for every answer, ignored when
+    /// read from disk and never written there.
+    #[serde(
+        default,
+        rename = "secretStore",
+        skip_serializing_if = "Option::is_none"
+    )]
+    secret_store: Option<secret_store::SecretStoreState>,
 }
+
 impl Default for Inventory {
     fn default() -> Self {
         Self {
@@ -168,8 +242,46 @@ impl Default for Inventory {
             next_revision: 1,
             allow_unsigned_apps: false,
             plugins: vec![],
+            secret_store: None,
         }
     }
+}
+/// Recheck installed app authority for each native contribution read.
+async fn resolver_app(
+    inventory: Store,
+    core: &Arc<Registry>,
+    client_cache: &Arc<srelens_kube::client_cache::ClientCache>,
+    id: &str,
+    revision: u64,
+    context: String,
+) -> Result<(Inventory, usize, String), CapabilityError> {
+    let resolved = request_context(client_cache, &context).await;
+    let state = tokio::task::spawn_blocking(move || read(&inventory))
+        .await
+        .map_err(|error| CapabilityError::Handler(error.to_string()))?
+        .map_err(CapabilityError::Handler)?;
+    let index = state
+        .plugins
+        .iter()
+        .position(|plugin| plugin.manifest.id == id)
+        .ok_or_else(|| CapabilityError::Handler("Extension was removed; refresh the view".into()))?;
+    let plugin = &state.plugins[index];
+    if let Some(reason) = &plugin.policy_blocked {
+        return Err(CapabilityError::Handler(reason.clone()));
+    }
+    if !plugin.enabled || plugin.revision != revision {
+        return Err(CapabilityError::Handler(
+            "Extension was disabled or updated; refresh the view".into(),
+        ));
+    }
+    plugin.check_scope(&resolved)?;
+    validate_app(&plugin.manifest, &plugin.grants, core.clone())
+        .map_err(|errors| CapabilityError::Handler(errors.to_string()))?;
+    let context = resolved
+        .ok()
+        .and_then(|context| context.pinned_id())
+        .unwrap_or(context);
+    Ok((state, index, context))
 }
 #[derive(Deserialize, JsonSchema)]
 #[serde(tag = "action", deny_unknown_fields)]
@@ -190,6 +302,10 @@ enum Configure {
         #[schemars(length(max = 262144))]
         manifest: String,
         grants: Vec<String>,
+        /// Revision displayed by the host preview. An update must name it so a
+        /// different version cannot be silently replaced after consent.
+        #[serde(default, rename = "reviewedRevision")]
+        reviewed_revision: Option<u64>,
     },
     #[serde(rename = "enable")]
     Enable { id: String, enabled: bool },
@@ -209,6 +325,14 @@ enum Configure {
         id: String,
         revision: u64,
         grants: Vec<String>,
+    },
+    /// Lets the app's `network.http` requests use plain HTTP to this computer, or stops
+    /// them (#568).
+    #[serde(rename = "loopbackHttp")]
+    LoopbackHttp {
+        id: String,
+        #[serde(rename = "allowLoopbackHttp")]
+        allow_loopback_http: bool,
     },
     /// Limits the app to these kubeconfig context names, or with `null` allows every cluster.
     #[serde(rename = "clusters")]
@@ -238,23 +362,24 @@ struct Read {
     context: String,
     #[serde(default)]
     namespace: String,
+    /// A dashboard card's id: return only the rows that card counted (#540).
+    #[serde(default)]
+    #[schemars(length(max = 64))]
+    card: Option<String>,
+    /// With `card` and no `namespace`: the several namespaces the card counted
+    /// in, so its target page shows exactly those rows (#540).
+    #[serde(default)]
+    namespaces: Vec<String>,
 }
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct Empty {}
 
-fn read(path: &Path) -> Result<Inventory, String> {
-    // One byte past the limit is enough to refuse it, so an oversized file is never loaded whole.
-    let mut raw = Vec::new();
-    match fs::File::open(path).and_then(|file| {
-        std::io::Read::read_to_end(
-            &mut std::io::Read::take(file, MAX_INVENTORY_BYTES as u64 + 1),
-            &mut raw,
-        )
-    }) {
-        Ok(_) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Inventory::default()),
-        Err(e) => return Err(format!("read extension inventory: {e}")),
+fn read<S: InventoryStore + ?Sized>(store: &S) -> Result<Inventory, String> {
+    // One byte past the limit is enough to refuse it, so an oversized inventory is never
+    // loaded whole.
+    let Some(raw) = store.load(MAX_INVENTORY_BYTES)? else {
+        return Ok(Inventory::default());
     };
     if raw.len() > MAX_INVENTORY_BYTES {
         return Err("extension inventory exceeds 1 MiB".into());
@@ -296,6 +421,8 @@ fn read(path: &Path) -> Result<Inventory, String> {
     if state.schema_version != 1 {
         return Err("unsupported extension inventory version".into());
     }
+    // The store's state is the host's to report now, never the file's.
+    state.secret_store = None;
     let mut ids = std::collections::BTreeSet::new();
     for plugin in &state.plugins {
         if !ids.insert(plugin.manifest.id.clone()) {
@@ -305,6 +432,7 @@ fn read(path: &Path) -> Result<Inventory, String> {
     // One entry this host can no longer trust (a rotated key, a tampered proof, an API
     // version it dropped) is disabled on its own instead of failing every other app.
     for plugin in &mut state.plugins {
+        drop_secret_values(plugin);
         plugin.quarantined = reverify(plugin).err();
         if plugin.quarantined.is_some() {
             plugin.enabled = false;
@@ -371,9 +499,25 @@ fn verify_proof(proof: &SignatureProof, manifest: &Manifest) -> Result<(), Strin
 const MAX_INVENTORY_BYTES: usize = 1024 * 1024;
 /// The inventory exactly as `write` saves it.
 fn saved_form(state: &Inventory) -> Result<Vec<u8>, String> {
+    // The one place every save passes: a secret setting holding anything but
+    // its reference is refused here, whichever path put it there, so a secret
+    // value cannot reach the file (#542, #543).
+    if let Some(problem) = state
+        .plugins
+        .iter()
+        .flat_map(|plugin| plugin.manifest.stored_secret_problems(&plugin.settings))
+        .next()
+    {
+        return Err(format!(
+            "refusing to save the extension inventory: {problem}"
+        ));
+    }
     // Quarantine is recomputed on every load. Persisting it would also make the file
     // unreadable to hosts that predate the field.
     let mut stored = serde_json::to_value(state).map_err(|e| e.to_string())?;
+    if let Some(fields) = stored.as_object_mut() {
+        fields.remove("secretStore");
+    }
     if let Some(plugins) = stored.get_mut("plugins").and_then(Value::as_array_mut) {
         for plugin in plugins.iter_mut().filter_map(Value::as_object_mut) {
             plugin.remove("quarantined");
@@ -382,13 +526,16 @@ fn saved_form(state: &Inventory) -> Result<Vec<u8>, String> {
     }
     serde_json::to_vec_pretty(&stored).map_err(|e| e.to_string())
 }
-fn write(path: &Path, state: &Inventory) -> Result<(), String> {
+fn write<S: InventoryStore + ?Sized>(store: &S, state: &Inventory) -> Result<(), String> {
     let raw = saved_form(state)?;
     if raw.len() > MAX_INVENTORY_BYTES {
         return Err("extension inventory exceeds 1 MiB".into());
     }
-    crate::durable::replace(path, &raw).map_err(|e| format!("save extension inventory: {e}"))
+    store.save(&raw)
 }
+/// The `k8s.listCustomResource` input the host fills from `statusResolvers`.
+const STATUS_RULES_ARGUMENT: &str = "statusRules";
+
 /// The manifest's own rules and this app's narrower ones, reporting every violation.
 fn validate_app(
     manifest: &Manifest,
@@ -398,6 +545,20 @@ fn validate_app(
     let mut problems = manifest.validate().err().unwrap_or_default();
     for (index, binding) in manifest.capabilities.iter().enumerate() {
         let at = format!("capabilities[{index}]");
+        // Brokered HTTP (#568): a request to one of the app's granted hosts, checked
+        // by its own rules rather than a reader's.
+        if binding.target == srelens_plugin_host::NETWORK_HTTP {
+            if core.get(&binding.target).is_none() {
+                problems.push(
+                    Code::UnsupportedTarget,
+                    format!("{at}.target"),
+                    "This host does not provide network.http",
+                );
+            } else {
+                network::binding_problems(manifest, index, binding, &mut problems);
+            }
+            continue;
+        }
         let builtin = srelens_plugin_host::builtin_reader_identity(&binding.target);
         if builtin.is_none()
             && !matches!(
@@ -471,7 +632,12 @@ fn validate_app(
             continue;
         }
         // Core resources, including Secrets, must not be disguised as custom resources.
+        // A reader that lists `versions` binds none here; the manifest's own rules hold
+        // each listed one to the same characters (#547).
         for key in ["group", "version", "plural", "kind"] {
+            if key == "version" && !binding.versions.is_empty() {
+                continue;
+            }
             let text = binding
                 .arguments
                 .get(key)
@@ -506,6 +672,16 @@ fn validate_app(
                     format!("{key} comes from the host view and cannot be bound"),
                 );
             }
+        }
+        // The host copies a kind's `statusResolvers` rules into the read it
+        // sends; a second spelling in the binding would leave two rule lists
+        // for one kind and the reader picking whichever it looked at.
+        if binding.arguments.contains_key(STATUS_RULES_ARGUMENT) {
+            problems.push(
+                Code::InvalidBinding,
+                format!("{at}.arguments.{STATUS_RULES_ARGUMENT}"),
+                "Status rules are declared in contributions.statusResolvers",
+            );
         }
         match binding.arguments.get("namespaced") {
             Some(Value::Bool(true)) if !accepts("namespace") => problems.push(
@@ -559,6 +735,25 @@ fn validate_app(
                 at,
                 "This host does not provide the action primitive",
             );
+        }
+    }
+    // A badge sits on a row of a built-in table the host lists itself. The
+    // kind must be one this host reads in exactly that group, and never a
+    // Secret, whose metadata the host redacts on every ungated read.
+    for (index, badge) in manifest.contributions.badges.iter().enumerate() {
+        for (position, kind) in badge.for_kinds.iter().enumerate() {
+            let Some((group, name)) = kind.split_once('/') else {
+                continue; // Reported by the manifest's own rules.
+            };
+            let builtin = srelens_kube::manifest::gvk_for(name)
+                .is_some_and(|(gvk, _)| gvk.group == group && gvk.kind == name);
+            if !builtin || (group.is_empty() && name == "Secret") {
+                problems.push(
+                    Code::UnsupportedTarget,
+                    format!("contributions.badges[{index}].forKinds[{position}]"),
+                    format!("{kind} is not a built-in kind this host badges"),
+                );
+            }
         }
     }
     // Built-in groups such as apps are not custom resources, whatever their syntax.
@@ -644,11 +839,11 @@ fn validate_app(
         }
     }
     for permission in &manifest.permissions {
-        if !grants.contains(permission) {
+        if !grants.iter().any(|grant| permission == grant.as_str()) {
             problems.push(
                 Code::PermissionMismatch,
                 "permissions",
-                format!("{permission} was not granted"),
+                format!("{} was not granted", permission.capability()),
             );
         }
     }
@@ -665,7 +860,7 @@ fn validate_app(
             continue;
         }
         let found: Vec<_> = host
-            .binding_problems(index, binding)
+            .binding_problems(index, manifest, binding)
             .into_iter()
             .filter(|found| !problems.0.iter().any(|p| p.path == found.path))
             .collect();
@@ -709,6 +904,8 @@ fn check_install(
     let mut problems = validate_app(&manifest, grants, core)
         .err()
         .unwrap_or_default();
+    // The rules a new install meets that an installed app is not re-held to.
+    problems.0.extend(manifest.install_problems());
     // Without this, a pasted manifest could replace a signed app, or take an
     // official ID and its logo, differing from the real one only by a label.
     if let Some(reason) = unsigned_reserved(&manifest.id, signature.is_some()) {
@@ -742,9 +939,30 @@ fn take_revision(state: &mut Inventory) -> Result<u64, String> {
         .ok_or("extension revision limit reached")?;
     Ok(revision)
 }
+/// [`configure`] on the desktop's layout with no secret store, for the lifecycle tests
+/// that name an inventory by its file (see [`Apps`]'s `From<PathBuf>`).
+#[cfg(test)]
 fn mutate(path: &Path, core: Arc<Registry>, input: Configure) -> Result<Inventory, String> {
-    let _lock = super::settings::write_lock(path)?;
-    let mut state = read(path)?;
+    configure(
+        &Apps::from(path.to_path_buf()),
+        core,
+        &srelens_plugin_host::NoSecretStore,
+        input,
+    )
+}
+/// `extensions.configure`: one read-modify-write of `apps`'s inventory, under its lock,
+/// then the host's secret store made to follow the inventory: whatever the change
+/// dropped — an app, a setting an update no longer declares as a secret — is deleted
+/// from the store (#543).
+fn configure(
+    apps: &Apps,
+    core: Arc<Registry>,
+    secrets: &dyn srelens_plugin_host::SecretStore,
+    input: Configure,
+) -> Result<Inventory, String> {
+    let store = &*apps.inventory;
+    let _lock = store.lock()?;
+    let mut state = read(store)?;
     match input {
         Configure::UnsignedApps {
             allow_unsigned_apps,
@@ -755,18 +973,23 @@ fn mutate(path: &Path, core: Arc<Registry>, input: Configure) -> Result<Inventor
             manifest: source,
             grants,
             signature,
+            reviewed_revision,
         } => {
             let manifest = check_install(&source, &grants, signature.as_deref(), core)?;
             check_unsigned_policy(&manifest, signature.is_some(), state.allow_unsigned_apps)?;
+            let current_revision = state
+                .plugins
+                .iter()
+                .find(|app| app.manifest.id == manifest.id)
+                .map(|app| app.revision);
+            if current_revision != reviewed_revision {
+                return Err("App changed since permission review; review this update again".into());
+            }
             let checksum = format!(
                 "{:x}",
                 <sha2::Sha256 as sha2::Digest>::digest(source.as_bytes())
             );
-            let origin = if catalog::cached_release(
-                &path.with_extension("catalog.json"),
-                &manifest.id,
-                &checksum,
-            ) {
+            let origin = if apps.catalog.lists_release(&manifest.id, &checksum) {
                 Source::Catalog
             } else {
                 Source::Local
@@ -783,7 +1006,7 @@ fn mutate(path: &Path, core: Arc<Registry>, input: Configure) -> Result<Inventor
                 .map(|i| state.plugins.remove(i));
             // An update keeps the app's settings and clusters, and the version it replaces
             // for rollback.
-            let (settings, history, contexts) = match previous {
+            let (settings, history, contexts, allow_loopback_http) = match previous {
                 Some(Installed {
                     signature_proof: replaced_proof,
                     manifest: replaced,
@@ -794,6 +1017,7 @@ fn mutate(path: &Path, core: Arc<Registry>, input: Configure) -> Result<Inventor
                     settings,
                     mut history,
                     contexts,
+                    allow_loopback_http,
                     ..
                 }) => {
                     history.insert(
@@ -808,9 +1032,16 @@ fn mutate(path: &Path, core: Arc<Registry>, input: Configure) -> Result<Inventor
                         },
                     );
                     history.truncate(KEPT_VERSIONS);
-                    (settings, history, contexts)
+                    // Only what the new version still declares, and still
+                    // accepts, carries over (#542).
+                    (
+                        manifest.retain_settings(settings),
+                        history,
+                        contexts,
+                        allow_loopback_http,
+                    )
                 }
-                None => (Default::default(), Vec::new(), None),
+                None => (Default::default(), Vec::new(), None, false),
             };
             state.plugins.push(Installed {
                 signature_proof,
@@ -825,6 +1056,7 @@ fn mutate(path: &Path, core: Arc<Registry>, input: Configure) -> Result<Inventor
                 installed_at: now(),
                 history,
                 contexts,
+                allow_loopback_http,
             });
             state
                 .plugins
@@ -878,6 +1110,11 @@ fn mutate(path: &Path, core: Arc<Registry>, input: Configure) -> Result<Inventor
             // Going back discards the versions after the restored one.
             app.history.drain(..=index);
             app.signature_proof = target.signature_proof;
+            // Settings are kept as an update keeps them: what the restored
+            // version declares and accepts (#542).
+            app.settings = target
+                .manifest
+                .retain_settings(std::mem::take(&mut app.settings));
             app.manifest = target.manifest;
             app.grants = grants;
             app.source = target.source;
@@ -885,6 +1122,23 @@ fn mutate(path: &Path, core: Arc<Registry>, input: Configure) -> Result<Inventor
             app.quarantined = None;
             // A new revision, so views pinned to the rolled-away version refresh.
             app.revision = next;
+        }
+        Configure::LoopbackHttp {
+            id,
+            allow_loopback_http,
+        } => {
+            let app = state
+                .plugins
+                .iter_mut()
+                .find(|p| p.manifest.id == id)
+                .ok_or("Extension is not installed")?;
+            if allow_loopback_http && app.manifest.network_hosts().is_empty() {
+                return Err(format!(
+                    "{id} does not request {}",
+                    srelens_plugin_host::NETWORK_HTTP
+                ));
+            }
+            app.allow_loopback_http = allow_loopback_http;
         }
         Configure::Clusters { id, contexts } => {
             if let Some(contexts) = &contexts {
@@ -938,16 +1192,18 @@ fn mutate(path: &Path, core: Arc<Registry>, input: Configure) -> Result<Inventor
             state.plugins.remove(i);
         }
         Configure::Settings { id, settings } => {
-            state
+            let app = state
                 .plugins
                 .iter_mut()
                 .find(|p| p.manifest.id == id)
-                .ok_or("Extension is not installed")?
-                .settings = settings;
+                .ok_or("Extension is not installed")?;
+            app.settings = checked_settings(&app.manifest, &app.settings, settings, core)?;
         }
     }
     apply_unsigned_policy(&mut state);
-    write(path, &state)?;
+    write(store, &state)?;
+    secret_store::sweep(secrets, &state);
+    streams::announce(&store.key(), &state);
     Ok(state)
 }
 #[derive(Deserialize, JsonSchema)]
@@ -968,41 +1224,257 @@ struct ValidateIn {
 struct ValidationReport {
     /// Empty when the manifest could be installed with these grants.
     errors: Vec<ValidationError>,
+    #[serde(rename = "permissionDiff", skip_serializing_if = "Option::is_none")]
+    permission_diff: Option<PermissionDiff>,
 }
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct PermissionDiff {
+    previous_revision: Option<u64>,
+    added: Vec<String>,
+    removed: Vec<String>,
+    unchanged: Vec<String>,
+}
+
+// Canonicalise nested argument objects so a Cargo feature changing serde_json's map
+// ordering cannot turn an unchanged scope into a spurious removal and addition.
+fn canonical(value: &Value) -> String {
+    match value {
+        Value::Object(map) => {
+            let mut entries: Vec<_> = map.iter().collect();
+            entries.sort_by_key(|(key, _)| *key);
+            format!(
+                "{{{}}}",
+                entries
+                    .iter()
+                    .map(|(key, value)| format!("{}:{}", serde_json::to_string(key).unwrap(), canonical(value)))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+        }
+        Value::Array(items) => format!(
+            "[{}]",
+            items.iter().map(canonical).collect::<Vec<_>>().join(",")
+        ),
+        _ => value.to_string(),
+    }
+}
+
+fn access_items(manifest: &Manifest, grants: &[String]) -> std::collections::BTreeSet<String> {
+    let mut access = std::collections::BTreeSet::new();
+    for grant in grants {
+        access.insert(format!("Grant {grant}"));
+    }
+    // Which secrets the host keeps for the app (#543): an update that keeps
+    // one more is new access, even under the same grant.
+    let mut secrets: Vec<&str> = manifest
+        .settings
+        .iter()
+        .filter(|setting| {
+            setting.setting_type == srelens_capability::settings::SettingType::SecretReference
+        })
+        .map(|setting| setting.id.as_str())
+        .collect();
+    if !secrets.is_empty() {
+        secrets.sort_unstable();
+        access.insert(format!(
+            "Keep secrets for settings [{}] with {}",
+            secrets.join(","),
+            srelens_plugin_host::SECRET_STORE_PERMISSION
+        ));
+    }
+    // Where the app may reach (#568), one item per host, so an update that adds a host
+    // shows as that host: new access under the same grant. A host read from a url
+    // setting carries the setting's declaration, as an interpolated argument does.
+    for host in manifest.network_hosts() {
+        let reference = serde_json::Map::from_iter([("host".to_owned(), json!(host))]);
+        access.insert(format!(
+            "Reach {host}{} with {}",
+            setting_scope(manifest, &reference),
+            srelens_plugin_host::NETWORK_HTTP
+        ));
+    }
+    // What a reader reads: its arguments and, when it lists several, the versions it may
+    // read and the paths each moves (#547). Another accepted version reads more, and a
+    // moved path changes what an action's precondition checks there.
+    let reads = |binding: &srelens_plugin_host::Binding| {
+        let mut identity = binding.arguments.clone();
+        if !binding.versions.is_empty() {
+            identity.insert("versions".into(), json!(binding.versions));
+        }
+        if !binding.json_path_overrides.is_empty() {
+            identity.insert(
+                "jsonPathOverrides".into(),
+                json!(binding.json_path_overrides),
+            );
+        }
+        canonical(&Value::Object(identity))
+    };
+    for binding in &manifest.capabilities {
+        access.insert(format!(
+            "Read {} with {}{}",
+            binding.target,
+            reads(binding),
+            setting_scope(manifest, &binding.arguments)
+        ));
+    }
+    for action in &manifest.actions {
+        let reader = manifest
+            .capabilities
+            .iter()
+            .find(|binding| binding.name == action.resource);
+        let scope = reader
+            .map(|binding| format!("{} {}", binding.target, reads(binding)))
+            .unwrap_or_else(|| action.resource.clone());
+        // Preconditions are enforced on the fresh object by the host action
+        // binding. Removing one broadens access even if its primitive and
+        // resource kind did not change. Reason text and predicate order do not.
+        let mut preconditions: Vec<_> = action
+            .preconditions
+            .iter()
+            .map(|predicate| {
+                let mut fields = serde_json::Map::new();
+                fields.insert("jsonPath".into(), Value::String(predicate.json_path.clone()));
+                if let Some(value) = &predicate.equals {
+                    fields.insert("equals".into(), value.clone());
+                }
+                if let Some(value) = &predicate.not_equals {
+                    fields.insert("notEquals".into(), value.clone());
+                }
+                if let Some(value) = predicate.present {
+                    fields.insert("present".into(), Value::Bool(value));
+                }
+                if let Some(value) = predicate.absent {
+                    fields.insert("absent".into(), Value::Bool(value));
+                }
+                canonical(&Value::Object(fields))
+            })
+            .collect();
+        preconditions.sort();
+        access.insert(format!(
+            "Action {} on {} with {}{} preconditions [{}]",
+            action.target,
+            scope,
+            canonical(&Value::Object(action.arguments.clone())),
+            setting_scope(manifest, &action.arguments),
+            preconditions.join(",")
+        ));
+    }
+    access
+}
+
+fn permission_diff(
+    previous: Option<(&Manifest, &[String], u64)>,
+    manifest: &Manifest,
+    grants: &[String],
+) -> PermissionDiff {
+    let current = access_items(manifest, grants);
+    let old = previous.map(|(manifest, grants, _)| access_items(manifest, grants)).unwrap_or_default();
+    PermissionDiff {
+        previous_revision: previous.map(|(_, _, revision)| revision),
+        added: current.difference(&old).cloned().collect(),
+        removed: old.difference(&current).cloned().collect(),
+        unchanged: current.intersection(&old).cloned().collect(),
+    }
+}
+/// [`register_with_secrets`] on a host with no secret store: secrets cannot
+/// be set, and `extensions.list` says so. For the lifecycle tests; every
+/// registry build names its store.
+#[cfg(test)]
 pub fn register(
     reg: &mut Registry,
-    path: PathBuf,
+    apps: impl Into<Apps>,
     core: Arc<Registry>,
     cache: Arc<srelens_kube::client_cache::ClientCache>,
-) {
-    catalog::register(reg, path.with_extension("catalog.json"), core.clone());
+) -> Arc<streams::ExtensionStreams> {
+    register_with_secrets(
+        reg,
+        apps,
+        core,
+        cache,
+        Arc::new(srelens_plugin_host::NoSecretStore),
+    )
+}
+/// Every `extensions.*` capability over `apps` — an inventory file for the desktop's
+/// layout, or one web user's inventory and the shared catalog — with `secrets` keeping
+/// apps' secret settings (#543): the desktop vault, or
+/// [`srelens_plugin_host::NoSecretStore`].
+pub fn register_with_secrets(
+    reg: &mut Registry,
+    apps: impl Into<Apps>,
+    core: Arc<Registry>,
+    cache: Arc<srelens_kube::client_cache::ClientCache>,
+    secrets: Arc<dyn srelens_plugin_host::SecretStore>,
+) -> Arc<streams::ExtensionStreams> {
+    register_apps(reg, apps.into(), core, cache, Some(secrets))
+}
+/// The `extensions.*` capabilities on a host that keeps no app secrets at all: the
+/// web host, until per-user secret storage exists (#522). `extension.secretStore` is
+/// not registered, so there is no way to hand it one, and `extensions.list` reports
+/// the store as unavailable.
+pub fn register_without_secrets(
+    reg: &mut Registry,
+    apps: impl Into<Apps>,
+    core: Arc<Registry>,
+    cache: Arc<srelens_kube::client_cache::ClientCache>,
+) -> Arc<streams::ExtensionStreams> {
+    register_apps(reg, apps.into(), core, cache, None)
+}
+fn register_apps(
+    reg: &mut Registry,
+    apps: Apps,
+    core: Arc<Registry>,
+    cache: Arc<srelens_kube::client_cache::ClientCache>,
+    secrets: Option<Arc<dyn srelens_plugin_host::SecretStore>>,
+) -> Arc<streams::ExtensionStreams> {
+    let path = apps.inventory.clone();
+    let secrets = match secrets {
+        Some(secrets) => {
+            secret_store::register(reg, path.clone(), secrets.clone());
+            secrets
+        }
+        None => Arc::new(srelens_plugin_host::NoSecretStore),
+    };
+    catalog::register(reg, apps.catalog.clone(), core.clone());
     resource::register(reg, path.clone(), core.clone(), cache.clone());
+    // One snapshot of each granted reader, shared by table columns, dashboard
+    // cards and a card's target page, so the three agree and list it once.
+    let snapshots = columns::JoinCache::default();
+    columns::register(reg, path.clone(), core.clone(), cache.clone(), snapshots.clone());
+    cards::register(reg, path.clone(), core.clone(), cache.clone(), snapshots.clone());
     let p = path.clone();
+    let s = secrets.clone();
     reg.register(Capability::typed::<Empty, Inventory, _, _>(
         "extensions.list",
         "List installed declarative extensions",
         Annotations::READ_ONLY,
         move |_| {
             let p = p.clone();
+            let s = s.clone();
             async move {
-                tokio::task::spawn_blocking(move || read(&p))
-                    .await
-                    .map_err(|e| CapabilityError::Handler(e.to_string()))?
-                    .map_err(CapabilityError::Handler)
+                tokio::task::spawn_blocking(move || {
+                    let mut state = read(&p)?;
+                    secret_store::report(s.as_ref(), &mut state);
+                    Ok(state)
+                })
+                .await
+                .map_err(|e| CapabilityError::Handler(e.to_string()))?
+                .map_err(CapabilityError::Handler)
             }
         },
     ));
-    let p = path.clone();
     let c = core.clone();
+    let s = secrets.clone();
     reg.register(Capability::typed::<Configure, Inventory, _, _>(
         "extensions.configure",
         "Install, enable, remove or configure local extensions; requires approval",
         Annotations::MUTATING,
         move |input| {
-            let p = p.clone();
+            let apps = apps.clone();
             let c = c.clone();
+            let s = s.clone();
             async move {
-                tokio::task::spawn_blocking(move || mutate(&p, c, input))
+                tokio::task::spawn_blocking(move || configure(&apps, c, s.as_ref(), input))
                     .await
                     .map_err(|e| CapabilityError::Handler(e.to_string()))?
                     .map_err(CapabilityError::Handler)
@@ -1022,111 +1494,235 @@ pub fn register(
                 let state = tokio::task::spawn_blocking(move || read(&p))
                     .await.map_err(|e| CapabilityError::Handler(e.to_string()))?
                     .map_err(CapabilityError::Handler)?;
-                let errors = match check_install(&input.manifest, &input.grants, input.signature.as_deref(), c) {
-                    Err(problems) => problems.0,
-                    Ok(manifest) => check_unsigned_policy(&manifest, input.signature.is_some(), state.allow_unsigned_apps)
-                        .err().map(|reason| vec![ValidationError::new(Code::InvalidValue, "actions", reason)])
-                        .unwrap_or_default(),
+                let (errors, permission_diff) = match check_install(&input.manifest, &input.grants, input.signature.as_deref(), c) {
+                    Err(problems) => (problems.0, None),
+                    Ok(manifest) => {
+                        let errors = check_unsigned_policy(&manifest, input.signature.is_some(), state.allow_unsigned_apps)
+                            .err().map(|reason| vec![ValidationError::new(Code::InvalidValue, "actions", reason)])
+                            .unwrap_or_default();
+                        let previous = state.plugins.iter().find(|app| app.manifest.id == manifest.id)
+                            .map(|app| (&app.manifest, app.grants.as_slice(), app.revision));
+                        let diff = errors.is_empty().then(|| permission_diff(previous, &manifest, &input.grants));
+                        (errors, diff)
+                    },
                 };
-                Ok::<_, CapabilityError>(ValidationReport { errors })
+                Ok::<_, CapabilityError>(ValidationReport { errors, permission_diff })
             }
         },
     ));
+    let reader_snapshots = snapshots.clone();
+    let reader_path = path.clone();
+    let reader_core = core.clone();
+    let reader_cache = cache.clone();
+    let reader_secrets = secrets.clone();
     reg.register(Capability::typed::<Read, Value, _, _>(
         "extensions.read",
-        "Read a declared custom-resource contribution from an enabled extension",
+        "Read a declared custom-resource contribution, or send a declared network.http request, from an enabled extension",
         Annotations::READ_ONLY,
         move |input: Read| {
-            let p = path.clone();
-            let c = core.clone();
-            let k = cache.clone();
-            async move {
-                let resolved = request_context(&k, &input.context).await;
-                if input.context.trim().is_empty() {
-                    return Err(CapabilityError::InvalidInput(
-                        "An explicit cluster context is required".into(),
-                    ));
-                }
-                if !input.namespace.is_empty()
-                    && (input.namespace.len() > 63
-                        || !input
-                            .namespace
-                            .bytes()
-                            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
-                        || input.namespace.starts_with('-')
-                        || input.namespace.ends_with('-'))
-                {
-                    return Err(CapabilityError::InvalidInput(
-                        "Namespace must be a Kubernetes namespace name".into(),
-                    ));
-                }
-                let state = tokio::task::spawn_blocking(move || read(&p))
-                    .await
-                    .map_err(|e| CapabilityError::Handler(e.to_string()))?
-                    .map_err(CapabilityError::Handler)?;
-                if let Some(reason) = state
-                    .plugins
-                    .iter()
-                    .find(|p| p.manifest.id == input.id)
-                    .and_then(|p| p.policy_blocked.as_ref())
-                {
-                    return Err(CapabilityError::Handler(reason.clone()));
-                }
-                let plugin = state
-                    .plugins
-                    .iter()
-                    .find(|p| {
-                        p.manifest.id == input.id && p.enabled && p.revision == input.revision
-                    })
-                    .ok_or_else(|| {
-                        CapabilityError::Handler(
-                            "Extension was disabled, removed or updated; refresh the view".into(),
-                        )
-                    })?;
-                plugin.check_scope(&resolved)?;
-                validate_app(&plugin.manifest, &plugin.grants, c.clone())
-                    .map_err(|errors| CapabilityError::Handler(errors.to_string()))?;
-                let mut manifest = plugin.manifest.clone();
-                if input.use_crd_columns {
-                    if let Some(binding) = manifest.capabilities.iter_mut().find(|b| {
-                        b.name == input.capability && b.target == "k8s.listCustomResource"
-                    }) {
-                        binding
-                            .arguments
-                            .insert("useCrdColumns".into(), json!(true));
-                    }
-                }
-                let context = resolved
-                    .ok()
-                    .and_then(|context| context.pinned_id())
-                    .unwrap_or(input.context);
-                if let Some(binding) =
-                    plugin.manifest.capabilities.iter().find(|b| {
-                        b.name == input.capability && b.target == "k8s.listCustomResource"
-                    })
-                {
-                    crd::require(&c, &context, binding).await?;
-                }
-                let mut registry = Registry::new();
-                let _registration = PluginHost::new(c)
-                    .register(&mut registry, manifest, &plugin.grants)
-                    .map_err(CapabilityError::Handler)?;
-                let mut args = json!({ "context": context });
-                if plugin
-                    .manifest
-                    .capabilities
-                    .iter()
-                    .find(|b| b.name == input.capability)
-                    .is_some_and(|b| b.inputs.iter().any(|k| k == "namespace"))
-                {
-                    args["namespace"] = json!(input.namespace);
-                }
-                registry
-                    .invoke(&format!("plugin/{}/{}", input.id, input.capability), args)
-                    .await
-            }
+            read_contribution(
+                reader_path.clone(),
+                reader_core.clone(),
+                reader_cache.clone(),
+                reader_snapshots.clone(),
+                reader_secrets.clone(),
+                input,
+            )
         },
     ));
+    streams::register(reg, path, core, cache, snapshots)
+}
+
+/// `extensions.read`: every check it makes is made again on each call, which
+/// is what lets a stream re-run it on every tick (#565).
+async fn read_contribution(
+    p: Store,
+    c: Arc<Registry>,
+    k: Arc<srelens_kube::client_cache::ClientCache>,
+    snapshots: columns::JoinCache,
+    secrets: Arc<dyn srelens_plugin_host::SecretStore>,
+    input: Read,
+) -> Result<Value, CapabilityError> {
+    let resolved = request_context(&k, &input.context).await;
+    if input.context.trim().is_empty() {
+        return Err(CapabilityError::InvalidInput(
+            "An explicit cluster context is required".into(),
+        ));
+    }
+    if input.card.as_ref().is_some_and(|card| card.len() > 64) {
+        return Err(CapabilityError::InvalidInput(
+            "A dashboard card id is at most 64 characters".into(),
+        ));
+    }
+    cards::check_card_namespaces(
+        input.card.is_some(),
+        &input.namespace,
+        &input.namespaces,
+    )?;
+    if !input.namespace.is_empty()
+        && (input.namespace.len() > 63
+            || !input
+                .namespace
+                .bytes()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
+            || input.namespace.starts_with('-')
+            || input.namespace.ends_with('-'))
+    {
+        return Err(CapabilityError::InvalidInput(
+            "Namespace must be a Kubernetes namespace name".into(),
+        ));
+    }
+    let state = tokio::task::spawn_blocking(move || read(&p))
+        .await
+        .map_err(|e| CapabilityError::Handler(e.to_string()))?
+        .map_err(CapabilityError::Handler)?;
+    if let Some(reason) = state
+        .plugins
+        .iter()
+        .find(|p| p.manifest.id == input.id)
+        .and_then(|p| p.policy_blocked.as_ref())
+    {
+        return Err(CapabilityError::Handler(reason.clone()));
+    }
+    let plugin = state
+        .plugins
+        .iter()
+        .find(|p| {
+            p.manifest.id == input.id && p.enabled && p.revision == input.revision
+        })
+        .ok_or_else(|| {
+            CapabilityError::Handler(
+                "Extension was disabled, removed or updated; refresh the view".into(),
+            )
+        })?;
+    plugin.check_scope(&resolved)?;
+    validate_app(&plugin.manifest, &plugin.grants, c.clone())
+        .map_err(|errors| CapabilityError::Handler(errors.to_string()))?;
+    let context = resolved
+        .ok()
+        .and_then(|context| context.pinned_id())
+        .unwrap_or(input.context);
+    // A network.http binding (#568) is a request to one of the app's hosts, sent by
+    // the broker with the app's allowlist and secrets. The checks above are the ones
+    // every app request makes; the cluster is not part of the request.
+    if plugin
+        .manifest
+        .capabilities
+        .iter()
+        .any(|b| b.name == input.capability && b.target == srelens_plugin_host::NETWORK_HTTP)
+    {
+        if input.card.is_some() {
+            return Err(CapabilityError::InvalidInput(
+                "A dashboard card counts a custom-resource reader, not a network.http request"
+                    .into(),
+            ));
+        }
+        return network::read(&c, secrets.as_ref(), plugin, &input.capability).await;
+    }
+    // A custom-resource reader reads the version this cluster serves, through
+    // that version's paths (#547); `crd::resolved` is also the #601 check. A
+    // stream re-runs this on every tick, so it follows a discovery change too.
+    let custom = plugin
+        .manifest
+        .capabilities
+        .iter()
+        .any(|b| b.name == input.capability && b.target == "k8s.listCustomResource");
+    let mut manifest = if custom {
+        crd::resolved(&c, &context, &plugin.manifest, &input.capability)
+            .await?
+            .0
+    } else {
+        plugin.manifest.clone()
+    };
+    // The kind's status rules travel in the host's binding, copied
+    // out of `statusResolvers` the way an action's preconditions
+    // are: the reader evaluates them on the whole object, which
+    // never leaves it (#541).
+    if let Some(rules) = manifest
+        .status_rules_for_binding(&input.capability)
+        .map(serde_json::to_value)
+        .transpose()
+        .map_err(|e| CapabilityError::Handler(format!("status rules: {e}")))?
+    {
+        if let Some(binding) = manifest.capabilities.iter_mut().find(|b| {
+            b.name == input.capability && b.target == "k8s.listCustomResource"
+        }) {
+            binding
+                .arguments
+                .insert(STATUS_RULES_ARGUMENT.into(), rules);
+        }
+    }
+    if input.use_crd_columns {
+        if let Some(binding) = manifest.capabilities.iter_mut().find(|b| {
+            b.name == input.capability && b.target == "k8s.listCustomResource"
+        }) {
+            binding
+                .arguments
+                .insert("useCrdColumns".into(), json!(true));
+        }
+    }
+    // A card's target shows only what the card counted. Worked out before
+    // the page's own read, so a card that cannot be evaluated fails the
+    // read rather than leaving every row on a page titled by the card.
+    let counted = match &input.card {
+        Some(card) => Some(
+            cards::card_rows(
+                &snapshots,
+                &k,
+                &c,
+                plugin,
+                card,
+                &input.capability,
+                &context,
+                &input.namespace,
+                &input.namespaces,
+            )
+            .await?,
+        ),
+        None => None,
+    };
+    let mut registry = Registry::new();
+    let _registration = PluginHost::new(c)
+        .register_with_settings(
+            &mut registry,
+            manifest,
+            &plugin.grants,
+            &plugin.settings,
+        )
+        .map_err(CapabilityError::Handler)?;
+    let mut args = json!({ "context": context });
+    if plugin
+        .manifest
+        .capabilities
+        .iter()
+        .find(|b| b.name == input.capability)
+        .is_some_and(|b| b.inputs.iter().any(|k| k == "namespace"))
+    {
+        args["namespace"] = json!(input.namespace);
+    }
+    let mut out = registry
+        .invoke(&format!("plugin/{}/{}", input.id, input.capability), args)
+        .await?;
+    if let Some(counted) = counted {
+        let items = out
+            .get_mut("items")
+            .and_then(Value::as_array_mut)
+            .ok_or_else(|| {
+                CapabilityError::Handler(
+                    "The page's read returned no rows to narrow to the card's".into(),
+                )
+            })?;
+        // A row the card's snapshot lacks — created since it was read — is
+        // left out rather than shown as something the card counted.
+        items.retain(|item| {
+            let key = (
+                item["namespace"].as_str().unwrap_or("").to_owned(),
+                item["name"].as_str().unwrap_or("").to_owned(),
+            );
+            counted.contains(&key)
+        });
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -1172,7 +1768,9 @@ mod tests {
                 json!({"manifest": manifest, "grants": grants}),
             )
         };
-        assert_eq!(validate(manifest()).await.unwrap(), json!({"errors": []}));
+        let valid = validate(manifest()).await.unwrap();
+        assert_eq!(valid["errors"], json!([]));
+        assert!(valid["permissionDiff"].is_object());
 
         let mut value: Value = serde_json::from_str(&manifest()).unwrap();
         // One manifest rule and two host rules, each independent of the others.
@@ -1372,8 +1970,8 @@ mod tests {
                 json!({"manifest": manifest(), "grants": grants})
             )
             .await
-            .unwrap(),
-            json!({"errors": []})
+            .unwrap()["errors"],
+            json!([])
         );
         reg.invoke(
             "extensions.configure",
@@ -1499,19 +2097,33 @@ mod tests {
         write(path, &state).unwrap();
     }
     /// The example manifest under an unreserved ID, as a local author would install it.
+    /// It declares one setting, `team`, so the lifecycle tests can save one
+    /// (#542: a save is held to the manifest's declarations).
     pub(super) fn manifest() -> String {
-        include_str!("../tests/fixtures/argocd-manifest.json")
+        let source = include_str!("../tests/fixtures/argocd-manifest.json")
             .replace("\"org.srelens.argocd\"", "\"org.example.argocd\"")
-            .replace("\"^0.1\"", "\"^0.3\"")
+            .replace("\"^0.1\"", "\"^0.4\"");
+        let mut value: Value = serde_json::from_str(&source).unwrap();
+        value["settings"] = json!([{"id": "team", "type": "string", "title": "Team"}]);
+        value.to_string()
     }
     fn signed_argocd() -> Configure {
         Configure::Install {
             signature: Some(include_bytes!("../tests/fixtures/argocd-manifest.sig").to_vec()),
             manifest: include_str!("../tests/fixtures/argocd-manifest.json").into(),
             grants: vec!["k8s.listCustomResource".into()],
+            reviewed_revision: None,
         }
     }
     pub(super) fn configure(path: &Path, input: Value) -> Result<Inventory, String> {
+        let mut input = input;
+        if input["action"] == "install" && input.get("reviewedRevision").is_none() {
+            if let Some(id) = input["manifest"].as_str().and_then(|source| Manifest::parse(source).ok()).map(|manifest| manifest.id) {
+                if let Some(app) = read(path)?.plugins.iter().find(|app| app.manifest.id == id) {
+                    input["reviewedRevision"] = json!(app.revision);
+                }
+            }
+        }
         let input = serde_json::from_value::<Configure>(input).map_err(|e| e.to_string())?;
         mutate(path, fake_core(), input)
     }
@@ -1520,6 +2132,69 @@ mod tests {
         let mut value: Value = serde_json::from_str(&manifest()).unwrap();
         value["version"] = json!(version);
         value.to_string()
+    }
+    #[test]
+    fn update_preview_separates_added_removed_and_unchanged_access() {
+        let mut old: Manifest = serde_json::from_str(&manifest()).unwrap();
+        let mut new = old.clone();
+        old.permissions.push("k8s.listEvents".into());
+        new.permissions.push("k8s.annotate".into());
+        let preview = permission_diff(Some((&old, &["k8s.listCustomResource".into(), "k8s.listEvents".into()][..], 7)), &new, &["k8s.listCustomResource".into(), "k8s.annotate".into()]);
+        assert_eq!(preview.previous_revision, Some(7));
+        assert!(preview.added.iter().any(|entry| entry.contains("k8s.annotate")));
+        assert!(preview.removed.iter().any(|entry| entry.contains("k8s.listEvents")));
+        assert!(preview.unchanged.iter().any(|entry| entry.contains("k8s.listCustomResource")));
+    }
+    #[test]
+    fn changing_a_reader_kind_or_bound_action_is_an_access_change_even_with_same_grants() {
+        let mut old: Manifest = serde_json::from_str(&manifest()).unwrap();
+        old.actions.push(serde_json::from_value(json!({"name":"renew","title":"Renew","target":"k8s.annotate","resource":"applications","arguments":{"key":"old"}})).unwrap());
+        let mut next = old.clone();
+        next.capabilities[0].arguments.insert("kind".into(), json!("OtherApplication"));
+        next.actions[0].arguments.insert("key".into(), json!("new"));
+        let grants = ["k8s.listCustomResource".into(), "k8s.annotate".into()];
+        let diff = permission_diff(Some((&old, &grants, 4)), &next, &grants);
+        assert_eq!(diff.added.len(), 2, "reader kind and action scope changed: {diff:?}");
+        assert_eq!(diff.removed.len(), 2, "the old reader and action scopes were removed: {diff:?}");
+        assert_eq!(diff.unchanged.len(), 2, "grant names alone did not change: {diff:?}");
+    }
+    #[test]
+    fn removing_an_enforced_action_precondition_is_reported_as_broader_access() {
+        let mut guarded: Manifest = serde_json::from_str(&manifest()).unwrap();
+        guarded.actions.push(serde_json::from_value(json!({
+            "name":"reconcile", "title":"Reconcile", "target":"k8s.annotate",
+            "resource":"applications", "arguments":{"key":"reconcile"},
+            "preconditions":[{"jsonPath":".spec.suspend","notEquals":true,"reason":"Resume first"}]
+        })).unwrap());
+        let mut unguarded = guarded.clone();
+        unguarded.actions[0].preconditions.clear();
+        let grants = ["k8s.listCustomResource".into(), "k8s.annotate".into()];
+        let diff = permission_diff(Some((&guarded, &grants, 3)), &unguarded, &grants);
+        assert_eq!(diff.added.len(), 1, "unguarded action must be new access: {diff:?}");
+        assert_eq!(diff.removed.len(), 1, "guarded action must be removed: {diff:?}");
+    }
+    #[tokio::test]
+    async fn validation_previews_installed_access_and_stale_review_cannot_replace_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("extensions.json");
+        let old_revision = install(&path, fake_core());
+        let mut next: Value = serde_json::from_str(&manifest()).unwrap();
+        next["version"] = json!("0.3.0");
+        let source = next.to_string();
+        let reg = setup(&path);
+        let preview = reg.invoke("extensions.validate", json!({"manifest":source,"grants":["k8s.listCustomResource"]})).await.unwrap();
+        assert_eq!(preview["errors"], json!([]));
+        assert_eq!(preview["permissionDiff"]["previousRevision"], old_revision);
+        let before = fs::read(&path).unwrap();
+        let refused = reg.invoke("extensions.configure", json!({"action":"install","manifest":source,"grants":["k8s.listCustomResource"]})).await;
+        assert!(refused.is_err());
+        assert_eq!(fs::read(&path).unwrap(), before);
+        let installed = reg.invoke("extensions.configure", json!({"action":"install","manifest":source,"grants":["k8s.listCustomResource"],"reviewedRevision":old_revision})).await.unwrap();
+        assert_eq!(installed["plugins"][0]["manifest"]["version"], "0.3.0");
+        let before = fs::read(&path).unwrap();
+        let stale = reg.invoke("extensions.configure", json!({"action":"install","manifest":source,"grants":["k8s.listCustomResource"],"reviewedRevision":old_revision})).await;
+        assert!(stale.is_err());
+        assert_eq!(fs::read(&path).unwrap(), before);
     }
     #[test]
     fn update_then_rollback_restores_the_previous_manifest_and_grants_under_a_new_revision() {
@@ -1614,6 +2289,7 @@ mod tests {
                 manifest: source,
                 signature: None,
                 grants: vec!["k8s.listCustomResource".into()],
+                reviewed_revision: None,
             },
         )
         .unwrap();
@@ -1940,6 +2616,42 @@ mod tests {
         cache.set_paths(vec![second]).await;
         assert!(refused("c".to_owned()).await);
     }
+    /// An app page asks the host by the pinned ID `k8s.listContexts` reports (#695), so two
+    /// contexts that share a stable ID each read their own cluster.
+    #[tokio::test]
+    async fn each_context_sharing_a_stable_id_reads_its_own_cluster_by_its_listed_pinned_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("extensions.json");
+        let first = kubeconfig(dir.path(), "a", &["b#c"]);
+        let second = kubeconfig(dir.path(), "a#b", &["c"]);
+        let core = fake_core();
+        let listed = core
+            .invoke("k8s.listContexts", json!({"paths": [&first, &second]}))
+            .await
+            .unwrap();
+        let contexts = listed["contexts"].as_array().unwrap();
+        assert_eq!(contexts[0]["stableId"], contexts[1]["stableId"]);
+        let pinned: Vec<Value> = contexts.iter().map(|c| c["pinnedId"].clone()).collect();
+        assert!(
+            pinned.iter().all(Value::is_string) && pinned[0] != pinned[1],
+            "{pinned:?}"
+        );
+        let revision = install(&path, core.clone());
+        let mut reg = Registry::new();
+        let cache = srelens_kube::client_cache::ClientCache::new_many(vec![first, second]);
+        register(&mut reg, path, core, cache);
+        let read = |context: Value| {
+            let payload = json!({"id":"org.example.argocd","revision":revision,
+                "capability":"applications","context":context,"namespace":""});
+            reg.invoke("extensions.read", payload)
+        };
+        for id in &pinned {
+            assert_eq!(read(id.clone()).await.unwrap()["context"], *id);
+        }
+        // The shared stable ID names two contexts, so it is pinned to neither.
+        let shared = read(contexts[0]["stableId"].clone()).await;
+        assert!(shared.map_or(true, |out| !pinned.contains(&out["context"])));
+    }
     /// A limited app is refused on a context the host cannot resolve, but with why: whether
     /// the app is enabled there is unknown, which is not the same as not enabled.
     #[tokio::test]
@@ -2034,7 +2746,7 @@ mod tests {
         let mut value: Value =
             serde_json::from_str(include_str!("../../../examples/extensions/flux.json")).unwrap();
         let parsed = Manifest::parse(&value.to_string()).unwrap();
-        let grants = parsed.permissions.clone();
+        let grants = parsed.permission_names();
         let without_events: Vec<_> = grants
             .iter()
             .filter(|grant| grant.as_str() != "k8s.listEvents")
@@ -2042,9 +2754,20 @@ mod tests {
             .collect();
         assert!(validate_app(&parsed, &grants, core.clone()).is_ok());
         assert!(validate_app(&parsed, &without_events, core.clone()).is_err());
+        // The example's card targets this page; it would be refused first, for its own reason.
+        value["contributions"].as_object_mut().unwrap().remove("dashboardCards");
         value["contributions"]["pages"][1]["capability"] = json!("events");
-        let invalid = Manifest::parse(&value.to_string()).unwrap();
-        assert!(validate_app(&invalid, &grants, core).is_err());
+        let invalid = Manifest::decode(&value.to_string()).unwrap();
+        // The specific refusal: an event reader cannot back a table. Other
+        // problems this edit also causes (the dashboard page now names a
+        // kind with no resolver) must not stand in for it.
+        let refused = validate_app(&invalid, &grants, core).unwrap_err();
+        assert!(
+            refused.0.iter().any(|p| p.code == Code::UnsupportedTarget
+                && p.path == "contributions.pages[1].capability"
+                && p.message.contains("k8s.listCustomResource reader")),
+            "{refused}"
+        );
     }
 
     #[test]
@@ -2083,7 +2806,7 @@ mod tests {
                 "inputs":if reader == "k8s.listNodes" {vec!["context"]} else {vec!["context","namespace"]}}]);
             source["actions"] = json!([{"name":"request","title":"Request","target":target,"resource":"objects","arguments":arguments}]);
             let parsed = Manifest::parse(&source.to_string()).unwrap();
-            let grants = parsed.permissions.clone();
+            let grants = parsed.permission_names();
             validate_app(&parsed, &grants, core.clone()).unwrap();
             assert!(validate_app(&parsed, &[reader.into()], core.clone()).is_err());
             for denied in [
@@ -2097,7 +2820,7 @@ mod tests {
                 wrong["actions"][0]["target"] = json!(denied);
                 let wrong = Manifest::parse(&wrong.to_string()).unwrap();
                 assert!(
-                    validate_app(&wrong, &wrong.permissions, core.clone()).is_err(),
+                    validate_app(&wrong, &wrong.permission_names(), core.clone()).is_err(),
                     "{reader}: {denied}"
                 );
             }
@@ -2124,6 +2847,8 @@ mod tests {
             "name":"refresh", "title":"Refresh", "target":"k8s.annotate", "resource":"applications",
             "arguments":{"key":"argocd.argoproj.io/refresh","value":"normal"}
         }]);
+        // The example's palette commands name the actions replaced above.
+        value["contributions"]["commands"] = json!([]);
         let grants = vec!["k8s.listCustomResource".into(), "k8s.annotate".into()];
         let parsed = Manifest::parse(&value.to_string()).unwrap();
         validate_app(&parsed, &grants, core.clone()).unwrap();
@@ -2137,7 +2862,10 @@ mod tests {
         writing_reader["capabilities"][0]["arguments"] =
             json!({"key":"a.example.io/b","value":"$now"});
         writing_reader["permissions"] = json!(["k8s.annotate"]);
-        let parsed = Manifest::parse(&writing_reader.to_string()).unwrap();
+        // Decoded, not parsed: the manifest's own rules also refuse it now
+        // (its status resolver names a kind no reader lists), and this case
+        // is about what `validate_app` says of the reader's target.
+        let parsed = Manifest::decode(&writing_reader.to_string()).unwrap();
         let refused = validate_app(&parsed, &["k8s.annotate".into()], core.clone()).unwrap_err();
         assert!(
             refused
@@ -2364,6 +3092,7 @@ mod tests {
                 signature: None,
                 manifest: source.to_string(),
                 grants: vec!["k8s.listCustomResource".into()],
+                reviewed_revision: None,
             }
         };
         let state = mutate(
@@ -2530,27 +3259,40 @@ mod tests {
         cap.handler = Arc::new(|args| Box::pin(async move { Ok(args) }));
         core.register(cap);
         serve_crds(&mut core, &["applications.argoproj.io/v1alpha1"]);
+        // The broker's own, as `build_registry_and_app_streams` registers it (#568).
+        core.register(network::capability());
         Arc::new(core)
     }
     /// Answers the broker's CRD check as a cluster whose CRDs serve exactly these
-    /// `{plural}.{group}/{version}` would.
+    /// `{plural}.{group}/{version}` would: the first listed version served, or none.
     pub(super) fn serve_crds(core: &mut Registry, names: &'static [&'static str]) {
         let mut cap =
             crd::check_capability(srelens_kube::client_cache::ClientCache::new_many(vec![]));
         cap.handler = Arc::new(move |args| {
             Box::pin(async move {
-                let name = format!(
-                    "{}.{}/{}",
-                    args["plural"].as_str().unwrap_or_default(),
-                    args["group"].as_str().unwrap_or_default(),
-                    args["version"].as_str().unwrap_or_default()
-                );
-                Ok(json!(names.contains(&name.as_str())))
+                let served = args["versions"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .find(|version| {
+                        let name = format!(
+                            "{}.{}/{version}",
+                            args["plural"].as_str().unwrap_or_default(),
+                            args["group"].as_str().unwrap_or_default(),
+                        );
+                        names.contains(&name.as_str())
+                    })
+                    .map(str::to_owned);
+                Ok(json!(served))
             })
         });
         core.register(cap);
     }
     pub(super) fn install(path: &Path, core: Arc<Registry>) -> u64 {
+        let reviewed_revision = read(path).unwrap().plugins.iter()
+            .find(|app| app.manifest.id == "org.example.argocd")
+            .map(|app| app.revision);
         mutate(
             path,
             core,
@@ -2558,12 +3300,115 @@ mod tests {
                 signature: None,
                 manifest: manifest(),
                 grants: vec!["k8s.listCustomResource".into()],
+                reviewed_revision,
             },
         )
         .unwrap()
         .plugins[0]
             .revision
     }
+    /// The example manifest with a status resolver for its Application reader.
+    fn manifest_with_status() -> Value {
+        let mut value: Value = serde_json::from_str(&manifest()).unwrap();
+        value["contributions"]["statusResolvers"] = json!([{
+            "forKinds": ["argoproj.io/Application"],
+            "rules": [
+                {"when": [{"jsonPath": ".status.health.status", "equals": "Healthy"}],
+                 "status": "healthy", "label": "Healthy"},
+                {"when": [], "status": "unknown", "label": "Unknown"}
+            ]
+        }]);
+        value
+    }
+
+    #[tokio::test]
+    async fn a_read_binds_the_status_rules_declared_for_the_readers_kind() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("extensions.json");
+        let core = fake_core();
+        let declared = manifest_with_status();
+        let revision = mutate(
+            &path,
+            core.clone(),
+            Configure::Install {
+                signature: None,
+                manifest: declared.to_string(),
+                grants: vec!["k8s.listCustomResource".into()],
+                reviewed_revision: None,
+            },
+        )
+        .unwrap()
+        .plugins[0]
+            .revision;
+        let mut reader = Registry::new();
+        register(
+            &mut reader,
+            path.clone(),
+            core.clone(),
+            srelens_kube::client_cache::ClientCache::new_many(vec![]),
+        );
+        // `fake_core`'s reader echoes what it was sent: the host's binding,
+        // with the rules copied out of the manifest under the reader's
+        // camelCase input name.
+        let sent = reader
+            .invoke(
+                "extensions.read",
+                json!({"id":"org.example.argocd","revision":revision,"capability":"applications",
+                    "context":"staging","namespace":"argo"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            sent["statusRules"],
+            declared["contributions"]["statusResolvers"][0]["rules"]
+        );
+        // Without a resolver, nothing is bound.
+        let revision = install(&path, core.clone());
+        let sent = reader
+            .invoke(
+                "extensions.read",
+                json!({"id":"org.example.argocd","revision":revision,"capability":"applications",
+                    "context":"staging","namespace":"argo"}),
+            )
+            .await
+            .unwrap();
+        assert!(sent.get("statusRules").is_none(), "{sent}");
+    }
+
+    #[test]
+    fn status_rules_are_the_hosts_to_bind_and_badges_sit_on_built_in_kinds() {
+        let core = fake_core();
+        let grants = vec!["k8s.listCustomResource".to_owned()];
+        let paths = |value: &Value| {
+            let manifest: Manifest = serde_json::from_value(value.clone()).unwrap();
+            let mut found: Vec<String> = validate_app(&manifest, &grants, core.clone())
+                .err()
+                .map(|errors| errors.0.into_iter().map(|e| e.path).collect())
+                .unwrap_or_default();
+            found.sort();
+            found
+        };
+        let mut value = manifest_with_status();
+        assert_eq!(paths(&value), Vec::<String>::new());
+        // One spelling: an app does not bind the reader's rules itself.
+        value["capabilities"][0]["arguments"]["statusRules"] = json!([]);
+        assert_eq!(paths(&value), vec!["capabilities[0].arguments.statusRules"]);
+        let mut value = manifest_with_status();
+        value["contributions"]["badges"] = json!([{
+            "id": "argo", "forKinds": ["apps/Deployment", "/Secret", "argoproj.io/Application", "acme.io/Deployment"],
+            "rules": [{"when": [{"jsonPath": ".metadata.annotations['argocd.argoproj.io/tracking-id']", "present": true}],
+                "status": "healthy", "label": "Argo CD"}]
+        }]);
+        assert_eq!(
+            paths(&value),
+            vec![
+                "contributions.badges[0].forKinds[1]",
+                "contributions.badges[0].forKinds[2]",
+                "contributions.badges[0].forKinds[3]",
+            ]
+        );
+    }
+
     #[tokio::test]
     async fn reads_are_bound_to_host_scope_and_revoked_across_registry_instances() {
         let dir = tempfile::tempdir().unwrap();
@@ -2674,6 +3519,7 @@ mod tests {
         let core = fake_core();
         install(&path, core.clone());
         let before = fs::read(&path).unwrap();
+        let reviewed_revision = Some(read(&path).unwrap().plugins[0].revision);
         for (field, value) in [
             ("target", json!("k8s.deleteResource")),
             ("inputs", json!(["context", "group"])),
@@ -2687,7 +3533,8 @@ mod tests {
                 Configure::Install {
                     signature: None,
                     manifest: source.to_string(),
-                    grants: vec!["k8s.listCustomResource".into()]
+                    grants: vec!["k8s.listCustomResource".into()],
+                    reviewed_revision,
                 }
             )
             .is_err());
@@ -2710,7 +3557,8 @@ mod tests {
                 Configure::Install {
                     signature: None,
                     manifest: source.to_string(),
-                    grants: vec!["k8s.listCustomResource".into()]
+                    grants: vec!["k8s.listCustomResource".into()],
+                    reviewed_revision,
                 }
             )
             .is_err());
@@ -2749,14 +3597,23 @@ mod tests {
         );
         for id in [
             "extensions.read",
+            "extensions.resolveColumns",
+            "extensions.resolveCards",
+            "extensions.resolvePanels",
+            "extensions.resolveLinks",
             "extensions.catalog",
             "extensions.catalogManifest",
             "extensions.validate",
+            "extensions.streams",
         ] {
             assert!(reg.get(id).unwrap().annotations.read_only);
         }
+        // The secret store (#543) is gated, and sensitive: what goes through
+        // it is secret material.
+        let store = reg.get("extension.secretStore").unwrap().annotations;
+        assert!(store.requires_confirm && store.sensitive && !store.read_only);
         let mcp = srelens_mcp::McpServer::new(Arc::new(reg));
-        assert_eq!(mcp.list_tools().len(), 8);
+        assert_eq!(mcp.list_tools().len(), 14);
         use srelens_mcp::{stdio::handle_request, Transport};
         for args in [
             json!({"action":"install","manifest":manifest(),"grants":["k8s.listCustomResource"]}),
@@ -2793,6 +3650,7 @@ mod tests {
                             signature: None,
                             manifest: source.to_string(),
                             grants: vec!["k8s.listCustomResource".into()],
+                            reviewed_revision: None,
                         },
                     )
                     .unwrap();
@@ -2932,6 +3790,7 @@ mod tests {
             signature: None,
             manifest: manifest.into(),
             grants: vec!["k8s.listCustomResource".into()],
+            reviewed_revision: None,
         };
         let refused = mutate(&path, core.clone(), unsigned(official))
             .err()

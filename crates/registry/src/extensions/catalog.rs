@@ -1,13 +1,15 @@
 //! A fixed public catalog; official manifests require a pinned publisher signature.
+use super::http_policy;
 use super::*;
 use sha2::{Digest, Sha256};
 use srelens_plugin_host::{
-    is_format_character, negotiate_api_version, MAX_MANIFEST_BYTES, SUPPORTED_API_VERSIONS,
+    is_format_character, negotiate_api_version_in, MAX_MANIFEST_BYTES, SUPPORTED_API_VERSIONS,
 };
 use std::{
     collections::BTreeSet,
     io::Read as _,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    sync::Mutex,
+    time::{SystemTime, UNIX_EPOCH},
 };
 const CATALOG_URL: &str = "https://raw.githubusercontent.com/srelens/extensions/main/catalog.json";
 pub(super) const MAX_CATALOG: usize = 1024 * 1024;
@@ -90,12 +92,8 @@ fn now() -> u64 {
 }
 fn https_url(raw: &str) -> Result<reqwest::Url, String> {
     let url = reqwest::Url::parse(raw).map_err(|_| "Invalid catalog URL")?;
-    if url.scheme() != "https"
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.fragment().is_some()
-        || url.port().is_some()
-    {
+    // The shared policy's strictest reading: no port, and never plain HTTP.
+    if http_policy::check_url(&url, http_policy::UrlRules::default()).is_err() {
         return Err(
             "Catalog URLs must use HTTPS without credentials, fragments or custom ports".into(),
         );
@@ -114,7 +112,13 @@ fn allowed_download(url: &reqwest::Url) -> bool {
         }
 }
 fn compatible(range: &str) -> bool {
-    semver::VersionReq::parse(range).is_ok_and(|range| negotiate_api_version(&range).is_some())
+    compatible_in(range, SUPPORTED_API_VERSIONS)
+}
+/// Whether a host implementing the API versions `supported` can install a release that
+/// requires `range`: what the catalog asks before it offers one.
+fn compatible_in(range: &str, supported: &[&str]) -> bool {
+    semver::VersionReq::parse(range)
+        .is_ok_and(|range| negotiate_api_version_in(&range, supported).is_some())
 }
 fn newest_api_version() -> String {
     SUPPORTED_API_VERSIONS
@@ -198,18 +202,16 @@ fn download(url: &str, limit: usize) -> Result<Vec<u8>, String> {
         return Err("Unsupported extension download URL".into());
     }
     // Catalog browsing may be the first network operation, before any kube
-    // client exists. Workspace feature unification can link two providers.
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    // client exists.
+    http_policy::install_crypto_provider();
     let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(20))
-        .connect_timeout(Duration::from_secs(10))
+        .timeout(http_policy::TIMEOUT)
+        .connect_timeout(http_policy::CONNECT_TIMEOUT)
         .user_agent("srelens-extension-catalog")
-        .redirect(reqwest::redirect::Policy::custom(|attempt| {
-            if attempt.previous().len() >= 5 || !allowed_download(attempt.url()) {
-                attempt.error("Unsupported extension download redirect")
-            } else {
-                attempt.follow()
-            }
+        .redirect(http_policy::redirects(|url| {
+            allowed_download(url)
+                .then_some(())
+                .ok_or("Unsupported extension download redirect")
         }))
         .build()
         .map_err(|e| e.to_string())?;
@@ -218,15 +220,41 @@ fn download(url: &str, limit: usize) -> Result<Vec<u8>, String> {
         .send()
         .and_then(|r| r.error_for_status())
         .map_err(|e| format!("Download extension catalog/manifest: {e}"))?;
+    read_download(response, limit)
+}
+/// A download's body: at most `limit` bytes, or which of the two things went wrong.
+fn read_download(body: impl std::io::Read, limit: usize) -> Result<Vec<u8>, String> {
+    http_policy::read_limited_blocking(body, limit).map_err(|error| match error {
+        http_policy::BlockingBodyError::TooLarge => "Extension download exceeds size limit".into(),
+        http_policy::BlockingBodyError::Read(error) => {
+            format!("Download extension catalog/manifest: {error}")
+        }
+    })
+}
+/// The cached catalog, validated again, with this host's fields recomputed; `None` when
+/// there is no cache or it cannot be trusted.
+fn read_cache(path: &Path) -> Option<Snapshot> {
+    let f = fs::File::open(path).ok()?;
     let mut raw = Vec::new();
-    response
-        .take(limit as u64 + 1)
+    f.take((MAX_CATALOG + 65536) as u64 + 1)
         .read_to_end(&mut raw)
-        .map_err(|e| e.to_string())?;
-    if raw.len() > limit {
-        return Err("Extension download exceeds size limit".into());
-    }
-    Ok(raw)
+        .ok()?;
+    let mut state: Snapshot = serde_json::from_slice(&raw).ok()?;
+    state.catalog = parse_catalog(&serde_json::to_vec(&state.catalog).ok()?).ok()?;
+    state.incompatible = state
+        .catalog
+        .extensions
+        .iter()
+        .filter(|e| !compatible(&e.release.srelens_api_version))
+        .map(|e| e.id.clone())
+        .collect();
+    state.host_api_version = newest_api_version();
+    state.host_api_versions = host_api_versions();
+    Some(state)
+}
+/// Fetched less than a day ago, and not in the future.
+fn is_fresh(state: &Snapshot) -> bool {
+    state.fetched_at <= now() && now() - state.fetched_at < TTL
 }
 fn load_with(
     path: &Path,
@@ -235,29 +263,8 @@ fn load_with(
 ) -> Result<Snapshot, String> {
     // Serialize refreshes across windows/processes and atomically replace validated caches.
     let _lock = super::super::settings::write_lock(path)?;
-    let cached = fs::File::open(path).ok().and_then(|f| {
-        let mut raw = Vec::new();
-        f.take((MAX_CATALOG + 65536) as u64 + 1)
-            .read_to_end(&mut raw)
-            .ok()?;
-        let mut state: Snapshot = serde_json::from_slice(&raw).ok()?;
-        state.catalog = parse_catalog(&serde_json::to_vec(&state.catalog).ok()?).ok()?;
-        state.incompatible = state
-            .catalog
-            .extensions
-            .iter()
-            .filter(|e| !compatible(&e.release.srelens_api_version))
-            .map(|e| e.id.clone())
-            .collect();
-        state.host_api_version = newest_api_version();
-        state.host_api_versions = host_api_versions();
-        Some(state)
-    });
-    if !refresh
-        && cached
-            .as_ref()
-            .is_some_and(|s| s.fetched_at <= now() && now() - s.fetched_at < TTL)
-    {
+    let cached = read_cache(path);
+    if !refresh && cached.as_ref().is_some_and(is_fresh) {
         return Ok(cached.unwrap());
     }
     let result = fetch().and_then(|raw| parse_catalog(&raw));
@@ -274,6 +281,10 @@ fn load_with(
             }
         }
     };
+    save_cache(path, catalog)
+}
+/// Replace the cache with `catalog`, fetched now. The caller holds the cache's lock.
+fn save_cache(path: &Path, catalog: Catalog) -> Result<Snapshot, String> {
     let state = Snapshot {
         incompatible: catalog
             .extensions
@@ -294,6 +305,105 @@ fn load_with(
 }
 fn load(path: &Path, refresh: bool) -> Result<Snapshot, String> {
     load_with(path, refresh, || download(CATALOG_URL, MAX_CATALOG))
+}
+/// The catalog cache a registry's apps read.
+#[derive(Clone)]
+pub(super) enum CatalogCache {
+    /// This host's own cache file (the desktop). `extensions.catalog` fetches the catalog
+    /// into it when it is a day old or the reader asks.
+    Owned(PathBuf),
+    /// The cache every user of one server shares. Capabilities only read it.
+    Shared(SharedCatalog),
+}
+impl CatalogCache {
+    /// The catalog as this cache has it; an owned cache is fetched first when it is a day
+    /// old or `refresh` asks. The shared cache never is: it is what the server last fetched.
+    fn snapshot(&self, refresh: bool) -> Result<Snapshot, String> {
+        match self {
+            Self::Owned(path) => load(path, refresh),
+            Self::Shared(shared) => shared.read(),
+        }
+    }
+    /// Whether the cached catalog, fresh or stale, lists this exact release. Never fetches.
+    pub(super) fn lists_release(&self, id: &str, sha256: &str) -> bool {
+        let path = match self {
+            Self::Owned(path) => path,
+            Self::Shared(shared) => &shared.path,
+        };
+        cached_release(path, id, sha256)
+    }
+}
+/// The catalog cache every user of one web server shares (#515).
+///
+/// The catalog is not anyone's: it is the fixed public catalog, the same for every user.
+/// What is per user is the inventory, and every install from this cache downloads and
+/// verifies its release again for the user installing it. So one cache serves them all,
+/// and nothing a user sends can write it: their `extensions.catalog` and
+/// `extensions.catalogManifest` read it and never fetch into it, and only the server, on
+/// its own schedule through [`SharedCatalog::refresh_if_stale`], replaces it — with what it
+/// downloaded from the fixed catalog URL and validated, exactly as a desktop refresh does.
+#[derive(Clone)]
+pub struct SharedCatalog {
+    path: PathBuf,
+    /// Why the server's last refresh failed, if it did, for readers of a stale cache.
+    last_error: Arc<Mutex<Option<String>>>,
+}
+impl SharedCatalog {
+    /// The shared cache kept at `path`. Nothing is read or fetched until it is used.
+    pub fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            last_error: Arc::default(),
+        }
+    }
+    /// Fetch the catalog into the cache when it is missing or a day old, as a desktop
+    /// does when its catalog is opened. For the server's own schedule: no capability calls
+    /// it. A failed fetch keeps the cache as it was, and says why.
+    pub fn refresh_if_stale(&self) -> Result<(), String> {
+        self.refresh_if_stale_with(|| download(CATALOG_URL, MAX_CATALOG))
+    }
+    /// [`SharedCatalog::refresh_if_stale`], with the fetch supplied. What it returns is
+    /// validated as a downloaded catalog is.
+    pub fn refresh_if_stale_with(
+        &self,
+        fetch: impl FnOnce() -> Result<Vec<u8>, String>,
+    ) -> Result<(), String> {
+        let outcome = self.refresh_outside_the_lock(fetch);
+        *self.last_error.lock().unwrap() = outcome.as_ref().err().cloned();
+        outcome
+    }
+    /// The cache's lock is held to look and to save, never across the download: every
+    /// user's catalog read and install check waits on it, and a download may take the
+    /// whole of its timeout.
+    fn refresh_outside_the_lock(
+        &self,
+        fetch: impl FnOnce() -> Result<Vec<u8>, String>,
+    ) -> Result<(), String> {
+        let fresh = || read_cache(&self.path).is_some_and(|cached| is_fresh(&cached));
+        {
+            let _lock = super::super::settings::write_lock(&self.path)?;
+            if fresh() {
+                return Ok(());
+            }
+        }
+        let catalog = fetch().and_then(|raw| parse_catalog(&raw))?;
+        let _lock = super::super::settings::write_lock(&self.path)?;
+        // Another refresh may have saved a copy while this one downloaded; it is at least
+        // as new, so it stays.
+        if fresh() {
+            return Ok(());
+        }
+        save_cache(&self.path, catalog).map(|_| ())
+    }
+    /// What a user reads: the cache as the server last fetched it. Never fetches and never
+    /// writes it; a cache past its day is returned as stale, with why it was not refreshed.
+    fn read(&self) -> Result<Snapshot, String> {
+        let why = match self.last_error.lock().unwrap().clone() {
+            Some(error) => format!("the server could not refresh the shared catalog: {error}"),
+            None => "the server has not refreshed the shared catalog yet".to_owned(),
+        };
+        load_with(&self.path, false, || Err(why))
+    }
 }
 /// Whether the cached catalog, fresh or stale, lists this exact release. Never fetches.
 pub(super) fn cached_release(path: &Path, id: &str, sha256: &str) -> bool {
@@ -361,16 +471,16 @@ fn verify_release(entry: &Entry, raw: &[u8], signature: Option<Vec<u8>>) -> Resu
         signature,
     })
 }
-pub(super) fn register(reg: &mut Registry, path: PathBuf, core: Arc<Registry>) {
-    let p = path.clone();
+pub(super) fn register(reg: &mut Registry, cache: CatalogCache, core: Arc<Registry>) {
+    let c = cache.clone();
     reg.register(Capability::typed::<ListIn, Snapshot, _, _>(
         "extensions.catalog",
         "Browse the native extension catalog with a durable cache; never connects clusters",
         Annotations::READ_ONLY,
         move |input| {
-            let path = p.clone();
+            let cache = c.clone();
             async move {
-                tokio::task::spawn_blocking(move || load(&path, input.refresh))
+                tokio::task::spawn_blocking(move || cache.snapshot(input.refresh))
                     .await
                     .map_err(|e| CapabilityError::Handler(e.to_string()))?
                     .map_err(CapabilityError::Handler)
@@ -378,16 +488,16 @@ pub(super) fn register(reg: &mut Registry, path: PathBuf, core: Arc<Registry>) {
         },
     ));
     reg.register(Capability::typed::<ManifestIn, Review, _, _>("extensions.catalogManifest", "Download and checksum-verify a catalog manifest for permission review; does not install it", Annotations::READ_ONLY, move |input| {
-        let path = path.clone(); let core = core.clone();
+        let cache = cache.clone(); let core = core.clone();
         async move { tokio::task::spawn_blocking(move || {
-            let state = load(&path, false)?;
+            let state = cache.snapshot(false)?;
             let entry = state.catalog.extensions.iter().find(|e| e.id == input.id && e.release.sha256 == input.sha256).ok_or("Catalog release changed; refresh and review it again")?;
             if !compatible(&entry.release.srelens_api_version) { return Err("Extension requires a different host API version".to_string()); }
             let signature = signature_url(entry)?.map(|url| download(&url, 64)).transpose()?;
             let review = verify_release(entry, &download(&entry.release.manifest_url, MAX_MANIFEST_BYTES)?, signature)?;
             let manifest = &review.manifest;
             let parsed = Manifest::parse(&manifest)?;
-            super::validate_app(&parsed, &parsed.permissions, core)?;
+            super::validate_app(&parsed, &parsed.permission_names(), core)?;
             Ok(review)
         }).await.map_err(|e| CapabilityError::Handler(e.to_string()))?.map_err(CapabilityError::Handler) }
     }));
@@ -422,6 +532,7 @@ mod tests {
         assert_eq!(catalog.extensions.len(), 2);
         assert!(!compatible(&catalog.extensions[0].release.srelens_api_version));
         assert!(compatible("^0.3"));
+        assert!(compatible("^0.4"));
         assert!(!compatible("^0.2"));
         assert!(!compatible("^99"));
         let mut value: serde_json::Value = serde_json::from_slice(&fixture()).unwrap();
@@ -436,7 +547,7 @@ mod tests {
         let source = super::super::tests::manifest();
         let raw = source.as_bytes();
         entry.id = "org.example.argocd".into();
-        entry.release.srelens_api_version = "^0.3".into();
+        entry.release.srelens_api_version = "^0.4".into();
         entry.release.sha256 = format!("{:x}", Sha256::digest(raw));
         assert!(verify_manifest(&entry, raw).is_ok());
         assert!(verify_manifest(&entry, b"{}")
@@ -555,7 +666,7 @@ mod tests {
 
         let mut reg = Registry::new();
         let core = Arc::new(Registry::new());
-        register(&mut reg, path, core);
+        register(&mut reg, CatalogCache::Owned(path), core);
 
         let cap_list = reg.get("extensions.catalog").unwrap();
         let list_res = (cap_list.handler)(serde_json::json!({"refresh": false}))
@@ -570,6 +681,137 @@ mod tests {
                 .await;
         assert!(err_res.is_err());
     }
+    /// The web's shared cache (#515): a user's capabilities read it, whatever they ask,
+    /// and neither fetch nor write it. Only the server's refresh fills it.
+    #[tokio::test]
+    async fn no_capability_fetches_into_or_writes_the_shared_catalog() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cache").join("extensions.catalog.json");
+        let shared = SharedCatalog::new(path.clone());
+        let mut reg = Registry::new();
+        register(
+            &mut reg,
+            CatalogCache::Shared(shared.clone()),
+            Arc::new(Registry::new()),
+        );
+        let refresh = json!({"refresh": true});
+
+        // Nothing fetched yet: the read says so rather than going to the network.
+        let refused = reg
+            .invoke("extensions.catalog", refresh.clone())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            refused.contains("has not refreshed the shared catalog yet"),
+            "{refused}"
+        );
+        assert!(!path.exists());
+
+        shared.refresh_if_stale_with(|| Ok(fixture())).unwrap();
+        let saved = fs::read(&path).unwrap();
+        // Asked to refresh, a user gets the server's copy, unchanged on disk.
+        let read = reg
+            .invoke("extensions.catalog", refresh.clone())
+            .await
+            .unwrap();
+        assert_eq!(read["stale"], json!(false));
+        assert_eq!(read["catalog"]["extensions"].as_array().unwrap().len(), 2);
+        assert_eq!(fs::read(&path).unwrap(), saved);
+        // A fresh cache is not fetched again by the server either.
+        shared
+            .refresh_if_stale_with(|| unreachable!("a fresh cache is not fetched"))
+            .unwrap();
+        let entry = parse_catalog(&fixture()).unwrap().extensions.remove(0);
+        let cache = CatalogCache::Shared(shared.clone());
+        assert!(cache.lists_release(&entry.id, &entry.release.sha256));
+        assert!(reg
+            .invoke(
+                "extensions.catalogManifest",
+                json!({"id": "org.example.missing", "sha256": "0".repeat(64)})
+            )
+            .await
+            .is_err());
+        assert_eq!(fs::read(&path).unwrap(), saved);
+
+        // A day old, it is served as stale, with why the server has not replaced it.
+        let mut old: Snapshot = serde_json::from_slice(&saved).unwrap();
+        old.fetched_at = 0;
+        fs::write(&path, serde_json::to_vec(&old).unwrap()).unwrap();
+        let aged = fs::read(&path).unwrap();
+        let read = reg
+            .invoke("extensions.catalog", refresh.clone())
+            .await
+            .unwrap();
+        assert_eq!(read["stale"], json!(true));
+        assert!(read["error"]
+            .as_str()
+            .unwrap()
+            .contains("has not refreshed"));
+        let failed = shared.refresh_if_stale_with(|| Err("offline".into()));
+        assert_eq!(failed.unwrap_err(), "offline");
+        let read = reg.invoke("extensions.catalog", refresh).await.unwrap();
+        assert_eq!(
+            read["error"],
+            json!("the server could not refresh the shared catalog: offline")
+        );
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            aged,
+            "a failed refresh keeps the cache"
+        );
+    }
+    /// A shared cache a day old, so the next server refresh downloads.
+    fn aged_shared_catalog(dir: &Path) -> SharedCatalog {
+        let shared = SharedCatalog::new(dir.join("extensions.catalog.json"));
+        shared.refresh_if_stale_with(|| Ok(fixture())).unwrap();
+        let mut old = read_cache(&shared.path).unwrap();
+        old.fetched_at = 0;
+        fs::write(&shared.path, serde_json::to_vec(&old).unwrap()).unwrap();
+        shared
+    }
+    /// The server downloads outside the cache's lock: a user's read meanwhile is
+    /// answered from the cache at once, not after the download.
+    #[test]
+    fn readers_are_answered_from_the_cache_while_the_server_downloads() {
+        let dir = tempfile::tempdir().unwrap();
+        let shared = aged_shared_catalog(dir.path());
+        let reader = shared.clone();
+        shared
+            .refresh_if_stale_with(|| {
+                let (tx, rx) = std::sync::mpsc::channel();
+                let reader = reader.clone();
+                std::thread::spawn(move || {
+                    let _ = tx.send(reader.read());
+                });
+                let read = rx
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .expect("a read waited for the server's download");
+                assert!(read.unwrap().stale, "the cached copy, as it was");
+                Ok(fixture())
+            })
+            .unwrap();
+        assert!(is_fresh(&read_cache(&shared.path).unwrap()));
+    }
+    /// A copy another refresh saved while this one downloaded is at least as new, so
+    /// this one does not replace it.
+    #[test]
+    fn a_refresh_does_not_replace_a_copy_saved_while_it_downloaded() {
+        let dir = tempfile::tempdir().unwrap();
+        let shared = aged_shared_catalog(dir.path());
+        let mut one: Value = serde_json::from_slice(&fixture()).unwrap();
+        one["extensions"].as_array_mut().unwrap().truncate(1);
+        let one = serde_json::to_vec(&one).unwrap();
+        shared
+            .refresh_if_stale_with(|| {
+                let _lock = super::super::super::settings::write_lock(&shared.path).unwrap();
+                save_cache(&shared.path, parse_catalog(&one).unwrap()).unwrap();
+                Ok(fixture())
+            })
+            .unwrap();
+        let kept = read_cache(&shared.path).unwrap();
+        assert_eq!(kept.catalog.extensions.len(), 1);
+    }
     #[test]
     fn additive_catalog_fields_do_not_break_released_hosts() {
         let mut value: Value = serde_json::from_slice(&fixture()).unwrap();
@@ -582,6 +824,22 @@ mod tests {
         assert_eq!(catalog.extensions.len(), 2);
         value["extensions"][0]["release"]["sha256"] = json!("bad");
         assert!(parse_catalog(&serde_json::to_vec(&value).unwrap()).is_err());
+    }
+    #[test]
+    fn a_download_that_fails_part_way_is_not_called_too_large() {
+        let failed =
+            read_download(super::super::http_policy::tests::FailingBody, 1024).unwrap_err();
+        assert!(
+            failed.starts_with("Download extension catalog/manifest: "),
+            "{failed}"
+        );
+        assert!(failed.contains("timed out"), "{failed}");
+        assert!(!failed.contains("size limit"), "{failed}");
+        assert_eq!(
+            read_download(&b"abcde"[..], 4).unwrap_err(),
+            "Extension download exceeds size limit"
+        );
+        assert_eq!(read_download(&b"abcd"[..], 4).unwrap(), b"abcd");
     }
     #[test]
     fn rejects_private_downloads_and_redirects() {
@@ -741,6 +999,95 @@ mod tests {
             newest
         );
     }
+    /// The public catalog as it stood when API 0.4 was cut (#709), and the signed bytes of
+    /// each release it listed: Argo CD 0.3.0 and Flux 0.4.0, both `^0.3` and using none
+    /// of 0.4's fields. `public_catalog_release_smoke` follows the live catalog as it
+    /// moves on; these stay, because installed copies of them go on reverifying.
+    fn published_0_3_line() -> (Catalog, [(&'static str, &'static [u8], &'static [u8]); 2]) {
+        let catalog = parse_catalog(include_bytes!(
+            "../../tests/fixtures/extension-catalog-api-0.3.json"
+        ))
+        .unwrap();
+        let releases = [
+            (
+                "org.srelens.argocd",
+                &include_bytes!("../../tests/fixtures/argocd-0.3.0-manifest.json")[..],
+                &include_bytes!("../../tests/fixtures/argocd-0.3.0-manifest.sig")[..],
+            ),
+            (
+                "org.srelens.flux",
+                &include_bytes!("../../tests/fixtures/flux-0.4.0-manifest.json")[..],
+                &include_bytes!("../../tests/fixtures/flux-0.4.0-manifest.sig")[..],
+            ),
+        ];
+        (catalog, releases)
+    }
+    #[test]
+    fn the_published_0_3_line_releases_still_verify_install_and_reverify() {
+        let (catalog, releases) = published_0_3_line();
+        assert_eq!(catalog.extensions.len(), releases.len());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("apps.json");
+        for (id, raw, signature) in releases {
+            let entry = catalog.extensions.iter().find(|e| e.id == id).unwrap();
+            assert_eq!(entry.release.srelens_api_version, "^0.3", "{id}");
+            // Offered, checksum and pinned signature verified, and valid on this host.
+            assert!(compatible(&entry.release.srelens_api_version), "{id}");
+            let review = verify_release(entry, raw, Some(signature.to_vec())).unwrap();
+            let parsed = Manifest::parse(&review.manifest).unwrap();
+            super::super::validate_app(
+                &parsed,
+                &parsed.permission_names(),
+                super::super::tests::fake_core(),
+            )
+            .unwrap();
+            let state = super::super::tests::configure(
+                &path,
+                json!({"action":"install","manifest":review.manifest,
+                    "signature":signature.to_vec(),"grants":parsed.permission_names()}),
+            )
+            .unwrap_or_else(|e| panic!("{id}: {e}"));
+            let app = state
+                .plugins
+                .iter()
+                .find(|app| app.manifest.id == id)
+                .unwrap();
+            assert!(app.enabled && app.quarantined.is_none(), "{id}");
+            assert!(app.signature_proof.is_some(), "{id}");
+        }
+        // Loading the inventory rechecks every app against this host's API fields.
+        let state = read(&path).unwrap();
+        assert_eq!(state.plugins.len(), 2);
+        assert!(state
+            .plugins
+            .iter()
+            .all(|app| app.enabled && app.quarantined.is_none()));
+    }
+    #[test]
+    fn a_host_on_the_0_3_line_lists_the_0_4_releases_as_incompatible() {
+        // A host that implements 0.3 without 0.4's fields — every release up to the one
+        // that cut 0.4 — asks this before it offers a release. The next Flux and Argo CD
+        // releases require ^0.4, so it says "Incompatible" instead of failing them on
+        // an unknown field; this host offers them, and still offers the 0.3 line.
+        let only_0_3 = ["0.3.0"];
+        for example in [
+            include_str!("../../../../examples/extensions/argocd.json"),
+            include_str!("../../../../examples/extensions/flux.json"),
+        ] {
+            let example: Value = serde_json::from_str(example).unwrap();
+            let range = example["srelensApiVersion"].as_str().unwrap();
+            assert!(
+                !compatible_in(range, &only_0_3),
+                "{} {range}",
+                example["id"]
+            );
+            assert!(compatible(range), "{} {range}", example["id"]);
+        }
+        let (catalog, _) = published_0_3_line();
+        for entry in &catalog.extensions {
+            assert!(compatible_in(&entry.release.srelens_api_version, &only_0_3));
+        }
+    }
     #[test]
     #[ignore = "downloads the public catalog and release manifests; no clusters or installs"]
     fn public_catalog_release_smoke() {
@@ -758,7 +1105,7 @@ mod tests {
                 .map(|url| download(&url, 64).unwrap());
             let source = verify_release(&entry, &raw, signature).unwrap().manifest;
             let parsed = Manifest::parse(&source).unwrap();
-            super::super::validate_app(&parsed, &parsed.permissions, core.clone()).unwrap();
+            super::super::validate_app(&parsed, &parsed.permission_names(), core.clone()).unwrap();
             println!("Verified {} {}", entry.id, entry.release.version);
         }
     }

@@ -81,9 +81,16 @@ export function useContextId(name: string): string | undefined {
   return useSyncExternalStore(subscribe, getState, getState).ids?.get(name);
 }
 
-/** What an app page says when its route's cluster shares a stable ID with another (the route cannot say which). */
+/**
+ * What an app page says when its route, from a tab opened before #695, names a stable ID two
+ * contexts share: the route cannot say which. Opened again, it names the context by key.
+ */
 export const SHARED_CONTEXT_ID_MESSAGE =
-  "This cluster shares its ID with another context, so this page cannot tell which one it is for. Rename one of them in your kubeconfig files.";
+  "This tab names its cluster by an ID that two contexts share, so it cannot tell which one it is for. Open the page again from that cluster's sidebar.";
+
+/** What an app surface says when the host lists its cluster without a pinned ID to ask it by. */
+export const NO_PINNED_ID_MESSAGE =
+  "This cluster's kubeconfig path cannot be made absolute, so its apps cannot be opened here. Manage your kubeconfig files in Settings → Contexts.";
 
 /**
  * The context named `name`: found; still being listed; not found because the listing

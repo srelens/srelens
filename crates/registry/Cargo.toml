@@ -7,6 +7,8 @@ edition.workspace = true
 srelens-plugin-host = { path = "../plugin-host" }
 srelens-capability = { path = "../capability" }
 srelens-kube = { path = "../kube" }
+# App streams (#565): the generic stream contract the extension broker drives.
+srelens-streams = { path = "../streams" }
 # `kind_resolver` returns `dyn srelens_mcp::resources::KindResolver`, so this is
 # real API surface, not test-only. `crates/mcp` also has `srelens-registry` as
 # a dev-dependency (for its own e2e prompt test), making this a dev-only cycle:
@@ -24,14 +26,18 @@ dirs = "6"
 # NO auto crypto-provider: the workspace standardises on ring via kube-client;
 # a second provider (aws-lc-rs) causes a runtime "could not determine
 # CryptoProvider" panic. Mirrors apps/desktop/src-tauri/Cargo.toml.
+# The async client carries apps' brokered `network.http` requests (#568).
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls-no-provider"] }
 libc = "0.2"
 # `durable` warns when a save could not be made durable; the desktop app routes `log`.
 log = "0.4"
 tempfile = "3"
-tokio = { version = "1", features = ["rt"] }
+tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
 
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+# Brokered HTTP (#568) matches a URL's host against an app's allowlist. Already in the
+# workspace through reqwest and srelens-plugin-host.
+url = "2"
 sha2 = "0.10"
 ring = "0.17"
 semver = "1"
@@ -51,4 +57,5 @@ fuzzing = []
 # test support.
 srelens-plugin-host = { path = "../plugin-host", features = ["fuzzing"] }
 proptest = { version = "1", default-features = false, features = ["std"] }
-tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
+# net and io-util: the `network.http` tests (#568) answer from a local socket.
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "test-util", "net", "io-util"] }

@@ -20,8 +20,11 @@ Tracking: [#163](https://github.com/srelens/srelens/issues/163). Architecture de
 
 - Run code. No JavaScript, subprocess, iframe, npm install or lifecycle script is
   executed.
-- Read kubeconfig, tokens, files or the network. Every read goes through the host,
-  under the selected cluster's RBAC.
+- Read kubeconfig, tokens or files. Every read goes through the host, under the
+  selected cluster's RBAC.
+- Open a network connection. An app granted `network.http` asks the host to send a
+  fixed request to one of the hosts a person approved
+  ([Network requests](manifest.md#network-requests)); it reaches nothing else.
 - Write to the cluster, except through the host's own confirmed actions.
 
 Freelens and OpenLens packages are not supported.
@@ -36,6 +39,7 @@ Freelens and OpenLens packages are not supported.
 | [permissions.md](permissions.md) | Permissions, grants, what an app may read, RBAC and consent |
 | [ui-contributions.md](ui-contributions.md) | Pages, dashboards, detail tabs, requirement checks, resource inspection |
 | [capabilities.md](capabilities.md) | The `extensions.*` capabilities, MCP, host GitOps actions |
+| [streams.md](streams.md) | The generic stream contract: frames, view ownership, limits, metrics |
 | [security.md](security.md) | Trust boundary and what is not yet protected |
 | [threat-model.md](threat-model.md) | Assets, adversaries, mitigations with their code, residual risk and open work |
 | [distribution.md](distribution.md) | Catalog, signed releases, local installation |
@@ -44,9 +48,9 @@ Freelens and OpenLens packages are not supported.
 
 ## Try an app
 
-On the desktop, the quickest path is **Settings → Apps → Catalog** → Flux or Argo CD →
-**Review installation**. Apps are not yet available on the web host
-([#515](https://github.com/srelens/srelens/issues/515)).
+The quickest path is **Settings → Apps → Catalog** → Flux or Argo CD →
+**Review installation**, on the desktop or the web host. On the web the apps you
+install are yours alone ([#515](https://github.com/srelens/srelens/issues/515)).
 
 To exercise the local installer instead:
 
@@ -62,7 +66,7 @@ To exercise the local installer instead:
 4. Open a Namespace's resource overview. Its **Apps** section contains the declared
    detail view and an **App links** menu, scoped to that namespace.
 5. Disable or remove the app to remove its contributions, or install the same ID
-   again to update it. Open views refresh against the new revision. JSON settings are
+   again to update it. Open views refresh against the new revision. Settings the new version still declares and accepts are
    preserved across updates and restarts, and deleted on removal.
 
 Installation and inventory discovery do not contact clusters. Page reads happen when

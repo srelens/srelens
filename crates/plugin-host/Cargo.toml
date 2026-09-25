@@ -14,6 +14,10 @@ serde_json = { version = "1", features = ["float_roundtrip"] }
 serde_path_to_error = "0.1"
 schemars = "0.8"
 semver = "1"
+# A `url` setting (#542) is parsed, not pattern-matched, so a scheme or
+# credentials in it cannot hide behind unusual spelling. Already in the
+# workspace through srelens-capability.
+url = "2"
 
 [features]
 # Exposes `srelens_plugin_host::fuzzing` to the fuzz targets in `fuzz/` and to

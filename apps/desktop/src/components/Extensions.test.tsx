@@ -1,8 +1,9 @@
 import { act, render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { beforeEach, expect, it, vi } from "vitest";
+const host = vi.hoisted(() => ({ tauri: true }));
 vi.mock("@srelens/core", async (original) => ({
   ...(await original<typeof import("@srelens/core")>()),
-  isTauri: () => true,
+  isTauri: () => host.tauri,
   listExtensions: vi.fn(),
   configureExtensions: vi.fn(),
   readExtension: vi.fn(),
@@ -29,6 +30,7 @@ const plugin = {
 } as InstalledExtension;
 beforeEach(() => {
   vi.clearAllMocks();
+  host.tauri = true;
   vi.mocked(listExtensions).mockResolvedValue({
     schemaVersion: 1,
     nextRevision: 2,
@@ -37,10 +39,15 @@ beforeEach(() => {
   vi.mocked(readExtension).mockResolvedValue({ items: [] });
 });
 it("opens backend-owned app settings through classic controls", async () => {
+  vi.mocked(listExtensions).mockResolvedValue({
+    schemaVersion: 1,
+    nextRevision: 2,
+    plugins: [{ ...plugin, manifest: { ...plugin.manifest, settings: [{ id: "team", type: "string", title: "Team" }] } }],
+  });
   render(<ExtensionManager />);
-  fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
-  fireEvent.change(screen.getByLabelText("App settings (JSON object)"), {
-    target: { value: '{"team":"classic"}' },
+  fireEvent.click(await screen.findByRole("button", { name: `Settings for ${manifest.name}` }));
+  fireEvent.change(screen.getByRole("textbox", { name: "Team" }), {
+    target: { value: "classic" },
   });
   fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
   await waitFor(() =>
@@ -85,6 +92,18 @@ it("opens native app pages from classic's connected-cluster navigation without a
   fireEvent.click(await screen.findByRole("button",{name:"Open Applications"}));
   expect(open).toHaveBeenCalledWith("cluster/a",manifest.id,manifest.contributions.pages[0].id);
   expect(screen.queryByText("Choose a cluster")).toBeNull();
+});
+
+/** The web server keeps each user's own apps (#515), so classic's app tabs open there too. */
+it("opens app pages from classic's cluster navigation on the web", async () => {
+  host.tauri = false;
+  const {ClassicAppsNav}=await import("./Extensions");
+  const open=vi.fn();
+  render(<ClassicAppsNav context="cluster/a" onOpen={open}/>);
+  fireEvent.click(await screen.findByText("Apps"));
+  fireEvent.click(await screen.findByRole("button",{name:"Open Applications"}));
+  expect(open).toHaveBeenCalledWith("cluster/a",manifest.id,manifest.contributions.pages[0].id);
+  expect(listExtensions).toHaveBeenCalled();
 });
 
 /** The contexts both clusters tests list: names are presentation, stable IDs are identity. */

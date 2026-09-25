@@ -34,7 +34,8 @@ import { mcpAutoStartSettled, mcpAutoStartStarting } from "../lib/mcpAutoStart";
 import { openCluster } from "../lib/openCluster";
 import { loadPeekWidth } from "../lib/peekWidth";
 import { loadSectionFolds } from "../lib/sectionFolds";
-import { loadExpanded, loadNamespaces } from "../lib/workspace";
+import { loadExpanded } from "../lib/workspace";
+import { TabScope } from "../lib/tabScope";
 import { getInfo, probeCluster } from "../lib/probe";
 import { defaultState, makeTab, reconcile, type TabsState } from "../lib/tabs";
 import { parseEditRoute, parseNewRoute } from "../lib/detailRoute";
@@ -228,10 +229,10 @@ export function Window({
       // unfolded — and the first unfold then spreads over an empty record and
       // erases every other kind's, exactly as `loadMarks` above describes.
       loadSectionFolds();
-      // Restore each cluster's sidebar groups and namespace selection before
-      // rendering navigation, so the first toggle preserves other clusters.
+      // Restore each cluster's sidebar groups before rendering navigation, so
+      // the first toggle preserves other clusters. (Namespace selections live
+      // on the tabs and come back with them.)
       loadExpanded();
-      loadNamespaces();
       // And the subjects a bare `/logs` offers as a way in. Unread, that
       // screen has nothing to offer on the first visit of every launch — and
       // the first subject followed then spreads over an empty list and erases
@@ -738,6 +739,7 @@ export function Window({
             const pausedContext = !keepsManagementWhenPaused(tab.route) && context && workspace.pausedClusters?.includes(context.stableId) ? context : undefined;
             return (
             <TabSurface key={tab.id} visible={tab.id === activeId}>
+              <TabScope.Provider value={tab.id}>
               {/* A placeholder tab without a cluster of its own still leaves
                   via the cluster this window is looking at — that is the
                   context classic reopens onto. */}
@@ -756,6 +758,7 @@ export function Window({
                 // non-throwing and idempotent: the whole of the contract.
                 onLocked={lockWorkspace}
               />
+              </TabScope.Provider>
             </TabSurface>
             );
           })}

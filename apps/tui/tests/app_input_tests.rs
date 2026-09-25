@@ -94,6 +94,7 @@ fn ctx(name: &str, cluster: &str, namespace: &str) -> ContextDto {
         name: name.to_string(),
         stable_id: format!("file/{}", name),
         key: format!("file/{}", name),
+        pinned_id: None,
         cluster: cluster.to_string(),
         server: format!("https://{}.example.invalid", cluster),
         namespace: namespace.to_string(),

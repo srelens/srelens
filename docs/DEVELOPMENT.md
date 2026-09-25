@@ -129,7 +129,7 @@ Four invariants are enforced by tests rather than by review, so "everything is e
 | `every_capability_is_mcp_exposed` (`crates/registry`) | The registry and the MCP tool list match exactly. |
 | `assert_mutating_capabilities_are_gated` (`crates/mcp/src/completeness.rs`) | Every capability that is not `read_only` is `requires_confirm`. Note the predicate is *mutating*, not *destructive* — a non-destructive capability can still need consent. |
 | `capability_catalog_json_is_in_sync` (`crates/registry`) | The committed `packages/core/src/lib/capability-catalog.json` equals the live registry, so the frontend palette audit can cross-check without linking Rust. Regenerate with `UPDATE_CATALOG=1 cargo test -p srelens-registry`. |
-| `committed_manifest_schema_matches_the_contract` (`crates/plugin-host/tests/schema.rs`) | The committed `schemas/extension-manifest.v0.3.json` equals `Manifest::schema()`, and Vitest validates every example manifest against it. Regenerate with `UPDATE_CATALOG=1 cargo test -p srelens-plugin-host --test schema`. |
+| `committed_manifest_schema_matches_the_contract` (`crates/plugin-host/tests/schema.rs`) | The committed `schemas/extension-manifest.v0.4.json` (the newest supported API line) equals `Manifest::schema()`, and Vitest validates every example manifest against it. An older line's file stays as it was when the next line was cut, and `a_field_missing_from_an_older_lines_schema_is_gated_in_api_fields` fails when the contract has a field that file lacks and `API_FIELDS` does not list. Regenerate with `UPDATE_CATALOG=1 cargo test -p srelens-plugin-host --test schema`. |
 | `extension_inventory_schema_json_is_in_sync` (`crates/registry`) | The committed `packages/core/src/lib/extension-inventory.schema.json` equals the Rust inventory and manifest types, and `extensionTypes.test.ts` holds the `@srelens/core` extension types to its field names and optionality. Regenerate with `UPDATE_CATALOG=1 cargo test -p srelens-registry`. |
 | `full_capability_suite` (`apps/desktop/src-tauri/tests/e2e.rs`) | Every registered capability is actually exercised against a live kind cluster, or explicitly excluded with a reason. Runs in the `backend` CI job. |
 
@@ -141,6 +141,8 @@ Watches, pod exec, log tails, terminals, helm operations, and port-forwards don'
 - **Web** implements it over WebSocket frames (`crates/server/src/ws/`, `crates/server/src/streams.rs`), started through `/api/command/*`.
 
 The frontend side is identical in both cases and lives in `@srelens/core` (`packages/core/src/lib/`: `watch.ts`, `exec.ts`, `logsStream.ts`, `forward.ts`).
+
+Streams an app's views open go through one generic contract instead of a manager per kind: `crates/streams/src/app.rs` (frames, view ownership, per-app limits, metrics), with the extension broker deciding what an app may open. A new app stream source is a new `source` kind, not a new command. See [docs/extensions/streams.md](extensions/streams.md).
 
 ### The transport shim
 
@@ -318,6 +320,7 @@ technology, and its version.
 - **smoke (webdriver)** — pull requests only: the built app, driven through tauri-driver against a kind cluster.
 - **install script** — shellcheck and the install script's tests, again as root in a container.
 - **docker image** — builds the whole container image.
+- **extension budgets (release)** — the extension platform's performance budgets (#581) without coverage — the host suite as a release build, the client suite in Vitest — uploaded as the `extension-budgets` artifact so they can be tracked across runs. The same tests run inside `frontend` and `backend`; there, as debug builds under coverage, they hold only counts and generous time ceilings. See [extensions/testing.md](extensions/testing.md#performance-budgets).
 
 All must be green.
 
