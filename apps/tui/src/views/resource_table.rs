@@ -1776,10 +1776,17 @@ fn render_single_resource_table(f: &mut Frame, area: Rect, state: &ResourceTable
         };
         let detail_line = Line::from(vec![
             Span::styled(
-                format!(
-                    "  {} is not installed or cannot be read: ",
-                    state.kind.display_name()
-                ),
+                if is_not_found {
+                    format!(
+                        "  {} is not installed on this cluster: ",
+                        state.kind.display_name()
+                    )
+                } else {
+                    format!(
+                        "  {} could not be loaded from the cluster: ",
+                        state.kind.display_name()
+                    )
+                },
                 Style::default().fg(Theme::dim()),
             ),
             Span::styled(err.as_str(), Style::default().fg(Theme::fg())),

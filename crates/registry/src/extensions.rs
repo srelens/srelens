@@ -1227,7 +1227,11 @@ mod tests {
         // A reserved ID needs the publisher signature, which validation also checks.
         let official = include_str!("../tests/fixtures/argocd-manifest.json");
         let unsigned = validate(official.into()).await.unwrap();
-        assert!(unsigned["errors"].as_array().unwrap().iter().any(|e| e["code"] == "EXTENSION_RESERVED_ID" && e["path"] == "id"));
+        assert!(unsigned["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["code"] == "EXTENSION_RESERVED_ID" && e["path"] == "id"));
         let signature = include_bytes!("../tests/fixtures/argocd-manifest.sig").to_vec();
         let signed = reg
             .invoke(
@@ -1245,7 +1249,11 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(tampered["errors"].as_array().unwrap().iter().any(|e| e["code"] == "EXTENSION_INVALID_SIGNATURE"));
+        assert!(tampered["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["code"] == "EXTENSION_INVALID_SIGNATURE"));
 
         // Broker and signature checks do not wait for the other problems to be fixed.
         let codes_and_paths = |report: &Value| {
@@ -1288,7 +1296,10 @@ mod tests {
         assert_eq!(
             codes_and_paths(&report),
             [
-                ("EXTENSION_API_INCOMPATIBLE".to_owned(), "srelensApiVersion".to_owned()),
+                (
+                    "EXTENSION_API_INCOMPATIBLE".to_owned(),
+                    "srelensApiVersion".to_owned()
+                ),
                 ("EXTENSION_INVALID_SIGNATURE".to_owned(), String::new()),
                 ("EXTENSION_INVALID_VALUE".to_owned(), "name".to_owned()),
             ]
@@ -1432,25 +1443,48 @@ mod tests {
         let reason = mutate(&path, fake_core(), signed_argocd()).err().unwrap();
         assert!(reason.contains("requires API ^0.1"), "{reason}");
         assert!(read(&path).unwrap().plugins.is_empty());
-        let tampered = check_install(&format!("{source} "), &["k8s.listCustomResource".into()], Some(signature), fake_core()).unwrap_err();
-        assert!(tampered.0.iter().any(|error| error.code == Code::InvalidSignature));
+        let tampered = check_install(
+            &format!("{source} "),
+            &["k8s.listCustomResource".into()],
+            Some(signature),
+            fake_core(),
+        )
+        .unwrap_err();
+        assert!(tampered
+            .0
+            .iter()
+            .any(|error| error.code == Code::InvalidSignature));
         // Existing signed bytes remain in the inventory, quarantined under this host.
         seed_retired_signed_app(&path);
         let state = read(&path).unwrap();
         let app = &state.plugins[0];
         assert!(!app.enabled);
-        assert!(app.quarantined.as_deref().unwrap().contains("requires API ^0.1"));
+        assert!(app
+            .quarantined
+            .as_deref()
+            .unwrap()
+            .contains("requires API ^0.1"));
         assert_eq!(app.signature_proof.as_ref().unwrap().manifest, source);
     }
     /// An authentic installation written by a previous host, never installed through
     /// this host's API or re-signed. Preserve the production proof exactly.
     fn seed_retired_signed_app(path: &Path) {
-        let fixture: Inventory = serde_json::from_str(include_str!("../tests/fixtures/extension-inventory.json")).unwrap();
-        let mut app = fixture.plugins.into_iter().find(|app| app.manifest.id == "org.srelens.argocd").unwrap();
+        let fixture: Inventory =
+            serde_json::from_str(include_str!("../tests/fixtures/extension-inventory.json"))
+                .unwrap();
+        let mut app = fixture
+            .plugins
+            .into_iter()
+            .find(|app| app.manifest.id == "org.srelens.argocd")
+            .unwrap();
         app.history.clear();
         let mut state = read(path).unwrap();
         app.revision = take_revision(&mut state).unwrap();
-        if let Some(previous) = state.plugins.iter().position(|p| p.manifest.id == app.manifest.id) {
+        if let Some(previous) = state
+            .plugins
+            .iter()
+            .position(|p| p.manifest.id == app.manifest.id)
+        {
             let previous = state.plugins.remove(previous);
             app.history.push(PreviousVersion {
                 signature_proof: previous.signature_proof,
@@ -1557,19 +1591,32 @@ mod tests {
         assert!(local.installed_at >= started);
         // The exact bytes of a cached catalog release are recorded as from the catalog, even
         // when the cache is stale: the host decides this, not the caller.
-        let mut release: Value = serde_json::from_slice(include_bytes!("../tests/fixtures/extension-catalog.json")).unwrap();
+        let mut release: Value =
+            serde_json::from_slice(include_bytes!("../tests/fixtures/extension-catalog.json"))
+                .unwrap();
         let source = manifest().replace("org.example.argocd", "org.example.catalog");
         let entry = &mut release["extensions"][0];
         entry["id"] = json!("org.example.catalog");
         entry["repository"] = json!("https://github.com/example/catalog");
-        entry["release"]["manifestUrl"] = json!("https://github.com/example/catalog/releases/download/v0.2.0/manifest.json");
+        entry["release"]["manifestUrl"] =
+            json!("https://github.com/example/catalog/releases/download/v0.2.0/manifest.json");
         entry["release"]["srelensApiVersion"] = json!("^0.3");
         use sha2::Digest;
-        entry["release"]["sha256"] = json!(format!("{:x}", sha2::Sha256::digest(source.as_bytes())));
+        entry["release"]["sha256"] =
+            json!(format!("{:x}", sha2::Sha256::digest(source.as_bytes())));
         fs::write(path.with_extension("catalog.json"), serde_json::to_vec(&json!({
             "catalog": release, "fetchedAt": 0, "stale": false, "error": null, "incompatible": []
         })).unwrap()).unwrap();
-        mutate(&path, fake_core(), Configure::Install { manifest: source, signature: None, grants: vec!["k8s.listCustomResource".into()] }).unwrap();
+        mutate(
+            &path,
+            fake_core(),
+            Configure::Install {
+                manifest: source,
+                signature: None,
+                grants: vec!["k8s.listCustomResource".into()],
+            },
+        )
+        .unwrap();
         let state = read(&path).unwrap();
         assert!(find(&state, "org.example.catalog").source == Source::Catalog);
         assert!(find(&state, "org.example.argocd").source == Source::Local);
@@ -1710,8 +1757,9 @@ mod tests {
     /// that resolve context names without a cluster.
     pub(super) fn kubeconfig(dir: &Path, file: &str, contexts: &[&str]) -> PathBuf {
         let path = dir.join(file);
+        let path_segment = file.replace('#', "%23");
         let mut yaml = format!(
-            "apiVersion: v1\nkind: Config\nclusters:\n- name: c\n  cluster:\n    server: https://{file}:1\nusers:\n- name: u\n  user: {{}}\ncontexts:\n",
+            "apiVersion: v1\nkind: Config\nclusters:\n- name: c\n  cluster:\n    server: https://127.0.0.1:1/{path_segment}\nusers:\n- name: u\n  user: {{}}\ncontexts:\n",
         );
         for context in contexts {
             yaml.push_str(&format!(
@@ -1987,7 +2035,11 @@ mod tests {
             serde_json::from_str(include_str!("../../../examples/extensions/flux.json")).unwrap();
         let parsed = Manifest::parse(&value.to_string()).unwrap();
         let grants = parsed.permissions.clone();
-        let without_events: Vec<_> = grants.iter().filter(|grant| grant.as_str() != "k8s.listEvents").cloned().collect();
+        let without_events: Vec<_> = grants
+            .iter()
+            .filter(|grant| grant.as_str() != "k8s.listEvents")
+            .cloned()
+            .collect();
         assert!(validate_app(&parsed, &grants, core.clone()).is_ok());
         assert!(validate_app(&parsed, &without_events, core.clone()).is_err());
         value["contributions"]["pages"][1]["capability"] = json!("events");
@@ -2776,7 +2828,13 @@ mod tests {
         let quarantined = find(&state, "org.srelens.argocd");
         assert!(!quarantined.enabled);
         let proof = quarantined.signature_proof.as_ref().unwrap();
-        assert!(signing::verify_for(&quarantined.manifest.id, proof.manifest.as_bytes(), &proof.signature).unwrap_err().contains("signature"));
+        assert!(signing::verify_for(
+            &quarantined.manifest.id,
+            proof.manifest.as_bytes(),
+            &proof.signature
+        )
+        .unwrap_err()
+        .contains("signature"));
         let reason = quarantined.quarantined.clone().unwrap();
         assert!(reason.contains("requires API ^0.1"), "{reason}");
         let healthy = find(&state, "org.example.argocd");
@@ -2838,7 +2896,10 @@ mod tests {
         assert_eq!(saved["plugins"][signed]["enabled"], false);
 
         // Authenticity alone cannot lift quarantine for a retired API.
-        assert!(mutate(&path, core, signed_argocd()).err().unwrap().contains("requires API ^0.1"));
+        assert!(mutate(&path, core, signed_argocd())
+            .err()
+            .unwrap()
+            .contains("requires API ^0.1"));
         assert!(!find(&read(&path).unwrap(), "org.srelens.argocd").enabled);
     }
     #[test]
@@ -2887,7 +2948,9 @@ mod tests {
             .contains("reserved"));
         assert_eq!(fs::read(&path).unwrap(), before);
 
-        let lookalike = official.replace("\"org.srelens.argocd\"", "\"org.srelensx.argocd\"").replace("^0.1", "^0.3");
+        let lookalike = official
+            .replace("\"org.srelens.argocd\"", "\"org.srelensx.argocd\"")
+            .replace("^0.1", "^0.3");
         assert!(mutate(&path, core, unsigned(&lookalike)).is_ok());
     }
     /// The saved inventory with the signature proof stripped from the app at `pointer`.
@@ -2948,7 +3011,10 @@ mod tests {
         );
 
         // A replacement must also target a supported API; the old signature is insufficient.
-        assert!(mutate(&path, core, signed_argocd()).err().unwrap().contains("requires API ^0.1"));
+        assert!(mutate(&path, core, signed_argocd())
+            .err()
+            .unwrap()
+            .contains("requires API ^0.1"));
     }
     #[test]
     fn rollback_refuses_an_unsigned_version_under_a_reserved_id() {

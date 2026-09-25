@@ -2799,11 +2799,48 @@ fn test_resource_table_renders_explicit_error_panel_when_crd_not_found() {
         "error title should be rendered:\n{text}"
     );
     assert!(
-        text.contains("ClusterSecretStore is not installed or cannot be read"),
-        "error description should name the resource:\n{text}"
+        text.contains("ClusterSecretStore is not installed on this cluster"),
+        "error description should name the resource as not installed:\n{text}"
     );
     assert!(
         !text.contains("No ClusterSecretStore found in this scope."),
         "misleading empty state must NOT be rendered when error is present:\n{text}"
+    );
+}
+
+#[test]
+fn test_resource_table_renders_explicit_error_panel_when_load_fails_with_network_or_rbac_error() {
+    let crd_meta = CrdMeta {
+        crd_name: "clustersecretstores.external-secrets.io".to_string(),
+        group: "external-secrets.io".to_string(),
+        version: "v1beta1".to_string(),
+        kind: "ClusterSecretStore".to_string(),
+        plural: "clustersecretstores".to_string(),
+        singular: "clustersecretstore".to_string(),
+        namespaced: false,
+        short_names: vec!["css".to_string()],
+        printer_columns: Vec::new(),
+        created_at: None,
+    };
+    let mut state = ResourceTableState::new(ResourceKind::CustomResource(crd_meta));
+    state.set_error(
+        "Forbidden: User 'bob' cannot list resource in API group (403 Forbidden)".to_string(),
+    );
+
+    let rows = common::render_lines(100, 30, |f| {
+        render_resource_table(f, f.area(), &mut state);
+    });
+    let text = rows.join("\n");
+    assert!(
+        text.contains("Failed to load resource"),
+        "failure title should be rendered:\n{text}"
+    );
+    assert!(
+        text.contains("ClusterSecretStore could not be loaded from the cluster"),
+        "error description should indicate failure to load rather than claiming not installed:\n{text}"
+    );
+    assert!(
+        !text.contains("is not installed on this cluster"),
+        "must NOT claim resource is not installed when error is RBAC or network failure:\n{text}"
     );
 }

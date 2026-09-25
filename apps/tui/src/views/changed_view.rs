@@ -1294,10 +1294,17 @@ fn render_infra_tab(f: &mut Frame, area: Rect, state: &ChangedViewState) {
 
     let infra = state.filtered_infra();
     if infra.is_empty() {
-        let msg = format!(
-            "No infrastructure changes or warning events detected in the last {}.",
-            state.current_window_label()
-        );
+        let msg = if !state.filter_query.is_empty() {
+            format!(
+                "No infrastructure changes matching query '{}'. Press / to change search or Esc to clear.",
+                state.filter_query
+            )
+        } else {
+            format!(
+                "No infrastructure changes or warning events detected in the last {}.",
+                state.current_window_label()
+            )
+        };
         let p = Paragraph::new(msg)
             .style(Style::default().fg(Theme::dim()))
             .block(block)

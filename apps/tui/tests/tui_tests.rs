@@ -7857,7 +7857,7 @@ mod tests {
                 },
             ],
         };
-        detail_state.set_detail(mock_detail);
+        detail_state.set_detail(mock_detail.clone());
 
         // Verify resource parsing from manifest
         let counts = detail_state.parse_manifest_resource_counts();
@@ -7926,6 +7926,16 @@ mod tests {
         assert!(rev_diff
             .iter()
             .any(|l| matches!(l.kind, DiffKind::Add) && l.text.contains("replicaCount: 3")));
+
+        // If revision is unchanged, previous_detail is preserved
+        detail_state.set_detail(mock_detail.clone());
+        assert!(detail_state.previous_detail.is_some());
+
+        // If revision changes, previous_detail is cleared
+        let mut new_rev_detail = mock_detail.clone();
+        new_rev_detail.revision = 4;
+        detail_state.set_detail(new_rev_detail);
+        assert!(detail_state.previous_detail.is_none());
 
         // Revision selection
         detail_state.set_tab(HelmDetailTab::Revisions);

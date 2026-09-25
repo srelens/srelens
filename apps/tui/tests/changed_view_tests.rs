@@ -396,7 +396,10 @@ fn renders_changed_view_wide_with_diagnostic_card() {
     assert!(!rendered.contains("[j/k] Navigate"));
     assert!(!rendered.contains("[r] Rollout Restart"));
     assert!(rendered.contains("[y] YAML"));
-    assert!(!rendered.contains("YAML Diff"), "y opens the manifest, not a diff");
+    assert!(
+        !rendered.contains("YAML Diff"),
+        "y opens the manifest, not a diff"
+    );
 }
 
 #[test]
@@ -417,6 +420,14 @@ fn renders_changed_view_infra_tab() {
     assert!(rendered.contains("app-config"));
     assert!(rendered.contains("api-ingress"));
     assert!(rendered.contains("Backend TLS certificate expired"));
+
+    // When filter matches nothing, it tells the user the filter hid them
+    state.filter_query = "nonexistent".to_string();
+    let lines = render_lines(120, 28, |f| {
+        render_changed_view(f, f.area(), &state);
+    });
+    let rendered = lines.join("\n");
+    assert!(rendered.contains("No infrastructure changes matching query 'nonexistent'."));
 }
 
 #[test]
@@ -474,7 +485,10 @@ fn card_advertises_quick_rca_and_the_assistant_separately() {
     let rendered = render_card(&state);
     assert!(rendered.contains("[s] Quick AI RCA"));
     assert!(rendered.contains("[a] Assistant"));
-    assert!(!rendered.contains("Quick AI RCA ("), "no RCA section until asked for");
+    assert!(
+        !rendered.contains("Quick AI RCA ("),
+        "no RCA section until asked for"
+    );
 }
 
 #[test]
@@ -493,14 +507,23 @@ fn card_renders_quick_rca_loading_ready_and_error() {
     assert!(ready.contains("Root Cause: Redis at redis-master.prod:6379 refuses connections."));
     assert!(ready.contains("Action Item: Check the redis-master pods, or roll back 7b89abc."));
     let rca_at = ready.find("Quick AI RCA (").unwrap();
-    assert!(ready.find("Symptoms (").unwrap() < rca_at, "after the symptoms");
-    assert!(rca_at < ready.find("Actions:").unwrap(), "before the actions");
+    assert!(
+        ready.find("Symptoms (").unwrap() < rca_at,
+        "after the symptoms"
+    );
+    assert!(
+        rca_at < ready.find("Actions:").unwrap(),
+        "before the actions"
+    );
 
     let error = render_card(&with_rca(QuickRcaStatus::Error(
         "No API key configured for Anthropic (Claude). Add one in :ai-settings".to_string(),
     )));
     assert!(error.contains("No API key configured for Anthropic (Claude). Add one in :ai-settings"));
-    assert!(!error.contains("Ctrl+s"), "Ctrl+s means Scale outside the Assistant");
+    assert!(
+        !error.contains("Ctrl+s"),
+        "Ctrl+s means Scale outside the Assistant"
+    );
 }
 
 #[test]
@@ -575,8 +598,13 @@ fn card_shows_at_most_three_symptom_groups_however_many_pods_fail() {
     let _settings = common::env::isolate_settings();
     let mut report = sample_report();
     let d = &mut report.deployments[0];
-    d.pod_symptoms = (0..150).map(|i| crash_pod(&format!("checkout-api-{i}"))).collect();
-    for (i, status) in ["OOMKilled", "Error", "Pending", "ImagePullBackOff"].iter().enumerate() {
+    d.pod_symptoms = (0..150)
+        .map(|i| crash_pod(&format!("checkout-api-{i}")))
+        .collect();
+    for (i, status) in ["OOMKilled", "Error", "Pending", "ImagePullBackOff"]
+        .iter()
+        .enumerate()
+    {
         d.pod_symptoms.push(PodIncidentDetail {
             pod_name: format!("odd-{i}"),
             status: status.to_string(),
@@ -594,7 +622,10 @@ fn card_shows_at_most_three_symptom_groups_however_many_pods_fail() {
     assert!(rendered.contains("odd-1: Error"));
     assert!(!rendered.contains("odd-2"), "the fourth group is not drawn");
     assert!(rendered.contains("+2 other symptoms"));
-    assert!(!rendered.contains("checkout-api-7,"), "individual pods are not listed");
+    assert!(
+        !rendered.contains("checkout-api-7,"),
+        "individual pods are not listed"
+    );
 }
 
 #[test]
@@ -609,8 +640,12 @@ fn an_unchanged_row_says_why_it_is_shown() {
 
     let rendered = render_card(&state);
 
-    assert!(rendered.contains("checkout-api (unchanged)"), "a word, not only colour");
-    assert!(rendered.contains("Not changed in the last 1h; shown because it is failing now (u to hide)."));
+    assert!(
+        rendered.contains("checkout-api (unchanged)"),
+        "a word, not only colour"
+    );
+    assert!(rendered
+        .contains("Not changed in the last 1h; shown because it is failing now (u to hide)."));
     assert!(rendered.contains("Scope: [CHANGED + FAILING]"));
     assert!(rendered.contains("[u] Hide unchanged"));
     // Rows that did change carry no marker.
@@ -637,12 +672,20 @@ fn footer_leaves_the_cards_keys_to_the_card() {
 
     // Too short for a card: its keys move to the footer.
     let short = footer_line(200, 24, &state);
-    assert!(short.starts_with("[Enter] Describe  [y] YAML  [l] Logs  [s] Quick RCA  [a] Assistant  [r] Refresh"), "{short}");
+    assert!(
+        short.starts_with(
+            "[Enter] Describe  [y] YAML  [l] Logs  [s] Quick RCA  [a] Assistant  [r] Refresh"
+        ),
+        "{short}"
+    );
 
     // Infra tab: no card and no workload keys, but describe/yaml/refresh.
     state.toggle_tab();
     let infra = footer_line(200, 44, &state);
-    assert!(infra.starts_with("[Enter] Describe  [y] YAML  [r] Refresh  [[/]] Window"), "{infra}");
+    assert!(
+        infra.starts_with("[Enter] Describe  [y] YAML  [r] Refresh  [[/]] Window"),
+        "{infra}"
+    );
     assert!(!infra.contains("Quick RCA"));
 }
 
@@ -660,8 +703,14 @@ fn an_empty_list_says_why_it_is_empty() {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");
-    assert!(strict_flat.contains("No workloads changed within the last 1h."), "{strict_flat}");
-    assert!(strict_flat.contains("S to include scaled workloads"), "{strict_flat}");
+    assert!(
+        strict_flat.contains("No workloads changed within the last 1h."),
+        "{strict_flat}"
+    );
+    assert!(
+        strict_flat.contains("S to include scaled workloads"),
+        "{strict_flat}"
+    );
     assert!(strict_flat.contains("u to include workloads failing without a change"));
 
     state.include_failing = true;
@@ -698,8 +747,17 @@ fn a_scaled_row_shows_when_it_scaled_and_says_so() {
     let rendered = render_card(&state);
 
     assert!(rendered.contains("checkout-api (scaled)"), "{rendered}");
-    let row = rendered.lines().find(|l| l.contains("checkout-api (scaled)")).unwrap();
-    assert!(row.trim_end().trim_end_matches('│').trim_end().ends_with("5m"), "CHANGED is the scale time: {row}");
+    let row = rendered
+        .lines()
+        .find(|l| l.contains("checkout-api (scaled)"))
+        .unwrap();
+    assert!(
+        row.trim_end()
+            .trim_end_matches('│')
+            .trim_end()
+            .ends_with("5m"),
+        "CHANGED is the scale time: {row}"
+    );
     assert!(rendered.contains("CHANGED"), "column header");
     assert!(rendered.contains("Scaled 3→4 5m ago; last rollout 66d ago (S to hide)."));
     assert!(rendered.contains("Scope: [CHANGED + SCALED]"));
@@ -755,18 +813,40 @@ fn card_sections_are_spaced_by_exactly_one_blank_line() {
 
     let rows = card_rows(&render_card(&state));
 
-    let at = |needle: &str| rows.iter().position(|r| r.contains(needle)).unwrap_or_else(|| panic!("{needle}: {rows:#?}"));
+    let at = |needle: &str| {
+        rows.iter()
+            .position(|r| r.contains(needle))
+            .unwrap_or_else(|| panic!("{needle}: {rows:#?}"))
+    };
     let root = at("Root Cause: [OK]");
     let header = at("Quick AI RCA (");
     let first_bullet = at("• Root Cause: Nothing is failing.");
     let actions = at("Actions:");
     // Workload block, blank, Root Cause, blank, RCA header, blank, RCA, blank, Actions.
-    assert!(rows[root - 1].is_empty() && !rows[root - 2].is_empty(), "{rows:#?}");
-    assert_eq!(header, root + 2, "one blank between Root Cause and the RCA header: {rows:#?}");
-    assert_eq!(first_bullet, header + 2, "one blank between the header and its body: {rows:#?}");
-    assert!(rows[actions - 1].is_empty() && !rows[actions - 2].is_empty(), "{rows:#?}");
+    assert!(
+        rows[root - 1].is_empty() && !rows[root - 2].is_empty(),
+        "{rows:#?}"
+    );
+    assert_eq!(
+        header,
+        root + 2,
+        "one blank between Root Cause and the RCA header: {rows:#?}"
+    );
+    assert_eq!(
+        first_bullet,
+        header + 2,
+        "one blank between the header and its body: {rows:#?}"
+    );
+    assert!(
+        rows[actions - 1].is_empty() && !rows[actions - 2].is_empty(),
+        "{rows:#?}"
+    );
     // Never two blanks in a row.
-    assert!(rows.windows(2).all(|w| !(w[0].is_empty() && w[1].is_empty())), "{rows:#?}");
+    assert!(
+        rows.windows(2)
+            .all(|w| !(w[0].is_empty() && w[1].is_empty())),
+        "{rows:#?}"
+    );
 }
 
 #[test]

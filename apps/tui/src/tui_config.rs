@@ -1,5 +1,5 @@
-use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 pub const DEFAULT_COMMAND_POPUP_MAX_WIDTH: u16 = 65;
 pub const MIN_COMMAND_POPUP_MAX_WIDTH: u16 = 40;
@@ -231,6 +231,17 @@ impl TuiConfig {
         self.command_popup_max_visible = self
             .command_popup_max_visible
             .clamp(MIN_COMMAND_POPUP_MAX_VISIBLE, MAX_COMMAND_POPUP_MAX_VISIBLE);
+        if let Some(ref mut url) = self.argo_ui_url {
+            let trimmed = url.trim().trim_end_matches('/').to_string();
+            if trimmed.is_empty() {
+                self.argo_ui_url = None;
+            } else {
+                *url = trimmed;
+            }
+        }
+        if let Some(ref mut timeout) = self.argo_timeout_secs {
+            *timeout = (*timeout).clamp(1, 300);
+        }
     }
 
     pub fn text_scale(&self) -> u8 {
@@ -243,14 +254,19 @@ impl TuiConfig {
         );
     }
 
-    /// The ArgoCD web UI link for Application `app`, or `None` when no UI
+    /// The ArgoCD web UI link for Application in `namespace` named `app`, or `None` when no UI
     /// URL is configured.
-    pub fn argo_app_url(&self, app: &str) -> Option<String> {
+    pub fn argo_app_url(&self, namespace: &str, app: &str) -> Option<String> {
         let base = self.argo_ui_url.as_deref()?.trim().trim_end_matches('/');
         if base.is_empty() {
             return None;
         }
-        Some(format!("{base}/applications/{app}"))
+        let ns = namespace.trim();
+        if ns.is_empty() || ns == "argocd" {
+            Some(format!("{base}/applications/{app}"))
+        } else {
+            Some(format!("{base}/applications/{ns}/{app}"))
+        }
     }
 
     /// Push `argo_timeout_secs` to the kube crate, which every ArgoCD read
@@ -390,11 +406,17 @@ mod tests {
         cfg.argo_hub_context = None;
         cfg.argo_hub_kubeconfig = Some(kc_path);
 
-        assert_eq!(cfg.resolved_argo_hub_context(), Some("hub-cluster-ctx".to_string()));
+        assert_eq!(
+            cfg.resolved_argo_hub_context(),
+            Some("hub-cluster-ctx".to_string())
+        );
 
         // Explicit context overrides kubeconfig current-context
         cfg.argo_hub_context = Some("explicit-ctx".to_string());
-        assert_eq!(cfg.resolved_argo_hub_context(), Some("explicit-ctx".to_string()));
+        assert_eq!(
+            cfg.resolved_argo_hub_context(),
+            Some("explicit-ctx".to_string())
+        );
     }
 
     /// A `tui.json` written before a field existed still loads, and keeps every
@@ -447,16 +469,34 @@ mod tests {
     #[test]
     fn argo_app_url_joins_the_base_and_the_application_name() {
         let mut config = TuiConfig::default();
-        assert_eq!(config.argo_app_url("payments"), None, "off until configured");
+        assert_eq!(
+            config.argo_app_url("argocd", "payments"),
+            None,
+            "off until configured"
+        );
 
         config.argo_ui_url = Some("   ".to_string());
-        assert_eq!(config.argo_app_url("payments"), None, "blank is off");
+        assert_eq!(
+            config.argo_app_url("argocd", "payments"),
+            None,
+            "blank is off"
+        );
 
         config.argo_ui_url = Some("https://argocd.example.com/".to_string());
         assert_eq!(
-            config.argo_app_url("payments").as_deref(),
+            config.argo_app_url("argocd", "payments").as_deref(),
             Some("https://argocd.example.com/applications/payments"),
-            "no double slash from a trailing one"
+            "control plane namespace omits namespace segment"
+        );
+        assert_eq!(
+            config.argo_app_url("", "payments").as_deref(),
+            Some("https://argocd.example.com/applications/payments"),
+            "empty namespace omits namespace segment"
+        );
+        assert_eq!(
+            config.argo_app_url("custom-ns", "payments").as_deref(),
+            Some("https://argocd.example.com/applications/custom-ns/payments"),
+            "non-control plane namespace includes namespace segment"
         );
     }
 
@@ -476,7 +516,9 @@ mod tests {
             normalize_argo_ui_url("HTTPS://Argo.Example.com"),
             Ok(Some("HTTPS://Argo.Example.com".to_string()))
         );
-        assert!(normalize_argo_ui_url("argo.local").unwrap_err().contains("https://"));
+        assert!(normalize_argo_ui_url("argo.local")
+            .unwrap_err()
+            .contains("https://"));
         assert!(normalize_argo_ui_url("https://").is_err());
         assert!(normalize_argo_ui_url("ftp://argo").is_err());
     }
@@ -495,7 +537,11 @@ mod tests {
 
         config.argo_timeout_secs = Some(120);
         config.step_argo_timeout(1);
-        assert_eq!(config.argo_timeout_secs, Some(120), "no step above the maximum");
+        assert_eq!(
+            config.argo_timeout_secs,
+            Some(120),
+            "no step above the maximum"
+        );
 
         // A hand-edited value between choices steps from the one below it.
         config.argo_timeout_secs = Some(25);

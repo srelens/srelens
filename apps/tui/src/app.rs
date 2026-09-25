@@ -1995,6 +1995,14 @@ impl App {
             argo.is_loading = true;
             self.refresh_argo_applications();
         }
+        if let ActiveView::Changed(changed) = &mut self.active_view {
+            self.changed_refreshing = false;
+            changed.context = self.active_context.clone();
+            changed.report = None;
+            changed.error = None;
+            changed.is_loading = true;
+            self.refresh_changed_triage();
+        }
         self.set_toast(
             format!("Switched to context '{}'", self.active_context),
             Theme::status_ok(),
@@ -2121,6 +2129,27 @@ impl App {
             let name = detail.app_name.clone();
             let ns = detail.app_namespace.clone();
             self.reload_argo_detail(&name, &ns);
+            return;
+        }
+
+        if let ActiveView::Changed(changed) = &mut self.active_view {
+            let cur_ns = if self.active_namespace.is_empty() {
+                None
+            } else {
+                Some(self.active_namespace.as_str())
+            };
+            let is_stale_ns = changed
+                .report
+                .as_ref()
+                .is_some_and(|r| r.namespace.as_deref() != cur_ns);
+            if changed.context != self.active_context || is_stale_ns {
+                self.changed_refreshing = false;
+                changed.context = self.active_context.clone();
+                changed.report = None;
+                changed.error = None;
+                changed.is_loading = true;
+            }
+            self.refresh_changed_triage();
             return;
         }
 
@@ -7810,7 +7839,7 @@ impl App {
                     }
                     KeyCode::Char('a') => {
                         if let Some(ref app) = app_opt {
-                            match self.tui_config.argo_app_url(&app.name) {
+                            match self.tui_config.argo_app_url(&app.namespace, &app.name) {
                                 Some(url) => match open_browser_url(&url) {
                                     Ok(_) => self.set_toast(
                                         format!("Opened ArgoCD: {url}"),
@@ -11133,6 +11162,7 @@ impl App {
                 Some(self.active_namespace.as_str())
             };
             if self.active_context != context || cur_ns != namespace {
+                self.refresh_changed_triage();
                 return;
             }
             // A window change while a fetch was in flight could not start its

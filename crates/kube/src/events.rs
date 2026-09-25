@@ -85,6 +85,7 @@ pub(crate) fn event_first_timestamp(ev: &Event) -> Option<k8s_openapi::jiff::Tim
     ev.first_timestamp
         .as_ref()
         .map(|t| t.0)
+        .or_else(|| ev.event_time.as_ref().map(|t| t.0))
         .or_else(|| ev.metadata.creation_timestamp.as_ref().map(|t| t.0))
 }
 
@@ -213,6 +214,12 @@ mod tests {
         assert_eq!(value["firstCreated"], "2026-09-13T12:00:00Z");
         assert_eq!(value["created"], "2026-09-13T12:00:10Z");
         event.first_timestamp = None;
+        event.event_time = Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::MicroTime(
+            "2026-09-13T11:59:30Z".parse().unwrap(),
+        ));
+        let value = serde_json::to_value(summarise(event.clone())).unwrap();
+        assert_eq!(value["firstCreated"], "2026-09-13T11:59:30Z");
+        event.event_time = None;
         let value = serde_json::to_value(summarise(event.clone())).unwrap();
         assert_eq!(value["firstCreated"], "2026-09-13T11:59:00Z");
         event.metadata.creation_timestamp = None;

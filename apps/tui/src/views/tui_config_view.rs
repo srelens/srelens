@@ -1424,7 +1424,7 @@ pub fn render_tui_config_view(
             ]),
             Line::from(vec![
                 Span::styled("UI Link:       ", Theme::header_label()),
-                match config.argo_app_url("<application>") {
+                match config.argo_app_url("argocd", "<application>") {
                     Some(url) => Span::styled(url, Style::default().fg(Theme::cyan())),
                     None => Span::styled("not set", Style::default().fg(Theme::dim())),
                 },
