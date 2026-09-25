@@ -9,13 +9,11 @@ import {
 } from "react";
 import {
   absoluteTimestamp,
-  isTauri,
   logConnectionStatus,
   logLineHealth,
   listResource,
   logLineLevel,
   podLogs,
-  saveTextFile,
   type HealthKind,
   type LogConnectionVerdict,
   type LogLine as StreamLine,
@@ -45,6 +43,7 @@ import { FailureAlert, FailureState } from "../lib/errorCopy";
 import { Icons } from "../lib/icons";
 import { useLogStream, type LogStreamStatus } from "../lib/logStream";
 import { groupNumber } from "../lib/numbers";
+import { saveOrDownload } from "../lib/saveOrDownload";
 import {
   resolveLogSubject,
   type LogSubject,
@@ -210,34 +209,6 @@ function connectionLabel(
   completed = 0,
 ): string {
   return `${verdict.label} — ${live} of ${total} streaming${completed > 0 ? `, ${completed} completed` : ""}`;
-}
-
-/**
- * Save `content` to `filename`: through the native save dialog in the desktop
- * shell, and as a browser download in web mode.
- *
- * Both halves are needed, and neither works in the other's place — a Tauri
- * webview does not prompt on `<a download>`, and a browser has no
- * `save_text_file` command to invoke. Classic reached the same conclusion
- * (`apps/desktop/src/components/LogsView.tsx`); this is that decision written
- * where the new screen can use it, not a second policy.
- */
-async function saveOrDownload(
-  filename: string,
-  content: string,
-): Promise<void> {
-  if (isTauri()) {
-    await saveTextFile(filename, content);
-    return;
-  }
-  const url = URL.createObjectURL(new Blob([content], { type: "text/plain" }));
-  const anchor = document.createElement("a");
-  anchor.href = url;
-  anchor.download = filename;
-  document.body.appendChild(anchor);
-  anchor.click();
-  anchor.remove();
-  URL.revokeObjectURL(url);
 }
 
 /**

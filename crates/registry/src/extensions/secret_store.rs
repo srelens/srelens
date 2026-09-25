@@ -14,7 +14,7 @@
 //! Nothing here returns, logs or quotes a value: the answer is `{set}`, every
 //! refusal is written without the value, and the input's `secret` refuses a
 //! value it cannot take without repeating it.
-use super::{read, write, Installed, Inventory};
+use super::{read, write, Installed, Inventory, InventoryStore, Store};
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
@@ -24,7 +24,7 @@ use srelens_plugin_host::{
     secret_key, secret_reference, SecretStore, SecretValue, SECRET_STORE_PERMISSION,
 };
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 /// The most a secret may hold, in bytes: room for a long token or a PEM key.
@@ -197,9 +197,13 @@ fn is_secret(app: &Installed, setting: &str) -> bool {
         .is_some_and(|declared| declared.setting_type == SettingType::SecretReference)
 }
 
-fn change(path: &Path, store: &dyn SecretStore, input: SecretIn) -> Result<SecretOut, String> {
-    let _lock = crate::settings::write_lock(path)?;
-    let mut state = read(path)?;
+fn change(
+    inventory: &dyn InventoryStore,
+    store: &dyn SecretStore,
+    input: SecretIn,
+) -> Result<SecretOut, String> {
+    let _lock = inventory.lock()?;
+    let mut state = read(inventory)?;
     let set = match input {
         SecretIn::Set {
             id,
@@ -254,24 +258,24 @@ fn change(path: &Path, store: &dyn SecretStore, input: SecretIn) -> Result<Secre
             false
         }
     };
-    write(path, &state)?;
+    write(inventory, &state)?;
     sweep(store, &state);
     // An inventory write like any other, so the app streams and the windows
     // listening to them hear of it (#566). They hear only that it changed.
-    super::streams::announce(path, &state);
+    super::streams::announce(&inventory.key(), &state);
     Ok(SecretOut { set })
 }
 
-pub(super) fn register(reg: &mut Registry, path: PathBuf, store: Arc<dyn SecretStore>) {
+pub(super) fn register(reg: &mut Registry, inventory: Store, store: Arc<dyn SecretStore>) {
     let mut capability = Capability::typed::<SecretIn, SecretOut, _, _>(
         SECRET_STORE_PERMISSION,
         "Set or clear a secret an app keeps in srelens's encrypted secrets vault; write-only, never returns a value; requires approval",
         SECRET_STORE_ANNOTATIONS,
         move |input| {
-            let path = path.clone();
+            let inventory = inventory.clone();
             let store = store.clone();
             async move {
-                tokio::task::spawn_blocking(move || change(&path, store.as_ref(), input))
+                tokio::task::spawn_blocking(move || change(&*inventory, store.as_ref(), input))
                     .await
                     .map_err(|e| CapabilityError::Handler(e.to_string()))?
                     .map_err(CapabilityError::Handler)

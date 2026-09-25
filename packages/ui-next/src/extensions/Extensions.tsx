@@ -138,12 +138,6 @@ export function ExtensionManager() {
       setReview((current) => (current?.request === request ? { ...current, checkError } : current));
     }
   }
-  if (!isTauri())
-    return (
-      <p className="extension-message">
-        Local apps are available in the desktop app.
-      </p>
-    );
   if (inventory.status === "loading")
     return (
       <p role="status" className="extension-message">
@@ -161,6 +155,11 @@ export function ExtensionManager() {
           Refresh
         </Button>
       </div>
+      {!isTauri() && (
+        <p className="extension-message">
+          The apps you install here are yours: everyone who signs in to this server has their own.
+        </p>
+      )}
       {inventory.updates?.mode === "polling" && (
         <p role="status" className="extension-message">
           Live updates to this list are unavailable ({inventory.updates.reason}); a change made elsewhere shows within five seconds.

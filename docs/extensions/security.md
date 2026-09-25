@@ -36,7 +36,9 @@ mitigation and the risk that remains.
   vault's key is only in a plain file beside it (no keychain and no master password) or
   the vault is locked, and is deleted with the app
   ([manifest.md](manifest.md#secret-settings)).
-- **The web host refuses app capabilities** until state is per user
+- **The web host keeps apps per user.** Each user's inventory is their own database
+  row, the one shared catalog cache is written only by the server, and no app secret is
+  kept there until per-user secret storage exists
   ([capabilities.md](capabilities.md#web-host)).
 - **Every write is recorded locally, wherever it came from.** A mutating or
   sensitive capability call is appended to `audit.jsonl` whether an agent made

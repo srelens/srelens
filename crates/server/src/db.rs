@@ -1,6 +1,6 @@
 //! SQLite persistence: pool construction and embedded migrations. Store
-//! methods (users, sessions, kubeconfigs, settings) are implemented on [`Db`]
-//! in this module as well.
+//! methods (users, sessions, kubeconfigs, settings, app inventories) are
+//! implemented on [`Db`] in `stores.rs`.
 
 use std::path::Path;
 
@@ -64,7 +64,13 @@ mod tests {
     #[tokio::test]
     async fn migrations_create_all_tables() {
         let db = Db::open_in_memory().await.unwrap();
-        for table in ["users", "sessions", "kubeconfigs", "settings"] {
+        for table in [
+            "users",
+            "sessions",
+            "kubeconfigs",
+            "settings",
+            "extension_inventories",
+        ] {
             let found: Option<(String,)> =
                 sqlx::query_as("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")
                     .bind(table)

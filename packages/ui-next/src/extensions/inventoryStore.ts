@@ -19,7 +19,9 @@ export function extensionLabel(plugin: InstalledExtension): string {
  * How the list learns of a change made elsewhere (#566): `live` when the host
  * announces every inventory write, `polling` when that channel could not be
  * listened to (with why) and the list is read every five seconds instead, and
- * `none` on the web, which keeps no app inventory (#515).
+ * `none` on the web. The web server keeps each user's inventory (#515) but
+ * announces nothing, so the list is read when this window changes it and when
+ * the window gains focus, which is where a change made in another tab shows.
  */
 export type InventoryUpdates =
   | { mode: "live" }
@@ -65,9 +67,7 @@ function start() {
     pending = true;
     const mine = generation;
     try {
-      const data = isTauri() ? await listExtensions() : {
-        schemaVersion: 1, nextRevision: 1, plugins: [],
-      };
+      const data = await listExtensions();
       if (active && mine === generation) { latest = { status: "ready", data }; show(); }
     } catch (error) {
       if (active && mine === generation) {
