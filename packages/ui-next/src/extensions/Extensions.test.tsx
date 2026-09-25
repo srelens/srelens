@@ -693,6 +693,47 @@ it("reviews a rollback that reaches other hosts under the same grant", async () 
     expect(configureExtensions).toHaveBeenCalledWith({ action: "rollback", id: "org.test.gitops", revision: 2, grants: ["network.http"] }),
   );
 });
+it("reviews a rollback whose network.http request sends something else under the same grants and hosts", async () => {
+  const request = (args: Record<string, unknown>) => ({
+    name: "up", title: "Targets up", target: "network.http", inputs: [],
+    arguments: { url: "${settings.prometheusUrl}", path: "/api/v1/query", ...args },
+  });
+  const current = networkApp();
+  const app = {
+    ...current,
+    manifest: { ...current.manifest, capabilities: [request({})] },
+    history: [
+      {
+        manifest: {
+          ...current.manifest,
+          version: "0.1.0",
+          capabilities: [request({ secretHeaders: { Authorization: { secret: "token", prefix: "Bearer " } } })],
+        },
+        grants: ["network.http"], revision: 2, source: "local", installedAt: 1_690_000_000,
+      },
+    ],
+  };
+  const details = await openDetails(app as unknown as ReturnType<typeof updated>);
+  fireEvent.click(within(details).getByRole("button", { name: "Roll back to 0.1.0" }));
+  const review = screen.getByRole("region", { name: "Review rollback" });
+  expect(review.textContent).toContain("Its network requests differ from this version's");
+  // What the restored version would send, before anything is confirmed.
+  const up = within(review).getByRole("listitem", { name: "Binding up" });
+  expect(up.textContent).toContain("sends secret token as the Authorization header");
+  expect(within(review).getByRole("button", { name: "Roll back and grant permissions" })).toBeTruthy();
+});
+it("says a rollback with the same requests uses the permissions granted now", async () => {
+  const current = networkApp();
+  const app = {
+    ...current,
+    history: [{ manifest: { ...current.manifest, version: "0.1.0" }, grants: ["network.http"], revision: 2, source: "local", installedAt: 1_690_000_000 }],
+  };
+  const details = await openDetails(app as unknown as ReturnType<typeof updated>);
+  fireEvent.click(within(details).getByRole("button", { name: "Roll back to 0.1.0" }));
+  const review = screen.getByRole("region", { name: "Review rollback" });
+  expect(review.textContent).toContain("It uses the permissions granted now.");
+  expect(within(review).queryByRole("listitem", { name: "Binding up" })).toBeNull();
+});
 it("closes the reset confirmation with Escape without resetting", async () => {
   const details = await openDetails(updated());
   fireEvent.click(within(details).getByRole("button", { name: "Reset settings" }));

@@ -1,3 +1,4 @@
+import { NETWORK_HTTP } from "@srelens/core";
 import { plainText } from "./displayText";
 
 /** A `${settings.<id>}` reference's setting id, when `value` is one. */
@@ -36,4 +37,30 @@ export function HostText({ manifest, host }: { manifest: unknown; host: string }
       {host.startsWith("*.") && " (one subdomain label)"}
     </>
   );
+}
+
+/** `value` as JSON with every object's keys sorted, so equal values compare equal. */
+const canonical = (value: unknown): string =>
+  Array.isArray(value)
+    ? `[${value.map(canonical).join(",")}]`
+    : value && typeof value === "object"
+      ? `{${Object.keys(value)
+          .sort()
+          .map((key) => `${JSON.stringify(key)}:${canonical((value as Record<string, unknown>)[key])}`)
+          .join(",")}}`
+      : JSON.stringify(value) ?? "null";
+
+/**
+ * A manifest's `network.http` requests (#568) as comparable text: each binding's name and
+ * arguments. Two versions with the same grants and hosts can still send different
+ * requests — another path, or a secret in another header — and that is what this tells.
+ */
+export function networkRequests(manifest: unknown): string {
+  const capabilities = (manifest as { capabilities?: unknown } | null)?.capabilities;
+  const bindings = (Array.isArray(capabilities) ? capabilities : [])
+    .map((entry) => entry as { name?: unknown; target?: unknown; arguments?: unknown })
+    .filter((binding) => binding.target === NETWORK_HTTP)
+    .map((binding) => ({ name: binding.name, arguments: binding.arguments }))
+    .sort((a, b) => String(a.name).localeCompare(String(b.name)));
+  return canonical(bindings);
 }

@@ -220,8 +220,16 @@ fn download(url: &str, limit: usize) -> Result<Vec<u8>, String> {
         .send()
         .and_then(|r| r.error_for_status())
         .map_err(|e| format!("Download extension catalog/manifest: {e}"))?;
-    http_policy::read_limited_blocking(response, limit)
-        .map_err(|_| "Extension download exceeds size limit".into())
+    read_download(response, limit)
+}
+/// A download's body: at most `limit` bytes, or which of the two things went wrong.
+fn read_download(body: impl std::io::Read, limit: usize) -> Result<Vec<u8>, String> {
+    http_policy::read_limited_blocking(body, limit).map_err(|error| match error {
+        http_policy::BlockingBodyError::TooLarge => "Extension download exceeds size limit".into(),
+        http_policy::BlockingBodyError::Read(error) => {
+            format!("Download extension catalog/manifest: {error}")
+        }
+    })
 }
 /// The cached catalog, validated again, with this host's fields recomputed; `None` when
 /// there is no cache or it cannot be trusted.
@@ -816,6 +824,22 @@ mod tests {
         assert_eq!(catalog.extensions.len(), 2);
         value["extensions"][0]["release"]["sha256"] = json!("bad");
         assert!(parse_catalog(&serde_json::to_vec(&value).unwrap()).is_err());
+    }
+    #[test]
+    fn a_download_that_fails_part_way_is_not_called_too_large() {
+        let failed =
+            read_download(super::super::http_policy::tests::FailingBody, 1024).unwrap_err();
+        assert!(
+            failed.starts_with("Download extension catalog/manifest: "),
+            "{failed}"
+        );
+        assert!(failed.contains("timed out"), "{failed}");
+        assert!(!failed.contains("size limit"), "{failed}");
+        assert_eq!(
+            read_download(&b"abcde"[..], 4).unwrap_err(),
+            "Extension download exceeds size limit"
+        );
+        assert_eq!(read_download(&b"abcd"[..], 4).unwrap(), b"abcd");
     }
     #[test]
     fn rejects_private_downloads_and_redirects() {

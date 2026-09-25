@@ -158,21 +158,25 @@ fn arguments(value: Value) -> Map<String, Value> {
 
 #[test]
 fn a_binding_asks_for_a_url_this_host_could_fetch_with_headers_an_app_may_set() {
-    for good in [
+    // The cases hold header names and secret references, so no message prints one:
+    // each names its case by position (CodeQL rust/cleartext-logging).
+    for (case, good) in [
         json!({"url":"https://api.github.com"}),
         json!({"url":"https://prometheus.internal:9090/prometheus","path":"/api/v1/query","query":{"query":"up"}}),
         json!({"url":"http://localhost:9090","path":"/api/v1/query"}),
         json!({"url":STAND_IN,"headers":{"Accept":"application/json"}}),
         json!({"url":STAND_IN,"secretHeaders":{"Authorization":{"secret":"token","prefix":"Bearer "}}}),
         json!({"url":STAND_IN,"secretHeaders":{"DD-API-KEY":{"secret":"api-key"}}}),
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
         assert!(
-            check_arguments(&arguments(good.clone())).is_ok(),
-            "{good}: {:?}",
-            check_arguments(&arguments(good.clone()))
+            check_arguments(&arguments(good)).is_ok(),
+            "accepted case {case} was refused"
         );
     }
-    for (bad, why) in [
+    for (case, (bad, why)) in [
         (
             json!({"url":"http://prometheus.internal"}),
             "only this computer",
@@ -226,9 +230,15 @@ fn a_binding_asks_for_a_url_this_host_could_fetch_with_headers_an_app_may_set() 
             "printable ASCII",
         ),
         (json!({"url":STAND_IN,"method":"POST"}), "unknown field"),
-    ] {
-        let found = check_arguments(&arguments(bad.clone())).unwrap_err();
-        assert!(found.contains(why), "{bad}: {found}");
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let found = check_arguments(&arguments(bad)).unwrap_err();
+        assert!(
+            found.contains(why),
+            "refused case {case} does not say {why:?}"
+        );
     }
     let long = "a".repeat(MAX_URL);
     assert!(
@@ -365,19 +375,23 @@ async fn a_redirect_loop_is_followed_four_times_and_no_further() {
 }
 
 #[tokio::test]
-async fn a_redirect_is_held_to_the_scheme_rule_too() {
-    // An allowed host that redirects to plain HTTP on loopback, while the app may
-    // not use plain HTTP: the hop is refused even though the port is allowlisted.
-    let target = server(|_| Reply::Text("plain")).await;
-    let policy = policy(vec![target.rule()], false);
+async fn a_redirect_to_plain_http_off_this_computer_is_refused() {
+    // Loopback HTTP is allowed and the target's host and port are allowlisted, so
+    // only the scheme rule refuses the hop: plain HTTP reaches this computer alone.
+    // It is refused before any connection, so nothing listens on 10.0.0.5.
+    let from = server(|_| Reply::Redirect("http://10.0.0.5:9090/".into())).await;
+    let rules = vec![from.rule(), HostRule::parse("10.0.0.5:9090").unwrap()];
+    let refused = send(from.url("/"), HeaderMap::new(), false, policy(rules, true))
+        .await
+        .unwrap_err();
+    assert!(refused.contains("only this computer"), "{refused}");
+    assert_eq!(from.seen().len(), 1);
+    // With loopback off, plain HTTP to this computer is refused as well.
+    let policy = policy(vec![from.rule()], false);
     assert!(policy
-        .check(&target.url("/"))
+        .check(&from.url("/"))
         .unwrap_err()
         .contains("Allow plain HTTP"));
-    assert!(policy
-        .check(&Url::parse("https://127.0.0.1/").unwrap())
-        .unwrap_err()
-        .contains("not among"));
 }
 
 #[tokio::test]
@@ -636,19 +650,23 @@ async fn an_installed_app_reaches_its_host_through_extensions_read_with_its_secr
     assert!(vault.contains(&secret_key(APP, "token")).unwrap());
 
     let answer = read().await.unwrap();
+    // Absence first, with messages that print nothing, so a failure here cannot put
+    // the secret in the test output (CodeQL rust/cleartext-logging, as in #710).
+    let leaked = answer.to_string().contains(TOKEN);
+    assert!(!leaked, "the answer holds the secret");
     assert_eq!(
         answer,
         json!({"status":200,"contentType":"application/json","body":{"status":"success"}})
     );
     let seen = prometheus.seen();
     assert_eq!(seen[0].target, "/api/v1/query?query=up");
-    assert_eq!(
-        seen[0].header("authorization"),
-        Some(format!("Bearer {TOKEN}").as_str())
+    let bearer = format!("Bearer {TOKEN}");
+    let sent = seen[0].header("authorization") == Some(bearer.as_str());
+    assert!(
+        sent,
+        "the server did not receive the secret as a bearer header"
     );
     assert_eq!(seen[0].header("accept"), Some("application/json"));
-    // The value reached the server and nothing else: not the answer, not the inventory.
-    assert!(!answer.to_string().contains(TOKEN));
     let listed = reg.invoke("extensions.list", json!({})).await.unwrap();
     assert!(!listed.to_string().contains(TOKEN));
     assert_eq!(listed["plugins"][0]["allowLoopbackHttp"], true);

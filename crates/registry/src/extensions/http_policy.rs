@@ -113,19 +113,29 @@ pub(super) fn install_crypto_provider() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 }
 
-/// Reads at most `limit` bytes of a blocking body, refusing one that is longer.
+/// Reads at most `limit` bytes of a blocking body, refusing one that is longer. A body
+/// that fails part-way says so, never that it was too large: a timeout mid-body is not
+/// a size.
 pub(super) fn read_limited_blocking(
     body: impl std::io::Read,
     limit: usize,
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, BlockingBodyError> {
     let mut raw = Vec::new();
     body.take(limit as u64 + 1)
         .read_to_end(&mut raw)
-        .map_err(|e| e.to_string())?;
+        .map_err(BlockingBodyError::Read)?;
     if raw.len() > limit {
-        return Err(too_large(limit));
+        return Err(BlockingBodyError::TooLarge);
     }
     Ok(raw)
+}
+
+/// Why a blocking body could not be read whole.
+#[derive(Debug)]
+pub(super) enum BlockingBodyError {
+    /// Longer than the limit; the caller says what the limit was for.
+    TooLarge,
+    Read(std::io::Error),
 }
 
 /// Reads at most `limit` bytes of `response`, refusing one that says or turns out
@@ -165,7 +175,7 @@ fn too_large(limit: usize) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
 
     fn url(raw: &str) -> Url {
@@ -244,9 +254,31 @@ mod tests {
     #[test]
     fn a_blocking_body_past_the_limit_is_refused() {
         assert_eq!(read_limited_blocking(&b"abcd"[..], 4).unwrap(), b"abcd");
-        assert!(read_limited_blocking(&b"abcde"[..], 4)
-            .unwrap_err()
-            .contains("larger than 4 bytes"));
+        assert!(matches!(
+            read_limited_blocking(&b"abcde"[..], 4),
+            Err(BlockingBodyError::TooLarge)
+        ));
         assert!(too_large(4 * 1024 * 1024).contains("4 MiB"));
+    }
+
+    /// A body whose read fails part-way, as a timeout or a reset connection does.
+    pub(in crate::extensions) struct FailingBody;
+    impl std::io::Read for FailingBody {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "operation timed out",
+            ))
+        }
+    }
+
+    #[test]
+    fn a_blocking_body_that_fails_says_so_not_that_it_was_too_large() {
+        match read_limited_blocking(FailingBody, 4) {
+            Err(BlockingBodyError::Read(error)) => {
+                assert_eq!(error.kind(), std::io::ErrorKind::TimedOut)
+            }
+            other => panic!("a failed read was reported as {other:?}"),
+        }
     }
 }

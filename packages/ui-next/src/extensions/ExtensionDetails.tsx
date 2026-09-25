@@ -15,7 +15,8 @@ import { CodeEditor } from "@srelens/ui-kit";
 import { saveOrDownload } from "../lib/saveOrDownload";
 import { ExtensionClusters } from "./ExtensionClusters";
 import { ExtensionNetwork } from "./ExtensionNetwork";
-import { hostText } from "./networkText";
+import { ExtensionBindings } from "./ExtensionBindings";
+import { hostText, networkRequests } from "./networkText";
 import { ExtensionControls } from "./ExtensionControls";
 import { escapeFormatCharacters } from "./displayText";
 import { extensionLabel } from "./inventoryStore";
@@ -129,7 +130,11 @@ export function ExtensionDetails({
   const reaches = rollback ? networkHosts(rollback.manifest) : [];
   const reachesNow = networkHosts(manifest);
   const changesHosts = [...reaches].sort().join("\n") !== [...reachesNow].sort().join("\n");
-  const changesGrants = added.length > 0 || dropped.length > 0 || changesHosts;
+  // And another request under the same grant and hosts: a different path, or a secret
+  // sent in another header. The host diffs these for an update; a rollback's review
+  // shows what the restored version would send.
+  const changesRequests = rollback !== null && networkRequests(rollback.manifest) !== networkRequests(manifest);
+  const changesGrants = added.length > 0 || dropped.length > 0 || changesHosts || changesRequests;
 
   return (
     <section className="extension-details" aria-label={`${extensionLabel(plugin)} details`}>
@@ -230,12 +235,14 @@ export function ExtensionDetails({
                 {dropped.length > 0 && ` It no longer uses: ${dropped.join(", ")}.`}
                 {changesHosts &&
                   ` It reaches: ${reaches.map((host) => hostText(rollback!.manifest, host)).join(", ") || "no hosts"}.`}
+                {changesRequests && " Its network requests differ from this version's; they are listed below."}
               </>
             ) : (
               "It uses the permissions granted now."
             )}{" "}
             Settings are kept, and the versions after it are discarded.
           </p>
+          {changesRequests && <ExtensionBindings manifest={rollback.manifest} permissions={[NETWORK_HTTP]} />}
           <Button
             disabled={busy}
             onClick={() =>

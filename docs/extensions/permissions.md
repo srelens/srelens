@@ -117,7 +117,8 @@ derives ([#543](https://github.com/srelens/srelens/issues/543)).
   another secret shows as changed access.
 - Without the grant, a secret cannot be set. A secret is write-only: nothing returns
   it to the app, the UI, MCP or an export, and the host injects one only into an
-  argument a host capability declares for it. None does yet (#568 will).
+  argument a host capability declares for it: today, a `network.http` request's
+  `secretHeaders` ([What an app may reach](#what-an-app-may-reach)).
 - Removing the app, or an update or rollback that drops the setting, deletes it. Reset
   in Settings → Apps clears the app's secrets before it resets the other settings.
 
