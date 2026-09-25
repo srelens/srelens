@@ -222,6 +222,49 @@ mod stop_tests {
     }
 }
 
+#[cfg(test)]
+mod reply_tests {
+    use super::{Process, Reply, Sidecar};
+    use serde_json::json;
+    use std::io;
+    use std::process::{Command, Stdio};
+
+    /// A sidecar whose stdout is `bytes`, attached to a real process that has already
+    /// exited, so a call that wrongly waits for it returns at once instead of hanging.
+    fn reading(bytes: &[u8]) -> Sidecar {
+        let mut child = Command::new(env!("CARGO"))
+            .arg("--version")
+            .stdout(Stdio::null())
+            .spawn()
+            .expect("cargo starts");
+        child.wait().expect("cargo exits");
+        let stdout = Box::new(io::Cursor::new(bytes.to_vec()));
+        Sidecar::new(Box::new(io::sink()), stdout, Process::Plain(child))
+    }
+
+    #[test]
+    fn an_unreadable_reply_is_garbled_not_stopped() {
+        // A line that is not UTF-8 fails the read; the process may still be running.
+        let mut sidecar = reading(b"\xff\xfe not UTF-8\n");
+        match sidecar.call("ping", json!({})) {
+            Reply::Garbled(text) => assert!(text.contains("unreadable"), "{text}"),
+            other => panic!("expected Garbled, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_unreadable_line_in_a_garble_is_not_a_closed_stdout() {
+        let mut sidecar = reading(b"thread 'main' panicked\n\xff\n");
+        match sidecar.call("ping", json!({})) {
+            Reply::Garbled(text) => {
+                assert!(text.contains("unreadable"), "{text}");
+                assert!(!text.contains("stdout closed"), "{text}");
+            }
+            other => panic!("expected Garbled, got {other:?}"),
+        }
+    }
+}
+
 /// What the OS can say about a sidecar that never answered its first ping. On macOS under
 /// `seatbelt`, the sandbox's recent log entries for the probe; elsewhere, nothing more.
 pub fn start_failure_context(backend: Backend) -> String {
@@ -520,7 +563,10 @@ impl Sidecar {
         }
         let mut line = String::new();
         match self.stdout.read_line(&mut line) {
-            Ok(0) | Err(_) => Reply::Stopped(self.ended()),
+            Ok(0) => Reply::Stopped(self.ended()),
+            // A failed read (bytes that are not UTF-8, say) is a broken exchange, not a
+            // closed stdout: the process may still be running, and waiting for it would hang.
+            Err(e) => Reply::Garbled(format!("unreadable reply: {e}")),
             Ok(_) => match serde_json::from_str::<Value>(&line) {
                 Ok(v) if v["id"] != id => Reply::Garbled(format!("reply for the wrong id: {line}")),
                 Ok(v) if v.get("error").is_some() => {
@@ -544,8 +590,12 @@ impl Sidecar {
         for _ in 0..20 {
             let mut line = String::new();
             match self.stdout.read_line(&mut line) {
-                Ok(0) | Err(_) => {
+                Ok(0) => {
                     text.push_str(&format!("[then stdout closed; {}]", self.ended().text));
+                    break;
+                }
+                Err(e) => {
+                    text.push_str(&format!("[then an unreadable line: {e}]"));
                     break;
                 }
                 Ok(_) => {
