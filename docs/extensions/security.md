@@ -17,6 +17,14 @@ mitigation and the risk that remains.
 - **Reviews cannot go stale.** The review keeps the UID and resourceVersion the reader
   saw, and the backend's conditional PATCH rejects the write if the resource changed
   ([capabilities.md](capabilities.md#declared-gitops-actions)).
+- **An update shows what access it changes.** The host compares the incoming manifest's
+  access with the installed revision's: the grants, what each reader binds, the settings
+  it keeps secrets for, and each action. The review in Settings → Apps lists what is
+  added and removed before what is unchanged, and the consent prompt for an install over
+  MCP names the added and removed access. The update must name the installed revision it
+  was reviewed against, and is refused if the app has changed since. A rollback gets no
+  such comparison: its review compares capability IDs only
+  ([threat-model.md](threat-model.md#malicious-app)).
 - **Official identities are reserved.** IDs under `org.srelens.` install only with the
   srelens publisher signature, so a pasted manifest cannot take an official app's ID
   or logo ([distribution.md](distribution.md#signed-official-releases)).
@@ -58,4 +66,3 @@ Declarative support does not claim these protections:
 - signing key rotation ([#560](https://github.com/srelens/srelens/issues/560))
 - revocation and a kill switch ([#561](https://github.com/srelens/srelens/issues/561))
 - executable apps and OS sandboxing ([#521](https://github.com/srelens/srelens/issues/521))
-- a permission diff on update ([#554](https://github.com/srelens/srelens/issues/554))
