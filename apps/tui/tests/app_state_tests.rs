@@ -1974,13 +1974,23 @@ async fn assistant_busy_turn_can_be_cancelled_with_esc_or_ctrl_c() {
         .unwrap()
         .content
         .contains("[Cancelled by user]"));
+    let res1 = tokio::time::timeout(std::time::Duration::from_millis(500), task1).await;
+    assert!(
+        res1.is_ok() && res1.unwrap().unwrap_err().is_cancelled(),
+        "task1 was aborted"
+    );
 
-    // 2. Cancel via Ctrl+c when busy and no selection
+    // 2. Cancel via Ctrl+c when busy and no selection, and verify running tool call is closed
     app.assistant_state.is_busy = true;
     let task2 = tokio::spawn(async {
         tokio::time::sleep(std::time::Duration::from_secs(60)).await;
     });
     app.assistant_state.task = Some(task2.abort_handle());
+    app.assistant_state.add_tool_call_start(
+        "call_1".to_string(),
+        "k8s.listPods".to_string(),
+        "namespace: default".to_string(),
+    );
 
     app.handle_key_event(common::ctrl('c')).await;
     assert!(
@@ -1989,6 +1999,16 @@ async fn assistant_busy_turn_can_be_cancelled_with_esc_or_ctrl_c() {
     );
     assert!(app.assistant_state.task.is_none());
     assert_eq!(toast(&app), "✓ Assistant generation cancelled");
+    let res2 = tokio::time::timeout(std::time::Duration::from_millis(500), task2).await;
+    assert!(
+        res2.is_ok() && res2.unwrap().unwrap_err().is_cancelled(),
+        "task2 was aborted"
+    );
+    let last_msg = app.assistant_state.messages.last().unwrap();
+    assert_eq!(
+        last_msg.tool_calls.first().unwrap().status,
+        srelens_tui::views::assistant_view::ToolCallStatus::Error("Cancelled by user".to_string())
+    );
 
     // 3. Ctrl+l aborts task while clearing conversation
     app.assistant_state.is_busy = true;
@@ -2002,6 +2022,39 @@ async fn assistant_busy_turn_can_be_cancelled_with_esc_or_ctrl_c() {
     assert!(!app.assistant_state.is_busy);
     assert!(app.assistant_state.task.is_none());
     assert_eq!(toast(&app), "✓ Conversation cleared");
+    let res3 = tokio::time::timeout(std::time::Duration::from_millis(500), task3).await;
+    assert!(
+        res3.is_ok() && res3.unwrap().unwrap_err().is_cancelled(),
+        "task3 was aborted"
+    );
+}
+
+#[tokio::test]
+async fn submitting_second_query_after_completed_turn_does_not_mark_prior_cancelled() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.active_view = ActiveView::Assistant;
+
+    // Simulate completed first query and answer
+    app.assistant_state.start_turn("First query".to_string());
+    app.assistant_state
+        .append_stream_chunk("First answer complete.");
+    app.assistant_state.finish_turn();
+
+    assert!(!app.assistant_state.is_busy);
+    assert!(app.assistant_state.task.is_none());
+
+    // Submit second query via submit_assistant_query
+    app.submit_assistant_query("Second query".to_string(), "Second query".to_string());
+
+    // Verify first answer in history was NOT modified to include [Cancelled by user]
+    let first_answer = &app.assistant_state.messages[2]; // 0: welcome, 1: user first, 2: assistant first
+    assert_eq!(first_answer.role, "assistant");
+    assert_eq!(first_answer.content, "First answer complete.");
+    assert!(
+        !first_answer.content.contains("Cancelled"),
+        "completed turn must not be marked cancelled on next query"
+    );
 }
 
 #[tokio::test]

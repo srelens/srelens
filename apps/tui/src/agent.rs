@@ -561,6 +561,7 @@ pub async fn run_boxed_cursor_turn(
     cmd.args(&final_args);
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
+    cmd.kill_on_drop(true);
 
     // 5. Spawn and stream results
     match cmd.spawn() {

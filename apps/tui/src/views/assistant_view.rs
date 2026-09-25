@@ -628,6 +628,9 @@ impl AssistantViewState {
     }
 
     pub fn cancel_turn(&mut self) {
+        if !self.is_busy && self.task.is_none() {
+            return;
+        }
         if let Some(h) = self.task.take() {
             h.abort();
         }
@@ -635,6 +638,11 @@ impl AssistantViewState {
         self.busy_status.clear();
         self.busy_start = None;
         if let Some(last) = self.messages.last_mut() {
+            for tc in &mut last.tool_calls {
+                if tc.status == ToolCallStatus::Running {
+                    tc.status = ToolCallStatus::Error("Cancelled by user".to_string());
+                }
+            }
             if last.role == "assistant" {
                 if !last.content.is_empty() {
                     last.content.push_str("\n\n*[Cancelled by user]*");
@@ -1073,10 +1081,7 @@ pub fn render_assistant_view(
 
     let split = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(header_height),
-            Constraint::Min(4),
-        ])
+        .constraints([Constraint::Length(header_height), Constraint::Min(4)])
         .split(inner);
     let header_area = split[0];
     let body_area = split[1];
