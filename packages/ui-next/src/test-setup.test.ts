@@ -15,3 +15,16 @@ describe("a time zone a test pins", () => {
     expect(zoneNow()).toBe(machine);
   });
 });
+
+describe("a WebSocket a test opens", () => {
+  // A real one to the transport's URL is refused within milliseconds, and the
+  // refusal is what arms the transport's reconnect timer.
+  it("never connects and never fails, so the transport has nothing to retry", async () => {
+    const socket = new WebSocket("ws://localhost:3000/api/ws");
+    const events: string[] = [];
+    for (const type of ["open", "message", "error", "close"]) socket.addEventListener(type, () => events.push(type));
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    expect(events).toEqual([]);
+    expect(socket.readyState).toBe(WebSocket.CONNECTING);
+  });
+});
