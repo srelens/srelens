@@ -1,4 +1,5 @@
 //! A fixed public catalog; official manifests require a pinned publisher signature.
+use super::http_policy;
 use super::*;
 use sha2::{Digest, Sha256};
 use srelens_plugin_host::{
@@ -7,7 +8,7 @@ use srelens_plugin_host::{
 use std::{
     collections::BTreeSet,
     io::Read as _,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
 const CATALOG_URL: &str = "https://raw.githubusercontent.com/srelens/extensions/main/catalog.json";
 pub(super) const MAX_CATALOG: usize = 1024 * 1024;
@@ -90,12 +91,8 @@ fn now() -> u64 {
 }
 fn https_url(raw: &str) -> Result<reqwest::Url, String> {
     let url = reqwest::Url::parse(raw).map_err(|_| "Invalid catalog URL")?;
-    if url.scheme() != "https"
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.fragment().is_some()
-        || url.port().is_some()
-    {
+    // The shared policy's strictest reading: no port, and never plain HTTP.
+    if http_policy::check_url(&url, http_policy::UrlRules::default()).is_err() {
         return Err(
             "Catalog URLs must use HTTPS without credentials, fragments or custom ports".into(),
         );
@@ -204,18 +201,16 @@ fn download(url: &str, limit: usize) -> Result<Vec<u8>, String> {
         return Err("Unsupported extension download URL".into());
     }
     // Catalog browsing may be the first network operation, before any kube
-    // client exists. Workspace feature unification can link two providers.
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    // client exists.
+    http_policy::install_crypto_provider();
     let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(20))
-        .connect_timeout(Duration::from_secs(10))
+        .timeout(http_policy::TIMEOUT)
+        .connect_timeout(http_policy::CONNECT_TIMEOUT)
         .user_agent("srelens-extension-catalog")
-        .redirect(reqwest::redirect::Policy::custom(|attempt| {
-            if attempt.previous().len() >= 5 || !allowed_download(attempt.url()) {
-                attempt.error("Unsupported extension download redirect")
-            } else {
-                attempt.follow()
-            }
+        .redirect(http_policy::redirects(|url| {
+            allowed_download(url)
+                .then_some(())
+                .ok_or("Unsupported extension download redirect")
         }))
         .build()
         .map_err(|e| e.to_string())?;
@@ -224,15 +219,8 @@ fn download(url: &str, limit: usize) -> Result<Vec<u8>, String> {
         .send()
         .and_then(|r| r.error_for_status())
         .map_err(|e| format!("Download extension catalog/manifest: {e}"))?;
-    let mut raw = Vec::new();
-    response
-        .take(limit as u64 + 1)
-        .read_to_end(&mut raw)
-        .map_err(|e| e.to_string())?;
-    if raw.len() > limit {
-        return Err("Extension download exceeds size limit".into());
-    }
-    Ok(raw)
+    http_policy::read_limited_blocking(response, limit)
+        .map_err(|_| "Extension download exceeds size limit".into())
 }
 fn load_with(
     path: &Path,
@@ -393,7 +381,7 @@ pub(super) fn register(reg: &mut Registry, path: PathBuf, core: Arc<Registry>) {
             let review = verify_release(entry, &download(&entry.release.manifest_url, MAX_MANIFEST_BYTES)?, signature)?;
             let manifest = &review.manifest;
             let parsed = Manifest::parse(&manifest)?;
-            super::validate_app(&parsed, &parsed.permissions, core)?;
+            super::validate_app(&parsed, &parsed.permission_names(), core)?;
             Ok(review)
         }).await.map_err(|e| CapabilityError::Handler(e.to_string()))?.map_err(CapabilityError::Handler) }
     }));
@@ -786,14 +774,14 @@ mod tests {
             let parsed = Manifest::parse(&review.manifest).unwrap();
             super::super::validate_app(
                 &parsed,
-                &parsed.permissions,
+                &parsed.permission_names(),
                 super::super::tests::fake_core(),
             )
             .unwrap();
             let state = super::super::tests::configure(
                 &path,
                 json!({"action":"install","manifest":review.manifest,
-                    "signature":signature.to_vec(),"grants":parsed.permissions}),
+                    "signature":signature.to_vec(),"grants":parsed.permission_names()}),
             )
             .unwrap_or_else(|e| panic!("{id}: {e}"));
             let app = state
@@ -854,7 +842,7 @@ mod tests {
                 .map(|url| download(&url, 64).unwrap());
             let source = verify_release(&entry, &raw, signature).unwrap().manifest;
             let parsed = Manifest::parse(&source).unwrap();
-            super::super::validate_app(&parsed, &parsed.permissions, core.clone()).unwrap();
+            super::super::validate_app(&parsed, &parsed.permission_names(), core.clone()).unwrap();
             println!("Verified {} {}", entry.id, entry.release.version);
         }
     }

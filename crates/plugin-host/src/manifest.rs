@@ -7,9 +7,11 @@ use srelens_capability::{Predicate, ReferenceFormat, MAX_PREDICATES};
 use std::collections::{BTreeMap, BTreeSet};
 
 mod cards;
+mod network;
 mod settings;
 mod versions;
 pub use cards::*;
+pub use network::*;
 pub use settings::*;
 pub use versions::{MAX_BINDING_VERSIONS, MAX_PATH_OVERRIDES};
 
@@ -163,6 +165,11 @@ pub const API_FIELDS: &[ApiField] = &[
     // already 0.4 fields; these are the predicate paths API 0.3 had.
     api_0_4_filter("actions[].preconditions[].jsonPath"), // #541
     api_0_4_filter("actions[].availableWhen[].jsonPath"), // #541
+    // Brokered HTTP (#568), new in 0.4: the scoped `permissions` entry, whose two fields
+    // are always written together. `network.http` is granted only with hosts, so this
+    // also gates the capability as a binding target.
+    api_0_4("permissions[].hosts"),
+    api_0_4("permissions[].capability"),
 ];
 
 /// Rejects a field in `raw` that is missing from any of `versions`: every supported API
@@ -273,7 +280,9 @@ pub struct Manifest {
     #[serde(rename = "srelensApiVersion")]
     pub api_version: String,
     pub kind: ManifestKind,
-    pub permissions: Vec<String>,
+    /// The host capabilities the bindings target, each by id; `network.http`
+    /// with the hosts it may reach (#568).
+    pub permissions: Vec<Permission>,
     pub capabilities: Vec<Binding>,
     /// Declared mutations (#549). Absent in a manifest that only reads, and
     /// left out of the serialized form when empty so a manifest stored and
@@ -1256,7 +1265,7 @@ impl Manifest {
             self.permissions
                 .iter()
                 .enumerate()
-                .map(|(index, p)| (format!("permissions[{index}]"), p.as_str())),
+                .map(|(index, p)| (format!("permissions[{index}]"), p.capability())),
         );
         let mut targets = BTreeSet::new();
         for (index, binding) in self.capabilities.iter().enumerate() {
@@ -1807,6 +1816,7 @@ impl Manifest {
         self.status_problems(&mut problems, &join_ids);
         cards::card_problems(self, &mut problems);
         settings::setting_problems(self, &mut problems);
+        network::permission_problems(self, &mut problems);
         self.command_problems(&mut problems);
         self.link_problems(&mut problems);
         problems

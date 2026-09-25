@@ -1,7 +1,10 @@
 import { useContext, useState } from "react";
 import {
   CAPABILITY_CATALOG,
+  NETWORK_HTTP,
   clearExtensionSecret,
+  networkHosts,
+  permissionName,
   saveTextFile,
   type ExtensionChange,
   type ExtensionPreviousVersion,
@@ -10,6 +13,8 @@ import {
 } from "@srelens/core";
 import { CodeEditor } from "@srelens/ui-kit";
 import { ExtensionClusters } from "./ExtensionClusters";
+import { ExtensionNetwork } from "./ExtensionNetwork";
+import { hostText } from "./networkText";
 import { ExtensionControls } from "./ExtensionControls";
 import { escapeFormatCharacters } from "./displayText";
 import { extensionLabel } from "./inventoryStore";
@@ -18,6 +23,9 @@ const facts = new Map(CAPABILITY_CATALOG.map((capability) => [capability.id, cap
 
 /** What a granted host capability can do, from the backend registry's own annotations. */
 function describeGrant(id: string): string {
+  // The broker's own capability (#568): never offered to MCP or the catalog, since
+  // called directly it would fetch any URL. That is not "not provided".
+  if (id === NETWORK_HTTP) return "Read-only · GET requests to this app's hosts only, sent by the host";
   const fact = facts.get(id);
   if (!fact) return "Not provided by this host";
   return [
@@ -109,10 +117,14 @@ export function ExtensionDetails({
 
   // Rolling back grants the older manifest's permissions again, so it is reviewed like an
   // install whenever those differ from what is granted now.
-  const requested = rollback?.manifest.permissions ?? [];
+  const requested = (rollback?.manifest.permissions ?? []).map((permission) => permissionName(permission) ?? "");
   const added = requested.filter((permission) => !plugin.grants.includes(permission));
   const dropped = plugin.grants.filter((grant) => !requested.includes(grant));
-  const changesGrants = added.length > 0 || dropped.length > 0;
+  // Another host under the same `network.http` grant is new access too (#568).
+  const reaches = rollback ? networkHosts(rollback.manifest) : [];
+  const reachesNow = networkHosts(manifest);
+  const changesHosts = [...reaches].sort().join("\n") !== [...reachesNow].sort().join("\n");
+  const changesGrants = added.length > 0 || dropped.length > 0 || changesHosts;
 
   return (
     <section className="extension-details" aria-label={`${extensionLabel(plugin)} details`}>
@@ -122,6 +134,7 @@ export function ExtensionDetails({
       </p>
 
       <ExtensionClusters key={JSON.stringify(plugin.contexts ?? null)} plugin={plugin} busy={busy} change={change} />
+      <ExtensionNetwork plugin={plugin} busy={busy} change={change} />
 
       <h3>Granted capabilities</h3>
       <ul className="extension-grants" aria-label="Granted capabilities">
@@ -210,6 +223,8 @@ export function ExtensionDetails({
               <>
                 It requests: {requested.join(", ") || "no permissions"}.
                 {dropped.length > 0 && ` It no longer uses: ${dropped.join(", ")}.`}
+                {changesHosts &&
+                  ` It reaches: ${reaches.map((host) => hostText(rollback!.manifest, host)).join(", ") || "no hosts"}.`}
               </>
             ) : (
               "It uses the permissions granted now."

@@ -256,15 +256,22 @@ impl ExtensionStreams {
         )
         .await
         .map_err(|e| e.to_string())?;
-        if !state.plugins[index]
+        let Some(binding) = state.plugins[index]
             .manifest
             .capabilities
             .iter()
-            .any(|binding| binding.name == capability)
-        {
+            .find(|binding| binding.name == capability)
+        else {
             return Err(format!(
                 "App {} declares no reader named \"{capability}\"",
                 input.id
+            ));
+        };
+        // A request to another system is sent when a view asks for it, not on a
+        // timer that would keep calling someone else's API while the view is open.
+        if binding.target == srelens_plugin_host::NETWORK_HTTP {
+            return Err(format!(
+                "\"{capability}\" is a network.http request: read it with extensions.read, not a stream"
             ));
         }
         let owner = StreamOwner {
@@ -299,6 +306,9 @@ impl ExtensionStreams {
                             core.clone(),
                             cache.clone(),
                             snapshots.clone(),
+                            // `open` refuses a network.http binding, the one read that
+                            // takes a secret, so a stream is never handed the store.
+                            Arc::new(srelens_plugin_host::NoSecretStore),
                             ask.read(),
                         )
                         .await
@@ -880,6 +890,36 @@ mod tests {
         let mut unknown = payload;
         unknown["viewId"] = json!("x");
         assert!(serde_json::from_value::<OpenStreamIn>(unknown).is_err());
+    }
+
+    /// A `network.http` request (#568) goes out when a view asks for it, not on
+    /// a timer that keeps calling someone else's API while the view is open.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_network_http_request_is_not_streamed() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, _reg, streams) = setup(dir.path());
+        let releases = json!({
+            "id": "org.example.releases", "name": "Releases", "version": "0.1.0",
+            "srelensApiVersion": "^0.4", "kind": "declarative",
+            "permissions": [{"capability": "network.http", "hosts": ["api.github.com"]}],
+            "capabilities": [{"name": "latest", "title": "Latest release", "target": "network.http",
+                "arguments": {"url": "https://api.github.com", "path": "/repos/srelens/srelens/releases/latest"},
+                "inputs": []}],
+            "contributions": {"pages": [], "detailTabs": [], "detailLinks": []}
+        });
+        let state = configure(
+            &path,
+            json!({"action": "install", "manifest": releases.to_string(), "grants": ["network.http"]}),
+        )
+        .unwrap();
+        let revision = state.plugins[0].revision;
+        let mut input = request("org.example.releases", revision, "v", "extstream:x");
+        input["source"]["capability"] = json!("latest");
+        let refused = streams
+            .open(Arc::new(TestSink::default()), input)
+            .await
+            .unwrap_err();
+        assert!(refused.contains("is a network.http request"), "{refused}");
     }
 
     /// The real source end to end: the app's own reader, through

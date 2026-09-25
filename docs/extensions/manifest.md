@@ -42,7 +42,7 @@ before publishing.
 | `version` | Yes | The app's own SemVer version. |
 | `srelensApiVersion` | Yes | A SemVer range of extension API versions, for example `^0.4`. The fields marked **API 0.4** on this page need a range that admits only 0.4 or later; see [Versioning](specification.md#versioning). |
 | `kind` | Yes | `declarative`. No other kind is accepted. |
-| `permissions` | Yes | The exact host capability IDs the bindings use. |
+| `permissions` | Yes | The exact host capability IDs the bindings use. `network.http` is written `{ "capability": "network.http", "hosts": [...] }` (API 0.4). See [Network requests](#network-requests). |
 | `capabilities` | Yes | 1–32 bindings, below. |
 | `actions` | No | Up to 32 declared mutations, below. |
 | `settings` | No | **API 0.4.** Up to 32 typed settings, drawn as a host form. See [Settings](#settings). |
@@ -692,6 +692,7 @@ argument as settable, and only with a setting of a type the argument takes:
 |---|---|---|
 | `k8s.annotate` | `value` | `string`, `select` |
 | `k8s.setStatusCondition` | `message` | `string`, `select` |
+| `network.http` | `url` | `url` |
 
 Nothing else is settable. Every other argument decides what a request reads or where
 a write lands, which is the access a person reviewed at install, so a setting cannot
@@ -700,8 +701,9 @@ always has a value. A `secret-reference` is never interpolated.
 
 `${settings.` anywhere else is refused at install at the path that holds it: in any
 other argument, in a nested value or key of an argument, embedded in longer text
-(`"v-${settings.mode}"`), or anywhere outside `capabilities[i].arguments` and
-`actions[i].arguments`.
+(`"v-${settings.mode}"`), or anywhere outside `capabilities[i].arguments`,
+`actions[i].arguments` and a `network.http` permission's `hosts`, where a host may name
+a `url` setting ([Hosts](#hosts)).
 
 The same check (`PluginHost::interpolate`) runs three times:
 
@@ -766,9 +768,9 @@ entry in it, beside the MCP token and the provider API keys, keyed by
   settings; a settings save through `extensions.configure` on its own keeps them.
 - **Where it is used.** The host injects a secret only into an argument a host capability
   declares as a secret slot, and only for an app granted `extension.secretStore`
-  (`PluginHost::inject_secret`). No capability declares one yet; brokered HTTP headers
-  (#568) will be the first. A declarative app never sees the value, and a
-  `secret-reference` is never interpolated.
+  (`PluginHost::inject_secret`). The one slot is a `network.http` request's
+  `secretHeaders` (#568): see [Network requests](#network-requests). A declarative app
+  never sees the value, and a `secret-reference` is never interpolated.
 - **Web.** The web host keeps no app secrets yet (#522): `extension.secretStore` is refused
   there before dispatch.
 
@@ -781,13 +783,102 @@ turn its reference into a value; the stored secret itself is deleted, as it is w
 secret setting is dropped. A required setting left without a value makes the
 requests that interpolate it fail, naming the setting, until one is saved.
 
+## Network requests
+
+API 0.4. An app reaches a system outside the cluster — Prometheus, Grafana, GitHub —
+only through `network.http` (#568), and only the hosts it was granted. It never opens a
+connection itself: the host sends each request, and holds it to the allowlist below.
+
+```json
+"permissions": [
+  { "capability": "network.http", "hosts": ["${settings.prometheusUrl}", "api.github.com"] },
+  "extension.secretStore"
+],
+"settings": [
+  { "id": "prometheusUrl", "type": "url", "title": "Prometheus URL", "required": true },
+  { "id": "token", "type": "secret-reference", "title": "API token" }
+],
+"capabilities": [
+  { "name": "up", "title": "Targets up", "target": "network.http", "inputs": [],
+    "arguments": {
+      "url": "${settings.prometheusUrl}", "path": "/api/v1/query", "query": { "query": "up" },
+      "headers": { "Accept": "application/json" },
+      "secretHeaders": { "Authorization": { "secret": "token", "prefix": "Bearer " } } } }
+]
+```
+
+### Hosts
+
+`network.http` is the one permission written as an object, and it always is: a plain
+`"network.http"` is refused, and so is `hosts` on any other capability. It lists 1–16
+hosts, each once:
+
+| Entry | Reaches |
+|---|---|
+| `api.github.com` | That host, at the default port of the request's scheme. |
+| `prometheus.internal:9090` | That host, at that port only. |
+| `*.grafana.net` | Exactly one label before `grafana.net` (`myorg.grafana.net`, not `a.b.grafana.net` or `grafana.net`), as a certificate wildcard does. The wildcard is the whole leftmost label and needs two labels after it, so `*.com`, `api.*.com` and `foo*.bar.com` are refused. |
+| `127.0.0.1`, `[::1]:9090` | That IP address, at the default or the named port. |
+| `${settings.<id>}` | The host and port of the URL saved in that `url` setting (or its default), read again on every request. While the setting has no value it reaches nothing. |
+
+A literal entry is lowercase ASCII (write an internationalized name as punycode), with
+no scheme, path or trailing dot. A setting reference is the whole entry and names a
+declared `url` setting. Problems are reported at `permissions[i].hosts[j]`.
+
+### A request
+
+A `network.http` binding is one fixed GET. It takes no `inputs` in API 0.4; templated
+queries are [#569](https://github.com/srelens/srelens/issues/569)'s.
+
+| Argument | Meaning |
+|---|---|
+| `url` | Required. `https://…`, or `http://` to this computer (below). May be `"${settings.<id>}"` for a `url` setting. A literal URL must be on the app's own hosts. |
+| `path` | Appended to the URL's path. Starts with `/`, at most 2048 characters, with no `.` or `..` segment (encoded ones included), query, fragment, backslash or space. |
+| `query` | Up to 32 parameters, added to the URL's own. |
+| `headers` | Literal headers. `Authorization` and `Cookie` are refused here, since a manifest is public, and so are the headers the host sets itself (`Host`, `Content-Length`, `Connection`, `Proxy-*` and the like). |
+| `secretHeaders` | Headers filled from secrets: `{ "<Header>": { "secret": "<setting id>", "prefix": "Bearer " } }`. The setting is a declared `secret-reference`; `prefix` is up to 32 printable ASCII characters. |
+
+Up to 32 headers in all, and a request URL of at most 8 KiB.
+
+### What the host holds a request to
+
+On every request, before anything is sent and again at every redirect:
+
+- **HTTPS only.** Plain `http` reaches only this computer (`localhost`, `127.0.0.0/8`,
+  `::1`), and only once a person turns on **Allow plain HTTP to this computer
+  (loopback)** in the app's details in Settings → Apps — for a service with no HTTPS,
+  such as a Prometheus behind `kubectl port-forward`. It is off for every app until then,
+  and it is per app, so allowing it for one does not let another reach a local service.
+- **The allowlist.** The URL's host and port must match an entry, resolved from the
+  manifest and the app's saved settings at that moment.
+- **Redirects.** Each one is checked against both rules again, at most four. A request
+  carrying a secret header follows no redirect to another origin (scheme, host and
+  port), since a server can redirect anywhere and a header is not tied to where it
+  goes.
+- **Limits.** 10 s to connect, 20 s for the whole request, 4 MiB of response.
+- **Secrets last.** The secret for each `secretHeaders` entry is read from the host's
+  secret store only after the request has passed every rule above, and only through
+  `PluginHost::inject_secret`: the app must be granted `extension.secretStore`, and the
+  setting must hold the host's own reference for it. The value goes into a sensitive
+  header and nowhere else.
+
+The answer is `{ "status", "contentType", "body" }`: the body parsed when the server says
+it is JSON, as text otherwise. A status outside 2xx is an error that names it. No error
+repeats the URL, its host or a secret; a URL may be a setting's value.
+
+`extensions.read` sends a request, with every check an app read makes: the app enabled,
+at the revision the view knows, on a cluster it is enabled for, with its grants. A read
+stream (`extensions.streams`) refuses a `network.http` binding, so nothing calls another
+system on a timer.
+
 ## Rules the desktop app adds
 
 The desktop app accepts a narrower surface than the developer broker:
 
-- Targets are `k8s.listCustomResource` or `k8s.listEvents`, and the target must be
-  read-only with no confirmation, sensitive or destructive annotation.
-- Inputs are only `context` and `namespace`.
+- Targets are `k8s.listCustomResource`, `k8s.listEvents` or `network.http`. A reader
+  target must be read-only with no confirmation, sensitive or destructive annotation;
+  `network.http` is held to [its own rules](#network-requests).
+- A reader's inputs are only `context` and `namespace`; a `network.http` binding takes none.
 - A `k8s.listCustomResource` binding fixes a non-empty `group`, `version`, `plural`
   and `kind` (letters, digits, `.` and `-`) and a boolean `namespaced`, or lists
   `versions` held to the same characters instead of fixing `version`. It must accept

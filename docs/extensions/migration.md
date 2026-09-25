@@ -40,6 +40,14 @@ versions** restores one:
   again means installing the newer release.
 - The app gets a new revision, so open views refresh against the restored version.
 
+## Plain HTTP to this computer (#568)
+
+An installed app records **Allow plain HTTP to this computer** as `allowLoopbackHttp`,
+written only while it is on, and kept across the app's updates and rollbacks. An
+inventory written without it reads as off. A host from before #568 cannot read an
+inventory in which an app has it on, since installed apps are read strictly: turn it off
+before going back to an older srelens.
+
 ## Reserved IDs
 
 Since #528, IDs under `org.srelens.` install only with the srelens signature:

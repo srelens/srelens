@@ -766,6 +766,10 @@
     "Installed": {
       "additionalProperties": false,
       "properties": {
+        "allowLoopbackHttp": {
+          "description": "Whether the app's `network.http` requests may use plain HTTP to this computer (loopback), such as a Prometheus behind `kubectl port-forward` (#568). Off until a person turns it on for this app; kept across updates, as `contexts` is.",
+          "type": "boolean"
+        },
         "contexts": {
           "description": "The keys of the kubeconfig contexts the app is enabled for (`ResolvedContext::key`: `{file}#{name}` with `#` and `%` encoded in each part, as `k8s.listContexts` reports under `key`); `None` is every cluster. A context's display name is not identity: it changes when another kubeconfig declares the same name (#265). A stable ID is not either: `a` + `b#c` and `a#b` + `c` share one (#623).",
           "items": {
@@ -1001,8 +1005,9 @@
           "type": "string"
         },
         "permissions": {
+          "description": "The host capabilities the bindings target, each by id; `network.http` with the hosts it may reach (#568).",
           "items": {
-            "type": "string"
+            "$ref": "#/definitions/Permission"
           },
           "type": "array"
         },
@@ -1124,6 +1129,23 @@
         "title"
       ],
       "type": "object"
+    },
+    "Permission": {
+      "anyOf": [
+        {
+          "description": "A host capability the manifest binds, by id.",
+          "type": "string"
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ScopedPermission"
+            }
+          ],
+          "description": "A capability granted with a scope: today only `network.http`."
+        }
+      ],
+      "description": "One `permissions` entry: a host capability's id, or `network.http` with the hosts it may reach.\n\nA plain entry is stored as the string it was written as, so a manifest signed before scoped permissions existed still round-trips to its bytes."
     },
     "Predicate": {
       "additionalProperties": false,
@@ -1250,6 +1272,27 @@
         "match",
         "relation",
         "to"
+      ],
+      "type": "object"
+    },
+    "ScopedPermission": {
+      "additionalProperties": false,
+      "description": "`{\"capability\": \"network.http\", \"hosts\": [...]}`.",
+      "properties": {
+        "capability": {
+          "type": "string"
+        },
+        "hosts": {
+          "description": "Where the capability may reach: `host`, `host:port`, `*.example.com` (one subdomain label), an IP literal (`[::1]` for IPv6), or `${settings.<id>}` naming a `url` setting, whose host and port are read from the saved value on every request.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "capability",
+        "hosts"
       ],
       "type": "object"
     },

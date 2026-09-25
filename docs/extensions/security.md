@@ -11,6 +11,11 @@ mitigation and the risk that remains.
 - **No ambient access.** Apps never receive kubeconfig, tokens, files or network
   access. Every call goes through the broker with fixed arguments, under the selected
   cluster's RBAC ([permissions.md](permissions.md)).
+- **Network requests are brokered.** An app that requests `network.http` reaches only
+  the hosts it lists and the person approved, over HTTPS (plain HTTP only to this
+  computer, per app, when a person allows it). The host sends each request and checks
+  it and every redirect; a secret goes into a header by reference and never leaves for
+  another origin ([manifest.md](manifest.md#network-requests)).
 - **Consent cannot be weakened.** Bindings inherit the host capability's annotations.
   Mutating operations stay behind the MCP consent gate, and every UI action opens a
   host-owned review.
@@ -56,4 +61,3 @@ Declarative support does not claim these protections:
 - signing key rotation ([#560](https://github.com/srelens/srelens/issues/560))
 - revocation and a kill switch ([#561](https://github.com/srelens/srelens/issues/561))
 - executable apps and OS sandboxing ([#521](https://github.com/srelens/srelens/issues/521))
-- a permission diff on update ([#554](https://github.com/srelens/srelens/issues/554))

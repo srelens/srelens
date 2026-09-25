@@ -7,7 +7,9 @@ cluster's RBAC.
 ## Declaring and granting
 
 - `permissions` lists the exact host capability IDs the manifest's bindings target,
-  no more and no fewer (see [manifest.md](manifest.md#capability-bindings)).
+  no more and no fewer (see [manifest.md](manifest.md#capability-bindings)). One entry is
+  scoped: `network.http` is written with the hosts it may reach (API 0.4, #568).
+  The grant names the capability, and the hosts are what the review shows it covers.
 - A declaration is not an authorization. The host supplies grants separately:
   installation shows the requested permissions for review, and **Install and grant
   permissions** grants that list.
@@ -17,10 +19,12 @@ cluster's RBAC.
   columns (with their JSON paths); for each `k8s.listEvents` reader the API groups its
   dashboards show; for anything else its fixed arguments. **View manifest** opens the
   full manifest before installing, whether it came from the Catalog or was pasted.
-- Installing a new version of an installed app shows its permissions again. The
-  application never silently replaces a manifest or expands its grants. A
-  permission diff on update is planned
-  ([#554](https://github.com/srelens/srelens/issues/554)).
+- Installing a new version of an installed app shows its permissions again, with what
+  changed against the installed version first
+  ([#554](https://github.com/srelens/srelens/issues/554)). Another host for
+  `network.http`, or another declaration of a url setting a host is read from, is
+  changed access even under the same grant. The application never silently replaces a
+  manifest or expands its grants.
 
 ## What an app may read
 
@@ -47,6 +51,26 @@ version, plural, kind and scope, plus explicitly granted `k8s.listEvents` reader
 - The app receives no kubeconfig or token.
 - Reads remain subject to the selected cluster's RBAC. RBAC and discovery failures are
   shown as errors, never as empty results.
+
+## What an app may reach
+
+Nothing outside the cluster, unless it requests `network.http` (#568), and then only
+the hosts it lists: names, `host:port`, one-label subdomain wildcards, IP addresses, or
+the URL a person saves in one of the app's `url` settings. The host sends each request,
+a fixed GET, and holds it and every redirect to that allowlist:
+
+- HTTPS only. Plain HTTP reaches only this computer (loopback), and only after a person
+  turns on **Allow plain HTTP to this computer** in that app's details. The switch is
+  per app, off by default, and set through the confirm-gated `extensions.configure`.
+- A credential goes only by reference: a `secretHeaders` entry names one of the app's
+  `secret-reference` settings, which needs the `extension.secretStore` grant, and the
+  host puts the value into the header as the request is sent. A request carrying one
+  follows no redirect to another origin.
+- Bounded time and size, and no error repeats the URL or a secret.
+
+`network.http` is the broker's alone: it is not in the capability catalog or MCP, so
+nothing can call it except through an installed app's binding. See
+[manifest.md](manifest.md#network-requests).
 
 ## What an app may write
 
@@ -96,7 +120,8 @@ raises a binding's row and never lowers it.
 
 The app-level operations follow the normal MCP consent gate:
 
-- `extensions.configure` (install, enable, remove, settings, rollback, clusters) is mutating,
+- `extensions.configure` (install, enable, remove, settings, rollback, clusters, and
+  plain HTTP to this computer for an app, `loopbackHttp`) is mutating,
   `medium` impact. A rollback takes the grants explicitly, like an install, because it
   grants the restored version's permissions again.
 - `extension.secretStore` (set or clear an app's secret) is mutating, sensitive and

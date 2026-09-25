@@ -538,8 +538,9 @@ pub fn build_registry_app_streams_and_secrets(
     let mut app_streams = None;
     if let Some(path) = settings_path {
         let mut core = reg.clone();
-        // Broker-only: kept out of `reg`, so neither the catalog nor MCP offers it.
-        core.register(extensions::crd::check_capability(cache.clone()));
+        for capability in broker_only(cache.clone()) {
+            core.register(capability);
+        }
         let core = Arc::new(core);
         app_streams = Some(extensions::register_with_secrets(
             &mut reg,
@@ -552,6 +553,16 @@ pub fn build_registry_app_streams_and_secrets(
     }
 
     (reg, app_streams)
+}
+
+/// The capabilities only the extension broker calls. Kept out of the registry the
+/// catalog and MCP are built from, so neither offers them: the CRD check an app read
+/// makes first, and `network.http` (#568), which called directly would fetch any URL.
+fn broker_only(cache: Arc<ClientCache>) -> Vec<Capability> {
+    vec![
+        extensions::crd::check_capability(cache),
+        extensions::network::capability(),
+    ]
 }
 
 /// Build the registry using a caller-provided client cache with the host's
@@ -738,15 +749,26 @@ mod tests {
         }
     }
 
-    /// #543: no current consumer can be handed a secret. No host capability
-    /// declares a secret slot, and no settable position takes a
-    /// `secret-reference` — so brokered HTTP (#568), the first that will,
-    /// has to change this test on purpose.
+    /// #543, then #568: the one place the host may put an app's secret is the
+    /// `secretHeaders` of `network.http`, and that capability is the broker's
+    /// alone. Nothing the catalog or MCP offers declares a slot, and no
+    /// settable position anywhere takes a `secret-reference`. Another slot has
+    /// to change this test on purpose.
     #[test]
-    fn no_host_capability_takes_a_secret_today() {
+    fn only_the_brokers_network_http_takes_a_secret() {
         let reg = build_registry();
-        for capability in reg.entries() {
-            assert!(capability.secret_slots.is_empty(), "{} declares a secret slot", capability.id);
+        let broker = broker_only(ClientCache::new_many(vec![]));
+        for capability in reg.entries().chain(broker.iter()) {
+            let expected: &[&str] = if capability.id == srelens_plugin_host::NETWORK_HTTP {
+                &["secretHeaders"]
+            } else {
+                &[]
+            };
+            assert_eq!(
+                capability.secret_slots, expected,
+                "{} secret slots",
+                capability.id
+            );
             for position in &capability.settable {
                 assert!(
                     !position.accepts.contains(&srelens_capability::settings::SettingType::SecretReference),
@@ -756,6 +778,23 @@ mod tests {
                 );
             }
         }
+        // Called directly, network.http would fetch any URL: neither the catalog
+        // nor MCP may offer it, on any build.
+        assert!(reg.get(srelens_plugin_host::NETWORK_HTTP).is_none());
+        assert!(capability_catalog()
+            .iter()
+            .all(|entry| entry.id != srelens_plugin_host::NETWORK_HTTP));
+        let dir = tempfile::tempdir().unwrap();
+        let desktop = build_registry_with_paths_and_settings(
+            ClientCache::new_many(vec![]),
+            vec![],
+            Some(dir.path().join("settings.json")),
+        );
+        assert!(desktop.get(srelens_plugin_host::NETWORK_HTTP).is_none());
+        let tools = srelens_mcp::McpServer::new(Arc::new(desktop)).list_tools();
+        assert!(tools
+            .iter()
+            .all(|tool| tool.name != srelens_plugin_host::NETWORK_HTTP));
     }
 
     /// The desktop hands its vault to the registry; every other build says

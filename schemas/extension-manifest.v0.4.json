@@ -970,6 +970,23 @@
       ],
       "type": "object"
     },
+    "Permission": {
+      "anyOf": [
+        {
+          "description": "A host capability the manifest binds, by id.",
+          "type": "string"
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ScopedPermission"
+            }
+          ],
+          "description": "A capability granted with a scope: today only `network.http`."
+        }
+      ],
+      "description": "One `permissions` entry: a host capability's id, or `network.http` with the hosts it may reach.\n\nA plain entry is stored as the string it was written as, so a manifest signed before scoped permissions existed still round-trips to its bytes."
+    },
     "Predicate": {
       "additionalProperties": false,
       "description": "One declared check about the object an action would write.\n\nExactly one operator per predicate:\n\n```json {\"jsonPath\": \".spec.suspend\", \"notEquals\": true, \"reason\": \"Resume this resource before requesting reconciliation\"} ```",
@@ -1049,6 +1066,27 @@
         "match",
         "relation",
         "to"
+      ],
+      "type": "object"
+    },
+    "ScopedPermission": {
+      "additionalProperties": false,
+      "description": "`{\"capability\": \"network.http\", \"hosts\": [...]}`.",
+      "properties": {
+        "capability": {
+          "type": "string"
+        },
+        "hosts": {
+          "description": "Where the capability may reach: `host`, `host:port`, `*.example.com` (one subdomain label), an IP literal (`[::1]` for IPv6), or `${settings.<id>}` naming a `url` setting, whose host and port are read from the saved value on every request.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "capability",
+        "hosts"
       ],
       "type": "object"
     },
@@ -1363,8 +1401,9 @@
       "type": "string"
     },
     "permissions": {
+      "description": "The host capabilities the bindings target, each by id; `network.http` with the hosts it may reach (#568).",
       "items": {
-        "type": "string"
+        "$ref": "#/definitions/Permission"
       },
       "type": "array"
     },

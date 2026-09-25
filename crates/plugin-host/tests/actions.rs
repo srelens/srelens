@@ -54,7 +54,7 @@ fn install(value: &Value) -> Result<Registry, String> {
             .collect::<Vec<_>>()
             .join("\n")
     })?;
-    let grants = manifest.permissions.clone();
+    let grants = manifest.permission_names();
     let mut reg = Registry::new();
     host.register(&mut reg, manifest, &grants)?;
     Ok(reg)
@@ -292,7 +292,7 @@ async fn builtin_bindings_keep_host_identity_safety_and_revocation() {
         let host = PluginHost::new(Arc::new(core));
         let mut registry = Registry::new();
         let registration = host
-            .register(&mut registry, parsed.clone(), &parsed.permissions)
+            .register(&mut registry, parsed.clone(), &parsed.permission_names())
             .unwrap();
         let id = "plugin/org.example.gitops/refresh";
         let cap = registry.get(id).unwrap();

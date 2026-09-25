@@ -35,7 +35,7 @@ fn declared() -> Value {
 
 fn install(path: &Path, source: String) -> Inventory {
     // Granted exactly what the manifest requests.
-    let grants = Manifest::parse(&source).unwrap().permissions;
+    let grants = Manifest::parse(&source).unwrap().permission_names();
     configure(
         path,
         json!({"action":"install","manifest":source,"grants":grants}),
@@ -415,7 +415,7 @@ fn the_annotation_primitive_decides_what_setting_may_fill_its_value() {
     value["settings"] = refresh_mode();
     value["actions"][0]["arguments"]["key"] = json!("${settings.refreshMode}");
     let manifest = Manifest::parse(&value.to_string()).unwrap();
-    let problems = validate_app(&manifest, &manifest.permissions.clone(), fake_core())
+    let problems = validate_app(&manifest, &manifest.permission_names(), fake_core())
         .err()
         .unwrap();
     assert!(
@@ -471,7 +471,7 @@ fn the_access_review_names_the_setting_an_action_writes() {
         .unwrap()
         .push(json!({"value":"sync","label":"Sync"}));
     let after = manifest(widened);
-    let grants = before.permissions.clone();
+    let grants = before.permission_names();
     let diff = permission_diff(Some((&before, &grants, 1)), &after, &grants);
     assert!(
         diff.added
