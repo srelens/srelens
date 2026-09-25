@@ -2495,7 +2495,10 @@ mod tests {
         let contexts = listed["contexts"].as_array().unwrap();
         assert_eq!(contexts[0]["stableId"], contexts[1]["stableId"]);
         let pinned: Vec<Value> = contexts.iter().map(|c| c["pinnedId"].clone()).collect();
-        assert!(pinned.iter().all(Value::is_string) && pinned[0] != pinned[1], "{pinned:?}");
+        assert!(
+            pinned.iter().all(Value::is_string) && pinned[0] != pinned[1],
+            "{pinned:?}"
+        );
         let revision = install(&path, core.clone());
         let mut reg = Registry::new();
         let cache = srelens_kube::client_cache::ClientCache::new_many(vec![first, second]);
