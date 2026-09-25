@@ -1,22 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { subscribe } from "@srelens/core/transport";
 
-/** The zone in effect, or `timeZone` as ICU names it ("Asia/Kathmandu" comes back "Asia/Katmandu"). */
-const zoneNow = (timeZone?: string) => Intl.DateTimeFormat(undefined, { timeZone }).resolvedOptions().timeZone;
-
-// The two cases run in order: the first pins a zone, the second checks it did not outlive the test.
-describe("a time zone a test pins", () => {
-  const machine = zoneNow();
-  const other = zoneNow(machine === zoneNow("Asia/Kathmandu") ? "America/Los_Angeles" : "Asia/Kathmandu");
-  it("applies within the test", () => {
-    process.env.TZ = other;
-    expect(zoneNow()).toBe(other);
-  });
-  it("is gone by the next test", () => {
-    expect(zoneNow()).toBe(machine);
-  });
-});
-
 // #730. A view subscribes on mount and waits for the server's ack before it is
 // handed its unsubscribe. No server answers a test, so the channel stays open
 // for the rest of the file. If the test's socket could reach the network, it

@@ -39,6 +39,8 @@ export default defineConfig({
         "apps/desktop/src/components/PodTerminal.tsx",
         "packages/core/src/index.ts",
         "packages/core/src/react.ts",
+        // Test support the setup files install, not app code.
+        "packages/core/src/testing/**",
         "packages/ui-kit/src/test-setup.ts",
         "packages/ui-next/src/test-setup.ts",
       ],

@@ -1,5 +1,10 @@
 import { afterEach } from "vitest";
 import { cleanup } from "@testing-library/react";
+import { installInertWebSocket } from "@srelens/core/testing/inertWebSocket";
+
+// No component test reaches the network: a refused socket left the web
+// transport reconnecting after jsdom was gone (#730). See `InertWebSocket`.
+installInertWebSocket();
 
 // Unmount React trees between tests so repeated render() calls don't stack —
 // without this a query for a button finds every previous test's copy too.

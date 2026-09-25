@@ -10,7 +10,8 @@
     "./platform": "./src/transport/platform.ts",
     "./webTransport": "./src/transport/webTransport.ts",
     "./wsClient": "./src/transport/wsClient.ts",
-    "./lib/*": "./src/lib/*.ts"
+    "./lib/*": "./src/lib/*.ts",
+    "./testing/inertWebSocket": "./src/testing/inertWebSocket.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
