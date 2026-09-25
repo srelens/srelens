@@ -1,9 +1,9 @@
 {
-  "$schema": "https://raw.githubusercontent.com/srelens/srelens/main/schemas/extension-manifest.v0.3.json",
+  "$schema": "https://raw.githubusercontent.com/srelens/srelens/main/schemas/extension-manifest.v0.4.json",
   "id": "org.srelens.argocd",
   "name": "Argo CD",
   "version": "0.4.0",
-  "srelensApiVersion": "^0.3",
+  "srelensApiVersion": "^0.4",
   "kind": "declarative",
   "permissions": [
     "k8s.listCustomResource",

@@ -153,7 +153,6 @@
         },
         "limit": {
           "description": "How many rows to show, 1–10; by the card's size when absent.",
-          "format": "uint",
           "minimum": 0.0,
           "type": [
             "integer",
@@ -763,93 +762,6 @@
       ],
       "type": "object"
     },
-    "Installed": {
-      "additionalProperties": false,
-      "properties": {
-        "contexts": {
-          "description": "The keys of the kubeconfig contexts the app is enabled for (`ResolvedContext::key`: `{file}#{name}` with `#` and `%` encoded in each part, as `k8s.listContexts` reports under `key`); `None` is every cluster. A context's display name is not identity: it changes when another kubeconfig declares the same name (#265). A stable ID is not either: `a` + `b#c` and `a#b` + `c` share one (#623).",
-          "items": {
-            "type": "string"
-          },
-          "type": [
-            "array",
-            "null"
-          ]
-        },
-        "enabled": {
-          "type": "boolean"
-        },
-        "grants": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "history": {
-          "description": "The versions this one replaced, newest first, at most [`KEPT_VERSIONS`].",
-          "items": {
-            "$ref": "#/definitions/PreviousVersion"
-          },
-          "type": "array"
-        },
-        "installedAt": {
-          "description": "When this version was installed, in seconds since the Unix epoch.",
-          "format": "uint64",
-          "minimum": 0.0,
-          "type": "integer"
-        },
-        "manifest": {
-          "$ref": "#/definitions/Manifest"
-        },
-        "policyBlocked": {
-          "description": "Recomputed policy denial, distinct from a failed publisher verification.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "quarantined": {
-          "description": "Why this host refused to trust the stored entry when loading it. Recomputed on every read, reported to the UI, and never written to disk.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "revision": {
-          "format": "uint64",
-          "minimum": 0.0,
-          "type": "integer"
-        },
-        "settings": {
-          "additionalProperties": true,
-          "type": "object"
-        },
-        "signatureProof": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/SignatureProof"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "source": {
-          "$ref": "#/definitions/Source"
-        }
-      },
-      "required": [
-        "enabled",
-        "grants",
-        "history",
-        "installedAt",
-        "manifest",
-        "revision",
-        "settings",
-        "source"
-      ],
-      "type": "object"
-    },
     "Join": {
       "additionalProperties": false,
       "description": "A single granted custom-resource list used to enrich native table rows.",
@@ -964,73 +876,6 @@
         "references"
       ],
       "type": "string"
-    },
-    "Manifest": {
-      "additionalProperties": false,
-      "properties": {
-        "$schema": {
-          "description": "Editor metadata: the JSON Schema the manifest is written against. The host ignores it; it is the one key allowed that is not part of the contract.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "actions": {
-          "description": "Declared mutations (#549). Absent in a manifest that only reads, and left out of the serialized form when empty so a manifest stored and signed without it still round-trips to its own bytes.",
-          "items": {
-            "$ref": "#/definitions/ActionBinding"
-          },
-          "type": "array"
-        },
-        "capabilities": {
-          "items": {
-            "$ref": "#/definitions/Binding"
-          },
-          "type": "array"
-        },
-        "contributions": {
-          "$ref": "#/definitions/Contributions"
-        },
-        "id": {
-          "type": "string"
-        },
-        "kind": {
-          "$ref": "#/definitions/ManifestKind"
-        },
-        "name": {
-          "type": "string"
-        },
-        "permissions": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "settings": {
-          "description": "Typed settings (#542), drawn as a host form and held to these declarations on every save. Left out of the stored form when empty.",
-          "items": {
-            "$ref": "#/definitions/Setting"
-          },
-          "type": "array"
-        },
-        "srelensApiVersion": {
-          "type": "string"
-        },
-        "version": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "capabilities",
-        "contributions",
-        "id",
-        "kind",
-        "name",
-        "permissions",
-        "srelensApiVersion",
-        "version"
-      ],
-      "type": "object"
     },
     "ManifestKind": {
       "description": "Only data is executable in this first host. Code-bearing manifests must go through the future sandboxed runtime, never through a permissive fallback.",
@@ -1164,52 +1009,6 @@
       ],
       "type": "object"
     },
-    "PreviousVersion": {
-      "additionalProperties": false,
-      "description": "A version an update replaced, kept so it can be restored.",
-      "properties": {
-        "grants": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "installedAt": {
-          "format": "uint64",
-          "minimum": 0.0,
-          "type": "integer"
-        },
-        "manifest": {
-          "$ref": "#/definitions/Manifest"
-        },
-        "revision": {
-          "format": "uint64",
-          "minimum": 0.0,
-          "type": "integer"
-        },
-        "signatureProof": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/SignatureProof"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "source": {
-          "$ref": "#/definitions/Source"
-        }
-      },
-      "required": [
-        "grants",
-        "installedAt",
-        "manifest",
-        "revision",
-        "source"
-      ],
-      "type": "object"
-    },
     "ReferenceFormat": {
       "description": "A reference format the host knows how to check against the object that carries it (#541 review).\n\nA condition compares against literals, so it cannot say \"this annotation names the resource it is on\". An ownership claim needs exactly that — a copied annotation must not make a resource look owned — so the host implements the check for each format, exactly as the owning controller does, rather than offering a template language.",
       "oneOf": [
@@ -1253,25 +1052,6 @@
       ],
       "type": "object"
     },
-    "SecretStoreState": {
-      "description": "Whether the host can store a secret now, as `extensions.list` reports it.",
-      "properties": {
-        "available": {
-          "type": "boolean"
-        },
-        "reason": {
-          "description": "Why not, in the host's words, when it cannot.",
-          "type": [
-            "string",
-            "null"
-          ]
-        }
-      },
-      "required": [
-        "available"
-      ],
-      "type": "object"
-    },
     "Setting": {
       "additionalProperties": false,
       "description": "One setting an app declares. The host renders it as a form field and checks every value saved into it.",
@@ -1295,7 +1075,6 @@
         },
         "maxLength": {
           "description": "The most characters a `string` setting takes, 1–4096 (1024 when absent); refused on other types.",
-          "format": "uint32",
           "minimum": 0.0,
           "type": [
             "integer",
@@ -1428,40 +1207,10 @@
         }
       ]
     },
-    "SignatureProof": {
-      "additionalProperties": false,
-      "properties": {
-        "manifest": {
-          "type": "string"
-        },
-        "signature": {
-          "items": {
-            "format": "uint8",
-            "minimum": 0.0,
-            "type": "integer"
-          },
-          "type": "array"
-        }
-      },
-      "required": [
-        "manifest",
-        "signature"
-      ],
-      "type": "object"
-    },
-    "Source": {
-      "description": "Where an installed version came from. The host decides: `catalog` means the exact bytes of a release listed in the cached catalog, whoever submitted them.",
-      "enum": [
-        "local",
-        "catalog"
-      ],
-      "type": "string"
-    },
     "StatusColumns": {
       "additionalProperties": false,
       "properties": {
         "progressing": {
-          "format": "uint",
           "minimum": 0.0,
           "type": [
             "integer",
@@ -1469,12 +1218,10 @@
           ]
         },
         "ready": {
-          "format": "uint",
           "minimum": 0.0,
           "type": "integer"
         },
         "suspended": {
-          "format": "uint",
           "minimum": 0.0,
           "type": [
             "integer",
@@ -1583,43 +1330,68 @@
     }
   },
   "properties": {
-    "allowUnsignedApps": {
-      "default": false,
-      "type": "boolean"
+    "$schema": {
+      "description": "Editor metadata: the JSON Schema the manifest is written against. The host ignores it; it is the one key allowed that is not part of the contract.",
+      "type": [
+        "string",
+        "null"
+      ]
     },
-    "nextRevision": {
-      "format": "uint64",
-      "minimum": 0.0,
-      "type": "integer"
-    },
-    "plugins": {
+    "actions": {
+      "description": "Declared mutations (#549). Absent in a manifest that only reads, and left out of the serialized form when empty so a manifest stored and signed without it still round-trips to its own bytes.",
       "items": {
-        "$ref": "#/definitions/Installed"
+        "$ref": "#/definitions/ActionBinding"
       },
       "type": "array"
     },
-    "schemaVersion": {
-      "format": "uint32",
-      "minimum": 0.0,
-      "type": "integer"
+    "capabilities": {
+      "items": {
+        "$ref": "#/definitions/Binding"
+      },
+      "type": "array"
     },
-    "secretStore": {
-      "anyOf": [
-        {
-          "$ref": "#/definitions/SecretStoreState"
-        },
-        {
-          "type": "null"
-        }
-      ],
-      "description": "Whether the host can store an app's secret now (#543), as `extensions.list` reports it. Recomputed for every answer, ignored when read from disk and never written there."
+    "contributions": {
+      "$ref": "#/definitions/Contributions"
+    },
+    "id": {
+      "type": "string"
+    },
+    "kind": {
+      "$ref": "#/definitions/ManifestKind"
+    },
+    "name": {
+      "type": "string"
+    },
+    "permissions": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "settings": {
+      "description": "Typed settings (#542), drawn as a host form and held to these declarations on every save. Left out of the stored form when empty.",
+      "items": {
+        "$ref": "#/definitions/Setting"
+      },
+      "type": "array"
+    },
+    "srelensApiVersion": {
+      "type": "string"
+    },
+    "version": {
+      "type": "string"
     }
   },
   "required": [
-    "nextRevision",
-    "plugins",
-    "schemaVersion"
+    "capabilities",
+    "contributions",
+    "id",
+    "kind",
+    "name",
+    "permissions",
+    "srelensApiVersion",
+    "version"
   ],
-  "title": "Inventory",
+  "title": "Manifest",
   "type": "object"
 }

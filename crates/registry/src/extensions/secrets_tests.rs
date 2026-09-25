@@ -340,9 +340,12 @@ async fn setting_a_secret_needs_the_secret_store_grant() {
 
 /// Review of #543: #691 shipped in the pre-release `srelens-v0.15.1-185`,
 /// where a manifest could declare a `secret-reference` without requesting
-/// `extension.secretStore`. Such an app, already installed, keeps working —
-/// it is not quarantined on upgrade — and simply cannot keep a secret until
-/// it is reinstalled with the permission. A new install is held to the rule.
+/// `extension.secretStore`. An app that requires `^0.4` without the
+/// permission keeps working — it is not quarantined on upgrade — and simply
+/// cannot keep a secret until it is reinstalled with the permission. What
+/// v0.15.1-185 wrote was `^0.3`, though, which has no `settings` (#709), so
+/// that app is quarantined with the version it needs. A new install is held
+/// to the rule.
 #[tokio::test]
 async fn an_app_installed_before_the_permission_existed_keeps_working() {
     let dir = tempfile::tempdir().unwrap();
@@ -350,8 +353,7 @@ async fn an_app_installed_before_the_permission_existed_keeps_working() {
     let store = Arc::new(MemoryStore::default());
     let reg = registry(&path, store.clone());
     install(&reg, with_secret(declared())).await;
-    // The inventory as v0.15.1-185 wrote it: the setting, but no permission
-    // and no grant.
+    // The setting, but no permission and no grant.
     let mut raw: Value = serde_json::from_str(&on_disk(&path)).unwrap();
     raw["plugins"][0]["manifest"]["permissions"] = json!(["k8s.listCustomResource"]);
     raw["plugins"][0]["grants"] = json!(["k8s.listCustomResource"]);
@@ -385,6 +387,16 @@ async fn an_app_installed_before_the_permission_existed_keeps_working() {
         refused.contains("permissions") && refused.contains(SECRET_STORE_PERMISSION),
         "{refused}"
     );
+
+    // The inventory as v0.15.1-185 wrote it, under the only range it had.
+    raw["plugins"][0]["manifest"]["srelensApiVersion"] = json!("^0.3");
+    fs::write(&path, raw.to_string()).unwrap();
+    let app = listed(&reg).await["plugins"][0].clone();
+    let reason = app["quarantined"].as_str().unwrap_or_default();
+    assert!(reason.contains("`settings` requires API 0.4.0"), "{app}");
+    assert_eq!(app["enabled"], false);
+    assert!(set(&reg, "token").await.is_err());
+    assert!(store.keys().is_empty());
 }
 
 /// An app this host no longer trusts keeps nothing new, whatever it was
