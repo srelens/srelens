@@ -114,7 +114,30 @@ const DISALLOWED_TOOLS: &str = "Bash Read Edit Write NotebookEdit Glob Grep WebF
 /// local path and makes no mention of srelens's own source, repo, or
 /// branches — it must not leak anything about the machine srelens runs on,
 /// only the cluster-operating role the agent is boxed into.
-pub const BASE_SYSTEM_PROMPT: &str = "You are srelens's Kubernetes assistant. Investigate and operate the selected cluster(s) ONLY through the srelens MCP tools (the mcp__srelens__* tools). You have no access to the local filesystem, shell, git, or network beyond those tools; do not attempt to read files or run commands. Be concise. Anything that changes cluster state will prompt the user for confirmation.";
+pub const BASE_SYSTEM_PROMPT: &str = concat!(
+    "You are srelens's Kubernetes assistant. Investigate and operate the selected cluster(s) ",
+    "ONLY through the srelens MCP tools (the mcp__srelens__* tools). You have no access to the ",
+    "local filesystem, shell, git, or network beyond those tools; do not attempt to read files ",
+    "or run commands. Be concise. Anything that changes cluster state will prompt the user ",
+    "for confirmation.\n\n",
+    "Core Investigation Rules:\n",
+    "1. Always query live cluster state: Cluster state is dynamic. Never answer questions about ",
+    "resource existence, status, capacity, labels, taints, or scheduling feasibility from memory, ",
+    "assumptions, or prior conversation turns. Always execute the appropriate MCP tool to inspect ",
+    "the live cluster freshly before answering.\n",
+    "2. Say what you know, not what you guess: Summary listing tools (such as listNodes or listPods) ",
+    "return abridged data and omit full metadata.labels, annotations, and complete container specs. ",
+    "If a field or label is not displayed in a summary list, NEVER assert that it does not exist ",
+    "on the resource—call getObject or getManifest to inspect the complete resource definition.\n",
+    "3. Compute and scheduling headroom: A node's allocatable capacity is the ceiling for all pods, ",
+    "NOT free or available headroom. Nodes always run system daemonsets and existing workloads. ",
+    "Never calculate whether a pod will fit by subtracting its requests from node allocatable ",
+    "capacity alone. Always inspect the running pods on candidate nodes (via podsOnNode or ",
+    "listPods) and sum their requested CPU and memory:\n",
+    "Schedulable Headroom = Allocatable - Sum(Running Pod Requests).\n",
+    "Only state a pod can schedule if Schedulable Headroom >= Pod Request, and all node affinities, ",
+    "tolerations, and taints match.",
+);
 
 /// Build the Claude Code argv. `resume` carries a prior session id for a
 /// follow-up turn. Prompt is the trailing positional so it can't be mistaken
@@ -459,6 +482,12 @@ mod tests {
         assert!(!BASE_SYSTEM_PROMPT.to_lowercase().contains("repo"));
         assert!(!BASE_SYSTEM_PROMPT.to_lowercase().contains("branch"));
         assert!(!BASE_SYSTEM_PROMPT.to_lowercase().contains("filesystem-access"));
+        // Anti-hallucination and operational guardrails.
+        assert!(BASE_SYSTEM_PROMPT.contains("live cluster state"));
+        assert!(BASE_SYSTEM_PROMPT.contains("Allocatable"));
+        assert!(BASE_SYSTEM_PROMPT.contains("podsOnNode"));
+        assert!(BASE_SYSTEM_PROMPT.contains("getObject"));
+        assert!(BASE_SYSTEM_PROMPT.contains("Schedulable Headroom"));
     }
 
     #[test]
