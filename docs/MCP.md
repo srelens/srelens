@@ -324,11 +324,13 @@ merge-patch action can apply an Argo CD sync. The selected primitive's level
 comes back with the resource on `extensions.resource`.
 
 The host action primitives an extension binds as declared actions —
-`k8s.annotate`, `k8s.setFields`, `k8s.setStatusCondition` and
-`k8s.mergePatch` — publish one row each, and an app's bound action inherits
-its primitive's row and can only be raised above it. `k8s.mergePatch` is
-`high` because it is the one that can express an Argo CD sync; the three
-narrower ones are `medium`.
+`k8s.annotate`, `k8s.setFields`, `k8s.setStatusCondition`,
+`k8s.mergePatch`, `k8s.requestRolloutRestart` and `k8s.requestCordonNode` —
+publish one row each, and an app's bound action inherits its primitive's row
+and can only be raised above it. `k8s.mergePatch` is `high` because it is the
+one that can express an Argo CD sync, and `k8s.requestRolloutRestart` is
+`high` because it replaces a workload's running pods; the other four are
+`medium`.
 
 ## Client configuration
 

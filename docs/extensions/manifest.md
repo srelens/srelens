@@ -182,6 +182,8 @@ the controller has done anything.
 | `k8s.setFields` | `fields` | RFC 6901 pointers under `/spec` (at most 16, at most 8 segments deep, none inside another), each set to a fixed value. |
 | `k8s.setStatusCondition` | `conditionType`, `conditionStatus`, `reason`, `message?` | One condition, through the **status subresource**, carrying over the conditions it does not own. `conditionStatus` is `True`, `False` or `Unknown`, and `lastTransitionTime` moves only when the status changes. |
 | `k8s.mergePatch` | `patch` | A fixed JSON merge patch, past the deny-list below. |
+| `k8s.requestRolloutRestart` | none | The pod template's `kubectl.kubernetes.io/restartedAt` annotation, set to the request time, on a Deployment, StatefulSet or DaemonSet. See [Built-in operational action bindings](#built-in-operational-action-bindings). |
+| `k8s.requestCordonNode` | `unschedulable` | A Node's `spec.unschedulable`: `true` to cordon, `false` to uncordon. See [Built-in operational action bindings](#built-in-operational-action-bindings). |
 
 `k8s.setFields` writes **object fields**, and writes a list by naming the list
 (`"/spec/ignore": ["a", "b"]`). A pointer that reaches *through* a list —

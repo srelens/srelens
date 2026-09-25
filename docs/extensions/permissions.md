@@ -62,8 +62,9 @@ version, plural, kind and scope, plus explicitly granted `k8s.listEvents` reader
 ## What an app may write
 
 Only through a declared action ([manifest.md](manifest.md#declared-actions)), and only
-one of the four host action primitives, each a separate permission the user grants:
-`k8s.annotate`, `k8s.setFields`, `k8s.setStatusCondition` and `k8s.mergePatch`.
+one of the six host action primitives, each a separate permission the user grants:
+`k8s.annotate`, `k8s.setFields`, `k8s.setStatusCondition`, `k8s.mergePatch`,
+`k8s.requestRolloutRestart` and `k8s.requestCordonNode`.
 
 - A reader grant buys no write, and an action grant buys no read.
 - An action reaches only the kind of a reader binding in the same manifest, because
