@@ -10,6 +10,8 @@ const revoked = vi.fn();
 beforeEach(() => {
   core.tauri = true;
   core.saveTextFile.mockReset();
+  created.mockClear();
+  revoked.mockClear();
   Object.assign(URL, { createObjectURL: created, revokeObjectURL: revoked });
 });
 afterEach(() => vi.restoreAllMocks());
