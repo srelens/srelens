@@ -293,6 +293,22 @@ list, and the [developer harness](testing.md#developer-harness) prints one per l
 
 ### 0.4.0
 
+New in this line:
+
+- Apps may reach systems outside the cluster through the brokered `network.http`
+  capability, granted as `{"capability": "network.http", "hosts": [...]}`: host names,
+  `host:port`, one-label subdomain wildcards, IP addresses, or `${settings.<id>}` for a
+  `url` setting's saved value (#568). `permissions[].hosts` requires API 0.4, so a `^0.3`
+  manifest using it is told so; a plain `"network.http"` entry and `hosts` on any other
+  capability are refused. A `network.http` binding is one fixed GET (`url`, `path`,
+  `query`, `headers`, `secretHeaders`) with no inputs. The host sends it through
+  `extensions.read`: HTTPS only, plain HTTP only to this computer and only when a person
+  allows it for the app (`extensions.configure` `loopbackHttp`), every redirect checked
+  against the allowlist again, a secret-carrying request never redirected to another
+  origin, 20 s and 4 MiB at most. `secretHeaders` puts one of the app's
+  `secret-reference` settings into a header by reference (#543). The access review lists
+  the hosts. See [Network requests](manifest.md#network-requests).
+
 Everything below was first added to API 0.3 in place, and moved to this line before
 any signed release used it (#709). A manifest that uses any of it requires `^0.4`.
 Under a range that admits 0.3 it is refused with `EXTENSION_API_INCOMPATIBLE` at

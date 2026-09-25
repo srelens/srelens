@@ -1,8 +1,9 @@
-import { useContext, useState } from "react";
-import { CAPABILITY_CATALOG, renderConfirmTemplate } from "@srelens/core";
+import { useContext, useState, type ReactNode } from "react";
+import { CAPABILITY_CATALOG, NETWORK_HTTP, networkHosts, renderConfirmTemplate } from "@srelens/core";
 import { CodeEditor } from "@srelens/ui-kit";
 import { ExtensionControls } from "./ExtensionControls";
 import { escapeFormatCharacters, plainText } from "./displayText";
+import { HostText, settingReference, settingTitle } from "./networkText";
 
 // The review reads the manifest as parsed JSON, not as the checked `ExtensionManifest` type:
 // it is drawn only once the host has accepted it, but nothing here may throw on a shape the
@@ -273,6 +274,89 @@ function OtherReaders({ bindings }: { bindings: Binding[] }) {
   );
 }
 
+/** A request's URL: the setting it is saved in, or the URL as written. */
+function RequestUrl({ manifest, url }: { manifest: unknown; url: unknown }) {
+  const id = settingReference(url);
+  return id ? <>the URL saved in {settingTitle(manifest, id)}</> : <code>{show(url)}</code>;
+}
+
+/** Items joined by commas. */
+const listed = (items: ReactNode[]) =>
+  items.map((item, index) => (
+    <span key={index}>
+      {index > 0 && ", "}
+      {item}
+    </span>
+  ));
+
+/**
+ * `network.http` (#568): where the app may reach, then what each request sends. The
+ * hosts are the grant's scope, and a secret header is named by the setting that keeps
+ * it; the value is never in the manifest.
+ */
+function NetworkRequests({ bindings, manifest }: { bindings: Binding[]; manifest: unknown }) {
+  const hosts = networkHosts(manifest);
+  return (
+    <>
+      <p className="extension-message">
+        May reach, over HTTPS only (plain HTTP to this computer only if you allow it in the app's details):
+      </p>
+      <ul className="extension-network-hosts" aria-label="Hosts network.http may reach">
+        {hosts.map((host, index) => (
+          <li key={index}>
+            <HostText manifest={manifest} host={host} />
+          </li>
+        ))}
+      </ul>
+      <ul className="extension-binding-readers">
+        {bindings.map((binding, index) => {
+          const args = binding.arguments;
+          const query = Object.entries(fields(args.query));
+          const headers = Object.entries(fields(args.headers));
+          const secrets = Object.entries(fields(args.secretHeaders)).map(([name, entry]) => {
+            const header = fields(entry);
+            const prefix = typeof header.prefix === "string" && header.prefix ? header.prefix : null;
+            return (
+              <>
+                secret {settingTitle(manifest, String(header.secret ?? ""))} as the <code>{plainText(name)}</code> header
+                {/* Quoted, so a trailing space shows. */}
+                {prefix !== null && (
+                  <>
+                    , after <code>{plainText(JSON.stringify(prefix))}</code>
+                  </>
+                )}
+              </>
+            );
+          });
+          return (
+            <li key={`${index}:${binding.name}`} aria-label={`Binding ${plainText(binding.name)}`}>
+              <strong>{label(binding)}</strong>: GET <RequestUrl manifest={manifest} url={args.url} />
+              {typeof args.path === "string" && (
+                <>
+                  , path <code>{show(args.path)}</code>
+                </>
+              )}
+              {query.length > 0 && (
+                <>
+                  , query{" "}
+                  {listed(query.map(([key, value]) => <code>{`${plainText(key)}=${show(value)}`}</code>))}
+                </>
+              )}
+              {headers.length > 0 && (
+                <>
+                  ; {headers.length === 1 ? "header" : "headers"}{" "}
+                  {listed(headers.map(([key, value]) => <code>{`${plainText(key)}: ${show(value)}`}</code>))}
+                </>
+              )}
+              {secrets.length > 0 && <>; sends {listed(secrets)}</>}.
+            </li>
+          );
+        })}
+      </ul>
+    </>
+  );
+}
+
 /**
  * `extension.secretStore` (#543): not bound to anything, so what it grants is
  * which of the app's settings the host keeps as secrets, plus the host's own
@@ -327,6 +411,8 @@ export function ExtensionBindings({ manifest, permissions }: { manifest: unknown
                 <CustomResourceReaders bindings={bound} />
               ) : target === EVENTS ? (
                 <EventReaders bindings={bound} manifest={manifest} />
+              ) : target === NETWORK_HTTP ? (
+                <NetworkRequests bindings={bound} manifest={manifest} />
               ) : (
                 <OtherReaders bindings={bound} />
               )}

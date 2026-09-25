@@ -630,6 +630,133 @@ it("reviews the permissions of a rollback whose grants differ", async () => {
     }),
   );
 });
+/** A metrics app reaching its Prometheus through network.http (#568). */
+const networkApp = (allowLoopbackHttp?: boolean) => ({
+  ...updated(),
+  manifest: {
+    ...updated().manifest,
+    permissions: [{ capability: "network.http", hosts: ["${settings.prometheusUrl}", "api.github.com"] }],
+    settings: [{ id: "prometheusUrl", type: "url", title: "Prometheus URL", required: true }],
+  },
+  grants: ["network.http"],
+  ...(allowLoopbackHttp === undefined ? {} : { allowLoopbackHttp }),
+});
+it("lets a person allow an app's network.http requests plain HTTP to this computer (#568)", async () => {
+  const details = await openDetails(networkApp() as unknown as ReturnType<typeof updated>);
+  const network = within(details).getByRole("group", { name: "Network" });
+  expect(network.textContent).toContain("api.github.com");
+  expect(network.textContent).toContain("The host of the URL saved in Prometheus URL");
+  // network.http is the broker's alone, so the catalog does not list it; that is not
+  // "not provided".
+  const grants = within(details).getByRole("list", { name: "Granted capabilities" });
+  const grant = within(grants).getByText("network.http").closest("li")!.textContent;
+  expect(grant).not.toContain("Not provided by this host");
+  expect(grant).toContain("GET requests to this app's hosts only");
+  const box = within(network).getByRole("checkbox", { name: "Allow plain HTTP to this computer (loopback)" });
+  expect((box as HTMLInputElement).checked).toBe(false);
+  fireEvent.click(box);
+  await waitFor(() =>
+    expect(configureExtensions).toHaveBeenCalledWith({ action: "loopbackHttp", id: "org.test.gitops", allowLoopbackHttp: true }),
+  );
+});
+it("shows plain HTTP to this computer as allowed, and turns it off", async () => {
+  const details = await openDetails(networkApp(true) as unknown as ReturnType<typeof updated>);
+  const box = within(details).getByRole("checkbox", { name: "Allow plain HTTP to this computer (loopback)" });
+  expect((box as HTMLInputElement).checked).toBe(true);
+  fireEvent.click(box);
+  await waitFor(() =>
+    expect(configureExtensions).toHaveBeenCalledWith({ action: "loopbackHttp", id: "org.test.gitops", allowLoopbackHttp: false }),
+  );
+});
+it("offers no network switch to an app that makes no requests", async () => {
+  const details = await openDetails(updated());
+  expect(within(details).queryByRole("group", { name: "Network" })).toBeNull();
+});
+it("reviews a rollback that reaches other hosts under the same grant", async () => {
+  const app = {
+    ...networkApp(),
+    history: [
+      {
+        manifest: { ...networkApp().manifest, version: "0.1.0", permissions: [{ capability: "network.http", hosts: ["evil.example"] }] },
+        grants: ["network.http"], revision: 2, source: "local", installedAt: 1_690_000_000,
+      },
+    ],
+  };
+  const details = await openDetails(app as unknown as ReturnType<typeof updated>);
+  fireEvent.click(within(details).getByRole("button", { name: "Roll back to 0.1.0" }));
+  const review = screen.getByRole("region", { name: "Review rollback" });
+  expect(review.textContent).toContain("It requests: network.http.");
+  expect(review.textContent).toContain("It reaches: evil.example.");
+  expect(review.textContent).not.toContain("[object Object]");
+  fireEvent.click(within(review).getByRole("button", { name: "Roll back and grant permissions" }));
+  await waitFor(() =>
+    expect(configureExtensions).toHaveBeenCalledWith({ action: "rollback", id: "org.test.gitops", revision: 2, grants: ["network.http"] }),
+  );
+});
+it("reviews a rollback whose network.http request sends something else under the same grants and hosts", async () => {
+  const request = (args: Record<string, unknown>) => ({
+    name: "up", title: "Targets up", target: "network.http", inputs: [],
+    arguments: { url: "${settings.prometheusUrl}", path: "/api/v1/query", ...args },
+  });
+  const current = networkApp();
+  const app = {
+    ...current,
+    manifest: { ...current.manifest, capabilities: [request({})] },
+    history: [
+      {
+        manifest: {
+          ...current.manifest,
+          version: "0.1.0",
+          capabilities: [request({ secretHeaders: { Authorization: { secret: "token", prefix: "Bearer " } } })],
+        },
+        grants: ["network.http"], revision: 2, source: "local", installedAt: 1_690_000_000,
+      },
+    ],
+  };
+  const details = await openDetails(app as unknown as ReturnType<typeof updated>);
+  fireEvent.click(within(details).getByRole("button", { name: "Roll back to 0.1.0" }));
+  const review = screen.getByRole("region", { name: "Review rollback" });
+  expect(review.textContent).toContain("Its network requests differ from this version's");
+  // What the restored version would send, before anything is confirmed.
+  const up = within(review).getByRole("listitem", { name: "Binding up" });
+  expect(up.textContent).toContain("sends secret token as the Authorization header");
+  expect(within(review).getByRole("button", { name: "Roll back and grant permissions" })).toBeTruthy();
+});
+it("reviews a rollback whose host setting has another default under the same host entries", async () => {
+  // No saved value, so each version's default is where its requests go.
+  const withDefault = (url: string) => [{ id: "prometheusUrl", type: "url", title: "Prometheus URL", default: url }];
+  const current = networkApp();
+  const app = {
+    ...current,
+    settings: {},
+    manifest: { ...current.manifest, settings: withDefault("https://prometheus.example.com") },
+    history: [
+      {
+        manifest: { ...current.manifest, version: "0.1.0", settings: withDefault("https://prometheus.elsewhere.example") },
+        grants: ["network.http"], revision: 2, source: "local", installedAt: 1_690_000_000,
+      },
+    ],
+  };
+  const details = await openDetails(app as unknown as ReturnType<typeof updated>);
+  fireEvent.click(within(details).getByRole("button", { name: "Roll back to 0.1.0" }));
+  const review = screen.getByRole("region", { name: "Review rollback" });
+  expect(review.textContent).toContain(
+    "It reaches: The host of the URL saved in Prometheus URL (default https://prometheus.elsewhere.example), api.github.com.",
+  );
+  expect(within(review).getByRole("button", { name: "Roll back and grant permissions" })).toBeTruthy();
+});
+it("says a rollback with the same requests uses the permissions granted now", async () => {
+  const current = networkApp();
+  const app = {
+    ...current,
+    history: [{ manifest: { ...current.manifest, version: "0.1.0" }, grants: ["network.http"], revision: 2, source: "local", installedAt: 1_690_000_000 }],
+  };
+  const details = await openDetails(app as unknown as ReturnType<typeof updated>);
+  fireEvent.click(within(details).getByRole("button", { name: "Roll back to 0.1.0" }));
+  const review = screen.getByRole("region", { name: "Review rollback" });
+  expect(review.textContent).toContain("It uses the permissions granted now.");
+  expect(within(review).queryByRole("listitem", { name: "Binding up" })).toBeNull();
+});
 it("closes the reset confirmation with Escape without resetting", async () => {
   const details = await openDetails(updated());
   fireEvent.click(within(details).getByRole("button", { name: "Reset settings" }));

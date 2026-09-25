@@ -2793,6 +2793,96 @@ async fn extensions_and_gitops(h: &mut Harness, ctx: &str, settings: &TempSettin
         "refused for another reason than an undeclared secret setting: {err}"
     );
 
+    // #568. A network.http app reaching a one-request HTTP server on this
+    // machine's loopback: the per-app switch as `@srelens/core` sends it, and the
+    // request through `extensions.read`, the one path that sends one.
+    println!("=== extensions: network.http ===");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+    let port = listener.local_addr().unwrap().port();
+    let served = std::thread::spawn(move || {
+        use std::io::{BufRead, BufReader, Write};
+        let (stream, _) = listener.accept().expect("accept");
+        let mut reader = BufReader::new(stream);
+        let mut request_line = String::new();
+        reader.read_line(&mut request_line).unwrap();
+        loop {
+            let mut header = String::new();
+            if reader.read_line(&mut header).unwrap() == 0 || header.trim().is_empty() {
+                break;
+            }
+        }
+        let body = r#"{"status":"success"}"#;
+        write!(
+            reader.get_mut(),
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+        request_line
+    });
+    let metrics = json!({
+        "id": "org.example.metrics", "name": "Metrics", "version": "0.1.0",
+        "srelensApiVersion": "^0.4", "kind": "declarative",
+        "permissions": [{"capability": "network.http", "hosts": ["${settings.prometheusUrl}"]}],
+        "settings": [{"id": "prometheusUrl", "type": "url", "title": "Prometheus URL", "required": true}],
+        "capabilities": [{"name": "up", "title": "Targets up", "target": "network.http", "inputs": [],
+            "arguments": {"url": "${settings.prometheusUrl}", "path": "/api/v1/query", "query": {"query": "up"}}}],
+        "contributions": {"pages": [], "detailTabs": [], "detailLinks": []}
+    });
+    h.ok(
+        "extensions.configure",
+        json!({"action": "install", "manifest": metrics.to_string(), "grants": ["network.http"]}),
+    )
+    .await;
+    h.ok(
+        "extensions.configure",
+        json!({"action": "settings", "id": "org.example.metrics",
+               "settings": {"prometheusUrl": format!("http://127.0.0.1:{port}")}}),
+    )
+    .await;
+    let listed = h.ok("extensions.list", json!({})).await;
+    let metrics_revision = listed["plugins"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["manifest"]["id"] == "org.example.metrics")
+        .and_then(|p| p["revision"].as_u64())
+        .unwrap_or_else(|| panic!("the metrics app is installed: {listed}"));
+    let request = json!({"id": "org.example.metrics", "revision": metrics_revision,
+                         "capability": "up", "context": ctx});
+    // Plain HTTP to this computer is off until a person turns it on for the app.
+    let err = h.err("extensions.read", request.clone()).await;
+    assert!(err.contains("Allow plain HTTP"), "{err}");
+    // The wrapper's camelCase is what the host reads; the Rust spelling is refused.
+    let snake = h
+        .err(
+            "extensions.configure",
+            json!({"action": "loopbackHttp", "id": "org.example.metrics", "allow_loopback_http": true}),
+        )
+        .await;
+    assert!(snake.contains("allow_loopback_http"), "{snake}");
+    h.ok(
+        "extensions.configure",
+        json!({"action": "loopbackHttp", "id": "org.example.metrics", "allowLoopbackHttp": true}),
+    )
+    .await;
+    let out = h.ok("extensions.read", request).await;
+    assert_eq!(
+        out,
+        json!({"status": 200, "contentType": "application/json", "body": {"status": "success"}}),
+        "{out}"
+    );
+    let request_line = served.join().expect("the server thread");
+    assert!(
+        request_line.starts_with("GET /api/v1/query?query=up "),
+        "{request_line}"
+    );
+    h.ok(
+        "extensions.configure",
+        json!({"action": "remove", "id": "org.example.metrics"}),
+    )
+    .await;
+
     println!("=== extensions: read ===");
     let out = h
         .ok(

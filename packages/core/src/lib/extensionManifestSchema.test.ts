@@ -63,3 +63,34 @@ describe("frozen API 0.3 manifest schema", () => {
     expect(validate({ ...manifest, srelensApiVersion: "^0.3" })).toBe(false);
   });
 });
+
+describe("network.http permissions (#568)", () => {
+  const validate = new Ajv({ allErrors: true }).compile(schema);
+  const frozen = new Ajv({ allErrors: true }).compile(JSON.parse(repoFile("schemas/extension-manifest.v0.3.json")));
+  /** An example asking for network.http with its hosts. */
+  const scoped = () => ({
+    ...JSON.parse(repoFile(examples[0])),
+    permissions: [{ capability: "network.http", hosts: ["${settings.prometheusUrl}", "api.github.com"] }],
+  });
+
+  it("accepts network.http granted with hosts, which API 0.3's schema does not", () => {
+    expect(validate(scoped()), JSON.stringify(validate.errors)).toBe(true);
+    // A published 0.3 release that 0.3 accepts, with a scoped entry the only change.
+    const published = JSON.parse(repoFile("crates/registry/tests/fixtures/argocd-0.3.0-manifest.json"));
+    expect(frozen(published), JSON.stringify(frozen.errors)).toBe(true);
+    const withHosts = {
+      ...published,
+      permissions: [...published.permissions, { capability: "network.http", hosts: ["api.github.com"] }],
+    };
+    expect(frozen(withHosts)).toBe(false);
+  });
+
+  it("rejects a scoped permission with an unknown or a missing field, as the host does", () => {
+    const methods = scoped();
+    methods.permissions[0].methods = ["POST"];
+    expect(validate(methods)).toBe(false);
+    const hostless = scoped();
+    delete hostless.permissions[0].hosts;
+    expect(validate(hostless)).toBe(false);
+  });
+});

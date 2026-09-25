@@ -419,7 +419,7 @@ mod migration_tests {
                 "{} must declare its actions",
                 manifest.id
             );
-            validate_app(&manifest, &manifest.permissions, core.clone()).unwrap();
+            validate_app(&manifest, &manifest.permission_names(), core.clone()).unwrap();
             assert!(
                 validate_app(&manifest, &["k8s.listCustomResource".into()], core.clone()).is_err()
             );

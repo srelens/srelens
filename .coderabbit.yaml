@@ -582,9 +582,16 @@ reviews:
           2. If it is added, or its safety annotations changed,
              packages/core/src/lib/capability-catalog.json is updated in the same
              PR. The catalog holds only ids and annotation flags, so this
-             condition passes for a schema-only or handler-only change.
+             condition passes for a schema-only or handler-only change. A
+             broker-only capability (registered only through `broker_only` in
+             crates/registry/src/lib.rs, which keeps it out of the registry the
+             catalog and MCP are built from, such as `network.http`) has no
+             catalog entry by design: `capability_catalog_json_is_in_sync` fails
+             if it gains one. This condition passes for it.
           3. apps/desktop/src-tauri/tests/e2e.rs exercises it or excludes it with a
-             concrete reason.
+             concrete reason. A broker-only capability is exercised through the
+             broker path that reaches it (for `network.http`, `extensions.read`),
+             since the suite's coverage count covers only the public registry.
           4. Every multi-word input field's serialized name matches the JSON the
              @srelens/core wrapper sends (camelCase via serde rename).
           5. It is `read_only`, or `requires_confirm` (with `destructive` /

@@ -553,7 +553,7 @@ fn the_host_checks_a_multi_version_reader_and_its_action_against_their_targets()
 #[tokio::test]
 async fn a_reader_is_callable_only_at_a_resolved_version_and_its_action_goes_with_it() {
     let manifest = parse(&manifest());
-    let grants = manifest.permissions.clone();
+    let grants = manifest.permission_names();
     let host = srelens_plugin_host::PluginHost::new(echoing_core());
 
     // Unresolved, nothing reads HelmReleases or acts on them: no version was chosen.
@@ -632,7 +632,7 @@ async fn a_request_interpolates_the_setting_into_the_resolved_version_binding() 
     host.register_with_settings(
         &mut reg,
         resolved,
-        &manifest.permissions,
+        &manifest.permission_names(),
         &saved(json!({"mode":"hard"})),
     )
     .unwrap();

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import inventorySchema from "./extension-inventory.schema.json";
 import type { ActionPredicate } from "./actionPredicates";
-import type { ExtensionInventory, ExtensionLinkRelation, ExtensionManifest, ExtensionStatusRule, InstalledExtension, NormalizedStatus } from "./extensions";
+import type { ExtensionInventory, ExtensionLinkRelation, ExtensionManifest, ExtensionScopedPermission, ExtensionStatusRule, InstalledExtension, NormalizedStatus } from "./extensions";
 
 // extension-inventory.schema.json is generated from the Rust inventory and manifest
 // types (crates/registry/src/extensions.rs keeps it current). Each table below is held
@@ -38,6 +38,7 @@ const tables: Record<string, Record<string, "required" | "optional">> = {
     installedAt: "required",
     history: "required",
     contexts: "optional",
+    allowLoopbackHttp: "optional",
   } satisfies Presence<InstalledExtension>,
   PreviousVersion: {
     signatureProof: "optional",
@@ -70,6 +71,7 @@ const tables: Record<string, Record<string, "required" | "optional">> = {
     maxLength: "optional",
   } satisfies Presence<Setting>,
   SettingOption: { value: "required", label: "required" } satisfies Presence<NonNullable<Setting["options"]>[number]>,
+  ScopedPermission: { capability: "required", hosts: "required" } satisfies Presence<ExtensionScopedPermission>,
   Binding: {
     name: "required",
     title: "required",

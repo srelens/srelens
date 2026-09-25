@@ -467,9 +467,10 @@ const NOT_HERE: &str =
     "Settings are interpolated only into a binding argument the host marks as settable";
 
 /// `${settings.…}` anywhere but the whole value of a top-level binding or
-/// action argument is refused here; whether that argument is settable, and
-/// by a setting of this type, is the capability's to say
-/// ([`crate::PluginHost::interpolate`]).
+/// action argument, or a `network.http` host (#568), is refused here; whether
+/// that argument is settable, and by a setting of this type, is the
+/// capability's to say ([`crate::PluginHost::interpolate`]), and a host is the
+/// permission's own rules' (`network::permission_problems`).
 fn interpolation_problems(manifest: &Manifest, problems: &mut ValidationErrors) {
     let Ok(raw) = serde_json::to_value(manifest) else {
         return;
@@ -489,6 +490,9 @@ fn interpolation_problems(manifest: &Manifest, problems: &mut ValidationErrors) 
             for (field, value) in fields {
                 let path = format!("{at}.{field}");
                 match value {
+                    // A `network.http` host may name a url setting (#568); the
+                    // permission's own rules check each one.
+                    Value::Array(_) if list == "permissions" && field == "hosts" => {}
                     Value::Object(arguments) if binding && field == "arguments" => {
                         for (key, argument) in arguments {
                             argument_problems(

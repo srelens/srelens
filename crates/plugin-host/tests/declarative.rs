@@ -260,7 +260,7 @@ fn gitops_examples_bind_to_the_real_host_contract() {
                 .map(|binding| format!("plugin/{}/{}", manifest.id, binding.name))
                 .collect();
             let count = manifest.capabilities.len() + manifest.actions.len();
-            let grants = manifest.permissions.clone();
+            let grants = manifest.permission_names();
             let mut reg = Registry::new();
             let _installed = host.register(&mut reg, manifest, &grants).unwrap();
             assert_eq!(reg.ids().len(), count);

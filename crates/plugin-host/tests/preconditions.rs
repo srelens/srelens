@@ -47,7 +47,7 @@ fn parse(value: &Value) -> Result<Manifest, String> {
 /// Installs `value` against the real host registry.
 fn install(value: &Value) -> Result<Registry, String> {
     let manifest = parse(value)?;
-    let grants = manifest.permissions.clone();
+    let grants = manifest.permission_names();
     let mut reg = Registry::new();
     PluginHost::new(Arc::new(srelens_registry::build_registry()))
         .register(&mut reg, manifest, &grants)?;

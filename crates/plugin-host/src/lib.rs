@@ -402,7 +402,11 @@ impl PluginHost {
         if registry.ids().iter().any(|id| id.starts_with(&prefix)) {
             return Err(format!("extension already registered: {}", manifest.id));
         }
-        if manifest.permissions.iter().any(|p| !grants.contains(p)) {
+        if manifest
+            .permissions
+            .iter()
+            .any(|p| !grants.iter().any(|grant| p == grant.as_str()))
+        {
             return Err("extension permissions have not been granted".into());
         }
         let active = Arc::new(AtomicBool::new(true));

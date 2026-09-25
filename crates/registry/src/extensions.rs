@@ -8,8 +8,10 @@ mod columns;
 pub(crate) mod crd;
 #[cfg(any(test, feature = "fuzzing"))]
 pub mod fuzzing;
+mod http_policy;
 mod limits;
 mod links;
+pub(crate) mod network;
 mod panels;
 #[cfg(test)]
 mod policy_tests;
@@ -112,6 +114,15 @@ pub struct Installed {
     /// either: `a` + `b#c` and `a#b` + `c` share one (#623).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     contexts: Option<Vec<String>>,
+    /// Whether the app's `network.http` requests may use plain HTTP to this computer
+    /// (loopback), such as a Prometheus behind `kubectl port-forward` (#568). Off until
+    /// a person turns it on for this app; kept across updates, as `contexts` is.
+    #[serde(
+        default,
+        rename = "allowLoopbackHttp",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    allow_loopback_http: bool,
 }
 /// What the broker answers when an app is used on a cluster it is not enabled for.
 const NOT_ENABLED_FOR_CLUSTER: &str = "App is not enabled for this cluster";
@@ -314,6 +325,14 @@ enum Configure {
         id: String,
         revision: u64,
         grants: Vec<String>,
+    },
+    /// Lets the app's `network.http` requests use plain HTTP to this computer, or stops
+    /// them (#568).
+    #[serde(rename = "loopbackHttp")]
+    LoopbackHttp {
+        id: String,
+        #[serde(rename = "allowLoopbackHttp")]
+        allow_loopback_http: bool,
     },
     /// Limits the app to these kubeconfig context names, or with `null` allows every cluster.
     #[serde(rename = "clusters")]
@@ -526,6 +545,20 @@ fn validate_app(
     let mut problems = manifest.validate().err().unwrap_or_default();
     for (index, binding) in manifest.capabilities.iter().enumerate() {
         let at = format!("capabilities[{index}]");
+        // Brokered HTTP (#568): a request to one of the app's granted hosts, checked
+        // by its own rules rather than a reader's.
+        if binding.target == srelens_plugin_host::NETWORK_HTTP {
+            if core.get(&binding.target).is_none() {
+                problems.push(
+                    Code::UnsupportedTarget,
+                    format!("{at}.target"),
+                    "This host does not provide network.http",
+                );
+            } else {
+                network::binding_problems(manifest, index, binding, &mut problems);
+            }
+            continue;
+        }
         let builtin = srelens_plugin_host::builtin_reader_identity(&binding.target);
         if builtin.is_none()
             && !matches!(
@@ -806,11 +839,11 @@ fn validate_app(
         }
     }
     for permission in &manifest.permissions {
-        if !grants.contains(permission) {
+        if !grants.iter().any(|grant| permission == grant.as_str()) {
             problems.push(
                 Code::PermissionMismatch,
                 "permissions",
-                format!("{permission} was not granted"),
+                format!("{} was not granted", permission.capability()),
             );
         }
     }
@@ -973,7 +1006,7 @@ fn configure(
                 .map(|i| state.plugins.remove(i));
             // An update keeps the app's settings and clusters, and the version it replaces
             // for rollback.
-            let (settings, history, contexts) = match previous {
+            let (settings, history, contexts, allow_loopback_http) = match previous {
                 Some(Installed {
                     signature_proof: replaced_proof,
                     manifest: replaced,
@@ -984,6 +1017,7 @@ fn configure(
                     settings,
                     mut history,
                     contexts,
+                    allow_loopback_http,
                     ..
                 }) => {
                     history.insert(
@@ -1000,9 +1034,14 @@ fn configure(
                     history.truncate(KEPT_VERSIONS);
                     // Only what the new version still declares, and still
                     // accepts, carries over (#542).
-                    (manifest.retain_settings(settings), history, contexts)
+                    (
+                        manifest.retain_settings(settings),
+                        history,
+                        contexts,
+                        allow_loopback_http,
+                    )
                 }
-                None => (Default::default(), Vec::new(), None),
+                None => (Default::default(), Vec::new(), None, false),
             };
             state.plugins.push(Installed {
                 signature_proof,
@@ -1017,6 +1056,7 @@ fn configure(
                 installed_at: now(),
                 history,
                 contexts,
+                allow_loopback_http,
             });
             state
                 .plugins
@@ -1082,6 +1122,23 @@ fn configure(
             app.quarantined = None;
             // A new revision, so views pinned to the rolled-away version refresh.
             app.revision = next;
+        }
+        Configure::LoopbackHttp {
+            id,
+            allow_loopback_http,
+        } => {
+            let app = state
+                .plugins
+                .iter_mut()
+                .find(|p| p.manifest.id == id)
+                .ok_or("Extension is not installed")?;
+            if allow_loopback_http && app.manifest.network_hosts().is_empty() {
+                return Err(format!(
+                    "{id} does not request {}",
+                    srelens_plugin_host::NETWORK_HTTP
+                ));
+            }
+            app.allow_loopback_http = allow_loopback_http;
         }
         Configure::Clusters { id, contexts } => {
             if let Some(contexts) = &contexts {
@@ -1224,6 +1281,17 @@ fn access_items(manifest: &Manifest, grants: &[String]) -> std::collections::BTr
             "Keep secrets for settings [{}] with {}",
             secrets.join(","),
             srelens_plugin_host::SECRET_STORE_PERMISSION
+        ));
+    }
+    // Where the app may reach (#568), one item per host, so an update that adds a host
+    // shows as that host: new access under the same grant. A host read from a url
+    // setting carries the setting's declaration, as an interpolated argument does.
+    for host in manifest.network_hosts() {
+        let reference = serde_json::Map::from_iter([("host".to_owned(), json!(host))]);
+        access.insert(format!(
+            "Reach {host}{} with {}",
+            setting_scope(manifest, &reference),
+            srelens_plugin_host::NETWORK_HTTP
         ));
     }
     // What a reader reads: its arguments and, when it lists several, the versions it may
@@ -1446,9 +1514,10 @@ fn register_apps(
     let reader_path = path.clone();
     let reader_core = core.clone();
     let reader_cache = cache.clone();
+    let reader_secrets = secrets.clone();
     reg.register(Capability::typed::<Read, Value, _, _>(
         "extensions.read",
-        "Read a declared custom-resource contribution from an enabled extension",
+        "Read a declared custom-resource contribution, or send a declared network.http request, from an enabled extension",
         Annotations::READ_ONLY,
         move |input: Read| {
             read_contribution(
@@ -1456,6 +1525,7 @@ fn register_apps(
                 reader_core.clone(),
                 reader_cache.clone(),
                 reader_snapshots.clone(),
+                reader_secrets.clone(),
                 input,
             )
         },
@@ -1470,6 +1540,7 @@ async fn read_contribution(
     c: Arc<Registry>,
     k: Arc<srelens_kube::client_cache::ClientCache>,
     snapshots: columns::JoinCache,
+    secrets: Arc<dyn srelens_plugin_host::SecretStore>,
     input: Read,
 ) -> Result<Value, CapabilityError> {
     let resolved = request_context(&k, &input.context).await;
@@ -1531,6 +1602,23 @@ async fn read_contribution(
         .ok()
         .and_then(|context| context.pinned_id())
         .unwrap_or(input.context);
+    // A network.http binding (#568) is a request to one of the app's hosts, sent by
+    // the broker with the app's allowlist and secrets. The checks above are the ones
+    // every app request makes; the cluster is not part of the request.
+    if plugin
+        .manifest
+        .capabilities
+        .iter()
+        .any(|b| b.name == input.capability && b.target == srelens_plugin_host::NETWORK_HTTP)
+    {
+        if input.card.is_some() {
+            return Err(CapabilityError::InvalidInput(
+                "A dashboard card counts a custom-resource reader, not a network.http request"
+                    .into(),
+            ));
+        }
+        return network::read(&c, secrets.as_ref(), plugin, &input.capability).await;
+    }
     // A custom-resource reader reads the version this cluster serves, through
     // that version's paths (#547); `crd::resolved` is also the #601 check. A
     // stream re-runs this on every tick, so it follows a discovery change too.
@@ -2609,7 +2697,7 @@ mod tests {
         let mut value: Value =
             serde_json::from_str(include_str!("../../../examples/extensions/flux.json")).unwrap();
         let parsed = Manifest::parse(&value.to_string()).unwrap();
-        let grants = parsed.permissions.clone();
+        let grants = parsed.permission_names();
         let without_events: Vec<_> = grants.iter().filter(|grant| grant.as_str() != "k8s.listEvents").cloned().collect();
         assert!(validate_app(&parsed, &grants, core.clone()).is_ok());
         assert!(validate_app(&parsed, &without_events, core.clone()).is_err());
@@ -2665,7 +2753,7 @@ mod tests {
                 "inputs":if reader == "k8s.listNodes" {vec!["context"]} else {vec!["context","namespace"]}}]);
             source["actions"] = json!([{"name":"request","title":"Request","target":target,"resource":"objects","arguments":arguments}]);
             let parsed = Manifest::parse(&source.to_string()).unwrap();
-            let grants = parsed.permissions.clone();
+            let grants = parsed.permission_names();
             validate_app(&parsed, &grants, core.clone()).unwrap();
             assert!(validate_app(&parsed, &[reader.into()], core.clone()).is_err());
             for denied in [
@@ -2679,7 +2767,7 @@ mod tests {
                 wrong["actions"][0]["target"] = json!(denied);
                 let wrong = Manifest::parse(&wrong.to_string()).unwrap();
                 assert!(
-                    validate_app(&wrong, &wrong.permissions, core.clone()).is_err(),
+                    validate_app(&wrong, &wrong.permission_names(), core.clone()).is_err(),
                     "{reader}: {denied}"
                 );
             }
@@ -3118,6 +3206,8 @@ mod tests {
         cap.handler = Arc::new(|args| Box::pin(async move { Ok(args) }));
         core.register(cap);
         serve_crds(&mut core, &["applications.argoproj.io/v1alpha1"]);
+        // The broker's own, as `build_registry_and_app_streams` registers it (#568).
+        core.register(network::capability());
         Arc::new(core)
     }
     /// Answers the broker's CRD check as a cluster whose CRDs serve exactly these
