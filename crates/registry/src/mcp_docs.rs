@@ -252,15 +252,19 @@ pub mod tests_support {
     /// Every heading anchor on a page. A `#` line GitHub renders as code is
     /// not a heading: one inside a ```` ``` ```` or `~~~` fence (closed only by
     /// the same character, at least as many times), or one indented four
-    /// spaces or a tab. A repeated heading gets `-1`, `-2`, … the way GitHub
-    /// numbers them.
+    /// spaces or a tab. That indent makes a fence marker code as well, so it
+    /// neither opens nor closes a fence. A repeated heading gets `-1`, `-2`, …
+    /// the way GitHub numbers them.
     pub fn heading_anchors(md: &str) -> std::collections::BTreeSet<String> {
         let mut anchors = std::collections::BTreeSet::new();
         let mut seen = std::collections::BTreeMap::<String, usize>::new();
         let mut fence: Option<(char, usize)> = None;
         for line in md.lines() {
             let trimmed = line.trim_start();
-            if let Some(c) = trimmed.chars().next().filter(|c| *c == '`' || *c == '~') {
+            let indent = &line[..line.len() - trimmed.len()];
+            let code_indent = indent.len() > 3 || indent.contains('\t');
+            let marker = trimmed.chars().next().filter(|c| *c == '`' || *c == '~');
+            if let Some(c) = marker.filter(|_| !code_indent) {
                 let run = trimmed.chars().take_while(|&x| x == c).count();
                 match fence {
                     None if run >= 3 => {
@@ -276,8 +280,7 @@ pub mod tests_support {
                     _ => {}
                 }
             }
-            let indent = &line[..line.len() - trimmed.len()];
-            if fence.is_some() || indent.len() > 3 || indent.contains('\t') {
+            if fence.is_some() || code_indent {
                 continue;
             }
             let level = trimmed.chars().take_while(|&c| c == '#').count();
@@ -1078,5 +1081,11 @@ mod tests {
         let md = "~~~md\n## Tilde\n```\n## Still tilde\n~~~\n\n    ## Indented\n\n\t## Tabbed\n\n   ## Three spaces\n";
         let got: Vec<String> = heading_anchors(md).into_iter().collect();
         assert_eq!(got, ["three-spaces"]);
+
+        // A fence marker indented four spaces is code too: it neither closes
+        // the open fence around `Ghost` nor opens one around `Real`.
+        let md = "```\n    ```\n## Ghost\n```\n\n    ~~~\n## Real\n";
+        let got: Vec<String> = heading_anchors(md).into_iter().collect();
+        assert_eq!(got, ["real"]);
     }
 }
