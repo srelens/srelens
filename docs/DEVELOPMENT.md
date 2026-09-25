@@ -320,6 +320,7 @@ technology, and its version.
 - **smoke (webdriver)** — pull requests only: the built app, driven through tauri-driver against a kind cluster.
 - **install script** — shellcheck and the install script's tests, again as root in a container.
 - **docker image** — builds the whole container image.
+- **extension budgets (release)** — the extension platform's performance budgets (#581) without coverage — the host suite as a release build, the client suite in Vitest — uploaded as the `extension-budgets` artifact so they can be tracked across runs. The same tests run inside `frontend` and `backend`; there, as debug builds under coverage, they hold only counts and generous time ceilings. See [extensions/testing.md](extensions/testing.md#performance-budgets).
 
 All must be green.
 

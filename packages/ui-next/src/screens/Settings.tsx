@@ -91,7 +91,8 @@ const SECTIONS: ReadonlyArray<{ id: SectionId; label: string; desktopOnly?: true
   { id: "logs", label: "Application logs" },
   { id: "updates", label: "Updates", desktopOnly: true },
   { id: "clusters", label: "Clusters" },
-  { id: "extensions", label: "Apps", desktopOnly: true },
+  // Not desktop-only: the web server keeps each user's own apps (#515).
+  { id: "extensions", label: "Apps" },
 ];
 
 /**

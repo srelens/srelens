@@ -31,6 +31,8 @@ vi.mock("@srelens/core", async (importOriginal) => ({
   listCrds,
   deleteResource,
   podsOnNode,
+  // The web server's answer for a user with no apps (#515): the app slot stays empty.
+  listExtensions: async () => ({ schemaVersion: 1, nextRevision: 1, plugins: [] }),
 }));
 
 // The shell asks the same descriptor the list screen resolves, only to read

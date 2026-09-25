@@ -112,7 +112,7 @@ fn used_joins(panels: &[&DetailPanel]) -> HashSet<String> {
 
 pub(super) fn register(
     reg: &mut Registry,
-    path: PathBuf,
+    path: Store,
     core: Arc<Registry>,
     client_cache: Arc<srelens_kube::client_cache::ClientCache>,
     cache: JoinCache,

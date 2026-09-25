@@ -21,7 +21,7 @@ struct Action {
     resource_version: String,
 }
 async fn resolve(
-    path: PathBuf,
+    path: Store,
     core: Arc<Registry>,
     cache: Arc<srelens_kube::client_cache::ClientCache>,
     selection: Selection,
@@ -103,7 +103,7 @@ async fn resolve(
 }
 pub(super) fn register(
     reg: &mut Registry,
-    path: PathBuf,
+    path: Store,
     core: Arc<Registry>,
     cache: Arc<srelens_kube::client_cache::ClientCache>,
 ) {
@@ -167,7 +167,7 @@ mod tests {
         let mut payload = payload;
         payload["capability"] = json!(state.plugins[0].manifest.capabilities[0].name);
         let resolved = resolve(
-            path.clone(),
+            Arc::new(path.clone()),
             core.clone(),
             srelens_kube::client_cache::ClientCache::new_many(vec![]),
             serde_json::from_value(payload.clone()).unwrap(),
@@ -190,7 +190,7 @@ mod tests {
         )
         .unwrap();
         assert!(resolve(
-            path,
+            Arc::new(path),
             core,
             srelens_kube::client_cache::ClientCache::new_many(vec![]),
             serde_json::from_value(payload).unwrap()
@@ -210,7 +210,7 @@ mod tests {
             .clone();
         let selection = json!({"id":"org.example.argocd","revision":revision,"capability":binding,"context":"default","namespace":"team","name":"app"});
         let resolved = resolve(
-            path,
+            Arc::new(path),
             core,
             srelens_kube::client_cache::ClientCache::new_many(vec![config.clone()]),
             serde_json::from_value(selection).unwrap(),
@@ -261,7 +261,7 @@ mod tests {
         let mut reg = Registry::new();
         register(
             &mut reg,
-            path.clone(),
+            Arc::new(path.clone()),
             core.clone(),
             srelens_kube::client_cache::ClientCache::new_many(vec![]),
         );
@@ -343,7 +343,7 @@ mod tests {
         let mut reg = Registry::new();
         register(
             &mut reg,
-            path.clone(),
+            Arc::new(path.clone()),
             core.clone(),
             srelens_kube::client_cache::ClientCache::new_many(vec![]),
         );
@@ -389,7 +389,7 @@ mod tests {
         )
         .unwrap();
         assert!(resolve(
-            path,
+            Arc::new(path),
             core,
             srelens_kube::client_cache::ClientCache::new_many(vec![]),
             serde_json::from_value(selected).unwrap()
@@ -442,7 +442,7 @@ mod migration_tests {
         let mut reg = Registry::new();
         register(
             &mut reg,
-            path,
+            Arc::new(path),
             core,
             srelens_kube::client_cache::ClientCache::new_many(vec![]),
         );

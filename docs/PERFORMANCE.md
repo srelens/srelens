@@ -118,6 +118,62 @@ clusters connected with watches live. Tracked in
 [issue #31](https://github.com/srelens/srelens/issues/31); the size numbers
 above are complete and independent of it.
 
+## Extension platform budgets
+
+The extension platform's roadmap targets — manifest loading under 50 ms, the
+navigation apps contribute under 10 ms, a typical host call's own overhead under
+5 ms — are measured by two test suites described in
+[extensions/testing.md](extensions/testing.md#performance-budgets). The
+`extension budgets (release)` CI job runs them on every CI run and uploads
+the results as the `extension-budgets` artifact, one JSON file per
+measurement, so they can be compared across runs.
+
+Measured on 2026-09-25 on an Apple M5 Max, over 50 installed apps (45 copies of
+the Argo CD example and 5 of Flux), under two conditions. The host figures are
+`cargo test --release` on one test thread. The client figures — the sidebar's
+Apps group and the app list — are Vitest in Node 26 with jsdom and no coverage:
+the same TypeScript, not the production bundle in the WebView, so they compare
+across runs of the suite rather than with what a person waits for. Each figure is
+the range of medians over several runs; CI's runners are slower, which is what the
+artifact is for.
+
+| Budget | Measured in | Target | Measured |
+| --- | --- | ---: | ---: |
+| Load 50 apps (`extensions.list`) | host, release | 50 ms | 5.4–9.0 ms |
+| Sidebar Apps group from 50 apps | client, Vitest | 10 ms | 0.06–0.11 ms |
+| App list: host answer to ready, 50 apps | client, Vitest | 50 ms | 1.4–1.9 ms |
+| A host call's own overhead, 1 app installed | host, release | 5 ms | 0.16–0.45 ms |
+| A host call's own overhead, 50 apps installed | host, release | 5 ms | **4.9–8.5 ms** |
+| Close a view of 6 streams, host side | host, release | 5 ms | 0.01 ms |
+| Resolve 1,000 rows over 3 joins, warm | host, release | — | 3.8–10.4 ms |
+
+### Reading these honestly
+
+- **A host call's overhead grows with the inventory.** Every broker call —
+  `extensions.read`, `extensions.resource`, `resolveColumns`, `resolveCards`,
+  `resolvePanels`, `resolveLinks`, each stream tick — authorizes itself by
+  reading and re-validating the whole inventory (`read` in
+  `crates/registry/src/extensions.rs`), so its own cost is roughly that of
+  loading every app. With one app it is well under a millisecond; with fifty it
+  sits at or over the 5 ms target, and every app added re-validates on every
+  call. On this machine it is the one target not met at 50 apps.
+- **The inventory's size limit comes before its load time.** These 50 apps
+  take 709 KB of the inventory's 1 MiB limit (VULN-2 in the
+  [threat model](extensions/threat-model.md)), before any kept previous
+  versions. Loading is an order of magnitude inside its target; a larger set of
+  Flux-sized manifests would reach the limit first.
+- **Counts do not vary by machine.** Resolving 1,000 rows lists each joined
+  reader once — two lists (four 500-object pages) for three joins on two
+  readers, across four concurrent resolves and a refresh. Its CRD check is made
+  once per join per call, not once per reader, so two joins on one reader look
+  it up twice. A table with live updates resolves twice when it opens: once on
+  its own, and once when its watch first lists, because `synced` drops the
+  reader's snapshot so nothing that changed between the two is missed.
+- **Timings under coverage are not these numbers.** `backend` and `frontend`
+  run the same suites as debug builds under coverage instrumentation and hold
+  each time only to a ceiling far above its target; their timings are not
+  uploaded.
+
 ## Methodology notes
 
 - Sizes come from release metadata, so they do not depend on the machine

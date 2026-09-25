@@ -17,10 +17,21 @@ cluster's RBAC.
   columns (with their JSON paths); for each `k8s.listEvents` reader the API groups its
   dashboards show; for anything else its fixed arguments. **View manifest** opens the
   full manifest before installing, whether it came from the Catalog or was pasted.
-- Installing a new version of an installed app shows its permissions again. The
-  application never silently replaces a manifest or expands its grants. A
-  permission diff on update is planned
-  ([#554](https://github.com/srelens/srelens/issues/554)).
+- Installing a new version of an installed app shows its permissions again, with
+  what access the update changes
+  ([#554](https://github.com/srelens/srelens/issues/554)). The host compares the
+  incoming manifest's access with the installed revision's: the grants, what each
+  reader binds, the settings it keeps secrets for, and each action. The review in
+  Settings → Apps lists what is added and removed before what is unchanged, and the
+  consent prompt for an install over MCP names the added and removed access. The
+  update must name the installed revision it was reviewed against, and is refused if
+  the app has changed since. The comparison is a review aid and refuses nothing: an
+  update that widens access installs once it is approved. The application never
+  silently replaces a manifest or expands its grants.
+- A rollback gets no such comparison. Its review in Settings → Apps compares
+  capability IDs only: when they differ from the grants held now, it lists those the
+  kept version requests and those it no longer uses
+  ([threat-model.md](threat-model.md#malicious-app)).
 
 ## What an app may read
 
@@ -119,5 +130,7 @@ admitted may finish.
 
 ## Web host
 
-Apps are not available on the multi-user web host yet. See
-[capabilities.md](capabilities.md#web-host).
+Each user of the multi-user web host grants permissions to their own apps; one user's
+grants never reach another's. Declared actions run only through `extensions.action`,
+after the host confirmation, and the host action primitives stay refused when called
+directly. See [capabilities.md](capabilities.md#web-host).

@@ -1,6 +1,6 @@
 import { ExtensionLogo } from "./ExtensionLogo";
 import { useContext, useEffect, useRef, useState } from "react";
-import { listExtensionCatalog, reviewCatalogExtension, openExternal, type ExtensionCatalogSnapshot, type InstalledExtension } from "@srelens/core";
+import { isTauri, listExtensionCatalog, reviewCatalogExtension, openExternal, type ExtensionCatalogSnapshot, type InstalledExtension } from "@srelens/core";
 import { ExtensionControls } from "./ExtensionControls";
 
 export function ExtensionCatalog({ installed, onReview, autoLoad = false }: {
@@ -41,6 +41,9 @@ export function ExtensionCatalog({ installed, onReview, autoLoad = false }: {
     {error && <p className="extension-error" role="alert">{error}</p>}
     {data && <>
       <p className="extension-message extension-catalog-meta">{data.stale ? "Cached catalog" : "Catalog checked"} · {new Date(data.fetchedAt * 1000).toLocaleString()} · Host API {data.hostApiVersions.join(", ")}</p>
+      {/* The web server shares one catalog between its users and fetches it itself (#515), so a
+          Refresh here shows its copy rather than fetching one: say so, or the time above reads as wrong. */}
+      {!isTauri() && <p className="extension-message">This server keeps one catalog for everyone who signs in, and fetches it again once a day.</p>}
       {data.error && <p className="extension-warning" role="alert">Refresh failed: {data.error}. Showing the cached catalog.</p>}
       <p className="extension-message">Official srelens app signatures are verified before installation review. Review permissions before installing.</p>
       {entries?.length === 0 && <p className="extension-message">No matching apps.</p>}

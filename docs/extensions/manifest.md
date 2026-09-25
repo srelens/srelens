@@ -769,8 +769,9 @@ entry in it, beside the MCP token and the provider API keys, keyed by
   (`PluginHost::inject_secret`). No capability declares one yet; brokered HTTP headers
   (#568) will be the first. A declarative app never sees the value, and a
   `secret-reference` is never interpolated.
-- **Web.** The web host keeps no app secrets yet (#522): `extension.secretStore` is refused
-  there before dispatch.
+- **Web.** The web host keeps no app secrets yet (#522): a web user's registry has no
+  secret store, so `extension.secretStore` is not registered there, and it is refused
+  before dispatch too. Apps with secret settings still install; those settings stay unset.
 
 ### When the manifest changes
 
