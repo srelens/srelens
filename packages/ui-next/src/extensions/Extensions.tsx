@@ -30,7 +30,7 @@ export { ErrorNotice, ExtensionResults } from "./ExtensionResults";
 
 import { extensionLabel as label, useExtensions } from "./inventoryStore";
 export { useExtensions } from "./inventoryStore";
-export { SHARED_CONTEXT_ID_MESSAGE, refreshContextIds, useContextId, useContextLookup } from "./contextIds";
+export { AMBIGUOUS_CONTEXT_MESSAGE, SHARED_CONTEXT_ID_MESSAGE, refreshContextIds, useContextId, useContextLookup } from "./contextIds";
 
 export function ExtensionManager() {
   const { Button, Tabs } = useContext(ExtensionControls);

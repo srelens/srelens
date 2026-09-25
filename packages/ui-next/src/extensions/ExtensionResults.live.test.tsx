@@ -113,3 +113,28 @@ describe("a live app page (#566)", () => {
     expect(screen.getByRole("button", { name: "Refresh" })).toBeTruthy();
   });
 });
+
+describe("an app limited to chosen clusters (Settings → Apps)", () => {
+  const limited = {
+    ...(plugin as object),
+    manifest: {
+      ...(plugin as { manifest: object }).manifest,
+      contributions: { pages: [{ id: "apps", title: "Applications", capability: "list" }], detailTabs: [], detailLinks: [],
+        tableColumns: [{ id: "sync", title: "Sync", forKinds: ["argoproj.io/Application"], source: { jsonPath: ".name" }, format: "text" }] },
+    },
+    contexts: ["/kube/a%23b#c"],
+  } as never;
+
+  it("joins its columns on its own page, which asks the host by pinned ID (#695)", async () => {
+    // `/kube/a` declaring `b#c` and `/kube/a#b` declaring `c` share the stable ID `/kube/a#b#c` (#623).
+    core.listContexts.mockResolvedValue({ contexts: [
+      { name: "b#c", stableId: "/kube/a#b#c", key: "/kube/a#b%23c", pinnedId: "srelens-context:/kube/a#b%23c" },
+      { name: "c", stableId: "/kube/a#b#c", key: "/kube/a%23b#c", pinnedId: "srelens-context:/kube/a%23b#c" },
+    ] });
+    core.readExtension.mockResolvedValue(rows("web"));
+    render(<ExtensionResults plugin={limited} capability="list" context="srelens-context:/kube/a%23b#c" namespace="team" />);
+    await screen.findByText("web");
+    await waitFor(() => expect(core.resolveExtensionColumns).toHaveBeenCalledWith(
+      "org.test.gitops", 1, "srelens-context:/kube/a%23b#c", "team", "argoproj.io/Application", expect.any(Array)));
+  });
+});
