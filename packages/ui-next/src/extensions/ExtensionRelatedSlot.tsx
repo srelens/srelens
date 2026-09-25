@@ -65,8 +65,9 @@ function RelatedLinks({ plugins, context, kind, resource }: {
 }) {
   const contexts = useContexts();
   // The Inspector names its cluster by display name; an app's resource page by the pinned ID it
-  // reads by. A pinned ID first: the host never reads its reserved form as a name, so a context
-  // named after another's pinned ID does not take its links. The route carries the key (#695).
+  // reads by. A pinned ID first: the host never resolves its reserved form to a context merely
+  // named so. (While both are listed, it resolves such a string to neither, and the links fail
+  // there.) The route carries the key (#695).
   const cluster = contexts.find(c => c.pinnedId === context) ?? contexts.find(c => c.name === context);
   const namespace = resource.metadata.namespace ?? "";
   // The resolver reads the resource's identity and metadata and nothing else:
