@@ -599,17 +599,20 @@ fn fields_must_exist_in_every_api_version_the_range_admits() {
             path: "contributions.dashboardCards",
             introduced: "0.2.0",
             removed: None,
+            form: None,
         },
         ApiField {
             path: "contributions.pages[].badges",
             introduced: "0.2.0",
             removed: None,
+            form: None,
         },
         // A 0.1 field a later line removed; a rename is this plus an addition.
         ApiField {
             path: "contributions.detailLinks",
             introduced: "0.1.0",
             removed: Some("0.2.0"),
+            form: None,
         },
     ];
     let with_detail_link = || {
@@ -689,6 +692,7 @@ fn stored_manifests_are_rechecked_against_the_hosts_api_fields() {
         path: "contributions.detailLinks",
         introduced: "0.1.0",
         removed: Some("0.3.0"),
+        form: None,
     }];
     assert!(stored
         .check_api_fields(&["0.1.0", "0.2.0"], &fields)

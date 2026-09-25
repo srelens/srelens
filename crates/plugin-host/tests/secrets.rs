@@ -14,7 +14,7 @@ const TOKEN: &str = "tok-3f9a1c-very-secret";
 
 fn manifest(permissions: &[&str], settings: Value) -> Value {
     json!({
-        "id":"org.example.metrics", "name":"Metrics", "version":"0.1.0", "srelensApiVersion":"^0.3",
+        "id":"org.example.metrics", "name":"Metrics", "version":"0.1.0", "srelensApiVersion":"^0.4",
         "kind":"declarative", "permissions": permissions,
         "capabilities":[{"name":"rows","title":"Rows","target":"test.read",
             "arguments":{"group":"example.io"},"inputs":["context"]}],

@@ -1,6 +1,5 @@
-import { extensionLogoIcon, extensionPageIcon } from "../extensions/ExtensionLogo";
+import { appNavigation } from "../extensions/appNavigation";
 import { useExtensions } from "../extensions/Extensions";
-import { extensionEnabledFor, extensionClusterRoute as extensionRoute } from "@srelens/core";
 import { symbolFor } from "../lib/markSymbols";
 import { useMemo, useState } from "react";
 import { listCrds, type ClusterContext, type CrdRef } from "@srelens/core";
@@ -112,27 +111,13 @@ export function Nav({ contexts }: NavProps) {
       ? [{ id: CRD_ERROR_ID, label: "Custom resources unavailable — retry", icon: Icons.warn }]
       : crdNodes(crds);
 
-  const nodes = useMemo<ResourceNode[]>(
-    () => [
+  const nodes = useMemo<ResourceNode[]>(() => {
+    const apps = ctx && scopeId !== undefined && extensions.data
+      ? appNavigation(extensions.data.plugins, ctx.stableId, scopeId)
+      : null;
+    return [
       ...kindNodes().slice(0, 1),
-      ...(ctx && scopeId !== undefined && extensions.data && extensions.data.plugins.some(p => p.enabled && extensionEnabledFor(p, scopeId) && p.manifest.contributions.pages.length)
-        ? [{
-            id: "extensions", label: "Apps", icon: Icons.apps,
-            children: extensions.data.plugins.filter(p => p.enabled && extensionEnabledFor(p, scopeId) && p.manifest.contributions.pages.length).map(p => ({
-              id: `extension:${p.manifest.id}`, label: p.manifest.name, icon: extensionLogoIcon(p.manifest.id, p.manifest.name),
-              children: p.manifest.contributions.pages.flatMap((page, index, pages) => {
-                const leaf = (item: typeof page) => ({
-                  id: `route:${extensionRoute(ctx.stableId, p.manifest.id, item.id)}`,
-                  label: item.title, icon: extensionPageIcon(item.title),
-                });
-                if (!page.group) return [leaf(page)];
-                if (pages.findIndex(item => item.group === page.group) !== index) return [];
-                return [{ id: `extension:${p.manifest.id}:${page.group}`, label: page.group, icon: extensionPageIcon(page.group),
-                  children: pages.filter(item => item.group === page.group).map(leaf) }];
-              }),
-            })),
-          }]
-        : []),
+      ...(apps ? [apps] : []),
       ...kindNodes().slice(1),
       { id: "crds", label: "Custom resources", icon: Icons.crds, defaultExpanded: false, children: crdChildren },
       {
@@ -141,9 +126,8 @@ export function Nav({ contexts }: NavProps) {
         icon: Icons.investigate,
         children: INVESTIGATE.map((i) => ({ id: `route:${i.route}`, label: i.label, icon: glyph(i.id) })),
       },
-    ],
-    [crds, crdChildren, ctx, scopeId, extensions.data],
-  );
+    ];
+  }, [crds, crdChildren, ctx, scopeId, extensions.data]);
 
   const link = ctx
     ? (paused ? { word: "Paused", kind: "neutral" as const } : view.links[ctx.stableId] ? LINK[view.links[ctx.stableId].state] : UNKNOWN)

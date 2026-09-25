@@ -2,7 +2,7 @@
 use super::*;
 use sha2::{Digest, Sha256};
 use srelens_plugin_host::{
-    is_format_character, negotiate_api_version, MAX_MANIFEST_BYTES, SUPPORTED_API_VERSIONS,
+    is_format_character, negotiate_api_version_in, MAX_MANIFEST_BYTES, SUPPORTED_API_VERSIONS,
 };
 use std::{
     collections::BTreeSet,
@@ -115,7 +115,13 @@ fn allowed_download(url: &reqwest::Url) -> bool {
         }
 }
 fn compatible(range: &str) -> bool {
-    semver::VersionReq::parse(range).is_ok_and(|range| negotiate_api_version(&range).is_some())
+    compatible_in(range, SUPPORTED_API_VERSIONS)
+}
+/// Whether a host implementing the API versions `supported` can install a release that
+/// requires `range`: what the catalog asks before it offers one.
+fn compatible_in(range: &str, supported: &[&str]) -> bool {
+    semver::VersionReq::parse(range)
+        .is_ok_and(|range| negotiate_api_version_in(&range, supported).is_some())
 }
 fn newest_api_version() -> String {
     SUPPORTED_API_VERSIONS
@@ -530,6 +536,7 @@ mod tests {
         assert_eq!(catalog.extensions.len(), 2);
         assert!(!compatible(&catalog.extensions[0].release.srelens_api_version));
         assert!(compatible("^0.3"));
+        assert!(compatible("^0.4"));
         assert!(!compatible("^0.2"));
         assert!(!compatible("^99"));
         let mut value: serde_json::Value = serde_json::from_slice(&fixture()).unwrap();
@@ -544,7 +551,7 @@ mod tests {
         let source = super::super::tests::manifest();
         let raw = source.as_bytes();
         entry.id = "org.example.argocd".into();
-        entry.release.srelens_api_version = "^0.3".into();
+        entry.release.srelens_api_version = "^0.4".into();
         entry.release.sha256 = format!("{:x}", Sha256::digest(raw));
         assert!(verify_manifest(&entry, raw).is_ok());
         assert!(verify_manifest(&entry, b"{}")
@@ -979,6 +986,95 @@ mod tests {
             serde_json::to_value(&cached).unwrap()["hostApiVersion"],
             newest
         );
+    }
+    /// The public catalog as it stood when API 0.4 was cut (#709), and the signed bytes of
+    /// each release it listed: Argo CD 0.3.0 and Flux 0.4.0, both `^0.3` and using none
+    /// of 0.4's fields. `public_catalog_release_smoke` follows the live catalog as it
+    /// moves on; these stay, because installed copies of them go on reverifying.
+    fn published_0_3_line() -> (Catalog, [(&'static str, &'static [u8], &'static [u8]); 2]) {
+        let catalog = parse_catalog(include_bytes!(
+            "../../tests/fixtures/extension-catalog-api-0.3.json"
+        ))
+        .unwrap();
+        let releases = [
+            (
+                "org.srelens.argocd",
+                &include_bytes!("../../tests/fixtures/argocd-0.3.0-manifest.json")[..],
+                &include_bytes!("../../tests/fixtures/argocd-0.3.0-manifest.sig")[..],
+            ),
+            (
+                "org.srelens.flux",
+                &include_bytes!("../../tests/fixtures/flux-0.4.0-manifest.json")[..],
+                &include_bytes!("../../tests/fixtures/flux-0.4.0-manifest.sig")[..],
+            ),
+        ];
+        (catalog, releases)
+    }
+    #[test]
+    fn the_published_0_3_line_releases_still_verify_install_and_reverify() {
+        let (catalog, releases) = published_0_3_line();
+        assert_eq!(catalog.extensions.len(), releases.len());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("apps.json");
+        for (id, raw, signature) in releases {
+            let entry = catalog.extensions.iter().find(|e| e.id == id).unwrap();
+            assert_eq!(entry.release.srelens_api_version, "^0.3", "{id}");
+            // Offered, checksum and pinned signature verified, and valid on this host.
+            assert!(compatible(&entry.release.srelens_api_version), "{id}");
+            let review = verify_release(entry, raw, Some(signature.to_vec())).unwrap();
+            let parsed = Manifest::parse(&review.manifest).unwrap();
+            super::super::validate_app(
+                &parsed,
+                &parsed.permissions,
+                super::super::tests::fake_core(),
+            )
+            .unwrap();
+            let state = super::super::tests::configure(
+                &path,
+                json!({"action":"install","manifest":review.manifest,
+                    "signature":signature.to_vec(),"grants":parsed.permissions}),
+            )
+            .unwrap_or_else(|e| panic!("{id}: {e}"));
+            let app = state
+                .plugins
+                .iter()
+                .find(|app| app.manifest.id == id)
+                .unwrap();
+            assert!(app.enabled && app.quarantined.is_none(), "{id}");
+            assert!(app.signature_proof.is_some(), "{id}");
+        }
+        // Loading the inventory rechecks every app against this host's API fields.
+        let state = read(&path).unwrap();
+        assert_eq!(state.plugins.len(), 2);
+        assert!(state
+            .plugins
+            .iter()
+            .all(|app| app.enabled && app.quarantined.is_none()));
+    }
+    #[test]
+    fn a_host_on_the_0_3_line_lists_the_0_4_releases_as_incompatible() {
+        // A host that implements 0.3 without 0.4's fields — every release up to the one
+        // that cut 0.4 — asks this before it offers a release. The next Flux and Argo CD
+        // releases require ^0.4, so it says "Incompatible" instead of failing them on
+        // an unknown field; this host offers them, and still offers the 0.3 line.
+        let only_0_3 = ["0.3.0"];
+        for example in [
+            include_str!("../../../../examples/extensions/argocd.json"),
+            include_str!("../../../../examples/extensions/flux.json"),
+        ] {
+            let example: Value = serde_json::from_str(example).unwrap();
+            let range = example["srelensApiVersion"].as_str().unwrap();
+            assert!(
+                !compatible_in(range, &only_0_3),
+                "{} {range}",
+                example["id"]
+            );
+            assert!(compatible(range), "{} {range}", example["id"]);
+        }
+        let (catalog, _) = published_0_3_line();
+        for entry in &catalog.extensions {
+            assert!(compatible_in(&entry.release.srelens_api_version, &only_0_3));
+        }
     }
     #[test]
     #[ignore = "downloads the public catalog and release manifests; no clusters or installs"]

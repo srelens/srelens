@@ -293,11 +293,14 @@ reviews:
 
     - path: "crates/plugin-host/**"
       instructions: |
-        Extension manifest parsing and validation. The manifest contract is
-        schemas/extension-manifest.v0.1.json (regenerated with
-        `UPDATE_CATALOG=1 cargo test -p srelens-plugin-host --test schema`); a
-        field change without the schema update, or a breaking change without a
-        version/migration note in docs/extensions, is a finding. Parsers take
+        Extension manifest parsing and validation. The manifest contract is the
+        newest supported line's schema, schemas/extension-manifest.v0.4.json
+        (regenerated with
+        `UPDATE_CATALOG=1 cargo test -p srelens-plugin-host --test schema`); an
+        older line's file is frozen and must not be regenerated. A field change
+        without the schema update, a new manifest field or value form without a
+        new API minor and an `API_FIELDS` entry (#709), or a breaking change
+        without a version/migration note in docs/extensions, is a finding. Parsers take
         untrusted input: bound sizes and depth, never panic, report every problem
         with a code and JSON path. Identifiers and display strings refuse bidi
         overrides, zero-width and other Unicode format characters. If fuzz/ targets

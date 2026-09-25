@@ -5,7 +5,7 @@ use srelens_plugin_host::{Manifest, ValidationCode, ValidationError};
 
 fn manifest() -> Value {
     json!({
-        "id":"org.example.gitops", "name":"GitOps", "version":"0.1.0", "srelensApiVersion":"^0.3",
+        "id":"org.example.gitops", "name":"GitOps", "version":"0.1.0", "srelensApiVersion":"^0.4",
         "kind":"declarative", "permissions":["k8s.listCustomResource"],
         "capabilities":[{"name":"applications","title":"List applications", "target":"k8s.listCustomResource",
             "arguments":{"group":"argoproj.io"},"inputs":["context","namespace"]}],

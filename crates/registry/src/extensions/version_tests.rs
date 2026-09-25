@@ -16,7 +16,7 @@ const APP: &str = "org.example.flux";
 
 fn manifest() -> Value {
     json!({
-        "id":APP, "name":"Flux", "version":"0.1.0", "srelensApiVersion":"^0.3",
+        "id":APP, "name":"Flux", "version":"0.1.0", "srelensApiVersion":"^0.4",
         "kind":"declarative", "permissions":["k8s.listCustomResource","k8s.setFields"],
         "capabilities":[{"name":"helmreleases","title":"List Helm releases","target":"k8s.listCustomResource",
             "versions":["v2","v2beta2"],

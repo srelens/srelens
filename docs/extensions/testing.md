@@ -45,7 +45,7 @@ handler's consent gate.
 
 | Suite | Covers |
 |---|---|
-| `cargo test -p srelens-plugin-host` | Manifest parsing and validation, API version negotiation, broker registration, revocation, consent, and that `schemas/extension-manifest.v0.3.json` equals the generated schema |
+| `cargo test -p srelens-plugin-host` | Manifest parsing and validation, API version negotiation, broker registration, revocation, consent, that `schemas/extension-manifest.v0.4.json` equals the generated schema, and that a field missing from the frozen 0.3 schema is gated in `API_FIELDS` |
 | `cargo test -p srelens-plugin-host --lib fuzzing` | Manifest decoding, validation and parsing on arbitrary bytes and on edits of the example manifests: no panic, a value or a coded problem, the 256 KiB limit to the byte, and an accepted manifest re-serializes to an equal one |
 | `cargo test -p srelens-registry` | Inventory lifecycle, quarantine, catalog parsing and caching, signing, app capabilities |
 | `cargo test -p srelens-registry --lib fuzzing` | The same properties for catalog parsing, publisher signature verification and the inventory reader with its legacy migration, starting from `crates/registry/tests/fixtures` |
@@ -54,6 +54,8 @@ handler's consent gate.
 | `packages/core/src/lib/extensionManifestSchema.test.ts` | Every example manifest validates against the committed schema and names it in `$schema` |
 | `packages/core/src/lib/extensionTypes.test.ts` | The TypeScript manifest and inventory types have the Rust field names and optionality, from `extension-inventory.schema.json` |
 | `packages/ui-next/src/extensions/*.test.tsx` | Settings → Apps, catalog, workspace, resource details |
+| `cargo test -p srelens-registry --lib budget_tests` | [Performance budgets](#performance-budgets), the host's half: loading 50 apps, a call's own overhead, resolving 1,000 rows, closing a view |
+| `packages/ui-next/src/extensions/extensionBudgets.test.tsx` | [Performance budgets](#performance-budgets), the client's half: the sidebar's apps, the app list, closing a view |
 | `cargo test -p srelens-desktop --test e2e -- --ignored` (kind) | Every `extensions.*` capability, `k8s.getCustomResource` and the action primitives against a live cluster: the example Flux and Argo CD apps are validated, installed, listed, read and inspected; the historical signed API 0.1 release is refused as incompatible; suspend, resume and refresh land on the object; a stale `resourceVersion` is refused; a disabled app stops reading |
 | `.github/workflows/extension-catalog.yml` (daily) | The ignored `public_catalog_release_smoke`: every release in the live public catalog downloads, matches its checksum and publisher signature, and validates on this host |
 
@@ -80,6 +82,62 @@ cargo test -p srelens-registry --lib -- --ignored --exact \
 
 An authoring CLI with a test command is planned
 ([#577](https://github.com/srelens/srelens/issues/577)).
+
+## Performance budgets
+
+The roadmap sets three targets for the platform: loading the installed apps' manifests
+in under 50 ms, building the navigation apps contribute in under 10 ms, and keeping a
+typical host call's own overhead under 5 ms. It also requires batching, deduplication
+and cancellation. [#581](https://github.com/srelens/srelens/issues/581) measures them in
+two suites, one per side of the bridge:
+
+| Budget | What is measured | Target |
+|---|---|---|
+| `inventory-load-50-apps` | `extensions.list` over 50 installed apps (45 Argo CD, 5 Flux, from `examples/extensions`) | 50 ms |
+| `host-call-overhead-1-app`, `-50-apps` | A broker call with nothing to read, from the bridge's entry: it resolves the context and loads the whole inventory to authorize one app | 5 ms |
+| `resolve-columns-1000-rows-warm` | `extensions.resolveColumns` over 1,000 rows, three joined columns and a badge, from the snapshot | none, tracked |
+| `close-view-6-streams` | The host's side of closing a view that holds three watches and three read streams | 5 ms |
+| `navigation-build-50-apps` | The sidebar's Apps group from 50 apps (`appNavigation.ts`) | 10 ms |
+| `inventory-store-load-50-apps` | The app list's own part of loading 50 apps: from the host's answer to a ready list | 50 ms |
+| `resolve-columns-lists-per-join` | Kubernetes lists for five resolves of 1,000 rows (four at once, then a refresh) over three joins on two readers, against a loopback API server | exactly one per joined reader |
+| `close-view-releases` | Watch sessions and streams the host still holds after views are closed | none left |
+| `client-view-close-releases` | Streams left open on the host, and channel listeners left in the client, after a view with three apps' watches unmounts | none left |
+
+Counts are held exactly, on every run. Times are held to a **ceiling**, not to the
+target: `backend` runs the Rust suite as a debug build under coverage instrumentation on
+a shared runner, many times slower than the release build a target describes, and a test
+that failed at the target there would fail on every run. A ceiling sits far enough above
+the target to catch a path that became an order of magnitude slower, and never a noisy
+runner. When one fails, find the change; do not raise the number.
+
+With `SRELENS_PERF_REPORT_DIR` set, each suite writes one JSON file per measurement into
+that directory, `rust-<name>.json` or `ts-<name>.json`, in one of two shapes. Both carry
+`kind`, `name`, `what`, the commit, and the Rust build or the Node version.
+
+- A **timing** report (`"kind": "timing"`) has the median, fastest and slowest run
+  (`medianMs`, `minMs`, `maxMs`, `runs`), `targetMs`, `ceilingMs`, `withinTarget` and a
+  `detail` object. A debug build leaves `withinTarget` empty, because the targets
+  describe a release build.
+- A **count** report (`"kind": "count"`) has no times: it has the counts the test holds
+  and what it expected of them, such as `lists` and `expectedLists`, or `leaks` and the
+  watch sessions and streams still held after the views closed. It is written before
+  the counts are held, so a run that breaks one says by how much.
+
+The `extension budgets (release)` job in `ci.yml` runs the host suite as a release build
+and the client suite in Vitest, both without coverage, checks that each wrote reports, and
+uploads the directory as the `extension-budgets` artifact on every run, so a drift is
+visible across runs long before it reaches a ceiling. The client figures are Vitest's,
+in Node with jsdom, not a production bundle in the WebView. To compare against the
+targets locally:
+
+```sh
+SRELENS_PERF_REPORT_DIR=/tmp/budgets cargo test --release -p srelens-registry --lib budget_tests -- --test-threads=1 --nocapture
+SRELENS_PERF_REPORT_DIR=/tmp/budgets pnpm exec vitest run packages/ui-next/src/extensions/extensionBudgets.test.tsx
+```
+
+The broker loads the whole inventory on every call, so a call's overhead grows with the
+number of installed apps; at 50 it is close to its target. See
+[PERFORMANCE.md](../PERFORMANCE.md#extension-platform-budgets) for the figures.
 
 ## Fuzzing
 
