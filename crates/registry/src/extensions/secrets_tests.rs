@@ -722,7 +722,7 @@ fn the_access_review_names_the_secrets_an_app_keeps() {
     let after = Manifest::parse(&with_secret(declared())).unwrap();
     let grants: Vec<String> = serde_json::from_value(grants()).unwrap();
     let diff = permission_diff(
-        Some((&before, &before.permissions.clone(), 1)),
+        Some((&before, &before.permission_names(), 1)),
         &after,
         &grants,
     );

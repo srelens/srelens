@@ -7,7 +7,9 @@ cluster's RBAC.
 ## Declaring and granting
 
 - `permissions` lists the exact host capability IDs the manifest's bindings target,
-  no more and no fewer (see [manifest.md](manifest.md#capability-bindings)).
+  no more and no fewer (see [manifest.md](manifest.md#capability-bindings)). One entry is
+  scoped: `network.http` is written with the hosts it may reach (API 0.4, #568).
+  The grant names the capability, and the hosts are what the review shows it covers.
 - A declaration is not an authorization. The host supplies grants separately:
   installation shows the requested permissions for review, and **Install and grant
   permissions** grants that list.
@@ -21,7 +23,9 @@ cluster's RBAC.
   what access the update changes
   ([#554](https://github.com/srelens/srelens/issues/554)). The host compares the
   incoming manifest's access with the installed revision's: the grants, what each
-  reader binds, the settings it keeps secrets for, and each action. The review in
+  reader binds, the settings it keeps secrets for, each action, and each host
+  `network.http` may reach (#568), so another host is changed access even under the
+  same grant. The review in
   Settings → Apps lists what is added and removed before what is unchanged, and the
   consent prompt for an install over MCP names the added and removed access. The
   update must name the installed revision it was reviewed against, and is refused if
@@ -29,8 +33,11 @@ cluster's RBAC.
   update that widens access installs once it is approved. The application never
   silently replaces a manifest or expands its grants.
 - A rollback gets no such comparison. Its review in Settings → Apps compares
-  capability IDs only: when they differ from the grants held now, it lists those the
-  kept version requests and those it no longer uses
+  capability IDs: when they differ from the grants held now, it lists those the kept
+  version requests and those it no longer uses. For `network.http` it also compares the
+  hosts (with the declaration of each url setting a host is read from, so another
+  default counts) and each request, and lists the kept version's when they differ.
+  Reader and action bindings are compared by capability ID only
   ([threat-model.md](threat-model.md#malicious-app)).
 
 ## What an app may read
@@ -58,6 +65,26 @@ version, plural, kind and scope, plus explicitly granted `k8s.listEvents` reader
 - The app receives no kubeconfig or token.
 - Reads remain subject to the selected cluster's RBAC. RBAC and discovery failures are
   shown as errors, never as empty results.
+
+## What an app may reach
+
+Nothing outside the cluster, unless it requests `network.http` (#568), and then only
+the hosts it lists: names, `host:port`, one-label subdomain wildcards, IP addresses, or
+the URL a person saves in one of the app's `url` settings. The host sends each request,
+a fixed GET, and holds it and every redirect to that allowlist:
+
+- HTTPS only. Plain HTTP reaches only this computer (loopback), and only after a person
+  turns on **Allow plain HTTP to this computer** in that app's details. The switch is
+  per app, off by default, and set through the confirm-gated `extensions.configure`.
+- A credential goes only by reference: a `secretHeaders` entry names one of the app's
+  `secret-reference` settings, which needs the `extension.secretStore` grant, and the
+  host puts the value into the header as the request is sent. A request carrying one
+  follows no redirect to another origin.
+- Bounded time and size, and no error repeats the URL or a secret.
+
+`network.http` is the broker's alone: it is not in the capability catalog or MCP, so
+nothing can call it except through an installed app's binding. See
+[manifest.md](manifest.md#network-requests).
 
 ## What an app may write
 
@@ -92,7 +119,8 @@ derives ([#543](https://github.com/srelens/srelens/issues/543)).
   another secret shows as changed access.
 - Without the grant, a secret cannot be set. A secret is write-only: nothing returns
   it to the app, the UI, MCP or an export, and the host injects one only into an
-  argument a host capability declares for it. None does yet (#568 will).
+  argument a host capability declares for it: today, a `network.http` request's
+  `secretHeaders` ([What an app may reach](#what-an-app-may-reach)).
 - Removing the app, or an update or rollback that drops the setting, deletes it. Reset
   in Settings → Apps clears the app's secrets before it resets the other settings.
 
@@ -108,7 +136,8 @@ raises a binding's row and never lowers it.
 
 The app-level operations follow the normal MCP consent gate:
 
-- `extensions.configure` (install, enable, remove, settings, rollback, clusters) is mutating,
+- `extensions.configure` (install, enable, remove, settings, rollback, clusters, and
+  plain HTTP to this computer for an app, `loopbackHttp`) is mutating,
   `medium` impact. A rollback takes the grants explicitly, like an install, because it
   grants the restored version's permissions again.
 - `extension.secretStore` (set or clear an app's secret) is mutating, sensitive and

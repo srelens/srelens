@@ -113,6 +113,16 @@ fn uses_of_0_4() -> Vec<(&'static [&'static str], Use)> {
         (&["actions[].availableWhen[].jsonPath"], |v| {
             v["actions"][0]["availableWhen"][0] = ready();
         }),
+        // Brokered HTTP (#568): new in 0.4, not moved there from 0.3.
+        (&["permissions[].hosts", "permissions[].capability"], |v| {
+            v["permissions"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({"capability":"network.http","hosts":["api.github.com"]}));
+            v["capabilities"].as_array_mut().unwrap().push(json!({"name":"latest",
+                "title":"Latest release","target":"network.http","inputs":[],
+                "arguments":{"url":"https://api.github.com","path":"/repos/argoproj/argo-cd/releases/latest"}}));
+        }),
     ]
 }
 

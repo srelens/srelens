@@ -365,3 +365,75 @@ it("reviews every version a reader may read, and each path it reads elsewhere th
   // Neither field is shown again as an unexplained fixed argument.
   expect(screen.queryByRole("columnheader", { name: "Other fixed arguments" })).toBeNull();
 });
+
+/** A metrics app: its Prometheus URL a setting, its token a secret sent as a header (#568). */
+const metrics = () => ({
+  id: "org.test.metrics",
+  name: "Metrics",
+  version: "0.1.0",
+  srelensApiVersion: "^0.4",
+  kind: "declarative",
+  permissions: [
+    { capability: "network.http", hosts: ["${settings.prometheusUrl}", "*.grafana.net"] },
+    "extension.secretStore",
+  ],
+  settings: [
+    { id: "prometheusUrl", type: "url", title: "Prometheus URL", required: true },
+    { id: "token", type: "secret-reference", title: "API token" },
+  ],
+  capabilities: [
+    {
+      name: "up",
+      title: "Targets up",
+      target: "network.http",
+      arguments: {
+        url: "${settings.prometheusUrl}",
+        path: "/api/v1/query",
+        query: { query: "up" },
+        headers: { Accept: "application/json" },
+        secretHeaders: { Authorization: { secret: "token", prefix: "Bearer " } },
+      },
+      inputs: [],
+    },
+  ],
+  contributions: { pages: [], detailTabs: [], detailLinks: [] },
+});
+
+it("reviews network.http as the hosts it may reach and each request it sends (#568)", async () => {
+  const source = JSON.stringify(metrics());
+  const review = await reviewPasted(source);
+  // A grant names the capability; the hosts are the manifest's, shown here and diffed by the host.
+  expect(validateExtension).toHaveBeenCalledWith(source, ["network.http", "extension.secretStore"], undefined);
+  const network = within(review).getByRole("listitem", { name: "network.http bindings" });
+  expect(network.textContent).not.toContain("No binding uses this permission");
+  const hosts = within(network).getByRole("list", { name: "Hosts network.http may reach" });
+  expect(within(hosts).getAllByRole("listitem").map((host) => host.textContent)).toEqual([
+    "The host of the URL saved in Prometheus URL",
+    "*.grafana.net (one subdomain label)",
+  ]);
+  expect(network.textContent).toContain("HTTPS only");
+  const up = within(network).getByRole("listitem", { name: "Binding up" });
+  expect(up.textContent).toBe(
+    'Targets up: GET the URL saved in Prometheus URL, path /api/v1/query, query query=up; header Accept: application/json; sends secret API token as the Authorization header, after "Bearer ".',
+  );
+  fireEvent.click(screen.getByText("Install and grant permissions"));
+  await waitFor(() =>
+    expect(configureExtensions).toHaveBeenCalledWith({
+      action: "install",
+      manifest: source,
+      grants: ["network.http", "extension.secretStore"],
+    }),
+  );
+});
+
+it("draws a request's literal URL and headers as plain text", async () => {
+  const literal = metrics();
+  literal.permissions = [{ capability: "network.http", hosts: ["api.github.com"] }];
+  literal.settings = [];
+  literal.capabilities[0].arguments = { url: `https://api.github.com/${RLO}x`, headers: {} } as any;
+  const review = await reviewPasted(JSON.stringify(literal));
+  const up = within(review).getByRole("listitem", { name: "Binding up" });
+  expect(up.textContent).toContain("GET https://api.github.com/");
+  expect(up.textContent).not.toContain(RLO);
+  expect(within(review).getByRole("list", { name: "Hosts network.http may reach" }).textContent).toBe("api.github.com");
+});

@@ -13,6 +13,7 @@ import {
   setExtensionSecret,
   extensionEnabledFor,
   isTauri,
+  permissionName,
   validateExtension,
   type ExtensionChange,
   type ExtensionValidationError,
@@ -111,10 +112,10 @@ export function ExtensionManager() {
     } catch {
       // The host reports invalid JSON with a code and path, like any other problem.
     }
-    const permissions =
-      Array.isArray(parsed.permissions) && parsed.permissions.every((p) => typeof p === "string")
-        ? (parsed.permissions as string[])
-        : [];
+    // What an install grants: each entry's capability, `network.http` included (#568),
+    // whose hosts the review shows and the host diffs.
+    const names = Array.isArray(parsed.permissions) ? parsed.permissions.map(permissionName) : [];
+    const permissions = names.every((name) => name !== undefined) ? (names as string[]) : [];
     const name = typeof parsed.name === "string" ? parsed.name : "This manifest";
     const request = {};
     setError("");

@@ -165,7 +165,7 @@ Everything this server exposes over MCP, generated from the live registry so it 
 | `extensions.catalog` | low | Browse the native extension catalog with a durable cache; never connects clusters |
 | `extensions.catalogManifest` | low | Download and checksum-verify a catalog manifest for permission review; does not install it |
 | `extensions.list` | low | List installed declarative extensions |
-| `extensions.read` | low | Read a declared custom-resource contribution from an enabled extension |
+| `extensions.read` | low | Read a declared custom-resource contribution, or send a declared network.http request, from an enabled extension |
 | `extensions.resolveCards` | low | Resolve the cluster dashboard cards an enabled extension declares, each to a figure or the reason it has none |
 | `extensions.resolveColumns` | low | Resolve native extension table columns and badges in one batch |
 | `extensions.resolveLinks` | low | Resolve an app's resource relationship links for a resource Inspector |

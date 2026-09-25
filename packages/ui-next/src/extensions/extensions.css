@@ -394,14 +394,16 @@
   gap: 4px 12px;
 }
 .extension-grants code { font-family: var(--font-mono); }
-.extension-clusters {
+.extension-clusters,
+.extension-network {
   display: grid;
   gap: 6px;
   margin: 0;
   padding: 0;
   border: 0;
 }
-.extension-clusters legend {
+.extension-clusters legend,
+.extension-network legend {
   margin-bottom: 4px;
   font-size: var(--text-body, 0.8125rem);
   font-weight: 600;
@@ -416,6 +418,25 @@
 }
 .extension-cluster-list li { display: flex; align-items: center; gap: 8px; }
 .extension-cluster-list code { font-family: var(--font-mono); white-space: nowrap; overflow-x: auto; }
+/* An app's network.http hosts (#568), in Details and in the install review. */
+.extension-network-hosts {
+  display: grid;
+  gap: 2px;
+  margin: 0;
+  padding-left: 20px;
+  list-style: none;
+}
+/* A host is machine text: one line that scrolls inside its row rather than widening the
+   list. Inline-block, so a wildcard's "(one subdomain label)" stays beside it. */
+.extension-network-hosts li { min-width: 0; }
+.extension-network-hosts code {
+  display: inline-block;
+  max-width: 100%;
+  overflow-x: auto;
+  vertical-align: bottom;
+  font-family: var(--font-mono);
+  white-space: nowrap;
+}
 .extension-grants span { color: var(--ink-muted, var(--fl-color-text-muted)); }
 .extension-problem-code {
   color: var(--ink-muted, var(--fl-color-text-muted));

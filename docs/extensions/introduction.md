@@ -20,8 +20,11 @@ Tracking: [#163](https://github.com/srelens/srelens/issues/163). Architecture de
 
 - Run code. No JavaScript, subprocess, iframe, npm install or lifecycle script is
   executed.
-- Read kubeconfig, tokens, files or the network. Every read goes through the host,
-  under the selected cluster's RBAC.
+- Read kubeconfig, tokens or files. Every read goes through the host, under the
+  selected cluster's RBAC.
+- Open a network connection. An app granted `network.http` asks the host to send a
+  fixed request to one of the hosts a person approved
+  ([Network requests](manifest.md#network-requests)); it reaches nothing else.
 - Write to the cluster, except through the host's own confirmed actions.
 
 Freelens and OpenLens packages are not supported.

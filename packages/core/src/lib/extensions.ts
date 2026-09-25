@@ -203,6 +203,37 @@ export interface ExtensionCommand {
   /** Action commands only: the qualified kind of the reader binding the action acts on. */
   forKinds?: string[];
 }
+/** The one capability granted with a scope (#568). */
+export const NETWORK_HTTP = "network.http";
+/**
+ * `network.http` with the hosts it may reach (#568): `host`, `host:port`,
+ * `*.example.com` (one subdomain label), an IP address, or `${settings.<id>}`
+ * for a `url` setting, whose saved value's host the host allows.
+ */
+export interface ExtensionScopedPermission {
+  capability: string;
+  hosts: string[];
+}
+/** One `permissions` entry: a host capability's id, or a scoped grant. */
+export type ExtensionPermission = string | ExtensionScopedPermission;
+/**
+ * The capability a `permissions` entry grants, which is what a grant names.
+ * Reads parsed JSON too, so a review can call it before the host has checked
+ * the manifest: anything else is `undefined`.
+ */
+export function permissionName(permission: unknown): string | undefined {
+  if (typeof permission === "string") return permission;
+  const capability = (permission as { capability?: unknown } | null)?.capability;
+  return typeof capability === "string" ? capability : undefined;
+}
+/** The hosts a manifest's `network.http` permission lists; empty when it has none. */
+export function networkHosts(manifest: unknown): string[] {
+  const permissions = (manifest as { permissions?: unknown } | null)?.permissions;
+  const scoped = (Array.isArray(permissions) ? permissions : []).find(
+    (permission) => permissionName(permission) === NETWORK_HTTP && typeof permission === "object",
+  ) as { hosts?: unknown } | undefined;
+  return Array.isArray(scoped?.hosts) ? scoped.hosts.filter((host): host is string => typeof host === "string") : [];
+}
 export interface ExtensionManifest {
   /** Editor metadata naming the manifest's JSON Schema; the host ignores it. */
   $schema?: string;
@@ -211,7 +242,8 @@ export interface ExtensionManifest {
   version: string;
   srelensApiVersion: string;
   kind: "declarative";
-  permissions: string[];
+  /** The host capabilities the bindings target; `network.http` with its hosts (#568). */
+  permissions: ExtensionPermission[];
   capabilities: Array<{
     name: string;
     title: string;
@@ -306,6 +338,11 @@ export interface InstalledExtension {
    * be shared by two contexts (#623), so neither is the identity here.
    */
   contexts?: string[];
+  /**
+   * Whether the app's `network.http` requests may use plain HTTP to this computer
+   * (#568). Off until a person turns it on for this app; absent means off.
+   */
+  allowLoopbackHttp?: boolean;
 }
 export interface ExtensionInventory {
   /** Missing in older inventories means false. */
@@ -335,6 +372,8 @@ export type ExtensionChange =
   | { action: "rollback"; id: string; revision: number; grants: string[] }
   /** Limits the app to these stable context IDs, or with `null` allows every cluster. */
   | { action: "clusters"; id: string; contexts: string[] | null }
+  /** Lets the app's `network.http` requests use plain HTTP to this computer, or stops them (#568). */
+  | { action: "loopbackHttp"; id: string; allowLoopbackHttp: boolean }
   | { action: "settings"; id: string; settings: Record<string, unknown> };
 /**
  * Whether an installed app may be used on a context, given that context's key

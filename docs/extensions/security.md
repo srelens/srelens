@@ -11,6 +11,11 @@ mitigation and the risk that remains.
 - **No ambient access.** Apps never receive kubeconfig, tokens, files or network
   access. Every call goes through the broker with fixed arguments, under the selected
   cluster's RBAC ([permissions.md](permissions.md)).
+- **Network requests are brokered.** An app that requests `network.http` reaches only
+  the hosts it lists and the person approved, over HTTPS (plain HTTP only to this
+  computer, per app, when a person allows it). The host sends each request and checks
+  it and every redirect; a secret goes into a header by reference and never leaves for
+  another origin ([manifest.md](manifest.md#network-requests)).
 - **Consent cannot be weakened.** Bindings inherit the host capability's annotations.
   Mutating operations stay behind the MCP consent gate, and every UI action opens a
   host-owned review.
@@ -19,11 +24,13 @@ mitigation and the risk that remains.
   ([capabilities.md](capabilities.md#declared-gitops-actions)).
 - **An update shows what access it changes.** The host compares the incoming manifest's
   access with the installed revision's: the grants, what each reader binds, the settings
-  it keeps secrets for, and each action. The review in Settings → Apps lists what is
+  it keeps secrets for, each action, and each host `network.http` may reach. The review
+  in Settings → Apps lists what is
   added and removed before what is unchanged, and the consent prompt for an install over
   MCP names the added and removed access. The update must name the installed revision it
   was reviewed against, and is refused if the app has changed since. A rollback gets no
-  such comparison: its review compares capability IDs only
+  such comparison: its review compares capability IDs, and for `network.http` the hosts
+  and requests, but not reader or action bindings
   ([threat-model.md](threat-model.md#malicious-app)).
 - **Official identities are reserved.** IDs under `org.srelens.` install only with the
   srelens publisher signature, so a pasted manifest cannot take an official app's ID

@@ -134,7 +134,9 @@ const ARGO = argocdExample as unknown as ExtensionManifest;
 
 function installed(manifest: ExtensionManifest, revision: number, id = manifest.id): InstalledExtension {
   return {
-    manifest: { ...manifest, id }, enabled: true, revision, grants: manifest.permissions,
+    manifest: { ...manifest, id }, enabled: true, revision,
+    // What an install grants: each entry's capability, a scoped one's too (#568).
+    grants: manifest.permissions.map((permission) => (typeof permission === "string" ? permission : permission.capability)),
     settings: {}, source: "local", installedAt: 1_767_225_600, history: [],
   };
 }

@@ -247,7 +247,14 @@ pub fn build_registry_for_user(
     kubeconfig_paths: Vec<PathBuf>,
     apps: Apps,
 ) -> Registry {
-    build_with(cache, kubeconfig_paths, Some(apps), None).0
+    build_with(
+        cache,
+        kubeconfig_paths,
+        Some(apps),
+        None,
+        BrokeredNetwork::Off,
+    )
+    .0
 }
 
 /// Build a registry and optionally add the durable desktop settings surface.
@@ -301,7 +308,13 @@ pub fn build_registry_app_streams_and_secrets(
     let apps = settings_path
         .as_ref()
         .map(|path| Apps::from(path.with_extension("extensions.json")));
-    let (mut reg, app_streams) = build_with(cache, kubeconfig_paths, apps, Some(secrets));
+    let (mut reg, app_streams) = build_with(
+        cache,
+        kubeconfig_paths,
+        apps,
+        Some(secrets),
+        BrokeredNetwork::Desktop,
+    );
     if let Some(path) = settings_path {
         settings::register(&mut reg, path);
     }
@@ -316,6 +329,7 @@ fn build_with(
     kubeconfig_paths: Vec<PathBuf>,
     apps: Option<Apps>,
     secrets: Option<Arc<dyn SecretStore>>,
+    network: BrokeredNetwork,
 ) -> (Registry, Option<Arc<ExtensionStreams>>) {
     let mut reg = Registry::new();
 
@@ -575,8 +589,9 @@ fn build_with(
     let mut app_streams = None;
     if let Some(apps) = apps {
         let mut core = reg.clone();
-        // Broker-only: kept out of `reg`, so neither the catalog nor MCP offers it.
-        core.register(extensions::crd::check_capability(cache.clone()));
+        for capability in broker_only(cache.clone(), network) {
+            core.register(capability);
+        }
         let core = Arc::new(core);
         app_streams = Some(match secrets {
             Some(secrets) => {
@@ -587,6 +602,28 @@ fn build_with(
     }
 
     (reg, app_streams)
+}
+
+/// Whether an apps registry's broker may send `network.http` requests (#568).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BrokeredNetwork {
+    /// The desktop: a request leaves from the person's own computer, as their browser's
+    /// would.
+    Desktop,
+    /// The web host: a request would leave from the shared server — from its network
+    /// position, and to its loopback — so there is none.
+    Off,
+}
+
+/// The capabilities only the extension broker calls. Kept out of the registry the
+/// catalog and MCP are built from, so neither offers them: the CRD check an app read
+/// makes first, and `network.http` (#568), which called directly would fetch any URL.
+fn broker_only(cache: Arc<ClientCache>, network: BrokeredNetwork) -> Vec<Capability> {
+    let mut capabilities = vec![extensions::crd::check_capability(cache)];
+    if network == BrokeredNetwork::Desktop {
+        capabilities.push(extensions::network::capability());
+    }
+    capabilities
 }
 
 /// Build the registry using a caller-provided client cache with the host's
@@ -816,15 +853,81 @@ mod tests {
         assert_eq!(listed.into_iter().collect::<Vec<_>>(), host_only);
     }
 
-    /// #543: no current consumer can be handed a secret. No host capability
-    /// declares a secret slot, and no settable position takes a
-    /// `secret-reference` — so brokered HTTP (#568), the first that will,
-    /// has to change this test on purpose.
+    /// #568: on the web host a `network.http` request would leave from the shared
+    /// server, not from the person's own computer: from its network position, and to
+    /// its loopback. So a web user's registry has no `network.http`, and an app that
+    /// binds it is refused there as a target this host does not provide.
+    #[tokio::test]
+    async fn a_web_users_apps_cannot_send_network_requests() {
+        let dir = tempfile::tempdir().unwrap();
+        let apps = Apps::with_shared_catalog(
+            Arc::new(dir.path().join("inventory.json")),
+            SharedCatalog::new(dir.path().join("catalog.json")),
+        );
+        let reg = build_registry_for_user(ClientCache::new_many(vec![]), vec![], apps);
+        let manifest = json!({
+            "id": "org.example.releases", "name": "Releases", "version": "0.1.0",
+            "srelensApiVersion": "^0.4", "kind": "declarative",
+            "permissions": [{"capability": "network.http", "hosts": ["api.github.com"]}],
+            "capabilities": [{"name": "latest", "title": "Latest release", "target": "network.http",
+                "arguments": {"url": "https://api.github.com", "path": "/repos/srelens/srelens/releases/latest"},
+                "inputs": []}],
+            "contributions": {"pages": [], "detailTabs": [], "detailLinks": []}
+        })
+        .to_string();
+        let report = reg
+            .invoke(
+                "extensions.validate",
+                json!({"manifest": manifest, "grants": ["network.http"]}),
+            )
+            .await
+            .unwrap();
+        let refused = report["errors"].as_array().unwrap().iter().any(|error| {
+            error["code"] == "EXTENSION_UNSUPPORTED_TARGET"
+                && error["path"] == "capabilities[0].target"
+                && error["message"] == "This host does not provide network.http"
+        });
+        assert!(refused, "{report}");
+        let installed = reg
+            .invoke(
+                "extensions.configure",
+                json!({"action": "install", "manifest": manifest, "grants": ["network.http"]}),
+            )
+            .await;
+        assert!(installed.is_err(), "{installed:?}");
+        // The desktop's broker has it, and only the desktop's.
+        assert!(
+            broker_only(ClientCache::new_many(vec![]), BrokeredNetwork::Desktop)
+                .iter()
+                .any(|capability| capability.id == srelens_plugin_host::NETWORK_HTTP)
+        );
+        assert!(
+            !broker_only(ClientCache::new_many(vec![]), BrokeredNetwork::Off)
+                .iter()
+                .any(|capability| capability.id == srelens_plugin_host::NETWORK_HTTP)
+        );
+    }
+
+    /// #543, then #568: the one place the host may put an app's secret is the
+    /// `secretHeaders` of `network.http`, and that capability is the broker's
+    /// alone. Nothing the catalog or MCP offers declares a slot, and no
+    /// settable position anywhere takes a `secret-reference`. Another slot has
+    /// to change this test on purpose.
     #[test]
-    fn no_host_capability_takes_a_secret_today() {
+    fn only_the_brokers_network_http_takes_a_secret() {
         let reg = build_registry();
-        for capability in reg.entries() {
-            assert!(capability.secret_slots.is_empty(), "{} declares a secret slot", capability.id);
+        let broker = broker_only(ClientCache::new_many(vec![]), BrokeredNetwork::Desktop);
+        for capability in reg.entries().chain(broker.iter()) {
+            let expected: &[&str] = if capability.id == srelens_plugin_host::NETWORK_HTTP {
+                &["secretHeaders"]
+            } else {
+                &[]
+            };
+            assert_eq!(
+                capability.secret_slots, expected,
+                "{} secret slots",
+                capability.id
+            );
             for position in &capability.settable {
                 assert!(
                     !position.accepts.contains(&srelens_capability::settings::SettingType::SecretReference),
@@ -834,6 +937,23 @@ mod tests {
                 );
             }
         }
+        // Called directly, network.http would fetch any URL: neither the catalog
+        // nor MCP may offer it, on any build.
+        assert!(reg.get(srelens_plugin_host::NETWORK_HTTP).is_none());
+        assert!(capability_catalog()
+            .iter()
+            .all(|entry| entry.id != srelens_plugin_host::NETWORK_HTTP));
+        let dir = tempfile::tempdir().unwrap();
+        let desktop = build_registry_with_paths_and_settings(
+            ClientCache::new_many(vec![]),
+            vec![],
+            Some(dir.path().join("settings.json")),
+        );
+        assert!(desktop.get(srelens_plugin_host::NETWORK_HTTP).is_none());
+        let tools = srelens_mcp::McpServer::new(Arc::new(desktop)).list_tools();
+        assert!(tools
+            .iter()
+            .all(|tool| tool.name != srelens_plugin_host::NETWORK_HTTP));
     }
 
     /// The desktop hands its vault to the registry; every other build says
