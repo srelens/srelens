@@ -579,7 +579,9 @@ fn build_with(
         core.register(extensions::crd::check_capability(cache.clone()));
         let core = Arc::new(core);
         app_streams = Some(match secrets {
-            Some(secrets) => extensions::register_with_secrets(&mut reg, apps, core, cache, secrets),
+            Some(secrets) => {
+                extensions::register_with_secrets(&mut reg, apps, core, cache, secrets)
+            }
             None => extensions::register_without_secrets(&mut reg, apps, core, cache),
         });
     }
@@ -790,7 +792,10 @@ mod tests {
         let desktop: std::collections::BTreeSet<&str> = desktop_reg.ids().into_iter().collect();
         let host_only: Vec<&str> = desktop.difference(&web).copied().collect();
         // No secret store on the web yet (#522), so no way to hand one a secret.
-        assert_eq!(host_only, ["extension.secretStore", "settings.get", "settings.set"]);
+        assert_eq!(
+            host_only,
+            ["extension.secretStore", "settings.get", "settings.set"]
+        );
         assert!(web.is_subset(&desktop));
 
         let core = std::fs::read_to_string(concat!(
