@@ -123,6 +123,7 @@ pub struct AssistantViewState {
     pub slash_suggestions: Vec<&'static crate::ai_skills::SkillDef>,
     pub slash_suggestion_idx: usize,
     pub caveman_level: Option<crate::ai_skills::CavemanLevel>,
+    pub task: Option<tokio::task::AbortHandle>,
 }
 
 pub fn is_internal_meta_tool(tool: &str) -> bool {
@@ -178,6 +179,7 @@ impl AssistantViewState {
             slash_suggestions: Vec::new(),
             slash_suggestion_idx: 0,
             caveman_level: None,
+            task: None,
         }
     }
 
@@ -620,11 +622,41 @@ impl AssistantViewState {
     }
 
     pub fn finish_turn(&mut self) {
+        self.task = None;
         self.is_busy = false;
         self.busy_start = None;
     }
 
+    pub fn cancel_turn(&mut self) {
+        if let Some(h) = self.task.take() {
+            h.abort();
+        }
+        self.is_busy = false;
+        self.busy_status.clear();
+        self.busy_start = None;
+        if let Some(last) = self.messages.last_mut() {
+            if last.role == "assistant" {
+                if !last.content.is_empty() {
+                    last.content.push_str("\n\n*[Cancelled by user]*");
+                } else {
+                    last.content = "*[Cancelled by user]*".to_string();
+                }
+            } else {
+                self.messages.push(ChatMessage {
+                    role: "assistant".to_string(),
+                    content: "*[Cancelled by user]*".to_string(),
+                    timestamp: current_timestamp(),
+                    tool_calls: Vec::new(),
+                    token_usage: None,
+                });
+            }
+        }
+    }
+
     pub fn clear_conversation(&mut self) {
+        if let Some(h) = self.task.take() {
+            h.abort();
+        }
         let content = if self.context_name.is_empty() {
             "Hello! I am your SRElens AI Assistant. I can analyze pod crashes, diagnose cluster events, inspect configurations, and suggest Kubernetes remediation actions. Type your prompt below:".to_string()
         } else {
@@ -1003,21 +1035,55 @@ pub fn render_assistant_view(
         Some(lvl) => format!(" [🦖 CAVEMAN: {}]", lvl.display_name().to_uppercase()),
         None => String::new(),
     };
+    let back_or_cancel = if state.is_busy {
+        "<Esc>/<Ctrl+c> Cancel"
+    } else {
+        "<Esc> Back"
+    };
     let title = format!(
-        " SRElens AI Assistant{}{}[{} - {}] [{}{}, {}, <Ctrl+o> Save, <Ctrl+l> Clear, <Ctrl+s> Settings, <Esc> Back] ",
-        cluster_tag, caveman_tag, prov_name, model, token_hint, copy_hint, tools_hint
+        " SRElens AI Assistant{}{}[{} - {}] [{}{}, {}, <Ctrl+o> Save, <Ctrl+l> Clear, <Ctrl+s> Settings, {}] ",
+        cluster_tag, caveman_tag, prov_name, model, token_hint, copy_hint, tools_hint, back_or_cancel
     );
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Theme::ACCENT))
-        .title(Span::styled(title, Theme::title()));
+        .border_style(Style::default().fg(Theme::ACCENT));
 
     let inner = block.inner(area);
     f.render_widget(block, area);
 
+    let header_width = (inner.width as usize).saturating_sub(2).max(10);
+    let header_line = Line::from(vec![Span::styled(title, Theme::title())]);
+    let raw_wrapped_header = wrap_line(header_line, header_width);
+    let mut wrapped_header = Vec::new();
+    for (i, mut line) in raw_wrapped_header.into_iter().enumerate() {
+        if i > 0 {
+            let starts_with_space = line
+                .spans
+                .first()
+                .map(|s| s.content.starts_with(' '))
+                .unwrap_or(false);
+            if !starts_with_space {
+                line.spans.insert(0, Span::styled(" ", Theme::title()));
+            }
+        }
+        wrapped_header.push(line);
+    }
+    let header_height = (wrapped_header.len() as u16).clamp(1, 4);
+
+    let split = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(header_height),
+            Constraint::Min(4),
+        ])
+        .split(inner);
+    let header_area = split[0];
+    let body_area = split[1];
+    f.render_widget(Paragraph::new(wrapped_header), header_area);
+
     // Calculate dynamic input box height based on wrapped lines
-    let input_inner_width = (inner.width.saturating_sub(2).max(10)) as usize;
+    let input_inner_width = (body_area.width.saturating_sub(2).max(10)) as usize;
     let cursor_idx = state.cursor_pos();
     let chars: Vec<char> = state.input.chars().collect();
     let before: String = chars[..cursor_idx].iter().collect();
@@ -1039,7 +1105,7 @@ pub fn render_assistant_view(
     }
     let cursor_row = cursor_row.saturating_sub(1) as u16;
 
-    let max_box_height = (inner.height / 3).clamp(3, 8);
+    let max_box_height = (body_area.height / 3).clamp(3, 8);
     let input_box_height = ((input_lines as u16) + 2).min(max_box_height).max(3);
 
     let chunks = Layout::default()
@@ -1049,7 +1115,7 @@ pub fn render_assistant_view(
             Constraint::Length(1), // Blank separator between chat history and input window
             Constraint::Length(input_box_height), // Dynamic input prompt
         ])
-        .split(inner);
+        .split(body_area);
 
     // 1. Message history
     state.tool_chip_lines.borrow_mut().clear();
@@ -1370,7 +1436,9 @@ pub fn render_assistant_view(
     f.render_widget(history_widget, chunks[0]);
 
     // 2. Input box
-    let input_title = if !state.slash_suggestions.is_empty() {
+    let input_title = if state.is_busy {
+        " Assistant is thinking... (<Esc> or <Ctrl+c> to Cancel) ".to_string()
+    } else if !state.slash_suggestions.is_empty() {
         " Ask Assistant (⚡ SRE Playbooks: <Tab>/<Enter> Apply, ↑/↓ Select, <Esc> Dismiss) "
             .to_string()
     } else if !state.auto_scroll && effective_scroll < max_scroll {

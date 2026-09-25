@@ -1945,6 +1945,66 @@ async fn assistant_history_and_slash_suggestions_drive_the_arrow_keys() {
 }
 
 #[tokio::test]
+async fn assistant_busy_turn_can_be_cancelled_with_esc_or_ctrl_c() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.active_view = ActiveView::Assistant;
+
+    // 1. Cancel via Esc
+    app.assistant_state.is_busy = true;
+    let task1 = tokio::spawn(async {
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+    });
+    app.assistant_state.task = Some(task1.abort_handle());
+
+    app.handle_key_event(common::key(KeyCode::Esc)).await;
+    assert!(
+        !app.assistant_state.is_busy,
+        "Esc cancels busy assistant state"
+    );
+    assert!(
+        app.assistant_state.task.is_none(),
+        "assistant task handle was taken"
+    );
+    assert_eq!(toast(&app), "✓ Assistant generation cancelled");
+    assert!(app
+        .assistant_state
+        .messages
+        .last()
+        .unwrap()
+        .content
+        .contains("[Cancelled by user]"));
+
+    // 2. Cancel via Ctrl+c when busy and no selection
+    app.assistant_state.is_busy = true;
+    let task2 = tokio::spawn(async {
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+    });
+    app.assistant_state.task = Some(task2.abort_handle());
+
+    app.handle_key_event(common::ctrl('c')).await;
+    assert!(
+        !app.assistant_state.is_busy,
+        "Ctrl+c cancels busy assistant state"
+    );
+    assert!(app.assistant_state.task.is_none());
+    assert_eq!(toast(&app), "✓ Assistant generation cancelled");
+
+    // 3. Ctrl+l aborts task while clearing conversation
+    app.assistant_state.is_busy = true;
+    let task3 = tokio::spawn(async {
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+    });
+    let abort3 = task3.abort_handle();
+    app.assistant_state.task = Some(abort3);
+
+    app.handle_key_event(common::ctrl('l')).await;
+    assert!(!app.assistant_state.is_busy);
+    assert!(app.assistant_state.task.is_none());
+    assert_eq!(toast(&app), "✓ Conversation cleared");
+}
+
+#[tokio::test]
 async fn assistant_scroll_keys_move_the_viewport() {
     let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;

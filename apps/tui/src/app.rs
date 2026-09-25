@@ -4236,6 +4236,10 @@ impl App {
                         self.assistant_state.clear_selection();
                         return;
                     }
+                    if self.assistant_state.is_busy {
+                        self.cancel_assistant_turn();
+                        return;
+                    }
                 }
                 if let ActiveView::Yaml(ref mut yaml) = self.active_view {
                     if yaml.selection.is_some() {
@@ -5969,6 +5973,10 @@ impl App {
                     && (key.modifiers.contains(KeyModifiers::CONTROL)
                         || key.modifiers.contains(KeyModifiers::SUPER))
                 {
+                    if ai.is_busy && ai.selection.is_none() {
+                        self.cancel_assistant_turn();
+                        return;
+                    }
                     if let Some(selected) = ai.get_selected_text() {
                         let _ = copy_to_clipboard(&selected);
                         self.set_toast(
@@ -6141,7 +6149,7 @@ impl App {
                     }
                     KeyCode::Enter => {
                         if ai.is_busy {
-                            self.set_toast("⚠️ Assistant is busy processing a query. Please wait or press <Ctrl+l> to clear.".to_string(), Theme::status_warn());
+                            self.set_toast("⚠️ Assistant is busy. Press <Esc> or <Ctrl+c> to cancel, or <Ctrl+l> to clear.".to_string(), Theme::status_warn());
                             return;
                         }
                         let raw_input = ai.input.trim().to_string();
@@ -7921,8 +7929,20 @@ impl App {
         }
     }
 
+    pub fn cancel_assistant_turn(&mut self) {
+        let ai = &mut self.assistant_state;
+        if ai.is_busy {
+            ai.cancel_turn();
+            self.set_toast(
+                "✓ Assistant generation cancelled".to_string(),
+                Theme::status_ok(),
+            );
+        }
+    }
+
     pub fn submit_assistant_query(&mut self, clean_query: String, agent_query: String) {
         let ai = &mut self.assistant_state;
+        ai.cancel_turn();
         ai.slash_suggestions.clear();
         ai.start_turn(clean_query);
         let query = if let Some(lvl) = ai.caveman_level {
@@ -7933,6 +7953,15 @@ impl App {
         let provider = self.ai_settings.default_provider;
         let active_ctx = self.active_context.clone();
         let active_ns = self.active_namespace.clone();
+        let argo_hub_ctx = self.tui_config.resolved_argo_hub_context();
+        let argo_hub_kc = self.tui_config.resolved_argo_hub_kubeconfig();
+
+        let mut kubeconfig_paths = self.kubeconfig_paths.clone();
+        if let Some(ref hub_kc) = argo_hub_kc {
+            if !kubeconfig_paths.contains(hub_kc) {
+                kubeconfig_paths.push(hub_kc.clone());
+            }
+        }
 
         if provider == crate::ai_config::AiProvider::Cursor {
             if let Some(cursor_bin) = crate::ai_config::find_cursor_binary() {
@@ -7940,10 +7969,13 @@ impl App {
                 let model = self.ai_settings.get_model(provider);
                 let api_key = self.ai_settings.get_api_key(provider);
                 let cache = self.client_cache.clone();
-                let kubeconfig_paths = self.kubeconfig_paths.clone();
                 let timeout_seconds = self.ai_settings.get_timeout_seconds(provider);
+                let hub_kc_opt = argo_hub_kc.clone();
 
-                tokio::spawn(async move {
+                let handle = tokio::spawn(async move {
+                    if let Some(ref hub_kc) = hub_kc_opt {
+                        cache.ensure_paths(vec![hub_kc.clone()]).await;
+                    }
                     crate::agent::run_boxed_cursor_turn(
                         cursor_bin,
                         model,
@@ -7951,6 +7983,7 @@ impl App {
                         query,
                         active_ctx,
                         active_ns,
+                        argo_hub_ctx,
                         cache,
                         kubeconfig_paths,
                         event_tx,
@@ -7958,19 +7991,21 @@ impl App {
                     )
                     .await;
                 });
+                ai.task = Some(handle.abort_handle());
             } else {
                 ai.add_assistant_message("cursor-agent CLI was not found on PATH. Install from https://docs.cursor.com/en/cli/overview or ensure ~/.local/bin is in your PATH.".to_string());
             }
         } else if let Some(config) = self.ai_settings.resolve_provider_config(provider) {
             let event_tx = self.event_tx.clone();
             let cache = self.client_cache.clone();
-            let kubeconfig_paths = self.kubeconfig_paths.clone();
-            let active_ctx = self.active_context.clone();
-            let active_ns = self.active_namespace.clone();
             let history = ai.native_history.clone();
             let timeout_seconds = self.ai_settings.get_timeout_seconds(provider);
+            let hub_kc_opt = argo_hub_kc.clone();
 
-            tokio::spawn(async move {
+            let handle = tokio::spawn(async move {
+                if let Some(ref hub_kc) = hub_kc_opt {
+                    cache.ensure_paths(vec![hub_kc.clone()]).await;
+                }
                 let server = crate::agent::build_mcp_server(cache, kubeconfig_paths);
                 let invoker = std::sync::Arc::new(crate::agent::McpToolInvoker::new(server));
                 crate::agent::run_native_agent_turn(
@@ -7980,11 +8015,13 @@ impl App {
                     query,
                     active_ctx,
                     active_ns,
+                    argo_hub_ctx,
                     event_tx,
                     timeout_seconds,
                 )
                 .await;
             });
+            ai.task = Some(handle.abort_handle());
         } else {
             let env_var = crate::ai_config::env_var_for_provider(provider);
             let prov_name = crate::ai_config::provider_display_name(provider);

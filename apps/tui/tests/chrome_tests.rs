@@ -1504,6 +1504,26 @@ fn the_assistant_title_reflects_context_caveman_tokens_selection_and_folded_tool
     );
 }
 
+#[test]
+fn the_assistant_title_wraps_cleanly_at_narrow_widths() {
+    let mut state = AssistantViewState::for_context("elastic-infra-prod-eu-dus1");
+    state.caveman_level = Some(CavemanLevel::Full);
+    let lines = common::render_lines(120, 30, |f| {
+        render_assistant_view(f, f.area(), &state, &AiSettings::default())
+    });
+    let text = lines.join("\n");
+    assert!(text.contains("SRElens AI Assistant @elastic-infra-prod-eu-dus1"), "{text}");
+    assert!(text.contains("<Ctrl+l> Clear"), "{text}");
+    assert!(text.contains("<Ctrl+s> Settings"), "{text}");
+    assert!(text.contains("<Esc>"), "{text}");
+    assert!(text.contains("Back]"), "{text}");
+
+    let row1 = &lines[1];
+    let row2 = &lines[2];
+    assert!(row1.contains("SRElens AI Assistant"), "row1: {row1}");
+    assert!(row2.contains("<Ctrl+l> Clear"), "row2: {row2}");
+}
+
 // ───────────────────────── assistant: tool chips ─────────────────────────
 
 fn state_with_tools(expand: bool) -> AssistantViewState {
