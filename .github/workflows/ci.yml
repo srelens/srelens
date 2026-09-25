@@ -191,6 +191,9 @@ jobs:
   extension-budgets:
     name: extension budgets (release)
     runs-on: ubuntu-22.04
+    # Reads the checkout and nothing else; uploading an artifact needs no scope.
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # No `version:` — `pnpm/action-setup` reads `packageManager` from

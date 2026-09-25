@@ -263,13 +263,14 @@ async fn an_inventory_of_fifty_apps_loads_within_budget() {
 }
 
 /// A kubeconfig in `dir` whose one context, `name`, is the API server on `port`.
+/// Its user carries no credential: the loopback servers here authenticate nothing.
 fn kubeconfig(dir: &Path, name: &str, port: u16) -> PathBuf {
     let path = dir.join("config");
     fs::write(
         &path,
         format!(
             "apiVersion: v1\nkind: Config\nclusters:\n- name: c\n  cluster:\n    server: http://127.0.0.1:{port}\n\
-             users:\n- name: u\n  user:\n    token: t\ncontexts:\n- name: {name}\n  context:\n    cluster: c\n    user: u\n\
+             users:\n- name: u\n  user: {{}}\ncontexts:\n- name: {name}\n  context:\n    cluster: c\n    user: u\n\
              current-context: {name}\n"
         ),
     )
