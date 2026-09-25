@@ -130,7 +130,7 @@ fn handle(method: &str, params: &Value) -> Result<Value, Fail> {
         "burn_cpu" => {
             let millis = params["millis"].as_u64().ok_or("missing millis")?;
             let threads = params["threads"].as_u64().unwrap_or(1);
-            let cpu_before = process_cpu_ms();
+            let cpu_before = process_cpu_ms()?;
             let start = Instant::now();
             let deadline = start + Duration::from_millis(millis);
             let workers: Vec<_> = (0..threads)
@@ -150,7 +150,7 @@ fn handle(method: &str, params: &Value) -> Result<Value, Fail> {
                 w.join().map_err(|_| Fail::new("Other", "worker panicked"))?;
             }
             let wall_ms = start.elapsed().as_secs_f64() * 1000.0;
-            let cpu_ms = process_cpu_ms() - cpu_before;
+            let cpu_ms = process_cpu_ms()? - cpu_before;
             Ok(json!({ "cpu_ms": cpu_ms, "wall_ms": wall_ms, "threads": threads }))
         }
         other => Err(format!("unknown method {other}").into()),
@@ -163,21 +163,51 @@ fn str_param<'a>(params: &'a Value, key: &str) -> Result<&'a str, String> {
 
 /// User plus kernel CPU time of this whole process, in milliseconds.
 #[cfg(windows)]
-fn process_cpu_ms() -> f64 {
+fn process_cpu_ms() -> Result<f64, Fail> {
     use windows_sys::Win32::Foundation::FILETIME;
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
     let zero = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
     let (mut c, mut e, mut k, mut u) = (zero, zero, zero, zero);
     // SAFETY: GetCurrentProcess is a pseudo-handle; the out-pointers are valid locals.
-    unsafe { GetProcessTimes(GetCurrentProcess(), &mut c, &mut e, &mut k, &mut u) };
+    let ok = unsafe { GetProcessTimes(GetCurrentProcess(), &mut c, &mut e, &mut k, &mut u) };
     let t = |f: FILETIME| ((f.dwHighDateTime as u64) << 32 | f.dwLowDateTime as u64) as f64;
-    (t(k) + t(u)) / 10_000.0
+    cpu_clock(ok != 0, "GetProcessTimes", (t(k) + t(u)) / 10_000.0)
 }
 
 #[cfg(unix)]
-fn process_cpu_ms() -> f64 {
+fn process_cpu_ms() -> Result<f64, Fail> {
     let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
     // SAFETY: valid out-pointer.
-    unsafe { libc::clock_gettime(libc::CLOCK_PROCESS_CPUTIME_ID, &mut ts) };
-    ts.tv_sec as f64 * 1000.0 + ts.tv_nsec as f64 / 1e6
+    let ret = unsafe { libc::clock_gettime(libc::CLOCK_PROCESS_CPUTIME_ID, &mut ts) };
+    cpu_clock(ret == 0, "clock_gettime", ts.tv_sec as f64 * 1000.0 + ts.tv_nsec as f64 / 1e6)
+}
+
+/// A CPU-time reading, or the OS error of the call that failed to take it. A failed call
+/// leaves the zeroed locals behind, and a zero must not be reported as a measurement:
+/// check 6 would read it as throttling.
+fn cpu_clock(succeeded: bool, call: &str, ms: f64) -> Result<f64, Fail> {
+    if succeeded {
+        return Ok(ms);
+    }
+    let e = std::io::Error::last_os_error();
+    Err(Fail { message: format!("{call} failed: {e}"), ..Fail::from(e) })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cpu_clock;
+
+    #[test]
+    fn a_failed_clock_read_is_an_error_not_zero() {
+        // Check 6 would read a zero as "throttled".
+        let reading = cpu_clock(false, "clock_gettime", 0.0);
+        assert!(reading.is_err(), "got {:?}", reading.ok());
+        let fail = reading.err().expect("an error");
+        assert!(fail.message.starts_with("clock_gettime failed"), "{}", fail.message);
+    }
+
+    #[test]
+    fn a_successful_clock_read_is_the_reading() {
+        assert_eq!(cpu_clock(true, "clock_gettime", 12.5).ok(), Some(12.5));
+    }
 }
