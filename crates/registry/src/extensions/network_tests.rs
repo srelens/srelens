@@ -26,6 +26,27 @@ enum Reply {
     Slow(Duration),
 }
 
+/// Headers that carry a credential. The test server keeps only their digest, so a
+/// capture never holds a secret in the clear.
+const SECRET_HEADERS_SEEN: &[&str] = &["authorization", "dd-api-key"];
+
+/// How the test server records a secret-bearing header's value.
+fn digest(value: &str) -> String {
+    use sha2::{Digest, Sha256};
+    format!("sha256:{:x}", Sha256::digest(value.as_bytes()))
+}
+
+/// A stand-in secret made at run time, so no credential-shaped value is written in
+/// the source. It is still handled as a secret everywhere: never printed, and kept
+/// by the test server only as a digest.
+fn stand_in_secret(label: &str) -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!("{label}-not-a-credential-{nanos:x}")
+}
+
 /// One request as the server saw it.
 #[derive(Clone, Debug)]
 struct Seen {
@@ -91,7 +112,14 @@ async fn server(answer: impl Fn(&str) -> Reply + Send + Sync + 'static) -> Serve
                         break;
                     }
                     if let Some((key, value)) = header.split_once(':') {
-                        headers.push((key.trim().to_owned(), value.trim().to_owned()));
+                        let (key, value) = (key.trim(), value.trim());
+                        let kept =
+                            if SECRET_HEADERS_SEEN.contains(&key.to_ascii_lowercase().as_str()) {
+                                digest(value)
+                            } else {
+                                value.to_owned()
+                            };
+                        headers.push((key.to_owned(), kept));
                     }
                 }
                 log.lock().unwrap().push(Seen {
@@ -401,7 +429,7 @@ async fn a_request_carrying_a_secret_follows_no_redirect_to_another_origin() {
     let grafana = server(move |_| Reply::Redirect(away.clone())).await;
     let rules = vec![grafana.rule(), elsewhere.rule()];
     let mut headers = HeaderMap::new();
-    let mut key = HeaderValue::from_static("dd-api-7c1e4f");
+    let mut key = HeaderValue::from_str(&stand_in_secret("dd-api")).unwrap();
     key.set_sensitive(true);
     headers.insert("dd-api-key", key);
     let refused = send(
@@ -569,7 +597,6 @@ impl SecretStore for Vault {
 }
 
 const APP: &str = "org.example.metrics";
-const TOKEN: &str = "glc-9f2e-hunter2";
 
 /// A metrics app: one Prometheus query, its URL a setting and its token a
 /// secret sent as a bearer header.
@@ -609,6 +636,7 @@ fn broker(dir: &std::path::Path, vault: Arc<Vault>) -> (std::path::PathBuf, Regi
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_installed_app_reaches_its_host_through_extensions_read_with_its_secret_injected() {
+    let token = stand_in_secret("api-token");
     let prometheus = server(|_| Reply::Json(json!({"status":"success"}))).await;
     let dir = tempfile::tempdir().unwrap();
     let vault = Arc::new(Vault::default());
@@ -643,7 +671,7 @@ async fn an_installed_app_reaches_its_host_through_extensions_read_with_its_secr
     assert!(prometheus.seen().is_empty());
     reg.invoke(
         "extension.secretStore",
-        json!({"action":"set","id":APP,"setting":"token","secret":TOKEN}),
+        json!({"action":"set","id":APP,"setting":"token","secret":token}),
     )
     .await
     .unwrap();
@@ -652,7 +680,7 @@ async fn an_installed_app_reaches_its_host_through_extensions_read_with_its_secr
     let answer = read().await.unwrap();
     // Absence first, with messages that print nothing, so a failure here cannot put
     // the secret in the test output (CodeQL rust/cleartext-logging, as in #710).
-    let leaked = answer.to_string().contains(TOKEN);
+    let leaked = answer.to_string().contains(&token);
     assert!(!leaked, "the answer holds the secret");
     assert_eq!(
         answer,
@@ -660,7 +688,7 @@ async fn an_installed_app_reaches_its_host_through_extensions_read_with_its_secr
     );
     let seen = prometheus.seen();
     assert_eq!(seen[0].target, "/api/v1/query?query=up");
-    let bearer = format!("Bearer {TOKEN}");
+    let bearer = digest(&format!("Bearer {token}"));
     let sent = seen[0].header("authorization") == Some(bearer.as_str());
     assert!(
         sent,
@@ -668,7 +696,7 @@ async fn an_installed_app_reaches_its_host_through_extensions_read_with_its_secr
     );
     assert_eq!(seen[0].header("accept"), Some("application/json"));
     let listed = reg.invoke("extensions.list", json!({})).await.unwrap();
-    assert!(!listed.to_string().contains(TOKEN));
+    assert!(!listed.to_string().contains(&token));
     assert_eq!(listed["plugins"][0]["allowLoopbackHttp"], true);
 
     // Moving the URL elsewhere moves the allowlist with it, and a stream is never
