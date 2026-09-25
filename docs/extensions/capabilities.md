@@ -146,8 +146,9 @@ releases and reviewed with their new grants before they can be enabled.
 
 ## Host action primitives
 
-The four capabilities a manifest binds as `actions`
-([#549](https://github.com/srelens/srelens/issues/549), written up in
+The six capabilities a manifest binds as `actions`
+([#549](https://github.com/srelens/srelens/issues/549), with the workload restart and
+Node cordon from [#557](https://github.com/srelens/srelens/issues/557), written up in
 [manifest.md](manifest.md#declared-actions)). They execute a write the *app* declares, against a kind it already holds a granted reader for,
 with every rule enforced by the host.
 
@@ -157,6 +158,8 @@ with every rule enforced by the host.
 | `k8s.setFields` | `medium` | Sets fixed fields under `spec`. Workloads already running are not stopped. |
 | `k8s.setStatusCondition` | `medium` | Writes one condition through the status subresource, which a controller then acts on. |
 | `k8s.mergePatch` | `high` | The one that can express an Argo CD sync: applying manifests and running hooks. |
+| `k8s.requestRolloutRestart` | `high` | Stamps the pod template of the reviewed Deployment, StatefulSet or DaemonSet, so its running pods are replaced. |
+| `k8s.requestCordonNode` | `medium` | Sets `spec.unschedulable` on the reviewed Node. Running pods are not evicted. |
 
 The level is the ceiling of what the *primitive's shape* can do, not of what a
 controller may do afterwards — an app is free to bind Flux's `forceAt` key through
