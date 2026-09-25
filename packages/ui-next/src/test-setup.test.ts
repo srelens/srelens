@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { subscribe } from "@srelens/core/transport";
-import { InertWebSocket } from "@srelens/core/testing/inertWebSocket";
 
 /** The zone in effect, or `timeZone` as ICU names it ("Asia/Kathmandu" comes back "Asia/Katmandu"). */
 const zoneNow = (timeZone?: string) => Intl.DateTimeFormat(undefined, { timeZone }).resolvedOptions().timeZone;
@@ -18,18 +17,38 @@ describe("a time zone a test pins", () => {
   });
 });
 
-// #730. A view subscribes on mount and waits for the server's ack before it is
-// handed its unsubscribe. No server answers a test, so the channel stays open
-// for the rest of the file. If the test's socket could reach the network, it
-// would be refused and closed, and the client would schedule a reconnect —
-// which, fired after Vitest has torn jsdom down, reads a `location` that is
-// gone and fails the whole run with every test green.
+describe("a WebSocket a test opens", () => {
+  afterEach(() => { vi.useRealTimers(); });
+
+  // Not jsdom's: a real one to the transport's URL is refused, and the refusal
+  // is what arms the transport's reconnect timer. Checked by name rather than
+  // by importing the setup file, which would install it and so pass even when
+  // `setupFiles` no longer lists it.
+  it("is the offline one the setup installs", () => {
+    expect(WebSocket.name).toBe("OfflineWebSocket");
+  });
+
+  it("never connects and never fails, even when closed, so the transport has nothing to retry", async () => {
+    vi.useFakeTimers();
+    const socket = new WebSocket("ws://localhost:3000/api/ws");
+    const events: string[] = [];
+    for (const type of ["open", "message", "error", "close"]) socket.addEventListener(type, () => events.push(type));
+    await vi.runAllTimersAsync();
+    expect(socket.readyState).toBe(WebSocket.CONNECTING);
+    socket.close();
+    await vi.runAllTimersAsync();
+    expect(socket.readyState).toBe(WebSocket.CLOSED);
+    expect(events).toEqual([]);
+  });
+});
+
+// The failure itself, end to end through the transport (#730): a channel taken
+// with `subscribe` is never acked in a test, so it is held for good. Whatever
+// its socket does must leave no timer that runs after jsdom is gone.
 describe("a channel a test never closes", () => {
-  afterEach(() => vi.useRealTimers());
+  afterEach(() => { vi.useRealTimers(); });
+
   it("leaves no reconnect behind, to fire after jsdom is torn down", async () => {
-    // Stated outright: with jsdom's own socket, whether the timers below throw
-    // depends on the refusal arriving within the wait.
-    expect(globalThis.WebSocket).toBe(InertWebSocket);
     const wait = setTimeout;
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     void subscribe("test:never-acked", () => {});

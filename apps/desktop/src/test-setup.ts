@@ -1,6 +1,5 @@
 import { afterEach } from "vitest";
 import { cleanup } from "@testing-library/react";
-import { installInertWebSocket } from "@srelens/core/testing/inertWebSocket";
 
 // Unmount React trees between tests so repeated render() calls don't stack.
 afterEach(() => cleanup());
@@ -48,8 +47,4 @@ if (typeof window !== "undefined") {
   proto.setPointerCapture ??= () => {};
   proto.releasePointerCapture ??= () => {};
   proto.scrollIntoView ??= () => {};
-
-  // No component test reaches the network: a refused socket left the web
-  // transport reconnecting after jsdom was gone (#730). See `InertWebSocket`.
-  installInertWebSocket();
 }
