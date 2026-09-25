@@ -17,7 +17,7 @@
 //! because the operation succeeds. See `src/lib.rs` for the backends.
 
 use serde_json::json;
-use sidecar_sandbox_spike::{Backend, Denial, Fixture, Limits, Reply, Sidecar};
+use sidecar_sandbox_spike::{Backend, Denial, Fixture, Limits, Reply, Sidecar, Stop};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
@@ -198,9 +198,11 @@ fn c5_memory_past_limit_is_refused_or_stopped_and_host_survives() {
     let reply = run.sidecar.call("allocate", json!({ "mib": mib }));
     println!("[{}] allocate {mib} MiB (limit {} MiB): {reply:?}", run.backend, LIMITS.memory_mib);
     let refused = matches!(&reply, Reply::Refused(f) if Denial::Memory.accepts(f));
+    // Stopped counts only as the limit's own kill, never as a crash: see `Stop`.
+    let stopped = matches!(&reply, Reply::Stopped(ended) if Stop::Memory.accepts(ended));
     assert!(
-        refused || matches!(reply, Reply::Stopped(_)),
-        "[{}] allocating {mib} MiB past a {} MiB limit must be refused or stop the sidecar, got {reply:?}",
+        refused || stopped,
+        "[{}] allocating {mib} MiB past a {} MiB limit must be refused, or stop the sidecar with the limit's signal, got {reply:?}",
         run.backend,
         LIMITS.memory_mib
     );
@@ -217,7 +219,8 @@ fn c6_cpu_past_limit_is_throttled_or_stopped() {
     let reply = run.sidecar.call("burn_cpu", json!({ "millis": 3000, "threads": 2 }));
     println!("[{}] burn 2 threads for 3 s (limit {} CPU): {reply:?}", run.backend, LIMITS.cpus);
     match &reply {
-        Reply::Stopped(_) => {}
+        // Only the limit's own signal: a probe that crashed says nothing about the limit.
+        Reply::Stopped(ended) if Stop::Cpu.accepts(ended) => {}
         Reply::Ok(result) => {
             let cpu = result["cpu_ms"].as_f64().expect("cpu_ms");
             let wall = result["wall_ms"].as_f64().expect("wall_ms");

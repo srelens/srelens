@@ -7,8 +7,9 @@
 //! has moved the container's processes into a leaf). Each sidecar gets its own child
 //! directory with `memory.max`, `memory.swap.max = 0` and `cpu.max`.
 
-use crate::{built_binary, Fixture, Limits};
+use crate::{built_binary, Ended, Fixture, Limits};
 use std::io;
+use std::os::unix::process::ExitStatusExt;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -26,19 +27,20 @@ pub struct Confined {
 }
 
 impl Confined {
-    pub fn ended(&mut self) -> String {
-        let status = match self.child.wait() {
-            Ok(status) => format!("exited: {status}"),
-            Err(e) => format!("wait failed: {e}"),
+    pub fn ended(&mut self) -> Ended {
+        let (status, signal) = match self.child.wait() {
+            Ok(status) => (format!("exited: {status}"), status.signal()),
+            Err(e) => (format!("wait failed: {e}"), None),
         };
-        match &self.cgroup {
+        let text = match &self.cgroup {
             Some(dir) => {
                 let events = std::fs::read_to_string(dir.join("memory.events")).unwrap_or_default();
                 let oom = events.lines().find(|l| l.starts_with("oom_kill ")).unwrap_or("oom_kill ?");
                 format!("{status}; cgroup memory.events {oom}")
             }
             None => status,
-        }
+        };
+        Ended { text, signal }
     }
 }
 

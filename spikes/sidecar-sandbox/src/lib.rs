@@ -177,6 +177,51 @@ mod denial_tests {
     }
 }
 
+#[cfg(test)]
+mod stop_tests {
+    use super::{Ended, Stop};
+
+    fn ended(text: &str, signal: Option<i32>) -> Ended {
+        Ended { text: text.into(), signal }
+    }
+
+    #[test]
+    fn an_ordinary_exit_is_never_a_limit() {
+        // A panic in the probe: exit status 101, no signal.
+        let panicked = ended("exited: exit status: 101", None);
+        for stop in [Stop::Memory, Stop::Cpu] {
+            assert!(!stop.accepts(&panicked), "{stop:?}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_abort_is_never_a_limit() {
+        let aborted = ended("exited: signal: 6 (SIGABRT)", Some(libc::SIGABRT));
+        for stop in [Stop::Memory, Stop::Cpu] {
+            assert!(!stop.accepts(&aborted), "{stop:?}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_memory_stop_is_the_oom_killers_sigkill() {
+        let oom = "exited: signal: 9 (SIGKILL); cgroup memory.events oom_kill 1";
+        let killed = ended(oom, Some(libc::SIGKILL));
+        assert!(Stop::Memory.accepts(&killed));
+        let xcpu = ended("exited: signal: 24 (SIGXCPU)", Some(libc::SIGXCPU));
+        assert!(!Stop::Memory.accepts(&xcpu));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_cpu_stop_is_rlimit_cpus_sigxcpu_or_sigkill() {
+        for signal in [libc::SIGXCPU, libc::SIGKILL] {
+            assert!(Stop::Cpu.accepts(&ended("exited: signal", Some(signal))), "{signal}");
+        }
+    }
+}
+
 /// What the OS can say about a sidecar that never answered its first ping. On macOS under
 /// `seatbelt`, the sandbox's recent log entries for the probe; elsewhere, nothing more.
 pub fn start_failure_context(backend: Backend) -> String {
@@ -320,6 +365,59 @@ impl Denial {
     }
 }
 
+/// How a sidecar ended, once its stdout closed.
+pub struct Ended {
+    /// What the OS reported: the exit status and, under a cgroup, its OOM kills.
+    pub text: String,
+    /// The signal that ended it, on Unix.
+    pub signal: Option<i32>,
+}
+
+/// Prints as the text alone, so a recorded reply reads `Stopped("exited: …")`.
+impl fmt::Debug for Ended {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&self.text, f)
+    }
+}
+
+/// The signal that ended a process, on Unix; `None` for an ordinary exit and on Windows.
+fn signal_of(status: &std::process::ExitStatus) -> Option<i32> {
+    #[cfg(unix)]
+    return std::os::unix::process::ExitStatusExt::signal(status);
+    #[cfg(not(unix))]
+    {
+        let _ = status;
+        None
+    }
+}
+
+/// Which resource limit a check expects to have stopped the sidecar. A stop counts only if
+/// it ended with the signal that limit sends: a panic (exit status 101) or an abort is the
+/// sidecar breaking, never a limit. No Windows backend here stops the sidecar for a limit
+/// (the Job Object refuses the allocation and throttles the CPU), so none counts there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stop {
+    Memory,
+    Cpu,
+}
+
+impl Stop {
+    pub fn accepts(self, ended: &Ended) -> bool {
+        #[cfg(unix)]
+        return match self {
+            // The OOM killer's SIGKILL, under cgroup v2's memory.max.
+            Stop::Memory => ended.signal == Some(libc::SIGKILL),
+            // RLIMIT_CPU: SIGXCPU at the soft limit, SIGKILL at the hard one.
+            Stop::Cpu => matches!(ended.signal, Some(libc::SIGXCPU | libc::SIGKILL)),
+        };
+        #[cfg(not(unix))]
+        {
+            let _ = (self, ended);
+            false
+        }
+    }
+}
+
 /// What came back from one call.
 #[derive(Debug)]
 pub enum Reply {
@@ -328,7 +426,7 @@ pub enum Reply {
     /// The probe answered that the operation failed.
     Refused(Failure),
     /// The probe did not answer: its stdout closed. Carries how the process ended.
-    Stopped(String),
+    Stopped(Ended),
     /// Something other than a well-formed reply to this request came back (for example a
     /// panic message). Never a denial: the exchange itself broke.
     Garbled(String),
@@ -447,7 +545,7 @@ impl Sidecar {
             let mut line = String::new();
             match self.stdout.read_line(&mut line) {
                 Ok(0) | Err(_) => {
-                    text.push_str(&format!("[then stdout closed; {}]", self.ended()));
+                    text.push_str(&format!("[then stdout closed; {}]", self.ended().text));
                     break;
                 }
                 Ok(_) => {
@@ -463,14 +561,16 @@ impl Sidecar {
     }
 
     /// How the process ended, once its stdout has closed.
-    fn ended(&mut self) -> String {
+    fn ended(&mut self) -> Ended {
         match &mut self.process {
             Process::Plain(child) => match child.wait() {
-                Ok(status) => format!("exited: {status}"),
-                Err(e) => format!("wait failed: {e}"),
+                Ok(status) => {
+                    Ended { text: format!("exited: {status}"), signal: signal_of(&status) }
+                }
+                Err(e) => Ended { text: format!("wait failed: {e}"), signal: None },
             },
             #[cfg(windows)]
-            Process::Windows(c) => c.ended(),
+            Process::Windows(c) => Ended { text: c.ended(), signal: None },
             #[cfg(target_os = "linux")]
             Process::Linux(c) => c.ended(),
         }
