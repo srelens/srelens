@@ -32,8 +32,8 @@ function pageFor(plugin: InstalledExtension, capability: string) {
   return (pages.find(page => !page.dashboard) ?? pages[0])?.id;
 }
 
-function LinkRow({ plugin, link, clusterId, clusterName }: {
-  plugin: InstalledExtension; link: ExtensionResolvedLink; clusterId: string; clusterName?: string;
+function LinkRow({ plugin, link, contextKey, clusterName }: {
+  plugin: InstalledExtension; link: ExtensionResolvedLink; contextKey?: string; clusterName?: string;
 }) {
   const kind = link.to.split("/").pop() ?? link.to;
   const relation = RELATION[link.relation] ?? link.relation;
@@ -52,9 +52,10 @@ function LinkRow({ plugin, link, clusterId, clusterName }: {
     // Not looked up is not missing: say why the host did not look.
     if (target.unverified) return <li key={key}>{plainText(text)} — {plainText(target.unverified)}</li>;
     if (!target.exists) return <li key={key}>{plainText(text)} — not found on this cluster</li>;
-    if (!page) return <li key={key}>{plainText(text)}</li>;
+    // No page, or no listed context to name the tab by: the target as plain text.
+    if (!page || contextKey === undefined) return <li key={key}>{plainText(text)}</li>;
     return <li key={key}><Button type="button" variant="ghost" size="sm"
-      onClick={() => openTab(extensionClusterResourceRoute(clusterId, plugin.manifest.id, page, target.namespace ?? "", target.name),
+      onClick={() => openTab(extensionClusterResourceRoute(contextKey, plugin.manifest.id, page, target.namespace ?? "", target.name),
         { clusterName })}>{plainText(text)}</Button></li>;
   })}</>;
 }
@@ -63,7 +64,11 @@ function RelatedLinks({ plugins, context, kind, resource }: {
   plugins: InstalledExtension[]; context: string; kind: string; resource: LinkResource;
 }) {
   const contexts = useContexts();
-  const cluster = contexts.find(c => c.name === context) ?? contexts.find(c => c.stableId === context);
+  // The Inspector names its cluster by display name; an app's resource page by the pinned ID it
+  // reads by. A pinned ID first: the host never resolves its reserved form to a context merely
+  // named so. (While both are listed, it resolves such a string to neither, and the links fail
+  // there.) The route carries the key (#695).
+  const cluster = contexts.find(c => c.pinnedId === context) ?? contexts.find(c => c.name === context);
   const namespace = resource.metadata.namespace ?? "";
   // The resolver reads the resource's identity and metadata and nothing else:
   // a ConfigMap's data, a spec or a Secret's values never leave the Inspector.
@@ -86,7 +91,7 @@ function RelatedLinks({ plugins, context, kind, resource }: {
         ? <li key={answer.plugin.manifest.id} className="extension-related-error">
           Couldn’t read related resources from {plainText(answer.plugin.manifest.name)}: {plainText(answer.error)}</li>
         : answer.links?.map(link => <LinkRow key={`${answer.plugin.manifest.id}/${link.id}`} plugin={answer.plugin}
-          link={link} clusterId={cluster?.stableId ?? context} clusterName={cluster?.name}/>))}
+          link={link} contextKey={cluster?.key} clusterName={cluster?.name}/>))}
     </ul>}
     {failed && <Button type="button" variant="ghost" size="sm" onClick={data.reload}>Retry related resources</Button>}
   </>;

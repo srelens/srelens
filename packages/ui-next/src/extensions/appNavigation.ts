@@ -9,12 +9,12 @@ import { extensionLogoIcon, extensionPageIcon } from "./ExtensionLogo";
  * `group` nested under it in their first page's place. `null` when no app
  * contributes a page here, so the sidebar shows no empty group.
  *
- * `stableId` goes in each page's route; `scopeId` is the context key an app's
- * cluster scope names (#623). Pure, so the budget test (#581) times exactly
- * what the sidebar builds.
+ * `contextKey` is both what each page's route carries and what an app's cluster
+ * scope names: the one identity no two contexts share (#623, #695). Pure, so
+ * the budget test (#581) times exactly what the sidebar builds.
  */
-export function appNavigation(plugins: InstalledExtension[], stableId: string, scopeId: string): ResourceNode | null {
-  const apps = plugins.filter((p) => p.enabled && extensionEnabledFor(p, scopeId) && p.manifest.contributions.pages.length);
+export function appNavigation(plugins: InstalledExtension[], contextKey: string): ResourceNode | null {
+  const apps = plugins.filter((p) => p.enabled && extensionEnabledFor(p, contextKey) && p.manifest.contributions.pages.length);
   if (!apps.length) return null;
   return {
     id: "extensions", label: "Apps", icon: Icons.apps,
@@ -22,7 +22,7 @@ export function appNavigation(plugins: InstalledExtension[], stableId: string, s
       id: `extension:${p.manifest.id}`, label: p.manifest.name, icon: extensionLogoIcon(p.manifest.id, p.manifest.name),
       children: p.manifest.contributions.pages.flatMap((page, index, pages) => {
         const leaf = (item: typeof page) => ({
-          id: `route:${extensionClusterRoute(stableId, p.manifest.id, item.id)}`,
+          id: `route:${extensionClusterRoute(contextKey, p.manifest.id, item.id)}`,
           label: item.title, icon: extensionPageIcon(item.title),
         });
         if (!page.group) return [leaf(page)];

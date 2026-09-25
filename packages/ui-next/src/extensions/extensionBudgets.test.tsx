@@ -161,7 +161,7 @@ afterEach(() => cleanup());
 describe("extension performance budgets (#581)", () => {
   it("builds the sidebar's apps from fifty installed apps within budget", async () => {
     const plugins = fiftyApps();
-    const nav = appNavigation(plugins, "id:prod", "prod-key");
+    const nav = appNavigation(plugins, "prod-key");
     // Every app with a page, each under its own node, its grouped pages nested.
     expect(nav?.children).toHaveLength(APPS);
     const flux = nav!.children![0];
@@ -171,7 +171,7 @@ describe("extension performance budgets (#581)", () => {
     ]);
     expect(flux.children![3].children).toHaveLength(5);
     const pages = FLUX_APPS * FLUX.contributions.pages.length + (APPS - FLUX_APPS) * ARGO.contributions.pages.length;
-    const samples = await time(5, 50, () => appNavigation(plugins, "id:prod", "prod-key"));
+    const samples = await time(5, 50, () => appNavigation(plugins, "prod-key"));
     hold({
       name: "navigation-build-50-apps",
       what: "the sidebar's Apps group from 50 installed apps",

@@ -74,8 +74,6 @@ export function Nav({ contexts }: NavProps) {
   const extensions = useExtensions();
   const activeCluster = useActiveCluster();
   const ctx = resolveContext(contexts, activeCluster) ?? null;
-  // App routes carry the stable ID, so a shared one cannot be routed; app scope itself keys on `key` (#623).
-  const scopeId = ctx && contexts.filter((c) => c.stableId === ctx.stableId).length === 1 ? ctx.key : undefined;
   const view = useWorkspaceView();
   const [query, setQuery] = useState("");
   const mark = useMark(ctx?.stableId ?? "", ctx?.name ?? "");
@@ -112,9 +110,9 @@ export function Nav({ contexts }: NavProps) {
       : crdNodes(crds);
 
   const nodes = useMemo<ResourceNode[]>(() => {
-    const apps = ctx && scopeId !== undefined && extensions.data
-      ? appNavigation(extensions.data.plugins, ctx.stableId, scopeId)
-      : null;
+    // App routes and app scope both name the cluster by its key, which no two contexts share
+    // (#623, #695); a window opened for one of two sharing a stable ID pins its key.
+    const apps = ctx && extensions.data ? appNavigation(extensions.data.plugins, ctx.key) : null;
     return [
       ...kindNodes().slice(0, 1),
       ...(apps ? [apps] : []),
@@ -127,7 +125,7 @@ export function Nav({ contexts }: NavProps) {
         children: INVESTIGATE.map((i) => ({ id: `route:${i.route}`, label: i.label, icon: glyph(i.id) })),
       },
     ];
-  }, [crds, crdChildren, ctx, scopeId, extensions.data]);
+  }, [crds, crdChildren, ctx, extensions.data]);
 
   const link = ctx
     ? (paused ? { word: "Paused", kind: "neutral" as const } : view.links[ctx.stableId] ? LINK[view.links[ctx.stableId].state] : UNKNOWN)
