@@ -32,15 +32,15 @@ impl Confined {
             Ok(status) => (format!("exited: {status}"), status.signal()),
             Err(e) => (format!("wait failed: {e}"), None),
         };
-        let text = match &self.cgroup {
+        let (text, oom_kills) = match &self.cgroup {
             Some(dir) => {
                 let events = std::fs::read_to_string(dir.join("memory.events")).unwrap_or_default();
                 let oom = events.lines().find(|l| l.starts_with("oom_kill ")).unwrap_or("oom_kill ?");
-                format!("{status}; cgroup memory.events {oom}")
+                (format!("{status}; cgroup memory.events {oom}"), oom_kills(&events))
             }
-            None => status,
+            None => (status, None),
         };
-        Ended { text, signal }
+        Ended { text, signal, oom_kills }
     }
 }
 
@@ -52,6 +52,11 @@ impl Drop for Confined {
             let _ = std::fs::remove_dir(dir);
         }
     }
+}
+
+/// The `oom_kill` count in a cgroup's `memory.events`, if it has a readable one.
+fn oom_kills(events: &str) -> Option<u64> {
+    events.lines().find_map(|l| l.strip_prefix("oom_kill ")).and_then(|n| n.trim().parse().ok())
 }
 
 fn cgroup(limits: &Limits) -> io::Result<PathBuf> {
@@ -89,7 +94,22 @@ fn cgroup_in(root: &std::path::Path, limits: &Limits) -> io::Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::cgroup_in;
+    use super::{cgroup_in, oom_kills};
+
+    #[test]
+    fn the_oom_kill_count_is_read_from_memory_events() {
+        let events = "low 0\nhigh 0\nmax 12\noom 1\noom_kill 1\noom_group_kill 0\n";
+        assert_eq!(oom_kills(events), Some(1));
+        assert_eq!(oom_kills("oom 0\noom_kill 0\n"), Some(0));
+    }
+
+    #[test]
+    fn memory_events_without_a_readable_count_give_none() {
+        assert_eq!(oom_kills(""), None);
+        assert_eq!(oom_kills("oom_kill many\n"), None);
+        // A different counter.
+        assert_eq!(oom_kills("oom_group_kill 3\n"), None);
+    }
     use crate::Limits;
     use std::path::Path;
 
