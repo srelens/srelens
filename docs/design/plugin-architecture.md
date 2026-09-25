@@ -108,7 +108,7 @@ harness (`spikes/sidecar-sandbox/src/lib.rs`) starts it under one backend, and
 | 2 | Write inside the scratch directory; write outside it | Allowed; denied |
 | 3 | TCP connect to a listener on the host's loopback, TCP connect to `1.1.1.1:443`, resolve `example.com` | Denied |
 | 4 | Start a child process (the probe re-executing itself) | Denied |
-| 5 | Allocate and touch 512 MiB | Refused, or the sidecar is stopped by the limit (`SIGKILL`, with its cgroup recording that it reached `memory.max` and OOM-killed a process); the host keeps running and can start another |
+| 5 | Allocate and touch 512 MiB | Refused, or the sidecar is stopped with evidence of the cgroup limit (`SIGKILL`, with its cgroup's counters showing that it reached `memory.max` and that a process in it was OOM-killed); the host keeps running and can start another |
 | 6 | Burn two threads for 3 s | Throttled to at most 1.5× the limit, or stopped by the limit (`SIGXCPU`) |
 | 7 | 50 JSON-RPC round trips over stdin/stdout | Works |
 
@@ -147,8 +147,12 @@ The memory and CPU checks (5 and 6) hold to the same two ideas:
   the limit sends, backed by evidence of its cause:
   - **Memory:** `SIGKILL`, with the sidecar's cgroup recording both `oom` (its usage
     reached `memory.max`) and `oom_kill` above 0 in `memory.events`. `oom_kill` alone is
-    not enough: it also counts a kill by the system's OOM killer. A `SIGKILL` with no
-    cgroup to count it, or from anything else, does not count.
+    not enough: it also counts a kill by the system's OOM killer. Together they are
+    strong evidence, not proof. They are running totals for the cgroup and do not
+    record which OOM killer sent this `SIGKILL`. The probe is the cgroup's only process
+    and is killed once, so a system OOM kill would have to coincide with the cgroup
+    reaching its own limit. A `SIGKILL` with no cgroup to count it, or from anything
+    else, does not count.
   - **CPU:** `SIGXCPU` only. The launcher sets `RLIMIT_CPU` with the soft limit equal to
     the hard one. With a 1-second budget, macOS 27.0 arm64 sent `SIGXCPU` and Linux
     7.0.12 arm64 (Docker) sent `SIGKILL`. A `SIGKILL` cannot be told apart from an OOM

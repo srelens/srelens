@@ -20,7 +20,7 @@ A probe sidecar (`src/bin/probe.rs`) speaks JSON-RPC over stdin/stdout. The host
 | 2 | Write inside the scratch directory; write outside it | allowed; denied |
 | 3 | TCP to the host's loopback, TCP to `1.1.1.1:443`, resolve `example.com` | denied |
 | 4 | Start a child process | denied |
-| 5 | Allocate 512 MiB against a 128 MiB limit | refused or stopped by the limit, and the host survives |
+| 5 | Allocate 512 MiB against a 128 MiB limit | refused, or stopped with evidence of the cgroup limit, and the host survives |
 | 6 | Burn two threads for 3 s against a 0.25-CPU limit | throttled or stopped by the limit |
 | 7 | 50 JSON-RPC round trips | work |
 
@@ -40,7 +40,9 @@ The memory and CPU checks follow the same idea:
   must allocate the 512 MiB or use more than 0.375 CPUs;
 - a stopped sidecar counts only with the signal the limit sends (`Stop` in
   `src/lib.rs`): for memory, `SIGKILL` with the cgroup's `memory.events` recording
-  both `oom` and `oom_kill` above 0; for CPU, `SIGXCPU`. A crash never counts.
+  both `oom` and `oom_kill` above 0; for CPU, `SIGXCPU`. A crash never counts. The
+  memory counters are evidence of the cgroup limit, not proof: they are running totals
+  and do not record which OOM killer sent the `SIGKILL`.
 
 | OS | Backends (`SPIKE_BACKEND`) | Recommended or candidate |
 |---|---|---|
@@ -171,7 +173,9 @@ test result: ok. 11 passed; 0 failed; ...
 
 - `Ok(...)` means the operation worked.
 - `Refused(...)` means the probe reported that it failed, with the error kind and OS code.
-- `Stopped(...)` means the sidecar was killed or exited.
+- `Stopped(...)` means the sidecar was killed or exited. After a memory stop, the
+  cgroup's counts (`oom 1, oom_kill 1` above) are what the check classifies the stop
+  by. They are running totals, not a record of what sent that `SIGKILL`.
 - `Garbled(...)` means it wrote something that was not a reply, such as a panic, or
   something that could not be read.
 - `INCONCLUSIVE` means the host itself could not do the operation, so the result says
