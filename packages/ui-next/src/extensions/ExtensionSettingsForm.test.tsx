@@ -38,7 +38,7 @@ const every: ExtensionSetting[] = [
 function app(settings: ExtensionSetting[] = every, saved: Record<string, unknown> = {}): InstalledExtension {
   return {
     manifest: {
-      id: "org.example.certs", name: "Certificates", version: "1.0.0", srelensApiVersion: "^0.3", kind: "declarative",
+      id: "org.example.certs", name: "Certificates", version: "1.0.0", srelensApiVersion: "^0.4", kind: "declarative",
       permissions: [], capabilities: [], settings, contributions: { pages: [], detailTabs: [], detailLinks: [] },
     },
     enabled: true, revision: 3, grants: [], settings: saved, source: "local", installedAt: 0, history: [],
@@ -82,7 +82,8 @@ it("draws a field for every declared setting type", async () => {
   expect(url.getAttribute("aria-required")).toBe("true");
   expect(within(region).getByRole("combobox", { name: "Home cluster" })).toBeTruthy();
   expect(within(region).getByRole("group", { name: "Default namespace" })).toBeTruthy();
-  // A secret has no input: its value never goes through settings.
+  // A secret has no text input: its value never goes through settings,
+  // only through the write-only password field (#543).
   const secret = within(region).getByRole("group", { name: "API token" });
   expect(within(secret).queryByRole("textbox")).toBeNull();
   expect(secret.textContent).toContain("Not set");
@@ -272,4 +273,124 @@ it("says so when an app declares no settings", () => {
   form(app([]));
   expect(screen.getByText("This app declares no settings.")).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Save settings" })).toBeNull();
+});
+
+// ------------------------------------------------ secrets (#543), write-only
+
+const available = { available: true };
+
+function secretForm(
+  plugin = app(every, {}),
+  options: { store?: { available: boolean; reason?: string }; grants?: string[] } = {},
+) {
+  // `store: undefined` is a host that did not report one, not "the default".
+  const store = "store" in options ? options.store : available;
+  plugin.grants = options.grants ?? ["extension.secretStore"];
+  const onSave = vi.fn().mockResolvedValue(undefined);
+  const onSetSecret = vi.fn().mockResolvedValue(undefined);
+  const onClearSecret = vi.fn().mockResolvedValue(undefined);
+  render(
+    <ExtensionSettingsForm
+      plugin={plugin}
+      secretStore={store}
+      onSave={onSave}
+      onSetSecret={onSetSecret}
+      onClearSecret={onClearSecret}
+      onClose={() => {}}
+    />,
+  );
+  const region = screen.getByRole("form", { name: "Certificates settings" });
+  return { region, onSave, onSetSecret, onClearSecret, field: within(region).getByRole("group", { name: "API token" }) };
+}
+
+it("keeps a secret write-only: the typed value goes to the store, then leaves the page", async () => {
+  const { region, field, onSave, onSetSecret } = secretForm();
+  const input = within(field).getByLabelText("API token") as HTMLInputElement;
+  expect(input.type).toBe("password");
+  expect(input.autocomplete).toBe("new-password");
+  // Where it is kept, true in every vault mode: the key is the keychain's, or
+  // derived from the master password (review of #543).
+  expect(field.textContent).toContain("Kept in srelens's encrypted secrets vault.");
+  expect(field.textContent).not.toContain("system keychain");
+  fireEvent.change(input, { target: { value: "s3cret-typed" } });
+  fireEvent.click(within(field).getByRole("button", { name: "Save secret" }));
+  await waitFor(() => expect(onSetSecret).toHaveBeenCalledWith("token", "s3cret-typed"));
+  expect(await within(field).findByRole("status")).toHaveProperty("textContent", "Secret saved.");
+  expect(input.value, "the value does not stay in the page").toBe("");
+  // A settings save never carries it.
+  fireEvent.change(within(region).getByRole("textbox", { name: /Prometheus URL/ }), { target: { value: "https://prom" } });
+  fireEvent.click(within(region).getByRole("button", { name: "Save settings" }));
+  await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+  expect(JSON.stringify(onSave.mock.calls)).not.toContain("s3cret-typed");
+});
+
+it("names the secret's field by its title once, not twice (found in the harness)", () => {
+  const { field } = secretForm();
+  // The legend names the group and the input alike; a second visible label
+  // drew the title twice in a row.
+  expect(field.textContent!.split("API token").length - 1).toBe(1);
+  expect(within(field).getByLabelText("API token").tagName).toBe("INPUT");
+});
+it("pressing Enter in the secret field saves the secret, not the settings", async () => {
+  const { field, onSave, onSetSecret } = secretForm();
+  const input = within(field).getByLabelText("API token");
+  fireEvent.change(input, { target: { value: "via-enter" } });
+  fireEvent.keyDown(input, { key: "Enter" });
+  await waitFor(() => expect(onSetSecret).toHaveBeenCalledWith("token", "via-enter"));
+  expect(onSave).not.toHaveBeenCalled();
+});
+
+it("offers to replace or clear a secret that is set, and never shows it", async () => {
+  const { field, onClearSecret } = secretForm(app(every, { token: { secretRef: "org.example.certs/token" } }));
+  expect(field.textContent).toContain("Set");
+  expect(field.textContent).not.toContain("Not set");
+  expect(within(field).getByRole("button", { name: "Replace secret" })).toBeTruthy();
+  expect((within(field).getByLabelText("API token") as HTMLInputElement).value).toBe("");
+  fireEvent.click(within(field).getByRole("button", { name: "Clear secret" }));
+  await waitFor(() => expect(onClearSecret).toHaveBeenCalledWith("token"));
+  expect(await within(field).findByRole("status")).toHaveProperty("textContent", "Secret cleared.");
+});
+
+it("fails closed when the store is unavailable, saying why, and sends nothing", () => {
+  const reason = "The secrets vault is locked. Unlock it with your master password";
+  const { field, onSetSecret } = secretForm(app(every, {}), { store: { available: false, reason } });
+  expect(field.textContent).toContain(reason);
+  expect(field.textContent).toContain("Nothing is saved in plain text");
+  const input = within(field).getByLabelText("API token") as HTMLInputElement;
+  expect(input.disabled).toBe(true);
+  expect((within(field).getByRole("button", { name: "Save secret" }) as HTMLButtonElement).disabled).toBe(true);
+  expect(onSetSecret).not.toHaveBeenCalled();
+});
+
+it("treats a host that does not report its store as unavailable", () => {
+  const { field } = secretForm(app(every, {}), { store: undefined });
+  expect((within(field).getByLabelText("API token") as HTMLInputElement).disabled).toBe(true);
+  expect(field.textContent).toContain("did not say");
+});
+
+it("lets a secret be cleared even while the store cannot keep a new one", async () => {
+  const { field, onClearSecret } = secretForm(app(every, { token: { secretRef: "org.example.certs/token" } }), {
+    store: { available: false, reason: "locked" },
+  });
+  fireEvent.click(within(field).getByRole("button", { name: "Clear secret" }));
+  await waitFor(() => expect(onClearSecret).toHaveBeenCalledWith("token"));
+});
+
+it("says an app without the secret store grant cannot keep secrets", () => {
+  const { field } = secretForm(app(every, {}), { grants: [] });
+  expect(field.textContent).toContain("extension.secretStore");
+  expect((within(field).getByLabelText("API token") as HTMLInputElement).disabled).toBe(true);
+});
+
+it("shows the host's refusal beside the field and keeps nothing typed", async () => {
+  const { field, onSetSecret } = secretForm();
+  onSetSecret.mockRejectedValue(new Error("The secret was not stored: the vault is locked"));
+  const input = within(field).getByLabelText("API token") as HTMLInputElement;
+  fireEvent.change(input, { target: { value: "never-kept" } });
+  fireEvent.click(within(field).getByRole("button", { name: "Save secret" }));
+  const alert = await within(field).findByRole("alert");
+  expect(alert.textContent).toContain("the vault is locked");
+  expect(input.value).toBe("");
+  expect(input.getAttribute("aria-invalid")).toBe("true");
+  expect(input.getAttribute("aria-describedby")!.split(" ")).toContain(alert.id);
 });

@@ -55,7 +55,7 @@ function app(cards: ExtensionDashboardCard[], extra: Partial<InstalledExtension>
   return {
     enabled: true, revision: 4, grants: [], settings: {}, source: "local", installedAt: 0, history: [],
     manifest: {
-      id: "org.example.certs", name: "Certificates", version: "1.0.0", srelensApiVersion: "^0.3",
+      id: "org.example.certs", name: "Certificates", version: "1.0.0", srelensApiVersion: "^0.4",
       kind: "declarative", permissions: [], capabilities: [],
       contributions: {
         pages: [{ id: "certificates", title: "Certificates", capability: "certificates" }],

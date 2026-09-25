@@ -1,4 +1,5 @@
 import { invokeCapability } from "../transport/transport";
+import { isTauri } from "../transport/platform";
 import type { ActionPredicate } from "./actionPredicates";
 import type { CapabilityImpact } from "./capabilities";
 // These mirror crates/plugin-host/src/manifest.rs and crates/registry/src/extensions.rs;
@@ -312,6 +313,18 @@ export interface ExtensionInventory {
   schemaVersion: number;
   nextRevision: number;
   plugins: InstalledExtension[];
+  /**
+   * Whether the host can keep an app's secret now (#543), reported by
+   * `extensions.list` and never stored. Absent from `extensions.configure`'s
+   * answer; read it from the list.
+   */
+  secretStore?: ExtensionSecretStoreState;
+}
+/** The host's secret store, as `extensions.list` reports it (#543). */
+export interface ExtensionSecretStoreState {
+  available: boolean;
+  /** Why not, in the host's words: no keychain, locked, or no store on this host. */
+  reason?: string;
 }
 export type ExtensionChange =
   | { action: "unsignedApps"; allowUnsignedApps: boolean }
@@ -344,6 +357,38 @@ export async function configureExtensions(change: ExtensionChange) {
     window.dispatchEvent(new Event(EXTENSIONS_CHANGED));
   return state;
 }
+/** Why an app's secret cannot be set or cleared outside the desktop app (#543, #522). */
+const SECRETS_ON_DESKTOP_ONLY =
+  "App secrets are kept in the desktop app's encrypted secrets vault; this host cannot store one";
+
+/** What setting or clearing a secret answers: whether it is set now, never the value. */
+export interface ExtensionSecretState {
+  set: boolean;
+}
+
+async function changeSecret(input: Record<string, unknown>): Promise<ExtensionSecretState> {
+  // Refused before the value leaves the page: the web host keeps no app
+  // secrets (#522), and a request carrying one is a request that could be
+  // logged on the way to being refused.
+  if (!isTauri()) throw new Error(SECRETS_ON_DESKTOP_ONLY);
+  const answer = await invokeCapability<{ set?: unknown }>("extension.secretStore", input);
+  if (typeof window !== "undefined") window.dispatchEvent(new Event(EXTENSIONS_CHANGED));
+  return { set: answer?.set === true };
+}
+
+/**
+ * Keep `secret` for an app's `secret-reference` setting in the host's store
+ * (#543). Write-only: the answer says the setting is set, and nothing ever
+ * returns the value. Needs the app's `extension.secretStore` grant and an
+ * available store; the host's refusal says why and never repeats the value.
+ */
+export const setExtensionSecret = (id: string, setting: string, secret: string) =>
+  changeSecret({ action: "set", id, setting, secret });
+
+/** Delete an app's secret, or every secret it keeps when no setting is named. */
+export const clearExtensionSecret = (id: string, setting?: string) =>
+  changeSecret({ action: "clear", id, ...(setting === undefined ? {} : { setting }) });
+
 /**
  * One manifest problem. `code` is stable (docs/extensions/specification.md); `path` names
  * the value at fault, e.g. `contributions.pages[2].capability`, and is empty for the whole

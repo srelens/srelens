@@ -2769,6 +2769,30 @@ async fn extensions_and_gitops(h: &mut Harness, ctx: &str, settings: &TempSettin
     }
     let revision = |app: &Value| app["revision"].as_u64().expect("revision");
 
+    // #543. This registry is built with no secret store (the desktop hands
+    // its vault to the GUI's): clearing is always allowed, and a set is
+    // refused — here because the app declares no secret setting — never kept
+    // anywhere else, and the refusal does not repeat the value.
+    println!("=== extensions: secret store ===");
+    let cleared = h
+        .ok("extension.secretStore", json!({"action": "clear", "id": "org.example.flux"}))
+        .await;
+    assert_eq!(cleared, json!({"set": false}), "{cleared}");
+    let err = h
+        .err(
+            "extension.secretStore",
+            json!({"action": "set", "id": "org.example.flux", "setting": "token", "secret": "e2e-secret-value"}),
+        )
+        .await;
+    // Absence first, with a message that prints nothing of the refusal; then
+    // the cause, which the refusal may be printed for once the value is known
+    // not to be in it.
+    assert!(!err.contains("e2e-secret-value"), "the refusal repeated the secret");
+    assert!(
+        err.contains("declares no secret setting"),
+        "refused for another reason than an undeclared secret setting: {err}"
+    );
+
     println!("=== extensions: read ===");
     let out = h
         .ok(

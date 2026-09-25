@@ -7,19 +7,21 @@ and [flux.json](../../examples/extensions/flux.json).
 
 ## JSON Schema
 
-The schema for API 0.3 is committed at
-[`schemas/extension-manifest.v0.3.json`](../../schemas/extension-manifest.v0.3.json).
+The schema for API 0.4 is committed at
+[`schemas/extension-manifest.v0.4.json`](../../schemas/extension-manifest.v0.4.json).
 Point your editor at it by naming it in the manifest:
 
 ```json
 {
-  "$schema": "https://raw.githubusercontent.com/srelens/srelens/main/schemas/extension-manifest.v0.3.json",
+  "$schema": "https://raw.githubusercontent.com/srelens/srelens/main/schemas/extension-manifest.v0.4.json",
   "id": "io.example.cert-manager"
 }
 ```
 
 The file is generated from the host's `Manifest` type, and `cargo test` fails when the
-two differ. After changing a manifest field, regenerate it with:
+two differ. [`schemas/extension-manifest.v0.3.json`](../../schemas/extension-manifest.v0.3.json)
+is the API 0.3 contract, kept as it was when 0.4 was cut, for manifests that still
+require `^0.3`. After changing a manifest field, regenerate the newest file with:
 
 ```sh
 UPDATE_CATALOG=1 cargo test -p srelens-plugin-host --test schema
@@ -38,13 +40,13 @@ before publishing.
 | `id` | Yes | Reverse-domain identifier. See [Identifiers](specification.md#identifiers). |
 | `name` | Yes | Display name, 1–120 characters, with no control characters and no bidirectional or invisible format characters. See [Identifiers](specification.md#identifiers). |
 | `version` | Yes | The app's own SemVer version. |
-| `srelensApiVersion` | Yes | A SemVer range of extension API versions, for example `^0.1`. See [Versioning](specification.md#versioning). |
+| `srelensApiVersion` | Yes | A SemVer range of extension API versions, for example `^0.4`. The fields marked **API 0.4** on this page need a range that admits only 0.4 or later; see [Versioning](specification.md#versioning). |
 | `kind` | Yes | `declarative`. No other kind is accepted. |
 | `permissions` | Yes | The exact host capability IDs the bindings use. |
 | `capabilities` | Yes | 1–32 bindings, below. |
 | `actions` | No | Up to 32 declared mutations, below. |
-| `settings` | No | Up to 32 typed settings, drawn as a host form. See [Settings](#settings). |
-| `contributions` | Yes | `pages`, `detailTabs`, `detailLinks`, and optional `joins`, `tableColumns`, `detailPanels`, `statusResolvers`, `badges`, `dashboardCards`, `commands` and `resourceLinks`, below. |
+| `settings` | No | **API 0.4.** Up to 32 typed settings, drawn as a host form. See [Settings](#settings). |
+| `contributions` | Yes | `pages`, `detailTabs`, `detailLinks`, and optional `joins`, `tableColumns`, `detailPanels`, `statusResolvers`, `badges`, `dashboardCards`, `commands` and `resourceLinks` (all **API 0.4**), below. |
 
 Unknown fields are errors at every level. A manifest is at most 256 KiB.
 
@@ -57,8 +59,8 @@ Each entry in `capabilities` binds a local operation to a trusted host capabilit
 | `name` | Local operation name, unique within the manifest. Addressed as `plugin/<id>/<name>`. |
 | `title` | Display title, held to the same rules as `name`. |
 | `target` | The host capability ID. It cannot start with `plugin/`; apps cannot call other apps. |
-| `versions` | Optional, `k8s.listCustomResource` only: the API versions the reader accepts, most preferred first, instead of one `arguments.version`. See [Several served versions](#several-served-versions). |
-| `jsonPathOverrides` | Optional, with `versions`: per listed version, the paths read differently at that version. See [Several served versions](#several-served-versions). |
+| `versions` | **API 0.4.** Optional, `k8s.listCustomResource` only: the API versions the reader accepts, most preferred first, instead of one `arguments.version`. See [Several served versions](#several-served-versions). |
+| `jsonPathOverrides` | **API 0.4.** Optional, with `versions`: per listed version, the paths read differently at that version. See [Several served versions](#several-served-versions). |
 | `arguments` | Fixed arguments, merged into every call. Callers cannot override them. A `k8s.listCustomResource` binding may declare at most 32 `printerColumns`. |
 | `inputs` | The argument names a caller may supply. They cannot overlap with `arguments`. |
 
@@ -223,7 +225,7 @@ value:
 
 | Field | Meaning |
 |---|---|
-| `jsonPath` | The value to ask about. An optional leading `$`, then `.key`, `['key']`, `["key"]`, `[0]`, and one filter form, `[?(@.key=="text")]` (either quote), at most 8 segments and 256 characters. The filter selects the **first** element of a list whose plain `key` holds exactly the string `text` — the element a Kubernetes printer column shows for the same path — so `.status.conditions[?(@.type=="Ready")].status` reads the Ready condition wherever it sits in the list. A filter that matches nothing is an unset field, as `.status.missing` is. No wildcard, other filter, recursive descent or function — each addresses a *set* of values, and "does this hold" over a set is a different question. |
+| `jsonPath` | The value to ask about. An optional leading `$`, then `.key`, `['key']`, `["key"]`, `[0]`, and, from **API 0.4**, one filter form, `[?(@.key=="text")]` (either quote), at most 8 segments and 256 characters. The filter selects the **first** element of a list whose plain `key` holds exactly the string `text` — the element a Kubernetes printer column shows for the same path — so `.status.conditions[?(@.type=="Ready")].status` reads the Ready condition wherever it sits in the list. A filter that matches nothing is an unset field, as `.status.missing` is. No wildcard, other filter, recursive descent or function — each addresses a *set* of values, and "does this hold" over a set is a different question. |
 | `equals` / `notEquals` | The value must (not) be this string, number or boolean **literal**. An object or a list is not a comparand. A field nobody set is not equal to anything, so `notEquals` holds when it is absent. |
 | `present` / `absent` | Written `true`. The value must be set, or unset. `null` counts as unset, which is also why `null` is not a comparand: write `absent: true`. |
 | `reason` | Required, at most 200 characters. Shown to the operator, so it says what to do next. |
@@ -306,7 +308,7 @@ contribution names a declared capability.
 |---|---|
 | `id`, `title`, `capability` | Identity, navigation label, and the binding that lists the page's resources. |
 | `group` | Optional navigation group label, held to the same rules as `name`. |
-| `statusColumns` | **Deprecated** in favour of [`statusResolvers`](#status-resolvers-and-badges); still accepted on the 0.3 line. Optional `{ ready, suspended?, progressing? }`: zero-based indices into the binding's `printerColumns`, each below 64. |
+| `statusColumns` | **Deprecated** in favour of [`statusResolvers`](#status-resolvers-and-badges); still accepted on the 0.3 and 0.4 lines. Optional `{ ready, suspended?, progressing? }`: zero-based indices into the binding's `printerColumns`, each below 64. |
 | `dashboard` | Optional `{ pages, events? }`. `pages` references 1–12 resource pages that are not dashboards and whose binding's kind has a status resolver (or, deprecated, that have `statusColumns`). `events` is `{ capability, apiGroups }`, where `capability` binds `k8s.listEvents` and `apiGroups` lists 1–32 dotted groups. |
 
 ### `detailTabs` and `detailLinks`
@@ -671,7 +673,7 @@ An app declares its settings, and the host draws them as a form in Settings → 
 | `url` | An `http` or `https` URL with a host and no user name or password. Put credentials in a `secret-reference`. |
 | `namespace-selector` | A Kubernetes namespace name. The form lists the namespaces of a cluster the person chooses. |
 | `cluster-selector` | A kubeconfig context, saved by its key (`ClusterContext.key`), the identity app cluster scope uses. |
-| `secret-reference` | Never a value. The host's secret store (#543) keeps the secret; the inventory holds only its reference, `{"secretRef": "<app id>/<setting id>"}`, written by that store. |
+| `secret-reference` | Never a value. The host's secret store keeps the secret; the inventory holds only its reference, `{"secretRef": "<app id>/<setting id>"}`, written by that store. See [Secret settings](#secret-settings). |
 
 The host holds every save to these rules, whatever the form allowed. A save
 (`extensions.configure` with `action: "settings"`) is refused, with each problem at
@@ -718,12 +720,65 @@ The access review lists the declaration of each setting an action or reader
 interpolates, so an update that lets a setting write another value shows as changed
 access.
 
+### Secret settings
+
+A `secret-reference` setting is kept by the host's secret store (#543). On the desktop
+that is srelens's encrypted secrets vault (`secrets.enc`), whose one master key is held
+by the OS keychain or derived from the master password; the app secret is one more
+entry in it, beside the MCP token and the provider API keys, keyed by
+`<app id>/<setting id>`. The inventory holds only the reference.
+
+- **Permission.** A manifest installed or updated now that declares a
+  `secret-reference` setting lists `extension.secretStore` in `permissions`, and one
+  that declares none may not (`EXTENSION_PERMISSION_MISMATCH`). It is granted at install
+  like any other permission and is never a binding target
+  (`EXTENSION_UNSUPPORTED_TARGET`). The install and update review names it, the secret
+  settings it covers, and the host's metadata for it: sensitive, `medium` impact, and its
+  confirmation wording.
+- **Migration.** Secret settings shipped before the permission existed (#542, in the
+  pre-release `srelens-v0.15.1-185`), so an app installed then may declare one without
+  requesting `extension.secretStore`. That build wrote it under `^0.3`, and `settings`
+  is an API 0.4 field ([#709](https://github.com/srelens/srelens/issues/709)), so this
+  host quarantines it with "`settings` requires API 0.4.0" until it is updated to a
+  release that requires `^0.4`, and requests the permission. A `^0.4` app without the
+  permission is not quarantined: it keeps working, and its secret settings cannot be
+  set, with the form saying the app was not granted the permission, until it is
+  reinstalled or updated to a version that requests it.
+- **Write-only.** Settings → Apps sets, replaces and clears a secret, and shows whether
+  it is set. Nothing returns the value: not `extensions.list`, not the capability's own
+  answer (`{"set": true}`), not an error, not the audit log, not an MCP response or
+  consent prompt, not exported settings or the settings bundle. The consent prompt shows
+  only the action, and the app and setting when they name an installed app's declared
+  secret; anything else the call carried is left out.
+- **Fails closed.** A secret is stored only while the vault's key is held by the OS
+  keychain (or its biometric gate) or derived from the master password, and the vault is
+  unlocked. When the vault's key is only in a plain file beside it (no keychain and no
+  master password), the vault is locked, or there is no store at all, a set is refused
+  with the reason, which Settings → Apps shows beside the field. Nothing is ever written
+  in plain text instead.
+- **Deleted with the app.** Removing the app, or an update or rollback that no longer
+  declares the setting as a secret, deletes the secret. The inventory is the source of
+  truth and the store follows it: after every inventory change the host deletes each
+  stored secret no app references. A delete the store cannot make at that moment (a
+  locked vault) leaves the secret unreferenced, where nothing can reach it, and the next
+  change deletes it. **Reset** in Settings → Apps clears the app's secrets explicitly
+  (`extension.secretStore` with `clear` and no setting) before it resets the other
+  settings; a settings save through `extensions.configure` on its own keeps them.
+- **Where it is used.** The host injects a secret only into an argument a host capability
+  declares as a secret slot, and only for an app granted `extension.secretStore`
+  (`PluginHost::inject_secret`). No capability declares one yet; brokered HTTP headers
+  (#568) will be the first. A declarative app never sees the value, and a
+  `secret-reference` is never interpolated.
+- **Web.** The web host keeps no app secrets yet (#522): `extension.secretStore` is refused
+  there before dispatch.
+
 ### When the manifest changes
 
 An update or a rollback keeps only the saved values the new manifest still declares and
 still accepts. A string setting that becomes a `secret-reference` loses its plaintext
 rather than keeping it under a secret's name, and a secret that becomes a string does not
-turn its reference into a value. A required setting left without a value makes the
+turn its reference into a value; the stored secret itself is deleted, as it is when a
+secret setting is dropped. A required setting left without a value makes the
 requests that interpolate it fail, naming the setting, until one is saved.
 
 ## Rules the desktop app adds

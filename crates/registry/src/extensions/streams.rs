@@ -1840,6 +1840,29 @@ mod tests {
         );
     }
 
+    /// #543 merged with #566: the secret store writes the inventory too (it
+    /// adds or drops a reference), so its writes are announced like every
+    /// other, and what a window hears is still only that something changed.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_secret_store_write_is_announced_and_carries_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, reg, streams) = setup(dir.path());
+        let window = Arc::new(TestSink::default());
+        install(&path, fake_core());
+        streams.listen_inventory(window.clone());
+        reg.invoke(
+            "extension.secretStore",
+            json!({"action": "clear", "id": APP}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            window.payloads_for(INVENTORY_CHANNEL),
+            [json!({"type": "changed"})],
+            "the secret store's inventory write was not announced"
+        );
+    }
+
     /// The whole watch path against a real cluster: a Deployments reader's
     /// kind in a throwaway namespace this test creates and deletes. With
     /// `SRELENS_LIVE_RESTART` naming the cluster's node container, it also

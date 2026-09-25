@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 
 fn manifest() -> Value {
     json!({
-        "id":"org.example.certs", "name":"Certificates", "version":"0.1.0", "srelensApiVersion":"^0.3",
+        "id":"org.example.certs", "name":"Certificates", "version":"0.1.0", "srelensApiVersion":"^0.4",
         "kind":"declarative", "permissions":["test.read"],
         "capabilities":[{"name":"certificates","title":"List certificates", "target":"test.read",
             "arguments":{"group":"cert-manager.io"},"inputs":["context"]}],
@@ -36,6 +36,13 @@ fn every_type() -> Value {
 
 fn with_settings(settings: Value) -> Value {
     let mut value = manifest();
+    // A secret setting needs the secret store's permission (#543).
+    let secret = settings
+        .as_array()
+        .is_some_and(|all| all.iter().any(|s| s["type"] == "secret-reference"));
+    if secret {
+        value["permissions"] = json!(["test.read", "extension.secretStore"]);
+    }
     value["settings"] = settings;
     value
 }
