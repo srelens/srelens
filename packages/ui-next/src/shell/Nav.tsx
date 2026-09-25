@@ -75,8 +75,6 @@ export function Nav({ contexts }: NavProps) {
   const extensions = useExtensions();
   const activeCluster = useActiveCluster();
   const ctx = resolveContext(contexts, activeCluster) ?? null;
-  // App routes carry the stable ID, so a shared one cannot be routed; app scope itself keys on `key` (#623).
-  const scopeId = ctx && contexts.filter((c) => c.stableId === ctx.stableId).length === 1 ? ctx.key : undefined;
   const view = useWorkspaceView();
   const [query, setQuery] = useState("");
   const mark = useMark(ctx?.stableId ?? "", ctx?.name ?? "");
@@ -115,14 +113,16 @@ export function Nav({ contexts }: NavProps) {
   const nodes = useMemo<ResourceNode[]>(
     () => [
       ...kindNodes().slice(0, 1),
-      ...(ctx && scopeId !== undefined && extensions.data && extensions.data.plugins.some(p => p.enabled && extensionEnabledFor(p, scopeId) && p.manifest.contributions.pages.length)
+      // App routes and app scope both name the cluster by its key, which no two contexts
+      // share (#623, #695); a window opened for one of two sharing a stable ID pins its key.
+      ...(ctx && extensions.data && extensions.data.plugins.some(p => p.enabled && extensionEnabledFor(p, ctx.key) && p.manifest.contributions.pages.length)
         ? [{
             id: "extensions", label: "Apps", icon: Icons.apps,
-            children: extensions.data.plugins.filter(p => p.enabled && extensionEnabledFor(p, scopeId) && p.manifest.contributions.pages.length).map(p => ({
+            children: extensions.data.plugins.filter(p => p.enabled && extensionEnabledFor(p, ctx.key) && p.manifest.contributions.pages.length).map(p => ({
               id: `extension:${p.manifest.id}`, label: p.manifest.name, icon: extensionLogoIcon(p.manifest.id, p.manifest.name),
               children: p.manifest.contributions.pages.flatMap((page, index, pages) => {
                 const leaf = (item: typeof page) => ({
-                  id: `route:${extensionRoute(ctx.stableId, p.manifest.id, item.id)}`,
+                  id: `route:${extensionRoute(ctx.key, p.manifest.id, item.id)}`,
                   label: item.title, icon: extensionPageIcon(item.title),
                 });
                 if (!page.group) return [leaf(page)];
@@ -142,7 +142,7 @@ export function Nav({ contexts }: NavProps) {
         children: INVESTIGATE.map((i) => ({ id: `route:${i.route}`, label: i.label, icon: glyph(i.id) })),
       },
     ],
-    [crds, crdChildren, ctx, scopeId, extensions.data],
+    [crds, crdChildren, ctx, extensions.data],
   );
 
   const link = ctx

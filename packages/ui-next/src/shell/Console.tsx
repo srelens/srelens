@@ -275,14 +275,13 @@ export function Console({ fullView }: { fullView?: boolean }) {
   const askScope = shown ? contextLabelFor(shown.route, shownClusterLabel) : scope;
 
   // Installed apps' commands (#544). Scoped as the sidebar's Apps entries are:
-  // enabled, allowed on the cluster, and not on a stable ID two contexts share,
-  // which the host refuses anyway. Named by `extensionLabel`, the host's name.
+  // enabled and allowed on the cluster, found by the context key no two
+  // contexts share (#695). Named by `extensionLabel`, the host's name.
   const plugins = useExtensions().data?.plugins;
-  const appsOn = useMemo(() => (clusterId: string): readonly PaletteApp[] => {
-    const matches = contexts.filter((c) => c.stableId === clusterId);
-    if (matches.length !== 1 || !plugins) return [];
+  const appsOn = useMemo(() => (contextKey: string): readonly PaletteApp[] => {
+    if (!plugins || !contexts.some((c) => c.key === contextKey)) return [];
     return plugins
-      .filter((p) => p.enabled && !p.quarantined && extensionEnabledFor(p, matches[0].key))
+      .filter((p) => p.enabled && !p.quarantined && extensionEnabledFor(p, contextKey))
       .map((p) => ({ id: p.manifest.id, name: extensionLabel(p), manifest: p.manifest }));
   }, [contexts, plugins]);
 
@@ -290,13 +289,13 @@ export function Console({ fullView }: { fullView?: boolean }) {
     () => ({
       route,
       context,
-      clusterId: activeCtx?.stableId,
+      contextKey: activeCtx?.key,
       apps: appsOn,
       openAppAction: ({ route: target, request }) => {
         // Held first, then the tab opened: a tab that mounts takes the request
         // on mount, and one already showing hears it.
         requestExtensionAction(request);
-        openTab(target, { clusterName: contexts.find((c) => c.stableId === request.context)?.name });
+        openTab(target, { clusterName: contexts.find((c) => c.key === request.context)?.name });
       },
       // Only the clusters THIS workspace holds. `setActiveCluster` refuses an
       // id outside `workspace.clusters` and returns the workspace untouched
@@ -352,7 +351,7 @@ export function Console({ fullView }: { fullView?: boolean }) {
         openTab(r.as === "shell" ? "/terminals" : "/forwards", { clusterName: r.context });
       },
     }),
-    [route, context, contexts, workspace, workspaces, onToggleTheme, activeCtx?.stableId, appsOn],
+    [route, context, contexts, workspace, workspaces, onToggleTheme, activeCtx?.key, appsOn],
   );
 
   const commands = useMemo(() => commandsFor(deps), [deps]);

@@ -11,7 +11,7 @@ const app = { id: manifest.id, name: "Flux", manifest };
 const deps = (route: string, over: Partial<CommandDeps> = {}): CommandDeps => ({
   route,
   context: "prod-eu",
-  clusterId: "stable-prod",
+  contextKey: "key-prod",
   clusters: [],
   workspaces: [],
   openTab: vi.fn(),
@@ -20,11 +20,11 @@ const deps = (route: string, over: Partial<CommandDeps> = {}): CommandDeps => ({
   onToggleTheme: vi.fn(),
   openAction: vi.fn(),
   openResource: vi.fn(),
-  apps: (clusterId) => (clusterId === "stable-prod" ? [app] : []),
+  apps: (contextKey) => (contextKey === "key-prod" ? [app] : []),
   openAppAction: vi.fn(),
   ...over,
 });
-const helmRelease = extensionClusterResourceRoute("stable-prod", manifest.id, "helmreleases", "team", "web");
+const helmRelease = extensionClusterResourceRoute("key-prod", manifest.id, "helmreleases", "team", "web");
 
 describe("app commands in the / palette", () => {
   it("lists the app's page commands under Apps, named for the app", () => {
@@ -37,12 +37,26 @@ describe("app commands in the / palette", () => {
   it("opens a page on the cluster in focus, pinned in its route", () => {
     const d = deps("/settings");
     commandsFor(d).find((c) => c.label === "Flux: Open Helm releases")!.run();
-    expect(d.openTab).toHaveBeenCalledWith(extensionClusterRoute("stable-prod", manifest.id, "helmreleases"), { clusterName: "prod-eu" });
+    expect(d.openTab).toHaveBeenCalledWith(extensionClusterRoute("key-prod", manifest.id, "helmreleases"), { clusterName: "prod-eu" });
+  });
+
+  it("opens a page of each of two contexts that share a stable ID in a tab of its own (#695)", () => {
+    // `/kube/a` declaring `b#c` and `/kube/a#b` declaring `c` share `/kube/a#b#c`.
+    const routes = [["/kube/a#b%23c", "b#c"], ["/kube/a%23b#c", "c"]].map(([contextKey, context]) => {
+      const d = deps("/settings", { contextKey, context, apps: () => [app] });
+      commandsFor(d).find((c) => c.label === "Flux: Open Helm releases")!.run();
+      expect(vi.mocked(d.openTab).mock.calls[0][1]).toEqual({ clusterName: context });
+      return vi.mocked(d.openTab).mock.calls[0][0];
+    });
+    expect(routes).toEqual([
+      "/extension-contexts/%2Fkube%2Fa%23b%2523c/org.srelens.flux/helmreleases/",
+      "/extension-contexts/%2Fkube%2Fa%2523b%23c/org.srelens.flux/helmreleases/",
+    ]);
   });
 
   it("offers nothing from an app that is not enabled on the cluster in focus", () => {
-    expect(commandsFor(deps("/settings", { clusterId: "stable-dev" })).some((c) => c.group === "Apps")).toBe(false);
-    expect(commandsFor(deps("/settings", { clusterId: undefined })).some((c) => c.group === "Apps")).toBe(false);
+    expect(commandsFor(deps("/settings", { contextKey: "key-dev" })).some((c) => c.group === "Apps")).toBe(false);
+    expect(commandsFor(deps("/settings", { contextKey: undefined })).some((c) => c.group === "Apps")).toBe(false);
   });
 
   it("offers an action only on a resource of its kind, and only asks for the review", () => {
@@ -54,22 +68,28 @@ describe("app commands in the / palette", () => {
     actions[0].run();
     expect(d.openAppAction).toHaveBeenCalledWith({
       route: helmRelease,
-      request: { id: manifest.id, capability: "helmreleases", context: "stable-prod", namespace: "team", name: "web", action: "helmreleases-reconcile" },
+      request: { id: manifest.id, capability: "helmreleases", context: "key-prod", namespace: "team", name: "web", action: "helmreleases-reconcile" },
     });
     expect(d.openTab).not.toHaveBeenCalled();
   });
 
   it("reads the resource's cluster from its route, not from the rail", () => {
     // The resource tab pins its cluster; the rail may have moved since.
-    const d = deps(helmRelease, { clusterId: "stable-dev", context: "dev" });
+    const d = deps(helmRelease, { contextKey: "key-dev", context: "dev" });
     const reconcile = commandsFor(d).find((c) => c.group === "Action");
     expect(reconcile?.label).toBe("Flux: Reconcile Helm release");
     reconcile!.run();
-    expect(vi.mocked(d.openAppAction!).mock.calls[0][0].request.context).toBe("stable-prod");
+    expect(vi.mocked(d.openAppAction!).mock.calls[0][0].request.context).toBe("key-prod");
+  });
+
+  it("offers no action on a tab opened before, whose route names its cluster by stable ID", () => {
+    // That ID may be two contexts'; the tab says which only once its page is opened again.
+    const legacy = "/extension-clusters/key-prod/org.srelens.flux/helmreleases/team/web";
+    expect(commandsFor(deps(legacy)).some((c) => c.group === "Action")).toBe(false);
   });
 
   it("offers a Kustomization's reconcile on a Kustomization, not on a Helm release", () => {
-    const route = extensionClusterResourceRoute("stable-prod", manifest.id, "kustomizations", "team", "apps");
+    const route = extensionClusterResourceRoute("key-prod", manifest.id, "kustomizations", "team", "apps");
     expect(commandsFor(deps(route)).filter((c) => c.group === "Action").map((c) => c.label)).toEqual(["Flux: Reconcile Kustomization"]);
   });
 });

@@ -123,10 +123,10 @@ export interface CommandDeps {
     context: string;
     as: "logs" | "shell" | "forward";
   }) => void;
-  /** The stable ID of the cluster in focus, which app routes pin (#544). */
-  clusterId?: string;
-  /** The enabled apps allowed on a cluster, by its stable ID, named as the host names them. */
-  apps?: (clusterId: string) => readonly PaletteApp[];
+  /** The context key of the cluster in focus, which app routes carry (#544, #695). */
+  contextKey?: string;
+  /** The enabled apps allowed on a cluster, by its context key, named as the host names them. */
+  apps?: (contextKey: string) => readonly PaletteApp[];
   /**
    * Asks the app resource tab at `route` for its own review of one declared
    * action. Never the write: the inspector there owns the host confirmation.
@@ -303,32 +303,34 @@ function workspaceCommands(deps: CommandDeps): Command[] {
  * resource's cluster from its ROUTE: the tab pins the cluster it was opened on,
  * and the rail may have moved since. Running one asks that tab's inspector for
  * its review; it is not `danger`, for the same reason `restart` is not — the
- * review it lands on is where the danger is. A legacy `/extensions/` route
- * names its cluster by display name only, so it offers no action command.
+ * review it lands on is where the danger is. Only a route that names its
+ * cluster by context key offers one: a legacy `/extensions/` route names it by
+ * display name, and one from before #695 by a stable ID two contexts can share.
  */
 function appCommands(deps: CommandDeps): Command[] {
   if (!deps.apps) return [];
   const commands: Command[] = [];
-  if (deps.clusterId) {
-    const clusterId = deps.clusterId;
-    for (const app of deps.apps(clusterId)) {
+  if (deps.contextKey) {
+    const contextKey = deps.contextKey;
+    for (const app of deps.apps(contextKey)) {
       for (const c of appPaletteCommands(app, null)) {
         if (c.target.kind !== "page") continue;
-        const route = extensionClusterRoute(clusterId, app.id, c.target.page);
+        const route = extensionClusterRoute(contextKey, app.id, c.target.page);
         commands.push({ id: c.id, group: "Apps", label: c.label, hint: "app page",
           run: () => deps.openTab(route, { clusterName: deps.context }) });
       }
     }
   }
   const open = parseExtensionRoute(deps.route);
-  if (open?.clusterId && open.resourceName && deps.openAppAction) {
-    const { clusterId, id, page: pageId, namespace, resourceName: name } = open;
-    const app = deps.apps(clusterId).find((a) => a.id === id);
+  if (open?.contextKey && open.resourceName && deps.openAppAction) {
+    const { contextKey, id, page: pageId, namespace, resourceName: name } = open;
+    const app = deps.apps(contextKey).find((a) => a.id === id);
     const page = app?.manifest.contributions.pages.find((p) => p.id === pageId);
     if (app && page) {
       for (const c of appPaletteCommands(app, { capability: page.capability })) {
         if (c.target.kind !== "action") continue;
-        const request = { id, capability: page.capability, context: clusterId, namespace, name, action: c.target.action };
+        // The resource tab asks the host by the same key, so its review takes this request.
+        const request = { id, capability: page.capability, context: contextKey, namespace, name, action: c.target.action };
         const route = deps.route;
         const openAppAction = deps.openAppAction;
         commands.push({ id: c.id, group: "Action", label: c.label, hint: `${name} · review first`,

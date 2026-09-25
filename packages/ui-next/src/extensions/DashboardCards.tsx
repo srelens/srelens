@@ -11,13 +11,12 @@ import {
 } from "@srelens/core";
 import { useNamespaceOptions } from "@srelens/core/react";
 import { Button, RawError, Section, Spinner } from "@srelens/ui-kit";
-import { getKubeconfigFiles, useContexts } from "../lib/clusters";
+import { getKubeconfigFiles } from "../lib/clusters";
 import { FailureAlert } from "../lib/errorCopy";
 import { openTab } from "../lib/tabsStore";
 import { useResource } from "../lib/useResource";
 import { useNamespaces, useSetNamespaces } from "../lib/workspace";
 import { NamespaceErrorAlert, NamespacePicker } from "../screens/resourceShell";
-import { SHARED_CONTEXT_ID_MESSAGE } from "./contextIds";
 import { plainText } from "./displayText";
 import { extensionLabel, useExtensions } from "./inventoryStore";
 import { LiveNotice, LiveStatus, useLiveApps } from "./liveReaders";
@@ -69,25 +68,22 @@ function CardsBand({ context, apps }: { context: ClusterContext; apps: Installed
   const setNamespaces = useSetNamespaces();
   const { namespaces, scope, error: namespaceError } = useNamespaceOptions(context.name, getKubeconfigFiles());
   const [refresh, setRefresh] = useState(0);
-  const contexts = useContexts();
   // A credential that may only read one namespace reads that one, whatever is selected.
   const effective = scope ? [scope] : selection;
-  // Two contexts with one stable ID: a read pinned by it cannot say which cluster it is for.
-  const shared = contexts.filter((c) => c.stableId === context.stableId).length > 1;
   // Each app's card readers are followed (#566): a change redraws that app's
   // figures in place. One namespace is watched there; several, or none, in
   // every namespace — the scope the cards themselves are read in.
   const [pulses, setPulses] = useState<Record<string, number>>({});
   const live = useLiveApps({
-    apps: shared || namespaces === null ? [] : apps.map((plugin) => ({
+    apps: namespaces === null ? [] : apps.map((plugin) => ({
       plugin, capabilities: (plugin.manifest.contributions.dashboardCards ?? []).map((card) => card.source),
     })),
-    context: context.stableId,
+    // By key, which names this context alone even when another shares its stable ID (#695).
+    context: context.key,
     namespace: effective.length === 1 ? effective[0] : "",
     label: "dashboard:cards",
-    // Why nothing is followed yet: the same two reasons nothing is read yet.
-    off: shared ? SHARED_CONTEXT_ID_MESSAGE
-      : namespaces === null ? "Waiting for the cluster's namespaces before following the cards." : undefined,
+    // Why nothing is followed yet: the same reason nothing is read yet.
+    off: namespaces === null ? "Waiting for the cluster's namespaces before following the cards." : undefined,
     onChange: (id) => setPulses((current) => ({ ...current, [id]: (current[id] ?? 0) + 1 })),
   });
   const stale = live.state === "reconnecting";
@@ -106,23 +102,19 @@ function CardsBand({ context, apps }: { context: ClusterContext; apps: Installed
       </div>
       <NamespaceErrorAlert error={namespaceError} />
       <LiveNotice live={live} what="figures" />
-      {shared ? (
-        <p className="dashboard-cards-message">{SHARED_CONTEXT_ID_MESSAGE}</p>
-      ) : (
-        <div className="dashboard-cards" data-stale={stale || undefined}>
-          {apps.map((plugin) =>
-            // Until the namespaces answer, a restricted credential's scope is not
-            // known, and a read of "every namespace" would draw its refusal as a
-            // failure the card does not have. So nothing reads yet.
-            namespaces === null ? (
-              <PendingAppCards key={plugin.manifest.id} plugin={plugin} />
-            ) : (
-              <AppCards key={plugin.manifest.id} plugin={plugin} context={context} selection={effective} refresh={refresh}
-                pulse={pulses[plugin.manifest.id] ?? 0} />
-            ),
-          )}
-        </div>
-      )}
+      <div className="dashboard-cards" data-stale={stale || undefined}>
+        {apps.map((plugin) =>
+          // Until the namespaces answer, a restricted credential's scope is not
+          // known, and a read of "every namespace" would draw its refusal as a
+          // failure the card does not have. So nothing reads yet.
+          namespaces === null ? (
+            <PendingAppCards key={plugin.manifest.id} plugin={plugin} />
+          ) : (
+            <AppCards key={plugin.manifest.id} plugin={plugin} context={context} selection={effective} refresh={refresh}
+              pulse={pulses[plugin.manifest.id] ?? 0} />
+          ),
+        )}
+      </div>
     </Section>
   );
 }
@@ -156,8 +148,8 @@ function AppCards({
 }) {
   const { id } = plugin.manifest;
   const answers = useResource(
-    () => resolveDashboardCards(id, plugin.revision, context.stableId, selection),
-    [id, plugin.revision, context.stableId, selection.join("\u0000"), refresh],
+    () => resolveDashboardCards(id, plugin.revision, context.key, selection),
+    [id, plugin.revision, context.key, selection.join("\u0000"), refresh],
     () => false,
   );
   const { refresh: reread } = answers;
@@ -190,7 +182,7 @@ function AppCards({
             open={
               target
                 ? () =>
-                    openTab(extensionCardRoute(context.stableId, id, target.page, namespace, card.id, selection), {
+                    openTab(extensionCardRoute(context.key, id, target.page, namespace, card.id, selection), {
                       clusterName: context.name,
                     })
                 : undefined

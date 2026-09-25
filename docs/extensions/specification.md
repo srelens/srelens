@@ -339,6 +339,13 @@ list, and the [developer harness](testing.md#developer-harness) prints one per l
   external releases and a catalog update; existing signed release bytes stay unchanged.
   The Flux example reads HelmReleases at `v2` or `v2beta2` and OCIRepositories at `v1`
   or `v1beta2` (#547), which also needs a new signed release.
+- App pages, dashboard card targets, palette page commands and Related links route by
+  context key (`/extension-contexts/<key>/…`) and ask the host by it, so two contexts
+  that share a stable ID open two tabs, each reading its own cluster. A context lookup
+  accepts the key as well as a pinned ID, a stable ID or a name; a string that is one
+  context's key and another's stable ID names neither. A route opened before
+  (`/extension-clusters/<stableId>/…`) still opens while one context carries that ID, and
+  says so when two do (#695).
 
 
 ### 0.1.0

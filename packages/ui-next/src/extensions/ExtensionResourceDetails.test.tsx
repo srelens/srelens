@@ -2,7 +2,7 @@ import fluxManifest from "../../../../examples/extensions/flux.json";
 import argoManifest from "../../../../examples/extensions/argocd.json";
 const declaredMeta = Object.fromEntries([...fluxManifest.actions.filter(action=>action.resource==="helmreleases").map(action=>({...action,name:action.name.replace("helmreleases-","")})),...argoManifest.actions].map(action=>[action.name,{title:action.title,availableWhen:("availableWhen" in action?action.availableWhen:[]) as import("@srelens/core").ActionPredicate[],impact:"medium" as const,confirm:null}]));
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
-import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, onTestFinished, vi } from "vitest";
 vi.mock("@srelens/core", async original => ({...await original<typeof import("@srelens/core")>(),inspectExtensionResource:vi.fn(),actOnExtensionResource:vi.fn(),listExtensions:vi.fn(),resolveExtensionPanels:vi.fn(),resolveExtensionLinks:vi.fn()}));
 import { inspectExtensionResource, actOnExtensionResource, listExtensions, resolveExtensionPanels, resolveExtensionLinks, EXTENSION_RESOURCE_CHANGED } from "@srelens/core";
 import { ExtensionResourceDetails } from "./ExtensionResourceDetails";
@@ -254,6 +254,10 @@ it("shows the app resource's Related links after its host sections (#545)", asyn
    resourceLinks:[{id:"source",from:"kustomize.toolkit.fluxcd.io/Kustomization",to:"source.toolkit.fluxcd.io/GitRepository",
     relation:"references",match:{label:"example.io/source"}}]}}};
  installedApps([app]);
+ // The page's context is listed: its links' routes carry its key (#695).
+ const {resetContexts,setContexts}=await import("../lib/clusters");
+ setContexts([{name:"cluster/a",stableId:"cluster/a",key:"cluster/a"} as import("@srelens/core").ClusterContext]);
+ onTestFinished(resetContexts);
  vi.mocked(resolveExtensionPanels).mockResolvedValue({panels:[]});
  vi.mocked(resolveExtensionLinks).mockResolvedValue({
   from:{kind:"kustomize.toolkit.fluxcd.io/Kustomization",namespace:"team",name:"apps"},

@@ -6,7 +6,7 @@ import { act, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Console } from "./Console";
 import { ConsoleProvider, useConsole } from "../console";
-import { resetContexts, setContexts } from "../lib/clusters";
+import { pinContextKey, resetContexts, setContexts } from "../lib/clusters";
 import { defaultState } from "../lib/tabs";
 import { logsRoute } from "../screens/Logs";
 import * as tabsStore from "../lib/tabsStore";
@@ -1605,5 +1605,34 @@ describe("app commands in the palette (#544)", () => {
     await user.type(screen.getByRole("textbox", { name: "Console prompt" }), "/reconcile helm{Enter}");
     expect(takeExtensionAction(helmReleaseSelection)).toBe("helmreleases-reconcile");
     expect(askAgent).not.toHaveBeenCalled();
+  });
+
+  describe("on two contexts that share a stable ID (#695)", () => {
+    // `/kube/a` declaring `b#c` and `/kube/a#b` declaring `c`; this window was opened for `c`.
+    const first = { ...ctx("/kube/a#b#c", "b#c"), key: "/kube/a#b%23c" };
+    const second = { ...ctx("/kube/a#b#c", "c"), key: "/kube/a%23b#c" };
+    beforeEach(() => {
+      setContexts([first, second]);
+      tabsStore.setState(defaultState([first, second]));
+      pinContextKey(second.key);
+    });
+    afterEach(() => pinContextKey(null));
+
+    it("opens a page on the context this window is for, not the first of the two", async () => {
+      const user = userEvent.setup();
+      setup();
+      await user.type(screen.getByRole("textbox", { name: "Console prompt" }), "/flux: open helm{Enter}");
+      const tab = tabsStore.currentWorkspace().tabs.find((t) => t.route === "/extension-contexts/%2Fkube%2Fa%2523b%23c/org.srelens.flux/helmreleases/");
+      expect(tab?.sub).toBe("c");
+    });
+
+    it("asks a resource tab's review by the key its route carries", async () => {
+      tabsStore.openTab(extensionClusterResourceRoute(first.key, flux.id, "helmreleases", "team", "web"));
+      const user = userEvent.setup();
+      setup();
+      await user.type(screen.getByRole("textbox", { name: "Console prompt" }), "/reconcile helm{Enter}");
+      expect(takeExtensionAction({ ...helmReleaseSelection, context: second.key })).toBeNull();
+      expect(takeExtensionAction({ ...helmReleaseSelection, context: first.key })).toBe("helmreleases-reconcile");
+    });
   });
 });

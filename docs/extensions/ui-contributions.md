@@ -10,7 +10,8 @@ reference: [manifest.md](manifest.md#contributions).
 Enabled apps with pages appear beneath **Apps → app name** in the connected cluster's
 sidebar. Pages may declare `group` to nest their navigation. Page icons follow each
 page's role (overview, sources, Helm, notifications) rather than repeating the app's
-logo. App routes pin the cluster, so a page stays on the cluster it was opened for.
+logo. App routes pin the cluster by its context key, so a page stays on the cluster it
+was opened for, and two contexts that share a stable ID (#623) open two tabs (#695).
 
 Namespace and search filters are scoped to the open cluster; they are temporary view
 state, not saved preferences. Refresh explicitly repeats a read.
@@ -76,13 +77,13 @@ Failed reads keep their error and a retry; they never become zero-count summarie
 `dashboardCards` ([Manifest reference](manifest.md#dashboard-cards)) draw an **App
 cards** band on the cluster overview, under the capacity strip, in the new design only.
 The band follows the cluster's namespace selection — the one the resource lists use —
-reads the cluster in focus by its stable ID, and has a **Refresh** action. On the
+reads the cluster in focus by its context key, and has a **Refresh** action. On the
 desktop it is live too: each app's card readers are watched, in the one selected
 namespace or, for several or none, in every namespace, and a change redraws that app's
 figures in place. While a watch reconnects, the band says its figures may be out of
-date, and a warning rule marks them. Until the cluster's namespaces are known, or when
-two contexts share the cluster's stable ID, no watch starts and the band says **Not
-live** with that reason, while its cards stay **Loading** during namespace discovery.
+date, and a warning rule marks them. Until the cluster's namespaces are known, no watch
+starts and the band says **Not live** with that reason, while its cards stay
+**Loading**.
 Each card
 shows its figure or one of three visibly different states:
 

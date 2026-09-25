@@ -239,14 +239,14 @@ describe("DashboardCards", () => {
     render(<DashboardCards context={CTX} />);
     await waitFor(() => expect(core.resolveDashboardCards).toHaveBeenCalled());
     // The stable ID, never the display name: a renamed context must not move the read.
-    expect(core.resolveDashboardCards).toHaveBeenLastCalledWith("org.example.certs", 4, CTX.stableId, []);
+    expect(core.resolveDashboardCards).toHaveBeenLastCalledWith("org.example.certs", 4, CTX.key, []);
     act(() => setNamespaces(CTX.stableId, ["team"]));
     await waitFor(() =>
-      expect(core.resolveDashboardCards).toHaveBeenLastCalledWith("org.example.certs", 4, CTX.stableId, ["team"]),
+      expect(core.resolveDashboardCards).toHaveBeenLastCalledWith("org.example.certs", 4, CTX.key, ["team"]),
     );
     act(() => setNamespaces(CTX.stableId, ["team", "prod"]));
     await waitFor(() =>
-      expect(core.resolveDashboardCards).toHaveBeenLastCalledWith("org.example.certs", 4, CTX.stableId, ["team", "prod"]),
+      expect(core.resolveDashboardCards).toHaveBeenLastCalledWith("org.example.certs", 4, CTX.key, ["team", "prod"]),
     );
   });
 
@@ -277,7 +277,7 @@ describe("DashboardCards", () => {
     answer([{ id: "c", state: "count", count: 1 }]);
     render(<DashboardCards context={CTX} />);
     await waitFor(() =>
-      expect(core.resolveDashboardCards).toHaveBeenLastCalledWith("org.example.certs", 4, CTX.stableId, ["team"]),
+      expect(core.resolveDashboardCards).toHaveBeenLastCalledWith("org.example.certs", 4, CTX.key, ["team"]),
     );
   });
 
@@ -300,7 +300,7 @@ describe("DashboardCards", () => {
     view.rerender(<DashboardCards context={CTX} />);
     await waitFor(() => expect(cardRegion("Expiring").getAttribute("data-state")).toBe("value"));
     expect(core.resolveDashboardCards).toHaveBeenCalledTimes(1);
-    expect(core.resolveDashboardCards).toHaveBeenLastCalledWith("org.example.certs", 4, CTX.stableId, ["team"]);
+    expect(core.resolveDashboardCards).toHaveBeenLastCalledWith("org.example.certs", 4, CTX.key, ["team"]);
   });
 
   it("follows each card's reader and redraws its figure in place when it changes (#566)", async () => {
@@ -321,7 +321,7 @@ describe("DashboardCards", () => {
     const figure = () => cardRegion("Expiring").querySelector(".dashboard-card-figure")?.textContent;
     await waitFor(() => expect(figure()).toBe("1"));
     // Two cards over one reader: one watch, in the selected namespace, on the pinned cluster.
-    await waitFor(() => expect(watched.map((w) => [w.capability, w.namespace, w.context])).toEqual([["certificates", "team", CTX.stableId]]));
+    await waitFor(() => expect(watched.map((w) => [w.capability, w.namespace, w.context])).toEqual([["certificates", "team", CTX.key]]));
     act(() => watched[0].onData({ event: "synced" }, 1));
     expect(screen.getByText("Live")).toBeTruthy();
     act(() => watched[0].onData({ event: "changed" }, 2));
@@ -352,7 +352,7 @@ describe("DashboardCards", () => {
     render(<DashboardCards context={CTX} />);
     await userEvent.click(await screen.findByRole("button", { name: "Open Expiring" }));
     expect(open).toHaveBeenCalledWith(
-      extensionCardRoute(CTX.stableId, "org.example.certs", "certificates", "team", "expiring"),
+      extensionCardRoute(CTX.key, "org.example.certs", "certificates", "team", "expiring"),
       { clusterName: CTX.name },
     );
     expect(within(cardRegion("No target")).queryByRole("button", { name: /Open/ })).toBeNull();
@@ -367,7 +367,7 @@ describe("DashboardCards", () => {
     await userEvent.click(await screen.findByRole("button", { name: "Open Expiring" }));
     // Not every namespace: the page would show rows the card never counted.
     expect(open).toHaveBeenCalledWith(
-      extensionCardRoute(CTX.stableId, "org.example.certs", "certificates", "", "expiring", ["team", "prod"]),
+      extensionCardRoute(CTX.key, "org.example.certs", "certificates", "", "expiring", ["team", "prod"]),
       { clusterName: CTX.name },
     );
   });
@@ -379,9 +379,41 @@ describe("DashboardCards", () => {
     render(<DashboardCards context={CTX} />);
     await userEvent.click(await screen.findByRole("button", { name: "Open Expiring" }));
     expect(open).toHaveBeenCalledWith(
-      extensionCardRoute(CTX.stableId, "org.example.certs", "certificates", "", "expiring"),
+      extensionCardRoute(CTX.key, "org.example.certs", "certificates", "", "expiring"),
       { clusterName: CTX.name },
     );
+  });
+
+  describe("on two contexts that share a stable ID (#695)", () => {
+    // `/kube/a` declaring `b#c` and `/kube/a#b` declaring `c` share `/kube/a#b#c`.
+    const first: ClusterContext = { ...CTX, name: "b#c", stableId: "/kube/a#b#c", key: "/kube/a#b%23c" };
+    const second: ClusterContext = { ...CTX, name: "c", stableId: "/kube/a#b#c", key: "/kube/a%23b#c" };
+
+    it("reads, follows and opens each one's cards by its own key", async () => {
+      const open = vi.spyOn(tabs, "openTab").mockImplementation(() => {});
+      const watched: string[] = [];
+      core.openExtensionView.mockImplementation((id: string) => ({
+        view: id, close: vi.fn(async () => {}),
+        open: async (request: { context: string }) => {
+          watched.push(request.context);
+          return { stream: "s", cancel: vi.fn(async () => {}) };
+        },
+      }));
+      installed(app([card({ id: "expiring", title: "Expiring", target: { page: "certificates" } })]));
+      answer([{ id: "expiring", state: "count", count: 2 }]);
+      for (const context of [first, second]) {
+        const view = render(<DashboardCards context={context} />);
+        await userEvent.click(await screen.findByRole("button", { name: "Open Expiring" }));
+        expect(core.resolveDashboardCards).toHaveBeenLastCalledWith("org.example.certs", 4, context.key, []);
+        await waitFor(() => expect(watched.at(-1)).toBe(context.key));
+        expect(screen.queryByText(/two contexts share/)).toBeNull();
+        view.unmount();
+      }
+      expect(open.mock.calls).toEqual([
+        ["/extension-contexts/%2Fkube%2Fa%23b%2523c/org.example.certs/certificates/?card=expiring", { clusterName: "b#c" }],
+        ["/extension-contexts/%2Fkube%2Fa%2523b%23c/org.example.certs/certificates/?card=expiring", { clusterName: "c" }],
+      ]);
+    });
   });
 
   it("draws app text as plain text, never markup or invisible reordering", async () => {

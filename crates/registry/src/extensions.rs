@@ -2332,6 +2332,35 @@ mod tests {
         cache.set_paths(vec![second]).await;
         assert!(refused("c".to_owned()).await);
     }
+    /// An app page names its cluster by context key (#695), so two contexts that share a
+    /// stable ID each read their own cluster; the shared stable ID still reaches neither.
+    #[tokio::test]
+    async fn a_read_named_by_context_key_goes_to_that_context_when_the_stable_id_is_shared() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("extensions.json");
+        let first = kubeconfig(dir.path(), "a", &["b#c"]);
+        let second = kubeconfig(dir.path(), "a#b", &["c"]);
+        let listed =
+            srelens_kube::context_resolve::resolve_contexts(&[first.clone(), second.clone()]);
+        assert_eq!(listed[0].stable_id(), listed[1].stable_id());
+        let core = fake_core();
+        let revision = install(&path, core.clone());
+        let mut reg = Registry::new();
+        let cache = srelens_kube::client_cache::ClientCache::new_many(vec![first, second]);
+        register(&mut reg, path, core, cache);
+        let read = |context: String| {
+            let payload = json!({"id":"org.example.argocd","revision":revision,
+                "capability":"applications","context":context,"namespace":""});
+            reg.invoke("extensions.read", payload)
+        };
+        for context in &listed {
+            let output = read(context.key()).await.unwrap();
+            assert_eq!(output["context"], json!(context.pinned_id().unwrap()));
+        }
+        // Pinned to neither: the reader resolves it again, and it names no single context.
+        let shared = read(listed[0].stable_id()).await.unwrap();
+        assert_eq!(shared["context"], json!(listed[0].stable_id()));
+    }
     /// A limited app is refused on a context the host cannot resolve, but with why: whether
     /// the app is enabled there is unknown, which is not the same as not enabled.
     #[tokio::test]

@@ -51,8 +51,7 @@ it("says the clusters could not be listed rather than that a limited app is not 
  await waitFor(()=>expect(setContexts).toHaveBeenCalledWith(listed,""));
 });
 it("keys app scope on the context key, so two contexts sharing a stable ID are told apart",async()=>{
- // The route still carries the stable ID (which this page cannot disambiguate), so a shared
- // one stays unroutable; a unique stable ID with a distinct key is checked by key.
+ // A legacy name route learns its context; that context's scope is checked by key.
  Object.assign(clusters,{contexts:[{name:"cluster/a",stableId:"/kube/x#y#z",key:"/kube/x#y%23z"},{name:"other",stableId:"/kube/o#other",key:"/kube/o#other"}],status:"loaded"});
  limitedTo("/kube/x#y%23z");
  openKustomizations();
@@ -66,7 +65,7 @@ it("keys app scope on the context key, so two contexts sharing a stable ID are t
  expect(screen.queryByText(/not enabled for this cluster/)).toBeNull();
 });
 
-it("keeps a stable route on its cluster after display names change", async () => {
+it("keeps a key route on its cluster after display names change", async () => {
  const id="/kube/a.yaml#default";
  limitedTo(id);
  Object.assign(clusters,{contexts:[{name:"first/default",stableId:id,key:id},{name:"second/default",stableId:"/kube/b.yaml#default",key:"/kube/b.yaml#default"}]});
@@ -82,13 +81,54 @@ it("does not dispatch an unrestricted app when its pinned cluster is missing",as
  expect(screen.queryByText("Open resource")).toBeNull();
 });
 
-it("never substitutes a literal name for a missing stable route identity",async()=>{
+it("never substitutes a literal name for a missing route identity",async()=>{
  const id="/kube/a.yaml#default";
  limitedTo(id);
  clusters.contexts=[{name:id,stableId:"/kube/impostor.yaml#literal",key:"/kube/impostor.yaml#literal"}];
  render(<ExtensionPage ported={[]} onSwitchToClassic={vi.fn()} onLocked={vi.fn()} route={extensionClusterRoute(id,manifest.id,"kustomizations")}/>);
  expect(await screen.findByText(/no longer in your kubeconfig files/)).toBeTruthy();
  expect(screen.queryByText("Open resource")).toBeNull();
+});
+
+// `/kube/a` declaring `b#c` and `/kube/a#b` declaring `c` share the stable ID `/kube/a#b#c` (#623).
+const shared=[{name:"b#c",stableId:"/kube/a#b#c",key:"/kube/a#b%23c"},{name:"c",stableId:"/kube/a#b#c",key:"/kube/a%23b#c"}];
+/** A route as tabs opened before #695 carry it: the cluster named by stable ID. */
+const stableIdRoute=(id:string,...rest:string[])=>`/extension-clusters/${[id,...rest].map(encodeURIComponent).join("/")}`;
+it("opens each of two contexts that share a stable ID on its own cluster (#695)",async()=>{
+ clusters.contexts=shared;
+ for(const context of shared){
+  const mounted=render(<ExtensionPage ported={[]} onSwitchToClassic={vi.fn()} onLocked={vi.fn()} route={extensionClusterResourceRoute(context.key,manifest.id,"kustomizations","team","apps")}/>);
+  const detail=JSON.parse((await screen.findByTestId("detail-page")).textContent!);
+  expect(detail.selection.context).toBe(context.key);
+  expect(screen.getByText(context.name)).toBeTruthy();
+  mounted.unmount();
+ }
+ render(<ExtensionPage ported={[]} onSwitchToClassic={vi.fn()} onLocked={vi.fn()} route={extensionClusterRoute(shared[1].key,manifest.id,"kustomizations")}/>);
+ fireEvent.click(await screen.findByText("Open resource"));
+ expect(openTab).toHaveBeenCalledWith(extensionClusterResourceRoute("/kube/a%23b#c",manifest.id,"kustomizations","team","apps"),{clusterName:"c"});
+});
+it("still opens a route from before that names its cluster by a stable ID only one context carries",async()=>{
+ clusters.contexts=[{name:"y#z",stableId:"/kube/x#y#z",key:"/kube/x#y%23z"}];
+ render(<ExtensionPage ported={[]} onSwitchToClassic={vi.fn()} onLocked={vi.fn()} route={stableIdRoute("/kube/x#y#z",manifest.id,"kustomizations","team","apps")}/>);
+ const detail=JSON.parse((await screen.findByTestId("detail-page")).textContent!);
+ expect(detail.selection.context).toBe("/kube/x#y%23z");
+});
+it("says a route from before names a stable ID two contexts share, rather than open either",async()=>{
+ clusters.contexts=shared;
+ render(<ExtensionPage ported={[]} onSwitchToClassic={vi.fn()} onLocked={vi.fn()} route={stableIdRoute("/kube/a#b#c",manifest.id,"kustomizations","team","apps")}/>);
+ expect(await screen.findByText(/two contexts share/)).toBeTruthy();
+ expect(screen.queryByTestId("detail-page")).toBeNull();
+ expect(screen.queryByText(/no longer in your kubeconfig files/)).toBeNull();
+});
+it("reads a key route as a key, even when the same string is another context's stable ID",async()=>{
+ // `y#z` has the key `/kube/x#y%23z`, the stable ID of a context literally named `y%23z`.
+ clusters.contexts=[{name:"y#z",stableId:"/kube/x#y#z",key:"/kube/x#y%23z"},{name:"y%23z",stableId:"/kube/x#y%23z",key:"/kube/x#y%2523z"}];
+ const byKey=render(<ExtensionPage ported={[]} onSwitchToClassic={vi.fn()} onLocked={vi.fn()} route={extensionClusterResourceRoute("/kube/x#y%23z",manifest.id,"kustomizations","team","apps")}/>);
+ expect(JSON.parse((await screen.findByTestId("detail-page")).textContent!).selection.context).toBe("/kube/x#y%23z");
+ expect(screen.getByText("y#z")).toBeTruthy();
+ byKey.unmount();
+ render(<ExtensionPage ported={[]} onSwitchToClassic={vi.fn()} onLocked={vi.fn()} route={stableIdRoute("/kube/x#y%23z",manifest.id,"kustomizations","team","apps")}/>);
+ expect(JSON.parse((await screen.findByTestId("detail-page")).textContent!).selection.context).toBe("/kube/x#y%2523z");
 });
 
 it("retains the identity of an already-open legacy route when its name changes",async()=>{

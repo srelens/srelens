@@ -506,23 +506,32 @@ export function extensionRoute(
 ) {
   return `/extensions/${[context, id, page, namespace].map(encodeURIComponent).join("/")}`;
 }
-/** A cluster identity route; legacy `/extensions/` routes still carry display names. */
-export function extensionClusterRoute(clusterId: string, id: string, page: string, namespace = "") {
-  return extensionRoute(clusterId, id, page, namespace).replace("/extensions/", "/extension-clusters/");
+/**
+ * An app page on one cluster, named by its context key (`ClusterContext.key`, #695).
+ *
+ * The route is the tab's identity — `openTab` dedupes by it — so it names the cluster by
+ * the one identity no two contexts share. A stable ID can be shared (`a` + `b#c` and
+ * `a#b` + `c`, #623), and a route carrying one opened the second context's page on the
+ * first's tab. Routes from before carry a stable ID under `/extension-clusters/`, and
+ * older ones a display name under `/extensions/`; the prefix says which, because one
+ * string can be one context's key and another's stable ID.
+ */
+export function extensionClusterRoute(contextKey: string, id: string, page: string, namespace = "") {
+  return extensionRoute(contextKey, id, page, namespace).replace("/extensions/", "/extension-contexts/");
 }
-export function extensionClusterResourceRoute(clusterId: string, id: string, page: string, namespace: string, name: string) {
-  return `${extensionClusterRoute(clusterId, id, page, namespace)}/${encodeURIComponent(name)}`;
+export function extensionClusterResourceRoute(contextKey: string, id: string, page: string, namespace: string, name: string) {
+  return `${extensionClusterRoute(contextKey, id, page, namespace)}/${encodeURIComponent(name)}`;
 }
 /**
  * A dashboard card's target: its app page, filtered to what the card counted.
  * The card is in the route because the route is the tab's identity — the
  * filtered page and the whole page are two things a reader can have open.
  */
-export function extensionCardRoute(clusterId: string, id: string, page: string, namespace: string, card: string, namespaces: string[] = []) {
+export function extensionCardRoute(contextKey: string, id: string, page: string, namespace: string, card: string, namespaces: string[] = []) {
   // One namespace is the path's, as on every app route. Several are the card's
   // selection, sorted so one selection is one tab whatever order it was picked in.
   const several = namespace ? [] : namespaces.length === 1 ? [] : [...new Set(namespaces)].sort();
-  const path = extensionClusterRoute(clusterId, id, page, namespace || (namespaces.length === 1 ? namespaces[0] : ""));
+  const path = extensionClusterRoute(contextKey, id, page, namespace || (namespaces.length === 1 ? namespaces[0] : ""));
   const query = `card=${encodeURIComponent(card)}${several.length ? `&namespaces=${several.map(encodeURIComponent).join(",")}` : ""}`;
   return `${path}?${query}`;
 }
@@ -530,7 +539,7 @@ export function parseExtensionRoute(route: string) {
   const query = route.indexOf("?");
   const path = query < 0 ? route : route.slice(0, query);
   const pieces = path.split("/");
-  if ((pieces.length !== 6 && pieces.length !== 7) || !["extensions", "extension-clusters"].includes(pieces[1])) return null;
+  if ((pieces.length !== 6 && pieces.length !== 7) || !["extensions", "extension-clusters", "extension-contexts"].includes(pieces[1])) return null;
   try {
     const [context, id, page, namespace] = pieces
       .slice(2)
@@ -552,7 +561,11 @@ export function parseExtensionRoute(route: string) {
         if (!namespaces.length || namespace) return null;
       }
     }
-    return context && id && page ? { context, id, page, namespace, ...(pieces[1] === "extension-clusters" ? { clusterId: context } : {}), ...(resourceName ? { resourceName } : {}), ...(card ? { card } : {}), ...(namespaces ? { namespaces } : {}) } : null;
+    // `contextKey`: the route names its context by key. `clusterId`: by stable ID, as
+    // routes opened before #695 do. Neither: by display name, older still.
+    const identity = pieces[1] === "extension-contexts" ? { contextKey: context }
+      : pieces[1] === "extension-clusters" ? { clusterId: context } : {};
+    return context && id && page ? { context, id, page, namespace, ...identity, ...(resourceName ? { resourceName } : {}), ...(card ? { card } : {}), ...(namespaces ? { namespaces } : {}) } : null;
   } catch {
     return null;
   }

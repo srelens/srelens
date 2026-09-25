@@ -53,12 +53,43 @@ it("links each related resource to a route carrying its cluster and app kind", a
   await userEvent.click(screen.getByRole("button", { name:/apps\/guestbook/ }));
   const routes = vi.mocked(openTab).mock.calls.map(([route]) => route);
   expect(routes).toEqual([
-    extensionClusterResourceRoute("file/prod", "org.example.argocd", "applications", "argocd", "guestbook"),
-    extensionClusterResourceRoute("file/prod", "org.example.argocd", "applications", "apps", "guestbook"),
+    extensionClusterResourceRoute("cluster-key", "org.example.argocd", "applications", "argocd", "guestbook"),
+    extensionClusterResourceRoute("cluster-key", "org.example.argocd", "applications", "apps", "guestbook"),
   ]);
   // Two targets, two tabs: the routes differ.
   expect(new Set(routes).size).toBe(2);
   expect(vi.mocked(openTab).mock.calls[0][1]).toEqual({ clusterName:"prod" });
+});
+
+// `/kube/a` declaring `b#c` and `/kube/a#b` declaring `c` share the stable ID `/kube/a#b#c` (#623).
+const shared = [
+  { name:"b#c", stableId:"/kube/a#b#c", key:"/kube/a#b%23c" },
+  { name:"c", stableId:"/kube/a#b#c", key:"/kube/a%23b#c" },
+];
+
+it("opens a link from each of two contexts that share a stable ID in a tab of its own (#695)", async () => {
+  vi.mocked(useContexts).mockReturnValue(shared as never);
+  vi.mocked(resolveExtensionLinks).mockResolvedValue(answer([link({ targets:[{ namespace:"argocd", name:"guestbook", exists:true }] })]));
+  for (const context of shared) {
+    const view = render(<ExtensionRelatedSlot context={context.name} resource={resource}/>);
+    await userEvent.click(await screen.findByRole("button", { name:/argocd\/guestbook/ }));
+    expect(resolveExtensionLinks).toHaveBeenLastCalledWith("org.example.argocd", 4, context.name, "team", "apps/Deployment", resource);
+    view.unmount();
+  }
+  expect(vi.mocked(openTab).mock.calls).toEqual([
+    ["/extension-contexts/%2Fkube%2Fa%23b%2523c/org.example.argocd/applications/argocd/guestbook", { clusterName:"b#c" }],
+    ["/extension-contexts/%2Fkube%2Fa%2523b%23c/org.example.argocd/applications/argocd/guestbook", { clusterName:"c" }],
+  ]);
+});
+
+it("links from an app resource page by the key that page reads its cluster by", async () => {
+  vi.mocked(useContexts).mockReturnValue(shared as never);
+  vi.mocked(resolveExtensionLinks).mockResolvedValue(answer([link({ targets:[{ namespace:"argocd", name:"guestbook", exists:true }] })]));
+  render(<ExtensionRelatedSlot context="/kube/a%23b#c" resource={resource}/>);
+  await userEvent.click(await screen.findByRole("button", { name:/argocd\/guestbook/ }));
+  expect(vi.mocked(openTab).mock.calls[0]).toEqual([
+    "/extension-contexts/%2Fkube%2Fa%2523b%23c/org.example.argocd/applications/argocd/guestbook", { clusterName:"c" },
+  ]);
 });
 
 it("says no related resources only when every link answered", async () => {
@@ -183,4 +214,12 @@ it("does not resolve links for an app not enabled on this cluster", () => {
   vi.mocked(useExtensions).mockReturnValue({ status:"ready", data:{ plugins:[{ ...plugin, contexts:["other"] }] }, reload:vi.fn() } as never);
   render(<ExtensionRelatedSlot context="prod" resource={resource}/>);
   expect(resolveExtensionLinks).not.toHaveBeenCalled();
+});
+
+it("names a target as plain text when its cluster is not listed, rather than open a tab for no cluster", async () => {
+  vi.mocked(useContexts).mockReturnValue([] as never);
+  vi.mocked(resolveExtensionLinks).mockResolvedValue(answer([link({ targets:[{ namespace:"argocd", name:"guestbook", exists:true }] })]));
+  render(<ExtensionRelatedSlot context="prod" resource={resource}/>);
+  expect(await screen.findByText(/Managed by.*Application.*argocd\/guestbook/)).toBeTruthy();
+  expect(screen.queryByRole("button", { name:/argocd\/guestbook/ })).toBeNull();
 });
