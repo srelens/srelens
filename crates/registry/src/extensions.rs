@@ -1,5 +1,7 @@
 //! Durable, native declarative extensions for desktop hosts.
 mod app_settings;
+#[cfg(test)]
+mod budget_tests;
 mod cards;
 mod catalog;
 mod columns;
@@ -12,9 +14,14 @@ mod panels;
 #[cfg(test)]
 mod policy_tests;
 mod resource;
+mod secret_store;
+pub use secret_store::{declares_secret_setting, SECRET_STORE_ANNOTATIONS};
+#[cfg(test)]
+mod secrets_tests;
 #[cfg(test)]
 mod settings_tests;
 mod signing;
+mod store;
 pub mod streams;
 #[cfg(test)]
 mod version_tests;
@@ -31,6 +38,41 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
+
+pub use catalog::SharedCatalog;
+pub use store::{InventoryKey, InventoryLock, InventoryStore};
+
+/// An inventory, as every capability that reads or changes one holds it.
+type Store = Arc<dyn InventoryStore>;
+
+/// Where one registry keeps its apps: the inventory, and the catalog cache that says
+/// which installed versions are catalog releases.
+#[derive(Clone)]
+pub struct Apps {
+    inventory: Store,
+    catalog: catalog::CatalogCache,
+}
+
+impl Apps {
+    /// One web user's apps (#515): their own inventory, and the catalog every user of the
+    /// server shares and none of them can write.
+    pub fn with_shared_catalog(inventory: Arc<dyn InventoryStore>, catalog: SharedCatalog) -> Self {
+        Self {
+            inventory,
+            catalog: catalog::CatalogCache::Shared(catalog),
+        }
+    }
+}
+
+/// The desktop's layout: the inventory file, and this host's own catalog cache beside it.
+impl From<PathBuf> for Apps {
+    fn from(path: PathBuf) -> Self {
+        Self {
+            catalog: catalog::CatalogCache::Owned(path.with_extension("catalog.json")),
+            inventory: Arc::new(path),
+        }
+    }
+}
 
 #[derive(Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -171,6 +213,15 @@ pub struct Inventory {
     #[serde(default, rename = "allowUnsignedApps")]
     allow_unsigned_apps: bool,
     plugins: Vec<Installed>,
+    /// Whether the host can store an app's secret now (#543), as
+    /// `extensions.list` reports it. Recomputed for every answer, ignored when
+    /// read from disk and never written there.
+    #[serde(
+        default,
+        rename = "secretStore",
+        skip_serializing_if = "Option::is_none"
+    )]
+    secret_store: Option<secret_store::SecretStoreState>,
 }
 
 impl Default for Inventory {
@@ -180,12 +231,13 @@ impl Default for Inventory {
             next_revision: 1,
             allow_unsigned_apps: false,
             plugins: vec![],
+            secret_store: None,
         }
     }
 }
 /// Recheck installed app authority for each native contribution read.
 async fn resolver_app(
-    path: PathBuf,
+    inventory: Store,
     core: &Arc<Registry>,
     client_cache: &Arc<srelens_kube::client_cache::ClientCache>,
     id: &str,
@@ -193,7 +245,7 @@ async fn resolver_app(
     context: String,
 ) -> Result<(Inventory, usize, String), CapabilityError> {
     let resolved = request_context(client_cache, &context).await;
-    let state = tokio::task::spawn_blocking(move || read(&path))
+    let state = tokio::task::spawn_blocking(move || read(&inventory))
         .await
         .map_err(|error| CapabilityError::Handler(error.to_string()))?
         .map_err(CapabilityError::Handler)?;
@@ -304,18 +356,11 @@ struct Read {
 #[serde(deny_unknown_fields)]
 struct Empty {}
 
-fn read(path: &Path) -> Result<Inventory, String> {
-    // One byte past the limit is enough to refuse it, so an oversized file is never loaded whole.
-    let mut raw = Vec::new();
-    match fs::File::open(path).and_then(|file| {
-        std::io::Read::read_to_end(
-            &mut std::io::Read::take(file, MAX_INVENTORY_BYTES as u64 + 1),
-            &mut raw,
-        )
-    }) {
-        Ok(_) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Inventory::default()),
-        Err(e) => return Err(format!("read extension inventory: {e}")),
+fn read<S: InventoryStore + ?Sized>(store: &S) -> Result<Inventory, String> {
+    // One byte past the limit is enough to refuse it, so an oversized inventory is never
+    // loaded whole.
+    let Some(raw) = store.load(MAX_INVENTORY_BYTES)? else {
+        return Ok(Inventory::default());
     };
     if raw.len() > MAX_INVENTORY_BYTES {
         return Err("extension inventory exceeds 1 MiB".into());
@@ -357,6 +402,8 @@ fn read(path: &Path) -> Result<Inventory, String> {
     if state.schema_version != 1 {
         return Err("unsupported extension inventory version".into());
     }
+    // The store's state is the host's to report now, never the file's.
+    state.secret_store = None;
     let mut ids = std::collections::BTreeSet::new();
     for plugin in &state.plugins {
         if !ids.insert(plugin.manifest.id.clone()) {
@@ -449,6 +496,9 @@ fn saved_form(state: &Inventory) -> Result<Vec<u8>, String> {
     // Quarantine is recomputed on every load. Persisting it would also make the file
     // unreadable to hosts that predate the field.
     let mut stored = serde_json::to_value(state).map_err(|e| e.to_string())?;
+    if let Some(fields) = stored.as_object_mut() {
+        fields.remove("secretStore");
+    }
     if let Some(plugins) = stored.get_mut("plugins").and_then(Value::as_array_mut) {
         for plugin in plugins.iter_mut().filter_map(Value::as_object_mut) {
             plugin.remove("quarantined");
@@ -457,12 +507,12 @@ fn saved_form(state: &Inventory) -> Result<Vec<u8>, String> {
     }
     serde_json::to_vec_pretty(&stored).map_err(|e| e.to_string())
 }
-fn write(path: &Path, state: &Inventory) -> Result<(), String> {
+fn write<S: InventoryStore + ?Sized>(store: &S, state: &Inventory) -> Result<(), String> {
     let raw = saved_form(state)?;
     if raw.len() > MAX_INVENTORY_BYTES {
         return Err("extension inventory exceeds 1 MiB".into());
     }
-    crate::durable::replace(path, &raw).map_err(|e| format!("save extension inventory: {e}"))
+    store.save(&raw)
 }
 /// The `k8s.listCustomResource` input the host fills from `statusResolvers`.
 const STATUS_RULES_ARGUMENT: &str = "statusRules";
@@ -821,6 +871,8 @@ fn check_install(
     let mut problems = validate_app(&manifest, grants, core)
         .err()
         .unwrap_or_default();
+    // The rules a new install meets that an installed app is not re-held to.
+    problems.0.extend(manifest.install_problems());
     // Without this, a pasted manifest could replace a signed app, or take an
     // official ID and its logo, differing from the real one only by a label.
     if let Some(reason) = unsigned_reserved(&manifest.id, signature.is_some()) {
@@ -854,9 +906,30 @@ fn take_revision(state: &mut Inventory) -> Result<u64, String> {
         .ok_or("extension revision limit reached")?;
     Ok(revision)
 }
+/// [`configure`] on the desktop's layout with no secret store, for the lifecycle tests
+/// that name an inventory by its file (see [`Apps`]'s `From<PathBuf>`).
+#[cfg(test)]
 fn mutate(path: &Path, core: Arc<Registry>, input: Configure) -> Result<Inventory, String> {
-    let _lock = super::settings::write_lock(path)?;
-    let mut state = read(path)?;
+    configure(
+        &Apps::from(path.to_path_buf()),
+        core,
+        &srelens_plugin_host::NoSecretStore,
+        input,
+    )
+}
+/// `extensions.configure`: one read-modify-write of `apps`'s inventory, under its lock,
+/// then the host's secret store made to follow the inventory: whatever the change
+/// dropped — an app, a setting an update no longer declares as a secret — is deleted
+/// from the store (#543).
+fn configure(
+    apps: &Apps,
+    core: Arc<Registry>,
+    secrets: &dyn srelens_plugin_host::SecretStore,
+    input: Configure,
+) -> Result<Inventory, String> {
+    let store = &*apps.inventory;
+    let _lock = store.lock()?;
+    let mut state = read(store)?;
     match input {
         Configure::UnsignedApps {
             allow_unsigned_apps,
@@ -883,11 +956,7 @@ fn mutate(path: &Path, core: Arc<Registry>, input: Configure) -> Result<Inventor
                 "{:x}",
                 <sha2::Sha256 as sha2::Digest>::digest(source.as_bytes())
             );
-            let origin = if catalog::cached_release(
-                &path.with_extension("catalog.json"),
-                &manifest.id,
-                &checksum,
-            ) {
+            let origin = if apps.catalog.lists_release(&manifest.id, &checksum) {
                 Source::Catalog
             } else {
                 Source::Local
@@ -1075,8 +1144,9 @@ fn mutate(path: &Path, core: Arc<Registry>, input: Configure) -> Result<Inventor
         }
     }
     apply_unsigned_policy(&mut state);
-    write(path, &state)?;
-    streams::announce(path, &state);
+    write(store, &state)?;
+    secret_store::sweep(secrets, &state);
+    streams::announce(&store.key(), &state);
     Ok(state)
 }
 #[derive(Deserialize, JsonSchema)]
@@ -1137,6 +1207,24 @@ fn access_items(manifest: &Manifest, grants: &[String]) -> std::collections::BTr
     let mut access = std::collections::BTreeSet::new();
     for grant in grants {
         access.insert(format!("Grant {grant}"));
+    }
+    // Which secrets the host keeps for the app (#543): an update that keeps
+    // one more is new access, even under the same grant.
+    let mut secrets: Vec<&str> = manifest
+        .settings
+        .iter()
+        .filter(|setting| {
+            setting.setting_type == srelens_capability::settings::SettingType::SecretReference
+        })
+        .map(|setting| setting.id.as_str())
+        .collect();
+    if !secrets.is_empty() {
+        secrets.sort_unstable();
+        access.insert(format!(
+            "Keep secrets for settings [{}] with {}",
+            secrets.join(","),
+            srelens_plugin_host::SECRET_STORE_PERMISSION
+        ));
     }
     // What a reader reads: its arguments and, when it lists several, the versions it may
     // read and the paths each moves (#547). Another accepted version reads more, and a
@@ -1221,13 +1309,65 @@ fn permission_diff(
         unchanged: current.intersection(&old).cloned().collect(),
     }
 }
+/// [`register_with_secrets`] on a host with no secret store: secrets cannot
+/// be set, and `extensions.list` says so. For the lifecycle tests; every
+/// registry build names its store.
+#[cfg(test)]
 pub fn register(
     reg: &mut Registry,
-    path: PathBuf,
+    apps: impl Into<Apps>,
     core: Arc<Registry>,
     cache: Arc<srelens_kube::client_cache::ClientCache>,
 ) -> Arc<streams::ExtensionStreams> {
-    catalog::register(reg, path.with_extension("catalog.json"), core.clone());
+    register_with_secrets(
+        reg,
+        apps,
+        core,
+        cache,
+        Arc::new(srelens_plugin_host::NoSecretStore),
+    )
+}
+/// Every `extensions.*` capability over `apps` — an inventory file for the desktop's
+/// layout, or one web user's inventory and the shared catalog — with `secrets` keeping
+/// apps' secret settings (#543): the desktop vault, or
+/// [`srelens_plugin_host::NoSecretStore`].
+pub fn register_with_secrets(
+    reg: &mut Registry,
+    apps: impl Into<Apps>,
+    core: Arc<Registry>,
+    cache: Arc<srelens_kube::client_cache::ClientCache>,
+    secrets: Arc<dyn srelens_plugin_host::SecretStore>,
+) -> Arc<streams::ExtensionStreams> {
+    register_apps(reg, apps.into(), core, cache, Some(secrets))
+}
+/// The `extensions.*` capabilities on a host that keeps no app secrets at all: the
+/// web host, until per-user secret storage exists (#522). `extension.secretStore` is
+/// not registered, so there is no way to hand it one, and `extensions.list` reports
+/// the store as unavailable.
+pub fn register_without_secrets(
+    reg: &mut Registry,
+    apps: impl Into<Apps>,
+    core: Arc<Registry>,
+    cache: Arc<srelens_kube::client_cache::ClientCache>,
+) -> Arc<streams::ExtensionStreams> {
+    register_apps(reg, apps.into(), core, cache, None)
+}
+fn register_apps(
+    reg: &mut Registry,
+    apps: Apps,
+    core: Arc<Registry>,
+    cache: Arc<srelens_kube::client_cache::ClientCache>,
+    secrets: Option<Arc<dyn srelens_plugin_host::SecretStore>>,
+) -> Arc<streams::ExtensionStreams> {
+    let path = apps.inventory.clone();
+    let secrets = match secrets {
+        Some(secrets) => {
+            secret_store::register(reg, path.clone(), secrets.clone());
+            secrets
+        }
+        None => Arc::new(srelens_plugin_host::NoSecretStore),
+    };
+    catalog::register(reg, apps.catalog.clone(), core.clone());
     resource::register(reg, path.clone(), core.clone(), cache.clone());
     // One snapshot of each granted reader, shared by table columns, dashboard
     // cards and a card's target page, so the three agree and list it once.
@@ -1235,31 +1375,38 @@ pub fn register(
     columns::register(reg, path.clone(), core.clone(), cache.clone(), snapshots.clone());
     cards::register(reg, path.clone(), core.clone(), cache.clone(), snapshots.clone());
     let p = path.clone();
+    let s = secrets.clone();
     reg.register(Capability::typed::<Empty, Inventory, _, _>(
         "extensions.list",
         "List installed declarative extensions",
         Annotations::READ_ONLY,
         move |_| {
             let p = p.clone();
+            let s = s.clone();
             async move {
-                tokio::task::spawn_blocking(move || read(&p))
-                    .await
-                    .map_err(|e| CapabilityError::Handler(e.to_string()))?
-                    .map_err(CapabilityError::Handler)
+                tokio::task::spawn_blocking(move || {
+                    let mut state = read(&p)?;
+                    secret_store::report(s.as_ref(), &mut state);
+                    Ok(state)
+                })
+                .await
+                .map_err(|e| CapabilityError::Handler(e.to_string()))?
+                .map_err(CapabilityError::Handler)
             }
         },
     ));
-    let p = path.clone();
     let c = core.clone();
+    let s = secrets.clone();
     reg.register(Capability::typed::<Configure, Inventory, _, _>(
         "extensions.configure",
         "Install, enable, remove or configure local extensions; requires approval",
         Annotations::MUTATING,
         move |input| {
-            let p = p.clone();
+            let apps = apps.clone();
             let c = c.clone();
+            let s = s.clone();
             async move {
-                tokio::task::spawn_blocking(move || mutate(&p, c, input))
+                tokio::task::spawn_blocking(move || configure(&apps, c, s.as_ref(), input))
                     .await
                     .map_err(|e| CapabilityError::Handler(e.to_string()))?
                     .map_err(CapabilityError::Handler)
@@ -1319,7 +1466,7 @@ pub fn register(
 /// `extensions.read`: every check it makes is made again on each call, which
 /// is what lets a stream re-run it on every tick (#565).
 async fn read_contribution(
-    p: PathBuf,
+    p: Store,
     c: Arc<Registry>,
     k: Arc<srelens_kube::client_cache::ClientCache>,
     snapshots: columns::JoinCache,
@@ -1833,7 +1980,7 @@ mod tests {
     pub(super) fn manifest() -> String {
         let source = include_str!("../tests/fixtures/argocd-manifest.json")
             .replace("\"org.srelens.argocd\"", "\"org.example.argocd\"")
-            .replace("\"^0.1\"", "\"^0.3\"");
+            .replace("\"^0.1\"", "\"^0.4\"");
         let mut value: Value = serde_json::from_str(&source).unwrap();
         value["settings"] = json!([{"id": "team", "type": "string", "title": "Team"}]);
         value.to_string()
@@ -2331,6 +2478,42 @@ mod tests {
         // The chosen context is gone and the other is the sole holder of the stable ID.
         cache.set_paths(vec![second]).await;
         assert!(refused("c".to_owned()).await);
+    }
+    /// An app page asks the host by the pinned ID `k8s.listContexts` reports (#695), so two
+    /// contexts that share a stable ID each read their own cluster.
+    #[tokio::test]
+    async fn each_context_sharing_a_stable_id_reads_its_own_cluster_by_its_listed_pinned_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("extensions.json");
+        let first = kubeconfig(dir.path(), "a", &["b#c"]);
+        let second = kubeconfig(dir.path(), "a#b", &["c"]);
+        let core = fake_core();
+        let listed = core
+            .invoke("k8s.listContexts", json!({"paths": [&first, &second]}))
+            .await
+            .unwrap();
+        let contexts = listed["contexts"].as_array().unwrap();
+        assert_eq!(contexts[0]["stableId"], contexts[1]["stableId"]);
+        let pinned: Vec<Value> = contexts.iter().map(|c| c["pinnedId"].clone()).collect();
+        assert!(
+            pinned.iter().all(Value::is_string) && pinned[0] != pinned[1],
+            "{pinned:?}"
+        );
+        let revision = install(&path, core.clone());
+        let mut reg = Registry::new();
+        let cache = srelens_kube::client_cache::ClientCache::new_many(vec![first, second]);
+        register(&mut reg, path, core, cache);
+        let read = |context: Value| {
+            let payload = json!({"id":"org.example.argocd","revision":revision,
+                "capability":"applications","context":context,"namespace":""});
+            reg.invoke("extensions.read", payload)
+        };
+        for id in &pinned {
+            assert_eq!(read(id.clone()).await.unwrap()["context"], *id);
+        }
+        // The shared stable ID names two contexts, so it is pinned to neither.
+        let shared = read(contexts[0]["stableId"].clone()).await;
+        assert!(shared.map_or(true, |out| !pinned.contains(&out["context"])));
     }
     /// A limited app is refused on a context the host cannot resolve, but with why: whether
     /// the app is enabled there is unknown, which is not the same as not enabled.
@@ -3282,8 +3465,12 @@ mod tests {
         ] {
             assert!(reg.get(id).unwrap().annotations.read_only);
         }
+        // The secret store (#543) is gated, and sensitive: what goes through
+        // it is secret material.
+        let store = reg.get("extension.secretStore").unwrap().annotations;
+        assert!(store.requires_confirm && store.sensitive && !store.read_only);
         let mcp = srelens_mcp::McpServer::new(Arc::new(reg));
-        assert_eq!(mcp.list_tools().len(), 13);
+        assert_eq!(mcp.list_tools().len(), 14);
         use srelens_mcp::{stdio::handle_request, Transport};
         for args in [
             json!({"action":"install","manifest":manifest(),"grants":["k8s.listCustomResource"]}),

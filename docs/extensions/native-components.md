@@ -3,7 +3,7 @@
 The host renders ten data-only components using `@srelens/ui-kit`. The contract
 is [native-component.v1.json](../../schemas/native-component.v1.json); each
 component has a named definition there. The vocabulary version is independent
-of the extension manifest API (currently `0.3`). Unknown versions, component
+of the extension manifest API (currently `0.3` and `0.4`). Unknown versions, component
 names, fields, and invalid data produce a visible error; validation never
 coerces or silently truncates input.
 

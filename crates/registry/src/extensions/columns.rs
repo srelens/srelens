@@ -515,7 +515,7 @@ fn resolved_badges(
 
 pub(super) fn register(
     reg: &mut Registry,
-    path: PathBuf,
+    path: Store,
     core: Arc<Registry>,
     client_cache: Arc<srelens_kube::client_cache::ClientCache>,
     cache: JoinCache,
@@ -1428,7 +1428,7 @@ mod tests {
         let mut registry = Registry::new();
         register(
             &mut registry,
-            path.clone(),
+            Arc::new(path.clone()),
             core,
             srelens_kube::client_cache::ClientCache::new_many(vec![]),
             JoinCache::default(),
@@ -1480,7 +1480,7 @@ mod tests {
         let mut registry = Registry::new();
         register(
             &mut registry,
-            path.clone(),
+            Arc::new(path.clone()),
             core.clone(),
             srelens_kube::client_cache::ClientCache::new_many(vec![]),
             Arc::new(Mutex::new(HashMap::new())),

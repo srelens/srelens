@@ -15,7 +15,7 @@ vi.mock("@srelens/core", async (original) => ({
   resolveExtensionColumns: vi.fn(),
 }));
 vi.mock("../lib/clusters", () => ({
-  useContexts: () => [{ name: "cluster/a", stableId: "cluster/a", key: "cluster/a" }],
+  useContexts: () => [{ name: "cluster/a", stableId: "cluster/a", key: "cluster/a", pinnedId: "srelens-context:/work/cluster/a" }],
   useContextsStatus: () => "loaded",
   useContextsError: () => "",
   getContexts: () => [],
@@ -47,7 +47,7 @@ import { openTab } from "../lib/tabsStore";
 import { ExtensionPage } from "./ExtensionPage";
 
 const manifest = {
-  id: "org.example.certs", name: "cert-manager", version: "1.0.0", srelensApiVersion: "^0.3", kind: "declarative",
+  id: "org.example.certs", name: "cert-manager", version: "1.0.0", srelensApiVersion: "^0.4", kind: "declarative",
   permissions: ["k8s.listCustomResource"],
   capabilities: [{ name: "certificates", title: "Certificates", target: "k8s.listCustomResource",
     arguments: { group: "cert-manager.io", version: "v1", plural: "certificates", kind: "Certificate", namespaced: true },
@@ -113,7 +113,7 @@ it("shows exactly the rows the card counted in its namespaces, under a banner na
   // `odd-tls` matches the card too, but in a namespace the card did not count.
   expect(screen.queryByText("odd-tls")).toBeNull();
   expect(screen.getByText(/counted by/).closest("[role=status]")?.textContent).toContain("in prod and team");
-  expect(readExtension).toHaveBeenCalledWith(manifest.id, 4, "certificates", "cluster/a", "", true, "expiring", ["prod", "team"]);
+  expect(readExtension).toHaveBeenCalledWith(manifest.id, 4, "certificates", "srelens-context:/work/cluster/a", "", true, "expiring", ["prod", "team"]);
 });
 
 it("shows the card's namespaces in the page's picker, not All namespaces", async () => {
@@ -150,7 +150,7 @@ it("leaves the card route when the picker chooses another namespace, and keeps t
   // This tab is still the card's route, so it still shows what the card counted.
   await settle();
   expect(shownRows()).toEqual(["shop-tls", "web-tls"]);
-  expect(readExtension).not.toHaveBeenCalledWith(manifest.id, 4, "certificates", "cluster/a", "other", true, "expiring");
+  expect(readExtension).not.toHaveBeenCalledWith(manifest.id, 4, "certificates", "srelens-context:/work/cluster/a", "other", true, "expiring");
   const status = screen.getByText(/counted by/).closest("[role=status]") as HTMLElement;
   expect(within(status).getByText(/in prod and team/)).toBeTruthy();
 });

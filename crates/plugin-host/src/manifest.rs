@@ -16,7 +16,7 @@ pub use versions::{MAX_BINDING_VERSIONS, MAX_PATH_OVERRIDES};
 /// Extension API versions this host implements, oldest first. A manifest is accepted when
 /// its `srelensApiVersion` range matches any of them. How versions are added and retired
 /// is specified in docs/extensions/specification.md.
-pub const SUPPORTED_API_VERSIONS: &[&str] = &["0.3.0"];
+pub const SUPPORTED_API_VERSIONS: &[&str] = &["0.3.0", "0.4.0"];
 
 /// The `format` values JSON Schema draft-07 defines.
 const STANDARD_FORMATS: &[&str] = &[
@@ -104,12 +104,66 @@ pub struct ApiField {
     pub introduced: &'static str,
     /// The first API version without it, when a later line removed or renamed it.
     pub removed: Option<&'static str>,
+    /// When set, the entry is about one form of value in a field every line has, rather
+    /// than the field itself: only a string at `path` written in this form counts as
+    /// using it.
+    pub form: Option<ApiForm>,
 }
 
-/// Manifest fields added or removed after API 0.1. A manifest may use a field only when
-/// its range negotiates to a version inside the field's availability. A rename is a
-/// removal plus an addition. Empty while 0.3 is the only supported version.
-pub const API_FIELDS: &[ApiField] = &[];
+/// A form of value that only some API lines accept in a field they all have, such as a
+/// path grammar a later line widened.
+#[derive(Debug, Clone, Copy)]
+pub struct ApiForm {
+    /// What the refusal calls it, e.g. "the `[?(@.key==\"text\")]` filter".
+    pub name: &'static str,
+    /// Whether a string value is written in this form.
+    pub matches: fn(&str) -> bool,
+}
+
+/// A field API 0.4 added (#709).
+const fn api_0_4(path: &'static str) -> ApiField {
+    ApiField {
+        path,
+        introduced: "0.4.0",
+        removed: None,
+        form: None,
+    }
+}
+
+/// The predicate path filter API 0.4 added to a path field API 0.3 already had (#541).
+const fn api_0_4_filter(path: &'static str) -> ApiField {
+    ApiField {
+        form: Some(ApiForm {
+            name: "the `[?(@.key==\"text\")]` filter",
+            matches: srelens_capability::path_uses_filter,
+        }),
+        ..api_0_4(path)
+    }
+}
+
+/// Manifest fields, and forms of a field's value, added or removed after the oldest
+/// supported API version. A manifest may use one only when every version its range
+/// admits has it. A rename is a removal plus an addition.
+pub const API_FIELDS: &[ApiField] = &[
+    // Added to API 0.3 in place while the platform was being built, then moved to a line
+    // of their own before a signed release used them (#709): a host that implements 0.3
+    // without them is told "requires API 0.4" rather than meeting an unknown field.
+    api_0_4("contributions.joins"),              // #538
+    api_0_4("contributions.tableColumns"),       // #538
+    api_0_4("contributions.detailPanels"),       // #539
+    api_0_4("contributions.statusResolvers"),    // #541
+    api_0_4("contributions.badges"),             // #541
+    api_0_4("contributions.dashboardCards"),     // #540
+    api_0_4("contributions.commands"),           // #544
+    api_0_4("contributions.resourceLinks"),      // #545
+    api_0_4("settings"),                         // #542
+    api_0_4("capabilities[].versions"),          // #547
+    api_0_4("capabilities[].jsonPathOverrides"), // #547
+    // The statusResolvers, badges and dashboardCards that also take the filter are
+    // already 0.4 fields; these are the predicate paths API 0.3 had.
+    api_0_4_filter("actions[].preconditions[].jsonPath"), // #541
+    api_0_4_filter("actions[].availableWhen[].jsonPath"), // #541
+];
 
 /// Rejects a field in `raw` that is missing from any of `versions`: every supported API
 /// version the manifest's range admits. A range that also admits an older line claims
@@ -124,9 +178,20 @@ pub fn check_api_fields_in(
             .map_err(|e| format!("invalid API version for {}: {e}", field.path))
     };
     for field in fields {
-        if !field_present(raw, field.path) {
+        let values = field_values(raw, field.path);
+        let used = match field.form {
+            None => values.iter().any(|value| contributes(value)),
+            Some(form) => values
+                .iter()
+                .any(|value| value.as_str().is_some_and(form.matches)),
+        };
+        if !used {
             continue;
         }
+        let what = match field.form {
+            None => format!("`{}`", field.path),
+            Some(form) => format!("{} in `{}`", form.name, field.path),
+        };
         let introduced = parse(field, field.introduced)?;
         let removed = field
             .removed
@@ -135,15 +200,13 @@ pub fn check_api_fields_in(
         for version in versions {
             if *version < introduced {
                 return Err(format!(
-                    "`{}` requires API {introduced}, but this manifest's srelensApiVersion admits API {version}",
-                    field.path
+                    "{what} requires API {introduced}, but this manifest's srelensApiVersion admits API {version}"
                 ));
             }
             if let Some(removed) = &removed {
                 if version >= removed {
                     return Err(format!(
-                        "`{}` was removed in API {removed}, but this manifest's srelensApiVersion admits API {version}",
-                        field.path
+                        "{what} was removed in API {removed}, but this manifest's srelensApiVersion admits API {version}"
                     ));
                 }
             }
@@ -152,10 +215,20 @@ pub fn check_api_fields_in(
     Ok(())
 }
 
-/// Whether `path` holds a value in `value`. Null, an empty array and an empty object count
-/// as absent: they contribute nothing, and a manifest loaded from storage serializes its
+/// Whether a value counts as using its field. Null, an empty array and an empty object
+/// do not: they contribute nothing, and a manifest loaded from storage serializes its
 /// unused collection fields as empty.
-fn field_present(value: &Value, path: &str) -> bool {
+fn contributes(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Array(items) => !items.is_empty(),
+        Value::Object(fields) => !fields.is_empty(),
+        _ => true,
+    }
+}
+
+/// Every value `path` reaches in `value`.
+fn field_values<'a>(value: &'a Value, path: &str) -> Vec<&'a Value> {
     let mut nodes = vec![value];
     for segment in path.split('.') {
         let (key, each) = match segment.strip_suffix("[]") {
@@ -170,17 +243,9 @@ fn field_present(value: &Value, path: &str) -> bool {
                 _ => {}
             }
         }
-        if next.is_empty() {
-            return false;
-        }
         nodes = next;
     }
-    nodes.iter().any(|node| match node {
-        Value::Null => false,
-        Value::Array(items) => !items.is_empty(),
-        Value::Object(fields) => !fields.is_empty(),
-        _ => true,
-    })
+    nodes
 }
 
 pub const MAX_MANIFEST_BYTES: usize = 256 * 1024;
@@ -263,7 +328,7 @@ pub const ACTION_PREDICATES: &[&str] = &["preconditions", "availableWhen"];
 /// kind it acts on, the arguments that fix what it writes, and what must be
 /// true of the object before it is written.
 ///
-/// Flux and Argo CD declare their actions using this contract in API 0.3.
+/// Flux and Argo CD declare their actions using this contract, which API 0.3 introduced.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ActionBinding {
@@ -363,7 +428,8 @@ pub struct Contributions {
     )]
     pub detail_panels: Vec<DetailPanel>,
     /// What status an app's custom resources have (#541). Replaces
-    /// `pages[].statusColumns`, which is deprecated but still accepted in 0.3.
+    /// `pages[].statusColumns`, which is deprecated but still accepted on the 0.3 and 0.4
+    /// lines.
     #[serde(
         default,
         rename = "statusResolvers",
@@ -1302,13 +1368,43 @@ impl Manifest {
                 );
             }
         }
+        // The secret store is granted, never bound (#543): the host keeps an
+        // app's secrets on its behalf, and a binding would make it a tool the
+        // app calls.
+        for (index, binding) in self.capabilities.iter().enumerate() {
+            if binding.target == crate::SECRET_STORE_PERMISSION {
+                problems.push(
+                    Code::UnsupportedTarget,
+                    format!("capabilities[{index}].target"),
+                    "extension.secretStore is granted to keep an app's secret settings, never bound",
+                );
+            }
+        }
+        for (index, action) in self.actions.iter().enumerate() {
+            if action.target == crate::SECRET_STORE_PERMISSION {
+                problems.push(
+                    Code::UnsupportedTarget,
+                    format!("actions[{index}].target"),
+                    "extension.secretStore is granted to keep an app's secret settings, never bound",
+                );
+            }
+        }
+        // What the app uses: its bound targets, plus the secret store, which
+        // it may request only when it declares a secret setting. That a new
+        // install declaring one must request it is `install_problems`'s: a
+        // manifest stored before the permission existed (#691 shipped in
+        // `srelens-v0.15.1-185`) is re-checked here on every load and must
+        // stay valid, or its app would be quarantined on upgrade.
+        if self.declares_secrets() && permissions.contains(crate::SECRET_STORE_PERMISSION) {
+            targets.insert(crate::SECRET_STORE_PERMISSION);
+        }
         if targets != permissions {
             let targets: Vec<_> = targets.into_iter().collect();
             problems.push(
                 Code::PermissionMismatch,
                 "permissions",
                 format!(
-                    "permissions must name exactly the bound host capabilities: {}",
+                    "permissions must name exactly the bound host capabilities, plus extension.secretStore when a secret-reference setting is declared: {}",
                     targets.join(", ")
                 ),
             );

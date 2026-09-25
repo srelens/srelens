@@ -17,10 +17,21 @@ cluster's RBAC.
   columns (with their JSON paths); for each `k8s.listEvents` reader the API groups its
   dashboards show; for anything else its fixed arguments. **View manifest** opens the
   full manifest before installing, whether it came from the Catalog or was pasted.
-- Installing a new version of an installed app shows its permissions again. The
-  application never silently replaces a manifest or expands its grants. A
-  permission diff on update is planned
-  ([#554](https://github.com/srelens/srelens/issues/554)).
+- Installing a new version of an installed app shows its permissions again, with
+  what access the update changes
+  ([#554](https://github.com/srelens/srelens/issues/554)). The host compares the
+  incoming manifest's access with the installed revision's: the grants, what each
+  reader binds, the settings it keeps secrets for, and each action. The review in
+  Settings → Apps lists what is added and removed before what is unchanged, and the
+  consent prompt for an install over MCP names the added and removed access. The
+  update must name the installed revision it was reviewed against, and is refused if
+  the app has changed since. The comparison is a review aid and refuses nothing: an
+  update that widens access installs once it is approved. The application never
+  silently replaces a manifest or expands its grants.
+- A rollback gets no such comparison. Its review in Settings → Apps compares
+  capability IDs only: when they differ from the grants held now, it lists those the
+  kept version requests and those it no longer uses
+  ([threat-model.md](threat-model.md#malicious-app)).
 
 ## What an app may read
 
@@ -51,8 +62,9 @@ version, plural, kind and scope, plus explicitly granted `k8s.listEvents` reader
 ## What an app may write
 
 Only through a declared action ([manifest.md](manifest.md#declared-actions)), and only
-one of the four host action primitives, each a separate permission the user grants:
-`k8s.annotate`, `k8s.setFields`, `k8s.setStatusCondition` and `k8s.mergePatch`.
+one of the six host action primitives, each a separate permission the user grants:
+`k8s.annotate`, `k8s.setFields`, `k8s.setStatusCondition`, `k8s.mergePatch`,
+`k8s.requestRolloutRestart` and `k8s.requestCordonNode`.
 
 - A reader grant buys no write, and an action grant buys no read.
 - An action reaches only the kind of a reader binding in the same manifest, because
@@ -67,6 +79,25 @@ one of the four host action primitives, each a separate permission the user gran
 - Every write re-reads the object, refuses one that has changed or is being deleted,
   and is still subject to the cluster's RBAC.
 
+## Secrets
+
+`extension.secretStore` lets the host keep an app's `secret-reference` settings in the
+desktop's encrypted secrets vault, whose key the OS keychain holds or the master password
+derives ([#543](https://github.com/srelens/srelens/issues/543)).
+
+- A manifest lists it exactly when it declares a `secret-reference` setting, and never
+  binds it. It is granted at install like any other permission.
+- The review names it with the secret settings it covers and the host's metadata for
+  it: sensitive, `medium` impact, and its confirmation wording. An update that keeps
+  another secret shows as changed access.
+- Without the grant, a secret cannot be set. A secret is write-only: nothing returns
+  it to the app, the UI, MCP or an export, and the host injects one only into an
+  argument a host capability declares for it. None does yet (#568 will).
+- Removing the app, or an update or rollback that drops the setting, deletes it. Reset
+  in Settings → Apps clears the app's secrets before it resets the other settings.
+
+See [Secret settings](manifest.md#secret-settings).
+
 ## Consent
 
 Annotations come from the host capability and cannot be weakened by a binding —
@@ -80,6 +111,10 @@ The app-level operations follow the normal MCP consent gate:
 - `extensions.configure` (install, enable, remove, settings, rollback, clusters) is mutating,
   `medium` impact. A rollback takes the grants explicitly, like an install, because it
   grants the restored version's permissions again.
+- `extension.secretStore` (set or clear an app's secret) is mutating, sensitive and
+  `medium` impact. Because it is sensitive, its audit record keeps the argument names
+  and blanks every value, and the desktop's consent prompt never carries the secret to
+  the window.
 - `extensions.action` (declared app actions) is mutating and `high` impact, because it
   can dispatch `k8s.mergePatch`, including an Argo CD sync. The per-action level
   is lower for most actions and travels with the resource; in the UI every action opens
@@ -96,5 +131,7 @@ admitted may finish.
 
 ## Web host
 
-Apps are not available on the multi-user web host yet. See
-[capabilities.md](capabilities.md#web-host).
+Each user of the multi-user web host grants permissions to their own apps; one user's
+grants never reach another's. Declared actions run only through `extensions.action`,
+after the host confirmation, and the host action primitives stay refused when called
+directly. See [capabilities.md](capabilities.md#web-host).

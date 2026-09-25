@@ -7,7 +7,7 @@ use srelens_plugin_host::{CommandTarget, Manifest, ValidationCode, ValidationErr
 /// One custom-resource reader with a page, and one declared action on it.
 fn manifest() -> Value {
     json!({
-        "id":"org.example.gitops", "name":"GitOps", "version":"0.1.0", "srelensApiVersion":"^0.3",
+        "id":"org.example.gitops", "name":"GitOps", "version":"0.1.0", "srelensApiVersion":"^0.4",
         "kind":"declarative", "permissions":["k8s.annotate","k8s.listCustomResource"],
         "capabilities":[
             {"name":"applications","title":"List applications", "target":"k8s.listCustomResource",

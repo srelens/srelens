@@ -207,8 +207,10 @@ arrives, instead of polling every five seconds. It still reads again when the
 window gains focus, which catches a change made by another process (a
 headless `srelens mcp` writing the same inventory). If the event cannot be
 subscribed to, the store falls back to reading every five seconds and says so
-on the Apps screen. The web host keeps no app inventory (#515), so there is
-nothing to announce or poll.
+on the Apps screen. The web host keeps each user's inventory (#515) but
+announces nothing, so there the list is read when the window changes it and
+when the window gains focus, which is where a change made in another tab shows.
+It neither polls nor claims to be live.
 
 Logs, exec and port-forwards ([#567](https://github.com/srelens/srelens/issues/567))
 and metric providers ([#569](https://github.com/srelens/srelens/issues/569)) are
@@ -266,9 +268,9 @@ what each app has sent since it started, for the Inspector
 
 - **Desktop:** frames are Tauri events on the stream's channel, through the
   same `EventSink` every other stream uses.
-- **Web:** the three commands are refused (`WEB_DENIED_COMMANDS`) and so is
-  `extensions.streams`, for the reason every `extensions.*` capability is: the
-  web host keeps no per-user app inventory yet
-  ([#515](https://github.com/srelens/srelens/issues/515)). Nothing in the
-  contract is desktop-specific: the client goes through the transport shim, so
-  on the web its frames would arrive as `/api/ws` frames on the same channel.
+- **Web:** the three commands are refused (`WEB_DENIED_COMMANDS`). Each user
+  has their own apps there ([#515](https://github.com/srelens/srelens/issues/515)),
+  but the server does not yet open a user's streams or carry their frames, so
+  `extensions.streams` answers with no open streams. Nothing in the contract is
+  desktop-specific: the client goes through the transport shim, so on the web
+  its frames would arrive as `/api/ws` frames on the same channel.

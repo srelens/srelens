@@ -74,8 +74,12 @@ extension replaced by `extensions.json`, so `settings.extensions.json`.
 - Stored settings are held to the typed `settings` the manifest declares (#542). A
   setting reaches a capability only through a binding argument the capability marks
   settable, checked at install, on save and on every request. A secret-reference
-  setting's value never enters the inventory; it holds only a reference for the secret
-  store (#543). See [Settings](manifest.md#settings).
+  setting's value never enters the inventory; it holds only a reference, and the value is
+  one more entry in srelens's encrypted secrets vault (`secrets.enc`), whose one master
+  key is held by the OS keychain or derived from the master password. The registry sees
+  the vault only as a `SecretStore`, which follows the
+  inventory: whatever the inventory stops referencing is deleted (#543). See
+  [Secret settings](manifest.md#secret-settings).
 
 ## Quarantine
 
@@ -96,9 +100,10 @@ whole inventory, because no single entry can be trusted then.
 ## Hosts
 
 - **Desktop:** full support in both the new and classic designs.
-- **Web:** every `extensions.*` capability is refused until app state is kept per
-  user ([#515](https://github.com/srelens/srelens/issues/515)). See
-  [capabilities.md](capabilities.md#web-host).
+- **Web:** each signed-in user has their own inventory, kept in the server database,
+  and every user reads one shared catalog only the server writes
+  ([#515](https://github.com/srelens/srelens/issues/515)). App streams are not run
+  there, so views read on Refresh. See [capabilities.md](capabilities.md#web-host).
 
 ## Where it is heading
 

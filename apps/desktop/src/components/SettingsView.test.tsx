@@ -699,6 +699,8 @@ describe("SettingsView", () => {
     // directory and local kubeconfig files, so on the web the entry would
     // open a pane whose every button fails.
     expect(screen.queryByRole("button", { name: /Backup/ })).toBeNull();
+    // Apps stays: the web server keeps each signed-in user's own apps (#515).
+    expect(screen.getByRole("button", { name: /Apps/ })).toBeDefined();
 
     // The request-timeout slider is a no-op on the web (set_request_timeout
     // isn't a web command), so it's hidden rather than shown-but-broken.

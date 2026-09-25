@@ -11,13 +11,13 @@ import {
 } from "@srelens/core";
 import { useNamespaceOptions } from "@srelens/core/react";
 import { Button, RawError, Section, Spinner } from "@srelens/ui-kit";
-import { getKubeconfigFiles, useContexts } from "../lib/clusters";
+import { getKubeconfigFiles } from "../lib/clusters";
 import { FailureAlert } from "../lib/errorCopy";
 import { openTab } from "../lib/tabsStore";
 import { useResource } from "../lib/useResource";
 import { useNamespaces, useSetNamespaces } from "../lib/workspace";
 import { NamespaceErrorAlert, NamespacePicker } from "../screens/resourceShell";
-import { SHARED_CONTEXT_ID_MESSAGE } from "./contextIds";
+import { NO_PINNED_ID_MESSAGE } from "./contextIds";
 import { plainText } from "./displayText";
 import { extensionLabel, useExtensions } from "./inventoryStore";
 import { LiveNotice, LiveStatus, useLiveApps } from "./liveReaders";
@@ -69,24 +69,24 @@ function CardsBand({ context, apps }: { context: ClusterContext; apps: Installed
   const setNamespaces = useSetNamespaces();
   const { namespaces, scope, error: namespaceError } = useNamespaceOptions(context.name, getKubeconfigFiles());
   const [refresh, setRefresh] = useState(0);
-  const contexts = useContexts();
   // A credential that may only read one namespace reads that one, whatever is selected.
   const effective = scope ? [scope] : selection;
-  // Two contexts with one stable ID: a read pinned by it cannot say which cluster it is for.
-  const shared = contexts.filter((c) => c.stableId === context.stableId).length > 1;
   // Each app's card readers are followed (#566): a change redraws that app's
   // figures in place. One namespace is watched there; several, or none, in
   // every namespace — the scope the cards themselves are read in.
   const [pulses, setPulses] = useState<Record<string, number>>({});
+  // The host is asked by pinned ID, which names this context alone even when another shares
+  // its stable ID (#695). A cluster listed without one cannot be asked at all.
+  const host = context.pinnedId;
   const live = useLiveApps({
-    apps: shared || namespaces === null ? [] : apps.map((plugin) => ({
+    apps: !host || namespaces === null ? [] : apps.map((plugin) => ({
       plugin, capabilities: (plugin.manifest.contributions.dashboardCards ?? []).map((card) => card.source),
     })),
-    context: context.stableId,
+    context: host ?? "",
     namespace: effective.length === 1 ? effective[0] : "",
     label: "dashboard:cards",
-    // Why nothing is followed yet: the same two reasons nothing is read yet.
-    off: shared ? SHARED_CONTEXT_ID_MESSAGE
+    // Why nothing is followed yet: the same reasons nothing is read yet.
+    off: !host ? NO_PINNED_ID_MESSAGE
       : namespaces === null ? "Waiting for the cluster's namespaces before following the cards." : undefined,
     onChange: (id) => setPulses((current) => ({ ...current, [id]: (current[id] ?? 0) + 1 })),
   });
@@ -106,8 +106,8 @@ function CardsBand({ context, apps }: { context: ClusterContext; apps: Installed
       </div>
       <NamespaceErrorAlert error={namespaceError} />
       <LiveNotice live={live} what="figures" />
-      {shared ? (
-        <p className="dashboard-cards-message">{SHARED_CONTEXT_ID_MESSAGE}</p>
+      {!host ? (
+        <p className="dashboard-cards-message">{NO_PINNED_ID_MESSAGE}</p>
       ) : (
         <div className="dashboard-cards" data-stale={stale || undefined}>
           {apps.map((plugin) =>
@@ -117,8 +117,8 @@ function CardsBand({ context, apps }: { context: ClusterContext; apps: Installed
             namespaces === null ? (
               <PendingAppCards key={plugin.manifest.id} plugin={plugin} />
             ) : (
-              <AppCards key={plugin.manifest.id} plugin={plugin} context={context} selection={effective} refresh={refresh}
-                pulse={pulses[plugin.manifest.id] ?? 0} />
+              <AppCards key={plugin.manifest.id} plugin={plugin} context={context} host={host} selection={effective}
+                refresh={refresh} pulse={pulses[plugin.manifest.id] ?? 0} />
             ),
           )}
         </div>
@@ -143,12 +143,15 @@ function PendingAppCards({ plugin }: { plugin: InstalledExtension }) {
 function AppCards({
   plugin,
   context,
+  host,
   selection,
   refresh,
   pulse,
 }: {
   plugin: InstalledExtension;
   context: ClusterContext;
+  /** The context's pinned ID, which the host is asked by. */
+  host: string;
   selection: string[];
   refresh: number;
   /** Bumped when a watch saw one of this app's card readers change. */
@@ -156,8 +159,8 @@ function AppCards({
 }) {
   const { id } = plugin.manifest;
   const answers = useResource(
-    () => resolveDashboardCards(id, plugin.revision, context.stableId, selection),
-    [id, plugin.revision, context.stableId, selection.join("\u0000"), refresh],
+    () => resolveDashboardCards(id, plugin.revision, host, selection),
+    [id, plugin.revision, host, selection.join("\u0000"), refresh],
     () => false,
   );
   const { refresh: reread } = answers;
@@ -190,7 +193,7 @@ function AppCards({
             open={
               target
                 ? () =>
-                    openTab(extensionCardRoute(context.stableId, id, target.page, namespace, card.id, selection), {
+                    openTab(extensionCardRoute(context.key, id, target.page, namespace, card.id, selection), {
                       clusterName: context.name,
                     })
                 : undefined

@@ -259,10 +259,14 @@ fn run_mcp_http(
         let cache = srelens_kube::client_cache::ClientCache::new_many(
             srelens_registry::all_kubeconfig_paths(),
         );
-        let registry = srelens_desktop_lib::build_registry_with_paths_and_settings(
+        // Apps' secrets (#543) in the vault this process already opened.
+        let registry = srelens_desktop_lib::registry_for(
             cache.clone(),
             srelens_registry::default_kubeconfig_paths(),
             srelens_desktop_lib::default_settings_path(),
+            Arc::new(srelens_desktop_lib::extension_secrets::VaultSecretStore::with(
+                vault.clone(),
+            )),
         );
         let server = srelens_mcp::McpServer::new(Arc::new(registry))
             .with_policy(policy)
@@ -326,7 +330,7 @@ fn run_serve(addr: &str, data_flag: Option<&str>) {
         .expect("build tokio runtime");
     runtime.block_on(async {
         let factory: srelens_server::RegistryFactory =
-            Arc::new(|cache, paths| srelens_desktop_lib::build_registry_with_paths(cache, paths));
+            Arc::new(srelens_desktop_lib::build_registry_for_user);
         eprintln!("srelens web server listening on http://{addr}");
         eprintln!("srelens data directory: {}", data_dir.display());
         if let Err(e) =
@@ -353,10 +357,17 @@ fn run_mcp_stdio(allow_destructive: bool, allow_sensitive_reads: bool) {
         let cache = srelens_kube::client_cache::ClientCache::new_many(
             srelens_registry::all_kubeconfig_paths(),
         );
-        let registry = srelens_desktop_lib::build_registry_with_paths_and_settings(
+        // Apps' secrets (#543) in the same vault as the GUI, opened only to
+        // keep a secret or to delete one from a vault that exists: listing
+        // apps reports the vault as not open yet rather than opening it, so a
+        // run that stores no secret never touches the keychain.
+        let registry = srelens_desktop_lib::registry_for(
             cache.clone(),
             srelens_registry::default_kubeconfig_paths(),
             srelens_desktop_lib::default_settings_path(),
+            Arc::new(srelens_desktop_lib::extension_secrets::VaultSecretStore::opening(
+                mcp_dir(),
+            )),
         );
         let server = srelens_mcp::McpServer::new(Arc::new(registry))
             .with_policy(policy)
