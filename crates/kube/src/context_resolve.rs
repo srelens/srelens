@@ -253,10 +253,10 @@ pub fn resolve_from(configs: &[SourceConfig]) -> Vec<ResolvedContext> {
         .filter(|current| !current.is_empty());
 
     // Track identical duplicate definitions across files: if an earlier file
-    // already defined context `X` pointing to a known server `S`, subsequent definitions
-    // of `(X, S)` are exact duplicates. They should not be emitted and should not
+    // already defined context `X` pointing to a known server `S` with user `U`, subsequent definitions
+    // of `(X, S, U)` are exact duplicates. They should not be emitted and should not
     // inflate collision counts.
-    let mut seen_canonical: std::collections::HashSet<(String, String)> =
+    let mut seen_canonical: std::collections::HashSet<(String, String, String)> =
         std::collections::HashSet::new();
 
     // Count each original name across all files (excluding identical duplicates)
@@ -267,9 +267,10 @@ pub fn resolve_from(configs: &[SourceConfig]) -> Vec<ResolvedContext> {
             let original = &named.name;
             let context = named.context.as_ref();
             let cluster_name = context.map(|c| c.cluster.as_str()).unwrap_or_default();
+            let user_name = context.and_then(|c| c.user.as_deref()).unwrap_or_default();
             let server = context_server_url(sc, cluster_name);
-            let is_duplicate =
-                !server.is_empty() && !seen_canonical.insert((original.clone(), server));
+            let is_duplicate = !server.is_empty()
+                && !seen_canonical.insert((original.clone(), server, user_name.to_string()));
             if !is_duplicate {
                 *counts.entry(original.clone()).or_default() += 1;
             }
@@ -287,10 +288,13 @@ pub fn resolve_from(configs: &[SourceConfig]) -> Vec<ResolvedContext> {
             let original = named.name.clone();
             let context = named.context.clone().unwrap_or_default();
             let cluster_name = context.cluster;
+            let user_name = context.user.clone().unwrap_or_default();
             let server = context_server_url(sc, &cluster_name);
 
             // Skip identical duplicates already registered from an earlier file.
-            if !server.is_empty() && !seen_canonical.insert((original.clone(), server.clone())) {
+            if !server.is_empty()
+                && !seen_canonical.insert((original.clone(), server.clone(), user_name))
+            {
                 continue;
             }
 

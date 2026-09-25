@@ -7532,11 +7532,17 @@ impl App {
                                 .clone()
                                 .or_else(|| d.pod_symptoms.first().map(|ps| ps.pod_name.clone()))
                                 .or_else(|| d.failing_pod_names.first().cloned()),
+                            d.error_log_container.clone(),
                         )
                     });
-                    if let Some((app_name, ns, pod_opt)) = target {
+                    if let Some((app_name, ns, pod_opt, container_opt)) = target {
                         if let Some(pod_name) = pod_opt {
-                            self.prompt_pod_logs(pod_name, Some(ns)).await;
+                            if let Some(container) = container_opt {
+                                self.open_logs_view(pod_name, Some(ns), Some(container))
+                                    .await;
+                            } else {
+                                self.prompt_pod_logs(pod_name, Some(ns)).await;
+                            }
                         } else {
                             self.set_toast(
                                 format!("No failing pods listed for {} to tail logs", app_name),
@@ -8503,10 +8509,7 @@ impl App {
             }
             ActiveView::Changed(changed) => {
                 changed.filter_query = filter;
-                let count = changed.filtered_deployments().len();
-                if changed.selected_idx >= count {
-                    changed.selected_idx = count.saturating_sub(1);
-                }
+                changed.clamp_selection();
             }
             _ => {}
         }

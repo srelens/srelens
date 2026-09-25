@@ -339,10 +339,7 @@ impl ChangedViewState {
         };
     }
 
-    pub fn set_report(&mut self, report: ChangedTriageReport) {
-        self.report = Some(report);
-        self.is_loading = false;
-        self.error = None;
+    pub fn clamp_selection(&mut self) {
         let dep_count = self.filtered_deployments().len();
         if self.selected_idx >= dep_count {
             self.selected_idx = dep_count.saturating_sub(1);
@@ -351,6 +348,13 @@ impl ChangedViewState {
         if self.infra_selected_idx >= infra_count {
             self.infra_selected_idx = infra_count.saturating_sub(1);
         }
+    }
+
+    pub fn set_report(&mut self, report: ChangedTriageReport) {
+        self.report = Some(report);
+        self.is_loading = false;
+        self.error = None;
+        self.clamp_selection();
     }
 
     pub fn set_error(&mut self, err: String) {
@@ -490,12 +494,20 @@ impl ChangedViewState {
 
 pub fn render_changed_view(f: &mut Frame, area: Rect, state: &ChangedViewState) {
     let (banner_block, health, controls) = summary_banner(state);
+    let b_height = banner_height(&health, &controls, area.width);
+    let card_visible = state.active_tab == ChangedTab::Deployments
+        && state
+            .report
+            .as_ref()
+            .map_or(false, |r| !r.deployments.is_empty())
+        && area.height.saturating_sub(b_height + 1) >= CARD_MIN_HEIGHT;
+    let footer_h = footer_height(area.width, state, card_visible);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(banner_height(&health, &controls, area.width)),
-            Constraint::Min(8),    // Main workspace
-            Constraint::Length(1), // Footer shortcuts
+            Constraint::Length(b_height),
+            Constraint::Min(8),           // Main workspace
+            Constraint::Length(footer_h), // Footer shortcuts
         ])
         .split(area);
 
@@ -1407,7 +1419,7 @@ fn render_infra_tab(f: &mut Frame, area: Rect, state: &ChangedViewState) {
 /// line lists the per-workload keys, so they appear here only when there is
 /// no card: on the Infra tab, or when the pane is too short to draw one.
 /// Cmd, Help and Back live in the status bar below.
-fn render_footer(f: &mut Frame, area: Rect, state: &ChangedViewState, card_visible: bool) {
+fn footer_line(state: &ChangedViewState, card_visible: bool) -> Line<'static> {
     let mut keys: Vec<(String, String)> = Vec::new();
     if !card_visible {
         keys.push(("[Enter]".into(), "Describe".into()));
@@ -1456,6 +1468,22 @@ fn render_footer(f: &mut Frame, area: Rect, state: &ChangedViewState, card_visib
             Style::default().fg(Theme::dim()),
         ));
     }
-    let p = Paragraph::new(Line::from(spans)).wrap(Wrap { trim: true });
+    Line::from(spans)
+}
+
+fn footer_height(width: u16, state: &ChangedViewState, card_visible: bool) -> u16 {
+    if width == 0 {
+        return 1;
+    }
+    let w = usize::from(width);
+    let line = footer_line(state, card_visible);
+    let len = line.width();
+    let rows = (len + w - 1) / w;
+    (rows as u16).clamp(1, 3)
+}
+
+fn render_footer(f: &mut Frame, area: Rect, state: &ChangedViewState, card_visible: bool) {
+    let line = footer_line(state, card_visible);
+    let p = Paragraph::new(line).wrap(Wrap { trim: true });
     f.render_widget(p, area);
 }

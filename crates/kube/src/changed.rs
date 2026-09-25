@@ -345,24 +345,36 @@ pub fn parse_duration(s: &str) -> Result<Duration, String> {
         let mins: u64 = stripped
             .parse()
             .map_err(|_| format!("Invalid minutes in duration: {s}"))?;
-        Ok(Duration::from_secs(mins * 60))
+        let secs = mins
+            .checked_mul(60)
+            .ok_or_else(|| format!("Duration value overflow: {s}"))?;
+        Ok(Duration::from_secs(secs))
     } else if let Some(stripped) = s.strip_suffix('h') {
         let hrs: u64 = stripped
             .parse()
             .map_err(|_| format!("Invalid hours in duration: {s}"))?;
-        Ok(Duration::from_secs(hrs * 3600))
+        let secs = hrs
+            .checked_mul(3600)
+            .ok_or_else(|| format!("Duration value overflow: {s}"))?;
+        Ok(Duration::from_secs(secs))
     } else if let Some(stripped) = s.strip_suffix('d') {
         let days: u64 = stripped
             .parse()
             .map_err(|_| format!("Invalid days in duration: {s}"))?;
-        Ok(Duration::from_secs(days * 86400))
+        let secs = days
+            .checked_mul(86400)
+            .ok_or_else(|| format!("Duration value overflow: {s}"))?;
+        Ok(Duration::from_secs(secs))
     } else if let Some(stripped) = s.strip_suffix('s') {
         let secs: u64 = stripped
             .parse()
             .map_err(|_| format!("Invalid seconds in duration: {s}"))?;
         Ok(Duration::from_secs(secs))
     } else if let Ok(mins) = s.parse::<u64>() {
-        Ok(Duration::from_secs(mins * 60))
+        let secs = mins
+            .checked_mul(60)
+            .ok_or_else(|| format!("Duration value overflow: {s}"))?;
+        Ok(Duration::from_secs(secs))
     } else {
         Err(format!(
             "Unrecognized time window '{s}'. Expected e.g. 15m, 30m, 1h, 3h, 24h"
@@ -2188,14 +2200,7 @@ pub async fn fetch_changed_triage(
         tokio::time::timeout(timeout, pod_api.list(&lp)),
         tokio::time::timeout(timeout, ev_api.list(&lp)),
         crate::argo::fetch_argo_applications_cached(
-            cache,
-            context,
-            None,
-            None,
-            None,
-            ns_opt.as_deref(),
-            true,
-            false,
+            cache, context, None, None, None, None, true, false,
         ),
     );
 
@@ -2264,7 +2269,7 @@ pub async fn fetch_changed_triage(
         .await;
 
     for (i, _pod, _container, lines) in tails {
-        if let (Some(lines), Some(d)) = (lines, report.deployments.get_mut(i)) {
+        if let (Ok(Some(lines)), Some(d)) = (lines, report.deployments.get_mut(i)) {
             d.error_log_snippet = Some(lines);
         }
     }
@@ -2273,15 +2278,16 @@ pub async fn fetch_changed_triage(
 }
 
 /// The last `tail_lines` log lines from `container` of `pod`: the previous
-/// (crashed) run first, else the current one. `None` when neither returns
-/// any text.
+/// (crashed) run first, else the current one. `Ok(None)` when neither returns
+/// any text. `Err` when API calls fail or time out.
 async fn tail_error_log(
     api: &Api<Pod>,
     pod: &str,
     container: Option<&str>,
     tail_lines: i64,
     timeout: Duration,
-) -> Option<Vec<String>> {
+) -> Result<Option<Vec<String>>, String> {
+    let mut last_err = None;
     for previous in [true, false] {
         let lp = kube::api::LogParams {
             container: container.map(str::to_string),
@@ -2290,14 +2296,29 @@ async fn tail_error_log(
             timestamps: false,
             ..Default::default()
         };
-        let Ok(Ok(text)) = tokio::time::timeout(timeout, api.logs(pod, &lp)).await else {
-            continue;
-        };
-        if let Some(lines) = log_snippet_lines(&text) {
-            return Some(lines);
+        match tokio::time::timeout(timeout, api.logs(pod, &lp)).await {
+            Ok(Ok(text)) => {
+                if let Some(lines) = log_snippet_lines(&text) {
+                    return Ok(Some(lines));
+                }
+            }
+            Ok(Err(kube::Error::Api(ae))) if ae.code == 400 || ae.reason == "BadRequest" => {
+                // Expected when previous=true and container was not previously terminated
+                continue;
+            }
+            Ok(Err(e)) => {
+                last_err = Some(format!("fetch logs: {e}"));
+            }
+            Err(_) => {
+                last_err = Some("fetch logs timed out".to_string());
+            }
         }
     }
-    None
+    if let Some(err) = last_err {
+        Err(err)
+    } else {
+        Ok(None)
+    }
 }
 
 /// A longer error-log tail for one pod, for the TUI's on-demand Quick AI
@@ -2314,7 +2335,7 @@ pub async fn fetch_error_log_tail(
 ) -> Result<Option<Vec<String>>, String> {
     let client = cache.get(context).await.map_err(|e| e.to_string())?;
     let api: Api<Pod> = Api::namespaced(client, namespace);
-    Ok(tail_error_log(&api, pod, container, tail_lines, request_timeout()).await)
+    tail_error_log(&api, pod, container, tail_lines, request_timeout()).await
 }
 
 /// The non-empty lines of a log tail, or `None` when there are none or the
@@ -2399,6 +2420,10 @@ mod tests {
         assert_eq!(parse_duration("60s").unwrap(), Duration::from_secs(60));
         assert_eq!(parse_duration("45").unwrap(), Duration::from_secs(45 * 60));
         assert!(parse_duration("invalid").is_err());
+        assert!(parse_duration("18446744073709551615m").is_err());
+        assert!(parse_duration("18446744073709551615h").is_err());
+        assert!(parse_duration("18446744073709551615d").is_err());
+        assert!(parse_duration("18446744073709551615").is_err());
     }
 
     #[test]

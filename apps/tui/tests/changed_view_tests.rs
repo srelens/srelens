@@ -868,3 +868,65 @@ fn table_columns_fit_their_longest_namespace_and_workload() {
         "{rendered}"
     );
 }
+
+#[test]
+fn clamp_selection_clamps_both_deployments_and_infra() {
+    let _settings = common::env::isolate_settings();
+    let mut state = ChangedViewState::new();
+    let mut report = sample_report();
+    report.infra_changes = vec![
+        InfraChangeItem {
+            age: "5m".to_string(),
+            last_ts: Some("2026-09-25T12:00:00Z".to_string()),
+            kind: "Node".to_string(),
+            name: "node-1".to_string(),
+            namespace: "".to_string(),
+            reason: "NodeNotReady".to_string(),
+            message: "Kubelet stopped posting node status.".to_string(),
+            count: 1,
+            is_warning: true,
+        },
+        InfraChangeItem {
+            age: "10m".to_string(),
+            last_ts: Some("2026-09-25T11:55:00Z".to_string()),
+            kind: "Node".to_string(),
+            name: "node-2".to_string(),
+            namespace: "".to_string(),
+            reason: "NodeReady".to_string(),
+            message: "Node is ready.".to_string(),
+            count: 1,
+            is_warning: false,
+        },
+    ];
+    state.set_report(report);
+    state.selected_idx = 50;
+    state.infra_selected_idx = 50;
+    state.clamp_selection();
+
+    assert_eq!(state.selected_idx, 2);
+    assert_eq!(state.infra_selected_idx, 1);
+
+    state.filter_query = "node-1".to_string();
+    state.clamp_selection();
+    assert_eq!(state.infra_selected_idx, 0);
+
+    state.filter_query = "non-existent-filter-query".to_string();
+    state.clamp_selection();
+    assert_eq!(state.selected_idx, 0);
+    assert_eq!(state.infra_selected_idx, 0);
+}
+
+#[test]
+fn narrow_terminal_allocates_multiline_footer() {
+    let _settings = common::env::isolate_settings();
+    let mut state = ChangedViewState::new();
+    state.set_report(sample_report());
+
+    // On narrow terminal (80 columns), footer has more than 80 chars of shortcuts,
+    // so it wraps onto two rows.
+    let rendered = render_lines(80, 24, |f| render_changed_view(f, f.area(), &state));
+    let last_three = &rendered[rendered.len() - 3..];
+    let footer_text = last_three.join(" ");
+    assert!(footer_text.contains("Filter"), "{footer_text}");
+    assert!(footer_text.contains("Search"), "{footer_text}");
+}
