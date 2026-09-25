@@ -249,20 +249,35 @@ pub mod tests_support {
             .collect()
     }
 
-    /// Every heading anchor on a page. A `#` line inside a code fence is a
-    /// shell comment, not a heading; a repeated heading gets `-1`, `-2`, …
-    /// the way GitHub numbers them.
+    /// Every heading anchor on a page. A `#` line GitHub renders as code is
+    /// not a heading: one inside a ```` ``` ```` or `~~~` fence (closed only by
+    /// the same character, at least as many times), or one indented four
+    /// spaces or a tab. A repeated heading gets `-1`, `-2`, … the way GitHub
+    /// numbers them.
     pub fn heading_anchors(md: &str) -> std::collections::BTreeSet<String> {
         let mut anchors = std::collections::BTreeSet::new();
         let mut seen = std::collections::BTreeMap::<String, usize>::new();
-        let mut in_fence = false;
+        let mut fence: Option<(char, usize)> = None;
         for line in md.lines() {
             let trimmed = line.trim_start();
-            if trimmed.starts_with("```") {
-                in_fence = !in_fence;
-                continue;
+            if let Some(c) = trimmed.chars().next().filter(|c| *c == '`' || *c == '~') {
+                let run = trimmed.chars().take_while(|&x| x == c).count();
+                match fence {
+                    None if run >= 3 => {
+                        fence = Some((c, run));
+                        continue;
+                    }
+                    Some((open, len))
+                        if open == c && run >= len && trimmed[run..].trim().is_empty() =>
+                    {
+                        fence = None;
+                        continue;
+                    }
+                    _ => {}
+                }
             }
-            if in_fence {
+            let indent = &line[..line.len() - trimmed.len()];
+            if fence.is_some() || indent.len() > 3 || indent.contains('\t') {
                 continue;
             }
             let level = trimmed.chars().take_while(|&c| c == '#').count();
@@ -1057,5 +1072,11 @@ mod tests {
         let md = "# Title\n\n```bash\n# a comment\n```\n\n## Setup\n\n## Setup\n\n#hashtag\n";
         let got: Vec<String> = heading_anchors(md).into_iter().collect();
         assert_eq!(got, ["setup", "setup-1", "title"]);
+
+        // Everything GitHub renders as code: a tilde fence, a backtick line
+        // inside one (which does not close it), and four-space or tab indent.
+        let md = "~~~md\n## Tilde\n```\n## Still tilde\n~~~\n\n    ## Indented\n\n\t## Tabbed\n\n   ## Three spaces\n";
+        let got: Vec<String> = heading_anchors(md).into_iter().collect();
+        assert_eq!(got, ["three-spaces"]);
     }
 }
