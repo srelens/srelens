@@ -1343,44 +1343,54 @@ impl App {
 
     pub fn handle_crd_instances_update(&mut self, title: &str, json_str: &str) {
         if let Ok(items) = serde_json::from_str::<Vec<serde_json::Value>>(json_str) {
-            let crd_kind = title.strip_prefix("crd_instances:").unwrap_or(title);
+            let crd_identifier = title.strip_prefix("crd_instances:").unwrap_or(title);
             let ctx = self.active_context.clone();
             // Cache under the scope `restart_active_watch` reads: a cluster-
             // scoped CRD's list belongs to no namespace. Keyed by the active
             // namespace instead, it was never found again, and a table shown
             // after an apply sat on Loading.
-            let cluster_scoped = self
+            let discovered = self
                 .crds
                 .iter()
-                .find(|c| c.kind == crd_kind || c.plural == crd_kind || c.crd_name == crd_kind)
-                .is_some_and(|c| !c.namespaced);
+                .find(|c| c.crd_name == crd_identifier)
+                .cloned()
+                .or_else(|| {
+                    self.crds
+                        .iter()
+                        .find(|c| c.kind == crd_identifier || c.plural == crd_identifier)
+                        .cloned()
+                });
+            let cluster_scoped = discovered.as_ref().is_some_and(|c| !c.namespaced);
             let ns = if cluster_scoped {
                 String::new()
             } else {
                 self.active_namespace.clone()
             };
             self.resource_cache.insert(
-                (ctx.clone(), ns.clone(), crd_kind.to_string()),
+                (ctx.clone(), ns.clone(), crd_identifier.to_string()),
                 items.clone(),
             );
-            if let Some(discovered) = self
-                .crds
-                .iter()
-                .find(|c| c.kind == crd_kind || c.plural == crd_kind || c.crd_name == crd_kind)
-            {
+            if let Some(ref d) = discovered {
                 self.resource_cache
-                    .insert((ctx, ns, discovered.crd_name.clone()), items.clone());
+                    .insert((ctx.clone(), ns.clone(), d.crd_name.clone()), items.clone());
+                self.resource_cache
+                    .insert((ctx.clone(), ns.clone(), d.kind.clone()), items.clone());
+                self.resource_cache
+                    .insert((ctx.clone(), ns.clone(), d.plural.clone()), items.clone());
             }
 
             if let ActiveView::Table(table) = &mut self.active_view {
                 if let ResourceKind::CustomResource(crd) = &mut table.kind {
-                    if crd.kind == crd_kind || crd.plural == crd_kind || crd.crd_name == crd_kind {
+                    let matches_table = crd.crd_name == crd_identifier
+                        || (discovered
+                            .as_ref()
+                            .is_some_and(|d| d.crd_name == crd.crd_name))
+                        || crd.kind == crd_identifier
+                        || crd.plural == crd_identifier;
+                    if matches_table {
                         if crd.printer_columns.is_empty() {
-                            if let Some(discovered) = self.crds.iter().find(|c| {
-                                c.crd_name == crd.crd_name
-                                    || (c.group == crd.group && c.kind == crd.kind)
-                            }) {
-                                crd.printer_columns = discovered.printer_columns.clone();
+                            if let Some(ref d) = discovered {
+                                crd.printer_columns = d.printer_columns.clone();
                                 table.columns =
                                     crate::views::resource_table::default_columns_for_kind(
                                         &table.kind,
@@ -1388,6 +1398,8 @@ impl App {
                             }
                         }
                         table.set_items(items, &self.filter_buffer);
+                        table.is_loading = false;
+                        table.error = None;
                     }
                 }
             }
@@ -1395,17 +1407,27 @@ impl App {
     }
 
     pub fn handle_crd_instances_failed(&mut self, title: &str, err: &str) {
-        let crd_kind = title.strip_prefix("crd_instances_failed:").unwrap_or(title);
+        let crd_identifier = title
+            .strip_prefix("crd_instances_failed:")
+            .or_else(|| title.strip_prefix("crd_instances:"))
+            .unwrap_or(title);
+        let mut toast_kind = None;
         if let ActiveView::Table(table) = &mut self.active_view {
             if let ResourceKind::CustomResource(crd) = &table.kind {
-                if crd.kind == crd_kind || crd.plural == crd_kind || crd.crd_name == crd_kind {
+                if crd.crd_name == crd_identifier
+                    || crd.kind == crd_identifier
+                    || crd.plural == crd_identifier
+                {
                     table.is_loading = false;
-                    self.set_toast(
-                        format!("Failed to list {}: {}", crd_kind, err),
-                        Theme::status_error(),
-                    );
+                    toast_kind = Some(crd.kind.clone());
                 }
             }
+        }
+        if let Some(kind) = toast_kind {
+            self.set_toast(
+                format!("Failed to list {}: {}", kind, err),
+                Theme::status_error(),
+            );
         }
     }
 
@@ -9361,12 +9383,18 @@ impl App {
         let cache = self.client_cache.clone();
         let event_tx = self.event_tx.clone();
 
+        let crd_identifier = if crd.crd_name.is_empty() {
+            crd.kind.clone()
+        } else {
+            crd.crd_name.clone()
+        };
+
         tokio::spawn(async move {
             let client = match cache.get(&ctx).await {
                 Ok(c) => c,
                 Err(e) => {
                     let _ = event_tx.send(AppEvent::ActionResult {
-                        title: format!("crd_instances_failed:{}", crd.kind),
+                        title: format!("crd_instances_failed:{}", crd_identifier),
                         result: Err(e.to_string()),
                     });
                     return;
@@ -9402,13 +9430,13 @@ impl App {
                         .collect();
 
                     let _ = event_tx.send(AppEvent::ActionResult {
-                        title: format!("crd_instances:{}", crd.kind),
+                        title: format!("crd_instances:{}", crd_identifier),
                         result: Ok(serde_json::to_string(&items).unwrap_or_default()),
                     });
                 }
                 Err(e) => {
                     let _ = event_tx.send(AppEvent::ActionResult {
-                        title: format!("crd_instances_failed:{}", crd.kind),
+                        title: format!("crd_instances_failed:{}", crd_identifier),
                         result: Err(e.to_string()),
                     });
                 }

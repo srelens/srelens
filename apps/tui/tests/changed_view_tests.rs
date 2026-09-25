@@ -718,6 +718,11 @@ fn an_empty_list_says_why_it_is_empty() {
     assert!(wide.contains("Workloads Changed or Failing in Window"));
     assert!(wide.contains("No workloads changed or failing within the last 1h."));
 
+    state.include_failing = false;
+    state.include_scaled = true;
+    let scaled_only = render_card(&state);
+    assert!(scaled_only.contains("No workloads changed or scaled within the last 1h."));
+
     // Rows exist, but the incident filter hides them: say so, not "none".
     let mut state = ChangedViewState::new();
     state.set_report(sample_report());
@@ -858,7 +863,7 @@ fn table_columns_fit_their_longest_namespace_and_workload() {
     report.deployments[1].app_name = "wiz-package-wiz-admission-controller-manager".to_string();
     report.deployments[1].kind = "CronJob".to_string();
     let mut state = ChangedViewState::new();
-    state.set_report(report);
+    state.set_report(report.clone());
 
     let rendered = render_lines(220, 44, |f| render_changed_view(f, f.area(), &state)).join("\n");
 
@@ -866,6 +871,16 @@ fn table_columns_fit_their_longest_namespace_and_workload() {
     assert!(
         rendered.contains("wiz-package-wiz-admission-controller-manager (cj)"),
         "{rendered}"
+    );
+
+    // Also verify StatefulSet format and column fitting
+    report.deployments[1].kind = "StatefulSet".to_string();
+    state.set_report(report);
+    let rendered_sts =
+        render_lines(220, 44, |f| render_changed_view(f, f.area(), &state)).join("\n");
+    assert!(
+        rendered_sts.contains("wiz-package-wiz-admission-controller-manager (sts)"),
+        "{rendered_sts}"
     );
 }
 

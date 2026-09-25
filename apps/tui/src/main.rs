@@ -26,13 +26,19 @@ use ratatui::Terminal;
 static KEY_ENHANCEMENT_ON: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+/// Cache whether keyboard enhancement is supported so subsequent returns
+/// (such as resuming from `$EDITOR`) do not poll stdin for 2 seconds.
+static KEYBOARD_ENHANCEMENT_SUPPORTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
 /// Ask the terminal to report modified keys distinctly (kitty's protocol, as
 /// crossterm's disambiguate flag). Without it Ctrl+Enter arrives as plain
 /// Enter and the Assistant cannot tell a line break from a send. Only the
 /// disambiguate flag: no release or repeat events, so every other binding
 /// sees the same presses as before. Terminals without it are left alone.
 fn push_key_enhancement(out: &mut impl std::io::Write) {
-    if matches!(crossterm::terminal::supports_keyboard_enhancement(), Ok(true))
+    let supported = *KEYBOARD_ENHANCEMENT_SUPPORTED
+        .get_or_init(|| matches!(crossterm::terminal::supports_keyboard_enhancement(), Ok(true)));
+    if supported
         && execute!(
             out,
             PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
@@ -47,6 +53,28 @@ fn push_key_enhancement(out: &mut impl std::io::Write) {
 fn pop_key_enhancement(out: &mut impl std::io::Write) {
     if KEY_ENHANCEMENT_ON.swap(false, std::sync::atomic::Ordering::Relaxed) {
         let _ = execute!(out, PopKeyboardEnhancementFlags);
+    }
+}
+
+/// RAII guard that restores raw mode, alternate screen, mouse capture,
+/// bracketed paste, and keyboard enhancement if `main` returns early via `?`.
+struct TerminalCleanupGuard {
+    defused: bool,
+}
+
+impl Drop for TerminalCleanupGuard {
+    fn drop(&mut self) {
+        if !self.defused {
+            pop_key_enhancement(&mut std::io::stdout());
+            let _ = crossterm::terminal::disable_raw_mode();
+            let _ = execute!(
+                std::io::stdout(),
+                LeaveAlternateScreen,
+                DisableMouseCapture,
+                DisableBracketedPaste,
+                crossterm::cursor::Show
+            );
+        }
     }
 }
 
@@ -194,6 +222,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut stdout = stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture, EnableBracketedPaste)?;
     push_key_enhancement(&mut stdout);
+    let mut cleanup_guard = TerminalCleanupGuard { defused: false };
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -698,6 +727,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Clean exit
+    cleanup_guard.defused = true;
     pop_key_enhancement(terminal.backend_mut());
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture, DisableBracketedPaste)?;

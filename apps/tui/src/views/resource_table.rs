@@ -1778,7 +1778,7 @@ fn render_single_resource_table(f: &mut Frame, area: Rect, state: &ResourceTable
             Span::styled(
                 if is_not_found {
                     format!(
-                        "  {} is not installed on this cluster: ",
+                        "  {} was not found on this cluster: ",
                         state.kind.display_name()
                     )
                 } else {

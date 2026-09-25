@@ -101,7 +101,10 @@ pub fn build_prompt(d: &AppDeploymentChange, logs: &LogEvidence) -> String {
         let groups = crate::views::changed_view::group_pod_symptoms(&d.pod_symptoms);
         p.push_str(&format!("Failing pods ({}):\n", d.pod_symptoms.len()));
         for g in groups.iter().take(MAX_ITEMS) {
-            p.push_str(&format!("- {}\n", clip(&g.describe())));
+            p.push_str(&format!(
+                "- <pod_symptom>{}</pod_symptom>\n",
+                clip(&g.describe())
+            ));
         }
         if groups.len() > MAX_ITEMS {
             p.push_str(&format!(
@@ -121,7 +124,7 @@ pub fn build_prompt(d: &AppDeploymentChange, logs: &LogEvidence) -> String {
         p.push_str("Warning events:\n");
         for e in warnings {
             p.push_str(&format!(
-                "- [{}] {} (x{}, {} ago)\n",
+                "- [{}] <event_message>{}</event_message> (x{}, {} ago)\n",
                 e.reason,
                 clip(&e.message),
                 e.count,
@@ -139,7 +142,7 @@ pub fn build_prompt(d: &AppDeploymentChange, logs: &LogEvidence) -> String {
             };
             p.push_str(&format!("Last {} log lines{source}:\n", lines.len()));
             for l in lines {
-                p.push_str(&format!("| {}\n", clip(l)));
+                p.push_str(&format!("| <log_line>{}</log_line>\n", clip(l)));
             }
         }
         LogEvidence::Unavailable(reason) => p.push_str(&format!(
@@ -367,11 +370,13 @@ mod tests {
         assert!(p.contains("payment:v1 ➔ payment:v2"));
         assert!(p.contains("Argo app payment-prod is Synced / Degraded at 7b89abc (main)"));
         assert!(p.contains("Failing pods (1):"));
-        assert!(p.contains("- payment-api-1: CrashLoopBackOff | exited with code 1"));
-        assert!(p.contains("[BackOff] Back-off restarting failed container (x4, 2m ago)"));
+        assert!(p.contains(
+            "- <pod_symptom>payment-api-1: CrashLoopBackOff | exited with code 1</pod_symptom>"
+        ));
+        assert!(p.contains("[BackOff] <event_message>Back-off restarting failed container</event_message> (x4, 2m ago)"));
         assert!(!p.contains("Pulled"), "Normal events are not evidence");
         assert!(p.contains("Last 2 log lines (payment-api-1/payment):"));
-        assert!(p.contains("| FATAL: bad DB_HOST"));
+        assert!(p.contains("| <log_line>FATAL: bad DB_HOST</log_line>"));
         assert!(p.contains("Root Cause: <one sentence>"));
         assert!(p.contains("Action Item: <one sentence>"));
     }
@@ -412,7 +417,7 @@ mod tests {
         let p = build_prompt(&d, &LogEvidence::NeverRan);
         assert!(p.contains("Failing pods (150):"));
         assert!(p.contains(
-            "- CrashLoopBackOff | exited with code 1 — 150 pods (payment-api-0, payment-api-1, +148 more)"
+            "- <pod_symptom>CrashLoopBackOff | exited with code 1 — 150 pods (payment-api-0, payment-api-1, +148 more)</pod_symptom>"
         ));
         assert!(!p.contains("payment-api-2,"), "not every pod is listed");
     }
@@ -421,12 +426,12 @@ mod tests {
     fn prompt_clips_long_and_multi_line_values() {
         let long = format!("{}\nsecond line", "x".repeat(2_000));
         let p = build_prompt(&workload(), &LogEvidence::Lines(vec![long]));
-        let log_line = p.lines().find(|l| l.starts_with("| x")).unwrap();
+        let log_line = p.lines().find(|l| l.starts_with("| <log_line>x")).unwrap();
         assert!(
-            log_line.chars().count() <= MAX_LINE_CHARS + 3,
+            log_line.chars().count() <= MAX_LINE_CHARS + 3 + "<log_line></log_line>".len(),
             "clipped to one bounded line"
         );
-        assert!(log_line.ends_with('…'));
+        assert!(log_line.ends_with("…</log_line>"));
     }
 
     #[test]

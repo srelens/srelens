@@ -20,9 +20,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc::UnboundedReceiver;
 
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use srelens_kube::lineage::{LineageNode, LineageRelation};
 use srelens_kube::node_inspector::{NodeInspectorDetails, NodePodItem};
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use srelens_tui::app::{ActiveView, App, SuspendAction};
 use srelens_tui::commands::{CrdMeta, ResourceKind};
 use srelens_tui::event::AppEvent;
@@ -204,7 +204,9 @@ async fn fake_cluster(routes: Vec<Route>) -> FakeCluster {
 /// so only the code paths under test reach the fake server.
 /// Bind the returned guard before the App so configuration stays isolated
 /// until after the App and its settings-sensitive work are dropped.
-async fn app_on(cluster: &FakeCluster) -> (common::env::SettingsGuard, App, UnboundedReceiver<AppEvent>) {
+async fn app_on(
+    cluster: &FakeCluster,
+) -> (common::env::SettingsGuard, App, UnboundedReceiver<AppEvent>) {
     let settings = common::env::isolate_settings();
     let (mut app, rx) = common::app_with(FAKE_CONTEXT, "default").await;
     app.client_cache
@@ -777,7 +779,7 @@ async fn custom_resource_instances_are_published_with_name_namespace_and_age() {
     let (_settings, mut app, mut rx) = app_on(&cluster).await;
 
     app.fetch_crd_instances(widget_crd());
-    let payload = action_result(&mut rx, "crd_instances:Widget")
+    let payload = action_result(&mut rx, "crd_instances:widgets.example.com")
         .await
         .expect("the namespaced list is published");
     let items: Vec<Value> = serde_json::from_str(&payload).expect("a JSON array");
@@ -785,7 +787,10 @@ async fn custom_resource_instances_are_published_with_name_namespace_and_age() {
     assert_eq!(items[0]["name"], "w-1");
     assert_eq!(items[0]["namespace"], "default");
     assert_eq!(items[0]["spec"]["size"], 3);
-    assert_eq!(items[0]["apiVersion"], "example.com/v1", "rows carry their type");
+    assert_eq!(
+        items[0]["apiVersion"], "example.com/v1",
+        "rows carry their type"
+    );
     assert_eq!(items[0]["kind"], "Widget");
     assert_eq!(
         items[0]["metadata"]["name"], "w-1",
@@ -798,7 +803,7 @@ async fn custom_resource_instances_are_published_with_name_namespace_and_age() {
     );
 
     app.fetch_crd_instances(gadget_crd());
-    let payload = action_result(&mut rx, "crd_instances:Gadget")
+    let payload = action_result(&mut rx, "crd_instances:gadgets.example.com")
         .await
         .expect("the cluster-scoped list is published");
     let items: Vec<Value> = serde_json::from_str(&payload).expect("a JSON array");
@@ -992,7 +997,10 @@ async fn the_yaml_view_reports_the_kubectl_fallback_failing_when_nothing_can_ser
 
     app.open_yaml_view("web-0".into(), "Pod".into(), Some("default".into()))
         .await;
-    assert_fetch_failed(&app, "Unable to fetch live manifest for Pod/web-0 in namespace default");
+    assert_fetch_failed(
+        &app,
+        "Unable to fetch live manifest for Pod/web-0 in namespace default",
+    );
 
     // An explicitly empty namespace is not passed to kubectl as `-n`, and it
     // is reported verbatim rather than as "default".
@@ -1010,7 +1018,10 @@ async fn the_yaml_view_reports_the_kubectl_fallback_failing_when_nothing_can_ser
     // CiliumBGPNodeConfig is cluster-scoped and must not have namespace appended.
     app.open_yaml_view("node-a".into(), "CiliumBGPNodeConfig".into(), None)
         .await;
-    assert_fetch_failed(&app, "Unable to fetch live manifest for CiliumBGPNodeConfig/node-a");
+    assert_fetch_failed(
+        &app,
+        "Unable to fetch live manifest for CiliumBGPNodeConfig/node-a",
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -2812,7 +2823,6 @@ async fn yaml_applied_invalidates_cache_in_all_namespaces_view() {
     );
 }
 
-
 // ---------------------------------------------------------------------------
 // Editing custom resources
 // ---------------------------------------------------------------------------
@@ -2877,14 +2887,24 @@ async fn a_manifest_that_cannot_be_fetched_says_why_and_is_not_edited() {
         reason.starts_with("Unable to fetch live manifest for Widget/w-2 in namespace default:"),
         "{reason}"
     );
-    assert!(reason.contains("apiserver (example.com/v1):"), "names what failed: {reason}");
+    assert!(
+        reason.contains("apiserver (example.com/v1):"),
+        "names what failed: {reason}"
+    );
     assert!(reason.contains("kubectl:"), "{reason}");
 
     // `e` asked for the editor; main.rs refuses before leaving the screen.
     assert!(app.requires_terminal_suspend.is_some());
     assert!(app.refuse_edit_without_manifest(), "nothing to edit");
-    let toast = app.toast.as_ref().map(|(m, _, _)| m.clone()).unwrap_or_default();
-    assert!(toast.starts_with("Can't edit Widget/w-2: Unable to fetch"), "{toast}");
+    let toast = app
+        .toast
+        .as_ref()
+        .map(|(m, _, _)| m.clone())
+        .unwrap_or_default();
+    assert!(
+        toast.starts_with("Can't edit Widget/w-2: Unable to fetch"),
+        "{toast}"
+    );
 }
 
 #[test]
@@ -2893,14 +2913,20 @@ fn manifest_fetch_error_names_every_attempt() {
         "SecretStore",
         "vault",
         Some("prod"),
-        &["apiserver (external-secrets.io/v1): forbidden".to_string(), "  ".to_string()],
+        &[
+            "apiserver (external-secrets.io/v1): forbidden".to_string(),
+            "  ".to_string(),
+        ],
     );
     assert_eq!(
         msg,
         "Unable to fetch live manifest for SecretStore/vault in namespace prod:\n  apiserver (external-secrets.io/v1): forbidden"
     );
     let bare = srelens_tui::app::manifest_fetch_error("Node", "n1", None, &[]);
-    assert_eq!(bare, "Unable to fetch live manifest for Node/n1: no lookup applied to this kind");
+    assert_eq!(
+        bare,
+        "Unable to fetch live manifest for Node/n1: no lookup applied to this kind"
+    );
 }
 
 #[tokio::test]
@@ -2917,8 +2943,11 @@ async fn a_cluster_scoped_crd_list_is_cached_where_the_table_looks() {
 
     let ctx = app.active_context.clone();
     assert!(
-        app.resource_cache
-            .contains_key(&(ctx.clone(), String::new(), "gadgets.example.com".to_string())),
+        app.resource_cache.contains_key(&(
+            ctx.clone(),
+            String::new(),
+            "gadgets.example.com".to_string()
+        )),
         "under no namespace, the key restart_active_watch reads"
     );
     assert!(!app
@@ -2940,13 +2969,15 @@ async fn a_warm_watch_with_an_empty_cache_refetches_the_list() {
     let (_settings, mut app, mut rx) = app_on(&cluster).await;
     app.crds = vec![widget_crd()];
     app.switch_view_to_crd(widget_crd()).await;
-    action_result(&mut rx, "crd_instances:Widget").await.expect("the first list");
+    action_result(&mut rx, "crd_instances:widgets.example.com")
+        .await
+        .expect("the first list");
 
     // An apply cleared the cache; the watch channel is still running.
     app.resource_cache.clear();
     app.restart_active_watch().await;
 
-    action_result(&mut rx, "crd_instances:Widget")
+    action_result(&mut rx, "crd_instances:widgets.example.com")
         .await
         .expect("the table is refilled by a fresh list, not left on Loading");
 }

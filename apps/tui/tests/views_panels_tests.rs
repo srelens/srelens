@@ -2799,8 +2799,8 @@ fn test_resource_table_renders_explicit_error_panel_when_crd_not_found() {
         "error title should be rendered:\n{text}"
     );
     assert!(
-        text.contains("ClusterSecretStore is not installed on this cluster"),
-        "error description should name the resource as not installed:\n{text}"
+        text.contains("ClusterSecretStore was not found on this cluster"),
+        "error description should name the resource as not found:\n{text}"
     );
     assert!(
         !text.contains("No ClusterSecretStore found in this scope."),
@@ -2837,10 +2837,10 @@ fn test_resource_table_renders_explicit_error_panel_when_load_fails_with_network
     );
     assert!(
         text.contains("ClusterSecretStore could not be loaded from the cluster"),
-        "error description should indicate failure to load rather than claiming not installed:\n{text}"
+        "error description should indicate failure to load rather than claiming not found:\n{text}"
     );
     assert!(
-        !text.contains("is not installed on this cluster"),
-        "must NOT claim resource is not installed when error is RBAC or network failure:\n{text}"
+        !text.contains("was not found on this cluster"),
+        "must NOT claim resource was not found when error is RBAC or network failure:\n{text}"
     );
 }

@@ -796,10 +796,15 @@ fn render_deployments_table(f: &mut Frame, area: Rect, state: &ChangedViewState)
                 state.incident_filter.label()
             )
         } else {
+            let what = match (state.include_scaled, state.include_failing) {
+                (false, false) => "changed",
+                (true, false) => "changed or scaled",
+                (false, true) => "changed or failing",
+                (true, true) => "changed, scaled or failing",
+            };
             let mut msg = format!(
-                "No workloads changed{}{} within the last {}. Use [ or ] to broaden the time window",
-                if state.include_scaled { ", scaled" } else { "" },
-                if state.include_failing { " or failing" } else { "" },
+                "No workloads {} within the last {}. Use [ or ] to broaden the time window",
+                what,
                 state.current_window_label()
             );
             let mut more = Vec::new();
@@ -983,8 +988,8 @@ fn render_deployments_table(f: &mut Frame, area: Rect, state: &ChangedViewState)
     // markers, within reason; the ROOT CAUSE column takes the rest.
     let workload_width = deps.iter().map(|d| {
         let kind_tag = match d.kind.as_str() {
-            "StatefulSet" | "CronJob" => 5,
-            "Job" => 6,
+            "CronJob" => 5,
+            "StatefulSet" | "Job" => 6,
             _ => 0,
         };
         let change = change_tag(d.change_kind).map_or(0, |t| t.chars().count());
