@@ -179,10 +179,14 @@ mod denial_tests {
 
 #[cfg(test)]
 mod stop_tests {
-    use super::{Ended, Stop};
+    use super::{Ended, MemoryEvents, Stop};
 
-    fn ended(text: &str, signal: Option<i32>, oom_kills: Option<u64>) -> Ended {
-        Ended { text: text.into(), signal, oom_kills }
+    fn ended(text: &str, signal: Option<i32>, memory_events: Option<MemoryEvents>) -> Ended {
+        Ended { text: text.into(), signal, memory_events }
+    }
+
+    fn events(oom: u64, oom_kill: u64) -> Option<MemoryEvents> {
+        Some(MemoryEvents { oom, oom_kill })
     }
 
     #[test]
@@ -205,23 +209,32 @@ mod stop_tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_memory_stop_is_the_oom_killers_sigkill() {
-        let oom = "exited: signal: 9 (SIGKILL); cgroup memory.events oom_kill 1";
-        let killed = ended(oom, Some(libc::SIGKILL), Some(1));
+    fn a_memory_stop_is_the_cgroup_limits_oom_kill() {
+        let oom = "exited: signal: 9 (SIGKILL); cgroup memory.events oom 1, oom_kill 1";
+        let killed = ended(oom, Some(libc::SIGKILL), events(1, 1));
         assert!(Stop::Memory.accepts(&killed));
-        let xcpu = ended("exited: signal: 24 (SIGXCPU)", Some(libc::SIGXCPU), Some(1));
+        let xcpu = ended("exited: signal: 24 (SIGXCPU)", Some(libc::SIGXCPU), events(1, 1));
         assert!(!Stop::Memory.accepts(&xcpu));
     }
 
     #[cfg(unix)]
     #[test]
     fn a_sigkill_without_a_recorded_oom_kill_is_not_the_memory_limit() {
-        // Killed from outside the cgroup's memory limit (`kill -9`, say): the counter is 0.
-        let other = "exited: signal: 9 (SIGKILL); cgroup memory.events oom_kill 0";
-        assert!(!Stop::Memory.accepts(&ended(other, Some(libc::SIGKILL), Some(0))));
-        // No cgroup at all, so no counter: the system OOM killer, or anything else.
+        // Killed from outside the cgroup's memory limit (`kill -9`, say): no OOM kill.
+        let other = "exited: signal: 9 (SIGKILL); cgroup memory.events oom 0, oom_kill 0";
+        assert!(!Stop::Memory.accepts(&ended(other, Some(libc::SIGKILL), events(0, 0))));
+        // No cgroup at all, so no counters: the system OOM killer, or anything else.
         let bare = ended("exited: signal: 9 (SIGKILL)", Some(libc::SIGKILL), None);
         assert!(!Stop::Memory.accepts(&bare));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_system_oom_kill_is_not_the_cgroup_limit() {
+        // oom_kill counts kills by any OOM killer, the system's included. Without the
+        // cgroup's own oom event, its memory.max was never reached.
+        let global = "exited: signal: 9 (SIGKILL); cgroup memory.events oom 0, oom_kill 1";
+        assert!(!Stop::Memory.accepts(&ended(global, Some(libc::SIGKILL), events(0, 1))));
     }
 
     #[cfg(unix)]
@@ -432,9 +445,18 @@ pub struct Ended {
     pub text: String,
     /// The signal that ended it, on Unix.
     pub signal: Option<i32>,
-    /// The cgroup's `oom_kill` count from `memory.events`, when the sidecar had a cgroup
-    /// and the count could be read.
-    pub oom_kills: Option<u64>,
+    /// The sidecar cgroup's OOM counters, when it had a cgroup and they could be read.
+    pub memory_events: Option<MemoryEvents>,
+}
+
+/// The two counters in a cgroup's `memory.events` that show its own limit killed a process.
+/// The sidecar's cgroup is a fresh leaf, so both start at 0 and count only its own events.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MemoryEvents {
+    /// Times the cgroup's usage reached `memory.max` and an allocation was about to fail.
+    pub oom: u64,
+    /// Processes in the cgroup killed by any OOM killer, the system's included.
+    pub oom_kill: u64,
 }
 
 /// Prints as the text alone, so a recorded reply reads `Stopped("exited: …")`.
@@ -456,10 +478,11 @@ fn signal_of(status: &std::process::ExitStatus) -> Option<i32> {
 }
 
 /// Which resource limit a check expects to have stopped the sidecar. A stop counts only if
-/// it ended with the signal that limit sends (for memory, with the cgroup's OOM kill
-/// recorded too): a panic (exit status 101) or an abort is the sidecar breaking, never a
-/// limit. No Windows backend here stops the sidecar for a limit
-/// (the Job Object refuses the allocation and throttles the CPU), so none counts there.
+/// it ended with the signal that limit sends (for memory, with the cgroup recording that
+/// its own limit was reached and a process OOM-killed): a panic (exit status 101) or an
+/// abort is the sidecar breaking, never a limit. No Windows backend here stops the sidecar
+/// for a limit (the Job Object refuses the allocation and throttles the CPU), so none
+/// counts there.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stop {
     Memory,
@@ -470,10 +493,13 @@ impl Stop {
     pub fn accepts(self, ended: &Ended) -> bool {
         #[cfg(unix)]
         return match self {
-            // The OOM killer's SIGKILL, with the sidecar's cgroup recording the kill: a
-            // SIGKILL from anything else, or with no cgroup to count it, is not the limit.
+            // The OOM killer's SIGKILL, with the sidecar's cgroup recording both that it hit
+            // its memory.max (oom) and that a process was OOM-killed (oom_kill). oom_kill
+            // alone also counts the system's OOM killer; a SIGKILL with no cgroup to count
+            // it, or from anything else, is not the limit.
             Stop::Memory => {
-                ended.signal == Some(libc::SIGKILL) && matches!(ended.oom_kills, Some(n) if n > 0)
+                ended.signal == Some(libc::SIGKILL)
+                    && matches!(ended.memory_events, Some(e) if e.oom > 0 && e.oom_kill > 0)
             }
             // RLIMIT_CPU's SIGXCPU, the one signal only it sends. The launcher sets soft =
             // hard: macOS then sends SIGXCPU, and Linux sends SIGKILL, which nothing tells
@@ -643,14 +669,14 @@ impl Sidecar {
             Process::Plain(child) => match child.wait() {
                 Ok(status) => {
                     let signal = signal_of(&status);
-                    Ended { text: format!("exited: {status}"), signal, oom_kills: None }
+                    Ended { text: format!("exited: {status}"), signal, memory_events: None }
                 }
                 Err(e) => {
-                    Ended { text: format!("wait failed: {e}"), signal: None, oom_kills: None }
+                    Ended { text: format!("wait failed: {e}"), signal: None, memory_events: None }
                 }
             },
             #[cfg(windows)]
-            Process::Windows(c) => Ended { text: c.ended(), signal: None, oom_kills: None },
+            Process::Windows(c) => Ended { text: c.ended(), signal: None, memory_events: None },
             #[cfg(target_os = "linux")]
             Process::Linux(c) => c.ended(),
         }

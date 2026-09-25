@@ -7,7 +7,7 @@
 //! has moved the container's processes into a leaf). Each sidecar gets its own child
 //! directory with `memory.max`, `memory.swap.max = 0` and `cpu.max`.
 
-use crate::{built_binary, Ended, Fixture, Limits};
+use crate::{built_binary, Ended, Fixture, Limits, MemoryEvents};
 use std::io;
 use std::os::unix::process::ExitStatusExt;
 use std::path::PathBuf;
@@ -32,15 +32,20 @@ impl Confined {
             Ok(status) => (format!("exited: {status}"), status.signal()),
             Err(e) => (format!("wait failed: {e}"), None),
         };
-        let (text, oom_kills) = match &self.cgroup {
-            Some(dir) => {
-                let events = std::fs::read_to_string(dir.join("memory.events")).unwrap_or_default();
-                let oom = events.lines().find(|l| l.starts_with("oom_kill ")).unwrap_or("oom_kill ?");
-                (format!("{status}; cgroup memory.events {oom}"), oom_kills(&events))
-            }
+        let (text, counts) = match &self.cgroup {
+            Some(dir) => match std::fs::read_to_string(dir.join("memory.events")) {
+                Ok(events) => match memory_events(&events) {
+                    Some(e) => {
+                        let note = format!("oom {}, oom_kill {}", e.oom, e.oom_kill);
+                        (format!("{status}; cgroup memory.events {note}"), Some(e))
+                    }
+                    None => (format!("{status}; cgroup memory.events has no oom counts"), None),
+                },
+                Err(e) => (format!("{status}; cgroup memory.events unreadable: {e}"), None),
+            },
             None => (status, None),
         };
-        Ended { text, signal, oom_kills }
+        Ended { text, signal, memory_events: counts }
     }
 }
 
@@ -77,9 +82,12 @@ impl Drop for Created {
     }
 }
 
-/// The `oom_kill` count in a cgroup's `memory.events`, if it has a readable one.
-fn oom_kills(events: &str) -> Option<u64> {
-    events.lines().find_map(|l| l.strip_prefix("oom_kill ")).and_then(|n| n.trim().parse().ok())
+/// The `oom` and `oom_kill` counts in a cgroup's `memory.events`, if both are readable.
+fn memory_events(events: &str) -> Option<MemoryEvents> {
+    let count = |key: &str| {
+        events.lines().find_map(|l| l.strip_prefix(key)?.strip_prefix(' ')?.trim().parse().ok())
+    };
+    Some(MemoryEvents { oom: count("oom")?, oom_kill: count("oom_kill")? })
 }
 
 fn cgroup(limits: &Limits) -> io::Result<Created> {
@@ -119,7 +127,8 @@ fn cgroup_in(root: &std::path::Path, limits: &Limits) -> io::Result<Created> {
 
 #[cfg(test)]
 mod tests {
-    use super::{cgroup_in, oom_kills, Created};
+    use super::{cgroup_in, memory_events, Created};
+    use crate::MemoryEvents;
 
     fn fresh_dir(name: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("srelens-{name}-{}", std::process::id()));
@@ -145,18 +154,21 @@ mod tests {
     }
 
     #[test]
-    fn the_oom_kill_count_is_read_from_memory_events() {
+    fn the_oom_counts_are_read_from_memory_events() {
         let events = "low 0\nhigh 0\nmax 12\noom 1\noom_kill 1\noom_group_kill 0\n";
-        assert_eq!(oom_kills(events), Some(1));
-        assert_eq!(oom_kills("oom 0\noom_kill 0\n"), Some(0));
+        assert_eq!(memory_events(events), Some(MemoryEvents { oom: 1, oom_kill: 1 }));
+        let global = "oom 0\noom_kill 1\n";
+        assert_eq!(memory_events(global), Some(MemoryEvents { oom: 0, oom_kill: 1 }));
     }
 
     #[test]
-    fn memory_events_without_a_readable_count_give_none() {
-        assert_eq!(oom_kills(""), None);
-        assert_eq!(oom_kills("oom_kill many\n"), None);
-        // A different counter.
-        assert_eq!(oom_kills("oom_group_kill 3\n"), None);
+    fn memory_events_without_both_counts_give_none() {
+        assert_eq!(memory_events(""), None);
+        assert_eq!(memory_events("oom 1\n"), None);
+        assert_eq!(memory_events("oom_kill 1\n"), None);
+        assert_eq!(memory_events("oom 1\noom_kill many\n"), None);
+        // Different counters with similar names.
+        assert_eq!(memory_events("oom_group_kill 3\noom_kill 1\n"), None);
     }
     use crate::Limits;
     use std::path::Path;
