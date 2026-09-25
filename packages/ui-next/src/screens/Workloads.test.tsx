@@ -578,6 +578,32 @@ describe("Workloads", () => {
       expect(screen.getByText(/Cronjobs are still being listed\./)).toBeTruthy();
     });
 
+    // Review on #714: the filtered case makes the same claim. A refused kind
+    // was never searched, so "no workloads match" is only true of the rows
+    // that were listed.
+    it("says only listed rows failed the filter when a kind could not be listed", async () => {
+      answer((kind) => (kind === "deployments" ? { error: refused(kind) } : { rows: FIXTURES[kind] ?? [] }));
+      open();
+      await waitFor(() => expect(rowNames()).toHaveLength(4));
+
+      await userEvent.type(screen.getByRole("searchbox", { name: "Filter workloads" }), "nothing-matches-this");
+
+      expect(await screen.findByText("No listed workloads match this filter")).toBeTruthy();
+      expect(screen.queryByText("No workloads match this filter")).toBeNull();
+      expect(screen.getByText(/Clear the filter to see all 4 that were listed\./)).toBeTruthy();
+      expect(screen.getByText(/Deployments could not be fully listed, so some may match — see above\./)).toBeTruthy();
+    });
+
+    it("keeps the plain filter copy when every kind was listed", async () => {
+      open();
+      await waitFor(() => expect(rowNames()).toHaveLength(5));
+
+      await userEvent.type(screen.getByRole("searchbox", { name: "Filter workloads" }), "nothing-matches-this");
+
+      expect(await screen.findByText("No workloads match this filter")).toBeTruthy();
+      expect(screen.getByText("Clear the filter to see all 5.")).toBeTruthy();
+    });
+
     it("still says the cluster has none when every kind answered empty", async () => {
       answer(() => ({ rows: [] }));
       open();

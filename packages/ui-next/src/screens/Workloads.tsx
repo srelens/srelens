@@ -306,6 +306,9 @@ function refusedEverywhere(k: KindEntry, scopeCount: number): boolean {
  * were fully listed (#703). The rest are said for what they are: not fully
  * listed (the banners above say why), or not answered yet. "Workloads" rather
  * than five nouns when it is all of them.
+ *
+ * The filtered case too: a kind that was never listed was never searched, so
+ * "no workloads match this filter" is only true of the rows that were.
  */
 function workloadsEmptyCopy(
   inView: KindEntry[],
@@ -315,21 +318,32 @@ function workloadsEmptyCopy(
   clusterName: string,
 ): { emptyText: string; emptyHint: string } {
   const suffix = " in the namespaces you are looking at";
-  if (count > 0 || inView.every(fullyListed)) return emptyTableCopy(count, noun, clusterName, suffix);
+  if (inView.every(fullyListed)) return emptyTableCopy(count, noun, clusterName, suffix);
 
   const nouns = (ks: KindEntry[], conjunction?: string) =>
     ks.length === allKinds ? "workloads" : wordList(ks.map((k) => `${k.label.toLocaleLowerCase()}s`), conjunction);
   const listed = inView.filter(fullyListed);
   const pending = inView.filter((k) => k.list.status === "loading");
   const partly = inView.filter((k) => !fullyListed(k) && k.list.status !== "loading");
+  const filtered = count > 0;
 
   const hint = [
-    listed.length > 0 ? `${clusterName} has none${suffix}.` : "",
-    partly.length > 0 ? `${capitalise(nouns(partly))} could not be fully listed, so there may be some — see above.` : "",
+    filtered
+      ? `Clear the filter to see all ${count} that were listed.`
+      : listed.length > 0
+        ? `${clusterName} has none${suffix}.`
+        : "",
+    partly.length > 0
+      ? `${capitalise(nouns(partly))} could not be fully listed, so ${filtered ? "some may match" : "there may be some"} — see above.`
+      : "",
     pending.length > 0 ? `${capitalise(nouns(pending))} are still being listed.` : "",
   ];
   return {
-    emptyText: listed.length > 0 ? `No ${nouns(listed, "or")}` : `No ${noun} to show`,
+    emptyText: filtered
+      ? `No listed ${noun} match this filter`
+      : listed.length > 0
+        ? `No ${nouns(listed, "or")}`
+        : `No ${noun} to show`,
     emptyHint: hint.filter((h) => h !== "").join(" "),
   };
 }
