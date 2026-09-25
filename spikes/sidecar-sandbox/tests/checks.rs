@@ -7,16 +7,19 @@
 //!    failed, never a crash or a garbled reply.
 //! 2. A host-side **positive control** runs first: the host itself reads the same file,
 //!    writes to the same directory, connects to the same address, resolves the same name
-//!    or starts the same program. If the control fails, the environment cannot do the
-//!    operation at all, so the sidecar failing it says nothing about the sandbox: the
-//!    check fails as INCONCLUSIVE, never passes.
+//!    or starts the same program. For memory and CPU, a probe with no sandbox runs the
+//!    same workload and must exceed the limit. If the control fails, the environment
+//!    cannot do the operation at all, so the sidecar failing it says nothing about the
+//!    sandbox: the check fails as INCONCLUSIVE, never passes.
 //! 3. The probe's error must be of a kind a sandbox produces for that operation
-//!    ([`Denial::accepts`]), not any error at all (a bad argument, say).
+//!    ([`Denial::accepts`]), not any error at all (a bad argument, say). For memory and
+//!    CPU, a stopped sidecar counts only with the signal the limit sends
+//!    ([`Stop::accepts`]), never a crash.
 //!
 //! Run with `SPIKE_BACKEND=none` to see the baseline: every "must be denied" check fails
 //! because the operation succeeds. See `src/lib.rs` for the backends.
 
-use serde_json::json;
+use serde_json::{json, Value};
 use sidecar_sandbox_spike::{Backend, Denial, Fixture, Limits, Reply, Sidecar, Stop};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::time::Duration;
@@ -189,13 +192,42 @@ fn c4_spawn_child_process_is_denied() {
     assert_denied(&run, check, Denial::Process, &reply);
 }
 
+// 5 and 6: the positive control is the same workload in a probe with no sandbox. An
+// environment that is itself short of memory or CPU (a small container, a loaded machine)
+// would otherwise refuse, kill or slow the sidecar with no help from the backend.
+
+/// The same call to a probe started with no sandbox.
+fn unconfined(run: &Run, method: &str, params: &Value) -> Reply {
+    let mut probe = Sidecar::launch(Backend::None, &run.fixture, &LIMITS)
+        .unwrap_or_else(|e| panic!("[{}] the unconfined probe could not start: {e}", run.backend));
+    probe.call(method, params.clone())
+}
+
+/// CPUs a `burn_cpu` reply used: CPU time over wall time.
+fn cpus_used(reply: &Reply) -> Result<f64, String> {
+    match reply {
+        Reply::Ok(r) => match (r["cpu_ms"].as_f64(), r["wall_ms"].as_f64()) {
+            (Some(cpu), Some(wall)) => Ok(cpu / wall),
+            _ => Err(format!("a reply without cpu_ms and wall_ms: {r}")),
+        },
+        other => Err(format!("{other:?}")),
+    }
+}
+
 // 5. Allocating past the memory limit stops or refuses the sidecar; the host keeps running.
 
 #[test]
 fn c5_memory_past_limit_is_refused_or_stopped_and_host_survives() {
     let mut run = start();
     let mib = LIMITS.memory_mib * 4;
-    let reply = run.sidecar.call("allocate", json!({ "mib": mib }));
+    let params = json!({ "mib": mib });
+    let check = format!("allocate {mib} MiB");
+    let host = match unconfined(&run, "allocate", &params) {
+        Reply::Ok(v) => Ok(v),
+        other => Err(format!("{other:?}")),
+    };
+    control(&check, &format!("allocate and touch {mib} MiB in an unconfined probe"), host);
+    let reply = run.sidecar.call("allocate", params);
     println!("[{}] allocate {mib} MiB (limit {} MiB): {reply:?}", run.backend, LIMITS.memory_mib);
     let refused = matches!(&reply, Reply::Refused(f) if Denial::Memory.accepts(f));
     // Stopped counts only as the limit's own kill, never as a crash: see `Stop`.
@@ -216,18 +248,28 @@ fn c5_memory_past_limit_is_refused_or_stopped_and_host_survives() {
 #[test]
 fn c6_cpu_past_limit_is_throttled_or_stopped() {
     let mut run = start();
-    let reply = run.sidecar.call("burn_cpu", json!({ "millis": 3000, "threads": 2 }));
-    println!("[{}] burn 2 threads for 3 s (limit {} CPU): {reply:?}", run.backend, LIMITS.cpus);
+    let params = json!({ "millis": 3000, "threads": 2 });
+    let ceiling = LIMITS.cpus * 1.5;
+    let check = "burn 2 threads for 3 s";
+    let host = cpus_used(&unconfined(&run, "burn_cpu", &params)).and_then(|used| {
+        println!("[{}] the unconfined probe used {used:.2} CPUs", run.backend);
+        if used > ceiling {
+            Ok(used)
+        } else {
+            Err(format!("it used {used:.2}"))
+        }
+    });
+    control(check, &format!("use more than {ceiling} CPUs in an unconfined probe"), host);
+    let reply = run.sidecar.call("burn_cpu", params);
+    println!("[{}] {check} (limit {} CPU): {reply:?}", run.backend, LIMITS.cpus);
     match &reply {
         // Only the limit's own signal: a probe that crashed says nothing about the limit.
         Reply::Stopped(ended) if Stop::Cpu.accepts(ended) => {}
-        Reply::Ok(result) => {
-            let cpu = result["cpu_ms"].as_f64().expect("cpu_ms");
-            let wall = result["wall_ms"].as_f64().expect("wall_ms");
-            let used = cpu / wall;
+        Reply::Ok(_) => {
+            let used = cpus_used(&reply).unwrap_or_else(|e| panic!("[{}] {e}", run.backend));
             println!("[{}] used {used:.2} CPUs", run.backend);
             assert!(
-                used <= LIMITS.cpus * 1.5,
+                used <= ceiling,
                 "[{}] the sidecar used {used:.2} CPUs against a {} CPU limit",
                 run.backend,
                 LIMITS.cpus
