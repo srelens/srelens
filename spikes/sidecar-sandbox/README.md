@@ -39,8 +39,9 @@ The memory and CPU checks follow the same idea:
 - their positive control is a probe with no sandbox running the same workload, which
   must allocate the 512 MiB or use more than 0.375 CPUs;
 - a stopped sidecar counts only with the signal the limit sends (`Stop` in
-  `src/lib.rs`): `SIGKILL` for memory, `SIGXCPU` or `SIGKILL` for CPU. A crash never
-  counts.
+  `src/lib.rs`): for memory, `SIGKILL` with the cgroup recording an OOM kill
+  (`oom_kill` above 0 in `memory.events`); for CPU, `SIGXCPU` or `SIGKILL`. A crash
+  never counts.
 
 | OS | Backends (`SPIKE_BACKEND`) | Recommended or candidate |
 |---|---|---|
@@ -146,8 +147,13 @@ mkdir -Force results | Out-Null
 } } | Tee-Object results/results-windows.txt
 Remove-Item Env:SPIKE_BACKEND
 cargo test                     # the recommended backend only: all 11 must pass
+$tests = $LASTEXITCODE
 cargo run --bin cleanup        # delete the AppContainer profile the harness registered
+if ($tests -ne 0) { throw "cargo test failed (exit $tests)" }
 ```
+
+The last three lines run the cleanup even when `cargo test` fails, and then report the
+failure, so a successful cleanup cannot hide it.
 
 - **Time:** about 1 minute to build, then about 40 seconds for all five backends.
 
