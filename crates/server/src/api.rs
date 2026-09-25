@@ -37,6 +37,11 @@ use crate::AppState;
 /// request: the web host runs no MCP server and no agent, so nothing here
 /// answers a consent prompt on anyone's behalf.
 pub const WEB_DENIED_CAPABILITIES: &[&str] = &[
+    // An app's secret settings (#543) are kept by the desktop vault; the web
+    // host has no per-user secret store yet (#522), so a set is refused here
+    // rather than kept anywhere else. A web user's registry is built with no
+    // store, so `extensions.list` reports secrets as unavailable there too.
+    "extension.secretStore",
     // The host action primitives (#549). What makes one safe is an installed
     // app's manifest fixing the kind and the template, and a person confirming
     // the request. A declared action reaches its primitive only through
@@ -686,6 +691,26 @@ mod tests {
                 2
             );
         }
+    }
+
+    /// #543. Keeping an app's secret needs a store the web host does not have
+    /// (per-user storage is #522's), so a set is refused before dispatch —
+    /// never answered by something that would keep the value somewhere else —
+    /// and the refusal does not repeat it.
+    #[tokio::test]
+    async fn app_secret_storage_is_refused_on_web_before_dispatch() {
+        let secret = "web-must-not-keep-this-7f3a";
+        let (status, body) = post(
+            "/api/capability/extension.secretStore",
+            Body::from(
+                json!({"action":"set","id":"org.example.app","setting":"token","secret":secret})
+                    .to_string(),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], json!("capability not available in web mode"));
+        assert!(!body.to_string().contains(secret));
     }
 
     #[tokio::test]

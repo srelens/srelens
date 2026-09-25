@@ -13,6 +13,13 @@ const SECRET: &str = "hunter2-very-secret";
 /// The example app with one setting of each kind the tests need.
 fn with_settings(settings: Value) -> String {
     let mut value: Value = serde_json::from_str(&manifest()).unwrap();
+    // A secret setting needs the secret store's permission (#543).
+    if settings
+        .as_array()
+        .is_some_and(|all| all.iter().any(|s| s["type"] == "secret-reference"))
+    {
+        value["permissions"] = json!(["k8s.listCustomResource", "extension.secretStore"]);
+    }
     value["settings"] = settings;
     value.to_string()
 }
@@ -27,9 +34,11 @@ fn declared() -> Value {
 }
 
 fn install(path: &Path, source: String) -> Inventory {
+    // Granted exactly what the manifest requests.
+    let grants = Manifest::parse(&source).unwrap().permissions;
     configure(
         path,
-        json!({"action":"install","manifest":source,"grants":["k8s.listCustomResource"]}),
+        json!({"action":"install","manifest":source,"grants":grants}),
     )
     .unwrap()
 }

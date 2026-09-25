@@ -1,6 +1,7 @@
 import { useContext, useState } from "react";
 import {
   CAPABILITY_CATALOG,
+  clearExtensionSecret,
   type ExtensionChange,
   type ExtensionPreviousVersion,
   type ExtensionSource,
@@ -80,6 +81,24 @@ export function ExtensionDetails({
   const [rollback, setRollback] = useState<ExtensionPreviousVersion | null>(null);
   const { manifest } = plugin;
 
+  const keepsSecrets = (manifest.settings ?? []).some((setting) => setting.type === "secret-reference");
+  /**
+   * A reset deletes the app's secrets as well (#543): a token left in the
+   * keychain after "reset to defaults" is a default nobody chose. The secrets
+   * go first, so a reset whose settings save fails has still not left one.
+   */
+  async function reset() {
+    if (keepsSecrets) {
+      try {
+        await clearExtensionSecret(manifest.id);
+      } catch (e) {
+        onError(e instanceof Error ? e.message : String(e));
+        return;
+      }
+    }
+    if (await change({ action: "settings", id: manifest.id, settings: requiredSettings(plugin) })) setResetting(false);
+  }
+
   async function exportSettings() {
     try {
       // A browser download on the web, which has no `save_text_file` command.
@@ -151,7 +170,8 @@ export function ExtensionDetails({
         >
           <p>
             Reset {extensionLabel(plugin)} to its default settings? Its saved settings are removed, except the
-            required ones, which have no default. Secrets stay set; they are kept outside these settings.
+            required ones, which have no default
+            {keepsSecrets ? ", and its secrets are deleted from srelens's secrets vault." : "."}
           </p>
           <Button variant="secondary" autoFocus disabled={busy} onClick={() => setResetting(false)}>
             Cancel
@@ -159,11 +179,7 @@ export function ExtensionDetails({
           <Button
             variant="danger"
             disabled={busy}
-            onClick={() =>
-              void change({ action: "settings", id: manifest.id, settings: requiredSettings(plugin) }).then((done) => {
-                if (done) setResetting(false);
-              })
-            }
+            onClick={() => void reset()}
           >
             Reset to defaults
           </Button>

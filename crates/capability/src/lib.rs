@@ -63,6 +63,15 @@ pub struct Capability {
     /// Empty for almost every capability: interpolation anywhere else is
     /// refused at install. See [`settings`].
     pub settable: Vec<settings::Settable>,
+    /// The top-level arguments into which the host may inject a secret an app
+    /// keeps in the host's secret store (#543), such as an HTTP header (#568).
+    ///
+    /// The mirror of `settable`, and deliberately separate from it: a setting
+    /// is written into the manifest's argument, while a secret is supplied by
+    /// the host at the moment of the call and never enters the manifest, the
+    /// inventory, an MCP response or a log. Empty for every capability today,
+    /// so no current consumer can receive a secret.
+    pub secret_slots: Vec<String>,
 }
 
 impl Capability {
@@ -81,6 +90,7 @@ impl Capability {
             handler: Arc::new(move |v| Box::pin(f(v))),
             bound_arguments: None,
             settable: Vec::new(),
+            secret_slots: Vec::new(),
         }
     }
 
@@ -116,6 +126,7 @@ impl Capability {
             handler,
             bound_arguments: None,
             settable: Vec::new(),
+            secret_slots: Vec::new(),
         }
     }
 
@@ -161,6 +172,18 @@ impl Capability {
     /// The settable position `argument`, if this capability marks one.
     pub fn settable_argument(&self, argument: &str) -> Option<&settings::Settable> {
         self.settable.iter().find(|s| s.argument == argument)
+    }
+
+    /// The same capability, letting the host inject an app's stored secret
+    /// into `argument` (see [`Capability::secret_slots`]).
+    pub fn with_secret_slot(mut self, argument: &str) -> Self {
+        self.secret_slots.push(argument.to_owned());
+        self
+    }
+
+    /// Whether the host may inject a secret into `argument`.
+    pub fn takes_secret(&self, argument: &str) -> bool {
+        self.secret_slots.iter().any(|slot| slot == argument)
     }
 }
 

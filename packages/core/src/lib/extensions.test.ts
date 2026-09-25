@@ -2,8 +2,12 @@ import { describe, expect, it, vi } from "vitest";
 vi.mock("../transport/transport", () => ({
   invokeCapability: vi.fn().mockResolvedValue({}),
 }));
+vi.mock("../transport/platform", () => ({ isTauri: vi.fn(() => true), isWeb: false }));
 import { invokeCapability } from "../transport/transport";
+import { isTauri } from "../transport/platform";
 import {
+  clearExtensionSecret,
+  setExtensionSecret,
   configureExtensions,
   readExtension,
   resolveExtensionColumns,
@@ -35,6 +39,42 @@ describe("itemStatus: one normalized status per listed resource (#541)", () => {
     expect(itemStatus(item(["True"]))).toBe("unknown");
     expect(itemStatuses([item(["False"]), item(["True"], { status: "warning", label: "W" })], legacy))
       .toEqual(["error", "warning"]);
+  });
+});
+describe("app secrets (#543): write-only, desktop only", () => {
+  it("sets and clears through extension.secretStore with the host's field names", async () => {
+    vi.mocked(invokeCapability).mockClear();
+    vi.mocked(invokeCapability).mockResolvedValueOnce({ set: true });
+    await expect(setExtensionSecret("org.test.app", "token", "s3cret")).resolves.toEqual({ set: true });
+    expect(invokeCapability).toHaveBeenCalledWith("extension.secretStore", {
+      action: "set", id: "org.test.app", setting: "token", secret: "s3cret",
+    });
+    vi.mocked(invokeCapability).mockResolvedValueOnce({ set: false });
+    await clearExtensionSecret("org.test.app", "token");
+    expect(invokeCapability).toHaveBeenLastCalledWith("extension.secretStore", {
+      action: "clear", id: "org.test.app", setting: "token",
+    });
+    // Every secret of the app, as a reset asks.
+    vi.mocked(invokeCapability).mockResolvedValueOnce({ set: false });
+    await clearExtensionSecret("org.test.app");
+    expect(invokeCapability).toHaveBeenLastCalledWith("extension.secretStore", { action: "clear", id: "org.test.app" });
+  });
+
+  it("answers only whether it is set, whatever else a host sends back", async () => {
+    vi.mocked(invokeCapability).mockResolvedValueOnce({ set: true, secret: "echoed" });
+    await expect(setExtensionSecret("org.test.app", "token", "s3cret")).resolves.toEqual({ set: true });
+  });
+
+  it("refuses on the web before the value leaves the page", async () => {
+    vi.mocked(isTauri).mockReturnValue(false);
+    vi.mocked(invokeCapability).mockClear();
+    try {
+      await expect(setExtensionSecret("org.test.app", "token", "s3cret")).rejects.toThrow(/desktop app/);
+      await expect(clearExtensionSecret("org.test.app", "token")).rejects.toThrow(/desktop app/);
+      expect(invokeCapability).not.toHaveBeenCalled();
+    } finally {
+      vi.mocked(isTauri).mockReturnValue(true);
+    }
   });
 });
 describe("extension contract", () => {

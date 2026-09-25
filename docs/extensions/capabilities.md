@@ -20,6 +20,7 @@ Consent rules are in [permissions.md](permissions.md).
 | `extensions.validate` | Read-only | Check a manifest, with its grants and optional signature, exactly as installing it would, and return every problem as `{code, path, message}` (see [Validation errors](specification.md#validation-errors)). Does not install it. A `signature` other than 64 bytes or a `manifest` over 256 KiB is refused as invalid input, not reported as a problem. |
 | `extensions.configure` | Mutating | Install, enable, remove or configure an app. An install that fails validation is refused with the same problems. `clusters` limits an app to chosen kubeconfig contexts by context key (`{file}#{name}` with `#` and `%` encoded in each part, as `k8s.listContexts` reports under `key`; a stable ID can be shared by two contexts, #623), or with `null` allows every cluster. As with `extensions.validate`, a `signature` must be 64 bytes and a `manifest` at most 256 KiB, and `settings` must be at most 64 KiB as compact JSON. `settings` is held to the typed settings the manifest declares and refused with each problem at `settings.<id>` (see [Settings](manifest.md#settings)); a value for a `secret-reference` is always refused. |
 | `extensions.action` | Mutating | Run an app’s declared action against a resolved resource through its bound host primitive. |
+| `extension.secretStore` | Mutating, sensitive | Set or clear an app's `secret-reference` setting in the host's secret store: `{"action":"set","id","setting","secret"}` or `{"action":"clear","id","setting"?}` (no `setting` clears every secret the app keeps). Write-only: answers `{"set": bool}` and never returns a value. A set needs the app's `extension.secretStore` grant and an available store, and `secret` is 1–16384 bytes of text with no NUL; every refusal leaves the value out. Also the permission an app requests to keep secrets, so its metadata is what the install review shows. `extensions.list` reports whether the store is available as `secretStore: {available, reason?}`. See [Secret settings](manifest.md#secret-settings). |
 
 The app facade refuses a host reader with stronger consent annotations than the
 declarative contract allows. App-installed operations go through `extensions.read`;
@@ -198,5 +199,10 @@ reports the request as accepted rather than as complete.
   (`extension_stream_open`, `extension_stream_cancel`, `extension_stream_close_view`)
   are refused, so pages, columns and cards read on Refresh and say they are not live;
   see [streams.md](streams.md#hosts).
+- **No app secrets on the web yet.** A web user's registry has no secret store, so
+  `extension.secretStore` is not registered there (and is refused before dispatch
+  too), and `extensions.list` reports the store unavailable: the web host keeps no app
+  secrets until per-user storage exists ([#522](https://github.com/srelens/srelens/issues/522)).
+  `@srelens/core` refuses a set on the web before the value leaves the page.
 - `k8s.getCustomResource` stays available: it is a read under the user's own
   kubeconfig and RBAC, like every other custom-resource read.

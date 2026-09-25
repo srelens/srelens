@@ -79,6 +79,14 @@ describe("gatedCapabilityIds", () => {
     expect(gatedCapabilityIds("web")).toContain("extensions.configure");
   });
 
+  // #543: the secret store is registered with the apps it serves, so the web
+  // host has none, and a web reader is never told it is one of their gates.
+  it("counts the app secret store as host-only", () => {
+    expect(entries.some((c) => c.id === "extension.secretStore")).toBe(true);
+    expect(gatedCapabilityIds("desktop")).toContain("extension.secretStore");
+    expect(gatedCapabilityIds("web")).not.toContain("extension.secretStore");
+  });
+
   it("exposes the catalog it derives from, unchanged", () => {
     expect(CAPABILITY_CATALOG).toEqual(entries);
   });

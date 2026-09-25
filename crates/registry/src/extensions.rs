@@ -12,6 +12,10 @@ mod panels;
 #[cfg(test)]
 mod policy_tests;
 mod resource;
+mod secret_store;
+pub use secret_store::{declares_secret_setting, SECRET_STORE_ANNOTATIONS};
+#[cfg(test)]
+mod secrets_tests;
 #[cfg(test)]
 mod settings_tests;
 mod signing;
@@ -207,6 +211,15 @@ pub struct Inventory {
     #[serde(default, rename = "allowUnsignedApps")]
     allow_unsigned_apps: bool,
     plugins: Vec<Installed>,
+    /// Whether the host can store an app's secret now (#543), as
+    /// `extensions.list` reports it. Recomputed for every answer, ignored when
+    /// read from disk and never written there.
+    #[serde(
+        default,
+        rename = "secretStore",
+        skip_serializing_if = "Option::is_none"
+    )]
+    secret_store: Option<secret_store::SecretStoreState>,
 }
 
 impl Default for Inventory {
@@ -216,6 +229,7 @@ impl Default for Inventory {
             next_revision: 1,
             allow_unsigned_apps: false,
             plugins: vec![],
+            secret_store: None,
         }
     }
 }
@@ -386,6 +400,8 @@ fn read<S: InventoryStore + ?Sized>(store: &S) -> Result<Inventory, String> {
     if state.schema_version != 1 {
         return Err("unsupported extension inventory version".into());
     }
+    // The store's state is the host's to report now, never the file's.
+    state.secret_store = None;
     let mut ids = std::collections::BTreeSet::new();
     for plugin in &state.plugins {
         if !ids.insert(plugin.manifest.id.clone()) {
@@ -478,6 +494,9 @@ fn saved_form(state: &Inventory) -> Result<Vec<u8>, String> {
     // Quarantine is recomputed on every load. Persisting it would also make the file
     // unreadable to hosts that predate the field.
     let mut stored = serde_json::to_value(state).map_err(|e| e.to_string())?;
+    if let Some(fields) = stored.as_object_mut() {
+        fields.remove("secretStore");
+    }
     if let Some(plugins) = stored.get_mut("plugins").and_then(Value::as_array_mut) {
         for plugin in plugins.iter_mut().filter_map(Value::as_object_mut) {
             plugin.remove("quarantined");
@@ -850,6 +869,8 @@ fn check_install(
     let mut problems = validate_app(&manifest, grants, core)
         .err()
         .unwrap_or_default();
+    // The rules a new install meets that an installed app is not re-held to.
+    problems.0.extend(manifest.install_problems());
     // Without this, a pasted manifest could replace a signed app, or take an
     // official ID and its logo, differing from the real one only by a label.
     if let Some(reason) = unsigned_reserved(&manifest.id, signature.is_some()) {
@@ -883,14 +904,27 @@ fn take_revision(state: &mut Inventory) -> Result<u64, String> {
         .ok_or("extension revision limit reached")?;
     Ok(revision)
 }
-/// `extensions.configure` on the desktop's layout, for the tests that name an inventory by
-/// its file (see [`Apps`]'s `From<PathBuf>`).
+/// [`configure`] on the desktop's layout with no secret store, for the lifecycle tests
+/// that name an inventory by its file (see [`Apps`]'s `From<PathBuf>`).
 #[cfg(test)]
 fn mutate(path: &Path, core: Arc<Registry>, input: Configure) -> Result<Inventory, String> {
-    configure(&Apps::from(path.to_path_buf()), core, input)
+    configure(
+        &Apps::from(path.to_path_buf()),
+        core,
+        &srelens_plugin_host::NoSecretStore,
+        input,
+    )
 }
-/// `extensions.configure`: one read-modify-write of `apps`'s inventory, under its lock.
-fn configure(apps: &Apps, core: Arc<Registry>, input: Configure) -> Result<Inventory, String> {
+/// `extensions.configure`: one read-modify-write of `apps`'s inventory, under its lock,
+/// then the host's secret store made to follow the inventory: whatever the change
+/// dropped — an app, a setting an update no longer declares as a secret — is deleted
+/// from the store (#543).
+fn configure(
+    apps: &Apps,
+    core: Arc<Registry>,
+    secrets: &dyn srelens_plugin_host::SecretStore,
+    input: Configure,
+) -> Result<Inventory, String> {
     let store = &*apps.inventory;
     let _lock = store.lock()?;
     let mut state = read(store)?;
@@ -1109,6 +1143,7 @@ fn configure(apps: &Apps, core: Arc<Registry>, input: Configure) -> Result<Inven
     }
     apply_unsigned_policy(&mut state);
     write(store, &state)?;
+    secret_store::sweep(secrets, &state);
     streams::announce(&store.key(), &state);
     Ok(state)
 }
@@ -1170,6 +1205,24 @@ fn access_items(manifest: &Manifest, grants: &[String]) -> std::collections::BTr
     let mut access = std::collections::BTreeSet::new();
     for grant in grants {
         access.insert(format!("Grant {grant}"));
+    }
+    // Which secrets the host keeps for the app (#543): an update that keeps
+    // one more is new access, even under the same grant.
+    let mut secrets: Vec<&str> = manifest
+        .settings
+        .iter()
+        .filter(|setting| {
+            setting.setting_type == srelens_capability::settings::SettingType::SecretReference
+        })
+        .map(|setting| setting.id.as_str())
+        .collect();
+    if !secrets.is_empty() {
+        secrets.sort_unstable();
+        access.insert(format!(
+            "Keep secrets for settings [{}] with {}",
+            secrets.join(","),
+            srelens_plugin_host::SECRET_STORE_PERMISSION
+        ));
     }
     // What a reader reads: its arguments and, when it lists several, the versions it may
     // read and the paths each moves (#547). Another accepted version reads more, and a
@@ -1254,16 +1307,64 @@ fn permission_diff(
         unchanged: current.intersection(&old).cloned().collect(),
     }
 }
-/// Register every `extensions.*` capability over `apps`: an inventory file for the
-/// desktop's layout, or one web user's inventory and the shared catalog.
+/// [`register_with_secrets`] on a host with no secret store: secrets cannot
+/// be set, and `extensions.list` says so. For the lifecycle tests; every
+/// registry build names its store.
+#[cfg(test)]
 pub fn register(
     reg: &mut Registry,
     apps: impl Into<Apps>,
     core: Arc<Registry>,
     cache: Arc<srelens_kube::client_cache::ClientCache>,
 ) -> Arc<streams::ExtensionStreams> {
-    let apps: Apps = apps.into();
+    register_with_secrets(
+        reg,
+        apps,
+        core,
+        cache,
+        Arc::new(srelens_plugin_host::NoSecretStore),
+    )
+}
+/// Every `extensions.*` capability over `apps` — an inventory file for the desktop's
+/// layout, or one web user's inventory and the shared catalog — with `secrets` keeping
+/// apps' secret settings (#543): the desktop vault, or
+/// [`srelens_plugin_host::NoSecretStore`].
+pub fn register_with_secrets(
+    reg: &mut Registry,
+    apps: impl Into<Apps>,
+    core: Arc<Registry>,
+    cache: Arc<srelens_kube::client_cache::ClientCache>,
+    secrets: Arc<dyn srelens_plugin_host::SecretStore>,
+) -> Arc<streams::ExtensionStreams> {
+    register_apps(reg, apps.into(), core, cache, Some(secrets))
+}
+/// The `extensions.*` capabilities on a host that keeps no app secrets at all: the
+/// web host, until per-user secret storage exists (#522). `extension.secretStore` is
+/// not registered, so there is no way to hand it one, and `extensions.list` reports
+/// the store as unavailable.
+pub fn register_without_secrets(
+    reg: &mut Registry,
+    apps: impl Into<Apps>,
+    core: Arc<Registry>,
+    cache: Arc<srelens_kube::client_cache::ClientCache>,
+) -> Arc<streams::ExtensionStreams> {
+    register_apps(reg, apps.into(), core, cache, None)
+}
+fn register_apps(
+    reg: &mut Registry,
+    apps: Apps,
+    core: Arc<Registry>,
+    cache: Arc<srelens_kube::client_cache::ClientCache>,
+    secrets: Option<Arc<dyn srelens_plugin_host::SecretStore>>,
+) -> Arc<streams::ExtensionStreams> {
     let path = apps.inventory.clone();
+    let secrets = match secrets {
+        Some(secrets) => {
+            secret_store::register(reg, path.clone(), secrets.clone());
+            secrets
+        }
+        None => Arc::new(srelens_plugin_host::NoSecretStore),
+    };
     catalog::register(reg, apps.catalog.clone(), core.clone());
     resource::register(reg, path.clone(), core.clone(), cache.clone());
     // One snapshot of each granted reader, shared by table columns, dashboard
@@ -1272,21 +1373,28 @@ pub fn register(
     columns::register(reg, path.clone(), core.clone(), cache.clone(), snapshots.clone());
     cards::register(reg, path.clone(), core.clone(), cache.clone(), snapshots.clone());
     let p = path.clone();
+    let s = secrets.clone();
     reg.register(Capability::typed::<Empty, Inventory, _, _>(
         "extensions.list",
         "List installed declarative extensions",
         Annotations::READ_ONLY,
         move |_| {
             let p = p.clone();
+            let s = s.clone();
             async move {
-                tokio::task::spawn_blocking(move || read(&p))
-                    .await
-                    .map_err(|e| CapabilityError::Handler(e.to_string()))?
-                    .map_err(CapabilityError::Handler)
+                tokio::task::spawn_blocking(move || {
+                    let mut state = read(&p)?;
+                    secret_store::report(s.as_ref(), &mut state);
+                    Ok(state)
+                })
+                .await
+                .map_err(|e| CapabilityError::Handler(e.to_string()))?
+                .map_err(CapabilityError::Handler)
             }
         },
     ));
     let c = core.clone();
+    let s = secrets.clone();
     reg.register(Capability::typed::<Configure, Inventory, _, _>(
         "extensions.configure",
         "Install, enable, remove or configure local extensions; requires approval",
@@ -1294,8 +1402,9 @@ pub fn register(
         move |input| {
             let apps = apps.clone();
             let c = c.clone();
+            let s = s.clone();
             async move {
-                tokio::task::spawn_blocking(move || configure(&apps, c, input))
+                tokio::task::spawn_blocking(move || configure(&apps, c, s.as_ref(), input))
                     .await
                     .map_err(|e| CapabilityError::Handler(e.to_string()))?
                     .map_err(CapabilityError::Handler)
@@ -3318,8 +3427,12 @@ mod tests {
         ] {
             assert!(reg.get(id).unwrap().annotations.read_only);
         }
+        // The secret store (#543) is gated, and sensitive: what goes through
+        // it is secret material.
+        let store = reg.get("extension.secretStore").unwrap().annotations;
+        assert!(store.requires_confirm && store.sensitive && !store.read_only);
         let mcp = srelens_mcp::McpServer::new(Arc::new(reg));
-        assert_eq!(mcp.list_tools().len(), 13);
+        assert_eq!(mcp.list_tools().len(), 14);
         use srelens_mcp::{stdio::handle_request, Transport};
         for args in [
             json!({"action":"install","manifest":manifest(),"grants":["k8s.listCustomResource"]}),
