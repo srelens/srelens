@@ -5,9 +5,9 @@
 
 Everything this server exposes over MCP, generated from the live registry so it cannot drift. Written for someone wiring an agent to srelens; the narrative reference is [MCP.md](MCP.md).
 
-## Tools (119)
+## Tools
 
-Argument schemas are not reproduced here — call `tools/list` for those, which cannot go stale.
+119 tools, grouped by area and then by how a call is gated. Argument schemas are not reproduced here — call `tools/list` for those, which cannot go stale.
 
 **Impact** is how much a successful call disturbs — `low`, `medium` or `high` — and is a different question from the section heading, which is how the call is gated. A capability that accepts several named operations carries the highest level any of them reaches; the per-operation level travels with the resource.
 
@@ -185,7 +185,9 @@ Argument schemas are not reproduced here — call `tools/list` for those, which 
 | `extensions.configure` | medium | Install, enable, remove or configure local extensions; requires approval |
 | `settings.set` | medium | atomically write or remove durable desktop settings |
 
-## Prompts (4)
+## Prompts
+
+4 built-in prompts:
 
 | Prompt | Description | Arguments |
 | --- | --- | --- |
@@ -194,16 +196,16 @@ Argument schemas are not reproduced here — call `tools/list` for those, which 
 | `pod-pending` | Work out why a pod will not schedule | context (required), namespace, pod |
 | `service-no-endpoints` | Work out why a service has no endpoints | context (required), namespace, service |
 
-## Resources (2 fixed, 4 templates)
+## Resources
 
-`resources/list` returns only these two:
+`resources/list` returns only these 2 fixed resources:
 
 | URI | Description |
 | --- | --- |
 | `k8s://contexts` | Contexts srelens can connect to, and which is current. |
 | `k8s://catalog` | Every tool, prompt and resource template this server exposes. |
 
-Object addressing is discovered through `resources/templates/list`:
+Object addressing is discovered through `resources/templates/list`, which returns these 4 URI templates:
 
 | URI template | Description |
 | --- | --- |

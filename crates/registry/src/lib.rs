@@ -1150,6 +1150,57 @@ mod tests {
         }
     }
 
+    /// A `#fragment` that names no heading still renders as a link; it just
+    /// lands at the top of the page. `mcp-catalog.md#prompts` and `#resources`
+    /// did that from the day the catalog was generated, because its headings
+    /// carried counts and GitHub put the counts in the anchors.
+    #[test]
+    fn every_anchor_the_mcp_docs_link_to_exists() {
+        use crate::mcp_docs::tests_support::heading_anchors;
+        // The catalog as the generator renders it, not as committed:
+        // `mcp_catalog_md_is_in_sync` holds the two equal, and reading the
+        // file here would race that test rewriting it under `UPDATE_CATALOG=1`.
+        let page_of = |name: &str| {
+            if name == "mcp-catalog.md" {
+                crate::mcp_docs::render_catalog()
+            } else {
+                doc(name)
+            }
+        };
+        let mut checked = 0usize;
+        for name in ["MCP.md", "mcp-catalog.md"] {
+            let md = page_of(name);
+            let targets = md
+                .split("](")
+                .skip(1)
+                .filter_map(|rest| rest.split_once(')').map(|(target, _)| target));
+            for target in targets {
+                let Some((file, anchor)) = target.split_once('#') else {
+                    continue;
+                };
+                if file.contains("://") {
+                    continue;
+                }
+                let page = if file.is_empty() {
+                    md.clone()
+                } else {
+                    page_of(file)
+                };
+                let anchors = heading_anchors(&page);
+                assert!(
+                    anchors.contains(anchor),
+                    "docs/{name} links to `{target}`, but no heading there has that anchor; \
+                     it has {anchors:?}"
+                );
+                checked += 1;
+            }
+        }
+        assert!(
+            checked >= 3,
+            "expected MCP.md's links into the catalog to be checked, saw {checked}"
+        );
+    }
+
     #[test]
     fn default_kubeconfig_paths_discovers_all_files_in_dot_kube_dir() {
         let temp = tempfile::tempdir().unwrap();

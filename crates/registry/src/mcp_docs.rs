@@ -110,7 +110,7 @@ const SAFETY_ORDER: [SafetyClass; 4] = [
 pub fn render_prompts() -> String {
     let lib = srelens_mcp::prompts::PromptLibrary::new(None);
     let specs = lib.list();
-    let mut out = format!("## Prompts ({})\n\n", specs.len());
+    let mut out = format!("## Prompts\n\n{} built-in prompts:\n\n", specs.len());
     out.push_str("| Prompt | Description | Arguments |\n| --- | --- | --- |\n");
     for spec in specs {
         let args: Vec<String> = spec
@@ -142,12 +142,10 @@ pub fn render_resources() -> String {
     let fixed = srelens_mcp::resources::fixed_resources();
     let templates = srelens_mcp::resources::templates();
     let mut out = format!(
-        "## Resources ({} fixed, {} templates)\n\n",
-        fixed.len(),
-        templates.len()
+        "## Resources\n\n`resources/list` returns only these {} fixed resources:\n\n\
+         | URI | Description |\n| --- | --- |\n",
+        fixed.len()
     );
-
-    out.push_str("`resources/list` returns only these two:\n\n| URI | Description |\n| --- | --- |\n");
     for r in &fixed {
         // These are internally-produced values, so a missing key is a bug in this repo.
         let uri = r["uri"]
@@ -159,10 +157,12 @@ pub fn render_resources() -> String {
         out.push_str(&format!("| `{}` | {} |\n", uri, description));
     }
 
-    out.push_str(
-        "\nObject addressing is discovered through `resources/templates/list`:\n\n\
+    out.push_str(&format!(
+        "\nObject addressing is discovered through `resources/templates/list`, which \
+         returns these {} URI templates:\n\n\
          | URI template | Description |\n| --- | --- |\n",
-    );
+        templates.len()
+    ));
     for t in &templates {
         // These are internally-produced values, so a missing key is a bug in this repo.
         let uri_template = t["uriTemplate"]
@@ -230,6 +230,53 @@ pub mod tests_support {
         }
         out
     }
+
+    /// The anchor GitHub gives a heading: lowercased, punctuation dropped,
+    /// every space a hyphen and nothing collapsed. `## Prompts (4)` is
+    /// `prompts-4`; `### Kubernetes — read-only (55)` is
+    /// `kubernetes--read-only-55`. Backticks are punctuation, so a code span
+    /// contributes its text.
+    pub fn github_slug(heading: &str) -> String {
+        heading
+            .trim()
+            .to_lowercase()
+            .chars()
+            .filter_map(|c| match c {
+                ' ' => Some('-'),
+                c if c.is_alphanumeric() || c == '-' || c == '_' => Some(c),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Every heading anchor on a page. A `#` line inside a code fence is a
+    /// shell comment, not a heading; a repeated heading gets `-1`, `-2`, …
+    /// the way GitHub numbers them.
+    pub fn heading_anchors(md: &str) -> std::collections::BTreeSet<String> {
+        let mut anchors = std::collections::BTreeSet::new();
+        let mut seen = std::collections::BTreeMap::<String, usize>::new();
+        let mut in_fence = false;
+        for line in md.lines() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("```") {
+                in_fence = !in_fence;
+                continue;
+            }
+            if in_fence {
+                continue;
+            }
+            let level = trimmed.chars().take_while(|&c| c == '#').count();
+            let text = &trimmed[level..];
+            if !(1..=6).contains(&level) || !(text.is_empty() || text.starts_with(' ')) {
+                continue;
+            }
+            let slug = github_slug(text.trim_end().trim_end_matches('#'));
+            let n = seen.entry(slug.clone()).or_default();
+            anchors.insert(if *n == 0 { slug } else { format!("{slug}-{n}") });
+            *n += 1;
+        }
+        anchors
+    }
 }
 
 /// Paste-ready client configs.
@@ -291,7 +338,10 @@ pub fn render_client_configs() -> String {
 /// an empty table.
 pub fn render_tools(reg: &srelens_capability::Registry) -> String {
     let mut out = String::new();
-    out.push_str(&format!("## Tools ({})\n\n", reg.ids().len()));
+    out.push_str(&format!(
+        "## Tools\n\n{} tools, grouped by area and then by how a call is gated. ",
+        reg.ids().len()
+    ));
     out.push_str(
         "Argument schemas are not reproduced here — call `tools/list` for those, \
          which cannot go stale.\n\n\
@@ -967,10 +1017,45 @@ mod tests {
         let md = render_catalog();
         assert!(md.starts_with("<!-- GENERATED FILE"), "got:\n{}", &md[..200.min(md.len())]);
         assert!(md.contains("UPDATE_CATALOG=1"), "the header must name the fix command");
-        assert!(md.contains("## Tools ("));
-        assert!(md.contains("## Prompts ("));
-        assert!(md.contains("## Resources ("));
-        assert!(md.contains("## Client configuration"));
+        assert!(md.contains("\n## Tools\n"));
+        assert!(md.contains("\n## Prompts\n"));
+        assert!(md.contains("\n## Resources\n"));
+        assert!(md.contains("\n## Client configuration\n"));
         assert!(md.ends_with('\n'), "must end with a newline");
+    }
+
+    /// A section heading is a link target — MCP.md links to three of them —
+    /// and GitHub builds the anchor from the heading text. A count in the
+    /// heading puts the count in the anchor: `## Prompts (4)` is
+    /// `#prompts-4`, so `mcp-catalog.md#prompts` went nowhere, and a link
+    /// pinned to `#prompts-4` would break on the next prompt added. Counts
+    /// belong in the section body.
+    #[test]
+    fn section_headings_carry_no_count() {
+        for heading in render_catalog().lines().filter(|l| l.starts_with("## ")) {
+            assert!(
+                !heading.contains(|c: char| c.is_ascii_digit()),
+                "{heading:?} carries a count, which changes its anchor whenever the count does"
+            );
+        }
+    }
+
+    #[test]
+    fn github_slugs_match_what_github_renders() {
+        use tests_support::{github_slug, heading_anchors};
+        assert_eq!(github_slug("Prompts (4)"), "prompts-4");
+        assert_eq!(
+            github_slug("Resources (2 fixed, 4 templates)"),
+            "resources-2-fixed-4-templates"
+        );
+        assert_eq!(
+            github_slug("Kubernetes — read-only (55)"),
+            "kubernetes--read-only-55"
+        );
+        assert_eq!(github_slug("The `k8s://` scheme"), "the-k8s-scheme");
+
+        let md = "# Title\n\n```bash\n# a comment\n```\n\n## Setup\n\n## Setup\n\n#hashtag\n";
+        let got: Vec<String> = heading_anchors(md).into_iter().collect();
+        assert_eq!(got, ["setup", "setup-1", "title"]);
     }
 }
