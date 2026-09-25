@@ -96,6 +96,16 @@ fn cgroup(limits: &Limits) -> io::Result<Created> {
 }
 
 fn cgroup_in(root: &std::path::Path, limits: &Limits) -> io::Result<Created> {
+    cgroup_with(root, limits, |path, value| std::fs::write(path, value))
+}
+
+/// `cgroup_in`, with the writer for the limit files passed in, so a test can refuse one:
+/// only a real cgroup filesystem refuses such a write, and a unit test has none.
+fn cgroup_with(
+    root: &std::path::Path,
+    limits: &Limits,
+    write: impl Fn(&std::path::Path, &str) -> io::Result<()>,
+) -> io::Result<Created> {
     static COUNTER: AtomicU32 = AtomicU32::new(0);
     let dir = root.join(format!(
         "srelens-sidecar-{}-{}",
@@ -115,7 +125,7 @@ fn cgroup_in(root: &std::path::Path, limits: &Limits) -> io::Result<Created> {
     // From here on, a limit that cannot be set removes the directory again.
     let created = Created(Some(dir.clone()));
     let set = |file: &str, value: String| {
-        std::fs::write(dir.join(file), &value)
+        write(&dir.join(file), &value)
             .map_err(|e| io::Error::other(format!("{}/{file} = {value}: {e}", dir.display())))
     };
     set("memory.max", (limits.memory_mib * 1024 * 1024).to_string())?;
@@ -127,8 +137,11 @@ fn cgroup_in(root: &std::path::Path, limits: &Limits) -> io::Result<Created> {
 
 #[cfg(test)]
 mod tests {
-    use super::{cgroup_in, memory_events, Created};
-    use crate::MemoryEvents;
+    use super::{cgroup_in, cgroup_with, memory_events, start, Created};
+    use crate::{Limits, MemoryEvents};
+    use std::io;
+    use std::path::Path;
+    use std::process::Command;
 
     fn fresh_dir(name: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("srelens-{name}-{}", std::process::id()));
@@ -142,6 +155,32 @@ mod tests {
         // A launch that fails after creating the cgroup drops it without keeping it.
         let dir = fresh_dir("created-dropped");
         drop(Created(Some(dir.clone())));
+        assert!(!dir.exists(), "{} was left behind", dir.display());
+    }
+
+    #[test]
+    fn a_limit_that_cannot_be_set_removes_the_cgroup() {
+        let root = fresh_dir("cgroup-root");
+        let refuse_cpu = |path: &Path, _: &str| {
+            if path.ends_with("cpu.max") {
+                Err(io::Error::other("refused"))
+            } else {
+                Ok(())
+            }
+        };
+        let err = cgroup_with(&root, &Limits::SPIKE, refuse_cpu).expect_err("cpu.max is refused");
+        assert!(err.to_string().contains("cpu.max"), "{err}");
+        let left: Vec<_> = std::fs::read_dir(&root).expect("the root").collect();
+        assert!(left.is_empty(), "left behind under {}: {left:?}", root.display());
+        std::fs::remove_dir(&root).expect("cleanup");
+    }
+
+    #[test]
+    fn a_launcher_that_cannot_start_removes_the_cgroup() {
+        let dir = fresh_dir("cgroup-unstarted");
+        let cannot_start = |_: Command| Err(io::Error::other("cannot start"));
+        let cgroup = Some(Created(Some(dir.clone())));
+        assert!(start(Command::new("sandbox-launch"), cgroup, cannot_start).is_err());
         assert!(!dir.exists(), "{} was left behind", dir.display());
     }
 
@@ -170,8 +209,6 @@ mod tests {
         // Different counters with similar names.
         assert_eq!(memory_events("oom_group_kill 3\noom_kill 1\n"), None);
     }
-    use crate::Limits;
-    use std::path::Path;
 
     #[test]
     fn an_unusable_cgroup_root_says_what_the_backend_needs() {
@@ -197,7 +234,17 @@ pub fn launch_layered(fixture: &Fixture, limits: &Limits, layers: Layers) -> io:
         cmd.arg("--seccomp");
     }
     cmd.arg("--").arg(fixture.probe());
-    // A launcher that cannot start drops `cgroup` here, which removes it.
+    start(cmd, cgroup, spawn)
+}
+
+/// Start the launcher that joins `cgroup`. One that cannot start drops `cgroup` here, which
+/// removes it; one that starts hands it to `Confined`, which removes it once the sidecar is
+/// done. `spawn` is passed in so a test can make the start fail.
+fn start(
+    cmd: Command,
+    cgroup: Option<Created>,
+    spawn: impl FnOnce(Command) -> io::Result<Child>,
+) -> io::Result<Confined> {
     let child = spawn(cmd)?;
     Ok(Confined { child, cgroup: cgroup.map(Created::keep) })
 }
