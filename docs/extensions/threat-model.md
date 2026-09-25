@@ -107,7 +107,7 @@ Out of scope, and assumed:
 | Entry point | Untrusted input | Mutating | Code |
 |---|---|---|---|
 | `extensions.validate` | Manifest, grants, signature | No | `check_install` in `crates/registry/src/extensions.rs` |
-| `extensions.configure` | Manifest, grants, signature; app ID; settings JSON; rollback revision | Yes | `mutate_in` in `crates/registry/src/extensions.rs` |
+| `extensions.configure` | Manifest, grants, signature; app ID; settings JSON; rollback revision | Yes | `configure` in `crates/registry/src/extensions.rs` |
 | `extension.secretStore` | App ID, setting, secret value | Yes | `change` in `crates/registry/src/extensions/secret_store.rs`, `VaultSecretStore` in `apps/desktop/src-tauri/src/extension_secrets.rs` |
 | `extensions.list` | None | No | `read` in `crates/registry/src/extensions.rs` |
 | `extensions.read` | App ID, revision, operation, context, namespace | No | `register` in `crates/registry/src/extensions.rs` |
