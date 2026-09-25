@@ -531,6 +531,16 @@ impl Cluster {
         (lists, pages.len())
     }
 
+    /// Lists — first pages — of any reader's objects in `namespace`.
+    fn lists_in(&self, namespace: &str) -> usize {
+        let seen = self.seen.lock().unwrap();
+        seen.iter()
+            .filter(|t| {
+                t.contains(&format!("/namespaces/{namespace}/")) && !t.contains("continue=")
+            })
+            .count()
+    }
+
     /// CRD lookups: the broker's per-call check that each reader is served.
     fn discovery(&self) -> usize {
         let seen = self.seen.lock().unwrap();
@@ -646,9 +656,15 @@ async fn resolving_a_thousand_rows_lists_each_joined_reader_once() {
     // The CRD check runs per call and per join, never per row.
     assert!(discovery <= calls * joins, "{discovery} CRD lookups");
 
-    // The same refresh, timed: the rows are resolved against the snapshot the
-    // lists above left, so this is the resolver's own work over 1,000 rows.
-    let timing = time(1, 10, || resolve("team")).await;
+    // The same refresh, timed, against a namespace first listed once the timing
+    // lock is held: however long another budget held it, the snapshot cannot
+    // have aged out, so each timed run is the resolver's own work over 1,000
+    // rows. The warm-up run lists both readers there; no timed run may list again.
+    let timing = time(1, 10, || resolve("warm")).await;
+    let relisted = cluster
+        .lists_in("warm")
+        .checked_sub(2)
+        .expect("the warm-up run listed both readers in the timed namespace");
     hold(
         &Budget {
             name: "resolve-columns-1000-rows-warm",
@@ -657,7 +673,12 @@ async fn resolving_a_thousand_rows_lists_each_joined_reader_once() {
             ceiling: Duration::from_millis(1_000),
         },
         &timing,
-        json!({"rows": ROWS, "joins": joins, "columns": 3, "badges": 1}),
+        json!({"rows": ROWS, "joins": joins, "columns": 3, "badges": 1,
+            "listsDuringTiming": relisted}),
+    );
+    assert_eq!(
+        relisted, 0,
+        "a timed run listed a reader again, so it measured the API server, not the resolver"
     );
 }
 
@@ -698,14 +719,19 @@ fn counted(sessions: Arc<Sessions>) -> streams::WatchSession {
     })
 }
 
-async fn eventually(what: &str, check: impl Fn() -> bool) {
+/// Whether `check` comes to hold within five seconds.
+async fn settles(check: impl Fn() -> bool) -> bool {
     for _ in 0..500 {
         if check() {
-            return;
+            return true;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    panic!("never happened: {what}");
+    false
+}
+
+async fn eventually(what: &str, check: impl Fn() -> bool) {
+    assert!(settles(check).await, "never happened: {what}");
 }
 
 /// A view that closes ends every stream it opened, and ends each of them all
@@ -771,6 +797,9 @@ async fn closing_a_view_releases_every_watch_and_stream_it_opened() {
 
     let _alone = TIMING.lock().await;
     let mut closing = Vec::new();
+    // A view that left anything behind, recorded rather than panicked on, so
+    // the report says by how much. The next view would hit the cap, so it stops.
+    let mut leaks = Vec::new();
     for round in 0..VIEWS {
         let view = format!("page#{round}");
         let mut channels = Vec::new();
@@ -796,11 +825,15 @@ async fn closing_a_view_releases_every_watch_and_stream_it_opened() {
         closing.push(started.elapsed());
         assert_eq!(closed, WATCHES + READS, "round {round}");
         // Every watch this view opened is dropped; the other view's is not.
-        eventually("the closed view's watches dropped", || {
-            sessions.alive.load(Ordering::SeqCst) == 1
-        })
-        .await;
-        assert_eq!(open_now(&streams), 2, "round {round}");
+        settles(|| sessions.alive.load(Ordering::SeqCst) == 1).await;
+        let (held, open) = (sessions.alive.load(Ordering::SeqCst), open_now(&streams));
+        if (held, open) != (1, 2) {
+            leaks.push(
+                json!({"round": round, "watchSessionsHeld": held, "streamsOpen": open,
+                "expected": {"watchSessionsHeld": 1, "streamsOpen": 2}}),
+            );
+            break;
+        }
         for channel in &channels {
             assert_eq!(
                 sink.payloads_for(channel).last().unwrap()["reason"],
@@ -811,23 +844,16 @@ async fn closing_a_view_releases_every_watch_and_stream_it_opened() {
         assert_eq!(streams.close_view(&view), 0, "closing twice ends nothing");
     }
     drop(_alone);
-    for channel in ["extstream:stays-w", "extstream:stays-r"] {
-        assert!(
-            sink.payloads_for(channel)
-                .iter()
-                .all(|frame| frame["type"] != "close"),
-            "the view that stayed open was not touched: {channel}"
-        );
-    }
-    // No watch was restarted behind the view's back: one session per watch opened.
+    let untouched = ["extstream:stays-w", "extstream:stays-r"].map(|channel| {
+        sink.payloads_for(channel)
+            .iter()
+            .all(|frame| frame["type"] != "close")
+    });
     let started = sessions.started.load(Ordering::SeqCst);
-    assert_eq!(started, 1 + VIEWS * WATCHES);
-    assert_eq!(streams.close_view("stays"), 2);
-    eventually("the last watch dropped", || {
-        sessions.alive.load(Ordering::SeqCst) == 0
-    })
-    .await;
-    assert_eq!(open_now(&streams), 0);
+    let stays_closed = streams.close_view("stays");
+    settles(|| sessions.alive.load(Ordering::SeqCst) == 0).await;
+    let (held, open) = (sessions.alive.load(Ordering::SeqCst), open_now(&streams));
+    // Reported before it is held, so a run that breaks it says by how much.
     report(
         "close-view-releases",
         json!({
@@ -836,10 +862,27 @@ async fn closing_a_view_releases_every_watch_and_stream_it_opened() {
             "views": VIEWS,
             "watchesPerView": WATCHES,
             "readsPerView": READS,
+            "leaks": leaks,
             "watchSessionsStarted": started,
-            "watchSessionsHeldAfterClose": sessions.alive.load(Ordering::SeqCst),
-            "streamsOpenAfterClose": open_now(&streams),
+            "watchSessionsHeldAfterClose": held,
+            "streamsOpenAfterClose": open,
         }),
+    );
+    assert!(
+        leaks.is_empty(),
+        "a closed view left watches or streams behind: {leaks:?}"
+    );
+    assert_eq!(
+        untouched, [true; 2],
+        "the view that stayed open was not touched"
+    );
+    // No watch was restarted behind the view's back: one session per watch opened.
+    assert_eq!(started, 1 + VIEWS * WATCHES);
+    assert_eq!(stays_closed, 2);
+    assert_eq!(
+        (held, open),
+        (0, 0),
+        "the last view's watch and stream released"
     );
     hold(
         &Budget {

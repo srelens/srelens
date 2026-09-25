@@ -111,12 +111,24 @@ the target to catch a path that became an order of magnitude slower, and never a
 runner. When one fails, find the change; do not raise the number.
 
 With `SRELENS_PERF_REPORT_DIR` set, each suite writes one JSON file per measurement into
-that directory: the median, fastest and slowest run, the target, the ceiling, whether the
-target was met, the commit, and the Rust build or the Node version. A debug build leaves `withinTarget` empty,
-because the targets describe a release build. The `extension budgets (release)` job in
-`ci.yml` runs both suites as a release build without coverage and uploads the directory
-as the `extension-budgets` artifact on every run, so a drift is visible across runs long
-before it reaches a ceiling. To compare against the targets locally:
+that directory, `rust-<name>.json` or `ts-<name>.json`, in one of two shapes. Both carry
+`kind`, `name`, `what`, the commit, and the Rust build or the Node version.
+
+- A **timing** report (`"kind": "timing"`) has the median, fastest and slowest run
+  (`medianMs`, `minMs`, `maxMs`, `runs`), `targetMs`, `ceilingMs`, `withinTarget` and a
+  `detail` object. A debug build leaves `withinTarget` empty, because the targets
+  describe a release build.
+- A **count** report (`"kind": "count"`) has no times: it has the counts the test holds
+  and what it expected of them, such as `lists` and `expectedLists`, or `leaks` and the
+  watch sessions and streams still held after the views closed. It is written before
+  the counts are held, so a run that breaks one says by how much.
+
+The `extension budgets (release)` job in `ci.yml` runs the host suite as a release build
+and the client suite in Vitest, both without coverage, checks that each wrote reports, and
+uploads the directory as the `extension-budgets` artifact on every run, so a drift is
+visible across runs long before it reaches a ceiling. The client figures are Vitest's,
+in Node with jsdom, not a production bundle in the WebView. To compare against the
+targets locally:
 
 ```sh
 SRELENS_PERF_REPORT_DIR=/tmp/budgets cargo test --release -p srelens-registry --lib budget_tests -- --test-threads=1 --nocapture

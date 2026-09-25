@@ -178,9 +178,11 @@ jobs:
   # under coverage instrumentation, several times slower than what the
   # targets describe (a broker call's own overhead with 50 apps installed:
   # ~30 ms debug, ~5 ms release on one developer machine), so its timings say
-  # little. This job runs them again as a release build, and
-  # without coverage, and uploads one JSON file per measurement: the median,
-  # the spread, the target and whether it was met. It needs no cluster and no
+  # little. This job runs the host suite again as a release build and the
+  # client suite in Vitest, both without coverage (the client's figures are
+  # Node with jsdom, not a production bundle in the WebView), checks that each
+  # wrote reports, and uploads one JSON file per measurement: the median, the
+  # spread, the target and whether it was met. It needs no cluster and no
   # system libraries — the registry crate is Tauri-free.
   #
   # Informational: nothing here is a required check (dev has none), and a
@@ -214,6 +216,21 @@ jobs:
         env:
           SRELENS_PERF_REPORT_DIR: ${{ runner.temp }}/extension-budgets
         run: pnpm exec vitest run packages/ui-next/src/extensions/extensionBudgets.test.tsx
+      - name: Check both suites reported
+        if: ${{ !cancelled() }}
+        # A test filter that matches nothing passes having measured nothing:
+        # renaming `budget_tests` would leave the host step green and empty.
+        # Each suite must have written at least one report.
+        env:
+          REPORTS: ${{ runner.temp }}/extension-budgets
+        run: |
+          for suite in rust ts; do
+            if ! ls "$REPORTS/$suite"-*.json >/dev/null 2>&1; then
+              echo "::error::No $suite-*.json budget report was written; did a test filter stop matching?"
+              exit 1
+            fi
+          done
+          ls "$REPORTS"
       - name: Upload the budget reports
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

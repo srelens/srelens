@@ -128,20 +128,24 @@ navigation apps contribute under 10 ms, a typical host call's own overhead under
 the results as the `extension-budgets` artifact, one JSON file per
 measurement, so they can be compared across runs.
 
-Measured on 2026-09-25 on an Apple M5 Max, release build, one test thread, over
-50 installed apps (45 copies of the Argo CD example and 5 of Flux). Each figure is
+Measured on 2026-09-25 on an Apple M5 Max, over 50 installed apps (45 copies of
+the Argo CD example and 5 of Flux), under two conditions. The host figures are
+`cargo test --release` on one test thread. The client figures — the sidebar's
+Apps group and the app list — are Vitest in Node 26 with jsdom and no coverage:
+the same TypeScript, not the production bundle in the WebView, so they compare
+across runs of the suite rather than with what a person waits for. Each figure is
 the range of medians over several runs; CI's runners are slower, which is what the
 artifact is for.
 
-| Budget | Target | Measured |
-| --- | ---: | ---: |
-| Load 50 apps (`extensions.list`) | 50 ms | 5.4–9.0 ms |
-| Sidebar Apps group from 50 apps | 10 ms | 0.06–0.11 ms |
-| App list: host answer to ready, 50 apps | 50 ms | 1.4–1.9 ms |
-| A host call's own overhead, 1 app installed | 5 ms | 0.16–0.45 ms |
-| A host call's own overhead, 50 apps installed | 5 ms | **4.9–8.5 ms** |
-| Close a view of 6 streams, host side | 5 ms | 0.01 ms |
-| Resolve 1,000 rows over 3 joins, warm | — | 3.8–10.4 ms |
+| Budget | Measured in | Target | Measured |
+| --- | --- | ---: | ---: |
+| Load 50 apps (`extensions.list`) | host, release | 50 ms | 5.4–9.0 ms |
+| Sidebar Apps group from 50 apps | client, Vitest | 10 ms | 0.06–0.11 ms |
+| App list: host answer to ready, 50 apps | client, Vitest | 50 ms | 1.4–1.9 ms |
+| A host call's own overhead, 1 app installed | host, release | 5 ms | 0.16–0.45 ms |
+| A host call's own overhead, 50 apps installed | host, release | 5 ms | **4.9–8.5 ms** |
+| Close a view of 6 streams, host side | host, release | 5 ms | 0.01 ms |
+| Resolve 1,000 rows over 3 joins, warm | host, release | — | 3.8–10.4 ms |
 
 ### Reading these honestly
 
