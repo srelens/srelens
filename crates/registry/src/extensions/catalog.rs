@@ -229,6 +229,31 @@ fn download(url: &str, limit: usize) -> Result<Vec<u8>, String> {
     }
     Ok(raw)
 }
+/// The cached catalog, validated again, with this host's fields recomputed; `None` when
+/// there is no cache or it cannot be trusted.
+fn read_cache(path: &Path) -> Option<Snapshot> {
+    let f = fs::File::open(path).ok()?;
+    let mut raw = Vec::new();
+    f.take((MAX_CATALOG + 65536) as u64 + 1)
+        .read_to_end(&mut raw)
+        .ok()?;
+    let mut state: Snapshot = serde_json::from_slice(&raw).ok()?;
+    state.catalog = parse_catalog(&serde_json::to_vec(&state.catalog).ok()?).ok()?;
+    state.incompatible = state
+        .catalog
+        .extensions
+        .iter()
+        .filter(|e| !compatible(&e.release.srelens_api_version))
+        .map(|e| e.id.clone())
+        .collect();
+    state.host_api_version = newest_api_version();
+    state.host_api_versions = host_api_versions();
+    Some(state)
+}
+/// Fetched less than a day ago, and not in the future.
+fn is_fresh(state: &Snapshot) -> bool {
+    state.fetched_at <= now() && now() - state.fetched_at < TTL
+}
 fn load_with(
     path: &Path,
     refresh: bool,
@@ -236,29 +261,8 @@ fn load_with(
 ) -> Result<Snapshot, String> {
     // Serialize refreshes across windows/processes and atomically replace validated caches.
     let _lock = super::super::settings::write_lock(path)?;
-    let cached = fs::File::open(path).ok().and_then(|f| {
-        let mut raw = Vec::new();
-        f.take((MAX_CATALOG + 65536) as u64 + 1)
-            .read_to_end(&mut raw)
-            .ok()?;
-        let mut state: Snapshot = serde_json::from_slice(&raw).ok()?;
-        state.catalog = parse_catalog(&serde_json::to_vec(&state.catalog).ok()?).ok()?;
-        state.incompatible = state
-            .catalog
-            .extensions
-            .iter()
-            .filter(|e| !compatible(&e.release.srelens_api_version))
-            .map(|e| e.id.clone())
-            .collect();
-        state.host_api_version = newest_api_version();
-        state.host_api_versions = host_api_versions();
-        Some(state)
-    });
-    if !refresh
-        && cached
-            .as_ref()
-            .is_some_and(|s| s.fetched_at <= now() && now() - s.fetched_at < TTL)
-    {
+    let cached = read_cache(path);
+    if !refresh && cached.as_ref().is_some_and(is_fresh) {
         return Ok(cached.unwrap());
     }
     let result = fetch().and_then(|raw| parse_catalog(&raw));
@@ -275,6 +279,10 @@ fn load_with(
             }
         }
     };
+    save_cache(path, catalog)
+}
+/// Replace the cache with `catalog`, fetched now. The caller holds the cache's lock.
+fn save_cache(path: &Path, catalog: Catalog) -> Result<Snapshot, String> {
     let state = Snapshot {
         incompatible: catalog
             .extensions
@@ -358,13 +366,32 @@ impl SharedCatalog {
         &self,
         fetch: impl FnOnce() -> Result<Vec<u8>, String>,
     ) -> Result<(), String> {
-        let outcome =
-            load_with(&self.path, false, fetch).and_then(|snapshot| match snapshot.error {
-                Some(error) => Err(error),
-                None => Ok(()),
-            });
+        let outcome = self.refresh_outside_the_lock(fetch);
         *self.last_error.lock().unwrap() = outcome.as_ref().err().cloned();
         outcome
+    }
+    /// The cache's lock is held to look and to save, never across the download: every
+    /// user's catalog read and install check waits on it, and a download may take the
+    /// whole of its timeout.
+    fn refresh_outside_the_lock(
+        &self,
+        fetch: impl FnOnce() -> Result<Vec<u8>, String>,
+    ) -> Result<(), String> {
+        let fresh = || read_cache(&self.path).is_some_and(|cached| is_fresh(&cached));
+        {
+            let _lock = super::super::settings::write_lock(&self.path)?;
+            if fresh() {
+                return Ok(());
+            }
+        }
+        let catalog = fetch().and_then(|raw| parse_catalog(&raw))?;
+        let _lock = super::super::settings::write_lock(&self.path)?;
+        // Another refresh may have saved a copy while this one downloaded; it is at least
+        // as new, so it stays.
+        if fresh() {
+            return Ok(());
+        }
+        save_cache(&self.path, catalog).map(|_| ())
     }
     /// What a user reads: the cache as the server last fetched it. Never fetches and never
     /// writes it; a cache past its day is returned as stale, with why it was not refreshed.
@@ -730,6 +757,57 @@ mod tests {
             aged,
             "a failed refresh keeps the cache"
         );
+    }
+    /// A shared cache a day old, so the next server refresh downloads.
+    fn aged_shared_catalog(dir: &Path) -> SharedCatalog {
+        let shared = SharedCatalog::new(dir.join("extensions.catalog.json"));
+        shared.refresh_if_stale_with(|| Ok(fixture())).unwrap();
+        let mut old = read_cache(&shared.path).unwrap();
+        old.fetched_at = 0;
+        fs::write(&shared.path, serde_json::to_vec(&old).unwrap()).unwrap();
+        shared
+    }
+    /// The server downloads outside the cache's lock: a user's read meanwhile is
+    /// answered from the cache at once, not after the download.
+    #[test]
+    fn readers_are_answered_from_the_cache_while_the_server_downloads() {
+        let dir = tempfile::tempdir().unwrap();
+        let shared = aged_shared_catalog(dir.path());
+        let reader = shared.clone();
+        shared
+            .refresh_if_stale_with(|| {
+                let (tx, rx) = std::sync::mpsc::channel();
+                let reader = reader.clone();
+                std::thread::spawn(move || {
+                    let _ = tx.send(reader.read());
+                });
+                let read = rx
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("a read waited for the server's download");
+                assert!(read.unwrap().stale, "the cached copy, as it was");
+                Ok(fixture())
+            })
+            .unwrap();
+        assert!(is_fresh(&read_cache(&shared.path).unwrap()));
+    }
+    /// A copy another refresh saved while this one downloaded is at least as new, so
+    /// this one does not replace it.
+    #[test]
+    fn a_refresh_does_not_replace_a_copy_saved_while_it_downloaded() {
+        let dir = tempfile::tempdir().unwrap();
+        let shared = aged_shared_catalog(dir.path());
+        let mut one: Value = serde_json::from_slice(&fixture()).unwrap();
+        one["extensions"].as_array_mut().unwrap().truncate(1);
+        let one = serde_json::to_vec(&one).unwrap();
+        shared
+            .refresh_if_stale_with(|| {
+                let _lock = super::super::super::settings::write_lock(&shared.path).unwrap();
+                save_cache(&shared.path, parse_catalog(&one).unwrap()).unwrap();
+                Ok(fixture())
+            })
+            .unwrap();
+        let kept = read_cache(&shared.path).unwrap();
+        assert_eq!(kept.catalog.extensions.len(), 1);
     }
     #[test]
     fn additive_catalog_fields_do_not_break_released_hosts() {
