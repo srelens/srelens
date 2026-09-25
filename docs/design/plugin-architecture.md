@@ -108,8 +108,8 @@ harness (`spikes/sidecar-sandbox/src/lib.rs`) starts it under one backend, and
 | 2 | Write inside the scratch directory; write outside it | Allowed; denied |
 | 3 | TCP connect to a listener on the host's loopback, TCP connect to `1.1.1.1:443`, resolve `example.com` | Denied |
 | 4 | Start a child process (the probe re-executing itself) | Denied |
-| 5 | Allocate and touch 512 MiB | Refused, or the sidecar is stopped; the host keeps running and can start another |
-| 6 | Burn two threads for 3 s | Throttled to at most 1.5× the limit, or stopped |
+| 5 | Allocate and touch 512 MiB | Refused, or the sidecar is stopped by the limit (`SIGKILL`); the host keeps running and can start another |
+| 6 | Burn two threads for 3 s | Throttled to at most 1.5× the limit, or stopped by the limit (`SIGXCPU` or `SIGKILL`) |
 | 7 | 50 JSON-RPC round trips over stdin/stdout | Works |
 
 A "must be denied" check passes only when three things hold:
@@ -136,7 +136,19 @@ A "must be denied" check passes only when three things hold:
    `ConnectionRefused`, `TimedOut` and "unreachable" count only because the host's own
    connection to the same address succeeded moments before.
 
-These rules caught three false passes:
+The memory and CPU checks (5 and 6) hold to the same two ideas:
+
+- **A positive control succeeded.** A probe with no sandbox first runs the same
+  workload, and it must allocate and touch the 512 MiB, or use more than the 0.375-CPU
+  ceiling. Otherwise the environment itself is short of memory or CPU, and the check
+  fails as INCONCLUSIVE.
+- **A stop is the limit's, not a crash** (`Stop::accepts` in
+  `spikes/sidecar-sandbox/src/lib.rs`). A stopped sidecar counts only with the signal
+  the limit sends: `SIGKILL` for memory (the cgroup OOM kill), and `SIGXCPU` or
+  `SIGKILL` for CPU (`RLIMIT_CPU`). A panic (exit status 101) or an abort never counts.
+  No Windows backend stops the sidecar for a limit, so no stop counts there.
+
+These rules caught four false passes:
 
 - **LPAC's network checks.** The probe had crashed (below).
 - **A child process under Landlock.** It looked refused because opening `/dev/null` for
@@ -146,10 +158,17 @@ These rules caught three false passes:
   The run that showed it used `SPIKE_BACKEND=none` under `unshare --net`, and the
   unreachable network looked like a denial. With the controls, the same run fails all
   three as INCONCLUSIVE.
+- **Memory and CPU in a small container**, found in review. With no sandbox, in a
+  container limited to 256 MiB and 0.3 CPUs, check 5 passed on the container's own OOM
+  kill and check 6 at 0.29 CPUs. With the controls, both fail as INCONCLUSIVE.
 
 The recorded runs used for the matrix were re-run under the controls and the error-kind
 rule. No cell changed. Every enforced network cell had a working host network behind it,
 and no enforced cell was actually inconclusive.
+
+The memory and CPU rules came in a later review round. The macOS run was repeated under
+them and no cell changed. The Windows and x86-64 Linux runs have not been repeated under
+them.
 
 With no sandbox, every "must be denied" check fails because the operation succeeds, on
 both Windows and Linux. The recorded runs are in the pull request for #571.
@@ -257,7 +276,9 @@ of the few `/etc` files libc's resolver opens. It then installs a seccomp filter
 fails `socket` for any family but `AF_UNIX`, `io_uring_setup`, `fork`, `vfork` and
 `clone` without `CLONE_THREAD` with `EPERM`, and `clone3` with `ENOSYS` so that libc
 falls back to an inspectable `clone`. Threads keep working and new processes do not.
-The code is in `spikes/sidecar-sandbox/src/linux.rs`.
+The ruleset and the filter are `apply_landlock` and `apply_seccomp` in
+`spikes/sidecar-sandbox/src/bin/sandbox-launch.rs`. The host side, which creates the
+cgroup and starts the launcher or bubblewrap, is `spikes/sidecar-sandbox/src/linux.rs`.
 
 **macOS (verified on macOS 27.0 arm64).** The `seatbelt` backend starts the same launcher. The
 launcher sets `RLIMIT_DATA` and `RLIMIT_AS` to the memory limit and `RLIMIT_CPU` to a
@@ -402,10 +423,10 @@ Considered and not chosen:
   checked.
 - **Landlock TCP rules** (ABI 4, kernel 6.7 and later) could not be exercised. Docker
   Desktop's WSL2 kernel has ABI 3.
-- **Architectures.** Only x86-64 was run. The spike compiles for arm64 Linux. There,
-  the seccomp filter leaves out `fork` and `vfork`, which arm64 does not have, and it has
-  not been run. That is what Docker on an Apple-silicon Mac would run. Windows on Arm
-  was not run.
+- **Architectures.** Linux and Windows were run on x86-64 only, and macOS on arm64
+  only. The spike compiles for arm64 Linux. There, the seccomp filter leaves out `fork`
+  and `vfork`, which arm64 does not have, and it has not been run. That is what Docker
+  on an Apple-silicon Mac would run. Windows on Arm was not run.
 - **Unix sockets.** The seccomp filter here still allows `AF_UNIX`, and the launcher's
   Landlock ruleset (ABI 5) does not handle ABI 9 `RESOLVE_UNIX`, whatever the kernel
   supports. A sidecar may therefore reach host sockets such as the D-Bus session bus.

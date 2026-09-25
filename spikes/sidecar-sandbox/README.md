@@ -20,8 +20,8 @@ A probe sidecar (`src/bin/probe.rs`) speaks JSON-RPC over stdin/stdout. The host
 | 2 | Write inside the scratch directory; write outside it | allowed; denied |
 | 3 | TCP to the host's loopback, TCP to `1.1.1.1:443`, resolve `example.com` | denied |
 | 4 | Start a child process | denied |
-| 5 | Allocate 512 MiB against a 128 MiB limit | refused or stopped, and the host survives |
-| 6 | Burn two threads for 3 s against a 0.25-CPU limit | throttled or stopped |
+| 5 | Allocate 512 MiB against a 128 MiB limit | refused or stopped by the limit, and the host survives |
+| 6 | Burn two threads for 3 s against a 0.25-CPU limit | throttled or stopped by the limit |
 | 7 | 50 JSON-RPC round trips | work |
 
 A "must be denied" check passes only in this case:
@@ -33,6 +33,14 @@ A "must be denied" check passes only in this case:
 
 If the host cannot do it either (no network or no DNS, for instance), the check fails as
 `INCONCLUSIVE`, never passes.
+
+The memory and CPU checks follow the same idea:
+
+- their positive control is a probe with no sandbox running the same workload, which
+  must allocate the 512 MiB or use more than 0.375 CPUs;
+- a stopped sidecar counts only with the signal the limit sends (`Stop` in
+  `src/lib.rs`): `SIGKILL` for memory, `SIGXCPU` or `SIGKILL` for CPU. A crash never
+  counts.
 
 | OS | Backends (`SPIKE_BACKEND`) | Recommended or candidate |
 |---|---|---|
@@ -159,7 +167,8 @@ test result: ok. 11 passed; 0 failed; ...
 - `Ok(...)` means the operation worked.
 - `Refused(...)` means the probe reported that it failed, with the error kind and OS code.
 - `Stopped(...)` means the sidecar was killed or exited.
-- `Garbled(...)` means it wrote something that was not a reply, such as a panic.
+- `Garbled(...)` means it wrote something that was not a reply, such as a panic, or
+  something that could not be read.
 - `INCONCLUSIVE` means the host itself could not do the operation, so the result says
   nothing about the sandbox.
 
