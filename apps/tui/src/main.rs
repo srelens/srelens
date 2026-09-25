@@ -9,6 +9,7 @@ use crossterm::{
     cursor::{MoveTo, Show},
     event::{
         DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
     style::ResetColor,
@@ -19,6 +20,35 @@ use crossterm::{
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
+
+/// Whether the enhanced keyboard protocol is on, so every exit path (normal,
+/// the `$EDITOR` suspend, a panic) turns it off exactly when it turned on.
+static KEY_ENHANCEMENT_ON: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Ask the terminal to report modified keys distinctly (kitty's protocol, as
+/// crossterm's disambiguate flag). Without it Ctrl+Enter arrives as plain
+/// Enter and the Assistant cannot tell a line break from a send. Only the
+/// disambiguate flag: no release or repeat events, so every other binding
+/// sees the same presses as before. Terminals without it are left alone.
+fn push_key_enhancement(out: &mut impl std::io::Write) {
+    if matches!(crossterm::terminal::supports_keyboard_enhancement(), Ok(true))
+        && execute!(
+            out,
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+        )
+        .is_ok()
+    {
+        KEY_ENHANCEMENT_ON.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Undo [`push_key_enhancement`], if it took effect.
+fn pop_key_enhancement(out: &mut impl std::io::Write) {
+    if KEY_ENHANCEMENT_ON.swap(false, std::sync::atomic::Ordering::Relaxed) {
+        let _ = execute!(out, PopKeyboardEnhancementFlags);
+    }
+}
 
 mod agent;
 mod ai_config;
@@ -153,6 +183,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Install panic hook to restore terminal on panic
     let default_panic = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
+        pop_key_enhancement(&mut stdout());
         let _ = disable_raw_mode();
         let _ = execute!(stdout(), LeaveAlternateScreen, DisableMouseCapture);
         default_panic(panic_info);
@@ -162,6 +193,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     enable_raw_mode()?;
     let mut stdout = stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture, EnableBracketedPaste)?;
+    push_key_enhancement(&mut stdout);
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -470,6 +502,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
         // Handle external tool suspend actions ($EDITOR, Pod shell, etc.)
+        // Refuse an edit with nothing to edit before leaving the screen, so a
+        // failed fetch reads as its reason, not a flash and "No YAML documents".
+        if matches!(app.requires_terminal_suspend, Some(SuspendAction::EditYaml))
+            && app.refuse_edit_without_manifest()
+        {
+            app.requires_terminal_suspend = None;
+        }
         if let Some(action) = app.requires_terminal_suspend.take() {
             // 1. Pause background event listener and wait for it to release stdin
             events.pause();
@@ -477,6 +516,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             while events.try_recv().is_ok() {}
 
             // Temporarily restore terminal for external interactive session on primary screen
+            pop_key_enhancement(terminal.backend_mut());
             disable_raw_mode()?;
             execute!(
                 terminal.backend_mut(),
@@ -641,6 +681,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 EnableMouseCapture,
                 EnableBracketedPaste
             )?;
+            push_key_enhancement(terminal.backend_mut());
             terminal.hide_cursor()?;
             terminal.clear()?;
             let _ = terminal.flush();
@@ -657,6 +698,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Clean exit
+    pop_key_enhancement(terminal.backend_mut());
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture, DisableBracketedPaste)?;
     terminal.show_cursor()?;

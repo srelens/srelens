@@ -1834,7 +1834,7 @@ mod tests {
 
         // 1. Test paste handling into Assistant input
         app.handle_paste("paste line 1\npaste line 2".to_string());
-        assert_eq!(app.assistant_state.input, "paste line 1 paste line 2");
+        assert_eq!(app.assistant_state.input, "paste line 1\npaste line 2");
 
         // 2. Test mouse selection and copy with 'c'
         *app.assistant_state.plain_lines.borrow_mut() =
@@ -5011,8 +5011,11 @@ mod tests {
 
         app.active_view = ActiveView::Assistant;
 
-        // Initially caveman mode is off
-        assert_eq!(app.assistant_state.caveman_level, None);
+        // Initially caveman mode is ultra: the default until the user chooses
+        assert_eq!(
+            app.assistant_state.caveman_level,
+            Some(srelens_tui::ai_skills::CavemanLevel::Ultra)
+        );
 
         // 1. Enter `/caveman ultra`
         app.assistant_state.input = "/caveman ultra".to_string();

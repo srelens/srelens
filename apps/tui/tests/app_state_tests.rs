@@ -1839,10 +1839,12 @@ async fn assistant_editing_keys_shape_the_input_buffer() {
     app.handle_key_event(alt('u')).await;
     assert_eq!(app.assistant_state.input, "");
 
-    // Ctrl+v appends the clipboard when there is one; either way the buffer
-    // stays a single line.
+    // Ctrl+v inserts the clipboard when there is one. The composer is
+    // multi-line, so its lines are kept; normalized, there is never a `\r`.
+    // (The system clipboard's content is the machine's, so only that is
+    // asserted here; line handling is tested with handle_paste below.)
     app.handle_key_event(common::ctrl('v')).await;
-    assert!(!app.assistant_state.input.contains('\n'));
+    assert!(!app.assistant_state.input.contains('\r'));
     app.assistant_state.input.clear();
 
     // 'c' with no assistant answer at all is plain typing.
@@ -2518,8 +2520,11 @@ async fn pasted_text_lands_in_the_active_input() {
 
     app.input_mode = InputMode::Normal;
     app.active_view = ActiveView::Assistant;
-    app.handle_paste("multi\nline".into());
-    assert_eq!(app.assistant_state.input, "multi line");
+    app.handle_paste("multi\r\nline".into());
+    assert_eq!(
+        app.assistant_state.input, "multi\nline",
+        "the Assistant composer is multi-line: a paste keeps its lines"
+    );
 
     let mut settings = srelens_tui::views::settings_view::SettingsViewState::new();
     settings.is_editing = true;

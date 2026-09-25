@@ -6,8 +6,8 @@ use ratatui::{
     Frame,
 };
 use srelens_kube::changed::{
-    AppDeploymentChange, ChangedTriageReport, FailureCategory, IncidentStatus, InfraChangeItem,
-    PodIncidentDetail, RolloutStatus,
+    AppDeploymentChange, ChangeKind, ChangedTriageReport, FailureCategory, IncidentStatus,
+    InfraChangeItem, PodIncidentDetail, RolloutStatus,
 };
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -86,6 +86,46 @@ pub fn group_pod_symptoms(symptoms: &[PodIncidentDetail]) -> Vec<SymptomGroup> {
         }
     }
     groups
+}
+
+/// The dim marker after a workload's name saying why it is listed, when it
+/// is not a rollout. A word, so colour is not the only signal.
+pub fn change_tag(kind: ChangeKind) -> Option<&'static str> {
+    match kind {
+        ChangeKind::Rollout => None,
+        ChangeKind::Scaled => Some(" (scaled)"),
+        ChangeKind::FailingOnly => Some(" (unchanged)"),
+    }
+}
+
+/// When the row's change happened. Older reports carry no `changed_age`;
+/// fall back to the rollout age they did carry.
+fn row_age(d: &AppDeploymentChange) -> &str {
+    if d.changed_age.is_empty() {
+        &d.deployed_age
+    } else {
+        &d.changed_age
+    }
+}
+
+/// A column exactly as wide as its longest value, and never narrower than
+/// its header, so no value is cut ("external-secrets" in a 14-wide column
+/// read "external-secre"). The flexible ROOT CAUSE / MESSAGE column takes
+/// what is left.
+fn column_width(header: &str, values: impl Iterator<Item = usize>) -> u16 {
+    values
+        .max()
+        .unwrap_or(0)
+        .max(header.chars().count())
+        .min(u16::MAX as usize) as u16
+}
+
+/// Push one blank line unless the card already ends with one, so sections
+/// are spaced once whichever of them are present.
+fn push_gap(lines: &mut Vec<Line<'_>>) {
+    if lines.last().is_some_and(|l| l.width() > 0) {
+        lines.push(Line::from(""));
+    }
 }
 
 pub const WINDOWS: &[(&str, Duration)] = &[
@@ -185,6 +225,9 @@ pub struct ChangedViewState {
     /// Also list workloads that did not change in the window but are failing
     /// in it (`u`). Off by default: the window means "changed".
     pub include_failing: bool,
+    /// Also list Deployments whose only change is a replica count (`S`).
+    /// Off by default: an autoscaled cluster scales something every hour.
+    pub include_scaled: bool,
 }
 
 impl ChangedViewState {
@@ -202,6 +245,7 @@ impl ChangedViewState {
             window_idx: 2, // Default to 1h
             incident_filter: IncidentFilter::All,
             include_failing: false,
+            include_scaled: false,
         }
     }
 
@@ -264,6 +308,22 @@ impl ChangedViewState {
     pub fn cycle_filter(&mut self) {
         self.incident_filter = self.incident_filter.next();
         self.selected_idx = 0;
+    }
+
+    pub fn toggle_include_scaled(&mut self) {
+        self.include_scaled = !self.include_scaled;
+        self.selected_idx = 0;
+        self.is_loading = true;
+    }
+
+    /// The banner's scope label: what the list holds besides rollouts.
+    pub fn scope_label(&self) -> &'static str {
+        match (self.include_scaled, self.include_failing) {
+            (false, false) => "[CHANGED]",
+            (true, false) => "[CHANGED + SCALED]",
+            (false, true) => "[CHANGED + FAILING]",
+            (true, true) => "[CHANGED + SCALED + FAILING]",
+        }
     }
 
     pub fn toggle_include_failing(&mut self) {
@@ -633,11 +693,7 @@ fn summary_banner(state: &ChangedViewState) -> (Block<'static>, Line<'static>, L
         Span::raw("  │  "),
         Span::styled("Scope: ", Theme::header_label()),
         Span::styled(
-            if state.include_failing {
-                "[CHANGED + FAILING]"
-            } else {
-                "[CHANGED]"
-            },
+            state.scope_label(),
             Style::default()
                 .fg(Theme::accent())
                 .add_modifier(Modifier::BOLD),
@@ -706,10 +762,11 @@ fn render_deployments_table(f: &mut Frame, area: Rect, state: &ChangedViewState)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(Theme::border()))
         .title(Span::styled(
-            if state.include_failing {
-                " Workloads Changed or Failing in Window "
-            } else {
-                " Workloads Changed in Window "
+            match (state.include_scaled, state.include_failing) {
+                (false, false) => " Workloads Changed in Window ",
+                (true, false) => " Workloads Changed or Scaled in Window ",
+                (false, true) => " Workloads Changed or Failing in Window ",
+                (true, true) => " Workloads Changed, Scaled or Failing in Window ",
             },
             Theme::table_header(),
         ));
@@ -726,16 +783,26 @@ fn render_deployments_table(f: &mut Frame, area: Rect, state: &ChangedViewState)
                 "No workloads in the window match the {} filter. Press f to cycle it back to ALL.",
                 state.incident_filter.label()
             )
-        } else if state.include_failing {
-            format!(
-                "No workloads changed or failing within the last {}. Use [ or ] to broaden the time window.",
-                state.current_window_label()
-            )
         } else {
-            format!(
-                "No workloads changed within the last {}. Use [ or ] to broaden the time window, or u to include workloads failing without a change.",
+            let mut msg = format!(
+                "No workloads changed{}{} within the last {}. Use [ or ] to broaden the time window",
+                if state.include_scaled { ", scaled" } else { "" },
+                if state.include_failing { " or failing" } else { "" },
                 state.current_window_label()
-            )
+            );
+            let mut more = Vec::new();
+            if !state.include_scaled {
+                more.push("S to include scaled workloads");
+            }
+            if !state.include_failing {
+                more.push("u to include workloads failing without a change");
+            }
+            if !more.is_empty() {
+                msg.push_str(", or ");
+                msg.push_str(&more.join(", or "));
+            }
+            msg.push('.');
+            msg
         };
         let p = Paragraph::new(msg)
             .style(Style::default().fg(Theme::dim()))
@@ -752,7 +819,7 @@ fn render_deployments_table(f: &mut Frame, area: Rect, state: &ChangedViewState)
         Cell::from(Span::styled("REVISION / GITOPS", Theme::table_header())),
         Cell::from(Span::styled("READY", Theme::table_header())),
         Cell::from(Span::styled("ROOT CAUSE / DETAIL", Theme::table_header())),
-        Cell::from(Span::styled("AGE", Theme::table_header())),
+        Cell::from(Span::styled("CHANGED", Theme::table_header())),
     ];
     let header = Row::new(header_cells).height(1).bottom_margin(0);
 
@@ -839,11 +906,8 @@ fn render_deployments_table(f: &mut Frame, area: Rect, state: &ChangedViewState)
                     .fg(Theme::fg())
                     .add_modifier(Modifier::BOLD),
             )];
-            if d.unchanged_in_window {
-                name_spans.push(Span::styled(
-                    " (unchanged)",
-                    Style::default().fg(Theme::dim()),
-                ));
+            if let Some(tag) = change_tag(d.change_kind) {
+                name_spans.push(Span::styled(tag, Style::default().fg(Theme::dim())));
             }
             let name_cell = Cell::from(Line::from(name_spans));
             let ns_cell = Cell::from(Span::styled(
@@ -883,10 +947,7 @@ fn render_deployments_table(f: &mut Frame, area: Rect, state: &ChangedViewState)
             let detail_cell =
                 Cell::from(Span::styled(sanitize_span_text(&detail_text), detail_style));
 
-            let age_cell = Cell::from(Span::styled(
-                &d.deployed_age,
-                Style::default().fg(Theme::dim()),
-            ));
+            let age_cell = Cell::from(Span::styled(row_age(d), Style::default().fg(Theme::dim())));
 
             let row = Row::new(vec![
                 status_cell,
@@ -908,24 +969,22 @@ fn render_deployments_table(f: &mut Frame, area: Rect, state: &ChangedViewState)
 
     // Wide enough for the longest name and its "(sts)"/"(unchanged)"
     // markers, within reason; the ROOT CAUSE column takes the rest.
-    let workload_width = deps
-        .iter()
-        .map(|d| {
-            let kind_tag = match d.kind.as_str() {
-                "StatefulSet" | "CronJob" => 5,
-                "Job" => 6,
-                _ => 0,
-            };
-            let unchanged_tag = if d.unchanged_in_window { 12 } else { 0 };
-            d.app_name.chars().count() + kind_tag + unchanged_tag
-        })
-        .max()
-        .unwrap_or(0)
-        .clamp(22, 44) as u16;
+    let workload_width = deps.iter().map(|d| {
+        let kind_tag = match d.kind.as_str() {
+            "StatefulSet" | "CronJob" => 5,
+            "Job" => 6,
+            _ => 0,
+        };
+        let change = change_tag(d.change_kind).map_or(0, |t| t.chars().count());
+        d.app_name.chars().count() + kind_tag + change
+    });
     let widths = [
         Constraint::Length(12),
-        Constraint::Length(workload_width),
-        Constraint::Length(14),
+        Constraint::Length(column_width("WORKLOAD", workload_width)),
+        Constraint::Length(column_width(
+            "NAMESPACE",
+            deps.iter().map(|d| d.namespace.chars().count()),
+        )),
         Constraint::Length(16),
         Constraint::Length(9),
         Constraint::Min(30),
@@ -999,16 +1058,6 @@ fn render_deployment_diagnostic_card(f: &mut Frame, area: Rect, state: &ChangedV
         ),
     ]));
 
-    if d.unchanged_in_window {
-        lines.push(Line::from(Span::styled(
-            format!(
-                "Not changed in the last {}; shown because it is failing now (u to hide).",
-                state.current_window_label()
-            ),
-            Style::default().fg(Theme::dim()),
-        )));
-    }
-
     // Line 1b: ArgoCD Rollout in Window (if detected)
     if let Some(ref argo_msg) = d.argo_rollout_in_window {
         lines.push(Line::from(vec![
@@ -1066,6 +1115,29 @@ fn render_deployment_diagnostic_card(f: &mut Frame, area: Rect, state: &ChangedV
         }
     }
 
+    // Why a non-rollout row is listed, with the rollout age for contrast.
+    match d.change_kind {
+        ChangeKind::Rollout => {}
+        ChangeKind::Scaled => lines.push(Line::from(Span::styled(
+            format!(
+                "{} {} ago; last rollout {} ago (S to hide).",
+                d.change_detail.as_deref().unwrap_or("Scaled"),
+                row_age(d),
+                d.deployed_age
+            ),
+            Style::default().fg(Theme::dim()),
+        ))),
+        ChangeKind::FailingOnly => lines.push(Line::from(Span::styled(
+            format!(
+                "Not changed in the last {}; shown because it is failing now (u to hide).",
+                state.current_window_label()
+            ),
+            Style::default().fg(Theme::dim()),
+        ))),
+    }
+
+    push_gap(&mut lines);
+
     // Line 3: Root Cause & Failure Detail
     let cat_style = match d.failure_category {
         FailureCategory::Compute | FailureCategory::Storage | FailureCategory::Network => {
@@ -1088,6 +1160,8 @@ fn render_deployment_diagnostic_card(f: &mut Frame, area: Rect, state: &ChangedV
                 .add_modifier(Modifier::BOLD),
         ),
     ]));
+
+    push_gap(&mut lines);
 
     // Symptoms, grouped: one line per distinct failure, not one per pod.
     // The full logs are one key away (`l`), so the card carries none.
@@ -1119,7 +1193,6 @@ fn render_deployment_diagnostic_card(f: &mut Frame, area: Rect, state: &ChangedV
                 Style::default().fg(Theme::dim()),
             )));
         }
-        lines.push(Line::from(""));
     } else if !d.primary_symptoms.is_empty() {
         lines.push(Line::from(vec![
             Span::styled(
@@ -1133,8 +1206,8 @@ fn render_deployment_diagnostic_card(f: &mut Frame, area: Rect, state: &ChangedV
                 Style::default().fg(Theme::fg()),
             ),
         ]));
-        lines.push(Line::from(""));
     }
+    push_gap(&mut lines);
 
     // Quick AI RCA (on demand, `s`)
     if let Some(rca) = state.rca_for(d) {
@@ -1157,6 +1230,7 @@ fn render_deployment_diagnostic_card(f: &mut Frame, area: Rect, state: &ChangedV
                 .fg(Theme::cyan())
                 .add_modifier(Modifier::BOLD),
         )]));
+        push_gap(&mut lines);
         match &rca.status {
             QuickRcaStatus::Loading => lines.push(Line::from(Span::styled(
                 "   ⚡ Analyzing termination state, events, and error logs...",
@@ -1190,7 +1264,7 @@ fn render_deployment_diagnostic_card(f: &mut Frame, area: Rect, state: &ChangedV
                     .add_modifier(Modifier::BOLD),
             ))),
         }
-        lines.push(Line::from(""));
+        push_gap(&mut lines);
     }
 
     // Actions Hint
@@ -1302,7 +1376,10 @@ fn render_infra_tab(f: &mut Frame, area: Rect, state: &ChangedViewState) {
     let widths = [
         Constraint::Length(8),
         Constraint::Length(14),
-        Constraint::Length(14),
+        Constraint::Length(column_width(
+            "NAMESPACE",
+            infra.iter().map(|i| i.namespace.chars().count()),
+        )),
         Constraint::Length(22),
         Constraint::Length(16),
         Constraint::Length(6),
@@ -1346,6 +1423,14 @@ fn render_footer(f: &mut Frame, area: Rect, state: &ChangedViewState, card_visib
             "Hide unchanged".into()
         } else {
             "Include failing".into()
+        },
+    ));
+    keys.push((
+        "[S]".into(),
+        if state.include_scaled {
+            "Hide scaled".into()
+        } else {
+            "Include scaled".into()
         },
     ));
     keys.push(("[Tab]".into(), "Toggle Infra".into()));

@@ -96,7 +96,9 @@ fn sample_report() -> ChangedTriageReport {
                 argo_rollout_in_window: Some("rev 7b89abc synced 12m ago".to_string()),
                 error_log_pod: Some("checkout-api-7b89-abcd".to_string()),
                 error_log_container: Some("api".to_string()),
-                unchanged_in_window: false,
+                change_kind: srelens_kube::changed::ChangeKind::Rollout,
+                changed_age: String::new(),
+                change_detail: None,
                 top_events: vec![EventSummary {
                     name: "checkout-api-7b89-abcd.ev1".to_string(),
                     namespace: "prod".to_string(),
@@ -150,7 +152,9 @@ fn sample_report() -> ChangedTriageReport {
                 argo_rollout_in_window: None,
                 error_log_pod: None,
                 error_log_container: None,
-                unchanged_in_window: false,
+                change_kind: srelens_kube::changed::ChangeKind::Rollout,
+                changed_age: String::new(),
+                change_detail: None,
                 top_events: vec![],
             },
             AppDeploymentChange {
@@ -194,7 +198,9 @@ fn sample_report() -> ChangedTriageReport {
                 argo_rollout_in_window: None,
                 error_log_pod: None,
                 error_log_container: None,
-                unchanged_in_window: false,
+                change_kind: srelens_kube::changed::ChangeKind::Rollout,
+                changed_age: String::new(),
+                change_detail: None,
                 top_events: vec![],
             },
         ],
@@ -223,6 +229,7 @@ fn sample_report() -> ChangedTriageReport {
             },
         ],
         includes_failing: false,
+        includes_scaled: false,
     }
 }
 
@@ -595,7 +602,7 @@ fn an_unchanged_row_says_why_it_is_shown() {
     let _settings = common::env::isolate_settings();
     let mut report = sample_report();
     report.includes_failing = true;
-    report.deployments[0].unchanged_in_window = true;
+    report.deployments[0].change_kind = srelens_kube::changed::ChangeKind::FailingOnly;
     let mut state = ChangedViewState::new();
     state.include_failing = true;
     state.set_report(report);
@@ -625,7 +632,7 @@ fn footer_leaves_the_cards_keys_to_the_card() {
     let footer = footer_line(200, 44, &state);
     assert_eq!(
         footer,
-        "[[/]] Window (1h)  [f] Filter  [u] Include failing  [Tab] Toggle Infra  [/] Search"
+        "[[/]] Window (1h)  [f] Filter  [u] Include failing  [S] Include scaled  [Tab] Toggle Infra  [/] Search"
     );
 
     // Too short for a card: its keys move to the footer.
@@ -647,8 +654,15 @@ fn an_empty_list_says_why_it_is_empty() {
     let mut state = ChangedViewState::new();
     state.set_report(report.clone());
     let strict = render_card(&state);
-    assert!(strict.contains("No workloads changed within the last 1h."));
-    assert!(strict.contains("or u to include workloads failing without a change"));
+    // The message wraps; judge it on one line.
+    let strict_flat = strict
+        .replace('│', " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(strict_flat.contains("No workloads changed within the last 1h."), "{strict_flat}");
+    assert!(strict_flat.contains("S to include scaled workloads"), "{strict_flat}");
+    assert!(strict_flat.contains("u to include workloads failing without a change"));
 
     state.include_failing = true;
     let wide = render_card(&state);
@@ -664,4 +678,113 @@ fn an_empty_list_says_why_it_is_empty() {
     let filtered = render_card(&state);
     assert!(filtered.contains("No workloads in the window match the OOM filter."));
     assert!(!filtered.contains("No workloads changed"));
+}
+
+#[test]
+fn a_scaled_row_shows_when_it_scaled_and_says_so() {
+    let _settings = common::env::isolate_settings();
+    use srelens_kube::changed::ChangeKind;
+    let mut report = sample_report();
+    report.includes_scaled = true;
+    let d = &mut report.deployments[0];
+    d.change_kind = ChangeKind::Scaled;
+    d.changed_age = "5m".to_string();
+    d.deployed_age = "66d".to_string();
+    d.change_detail = Some("Scaled 3→4".to_string());
+    let mut state = ChangedViewState::new();
+    state.include_scaled = true;
+    state.set_report(report);
+
+    let rendered = render_card(&state);
+
+    assert!(rendered.contains("checkout-api (scaled)"), "{rendered}");
+    let row = rendered.lines().find(|l| l.contains("checkout-api (scaled)")).unwrap();
+    assert!(row.trim_end().trim_end_matches('│').trim_end().ends_with("5m"), "CHANGED is the scale time: {row}");
+    assert!(rendered.contains("CHANGED"), "column header");
+    assert!(rendered.contains("Scaled 3→4 5m ago; last rollout 66d ago (S to hide)."));
+    assert!(rendered.contains("Scope: [CHANGED + SCALED]"));
+    assert!(rendered.contains("[S] Hide scaled"));
+}
+
+#[test]
+fn scope_label_names_every_combination() {
+    let mut state = ChangedViewState::new();
+    assert_eq!(state.scope_label(), "[CHANGED]");
+    state.include_scaled = true;
+    assert_eq!(state.scope_label(), "[CHANGED + SCALED]");
+    state.include_failing = true;
+    assert_eq!(state.scope_label(), "[CHANGED + SCALED + FAILING]");
+    state.include_scaled = false;
+    assert_eq!(state.scope_label(), "[CHANGED + FAILING]");
+}
+
+/// The card's rows, from its "Workload:" line to "Actions:", border-trimmed.
+fn card_rows(rendered: &str) -> Vec<String> {
+    let rows: Vec<String> = rendered
+        .lines()
+        .skip_while(|l| !l.contains("Workload: "))
+        .map(|l| l.trim_matches(|c| c == '│' || c == ' ').to_string())
+        .collect();
+    let end = rows.iter().position(|l| l.starts_with("Actions:")).unwrap();
+    rows[..=end].to_vec()
+}
+
+#[test]
+fn card_sections_are_spaced_by_exactly_one_blank_line() {
+    let _settings = common::env::isolate_settings();
+    // A healthy row with an RCA: no symptoms block between the two.
+    let mut report = sample_report();
+    report.deployments.swap(0, 2); // frontend (healthy, no symptoms) first
+    let mut state = ChangedViewState::new();
+    state.context = "prod-eu".to_string();
+    state.set_report(report);
+    let d = state.selected_deployment().unwrap().clone();
+    let key = state.rca_key(&d);
+    state.ai_summaries.insert(
+        key,
+        QuickRca {
+            pod_name: None,
+            provider: "Anthropic (Claude)".to_string(),
+            status: QuickRcaStatus::Ready {
+                root_cause: "Nothing is failing.".to_string(),
+                action_item: "No action needed.".to_string(),
+            },
+            updated_at: std::time::Instant::now(),
+        },
+    );
+
+    let rows = card_rows(&render_card(&state));
+
+    let at = |needle: &str| rows.iter().position(|r| r.contains(needle)).unwrap_or_else(|| panic!("{needle}: {rows:#?}"));
+    let root = at("Root Cause: [OK]");
+    let header = at("Quick AI RCA (");
+    let first_bullet = at("• Root Cause: Nothing is failing.");
+    let actions = at("Actions:");
+    // Workload block, blank, Root Cause, blank, RCA header, blank, RCA, blank, Actions.
+    assert!(rows[root - 1].is_empty() && !rows[root - 2].is_empty(), "{rows:#?}");
+    assert_eq!(header, root + 2, "one blank between Root Cause and the RCA header: {rows:#?}");
+    assert_eq!(first_bullet, header + 2, "one blank between the header and its body: {rows:#?}");
+    assert!(rows[actions - 1].is_empty() && !rows[actions - 2].is_empty(), "{rows:#?}");
+    // Never two blanks in a row.
+    assert!(rows.windows(2).all(|w| !(w[0].is_empty() && w[1].is_empty())), "{rows:#?}");
+}
+
+#[test]
+fn table_columns_fit_their_longest_namespace_and_workload() {
+    let _settings = common::env::isolate_settings();
+    let mut report = sample_report();
+    // Longer than the old fixed 14-column NAMESPACE and 44-column WORKLOAD.
+    report.deployments[0].namespace = "external-secrets-operator".to_string();
+    report.deployments[1].app_name = "wiz-package-wiz-admission-controller-manager".to_string();
+    report.deployments[1].kind = "CronJob".to_string();
+    let mut state = ChangedViewState::new();
+    state.set_report(report);
+
+    let rendered = render_lines(220, 44, |f| render_changed_view(f, f.area(), &state)).join("\n");
+
+    assert!(rendered.contains("external-secrets-operator"), "{rendered}");
+    assert!(
+        rendered.contains("wiz-package-wiz-admission-controller-manager (cj)"),
+        "{rendered}"
+    );
 }

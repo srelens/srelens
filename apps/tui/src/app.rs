@@ -162,6 +162,85 @@ pub fn delete_prev_word(s: &mut String) {
     }
 }
 
+/// One CRD table row from a listed object: its fields and metadata, the
+/// `name`/`namespace`/`age`/`createdAt` the table reads, and `apiVersion` and
+/// `kind`, as the watch path's rows carry. A list returns objects without
+/// their type (it is on the list), so without these a row could not say what
+/// it is.
+pub fn crd_row_value(
+    item: kube::core::DynamicObject,
+    api_version: &str,
+    kind: &str,
+) -> serde_json::Value {
+    let mut val = item.data;
+    if !val.is_object() {
+        val = serde_json::Value::Object(Default::default());
+    }
+    if let Some(obj) = val.as_object_mut() {
+        let (av, k) = match &item.types {
+            Some(t) => (t.api_version.clone(), t.kind.clone()),
+            None => (api_version.to_string(), kind.to_string()),
+        };
+        obj.insert("apiVersion".to_string(), serde_json::Value::String(av));
+        obj.insert("kind".to_string(), serde_json::Value::String(k));
+        if let Ok(meta_val) = serde_json::to_value(&item.metadata) {
+            obj.insert("metadata".to_string(), meta_val);
+        }
+        if let Some(n) = &item.metadata.name {
+            obj.insert("name".to_string(), serde_json::Value::String(n.clone()));
+        }
+        if let Some(ns_name) = &item.metadata.namespace {
+            obj.insert(
+                "namespace".to_string(),
+                serde_json::Value::String(ns_name.clone()),
+            );
+        }
+        if let Some(ts) = &item.metadata.creation_timestamp {
+            obj.insert(
+                "age".to_string(),
+                serde_json::Value::String(srelens_kube::humanize_age(Some(ts))),
+            );
+            obj.insert(
+                "createdAt".to_string(),
+                serde_json::Value::String(srelens_kube::creation_timestamp_iso(Some(ts))),
+            );
+        }
+    }
+    val
+}
+
+/// `\r\n` and lone `\r` as `\n`, for text entering a multi-line input.
+/// Why a live manifest could not be fetched: the object, its namespace when
+/// it has one, and each attempt's own error, one per line.
+pub fn manifest_fetch_error(
+    kind: &str,
+    name: &str,
+    namespace: Option<&str>,
+    failures: &[String],
+) -> String {
+    let mut msg = match namespace.filter(|ns| !ns.is_empty()) {
+        Some(ns) => format!("Unable to fetch live manifest for {kind}/{name} in namespace {ns}"),
+        None => format!("Unable to fetch live manifest for {kind}/{name}"),
+    };
+    if failures.is_empty() {
+        msg.push_str(": no lookup applied to this kind");
+    } else {
+        msg.push(':');
+        for f in failures {
+            let f = f.trim();
+            if !f.is_empty() {
+                msg.push_str("\n  ");
+                msg.push_str(f);
+            }
+        }
+    }
+    msg
+}
+
+pub fn normalize_line_breaks(text: &str) -> String {
+    text.replace("\r\n", "\n").replace('\r', "\n")
+}
+
 pub fn open_browser_url(url: &str) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
@@ -1265,7 +1344,20 @@ impl App {
         if let Ok(items) = serde_json::from_str::<Vec<serde_json::Value>>(json_str) {
             let crd_kind = title.strip_prefix("crd_instances:").unwrap_or(title);
             let ctx = self.active_context.clone();
-            let ns = self.active_namespace.clone();
+            // Cache under the scope `restart_active_watch` reads: a cluster-
+            // scoped CRD's list belongs to no namespace. Keyed by the active
+            // namespace instead, it was never found again, and a table shown
+            // after an apply sat on Loading.
+            let cluster_scoped = self
+                .crds
+                .iter()
+                .find(|c| c.kind == crd_kind || c.plural == crd_kind || c.crd_name == crd_kind)
+                .is_some_and(|c| !c.namespaced);
+            let ns = if cluster_scoped {
+                String::new()
+            } else {
+                self.active_namespace.clone()
+            };
             self.resource_cache.insert(
                 (ctx.clone(), ns.clone(), crd_kind.to_string()),
                 items.clone(),
@@ -1393,6 +1485,29 @@ impl App {
             ),
             Theme::status_error(),
         );
+    }
+
+    /// When the YAML view holds no manifest because the fetch failed, say
+    /// why and return true: the caller must not open `$EDITOR` on it.
+    pub fn refuse_edit_without_manifest(&mut self) -> bool {
+        let reason = match &self.active_view {
+            ActiveView::Yaml(yaml) => yaml.load_error.as_ref().map(|reason| {
+                format!(
+                    "Can't edit {}/{}: {}",
+                    yaml.resource_kind,
+                    yaml.resource_name,
+                    reason.replace('\n', " ")
+                )
+            }),
+            _ => None,
+        };
+        match reason {
+            Some(msg) => {
+                self.set_toast(msg, Theme::status_error());
+                true
+            }
+            None => false,
+        }
     }
 
     pub fn handle_yaml_error(&mut self, err: &str) {
@@ -2142,6 +2257,7 @@ impl App {
                         self.resource_cache
                             .get(&(ctx.clone(), ns.clone(), crd.plural.clone()))
                     });
+                let cache_missed = cached.is_none();
                 if let Some(cached) = cached {
                     table.set_items(cached.clone(), &self.filter_buffer);
                     table.is_loading = false;
@@ -2182,6 +2298,12 @@ impl App {
                     if let Some(pos) = self.active_watch_pool.iter().position(|c| c == &channel) {
                         let ch = self.active_watch_pool.remove(pos);
                         self.active_watch_pool.push(ch);
+                    }
+                    // A warm watch sends only changes, not the list. After an
+                    // apply cleared the cache, nothing would refill the table
+                    // until the next change: fetch it now.
+                    if cache_missed {
+                        self.fetch_crd_instances(crd.clone());
                     }
                 }
             }
@@ -4238,6 +4360,18 @@ impl App {
                         .unwrap_or_else(|| table.kind.to_string())
                 };
                 let table_kind = table.kind.clone();
+                // A CRD row knows its group and version. Pin them, so the
+                // object is fetched from that CRD and not from whichever
+                // CRD in discovery happens to share its kind name.
+                let crd_api_version = match &table.kind {
+                    ResourceKind::CustomResource(crd) if crd.group.is_empty() => {
+                        Some(crd.version.clone())
+                    }
+                    ResourceKind::CustomResource(crd) => {
+                        Some(format!("{}/{}", crd.group, crd.version))
+                    }
+                    _ => None,
+                };
 
                 if table.kind == ResourceKind::Events && table.reason_rail_focused {
                     let tallies = crate::views::reason_rail::tally_event_reasons(&table.raw_items);
@@ -4984,8 +5118,13 @@ impl App {
                                 }
                             }
                         } else if let Some(name) = sel_name.clone() {
-                            self.open_yaml_view(name, kind_str.clone(), sel_ns.clone())
-                                .await;
+                            self.open_yaml_view_in_group(
+                                name,
+                                kind_str.clone(),
+                                sel_ns.clone(),
+                                crd_api_version.clone(),
+                            )
+                            .await;
                         }
                     }
                     KeyCode::Char('d') => {
@@ -4999,15 +5138,25 @@ impl App {
                                 }
                             }
                         } else if let Some(name) = sel_name.clone() {
-                            self.open_describe_view(name, kind_str.clone(), sel_ns.clone())
-                                .await;
+                            self.open_describe_view_in_group(
+                                name,
+                                kind_str.clone(),
+                                sel_ns.clone(),
+                                crd_api_version.clone(),
+                            )
+                            .await;
                         }
                     }
                     KeyCode::Char('e') => {
                         // Edit YAML in $EDITOR
                         if let Some(name) = sel_name.clone() {
-                            self.open_yaml_view(name, kind_str.clone(), sel_ns.clone())
-                                .await;
+                            self.open_yaml_view_in_group(
+                                name,
+                                kind_str.clone(),
+                                sel_ns.clone(),
+                                crd_api_version.clone(),
+                            )
+                            .await;
                             self.requires_terminal_suspend = Some(SuspendAction::EditYaml);
                         }
                     }
@@ -5157,7 +5306,13 @@ impl App {
                             }
                         } else {
                             if let Some(name) = sel_name {
-                                self.open_describe_view(name, kind_str, sel_ns).await;
+                                self.open_describe_view_in_group(
+                                    name,
+                                    kind_str,
+                                    sel_ns,
+                                    crd_api_version,
+                                )
+                                .await;
                             }
                         }
                     }
@@ -5957,8 +6112,7 @@ impl App {
                             || key.modifiers.contains(KeyModifiers::SUPER) =>
                     {
                         if let Some(clip) = get_clipboard_text() {
-                            let cleaned = clip.replace("\r\n", " ").replace('\n', " ");
-                            ai.insert_str(&cleaned);
+                            ai.insert_str(&normalize_line_breaks(&clip));
                         }
                     }
                     KeyCode::Backspace => {
@@ -5973,6 +6127,17 @@ impl App {
                             && !key.modifiers.contains(KeyModifiers::SUPER) =>
                     {
                         ai.insert_char(c);
+                    }
+                    // A line break, not a send. Ctrl+Enter and Shift+Enter
+                    // reach us only on terminals that speak the enhanced
+                    // keyboard protocol (enabled in main.rs); Alt+Enter works
+                    // on the rest, where Option/Alt is sent as Meta.
+                    KeyCode::Enter
+                        if key.modifiers.intersects(
+                            KeyModifiers::CONTROL | KeyModifiers::SHIFT | KeyModifiers::ALT,
+                        ) =>
+                    {
+                        ai.insert_char('\n');
                     }
                     KeyCode::Enter => {
                         if ai.is_busy {
@@ -7230,6 +7395,10 @@ impl App {
                     changed.toggle_include_failing();
                     self.refresh_changed_triage();
                 }
+                KeyCode::Char('S') => {
+                    changed.toggle_include_scaled();
+                    self.refresh_changed_triage();
+                }
                 KeyCode::Char('g') | KeyCode::Home => {
                     changed.select_first();
                 }
@@ -8332,8 +8501,10 @@ impl App {
             return;
         }
         if let ActiveView::Assistant = &mut self.active_view {
-            let cleaned = text.replace("\r\n", " ").replace('\n', " ");
-            self.assistant_state.input.push_str(&cleaned);
+            // The Assistant input is multi-line: keep a pasted log's lines,
+            // and paste at the cursor rather than at the end.
+            self.assistant_state
+                .insert_str(&normalize_line_breaks(&text));
             return;
         }
         if let ActiveView::Settings(ref mut settings) = self.active_view {
@@ -9156,40 +9327,7 @@ impl App {
                     let items: Vec<serde_json::Value> = list
                         .items
                         .into_iter()
-                        .map(|item| {
-                            let mut val = item.data;
-                            if let Ok(meta_val) = serde_json::to_value(&item.metadata) {
-                                if let Some(obj) = val.as_object_mut() {
-                                    obj.insert("metadata".to_string(), meta_val.clone());
-                                    if let Some(n) = &item.metadata.name {
-                                        obj.insert(
-                                            "name".to_string(),
-                                            serde_json::Value::String(n.clone()),
-                                        );
-                                    }
-                                    if let Some(ns_name) = &item.metadata.namespace {
-                                        obj.insert(
-                                            "namespace".to_string(),
-                                            serde_json::Value::String(ns_name.clone()),
-                                        );
-                                    }
-                                    if let Some(ts) = &item.metadata.creation_timestamp {
-                                        let age = srelens_kube::humanize_age(Some(ts));
-                                        obj.insert(
-                                            "age".to_string(),
-                                            serde_json::Value::String(age),
-                                        );
-                                        obj.insert(
-                                            "createdAt".to_string(),
-                                            serde_json::Value::String(
-                                                srelens_kube::creation_timestamp_iso(Some(ts)),
-                                            ),
-                                        );
-                                    }
-                                }
-                            }
-                            val
-                        })
+                        .map(|item| crd_row_value(item, &ar.api_version, &crd.kind))
                         .collect();
 
                     let _ = event_tx.send(AppEvent::ActionResult {
@@ -9334,6 +9472,7 @@ impl App {
                 let window = changed_state.current_window();
                 let opts = srelens_kube::changed::TriageOptions {
                     include_failing: changed_state.include_failing,
+                    include_scaled: changed_state.include_scaled,
                     log_snippets: false,
                 };
                 let ctx = self.active_context.clone();
@@ -9946,6 +10085,21 @@ impl App {
         }
     }
 
+    /// `api_resource_for_api_version` guesses the plural from the kind
+    /// ("Prometheus" -> ?). When discovery knows this CRD, use its real
+    /// plural: the name-only path always did, and pinning must not regress
+    /// a CRD whose plural is not the regular one.
+    fn with_discovered_plural(&self, mut ar: kube::core::ApiResource) -> kube::core::ApiResource {
+        if let Some(crd) = self
+            .crds
+            .iter()
+            .find(|c| c.group == ar.group && c.kind.eq_ignore_ascii_case(&ar.kind))
+        {
+            ar.plural = crd.plural.clone();
+        }
+        ar
+    }
+
     pub async fn open_yaml_view(&mut self, name: String, kind: String, namespace: Option<String>) {
         self.open_yaml_view_in_group(name, kind, namespace, None)
             .await;
@@ -9969,7 +10123,8 @@ impl App {
         let kubeconfig_paths = self.kubeconfig_paths.clone();
         let pinned = api_version
             .as_deref()
-            .and_then(|v| srelens_kube::manifest::api_resource_for_api_version(v, &k));
+            .and_then(|v| srelens_kube::manifest::api_resource_for_api_version(v, &k))
+            .map(|ar| self.with_discovered_plural(ar));
         let crd_opt = if pinned.is_some() {
             None
         } else {
@@ -10025,9 +10180,16 @@ impl App {
         };
         let pinned_api_version = pinned.as_ref().map(|ar| ar.api_version.clone());
 
-        let yaml_text = tokio::task::spawn(async move {
+        let fetched = tokio::task::spawn(async move {
             let ns = ns_task;
-            if let Ok(client) = cache.get(&ctx).await {
+            // Why each attempt failed, so a failure can say what happened
+            // instead of "unable to fetch" (AGENTS.md: say what you know).
+            let mut failures: Vec<String> = Vec::new();
+            let client_res = cache.get(&ctx).await;
+            if let Err(ref e) = client_res {
+                failures.push(format!("connect to '{ctx}': {e}"));
+            }
+            if let Ok(client) = client_res {
                 if let Some(ar) = pinned.clone() {
                     let api: kube::Api<kube::core::DynamicObject> = match ns.as_deref() {
                         Some(ns) if !ns.is_empty() => {
@@ -10035,11 +10197,14 @@ impl App {
                         }
                         _ => kube::Api::all_with(client.clone(), &ar),
                     };
-                    if let Ok(mut obj) = api.get(&n).await {
-                        obj.metadata.managed_fields = None;
-                        if let Ok(y) = serde_yaml::to_string(&obj) {
-                            return y;
+                    match api.get(&n).await {
+                        Ok(mut obj) => {
+                            obj.metadata.managed_fields = None;
+                            if let Ok(y) = serde_yaml::to_string(&obj) {
+                                return Ok(y);
+                            }
                         }
+                        Err(e) => failures.push(format!("apiserver ({}): {e}", ar.api_version)),
                     }
                 }
 
@@ -10065,11 +10230,14 @@ impl App {
                     } else {
                         kube::Api::all_with(client.clone(), &ar)
                     };
-                    if let Ok(mut obj) = api.get(&n).await {
-                        obj.metadata.managed_fields = None;
-                        if let Ok(y) = serde_yaml::to_string(&obj) {
-                            return y;
+                    match api.get(&n).await {
+                        Ok(mut obj) => {
+                            obj.metadata.managed_fields = None;
+                            if let Ok(y) = serde_yaml::to_string(&obj) {
+                                return Ok(y);
+                            }
                         }
+                        Err(e) => failures.push(format!("apiserver ({}): {e}", ar.api_version)),
                     }
                 }
 
@@ -10088,11 +10256,14 @@ impl App {
                     } else {
                         kube::Api::all_with(client.clone(), &ar)
                     };
-                    if let Ok(mut obj) = api.get(&n).await {
-                        obj.metadata.managed_fields = None;
-                        if let Ok(y) = serde_yaml::to_string(&obj) {
-                            return y;
+                    match api.get(&n).await {
+                        Ok(mut obj) => {
+                            obj.metadata.managed_fields = None;
+                            if let Ok(y) = serde_yaml::to_string(&obj) {
+                                return Ok(y);
+                            }
                         }
+                        Err(e) => failures.push(format!("apiserver ({}): {e}", ar.api_version)),
                     }
                 }
 
@@ -10121,7 +10292,7 @@ impl App {
                         if let Ok(mut obj) = api.get(&n).await {
                             obj.metadata.managed_fields = None;
                             if let Ok(y) = serde_yaml::to_string(&obj) {
-                                return y;
+                                return Ok(y);
                             }
                         }
                     }
@@ -10137,7 +10308,7 @@ impl App {
                     if let Ok(mut obj) = api.get(&n).await {
                         obj.metadata.managed_fields = None;
                         if let Ok(y) = serde_yaml::to_string(&obj) {
-                            return y;
+                            return Ok(y);
                         }
                     }
                 }
@@ -10167,31 +10338,47 @@ impl App {
                 cmd.env("KUBECONFIG", joined);
             }
 
-            if let Ok(output) = cmd.output().await {
-                if output.status.success() {
+            match cmd.output().await {
+                Ok(output) if output.status.success() => {
                     let text = String::from_utf8_lossy(&output.stdout).to_string();
                     if !text.trim().is_empty() {
-                        return text;
+                        return Ok(text);
                     }
+                    failures.push("kubectl: returned an empty manifest".to_string());
                 }
+                Ok(output) => failures.push(format!(
+                    "kubectl: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                )),
+                Err(e) => failures.push(format!("kubectl: could not run: {e}")),
             }
 
-            if is_cluster_scoped || ns.is_none() {
-                format!("# Error: Unable to fetch live manifest for {}/{}\n", k, n)
+            let scope_ns = if is_cluster_scoped {
+                None
             } else {
-                format!(
-                    "# Error: Unable to fetch live manifest for {}/{} in namespace {}\n",
-                    k,
-                    n,
-                    ns.as_deref().unwrap_or("default")
-                )
-            }
+                ns.as_deref()
+            };
+            Err(manifest_fetch_error(&k, &n, scope_ns, &failures))
         })
         .await
-        .unwrap_or_default();
+        .unwrap_or_else(|e| Err(format!("Manifest fetch task failed: {e}")));
 
+        // A failed fetch is shown as what it is, and edit refuses to open on
+        // it: an editor on an error comment ended in "No YAML documents
+        // found", which named nothing that went wrong.
+        let (yaml_text, load_error) = match fetched {
+            Ok(text) => (text, None),
+            Err(reason) => (
+                reason
+                    .lines()
+                    .map(|l| format!("# {l}\n"))
+                    .collect::<String>(),
+                Some(reason),
+            ),
+        };
         let mut yaml_state = YamlViewState::new(name, kind, ns, yaml_text);
         yaml_state.pinned_api_version = pinned_api_version;
+        yaml_state.load_error = load_error;
         let old_view = std::mem::replace(&mut self.active_view, ActiveView::Yaml(yaml_state));
         self.nav_stack.push(old_view);
     }
@@ -10222,7 +10409,8 @@ impl App {
         let kubeconfig_paths = self.kubeconfig_paths.clone();
         let pinned = api_version
             .as_deref()
-            .and_then(|v| srelens_kube::manifest::api_resource_for_api_version(v, &k));
+            .and_then(|v| srelens_kube::manifest::api_resource_for_api_version(v, &k))
+            .map(|ar| self.with_discovered_plural(ar));
         let crd_opt = if pinned.is_some() {
             None
         } else {
@@ -10715,6 +10903,7 @@ impl App {
             // own tail, so a refresh makes no log calls.
             let opts = srelens_kube::changed::TriageOptions {
                 include_failing: changed.include_failing,
+                include_scaled: changed.include_scaled,
                 log_snippets: false,
             };
             (changed.current_window(), ns, opts)
@@ -10914,11 +11103,11 @@ impl App {
             // than show it under the new window's label, and fetch again.
             // The same holds for the `u` scope toggle.
             let wanted = changed.current_window().as_secs();
-            let wanted_scope = changed.include_failing;
+            let wanted_scope = (changed.include_failing, changed.include_scaled);
             match result {
                 Ok(report)
                     if report.window_seconds != wanted
-                        || report.includes_failing != wanted_scope =>
+                        || (report.includes_failing, report.includes_scaled) != wanted_scope =>
                 {
                     self.refresh_changed_triage();
                 }

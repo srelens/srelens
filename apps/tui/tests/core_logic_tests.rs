@@ -1155,8 +1155,12 @@ fn caveman_level_setting_round_trips_and_clears() {
     s.set_caveman_level(Some(CavemanLevel::WenyanFull));
     assert_eq!(s.caveman_level.as_deref(), Some("wenyan-full"));
     assert_eq!(s.get_caveman_level(), Some(CavemanLevel::WenyanFull));
+    // Off is stored as "off", so it is not mistaken for "never set" (ultra).
     s.set_caveman_level(None);
-    assert_eq!(s.caveman_level, None);
+    assert_eq!(s.caveman_level.as_deref(), Some("off"));
+    assert_eq!(s.get_caveman_level(), None);
+    s.caveman_level = None;
+    assert_eq!(s.get_caveman_level(), Some(CavemanLevel::Ultra), "unset is ultra");
     s.caveman_level = Some("garbage".into());
     assert_eq!(s.get_caveman_level(), None);
 }

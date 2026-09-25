@@ -1467,7 +1467,7 @@ fn the_assistant_title_names_the_provider_model_and_key_hints() {
         text.contains("Hello! I am your SRElens AI Assistant."),
         "{text}"
     );
-    assert!(text.contains(" Ask Assistant (Type '/' for SRE Playbooks, ↑/↓ History, <Ctrl+c> Copy, <Ctrl+s> Settings) "), "{text}");
+    assert!(text.contains(" Ask Assistant (Type '/' for SRE Playbooks, <Ctrl+Enter> New line, ↑/↓ History, <Ctrl+c> Copy, <Ctrl+s> Settings) "), "{text}");
 }
 
 #[test]

@@ -130,6 +130,29 @@ pub struct GitOpsReleaseInfo {
     pub sync_message: Option<String>,
 }
 
+/// Why a workload is in the report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum ChangeKind {
+    /// A new rollout (ReplicaSet) or another non-scaling event on the
+    /// workload in the window. The default report holds only these.
+    #[serde(rename = "rollout")]
+    Rollout,
+    /// Only its replica count changed (HPA or `kubectl scale`); reported
+    /// when [`TriageOptions::include_scaled`] is set.
+    #[serde(rename = "scaled")]
+    Scaled,
+    /// Nothing changed, but it is failing in the window; reported when
+    /// [`TriageOptions::include_failing`] is set.
+    #[serde(rename = "failing")]
+    FailingOnly,
+}
+
+impl Default for ChangeKind {
+    fn default() -> Self {
+        Self::Rollout
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum RolloutStatus {
     #[serde(rename = "complete")]
@@ -191,10 +214,17 @@ pub struct AppDeploymentChange {
     pub error_log_pod: Option<String>,
     #[serde(default, rename = "errorLogContainer")]
     pub error_log_container: Option<String>,
-    /// Nothing about this workload changed in the window; it is reported
-    /// only because it is failing in it (see [`TriageOptions`]).
-    #[serde(default, rename = "unchangedInWindow")]
-    pub unchanged_in_window: bool,
+    /// Why the workload is in the report.
+    #[serde(default, rename = "changeKind")]
+    pub change_kind: ChangeKind,
+    /// When that change happened: the rollout's age, or the latest scale's.
+    /// Not `deployed_age`, which is always the last rollout: a Deployment
+    /// scaled five minutes ago would otherwise read "66d".
+    #[serde(default, rename = "changedAge")]
+    pub changed_age: String,
+    /// What changed, when it is not a rollout, e.g. "Scaled 3→4".
+    #[serde(default, rename = "changeDetail")]
+    pub change_detail: Option<String>,
     #[serde(rename = "deployedAt")]
     pub deployed_at: Option<String>,
     #[serde(rename = "deployedAge")]
@@ -279,8 +309,12 @@ pub struct TriageSummary {
 pub struct TriageOptions {
     /// Also report workloads that did not change in the window but are
     /// failing in it (a Warning on a pod or the current ReplicaSet). They
-    /// are marked [`AppDeploymentChange::unchanged_in_window`].
+    /// are marked [`ChangeKind::FailingOnly`].
     pub include_failing: bool,
+    /// Also report Deployments whose only change in the window is a replica
+    /// count (HPA or `kubectl scale`), marked [`ChangeKind::Scaled`]. Off by
+    /// default: on an autoscaled cluster nearly everything scales hourly.
+    pub include_scaled: bool,
     /// Tail a five-line log snippet per failing workload. The TUI leaves
     /// this off (its card links to the full logs); MCP callers get it.
     pub log_snippets: bool,
@@ -301,6 +335,8 @@ pub struct ChangedTriageReport {
     /// can tell a stale answer from a current one.
     #[serde(default, rename = "includesFailing")]
     pub includes_failing: bool,
+    #[serde(default, rename = "includesScaled")]
+    pub includes_scaled: bool,
 }
 
 pub fn parse_duration(s: &str) -> Result<Duration, String> {
@@ -572,6 +608,30 @@ pub fn analyze_pod_failure(pod: &Pod, pod_events: &[&Event]) -> (FailureCategory
     }
 
     (FailureCategory::None, None)
+}
+
+/// "Scaled 3→4" from a Deployment `ScalingReplicaSet` message. Kubernetes
+/// writes "Scaled up replica set web-7f from 3 to 4" (newer) or "Scaled up
+/// replica set web-7f to 4" (older); anything else reads "Scaled".
+pub fn parse_scale_event(message: &str) -> String {
+    let words: Vec<&str> = message.split_whitespace().collect();
+    let num = |i: usize| {
+        words
+            .get(i)
+            .map(|w| w.trim_end_matches(|c: char| !c.is_ascii_digit()))
+            .filter(|w| !w.is_empty() && w.chars().all(|c| c.is_ascii_digit()))
+    };
+    if let Some(i) = words.iter().rposition(|w| *w == "to") {
+        if let Some(to) = num(i + 1) {
+            if i >= 2 && words[i - 2] == "from" {
+                if let Some(from) = num(i - 1) {
+                    return format!("Scaled {from}→{to}");
+                }
+            }
+            return format!("Scaled to {to}");
+        }
+    }
+    "Scaled".to_string()
 }
 
 /// Whether any of `events` is a Warning that last fired at or after `cutoff`.
@@ -851,7 +911,14 @@ fn evaluate_pod_failures(
             .cloned()
             .unwrap_or_default();
         let (cat, detail) = analyze_pod_failure(p, &pod_events);
-        if cat != FailureCategory::None && detected_failure_category == FailureCategory::None {
+        // Only a pod failing now explains the workload. A pod unschedulable
+        // forty minutes ago keeps its FailedScheduling event for about an
+        // hour after it was placed; read from a Running pod, that event
+        // gave a healthy 3/3 Deployment a [COMPUTE] root cause.
+        if is_pod_failing
+            && cat != FailureCategory::None
+            && detected_failure_category == FailureCategory::None
+        {
             detected_failure_category = cat;
             if let Some(ref d) = detail {
                 detected_failure_detail = d.clone();
@@ -1051,9 +1118,9 @@ pub fn evaluate_changed_triage(
         let current_rs = owned_rs.first().copied();
         let prev_rs = owned_rs.get(1).copied();
 
-        let mut in_window = false;
         let mut deployed_at = None;
         let mut deployed_age = "-".to_string();
+        let mut rolled_out = false;
 
         if let Some(rs) = current_rs {
             if let Some(ref ct) = rs.metadata.creation_timestamp {
@@ -1061,7 +1128,7 @@ pub fn evaluate_changed_triage(
                 deployed_age = crate::format_age(now.duration_since(ct.0).as_secs().max(0));
                 if let Some(ref cutoff) = cutoff_ts {
                     if ct.0 >= *cutoff {
-                        in_window = true;
+                        rolled_out = true;
                     }
                 }
             }
@@ -1071,16 +1138,20 @@ pub fn evaluate_changed_triage(
             .get(&("Deployment".to_string(), dep_ns.clone(), dep_name.clone()))
             .cloned()
             .unwrap_or_default();
-        for ev in &dep_events {
-            if let Some(last_ts) = event_last_timestamp(ev) {
-                if let Some(ref cutoff) = cutoff_ts {
-                    if last_ts >= *cutoff {
-                        in_window = true;
-                        break;
-                    }
-                }
-            }
-        }
+
+        // The latest in-window Deployment event of each sort. A scale is not
+        // a rollout: an HPA emits ScalingReplicaSet on every step, and
+        // counting it put most of an autoscaled cluster in a 1h "changed"
+        // list with its months-old rollout age beside it.
+        let latest_in_window = |scaling: bool| {
+            dep_events
+                .iter()
+                .filter(|ev| (ev.reason.as_deref() == Some("ScalingReplicaSet")) == scaling)
+                .filter_map(|ev| event_last_timestamp(ev).map(|t| (t, *ev)))
+                .filter(|(t, _)| cutoff_ts.as_ref().is_some_and(|c| t >= c))
+                .max_by_key(|(t, _)| *t)
+        };
+        let age_of = |t: Timestamp| crate::format_age(now.duration_since(t).as_secs().max(0));
 
         let current_rs_name = current_rs
             .and_then(|rs| rs.metadata.name.as_deref())
@@ -1090,13 +1161,19 @@ pub fn evaluate_changed_triage(
             .cloned()
             .unwrap_or_default();
 
-        // Not rolled out in the window, but failing in it: a Warning on the
-        // current ReplicaSet (FailedCreate on a quota) or on one of its pods.
-        // Only when asked for; by default the window means "changed".
-        let mut unchanged_in_window = false;
-        if !in_window && opts.include_failing {
-            if let Some(ref cutoff) = cutoff_ts {
-                in_window =
+        let mut change_detail = None;
+        let change = if rolled_out {
+            Some((ChangeKind::Rollout, deployed_age.clone()))
+        } else if let Some((t, _)) = latest_in_window(false) {
+            Some((ChangeKind::Rollout, age_of(t)))
+        } else if let (true, Some((t, ev))) = (opts.include_scaled, latest_in_window(true)) {
+            change_detail = Some(parse_scale_event(ev.message.as_deref().unwrap_or("")));
+            Some((ChangeKind::Scaled, age_of(t)))
+        } else if opts.include_failing {
+            // Not changed in the window, but failing in it: a Warning on the
+            // current ReplicaSet (FailedCreate on a quota) or on a pod.
+            cutoff_ts.as_ref().and_then(|cutoff| {
+                let failing =
                     warning_in_window(
                         events_by_object.get(&(
                             "ReplicaSet".to_string(),
@@ -1105,13 +1182,14 @@ pub fn evaluate_changed_triage(
                         )),
                         cutoff,
                     ) || pods_warned_in_window(&current_pods, &events_by_object, &dep_ns, cutoff);
-                unchanged_in_window = in_window;
-            }
-        }
-
-        if !in_window {
+                failing.then(|| (ChangeKind::FailingOnly, deployed_age.clone()))
+            })
+        } else {
+            None
+        };
+        let Some((change_kind, changed_age)) = change else {
             continue;
-        }
+        };
 
         tracked_objects.insert(("Deployment".to_string(), dep_ns.clone(), dep_name.clone()));
         for rs in &owned_rs {
@@ -1306,6 +1384,11 @@ pub fn evaluate_changed_triage(
         } else {
             "Healthy".to_string()
         };
+        // A scaled, healthy row: the scale is the news, not "Healthy".
+        let failure_detail = match (&change_detail, failure_category) {
+            (Some(scale), FailureCategory::None) => scale.clone(),
+            _ => failure_detail,
+        };
 
         let (error_log_pod, error_log_container) = log_target(&pod_symptoms, &current_pods);
         deployment_changes.push(AppDeploymentChange {
@@ -1320,7 +1403,9 @@ pub fn evaluate_changed_triage(
             error_log_snippet: None,
             error_log_pod,
             error_log_container,
-            unchanged_in_window,
+            change_kind,
+            changed_age,
+            change_detail,
             deployed_at,
             deployed_age,
             current_revision,
@@ -1399,12 +1484,14 @@ pub fn evaluate_changed_triage(
                 }
             }
         }
-        let mut unchanged_in_window = false;
+        let mut change_kind = ChangeKind::Rollout;
         if !in_window && opts.include_failing {
             if let Some(ref cutoff) = cutoff_ts {
                 in_window =
                     pods_warned_in_window(&current_pods, &events_by_object, &sts_ns, cutoff);
-                unchanged_in_window = in_window;
+                if in_window {
+                    change_kind = ChangeKind::FailingOnly;
+                }
             }
         }
 
@@ -1564,7 +1651,9 @@ pub fn evaluate_changed_triage(
             error_log_snippet: None,
             error_log_pod,
             error_log_container,
-            unchanged_in_window,
+            change_kind,
+            changed_age: deployed_age.clone(),
+            change_detail: None,
             deployed_at,
             deployed_age,
             current_revision,
@@ -1662,11 +1751,13 @@ pub fn evaluate_changed_triage(
                 }
             }
         }
-        let mut unchanged_in_window = false;
+        let mut change_kind = ChangeKind::Rollout;
         if !in_window && opts.include_failing {
             if let Some(ref cutoff) = cutoff_ts {
                 in_window = pods_warned_in_window(&current_pods, &events_by_object, &cj_ns, cutoff);
-                unchanged_in_window = in_window;
+                if in_window {
+                    change_kind = ChangeKind::FailingOnly;
+                }
             }
         }
 
@@ -1821,7 +1912,9 @@ pub fn evaluate_changed_triage(
             error_log_snippet: None,
             error_log_pod,
             error_log_container,
-            unchanged_in_window,
+            change_kind,
+            changed_age: deployed_age.clone(),
+            change_detail: None,
             deployed_at,
             deployed_age,
             current_revision: schedule_str,
@@ -1862,7 +1955,7 @@ pub fn evaluate_changed_triage(
         };
         rank(a.incident_status)
             .cmp(&rank(b.incident_status))
-            .then(a.unchanged_in_window.cmp(&b.unchanged_in_window))
+            .then((a.change_kind as u8).cmp(&(b.change_kind as u8)))
     });
 
     // 5. Gather non-workload Infrastructure & Config changes
@@ -2035,6 +2128,7 @@ pub fn evaluate_changed_triage(
         deployments: deployment_changes,
         infra_changes,
         includes_failing: opts.include_failing,
+        includes_scaled: opts.include_scaled,
     }
 }
 
@@ -2048,6 +2142,9 @@ pub struct ListChangesIn {
     /// Also report workloads failing in the window that did not change in it.
     #[serde(default, rename = "includeFailing")]
     pub include_failing: bool,
+    /// Also report Deployments that only scaled in the window.
+    #[serde(default, rename = "includeScaled")]
+    pub include_scaled: bool,
 }
 
 fn default_since() -> String {
@@ -2253,6 +2350,7 @@ pub fn list_changes_capability(cache: Arc<ClientCache>) -> Capability {
                 };
                 let opts = TriageOptions {
                     include_failing: input.include_failing,
+                    include_scaled: input.include_scaled,
                     log_snippets: true,
                 };
                 fetch_changed_triage(&cache, &input.context, ns_opt, window, opts)
@@ -3228,7 +3326,7 @@ mod tests {
         let api = &wide.deployments[0];
         assert_eq!(api.incident_status, IncidentStatus::CrashLoop);
         assert!(
-            api.unchanged_in_window,
+            api.change_kind == ChangeKind::FailingOnly,
             "marked as included for failing, not for changing"
         );
     }
@@ -3260,7 +3358,7 @@ mod tests {
         );
         assert_eq!(wide.deployments.len(), 1);
         assert_eq!(wide.deployments[0].app_name, "batch");
-        assert!(wide.deployments[0].unchanged_in_window);
+        assert_eq!(wide.deployments[0].change_kind, ChangeKind::FailingOnly);
     }
 
     #[test]
@@ -3287,12 +3385,18 @@ mod tests {
                 ..TriageOptions::default()
             },
         );
-        let rows: Vec<(&str, bool)> = report
+        let rows: Vec<(&str, ChangeKind)> = report
             .deployments
             .iter()
-            .map(|d| (d.app_name.as_str(), d.unchanged_in_window))
+            .map(|d| (d.app_name.as_str(), d.change_kind))
             .collect();
-        assert_eq!(rows, [("fresh", false), ("stale", true)]);
+        assert_eq!(
+            rows,
+            [
+                ("fresh", ChangeKind::Rollout),
+                ("stale", ChangeKind::FailingOnly)
+            ]
+        );
     }
 
     #[test]
@@ -3357,13 +3461,149 @@ mod tests {
         assert_eq!(d.error_log_snippet, None, "no log call was made");
     }
 
+    fn scale_event(name: &str, message: &str, secs_ago: i64) -> Event {
+        let mut ev = event("Deployment", name, "Normal", "ScalingReplicaSet", secs_ago);
+        ev.message = Some(message.to_string());
+        ev
+    }
+
+    #[test]
+    fn a_scale_is_not_a_rollout_and_is_reported_only_when_asked() {
+        // Rolled out 66 days ago; an HPA scaled it 5 minutes ago.
+        let deps = [deployment("price-index", 4, 4)];
+        let rs = [replicaset("price-index-9f", "price-index", 66 * 86_400)];
+        let pods = [pod(
+            "price-index-9f-a",
+            "price-index-9f",
+            vec![running("app")],
+        )];
+        let events = [scale_event(
+            "price-index",
+            "Scaled up replica set price-index-9f from 3 to 4",
+            300,
+        )];
+
+        let strict = triage(&deps, &rs, &pods, &events, &[]);
+        assert!(
+            strict.deployments.is_empty(),
+            "a scale alone is not a change"
+        );
+        assert!(!strict.includes_scaled);
+
+        let wide = triage_with(
+            &deps,
+            &rs,
+            &pods,
+            &events,
+            &[],
+            TriageOptions {
+                include_scaled: true,
+                ..TriageOptions::default()
+            },
+        );
+        assert!(wide.includes_scaled);
+        let d = &wide.deployments[0];
+        assert_eq!(d.change_kind, ChangeKind::Scaled);
+        assert_eq!(
+            d.changed_age, "5m",
+            "when it scaled, not when it rolled out"
+        );
+        assert_eq!(d.deployed_age, "66d");
+        assert_eq!(d.change_detail.as_deref(), Some("Scaled 3→4"));
+        assert_eq!(
+            d.failure_detail, "Scaled 3→4",
+            "the scale is the news on a healthy row"
+        );
+    }
+
+    #[test]
+    fn a_new_replicaset_in_the_window_is_a_rollout_even_with_scale_events() {
+        let deps = [deployment("web", 2, 2)];
+        let rs = [
+            replicaset("web-new", "web", 600),
+            replicaset("web-old", "web", 30 * 86_400),
+        ];
+        let events = [scale_event(
+            "web",
+            "Scaled up replica set web-new from 0 to 2",
+            590,
+        )];
+
+        let report = triage(&deps, &rs, &[], &events, &[]);
+
+        let d = &report.deployments[0];
+        assert_eq!(d.change_kind, ChangeKind::Rollout);
+        assert_eq!(d.changed_age, "10m");
+        assert_eq!(d.change_detail, None);
+    }
+
+    #[test]
+    fn a_non_scaling_deployment_event_still_counts_as_a_change() {
+        let deps = [deployment("api", 1, 1)];
+        let rs = [replicaset("api-1", "api", 30 * 86_400)];
+        let events = [event(
+            "Deployment",
+            "api",
+            "Warning",
+            "ReplicaSetCreateError",
+            120,
+        )];
+
+        let report = triage(&deps, &rs, &[], &events, &[]);
+
+        assert_eq!(report.deployments.len(), 1);
+        assert_eq!(report.deployments[0].change_kind, ChangeKind::Rollout);
+        assert_eq!(report.deployments[0].changed_age, "2m");
+    }
+
+    #[test]
+    fn a_stale_scheduling_event_on_a_running_pod_is_not_a_root_cause() {
+        // Rolled out 20m ago; unschedulable at first, Running now. Its
+        // FailedScheduling event (15m old) lingers for about an hour.
+        let deps = [deployment("mirrormaker", 3, 3)];
+        let rs = [replicaset("mirrormaker-1", "mirrormaker", 1_200)];
+        let pods = [pod("mirrormaker-1-a", "mirrormaker-1", vec![running("mm")])];
+        let mut stale = event("Pod", "mirrormaker-1-a", "Warning", "FailedScheduling", 900);
+        stale.message = Some("0/69 nodes are available: 13 Insufficient cpu.".to_string());
+
+        let report = triage(&deps, &rs, &pods, &[stale], &[]);
+
+        let d = &report.deployments[0];
+        assert_eq!(d.incident_status, IncidentStatus::Healthy);
+        assert_eq!(d.failure_category, FailureCategory::None);
+        assert_eq!(d.failure_detail, "Healthy");
+    }
+
+    #[test]
+    fn parse_scale_event_reads_both_message_forms() {
+        assert_eq!(
+            parse_scale_event("Scaled up replica set web-7f from 3 to 4"),
+            "Scaled 3→4"
+        );
+        assert_eq!(
+            parse_scale_event("Scaled down replica set web-7f from 10 to 2"),
+            "Scaled 10→2"
+        );
+        assert_eq!(
+            parse_scale_event("Scaled up replica set web-7f to 4"),
+            "Scaled to 4"
+        );
+        assert_eq!(
+            parse_scale_event("Scaled up replica set web-7f to 4."),
+            "Scaled to 4"
+        );
+        assert_eq!(parse_scale_event(""), "Scaled");
+        assert_eq!(parse_scale_event("something else entirely"), "Scaled");
+    }
+
     #[test]
     fn list_changes_input_reads_the_callers_camel_case() {
         let input: ListChangesIn = serde_json::from_value(serde_json::json!({
-            "context": "kind-x", "since": "1h", "includeFailing": true
+            "context": "kind-x", "since": "1h", "includeFailing": true, "includeScaled": true
         }))
         .unwrap();
         assert!(input.include_failing);
+        assert!(input.include_scaled);
 
         // The struct's own spelling is not what callers send, and is ignored.
         let input: ListChangesIn = serde_json::from_value(serde_json::json!({

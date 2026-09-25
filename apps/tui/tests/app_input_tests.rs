@@ -2560,6 +2560,50 @@ async fn test_argo_app_handlers_and_interactions() {
 }
 
 #[tokio::test]
+async fn assistant_modified_enter_breaks_the_line_and_plain_enter_sends() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.active_view = ActiveView::Assistant;
+
+    for modifier in [KeyModifiers::CONTROL, KeyModifiers::SHIFT, KeyModifiers::ALT] {
+        app.assistant_state.input.clear();
+        app.assistant_state.input_cursor = None;
+        press(&mut app, ch('a')).await;
+        press(&mut app, KeyEvent::new(KeyCode::Enter, modifier)).await;
+        press(&mut app, ch('b')).await;
+        assert_eq!(app.assistant_state.input, "a\nb", "{modifier:?}+Enter is a line break");
+        assert!(!app.assistant_state.is_busy, "{modifier:?}+Enter did not send");
+    }
+
+    // Plain Enter sends: the input is taken for the turn.
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert!(app.assistant_state.input.is_empty(), "plain Enter submits");
+}
+
+#[tokio::test]
+async fn assistant_paste_keeps_line_breaks_and_lands_at_the_cursor() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.active_view = ActiveView::Assistant;
+    app.assistant_state.input = "see: ".to_string();
+    app.assistant_state.input_cursor = None;
+
+    app.handle_paste("line one\r\nline two\rline three".to_string());
+
+    assert_eq!(app.assistant_state.input, "see: line one\nline two\nline three");
+}
+
+#[tokio::test]
+async fn assistant_opens_in_caveman_ultra_until_the_user_chooses() {
+    let _settings = common::env::isolate_settings();
+    let (app, _rx) = common::app().await;
+    assert_eq!(
+        app.assistant_state.caveman_level,
+        Some(srelens_tui::ai_skills::CavemanLevel::Ultra)
+    );
+}
+
+#[tokio::test]
 async fn assistant_view_cursor_navigation_and_word_skipping() {
     let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
@@ -4993,6 +5037,7 @@ async fn changed_view_drops_a_result_for_a_window_it_no_longer_shows() {
         deployments: vec![],
         infra_changes: vec![],
         includes_failing: false,
+        includes_scaled: false,
     };
 
     // The view shows 1h; a 15m answer from before a window change is stale.
@@ -5219,6 +5264,31 @@ async fn changed_view_u_widens_the_scope_and_drops_the_narrow_answer() {
     let c = changed_state(&app);
     assert_eq!(c.report.as_ref().unwrap().deployments.len(), 2);
     assert!(!c.is_loading);
+}
+
+#[tokio::test]
+async fn changed_view_capital_s_includes_scaled_and_drops_the_narrow_answer() {
+    let settings = common::env::isolate_settings();
+    let (mut app, _rx) = changed_app_with_report(&settings).await;
+    assert!(!changed_state(&app).include_scaled, "scale-only rows hidden by default");
+    app.changed_refreshing = false;
+
+    press(&mut app, ch('S')).await;
+    let c = changed_state(&app);
+    assert!(c.include_scaled);
+    assert!(!c.include_failing, "S is not u");
+    assert!(app.changed_refreshing, "the wider scope is fetched");
+
+    // The answer from before the toggle is dropped and refetched.
+    app.handle_changed_triage_result("fake-cluster", Some("default"), Ok(changed_report_with_two_workloads(false)));
+    assert!(changed_state(&app).is_loading);
+
+    let mut wide = changed_report_with_two_workloads(false);
+    wide.includes_scaled = true;
+    app.handle_changed_triage_result("fake-cluster", Some("default"), Ok(wide));
+    let c = changed_state(&app);
+    assert!(!c.is_loading);
+    assert_eq!(c.report.as_ref().unwrap().deployments.len(), 2);
 }
 
 #[tokio::test]

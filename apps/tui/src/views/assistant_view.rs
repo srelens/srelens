@@ -1380,7 +1380,7 @@ pub fn render_assistant_view(
             total_lines
         )
     } else {
-        " Ask Assistant (Type '/' for SRE Playbooks, ↑/↓ History, <Ctrl+c> Copy, <Ctrl+s> Settings) ".to_string()
+        " Ask Assistant (Type '/' for SRE Playbooks, <Ctrl+Enter> New line, ↑/↓ History, <Ctrl+c> Copy, <Ctrl+s> Settings) ".to_string()
     };
     let input_block = Block::default()
         .borders(Borders::ALL)
