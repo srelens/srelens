@@ -68,7 +68,11 @@ export type ExtensionStreamCloseReason =
   | "viewClosed"
   | "appDisabled"
   | "appUpdated"
-  | "appRemoved";
+  | "appRemoved"
+  // The window that opened it closed or reloaded (#700). The page that owned
+  // the stream is gone, so these are never followed by a reopen.
+  | "windowClosed"
+  | "windowReloaded";
 
 export type ExtensionStreamErrorCode = "source" | "rateLimited";
 
@@ -208,6 +212,8 @@ const CLOSED: Record<ExtensionStreamCloseReason, string> = {
   appDisabled: "The app was disabled.",
   appUpdated: "The app was updated; reopen the view to follow it again.",
   appRemoved: "The app was removed.",
+  windowClosed: "The window that opened the stream closed.",
+  windowReloaded: "The window that opened the stream reloaded.",
 };
 
 /** One sentence for how a stream ended. A failure says what failed. */
@@ -225,6 +231,8 @@ export interface ExtensionStreamMetrics {
     bytes: number;
     rateLimited: number;
     refused: number;
+    /** Streams ended because the window that opened them closed or reloaded (#700). */
+    windowEnded: number;
     streams: Array<{ stream: string; view: string; revision: number; source: string; messages: number; bytes: number }>;
   }>;
   maxOpenPerApp: number;

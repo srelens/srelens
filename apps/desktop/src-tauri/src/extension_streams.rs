@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use serde_json::Value;
 use srelens_registry::{ExtensionStreams, OpenStreamOut};
-use tauri::{AppHandle, Runtime, State};
+use tauri::{AppHandle, Runtime, State, Window};
 
 use crate::sink::TauriSink;
 
@@ -32,14 +32,20 @@ pub fn listen_inventory<R: Runtime>(streams: &Option<Arc<ExtensionStreams>>, app
 }
 
 /// Open a stream for one view of an app. `input` is `@srelens/core`'s
-/// `openExtensionView(…).open(…)` payload, parsed by the registry.
+/// `openExtensionView(…).open(…)` payload, parsed by the registry. The
+/// stream belongs to the calling window too, and ends when it closes or
+/// reloads (#700); the label is Tauri's, never the page's.
 #[tauri::command]
 pub async fn extension_stream_open<R: Runtime>(
     input: Value,
+    window: Window<R>,
     app: AppHandle<R>,
     streams: State<'_, AppExtensionStreams>,
 ) -> Result<OpenStreamOut, String> {
-    streams.get()?.open(Arc::new(TauriSink(app)), input).await
+    streams
+        .get()?
+        .open_in_window(Arc::new(TauriSink(app)), window.label(), input)
+        .await
 }
 
 /// Cancel one stream. Idempotent: `false` when it had already ended.
@@ -81,12 +87,13 @@ mod tests {
         assert!(streams.is_some(), "a desktop build has app streams");
         let app = tauri::test::mock_app();
         app.manage(AppExtensionStreams(streams));
+        let window = crate::window_streams::tests::mock_window(&app, "main");
 
         let input = json!({
             "id": "org.example.none", "revision": 1, "view": "v", "channel": "extstream:t",
             "context": "c", "source": {"kind": "read", "capability": "things"},
         });
-        let refused = extension_stream_open(input, app.handle().clone(), app.state())
+        let refused = extension_stream_open(input, window, app.handle().clone(), app.state())
             .await
             .unwrap_err();
         assert!(refused.contains("removed"), "{refused}");
@@ -141,7 +148,8 @@ mod tests {
     async fn a_host_without_apps_says_so() {
         let app = tauri::test::mock_app();
         app.manage(AppExtensionStreams(None));
-        let refused = extension_stream_open(json!({}), app.handle().clone(), app.state())
+        let window = crate::window_streams::tests::mock_window(&app, "main");
+        let refused = extension_stream_open(json!({}), window, app.handle().clone(), app.state())
             .await
             .unwrap_err();
         assert_eq!(refused, "Apps are not available on this host");

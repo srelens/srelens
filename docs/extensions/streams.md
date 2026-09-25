@@ -31,7 +31,7 @@ its `stream`:
 Exactly one terminal frame is sent, and nothing after it.
 
 `close.reason` is `completed`, `cancelled`, `viewClosed`, `appDisabled`,
-`appUpdated` or `appRemoved`. `error.code` is `source` (the source failed: the
+`appUpdated`, `appRemoved`, `windowClosed` or `windowReloaded`. `error.code` is `source` (the source failed: the
 cluster refused, timed out or was unreachable) or `rateLimited` (the host
 stopped the stream for the app's message rate). A source that panics ends
 with `error: source` too, and frees its place in the app's open-stream count.
@@ -68,6 +68,22 @@ another's streams.
   opened from another revision ends with `appUpdated`, and an open that names
   it is refused ("refresh the view").
 - **Removing the app** ends its streams with `appRemoved`.
+- **Closing the window** that opened a stream ends it with `windowClosed`,
+  and **reloading** it ends it with `windowReloaded`
+  ([#700](https://github.com/srelens/srelens/issues/700)). A page that goes
+  away never closes its views, so the host tracks the window too: each stream
+  records the label of the window whose call opened it — the label Tauri gives
+  the call, never one the page sends, so one window cannot end another's. A
+  destroyed window ends its streams from the host's window-event handler. A
+  reload keeps the window, so the new page calls `window_streams_reset` as the
+  transport loads, and every command that opens a stream waits for it; the
+  reset cannot end the new page's own streams. Each ending moves the window's
+  epoch, and an open the old page began before it is refused when it lands
+  ("The window … closed or reloaded while this stream was opening"), with no
+  frame. Another window's streams — the same app, the same page — are
+  untouched. The desktop's built-in resource watches and pod exec sessions end
+  the same way; a shell's task is aborted, which drops its connection to the
+  cluster.
 
 The lifecycle rule holds whichever registry made the change. Every inventory
 write is announced to the streams of that inventory, and those are shared by
@@ -252,7 +268,7 @@ what each app has sent since it started, for the Inspector
 {
   "apps": [{
     "app": "org.example.flux", "openStreams": 1, "opened": 3,
-    "messages": 41, "bytes": 18230, "rateLimited": 0, "refused": 0,
+    "messages": 41, "bytes": 18230, "rateLimited": 0, "refused": 0, "windowEnded": 2,
     "streams": [{ "stream": "s-3", "view": "org.example.flux/page:kustomizations#2",
                   "revision": 7, "source": "read", "messages": 12, "bytes": 5400 }]
   }],
@@ -261,7 +277,8 @@ what each app has sent since it started, for the Inspector
 }
 ```
 
-`bytes` counts `data` payloads as compact JSON. `extensionStreamMetrics()` in
+`bytes` counts `data` payloads as compact JSON. `windowEnded` counts the
+streams that ended because their window closed or reloaded. `extensionStreamMetrics()` in
 `@srelens/core` reads it.
 
 ## Hosts

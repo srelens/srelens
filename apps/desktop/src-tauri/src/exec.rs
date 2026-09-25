@@ -8,9 +8,10 @@
 use std::sync::Arc;
 
 use srelens_streams::exec::{ExecManager, ExecOpts};
-use tauri::{AppHandle, Runtime, State};
+use tauri::{AppHandle, Runtime, State, Window};
 
 use crate::sink::TauriSink;
+use crate::window_streams::WindowStreams;
 
 /// Open an interactive shell into a pod. Returns the session id; stdout streams
 /// on `exec:out:<channel>` and an `exec:exit:<channel>` event fires (with an
@@ -18,6 +19,10 @@ use crate::sink::TauriSink;
 /// caller-supplied subscription token — the WebView subscribes to it before
 /// this call, so an exec that dies in the same tick it spawns cannot outrun
 /// the listener.
+///
+/// The session belongs to the calling window and is closed when it closes or
+/// reloads (#700). One whose window reloaded while it was starting is closed
+/// at once and refused.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn start_pod_exec<R: Runtime>(
@@ -30,10 +35,13 @@ pub async fn start_pod_exec<R: Runtime>(
     channel: String,
     cols: Option<u16>,
     rows: Option<u16>,
+    window: Window<R>,
     app: AppHandle<R>,
     manager: State<'_, ExecManager>,
+    owned: State<'_, WindowStreams>,
 ) -> Result<u64, String> {
-    manager
+    let epoch = owned.epoch(window.label());
+    let session = manager
         .start(
             Arc::new(TauriSink(app)),
             context,
@@ -48,7 +56,8 @@ pub async fn start_pod_exec<R: Runtime>(
                 rows,
             },
         )
-        .await
+        .await?;
+    owned.keep_exec(&manager, window.label(), epoch, session)
 }
 
 /// Forward a keystroke / input string to an exec session's stdin.
@@ -76,8 +85,14 @@ pub async fn exec_resize(
 
 /// Close an exec session and abort its task.
 #[tauri::command]
-pub async fn exec_close(session: u64, manager: State<'_, ExecManager>) -> Result<(), String> {
+pub async fn exec_close<R: Runtime>(
+    session: u64,
+    window: Window<R>,
+    manager: State<'_, ExecManager>,
+    owned: State<'_, WindowStreams>,
+) -> Result<(), String> {
     manager.close(session);
+    owned.disown_exec(window.label(), session);
     Ok(())
 }
 
@@ -95,6 +110,8 @@ mod tests {
     async fn commands_run_against_a_mock_runtime() {
         let app = tauri::test::mock_app();
         app.manage(ExecManager::new(ClientCache::new_many(vec![])));
+        app.manage(WindowStreams::default());
+        let window = crate::window_streams::tests::mock_window(&app, "main");
 
         let id = start_pod_exec(
             "no-such-context".into(),
@@ -106,7 +123,9 @@ mod tests {
             "exec-0-abcd".into(),
             Some(80),
             Some(24),
+            window.clone(),
             app.handle().clone(),
+            app.state(),
             app.state(),
         )
         .await
@@ -114,10 +133,14 @@ mod tests {
 
         exec_input(id, "ls\n".into(), app.state()).await.unwrap();
         exec_resize(id, 120, 40, app.state()).await.unwrap();
-        exec_close(id, app.state()).await.unwrap();
+        exec_close(id, window.clone(), app.state(), app.state())
+            .await
+            .unwrap();
         // Unknown session: every command stays a quiet no-op.
         exec_input(id + 1, "x".into(), app.state()).await.unwrap();
         exec_resize(id + 1, 80, 24, app.state()).await.unwrap();
-        exec_close(id + 1, app.state()).await.unwrap();
+        exec_close(id + 1, window, app.state(), app.state())
+            .await
+            .unwrap();
     }
 }
