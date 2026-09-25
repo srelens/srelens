@@ -311,8 +311,11 @@ list, and the [developer harness](testing.md#developer-harness) prints one per l
   setting fills a binding argument as `"${settings.<id>}"` only where the host
   capability marks the argument settable (`k8s.annotate`'s `value`,
   `k8s.setStatusCondition`'s `message`), and is checked at install, on save and on
-  every request. A `secret-reference` value never enters the inventory (#542). See
-  [Manifest reference](manifest.md#settings).
+  every request. A `secret-reference` value never enters the inventory (#542): it is
+  kept, write-only, in srelens's encrypted secrets vault through
+  `extension.secretStore`, which an app declaring one must request as a permission
+  (#543). See [Manifest reference](manifest.md#settings) and
+  [Secret settings](manifest.md#secret-settings).
 - Apps may declare `commands` for the new design's command palette: open a declared
   page, or open the host confirmation for a declared action on a resource of the
   action's kind (#544). See the [manifest reference](manifest.md#commands).

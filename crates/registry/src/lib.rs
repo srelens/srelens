@@ -22,6 +22,12 @@ mod settings;
 pub use extensions::fuzzing;
 pub use extensions::streams::{ExtensionStreams, OpenStreamOut, INVENTORY_CHANNEL};
 pub use settings::default_settings_path;
+/// The secret store a host supplies for apps' secret settings (#543), so a
+/// host implements it against this crate alone.
+pub use srelens_plugin_host::{NoSecretStore, SecretStore, SecretValue, SECRET_STORE_PERMISSION};
+/// The host's metadata for `extension.secretStore`, for a host that renders
+/// its confirmation from names it has vetted (#543).
+pub use extensions::{declares_secret_setting, SECRET_STORE_ANNOTATIONS};
 
 // Test-only: every consumer of this module — `render_catalog` (regenerated via
 // `UPDATE_CATALOG=1 cargo test`), the doc-scan tests below, and mcp_docs.rs's
@@ -238,12 +244,41 @@ pub fn build_registry_with_paths_and_settings(
     build_registry_and_app_streams(cache, kubeconfig_paths, settings_path).0
 }
 
+/// [`build_registry_with_paths_and_settings`], with `secrets` keeping apps'
+/// secret settings (#543). The desktop passes its vault; a build with no
+/// store refuses to keep a secret, and says why.
+pub fn build_registry_with_paths_settings_and_secrets(
+    cache: Arc<ClientCache>,
+    kubeconfig_paths: Vec<PathBuf>,
+    settings_path: Option<PathBuf>,
+    secrets: Arc<dyn SecretStore>,
+) -> Registry {
+    build_registry_app_streams_and_secrets(cache, kubeconfig_paths, settings_path, secrets).0
+}
+
 /// The desktop build, plus the app streams (#565) its host opens streams
 /// through. `None` when there is no settings path, so no apps either.
 pub fn build_registry_and_app_streams(
     cache: Arc<ClientCache>,
     kubeconfig_paths: Vec<PathBuf>,
     settings_path: Option<PathBuf>,
+) -> (Registry, Option<Arc<ExtensionStreams>>) {
+    build_registry_app_streams_and_secrets(
+        cache,
+        kubeconfig_paths,
+        settings_path,
+        Arc::new(srelens_plugin_host::NoSecretStore),
+    )
+}
+
+/// [`build_registry_and_app_streams`], with `secrets` keeping apps' secret
+/// settings (#543). A store the host does not have is
+/// [`srelens_plugin_host::NoSecretStore`], which stores and deletes nothing.
+pub fn build_registry_app_streams_and_secrets(
+    cache: Arc<ClientCache>,
+    kubeconfig_paths: Vec<PathBuf>,
+    settings_path: Option<PathBuf>,
+    secrets: Arc<dyn SecretStore>,
 ) -> (Registry, Option<Arc<ExtensionStreams>>) {
     let mut reg = Registry::new();
 
@@ -506,11 +541,12 @@ pub fn build_registry_and_app_streams(
         // Broker-only: kept out of `reg`, so neither the catalog nor MCP offers it.
         core.register(extensions::crd::check_capability(cache.clone()));
         let core = Arc::new(core);
-        app_streams = Some(extensions::register(
+        app_streams = Some(extensions::register_with_secrets(
             &mut reg,
             path.with_extension("extensions.json"),
             core,
             cache,
+            secrets,
         ));
         settings::register(&mut reg, path);
     }
@@ -694,9 +730,78 @@ mod tests {
             "extensions.resolveColumns",
             "extensions.resolveCards",
             "extensions.streams",
+            // Web storage of app secrets is #522's; until then the web host
+            // has no secret store and registers no way to set one.
+            "extension.secretStore",
         ] {
             assert!(reg.get(id).is_none());
         }
+    }
+
+    /// #543: no current consumer can be handed a secret. No host capability
+    /// declares a secret slot, and no settable position takes a
+    /// `secret-reference` — so brokered HTTP (#568), the first that will,
+    /// has to change this test on purpose.
+    #[test]
+    fn no_host_capability_takes_a_secret_today() {
+        let reg = build_registry();
+        for capability in reg.entries() {
+            assert!(capability.secret_slots.is_empty(), "{} declares a secret slot", capability.id);
+            for position in &capability.settable {
+                assert!(
+                    !position.accepts.contains(&srelens_capability::settings::SettingType::SecretReference),
+                    "{}.{} takes a secret",
+                    capability.id,
+                    position.argument
+                );
+            }
+        }
+    }
+
+    /// The desktop hands its vault to the registry; every other build says
+    /// it has no store, and so refuses to keep a secret.
+    #[tokio::test]
+    async fn the_secret_store_a_host_supplies_is_the_one_the_apps_use() {
+        struct Open;
+        impl srelens_plugin_host::SecretStore for Open {
+            fn status(&self) -> Result<(), String> {
+                Ok(())
+            }
+            fn put(&self, _: &str, _: &srelens_plugin_host::SecretValue) -> Result<(), String> {
+                Ok(())
+            }
+            fn contains(&self, _: &str) -> Result<bool, String> {
+                Ok(false)
+            }
+            fn retain(&self, _: &std::collections::BTreeSet<String>) -> Result<(), String> {
+                Ok(())
+            }
+            fn reveal(
+                &self,
+                _: &str,
+            ) -> Result<Option<srelens_plugin_host::SecretValue>, String> {
+                Ok(None)
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let settings = dir.path().join("settings.json");
+        let with_store = build_registry_with_paths_settings_and_secrets(
+            ClientCache::new_many(vec![]),
+            vec![],
+            Some(settings.clone()),
+            Arc::new(Open),
+        );
+        let listed = with_store.invoke("extensions.list", json!({})).await.unwrap();
+        assert_eq!(listed["secretStore"], json!({"available": true}));
+
+        let without = build_registry_with_paths_and_settings(
+            ClientCache::new_many(vec![]),
+            vec![],
+            Some(settings),
+        );
+        let listed = without.invoke("extensions.list", json!({})).await.unwrap();
+        assert_eq!(listed["secretStore"]["available"], false);
+        assert!(without.get("extension.secretStore").is_some(), "its metadata is still the catalog's");
     }
 
     #[test]

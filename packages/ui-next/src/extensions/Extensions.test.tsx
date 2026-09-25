@@ -14,6 +14,8 @@ vi.mock("@srelens/core", async (importOriginal) => ({
   actOnExtensionResource: vi.fn(),
   saveTextFile: vi.fn(),
   listContexts: vi.fn(),
+  setExtensionSecret: vi.fn(),
+  clearExtensionSecret: vi.fn(),
   onExtensionInventoryChanged: vi.fn(),
 }));
 import {
@@ -26,6 +28,8 @@ import {
   resolveExtensionColumns,
   saveTextFile,
   listContexts,
+  setExtensionSecret,
+  clearExtensionSecret,
   onExtensionInventoryChanged,
 } from "@srelens/core";
 import { ExtensionManager, ExtensionResults } from "./Extensions";
@@ -519,27 +523,72 @@ it("inspects an installed app's source, grants and manifest, and exports or rese
     expect(configureExtensions).toHaveBeenCalledWith({ action: "settings", id: "org.test.gitops", settings: {} }),
   );
 });
-it("resets settings to their defaults but keeps a required one, which has none", async () => {
+it("resets settings to their defaults, keeps a required one, which has none, and deletes the app's secrets", async () => {
+  vi.mocked(clearExtensionSecret).mockResolvedValue({ set: false });
   const app = {
     ...updated(),
     manifest: { ...updated().manifest, settings: [
       { id: "url", type: "url", title: "URL", required: true },
       { id: "team", type: "string", title: "Team", default: "ops" },
+      { id: "token", type: "secret-reference", title: "Token" },
     ] },
-    settings: { url: "https://prom", team: "platform" },
+    settings: { url: "https://prom", team: "platform", token: { secretRef: "org.test.gitops/token" } },
   };
   const details = await openDetails(app as ReturnType<typeof updated>);
   expect(details.textContent).toContain("A secret is never saved in settings, so an export never holds one.");
   fireEvent.click(within(details).getByRole("button", { name: "Reset settings" }));
-  // Says what reset actually keeps: required values, and secrets, whose
-  // references the host carries across every settings save.
+  // Says what reset does: keeps required values, and deletes the secrets
+  // (#543): a reset that left a token in the keychain would not be one.
   const confirm = within(details).getByRole("alertdialog", { name: "Reset settings" });
   expect(confirm.textContent).toContain("except the required ones, which have no default");
-  expect(confirm.textContent).toContain("Secrets stay set");
+  expect(confirm.textContent).toContain("its secrets are deleted from srelens's secrets vault");
+  expect(confirm.textContent).not.toContain("Secrets stay set");
   fireEvent.click(within(details).getByRole("button", { name: "Reset to defaults" }));
+  await waitFor(() => expect(clearExtensionSecret).toHaveBeenCalledWith("org.test.gitops"));
   await waitFor(() =>
     expect(configureExtensions).toHaveBeenCalledWith({ action: "settings", id: "org.test.gitops", settings: { url: "https://prom" } }),
   );
+});
+it("keeps a secret through the host's store, never through settings, and shows why it cannot", async () => {
+  const secretApp = (settings: Record<string, unknown>) => ({
+    ...plugin, grants: ["k8s.listCustomResource", "extension.secretStore"],
+    manifest: { ...plugin.manifest, settings: [{ id: "token", type: "secret-reference", title: "API token" }] },
+    settings,
+  });
+  vi.mocked(listExtensions).mockResolvedValue({
+    schemaVersion: 1, nextRevision: 2, plugins: [secretApp({})], secretStore: { available: true },
+  } as any);
+  vi.mocked(setExtensionSecret).mockResolvedValue({ set: true });
+  render(<ExtensionManager />);
+  fireEvent.click(await screen.findByRole("button", { name: "Settings for GitOps" }));
+  const form = screen.getByRole("form", { name: "GitOps settings" });
+  const field = within(form).getByRole("group", { name: "API token" });
+  // After the save the host lists the reference, never the value.
+  vi.mocked(listExtensions).mockResolvedValue({
+    schemaVersion: 1, nextRevision: 2, plugins: [secretApp({ token: { secretRef: "org.test.gitops/token" } })],
+    secretStore: { available: true },
+  } as any);
+  fireEvent.change(within(field).getByLabelText("API token"), { target: { value: "typed-token" } });
+  fireEvent.click(within(field).getByRole("button", { name: "Save secret" }));
+  await waitFor(() => expect(setExtensionSecret).toHaveBeenCalledWith("org.test.gitops", "token", "typed-token"));
+  await waitFor(() => expect(listExtensions).toHaveBeenCalledTimes(2));
+  const again = within(await screen.findByRole("form", { name: "GitOps settings" })).getByRole("group", { name: "API token" });
+  await waitFor(() => expect(within(again).getByRole("button", { name: "Replace secret" })).toBeTruthy());
+  expect(configureExtensions).not.toHaveBeenCalled();
+  expect(document.body.textContent).not.toContain("typed-token");
+});
+it("tells a person the store is unavailable, in the host's words", async () => {
+  vi.mocked(listExtensions).mockResolvedValue({
+    schemaVersion: 1, nextRevision: 2,
+    plugins: [{ ...plugin, grants: ["extension.secretStore"],
+      manifest: { ...plugin.manifest, settings: [{ id: "token", type: "secret-reference", title: "API token" }] } }],
+    secretStore: { available: false, reason: "This system has no usable keychain, so srelens cannot protect an app's secret" },
+  } as any);
+  render(<ExtensionManager />);
+  fireEvent.click(await screen.findByRole("button", { name: "Settings for GitOps" }));
+  const field = within(screen.getByRole("form", { name: "GitOps settings" })).getByRole("group", { name: "API token" });
+  expect(field.textContent).toContain("no usable keychain");
+  expect((within(field).getByLabelText("API token") as HTMLInputElement).disabled).toBe(true);
 });
 it("reviews the permissions of a rollback whose grants differ", async () => {
   const details = await openDetails(updated());
@@ -769,6 +818,16 @@ it("persists settings, disable and remove through the backend", async () => {
       id: plugin.manifest.id,
     }),
   );
+});
+it("says removing an app deletes its secrets too", async () => {
+  vi.mocked(listExtensions).mockResolvedValue({
+    schemaVersion: 1, nextRevision: 2,
+    plugins: [{ ...plugin, manifest: { ...plugin.manifest, settings: [{ id: "token", type: "secret-reference", title: "Token" }] } }],
+  } as any);
+  render(<ExtensionManager />);
+  fireEvent.click(await screen.findByRole("button", { name: "Remove" }));
+  const dialog = screen.getByRole("alertdialog", { name: "Remove app" });
+  expect(dialog.textContent).toContain("deletes its secrets from srelens's secrets vault");
 });
 it("keeps reads idle until a cluster is chosen and shows successful empty results", async () => {
   vi.mocked(readExtension).mockResolvedValue({ items: [] });

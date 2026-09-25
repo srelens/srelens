@@ -67,6 +67,25 @@ one of the four host action primitives, each a separate permission the user gran
 - Every write re-reads the object, refuses one that has changed or is being deleted,
   and is still subject to the cluster's RBAC.
 
+## Secrets
+
+`extension.secretStore` lets the host keep an app's `secret-reference` settings in the
+desktop's encrypted secrets vault, whose key the OS keychain holds or the master password
+derives ([#543](https://github.com/srelens/srelens/issues/543)).
+
+- A manifest lists it exactly when it declares a `secret-reference` setting, and never
+  binds it. It is granted at install like any other permission.
+- The review names it with the secret settings it covers and the host's metadata for
+  it: sensitive, `medium` impact, and its confirmation wording. An update that keeps
+  another secret shows as changed access.
+- Without the grant, a secret cannot be set. A secret is write-only: nothing returns
+  it to the app, the UI, MCP or an export, and the host injects one only into an
+  argument a host capability declares for it. None does yet (#568 will).
+- Removing the app, or an update or rollback that drops the setting, deletes it. Reset
+  in Settings → Apps clears the app's secrets before it resets the other settings.
+
+See [Secret settings](manifest.md#secret-settings).
+
 ## Consent
 
 Annotations come from the host capability and cannot be weakened by a binding —
@@ -80,6 +99,10 @@ The app-level operations follow the normal MCP consent gate:
 - `extensions.configure` (install, enable, remove, settings, rollback, clusters) is mutating,
   `medium` impact. A rollback takes the grants explicitly, like an install, because it
   grants the restored version's permissions again.
+- `extension.secretStore` (set or clear an app's secret) is mutating, sensitive and
+  `medium` impact. Because it is sensitive, its audit record keeps the argument names
+  and blanks every value, and the desktop's consent prompt never carries the secret to
+  the window.
 - `extensions.action` (declared app actions) is mutating and `high` impact, because it
   can dispatch `k8s.mergePatch`, including an Argo CD sync. The per-action level
   is lower for most actions and travels with the resource; in the UI every action opens
