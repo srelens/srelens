@@ -348,6 +348,7 @@ Out of scope as an attacker (see [Scope](#scope)), but the host still checks wha
 | [#605] | VULN-3: redact extension settings in the MCP audit log |
 | [#578] ([#522]) | WEB-1: administrator policy for apps on the web host |
 | [#39] | Scope: CSP, update chain and the rest of the host |
+
 [#39]: https://github.com/srelens/srelens/issues/39
 [#515]: https://github.com/srelens/srelens/issues/515
 [#578]: https://github.com/srelens/srelens/issues/578
