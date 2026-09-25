@@ -737,9 +737,13 @@ entry in it, beside the MCP token and the provider API keys, keyed by
   confirmation wording.
 - **Migration.** Secret settings shipped before the permission existed (#542, in the
   pre-release `srelens-v0.15.1-185`), so an app installed then may declare one without
-  requesting `extension.secretStore`. It is not quarantined: it keeps working, and its
-  secret settings cannot be set, with the form saying the app was not granted the
-  permission, until it is reinstalled or updated to a version that requests it.
+  requesting `extension.secretStore`. That build wrote it under `^0.3`, and `settings`
+  is an API 0.4 field ([#709](https://github.com/srelens/srelens/issues/709)), so this
+  host quarantines it with "`settings` requires API 0.4.0" until it is updated to a
+  release that requires `^0.4`, and requests the permission. A `^0.4` app without the
+  permission is not quarantined: it keeps working, and its secret settings cannot be
+  set, with the form saying the app was not granted the permission, until it is
+  reinstalled or updated to a version that requests it.
 - **Write-only.** Settings → Apps sets, replaces and clears a secret, and shows whether
   it is set. Nothing returns the value: not `extensions.list`, not the capability's own
   answer (`{"set": true}`), not an error, not the audit log, not an MCP response or
