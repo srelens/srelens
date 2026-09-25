@@ -54,17 +54,40 @@ impl Drop for Confined {
     }
 }
 
+/// A cgroup directory this host created. It is removed on drop unless kept, so a launch
+/// that fails after creating it leaves nothing behind.
+#[derive(Debug)]
+struct Created(Option<PathBuf>);
+
+impl Created {
+    fn path(&self) -> &std::path::Path {
+        self.0.as_deref().expect("not yet kept")
+    }
+
+    fn keep(mut self) -> PathBuf {
+        self.0.take().expect("kept once")
+    }
+}
+
+impl Drop for Created {
+    fn drop(&mut self) {
+        if let Some(dir) = &self.0 {
+            let _ = std::fs::remove_dir(dir);
+        }
+    }
+}
+
 /// The `oom_kill` count in a cgroup's `memory.events`, if it has a readable one.
 fn oom_kills(events: &str) -> Option<u64> {
     events.lines().find_map(|l| l.strip_prefix("oom_kill ")).and_then(|n| n.trim().parse().ok())
 }
 
-fn cgroup(limits: &Limits) -> io::Result<PathBuf> {
+fn cgroup(limits: &Limits) -> io::Result<Created> {
     let root = PathBuf::from(std::env::var("SPIKE_CGROUP_ROOT").unwrap_or("/sys/fs/cgroup".into()));
     cgroup_in(&root, limits)
 }
 
-fn cgroup_in(root: &std::path::Path, limits: &Limits) -> io::Result<PathBuf> {
+fn cgroup_in(root: &std::path::Path, limits: &Limits) -> io::Result<Created> {
     static COUNTER: AtomicU32 = AtomicU32::new(0);
     let dir = root.join(format!(
         "srelens-sidecar-{}-{}",
@@ -81,6 +104,8 @@ fn cgroup_in(root: &std::path::Path, limits: &Limits) -> io::Result<PathBuf> {
             dir.display()
         ))
     })?;
+    // From here on, a limit that cannot be set removes the directory again.
+    let created = Created(Some(dir.clone()));
     let set = |file: &str, value: String| {
         std::fs::write(dir.join(file), &value)
             .map_err(|e| io::Error::other(format!("{}/{file} = {value}: {e}", dir.display())))
@@ -89,12 +114,35 @@ fn cgroup_in(root: &std::path::Path, limits: &Limits) -> io::Result<PathBuf> {
     set("memory.swap.max", "0".into())?;
     let period = 100_000u64;
     set("cpu.max", format!("{} {period}", (limits.cpus * period as f64) as u64))?;
-    Ok(dir)
+    Ok(created)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{cgroup_in, oom_kills};
+    use super::{cgroup_in, oom_kills, Created};
+
+    fn fresh_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("srelens-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir(&dir);
+        std::fs::create_dir(&dir).expect("a temporary directory");
+        dir
+    }
+
+    #[test]
+    fn a_created_cgroup_that_is_not_kept_is_removed() {
+        // A launch that fails after creating the cgroup drops it without keeping it.
+        let dir = fresh_dir("created-dropped");
+        drop(Created(Some(dir.clone())));
+        assert!(!dir.exists(), "{} was left behind", dir.display());
+    }
+
+    #[test]
+    fn a_kept_cgroup_stays_for_its_sidecar() {
+        let dir = fresh_dir("created-kept");
+        let kept = Created(Some(dir.clone())).keep();
+        assert!(kept.exists());
+        std::fs::remove_dir(&kept).expect("cleanup");
+    }
 
     #[test]
     fn the_oom_kill_count_is_read_from_memory_events() {
@@ -128,7 +176,7 @@ pub fn launch_layered(fixture: &Fixture, limits: &Limits, layers: Layers) -> io:
     let mut cmd = Command::new(built_binary("sandbox-launch")?);
     let cgroup = if layers.cgroup { Some(cgroup(limits)?) } else { None };
     if let Some(dir) = &cgroup {
-        cmd.arg("--cgroup").arg(dir);
+        cmd.arg("--cgroup").arg(dir.path());
     }
     if layers.landlock {
         cmd.arg("--landlock").arg(fixture.scratch());
@@ -137,8 +185,9 @@ pub fn launch_layered(fixture: &Fixture, limits: &Limits, layers: Layers) -> io:
         cmd.arg("--seccomp");
     }
     cmd.arg("--").arg(fixture.probe());
+    // A launcher that cannot start drops `cgroup` here, which removes it.
     let child = spawn(cmd)?;
-    Ok(Confined { child, cgroup })
+    Ok(Confined { child, cgroup: cgroup.map(Created::keep) })
 }
 
 /// bubblewrap with every namespace unshared and only the scratch directory, the probe and
