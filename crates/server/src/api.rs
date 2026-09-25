@@ -43,6 +43,10 @@ pub const WEB_DENIED_CAPABILITIES: &[&str] = &[
     "extensions.streams",
     "extensions.resource",
     "extensions.action",
+    // An app's secret settings (#543) are kept by the desktop vault; the web
+    // host has no per-user secret store yet (#522), so a set is refused here
+    // rather than kept anywhere else.
+    "extension.secretStore",
     // The host GitOps write. On the web no installed app scopes it to a resource
     // and there is no consent prompt (#374), so a caller could name any allowlisted
     // kind directly. `k8s.getCustomResource` stays allowed: it is a read under the
@@ -468,6 +472,26 @@ mod tests {
             assert_eq!(status, StatusCode::BAD_REQUEST, "{id}");
             assert_eq!(body["error"], json!("capability not available in web mode"), "{id}");
         }
+    }
+
+    /// #543. Keeping an app's secret needs a store the web host does not have
+    /// (per-user storage is #522's), so a set is refused before dispatch —
+    /// never answered by something that would keep the value somewhere else —
+    /// and the refusal does not repeat it.
+    #[tokio::test]
+    async fn app_secret_storage_is_refused_on_web_before_dispatch() {
+        let secret = "web-must-not-keep-this-7f3a";
+        let (status, body) = post(
+            "/api/capability/extension.secretStore",
+            Body::from(
+                json!({"action":"set","id":"org.example.app","setting":"token","secret":secret})
+                    .to_string(),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], json!("capability not available in web mode"));
+        assert!(!body.to_string().contains(secret));
     }
 
     #[tokio::test]

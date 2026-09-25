@@ -844,6 +844,7 @@ current-context: other
         bundle.secrets = Some(Secrets {
             mcp_token: Some("deadbeef".into()),
             llm_keys: BTreeMap::from([("anthropic".into(), "sk-ant-secret".into())]),
+            ..Default::default()
         });
         let summary = bundle.summary();
         assert_eq!(summary.secret_keys, vec!["anthropic".to_string()]);
@@ -856,7 +857,7 @@ current-context: other
     #[test]
     fn an_absent_or_blank_mcp_token_does_not_read_as_one_being_present() {
         let mut bundle = sample();
-        bundle.secrets = Some(Secrets { mcp_token: Some(String::new()), llm_keys: BTreeMap::new() });
+        bundle.secrets = Some(Secrets { mcp_token: Some(String::new()), llm_keys: BTreeMap::new(), ..Default::default() });
         assert!(!bundle.summary().has_mcp_token);
     }
 

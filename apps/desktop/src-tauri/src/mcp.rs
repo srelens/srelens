@@ -112,7 +112,18 @@ impl McpHttpManager {
                     5 * 1024 * 1024,
                 )),
             };
-        let registry = build_registry_with(self.cache.clone());
+        // Apps' secrets (#543) in the same vault-backed store the UI's
+        // registry uses, so an agent sees the same state and a removal made
+        // here deletes the app's secrets too.
+        let registry = match app.try_state::<crate::ExtensionSecrets>() {
+            Some(secrets) => crate::registry_for(
+                self.cache.clone(),
+                crate::capabilities::default_kubeconfig_paths(),
+                crate::capabilities::default_settings_path(),
+                secrets.0.clone(),
+            ),
+            None => build_registry_with(self.cache.clone()),
+        };
         srelens_mcp::McpServer::new(Arc::new(registry))
             .with_policy(Arc::new(crate::mcp_confirm::PromptUser::new(
                 app.clone(),
@@ -965,6 +976,41 @@ mod tests {
         assert!(
             !dir.join("audit.jsonl").exists(),
             "a second sink must not have been built over the same path"
+        );
+    }
+
+    /// Review of #543: an agent's registry uses the store the app manages —
+    /// the same vault the UI's registry and the unlock commands use — so it
+    /// sees the same state. Read-only on purpose: this registry points at the
+    /// real default inventory, and any change there sweeps the vault.
+    #[tokio::test]
+    async fn build_server_gives_the_agent_the_apps_secret_store() {
+        let dir = scratch("secrets");
+        let app = tauri::test::mock_app();
+        let vault = Arc::new(crate::vault::Vault::with_backend(
+            &dir.join("vault"),
+            Box::new(crate::vault::test_support::MemKeychain::empty()),
+        ));
+        app.manage(crate::ExtensionSecrets(Arc::new(
+            crate::extension_secrets::VaultSecretStore::with(vault),
+        )));
+        let manager = McpHttpManager::new(ClientCache::new_many(vec![]));
+        let pending = Arc::new(crate::mcp_confirm::Pending::default());
+
+        let server = manager.build_server(
+            app.handle(),
+            &pending,
+            &dir.join("audit.jsonl"),
+            &dir.join("prompts"),
+        );
+        let listed = server
+            .call_tool("extensions.list", serde_json::json!({}))
+            .await
+            .expect("extensions.list answers");
+        assert_eq!(
+            listed["secretStore"],
+            serde_json::json!({"available": true}),
+            "the agent's registry must use the managed store, not none"
         );
     }
 
