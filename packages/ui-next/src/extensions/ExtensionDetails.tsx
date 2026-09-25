@@ -2,6 +2,7 @@ import { useContext, useState } from "react";
 import {
   CAPABILITY_CATALOG,
   clearExtensionSecret,
+  isTauri,
   type ExtensionChange,
   type ExtensionPreviousVersion,
   type ExtensionSource,
@@ -81,7 +82,10 @@ export function ExtensionDetails({
   const [rollback, setRollback] = useState<ExtensionPreviousVersion | null>(null);
   const { manifest } = plugin;
 
-  const keepsSecrets = (manifest.settings ?? []).some((setting) => setting.type === "secret-reference");
+  // The web host keeps no app secrets yet (#522): an app there has none for a reset to
+  // delete, and no vault to name.
+  const keepsSecrets =
+    isTauri() && (manifest.settings ?? []).some((setting) => setting.type === "secret-reference");
   /**
    * A reset deletes the app's secrets as well (#543): a token left in the
    * keychain after "reset to defaults" is a default nobody chose. The secrets

@@ -642,6 +642,49 @@ mod tests {
         assert_eq!(listed["plugins"][0]["enabled"], json!(true));
     }
 
+    /// An app that declares a secret setting installs on the web, but the web host
+    /// keeps no app secrets yet (#522): the user's registry has no secret store and
+    /// no `extension.secretStore`, the list says so, and its other settings still save.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn apps_with_secret_settings_install_on_the_web_and_keep_no_secret() {
+        let state = apps_state().await;
+        let (erin_id, erin) = sign_in(&state, "erin").await;
+        let mut manifest: Value = serde_json::from_str(&local_app()).unwrap();
+        manifest["settings"] =
+            json!([{"id": "token", "type": "secret-reference", "title": "Token"}]);
+        manifest["permissions"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!("extension.secretStore"));
+        let grants = manifest["permissions"].clone();
+        let install =
+            json!({"action": "install", "manifest": manifest.to_string(), "grants": grants});
+        let (status, installed) = call(&state, &erin, "extensions.configure", install).await;
+        assert_eq!(status, StatusCode::OK, "{installed}");
+
+        let (_, listed) = call(&state, &erin, "extensions.list", json!({})).await;
+        assert_eq!(listed["secretStore"]["available"], json!(false), "{listed}");
+        let env = state
+            .user_envs
+            .env_for(&state.db, &state.master_key, erin_id)
+            .await
+            .unwrap();
+        assert!(env.registry.get("extension.secretStore").is_none());
+        let (status, refused) = call(
+            &state,
+            &erin,
+            "extension.secretStore",
+            json!({"action": "set", "id": "org.example.argocd", "setting": "token", "secret": "s"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(refused["error"], json!("capability not available in web mode"));
+
+        let reset = json!({"action": "settings", "id": "org.example.argocd", "settings": {}});
+        let (status, saved) = call(&state, &erin, "extensions.configure", reset).await;
+        assert_eq!(status, StatusCode::OK, "{saved}");
+    }
+
     /// The catalog is read without any kubeconfig, from the one cache the server
     /// shares between its users and refreshes itself (#515).
     #[tokio::test(flavor = "multi_thread")]
