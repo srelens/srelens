@@ -328,7 +328,7 @@ pub const ACTION_PREDICATES: &[&str] = &["preconditions", "availableWhen"];
 /// kind it acts on, the arguments that fix what it writes, and what must be
 /// true of the object before it is written.
 ///
-/// Flux and Argo CD declare their actions using this contract in API 0.3.
+/// Flux and Argo CD declare their actions using this contract, which API 0.3 introduced.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ActionBinding {
@@ -428,7 +428,8 @@ pub struct Contributions {
     )]
     pub detail_panels: Vec<DetailPanel>,
     /// What status an app's custom resources have (#541). Replaces
-    /// `pages[].statusColumns`, which is deprecated but still accepted in 0.3.
+    /// `pages[].statusColumns`, which is deprecated but still accepted on the 0.3 and 0.4
+    /// lines.
     #[serde(
         default,
         rename = "statusResolvers",
