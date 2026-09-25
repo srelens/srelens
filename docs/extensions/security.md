@@ -22,6 +22,14 @@ mitigation and the risk that remains.
 - **Reviews cannot go stale.** The review keeps the UID and resourceVersion the reader
   saw, and the backend's conditional PATCH rejects the write if the resource changed
   ([capabilities.md](capabilities.md#declared-gitops-actions)).
+- **An update shows what access it changes.** The host compares the incoming manifest's
+  access with the installed revision's: the grants, what each reader binds, the settings
+  it keeps secrets for, and each action. The review in Settings → Apps lists what is
+  added and removed before what is unchanged, and the consent prompt for an install over
+  MCP names the added and removed access. The update must name the installed revision it
+  was reviewed against, and is refused if the app has changed since. A rollback gets no
+  such comparison: its review compares capability IDs only
+  ([threat-model.md](threat-model.md#malicious-app)).
 - **Official identities are reserved.** IDs under `org.srelens.` install only with the
   srelens publisher signature, so a pasted manifest cannot take an official app's ID
   or logo ([distribution.md](distribution.md#signed-official-releases)).
@@ -41,7 +49,9 @@ mitigation and the risk that remains.
   vault's key is only in a plain file beside it (no keychain and no master password) or
   the vault is locked, and is deleted with the app
   ([manifest.md](manifest.md#secret-settings)).
-- **The web host refuses app capabilities** until state is per user
+- **The web host keeps apps per user.** Each user's inventory is their own database
+  row, the one shared catalog cache is written only by the server, and no app secret is
+  kept there until per-user secret storage exists
   ([capabilities.md](capabilities.md#web-host)).
 - **Every write is recorded locally, wherever it came from.** A mutating or
   sensitive capability call is appended to `audit.jsonl` whether an agent made

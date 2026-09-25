@@ -21,6 +21,7 @@ mod settings;
 #[doc(hidden)]
 pub use extensions::fuzzing;
 pub use extensions::streams::{ExtensionStreams, OpenStreamOut, INVENTORY_CHANNEL};
+pub use extensions::{Apps, InventoryKey, InventoryLock, InventoryStore, SharedCatalog};
 pub use settings::default_settings_path;
 /// The secret store a host supplies for apps' secret settings (#543), so a
 /// host implements it against this crate alone.
@@ -233,6 +234,29 @@ pub fn build_registry_with_paths(
     build_registry_with_paths_and_settings(cache, kubeconfig_paths, None)
 }
 
+/// Build one web user's registry (#515): the host capabilities over their own
+/// kubeconfig files, and the apps capabilities over `apps` — their own inventory
+/// and the catalog the server shares between its users.
+///
+/// No desktop settings: web settings are per-user SQLite rows, served by the
+/// server's own settings API rather than by a capability. No secret store
+/// either: the web host has none per user yet (#522), so `extension.secretStore`
+/// is not registered, and `extensions.list` reports the store unavailable.
+pub fn build_registry_for_user(
+    cache: Arc<ClientCache>,
+    kubeconfig_paths: Vec<PathBuf>,
+    apps: Apps,
+) -> Registry {
+    build_with(
+        cache,
+        kubeconfig_paths,
+        Some(apps),
+        None,
+        BrokeredNetwork::Off,
+    )
+    .0
+}
+
 /// Build a registry and optionally add the durable desktop settings surface.
 /// Web-server registries omit it because web settings are per-user SQLite
 /// rows; desktop GUI and MCP callers pass the stable desktop settings path.
@@ -279,6 +303,33 @@ pub fn build_registry_app_streams_and_secrets(
     kubeconfig_paths: Vec<PathBuf>,
     settings_path: Option<PathBuf>,
     secrets: Arc<dyn SecretStore>,
+) -> (Registry, Option<Arc<ExtensionStreams>>) {
+    // The desktop keeps its apps in one file beside its settings.
+    let apps = settings_path
+        .as_ref()
+        .map(|path| Apps::from(path.with_extension("extensions.json")));
+    let (mut reg, app_streams) = build_with(
+        cache,
+        kubeconfig_paths,
+        apps,
+        Some(secrets),
+        BrokeredNetwork::Desktop,
+    );
+    if let Some(path) = settings_path {
+        settings::register(&mut reg, path);
+    }
+    (reg, app_streams)
+}
+
+/// Every host capability, and the apps capabilities over `apps` when there are
+/// any: with `secrets` keeping their secret settings, or with no way to keep
+/// one when there is no store at all (`None`, the web host).
+fn build_with(
+    cache: Arc<ClientCache>,
+    kubeconfig_paths: Vec<PathBuf>,
+    apps: Option<Apps>,
+    secrets: Option<Arc<dyn SecretStore>>,
+    network: BrokeredNetwork,
 ) -> (Registry, Option<Arc<ExtensionStreams>>) {
     let mut reg = Registry::new();
 
@@ -536,33 +587,43 @@ pub fn build_registry_app_streams_and_secrets(
     ));
 
     let mut app_streams = None;
-    if let Some(path) = settings_path {
+    if let Some(apps) = apps {
         let mut core = reg.clone();
-        for capability in broker_only(cache.clone()) {
+        for capability in broker_only(cache.clone(), network) {
             core.register(capability);
         }
         let core = Arc::new(core);
-        app_streams = Some(extensions::register_with_secrets(
-            &mut reg,
-            path.with_extension("extensions.json"),
-            core,
-            cache,
-            secrets,
-        ));
-        settings::register(&mut reg, path);
+        app_streams = Some(match secrets {
+            Some(secrets) => {
+                extensions::register_with_secrets(&mut reg, apps, core, cache, secrets)
+            }
+            None => extensions::register_without_secrets(&mut reg, apps, core, cache),
+        });
     }
 
     (reg, app_streams)
 }
 
+/// Whether an apps registry's broker may send `network.http` requests (#568).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BrokeredNetwork {
+    /// The desktop: a request leaves from the person's own computer, as their browser's
+    /// would.
+    Desktop,
+    /// The web host: a request would leave from the shared server — from its network
+    /// position, and to its loopback — so there is none.
+    Off,
+}
+
 /// The capabilities only the extension broker calls. Kept out of the registry the
 /// catalog and MCP are built from, so neither offers them: the CRD check an app read
 /// makes first, and `network.http` (#568), which called directly would fetch any URL.
-fn broker_only(cache: Arc<ClientCache>) -> Vec<Capability> {
-    vec![
-        extensions::crd::check_capability(cache),
-        extensions::network::capability(),
-    ]
+fn broker_only(cache: Arc<ClientCache>, network: BrokeredNetwork) -> Vec<Capability> {
+    let mut capabilities = vec![extensions::crd::check_capability(cache)];
+    if network == BrokeredNetwork::Desktop {
+        capabilities.push(extensions::network::capability());
+    }
+    capabilities
 }
 
 /// Build the registry using a caller-provided client cache with the host's
@@ -725,8 +786,10 @@ mod tests {
         assert_eq!(ids, default_ids, "same capabilities regardless of paths");
     }
 
+    /// `build_registry_with_paths` has no settings path, so neither the desktop
+    /// settings nor any app capability: apps need an inventory to act on.
     #[test]
-    fn web_registry_omits_host_desktop_settings() {
+    fn a_registry_without_a_settings_path_has_no_settings_or_apps() {
         let cache = ClientCache::new_many(vec![]);
         let reg = build_registry_with_paths(cache, vec![]);
         assert!(!reg.ids().contains(&"settings.get"));
@@ -749,6 +812,102 @@ mod tests {
         }
     }
 
+    /// A web user's registry (#515) has every capability the desktop's has except the
+    /// desktop settings file's, which the web keeps as per-user SQLite rows.
+    /// `HOST_ONLY_CAPABILITY_IDS` in `packages/core/src/lib/capabilities.ts` is this
+    /// difference, so the two are held to each other here.
+    #[test]
+    fn a_web_users_registry_has_apps_but_no_desktop_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let apps = Apps::with_shared_catalog(
+            Arc::new(dir.path().join("inventory.json")),
+            SharedCatalog::new(dir.path().join("catalog.json")),
+        );
+        let reg = build_registry_for_user(ClientCache::new_many(vec![]), vec![], apps);
+        let web: std::collections::BTreeSet<&str> = reg.ids().into_iter().collect();
+        let desktop_reg = build_registry();
+        let desktop: std::collections::BTreeSet<&str> = desktop_reg.ids().into_iter().collect();
+        let host_only: Vec<&str> = desktop.difference(&web).copied().collect();
+        // No secret store on the web yet (#522), so no way to hand one a secret.
+        assert_eq!(
+            host_only,
+            ["extension.secretStore", "settings.get", "settings.set"]
+        );
+        assert!(web.is_subset(&desktop));
+
+        let core = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../packages/core/src/lib/capabilities.ts"
+        ))
+        .unwrap();
+        let listed = core
+            .split("export const HOST_ONLY_CAPABILITY_IDS: readonly string[] = [")
+            .nth(1)
+            .and_then(|rest| rest.split("];").next())
+            .expect("capabilities.ts declares HOST_ONLY_CAPABILITY_IDS");
+        let listed: std::collections::BTreeSet<&str> = listed
+            .split(',')
+            .map(|id| id.trim().trim_matches('"'))
+            .filter(|id| !id.is_empty())
+            .collect();
+        assert_eq!(listed.into_iter().collect::<Vec<_>>(), host_only);
+    }
+
+    /// #568: on the web host a `network.http` request would leave from the shared
+    /// server, not from the person's own computer: from its network position, and to
+    /// its loopback. So a web user's registry has no `network.http`, and an app that
+    /// binds it is refused there as a target this host does not provide.
+    #[tokio::test]
+    async fn a_web_users_apps_cannot_send_network_requests() {
+        let dir = tempfile::tempdir().unwrap();
+        let apps = Apps::with_shared_catalog(
+            Arc::new(dir.path().join("inventory.json")),
+            SharedCatalog::new(dir.path().join("catalog.json")),
+        );
+        let reg = build_registry_for_user(ClientCache::new_many(vec![]), vec![], apps);
+        let manifest = json!({
+            "id": "org.example.releases", "name": "Releases", "version": "0.1.0",
+            "srelensApiVersion": "^0.4", "kind": "declarative",
+            "permissions": [{"capability": "network.http", "hosts": ["api.github.com"]}],
+            "capabilities": [{"name": "latest", "title": "Latest release", "target": "network.http",
+                "arguments": {"url": "https://api.github.com", "path": "/repos/srelens/srelens/releases/latest"},
+                "inputs": []}],
+            "contributions": {"pages": [], "detailTabs": [], "detailLinks": []}
+        })
+        .to_string();
+        let report = reg
+            .invoke(
+                "extensions.validate",
+                json!({"manifest": manifest, "grants": ["network.http"]}),
+            )
+            .await
+            .unwrap();
+        let refused = report["errors"].as_array().unwrap().iter().any(|error| {
+            error["code"] == "EXTENSION_UNSUPPORTED_TARGET"
+                && error["path"] == "capabilities[0].target"
+                && error["message"] == "This host does not provide network.http"
+        });
+        assert!(refused, "{report}");
+        let installed = reg
+            .invoke(
+                "extensions.configure",
+                json!({"action": "install", "manifest": manifest, "grants": ["network.http"]}),
+            )
+            .await;
+        assert!(installed.is_err(), "{installed:?}");
+        // The desktop's broker has it, and only the desktop's.
+        assert!(
+            broker_only(ClientCache::new_many(vec![]), BrokeredNetwork::Desktop)
+                .iter()
+                .any(|capability| capability.id == srelens_plugin_host::NETWORK_HTTP)
+        );
+        assert!(
+            !broker_only(ClientCache::new_many(vec![]), BrokeredNetwork::Off)
+                .iter()
+                .any(|capability| capability.id == srelens_plugin_host::NETWORK_HTTP)
+        );
+    }
+
     /// #543, then #568: the one place the host may put an app's secret is the
     /// `secretHeaders` of `network.http`, and that capability is the broker's
     /// alone. Nothing the catalog or MCP offers declares a slot, and no
@@ -757,7 +916,7 @@ mod tests {
     #[test]
     fn only_the_brokers_network_http_takes_a_secret() {
         let reg = build_registry();
-        let broker = broker_only(ClientCache::new_many(vec![]));
+        let broker = broker_only(ClientCache::new_many(vec![]), BrokeredNetwork::Desktop);
         for capability in reg.entries().chain(broker.iter()) {
             let expected: &[&str] = if capability.id == srelens_plugin_host::NETWORK_HTTP {
                 &["secretHeaders"]

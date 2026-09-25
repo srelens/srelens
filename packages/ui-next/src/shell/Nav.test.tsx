@@ -1,10 +1,11 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ClusterContext, CrdRef } from "@srelens/core";
 import { Nav } from "./Nav";
 import { currentWorkspace, openTab, setState } from "../lib/tabsStore";
 import { defaultState } from "../lib/tabs";
+import { pinContextKey } from "../lib/clusters";
 import { loadExpanded, resetView, setLink } from "../lib/workspace";
 
 // The CRD list is the one thing here that talks to a cluster. Mocked at the
@@ -244,26 +245,54 @@ it("groups app pages under their display name", async () => {
   expect(fluxNode.querySelector("[data-extension-logo]")?.getAttribute("data-extension-logo")).toBe("org.srelens.flux");
   await userEvent.click(fluxNode);
   await userEvent.click(await screen.findByRole("treeitem", { name: "Kustomizations" }));
-  expect(tabFor("/extension-clusters/id%3Aprod-eu/org.srelens.flux/kustomizations/")?.sub).toBe("prod-eu");
+  expect(tabFor("/extension-contexts/id%3Aprod-eu/org.srelens.flux/kustomizations/")?.sub).toBe("prod-eu");
   expect(screen.queryByText("org.srelens.flux")).toBeNull();
   await userEvent.click(screen.getByRole("treeitem", { name: "Sources" }));
   await userEvent.click(screen.getByRole("treeitem", { name: "Git repositories" }));
-  expect(tabFor("/extension-clusters/id%3Aprod-eu/org.srelens.flux/repositories/")?.sub).toBe("prod-eu");
+  expect(tabFor("/extension-contexts/id%3Aprod-eu/org.srelens.flux/repositories/")?.sub).toBe("prod-eu");
 });
 
-it("hides limited apps when the selected stable ID is shared", async () => {
- extensionState.data={plugins:[{enabled:true,contexts:[PROD.stableId],manifest:{id:"org.test.app",name:"Test app",contributions:{pages:[{id:"page",title:"Page"}]}}}]};
- render(<Nav contexts={[PROD,{...ctx("other"),stableId:PROD.stableId}]} />);
- expect(screen.queryByRole("treeitem",{name:"Apps"})).toBeNull();
-});
+describe("two contexts that share a stable ID (#695)", () => {
+  // `/kube/a` declaring `b#c` and `/kube/a#b` declaring `c` share `/kube/a#b#c` (#623);
+  // a window opened for one of them pins its key.
+  const first = { ...ctx("b#c"), stableId: "/kube/a#b#c", key: "/kube/a#b%23c" };
+  const second = { ...ctx("c"), stableId: "/kube/a#b#c", key: "/kube/a%23b#c" };
+  const flux = { enabled: true, manifest: { id: "org.srelens.flux", name: "Flux", contributions: { pages: [
+    { id: "kustomizations", title: "Kustomizations" },
+  ] } } };
+  beforeEach(() => setState(defaultState([first, second])));
+  afterEach(() => pinContextKey(null));
 
-it("hides unrestricted apps on shared IDs and restores them when the collision is removed", () => {
-  extensionState.data = { plugins: [{
-    enabled: true,
-    manifest: { id: "org.test.app", name: "Test app", contributions: { pages: [{ id: "page", title: "Page" }] } },
-  }] };
-  const mounted = render(<Nav contexts={[PROD, { ...ctx("other"), stableId: PROD.stableId }]} />);
-  expect(screen.queryByRole("treeitem", { name: "Apps" })).toBeNull();
-  mounted.rerender(<Nav contexts={[PROD]} />);
-  expect(screen.getByRole("treeitem", { name: "Apps" })).toBeTruthy();
+  it("opens each one's app page in a tab of its own", async () => {
+    extensionState.data = { plugins: [flux] };
+    // Folds are kept per stable ID, so the pair shares them: open a group only when it is shut.
+    const unfold = async (name: string) => {
+      const group = await screen.findByRole("treeitem", { name });
+      if (group.getAttribute("aria-expanded") !== "true") await userEvent.click(group);
+    };
+    const open = async () => {
+      await unfold("Apps");
+      await unfold("Flux");
+      await userEvent.click(await screen.findByRole("treeitem", { name: "Kustomizations" }));
+    };
+    pinContextKey(first.key);
+    const mounted = render(<Nav contexts={[first, second]} />);
+    await open();
+    mounted.unmount();
+    pinContextKey(second.key);
+    render(<Nav contexts={[first, second]} />);
+    await open();
+    expect(tabFor("/extension-contexts/%2Fkube%2Fa%23b%2523c/org.srelens.flux/kustomizations/")?.sub).toBe("b#c");
+    expect(tabFor("/extension-contexts/%2Fkube%2Fa%2523b%23c/org.srelens.flux/kustomizations/")?.sub).toBe("c");
+  });
+
+  it("offers an app limited to one of them on that one only", () => {
+    extensionState.data = { plugins: [{ ...flux, contexts: [second.key] }] };
+    pinContextKey(first.key);
+    const mounted = render(<Nav contexts={[first, second]} />);
+    expect(screen.queryByRole("treeitem", { name: "Apps" })).toBeNull();
+    pinContextKey(second.key);
+    mounted.rerender(<Nav contexts={[first, second]} />);
+    expect(screen.getByRole("treeitem", { name: "Apps" })).toBeTruthy();
+  });
 });

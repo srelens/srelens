@@ -236,13 +236,44 @@ it("gives each app resource its own cluster, page, namespace and name route", as
   expect(route).not.toBe(extensionResourceRoute("cluster/b","org.srelens.flux","kustomizations","team","apps"));
 });
 
-it("distinguishes stable cluster routes from literal context-name routes", async () => {
+it("distinguishes context-key routes from literal context-name routes", async () => {
   const { extensionClusterRoute, extensionClusterResourceRoute } = await import("./extensions");
-  const id = "/kube/team.yaml#team#prod";
-  const route = extensionClusterRoute(id, "org.test.app", "page", "team");
-  expect(parseExtensionRoute(route)).toEqual({ context: id, clusterId: id, id: "org.test.app", page: "page", namespace: "team" });
-  expect(parseExtensionRoute(extensionRoute(id, "org.test.app", "page"))).not.toHaveProperty("clusterId");
-  expect(parseExtensionRoute(extensionClusterResourceRoute(id, "org.test.app", "page", "team", "resource"))?.resourceName).toBe("resource");
+  const key = "/kube/team.yaml#team%23prod";
+  const route = extensionClusterRoute(key, "org.test.app", "page", "team");
+  expect(parseExtensionRoute(route)).toEqual({ context: key, contextKey: key, id: "org.test.app", page: "page", namespace: "team" });
+  expect(parseExtensionRoute(extensionRoute(key, "org.test.app", "page"))).not.toHaveProperty("contextKey");
+  expect(parseExtensionRoute(extensionClusterResourceRoute(key, "org.test.app", "page", "team", "resource"))?.resourceName).toBe("resource");
+});
+
+describe("app routes name their cluster by context key (#695)", () => {
+  // `/kube/a` declaring `b#c` and `/kube/a#b` declaring `c` share the stable ID
+  // `/kube/a#b#c`; their keys encode `#` in each part, so they differ.
+  const first = "/kube/a#b%23c";
+  const second = "/kube/a%23b#c";
+
+  it("gives two contexts that share a stable ID two routes to one page, resource and card", async () => {
+    const { extensionClusterRoute, extensionClusterResourceRoute, extensionCardRoute } = await import("./extensions");
+    expect(extensionClusterRoute(first, "org.test.app", "page", "team"))
+      .toBe("/extension-contexts/%2Fkube%2Fa%23b%2523c/org.test.app/page/team");
+    expect(extensionClusterRoute(second, "org.test.app", "page", "team"))
+      .toBe("/extension-contexts/%2Fkube%2Fa%2523b%23c/org.test.app/page/team");
+    expect(extensionClusterResourceRoute(first, "org.test.app", "page", "team", "web"))
+      .not.toBe(extensionClusterResourceRoute(second, "org.test.app", "page", "team", "web"));
+    expect(extensionCardRoute(first, "org.test.app", "page", "team", "expiring"))
+      .not.toBe(extensionCardRoute(second, "org.test.app", "page", "team", "expiring"));
+    expect(parseExtensionRoute(extensionClusterResourceRoute(second, "org.test.app", "page", "team", "web"))).toEqual({
+      context: second, contextKey: second, id: "org.test.app", page: "page", namespace: "team", resourceName: "web",
+    });
+  });
+
+  it("still reads a route opened before, which names its cluster by stable ID", () => {
+    const route = "/extension-clusters/%2Fkube%2Fa%23b%23c/org.test.app/page/team/web";
+    expect(parseExtensionRoute(route)).toEqual({
+      context: "/kube/a#b#c", clusterId: "/kube/a#b#c", id: "org.test.app", page: "page", namespace: "team", resourceName: "web",
+    });
+    // One string can be a key and a stable ID; which one the route means is in its prefix.
+    expect(parseExtensionRoute("/extension-clusters/%2Fkube%2Fx%23y%2523z/org.test.app/page/")).not.toHaveProperty("contextKey");
+  });
 });
 
 describe("dashboard cards (#540)", () => {
@@ -271,7 +302,7 @@ describe("dashboard cards (#540)", () => {
     const id = "/kube/config#prod";
     const route = extensionCardRoute(id, "org.test.app", "certificates", "team", "expiring soon");
     expect(parseExtensionRoute(route)).toEqual({
-      context: id, clusterId: id, id: "org.test.app", page: "certificates", namespace: "team", card: "expiring soon",
+      context: id, contextKey: id, id: "org.test.app", page: "certificates", namespace: "team", card: "expiring soon",
     });
     // A filtered page is a different tab from the unfiltered one, and from another card's.
     expect(route).not.toBe(extensionClusterRoute(id, "org.test.app", "certificates", "team"));
@@ -284,7 +315,7 @@ describe("dashboard cards (#540)", () => {
     const id = "/kube/config#prod";
     const route = extensionCardRoute(id, "org.test.app", "certificates", "", "expiring", ["team", "prod"]);
     expect(parseExtensionRoute(route)).toEqual({
-      context: id, clusterId: id, id: "org.test.app", page: "certificates", namespace: "",
+      context: id, contextKey: id, id: "org.test.app", page: "certificates", namespace: "",
       card: "expiring", namespaces: ["prod", "team"],
     });
     // One selection, one tab, whatever order it was picked in.

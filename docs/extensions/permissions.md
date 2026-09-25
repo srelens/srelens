@@ -19,12 +19,24 @@ cluster's RBAC.
   columns (with their JSON paths); for each `k8s.listEvents` reader the API groups its
   dashboards show; for anything else its fixed arguments. **View manifest** opens the
   full manifest before installing, whether it came from the Catalog or was pasted.
-- Installing a new version of an installed app shows its permissions again, with what
-  changed against the installed version first
-  ([#554](https://github.com/srelens/srelens/issues/554)). Another host for
-  `network.http`, or another declaration of a url setting a host is read from, is
-  changed access even under the same grant. The application never silently replaces a
-  manifest or expands its grants.
+- Installing a new version of an installed app shows its permissions again, with
+  what access the update changes
+  ([#554](https://github.com/srelens/srelens/issues/554)). The host compares the
+  incoming manifest's access with the installed revision's: the grants, what each
+  reader binds, the settings it keeps secrets for, each action, and each host
+  `network.http` may reach (#568), so another host is changed access even under the
+  same grant. The review in
+  Settings → Apps lists what is added and removed before what is unchanged, and the
+  consent prompt for an install over MCP names the added and removed access. The
+  update must name the installed revision it was reviewed against, and is refused if
+  the app has changed since. The comparison is a review aid and refuses nothing: an
+  update that widens access installs once it is approved. The application never
+  silently replaces a manifest or expands its grants.
+- A rollback gets no such comparison. Its review in Settings → Apps compares
+  capability IDs and the hosts `network.http` may reach: when they differ from what is
+  granted now, it lists what the kept version requests and reaches, and what it no
+  longer uses
+  ([threat-model.md](threat-model.md#malicious-app)).
 
 ## What an app may read
 
@@ -75,8 +87,9 @@ nothing can call it except through an installed app's binding. See
 ## What an app may write
 
 Only through a declared action ([manifest.md](manifest.md#declared-actions)), and only
-one of the four host action primitives, each a separate permission the user grants:
-`k8s.annotate`, `k8s.setFields`, `k8s.setStatusCondition` and `k8s.mergePatch`.
+one of the six host action primitives, each a separate permission the user grants:
+`k8s.annotate`, `k8s.setFields`, `k8s.setStatusCondition`, `k8s.mergePatch`,
+`k8s.requestRolloutRestart` and `k8s.requestCordonNode`.
 
 - A reader grant buys no write, and an action grant buys no read.
 - An action reaches only the kind of a reader binding in the same manifest, because
@@ -144,5 +157,7 @@ admitted may finish.
 
 ## Web host
 
-Apps are not available on the multi-user web host yet. See
-[capabilities.md](capabilities.md#web-host).
+Each user of the multi-user web host grants permissions to their own apps; one user's
+grants never reach another's. Declared actions run only through `extensions.action`,
+after the host confirmation, and the host action primitives stay refused when called
+directly. See [capabilities.md](capabilities.md#web-host).

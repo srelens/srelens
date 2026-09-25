@@ -2090,6 +2090,7 @@ mod tests {
                     stable_id: "kube/prod-eu".to_string(),
 
                     key: "kube/prod-eu".to_string(),
+                    pinned_id: None,
                     cluster: "prod-cluster".to_string(),
                     server: "https://127.0.0.1:6443".to_string(),
                     namespace: "default".to_string(),
@@ -2104,6 +2105,7 @@ mod tests {
                     stable_id: "kube/kind-dev".to_string(),
 
                     key: "kube/kind-dev".to_string(),
+                    pinned_id: None,
                     cluster: "kind-cluster".to_string(),
                     server: "https://127.0.0.1:6444".to_string(),
                     namespace: "default".to_string(),
@@ -2269,6 +2271,7 @@ mod tests {
                     stable_id: "kube/prod".to_string(),
 
                     key: "kube/prod".to_string(),
+                    pinned_id: None,
                     cluster: "prod-cluster".to_string(),
                     server: "https://127.0.0.1:6443".to_string(),
                     namespace: "default".to_string(),
@@ -2283,6 +2286,7 @@ mod tests {
                     stable_id: "kube/harvester".to_string(),
 
                     key: "kube/harvester".to_string(),
+                    pinned_id: None,
                     cluster: "harvester-cluster".to_string(),
                     server: "https://127.0.0.1:6444".to_string(),
                     namespace: "kube-system".to_string(),
@@ -2455,6 +2459,7 @@ mod tests {
                     stable_id: "kube/prod".to_string(),
 
                     key: "kube/prod".to_string(),
+                    pinned_id: None,
                     cluster: "prod-cluster".to_string(),
                     server: "https://127.0.0.1:6443".to_string(),
                     namespace: "production".to_string(),
@@ -2469,6 +2474,7 @@ mod tests {
                     stable_id: "kube/staging".to_string(),
 
                     key: "kube/staging".to_string(),
+                    pinned_id: None,
                     cluster: "staging-cluster".to_string(),
                     server: "https://127.0.0.1:6444".to_string(),
                     namespace: "staging-ns".to_string(),

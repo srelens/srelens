@@ -48,9 +48,9 @@ Freelens and OpenLens packages are not supported.
 
 ## Try an app
 
-On the desktop, the quickest path is **Settings → Apps → Catalog** → Flux or Argo CD →
-**Review installation**. Apps are not yet available on the web host
-([#515](https://github.com/srelens/srelens/issues/515)).
+The quickest path is **Settings → Apps → Catalog** → Flux or Argo CD →
+**Review installation**, on the desktop or the web host. On the web the apps you
+install are yours alone ([#515](https://github.com/srelens/srelens/issues/515)).
 
 To exercise the local installer instead:
 

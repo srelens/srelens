@@ -120,7 +120,10 @@ function decodedSegment(raw: string): string {
  */
 export function describe(route: string, clusterName?: string): RouteInfo {
   const extension = parseExtensionRoute(route);
-  if (extension) return { route, title: extension.resourceName ?? extension.page, sub: extension.clusterId ? clusterName ?? extension.context : extension.context, kind: "resource" };
+  // A route that names its cluster by key or stable ID is labelled with the cluster's name;
+  // a legacy one already carries the name.
+  const named = extension && extension.contextKey === undefined && extension.clusterId === undefined;
+  if (extension) return { route, title: extension.resourceName ?? extension.page, sub: named ? extension.context : clusterName ?? extension.context, kind: "resource" };
   const sub = clusterName || undefined;
   if (route.startsWith("/resources/")) {
     const [, , rawName, suffix] = route.split("/");

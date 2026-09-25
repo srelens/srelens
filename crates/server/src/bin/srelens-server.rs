@@ -67,7 +67,7 @@ fn main() {
         .expect("build tokio runtime");
     runtime.block_on(async {
         let factory: srelens_server::RegistryFactory =
-            Arc::new(|cache, paths| srelens_registry::build_registry_with_paths(cache, paths));
+            Arc::new(srelens_registry::build_registry_for_user);
         eprintln!("srelens web server listening on http://{addr}");
         eprintln!("srelens data directory: {}", data_dir.display());
         if let Err(e) =

@@ -182,6 +182,8 @@ the controller has done anything.
 | `k8s.setFields` | `fields` | RFC 6901 pointers under `/spec` (at most 16, at most 8 segments deep, none inside another), each set to a fixed value. |
 | `k8s.setStatusCondition` | `conditionType`, `conditionStatus`, `reason`, `message?` | One condition, through the **status subresource**, carrying over the conditions it does not own. `conditionStatus` is `True`, `False` or `Unknown`, and `lastTransitionTime` moves only when the status changes. |
 | `k8s.mergePatch` | `patch` | A fixed JSON merge patch, past the deny-list below. |
+| `k8s.requestRolloutRestart` | none | The pod template's `kubectl.kubernetes.io/restartedAt` annotation, set to the request time, on a Deployment, StatefulSet or DaemonSet. See [Built-in operational action bindings](#built-in-operational-action-bindings). |
+| `k8s.requestCordonNode` | `unschedulable` | A Node's `spec.unschedulable`: `true` to cordon, `false` to uncordon. See [Built-in operational action bindings](#built-in-operational-action-bindings). |
 
 `k8s.setFields` writes **object fields**, and writes a list by naming the list
 (`"/spec/ignore": ["a", "b"]`). A pointer that reaches *through* a list —
@@ -771,8 +773,9 @@ entry in it, beside the MCP token and the provider API keys, keyed by
   (`PluginHost::inject_secret`). The one slot is a `network.http` request's
   `secretHeaders` (#568): see [Network requests](#network-requests). A declarative app
   never sees the value, and a `secret-reference` is never interpolated.
-- **Web.** The web host keeps no app secrets yet (#522): `extension.secretStore` is refused
-  there before dispatch.
+- **Web.** The web host keeps no app secrets yet (#522): a web user's registry has no
+  secret store, so `extension.secretStore` is not registered there, and it is refused
+  before dispatch too. Apps with secret settings still install; those settings stay unset.
 
 ### When the manifest changes
 
@@ -865,6 +868,10 @@ On every request, before anything is sent and again at every redirect:
 The answer is `{ "status", "contentType", "body" }`: the body parsed when the server says
 it is JSON, as text otherwise. A status outside 2xx is an error that names it. No error
 repeats the URL, its host or a secret; a URL may be a setting's value.
+
+**Desktop only.** On the web host a request would leave from the shared server, so a web
+user's registry has no `network.http` and an app that binds it is refused there
+(`EXTENSION_UNSUPPORTED_TARGET`); see [capabilities.md](capabilities.md#web-host).
 
 `extensions.read` sends a request, with every check an app read makes: the app enabled,
 at the revision the view knows, on a cluster it is enabled for, with its grants. A read

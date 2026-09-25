@@ -3,15 +3,16 @@ import {
   CAPABILITY_CATALOG,
   NETWORK_HTTP,
   clearExtensionSecret,
+  isTauri,
   networkHosts,
   permissionName,
-  saveTextFile,
   type ExtensionChange,
   type ExtensionPreviousVersion,
   type ExtensionSource,
   type InstalledExtension,
 } from "@srelens/core";
 import { CodeEditor } from "@srelens/ui-kit";
+import { saveOrDownload } from "../lib/saveOrDownload";
 import { ExtensionClusters } from "./ExtensionClusters";
 import { ExtensionNetwork } from "./ExtensionNetwork";
 import { hostText } from "./networkText";
@@ -89,7 +90,10 @@ export function ExtensionDetails({
   const [rollback, setRollback] = useState<ExtensionPreviousVersion | null>(null);
   const { manifest } = plugin;
 
-  const keepsSecrets = (manifest.settings ?? []).some((setting) => setting.type === "secret-reference");
+  // The web host keeps no app secrets yet (#522): an app there has none for a reset to
+  // delete, and no vault to name.
+  const keepsSecrets =
+    isTauri() && (manifest.settings ?? []).some((setting) => setting.type === "secret-reference");
   /**
    * A reset deletes the app's secrets as well (#543): a token left in the
    * keychain after "reset to defaults" is a default nobody chose. The secrets
@@ -109,7 +113,8 @@ export function ExtensionDetails({
 
   async function exportSettings() {
     try {
-      await saveTextFile(`${manifest.id}-settings.json`, `${JSON.stringify(plugin.settings, null, 2)}\n`);
+      // A browser download on the web, which has no `save_text_file` command.
+      await saveOrDownload(`${manifest.id}-settings.json`, `${JSON.stringify(plugin.settings, null, 2)}\n`);
     } catch (e) {
       onError(e instanceof Error ? e.message : String(e));
     }

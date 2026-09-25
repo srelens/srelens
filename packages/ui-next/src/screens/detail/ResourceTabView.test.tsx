@@ -28,6 +28,8 @@ vi.mock("@srelens/core", async (importOriginal) => ({
   podMetrics,
   podsForSelector,
   podsOnNode,
+  // The web server's answer for a user with no apps (#515): the app slot stays empty.
+  listExtensions: async () => ({ schemaVersion: 1, nextRevision: 1, plugins: [] }),
 }));
 
 const { descriptorFor } = vi.hoisted(() => ({

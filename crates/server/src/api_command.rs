@@ -30,11 +30,12 @@ fn error(status: StatusCode, message: &str) -> Response {
 /// kubeconfigs and sealed tokens. Web users get the RBAC-scoped in-pod
 /// `start_pod_exec` terminal instead; the host shell stays desktop-only.
 ///
-/// The app stream commands (#565) are refused for the reason every
-/// `extensions.*` capability is (`WEB_DENIED_CAPABILITIES`): the web host
-/// keeps no per-user app inventory yet (#515), so there is no installed app
-/// to authorize a stream against. Their frames already travel over `/api/ws`
-/// like every other stream's once that lands.
+/// The app stream commands (#565) are refused too. Each web user has their own
+/// apps now (#515), but the server does not run app streams for them: nothing
+/// here opens a user's `ExtensionStreams` or carries its frames over `/api/ws`.
+/// So on the web an app's page, columns and cards read once and again on
+/// Refresh, and say they are not live, rather than open a stream that would
+/// never send.
 pub const WEB_DENIED_COMMANDS: &[&str] = &[
     "start_terminal",
     "extension_stream_open",
@@ -516,9 +517,9 @@ mod tests {
         assert_eq!(body["error"], json!("command not available in web mode"));
     }
 
-    /// App streams (#565) are refused with every other app surface until app
-    /// state is kept per user (#515): refused as not available here, not
-    /// answered as an unknown command, so the client can say which it is.
+    /// App streams (#565) are refused while the server runs none for its users:
+    /// refused as not available here, not answered as an unknown command, so
+    /// the client can say which it is.
     #[tokio::test]
     async fn app_streams_are_denied_in_web_mode() {
         let state = AppState::for_tests(Arc::new(Registry::new())).await;

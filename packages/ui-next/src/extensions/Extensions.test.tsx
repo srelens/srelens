@@ -1,8 +1,9 @@
 import { act, render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import { beforeEach, expect, it, vi } from "vitest";
+const host = vi.hoisted(() => ({ tauri: true }));
 vi.mock("@srelens/core", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@srelens/core")>()),
-  isTauri: () => true,
+  isTauri: () => host.tauri,
   listExtensionCatalog: vi.fn(),
   reviewCatalogExtension: vi.fn(),
   listExtensions: vi.fn(),
@@ -548,6 +549,31 @@ it("resets settings to their defaults, keeps a required one, which has none, and
   await waitFor(() =>
     expect(configureExtensions).toHaveBeenCalledWith({ action: "settings", id: "org.test.gitops", settings: { url: "https://prom" } }),
   );
+});
+/** The web host keeps no app secrets (#522), so a reset there has none to delete and names no vault. */
+it("resets an app with a secret setting on the web without asking the host to delete a secret", async () => {
+  host.tauri = false;
+  try {
+    const app = {
+      ...updated(),
+      manifest: { ...updated().manifest, settings: [
+        { id: "team", type: "string", title: "Team", default: "ops" },
+        { id: "token", type: "secret-reference", title: "Token" },
+      ] },
+      settings: { team: "platform" },
+    };
+    const details = await openDetails(app as ReturnType<typeof updated>);
+    fireEvent.click(within(details).getByRole("button", { name: "Reset settings" }));
+    const confirm = within(details).getByRole("alertdialog", { name: "Reset settings" });
+    expect(confirm.textContent).not.toContain("secrets vault");
+    fireEvent.click(within(details).getByRole("button", { name: "Reset to defaults" }));
+    await waitFor(() =>
+      expect(configureExtensions).toHaveBeenCalledWith({ action: "settings", id: "org.test.gitops", settings: {} }),
+    );
+    expect(clearExtensionSecret).not.toHaveBeenCalled();
+  } finally {
+    host.tauri = true;
+  }
 });
 it("keeps a secret through the host's store, never through settings, and shows why it cannot", async () => {
   const secretApp = (settings: Record<string, unknown>) => ({
