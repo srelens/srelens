@@ -78,7 +78,7 @@ The same lines work in PowerShell.
   backends' failures are the matrix, not failures.
 - **The kernel is the Docker VM's, not your host's.** The first lines of the results file
   name it, and each Landlock run prints the kernel's Landlock ABI. On an Apple-silicon Mac
-  the container is arm64, which this spike has never run.
+  the container is arm64; the ADR records one such run.
 
 To run it on a Linux machine without Docker, as an ordinary user, the `cgroup` backends
 need a delegated cgroup v2 directory with the `memory` and `cpu` controllers enabled.

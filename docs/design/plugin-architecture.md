@@ -167,7 +167,8 @@ rule. No cell changed. Every enforced network cell had a working host network be
 and no enforced cell was actually inconclusive.
 
 The memory and CPU rules came in a later review round. The macOS run was repeated under
-them and no cell changed. The Windows and x86-64 Linux runs have not been repeated under
+them and no cell changed, and the Linux arm64 run (under [Support matrix](#support-matrix))
+was made under them. The Windows and x86-64 Linux runs have not been repeated under
 them.
 
 With no sandbox, every "must be denied" check fails because the operation succeeds, on
@@ -190,6 +191,22 @@ maintainer reproduced both Linux runs on the same kernel with the same results:
   `NetworkUnreachable`), with no process, memory or CPU limit. The cgroup backend
   OOM-killed the sidecar (`SIGKILL`, `oom_kill 1`) and held it to 0.26 CPUs.
 - **Unprivileged:** Landlock 5/11 and seccomp 6/11, identical to the privileged runs.
+
+Linux arm64 was run once, during review, in Docker Desktop 4.92.0 (engine 29.8.0) on an
+Apple-silicon Mac: kernel `7.0.12-linuxkit`, which reports Landlock ABI 8, so the
+launcher's ruleset was fully enforced, with Debian bookworm, cgroup v2 and bubblewrap
+0.8.0 as above. It ran under the memory and CPU rules of
+[What was checked](#what-was-checked). Every backend gave the x86-64 result except
+Landlock alone:
+
+- `landlock+seccomp+cgroup` 11/11, the cgroup backend OOM-killed the sidecar (`SIGKILL`,
+  `oom_kill 1`) and held it to 0.25 CPUs, and bubblewrap 8/11 and seccomp 6/11 as on
+  x86-64. The seccomp filter, which leaves out `fork` and `vfork` on arm64, still
+  refused the child process with `EPERM`.
+- Landlock alone passed 7/11: with ABI 4 or later its TCP rules deny both connects
+  (`EACCES`), which ABI 3 could not (the Landlock with TCP rules row). DNS still
+  resolved.
+- The unprivileged run gave the same Landlock and seccomp results.
 
 macOS was run by the maintainer on macOS 27.0 (26A428), arm64, kernel 27.0.0, with
 rustc 1.98.1. The first run, at `c7ff2875`, never got the probe started: all 11 tests
@@ -230,7 +247,7 @@ The second run, at `02190671`, used `SEATBELT_TRACE=1` and exited 0:
 | **Linux** cgroup v2 | Not provided | Not provided | Not provided | Not provided | Enforced: OOM-killed (`SIGKILL`, `oom_kill 1`), host relaunches | Enforced: 0.25 CPUs | Works |
 | **Linux** Landlock + seccomp + cgroup v2 | Enforced | Enforced | Enforced | Enforced | Enforced | Enforced: 0.26 CPUs | Works |
 | **Linux** bubblewrap, all namespaces unshared | Enforced (paths not mounted, `ENOENT`) | Enforced | Enforced (network namespace) | Not provided | Not provided | Not provided | Works |
-| **Linux** Landlock with TCP rules (ABI ≥ 4, kernel ≥ 6.7) | Unverified | Unverified | Unverified | — | — | — | Unverified |
+| **Linux** Landlock with TCP rules (ABI ≥ 4, kernel ≥ 6.7). Run on arm64 only (ABI 8) | Enforced (`EACCES`) | Enforced | TCP enforced (`EACCES`, loopback and internet). DNS not provided: UDP needs ABI 10 | Not provided | Not provided | Not provided | Works |
 | **macOS** `seatbelt`: `sandbox-exec` (deprecated) with `src/seatbelt.sb`, plus rlimits. Verified on macOS 27.0 arm64 only | Enforced (`EPERM`) | Enforced (`EPERM` outside, allowed inside) | Enforced: TCP `EPERM`, DNS resolver failure (the mDNSResponder socket is denied) | Enforced (`EPERM`) | **Not provided by the kernel (observed):** `setrlimit` refuses `RLIMIT_DATA` and `RLIMIT_AS` with `EINVAL`, and 512 MiB was allocated against a 128 MiB limit. Host-enforced by the planned watchdog (next row) | **Not provided by the kernel (observed):** 1.99 CPUs against 0.25. `RLIMIT_CPU` is accepted, but it is a lifetime budget, not a rate. Host-enforced by the planned watchdog (next row) | Works |
 | **macOS** supervisor watchdog ([#713](https://github.com/srelens/srelens/issues/713), decided, not built) | — | — | — | — | Host-enforced, weaker than the kernel: bounds sustained use, while a burst can exceed the limit between samples. Not built or measured | Host-enforced, weaker than the kernel: throttles with `SIGSTOP`/`SIGCONT` or kills after a sample shows the overrun. Not built or measured | — |
 | **macOS** `seatbelt` on Intel, or on macOS before 27 | Unverified | Unverified | Unverified | Unverified | Unverified | Unverified | Unverified |
@@ -421,12 +438,12 @@ Considered and not chosen:
   (for example a `systemd-run --user --scope` unit). Which controllers are delegated,
   and whether `cpu` is among them on the distributions srelens supports, was not
   checked.
-- **Landlock TCP rules** (ABI 4, kernel 6.7 and later) could not be exercised. Docker
-  Desktop's WSL2 kernel has ABI 3.
-- **Architectures.** Linux and Windows were run on x86-64 only, and macOS on arm64
-  only. The spike compiles for arm64 Linux. There, the seccomp filter leaves out `fork`
-  and `vfork`, which arm64 does not have, and it has not been run. That is what Docker
-  on an Apple-silicon Mac would run. Windows on Arm was not run.
+- **Landlock TCP rules** (ABI 4, kernel 6.7 and later) were exercised on arm64 only, in
+  Docker Desktop's `linuxkit` kernel (ABI 8). Docker Desktop's WSL2 kernel, the x86-64
+  run, has ABI 3.
+- **Architectures.** Windows was run on x86-64 only, and macOS on arm64 only. Linux was
+  run on x86-64 and, once, on arm64 in Docker Desktop on an Apple-silicon Mac; both
+  were containers running as root. Windows on Arm was not run.
 - **Unix sockets.** The seccomp filter here still allows `AF_UNIX`, and the launcher's
   Landlock ruleset (ABI 5) does not handle ABI 9 `RESOLVE_UNIX`, whatever the kernel
   supports. A sidecar may therefore reach host sockets such as the D-Bus session bus.
