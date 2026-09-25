@@ -47,7 +47,7 @@ import { openTab } from "../lib/tabsStore";
 import { ExtensionPage } from "./ExtensionPage";
 
 const manifest = {
-  id: "org.example.certs", name: "cert-manager", version: "1.0.0", srelensApiVersion: "^0.3", kind: "declarative",
+  id: "org.example.certs", name: "cert-manager", version: "1.0.0", srelensApiVersion: "^0.4", kind: "declarative",
   permissions: ["k8s.listCustomResource"],
   capabilities: [{ name: "certificates", title: "Certificates", target: "k8s.listCustomResource",
     arguments: { group: "cert-manager.io", version: "v1", plural: "certificates", kind: "Certificate", namespaced: true },

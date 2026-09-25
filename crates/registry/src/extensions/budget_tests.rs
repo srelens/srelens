@@ -358,7 +358,7 @@ fn columns_manifest() -> Value {
             "inputs": ["context", "namespace"]})
     };
     json!({
-        "id": COLUMNS_APP, "name": "Budget columns", "version": "0.1.0", "srelensApiVersion": "^0.3",
+        "id": COLUMNS_APP, "name": "Budget columns", "version": "0.1.0", "srelensApiVersion": "^0.4",
         "kind": "declarative", "permissions": ["k8s.listCustomResource"],
         "capabilities": [
             reader("vulnerabilityreports", "aquasecurity.github.io", "VulnerabilityReport"),

@@ -3,7 +3,8 @@
 
 use serde_json::{json, Value};
 use srelens_capability::{
-    check_path, check_predicates, resolve, unmet, Condition, Predicate, MAX_PREDICATES,
+    check_path, check_predicates, path_uses_filter, resolve, unmet, Condition, Predicate,
+    MAX_PREDICATES,
 };
 
 /// A predicate from its JSON, as a manifest writes one.
@@ -255,6 +256,29 @@ fn a_filter_selects_the_first_element_whose_key_is_that_string() {
         !ready.holds(&reconciling()),
         "the first Ready condition is the one read, not any of them"
     );
+}
+
+#[test]
+fn a_path_says_whether_it_uses_the_filter() {
+    // API 0.3's predicate paths have no filter; it arrived with API 0.4 (#709),
+    // so the manifest check asks the path grammar itself, not the spelling.
+    for path in [
+        ".status.conditions[?(@.type==\"Ready\")].status",
+        "$.status.conditions[?(@.type=='Ready')]",
+    ] {
+        assert!(path_uses_filter(path), "{path}");
+    }
+    for path in [
+        ".spec.suspend",
+        ".status.conditions[0].status",
+        // A quoted key that merely contains the characters is a key.
+        ".metadata.annotations['acme.io/[?(pinned']",
+        // Not a path at all: `check_path` refuses it, and it is no filter.
+        ".status.conditions[?(@.type!='Ready')].status",
+        "status",
+    ] {
+        assert!(!path_uses_filter(path), "{path}");
+    }
 }
 
 #[test]
