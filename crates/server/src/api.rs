@@ -529,11 +529,12 @@ mod tests {
         (status, serde_json::from_slice(&bytes).unwrap())
     }
 
-    /// A local, unsigned, read-only app: the registry's own test manifest.
+    /// A local, unsigned, read-only app: the registry's own test manifest, at the API
+    /// its fixtures use (`settings` needs 0.4, #709).
     fn local_app() -> String {
         let source = include_str!("../../registry/tests/fixtures/argocd-manifest.json")
             .replace("\"org.srelens.argocd\"", "\"org.example.argocd\"")
-            .replace("\"^0.1\"", "\"^0.3\"");
+            .replace("\"^0.1\"", "\"^0.4\"");
         let manifest: Value = serde_json::from_str(&source).unwrap();
         manifest.to_string()
     }
