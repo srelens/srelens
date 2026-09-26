@@ -151,8 +151,9 @@ pub fn package(data: &[u8]) {
         "the sink was not given the digest list that was verified"
     );
     assert_eq!(
-        given.remove(package::SIGNATURE).is_some(),
-        verified.signature.is_some()
+        given.remove(package::SIGNATURE),
+        verified.signature.as_deref().map(package::sha256_hex),
+        "the sink was not given the signature that was verified"
     );
     let listed: BTreeMap<String, String> = files
         .iter()

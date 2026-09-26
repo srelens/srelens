@@ -87,6 +87,17 @@ export function ExtensionManager() {
     request: object;
   } | null>(null);
   const reviews = useRef(0);
+  /**
+   * Counts the reviews started from every entry point: pasted text, a package file, the
+   * catalog. One whose manifest loads slowly (a package read and verified, a catalog
+   * download) is dropped if another was started after it, rather than replacing it.
+   */
+  const latestReview = useRef(0);
+  /** Starts a review, and answers whether it is still the one most recently started. */
+  function beginReview() {
+    const ticket = ++latestReview.current;
+    return () => ticket === latestReview.current;
+  }
   /** The package file input, hidden and opened by a kit button: its own label cannot be styled. */
   const packageInput = useRef<HTMLInputElement>(null);
   /** The ID of the app whose settings form is open. */
@@ -140,6 +151,7 @@ export function ExtensionManager() {
     const names = Array.isArray(parsed.permissions) ? parsed.permissions.map(permissionName) : [];
     const permissions = names.every((name) => name !== undefined) ? (names as string[]) : [];
     const name = typeof parsed.name === "string" ? parsed.name : "This manifest";
+    beginReview();
     const request = {};
     setError("");
     setReview({
@@ -170,6 +182,7 @@ export function ExtensionManager() {
   /** Reads a package file chosen here, has the host verify it, and opens its review. */
   async function reviewPackageFile(file: File | undefined) {
     if (!file) return;
+    const current = beginReview();
     setError("");
     setReview(null);
     if (file.size > MAX_EXTENSION_PACKAGE_BYTES) {
@@ -180,12 +193,13 @@ export function ExtensionManager() {
     try {
       const content = new Uint8Array(await file.arrayBuffer());
       const verified = await reviewExtensionPackage(content);
+      if (!current()) return;
       if (!verified.package) throw new Error("the host did not return what the package holds");
       void reviewManifest(verified.manifest, verified.signature ?? undefined, {
         kind: "packageFile", package: verified.package, file: encodePackage(content),
       });
     } catch (e) {
-      setError(`Could not review ${file.name}: ${e instanceof Error ? e.message : String(e)}`);
+      if (current()) setError(`Could not review ${file.name}: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setBusy(false);
     }
@@ -348,7 +362,7 @@ export function ExtensionManager() {
         )}
       <div hidden={tab !== "catalog"}>
         {catalogOpened && (
-      <ExtensionCatalog autoLoad installed={state.plugins} onReview={(result, release) => void reviewManifest(
+      <ExtensionCatalog autoLoad installed={state.plugins} onReviewStart={beginReview} onReview={(result, release) => void reviewManifest(
         result.manifest,
         result.signature ?? undefined,
         result.package ? { kind: "catalogPackage", package: result.package, ...release } : MANIFEST_ORIGIN,

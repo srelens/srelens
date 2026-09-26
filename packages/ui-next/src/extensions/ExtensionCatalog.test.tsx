@@ -53,6 +53,22 @@ it("reports a first-load failure with retry, not an empty catalog", async () => 
   expect(await screen.findByText("Flux")).toBeTruthy();
 });
 
+it("does not open a review that a newer one replaced while the release downloaded (#562)", async () => {
+  const review = vi.fn();
+  vi.mocked(reviewCatalogExtension).mockResolvedValue({ manifest: '{"name":"Flux","permissions":[]}' });
+  let latest = false;
+  const onReviewStart = vi.fn(() => () => latest);
+  render(<ExtensionCatalog onReview={review} onReviewStart={onReviewStart} installed={[]} autoLoad />);
+  fireEvent.click(await screen.findByText("Review installation"));
+  await waitFor(() => expect(reviewCatalogExtension).toHaveBeenCalledTimes(1));
+  await waitFor(() => expect(screen.queryByText("Loading…")).toBeNull());
+  expect(onReviewStart).toHaveBeenCalledTimes(1);
+  expect(review).not.toHaveBeenCalled();
+  latest = true;
+  fireEvent.click(screen.getByText("Review installation"));
+  await waitFor(() => expect(review).toHaveBeenCalledWith({ manifest: '{"name":"Flux","permissions":[]}' }, { id: entry.id, sha256: "abc" }));
+});
+
 it("passes the backend-verified signature into installation review",async()=>{
  const review=vi.fn();
  vi.mocked(reviewCatalogExtension).mockResolvedValue({manifest:'{"name":"Flux","permissions":[]}',signature:[1,2,3]});

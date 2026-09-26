@@ -22,12 +22,15 @@ cp "$fixtures"/extension-inventory*.json "$corpus/inventory/"
 } >"$corpus/signed-manifest/argocd"
 
 # package reads a mode byte, then the package: \001 is an uncompressed tar, which the target
-# compresses itself. Plain ustar, files in byte order, no macOS metadata: what pack writes.
+# compresses itself, and \000 is the package file as a host receives it, gzip included. Each
+# fixture is seeded both ways. Plain ustar, files in byte order, no macOS metadata: what
+# pack writes.
 for name in example signed; do
   dir="$fixtures/packages/$name"
-  {
-    printf '\001'
-    (cd "$dir" && find . -type f | sed 's|^\./||' | LC_ALL=C sort |
-      COPYFILE_DISABLE=1 tar --format=ustar -cf - -T -)
-  } >"$corpus/package/$name"
+  tar="$corpus/package/$name.tar"
+  (cd "$dir" && find . -type f | sed 's|^\./||' | LC_ALL=C sort |
+    COPYFILE_DISABLE=1 tar --format=ustar -cf - -T -) >"$tar"
+  { printf '\001'; cat "$tar"; } >"$corpus/package/$name"
+  { printf '\000'; gzip -n -c "$tar"; } >"$corpus/package/$name.gz"
+  rm "$tar"
 done

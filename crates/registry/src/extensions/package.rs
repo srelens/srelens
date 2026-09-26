@@ -83,6 +83,9 @@ const SIGNATURE_BYTES: u64 = 64;
 const MAX_STREAM_BYTES: u64 = MAX_UNPACKED_BYTES + (MAX_ENTRIES as u64 + 1) * 1024 + 20 * 512;
 /// The directory an install unpacks into before it is moved into place.
 const STAGING_PREFIX: &str = ".staging-";
+/// Where an install moves a copy of the version it is replacing, as `<prefix><digest>`,
+/// until the new copy is in place. A staging name too, so an unused one is pruned.
+const REPLACED_PREFIX: &str = ".staging-replaced-";
 
 /// What a path names in the layout.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -926,9 +929,12 @@ pub(super) fn unpack(root: &Path, archive: &[u8], package: &Package) -> Result<(
     let target = app.join(&package.digest);
     // The same version may be here already, reinstalled or kept for rollback. It is
     // replaced, not trusted, and moved aside first: the rename cannot replace a directory.
+    // An install that stops between the two moves leaves the version absent and its copy
+    // aside; `prune` puts that copy back on the next change, because the inventory, which
+    // this install never saved, still names the version.
     let aside = match fs::symlink_metadata(&target) {
         Ok(_) => {
-            let aside = app.join(format!("{STAGING_PREFIX}replaced-{}", package.digest));
+            let aside = app.join(format!("{REPLACED_PREFIX}{}", package.digest));
             remove(&aside);
             fs::rename(&target, &aside).map_err(|e| {
                 format!("Could not replace the installed copy of this version: {e}")
@@ -939,7 +945,11 @@ pub(super) fn unpack(root: &Path, archive: &[u8], package: &Package) -> Result<(
     };
     if let Err(error) = durable::publish_dir(staging.path(), &target) {
         if let Some(aside) = &aside {
-            let _ = fs::rename(aside, &target);
+            if let Err(back) = fs::rename(aside, &target) {
+                return Err(format!(
+                    "Could not move the unpacked app into place ({error}), nor put back the copy it was replacing ({back}); that copy goes back on the next change to your apps that saves"
+                ));
+            }
         }
         return Err(format!(
             "Could not move the unpacked app into place: {error}"
@@ -971,6 +981,9 @@ fn remove(path: &Path) {
 /// kept versions. Failures are logged and left for the next change: a stray directory
 /// costs disk, never correctness, because nothing reads a version the inventory does not
 /// name. Callers hold the inventory's lock, which every install holds too.
+///
+/// One leftover is put back rather than removed: the copy of a kept version that an
+/// install moved aside to replace it and never replaced (see [`unpack`]).
 pub(super) fn prune(root: &Path, keep: &BTreeMap<String, BTreeSet<String>>) {
     let mut wanted: BTreeMap<String, BTreeSet<&str>> = BTreeMap::new();
     for (id, versions) in keep {
@@ -1001,11 +1014,34 @@ pub(super) fn prune(root: &Path, keep: &BTreeMap<String, BTreeSet<String>>) {
         let Ok(entries) = fs::read_dir(&path) else {
             continue;
         };
-        for version in entries.flatten() {
-            let name = version.file_name();
-            if !name.to_str().is_some_and(|name| versions.contains(name)) {
-                remove(&version.path());
+        let entries: Vec<PathBuf> = entries.flatten().map(|entry| entry.path()).collect();
+        for entry in entries {
+            let name = entry
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default();
+            if versions.contains(name) {
+                continue;
             }
+            if let Some(digest) = name
+                .strip_prefix(REPLACED_PREFIX)
+                .filter(|digest| versions.contains(digest))
+            {
+                let kept = path.join(digest);
+                let is_directory = fs::symlink_metadata(&entry).is_ok_and(|m| m.is_dir());
+                if is_directory && fs::symlink_metadata(&kept).is_err() {
+                    if let Err(error) = durable::publish_dir(&entry, &kept) {
+                        // Kept where it is: it is the only copy, and the next change tries again.
+                        log::warn!(
+                            "could not put {} back as {}: {error}",
+                            entry.display(),
+                            kept.display()
+                        );
+                    }
+                    continue;
+                }
+            }
+            remove(&entry);
         }
     }
 }

@@ -142,6 +142,12 @@ own. So a crash leaves either the old version installed or the new one, never a
 half-unpacked app. Versions the inventory no longer names, current or kept for rollback,
 are removed after each change.
 
+Reinstalling a version that is already on disk, or one kept for rollback, replaces its
+copy: the old copy is moved aside, then the new one is moved into place. If the install
+stops between those two moves, the version is briefly absent while its old copy waits
+aside. The next change to the apps that saves puts the old copy back, because the
+inventory still names that version (`prune` in `package.rs`).
+
 A signed package's proof is kept in the inventory: the manifest, the signature and the
 digest list. Every load checks the signature over the list, that the list names the
 manifest, and that the list is the one the installed directory was unpacked with. An app

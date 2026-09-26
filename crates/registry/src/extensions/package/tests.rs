@@ -680,6 +680,49 @@ fn pruning_keeps_exactly_the_versions_the_inventory_names() {
     prune(&root.path().join("missing"), &BTreeMap::new());
 }
 
+/// An install that stopped after moving a kept version's copy aside, before its
+/// replacement was in place, leaves the version the inventory names with no directory.
+/// Pruning puts that copy back instead of removing the only one.
+#[test]
+fn an_interrupted_reinstall_gets_its_replaced_copy_back() {
+    let root = tempfile::tempdir().unwrap();
+    let archive = packed("example");
+    let package = read(&archive, &mut Discard).unwrap();
+    unpack(root.path(), &archive, &package).unwrap();
+    let app = root.path().join("org.example.packaged");
+    let version = app.join(&package.digest);
+    let aside = app.join(format!("{REPLACED_PREFIX}{}", package.digest));
+    let keep = BTreeMap::from([(
+        "org.example.packaged".to_owned(),
+        BTreeSet::from([package.digest.clone()]),
+    )]);
+
+    fs::rename(&version, &aside).unwrap();
+    prune(root.path(), &keep);
+    assert_eq!(entries(&app), [package.digest.clone()]);
+    assert_eq!(
+        fs::read(version.join(MANIFEST)).unwrap(),
+        files_of("example")[MANIFEST]
+    );
+    assert!(
+        installed_icon(root.path(), "org.example.packaged", &package.digest)
+            .unwrap()
+            .is_some()
+    );
+
+    // With the new copy in place, the one aside is only a leftover.
+    fs::create_dir(&aside).unwrap();
+    prune(root.path(), &keep);
+    assert_eq!(entries(&app), [package.digest.clone()]);
+    // So is a copy of a version nothing keeps, or one that is not a directory.
+    fs::create_dir(app.join(format!("{REPLACED_PREFIX}{}", "0".repeat(64)))).unwrap();
+    fs::rename(&version, &aside).unwrap();
+    fs::remove_dir_all(&aside).unwrap();
+    fs::write(&aside, b"not a directory").unwrap();
+    prune(root.path(), &keep);
+    assert_eq!(entries(&app), Vec::<String>::new());
+}
+
 #[test]
 fn packing_needs_a_digest_list_that_still_describes_the_files() {
     let dir = tempfile::tempdir().unwrap();
