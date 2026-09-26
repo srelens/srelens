@@ -533,7 +533,8 @@ impl std::fmt::Debug for Package {
 
 impl Package {
     /// Whether the package carries binaries. This host runs declarative apps only, so an
-    /// install refuses them until executable apps have a sandbox (#521).
+    /// install refuses them until a manifest kind can run them (#574), which is what
+    /// starts the sandboxed sidecar supervisor (#572).
     pub(super) fn carries_binaries(&self) -> bool {
         self.list
             .files

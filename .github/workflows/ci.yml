@@ -242,6 +242,74 @@ jobs:
           path: ${{ runner.temp }}/extension-budgets
           if-no-files-found: error
 
+  # The sidecar sandbox conformance suite (#572): the #571 spike's seven
+  # checks, and two for what it left open (the host's environment, Unix
+  # sockets), run against the production sandbox backend through the real
+  # supervisor and launcher (crates/plugin-host/tests/sandbox_conformance.rs).
+  # Those tests are #[ignore]d everywhere else: they need an OS sandbox, a
+  # network for their positive controls and, on Linux, a delegated cgroup,
+  # which this job makes. It is also the only place the Windows backend is
+  # compiled at all, so the other sidecar suites run on Windows here too.
+  #
+  # Not macOS: GitHub's macOS runners are older than macOS 27, the one version
+  # the Seatbelt profile was verified on, and srelens refuses sidecars on
+  # macOS until its memory and CPU watchdog exists (#713). The suite runs
+  # there by hand, and its header says how.
+  sandbox-conformance:
+    name: sandbox conformance (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # v1
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Build the suites
+        run: cargo test -p srelens-plugin-host --no-run
+      # A cgroup v2 subtree the runner's user owns, with the memory and cpu
+      # controllers enabled for its children: what a systemd desktop would
+      # delegate to srelens (a user scope with Delegate=yes). cgroup v2 lets a
+      # process move another only between cgroups under one it may write, so
+      # the test run itself goes into a leaf of the subtree (the next step),
+      # and each sidecar's launcher moves itself into a sibling.
+      - name: Delegate a cgroup
+        if: runner.os == 'Linux'
+        run: |
+          uname -r
+          sudo mkdir -p /sys/fs/cgroup/srelens-ci/host
+          sudo chown -R "$(id -u):$(id -g)" /sys/fs/cgroup/srelens-ci
+          for controller in memory cpu; do
+            grep -qw "$controller" /sys/fs/cgroup/cgroup.subtree_control \
+              || echo "+$controller" | sudo tee /sys/fs/cgroup/cgroup.subtree_control
+          done
+      - name: Conformance
+        if: runner.os == 'Linux'
+        env:
+          SRELENS_SANDBOX_CGROUP_ROOT: /sys/fs/cgroup/srelens-ci
+        run: |
+          echo $$ | sudo tee /sys/fs/cgroup/srelens-ci/host/cgroup.procs
+          echo "+memory +cpu" > /sys/fs/cgroup/srelens-ci/cgroup.subtree_control
+          cargo test -p srelens-plugin-host --test sandbox_conformance -- --ignored --test-threads=1 --nocapture
+      # One thread, and the AppContainer profile's cleanup is the test that
+      # sorts last.
+      - name: Conformance
+        if: runner.os == 'Windows'
+        run: cargo test -p srelens-plugin-host --test sandbox_conformance -- --ignored --test-threads=1 --nocapture
+      # bash, not the default PowerShell, which fails a step only on its last
+      # command's exit status.
+      - name: The other sidecar suites
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          cargo test -p srelens-plugin-host --lib sidecar
+          cargo test -p srelens-plugin-host --test sidecar --test sidecar_process
+
   # The WebDriver smoke suite (issue #30): the REAL built app — WebView and
   # all — driven through tauri-driver against a kind cluster. This is the
   # only job that crosses the WebView↔Rust bridge itself, so a regression in
