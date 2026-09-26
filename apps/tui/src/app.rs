@@ -4288,10 +4288,8 @@ impl App {
                         self.assistant_state.clear_selection();
                         return;
                     }
-                    if self.assistant_state.is_busy {
-                        self.cancel_assistant_turn();
-                        return;
-                    }
+                    // A busy turn is not cancelled here: Esc leaves it running
+                    // in the background, and only Ctrl+c cancels it.
                 }
                 if let ActiveView::Yaml(ref mut yaml) = self.active_view {
                     if yaml.selection.is_some() {
@@ -6201,7 +6199,7 @@ impl App {
                     }
                     KeyCode::Enter => {
                         if ai.is_busy {
-                            self.set_toast("⚠️ Assistant is busy. Press <Esc> or <Ctrl+c> to cancel, or <Ctrl+l> to clear.".to_string(), Theme::status_warn());
+                            self.set_toast("⚠️ Assistant is busy. Press <Ctrl+c> to cancel, or <Ctrl+l> to clear.".to_string(), Theme::status_warn());
                             return;
                         }
                         let raw_input = ai.input.trim().to_string();

@@ -1044,7 +1044,7 @@ pub fn render_assistant_view(
         None => String::new(),
     };
     let back_or_cancel = if state.is_busy {
-        "<Esc>/<Ctrl+c> Cancel"
+        "<Ctrl+c> Cancel, <Esc> Back"
     } else {
         "<Esc> Back"
     };
@@ -1442,7 +1442,7 @@ pub fn render_assistant_view(
 
     // 2. Input box
     let input_title = if state.is_busy {
-        " Assistant is thinking... (<Esc> or <Ctrl+c> to Cancel) ".to_string()
+        " Assistant is thinking... (<Ctrl+c> to Cancel, <Esc> to leave it running) ".to_string()
     } else if !state.slash_suggestions.is_empty() {
         " Ask Assistant (⚡ SRE Playbooks: <Tab>/<Enter> Apply, ↑/↓ Select, <Esc> Dismiss) "
             .to_string()
