@@ -379,7 +379,7 @@ Out of scope as an attacker (see [Scope](#scope)), but the host still checks wha
 | [#563] | APP-8, PUB-4: update checks and downgrade protection |
 | [#572] ([#521]) | VULN-1: sandboxed executable apps: the supervisor, its sandbox backends and their escape-hardening review, building on the [#571] findings |
 | [#713] ([#521]) | VULN-1: host-enforced memory and CPU limits for sidecars on macOS, weaker than kernel enforcement |
-| [#578] ([#522]) | WEB-5: a catalog source and version pin for each app the operator makes available |
+| [#578] ([#522]) | WEB-4, WEB-5: the extension policy, shipped in part; left is a catalog source and version pin for each app the operator makes available |
 | [#739] ([#522]) | WEB-5: an administrator role, policy administration in the web settings, and enabling apps for users |
 | [#39] | Scope: CSP, update chain and the rest of the host |
 
