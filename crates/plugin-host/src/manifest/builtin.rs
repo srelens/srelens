@@ -2,8 +2,13 @@
 //!
 //! A link's target is looked up in a list the host reads. For a custom resource that list
 //! is the app's own declared reader; for a built-in kind it is this table: the Kubernetes
-//! kinds the Inspector opens, by group and version, and whether they are namespaced. The host reads only their metadata for a link, and of a Secret only its
-//! identity.
+//! kinds the Inspector opens, by group and version, and whether they are namespaced. The
+//! host reads only their metadata for a link, and of a Secret only its identity.
+//!
+//! The listing resolves each kind again through kube's own table (`gvk_for`), which this
+//! crate does not depend on. `every_builtin_link_kind_is_one_kube_reads_in_that_group`
+//! in `crates/registry` holds every entry here to it, group, version and scope, so a
+//! kind added here and not there fails a test rather than every resolve.
 
 /// A Kubernetes built-in kind, as the host lists it for a resource link.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

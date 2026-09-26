@@ -6,7 +6,7 @@
 //! Inspector reads every declaration the other way round: which resources name
 //! it, through the same lists and the same snapshot cache.
 use super::columns::{
-    cached_objects, match_joined, read_at, reader_key, reader_listing, reader_objects, JoinCache,
+    cached_objects, match_joined, read_at, reader_key, reader_listing, JoinCache,
 };
 use super::panels::check_resource_scope;
 use super::*;
@@ -430,7 +430,8 @@ async fn read_from(
     let name = metadata["name"].as_str().unwrap_or("");
     let namespace = metadata["namespace"].as_str().unwrap_or("");
     let scope = if listed.namespaced() { namespace } else { "" };
-    let (objects, version) = reader_objects(
+    // A list cut off at the cap still holds the first 2,000: the resource may be among them.
+    let (objects, truncated, version) = reader_listing(
         cache,
         client_cache,
         core,
@@ -461,10 +462,18 @@ async fn read_from(
             } else {
                 format!("{namespace}/{name}")
             };
-            format!(
-                "The host's read of {} does not hold {at}; refresh the view",
-                link.from
-            )
+            if truncated {
+                // Not among what was read is not absent: the read stopped short.
+                format!(
+                    "The host read the first 2,000 {} and {at} is not among them, so its path cannot be read",
+                    link.from
+                )
+            } else {
+                format!(
+                    "The host's read of {} does not hold {at}; refresh the view",
+                    link.from
+                )
+            }
         })?;
     Ok((object, link))
 }
@@ -1912,11 +1921,7 @@ mod tests {
     /// One page of 2,500 Deployments, 500 at a time: `api` on the first tracks the
     /// Argo CD Application argocd/guestbook, and `late` on the last does too.
     fn deployments_page(query: &str) -> Value {
-        let page: usize = query
-            .split('&')
-            .find_map(|pair| pair.strip_prefix("continue=p"))
-            .and_then(|page| page.parse().ok())
-            .unwrap_or(1);
+        let page = page_of(query);
         let mut items: Vec<Value> = (0..500)
             .map(|i| tracked("team", &format!("d-{page}-{i}"), None))
             .collect();
@@ -1938,8 +1943,36 @@ mod tests {
         json!({"apiVersion":"v1","kind":"List","metadata":{"continue":next},"items":items})
     }
 
-    /// A cluster with ExternalSecrets, Secrets, an HTTPRoute, Services and 2,500
-    /// Deployments, and every request it was asked.
+    /// Which of five pages a list request asks for, by its continue token.
+    fn page_of(query: &str) -> usize {
+        query
+            .split('&')
+            .find_map(|pair| pair.strip_prefix("continue=p"))
+            .and_then(|page| page.parse().ok())
+            .unwrap_or(1)
+    }
+
+    /// One page of the 2,500 ExternalSecrets in namespace `busy`, 500 at a time:
+    /// `early` is on the first page, and `late`, on the last, is past the cut.
+    fn busy_external_secrets_page(query: &str) -> Value {
+        let page = page_of(query);
+        let secret = |name: String| {
+            json!({"apiVersion":"external-secrets.io/v1beta1","kind":"ExternalSecret",
+                "metadata":{"name":name,"namespace":"busy"},"spec":{"target":{"name":"db-creds"}}})
+        };
+        let mut items: Vec<Value> = (0..500).map(|i| secret(format!("es-{page}-{i}"))).collect();
+        if page == 1 {
+            items[0] = secret("early".into());
+        }
+        if page == 5 {
+            items[0] = secret("late".into());
+        }
+        let next = (page < 5).then(|| format!("p{}", page + 1));
+        json!({"apiVersion":"v1","kind":"List","metadata":{"continue":next},"items":items})
+    }
+
+    /// A cluster with ExternalSecrets (2,500 of them in `busy`), Secrets, an
+    /// HTTPRoute, Services and 2,500 Deployments, and every request it was asked.
     fn cluster() -> (
         srelens_kube::test_support::Client,
         Arc<std::sync::Mutex<Vec<srelens_kube::test_support::Seen>>>,
@@ -1957,6 +1990,9 @@ mod tests {
                 ]),
                 "/apis/apps/v1/deployments" | "/apis/apps/v1/namespaces/team/deployments" => {
                     deployments_page(&seen.query)
+                }
+                "/apis/external-secrets.io/v1beta1/namespaces/busy/externalsecrets" => {
+                    busy_external_secrets_page(&seen.query)
                 }
                 "/apis/gateway.networking.k8s.io/v1/namespaces/team/httproutes"
                 | "/apis/gateway.networking.k8s.io/v1/httproutes" => list(vec![route()]),
@@ -2299,5 +2335,46 @@ mod tests {
             "{out}"
         );
         assert_eq!(link["targets"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn a_path_link_reads_its_resource_from_a_cut_off_list_and_names_the_cut() {
+        // 2,500 ExternalSecrets in one namespace: the host reads 2,000 of them.
+        let (_dir, reg, revision, _seen) = installed_on_fake(json!([{"id":"target",
+            "from":"external-secrets.io/ExternalSecret","to":"/Secret","relation":"references",
+            "match":{"path":".spec.target.name"}}]))
+        .await;
+        let inspect = |name: &str| {
+            let mut payload = call(
+                revision,
+                "external-secrets.io/ExternalSecret",
+                json!({"apiVersion":"external-secrets.io/v1beta1","kind":"ExternalSecret",
+                    "metadata":{"name":name,"namespace":"busy"}}),
+            );
+            payload["namespace"] = json!("busy");
+            payload
+        };
+        // Among what was read: answered, though the list was cut.
+        let out = reg
+            .invoke("extensions.resolveLinks", inspect("early"))
+            .await
+            .unwrap();
+        let link = &out["links"][0];
+        assert!(link.get("error").is_none(), "{out}");
+        assert_eq!(
+            link["targets"],
+            json!([{"namespace":"busy","name":"db-creds","exists":false}])
+        );
+        // Past the cut: the limit is the reason, not an absence a refresh would fix.
+        let out = reg
+            .invoke("extensions.resolveLinks", inspect("late"))
+            .await
+            .unwrap();
+        let error = out["links"][0]["error"].as_str().expect("an error");
+        assert!(
+            error.contains("2,000") && error.contains("busy/late"),
+            "{error}"
+        );
+        assert!(!error.contains("refresh"), "{error}");
     }
 }
