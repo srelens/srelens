@@ -81,7 +81,7 @@ permission grants, action confirmation, cluster scoping, or manifest validation.
    version is not removed. It is quarantined: disabled, with the reason shown in
    Settings → Apps, until it is updated or removed.
 3. **Choosing a range.** Target the API line you tested against with a caret range:
-   `^0.4` before 1.0, `^1.2` after. Under SemVer caret rules a `0.x` range pins its
+   `^0.5` before 1.0, `^1.2` after. Under SemVer caret rules a `0.x` range pins its
    minor version, so `^0.1` does not match `0.2.0`. That is deliberate: each `0.MINOR`
    is its own compatibility line.
 4. **New API versions.** Before 1.0, any manifest-visible change (a new field, a new
@@ -89,9 +89,9 @@ permission grants, action confirmation, cluster scoping, or manifest validation.
    `0.MINOR` version. A `0.MINOR.PATCH` bump is for clarifications that do not change
    which manifests validate. From 1.0: MAJOR for breaking changes, MINOR for
    additive ones, PATCH for fixes.
-5. **Current supported lines.** This host implements **API 0.3 and API 0.4**. A
-   `^0.3` manifest is served under 0.3 and may use only what 0.3 has; a `^0.4` one may
-   also use what [0.4 added](#040). API 0.1 and API 0.2 are not supported. Existing
+5. **Current supported lines.** This host implements **API 0.3, API 0.4 and API 0.5**.
+   A `^0.3` manifest is served under 0.3 and may use only what 0.3 has; a `^0.4` one may
+   also use what [0.4 added](#040), and a `^0.5` one what [0.5 added](#050). API 0.1 and API 0.2 are not supported. Existing
    installations targeting a retired line are quarantined until replaced by a
    compatible manifest. Official manifests must receive a new version and publisher
    signature; editing an installed signed manifest invalidates its proof.
@@ -129,6 +129,9 @@ implementing 0.3 with none or only some of them had already been published. A si
 release using them under `^0.3` would have been offered by those hosts and then failed
 to parse on an unknown field. They moved to API 0.4 before any signed release used them
 ([#709](https://github.com/srelens/srelens/issues/709)), and the exception is retired.
+It stays retired: srelens builds implementing API 0.4 were published (the pre-releases
+`0.15.1-186` and `0.15.1-187`), so what [#728](https://github.com/srelens/srelens/issues/728)
+added to resource links is API 0.5, not an addition to 0.4 in place.
 
 The host enforces this. `API_FIELDS` in `crates/plugin-host/src/manifest.rs` lists every
 field whose availability differs across supported API lines, and every *form* of value
@@ -291,6 +294,47 @@ list, and the [developer harness](testing.md#developer-harness) prints one per l
 
 ## API changelog
 
+### 0.5.0
+
+New in this line ([#728](https://github.com/srelens/srelens/issues/728)):
+
+- A resource link's `to` may name a built-in kind the host lists, such as `/Service`,
+  `/Secret` or `/Namespace`, as well as a kind a declared reader lists. The host looks
+  a built-in target up in the kind's metadata, requested as a
+  `PartialObjectMetadataList` so no spec, status or Secret value is sent, and keeps of a
+  Secret only its name, namespace, uid, labels and owner references. The resolved link's
+  `capability` is empty for a built-in target. `API_FIELDS` gates the form: a `^0.4`
+  manifest whose link names a built-in kind no reader of it lists is refused with
+  `EXTENSION_API_INCOMPATIBLE`; one naming a reader's kind means what it did.
+- A link may match by `path`: the predicate grammar plus `[*]`, validated at install,
+  read on the `from` resource through the declared reader of `from` (never `/Secret`),
+  and subject to that reader's `jsonPathOverrides`. Each value is the target's name or
+  an object reference; a reference to another kind or group is not the link's. See
+  [`resourceLinks`](manifest.md#resourcelinks).
+- The host supports API 0.3, 0.4 and 0.5, and `extensions.catalog` reports all three in
+  `hostApiVersions`. A host on the 0.4 line lists a `^0.5` release as incompatible
+  rather than offering it.
+- The manifest JSON Schema for this line is `schemas/extension-manifest.v0.5.json`.
+  `schemas/extension-manifest.v0.4.json` is the 0.4 contract, without these fields,
+  frozen as it was when 0.5 was cut.
+- The Flux example is 0.6.0, requires `^0.5` and names `extension-manifest.v0.5.json`:
+  its Kustomizations reference their GitRepository, OCIRepository or Bucket through
+  `.spec.sourceRef`, their target Namespace and ServiceAccount, and a HelmRelease its
+  HelmRepository through `.spec.chart.spec.sourceRef`. The Argo CD example uses nothing
+  0.5 added and stays 0.4.0 on `^0.4`. Publishing the Flux example requires a fresh
+  signed external release and a catalog update; the published release bytes, and their
+  signatures, are unchanged.
+
+For existing manifests, with no manifest change (additive host behaviour):
+
+- The Inspector of a resource of a link's `to` kind shows the link read the other way
+  round, through the new read-only capability `extensions.resolveReverseLinks`: the
+  resources of `from` whose link names it, from the same lists and snapshot cache the
+  other contributions use, capped at 2,000 objects, with the cut reported as
+  `truncated` and resources the link could not be read on counted as `unreadable`. An
+  API 0.4 manifest's links get it too. The forward output (`extensions.resolveLinks`)
+  keeps its shape, so the edges a topology draws (#524) are the same either way.
+
 ### 0.4.0
 
 New in this line:
@@ -369,8 +413,9 @@ unknown field. A 0.4 manifest may use everything 0.3 has, with the same meaning.
   [Compatibility rules](#compatibility-rules).
 - The manifest JSON Schema for this line is `schemas/extension-manifest.v0.4.json`.
   `schemas/extension-manifest.v0.3.json` is the 0.3 contract, without these fields.
-- Current examples are Flux 0.5.0 and Argo CD 0.4.0, requiring `^0.4` and naming
-  `schemas/extension-manifest.v0.4.json`. Publishing them requires fresh signed
+- The examples written for this line are Flux 0.5.0 and Argo CD 0.4.0, requiring `^0.4`
+  and naming `schemas/extension-manifest.v0.4.json`. Argo CD 0.4.0 is still the current
+  example; Flux moved to [0.5](#050). Publishing them requires fresh signed
   external releases and a catalog update; existing signed release bytes stay unchanged.
   The Flux example reads HelmReleases at `v2` or `v2beta2` and OCIRepositories at `v1`
   or `v1beta2` (#547).

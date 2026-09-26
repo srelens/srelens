@@ -717,19 +717,74 @@ pub async fn list_builtin_metadata(
         .map_err(|error| error.into_capability_error("list built-in resource metadata"))?;
     let metadata = objects
         .iter()
-        .map(|object| {
-            let meta = &object.metadata;
-            // The kind's identity is the host's own, from the GVK it listed,
-            // so a rule can check a reference against the very object.
-            serde_json::json!({"apiVersion": resource.api_version, "kind": resource.kind, "metadata": {
-                "name": meta.name,
-                "namespace": meta.namespace,
-                "uid": meta.uid,
-                "labels": meta.labels,
-                "annotations": meta.annotations,
-                "ownerReferences": meta.owner_references,
-            }})
-        })
+        .map(|object| metadata_of(&resource, &object.metadata, true))
+        .collect();
+    Ok((metadata, truncated))
+}
+
+/// What the host keeps of one built-in object's metadata for an app: identity,
+/// labels, owner references and, when `annotations`, annotations. Never
+/// managed fields, whose `fieldsV1` names every key a Secret holds.
+fn metadata_of(
+    resource: &ApiResource,
+    meta: &kube::api::ObjectMeta,
+    annotations: bool,
+) -> serde_json::Value {
+    // The kind's identity is the host's own, from the GVK it listed, so a
+    // rule can check a reference against the very object.
+    let mut metadata = serde_json::json!({
+        "name": meta.name,
+        "namespace": meta.namespace,
+        "uid": meta.uid,
+        "labels": meta.labels,
+        "ownerReferences": meta.owner_references,
+    });
+    if annotations {
+        metadata["annotations"] = serde_json::json!(meta.annotations);
+    }
+    serde_json::json!({"apiVersion": resource.api_version, "kind": resource.kind, "metadata": metadata})
+}
+
+/// Host-only read of a built-in kind's metadata for resource links (#728): the
+/// target a link names, or the resources whose links name one.
+///
+/// `kind` is qualified and must be a built-in kind this host knows in exactly
+/// that group. The API server is asked for metadata only
+/// (`PartialObjectMetadataList`), so no spec or status is sent, and a
+/// Secret's values never leave it — a link reads a Secret's identity, labels
+/// and owner references, and not its annotations, which the host redacts on
+/// every ungated read. What the host keeps is [`metadata_of`], whatever the
+/// server answered.
+pub async fn list_builtin_link_metadata(
+    cache: &ClientCache,
+    context: &str,
+    namespace: &str,
+    kind: &str,
+) -> Result<(Vec<serde_json::Value>, bool), CapabilityError> {
+    let refuse = |why: &str| Err(CapabilityError::InvalidInput(format!("{kind}: {why}")));
+    let Some((group, name)) = kind.split_once('/') else {
+        return refuse("qualify a kind with its API group");
+    };
+    let Some((gvk, namespaced)) = crate::manifest::gvk_for(name) else {
+        return refuse("not a built-in kind this host reads");
+    };
+    if gvk.group != group || gvk.kind != name {
+        return refuse("not a built-in kind this host reads");
+    }
+    let secret = group.is_empty() && name == "Secret";
+    let client = cache.get(context).await.map_err(CapabilityError::Handler)?;
+    let resource = ApiResource::from_gvk(&gvk);
+    let api: Api<DynamicObject> = if namespaced && !namespace.is_empty() {
+        Api::namespaced_with(client, namespace, &resource)
+    } else {
+        Api::all_with(client, &resource)
+    };
+    let (objects, truncated) = crate::list_cap::list_metadata_capped(&api, ListParams::default())
+        .await
+        .map_err(|error| error.into_capability_error("list built-in resource metadata"))?;
+    let metadata = objects
+        .iter()
+        .map(|object| metadata_of(&resource, &object.metadata, !secret))
         .collect();
     Ok((metadata, truncated))
 }
@@ -1364,6 +1419,106 @@ mod tests {
             "/Nope",
         ] {
             let error = list_builtin_metadata(&cache, "fake", "team", kind)
+                .await
+                .err()
+                .unwrap_or_else(|| panic!("{kind} must be refused"));
+            assert!(
+                matches!(error, CapabilityError::InvalidInput(_)),
+                "{kind}: {error}"
+            );
+        }
+    }
+
+    /// A Secret list as a server that ignored the metadata-only request would send it:
+    /// whole objects, values and all.
+    fn secret_list_page() -> serde_json::Value {
+        serde_json::json!({"apiVersion":"v1","kind":"SecretList","metadata":{},
+            "items":[{"apiVersion":"v1","kind":"Secret",
+                "metadata":{"name":"db","namespace":"team","uid":"u-db",
+                    "labels":{"app.kubernetes.io/name":"api"},
+                    "annotations":{"note":"hunter2",
+                        "kubectl.kubernetes.io/last-applied-configuration":
+                            "{\"data\":{\"password\":\"aHVudGVyMg==\"}}"},
+                    "ownerReferences":[{"apiVersion":"external-secrets.io/v1beta1",
+                        "kind":"ExternalSecret","name":"db","uid":"u-es"}],
+                    "managedFields":[{"manager":"kubectl","fieldsV1":{"f:data":{"f:password":{}}}}]},
+                "data":{"password":"aHVudGVyMg=="},
+                "stringData":{"password":"hunter2"},
+                "type":"Opaque"}]})
+    }
+
+    #[tokio::test]
+    async fn link_metadata_asks_for_metadata_only_and_keeps_no_secret_value() {
+        let (client, seen) = crate::test_support::fake_api(|_| secret_list_page());
+        let cache = ClientCache::new_many(vec![]);
+        cache.preload("fake", client).await;
+        let (objects, truncated) = list_builtin_link_metadata(&cache, "fake", "team", "/Secret")
+            .await
+            .unwrap();
+        assert!(!truncated);
+        let request = &seen.lock().unwrap()[0];
+        assert_eq!(request.path, "/api/v1/namespaces/team/secrets");
+        // The API server is asked for metadata alone: it never sends a value.
+        assert!(
+            request.accept.contains("as=PartialObjectMetadataList"),
+            "{}",
+            request.accept
+        );
+        // And had it sent them, none leaves: no data, no stringData, no annotation.
+        let text = serde_json::to_string(&objects).unwrap();
+        for secret in [
+            "hunter2",
+            "aHVudGVyMg==",
+            "password",
+            "last-applied",
+            "note",
+        ] {
+            assert!(!text.contains(secret), "{secret} in {text}");
+        }
+        // What a link needs is kept: identity, labels and owner references.
+        assert_eq!(objects.len(), 1);
+        let metadata = &objects[0]["metadata"];
+        assert_eq!(metadata["name"], "db");
+        assert_eq!(metadata["namespace"], "team");
+        assert_eq!(metadata["uid"], "u-db");
+        assert_eq!(metadata["labels"]["app.kubernetes.io/name"], "api");
+        assert_eq!(metadata["ownerReferences"][0]["uid"], "u-es");
+        assert_eq!(objects[0]["apiVersion"], "v1");
+        assert_eq!(objects[0]["kind"], "Secret");
+    }
+
+    #[tokio::test]
+    async fn link_metadata_keeps_the_annotations_of_any_kind_but_a_secret() {
+        let (client, seen) = crate::test_support::fake_api(|_| {
+            serde_json::json!({"apiVersion":"v1","kind":"ServiceList","metadata":{},
+                "items":[{"apiVersion":"v1","kind":"Service","metadata":{"name":"api",
+                    "namespace":"team","annotations":{"example.io/owner":"web"}},
+                    "spec":{"clusterIP":"10.0.0.1"}}]})
+        });
+        let cache = ClientCache::new_many(vec![]);
+        cache.preload("fake", client).await;
+        let (objects, _) = list_builtin_link_metadata(&cache, "fake", "", "/Service")
+            .await
+            .unwrap();
+        assert_eq!(seen.lock().unwrap()[0].path, "/api/v1/services");
+        assert_eq!(
+            objects[0]["metadata"]["annotations"]["example.io/owner"],
+            "web"
+        );
+        assert!(objects[0].get("spec").is_none(), "{}", objects[0]);
+    }
+
+    #[tokio::test]
+    async fn link_metadata_refuses_a_kind_this_host_does_not_read_in_that_group() {
+        let cache = ClientCache::new_many(vec![]);
+        for kind in [
+            "acme.io/Widget",
+            "acme.io/Secret",
+            "Deployment",
+            "/Nope",
+            "apps/Service",
+        ] {
+            let error = list_builtin_link_metadata(&cache, "fake", "team", kind)
                 .await
                 .err()
                 .unwrap_or_else(|| panic!("{kind} must be refused"));

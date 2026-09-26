@@ -1,11 +1,15 @@
 //! The committed manifest JSON Schema is what editors and CI validate manifests against.
 use serde_json::{json, Value};
-use srelens_plugin_host::{Manifest, API_FIELDS, SUPPORTED_API_VERSIONS};
+use srelens_plugin_host::{negotiate_api_version, Manifest, API_FIELDS, SUPPORTED_API_VERSIONS};
 use std::collections::BTreeSet;
 
-/// The published URL manifests name in `$schema`.
-const SCHEMA_URL: &str =
-    "https://raw.githubusercontent.com/srelens/srelens/main/schemas/extension-manifest.v0.4.json";
+/// The published URL a manifest written for `version`'s line names in `$schema`.
+fn schema_url_for(version: &semver::Version) -> String {
+    format!(
+        "https://raw.githubusercontent.com/srelens/srelens/main/schemas/extension-manifest.v{}.{}.json",
+        version.major, version.minor
+    )
+}
 
 /// One file per API line: `v0.4` for 0.4.0.
 fn schema_path_for(version: &str) -> String {
@@ -92,7 +96,12 @@ fn manifests_may_name_their_schema_for_editors() {
     assert!(Manifest::schema()["properties"].get("$schema").is_some());
     for (path, source) in examples() {
         let value: Value = serde_json::from_str(&source).unwrap();
-        assert_eq!(value["$schema"], json!(SCHEMA_URL), "{path}");
+        // The schema of the line the example is written for: an example that needs
+        // nothing newer stays on its line (#728 left Argo CD on 0.4).
+        let range =
+            semver::VersionReq::parse(value["srelensApiVersion"].as_str().unwrap()).unwrap();
+        let line = negotiate_api_version(&range).unwrap_or_else(|| panic!("{path}"));
+        assert_eq!(value["$schema"], json!(schema_url_for(&line)), "{path}");
         Manifest::parse(&source).unwrap_or_else(|error| panic!("{path}: {error}"));
         // `$schema` is editor metadata: removing it leaves the same valid contract.
         let mut without = value.clone();
