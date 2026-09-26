@@ -41,6 +41,12 @@ url = "2"
 sha2 = "0.10"
 ring = "0.17"
 semver = "1"
+# `.srelens-extension` packages (#562) are gzip-compressed tar archives, and a package file
+# chosen in the app reaches `extensions.configure` as base64. All three are already in the
+# workspace through srelens-kube, which uses each of them; no new crate is built.
+tar = "0.4"
+flate2 = "1"
+base64 = "0.22"
 
 # Windows: `durable::replace` renames with `MoveFileExW` and `MOVEFILE_WRITE_THROUGH`.
 # Already in the lockfile through tempfile and others; no new crate is built.

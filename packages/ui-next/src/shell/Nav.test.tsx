@@ -242,7 +242,8 @@ it("groups app pages under their display name", async () => {
   expect(screen.getByRole("treeitem",{name:"Cluster"}).compareDocumentPosition(apps) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   expect(apps.compareDocumentPosition(screen.getByRole("treeitem",{name:"Workloads"})) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   const fluxNode = await screen.findByRole("treeitem", { name: "Flux" });
-  expect(fluxNode.querySelector("[data-extension-logo]")?.getAttribute("data-extension-logo")).toBe("org.srelens.flux");
+  // No package, so no logo but initials: nothing is chosen by the app's ID (#562).
+  expect(fluxNode.querySelector("[data-extension-logo]")?.getAttribute("data-extension-logo")).toBe("initials");
   await userEvent.click(fluxNode);
   await userEvent.click(await screen.findByRole("treeitem", { name: "Kustomizations" }));
   expect(tabFor("/extension-contexts/id%3Aprod-eu/org.srelens.flux/kustomizations/")?.sub).toBe("prod-eu");

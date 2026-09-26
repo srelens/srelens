@@ -19,7 +19,7 @@ it("browses on demand, searches, and reviews exact verified bytes before any ins
   expect(screen.getByText("No matching apps.")).toBeTruthy();
   fireEvent.change(screen.getByLabelText("Find an app"), { target: { value: "flux" } });
   fireEvent.click(screen.getByText("Review installation"));
-  await waitFor(() => expect(review).toHaveBeenCalledWith('{"name":"Flux","permissions":[]}', undefined));
+  await waitFor(() => expect(review).toHaveBeenCalledWith({ manifest: '{"name":"Flux","permissions":[]}' }, { id: entry.id, sha256: "abc" }));
   expect(reviewCatalogExtension).toHaveBeenCalledWith(entry.id, "abc");
 });
 it("shows cached refresh failures and keeps incompatible releases disabled", async () => {
@@ -58,7 +58,7 @@ it("passes the backend-verified signature into installation review",async()=>{
  vi.mocked(reviewCatalogExtension).mockResolvedValue({manifest:'{"name":"Flux","permissions":[]}',signature:[1,2,3]});
  render(<ExtensionCatalog onReview={review} installed={[]} autoLoad/>);
  fireEvent.click(await screen.findByText("Review installation"));
- await waitFor(()=>expect(review).toHaveBeenCalledWith('{"name":"Flux","permissions":[]}',[1,2,3]));
+ await waitFor(()=>expect(review).toHaveBeenCalledWith({manifest:'{"name":"Flux","permissions":[]}',signature:[1,2,3]},{id:entry.id,sha256:"abc"}));
 });
 
 /** On the web the catalog is the server's shared copy (#515): a Refresh there reads it, never fetches. */

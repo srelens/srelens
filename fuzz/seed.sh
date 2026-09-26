@@ -10,7 +10,7 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 corpus="$root/fuzz/corpus"
 fixtures="$root/crates/registry/tests/fixtures"
 
-mkdir -p "$corpus/manifest" "$corpus/catalog" "$corpus/signed-manifest" "$corpus/inventory"
+mkdir -p "$corpus/manifest" "$corpus/catalog" "$corpus/signed-manifest" "$corpus/inventory" "$corpus/package"
 cp "$root"/examples/extensions/*.json "$fixtures/argocd-manifest.json" "$corpus/manifest/"
 cp "$fixtures/extension-catalog.json" "$corpus/catalog/"
 cp "$fixtures"/extension-inventory*.json "$corpus/inventory/"
@@ -20,3 +20,14 @@ cp "$fixtures"/extension-inventory*.json "$corpus/inventory/"
   printf '\100'
   cat "$fixtures/argocd-manifest.sig" "$fixtures/argocd-manifest.json"
 } >"$corpus/signed-manifest/argocd"
+
+# package reads a mode byte, then the package: \001 is an uncompressed tar, which the target
+# compresses itself. Plain ustar, files in byte order, no macOS metadata: what pack writes.
+for name in example signed; do
+  dir="$fixtures/packages/$name"
+  {
+    printf '\001'
+    (cd "$dir" && find . -type f | sed 's|^\./||' | LC_ALL=C sort |
+      COPYFILE_DISABLE=1 tar --format=ustar -cf - -T -)
+  } >"$corpus/package/$name"
+done

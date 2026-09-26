@@ -306,18 +306,29 @@ export interface ExtensionManifest {
 }
 /** Where a version came from: `catalog` is the exact bytes of a cached catalog release. */
 export type ExtensionSource = "local" | "catalog";
+/**
+ * A publisher signature the host keeps and checks on every load. For a package (#562) it is
+ * over `digests`, the package's digest list, which names `manifest`; otherwise over `manifest`.
+ */
+export interface ExtensionSignatureProof {
+  manifest: string;
+  signature: number[];
+  digests?: string;
+}
 /** A version an update replaced, kept so it can be restored. */
 export interface ExtensionPreviousVersion {
-  signatureProof?: {manifest:string;signature:number[]};
+  signatureProof?: ExtensionSignatureProof;
   manifest: ExtensionManifest;
   grants: string[];
   revision: number;
   source: ExtensionSource;
   /** Seconds since the Unix epoch. */
   installedAt: number;
+  /** The package this version was unpacked from, by its digest list's SHA-256 (#562). */
+  package?: string;
 }
 export interface InstalledExtension {
-  signatureProof?: {manifest:string;signature:number[]};
+  signatureProof?: ExtensionSignatureProof;
   /** Set by the host when a stored app failed re-verification; the app is disabled. */
   quarantined?: string;
   /** Host-computed unsigned-app policy denial; the affected app is disabled. */
@@ -343,6 +354,17 @@ export interface InstalledExtension {
    * (#568). Off until a person turns it on for this app; absent means off.
    */
   allowLoopbackHttp?: boolean;
+  /**
+   * The package this version was unpacked from, by its digest list's SHA-256 (#562);
+   * absent for an app installed from a single-file manifest.
+   */
+  package?: string;
+  /**
+   * The package's logo as a `data:` URL, reported by `extensions.list` and never stored;
+   * absent from `extensions.configure`'s answer. Decoration only: it never says who
+   * published the app, which the signature label does.
+   */
+  icon?: string;
 }
 export interface ExtensionInventory {
   /** Missing in older inventories means false. */
@@ -366,6 +388,13 @@ export interface ExtensionSecretStoreState {
 export type ExtensionChange =
   | { action: "unsignedApps"; allowUnsignedApps: boolean }
   | { action: "install"; manifest: string; grants: string[]; signature?: number[]; reviewedRevision?: number }
+  /** Installs a package file (#562), sent as base64; the host verifies it again. */
+  | { action: "installPackage"; package: string; grants: string[]; reviewedRevision?: number }
+  /**
+   * Installs a catalog release's package (#562), which the host downloads again. `sha256`
+   * names the release; `packageSha256` is the package that was reviewed.
+   */
+  | { action: "installCatalogPackage"; id: string; sha256: string; packageSha256: string; grants: string[]; reviewedRevision?: number }
   | { action: "enable"; id: string; enabled: boolean }
   | { action: "remove"; id: string }
   /** Restores a kept version; `grants` are what the user reviewed and grants again. */
@@ -445,13 +474,46 @@ export interface ExtensionPermissionDiff {
   removed: string[];
   unchanged: string[];
 }
-/** Checks a manifest exactly as installing it with these grants would, without installing. */
-export const validateExtension = (manifest: string, grants: string[], signature?: number[]) =>
+/**
+ * Checks a manifest exactly as installing it with these grants would, without installing.
+ * For a package's manifest, `digests` is its digest list as the review returned it, and
+ * `signature` is over that list.
+ */
+export const validateExtension = (manifest: string, grants: string[], signature?: number[], digests?: string) =>
   invokeCapability<{ errors: ExtensionValidationError[]; permissionDiff?: ExtensionPermissionDiff }>("extensions.validate", {
     manifest,
     grants,
     ...(signature ? { signature } : {}),
+    ...(digests !== undefined ? { digests } : {}),
   });
+/** What a package holds beyond its manifest, as the host verified it (#562). */
+export interface ExtensionPackageReview {
+  /** SHA-256 of the package file. */
+  sha256: string;
+  /** The exact digest list the signature, if any, covers; `validateExtension` takes it. */
+  digests: string;
+  files: Array<{ path: string; size: number }>;
+  /** The package's logo as a `data:` URL. Decoration, never a sign of who published it. */
+  icon?: string;
+}
+/** A manifest to review, exactly as the host verified it, and its package when it came as one. */
+export interface ExtensionReview {
+  manifest: string;
+  signature?: number[] | null;
+  package?: ExtensionPackageReview;
+}
+/** The largest package file the host accepts (#562). */
+export const MAX_EXTENSION_PACKAGE_BYTES = 16 * 1024 * 1024;
+/** A package file's bytes as the base64 the host reads. */
+export function encodePackage(bytes: Uint8Array): string {
+  let binary = "";
+  for (let at = 0; at < bytes.length; at += 0x8000)
+    binary += String.fromCharCode(...bytes.subarray(at, at + 0x8000));
+  return btoa(binary);
+}
+/** Verifies a package file (`.srelens-extension`) and returns what to review; installs nothing. */
+export const reviewExtensionPackage = (bytes: Uint8Array) =>
+  invokeCapability<ExtensionReview>("extensions.packageManifest", { package: encodePackage(bytes) });
 export interface ExtensionResourceResult {
   printerColumns?: Array<{name:string;jsonPath:string;type?:string}>;
   columnsError?: string;
@@ -664,7 +726,11 @@ export interface ExtensionCatalogEntry {
   description: string;
   repository: string;
   license: string;
-  release: { version: string; manifestUrl: string; sha256: string; srelensApiVersion: string; prerelease: boolean };
+  release: {
+    version: string; manifestUrl: string; sha256: string; srelensApiVersion: string; prerelease: boolean;
+    /** The same release as a package (#562). A host that keeps no app files installs `manifestUrl`. */
+    package?: { url: string; sha256: string };
+  };
   testedHost: { repository: string; revision: string };
 }
 export interface ExtensionCatalogSnapshot {
@@ -680,9 +746,12 @@ export interface ExtensionCatalogSnapshot {
 }
 export const listExtensionCatalog = (refresh = false) =>
   invokeCapability<ExtensionCatalogSnapshot>("extensions.catalog", { refresh });
-/** Returns the exact checksum-verified bytes for explicit permission review. */
+/**
+ * Returns the exact checksum-verified bytes for explicit permission review; for a release
+ * the host installs as a package (#562), with the package's review.
+ */
 export const reviewCatalogExtension = (id: string, sha256: string) =>
-  invokeCapability<{ manifest: string; signature?: number[] | null }>("extensions.catalogManifest", { id, sha256 });
+  invokeCapability<ExtensionReview>("extensions.catalogManifest", { id, sha256 });
 
 /** Host-selected resource identity; API group/kind are resolved from the installed app. */
 export interface ExtensionResourceSelection {

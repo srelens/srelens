@@ -1,6 +1,8 @@
 # Distribution
 
-How apps reach users: the catalog, signed official releases, and local installation.
+How apps reach users: the catalog, signed official releases, and local installation. An
+app is released as one manifest file, or as a `.srelens-extension` package that carries its
+logo and files as well ([packages.md](packages.md)).
 
 ## The catalog
 
@@ -25,8 +27,12 @@ description.
   stay visible but cannot be installed. The catalog shows the host's versions.
 - Preview labels come from catalog metadata. `testedHost.revision` records test
   provenance, not an exact-build restriction.
-- Flux and Argo CD use bundled project logos; other apps get an initials mark. Logos
-  identify an integration and do not indicate trust or signing.
+- An installed app's logo comes from its package; every other app, and every catalog
+  entry, gets an initials mark. Nothing is chosen by app ID, and a logo never indicates
+  trust or signing ([packages.md](packages.md#logos)).
+- A release may also be published as a package (`release.package`). A host that installs
+  packages reviews that instead; a host that predates them, and the web host, install
+  `manifestUrl` ([packages.md](packages.md#in-the-catalog)).
 
 ## Reviewing an installation
 
@@ -85,6 +91,8 @@ trusting a stored signature quarantines only that app.
 
 ## Local installation
 
-Paste a manifest under **Settings → Apps → Install a local manifest**. It goes through
-the same validation and permission review, with an ID outside reserved namespaces. See
-[introduction.md](introduction.md#try-an-app) for a walkthrough.
+Paste a manifest under **Settings → Apps → Install a local manifest or package**, or choose
+a `.srelens-extension` file there on the desktop. Either goes through the same validation
+and permission review; a package is verified whole first, every file against its digest
+list ([packages.md](packages.md#installing)). Unsigned, its ID must be outside reserved
+namespaces. See [introduction.md](introduction.md#try-an-app) for a walkthrough.

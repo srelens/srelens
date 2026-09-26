@@ -13,5 +13,6 @@ The extension documentation has moved to [docs/extensions](extensions/introducti
 - [Security](extensions/security.md)
 - [Threat model](extensions/threat-model.md): assets, adversaries, mitigations and residual risk
 - [Distribution](extensions/distribution.md)
+- [Packages](extensions/packages.md): the `.srelens-extension` format, its signature and limits
 - [Testing](extensions/testing.md)
 - [Migration](extensions/migration.md)

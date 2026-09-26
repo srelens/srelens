@@ -19,7 +19,7 @@ export function appNavigation(plugins: InstalledExtension[], contextKey: string)
   return {
     id: "extensions", label: "Apps", icon: Icons.apps,
     children: apps.map((p) => ({
-      id: `extension:${p.manifest.id}`, label: p.manifest.name, icon: extensionLogoIcon(p.manifest.id, p.manifest.name),
+      id: `extension:${p.manifest.id}`, label: p.manifest.name, icon: extensionLogoIcon(p.manifest.name, p.icon),
       children: p.manifest.contributions.pages.flatMap((page, index, pages) => {
         const leaf = (item: typeof page) => ({
           id: `route:${extensionClusterRoute(contextKey, p.manifest.id, item.id)}`,

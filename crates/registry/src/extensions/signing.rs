@@ -11,7 +11,7 @@ struct Publisher {
     apps: &'static [(&'static str, &'static str)],
 }
 
-const PUBLISHERS: &[Publisher] = &[Publisher {
+const SRELENS: Publisher = Publisher {
     key: include_bytes!("srelens-apps.pub"),
     namespace: "org.srelens.",
     repository_owner: "https://github.com/srelens/",
@@ -25,7 +25,28 @@ const PUBLISHERS: &[Publisher] = &[Publisher {
             "https://github.com/srelens/extension-argocd",
         ),
     ],
-}];
+};
+
+#[cfg(not(test))]
+const PUBLISHERS: &[Publisher] = &[SRELENS];
+
+/// This crate's unit tests also trust a publisher whose private key they hold
+/// ([`tests::TEST_PUBLISHER_SEED`]), so they can sign packages (#562) and install them.
+/// It has a namespace of its own, and it exists only under `cfg(test)`: no build that
+/// anyone runs, the fuzz targets included, trusts it.
+#[cfg(test)]
+const PUBLISHERS: &[Publisher] = &[
+    SRELENS,
+    Publisher {
+        key: include_bytes!("../../tests/fixtures/packages/test-publisher.pub"),
+        namespace: "test.signed.",
+        repository_owner: "https://github.com/srelens-test-publisher/",
+        apps: &[(
+            "test.signed.packaged",
+            "https://github.com/srelens-test-publisher/extension-packaged",
+        )],
+    },
+];
 
 /// IDs in a trusted publisher's namespace install only with that publisher's signature.
 pub(super) fn reserved(id: &str) -> bool {
@@ -77,6 +98,10 @@ pub(super) fn verify(raw: &[u8], signature: &[u8]) -> Result<(), String> {
 
 /// Checks `signature` over `raw` with the key of the publisher that owns `id`. It does not
 /// depend on the manifest passing its rules, so both can be reported together.
+///
+/// The one place a publisher key is looked up. `raw` is a single-file release's manifest,
+/// or a package's digest list (#562); either way the scheme is this one, and replacing how
+/// the key is found (#559) replaces this function and [`PUBLISHERS`], not its callers.
 pub(super) fn verify_for(id: &str, raw: &[u8], signature: &[u8]) -> Result<(), String> {
     let (publisher, _) = publisher(id).ok_or("Signing key is not trusted for this app ID")?;
     verify_key(publisher.key, raw, signature)
@@ -89,9 +114,32 @@ fn verify_key(public_key: &[u8], raw: &[u8], signature: &[u8]) -> Result<(), Str
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use ring::signature::{Ed25519KeyPair, KeyPair};
+
+    /// The seed of the test publisher's key. A private key in the repository, trusted by
+    /// nothing but this crate's unit tests.
+    pub(in crate::extensions) const TEST_PUBLISHER_SEED: [u8; 32] = [0x62; 32];
+
+    /// Signs `raw` as the test publisher.
+    pub(in crate::extensions) fn test_publisher_sign(raw: &[u8]) -> Vec<u8> {
+        Ed25519KeyPair::from_seed_unchecked(&TEST_PUBLISHER_SEED)
+            .unwrap()
+            .sign(raw)
+            .as_ref()
+            .to_vec()
+    }
+
+    #[test]
+    fn the_test_publisher_key_is_the_one_its_seed_makes() {
+        let key = Ed25519KeyPair::from_seed_unchecked(&TEST_PUBLISHER_SEED).unwrap();
+        assert_eq!(key.public_key().as_ref(), &PUBLISHERS[1].key[..]);
+        let raw = b"signed by the test publisher";
+        assert!(verify_for("test.signed.packaged", raw, &test_publisher_sign(raw)).is_ok());
+        // Its key speaks for its namespace only.
+        assert!(verify_for("org.srelens.flux", raw, &test_publisher_sign(raw)).is_err());
+    }
 
     #[test]
     fn rejects_tampered_bytes_wrong_keys_and_missing_signatures() {

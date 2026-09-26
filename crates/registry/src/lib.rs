@@ -22,6 +22,11 @@ mod settings;
 pub use extensions::fuzzing;
 pub use extensions::streams::{ExtensionStreams, OpenStreamOut, INVENTORY_CHANNEL};
 pub use extensions::{Apps, InventoryKey, InventoryLock, InventoryStore, SharedCatalog};
+/// Making `.srelens-extension` packages (#562): what a publisher runs before a release, and
+/// what `cargo run -p srelens-registry --example pack-extension` wraps.
+pub mod extension_package {
+    pub use crate::extensions::package::{digest_list, pack};
+}
 pub use settings::default_settings_path;
 /// The secret store a host supplies for apps' secret settings (#543), so a
 /// host implements it against this crate alone.

@@ -132,6 +132,11 @@ impl TempSettings {
     fn catalog_cache(&self) -> PathBuf {
         self.0.with_extension("extensions.catalog.json")
     }
+
+    /// Where installed packages are unpacked (#562), beside the inventory.
+    fn packages(&self) -> PathBuf {
+        self.0.with_extension("extensions.packages")
+    }
 }
 
 impl Drop for TempSettings {
@@ -2890,6 +2895,64 @@ async fn extensions_and_gitops(h: &mut Harness, ctx: &str, settings: &TempSettin
         json!({"action": "remove", "id": "org.example.metrics"}),
     )
     .await;
+
+    // #562. A package file, reviewed and installed as Settings → Apps sends it: the
+    // manifest, signature and digest list the review returns are checked together, then
+    // the bytes are installed, unpacked into the app's own directory, and its logo listed.
+    println!("=== extensions: package ===");
+    let package = base64::engine::general_purpose::STANDARD.encode(
+        srelens_registry::extension_package::pack(&PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../crates/registry/tests/fixtures/packages/example"
+        )))
+        .expect("pack the example package"),
+    );
+    let review = h
+        .ok("extensions.packageManifest", json!({ "package": package }))
+        .await;
+    let grants = declared_permissions(review["manifest"].as_str().expect("a manifest"));
+    let checked = h
+        .ok(
+            "extensions.validate",
+            json!({"manifest": review["manifest"], "grants": grants,
+                   "digests": review["package"]["digests"]}),
+        )
+        .await;
+    assert_eq!(checked["errors"], json!([]), "{checked}");
+    h.ok(
+        "extensions.configure",
+        json!({"action": "installPackage", "package": package, "grants": grants}),
+    )
+    .await;
+    let listed = h.ok("extensions.list", json!({})).await;
+    let packaged = listed["plugins"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["manifest"]["id"] == "org.example.packaged")
+        .cloned()
+        .unwrap_or_else(|| panic!("the package is installed: {listed}"));
+    assert!(
+        packaged["icon"]
+            .as_str()
+            .is_some_and(|icon| icon.starts_with("data:image/svg+xml;base64,")),
+        "{packaged}"
+    );
+    let unpacked = settings
+        .packages()
+        .join("org.example.packaged")
+        .join(packaged["package"].as_str().expect("a package digest"));
+    assert!(
+        unpacked.join("extension.json").is_file(),
+        "{}",
+        unpacked.display()
+    );
+    h.ok(
+        "extensions.configure",
+        json!({"action": "remove", "id": "org.example.packaged"}),
+    )
+    .await;
+    assert!(!settings.packages().join("org.example.packaged").exists());
 
     println!("=== extensions: read ===");
     let out = h

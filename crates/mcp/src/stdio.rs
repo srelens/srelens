@@ -46,6 +46,55 @@ fn err(id: Value, code: i64, message: &str) -> Value {
 
 /// A failed host preflight is still an attempted mutating tool call. Record the
 /// refusal with the same redaction as the normal audited invocation.
+/// What `extensions.validate` checks before an install is put to the user: the manifest,
+/// grants and signature an `install` carries. A package (#562) is previewed from the
+/// manifest, signature and digest list the host reads from it, never from anything the
+/// caller says about it, and a catalog package must still be the one the caller named.
+async fn install_preview(server: &McpServer, args: &Value) -> Result<Value, String> {
+    let review = match args["action"].as_str() {
+        Some("installPackage") => {
+            server
+                .call_tool(
+                    "extensions.packageManifest",
+                    json!({"package": args["package"]}),
+                )
+                .await
+        }
+        Some("installCatalogPackage") => {
+            server
+                .call_tool(
+                    "extensions.catalogManifest",
+                    json!({"id": args["id"], "sha256": args["sha256"]}),
+                )
+                .await
+        }
+        _ => {
+            let mut preview = json!({"manifest": args["manifest"], "grants": args["grants"]});
+            if let Some(signature) = args.get("signature") {
+                preview["signature"] = signature.clone();
+            }
+            return Ok(preview);
+        }
+    }
+    .map_err(|error| error.to_string())?;
+    let package = review
+        .get("package")
+        .filter(|package| package.is_object())
+        .ok_or("the host returned no package to review")?;
+    if args["action"] == "installCatalogPackage" && package["sha256"] != args["packageSha256"] {
+        return Err("the catalog release changed; review it again".into());
+    }
+    let mut preview = json!({
+        "manifest": review["manifest"],
+        "grants": args["grants"],
+        "digests": package["digests"],
+    });
+    if review["signature"].is_array() {
+        preview["signature"] = review["signature"].clone();
+    }
+    Ok(preview)
+}
+
 fn rejected_tool_call(
     server: &McpServer,
     id: Value,
@@ -181,13 +230,18 @@ pub async fn handle_request(
             let mut decision = "auto";
 
             if let Some(mut request) = server.consent_request(name, &raw_args) {
-                if name == "extensions.configure" && args["action"] == "install" {
+                if name == "extensions.configure"
+                    && matches!(
+                        args["action"].as_str(),
+                        Some("install" | "installPackage" | "installCatalogPackage")
+                    )
+                {
                     // The host previews the exact manifest and current installed revision.
                     // Caller-supplied prose or revision is never used for consent.
-                    let mut preview_args = json!({"manifest": args["manifest"], "grants": args["grants"]});
-                    if let Some(signature) = args.get("signature") {
-                        preview_args["signature"] = signature.clone();
-                    }
+                    let preview_args = match install_preview(server, &args).await {
+                        Ok(preview_args) => preview_args,
+                        Err(error) => return Some(rejected_tool_call(server, id?, transport, name, &args, sensitive, format!("Could not review app access: {error}"))),
+                    };
                     let preview = match server.call_tool("extensions.validate", preview_args).await {
                         Ok(value) => value,
                         Err(error) => return Some(rejected_tool_call(server, id?, transport, name, &args, sensitive, format!("Could not review app access: {error}"))),
@@ -1261,6 +1315,101 @@ mod tests {
         assert!(prompt.contains("1 unchanged access item"), "{prompt}");
         assert!(!prompt.contains("Grant k8s.listCustomResource"), "{prompt}");
         assert_eq!(executed.lock().unwrap().as_ref().unwrap()["reviewedRevision"], 7);
+    }
+
+    /// A package install over MCP (#562) is previewed as `install` is: from the manifest,
+    /// signature and digest list the host reads from the package itself, with the access
+    /// changes in the prompt and the reviewed revision the host's.
+    #[tokio::test]
+    async fn package_installs_preview_what_the_host_reads_from_the_package() {
+        use srelens_capability::Annotations;
+        use std::sync::Mutex;
+        struct Yes(Arc<Mutex<Option<crate::policy::ConsentRequest>>>);
+        #[async_trait::async_trait]
+        impl crate::policy::ConfirmPolicy for Yes {
+            async fn confirm(
+                &self,
+                request: &crate::policy::ConsentRequest,
+            ) -> crate::policy::Decision {
+                *self.0.lock().unwrap() = Some(request.clone());
+                crate::policy::Decision::Approved
+            }
+        }
+        let review = json!({"manifest": "{\"id\":\"org.example.packaged\"}", "signature": [7, 7],
+            "package": {"sha256": "ab", "digests": "{\"format\":\"srelens-extension-package\"}", "files": []}});
+        let previewed = Arc::new(Mutex::new(Vec::new()));
+        let executed = Arc::new(Mutex::new(None));
+        let mut reg = Registry::new();
+        for tool in ["extensions.packageManifest", "extensions.catalogManifest"] {
+            let review = review.clone();
+            reg.register(Capability::read_only(tool, "review", move |_| {
+                let review = review.clone();
+                async move { Ok(review) }
+            }));
+        }
+        let capture = previewed.clone();
+        reg.register(Capability::read_only("extensions.validate", "preview", move |args| {
+            let capture = capture.clone();
+            async move {
+                capture.lock().unwrap().push(args);
+                Ok(json!({"errors":[],"permissionDiff":{"previousRevision":4,"added":["Grant k8s.listCustomResource"],"removed":[],"unchanged":[]}}))
+            }
+        }));
+        let capture = executed.clone();
+        let mut configure =
+            Capability::read_only("extensions.configure", "configure", move |args| {
+                let capture = capture.clone();
+                async move {
+                    *capture.lock().unwrap() = Some(args);
+                    Ok(json!({"done":true}))
+                }
+            });
+        configure.annotations = Annotations::MUTATING;
+        reg.register(configure);
+        let seen = Arc::new(Mutex::new(None));
+        let server = McpServer::new(Arc::new(reg)).with_policy(Arc::new(Yes(seen.clone())));
+        let call = |arguments: Value| json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"extensions.configure","arguments":arguments}});
+        for arguments in [
+            json!({"action":"installPackage","package":"H4sI","grants":["k8s.listCustomResource"],"reviewedRevision":99}),
+            json!({"action":"installCatalogPackage","id":"org.example.packaged","sha256":"cd","packageSha256":"ab","grants":["k8s.listCustomResource"]}),
+        ] {
+            let response = handle_request(&server, &call(arguments.clone()), Transport::Stdio)
+                .await
+                .unwrap();
+            assert_eq!(response["result"]["isError"], false, "{response}");
+            let preview = previewed.lock().unwrap().pop().unwrap();
+            assert_eq!(
+                preview,
+                json!({"manifest": review["manifest"], "grants": ["k8s.listCustomResource"],
+                "signature": [7, 7], "digests": review["package"]["digests"]})
+            );
+            let prompt = seen.lock().unwrap().take().unwrap().prompt();
+            assert!(
+                prompt.contains("Added: Grant k8s.listCustomResource"),
+                "{prompt}"
+            );
+            assert_eq!(
+                executed.lock().unwrap().take().unwrap()["reviewedRevision"],
+                4
+            );
+        }
+        // A catalog package other than the one the catalog lists now is refused unrun.
+        let response = handle_request(
+            &server,
+            &call(
+                json!({"action":"installCatalogPackage","id":"org.example.packaged",
+            "sha256":"cd","packageSha256":"stale","grants":[]}),
+            ),
+            Transport::Stdio,
+        )
+        .await
+        .unwrap();
+        assert_eq!(response["result"]["isError"], true);
+        assert!(
+            response.to_string().contains("catalog release changed"),
+            "{response}"
+        );
+        assert!(executed.lock().unwrap().is_none());
     }
 
     #[tokio::test]

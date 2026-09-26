@@ -34,7 +34,14 @@ mitigation and the risk that remains.
   ([threat-model.md](threat-model.md#malicious-app)).
 - **Official identities are reserved.** IDs under `org.srelens.` install only with the
   srelens publisher signature, so a pasted manifest cannot take an official app's ID
-  or logo ([distribution.md](distribution.md#signed-official-releases)).
+  ([distribution.md](distribution.md#signed-official-releases)).
+- **A logo never implies trust.** An app's logo comes only from its installed package, as
+  an image checked against the package's digest list; nothing is chosen by app ID, and the
+  signature label, not the logo, says who published an app ([packages.md](packages.md#logos)).
+- **A package is taken whole.** Every file is covered by one digest list and one
+  signature; links, traversal, extra, missing or changed files and oversized archives are
+  refused before anything is unpacked, into a private directory
+  ([packages.md](packages.md#what-the-host-refuses)).
 - **Names display as written.** App names, titles and groups, and catalog names and
   descriptions, refuse bidirectional overrides, zero-width characters and other Unicode
   format characters ([specification.md](specification.md#identifiers)).

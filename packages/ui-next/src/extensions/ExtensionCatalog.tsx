@@ -1,12 +1,13 @@
 import { ExtensionLogo } from "./ExtensionLogo";
 import { useContext, useEffect, useRef, useState } from "react";
-import { isTauri, listExtensionCatalog, reviewCatalogExtension, openExternal, type ExtensionCatalogSnapshot, type InstalledExtension } from "@srelens/core";
+import { isTauri, listExtensionCatalog, reviewCatalogExtension, openExternal, type ExtensionCatalogSnapshot, type ExtensionReview, type InstalledExtension } from "@srelens/core";
 import { ExtensionControls } from "./ExtensionControls";
 
 export function ExtensionCatalog({ installed, onReview, autoLoad = false }: {
   autoLoad?: boolean;
   installed: InstalledExtension[];
-  onReview: (manifest: string, signature?: number[]) => void;
+  /** The host-verified review, and the release it is of, which a package install names again. */
+  onReview: (review: ExtensionReview, release: { id: string; sha256: string }) => void;
 }) {
   const { Button } = useContext(ExtensionControls);
   const [data, setData] = useState<ExtensionCatalogSnapshot>();
@@ -52,7 +53,7 @@ export function ExtensionCatalog({ installed, onReview, autoLoad = false }: {
         const incompatible = data.incompatible.includes(entry.id);
         return <article className="extension-installed extension-catalog-entry" aria-label={entry.name} key={entry.id}>
           <div className="extension-toolbar">
-            <ExtensionLogo id={entry.id} name={entry.name} size={28} />
+            <ExtensionLogo name={entry.name} size={28} />
             <div className="extension-catalog-description">
               <strong>{entry.name}</strong>
               <p>{entry.description}</p>
@@ -64,7 +65,7 @@ export function ExtensionCatalog({ installed, onReview, autoLoad = false }: {
               const request = ++generation.current;
               void run(async () => {
                 const result = await reviewCatalogExtension(entry.id, entry.release.sha256);
-                if (request === generation.current) onReview(result.manifest, result.signature ?? undefined);
+                if (request === generation.current) onReview(result, { id: entry.id, sha256: entry.release.sha256 });
               });
             }}>{current ? "Review replacement" : "Review installation"}</Button>
           </div>
