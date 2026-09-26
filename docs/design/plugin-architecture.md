@@ -84,9 +84,11 @@ Status:
   [#571](https://github.com/srelens/srelens/issues/571) (recorded 2026-09-24). That
   covers the backend per OS and the open questions.
 
-Nothing here ships yet. The supervisor that will use these backends is
-[#572](https://github.com/srelens/srelens/issues/572), under
-[#521](https://github.com/srelens/srelens/issues/521).
+The supervisor ([#572](https://github.com/srelens/srelens/issues/572), under
+[#521](https://github.com/srelens/srelens/issues/521)) implements the recommended backend
+for each OS; see [The supervisor](#the-supervisor-572). Nothing runs it yet: no manifest
+kind starts a sidecar ([#574](https://github.com/srelens/srelens/issues/574)). The rest of
+this section is the spike's record.
 
 The spike asked one question: can each desktop OS's own sandbox facility enforce the
 restrictions an executable extension must run under, on ordinary operations? It is a
@@ -443,6 +445,48 @@ Considered and not chosen:
 2. **Isolation only on macOS, with no limits.** Rejected: a sidecar could exhaust the
    machine's memory or CPU, which the SDK promises to prevent.
 
+### The supervisor (#572)
+
+`crates/plugin-host/src/sidecar/` runs a sidecar under the recommended backend for its
+OS. The protocol, the limits and the restart backoff are in
+[the sidecar protocol](../extensions/sidecar-protocol.md). The backends are in
+`sandbox/`:
+
+- **Linux:** the host creates the sidecar's cgroup under a root delegated to srelens
+  (`sandbox/linux.rs`). It starts `srelens-sandbox-launch` (`src/bin/`, over
+  `sandbox/launch.rs`), which joins the cgroup, applies Landlock and the seccomp filter to
+  itself, and runs the sidecar. All three layers are required.
+- **Windows:** the spike's AppContainer and Job Object (`sandbox/windows.rs`).
+- **macOS:** the spike's Seatbelt profile (`sandbox/seatbelt.sb`), started through the
+  same launcher. Every sidecar is refused until the #713 watchdog exists: isolation
+  without limits is the alternative the decision above rejected.
+- **Any other OS:** refused.
+
+Where it departs from the spike:
+
+| The spike | The supervisor | Why |
+|---|---|---|
+| The seccomp filter allowed `AF_UNIX` sockets | It refuses every `socket` call | The sidecar's stdio is pipes, and an `AF_UNIX` socket reaches the D-Bus session bus (see [What the spike did not establish](#what-the-spike-did-not-establish)) |
+| Landlock ABI 5 | ABI 5, plus the ABI 6 scopes: abstract Unix sockets, and signals to processes outside the sandbox | Best effort, so kernels before 6.12 are unchanged; on newer ones a sidecar cannot signal srelens or the user's other processes |
+| A best-effort ruleset that a kernel without Landlock silently did not apply | The host refuses a kernel without Landlock, and the launcher refuses a ruleset the kernel enforces none of | A layer that is not there must refuse the app, not pass as applied |
+| The probe inherited the host's environment | The sidecar gets only the variables srelens names, plus `SystemRoot` on Windows | The environment may hold `KUBECONFIG`, cloud credentials or tokens |
+| Inherited descriptors were not closed | The launcher closes every descriptor above 2 before the sidecar runs (`close_range` on Linux, `/dev/fd` on macOS). Windows still inherits only the three pipe ends | Anything srelens opened without close-on-exec would otherwise reach the sidecar |
+| One AppContainer profile | One per app, named by a digest of its ID, with `delete_profile` for uninstall | The recommendation above; an app ID can be longer than a profile name |
+| On Windows, stderr joined stdout | Its own pipe | stdout is protocol only |
+| `icacls` found by `PATH` | Under `%SystemRoot%\System32` | A `PATH` entry must not choose it |
+| macOS launcher set `RLIMIT_DATA`, `RLIMIT_AS` and a 60-second `RLIMIT_CPU` | None | The first two were refused. The third would kill a long-lived sidecar after a minute of CPU, which is not a limit |
+
+`crates/plugin-host/tests/sandbox_conformance.rs` is the conformance suite: the seven
+checks above, with the same positive controls and error-kind rules, run through the real
+supervisor and launcher. It adds two checks: that none of the host's environment reaches
+the sidecar, and that a Unix socket outside the grant cannot be reached. The
+`sandbox-conformance` CI job runs it on `ubuntu-24.04` (with a cgroup the job delegates)
+and `windows-latest`.
+
+On macOS 27.0 (26A428), arm64, the suite's isolation checks were run by hand and all
+seven passed: 1 to 4, 7, the environment and the Unix socket. The CPU and memory checks
+are not run on macOS.
+
 ### What the spike did not establish
 
 - **Real desktops.** Linux ran in a privileged Docker container as root. A desktop
@@ -468,16 +512,20 @@ Considered and not chosen:
 
 ### Follow-up work
 
-- **#572: an escape-hardening security review of the real supervisor.** The spike tried
-  only ordinary operations. Before release, the supervisor needs adversarial review of
-  at least: handle and file-descriptor inheritance, symlink and hard-link tricks inside
-  the scratch directory, Unix and abstract sockets, `io_uring` and other syscall
-  surface the deny-list misses, signals and `ptrace` against sibling processes, named
-  objects and other IPC reachable from an AppContainer, and the launcher's own window
-  before its layers are applied.
-- **#572: a sandbox conformance suite.** `spikes/sidecar-sandbox/tests/checks.rs` is
-  meant to seed it: the same seven checks, run against each production backend in CI on
-  Windows and Linux runners.
+- **An escape-hardening security review of the real supervisor.** Assigned to #572, and
+  **not done there.** The spike tried only ordinary operations. Before release, the
+  supervisor needs adversarial review of at least: handle and file-descriptor
+  inheritance, symlink and hard-link tricks inside the data directory, Unix and abstract
+  sockets, `io_uring` and other syscall surface the deny-list misses, signals and
+  `ptrace` against sibling processes, named objects and other IPC reachable from an
+  AppContainer, and the launcher's own window before its layers are applied. #572
+  narrowed three of these by construction (see [The supervisor](#the-supervisor-572)):
+  descriptors above 2 are closed, every `socket` call is refused, and the ABI 6 signal
+  scope applies on kernels that have it. None of them has been attacked. The filter is
+  still a deny-list, and nothing kills a sidecar on Linux or macOS if srelens itself is
+  killed: it gets end-of-file on stdin, which a hostile one can ignore.
+- **A sandbox conformance suite.** Built in #572: `crates/plugin-host/tests/sandbox_conformance.rs`,
+  run by the `sandbox-conformance` CI job on Linux and Windows.
 - **macOS: more Macs.** Run
   `SEATBELT_TRACE=1 sh spikes/sidecar-sandbox/run-macos.sh` (see
   [the spike's README](../../spikes/sidecar-sandbox/README.md)) on an Intel Mac and on
@@ -522,6 +570,15 @@ Considered and not chosen:
 
   Should the supervisor target the newest ABI its Landlock library knows, and require a
   minimum for a sidecar to run at all?
+
+What the supervisor (#572) does until these are decided:
+
+- **A missing limit layer:** it refuses the app, and says which layer is missing.
+- **AppContainer profiles:** one per app, and `delete_profile` removes one on uninstall.
+  Nothing removes them when srelens itself is uninstalled.
+- **Broker callbacks:** the protocol carries them on stdio, and until #573 refuses them.
+- **Landlock:** the target is ABI 5 plus the ABI 6 scopes, best effort. The floor is any
+  kernel that enforces some of the ruleset.
 
 ### Running the spike
 
