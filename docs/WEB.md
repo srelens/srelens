@@ -277,7 +277,7 @@ Every field may be left out:
 | --- | --- | --- |
 | `allowedApps` | Any app | Only these app IDs may be installed and used. |
 | `blockedApps` | None | These app IDs may never be installed or used, whatever else allows them. |
-| `allowedPublishers` | Every trusted publisher | Signed apps only from these publishers. The one publisher srelens trusts today is `srelens`. |
+| `allowedPublishers` | Every trusted publisher | Signed apps only from these publishers, each named by the ID of the delegation its signature verifies under ([trust.md](extensions/trust.md)). A policy can name the publishers the build ships a delegation for; today that is `srelens`. |
 | `allowUnsignedApps` | `true` | `false` refuses every app without a verified publisher signature. With `true`, each user's own **Allow unsigned apps to modify clusters** still decides whether an unsigned app may write. |
 | `allowedCapabilities` | Every one | The host capabilities an app may be granted: `k8s.listCustomResource`, `k8s.listEvents`, `k8s.listDeployments`, `k8s.listStatefulSets`, `k8s.listDaemonSets`, `k8s.listNodes`, `network.http`, `extension.secretStore`, the pod capabilities `k8s.streamLogs`, `k8s.exec` and `k8s.portForward`, and the action primitives `k8s.annotate`, `k8s.setFields`, `k8s.setStatusCondition`, `k8s.mergePatch`, `k8s.requestRolloutRestart` and `k8s.requestCordonNode`. |
 | `allowWriteActions` | `true` | `false` refuses every app that declares a write action, which includes the official Argo CD and Flux apps. It does not cover running commands in pods: to refuse that, leave `k8s.exec` out of `allowedCapabilities`. |

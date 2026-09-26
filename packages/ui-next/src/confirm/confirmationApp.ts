@@ -60,7 +60,8 @@ export function appIdentity(
   if (!plugin) return null;
   return {
     name: extensionLabel(plugin),
-    publisher: plugin.signatureProof && !plugin.quarantined ? "srelens" : null,
+    // The publisher the host verified on this read (#559), never one the proof implies.
+    publisher: !plugin.quarantined && plugin.signedBy ? plugin.signedBy.name : null,
   };
 }
 

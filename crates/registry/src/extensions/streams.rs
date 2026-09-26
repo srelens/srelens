@@ -2187,6 +2187,7 @@ mod tests {
             core,
             super::super::Configure::Install {
                 signature: None,
+                key_id: None,
                 manifest: manifest.to_string(),
                 grants: vec!["k8s.listDeployments".into()],
                 reviewed_revision: None,

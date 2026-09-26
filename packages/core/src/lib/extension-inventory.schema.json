@@ -845,6 +845,47 @@
       ],
       "type": "object"
     },
+    "Envelope": {
+      "description": "A signed document: a DSSE envelope.",
+      "properties": {
+        "payload": {
+          "description": "The document's exact bytes, in base64.",
+          "type": "string"
+        },
+        "payloadType": {
+          "type": "string"
+        },
+        "signatures": {
+          "items": {
+            "$ref": "#/definitions/EnvelopeSignature"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "payload",
+        "payloadType",
+        "signatures"
+      ],
+      "type": "object"
+    },
+    "EnvelopeSignature": {
+      "properties": {
+        "keyid": {
+          "default": "",
+          "description": "Which key made it. Only narrows which key is tried: a signature counts when that key verifies it, and only if the role lists the key.",
+          "type": "string"
+        },
+        "sig": {
+          "description": "The Ed25519 signature, in base64.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "sig"
+      ],
+      "type": "object"
+    },
     "Installed": {
       "additionalProperties": false,
       "properties": {
@@ -933,6 +974,17 @@
               "type": "null"
             }
           ]
+        },
+        "signedBy": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Signer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Who signed the installed version, when its proof verified on this read: \"Signed by <name>\". Recomputed on every read, like `quarantined`, and never written to disk."
         },
         "source": {
           "$ref": "#/definitions/Source"
@@ -1590,6 +1642,17 @@
     "SignatureProof": {
       "additionalProperties": false,
       "properties": {
+        "delegation": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Envelope"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The signed publisher delegation that vouched for the signature (#559), so the app is verified again on every load with no catalog at hand. Absent when this build's shipped delegations vouch for it, as they do for every release signed before #559, which keeps those inventories readable by the hosts that wrote them."
+        },
         "digests": {
           "description": "For a package (#562): the exact digest list `signature` covers, which names `manifest` as the package's `extension.json`. Absent for a single-file manifest, whose signature covers `manifest` itself.",
           "type": [
@@ -1612,6 +1675,22 @@
       "required": [
         "manifest",
         "signature"
+      ],
+      "type": "object"
+    },
+    "Signer": {
+      "description": "Who signed an app, as the host reports it: \"Signed by <name>\".",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name"
       ],
       "type": "object"
     },

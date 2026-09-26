@@ -40,9 +40,14 @@ mitigation and the risk that remains.
   such comparison: its review compares capability IDs, and for `network.http` the hosts
   and requests, but not reader or action bindings
   ([threat-model.md](threat-model.md#malicious-app)).
-- **Official identities are reserved.** IDs under `org.srelens.` install only with the
-  srelens publisher signature, so a pasted manifest cannot take an official app's ID
-  ([distribution.md](distribution.md#signed-official-releases)).
+- **Publisher identities are reserved.** The signed catalog delegates app ID namespaces
+  to publishers, `org.srelens` to srelens, and an ID in one installs only with that
+  publisher's signature, as a manifest or as a package. A pasted manifest cannot take a
+  publisher's ID, and a publisher's key cannot sign outside its namespaces
+  ([distribution.md](distribution.md#signed-releases-and-publishers), [trust.md](trust.md)).
+- **The catalog is signed.** The host trusts a catalog only when the catalog role of
+  the root it pins signed it, and refuses one that has expired or is older than the last
+  it verified, keeping that one ([trust.md](trust.md#what-the-host-refuses)).
 - **A logo never implies trust.** An app's logo comes only from its installed package, as
   an image checked against the package's digest list; nothing is chosen by app ID, and the
   signature label, not the logo, says who published an app ([packages.md](packages.md#logos)).

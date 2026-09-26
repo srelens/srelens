@@ -1,5 +1,5 @@
 //! Installing, updating, verifying and removing apps that come as packages (#562).
-use super::package::tests::{fixture, packed, Raw};
+use super::package::tests::{fixture, packed, shipped, Raw};
 use super::tests::{configure, fake_core};
 use super::*;
 use base64::Engine as _;
@@ -12,7 +12,7 @@ fn encode(archive: &[u8]) -> String {
 
 /// `extensions.configure`'s `installPackage`, as the `@srelens/core` wrapper sends it.
 fn install_package(path: &Path, archive: &[u8]) -> Result<Inventory, String> {
-    let id = package::read(archive, &mut package::Discard)
+    let id = package::read(archive, &mut package::Discard, &shipped())
         .map(|verified| verified.list.id)
         .unwrap_or_default();
     let reviewed = read(path)?
@@ -91,7 +91,7 @@ async fn a_package_installs_into_its_private_directory_and_lists_its_logo() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("extensions.json");
     let archive = packed("example");
-    let verified = package::read(&archive, &mut package::Discard).unwrap();
+    let verified = package::read(&archive, &mut package::Discard, &shipped()).unwrap();
     let state = install_package(&path, &archive).unwrap();
     let installed = app(&state, "org.example.packaged");
     assert!(installed.enabled);
@@ -141,7 +141,7 @@ fn a_signed_package_keeps_its_proof_and_is_verified_on_every_load() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("extensions.json");
     let archive = packed("signed");
-    let verified = package::read(&archive, &mut package::Discard).unwrap();
+    let verified = package::read(&archive, &mut package::Discard, &shipped()).unwrap();
     install_package(&path, &archive).unwrap();
     let state = read(&path).unwrap();
     let installed = app(&state, "test.signed.packaged");
@@ -203,10 +203,10 @@ fn a_signed_package_keeps_its_proof_and_is_verified_on_every_load() {
 fn an_update_keeps_the_replaced_package_for_rollback_and_prunes_what_nothing_keeps() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("extensions.json");
-    let first = package::read(&packed("example"), &mut package::Discard).unwrap();
+    let first = package::read(&packed("example"), &mut package::Discard, &shipped()).unwrap();
     install_package(&path, &packed("example")).unwrap();
     let second_archive = example_at("1.1.0");
-    let second = package::read(&second_archive, &mut package::Discard).unwrap();
+    let second = package::read(&second_archive, &mut package::Discard, &shipped()).unwrap();
     let state = install_package(&path, &second_archive).unwrap();
     let installed = app(&state, "org.example.packaged");
     assert_eq!(installed.manifest.version, "1.1.0");
@@ -281,11 +281,11 @@ fn a_failed_inventory_save_leaves_every_version_it_names_in_place() {
     fs::create_dir(&apps).unwrap();
     let path = apps.join("extensions.json");
     let id = "org.example.packaged";
-    let first = package::read(&packed("example"), &mut package::Discard)
+    let first = package::read(&packed("example"), &mut package::Discard, &shipped())
         .unwrap()
         .digest;
     let update = example_at("1.1.0");
-    let second = package::read(&update, &mut package::Discard)
+    let second = package::read(&update, &mut package::Discard, &shipped())
         .unwrap()
         .digest;
     install_package(&path, &packed("example")).unwrap();
@@ -602,12 +602,14 @@ fn a_package_the_cached_catalog_lists_is_recorded_as_from_the_catalog() {
         "url": "https://github.com/example/packaged/releases/download/v1.0.0/packaged.srelens-extension",
         "sha256": package::sha256_hex(&archive),
     });
+    // A catalog the test root's catalog key signed (#559): the host trusts no other.
     fs::write(
         path.with_extension("catalog.json"),
-        serde_json::to_vec(&json!({
-            "catalog": catalog, "fetchedAt": 0, "stale": false, "error": null, "incompatible": []
-        }))
-        .unwrap(),
+        catalog::test_cache(
+            &[trust::testing::srelens_publisher()],
+            catalog["extensions"].clone(),
+            0,
+        ),
     )
     .unwrap();
     let state = install_package(&path, &archive).unwrap();
@@ -624,7 +626,7 @@ fn a_package_the_policy_refuses_is_neither_installed_nor_unpacked() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("extensions.json");
     let archive = packed("example");
-    let id = package::read(&archive, &mut package::Discard)
+    let id = package::read(&archive, &mut package::Discard, &shipped())
         .unwrap()
         .list
         .id;

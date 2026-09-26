@@ -60,6 +60,21 @@ impl<'de> Visitor<'de> for SignatureVisitor {
     }
 }
 
+/// Decodes an optional `keyId` (#559): a key's ID is 64 lowercase hexadecimal characters,
+/// and anything else is refused as it is read.
+pub(super) fn key_id<'de, D: Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+    let key_id = Option::<String>::deserialize(d)?;
+    if key_id
+        .as_deref()
+        .is_some_and(|id| !super::trust::is_key_id(id))
+    {
+        return Err(de::Error::custom(
+            "keyId must be 64 lowercase hexadecimal characters",
+        ));
+    }
+    Ok(key_id)
+}
+
 /// Decodes manifest text, refusing more than [`MAX_MANIFEST_BYTES`] before it is decoded.
 pub(super) fn manifest<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
     let text = String::deserialize(d)?;

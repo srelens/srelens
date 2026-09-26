@@ -52,7 +52,7 @@ export function ExtensionCatalog({ installed, onReview, onReviewStart, autoLoad 
           Refresh here shows its copy rather than fetching one: say so, or the time above reads as wrong. */}
       {!isTauri() && <p className="extension-message">This server keeps one catalog for everyone who signs in, and fetches it again once a day.</p>}
       {data.error && <p className="extension-warning" role="alert">Refresh failed: {data.error}. Showing the cached catalog.</p>}
-      <p className="extension-message">Official srelens app signatures are verified before installation review. Review permissions before installing.</p>
+      <p className="extension-message">An app whose ID is in a publisher's namespace installs only with that publisher's signature, verified before installation review. Review permissions before installing.</p>
       {entries?.length === 0 && <p className="extension-message">No matching apps.</p>}
       {entries?.map(entry => {
         const current = installed.find(p => p.manifest.id === entry.id);

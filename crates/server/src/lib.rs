@@ -90,18 +90,30 @@ impl AppState {
 
     /// [`AppState::for_tests`] with each user's registry built by `factory`.
     pub async fn for_tests_with(factory: RegistryFactory) -> AppState {
+        Self::for_tests_with_catalog_trust(factory, srelens_registry::TrustRoot::pinned()).await
+    }
+
+    /// [`AppState::for_tests_with`], with the shared app catalog and users' app signatures
+    /// verified against `trust`: a test's root, whose catalog the test can sign (#559).
+    pub async fn for_tests_with_catalog_trust(
+        factory: RegistryFactory,
+        trust: srelens_registry::TrustRoot,
+    ) -> AppState {
         let mut bytes = [0u8; 8];
         getrandom::getrandom(&mut bytes).expect("random");
         let data_dir =
             std::env::temp_dir().join(format!("srelens-state-test-{}", hex::encode(bytes)));
         std::fs::create_dir_all(&data_dir).expect("test data dir");
         AppState {
-            user_envs: Arc::new(users::UserEnvs::new(
-                factory,
-                data_dir,
-                "http://127.0.0.1:8080".into(),
-                Default::default(),
-            )),
+            user_envs: Arc::new(
+                users::UserEnvs::new(
+                    factory,
+                    data_dir,
+                    "http://127.0.0.1:8080".into(),
+                    Default::default(),
+                )
+                .with_catalog_trust(trust),
+            ),
             db: db::Db::open_in_memory().await.expect("in-memory db"),
             master_key: Arc::new(crypto::MasterKey::from_hex(&"ab".repeat(32)).expect("test key")),
             auth: Arc::new(auth::AuthConfig {

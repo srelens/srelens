@@ -1,6 +1,6 @@
 //! An administrator's policy (#578), as the broker applies it: at install and on every
 //! call, to apps installed before it changed as much as to new ones.
-use super::tests::{fake_core, manifest};
+use super::tests::{cache_delegating_example_labs, fake_core, manifest, signed_by_example_labs};
 use super::*;
 use serde_json::json;
 use srelens_kube::client_cache::ClientCache;
@@ -196,7 +196,7 @@ async fn a_blocked_app_can_be_neither_installed_nor_called() {
         "{report}"
     );
     assert_eq!(report["errors"][0]["path"], "id", "{report}");
-    assert!(read(&apps.inventory).unwrap().plugins.is_empty());
+    assert!(apps.inventory.read().unwrap().plugins.is_empty());
 
     // Installed before the block, it is refused from its next call on: nothing is
     // rebuilt, and the saved inventory is not touched.
@@ -366,11 +366,73 @@ async fn publishers_and_unsigned_apps_are_the_policys_to_allow() {
     let mut stored: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
     stored["plugins"][0]["signatureProof"]["signature"][0] = json!(0);
     fs::write(&path, stored.to_string()).unwrap();
-    let state = read(&apps.inventory).unwrap();
+    let state = apps.inventory.read().unwrap();
     assert!(state.plugins[0].quarantined.is_some());
     assert_eq!(
         state.plugins[0].policy_blocked.as_deref(),
         Some("The administrator's policy allows only signed apps")
+    );
+}
+
+/// Under #559, a signed app's publisher is the delegation its signature verified under,
+/// one only the catalog delegates to included: never unsigned for want of a publisher
+/// this build ships, which would let `allowedPublishers` pass it by.
+#[test]
+fn a_catalog_delegated_publisher_is_held_to_the_publishers_the_policy_allows() {
+    let dir = tempfile::tempdir().unwrap();
+    cache_delegating_example_labs(&dir.path().join("extensions.json"));
+    let id = "com.example-labs.gitops";
+    let (source, signature, key_id) = signed_by_example_labs(id);
+    let install = json!({"action":"install","manifest":source,"signature":signature,
+        "keyId":key_id,"grants":["k8s.listCustomResource"]});
+    let only_srelens = || policy(json!({"allowedPublishers":["srelens"]}));
+    let rules = SharedPolicy::new(only_srelens());
+    let apps = governed(dir.path(), &rules);
+    let error = refused(change(&apps, install.clone()));
+    assert!(
+        error.contains("does not allow apps signed by example"),
+        "{error}"
+    );
+
+    rules.replace(AppPolicy::default());
+    let state = change(&apps, install).unwrap();
+    let app = state
+        .plugins
+        .iter()
+        .find(|app| app.manifest.id == id)
+        .unwrap();
+    assert!(app.enabled && app.policy_blocked.is_none());
+    assert_eq!(app.signed_by.as_ref().unwrap().id, "example");
+
+    // Installed before the policy named its publishers, and refused from the next read.
+    rules.replace(only_srelens());
+    let state = apps.inventory.read().unwrap();
+    let app = state
+        .plugins
+        .iter()
+        .find(|app| app.manifest.id == id)
+        .unwrap();
+    assert!(!app.enabled);
+    assert_eq!(
+        app.policy_blocked.as_deref(),
+        Some("The administrator's policy does not allow apps signed by example")
+    );
+}
+
+/// A policy names publishers by the IDs of the delegations this build ships (#559): the
+/// test build's are srelens and the test publisher (#562). A publisher only a catalog
+/// delegates to is not one a policy can name, since the policy is read before any catalog.
+#[test]
+fn a_policy_may_name_the_publishers_this_build_ships() {
+    assert_eq!(
+        super::app_policy::publisher_ids(),
+        ["srelens", "test-publisher"]
+    );
+    assert!(AppPolicy::parse(r#"{"allowedPublishers":["srelens","test-publisher"]}"#).is_ok());
+    let error = AppPolicy::parse(r#"{"allowedPublishers":["example"]}"#).unwrap_err();
+    assert!(
+        error.contains("\"example\" is not a publisher this host trusts (srelens, test-publisher)"),
+        "{error}"
     );
 }
 
@@ -471,7 +533,7 @@ async fn under_a_policy_an_app_cannot_open_plain_http_to_the_host() {
     // the saved inventory says.
     let rules = SharedPolicy::new(policy(json!({"networkCeiling":["127.0.0.1:9090"]})));
     let apps = governed(dir.path(), &rules);
-    let state = read(&apps.inventory).unwrap();
+    let state = apps.inventory.read().unwrap();
     assert!(!state.plugins[0].allow_loopback_http);
     assert!(state.plugins[0].policy_blocked.is_none());
     let error = refused(change(
@@ -556,7 +618,7 @@ fn a_saved_inventory_carries_no_policy_of_its_own() {
     let desktop = Apps::from(path.clone());
     install_local(&desktop).unwrap();
     // The desktop has no policy, and reports none.
-    assert!(read(&desktop.inventory).unwrap().policy.is_none());
+    assert!(desktop.inventory.read().unwrap().policy.is_none());
     assert!(serde_json::to_value(read(&path).unwrap())
         .unwrap()
         .get("policy")
@@ -578,15 +640,15 @@ fn an_inventory_held_to_a_policy_is_never_saved() {
     let apps = governed(dir.path(), &rules);
     install_local(&apps).unwrap();
     let before = fs::read(dir.path().join("extensions.json")).unwrap();
-    let governed_state = read(&apps.inventory).unwrap();
-    let error = write(&apps.inventory, &governed_state).unwrap_err();
+    let governed_state = apps.inventory.read().unwrap();
+    let error = write(&*apps.inventory, &governed_state).unwrap_err();
     assert!(error.contains("held to a policy"), "{error}");
     assert_eq!(
         fs::read(dir.path().join("extensions.json")).unwrap(),
         before
     );
     // The inventory as saved still saves.
-    write(&apps.inventory, &read_saved(&apps.inventory).unwrap()).unwrap();
+    write(&*apps.inventory, &apps.inventory.read_saved().unwrap()).unwrap();
 }
 
 /// A required app is disabled by nothing the user does: turning off their own switch
@@ -617,7 +679,7 @@ fn the_unsigned_switch_cannot_disable_a_required_app() {
         ),
         "{error}"
     );
-    assert!(read(&apps.inventory).unwrap().plugins[0].enabled);
+    assert!(apps.inventory.read().unwrap().plugins[0].enabled);
     // Without the requirement, the switch is the user's again.
     rules.replace(AppPolicy::default());
     let state = change(

@@ -337,12 +337,32 @@ export interface ExtensionManifest {
 /** Where a version came from: `catalog` is the exact bytes of a cached catalog release. */
 export type ExtensionSource = "local" | "catalog";
 /**
+ * Who signed an app, as the host verified it (#559): the publisher the catalog delegates the
+ * app's ID namespace to. Shown as "Signed by <name>".
+ */
+export interface ExtensionSigner {
+  id: string;
+  name: string;
+}
+/** A signed document (#559): a DSSE envelope over the document's exact bytes. */
+export interface ExtensionSignedDocument {
+  payloadType: string;
+  /** The document's exact bytes, in base64. */
+  payload: string;
+  signatures: Array<{ keyid?: string; sig: string }>;
+}
+/**
  * A publisher signature the host keeps and checks on every load. For a package (#562) it is
  * over `digests`, the package's digest list, which names `manifest`; otherwise over `manifest`.
  */
 export interface ExtensionSignatureProof {
   manifest: string;
   signature: number[];
+  /**
+   * The signed publisher delegation that vouched for the signature (#559), kept so the host
+   * can verify it with no catalog at hand. Absent when the host's own delegations vouch for it.
+   */
+  delegation?: ExtensionSignedDocument;
   digests?: string;
 }
 /** A version an update replaced, kept so it can be restored. */
@@ -363,6 +383,8 @@ export interface InstalledExtension {
   quarantined?: string;
   /** Host-computed unsigned-app policy denial; the affected app is disabled. */
   policyBlocked?: string;
+  /** Who signed the installed version, when its proof verified on this read (#559). */
+  signedBy?: ExtensionSigner;
   manifest: ExtensionManifest;
   enabled: boolean;
   revision: number;
@@ -448,7 +470,8 @@ export interface ExtensionSecretStoreState {
 }
 export type ExtensionChange =
   | { action: "unsignedApps"; allowUnsignedApps: boolean }
-  | { action: "install"; manifest: string; grants: string[]; signature?: number[]; reviewedRevision?: number }
+  /** `keyId` is the key the signature names (#559), as the catalog review returned it. */
+  | { action: "install"; manifest: string; grants: string[]; signature?: number[]; keyId?: string; reviewedRevision?: number }
   /** Installs a package file (#562), sent as base64; the host verifies it again. */
   | { action: "installPackage"; package: string; grants: string[]; reviewedRevision?: number }
   /**
@@ -538,14 +561,16 @@ export interface ExtensionPermissionDiff {
 /**
  * Checks a manifest exactly as installing it with these grants would, without installing.
  * For a package's manifest, `digests` is its digest list as the review returned it, and
- * `signature` is over that list.
+ * `signature` is over that list. `keyId` is the key the signature names (#559), and
+ * `signedBy` in the answer names the publisher when the signature verified.
  */
-export const validateExtension = (manifest: string, grants: string[], signature?: number[], digests?: string) =>
-  invokeCapability<{ errors: ExtensionValidationError[]; permissionDiff?: ExtensionPermissionDiff }>("extensions.validate", {
+export const validateExtension = (manifest: string, grants: string[], signature?: number[], digests?: string, keyId?: string) =>
+  invokeCapability<{ errors: ExtensionValidationError[]; permissionDiff?: ExtensionPermissionDiff; signedBy?: ExtensionSigner }>("extensions.validate", {
     manifest,
     grants,
     ...(signature ? { signature } : {}),
     ...(digests !== undefined ? { digests } : {}),
+    ...(signature && keyId ? { keyId } : {}),
   });
 /** What a package holds beyond its manifest, as the host verified it (#562). */
 export interface ExtensionPackageReview {
@@ -561,6 +586,10 @@ export interface ExtensionPackageReview {
 export interface ExtensionReview {
   manifest: string;
   signature?: number[] | null;
+  /** The key the signature names (#559), passed back to the install. */
+  keyId?: string;
+  /** Who signed it: the publisher delegated its namespace (#559). */
+  signedBy?: ExtensionSigner;
   package?: ExtensionPackageReview;
 }
 /** The largest package file the host accepts (#562). */
@@ -824,8 +853,25 @@ export interface ExtensionCatalogEntry {
   };
   testedHost: { repository: string; revision: string };
 }
+/** A publisher the signed catalog delegates app ID namespaces to (#559). */
+export interface ExtensionCatalogPublisher {
+  id: string;
+  name: string;
+  namespaces: string[];
+}
 export interface ExtensionCatalogSnapshot {
-  catalog: { schemaVersion: number; extensions: ExtensionCatalogEntry[] };
+  /**
+   * The last catalog the host verified against its pinned root (#559): refused when unsigned,
+   * expired, or older than one it already verified.
+   */
+  catalog: {
+    schemaVersion: number;
+    version: number;
+    /** When hosts stop trusting it, as an RFC 3339 time. */
+    expires: string;
+    publishers: ExtensionCatalogPublisher[];
+    extensions: ExtensionCatalogEntry[];
+  };
   fetchedAt: number;
   stale: boolean;
   error: string | null;
@@ -839,7 +885,9 @@ export const listExtensionCatalog = (refresh = false) =>
   invokeCapability<ExtensionCatalogSnapshot>("extensions.catalog", { refresh });
 /**
  * Returns the exact checksum-verified bytes for explicit permission review; for a release
- * the host installs as a package (#562), with the package's review.
+ * the host installs as a package (#562), with the package's review. When the app's
+ * namespace is delegated (#559), with the publisher signature, the key it names, and who
+ * signed it.
  */
 export const reviewCatalogExtension = (id: string, sha256: string) =>
   invokeCapability<ExtensionReview>("extensions.catalogManifest", { id, sha256 });

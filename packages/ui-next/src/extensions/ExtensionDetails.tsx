@@ -18,8 +18,8 @@ import { ExtensionNetwork } from "./ExtensionNetwork";
 import { ExtensionBindings, POD_FACTS } from "./ExtensionBindings";
 import { networkReach, networkRequests, reachText } from "./networkText";
 import { ExtensionControls } from "./ExtensionControls";
-import { escapeFormatCharacters } from "./displayText";
-import { extensionLabel } from "./inventoryStore";
+import { escapeFormatCharacters, plainText } from "./displayText";
+import { extensionLabel, extensionSigner } from "./inventoryStore";
 
 const facts = new Map(CAPABILITY_CATALOG.map((capability) => [capability.id, capability]));
 
@@ -54,9 +54,7 @@ function origin(version: InstalledExtension | ExtensionPreviousVersion) {
     ? "Unsigned"
     : !installed
       ? "Signed; verified when restored"
-      : version.quarantined
-        ? "Signature not verified"
-        : "Signed by srelens";
+      : plainText(extensionSigner(version));
   return `${signer} · ${from[version.source]}`;
 }
 

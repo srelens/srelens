@@ -1,0 +1,3 @@
+{
+  "placeholder": "The signed srelens root document goes here. Until the key ceremony in docs/extensions/trust.md writes it, a build with this file trusts no catalog and no publisher signature."
+}

@@ -1328,6 +1328,7 @@ mod tests {
             core.clone(),
             Configure::Install {
                 signature: None,
+                key_id: None,
                 manifest: source.to_string(),
                 grants: vec!["k8s.listCustomResource".into()],
                 reviewed_revision: None,
@@ -2051,6 +2052,7 @@ mod tests {
             core.clone(),
             Configure::Install {
                 signature: None,
+                key_id: None,
                 manifest: manifest.to_string(),
                 grants: vec!["k8s.listCustomResource".into()],
                 reviewed_revision: None,

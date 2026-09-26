@@ -1,0 +1,3 @@
+{
+  "placeholder": "The publisher delegations this build ships go here: a JSON array of signed publisher documents, written by the key ceremony in docs/extensions/trust.md."
+}
