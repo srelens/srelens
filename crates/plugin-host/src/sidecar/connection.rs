@@ -22,6 +22,17 @@ use super::Limits;
 /// far ahead of the host has its stream stopped rather than buffered.
 pub const STREAM_BUFFER: usize = 64;
 
+/// Answers to a sidecar's own calls that may be waiting, being worked out or
+/// not yet written to its stdin. A sidecar that makes one more call than this
+/// without reading the answers is stopped: otherwise one that never reads
+/// its stdin could grow the host's memory without limit.
+pub const ANSWER_BUFFER: usize = 16;
+
+/// The longest `id` (as a string) and `method` a sidecar's call may carry.
+/// Both are echoed in the answer, so a longer one is refused as a protocol
+/// violation rather than copied.
+pub const MAX_CALL_FIELD_BYTES: usize = 256;
+
 /// Why a request did not get an answer.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RequestError {
@@ -130,6 +141,17 @@ pub(crate) enum Outgoing {
     Close,
 }
 
+/// What the writer reads from. The host's own messages (requests, lifecycle
+/// calls, cancellations) come first and are never held back by answers to the
+/// sidecar's calls. They need no bound of their own: they are limited by the
+/// host's request and stream limits, and a sidecar that stops reading its stdin
+/// stops answering its health check, which ends the session within
+/// `health_interval` plus `health_timeout`.
+pub(crate) struct Outbox {
+    host: mpsc::UnboundedReceiver<Outgoing>,
+    answers: mpsc::Receiver<String>,
+}
+
 /// How the reader stopped.
 #[derive(Debug)]
 pub(crate) enum ReadEnd {
@@ -161,6 +183,7 @@ struct State {
 struct Inner {
     limits: Limits,
     out: mpsc::UnboundedSender<Outgoing>,
+    answers: mpsc::Sender<String>,
     state: Mutex<State>,
     requests: Arc<Semaphore>,
     streams: Arc<Semaphore>,
@@ -174,9 +197,11 @@ pub(crate) struct Connection {
 
 impl Connection {
     /// A session under `limits`, and the lines to write to the sidecar.
-    pub(crate) fn new(limits: Limits) -> (Connection, mpsc::UnboundedReceiver<Outgoing>) {
-        let (out, lines) = mpsc::unbounded_channel();
+    pub(crate) fn new(limits: Limits) -> (Connection, Outbox) {
+        let (out, host) = mpsc::unbounded_channel();
+        let (answers, answered) = mpsc::channel(ANSWER_BUFFER);
         let inner = Inner {
+            answers,
             requests: Arc::new(Semaphore::new(limits.max_concurrent_requests)),
             streams: Arc::new(Semaphore::new(limits.max_streams)),
             callbacks: Arc::new(Semaphore::new(limits.max_concurrent_requests)),
@@ -192,7 +217,10 @@ impl Connection {
             Connection {
                 inner: Arc::new(inner),
             },
-            lines,
+            Outbox {
+                host,
+                answers: answered,
+            },
         )
     }
 
@@ -369,8 +397,20 @@ impl Connection {
                 Ok(())
             }
             Incoming::Request { id, method, params } => {
-                self.answer_call(id, method, params, broker.clone());
-                Ok(())
+                if id
+                    .as_str()
+                    .is_some_and(|id| id.len() > MAX_CALL_FIELD_BYTES)
+                {
+                    return Err(Violation(format!(
+                        "sent a call whose id is longer than {MAX_CALL_FIELD_BYTES} bytes"
+                    )));
+                }
+                if method.len() > MAX_CALL_FIELD_BYTES {
+                    return Err(Violation(format!(
+                        "sent a call whose method is longer than {MAX_CALL_FIELD_BYTES} bytes"
+                    )));
+                }
+                self.answer_call(id, method, params, broker.clone())
             }
             Incoming::Notification { method, params } => match method.as_str() {
                 method::STREAM_DATA => {
@@ -449,8 +489,22 @@ impl Connection {
         }
     }
 
-    fn answer_call(&self, id: Value, name: String, params: Value, broker: Arc<dyn Broker>) {
-        let connection = self.clone();
+    /// Answer the sidecar's call `id`. Its answer has a place in the bounded
+    /// answer queue before any work starts, so the queue never grows past
+    /// [`ANSWER_BUFFER`], whatever the broker does or how slowly the sidecar
+    /// reads.
+    fn answer_call(
+        &self,
+        id: Value,
+        name: String,
+        params: Value,
+        broker: Arc<dyn Broker>,
+    ) -> Result<(), Violation> {
+        let Ok(place) = self.inner.answers.clone().try_reserve_owned() else {
+            return Err(Violation(format!(
+                "is not reading its standard input: {ANSWER_BUFFER} answers to its calls are waiting for it"
+            )));
+        };
         let Ok(permit) = self.inner.callbacks.clone().try_acquire_owned() else {
             let error = RpcError::new(
                 code::INTERNAL_ERROR,
@@ -459,14 +513,15 @@ impl Connection {
                     self.inner.limits.max_concurrent_requests
                 ),
             );
-            self.send(protocol::response(&id, &Err(error)));
-            return;
+            place.send(protocol::response(&id, &Err(error)));
+            return Ok(());
         };
         tokio::spawn(async move {
             let outcome = broker.call(&name, params).await;
-            connection.send(protocol::response(&id, &outcome));
             drop(permit);
+            place.send(protocol::response(&id, &outcome));
         });
+        Ok(())
     }
 
     /// End the session: every request still waiting gets `why`, every open
@@ -527,15 +582,28 @@ impl Connection {
     }
 }
 
-/// Write `lines` to the sidecar's stdin until the session closes it.
-pub(crate) async fn write<W>(mut lines: mpsc::UnboundedReceiver<Outgoing>, mut stdin: W)
+/// Write the outbox to the sidecar's stdin until the session closes it: the
+/// host's own messages first, then answers to the sidecar's calls.
+pub(crate) async fn write<W>(mut outbox: Outbox, mut stdin: W)
 where
     W: tokio::io::AsyncWrite + Unpin,
 {
     use tokio::io::AsyncWriteExt;
-    while let Some(outgoing) = lines.recv().await {
-        let Outgoing::Line(mut line) = outgoing else {
-            break;
+    let mut answers_open = true;
+    loop {
+        let mut line = tokio::select! {
+            biased;
+            outgoing = outbox.host.recv() => match outgoing {
+                Some(Outgoing::Line(line)) => line,
+                Some(Outgoing::Close) | None => break,
+            },
+            answer = outbox.answers.recv(), if answers_open => match answer {
+                Some(line) => line,
+                None => {
+                    answers_open = false;
+                    continue;
+                }
+            },
         };
         line.push('\n');
         // A failed write is the process going away; its exit says why.
@@ -632,8 +700,8 @@ mod tests {
     /// The next line the host wrote, as JSON. On the paused clock a line
     /// that never comes fails at once, at the virtual deadline, instead of
     /// hanging the suite.
-    async fn sent(lines: &mut mpsc::UnboundedReceiver<Outgoing>) -> Value {
-        let next = tokio::time::timeout(Duration::from_secs(24 * 3600), lines.recv()).await;
+    async fn sent(lines: &mut Outbox) -> Value {
+        let next = tokio::time::timeout(Duration::from_secs(24 * 3600), lines.host.recv()).await;
         match next {
             Ok(Some(Outgoing::Line(line))) => serde_json::from_str(&line).expect("JSON"),
             Ok(other) => panic!("expected a line, got {other:?}"),
@@ -853,11 +921,7 @@ mod tests {
     }
 
     /// Open a stream, answering its `stream/open` as a sidecar that accepts.
-    async fn opened(
-        connection: &Connection,
-        lines: &mut mpsc::UnboundedReceiver<Outgoing>,
-        name: &str,
-    ) -> SidecarStream {
+    async fn opened(connection: &Connection, lines: &mut Outbox, name: &str) -> SidecarStream {
         let opening = tokio::spawn({
             let connection = connection.clone();
             let name = name.to_owned();
@@ -1074,11 +1138,66 @@ mod tests {
                 &broker(),
             )
             .unwrap();
-        let reply = sent(&mut lines).await;
+        let reply = lines.answers.recv().await.expect("an answer");
+        let reply: Value = serde_json::from_str(&reply).unwrap();
         assert_eq!(reply["id"], "c-1");
         assert_eq!(reply["error"]["code"], code::METHOD_NOT_FOUND);
         let message = reply["error"]["message"].as_str().unwrap();
         assert!(message.contains("k8s.listPods"), "{message}");
+    }
+
+    fn call_from_sidecar(
+        connection: &Connection,
+        id: Value,
+        method: &str,
+    ) -> Result<(), Violation> {
+        connection.handle(
+            Incoming::Request {
+                id,
+                method: method.into(),
+                params: json!({}),
+            },
+            &broker(),
+        )
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_sidecar_that_does_not_read_the_answers_to_its_calls_is_stopped_not_buffered() {
+        // Nothing drains what the host writes, as when a sidecar never reads
+        // its stdin: each call's answer would otherwise wait in memory.
+        let (connection, _lines) = Connection::new(limits());
+        let mut refused = None;
+        for n in 0..1_000 {
+            if let Err(violation) = call_from_sidecar(&connection, json!(n), "k8s.listPods") {
+                refused = Some((n, violation));
+                break;
+            }
+            // Let each broker call finish and queue its answer.
+            tokio::task::yield_now().await;
+        }
+        let Some((n, Violation(why))) = refused else {
+            panic!("a thousand unread answers were queued");
+        };
+        assert!(n <= 64, "stopped only after {n} unread answers");
+        assert!(why.contains("not reading"), "{why}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_call_whose_id_or_method_is_too_long_to_echo_breaks_the_protocol() {
+        let (connection, _lines) = Connection::new(limits());
+        let long = "x".repeat(4096);
+        let Err(Violation(why)) = call_from_sidecar(&connection, json!(long), "m") else {
+            panic!("a 4 KiB id was accepted");
+        };
+        assert!(why.contains("id"), "{why}");
+        let Err(Violation(why)) = call_from_sidecar(&connection, json!("c-1"), &long) else {
+            panic!("a 4 KiB method was accepted");
+        };
+        assert!(why.contains("method"), "{why}");
+        assert_eq!(
+            call_from_sidecar(&connection, json!("c-2"), "k8s.listPods"),
+            Ok(())
+        );
     }
 
     #[tokio::test(start_paused = true)]

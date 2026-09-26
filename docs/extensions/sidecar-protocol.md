@@ -129,6 +129,18 @@ A sidecar may send requests to srelens. **Until the broker exists
 sandbox has to open any network, loopback included. The ADR asks whether they can
 ("Open questions").
 
+Every call is answered, and the answer is echoed back with the call's `id`, so srelens
+bounds both:
+
+- **At most 16 answers wait at once** (`ANSWER_BUFFER`), counting those being worked out
+  and those not yet written to the sidecar's stdin. A place is taken before any work
+  starts. A sidecar that makes one more call than that without reading its answers is
+  stopped (see [Protocol violations](#protocol-violations)). Otherwise, a sidecar that
+  never reads its stdin could grow srelens's memory without limit, since its own limits
+  bound only itself. srelens's own messages are written first, so answers never hold
+  back a cancellation or a health check.
+- **A call's `id` and `method` are at most 256 bytes each** (`MAX_CALL_FIELD_BYTES`).
+
 ## Errors
 
 | Code | Meaning |
@@ -190,7 +202,12 @@ longer than 4 MiB. It does the same for a message without `"jsonrpc": "2.0"`, fo
 response with both or neither of `result` and `error`, for an answer to a request never
 sent, for a stream frame for a stream never opened, and when the sidecar closes stdout
 while still running. Once the framing is lost, no later answer can be trusted to belong
-to its request. The stop counts as an unexpected exit.
+to its request.
+
+It also stops a sidecar that makes a call whose `id` or `method` is longer than 256 bytes,
+or a 17th call while 16 answers are still waiting for it (see
+[Calls from the sidecar](#calls-from-the-sidecar)), so that nothing a sidecar sends can
+grow srelens's memory without limit. Every such stop counts as an unexpected exit.
 
 ### Stopping
 
