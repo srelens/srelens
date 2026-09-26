@@ -317,6 +317,7 @@ technology, and its version.
 
 - **frontend** (and **frontend (Node 24)**) — typecheck, `pnpm build`, Vitest with the coverage threshold, and the release and performance-baseline script tests.
 - **backend** — one `cargo llvm-cov` run over the workspace unit suites and, on a kind cluster with helm, the `#[ignore]`d live-cluster suites: the full capability e2e suite (which enforces capability coverage) and the helm lifecycle suite. It then enforces the ratcheting coverage floor. Without the live-cluster half a new capability could land with no end-to-end case.
+- **sandbox conformance** — on `ubuntu-24.04` and `windows-latest`: the sidecar sandbox conformance suite (#572) through the production backend, with a cgroup the job delegates on Linux. It is the only job that compiles the Windows backend, so the other sidecar suites run on Windows there too. See [extensions/sidecar-protocol.md](extensions/sidecar-protocol.md#sandbox).
 - **smoke (webdriver)** — pull requests only: the built app, driven through tauri-driver against a kind cluster.
 - **install script** — shellcheck and the install script's tests, again as root in a container.
 - **docker image** — builds the whole container image.
