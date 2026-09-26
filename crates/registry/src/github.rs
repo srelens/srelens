@@ -126,7 +126,8 @@ pub struct RolloutCause {
     #[serde(rename = "rolledBack")]
     pub rolled_back: bool,
     /// Commits in the range that touched `path` (all of them when `path` is
-    /// empty), newest first. With no previous revision, the synced commit.
+    /// empty), newest first. With no previous revision, the latest commit
+    /// under `path` at the synced revision, or the synced commit itself.
     pub commits: Vec<CauseCommit>,
     pub pulls: Vec<CausePull>,
     /// Commits in `commits` that no merged pull request brought.
@@ -291,6 +292,17 @@ impl GitHub {
         };
 
         let kept: Vec<Value> = match previous {
+            // No range to compare: the latest change under the path at this
+            // revision, not the head commit, which may be another app's.
+            None if !path.is_empty() => {
+                let latest = self
+                    .get(
+                        &format!("/repos/{slug}/commits"),
+                        &[("sha", revision), ("path", path), ("per_page", "1")],
+                    )
+                    .await?;
+                latest.as_array().cloned().unwrap_or_default()
+            }
             None => vec![
                 self.get(&format!("/repos/{slug}/commits/{revision}"), &[])
                     .await?,
@@ -807,13 +819,51 @@ mod tests {
         })
         .await;
         let gh = GitHub::new(&srv.base, None).unwrap();
+        let cause = gh.rollout_cause(&repo(), HEAD, None, "").await.unwrap();
+        assert_eq!(cause.commits[0].subject, "hotfix");
+        assert!(cause.pulls.is_empty());
+        assert_eq!(cause.direct_commits, [HEAD]);
+    }
+
+    #[tokio::test]
+    async fn a_first_sync_names_the_latest_change_under_the_path_not_the_head() {
+        let srv = server(|target: &str| {
+            if target.starts_with("/repos/acme/deploy/commits?") {
+                assert!(target.contains(&format!("sha={HEAD}")), "{target}");
+                assert!(target.contains("path=apps%2Fshop"), "{target}");
+                assert!(target.contains("per_page=1"), "{target}");
+                ok(serde_json::json!([commit(
+                    MID,
+                    "fix(shop): the last shop change",
+                    "alice",
+                    "User"
+                )]))
+            } else if target.ends_with("/pulls") {
+                ok(serde_json::json!([pull(
+                    7,
+                    "the last shop change",
+                    "alice"
+                )]))
+            } else {
+                Reply {
+                    status: 500,
+                    body: Value::Null,
+                    headers: vec![],
+                }
+            }
+        })
+        .await;
+        let gh = GitHub::new(&srv.base, None).unwrap();
         let cause = gh
             .rollout_cause(&repo(), HEAD, None, "apps/shop")
             .await
             .unwrap();
-        assert_eq!(cause.commits[0].subject, "hotfix");
-        assert!(cause.pulls.is_empty());
-        assert_eq!(cause.direct_commits, [HEAD]);
+        assert_eq!(cause.commits.len(), 1);
+        assert_eq!(
+            cause.commits[0].sha, MID,
+            "not the head, which is another app's"
+        );
+        assert_eq!(cause.pulls[0].number, 7);
     }
 
     #[tokio::test]
