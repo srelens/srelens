@@ -7457,12 +7457,22 @@ impl App {
                     changed.toggle_include_scaled();
                     self.refresh_changed_triage();
                 }
-                KeyCode::Char('g') | KeyCode::Home => {
+                KeyCode::Home => {
                     changed.select_first();
                 }
                 KeyCode::Char('G') | KeyCode::End => {
                     changed.select_last();
                 }
+                KeyCode::Char('g') => match changed.cause_link() {
+                    Ok((url, what)) => match open_browser_url(&url) {
+                        Ok(()) => self.set_toast(format!("Opened {what}"), Theme::status_ok()),
+                        Err(err) => self.set_toast(
+                            format!("Could not open browser: {err}"),
+                            Theme::status_error(),
+                        ),
+                    },
+                    Err(why) => self.set_toast(why, Theme::status_warn()),
+                },
                 KeyCode::Char('[') => {
                     changed.prev_window();
                     self.refresh_changed_triage();

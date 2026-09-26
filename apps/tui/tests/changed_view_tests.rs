@@ -1171,6 +1171,83 @@ fn what_could_not_be_found_out_is_said_as_such() {
 }
 
 #[test]
+fn g_opens_a_persons_pr_before_a_bots_else_a_commit_else_the_compare_view() {
+    let _settings = common::env::isolate_settings();
+    let mut state = why_state(with_sync);
+    assert_eq!(
+        state.cause_link(),
+        Err("Still looking up the pull requests on GitHub".to_string())
+    );
+    assert!(!render_card(&state).contains("[g] Open PR"));
+
+    let url = |n| format!("https://github.com/org/checkout/pull/{n}");
+    let with_url = |mut p: CausePull| {
+        p.html_url = url(p.number);
+        p
+    };
+    answer(
+        &mut state,
+        CauseLookup::Ready(RolloutCause {
+            pulls: vec![
+                with_url(pr(1843, "chore(deps): bump", "renovate[bot]", true)),
+                with_url(pr(1842, "fix: timeout", "bob", false)),
+            ],
+            compare_url: Some("https://github.com/org/checkout/compare/a...b".to_string()),
+            ..Default::default()
+        }),
+    );
+    assert_eq!(
+        state.cause_link(),
+        Ok((url(1842), "PR #1842 (1 of 2 in this sync)".to_string()))
+    );
+    assert!(render_card(&state).contains("[g] Open PR"));
+
+    let key = state.causes.keys().next().unwrap().clone();
+    let commit = srelens_registry::github::CauseCommit {
+        sha: SYNCED.to_string(),
+        html_url: "https://github.com/org/checkout/commit/a1b2c3d".to_string(),
+        ..Default::default()
+    };
+    state.causes.insert(
+        key.clone(),
+        CauseLookup::Ready(RolloutCause {
+            commits: vec![commit],
+            direct_commits: vec![SYNCED.to_string()],
+            ..Default::default()
+        }),
+    );
+    assert_eq!(
+        state.cause_link().map(|(_, what)| what),
+        Ok("commit a1b2c3d".to_string())
+    );
+
+    state.causes.insert(
+        key,
+        CauseLookup::Ready(RolloutCause {
+            compare_url: Some("https://github.com/org/checkout/compare/a...b".to_string()),
+            ..Default::default()
+        }),
+    );
+    assert_eq!(
+        state.cause_link().map(|(_, what)| what),
+        Ok("the sync's compare view".to_string())
+    );
+
+    let chart = why_state(|d| {
+        with_sync(d);
+        d.gitops
+            .as_mut()
+            .unwrap()
+            .rollout
+            .as_mut()
+            .unwrap()
+            .is_chart = true;
+    });
+    assert!(chart.cause_link().unwrap_err().starts_with("chart source"));
+    assert!(!render_card(&chart).contains("[g] Open PR"));
+}
+
+#[test]
 fn a_range_with_nothing_under_the_app_path_says_so() {
     let _settings = common::env::isolate_settings();
     let mut state = why_state(with_sync);

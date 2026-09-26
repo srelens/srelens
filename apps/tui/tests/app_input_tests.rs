@@ -6976,6 +6976,14 @@ async fn switch_namespace_while_in_changed_view_clears_stale_report() {
 }
 
 #[tokio::test]
+async fn g_in_changed_says_why_there_is_no_pr_to_open() {
+    let settings = common::env::isolate_settings();
+    let (mut app, _rx) = changed_app_with_report(&settings).await;
+    press(&mut app, ch('g')).await;
+    assert_eq!(toast(&app), "No Argo sync to trace for payment-api");
+}
+
+#[tokio::test]
 async fn a_github_answer_lands_on_the_changed_view_under_describe() {
     use srelens_tui::views::changed_view::CauseLookup;
     let settings = common::env::isolate_settings();

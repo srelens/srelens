@@ -413,6 +413,48 @@ impl ChangedViewState {
         self.clamp_selection();
     }
 
+    /// What `g` opens for the selected row: its pull request (a person's
+    /// before a bot's), else a commit that reached the branch without one,
+    /// else the sync's compare view, with the words for the toast. `Err`
+    /// says why there is nothing to open.
+    pub fn cause_link(&self) -> Result<(String, String), String> {
+        let d = self
+            .selected_deployment()
+            .ok_or_else(|| "Select a workload first".to_string())?;
+        let ask = match cause_ask(d) {
+            Some(Ok(ask)) => ask,
+            Some(Err(reason)) => return Err(reason),
+            None => return Err(format!("No Argo sync to trace for {}", d.app_name)),
+        };
+        let c = match self.causes.get(&ask.key) {
+            Some(CauseLookup::Ready(c)) => c,
+            Some(CauseLookup::Failed(e)) => return Err(format!("GitHub: {e}")),
+            _ => return Err("Still looking up the pull requests on GitHub".to_string()),
+        };
+        let pr = c.pulls.iter().find(|p| !p.is_bot).or(c.pulls.first());
+        if let Some(pr) = pr.filter(|p| !p.html_url.is_empty()) {
+            let more = match c.pulls.len() {
+                1 => String::new(),
+                n => format!(" (1 of {n} in this sync)"),
+            };
+            return Ok((pr.html_url.clone(), format!("PR #{}{more}", pr.number)));
+        }
+        let direct = c
+            .commits
+            .iter()
+            .find(|cm| c.direct_commits.contains(&cm.sha) && !cm.html_url.is_empty());
+        if let Some(cm) = direct {
+            return Ok((
+                cm.html_url.clone(),
+                format!("commit {}", short_sha(&cm.sha)),
+            ));
+        }
+        match &c.compare_url {
+            Some(url) => Ok((url.clone(), "the sync's compare view".to_string())),
+            None => Err("GitHub named no pull request for this sync".to_string()),
+        }
+    }
+
     /// The GitHub question the selected Deployments-tab row poses and has
     /// not asked yet.
     pub fn next_cause_ask(&self) -> Option<CauseAsk> {
@@ -1354,10 +1396,16 @@ fn render_deployment_diagnostic_card(f: &mut Frame, area: Rect, state: &ChangedV
     }
 
     // Actions Hint
+    let mut actions = String::from(
+        "[Enter/d] Describe   [l] Logs   [y] YAML   [s] Quick AI RCA   [a] Assistant   [r] Refresh",
+    );
+    if state.cause_link().is_ok() {
+        actions.push_str("   [g] Open PR");
+    }
     lines.push(Line::from(vec![
         Span::styled("Actions: ", Theme::header_label()),
         Span::styled(
-            "[Enter/d] Describe   [l] Logs   [y] YAML   [s] Quick AI RCA   [a] Assistant   [r] Refresh",
+            actions,
             Style::default()
                 .fg(Theme::accent())
                 .add_modifier(Modifier::BOLD),
