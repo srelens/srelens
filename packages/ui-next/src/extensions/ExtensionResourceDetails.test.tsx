@@ -3,8 +3,8 @@ import argoManifest from "../../../../examples/extensions/argocd.json";
 const declaredMeta = Object.fromEntries([...fluxManifest.actions.filter(action=>action.resource==="helmreleases").map(action=>({...action,name:action.name.replace("helmreleases-","")})),...argoManifest.actions].map(action=>[action.name,{title:action.title,availableWhen:("availableWhen" in action?action.availableWhen:[]) as import("@srelens/core").ActionPredicate[],impact:"medium" as const,confirm:null}]));
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, onTestFinished, vi } from "vitest";
-vi.mock("@srelens/core", async original => ({...await original<typeof import("@srelens/core")>(),inspectExtensionResource:vi.fn(),actOnExtensionResource:vi.fn(),listExtensions:vi.fn(),resolveExtensionPanels:vi.fn(),resolveExtensionLinks:vi.fn()}));
-import { inspectExtensionResource, actOnExtensionResource, listExtensions, resolveExtensionPanels, resolveExtensionLinks, EXTENSION_RESOURCE_CHANGED } from "@srelens/core";
+vi.mock("@srelens/core", async original => ({...await original<typeof import("@srelens/core")>(),inspectExtensionResource:vi.fn(),actOnExtensionResource:vi.fn(),listExtensions:vi.fn(),resolveExtensionPanels:vi.fn(),resolveExtensionLinks:vi.fn(),resolveExtensionReverseLinks:vi.fn()}));
+import { inspectExtensionResource, actOnExtensionResource, listExtensions, resolveExtensionPanels, resolveExtensionLinks, resolveExtensionReverseLinks, EXTENSION_RESOURCE_CHANGED } from "@srelens/core";
 import { ExtensionResourceDetails } from "./ExtensionResourceDetails";
 const selection = {id:"org.srelens.flux",revision:1,capability:"kustomizations",context:"cluster/a",namespace:"team",name:"apps"};
 const detail = {resource:{apiVersion:"kustomize.toolkit.fluxcd.io/v1",kind:"Kustomization",metadata:{name:"apps",namespace:"team",uid:"uid-a",resourceVersion:"12"},spec:{suspend:false,path:"./apps",sourceRef:{kind:"GitRepository",name:"platform-config"}},status:{conditions:[{type:"Ready",status:"False",reason:"BuildFailed",message:"Missing source"}],lastAppliedRevision:"main@sha1:abcdef"}},actions:["suspend","resume","reconcile"],actionMeta:declaredMeta};
@@ -269,6 +269,29 @@ it("shows the app resource's Related links after its host sections (#545)", asyn
  expect(related.textContent).toContain("team/platform-config");
  // Only identity and metadata go to the resolver; the Kustomization's spec does not.
  expect(resolveExtensionLinks).toHaveBeenCalledWith("org.srelens.flux",1,"cluster/a","team",
+  "kustomize.toolkit.fluxcd.io/Kustomization",
+  {apiVersion:detail.resource.apiVersion,kind:detail.resource.kind,metadata:detail.resource.metadata});
+});
+it("shows what names the app resource, read the other way round, on its page (#728)", async () => {
+ const app={...fluxApp,manifest:{...fluxApp.manifest,
+  contributions:{...fluxApp.manifest.contributions,
+   resourceLinks:[{id:"kustomization",from:"apps/Deployment",to:"kustomize.toolkit.fluxcd.io/Kustomization",
+    relation:"managedBy",match:{label:"kustomize.toolkit.fluxcd.io/name",namespaceLabel:"kustomize.toolkit.fluxcd.io/namespace"}}]}}};
+ installedApps([app]);
+ const {resetContexts,setContexts}=await import("../lib/clusters");
+ setContexts([{name:"cluster/a",stableId:"cluster/a",key:"cluster/a"} as import("@srelens/core").ClusterContext]);
+ onTestFinished(resetContexts);
+ vi.mocked(resolveExtensionPanels).mockResolvedValue({panels:[]});
+ vi.mocked(resolveExtensionReverseLinks).mockResolvedValue({
+  to:{kind:"kustomize.toolkit.fluxcd.io/Kustomization",namespace:"team",name:"apps"},
+  links:[{id:"kustomization",relation:"managedBy",from:"apps/Deployment",capability:"",truncated:false,
+   sources:[{namespace:"team",name:"api",exists:true}]}]});
+ render(<ExtensionResourceDetails selection={selection}/>);
+ const manages = await screen.findByRole("group",{name:"Manages"});
+ expect(manages.textContent).toContain("Deployment team/api");
+ // No link starts from a Kustomization here, so only the reverse view is asked, with identity alone.
+ expect(resolveExtensionLinks).not.toHaveBeenCalled();
+ expect(resolveExtensionReverseLinks).toHaveBeenCalledWith("org.srelens.flux",1,"cluster/a","team",
   "kustomize.toolkit.fluxcd.io/Kustomization",
   {apiVersion:detail.resource.apiVersion,kind:detail.resource.kind,metadata:detail.resource.metadata});
 });

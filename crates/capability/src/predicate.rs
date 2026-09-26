@@ -18,6 +18,11 @@
 //!
 //! Status rules (#541) ask their questions with [`Condition`], which is a
 //! predicate without the refusal sentence, evaluated by this same code.
+//!
+//! A resource link's `path` (#728) is parsed by this same code with one form
+//! more, `[*]` for every element of a list ([`resolve_each`]): a link names a
+//! set of targets, so a set is the answer it asks for. A predicate never
+//! parses `[*]`.
 
 use crate::text::escape_invisible;
 use schemars::JsonSchema;
@@ -236,6 +241,49 @@ impl Condition {
 /// Whether `path` is one this host evaluates, and if not, why.
 pub fn check_path(path: &str) -> Result<(), String> {
     segments(path).map(|_| ())
+}
+
+/// Most values one resource link path (#728) may reach, and most it may hold
+/// at any step on the way. An HTTPRoute holds at most 16 rules of 16 backends;
+/// a path past this is one no controller writes, and walking it would cost a
+/// step per element of whatever list the resource carries.
+pub const MAX_LINK_VALUES: usize = 256;
+
+/// Whether `path` is one this host reads for a resource link (#728), and if
+/// not, why: the predicate grammar, plus `[*]` for every element of a list.
+pub fn check_link_path(path: &str) -> Result<(), String> {
+    segments_in(path, true).map(|_| ())
+}
+
+/// Every value a resource link's `path` reaches in `object`, in document
+/// order.
+///
+/// The predicate grammar, read as [`resolve`] reads it, plus `[*]`, which
+/// steps into each element of a list. An unset field, a null, and `[*]` over
+/// something that is not a list reach nothing — an answer, as an absent label
+/// is. A path the host would refuse, and one that reaches or passes through
+/// more than [`MAX_LINK_VALUES`] values, is an error: the first is a manifest
+/// the host should not have accepted, the second a resource no link reads.
+pub fn resolve_each<'a>(object: &'a Value, path: &str) -> Result<Vec<&'a Value>, String> {
+    let parsed = segments_in(path, true)?;
+    let mut nodes = vec![object];
+    for segment in &parsed {
+        let mut next = Vec::new();
+        for node in nodes {
+            match segment {
+                Segment::Each => next.extend(node.as_array().into_iter().flatten()),
+                one => next.extend(walk(node, std::slice::from_ref(one))),
+            }
+        }
+        next.retain(|value| !value.is_null());
+        if next.len() > MAX_LINK_VALUES {
+            return Err(format!(
+                "`{path}` reaches more than {MAX_LINK_VALUES} values on this resource"
+            ));
+        }
+        nodes = next;
+    }
+    Ok(nodes)
 }
 
 /// Whether `path` selects an element with the `[?(@.key=="text")]` filter.
@@ -479,6 +527,10 @@ enum Segment {
         key: String,
         equals: String,
     },
+    /// `[*]`: every element of a list. Only a resource link's path (#728)
+    /// takes it: a link names a set of targets, so reading a set is its
+    /// question, while a predicate's is one value.
+    Each,
 }
 
 impl Predicate {
@@ -646,6 +698,9 @@ fn walk<'a>(object: &'a Value, path: &[Segment]) -> Option<&'a Value> {
                 .as_array()?
                 .iter()
                 .find(|item| item.get(key).and_then(Value::as_str) == Some(equals.as_str()))?,
+            // One value per step: a set is `resolve_each`'s, and a predicate
+            // path never parses to one.
+            Segment::Each => return None,
         };
     }
     Some(node)
@@ -653,6 +708,11 @@ fn walk<'a>(object: &'a Value, path: &[Segment]) -> Option<&'a Value> {
 
 /// One path's segments, or why it is not a path this host evaluates.
 fn segments(path: &str) -> Result<Vec<Segment>, String> {
+    segments_in(path, false)
+}
+
+/// [`segments`], with `[*]` admitted when `each` is: a resource link's path.
+fn segments_in(path: &str, each: bool) -> Result<Vec<Segment>, String> {
     let not_a_path = |why: &str| Err(format!("`{path}` is not a resource path: {why}"));
     if path.chars().count() > MAX_PATH_CHARS {
         return not_a_path(&format!("it is longer than {MAX_PATH_CHARS} characters"));
@@ -677,7 +737,12 @@ fn segments(path: &str) -> Result<Vec<Segment>, String> {
                 return not_a_path("a `[` has no `]`");
             };
             let inner = &open[..close];
-            let Some(segment) = bracket(inner) else {
+            let segment = if each && inner == "*" {
+                Some(Segment::Each)
+            } else {
+                bracket(inner)
+            };
+            let Some(segment) = segment else {
                 return not_a_path(&format!(
                     "`[{inner}]` is neither an index nor a quoted key; wildcards and filters address a set of values, which this host does not evaluate"
                 ));

@@ -3035,6 +3035,35 @@ async fn extensions_and_gitops(h: &mut Harness, ctx: &str, settings: &TempSettin
         json!([{"namespace": NS, "name": KUSTOMIZATION, "exists": true}]),
         "{links}"
     );
+    // Read the other way round (#728): the fixture Kustomization's `spec.sourceRef` names
+    // the GitRepository `e2e-source`, so that GitRepository's Inspector lists it. The host
+    // reads the Kustomization's spec through the app's own reader; the caller sends only
+    // the GitRepository's identity, and it need not exist for its referrers to be found.
+    let reverse = h
+        .ok(
+            "extensions.resolveReverseLinks",
+            json!({
+                "id": "org.example.flux", "revision": revision(&flux_app),
+                "context": ctx, "namespace": NS, "kind": "source.toolkit.fluxcd.io/GitRepository",
+                "resource": {"apiVersion": "source.toolkit.fluxcd.io/v1", "kind": "GitRepository",
+                    "metadata": {"name": "e2e-source", "namespace": NS}},
+            }),
+        )
+        .await;
+    let source = reverse["links"]
+        .as_array()
+        .and_then(|links| {
+            links
+                .iter()
+                .find(|link| link["id"] == "kustomization-git-source")
+        })
+        .unwrap_or_else(|| panic!("no kustomization-git-source link: {reverse}"));
+    assert_eq!(source["truncated"], false, "{reverse}");
+    assert_eq!(
+        source["sources"],
+        json!([{"namespace": NS, "name": KUSTOMIZATION, "exists": true}]),
+        "{reverse}"
+    );
     app_stream(h, ctx, settings, revision(&flux_app)).await;
     assert_eq!(
         detail["actions"],

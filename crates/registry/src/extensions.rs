@@ -3601,6 +3601,7 @@ mod tests {
             "extensions.resolveCards",
             "extensions.resolvePanels",
             "extensions.resolveLinks",
+            "extensions.resolveReverseLinks",
             "extensions.catalog",
             "extensions.catalogManifest",
             "extensions.validate",
@@ -3613,7 +3614,7 @@ mod tests {
         let store = reg.get("extension.secretStore").unwrap().annotations;
         assert!(store.requires_confirm && store.sensitive && !store.read_only);
         let mcp = srelens_mcp::McpServer::new(Arc::new(reg));
-        assert_eq!(mcp.list_tools().len(), 14);
+        assert_eq!(mcp.list_tools().len(), 15);
         use srelens_mcp::{stdio::handle_request, Transport};
         for args in [
             json!({"action":"install","manifest":manifest(),"grants":["k8s.listCustomResource"]}),

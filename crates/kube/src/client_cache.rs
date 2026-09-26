@@ -110,9 +110,10 @@ impl ClientCache {
 
     /// Test-only: hand the cache a ready-made client for `context`, so a
     /// capability handler can be driven end to end against a fake API server
-    /// without a kubeconfig. Stored with no bearer, the desktop shape.
-    #[cfg(test)]
-    pub(crate) async fn preload(&self, context: &str, client: Client) {
+    /// without a kubeconfig. Stored with no bearer, the desktop shape. Other
+    /// crates' tests reach it through the `test-support` feature (#728).
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn preload(&self, context: &str, client: Client) {
         self.clients
             .lock()
             .await
