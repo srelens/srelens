@@ -77,13 +77,15 @@ another's streams.
   destroyed window ends its streams from the host's window-event handler. A
   reload keeps the window, so the new page calls `window_streams_reset` as the
   transport loads, and every command that opens a stream waits for it; the
-  reset cannot end the new page's own streams. Each ending moves the window's
-  epoch, and an open the old page began before it is refused when it lands
-  ("The window … closed or reloaded while this stream was opening"), with no
-  frame. Another window's streams — the same app, the same page — are
-  untouched. The desktop's built-in resource watches and pod exec sessions end
-  the same way; a shell's task is aborted, which drops its connection to the
-  cluster.
+  reset cannot end the new page's own streams. If the reset fails, the stream
+  is not opened: the open is refused with the reason, and the next open tries
+  the reset again. Once a reset succeeds it is not repeated for that page.
+  Each ending moves the window's epoch, and an open the old page began before
+  it is refused when it lands ("The window … closed or reloaded while this
+  stream was opening"), with no frame. Another window's streams — the same
+  app, the same page — are untouched. The desktop's built-in resource watches
+  and pod exec sessions end the same way; a shell's task is aborted, which
+  drops its connection to the cluster.
 
 The lifecycle rule holds whichever registry made the change. Every inventory
 write is announced to the streams of that inventory, and those are shared by

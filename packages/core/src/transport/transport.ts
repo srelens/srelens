@@ -10,7 +10,8 @@ const impl = isTauri() ? tauri : web;
 // A reloaded desktop window still holds the streams its last page opened; end
 // them as this page loads (#700), not only when it first opens one. The web
 // host has no such command (#727).
-if (isTauri()) void tauri.resetWindowStreams();
+// A failure is already warned about, and the first stream open retries it.
+if (isTauri()) tauri.resetWindowStreams().catch(() => {});
 
 export const invokeCapability = impl.invokeCapability;
 export const invokeCommand = impl.invokeCommand;

@@ -36,20 +36,42 @@ let windowReset: Promise<void> | null = null;
  * before its first stream opens. Called as the transport loads, and awaited by
  * every command that opens a stream. The host reads the window from the call
  * itself, so a page can only ever end its own window's streams.
+ *
+ * Opens that arrive during one attempt share it. A failed attempt rejects them
+ * all and is forgotten, so the next open tries again; a successful one is
+ * never repeated, since a second reset would end this page's own streams.
  */
 export function resetWindowStreams(): Promise<void> {
-  windowReset ??= invoke("window_streams_reset").then(
-    () => {},
-    // Opening the page's streams matters more than the old ones: they still
-    // end when the window closes.
-    (e) => console.warn("srelens: could not end this window's streams from before the reload", e),
-  );
+  if (!windowReset) {
+    const attempt: Promise<void> = invoke("window_streams_reset").then(
+      () => {},
+      (e: unknown) => {
+        if (windowReset === attempt) windowReset = null;
+        console.warn("srelens: could not end this window's streams from before the reload", e);
+        throw e;
+      },
+    );
+    windowReset = attempt;
+  }
   return windowReset;
 }
 
-/** Invoke a raw Tauri command (for streaming primitives like watches). */
+/**
+ * Invoke a raw Tauri command (for streaming primitives like watches). A
+ * command that opens a stream fails closed: until the old page's streams are
+ * ended, it is not sent, so it can never be ended by a later reset either.
+ */
 export async function invokeCommand<T>(command: string, args?: Record<string, unknown>): Promise<T> {
-  if (OPENS_A_STREAM.has(command)) await resetWindowStreams();
+  if (OPENS_A_STREAM.has(command)) {
+    try {
+      await resetWindowStreams();
+    } catch (e) {
+      const reason = e instanceof Error ? e.message : String(e);
+      throw new Error(
+        `Not opened: srelens could not end this window's streams from before the reload (${reason}). Try again.`,
+      );
+    }
+  }
   return invoke<T>(command, args);
 }
 

@@ -37,7 +37,14 @@ describe("tauriTransport.invokeCapability", () => {
  * the reset cannot end the new page's streams, and it is asked once a page.
  */
 describe("tauriTransport window stream reset", () => {
-  afterEach(() => { vi.clearAllMocks(); vi.resetModules(); });
+  const realWarn = console.warn;
+  afterEach(() => {
+    vi.clearAllMocks();
+    vi.restoreAllMocks();
+    vi.resetModules();
+    // A silenced console.warn must not outlive its case.
+    expect(console.warn).toBe(realWarn);
+  });
 
   async function fresh() {
     vi.resetModules();
@@ -74,14 +81,78 @@ describe("tauriTransport window stream reset", () => {
     expect(invoke.mock.calls.map(([c]) => c)).toEqual(["stop_watch"]);
   });
 
-  it("still opens streams when the reset fails, and says so", async () => {
+  it("opens no stream while the old ones may still run: a failed reset rejects each opener, uninvoked", async () => {
     const { invoke, transport } = await fresh();
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     invoke.mockImplementation((command: string) =>
-      command === "window_streams_reset" ? Promise.reject("no such command") : Promise.resolve(7),
+      command === "window_streams_reset" ? Promise.reject("bridge down") : Promise.resolve(7),
     );
+    const opens = ["start_resource_watch", "start_pod_exec", "extension_stream_open"].map((c) =>
+      transport.invokeCommand(c, {}),
+    );
+    for (const open of opens) {
+      await expect(open).rejects.toThrow(/could not end this window's streams from before the reload.*bridge down/);
+    }
+    // One attempt, shared by the opens that arrived during it; none ran.
+    expect(invoke.mock.calls.map(([c]) => c)).toEqual(["window_streams_reset"]);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("could not end"), "bridge down");
+  });
+
+  it("retries a failed reset on the next open, and opens once one succeeds", async () => {
+    const { invoke, transport } = await fresh();
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    let resets = 0;
+    invoke.mockImplementation((command: string) =>
+      command === "window_streams_reset"
+        ? (++resets === 1 ? Promise.reject("busy") : Promise.resolve({ appStreams: 0, watches: 0, execs: 0 }))
+        : Promise.resolve(7),
+    );
+    await expect(transport.invokeCommand("start_pod_exec", {})).rejects.toThrow(/busy/);
     await expect(transport.invokeCommand("start_pod_exec", {})).resolves.toBe(7);
-    expect(warn).toHaveBeenCalledWith(expect.stringContaining("could not end"), "no such command");
+    await expect(transport.invokeCommand("start_resource_watch", {})).resolves.toBe(7);
+    // Never again after a success: it would end this page's own streams.
+    expect(invoke.mock.calls.map(([c]) => c)).toEqual([
+      "window_streams_reset", "window_streams_reset", "start_pod_exec", "start_resource_watch",
+    ]);
+  });
+
+  it("never holds up or blocks a command that opens nothing, even while the reset fails", async () => {
+    const { invoke, transport } = await fresh();
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    let failReset: () => void = () => {};
+    invoke.mockImplementation((command: string) =>
+      command === "window_streams_reset"
+        ? new Promise((_, reject) => { failReset = () => reject("down"); })
+        : Promise.resolve("stopped"),
+    );
+    const open = transport.invokeCommand("start_resource_watch", {});
+    await expect(transport.invokeCommand("stop_watch", { channel: "w" })).resolves.toBe("stopped");
+    failReset();
+    await expect(open).rejects.toThrow(/down/);
+    await expect(transport.invokeCommand("stop_watch", { channel: "w" })).resolves.toBe("stopped");
+  });
+
+  it("handles a failed page-load reset, so it only warns", async () => {
+    const w = window as unknown as Record<string, unknown>;
+    w.__TAURI_INTERNALS__ = {};
+    try {
+      const { invoke, transport } = await fresh();
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      let failReset: () => void = () => {};
+      invoke.mockImplementation(() => new Promise((_, reject) => { failReset = () => reject("bridge down"); }));
+      // The page-load call shares this pending attempt; see what it attaches.
+      const attempt = transport.resetWindowStreams();
+      const then = vi.spyOn(attempt, "then");
+      await import("./transport");
+      const handlers = then.mock.calls.map(([, onRejected]) => onRejected);
+      then.mockRestore();
+      expect(handlers.some((h) => typeof h === "function")).toBe(true);
+      failReset();
+      await expect(attempt).rejects.toBe("bridge down");
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining("could not end"), "bridge down");
+    } finally {
+      delete w.__TAURI_INTERNALS__;
+    }
   });
 
   it("is asked as the desktop transport loads, and never on the web", async () => {
