@@ -9582,15 +9582,20 @@ impl App {
                 };
                 let cache = self.client_cache.clone();
                 let event_tx = self.event_tx.clone();
+                let (argo_lookup, hub_kubeconfig) = self.changed_argo_lookup();
                 self.changed_refreshing = true;
 
                 tokio::spawn(async move {
+                    if let Some(path) = hub_kubeconfig {
+                        cache.ensure_paths(vec![path]).await;
+                    }
                     let res = srelens_kube::changed::fetch_changed_triage(
                         &cache,
                         &ctx,
                         ns.as_deref(),
                         window,
                         opts,
+                        &argo_lookup,
                     )
                     .await;
                     let _ = event_tx.send(crate::event::AppEvent::ChangedTriageResult {
@@ -11014,14 +11019,19 @@ impl App {
         let ctx = self.active_context.clone();
         let cache = self.client_cache.clone();
         let event_tx = self.event_tx.clone();
+        let (argo_lookup, hub_kubeconfig) = self.changed_argo_lookup();
 
         tokio::spawn(async move {
+            if let Some(path) = hub_kubeconfig {
+                cache.ensure_paths(vec![path]).await;
+            }
             let res = srelens_kube::changed::fetch_changed_triage(
                 &cache,
                 &ctx,
                 ns.as_deref(),
                 window,
                 opts,
+                &argo_lookup,
             )
             .await;
             let _ = event_tx.send(crate::event::AppEvent::ChangedTriageResult {
@@ -11030,6 +11040,27 @@ impl App {
                 result: res,
             });
         });
+    }
+
+    /// Where `:changed` looks for the Argo apps that manage the active
+    /// cluster, the same way the Argo view does, and the hub kubeconfig to
+    /// load before the lookup.
+    fn changed_argo_lookup(
+        &self,
+    ) -> (
+        srelens_kube::changed::ArgoLookup,
+        Option<std::path::PathBuf>,
+    ) {
+        let lookup = srelens_kube::changed::ArgoLookup {
+            hub_context: self.tui_config.resolved_argo_hub_context(),
+            cluster_name: Some(self.cluster_name.clone()),
+            server_url: self
+                .contexts
+                .iter()
+                .find(|c| c.name == self.active_context)
+                .map(|c| c.server.clone()),
+        };
+        (lookup, self.tui_config.resolved_argo_hub_kubeconfig())
     }
 
     /// `s` on the `:changed` Deployments tab: one tool-less completion over

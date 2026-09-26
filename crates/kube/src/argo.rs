@@ -66,13 +66,25 @@ pub struct ArgoResourceItem {
     pub hook: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArgoSyncHistoryItem {
     pub id: i64,
     pub revision: String,
     pub deployed_at: String,
     pub repo_url: String,
     pub path: String,
+    /// When the sync began; empty when Argo did not record it. With
+    /// `deployed_at` it bounds the window in which the sync created objects.
+    #[serde(default)]
+    pub deploy_started_at: String,
+    /// `initiatedBy.username`, or `"automated"` for an auto-sync. `None` on
+    /// Argo versions that do not record the initiator in history.
+    #[serde(default)]
+    pub initiated_by: Option<String>,
+    /// The source is a Helm chart repository: `revision` is a chart
+    /// version, not a git commit, and has no git history to look up.
+    #[serde(default)]
+    pub is_chart: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -105,6 +117,37 @@ pub struct ArgoApplication {
     pub created_at: String,
     pub resources: Vec<ArgoResourceItem>,
     pub sync_history: Vec<ArgoSyncHistoryItem>,
+}
+
+/// The revision and source of one `status.history` entry. A multi-source
+/// entry leaves `revision` and `source` empty and lists `revisions[i]` for
+/// `sources[i]`; the first git source is the one whose commits can explain a
+/// rollout, so it wins over a chart listed before it.
+fn history_source(h: &Value) -> (String, Option<&Value>) {
+    let single = h.get("revision").and_then(|v| v.as_str()).unwrap_or("");
+    if !single.is_empty() || h.get("sources").is_none() {
+        return (single.to_string(), h.get("source"));
+    }
+    let sources = h
+        .get("sources")
+        .and_then(|s| s.as_array())
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let revisions = h
+        .get("revisions")
+        .and_then(|r| r.as_array())
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let idx = sources
+        .iter()
+        .position(|s| s.get("chart").is_none())
+        .unwrap_or(0);
+    let rev = revisions
+        .get(idx)
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    (rev, sources.get(idx))
 }
 
 impl ArgoApplication {
@@ -305,17 +348,15 @@ impl ArgoApplication {
         {
             for h in hist_arr {
                 let id = h.get("id").and_then(|v| v.as_i64()).unwrap_or(0);
-                let rev = h
-                    .get("revision")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let deployed_at = h
-                    .get("deployedAt")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let h_src = h.get("source");
+                let str_at = |key: &str| {
+                    h.get(key)
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string()
+                };
+                let deployed_at = str_at("deployedAt");
+                let deploy_started_at = str_at("deployStartedAt");
+                let (rev, h_src) = history_source(h);
                 let h_url = h_src
                     .and_then(|s| s.get("repoURL"))
                     .and_then(|v| v.as_str())
@@ -326,6 +367,17 @@ impl ArgoApplication {
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
+                let is_chart = h_src.is_some_and(|s| s.get("chart").is_some());
+                let initiated_by = h.get("initiatedBy").and_then(|i| {
+                    if i.get("automated").and_then(|v| v.as_bool()) == Some(true) {
+                        Some("automated".to_string())
+                    } else {
+                        i.get("username")
+                            .and_then(|v| v.as_str())
+                            .filter(|s| !s.is_empty())
+                            .map(ToString::to_string)
+                    }
+                });
 
                 sync_history.push(ArgoSyncHistoryItem {
                     id,
@@ -333,6 +385,9 @@ impl ArgoApplication {
                     deployed_at,
                     repo_url: h_url,
                     path: h_path,
+                    deploy_started_at,
+                    initiated_by,
+                    is_chart,
                 });
             }
         }
@@ -720,6 +775,11 @@ pub async fn fetch_argo_applications(
     .await
 }
 
+/// The error [`fetch_argo_applications_cached`] returns when the cluster has
+/// no Argo CD and no hub is configured: an answer, not a failure.
+pub const NO_ARGO: &str =
+    "No ArgoCD deployment in this cluster AND no kubeconfig set to point to the ArgoCD cluster.";
+
 pub async fn fetch_argo_applications_cached(
     cache: &Arc<ClientCache>,
     current_context: &str,
@@ -813,7 +873,7 @@ pub async fn fetch_argo_applications_cached(
             let hub = match hub_context {
                 Some(h) if h != current_context => h,
                 _ => {
-                    return Err("No ArgoCD deployment in this cluster AND no kubeconfig set to point to the ArgoCD cluster.".to_string());
+                    return Err(NO_ARGO.to_string());
                 }
             };
 
@@ -1962,6 +2022,76 @@ mod tests {
         assert_eq!(app2.sync_history.len(), 2);
         assert_eq!(app2.sync_history[0].id, 0);
         assert_eq!(app2.sync_history[0].revision, "abc");
+    }
+
+    #[test]
+    fn history_entries_carry_the_sync_window_initiator_and_source_kind() {
+        let raw = serde_json::json!({
+            "metadata": { "name": "shop", "namespace": "argocd" },
+            "status": { "history": [
+                {
+                    "id": 1,
+                    "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "deployStartedAt": "2026-09-01T10:00:00Z",
+                    "deployedAt": "2026-09-01T10:01:00Z",
+                    "initiatedBy": { "username": "alice" },
+                    "source": { "repoURL": "https://github.com/acme/deploy.git", "path": "apps/shop" }
+                },
+                {
+                    "id": 2,
+                    "revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    "deployedAt": "2026-09-02T10:01:00Z",
+                    "initiatedBy": { "automated": true },
+                    "source": { "repoURL": "https://github.com/acme/deploy.git", "path": "apps/shop" }
+                },
+                {
+                    "id": 3,
+                    "revision": "1.4.3",
+                    "deployedAt": "2026-09-03T10:01:00Z",
+                    "source": { "repoURL": "https://charts.acme.io", "chart": "shop" }
+                },
+                {
+                    "id": 4,
+                    "deployedAt": "2026-09-04T10:01:00Z",
+                    "revisions": ["2.0.0", "cccccccccccccccccccccccccccccccccccccccc"],
+                    "sources": [
+                        { "repoURL": "https://charts.acme.io", "chart": "shop" },
+                        { "repoURL": "git@github.com:acme/values.git", "path": "shop" }
+                    ]
+                },
+                {
+                    "id": 5,
+                    "deployedAt": "2026-09-05T10:01:00Z",
+                    "revisions": ["3.0.0"],
+                    "sources": [{ "repoURL": "https://charts.acme.io", "chart": "shop" }]
+                }
+            ]}
+        });
+        let h = ArgoApplication::from_json(&raw).sync_history;
+        assert_eq!(h.len(), 5);
+
+        assert_eq!(h[0].deploy_started_at, "2026-09-01T10:00:00Z");
+        assert_eq!(h[0].initiated_by.as_deref(), Some("alice"));
+        assert!(!h[0].is_chart);
+
+        assert_eq!(h[1].deploy_started_at, "");
+        assert_eq!(h[1].initiated_by.as_deref(), Some("automated"));
+
+        assert!(
+            h[2].is_chart,
+            "a chart source's revision is a chart version"
+        );
+        assert_eq!(h[2].initiated_by, None, "older Argo records no initiator");
+
+        // Multi-source: the git source and its revision, not the chart's.
+        assert_eq!(h[3].revision, "cccccccccccccccccccccccccccccccccccccccc");
+        assert_eq!(h[3].repo_url, "git@github.com:acme/values.git");
+        assert_eq!(h[3].path, "shop");
+        assert!(!h[3].is_chart);
+
+        // Multi-source with only charts: the first, marked as a chart.
+        assert_eq!(h[4].revision, "3.0.0");
+        assert!(h[4].is_chart);
     }
 
     #[test]

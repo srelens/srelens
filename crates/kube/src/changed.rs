@@ -13,14 +13,15 @@ use std::time::Duration;
 use k8s_openapi::api::apps::v1::{Deployment, ReplicaSet, StatefulSet};
 use k8s_openapi::api::batch::v1::{CronJob, Job};
 use k8s_openapi::api::core::v1::{Event, Pod};
-use k8s_openapi::jiff::Timestamp;
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+use k8s_openapi::jiff::{SignedDuration, Timestamp};
 use kube::api::ListParams;
 use kube::Api;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use srelens_capability::{Annotations, Capability, CapabilityError};
+use srelens_capability::{Annotations, Capability, CapabilityError, ReferenceFormat};
 
-use crate::argo::ArgoApplication;
+use crate::argo::{ArgoApplication, ArgoSyncHistoryItem};
 use crate::client_cache::ClientCache;
 use crate::connect::request_timeout;
 use crate::events::{event_last_timestamp, EventSummary};
@@ -110,7 +111,7 @@ impl FailureCategory {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct GitOpsReleaseInfo {
     #[serde(rename = "appName")]
     pub app_name: String,
@@ -128,6 +129,44 @@ pub struct GitOpsReleaseInfo {
     pub sync_age: String,
     #[serde(rename = "syncMessage")]
     pub sync_message: Option<String>,
+    /// How the workload was matched to the app: `trackingId` (Argo's
+    /// `argocd.argoproj.io/tracking-id` annotation), `resources` (the app's
+    /// resource list) or `label` (the instance label).
+    #[serde(default, rename = "matchedBy")]
+    pub matched_by: String,
+    /// The Argo sync that produced the workload's current rollout.
+    #[serde(default)]
+    pub rollout: Option<ArgoRollout>,
+    /// Why no sync could be named as the rollout's cause. Set exactly when
+    /// `rollout` is `None`.
+    #[serde(default, rename = "rolloutUnmatched")]
+    pub rollout_unmatched: Option<String>,
+}
+
+/// One `status.history` entry of an Argo Application, named as the sync that
+/// rolled a workload out, with the entry before it so a reader can ask what
+/// changed between the two revisions.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ArgoRollout {
+    #[serde(rename = "historyId")]
+    pub history_id: i64,
+    /// Full revision: a git SHA, or a chart version when `isChart`.
+    pub revision: String,
+    #[serde(rename = "previousRevision")]
+    pub previous_revision: Option<String>,
+    #[serde(rename = "deployedAt")]
+    pub deployed_at: String,
+    #[serde(rename = "initiatedBy")]
+    pub initiated_by: Option<String>,
+    #[serde(rename = "repoUrl")]
+    pub repo_url: String,
+    /// The source path at that sync, which may differ from today's spec.
+    pub path: String,
+    #[serde(rename = "isChart")]
+    pub is_chart: bool,
+    /// Matched by "latest sync in the window", not by the time the rollout
+    /// was created: StatefulSets and CronJobs expose no such time here.
+    pub approximate: bool,
 }
 
 /// Why a workload is in the report.
@@ -206,6 +245,14 @@ pub struct AppDeploymentChange {
     pub gitops: Option<GitOpsReleaseInfo>,
     #[serde(default, rename = "argoRolloutInWindow")]
     pub argo_rollout_in_window: Option<String>,
+    /// The workload's tracking id names an Argo app that could not be read:
+    /// Argo was unreachable, or did not list that app. Not the same fact as
+    /// "not managed by Argo", which is `gitops: None` with this unset.
+    #[serde(default, rename = "gitopsUnresolved")]
+    pub gitops_unresolved: Option<String>,
+    /// A cause the cluster itself records, e.g. a rollout restart.
+    #[serde(default, rename = "localCause")]
+    pub local_cause: Option<String>,
     #[serde(rename = "errorLogSnippet")]
     pub error_log_snippet: Option<Vec<String>>,
     /// The pod the snippet was tailed from; not always the first failing
@@ -337,6 +384,10 @@ pub struct ChangedTriageReport {
     pub includes_failing: bool,
     #[serde(default, rename = "includesScaled")]
     pub includes_scaled: bool,
+    /// Argo Applications could not be listed, so no row can be said to be
+    /// unmanaged by Argo.
+    #[serde(default, rename = "argoError")]
+    pub argo_error: Option<String>,
 }
 
 /// Maximum window for triage query (30 days).
@@ -492,6 +543,30 @@ fn format_image_diff(prev: &[String], curr: &[String]) -> String {
     } else {
         diffs.join(", ")
     }
+}
+
+/// The pod template annotation `kubectl rollout restart` (and Argo's
+/// Restart action) stamps to force a new ReplicaSet.
+const RESTARTED_AT: &str = "kubectl.kubernetes.io/restartedAt";
+
+/// "rollout restart at T" when the current ReplicaSet differs from the
+/// previous one only by its restart stamp. A stamp that arrived alongside a
+/// spec change does not explain the rollout, so it is not reported.
+fn restart_cause(current: &ReplicaSet, previous: Option<&ReplicaSet>) -> Option<String> {
+    let template = |rs: &ReplicaSet| rs.spec.as_ref()?.template.clone();
+    let stamp = |rs: &ReplicaSet| {
+        template(rs)?
+            .metadata?
+            .annotations?
+            .get(RESTARTED_AT)
+            .cloned()
+    };
+    let previous = previous?;
+    let stamped = stamp(current)?;
+    let same_spec =
+        template(current).and_then(|t| t.spec) == template(previous).and_then(|t| t.spec);
+    (same_spec && stamp(previous).as_ref() != Some(&stamped))
+        .then(|| format!("rollout restart at {stamped}"))
 }
 
 fn parse_revision(rs: &ReplicaSet) -> i64 {
@@ -736,49 +811,260 @@ fn log_target(symptoms: &[PodIncidentDetail], pods: &[&Pod]) -> (Option<String>,
     (Some(sym.pod_name.clone()), container)
 }
 
-/// Match a workload to the ArgoCD Application that manages it, by the app's
-/// resource list or by the instance label, and describe its last sync.
+/// Argo CD's resource tracking annotation.
+const TRACKING_ID: &str = "argocd.argoproj.io/tracking-id";
+
+/// Longest gap between a rollout's creation and the end of the sync that
+/// made it, used when Argo recorded no start time for the sync.
+const SYNC_SKEW: SignedDuration = SignedDuration::from_secs(15 * 60);
+
+/// Clock difference allowed between Argo's controller, which stamps the
+/// history, and the API server, which stamps the ReplicaSet.
+const CLOCK_SLACK: SignedDuration = SignedDuration::from_secs(60);
+
+/// How a row's `gitops_unresolved` ends when Argo answered without the app;
+/// [`mark_argo_unavailable`] replaces it when Argo did not answer at all.
+const NOT_LISTED: &str = ", which Argo did not list";
+
+/// Record that Argo could not be read, on the report and on every row whose
+/// tracking id names an app: for those, "not listed" would blame the app.
+fn mark_argo_unavailable(report: &mut ChangedTriageReport, err: String) {
+    for d in &mut report.deployments {
+        if let Some(msg) = d.gitops_unresolved.as_mut() {
+            if let Some(head) = msg.strip_suffix(NOT_LISTED) {
+                *msg = format!("{head}; Argo unavailable: {err}");
+            }
+        }
+    }
+    report.argo_error = Some(err);
+}
+
+/// The workload a [`gitops_release_for`] lookup is about.
+struct Workload<'a> {
+    api_version: &'a str,
+    kind: &'a str,
+    name: &'a str,
+    ns: &'a str,
+    meta: &'a ObjectMeta,
+    /// When the current rollout was created: a Deployment's current
+    /// ReplicaSet. `None` where this report holds no such object.
+    rollout_created: Option<Timestamp>,
+}
+
+/// What [`gitops_release_for`] found for one workload.
+#[derive(Default)]
+struct GitOpsMatch {
+    info: Option<GitOpsReleaseInfo>,
+    rollout_in_window: Option<String>,
+    unresolved: Option<String>,
+}
+
+/// The index of the `history` entry whose sync created a rollout at
+/// `created`: the sync running at that moment, else the first to finish
+/// within [`SYNC_SKEW`] after it. `None` when no sync accounts for it — a
+/// change made outside Argo, or a sync already trimmed from the history.
+pub fn causal_history_entry(history: &[ArgoSyncHistoryItem], created: Timestamp) -> Option<usize> {
+    let parse = |s: &str| s.parse::<Timestamp>().ok();
+    let earliest =
+        |hits: Vec<(usize, Timestamp)>| hits.into_iter().min_by_key(|(_, d)| *d).map(|(i, _)| i);
+
+    let during = history
+        .iter()
+        .enumerate()
+        .filter_map(|(i, h)| {
+            let deployed = parse(&h.deployed_at)?;
+            let started = parse(&h.deploy_started_at)?;
+            (created.duration_since(started) >= -CLOCK_SLACK
+                && deployed.duration_since(created) >= -CLOCK_SLACK)
+                .then_some((i, deployed))
+        })
+        .collect();
+    if let Some(i) = earliest(during) {
+        return Some(i);
+    }
+
+    let after = history
+        .iter()
+        .enumerate()
+        .filter_map(|(i, h)| {
+            let deployed = parse(&h.deployed_at)?;
+            let gap = deployed.duration_since(created);
+            (gap >= -CLOCK_SLACK && gap <= SYNC_SKEW).then_some((i, deployed))
+        })
+        .collect();
+    earliest(after)
+}
+
+/// The sync behind a workload's current rollout, or why none can be named.
+fn rollout_for(
+    history: &[ArgoSyncHistoryItem],
+    created: Option<Timestamp>,
+    cutoff: Option<&Timestamp>,
+) -> Result<ArgoRollout, String> {
+    let (idx, approximate) = match created {
+        Some(created) => (
+            causal_history_entry(history, created).ok_or_else(|| {
+                "no Argo sync around this rollout: a change made outside Argo, \
+                 or a sync older than the app's history"
+                    .to_string()
+            })?,
+            false,
+        ),
+        None => {
+            let latest = history
+                .iter()
+                .enumerate()
+                .filter_map(|(i, h)| Some((i, h.deployed_at.parse::<Timestamp>().ok()?)))
+                .filter(|(_, d)| cutoff.is_some_and(|c| d >= c))
+                .max_by_key(|(_, d)| *d)
+                .map(|(i, _)| i);
+            (
+                latest.ok_or_else(|| "no Argo sync in this window".to_string())?,
+                true,
+            )
+        }
+    };
+    let entry = &history[idx];
+    // Only a sync of the same source bounds a meaningful range of changes.
+    let previous_revision = history
+        .iter()
+        .filter(|h| h.id < entry.id && h.repo_url == entry.repo_url && h.is_chart == entry.is_chart)
+        .max_by_key(|h| h.id)
+        .map(|h| h.revision.clone())
+        .filter(|r| !r.is_empty() && r != &entry.revision);
+    Ok(ArgoRollout {
+        history_id: entry.id,
+        revision: entry.revision.clone(),
+        previous_revision,
+        deployed_at: entry.deployed_at.clone(),
+        initiated_by: entry.initiated_by.clone(),
+        repo_url: entry.repo_url.clone(),
+        path: entry.path.clone(),
+        is_chart: entry.is_chart,
+        approximate,
+    })
+}
+
+/// A revision as a reader scans it: seven characters of a git SHA, a chart
+/// version whole.
+fn short_revision(rev: &str, is_chart: bool) -> String {
+    if is_chart {
+        rev.to_string()
+    } else {
+        rev.chars().take(7).collect()
+    }
+}
+
+/// Match a workload to the ArgoCD Application that manages it, describe its
+/// last sync, and name the sync behind its current rollout.
 ///
-/// The second value is set only when that sync finished inside the window:
-/// "a release landed during the incident" is a claim about time, and an app
-/// that last synced a week ago must not make it.
+/// A tracking id that names the workload decides the app, because Argo
+/// manages a resource by that id. When it names an app Argo did not list,
+/// the answer is "unresolved", not an app guessed from labels. Without one,
+/// the app's resource list decides, then the instance label.
+///
+/// `rollout_in_window` is set only when that sync finished inside the
+/// window: "a release landed during the incident" is a claim about time, and
+/// an app that last synced a week ago must not make it.
 fn gitops_release_for(
     argo_apps: &[ArgoApplication],
-    kind: &str,
-    name: &str,
-    ns: &str,
-    labels: Option<&std::collections::BTreeMap<String, String>>,
+    w: &Workload,
     now: Timestamp,
     cutoff: Option<&Timestamp>,
-) -> (Option<GitOpsReleaseInfo>, Option<String>) {
-    let instance = labels.and_then(|l| {
-        l.get("app.kubernetes.io/instance")
-            .or_else(|| l.get("argocd.argoproj.io/instance"))
-    });
-    let Some(app) = argo_apps.iter().find(|app| {
-        app.resources
+) -> GitOpsMatch {
+    let tracked = w
+        .meta
+        .annotations
+        .as_ref()
+        .and_then(|a| a.get(TRACKING_ID))
+        .and_then(|id| {
+            let obj = serde_json::json!({
+                "apiVersion": w.api_version,
+                "kind": w.kind,
+                "metadata": { "name": w.name, "namespace": w.ns },
+            });
+            ReferenceFormat::ArgocdTrackingId.owner(id, &obj)
+        });
+    let (app, matched_by) = if let Some((app_ns, app_name)) = &tracked {
+        let found = argo_apps
             .iter()
-            .any(|r| r.kind == kind && r.name == name && r.namespace == ns)
-            || instance.is_some_and(|v| v == &app.name)
-    }) else {
-        return (None, None);
+            .find(|a| &a.name == app_name && app_ns.as_ref().is_none_or(|n| n == &a.namespace));
+        match found {
+            Some(app) => (app, "trackingId"),
+            None => {
+                let label = match app_ns {
+                    Some(n) => format!("{n}/{app_name}"),
+                    None => app_name.clone(),
+                };
+                return GitOpsMatch {
+                    unresolved: Some(format!("tracking id names Argo app {label}{NOT_LISTED}")),
+                    ..Default::default()
+                };
+            }
+        }
+    } else {
+        let instance = w.meta.labels.as_ref().and_then(|l| {
+            l.get("app.kubernetes.io/instance")
+                .or_else(|| l.get("argocd.argoproj.io/instance"))
+        });
+        let by_resource = argo_apps.iter().find(|app| {
+            app.resources
+                .iter()
+                .any(|r| r.kind == w.kind && r.name == w.name && r.namespace == w.ns)
+        });
+        if let Some(app) = by_resource {
+            (app, "resources")
+        } else if let Some(app) = instance.and_then(|v| argo_apps.iter().find(|a| &a.name == v)) {
+            (app, "label")
+        } else {
+            return GitOpsMatch::default();
+        }
     };
 
     let short_rev: String = app.sync_revision.chars().take(7).collect();
     let synced_at = app.last_sync_time.parse::<Timestamp>().ok();
+    let age_since = |ts: Timestamp| crate::format_age(now.duration_since(ts).as_secs().max(0));
     let sync_age = match synced_at {
-        Some(ts) => crate::format_age(now.duration_since(ts).as_secs()),
+        Some(ts) => age_since(ts),
         None if app.last_sync_time.is_empty() => "-".to_string(),
         None => app.last_sync_time.clone(),
     };
-    let rollout_in_window = match (synced_at, cutoff) {
-        (Some(ts), Some(cutoff)) if ts >= *cutoff && !short_rev.is_empty() => {
+
+    let (rollout, rollout_unmatched) = if app.sync_history.is_empty() {
+        (None, Some("the app records no sync history".to_string()))
+    } else {
+        match rollout_for(&app.sync_history, w.rollout_created, cutoff) {
+            Ok(r) => (Some(r), None),
+            Err(why) => (None, Some(why)),
+        }
+    };
+
+    let in_window = |ts: Option<Timestamp>| match (ts, cutoff) {
+        (Some(ts), Some(cutoff)) => ts >= *cutoff,
+        _ => false,
+    };
+    let rollout_in_window = match &rollout {
+        Some(r) => {
+            let deployed = r.deployed_at.parse::<Timestamp>().ok();
+            in_window(deployed).then(|| {
+                format!(
+                    "rev {} synced {} ago",
+                    short_revision(&r.revision, r.is_chart),
+                    deployed.map(age_since).unwrap_or_default()
+                )
+            })
+        }
+        // Without history the last sync is all Argo tells us.
+        None if app.sync_history.is_empty() && in_window(synced_at) && !short_rev.is_empty() => {
             Some(format!("rev {short_rev} synced {sync_age} ago"))
         }
-        _ => None,
+        None => None,
     };
 
     let info = GitOpsReleaseInfo {
+        matched_by: matched_by.to_string(),
+        rollout,
+        rollout_unmatched,
         app_name: app.name.clone(),
         sync_status: app.sync_status.clone(),
         health_status: app.health_status.clone(),
@@ -794,7 +1080,11 @@ fn gitops_release_for(
             None
         },
     };
-    (Some(info), rollout_in_window)
+    GitOpsMatch {
+        info: Some(info),
+        rollout_in_window,
+        unresolved: None,
+    }
 }
 
 fn evaluate_pod_failures(
@@ -1318,15 +1608,22 @@ pub fn evaluate_changed_triage(
             }
         }
 
-        let (gitops, argo_rollout_in_window) = gitops_release_for(
+        let gitops_match = gitops_release_for(
             argo_apps,
-            "Deployment",
-            &dep_name,
-            &dep_ns,
-            dep.metadata.labels.as_ref(),
+            &Workload {
+                api_version: "apps/v1",
+                kind: "Deployment",
+                name: &dep_name,
+                ns: &dep_ns,
+                meta: &dep.metadata,
+                rollout_created: current_rs
+                    .and_then(|rs| rs.metadata.creation_timestamp.as_ref())
+                    .map(|t| t.0),
+            },
             now,
             cutoff_ts.as_ref(),
         );
+        let local_cause = current_rs.and_then(|rs| restart_cause(rs, prev_rs));
 
         let rollout_status = if desired_replicas == 0 {
             RolloutStatus::ScaledDown
@@ -1412,8 +1709,10 @@ pub fn evaluate_changed_triage(
             incident_status,
             failure_category,
             failure_detail,
-            gitops,
-            argo_rollout_in_window,
+            gitops: gitops_match.info,
+            argo_rollout_in_window: gitops_match.rollout_in_window,
+            gitops_unresolved: gitops_match.unresolved,
+            local_cause,
             error_log_snippet: None,
             error_log_pod,
             error_log_container,
@@ -1577,15 +1876,20 @@ pub fn evaluate_changed_triage(
             }
         }
 
-        let (gitops, argo_rollout_in_window) = gitops_release_for(
+        let gitops_match = gitops_release_for(
             argo_apps,
-            "StatefulSet",
-            &sts_name,
-            &sts_ns,
-            sts.metadata.labels.as_ref(),
+            &Workload {
+                api_version: "apps/v1",
+                kind: "StatefulSet",
+                name: &sts_name,
+                ns: &sts_ns,
+                meta: &sts.metadata,
+                rollout_created: None,
+            },
             now,
             cutoff_ts.as_ref(),
         );
+        let local_cause = None;
 
         let rollout_status = if desired_replicas == 0 {
             RolloutStatus::ScaledDown
@@ -1660,8 +1964,10 @@ pub fn evaluate_changed_triage(
             incident_status,
             failure_category,
             failure_detail,
-            gitops,
-            argo_rollout_in_window,
+            gitops: gitops_match.info,
+            argo_rollout_in_window: gitops_match.rollout_in_window,
+            gitops_unresolved: gitops_match.unresolved,
+            local_cause,
             error_log_snippet: None,
             error_log_pod,
             error_log_container,
@@ -1851,15 +2157,20 @@ pub fn evaluate_changed_triage(
             }
         }
 
-        let (gitops, argo_rollout_in_window) = gitops_release_for(
+        let gitops_match = gitops_release_for(
             argo_apps,
-            "CronJob",
-            &cj_name,
-            &cj_ns,
-            cj.metadata.labels.as_ref(),
+            &Workload {
+                api_version: "batch/v1",
+                kind: "CronJob",
+                name: &cj_name,
+                ns: &cj_ns,
+                meta: &cj.metadata,
+                rollout_created: None,
+            },
             now,
             cutoff_ts.as_ref(),
         );
+        let local_cause = None;
 
         let rollout_status = if is_suspended {
             RolloutStatus::ScaledDown
@@ -1921,8 +2232,10 @@ pub fn evaluate_changed_triage(
             incident_status,
             failure_category,
             failure_detail,
-            gitops,
-            argo_rollout_in_window,
+            gitops: gitops_match.info,
+            argo_rollout_in_window: gitops_match.rollout_in_window,
+            gitops_unresolved: gitops_match.unresolved,
+            local_cause,
             error_log_snippet: None,
             error_log_pod,
             error_log_container,
@@ -2143,6 +2456,7 @@ pub fn evaluate_changed_triage(
         infra_changes,
         includes_failing: opts.include_failing,
         includes_scaled: opts.include_scaled,
+        argo_error: None,
     }
 }
 
@@ -2165,6 +2479,16 @@ fn default_since() -> String {
     "30m".to_string()
 }
 
+/// Where to look for the Argo Applications that manage a cluster: Argo on
+/// the cluster itself, else the hub, matched to this cluster by its Argo
+/// cluster name or API server URL. The default is the cluster itself only.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ArgoLookup {
+    pub hub_context: Option<String>,
+    pub cluster_name: Option<String>,
+    pub server_url: Option<String>,
+}
+
 /// Fetches and evaluates the holistic triage report for recent changes across a cluster context.
 pub async fn fetch_changed_triage(
     cache: &Arc<ClientCache>,
@@ -2172,6 +2496,7 @@ pub async fn fetch_changed_triage(
     namespace: Option<&str>,
     window: Duration,
     opts: TriageOptions,
+    argo_lookup: &ArgoLookup,
 ) -> Result<ChangedTriageReport, String> {
     let client = cache.get(context).await.map_err(|e| e.to_string())?;
     let ns_str = namespace.unwrap_or("");
@@ -2202,7 +2527,14 @@ pub async fn fetch_changed_triage(
         tokio::time::timeout(timeout, pod_api.list(&lp)),
         tokio::time::timeout(timeout, ev_api.list(&lp)),
         crate::argo::fetch_argo_applications_cached(
-            cache, context, None, None, None, None, true, false,
+            cache,
+            context,
+            argo_lookup.cluster_name.as_deref(),
+            argo_lookup.server_url.as_deref(),
+            argo_lookup.hub_context.as_deref(),
+            None,
+            true,
+            false,
         ),
     );
 
@@ -2236,11 +2568,18 @@ pub async fn fetch_changed_triage(
     let sts = optional(sts);
     let cjs = optional(cjs);
     let jobs = optional(jobs);
-    let argo_apps = argo.map(|r| r.filtered_apps).unwrap_or_default();
+    let (argo_apps, argo_error) = match argo {
+        Ok(r) => (r.filtered_apps, None),
+        Err(e) if e == crate::argo::NO_ARGO => (Vec::new(), None),
+        Err(e) => (Vec::new(), Some(e)),
+    };
 
     let mut report = evaluate_changed_triage(
         &deps, &sts, &cjs, &jobs, &rs, &pods, &events, &argo_apps, window, now, ns_opt, opts,
     );
+    if let Some(err) = argo_error {
+        mark_argo_unavailable(&mut report, err);
+    }
     if !opts.log_snippets {
         return Ok(report);
     }
@@ -2376,9 +2715,16 @@ pub fn list_changes_capability(cache: Arc<ClientCache>) -> Capability {
                     include_scaled: input.include_scaled,
                     log_snippets: true,
                 };
-                fetch_changed_triage(&cache, &input.context, ns_opt, window, opts)
-                    .await
-                    .map_err(CapabilityError::Handler)
+                fetch_changed_triage(
+                    &cache,
+                    &input.context,
+                    ns_opt,
+                    window,
+                    opts,
+                    &ArgoLookup::default(),
+                )
+                .await
+                .map_err(CapabilityError::Handler)
             }
         },
     )
@@ -3826,5 +4172,394 @@ mod tests {
         assert!(dep.remove("errorLogContainer").is_some());
         let back: ChangedTriageReport = serde_json::from_value(raw).unwrap();
         assert_eq!(back.deployments[0].error_log_pod, None);
+    }
+
+    // NOW is 2023-11-14T22:13:20Z; `replicaset(.., 300)` was created at 22:08:20Z.
+    const SHA_OLD: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const SHA_PREV: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const SHA_NOW: &str = "cccccccccccccccccccccccccccccccccccccccc";
+
+    fn hist(id: i64, rev: &str, started: &str, deployed: &str) -> serde_json::Value {
+        let mut h = serde_json::json!({
+            "id": id,
+            "revision": rev,
+            "deployedAt": deployed,
+            "initiatedBy": { "username": "alice" },
+            "source": { "repoURL": "https://github.com/acme/deploy.git", "path": "apps/shop" }
+        });
+        if !started.is_empty() {
+            h["deployStartedAt"] = serde_json::json!(started);
+        }
+        h
+    }
+
+    fn argo_app(name: &str, ns: &str, history: Vec<serde_json::Value>) -> ArgoApplication {
+        ArgoApplication::from_json(&serde_json::json!({
+            "metadata": { "name": name, "namespace": ns },
+            "spec": { "source": { "repoURL": "https://github.com/acme/deploy.git", "path": "apps/shop" } },
+            "status": { "sync": { "revision": SHA_NOW }, "history": history }
+        }))
+    }
+
+    /// A sync three hours ago, then the one that ran while `api-new` was created.
+    fn shop_history() -> Vec<serde_json::Value> {
+        vec![
+            hist(6, SHA_PREV, "2023-11-14T19:00:00Z", "2023-11-14T19:01:00Z"),
+            hist(7, SHA_NOW, "2023-11-14T22:08:00Z", "2023-11-14T22:08:40Z"),
+        ]
+    }
+
+    fn tracked_deployment(tracking_id: Option<&str>, instance: Option<&str>) -> Deployment {
+        let mut dep = deployment("api", 1, 1);
+        if let Some(id) = tracking_id {
+            dep.metadata.annotations =
+                Some(BTreeMap::from([(TRACKING_ID.to_string(), id.to_string())]));
+        }
+        if let Some(app) = instance {
+            dep.metadata.labels = Some(BTreeMap::from([(
+                "app.kubernetes.io/instance".to_string(),
+                app.to_string(),
+            )]));
+        }
+        dep
+    }
+
+    #[test]
+    fn a_tracking_id_decides_the_app_and_names_the_sync_behind_the_rollout() {
+        let dep = tracked_deployment(Some("shop:apps/Deployment:default/api"), Some("other"));
+        let apps = [
+            argo_app("other", "argocd", vec![]),
+            argo_app("shop", "argocd", shop_history()),
+        ];
+        let report = triage(
+            &[dep],
+            &[replicaset("api-new", "api", 300)],
+            &[],
+            &[],
+            &apps,
+        );
+
+        let d = &report.deployments[0];
+        let g = d.gitops.as_ref().expect("matched");
+        assert_eq!(
+            g.app_name, "shop",
+            "the tracking id beats the instance label"
+        );
+        assert_eq!(g.matched_by, "trackingId");
+        let r = g.rollout.as_ref().expect("the sync running at 22:08:20");
+        assert_eq!(r.history_id, 7);
+        assert_eq!(r.revision, SHA_NOW);
+        assert_eq!(r.previous_revision.as_deref(), Some(SHA_PREV));
+        assert_eq!(r.initiated_by.as_deref(), Some("alice"));
+        assert_eq!(r.path, "apps/shop");
+        assert!(!r.approximate);
+        assert_eq!(g.rollout_unmatched, None);
+        assert!(d
+            .argo_rollout_in_window
+            .as_deref()
+            .is_some_and(|s| s.starts_with("rev ccccccc synced")));
+        assert_eq!(d.gitops_unresolved, None);
+    }
+
+    #[test]
+    fn a_namespaced_tracking_id_picks_the_app_in_that_namespace() {
+        let dep = tracked_deployment(Some("team_shop:apps/Deployment:default/api"), None);
+        let apps = [
+            argo_app("shop", "argocd", vec![]),
+            argo_app("shop", "team", shop_history()),
+        ];
+        let report = triage(
+            &[dep],
+            &[replicaset("api-new", "api", 300)],
+            &[],
+            &[],
+            &apps,
+        );
+        let g = report.deployments[0].gitops.as_ref().unwrap();
+        assert!(
+            g.rollout.is_some(),
+            "the app in `team`, which has the history"
+        );
+    }
+
+    #[test]
+    fn a_tracking_id_copied_from_another_workload_is_ignored() {
+        let dep = tracked_deployment(Some("shop:apps/Deployment:default/web"), Some("other"));
+        let apps = [
+            argo_app("shop", "argocd", shop_history()),
+            argo_app("other", "argocd", vec![]),
+        ];
+        let report = triage(
+            &[dep],
+            &[replicaset("api-new", "api", 300)],
+            &[],
+            &[],
+            &apps,
+        );
+        let g = report.deployments[0].gitops.as_ref().unwrap();
+        assert_eq!(g.app_name, "other");
+        assert_eq!(g.matched_by, "label");
+    }
+
+    #[test]
+    fn the_app_resource_list_beats_an_instance_label_naming_another_app() {
+        let dep = tracked_deployment(None, Some("other"));
+        let mut owner = argo_app("shop", "argocd", vec![]);
+        owner.resources.push(crate::argo::ArgoResourceItem {
+            group: "apps".into(),
+            version: "v1".into(),
+            kind: "Deployment".into(),
+            namespace: "default".into(),
+            name: "api".into(),
+            status: "Synced".into(),
+            health: "Healthy".into(),
+            message: String::new(),
+            hook: None,
+        });
+        let apps = [argo_app("other", "argocd", vec![]), owner];
+        let report = triage(
+            &[dep],
+            &[replicaset("api-new", "api", 300)],
+            &[],
+            &[],
+            &apps,
+        );
+        let g = report.deployments[0].gitops.as_ref().unwrap();
+        assert_eq!(
+            (g.app_name.as_str(), g.matched_by.as_str()),
+            ("shop", "resources")
+        );
+    }
+
+    #[test]
+    fn a_tracking_id_naming_an_unlisted_app_is_unresolved_not_unmanaged() {
+        let dep = tracked_deployment(Some("shop:apps/Deployment:default/api"), Some("other"));
+        let apps = [argo_app("other", "argocd", vec![])];
+        let mut report = triage(
+            &[dep],
+            &[replicaset("api-new", "api", 300)],
+            &[],
+            &[],
+            &apps,
+        );
+
+        let d = &report.deployments[0];
+        assert_eq!(d.gitops, None, "no guess from the label");
+        assert_eq!(
+            d.gitops_unresolved.as_deref(),
+            Some("tracking id names Argo app shop, which Argo did not list")
+        );
+
+        mark_argo_unavailable(&mut report, "list timed out".to_string());
+        assert_eq!(report.argo_error.as_deref(), Some("list timed out"));
+        assert_eq!(
+            report.deployments[0].gitops_unresolved.as_deref(),
+            Some("tracking id names Argo app shop; Argo unavailable: list timed out")
+        );
+    }
+
+    #[test]
+    fn a_rollout_no_sync_accounts_for_is_unmatched_with_a_reason() {
+        let dep = tracked_deployment(Some("shop:apps/Deployment:default/api"), None);
+        let apps = [argo_app(
+            "shop",
+            "argocd",
+            vec![hist(
+                6,
+                SHA_PREV,
+                "2023-11-14T19:00:00Z",
+                "2023-11-14T19:01:00Z",
+            )],
+        )];
+        let report = triage(
+            &[dep],
+            &[replicaset("api-new", "api", 300)],
+            &[],
+            &[],
+            &apps,
+        );
+        let d = &report.deployments[0];
+        let g = d.gitops.as_ref().unwrap();
+        assert_eq!(g.rollout, None);
+        assert!(g
+            .rollout_unmatched
+            .as_deref()
+            .is_some_and(|s| s.starts_with("no Argo sync around this rollout")));
+        assert_eq!(
+            d.argo_rollout_in_window, None,
+            "the old sync is not this rollout"
+        );
+    }
+
+    #[test]
+    fn causal_history_entry_prefers_the_running_sync_then_one_finishing_soon_after() {
+        let created: Timestamp = "2023-11-14T22:08:20Z".parse().unwrap();
+        let item = |id, started: &str, deployed: &str| ArgoSyncHistoryItem {
+            id,
+            deployed_at: deployed.into(),
+            deploy_started_at: started.into(),
+            ..Default::default()
+        };
+
+        let running = [
+            item(1, "2023-11-14T19:00:00Z", "2023-11-14T19:01:00Z"),
+            item(2, "2023-11-14T22:08:00Z", "2023-11-14T22:08:40Z"),
+            item(3, "2023-11-14T22:10:00Z", "2023-11-14T22:10:30Z"),
+        ];
+        assert_eq!(causal_history_entry(&running, created), Some(1));
+
+        // No start times recorded: the first sync to finish after, within 15m.
+        let no_starts = [
+            item(1, "", "2023-11-14T22:05:00Z"),
+            item(2, "", "2023-11-14T22:09:00Z"),
+            item(3, "", "2023-11-14T22:12:00Z"),
+        ];
+        assert_eq!(causal_history_entry(&no_starts, created), Some(1));
+
+        let too_late = [item(1, "", "2023-11-14T22:30:00Z")];
+        assert_eq!(causal_history_entry(&too_late, created), None);
+        assert_eq!(causal_history_entry(&[], created), None);
+    }
+
+    #[test]
+    fn the_first_sync_of_an_app_has_no_previous_revision() {
+        let dep = tracked_deployment(Some("shop:apps/Deployment:default/api"), None);
+        let apps = [argo_app(
+            "shop",
+            "argocd",
+            vec![
+                // A sync of another source does not bound this one's changes.
+                serde_json::json!({
+                    "id": 6, "revision": SHA_OLD, "deployedAt": "2023-11-14T19:01:00Z",
+                    "source": { "repoURL": "https://github.com/acme/legacy.git" }
+                }),
+                hist(7, SHA_NOW, "2023-11-14T22:08:00Z", "2023-11-14T22:08:40Z"),
+            ],
+        )];
+        let report = triage(
+            &[dep],
+            &[replicaset("api-new", "api", 300)],
+            &[],
+            &[],
+            &apps,
+        );
+        let r = report.deployments[0]
+            .gitops
+            .as_ref()
+            .unwrap()
+            .rollout
+            .as_ref()
+            .unwrap();
+        assert_eq!(r.revision, SHA_NOW);
+        assert_eq!(r.previous_revision, None);
+    }
+
+    fn templated_rs(
+        name: &str,
+        created_secs_ago: i64,
+        image: &str,
+        restarted_at: Option<&str>,
+    ) -> ReplicaSet {
+        let mut rs = replicaset(name, "api", created_secs_ago);
+        rs.spec = Some(ReplicaSetSpec {
+            template: Some(PodTemplateSpec {
+                metadata: Some(ObjectMeta {
+                    annotations: restarted_at
+                        .map(|t| BTreeMap::from([(RESTARTED_AT.to_string(), t.to_string())])),
+                    ..Default::default()
+                }),
+                spec: Some(PodSpec {
+                    containers: vec![Container {
+                        name: "app".into(),
+                        image: Some(image.into()),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }),
+            }),
+            ..Default::default()
+        });
+        rs
+    }
+
+    #[test]
+    fn a_rollout_restart_is_the_local_cause_only_when_nothing_else_changed() {
+        let prev = templated_rs("api-old", 86_400, "shop:1.4.2", None);
+        let restarted = templated_rs("api-new", 300, "shop:1.4.2", Some("2023-11-14T22:08:19Z"));
+        assert_eq!(
+            restart_cause(&restarted, Some(&prev)).as_deref(),
+            Some("rollout restart at 2023-11-14T22:08:19Z")
+        );
+
+        let bumped = templated_rs("api-new", 300, "shop:1.4.3", Some("2023-11-14T22:08:19Z"));
+        assert_eq!(
+            restart_cause(&bumped, Some(&prev)),
+            None,
+            "the image change is the news"
+        );
+
+        let again = templated_rs(
+            "api-old",
+            86_400,
+            "shop:1.4.2",
+            Some("2023-11-14T22:08:19Z"),
+        );
+        assert_eq!(
+            restart_cause(&restarted, Some(&again)),
+            None,
+            "same stamp: no restart"
+        );
+        assert_eq!(
+            restart_cause(&restarted, None),
+            None,
+            "a first rollout is not a restart"
+        );
+
+        let report = triage(
+            &[deployment("api", 1, 1)],
+            &[prev, restarted],
+            &[],
+            &[],
+            &[],
+        );
+        assert_eq!(
+            report.deployments[0].local_cause.as_deref(),
+            Some("rollout restart at 2023-11-14T22:08:19Z")
+        );
+    }
+
+    #[test]
+    fn the_report_names_the_why_fields_in_camel_case() {
+        let dep = tracked_deployment(Some("shop:apps/Deployment:default/api"), None);
+        let apps = [argo_app("shop", "argocd", shop_history())];
+        let mut report = triage(
+            &[dep],
+            &[replicaset("api-new", "api", 300)],
+            &[],
+            &[],
+            &apps,
+        );
+        report.argo_error = Some("x".into());
+        let raw = serde_json::to_value(&report).unwrap();
+        let d = &raw["deployments"][0];
+        assert_eq!(d["gitops"]["matchedBy"], "trackingId");
+        assert_eq!(d["gitops"]["rollout"]["previousRevision"], SHA_PREV);
+        assert_eq!(d["gitops"]["rollout"]["historyId"], 7);
+        assert!(d.get("gitopsUnresolved").is_some());
+        assert!(d.get("localCause").is_some());
+        assert_eq!(raw["argoError"], "x");
+
+        // An older host's report, with none of the new keys, still reads.
+        let mut old = raw.clone();
+        old.as_object_mut().unwrap().remove("argoError");
+        let od = old["deployments"][0].as_object_mut().unwrap();
+        od.remove("gitopsUnresolved");
+        od.remove("localCause");
+        let og = od["gitops"].as_object_mut().unwrap();
+        og.remove("matchedBy");
+        og.remove("rollout");
+        og.remove("rolloutUnmatched");
+        let back: ChangedTriageReport = serde_json::from_value(old).unwrap();
+        assert_eq!(back.deployments[0].gitops.as_ref().unwrap().rollout, None);
     }
 }

@@ -63,6 +63,7 @@ fn sample_report() -> ChangedTriageReport {
                     sync_revision: "7b89abc".to_string(),
                     sync_age: "12m".to_string(),
                     sync_message: None,
+                    ..Default::default()
                 }),
                 error_log_snippet: Some(vec![
                     "2026-09-23T10:00:01Z [ERROR] Failed to connect to Redis cache: connection refused"
@@ -94,6 +95,8 @@ fn sample_report() -> ChangedTriageReport {
                 }],
                 failing_pod_names: vec!["checkout-api-7b89-abcd".to_string()],
                 argo_rollout_in_window: Some("rev 7b89abc synced 12m ago".to_string()),
+                gitops_unresolved: None,
+                local_cause: None,
                 error_log_pod: Some("checkout-api-7b89-abcd".to_string()),
                 error_log_container: Some("api".to_string()),
                 change_kind: srelens_kube::changed::ChangeKind::Rollout,
@@ -150,6 +153,8 @@ fn sample_report() -> ChangedTriageReport {
                 }],
                 failing_pod_names: vec!["payment-worker-9988-xyz".to_string()],
                 argo_rollout_in_window: None,
+                gitops_unresolved: None,
+                local_cause: None,
                 error_log_pod: None,
                 error_log_container: None,
                 change_kind: srelens_kube::changed::ChangeKind::Rollout,
@@ -173,6 +178,7 @@ fn sample_report() -> ChangedTriageReport {
                     sync_revision: "a1b2c3d".to_string(),
                     sync_age: "27m".to_string(),
                     sync_message: None,
+                    ..Default::default()
                 }),
                 error_log_snippet: None,
                 deployed_at: Some("2026-09-23T09:45:00Z".to_string()),
@@ -196,6 +202,8 @@ fn sample_report() -> ChangedTriageReport {
                 pod_symptoms: vec![],
                 failing_pod_names: vec![],
                 argo_rollout_in_window: None,
+                gitops_unresolved: None,
+                local_cause: None,
                 error_log_pod: None,
                 error_log_container: None,
                 change_kind: srelens_kube::changed::ChangeKind::Rollout,
@@ -230,6 +238,7 @@ fn sample_report() -> ChangedTriageReport {
         ],
         includes_failing: false,
         includes_scaled: false,
+        argo_error: None,
     }
 }
 

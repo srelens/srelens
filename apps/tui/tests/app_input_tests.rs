@@ -5077,6 +5077,7 @@ async fn changed_view_drops_a_result_for_a_window_it_no_longer_shows() {
         infra_changes: vec![],
         includes_failing: false,
         includes_scaled: false,
+        argo_error: None,
     };
 
     // The view shows 1h; a 15m answer from before a window change is stale.
@@ -5617,6 +5618,7 @@ async fn argo_detail_revision_history_renders_long_path_without_truncation() {
         deployed_at: "2026-07-08T16:13:05Z".to_string(),
         repo_url: "https://github.com/trivago/gcp-data-cards-webapp.git".to_string(),
         path: long_path.to_string(),
+        ..Default::default()
     }];
     state.set_application(app_data);
     state.active_tab = srelens_tui::views::argo_detail_view::ArgoDetailTab::RevisionHistory;
@@ -6846,6 +6848,7 @@ async fn switch_context_while_in_changed_view_clears_report_and_handles_stale_re
         infra_changes: vec![],
         includes_failing: true,
         includes_scaled: false,
+        argo_error: None,
     });
     app.active_view = ActiveView::Changed(changed_state);
     app.active_context = "cluster-1".to_string();
@@ -6883,6 +6886,7 @@ async fn switch_context_while_in_changed_view_clears_report_and_handles_stale_re
         infra_changes: vec![],
         includes_failing: true,
         includes_scaled: false,
+        argo_error: None,
     };
     app.handle_changed_triage_result("cluster-1", None, Ok(stale_report));
 
@@ -6913,6 +6917,7 @@ async fn switch_context_while_in_changed_view_clears_report_and_handles_stale_re
         infra_changes: vec![],
         includes_failing: false,
         includes_scaled: false,
+        argo_error: None,
     };
     app.handle_changed_triage_result("cluster-2", None, Ok(cluster2_report));
 
@@ -6951,6 +6956,7 @@ async fn switch_namespace_while_in_changed_view_clears_stale_report() {
         infra_changes: vec![],
         includes_failing: true,
         includes_scaled: false,
+        argo_error: None,
     });
     app.active_view = ActiveView::Changed(changed_state);
     app.active_context = "cluster-1".to_string();

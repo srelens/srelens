@@ -318,8 +318,11 @@ mod tests {
                 sync_revision: "7b89abc".to_string(),
                 sync_age: "12m".to_string(),
                 sync_message: None,
+                ..Default::default()
             }),
             argo_rollout_in_window: None,
+            gitops_unresolved: None,
+            local_cause: None,
             error_log_snippet: Some(vec!["FATAL: bad DB_HOST".to_string()]),
             error_log_pod: Some("payment-api-1".to_string()),
             error_log_container: Some("payment".to_string()),
