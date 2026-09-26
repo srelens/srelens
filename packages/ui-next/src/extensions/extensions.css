@@ -464,7 +464,11 @@
 .extension-related > li > button { justify-content: flex-start; height: auto; min-height: 0; padding: 0; font-size: inherit; text-align: start; white-space: nowrap; text-decoration: underline; }
 /* A failure is prose, and wraps. */
 .extension-related > li.extension-related-error { color: var(--danger, var(--fl-color-danger, inherit)); white-space: normal; overflow-wrap: anywhere; overflow-x: visible; }
-.extension-related + button { margin: 0 12px 8px; }
+/* A note on a reverse link — the list was cut off, or some resources could not be read — is prose too. */
+.extension-related > li.extension-related-note { color: var(--ink-muted, var(--fl-color-text-muted)); white-space: normal; overflow-wrap: anywhere; overflow-x: visible; }
+/* The reverse links (#728), grouped under the word the relation reads as from the target. */
+.extension-related-group { margin: 0; padding: 6px 12px 0; color: var(--ink-muted, var(--fl-color-text-muted)); font-size: var(--text-caption, 0.75rem); font-weight: var(--weight-semibold); }
+.extension-related + button, [role="group"]:has(> .extension-related) + button { margin: 0 12px 8px; }
 .extension-resource-detail pre { white-space: pre; overflow: auto; max-width: 100%; font-family: var(--font-mono); font-size: inherit; }
 .extension-detail-metadata { padding: 12px; margin: 0; }
 .extension-action-review { padding: 12px; border-block: 1px solid var(--rule, var(--fl-color-border)); background: var(--surface, var(--fl-color-surface)); }

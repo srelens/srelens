@@ -256,76 +256,70 @@ fn a_0_4_manifest_is_incompatible_with_a_host_that_implements_only_0_3() {
     }
 }
 
-// ---- API 0.5 (#567) ----
-//
-// API 0.4 shipped in the `srelens-v0.15.1-186` and later prereleases, so what #567 adds
-// is a line of its own: a 0.4 host meets none of it.
-
-/// Each thing API 0.5 added, used validly on top of the 0.4 Argo CD app, with the
-/// `API_FIELDS` entries it uses.
-fn uses_of_0_5() -> Vec<(&'static [&'static str], Use)> {
+/// Each thing API 0.5 added (#728), used validly, with the `API_FIELDS` entry it uses:
+/// a link's spec `path`, and a link's `to` naming a built-in kind. API 0.4 was published
+/// in srelens builds without them, so a `^0.4` manifest may use neither.
+fn uses_of_0_5() -> Vec<(&'static str, Use)> {
     vec![
-        // A pod binding scoped by the object a reader lists: a new target, no new field.
-        (&["capabilities[].target"], |v| {
+        ("contributions.resourceLinks[].match.path", |v| {
+            // Toward the reader's own kind, so the path is the only new thing.
+            v["contributions"]["resourceLinks"] = json!([{"id":"parent",
+                "from":"argoproj.io/Application","to":"argoproj.io/Application",
+                "relation":"references","match":{"path":".spec.parentRefs[*]"}}]);
+        }),
+        ("contributions.resourceLinks[].to", |v| {
+            v["contributions"]["resourceLinks"] = json!([{"id":"account",
+                "from":"apps/Deployment","to":"/ServiceAccount","relation":"references",
+                "match":{"label":"example.io/service-account"}}]);
+        }),
+        // Logs, exec and port-forwards (#567): a pod binding scoped by the object a
+        // reader lists is a new target, and no new field.
+        ("capabilities[].target", |v| {
             v["permissions"]
                 .as_array_mut()
                 .unwrap()
                 .push(json!("k8s.streamLogs"));
-            v["capabilities"]
-                .as_array_mut()
-                .unwrap()
-                .push(json!({"name":"logs",
+            v["capabilities"].as_array_mut().unwrap().push(json!({"name":"logs",
                 "title":"Logs","target":"k8s.streamLogs","inputs":[],
                 "arguments":{"resource":"applications","selector":".spec.selector"}}));
         }),
-        // One scoped by the namespaces its permission grants.
-        (
-            &["capabilities[].target", "permissions[].namespaces"],
-            |v| {
-                v["permissions"]
-                    .as_array_mut()
-                    .unwrap()
-                    .push(json!({"capability":"k8s.exec","namespaces":["argocd"]}));
-                v["capabilities"]
-                    .as_array_mut()
-                    .unwrap()
-                    .push(json!({"name":"version",
+        // One scoped by the namespaces its permission grants. A grant needs a pod
+        // binding, so it is listed before the target and is what the refusal names.
+        ("permissions[].namespaces", |v| {
+            v["permissions"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({"capability":"k8s.exec","namespaces":["argocd"]}));
+            v["capabilities"].as_array_mut().unwrap().push(json!({"name":"version",
                 "title":"Argo CD version","target":"k8s.exec","inputs":[],
                 "arguments":{"command":["argocd","version","--client"]}}));
-            },
-        ),
+        }),
     ]
 }
 
 #[test]
 fn every_0_5_addition_under_a_0_4_range_is_told_it_requires_api_0_5() {
-    for (fields, apply) in uses_of_0_5() {
+    for (field, apply) in uses_of_0_5() {
         let mut value = manifest();
         apply(&mut value);
         for range in ["^0.5", ">=0.5, <0.6"] {
             Manifest::parse(&with_range(value.clone(), range))
-                .unwrap_or_else(|e| panic!("{fields:?} under {range}: {e}"));
+                .unwrap_or_else(|e| panic!("{field} under {range}: {e}"));
         }
-        // A range that also admits 0.3 is refused too, but may be told first about a
-        // 0.4 field the addition uses; the 0.4 cases above hold that line.
-        for (range, admitted) in [("^0.4", "0.4.0"), (">=0.4, <0.6", "0.4.0")] {
+        // A range that admits 0.4 claims the hosts published on that line.
+        for range in ["^0.4", ">=0.4, <0.6"] {
             let errors = Manifest::parse(&with_range(value.clone(), range))
-                .expect_err(&format!("{fields:?} under {range}"))
+                .expect_err(&format!("{field} under {range}"))
                 .0;
-            assert_eq!(errors.len(), 1, "{fields:?} under {range}: {errors:?}");
+            assert_eq!(errors.len(), 1, "{field} under {range}: {errors:?}");
             let error = &errors[0];
             assert_eq!(error.code, ValidationCode::ApiIncompatible, "{error:?}");
             assert_eq!(error.path, "srelensApiVersion", "{error:?}");
             assert!(
                 error.message.contains("requires API 0.5.0")
-                    && error.message.contains(&format!("admits API {admitted}")),
+                    && error.message.contains("admits API 0.4.0")
+                    && error.message.contains(&format!("`{field}`")),
                 "{error:?}"
-            );
-            assert!(
-                fields
-                    .iter()
-                    .any(|field| error.message.contains(&format!("`{field}`"))),
-                "{fields:?}: {error:?}"
             );
         }
     }
@@ -333,28 +327,47 @@ fn every_0_5_addition_under_a_0_4_range_is_told_it_requires_api_0_5() {
 
 #[test]
 fn every_0_5_entry_in_the_table_has_a_case_above() {
-    let covered: Vec<&str> = uses_of_0_5()
-        .iter()
-        .flat_map(|(fields, _)| fields.iter().copied())
-        .collect();
+    let covered: Vec<&str> = uses_of_0_5().iter().map(|(field, _)| *field).collect();
     let gated: Vec<&str> = API_FIELDS
         .iter()
         .filter(|field| field.introduced == "0.5.0")
         .map(|field| field.path)
         .collect();
-    assert!(!gated.is_empty());
+    assert_eq!(gated.len(), covered.len(), "{gated:?}");
     for path in &gated {
         assert!(covered.contains(path), "{path} has no case");
     }
-    for path in covered {
-        assert!(gated.contains(&path), "{path} is not in API_FIELDS");
+}
+
+#[test]
+fn a_link_to_a_kind_a_reader_lists_stays_a_0_4_link() {
+    // The built-in form is decided by the value: `to` naming a reader's kind is what API
+    // 0.4 already had, and a `^0.4` manifest keeps writing it.
+    let mut value = manifest();
+    value["contributions"]["resourceLinks"] = json!([{"id":"owner","from":"apps/Deployment",
+        "to":"argoproj.io/Application","relation":"managedBy",
+        "match":{"label":"argocd.argoproj.io/instance"}}]);
+    Manifest::parse(&with_range(value, "^0.4")).expect("a reader target is 0.4");
+}
+
+#[test]
+fn a_0_5_manifest_is_incompatible_with_a_host_on_the_0_4_line() {
+    // What the published 0.4 hosts (srelens 0.15.1-186 and -187) check first.
+    let published = ["0.3.0", "0.4.0"];
+    for range in ["^0.5", ">=0.5, <0.6"] {
+        let range = semver::VersionReq::parse(range).unwrap();
+        assert!(matching_api_versions_in(&range, &published).is_empty());
+        assert_eq!(
+            negotiate_api_version(&range).map(|v| v.to_string()),
+            Some("0.5.0".into())
+        );
     }
 }
 
 #[test]
 fn a_0_4_manifest_keeps_its_line_on_a_host_that_also_implements_0_5() {
     // `^0.4` pins its minor, so a 0.4 app is served under 0.4 here and keeps installing
-    // on a host that implements only 0.4.
+    // on a host that implements only 0.4 (#567).
     for range in ["^0.4", ">=0.4, <0.5"] {
         let range = semver::VersionReq::parse(range).unwrap();
         assert_eq!(

@@ -6,7 +6,7 @@
 //! stop at [`APP_LIST_CAP`], telling the caller when they were cut off.
 
 use crate::connect::request_timeout;
-use kube::api::{Api, ListParams};
+use kube::api::{Api, ListParams, ObjectList, PartialObjectMeta};
 use kube::Resource;
 use serde::de::DeserializeOwned;
 use srelens_capability::CapabilityError;
@@ -169,6 +169,42 @@ pub async fn list_capped_within<K>(
 where
     K: Resource + Clone + DeserializeOwned + Debug,
 {
+    walk_pages(
+        base,
+        per_page,
+        |params| async move { api.list(&params).await },
+    )
+    .await
+}
+
+/// [`list_capped`] asking the API server for each object's metadata alone
+/// (`PartialObjectMetadataList`): no spec, no status, and for a Secret no value
+/// ever leaves the API server (#728). The same cap, page bound and per-page
+/// budget.
+pub async fn list_metadata_capped<K>(
+    api: &Api<K>,
+    base: ListParams,
+) -> Result<(Vec<PartialObjectMeta<K>>, bool), ListCappedError>
+where
+    K: Resource + Clone + DeserializeOwned + Debug,
+{
+    walk_pages(base, request_timeout(), |params| async move {
+        api.list_metadata(&params).await
+    })
+    .await
+}
+
+/// The capped walk both lists share, over whatever `fetch` asks for one page of.
+async fn walk_pages<T, F, Fut>(
+    base: ListParams,
+    per_page: Duration,
+    fetch: F,
+) -> Result<(Vec<T>, bool), ListCappedError>
+where
+    T: Clone,
+    F: Fn(ListParams) -> Fut,
+    Fut: std::future::Future<Output = Result<ObjectList<T>, kube::Error>>,
+{
     let mut items = Vec::new();
     let mut token: Option<String> = None;
     // Every token followed so far, not only the last: a server can circle
@@ -180,7 +216,7 @@ where
         if let Some(ref t) = token {
             params = params.continue_token(t);
         }
-        let page = tokio::time::timeout(per_page, api.list(&params))
+        let page = tokio::time::timeout(per_page, fetch(params))
             .await
             .map_err(|_| ListCappedError::Timeout {
                 pages_read,

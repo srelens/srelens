@@ -12,6 +12,7 @@ import {
   readExtension,
   resolveExtensionColumns,
   resolveExtensionLinks,
+  resolveExtensionReverseLinks,
   extensionRoute,
   parseExtensionRoute,
   itemStatus,
@@ -112,6 +113,14 @@ describe("extension contract", () => {
     // `ResolveLinks` in crates/registry/src/extensions/links.rs denies unknown fields.
     expect(invokeCapability).toHaveBeenLastCalledWith("extensions.resolveLinks", {
       id: "org.test.app", revision: 3, context: "cluster/a", namespace: "team", kind: "apps/Deployment", resource,
+    });
+  });
+  it("sends a reverse link resolve with the forward resolver's field names (#728)", async () => {
+    const resource = { apiVersion: "argoproj.io/v1alpha1", kind: "Application", metadata: { name: "guestbook", namespace: "argocd" } };
+    await resolveExtensionReverseLinks("org.test.app", 3, "cluster/a", "argocd", "argoproj.io/Application", resource);
+    // Both resolvers deserialize `ResolveLinks`, which denies unknown fields.
+    expect(invokeCapability).toHaveBeenLastCalledWith("extensions.resolveReverseLinks", {
+      id: "org.test.app", revision: 3, context: "cluster/a", namespace: "argocd", kind: "argoproj.io/Application", resource,
     });
   });
   it("pins cluster and namespace in route identity", () => {

@@ -482,6 +482,7 @@ mod tests {
             "extensions.resolveCards",
             "extensions.resolvePanels",
             "extensions.resolveLinks",
+            "extensions.resolveReverseLinks",
             "extensions.streams",
             "extensions.pods",
         ] {

@@ -2052,6 +2052,7 @@ mod tests {
             Ok(Some((
                 std::time::Instant::now(),
                 Arc::new(vec![json!({"name": "a"})]),
+                false,
             )))
         };
         for key in [&key, &other] {

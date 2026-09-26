@@ -177,6 +177,8 @@ pub mod serviceaccounts;
 pub mod services;
 pub mod statefulsets;
 pub mod storageclasses;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 pub mod toolbox;
 pub mod toolbox_install;
 pub mod topology;

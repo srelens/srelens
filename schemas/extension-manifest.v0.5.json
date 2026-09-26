@@ -815,7 +815,7 @@
     },
     "LinkMatch": {
       "additionalProperties": false,
-      "description": "Where on the `from` resource the target's name is written. Exactly one of `label`, `ownerReference`, `annotation` and `name`.",
+      "description": "Where on the `from` resource the target's name is written. Exactly one of `label`, `ownerReference`, `annotation`, `name` and `path`.",
       "properties": {
         "annotation": {
           "description": "The annotation whose value is the target's name, or, with `parse`, a reference in a host-known format that names it.",
@@ -863,6 +863,13 @@
             }
           ],
           "description": "With `annotation`: the format the value is written in. The host accepts a reference only when it names the `from` resource itself."
+        },
+        "path": {
+          "description": "A path on the `from` resource whose value names the target (API 0.5, #728): the predicate grammar, plus `[*]` for every element of a list, such as `.spec.rules[*].backendRefs[*]`. Each value is the target's name, or an object reference with `name` and an optional `namespace`, `kind`, and `group` or `apiVersion`; a reference to another kind is not this link's. Without a `namespace` the target is in the `from` resource's namespace. The host reads the path through the declared reader of `from`.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "type": "object"
@@ -1040,7 +1047,7 @@
     },
     "ResourceLink": {
       "additionalProperties": false,
-      "description": "A relationship from a resource of kind `from` to resources of kind `to`, found by reading the `from` resource's own metadata (#545).\n\nThe `match` selectors are a join's (`joins[].match`), read the other way round: a join indexes the *listed* resources by a key that names the row, while a link reads the key on the resource being inspected, and the key names the target. The target is then looked up by name in the list of the declared reader for `to`, through the same index a join uses.",
+      "description": "A relationship from a resource of kind `from` to resources of kind `to`, found by reading the `from` resource's own metadata (#545), or a declared path on it (#728).\n\nThe metadata selectors are a join's (`joins[].match`), read the other way round: a join indexes the *listed* resources by a key that names the row, while a link reads the key on the resource being inspected, and the key names the target. The target is then looked up by name in the list of the declared reader for `to`, or of the built-in kind `to` names, through the same index a join uses. The target's own Inspector shows the same links the other way round, computed from these declarations.",
       "properties": {
         "from": {
           "description": "The qualified kind of the resource the link is read from, e.g. `apps/Deployment`.",
@@ -1056,7 +1063,7 @@
           "$ref": "#/definitions/LinkRelation"
         },
         "to": {
-          "description": "The qualified kind of the target. A declared `k8s.listCustomResource` reader must list it: that is how the host knows the target exists.",
+          "description": "The qualified kind of the target: one a declared `k8s.listCustomResource` reader lists, or a built-in kind this host lists (API 0.5, #728). That is how the host knows the target exists.",
           "type": "string"
         }
       },

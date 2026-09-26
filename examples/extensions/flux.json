@@ -1,9 +1,9 @@
 {
-  "$schema": "https://raw.githubusercontent.com/srelens/srelens/main/schemas/extension-manifest.v0.4.json",
+  "$schema": "https://raw.githubusercontent.com/srelens/srelens/main/schemas/extension-manifest.v0.5.json",
   "id": "org.srelens.flux",
   "name": "Flux",
-  "version": "0.5.0",
-  "srelensApiVersion": "^0.4",
+  "version": "0.6.0",
+  "srelensApiVersion": "^0.5",
   "kind": "declarative",
   "permissions": [
     "k8s.listCustomResource",
@@ -880,6 +880,48 @@
         "to": "helm.toolkit.fluxcd.io/HelmRelease",
         "relation": "managedBy",
         "match": {"label": "helm.toolkit.fluxcd.io/name", "namespaceLabel": "helm.toolkit.fluxcd.io/namespace"}
+      },
+      {
+        "id": "kustomization-git-source",
+        "from": "kustomize.toolkit.fluxcd.io/Kustomization",
+        "to": "source.toolkit.fluxcd.io/GitRepository",
+        "relation": "references",
+        "match": {"path": ".spec.sourceRef"}
+      },
+      {
+        "id": "kustomization-oci-source",
+        "from": "kustomize.toolkit.fluxcd.io/Kustomization",
+        "to": "source.toolkit.fluxcd.io/OCIRepository",
+        "relation": "references",
+        "match": {"path": ".spec.sourceRef"}
+      },
+      {
+        "id": "kustomization-bucket-source",
+        "from": "kustomize.toolkit.fluxcd.io/Kustomization",
+        "to": "source.toolkit.fluxcd.io/Bucket",
+        "relation": "references",
+        "match": {"path": ".spec.sourceRef"}
+      },
+      {
+        "id": "helmrelease-chart-source",
+        "from": "helm.toolkit.fluxcd.io/HelmRelease",
+        "to": "source.toolkit.fluxcd.io/HelmRepository",
+        "relation": "references",
+        "match": {"path": ".spec.chart.spec.sourceRef"}
+      },
+      {
+        "id": "kustomization-target-namespace",
+        "from": "kustomize.toolkit.fluxcd.io/Kustomization",
+        "to": "/Namespace",
+        "relation": "references",
+        "match": {"path": ".spec.targetNamespace"}
+      },
+      {
+        "id": "kustomization-service-account",
+        "from": "kustomize.toolkit.fluxcd.io/Kustomization",
+        "to": "/ServiceAccount",
+        "relation": "references",
+        "match": {"path": ".spec.serviceAccountName"}
       }
     ]
   },

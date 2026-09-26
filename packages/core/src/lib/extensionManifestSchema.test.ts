@@ -9,10 +9,9 @@ import { describe, expect, it } from "vitest";
 // Not `new URL(template, import.meta.url)`: Vite rewrites that form as an asset import.
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../../..");
 const repoFile = (path: string) => readFileSync(resolve(repoRoot, path), "utf8");
-// The examples target API 0.4 and name that line's schema; the newest line's (0.5,
-// #567) accepts them too, since a line only grows.
-const SCHEMA_URL =
-  "https://raw.githubusercontent.com/srelens/srelens/main/schemas/extension-manifest.v0.4.json";
+/** The published URL of an API line's schema, which a manifest written for it names. */
+const schemaUrl = (line: string) =>
+  `https://raw.githubusercontent.com/srelens/srelens/main/schemas/extension-manifest.v${line}.json`;
 const schema = JSON.parse(repoFile("schemas/extension-manifest.v0.5.json"));
 const frozen0_4 = JSON.parse(repoFile("schemas/extension-manifest.v0.4.json"));
 // Every example, so a new one cannot skip validation.
@@ -29,10 +28,11 @@ describe("committed extension manifest schema", () => {
     expect(examples.length).toBeGreaterThan(0);
   });
 
-  it.each(examples)("accepts %s and is named by it", (path) => {
+  it.each(examples)("accepts %s, which names its own line's schema", (path) => {
     const manifest = JSON.parse(repoFile(path));
     expect(validate(manifest), JSON.stringify(validate.errors)).toBe(true);
-    expect(manifest.$schema).toBe(SCHEMA_URL);
+    // `^0.4` names v0.4: an example that needs nothing newer stays on its line (#728).
+    expect(manifest.$schema).toBe(schemaUrl(manifest.srelensApiVersion.replace(/^\^/, "")));
   });
 
   it("rejects unknown and missing fields, as the host does", () => {
@@ -62,8 +62,33 @@ describe("frozen API 0.3 manifest schema", () => {
 
   it.each(examples)("refuses %s, which uses API 0.4 fields", (path) => {
     const manifest = JSON.parse(repoFile(path));
-    expect(manifest.srelensApiVersion).toBe("^0.4");
+    expect(manifest.srelensApiVersion).toMatch(/^\^0\.[45]$/);
     expect(validate({ ...manifest, srelensApiVersion: "^0.3" })).toBe(false);
+  });
+});
+
+// API 0.4's file is kept as it was when 0.5 was cut (#728): srelens 0.15.1-186 and -187
+// implement 0.4 without resource links by spec path or to built-in kinds.
+describe("frozen API 0.4 manifest schema", () => {
+  const validate = new Ajv({ allErrors: true }).compile(
+    JSON.parse(repoFile("schemas/extension-manifest.v0.4.json")),
+  );
+
+  it("accepts the Argo CD example, which uses nothing 0.5 added", () => {
+    const manifest = JSON.parse(repoFile("examples/extensions/argocd.json"));
+    expect(manifest.srelensApiVersion).toBe("^0.4");
+    expect(validate(manifest), JSON.stringify(validate.errors)).toBe(true);
+  });
+
+  it("refuses the Flux example's spec-path links", () => {
+    const manifest = JSON.parse(repoFile("examples/extensions/flux.json"));
+    expect(manifest.srelensApiVersion).toBe("^0.5");
+    expect(validate(manifest)).toBe(false);
+    const { resourceLinks, ...contributions } = manifest.contributions;
+    const withoutPaths = resourceLinks.filter((link: { match: { path?: string } }) => !link.match.path);
+    expect(withoutPaths.length).toBeGreaterThan(0);
+    expect(validate({ ...manifest, contributions: { ...contributions, resourceLinks: withoutPaths } }),
+      JSON.stringify(validate.errors)).toBe(true);
   });
 });
 
@@ -101,22 +126,12 @@ describe("network.http permissions (#568)", () => {
   });
 });
 
-// API 0.4's file is kept as it was when 0.5 was cut (#567). 0.4 shipped in the
-// `srelens-v0.15.1-186` prerelease, so a host on that line must never meet 0.5's fields.
-describe("frozen API 0.4 manifest schema", () => {
-  const validate = new Ajv({ allErrors: true }).compile(frozen0_4);
-
-  it.each(examples)("accepts %s, which targets API 0.4", (path) => {
-    expect(validate(JSON.parse(repoFile(path))), JSON.stringify(validate.errors)).toBe(true);
-  });
-});
-
 describe("pod permissions (#567)", () => {
   const validate = new Ajv({ allErrors: true }).compile(schema);
   const frozen = new Ajv({ allErrors: true }).compile(frozen0_4);
-  /** An example granted logs for the pods of one namespace. */
+  /** The Argo CD example, granted logs for the pods of one namespace. */
   const granted = () => {
-    const example = JSON.parse(repoFile(examples[0]));
+    const example = JSON.parse(repoFile("examples/extensions/argocd.json"));
     return {
       ...example,
       srelensApiVersion: "^0.5",

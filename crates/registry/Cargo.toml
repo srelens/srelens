@@ -59,6 +59,8 @@ fuzzing = []
 # The property tests start from valid documents and edit them with plugin-host's
 # test support.
 srelens-plugin-host = { path = "../plugin-host", features = ["fuzzing"] }
+# The fake API server the resource link tests drive the resolvers against (#728).
+srelens-kube = { path = "../kube", features = ["test-support"] }
 proptest = { version = "1", default-features = false, features = ["std"] }
 # net and io-util: the `network.http` tests (#568) answer from a local socket.
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "test-util", "net", "io-util"] }
