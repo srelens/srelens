@@ -483,6 +483,7 @@ mod tests {
             "extensions.resolvePanels",
             "extensions.resolveLinks",
             "extensions.streams",
+            "extensions.pods",
         ] {
             let (status, _) = post(&format!("/api/capability/{id}"), Body::from("{}")).await;
             assert_eq!(status, StatusCode::NOT_FOUND, "{id}");

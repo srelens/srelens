@@ -13,17 +13,26 @@ vi.mock("../transport/transport", () => ({
 
 import {
   describeStreamEnd,
+  extensionPods,
   extensionStreamMetrics,
   extensionStreamPayload,
   EXTENSION_INVENTORY_CHANNEL,
+  isExtensionExecEvent,
+  isExtensionForwardEvent,
+  isExtensionLogEvent,
   isExtensionWatchEvent,
   onExtensionInventoryChanged,
   openExtensionView,
+  startExtensionLogStream,
   type ExtensionStreamEnd,
 } from "./extensionStreams";
 // What the Rust `OpenStreamIn` test deserializes, byte for byte.
 import wrapperPayload from "./extension-stream-open.json";
 import watchPayload from "./extension-stream-watch.json";
+// The pod sources (#567), which `pods_tests.rs` deserializes too.
+import logsPayload from "./extension-stream-logs.json";
+import execPayload from "./extension-stream-exec.json";
+import forwardPayload from "./extension-stream-port-forward.json";
 
 describe("watch events (#566)", () => {
   it("accepts exactly the three events a watch sends", () => {
@@ -96,6 +105,44 @@ describe("extensionStreamPayload", () => {
   it("sends a watch exactly as the host's OpenStreamIn accepts it (#566)", () => {
     const watch = { ...request, source: { kind: "watch" as const, capability: "applications" } };
     expect(extensionStreamPayload("org.example.argocd/page:applications#1", "extstream:2-a8f3k1", watch)).toEqual(watchPayload);
+  });
+
+  it("sends the pod sources exactly as the host's OpenStreamIn accepts them (#567)", () => {
+    const pods = { id: "org.example.certmanager", revision: 1, context: "cluster/a", namespace: "cert-manager" };
+    const view = "org.example.certmanager/resource:controllers#1";
+    const logs = extensionStreamPayload(view, "extstream:3-q7w2e9", {
+      ...pods,
+      source: {
+        kind: "logs", capability: "controllerLogs", name: "cert-manager", pod: "cert-manager-7d9f8b6c5-x2x9k",
+        container: "cert-manager-controller", tailLines: 200, sinceSeconds: 3600, timestamps: true,
+      },
+    });
+    expect(logs).toEqual(logsPayload);
+    expect(JSON.stringify(logs)).not.toMatch(/tail_lines|since_seconds/);
+    const command = ["cmctl", "status", "certificate", "--all-namespaces"];
+    const exec = extensionStreamPayload(view, "extstream:4-m3n8b1", {
+      ...pods,
+      source: {
+        kind: "exec", capability: "status", name: "cert-manager", pod: "cert-manager-7d9f8b6c5-x2x9k",
+        container: "cert-manager-controller",
+        confirmed: { pod: "cert-manager-7d9f8b6c5-x2x9k", container: "cert-manager-controller", command },
+      },
+    });
+    expect(exec).toEqual(execPayload);
+    const forward = extensionStreamPayload(view, "extstream:5-z4c6v2", {
+      ...pods,
+      source: { kind: "portForward", capability: "webhook", name: "cert-manager", service: "cert-manager-webhook" },
+    });
+    expect(forward).toEqual(forwardPayload);
+  });
+
+  it("sends a pod source field by field, so nothing the host refuses rides along", () => {
+    const sneaky = {
+      ...request,
+      source: { kind: "exec" as const, capability: "status", pod: "p", command: ["sh", "-c", "id"], localPort: 1 } as never,
+    };
+    const payload = extensionStreamPayload("v", "extstream:1", sneaky);
+    expect(payload.source).toEqual({ kind: "exec", capability: "status", pod: "p" });
   });
 
   it("sends an empty namespace rather than leaving it out", () => {
@@ -256,5 +303,78 @@ describe("a window's ending (#700)", () => {
     expect(onEnd).toHaveBeenCalledWith({ type: "close", reason: "windowReloaded" } satisfies ExtensionStreamEnd);
     expect(onData).not.toHaveBeenCalled();
     expect(channels.get(channel)?.dispose).toHaveBeenCalled();
+  });
+});
+
+describe("pod source frames (#567)", () => {
+  it("accepts exactly what the pod sources send", () => {
+    expect(isExtensionLogEvent({ event: "lines", lines: [{ source: "p/c", line: "x" }] })).toBe(true);
+    expect(isExtensionLogEvent({ event: "lines", lines: [{ source: "p/c", line: "x" }], dropped: 3 })).toBe(true);
+    expect(isExtensionLogEvent({ event: "status", source: "p/c", status: "reconnecting", message: "EOF" })).toBe(true);
+    expect(isExtensionLogEvent({ event: "status", source: "p/c", status: "sideways" })).toBe(false);
+    expect(isExtensionLogEvent({ event: "lines", lines: [{ line: "no source" }] })).toBe(false);
+    expect(isExtensionExecEvent({ event: "output", chunks: [{ stream: "stderr", text: "x" }] })).toBe(true);
+    expect(isExtensionExecEvent({ event: "exit", code: 3 })).toBe(true);
+    expect(isExtensionExecEvent({ event: "exit", code: "3" })).toBe(false);
+    expect(isExtensionExecEvent({ event: "output", chunks: [{ stream: "stdin", text: "x" }] })).toBe(false);
+    expect(isExtensionForwardEvent({ event: "ready", localPort: 54321, pod: "p", port: 9402 })).toBe(true);
+    expect(isExtensionForwardEvent({ event: "ready", localPort: "54321", pod: "p", port: 9402 })).toBe(false);
+  });
+
+  it("reads the pods a binding may reach through extensions.pods", async () => {
+    invokeCapabilityMock.mockResolvedValue({ pods: [], scope: "pods selected by Deployment web" });
+    await extensionPods({ id: "a.b", revision: 2, capability: "logs", context: "c", namespace: "team", name: "web" });
+    expect(invokeCapabilityMock).toHaveBeenCalledWith("extensions.pods", {
+      id: "a.b", revision: 2, capability: "logs", context: "c", namespace: "team", name: "web",
+    });
+    await extensionPods({ id: "a.b", revision: 2, capability: "logs", context: "c", namespace: "cert-manager" });
+    expect(invokeCapabilityMock).toHaveBeenLastCalledWith("extensions.pods", {
+      id: "a.b", revision: 2, capability: "logs", context: "c", namespace: "cert-manager",
+    });
+  });
+});
+
+describe("startExtensionLogStream (#567)", () => {
+  const logs = {
+    id: "org.example.certmanager",
+    revision: 1,
+    context: "cluster/a",
+    namespace: "team",
+    source: { kind: "logs" as const, capability: "controllerLogs", name: "web", pod: "web-1", container: "app" },
+  };
+
+  // The pod log view follows any log source through the callbacks it gives
+  // `startLogStream`, so an app's logs — and a log provider's later (#569) —
+  // land in the same buffer as the cluster's own.
+  it("speaks startLogStream's callbacks: lines by source, status by source", async () => {
+    const onLine = vi.fn();
+    const onStatus = vi.fn();
+    const onDropped = vi.fn();
+    const onEnd = vi.fn();
+    const view = openExtensionView("org.example.certmanager", "logs");
+    const stream = await startExtensionLogStream(view, logs, onLine, onStatus, { onDropped, onEnd });
+    const [channel] = [...channels.keys()];
+    emit(channel, { type: "open", stream: "s-1" });
+    emit(channel, { type: "data", stream: "s-1", seq: 1, data: { event: "status", source: "web-1/app", status: "live" } });
+    emit(channel, {
+      type: "data", stream: "s-1", seq: 2,
+      data: { event: "lines", lines: [{ source: "web-1/app", line: "one" }, { source: "web-1/app", line: "two" }], dropped: 4 },
+    });
+    emit(channel, { type: "data", stream: "s-1", seq: 3, data: { event: "surprise" } });
+    expect(onStatus).toHaveBeenCalledWith("live", "web-1/app");
+    expect(onLine.mock.calls).toEqual([["web-1/app", "one"], ["web-1/app", "two"]]);
+    expect(onDropped).toHaveBeenCalledWith(4);
+    emit(channel, { type: "error", stream: "s-1", code: "source", message: "forbidden" });
+    expect(onEnd).toHaveBeenCalledWith({ type: "error", code: "source", message: "forbidden" });
+    stream.stop();
+    expect(invokeCommandMock).not.toHaveBeenCalledWith("extension_stream_cancel", expect.anything());
+  });
+
+  it("stops by cancelling its stream while it runs", async () => {
+    const view = openExtensionView("org.example.certmanager", "logs");
+    const stream = await startExtensionLogStream(view, logs, vi.fn());
+    stream.stop();
+    await Promise.resolve();
+    expect(invokeCommandMock).toHaveBeenCalledWith("extension_stream_cancel", { stream: "s-1" });
   });
 });

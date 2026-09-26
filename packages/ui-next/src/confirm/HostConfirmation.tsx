@@ -2,7 +2,7 @@ import { useMemo, useState, type ReactNode } from "react";
 import type { CapabilityImpact, DiffRow } from "@srelens/core";
 import { DiffLines } from "@srelens/ui-kit";
 import { collapseDiff } from "../lib/diffCollapse";
-import { escapeFormatCharacters, plainText } from "../extensions/displayText";
+import { commandArgument, escapeFormatCharacters, plainText } from "../extensions/displayText";
 
 /**
  * The one confirmation srelens asks before a write, wherever the write came
@@ -122,6 +122,13 @@ export interface HostConfirmationProps {
   app?: ConfirmationApp | null;
   /** The exact patch, as the manifest diff renderer's rows. */
   patch?: DiffRow[] | null;
+  /**
+   * The command the call runs (#567), as the host will run it: the container and
+   * every argument. Drawn whole — a reader approves this exact command, and one
+   * cut short is a different command — with each argument escaped, and quoted
+   * where its edges would not otherwise show.
+   */
+  command?: { container: string; argv: string[] } | null;
   /** `card` is the assistant transcript's inline frame, which is small. */
   frame?: "dialog" | "card";
   /** The frame's own extra detail — the tool id, the argument payload, a queue count. */
@@ -182,6 +189,7 @@ export function HostConfirmation({
   subject,
   app,
   patch,
+  command,
   frame = "dialog",
   details,
   actions,
@@ -198,7 +206,7 @@ export function HostConfirmation({
           {question}
         </p>
       )}
-      {(cluster || subject) && (
+      {(cluster || subject || command) && (
         <dl className="host-confirm-facts">
           {cluster ? (
             <>
@@ -210,6 +218,21 @@ export function HostConfirmation({
             <>
               <dt>{subject.kind === "bulk" ? "Selection" : "Resource"}</dt>
               <dd data-testid="host-confirm-target">{describeSubject(subject)}</dd>
+            </>
+          ) : null}
+          {command ? (
+            <>
+              <dt>Container</dt>
+              <dd data-testid="host-confirm-container">{boundedPlainText(command.container)}</dd>
+              <dt>Command</dt>
+              <dd className="host-confirm-command" data-testid="host-confirm-command">
+                {command.argv.map((argument, index) => (
+                  <span key={index}>
+                    {index > 0 ? " " : null}
+                    <span data-arg>{commandArgument(argument)}</span>
+                  </span>
+                ))}
+              </dd>
             </>
           ) : null}
         </dl>

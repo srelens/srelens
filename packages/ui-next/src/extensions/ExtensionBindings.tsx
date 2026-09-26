@@ -1,8 +1,18 @@
 import { useContext, useState, type ReactNode } from "react";
-import { CAPABILITY_CATALOG, NETWORK_HTTP, networkHosts, renderConfirmTemplate } from "@srelens/core";
+import {
+  CAPABILITY_CATALOG,
+  NETWORK_HTTP,
+  POD_EXEC,
+  POD_FORWARD,
+  POD_LOGS,
+  POD_TARGETS,
+  networkHosts,
+  podNamespaces,
+  renderConfirmTemplate,
+} from "@srelens/core";
 import { CodeEditor } from "@srelens/ui-kit";
 import { ExtensionControls } from "./ExtensionControls";
-import { escapeFormatCharacters, plainText } from "./displayText";
+import { commandArgument, escapeFormatCharacters, plainText } from "./displayText";
 import { HostText, settingReference, settingTitle } from "./networkText";
 
 // The review reads the manifest as parsed JSON, not as the checked `ExtensionManifest` type:
@@ -358,6 +368,116 @@ function NetworkRequests({ bindings, manifest }: { bindings: Binding[]; manifest
 }
 
 /**
+ * The host's own facts for the pod capabilities (#567). They are the broker's alone
+ * and not in the capability catalog, so they are stated here as the host declares them
+ * (`EXEC_ANNOTATIONS`, `FORWARD_ANNOTATIONS` in `crates/registry/src/extensions/pods.rs`).
+ */
+/** `k8s.exec`'s confirmation template, as the host declares it (`EXEC_ANNOTATIONS.confirm`). */
+export const EXEC_CONFIRM = "Run this app's command[ in {resource}][ in cluster {cluster}]?";
+export const POD_FACTS: Record<string, string> = {
+  [POD_LOGS]: "Read-only · low impact",
+  [POD_EXEC]: "Sensitive · high impact · confirmed on every run",
+  [POD_FORWARD]: "Read-only · medium impact · opens a port on this computer while the view is open",
+};
+
+/** The built-in kinds a pod scope's reader may list, by the reader's target (#567). */
+const WORKLOAD_KINDS: Record<string, string> = {
+  "k8s.listDeployments": "Deployment",
+  "k8s.listStatefulSets": "StatefulSet",
+  "k8s.listDaemonSets": "DaemonSet",
+};
+
+/**
+ * Whose pods a pod binding reaches (#567): each object of a reader's kind selects its
+ * own, by its selector — where Kubernetes keeps it for a built-in workload, where the
+ * binding says for a custom resource — or any pod in a granted namespace.
+ */
+function podScope(binding: Binding, bindings: Binding[]): ReactNode {
+  const resource = binding.arguments.resource;
+  if (resource === undefined) return <>any pod in a namespace above</>;
+  const reader = bindings.find((candidate) => candidate.name === resource);
+  if (!reader) return <>the pods of <code>{show(resource)}</code>, which this manifest does not declare</>;
+  const kind = WORKLOAD_KINDS[reader.target] ?? (typeof reader.arguments.kind === "string" ? reader.arguments.kind : reader.target);
+  const at = binding.arguments.selector;
+  return (
+    <>
+      pods selected by each {plainText(kind)} {label(reader)} lists
+      {at !== undefined && (
+        <>
+          , read at <code>{show(at)}</code>
+        </>
+      )}
+    </>
+  );
+}
+
+const containerOf = (binding: Binding): ReactNode =>
+  typeof binding.arguments.container === "string" ? (
+    <>
+      container <code>{plainText(binding.arguments.container)}</code> of{" "}
+    </>
+  ) : null;
+
+/**
+ * Logs, exec and port-forwards (#567): whose pods each binding reaches, and exactly
+ * what it does there — the command an exec binding runs, argument by argument, and the
+ * port a forward opens. Namespaces the permission grants are listed first, as
+ * `network.http`'s hosts are.
+ */
+function PodBindings({ target, bindings, all, manifest }: { target: string; bindings: Binding[]; all: Binding[]; manifest: unknown }) {
+  const namespaces = podNamespaces(manifest, target);
+  return (
+    <>
+      {namespaces.length > 0 && (
+        <>
+          <p className="extension-message">May reach any pod in these namespaces:</p>
+          <ul className="extension-network-hosts" aria-label={`Namespaces ${plainText(target)} may reach`}>
+            {namespaces.map((namespace, index) => (
+              <li key={index}>
+                <code>{plainText(namespace)}</code>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+      <ul className="extension-binding-readers">
+        {bindings.map((binding, index) => {
+          const args = binding.arguments;
+          const port = typeof args.port === "number" ? args.port : show(args.port);
+          const command = items(args.command).map((argument) => commandArgument(String(argument)));
+          return (
+            <li key={`${index}:${binding.name}`} aria-label={`Binding ${plainText(binding.name)}`}>
+              <strong>{label(binding)}</strong>:{" "}
+              {target === POD_LOGS && (
+                <>
+                  streams the logs of {containerOf(binding)}
+                  {podScope(binding, all)}.
+                </>
+              )}
+              {target === POD_EXEC && (
+                <>
+                  runs <code className="extension-command">{command.join(" ")}</code> in {containerOf(binding)}
+                  {podScope(binding, all)}. You confirm every run, with its pod, container and command.
+                </>
+              )}
+              {target === POD_FORWARD && (
+                <>
+                  forwards port <code>{port}</code>
+                  {args.service === true ? " through a Service to " : " of "}
+                  {podScope(binding, all)} to a port on this computer the host picks, while the view that opened it is
+                  open.
+                </>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+      <p className="extension-message">{POD_FACTS[target]}</p>
+    </>
+  );
+}
+
+/**
  * `extension.secretStore` (#543): not bound to anything, so what it grants is
  * which of the app's settings the host keeps as secrets, plus the host's own
  * metadata for the permission (#548) — read from the capability catalog,
@@ -413,6 +533,8 @@ export function ExtensionBindings({ manifest, permissions }: { manifest: unknown
                 <EventReaders bindings={bound} manifest={manifest} />
               ) : target === NETWORK_HTTP ? (
                 <NetworkRequests bindings={bound} manifest={manifest} />
+              ) : POD_TARGETS.includes(target) ? (
+                <PodBindings target={target} bindings={bound} all={bindings} manifest={manifest} />
               ) : (
                 <OtherReaders bindings={bound} />
               )}

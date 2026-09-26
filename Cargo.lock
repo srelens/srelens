@@ -6554,6 +6554,7 @@ dependencies = [
 name = "srelens-registry"
 version = "0.15.0"
 dependencies = [
+ "async-trait",
  "dirs",
  "libc",
  "log",

@@ -460,3 +460,36 @@ describe("useLogStream", () => {
     expect(startLogStream).toHaveBeenCalledTimes(1);
   });
 });
+
+// #567: an app's pod binding streams logs over its own source, and the pod log
+// view follows it through the same buffer, pause and status counting. A log
+// provider (#569) plugs in the same way.
+describe("useLogStream with another log source", () => {
+  it("opens the source it is given, not the cluster's own, and lands its lines", async () => {
+    startLogStream.mockReset();
+    let onLine!: (source: string, line: string) => void;
+    let onStatus!: (status: LogStatus, source: string) => void;
+    const stop = vi.fn();
+    const open = vi.fn(async (_targets: LogTarget[], line: typeof onLine, status: typeof onStatus, _options: unknown) => {
+      onLine = line;
+      onStatus = status;
+      return { stop };
+    });
+    const labelled: LogTarget = { pod: "web-1", container: "app", label: "web-1/app" };
+    const { result, unmount } = renderHook(() =>
+      useLogStream("ctx", "team", [labelled], { tailLines: 50, source: { key: "app:org.example/logs", open } }),
+    );
+    await waitFor(() => expect(open).toHaveBeenCalledTimes(1));
+    expect(startLogStream).not.toHaveBeenCalled();
+    expect(open.mock.calls[0][0]).toEqual([labelled]);
+    expect(open.mock.calls[0][3]).toMatchObject({ tailLines: 50 });
+    act(() => {
+      onStatus("live", "web-1/app");
+      onLine("web-1/app", "hello");
+    });
+    await waitFor(() => expect(result.current.lines.map((l) => l.text)).toEqual(["hello"]));
+    expect(result.current.status).toBe("live");
+    unmount();
+    expect(stop).toHaveBeenCalled();
+  });
+});

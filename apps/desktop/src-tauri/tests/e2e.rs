@@ -1329,6 +1329,7 @@ async fn run_suite() {
         .any(|i| i["name"] == WIDGET));
 
     extensions_and_gitops(&mut h, &ctx, &settings).await;
+    app_pod_streams(&mut h, &ctx, &settings).await;
 
     let out = h
         .ok(
@@ -2512,6 +2513,237 @@ async fn apply_gitops_fixtures(h: &mut Harness, ctx: &str) {
     );
     apply_once_served(h, ctx, &gitops_resources_yaml(), "the GitOps fixture CRDs").await;
     println!("fixtures applied: Flux Kustomization and Argo CD Application CRDs and objects");
+}
+
+/// Logs, exec and port-forwards for apps (#567), against the fixture Deployments:
+/// `extensions.pods` lists the pods a binding may reach, a `logs` stream follows one,
+/// an `exec` runs only once confirmed and reports its exit, a pod the Deployment does
+/// not select is refused, and a `portForward` reaches the HTTP fixture through a port
+/// the host picked, which stops listening when the view closes.
+async fn app_pod_streams(h: &mut Harness, ctx: &str, settings: &TempSettings) {
+    println!("=== extensions: pod logs, exec and port-forwards ===");
+    let id = "org.example.pods";
+    let manifest = json!({
+        "id": id, "name": "Pods", "version": "0.1.0", "srelensApiVersion": "^0.5",
+        "kind": "declarative",
+        "permissions": ["k8s.listDeployments", "k8s.streamLogs", "k8s.exec", "k8s.portForward"],
+        "capabilities": [
+            {"name": "workloads", "title": "Workloads", "target": "k8s.listDeployments",
+             "inputs": ["context", "namespace"], "arguments": {}},
+            {"name": "logs", "title": "Logs", "target": "k8s.streamLogs", "inputs": [],
+             "arguments": {"resource": "workloads", "container": "app"}},
+            {"name": "echo", "title": "Echo", "target": "k8s.exec", "inputs": [],
+             "arguments": {"resource": "workloads", "container": "app", "command": ["echo", "e2e-exec"]}},
+            {"name": "http", "title": "HTTP", "target": "k8s.portForward", "inputs": [],
+             "arguments": {"resource": "workloads", "port": 8080}}
+        ],
+        "contributions": {"pages": [], "detailTabs": [], "detailLinks": []}
+    })
+    .to_string();
+    // An exec binding runs code in the cluster, so an unsigned one needs the policy.
+    h.ok("extensions.configure", json!({"action":"unsignedApps","allowUnsignedApps":true})).await;
+    let grants = declared_permissions(&manifest);
+    let out = h.ok("extensions.validate", json!({"manifest": manifest, "grants": grants})).await;
+    assert_eq!(out["errors"], json!([]), "must validate: {out}");
+    let installed = h
+        .ok("extensions.configure", json!({"action": "install", "manifest": manifest, "grants": grants}))
+        .await;
+    let revision = installed["plugins"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["manifest"]["id"] == id)
+        .and_then(|p| p["revision"].as_u64())
+        .unwrap_or_else(|| panic!("{id} is installed: {installed}"));
+
+    let web = running_pod(h, ctx, id, revision, DEPLOY, "logs").await;
+    let http = running_pod(h, ctx, id, revision, HTTP_DEPLOY, "http").await;
+
+    let (_, streams) = srelens_desktop_lib::capabilities::build_registry_and_app_streams(
+        cache(),
+        kubeconfig_paths(),
+        Some(settings.0.clone()),
+    );
+    let streams = streams.expect("a build with settings has app streams");
+    let sink = Arc::new(srelens_streams::test_util::TestSink::default());
+    let request = |view: &str, channel: &str, workload: &str, mut source: Value| {
+        source["name"] = json!(workload);
+        json!({"id": id, "revision": revision, "view": view, "channel": channel,
+               "context": ctx, "namespace": NS, "source": source})
+    };
+    let data = |channel: &str| -> Vec<Value> {
+        sink.payloads_for(channel)
+            .into_iter()
+            .filter(|f| f["type"] == "data")
+            .map(|f| f["data"].clone())
+            .collect()
+    };
+
+    // Logs: the fixture echoes "hello" every five seconds.
+    streams
+        .open(
+            sink.clone(),
+            request("e2e/pods#1", "extstream:e2e-logs", DEPLOY,
+                json!({"kind": "logs", "capability": "logs", "pod": web, "tailLines": 20})),
+        )
+        .await
+        .expect("the logs stream opens");
+    let saw_hello = |frames: &[Value]| {
+        frames.iter().any(|f| {
+            f["data"]["event"] == "lines"
+                && f["data"]["lines"].as_array().is_some_and(|l| l.iter().any(|l| l["line"] == "hello"))
+        })
+    };
+    frames_until(&sink, "extstream:e2e-logs", "a hello line", &saw_hello).await;
+    assert!(
+        data("extstream:e2e-logs").iter().any(|d| d["event"] == "status" && d["status"] == "live"),
+        "{:?}",
+        data("extstream:e2e-logs")
+    );
+
+    // Exec: refused unconfirmed, then run once confirmed.
+    let echo = |confirmed: Option<Value>| {
+        let mut source = json!({"kind": "exec", "capability": "echo", "pod": web, "container": "app"});
+        if let Some(confirmed) = confirmed {
+            source["confirmed"] = confirmed;
+        }
+        source
+    };
+    let refused = streams
+        .open(sink.clone(), request("e2e/pods#1", "extstream:e2e-noexec", DEPLOY, echo(None)))
+        .await
+        .unwrap_err();
+    assert!(refused.contains("needs the host confirmation"), "{refused}");
+    streams
+        .open(
+            sink.clone(),
+            request("e2e/pods#1", "extstream:e2e-exec", DEPLOY,
+                echo(Some(json!({"pod": web, "container": "app", "command": ["echo", "e2e-exec"]})))),
+        )
+        .await
+        .expect("a confirmed exec opens");
+    let frames = frames_until(&sink, "extstream:e2e-exec", "the command's end", &|frames: &[Value]| {
+        frames.iter().any(|f| f["type"] == "close" || f["type"] == "error")
+    })
+    .await;
+    assert_eq!(frames.last().unwrap()["reason"], "completed", "{frames:?}");
+    let exec = data("extstream:e2e-exec");
+    assert!(
+        exec.iter().any(|d| d["event"] == "output"
+            && d["chunks"].as_array().unwrap().iter().any(|c| c["text"].as_str().unwrap_or_default().contains("e2e-exec"))),
+        "{exec:?}"
+    );
+    assert_eq!(exec.last().unwrap(), &json!({"event": "exit", "code": 0}), "{exec:?}");
+
+    // A pod the Deployment does not select is refused, whoever confirmed it.
+    let refused = streams
+        .open(
+            sink.clone(),
+            request("e2e/pods#1", "extstream:e2e-out", DEPLOY,
+                json!({"kind": "exec", "capability": "echo", "pod": http, "container": "app",
+                       "confirmed": {"pod": http, "container": "app", "command": ["echo", "e2e-exec"]}})),
+        )
+        .await
+        .unwrap_err();
+    assert!(refused.contains("not selected by Deployment"), "{refused}");
+
+    // Port-forward: the host picks the port, and the fixture answers through it.
+    streams
+        .open(
+            sink.clone(),
+            request("e2e/pods#2", "extstream:e2e-fwd", HTTP_DEPLOY,
+                json!({"kind": "portForward", "capability": "http", "pod": http})),
+        )
+        .await
+        .expect("the forward opens");
+    let frames = frames_until(&sink, "extstream:e2e-fwd", "ready", &|frames: &[Value]| {
+        frames.iter().any(|f| f["data"]["event"] == "ready")
+    })
+    .await;
+    let local = frames
+        .iter()
+        .find(|f| f["data"]["event"] == "ready")
+        .and_then(|f| f["data"]["localPort"].as_u64())
+        .expect("a local port") as u16;
+    let mut body = String::new();
+    for attempt in 0.. {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut socket = tokio::net::TcpStream::connect(("127.0.0.1", local)).await.expect("the port listens");
+        socket.write_all(b"GET /index.html HTTP/1.0\r\nHost: e2e\r\n\r\n").await.unwrap();
+        body.clear();
+        let _ = tokio::time::timeout(Duration::from_secs(10), socket.read_to_string(&mut body)).await;
+        if body.contains("ok") || attempt >= 5 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    assert!(body.starts_with("HTTP/1.") && body.contains("ok"), "{body}");
+    assert_eq!(streams.close_view("e2e/pods#2"), 1);
+    assert_eq!(sink.payloads_for("extstream:e2e-fwd").last().unwrap()["reason"], "viewClosed");
+    let mut closed = false;
+    for _ in 0..50 {
+        if std::net::TcpStream::connect(("127.0.0.1", local)).is_err() {
+            closed = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(closed, "the forward's port stops listening with its view");
+    assert_eq!(streams.close_view("e2e/pods#1"), 1, "the log stream was still open");
+
+    h.ok("extensions.configure", json!({"action": "remove", "id": id})).await;
+}
+
+/// The first running, ready pod the Deployment `workload` selects, as `extensions.pods`
+/// lists it for the app's `capability`: only that Deployment's pods, in the host's words.
+async fn running_pod(
+    h: &mut Harness,
+    ctx: &str,
+    id: &str,
+    revision: u64,
+    workload: &str,
+    capability: &str,
+) -> String {
+    let deadline = Instant::now() + Duration::from_secs(90);
+    loop {
+        let out = h
+            .ok(
+                "extensions.pods",
+                json!({"id": id, "revision": revision, "capability": capability,
+                       "context": ctx, "namespace": NS, "name": workload}),
+            )
+            .await;
+        assert_eq!(out["scope"], json!(format!("pods selected by Deployment {workload}")), "{out}");
+        let pods = out["pods"].as_array().cloned().unwrap_or_default();
+        assert!(
+            pods.iter()
+                .all(|p| p["name"].as_str().unwrap_or_default().starts_with(&format!("{workload}-"))),
+            "only {workload}'s pods: {out}"
+        );
+        if let Some(pod) = pods.iter().find(|p| p["phase"] == "Running" && p["ready"] == true) {
+            return pod["name"].as_str().unwrap().to_owned();
+        }
+        assert!(Instant::now() < deadline, "no running {workload} pod: {out}");
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+}
+
+/// The frames on `channel` once `done` holds for them, within thirty seconds.
+async fn frames_until(
+    sink: &srelens_streams::test_util::TestSink,
+    channel: &str,
+    what: &str,
+    done: &dyn Fn(&[Value]) -> bool,
+) -> Vec<Value> {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let frames = sink.payloads_for(channel);
+        if done(&frames) {
+            return frames;
+        }
+        assert!(Instant::now() < deadline, "{what}: {frames:?}");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
 }
 
 /// An example manifest under a local ID. `org.srelens.` IDs install only with the

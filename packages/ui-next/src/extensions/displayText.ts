@@ -28,3 +28,15 @@ export function escapeFormatCharacters(json: string): string {
 export function plainText(value: string): string {
   return value.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, escapeUnits);
 }
+
+/**
+ * One argument of a command an app runs (#567), as the host shows it: a plain one
+ * as it is, any other — empty, or holding a space, a quote, a backslash, or a
+ * control, format or separator character — as a JSON string literal with its
+ * format and separator characters escaped too. Exactly one reading, which decodes
+ * to the argument, so where it begins and ends is never a guess. Never bounded:
+ * a person approves the exact command, and one cut short is a different command.
+ */
+export function commandArgument(argument: string): string {
+  return /^[^\s"'\\\p{Cc}\p{Cf}\p{Zl}\p{Zp}]+$/u.test(argument) ? argument : plainText(JSON.stringify(argument));
+}

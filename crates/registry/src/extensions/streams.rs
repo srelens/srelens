@@ -13,13 +13,20 @@
 //! interval through `extensions.read`'s own path, so every tick rechecks
 //! everything a single read would; and `watch` (#566), which follows the kind
 //! a declared reader lists and says when it changed, so the view reads again
-//! through that same path. Logs, exec and port-forwards (#567) and metric
+//! through that same path. Logs, exec and port-forwards (#567) are the pod
+//! sources (`pods`): each reaches only pods its binding's scope admits. Metric
 //! providers (#569) are further `source` kinds on the same wire; none of them
 //! changes the frames.
+
+mod pods;
+#[cfg(test)]
+pub(super) use pods::MAX_LINES_PER_FRAME;
+pub use pods::{ExecConfirmed, PodTiming};
 
 use super::{columns, crd, read_contribution, resolver_app, Inventory, InventoryKey, Read, Store};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use srelens_capability::audit::{AuditSink, NoopAudit};
 use srelens_capability::{Annotations, Capability, CapabilityError, Registry};
 use srelens_kube::watch::{CustomWatchTarget, KindSignal};
 use srelens_plugin_host::Binding;
@@ -80,6 +87,50 @@ pub enum StreamSourceIn {
     /// Follow the kind a declared reader lists, and say when it changed (#566).
     #[serde(rename = "watch")]
     Watch { capability: String },
+    /// Follow one container's logs, through a `k8s.streamLogs` binding (#567).
+    /// `name` is the object whose pods, for a binding scoped by `resource`.
+    #[serde(rename = "logs")]
+    Logs {
+        capability: String,
+        #[serde(default)]
+        name: Option<String>,
+        pod: String,
+        #[serde(default)]
+        container: Option<String>,
+        /// Lines of history to start with: 0–5000, default 200.
+        #[serde(default, rename = "tailLines")]
+        tail_lines: Option<i64>,
+        #[serde(default, rename = "sinceSeconds")]
+        since_seconds: Option<i64>,
+        #[serde(default)]
+        timestamps: bool,
+    },
+    /// Run a `k8s.exec` binding's command once (#567). `confirmed` is what the
+    /// host confirmation named; the session runs only when it names exactly
+    /// the pod, container and command the host would run.
+    #[serde(rename = "exec")]
+    Exec {
+        capability: String,
+        #[serde(default)]
+        name: Option<String>,
+        pod: String,
+        #[serde(default)]
+        container: Option<String>,
+        #[serde(default)]
+        confirmed: Option<ExecConfirmed>,
+    },
+    /// Forward a local port the host picks through a `k8s.portForward` binding
+    /// (#567): to `pod`, or through `service` for a binding that says so.
+    #[serde(rename = "portForward")]
+    PortForward {
+        capability: String,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        pod: Option<String>,
+        #[serde(default)]
+        service: Option<String>,
+    },
 }
 
 /// The channel inventory announcements reach a window on (#566).
@@ -208,6 +259,9 @@ pub struct ExtensionStreams {
     /// How a watch source follows a kind; replaced by tests.
     watcher: Mutex<WatchSession>,
     timing: Mutex<WatchTiming>,
+    /// The cluster the pod sources reach (#567); replaced by tests.
+    cluster: Mutex<Arc<dyn super::pods::PodCluster>>,
+    pod_timing: Mutex<PodTiming>,
     /// Bumped on every announced inventory write, after the lifecycle's own
     /// endings: every watch rechecks what it may still follow.
     inventory: tokio::sync::watch::Sender<u64>,
@@ -224,7 +278,21 @@ impl ExtensionStreams {
         sink: Arc<dyn EventSink>,
         input: Value,
     ) -> Result<OpenStreamOut, String> {
-        self.open_owned(sink, None, input).await
+        self.open_owned(sink, None, Arc::new(NoopAudit), input)
+            .await
+    }
+
+    /// [`ExtensionStreams::open`], recording exec and port-forward sessions
+    /// to `audit` (#555). Test support; a host opens through
+    /// [`ExtensionStreams::open_in_window`].
+    #[cfg(test)]
+    pub(super) async fn open_audited(
+        &self,
+        sink: Arc<dyn EventSink>,
+        audit: Arc<dyn AuditSink>,
+        input: Value,
+    ) -> Result<OpenStreamOut, String> {
+        self.open_owned(sink, None, audit, input).await
     }
 
     /// [`ExtensionStreams::open`], owned by the window labelled `window` as
@@ -233,23 +301,29 @@ impl ExtensionStreams {
     /// never a value the page sent. The window's epoch is read here, before
     /// anything awaits: if the window ends while this open is authorizing,
     /// the open is refused when it lands.
+    ///
+    /// Exec and port-forward sessions (#567) are recorded to `audit` (#555):
+    /// one record when a session starts, and one for every session refused
+    /// once its binding was found.
     pub async fn open_in_window(
         &self,
         sink: Arc<dyn EventSink>,
         window: &str,
+        audit: Arc<dyn AuditSink>,
         input: Value,
     ) -> Result<OpenStreamOut, String> {
         let window = StreamWindow {
             label: window.to_owned(),
             epoch: self.streams.window_epoch(window),
         };
-        self.open_owned(sink, Some(window), input).await
+        self.open_owned(sink, Some(window), audit, input).await
     }
 
     async fn open_owned(
         &self,
         sink: Arc<dyn EventSink>,
         window: Option<StreamWindow>,
+        audit: Arc<dyn AuditSink>,
         input: Value,
     ) -> Result<OpenStreamOut, String> {
         let input: OpenStreamIn =
@@ -266,6 +340,11 @@ impl ExtensionStreams {
                 interval_seconds,
             } => (capability.clone(), *interval_seconds),
             StreamSourceIn::Watch { .. } => return self.open_watch(sink, window, input).await,
+            StreamSourceIn::Logs { .. } => return self.open_logs(sink, window, input).await,
+            StreamSourceIn::Exec { .. } => return self.open_exec(sink, window, audit, input).await,
+            StreamSourceIn::PortForward { .. } => {
+                return self.open_forward(sink, window, audit, input).await
+            }
         };
         let interval = interval_seconds.unwrap_or(DEFAULT_INTERVAL);
         if !(MIN_INTERVAL..=MAX_INTERVAL).contains(&interval) {
@@ -392,6 +471,18 @@ impl ExtensionStreams {
     pub(super) fn script_watches(&self, session: WatchSession, timing: WatchTiming) {
         *self.watcher.lock().unwrap() = session;
         *self.timing.lock().unwrap() = timing;
+    }
+
+    /// Replace the cluster the pod sources reach, and their clock. Test support.
+    #[cfg(test)]
+    pub(super) fn script_pods(&self, cluster: Arc<dyn super::pods::PodCluster>, timing: PodTiming) {
+        *self.cluster.lock().unwrap() = cluster;
+        *self.pod_timing.lock().unwrap() = timing;
+    }
+
+    /// The cluster the pod sources reach.
+    fn cluster(&self) -> Arc<dyn super::pods::PodCluster> {
+        self.cluster.lock().unwrap().clone()
     }
 
     /// Open a `watch` source: authorized as a read would be, then a
@@ -795,6 +886,8 @@ pub(super) fn register(
                     path: path.clone(),
                     core,
                     watcher: Mutex::new(kube_session(cache.clone())),
+                    cluster: Mutex::new(Arc::new(super::pods::KubePods(cache.clone()))),
+                    pod_timing: Mutex::new(PodTiming::default()),
                     cache,
                     snapshots,
                     streams: AppStreams::new(StreamLimits::default()),
@@ -808,6 +901,21 @@ pub(super) fn register(
             }
         }
     };
+    let targets = streams.clone();
+    reg.register(Capability::typed::<super::pods::PodsIn, super::pods::PodsOut, _, _>(
+        "extensions.pods",
+        "List the pods, and for a port-forward through a Service the Services, that one of an app's pod bindings may reach",
+        Annotations::READ_ONLY,
+        move |input| {
+            let targets = targets.clone();
+            async move {
+                targets
+                    .pod_targets(input)
+                    .await
+                    .map_err(CapabilityError::Handler)
+            }
+        },
+    ));
     let metrics = streams.clone();
     reg.register(Capability::typed::<Empty, StreamsOut, _, _>(
         "extensions.streams",
@@ -1221,6 +1329,7 @@ mod tests {
             .open_in_window(
                 sink.clone(),
                 "ctx-1",
+                Arc::new(NoopAudit),
                 watch(APP, revision, "page#1", "extstream:other"),
             )
             .await
@@ -1234,12 +1343,14 @@ mod tests {
                     request(APP, revision, "page#1", &channel)
                 };
                 streams
-                    .open_in_window(sink.clone(), "main", input)
+                    .open_in_window(sink.clone(), "main", Arc::new(NoopAudit), input)
                     .await
                     .unwrap_or_else(|e| panic!("reload {reload}, stream {n}: {e}"));
             }
             let over = request(APP, revision, "page#1", "extstream:over");
-            let refused = streams.open_in_window(sink.clone(), "main", over).await;
+            let refused = streams
+                .open_in_window(sink.clone(), "main", Arc::new(NoopAudit), over)
+                .await;
             assert!(refused.unwrap_err().contains("already has 8 open streams"));
             assert_eq!(streams.end_window("main", CloseReason::WindowReloaded), 7);
             for n in 0..7 {

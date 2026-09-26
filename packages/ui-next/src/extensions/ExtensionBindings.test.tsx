@@ -437,3 +437,76 @@ it("draws a request's literal URL and headers as plain text", async () => {
   expect(up.textContent).not.toContain(RLO);
   expect(within(review).getByRole("list", { name: "Hosts network.http may reach" }).textContent).toBe("api.github.com");
 });
+
+/** A cert-manager app with each pod binding (#567) and a namespace grant. */
+const podManifest = () => ({
+  id: "org.test.certmanager",
+  name: "cert-manager",
+  version: "0.1.0",
+  srelensApiVersion: "^0.5",
+  kind: "declarative",
+  permissions: [
+    "k8s.listDeployments",
+    "k8s.listCustomResource",
+    { capability: "k8s.streamLogs", namespaces: ["cert-manager", "kube-system"] },
+    "k8s.exec",
+    "k8s.portForward",
+  ],
+  capabilities: [
+    { name: "controllers", title: "Controllers", target: "k8s.listDeployments", arguments: {}, inputs: ["context", "namespace"] },
+    {
+      name: "rollouts", title: "Rollouts", target: "k8s.listCustomResource", inputs: ["context", "namespace"],
+      arguments: { group: "argoproj.io", version: "v1alpha1", plural: "rollouts", kind: "Rollout", namespaced: true },
+    },
+    { name: "controllerLogs", title: "Controller logs", target: "k8s.streamLogs", arguments: { resource: "controllers" }, inputs: [] },
+    {
+      name: "rolloutLogs", title: "Rollout logs", target: "k8s.streamLogs", inputs: [],
+      arguments: { resource: "rollouts", selector: ".spec.selector", container: "app" },
+    },
+    { name: "anyLogs", title: "Namespace logs", target: "k8s.streamLogs", arguments: {}, inputs: [] },
+    {
+      name: "status", title: "cmctl status", target: "k8s.exec", inputs: [],
+      arguments: { resource: "controllers", container: "controller", command: ["cmctl", "status", "two words", `x${RLO}y`] },
+    },
+    { name: "metrics", title: "Metrics", target: "k8s.portForward", arguments: { resource: "controllers", port: 9402 }, inputs: [] },
+    {
+      name: "webhook", title: "Webhook", target: "k8s.portForward", inputs: [],
+      arguments: { resource: "controllers", port: 443, service: true },
+    },
+  ],
+  contributions: { pages: [], detailTabs: [], detailLinks: [] },
+});
+
+// #567: the review says whose pods each binding reaches, the exact command an exec
+// binding runs, and the port a forward opens — before anything is granted.
+it("reviews each pod binding: whose pods, which command, which port", () => {
+  const permissions = ["k8s.listDeployments", "k8s.listCustomResource", "k8s.streamLogs", "k8s.exec", "k8s.portForward"];
+  render(<ExtensionBindings manifest={podManifest()} permissions={permissions} />);
+  const logs = screen.getByRole("listitem", { name: "k8s.streamLogs bindings" });
+  expect(within(logs).getByRole("list", { name: "Namespaces k8s.streamLogs may reach" }).textContent).toBe(
+    "cert-managerkube-system",
+  );
+  expect(within(logs).getByRole("listitem", { name: "Binding controllerLogs" }).textContent).toBe(
+    "Controller logs: streams the logs of pods selected by each Deployment Controllers lists.",
+  );
+  expect(within(logs).getByRole("listitem", { name: "Binding rolloutLogs" }).textContent).toBe(
+    "Rollout logs: streams the logs of container app of pods selected by each Rollout Rollouts lists, read at .spec.selector.",
+  );
+  expect(within(logs).getByRole("listitem", { name: "Binding anyLogs" }).textContent).toBe(
+    "Namespace logs: streams the logs of any pod in a namespace above.",
+  );
+  const exec = screen.getByRole("listitem", { name: "Binding status" });
+  expect(exec.textContent).toContain(
+    `cmctl status: runs cmctl status "two words" "x${escapes(0x202e)}y" in container controller of pods selected by each Deployment Controllers lists.`,
+  );
+  expect(exec.textContent).toContain("You confirm every run, with its pod, container and command.");
+  expect(screen.getByRole("listitem", { name: "k8s.exec bindings" }).textContent).toContain("Sensitive · high impact");
+  expect(exec.textContent).not.toContain(RLO);
+  const forward = screen.getByRole("listitem", { name: "k8s.portForward bindings" });
+  expect(within(forward).getByRole("listitem", { name: "Binding metrics" }).textContent).toBe(
+    "Metrics: forwards port 9402 of pods selected by each Deployment Controllers lists to a port on this computer the host picks, while the view that opened it is open.",
+  );
+  expect(within(forward).getByRole("listitem", { name: "Binding webhook" }).textContent).toContain(
+    "forwards port 443 through a Service to pods selected by each Deployment Controllers lists",
+  );
+});

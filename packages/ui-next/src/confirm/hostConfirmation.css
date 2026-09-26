@@ -67,6 +67,12 @@
   overflow-x: auto;
 }
 
+/* A command runs whole in one line and scrolls: every argument is shown, none
+   cut, and a line break inside one would read as two. */
+.host-confirm-command {
+  white-space: pre;
+}
+
 .host-confirm-requester {
   margin: 0;
   font-size: 0.75rem;

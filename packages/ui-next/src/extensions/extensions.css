@@ -814,3 +814,100 @@
 .dashboard-cards[data-stale] {
   box-shadow: inset 3px 0 0 var(--warn, var(--fl-color-warning));
 }
+
+/* Logs, exec and port-forwards from apps (#567). The panel is a region of the
+   Inspector like an app's detail panels; its log and output panes are machine
+   text, so they run and scroll rather than wrap (AGENTS.md). */
+.extension-pod-tools .extension-message { padding: 4px 0; }
+.extension-pod-group { display: grid; gap: 6px; min-width: 0; }
+.extension-pod-list { display: grid; margin: 0; padding: 0; list-style: none; }
+.extension-pod {
+  display: grid;
+  gap: 4px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--rule, var(--fl-color-border));
+  min-width: 0;
+}
+.extension-pod-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 4px 12px;
+  min-width: 0;
+}
+.extension-pod-head code {
+  min-width: 0;
+  overflow-x: auto;
+  white-space: nowrap;
+}
+.extension-pod-head span { color: var(--ink-muted, var(--fl-color-text-muted)); font-size: 0.75rem; }
+.extension-pod-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.extension-pod-tools .extension-review {
+  margin: 8px 0;
+  padding: 10px 12px;
+  border: 1px solid var(--rule, var(--fl-color-border));
+  border-radius: 4px;
+}
+.extension-pod-tools .extension-review:focus-visible {
+  outline: 2px solid var(--accent, var(--fl-color-primary));
+  outline-offset: 2px;
+}
+/* One track that never grows past the Inspector: a grid column is as wide as its
+   widest line by default, and one long log line would push the Stop control out of
+   the pane with it. */
+.extension-pod-sessions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 10px;
+  margin-top: 10px;
+  min-width: 0;
+}
+.extension-pod-session { display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; min-width: 0; }
+.extension-pod-group { grid-template-columns: minmax(0, 1fr); }
+.extension-pod-session > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--rule, var(--fl-color-border));
+}
+.extension-pod-session > header strong {
+  min-width: 0;
+  overflow-x: auto;
+  white-space: nowrap;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.75rem;
+  font-weight: 500;
+}
+.extension-pod-session > header button { flex: none; }
+.extension-pod-services-label { margin: 6px 0 0; }
+.extension-pod-log,
+.extension-pod-output {
+  max-height: 20rem;
+  margin: 0;
+  overflow: auto;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.75rem;
+  white-space: pre;
+  background: var(--surface-sunk, var(--fl-color-surface-alt));
+}
+.extension-pod-output { padding: 6px 8px; }
+.extension-pod-log { padding: 4px 0; }
+.extension-pod-line { display: flex; gap: 8px; padding: 1px 8px; width: max-content; min-width: 100%; }
+.extension-pod-line:hover { background: var(--field, var(--fl-color-surface-alt)); }
+/* The level is a word on the line; its tint only helps. */
+.extension-pod-level { flex: none; text-transform: uppercase; color: var(--ink-muted, var(--fl-color-text-muted)); }
+.extension-pod-level[data-level="error"],
+.extension-pod-level[data-level="fatal"] { color: var(--sev, var(--fl-color-danger)); }
+.extension-pod-level[data-level="warn"],
+.extension-pod-level[data-level="warning"] { color: var(--warn, var(--fl-color-warning)); }
+/* stderr is marked in words by the stream it came from on the span; the tint only helps. */
+.extension-pod-output [data-stream="stderr"] { color: var(--warn, var(--fl-color-warning)); }
+.extension-pod-stream { font-weight: 600; user-select: none; }
+.extension-command {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  white-space: pre;
+  overflow-x: auto;
+}
