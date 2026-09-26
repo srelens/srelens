@@ -512,8 +512,9 @@ are not run on macOS.
 
 ### Follow-up work
 
-- **An escape-hardening security review of the real supervisor.** Assigned to #572, and
-  **not done there.** The spike tried only ordinary operations. Before release, the
+- **An escape-hardening security review of the real supervisor**
+  ([#744](https://github.com/srelens/srelens/issues/744)). Assigned to #572, and **not
+  done there.** The spike tried only ordinary operations. Before release, the
   supervisor needs adversarial review of at least: handle and file-descriptor
   inheritance, symlink and hard-link tricks inside the data directory, Unix and abstract
   sockets, `io_uring` and other syscall surface the deny-list misses, signals and

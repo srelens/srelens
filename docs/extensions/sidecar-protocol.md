@@ -253,4 +253,4 @@ Windows, and it runs on macOS by hand (the file's header says how).
 | Per-app logs, the Inspector, runtime metrics | [#575](https://github.com/srelens/srelens/issues/575) |
 | JSON Schema for these messages, and the Rust and Go SDKs | [#576](https://github.com/srelens/srelens/issues/576) |
 | Memory and CPU limits on macOS | [#713](https://github.com/srelens/srelens/issues/713) |
-| The escape-hardening review of the supervisor and its backends, which the ADR assigns to #572 | not done ([ADR](../design/plugin-architecture.md#follow-up-work)) |
+| The escape-hardening review of the supervisor and its backends, which the ADR assigned to #572 | [#744](https://github.com/srelens/srelens/issues/744) |
