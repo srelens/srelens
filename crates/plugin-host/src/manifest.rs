@@ -8,17 +8,19 @@ use std::collections::{BTreeMap, BTreeSet};
 
 mod cards;
 mod network;
+mod pods;
 mod settings;
 mod versions;
 pub use cards::*;
 pub use network::*;
+pub use pods::*;
 pub use settings::*;
 pub use versions::{MAX_BINDING_VERSIONS, MAX_PATH_OVERRIDES};
 
 /// Extension API versions this host implements, oldest first. A manifest is accepted when
 /// its `srelensApiVersion` range matches any of them. How versions are added and retired
 /// is specified in docs/extensions/specification.md.
-pub const SUPPORTED_API_VERSIONS: &[&str] = &["0.3.0", "0.4.0"];
+pub const SUPPORTED_API_VERSIONS: &[&str] = &["0.3.0", "0.4.0", "0.5.0"];
 
 /// The `format` values JSON Schema draft-07 defines.
 const STANDARD_FORMATS: &[&str] = &[
@@ -132,6 +134,16 @@ const fn api_0_4(path: &'static str) -> ApiField {
     }
 }
 
+/// A field API 0.5 added (#567).
+const fn api_0_5(path: &'static str) -> ApiField {
+    ApiField {
+        path,
+        introduced: "0.5.0",
+        removed: None,
+        form: None,
+    }
+}
+
 /// The predicate path filter API 0.4 added to a path field API 0.3 already had (#541).
 const fn api_0_4_filter(path: &'static str) -> ApiField {
     ApiField {
@@ -170,6 +182,17 @@ pub const API_FIELDS: &[ApiField] = &[
     // also gates the capability as a binding target.
     api_0_4("permissions[].hosts"),
     api_0_4("permissions[].capability"),
+    // Logs, exec and port-forwards (#567). API 0.4 shipped in `srelens-v0.15.1-186`, so
+    // they are a line of their own. The pod targets are values of a field every line
+    // has; the namespaces a pod permission grants are a field.
+    ApiField {
+        form: Some(ApiForm {
+            name: "the pod targets k8s.streamLogs, k8s.exec and k8s.portForward",
+            matches: is_pod_target,
+        }),
+        ..api_0_5("capabilities[].target")
+    },
+    api_0_5("permissions[].namespaces"),
 ];
 
 /// Rejects a field in `raw` that is missing from any of `versions`: every supported API
@@ -281,7 +304,8 @@ pub struct Manifest {
     pub api_version: String,
     pub kind: ManifestKind,
     /// The host capabilities the bindings target, each by id; `network.http`
-    /// with the hosts it may reach (#568).
+    /// with the hosts it may reach (#568), and a pod capability with the
+    /// namespaces it grants, if any (#567).
     pub permissions: Vec<Permission>,
     pub capabilities: Vec<Binding>,
     /// Declared mutations (#549). Absent in a manifest that only reads, and
@@ -1817,6 +1841,7 @@ impl Manifest {
         cards::card_problems(self, &mut problems);
         settings::setting_problems(self, &mut problems);
         network::permission_problems(self, &mut problems);
+        pods::pod_problems(self, &mut problems);
         self.command_problems(&mut problems);
         self.link_problems(&mut problems);
         problems

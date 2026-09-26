@@ -255,3 +255,117 @@ fn a_0_4_manifest_is_incompatible_with_a_host_that_implements_only_0_3() {
         );
     }
 }
+
+// ---- API 0.5 (#567) ----
+//
+// API 0.4 shipped in the `srelens-v0.15.1-186` and later prereleases, so what #567 adds
+// is a line of its own: a 0.4 host meets none of it.
+
+/// Each thing API 0.5 added, used validly on top of the 0.4 Argo CD app, with the
+/// `API_FIELDS` entries it uses.
+fn uses_of_0_5() -> Vec<(&'static [&'static str], Use)> {
+    vec![
+        // A pod binding scoped by the object a reader lists: a new target, no new field.
+        (&["capabilities[].target"], |v| {
+            v["permissions"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!("k8s.streamLogs"));
+            v["capabilities"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({"name":"logs",
+                "title":"Logs","target":"k8s.streamLogs","inputs":[],
+                "arguments":{"resource":"applications","selector":".spec.selector"}}));
+        }),
+        // One scoped by the namespaces its permission grants.
+        (
+            &["capabilities[].target", "permissions[].namespaces"],
+            |v| {
+                v["permissions"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(json!({"capability":"k8s.exec","namespaces":["argocd"]}));
+                v["capabilities"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(json!({"name":"version",
+                "title":"Argo CD version","target":"k8s.exec","inputs":[],
+                "arguments":{"command":["argocd","version","--client"]}}));
+            },
+        ),
+    ]
+}
+
+#[test]
+fn every_0_5_addition_under_a_0_4_range_is_told_it_requires_api_0_5() {
+    for (fields, apply) in uses_of_0_5() {
+        let mut value = manifest();
+        apply(&mut value);
+        for range in ["^0.5", ">=0.5, <0.6"] {
+            Manifest::parse(&with_range(value.clone(), range))
+                .unwrap_or_else(|e| panic!("{fields:?} under {range}: {e}"));
+        }
+        // A range that also admits 0.3 is refused too, but may be told first about a
+        // 0.4 field the addition uses; the 0.4 cases above hold that line.
+        for (range, admitted) in [("^0.4", "0.4.0"), (">=0.4, <0.6", "0.4.0")] {
+            let errors = Manifest::parse(&with_range(value.clone(), range))
+                .expect_err(&format!("{fields:?} under {range}"))
+                .0;
+            assert_eq!(errors.len(), 1, "{fields:?} under {range}: {errors:?}");
+            let error = &errors[0];
+            assert_eq!(error.code, ValidationCode::ApiIncompatible, "{error:?}");
+            assert_eq!(error.path, "srelensApiVersion", "{error:?}");
+            assert!(
+                error.message.contains("requires API 0.5.0")
+                    && error.message.contains(&format!("admits API {admitted}")),
+                "{error:?}"
+            );
+            assert!(
+                fields
+                    .iter()
+                    .any(|field| error.message.contains(&format!("`{field}`"))),
+                "{fields:?}: {error:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn every_0_5_entry_in_the_table_has_a_case_above() {
+    let covered: Vec<&str> = uses_of_0_5()
+        .iter()
+        .flat_map(|(fields, _)| fields.iter().copied())
+        .collect();
+    let gated: Vec<&str> = API_FIELDS
+        .iter()
+        .filter(|field| field.introduced == "0.5.0")
+        .map(|field| field.path)
+        .collect();
+    assert!(!gated.is_empty());
+    for path in &gated {
+        assert!(covered.contains(path), "{path} has no case");
+    }
+    for path in covered {
+        assert!(gated.contains(&path), "{path} is not in API_FIELDS");
+    }
+}
+
+#[test]
+fn a_0_4_manifest_keeps_its_line_on_a_host_that_also_implements_0_5() {
+    // `^0.4` pins its minor, so a 0.4 app is served under 0.4 here and keeps installing
+    // on a host that implements only 0.4.
+    for range in ["^0.4", ">=0.4, <0.5"] {
+        let range = semver::VersionReq::parse(range).unwrap();
+        assert_eq!(
+            negotiate_api_version(&range).map(|v| v.to_string()),
+            Some("0.4.0".into())
+        );
+    }
+    let range = semver::VersionReq::parse("^0.5").unwrap();
+    assert_eq!(
+        negotiate_api_version(&range).map(|v| v.to_string()),
+        Some("0.5.0".into())
+    );
+    assert!(matching_api_versions_in(&range, &["0.3.0", "0.4.0"]).is_empty());
+}
