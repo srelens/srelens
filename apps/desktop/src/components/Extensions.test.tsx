@@ -227,6 +227,27 @@ it("opens a limited app on the chosen one of two clusters sharing a stable ID, b
   render(<ClassicAppPage context="b#c" id={manifest.id} page={manifest.contributions.pages[0].id} onPage={vi.fn()} />);
   await waitFor(() => expect(screen.queryByText(/not enabled for this cluster|Loading app/)).toBeNull());
 });
+it("says it cannot tell which cluster a name means when the name is also another context's pinned ID", async () => {
+  // A context literally named after another's pinned ID: the host's find_context refuses the
+  // string, so which one this page is for is not known, and "not enabled" would be a guess.
+  vi.mocked(listContexts).mockResolvedValue({
+    contexts: [
+      { name: "c", stableId: "/kube/a#b#c", key: "/kube/a%23b#c", pinnedId: "srelens-context:/kube/a%23b#c" },
+      { name: "srelens-context:/kube/a%23b#c", stableId: "/kube/x#srelens-context:/kube/a%23b#c",
+        key: "/kube/x#srelens-context:/kube/a%2523b%23c", pinnedId: "srelens-context:/kube/x#srelens-context:/kube/a%2523b%23c" },
+    ],
+  } as any);
+  vi.mocked(listExtensions).mockResolvedValue({
+    schemaVersion: 1,
+    nextRevision: 2,
+    plugins: [{ ...plugin, contexts: ["/kube/x#srelens-context:/kube/a%2523b%23c"] }],
+  });
+  const { ClassicAppPage } = await import("./Extensions");
+  render(<ClassicAppPage context="srelens-context:/kube/a%23b#c" id={manifest.id} page={manifest.contributions.pages[0].id} onPage={vi.fn()} />);
+  expect(await screen.findByText(/cannot tell which one it is for/)).toBeTruthy();
+  expect(screen.queryByText(/not enabled for this cluster/)).toBeNull();
+  expect(readExtension).not.toHaveBeenCalled();
+});
 it("says the cluster is gone rather than that a limited app is not enabled", async () => {
   vi.mocked(listContexts).mockResolvedValue({
     contexts: [{ name: "cluster/b", stableId: "/kube/b.yaml#cluster/b", key: "/kube/b.yaml#cluster/b" }],
