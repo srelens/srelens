@@ -72,7 +72,7 @@ pub fn build_prompt(d: &AppDeploymentChange, logs: &LogEvidence) -> String {
     ));
     p.push_str(&format!("Status: {}\n", d.incident_status.label()));
     p.push_str(&format!(
-        "Detected cause: {} {}\n",
+        "Detected cause: {} <failure_detail>{}</failure_detail>\n",
         d.failure_category.badge(),
         clip(&d.failure_detail)
     ));
@@ -92,7 +92,10 @@ pub fn build_prompt(d: &AppDeploymentChange, logs: &LogEvidence) -> String {
             g.app_name, g.sync_status, g.health_status, g.sync_revision, g.target_revision
         ));
         if let Some(msg) = &g.sync_message {
-            p.push_str(&format!("GitOps message: {}\n", clip(msg)));
+            p.push_str(&format!(
+                "GitOps message: <gitops_message>{}</gitops_message>\n",
+                clip(msg)
+            ));
         }
     }
 
@@ -124,8 +127,8 @@ pub fn build_prompt(d: &AppDeploymentChange, logs: &LogEvidence) -> String {
         p.push_str("Warning events:\n");
         for e in warnings {
             p.push_str(&format!(
-                "- [{}] <event_message>{}</event_message> (x{}, {} ago)\n",
-                e.reason,
+                "- [<event_reason>{}</event_reason>] <event_message>{}</event_message> (x{}, {} ago)\n",
+                clip(&e.reason),
                 clip(&e.message),
                 e.count,
                 e.age
@@ -360,20 +363,27 @@ mod tests {
             "connecting to bad-db-host.internal".to_string(),
             "FATAL: bad DB_HOST".to_string(),
         ];
-        let p = build_prompt(&workload(), &LogEvidence::Lines(logs));
+        let mut d = workload();
+        d.gitops.as_mut().unwrap().sync_message = Some("Failed to apply manifest".into());
+        let p = build_prompt(&d, &LogEvidence::Lines(logs));
 
         assert!(p.contains("Workload: Deployment prod/payment-api"));
         assert!(p.contains("Status: CrashLoop"));
-        assert!(p.contains("Detected cause: [APP] payment terminated with Exit Code 1"));
+        assert!(p.contains(
+            "Detected cause: [APP] <failure_detail>payment terminated with Exit Code 1</failure_detail>"
+        ));
         assert!(p.contains("Replicas: 0/2 ready"));
         assert!(p.contains("Revision: 5 (previous: 4)"));
         assert!(p.contains("payment:v1 ➔ payment:v2"));
         assert!(p.contains("Argo app payment-prod is Synced / Degraded at 7b89abc (main)"));
+        assert!(
+            p.contains("GitOps message: <gitops_message>Failed to apply manifest</gitops_message>")
+        );
         assert!(p.contains("Failing pods (1):"));
         assert!(p.contains(
             "- <pod_symptom>payment-api-1: CrashLoopBackOff | exited with code 1</pod_symptom>"
         ));
-        assert!(p.contains("[BackOff] <event_message>Back-off restarting failed container</event_message> (x4, 2m ago)"));
+        assert!(p.contains("[<event_reason>BackOff</event_reason>] <event_message>Back-off restarting failed container</event_message> (x4, 2m ago)"));
         assert!(!p.contains("Pulled"), "Normal events are not evidence");
         assert!(p.contains("Last 2 log lines (payment-api-1/payment):"));
         assert!(p.contains("| <log_line>FATAL: bad DB_HOST</log_line>"));

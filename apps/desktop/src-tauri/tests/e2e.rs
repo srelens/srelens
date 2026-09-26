@@ -1059,6 +1059,14 @@ async fn run_suite() {
     );
 
     let out = h
+        .ok(
+            "k8s.listChanges",
+            json!({ "context": ctx, "namespace": NS, "since": "1h" }),
+        )
+        .await;
+    assert!(out["deployments"].is_array());
+
+    let out = h
         .ok("k8s.listJobs", json!({ "context": ctx, "namespace": NS }))
         .await;
     assert!(out["jobs"]

@@ -339,47 +339,49 @@ pub struct ChangedTriageReport {
     pub includes_scaled: bool,
 }
 
+/// Maximum window for triage query (30 days).
+pub const MAX_DURATION_SECS: u64 = 30 * 86400;
+
 pub fn parse_duration(s: &str) -> Result<Duration, String> {
     let s = s.trim().to_ascii_lowercase();
-    if let Some(stripped) = s.strip_suffix('m') {
+    let secs = if let Some(stripped) = s.strip_suffix('m') {
         let mins: u64 = stripped
             .parse()
             .map_err(|_| format!("Invalid minutes in duration: {s}"))?;
-        let secs = mins
-            .checked_mul(60)
-            .ok_or_else(|| format!("Duration value overflow: {s}"))?;
-        Ok(Duration::from_secs(secs))
+        mins.checked_mul(60)
+            .ok_or_else(|| format!("Duration value overflow: {s}"))?
     } else if let Some(stripped) = s.strip_suffix('h') {
         let hrs: u64 = stripped
             .parse()
             .map_err(|_| format!("Invalid hours in duration: {s}"))?;
-        let secs = hrs
-            .checked_mul(3600)
-            .ok_or_else(|| format!("Duration value overflow: {s}"))?;
-        Ok(Duration::from_secs(secs))
+        hrs.checked_mul(3600)
+            .ok_or_else(|| format!("Duration value overflow: {s}"))?
     } else if let Some(stripped) = s.strip_suffix('d') {
         let days: u64 = stripped
             .parse()
             .map_err(|_| format!("Invalid days in duration: {s}"))?;
-        let secs = days
-            .checked_mul(86400)
-            .ok_or_else(|| format!("Duration value overflow: {s}"))?;
-        Ok(Duration::from_secs(secs))
+        days.checked_mul(86400)
+            .ok_or_else(|| format!("Duration value overflow: {s}"))?
     } else if let Some(stripped) = s.strip_suffix('s') {
-        let secs: u64 = stripped
-            .parse()
-            .map_err(|_| format!("Invalid seconds in duration: {s}"))?;
-        Ok(Duration::from_secs(secs))
+        stripped
+            .parse::<u64>()
+            .map_err(|_| format!("Invalid seconds in duration: {s}"))?
     } else if let Ok(mins) = s.parse::<u64>() {
-        let secs = mins
-            .checked_mul(60)
-            .ok_or_else(|| format!("Duration value overflow: {s}"))?;
-        Ok(Duration::from_secs(secs))
+        mins.checked_mul(60)
+            .ok_or_else(|| format!("Duration value overflow: {s}"))?
     } else {
-        Err(format!(
+        return Err(format!(
             "Unrecognized time window '{s}'. Expected e.g. 15m, 30m, 1h, 3h, 24h"
-        ))
+        ));
+    };
+
+    if secs > MAX_DURATION_SECS {
+        return Err(format!(
+            "Duration exceeds maximum supported window of 30d ({}s): {s}",
+            MAX_DURATION_SECS
+        ));
     }
+    Ok(Duration::from_secs(secs))
 }
 
 pub fn format_duration_label(d: Duration) -> String {
@@ -2417,6 +2419,12 @@ mod tests {
             Duration::from_secs(24 * 3600)
         );
         assert_eq!(parse_duration("1d").unwrap(), Duration::from_secs(86400));
+        assert_eq!(
+            parse_duration("30d").unwrap(),
+            Duration::from_secs(30 * 86400)
+        );
+        assert!(parse_duration("31d").is_err());
+        assert!(parse_duration("1000000d").is_err());
         assert_eq!(parse_duration("60s").unwrap(), Duration::from_secs(60));
         assert_eq!(parse_duration("45").unwrap(), Duration::from_secs(45 * 60));
         assert!(parse_duration("invalid").is_err());
