@@ -142,10 +142,18 @@ fn handle(method: &str, params: &Value) -> Result<Action, Fail> {
         "ping" => answer(json!({"pid": std::process::id()})),
         "echo" => answer(params.clone()),
         "env" => {
-            let names: Vec<String> = std::env::vars_os()
-                .map(|(k, _)| k.to_string_lossy().into_owned())
+            let vars: Vec<(String, String)> = std::env::vars_os()
+                .map(|(k, v)| {
+                    (
+                        k.to_string_lossy().into_owned(),
+                        v.to_string_lossy().into_owned(),
+                    )
+                })
                 .collect();
-            answer(json!({"names": names}))
+            let names: Vec<&String> = vars.iter().map(|(k, _)| k).collect();
+            let values: serde_json::Map<String, Value> =
+                vars.iter().map(|(k, v)| (k.clone(), json!(v))).collect();
+            answer(json!({"names": names, "values": values}))
         }
         "log" => {
             eprintln!("{}", str_param(params, "text")?);

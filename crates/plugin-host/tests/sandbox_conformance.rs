@@ -492,12 +492,28 @@ async fn the_host_environment_does_not_reach_the_sidecar() {
         .filter_map(Value::as_str)
         .collect();
     names.sort_unstable();
+    // On Windows, `SystemRoot` for Winsock, and the three variables Windows
+    // reroutes into the AppContainer's own folder when it starts the process.
     let expected: &[&str] = if cfg!(windows) {
-        &["PROBE_MARK", "SystemRoot"]
+        &["LOCALAPPDATA", "PROBE_MARK", "SystemRoot", "TEMP", "TMP"]
     } else {
         &["PROBE_MARK"]
     };
     assert_eq!(names, expected, "the host's own variables leaked");
+    #[cfg(windows)]
+    for name in ["LOCALAPPDATA", "TEMP", "TMP"] {
+        let theirs = answer["values"][name].as_str().unwrap_or_default();
+        let ours = std::env::var(name).unwrap_or_default();
+        eprintln!("{name}: the host's {ours}, the sidecar's {theirs}");
+        assert_ne!(
+            theirs, ours,
+            "{name} was not rerouted: the host's value reached the sidecar"
+        );
+        assert!(
+            theirs.contains("Packages"),
+            "{name} is not under the AppContainer's profile: {theirs}"
+        );
+    }
 }
 
 #[cfg(unix)]

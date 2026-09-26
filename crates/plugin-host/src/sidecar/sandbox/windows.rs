@@ -9,8 +9,8 @@
 //! - **stderr is its own pipe.** The spike joined it to stdout; here stdout is
 //!   protocol only, so a log line there would break the framing.
 //! - **The environment is passed, not inherited**: the command's own
-//!   variables and `SystemRoot`, which Winsock needs to start. The spike passed
-//!   no block, so its probe inherited the host's environment.
+//!   variables, and the few Windows needs ([`FROM_HOST`]). The spike passed no
+//!   block, so its probe inherited the host's environment.
 //!
 //! Everything else is as the spike ran it: `CreateAppContainerProfile` (a SID
 //! only derived is refused by `CreateProcessW`), read and execute on the
@@ -261,16 +261,29 @@ fn pipe(child_reads: bool) -> io::Result<(OwnedHandle, OwnedHandle)> {
     }
 }
 
-/// The environment block: the command's variables and `SystemRoot`, sorted
-/// case-insensitively as Windows expects, each `NAME=value\0`, then `\0`.
-fn environment_block(env: &[(OsString, OsString)], system_root: Option<OsString>) -> Vec<u16> {
+/// The host variables a sidecar's environment carries, when the command does
+/// not name them itself:
+///
+/// - `SystemRoot`, which Winsock needs to start.
+/// - `LOCALAPPDATA`, `TEMP` and `TMP`. Windows reroutes these to the
+///   AppContainer's own folder under its profile when it creates the process
+///   (Microsoft Learn, "Launch an AppContainer"), so the host's values do not
+///   reach the sidecar. `CreateProcessW` failed with `ERROR_ENVVAR_NOT_FOUND`
+///   (203) on a block without them, on the first CI run of this backend.
+const FROM_HOST: &[&str] = &["SystemRoot", "LOCALAPPDATA", "TEMP", "TMP"];
+
+/// The environment block: the command's variables and [`FROM_HOST`], as
+/// `host` reads them, sorted case-insensitively as Windows expects, each
+/// `NAME=value\0`, then `\0`.
+fn environment_block(
+    env: &[(OsString, OsString)],
+    host: impl Fn(&str) -> Option<OsString>,
+) -> Vec<u16> {
     let mut vars: Vec<(OsString, OsString)> = env.to_vec();
-    if let Some(root) = system_root {
-        if !vars
-            .iter()
-            .any(|(k, _)| k.eq_ignore_ascii_case("SystemRoot"))
-        {
-            vars.push(("SystemRoot".into(), root));
+    for name in FROM_HOST {
+        let named = vars.iter().any(|(k, _)| k.eq_ignore_ascii_case(name));
+        if let (false, Some(value)) = (named, host(name)) {
+            vars.push(((*name).into(), value));
         }
     }
     vars.sort_by_key(|(k, _)| k.to_ascii_uppercase());
@@ -385,7 +398,7 @@ pub(super) fn launch(command: &SidecarCommand, limits: &Limits) -> Result<Launch
         CapabilityCount: 0,
         Reserved: 0,
     };
-    let environment = environment_block(&command.env, std::env::var_os("SystemRoot"));
+    let environment = environment_block(&command.env, |name| std::env::var_os(name));
     let app = wide(&command.program);
     let mut cmdline = command_line(&command.program, &command.args);
     let cwd = wide(&command.data_dir);
@@ -530,14 +543,29 @@ mod tests {
     }
 
     #[test]
-    fn the_environment_is_the_commands_and_system_root_only() {
+    fn the_environment_is_the_commands_and_the_few_windows_needs() {
+        let host = |name: &str| match name {
+            "SystemRoot" => Some(OsString::from("C:\\Windows")),
+            "TEMP" => Some(OsString::from("C:\\T")),
+            "KUBECONFIG" => Some(OsString::from("C:\\kube")),
+            _ => None,
+        };
         let block = environment_block(
-            &[("ZED".into(), "1".into()), ("alpha".into(), "2".into())],
-            Some("C:\\Windows".into()),
+            &[
+                ("ZED".into(), "1".into()),
+                ("alpha".into(), "2".into()),
+                ("tmp".into(), "mine".into()),
+            ],
+            host,
         );
         let text = String::from_utf16(&block).unwrap();
-        assert_eq!(text, "alpha=2\0SystemRoot=C:\\Windows\0ZED=1\0\0");
-        let empty = environment_block(&[], None);
+        // A variable the command names is not read from the host, and
+        // nothing outside `FROM_HOST` is.
+        assert_eq!(
+            text,
+            "alpha=2\0SystemRoot=C:\\Windows\0TEMP=C:\\T\0tmp=mine\0ZED=1\0\0"
+        );
+        let empty = environment_block(&[], |_| None);
         assert_eq!(empty, [0, 0]);
     }
 

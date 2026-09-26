@@ -232,8 +232,11 @@ What the sidecar gets:
 - **One writable directory**, which is also its working directory. The per-app,
   size-limited data directory is #573's; the supervisor takes the directory it is given.
 - **Only the environment srelens names.** The host's own is never inherited: it may hold
-  `KUBECONFIG`, cloud credentials or tokens. On Windows `SystemRoot` is added, which
-  Winsock needs.
+  `KUBECONFIG`, cloud credentials or tokens. On Windows it also gets `SystemRoot`, which
+  Winsock needs, and `LOCALAPPDATA`, `TEMP` and `TMP`, which Windows reroutes into the
+  AppContainer's own folder when it starts the process, so the host's values do not reach
+  it. A block without those three failed with error 203 (`ERROR_ENVVAR_NOT_FOUND`) on
+  the first CI run.
 - **stdin, stdout and stderr, and nothing else.** On Linux and macOS the launcher closes
   every other inherited descriptor before the sidecar runs; on Windows only the three pipe
   ends are inherited.
