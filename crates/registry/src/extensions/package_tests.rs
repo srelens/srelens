@@ -262,6 +262,69 @@ fn an_update_keeps_the_replaced_package_for_rollback_and_prunes_what_nothing_kee
     );
 }
 
+/// The inventory's save comes after the unpack, and can fail. Every version the saved
+/// inventory names is still on disk when it does: `unpack` never touches another version's
+/// directory, and replaces a copy of the version it installs only with a copy verified
+/// against the same digest list. What a failed update unpacked is pruned by the next save
+/// that succeeds.
+#[cfg(unix)]
+#[test]
+fn a_failed_inventory_save_leaves_every_version_it_names_in_place() {
+    use std::os::unix::fs::PermissionsExt;
+    // SAFETY: geteuid has no preconditions.
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("skipped: root writes into any directory regardless of its mode");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let apps = dir.path().join("apps");
+    fs::create_dir(&apps).unwrap();
+    let path = apps.join("extensions.json");
+    let id = "org.example.packaged";
+    let first = package::read(&packed("example"), &mut package::Discard)
+        .unwrap()
+        .digest;
+    let update = example_at("1.1.0");
+    let second = package::read(&update, &mut package::Discard)
+        .unwrap()
+        .digest;
+    install_package(&path, &packed("example")).unwrap();
+    let saved = fs::read(&path).unwrap();
+
+    // The inventory's directory refuses new files, so the save's temporary file cannot be
+    // made. The packages directory beside it, and the lock file that exists already, still
+    // work, so each install gets as far as its unpack.
+    fs::set_permissions(&apps, fs::Permissions::from_mode(0o500)).unwrap();
+    let updated = install_package(&path, &update).err();
+    let reinstalled = install_package(&path, &packed("example")).err();
+    fs::set_permissions(&apps, fs::Permissions::from_mode(0o700)).unwrap();
+    for refused in [updated, reinstalled] {
+        let refused = refused.expect("the save was refused");
+        assert!(refused.contains("save extension inventory"), "{refused}");
+    }
+
+    assert_eq!(fs::read(&path).unwrap(), saved);
+    assert_eq!(
+        read(&path).unwrap().plugins[0].package.as_deref(),
+        Some(first.as_str())
+    );
+    // The version it names is whole: its logo verifies against its digest list.
+    assert!(
+        package::installed_icon(&path.with_extension("packages"), id, &first)
+            .unwrap()
+            .is_some()
+    );
+    // What the failed update unpacked goes with the next change that saves.
+    assert!(unpacked(&path, id, &second).is_dir());
+    configure(
+        &path,
+        json!({"action": "enable", "id": id, "enabled": true}),
+    )
+    .unwrap();
+    assert!(!unpacked(&path, id, &second).exists());
+    assert!(unpacked(&path, id, &first).is_dir());
+}
+
 #[test]
 fn a_package_is_refused_whole_and_leaves_nothing_behind() {
     let dir = tempfile::tempdir().unwrap();
