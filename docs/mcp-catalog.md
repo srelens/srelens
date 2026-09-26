@@ -172,6 +172,7 @@ Everything this server exposes over MCP, generated from the live registry so it 
 | `extensions.resolveColumns` | low | Resolve native extension table columns and badges in one batch |
 | `extensions.resolveLinks` | low | Resolve an app's resource relationship links for a resource Inspector |
 | `extensions.resolvePanels` | low | Resolve declarative app panels for a resource Inspector |
+| `extensions.resolveReverseLinks` | low | Resolve the resources whose app resource links name a resource, for its Inspector |
 | `extensions.resource` | low | Inspect the selected resource of an enabled app |
 | `extensions.streams` | low | Report the open app streams in this process and the traffic each app has sent |
 | `extensions.validate` | low | Check a declarative extension manifest exactly as installing it would and return every problem; does not install it |

@@ -1,9 +1,18 @@
 //! Resource relationship links (#545): what an Inspector's "Related" section
 //! shows, shaped as edges a topology can draw later (#524).
-use super::columns::{join_objects, match_joined, JoinCache};
+//!
+//! A link may point at a built-in kind the host lists, and may name its target
+//! through a path on the resource it starts from (#728). The target's own
+//! Inspector reads every declaration the other way round: which resources name
+//! it, through the same lists and the same snapshot cache.
+use super::columns::{
+    cached_objects, match_joined, read_at, reader_key, reader_listing, JoinCache,
+};
 use super::panels::check_resource_scope;
 use super::*;
-use srelens_plugin_host::{namespace_name, Join, JoinMatch, LinkRelation, ResourceLink};
+use srelens_plugin_host::{
+    builtin_link_kind, namespace_name, Binding, BuiltinKind, JoinMatch, LinkRelation, ResourceLink,
+};
 
 /// A resource named by a link's match: the target's namespace (`None` when
 /// the reference does not say, as a bare Argo CD application name does not),
@@ -53,6 +62,7 @@ pub(super) struct ResolvedLink {
     /// The target kind, qualified.
     to: String,
     /// The reader binding that lists `to`, which the UI opens a target through.
+    /// Empty for a built-in kind (#728), which opens in the host's own Inspector.
     capability: String,
     targets: Vec<LinkTarget>,
     /// Why the host could not answer. Never an empty `targets` in disguise.
@@ -65,6 +75,41 @@ pub(super) struct ResolvedLink {
 struct ResolvedLinks {
     from: ResourceRef,
     links: Vec<ResolvedLink>,
+}
+
+/// One declared link read the other way round, for the Inspector of a resource of
+/// its `to` kind (#728): the resources of kind `from` whose link names this one.
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ReverseLink {
+    id: String,
+    relation: LinkRelation,
+    /// The kind the link is read from, qualified.
+    from: String,
+    /// The reader binding that lists `from`, which the UI opens a source through.
+    /// Empty for a built-in kind, which opens in the host's own Inspector.
+    capability: String,
+    /// The resources whose link names this one. `unverified` says why one may not:
+    /// its reference leaves the namespace unsaid.
+    sources: Vec<LinkTarget>,
+    /// The read of `from` stopped at its 2,000-object limit: `sources` are what
+    /// the host found among the objects it read, and there may be more.
+    truncated: bool,
+    /// How many resources of `from` the host read but could not read this link
+    /// on, and why the first could not. They are not in `sources`, and not
+    /// known to be unrelated either.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unreadable: Option<String>,
+    /// Why the host could not answer. Never an empty `sources` in disguise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+#[derive(Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct ReverseLinks {
+    to: ResourceRef,
+    links: Vec<ReverseLink>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -190,6 +235,249 @@ pub(super) fn references(link: &ResourceLink, resource: &Value) -> Result<Vec<Re
     Err("the link declares no match".into())
 }
 
+/// The targets a path link names on `object` (#728), the resource the host read
+/// through the declared reader of the link's `from`.
+///
+/// Each value the path reaches is the target's name, or an object reference with
+/// a `name` and, optionally, a `namespace`, a `kind`, and a `group` or an
+/// `apiVersion`. A reference whose kind or group is not `to`'s names another
+/// kind of resource and is not this link's: an HTTPRoute backend may be a
+/// ServiceImport, a Flux source an OCIRepository. Without a namespace the
+/// target is in the resource's own. An unset field, an empty name and a null
+/// are no reference; a value that is none of these is an error, since the host
+/// cannot say what it names.
+pub(super) fn path_references(
+    link: &ResourceLink,
+    object: &Value,
+) -> Result<Vec<Reference>, String> {
+    let Some(path) = link.match_by.path.as_deref() else {
+        return Err("the link declares no path".into());
+    };
+    let own_namespace = object["metadata"]["namespace"]
+        .as_str()
+        .filter(|namespace| !namespace.is_empty())
+        .map(str::to_owned);
+    let (group, kind) = link.to.split_once('/').unwrap_or(("", &link.to));
+    let mut named = Vec::new();
+    for value in srelens_capability::resolve_each(object, path)? {
+        let reference = match value {
+            Value::String(name) if name.is_empty() => continue,
+            Value::String(name) => Reference {
+                namespace: own_namespace.clone(),
+                name: name.clone(),
+                uid: None,
+                unplaced: false,
+            },
+            Value::Object(fields) => {
+                let text = |key: &str| fields.get(key).and_then(Value::as_str);
+                if fields.get("kind").is_some_and(|k| k.as_str() != Some(kind)) {
+                    continue;
+                }
+                let referenced_group = match (fields.get("group"), text("apiVersion")) {
+                    (Some(group), _) => Some(group.as_str().unwrap_or("\u{0}")),
+                    (None, Some(api_version)) => {
+                        Some(api_version.rsplit_once('/').map_or("", |(group, _)| group))
+                    }
+                    (None, None) => None,
+                };
+                if referenced_group.is_some_and(|referenced| referenced != group) {
+                    continue;
+                }
+                let Some(name) = text("name").filter(|name| !name.is_empty()) else {
+                    return Err(format!("`{path}` holds a reference with no name"));
+                };
+                Reference {
+                    namespace: text("namespace")
+                        .filter(|namespace| !namespace.is_empty())
+                        .map(str::to_owned)
+                        .or_else(|| own_namespace.clone()),
+                    name: name.to_owned(),
+                    uid: text("uid").map(str::to_owned),
+                    unplaced: false,
+                }
+            }
+            Value::Array(_) => {
+                return Err(format!(
+                    "`{path}` holds a list, not a name or a reference; write `[*]` to read each element"
+                ))
+            }
+            _ => {
+                return Err(format!(
+                    "`{path}` holds neither a name nor an object reference"
+                ))
+            }
+        };
+        named.push(reference);
+    }
+    Ok(named)
+}
+
+/// How the host reads a kind for a link: through the app's declared reader of
+/// it, or as a built-in kind whose metadata the host lists itself (#728).
+#[derive(Clone, Copy)]
+enum Listed<'a> {
+    Reader(&'a Binding),
+    Builtin(&'static BuiltinKind),
+}
+
+impl<'a> Listed<'a> {
+    /// A declared reader first: a kind one lists is read through the app's grant.
+    fn of(manifest: &'a Manifest, kind: &str) -> Option<Self> {
+        manifest
+            .capabilities
+            .iter()
+            .find(|binding| Manifest::reader_kind(binding).as_deref() == Some(kind))
+            .map(Listed::Reader)
+            .or_else(|| builtin_link_kind(kind).map(Listed::Builtin))
+    }
+
+    /// The reader the UI opens a resource of this kind through; empty for a
+    /// built-in kind, which opens in the host's own Inspector.
+    fn capability(self) -> String {
+        match self {
+            Listed::Reader(binding) => binding.name.clone(),
+            Listed::Builtin(_) => String::new(),
+        }
+    }
+
+    fn namespaced(self) -> bool {
+        match self {
+            Listed::Reader(binding) => binding
+                .arguments
+                .get("namespaced")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            Listed::Builtin(kind) => kind.namespaced,
+        }
+    }
+}
+
+/// Every object of `kind` in `namespace` (`""` is all), whether the read stopped
+/// at the 2,000-object cap, and the version a reader resolved to on this cluster
+/// (#547; none for a built-in kind). Through the snapshot cache joins, panels and
+/// cards share, so an Inspector and a table over one reader list it once.
+#[allow(clippy::too_many_arguments)]
+async fn read_listed(
+    cache: &JoinCache,
+    client_cache: &srelens_kube::client_cache::ClientCache,
+    core: &Registry,
+    plugin: &Installed,
+    listed: Listed<'_>,
+    kind: &str,
+    context: &str,
+    namespace: &str,
+) -> Result<(Arc<Vec<Value>>, bool, Option<String>), CapabilityError> {
+    match listed {
+        Listed::Reader(binding) => {
+            let (objects, truncated, version) = reader_listing(
+                cache,
+                client_cache,
+                core,
+                plugin,
+                &binding.name,
+                context,
+                namespace,
+            )
+            .await?;
+            Ok((objects, truncated, Some(version)))
+        }
+        Listed::Builtin(_) => {
+            // Metadata alone, and of a Secret its identity, labels and owners:
+            // `list_builtin_link_metadata` never asks the API server for a value.
+            let key = reader_key(
+                &plugin.manifest.id,
+                plugin.revision,
+                context,
+                namespace,
+                &format!("builtin-link:{kind}"),
+                "",
+            );
+            let (objects, truncated) = cached_objects(cache, key, || {
+                srelens_kube::crds::list_builtin_link_metadata(
+                    client_cache,
+                    context,
+                    namespace,
+                    kind,
+                )
+            })
+            .await?;
+            Ok((objects, truncated, None))
+        }
+    }
+}
+
+/// The `from` resource as the host reads it through the app's reader of its
+/// kind, and the link as the manifest reads that reader's objects at the version
+/// it resolved to (#547). A path link reads the resource's body, which the
+/// Inspector does not send and the host does not take from the caller.
+#[allow(clippy::too_many_arguments)]
+async fn read_from(
+    cache: &JoinCache,
+    client_cache: &srelens_kube::client_cache::ClientCache,
+    core: &Registry,
+    plugin: &Installed,
+    link: &ResourceLink,
+    context: &str,
+    resource: &Value,
+) -> Result<(Value, ResourceLink), String> {
+    let Some(listed @ Listed::Reader(reader)) = Listed::of(&plugin.manifest, &link.from) else {
+        return Err(format!(
+            "No declared reader lists {}, so its path cannot be read",
+            link.from
+        ));
+    };
+    let metadata = &resource["metadata"];
+    let name = metadata["name"].as_str().unwrap_or("");
+    let namespace = metadata["namespace"].as_str().unwrap_or("");
+    let scope = if listed.namespaced() { namespace } else { "" };
+    // A list cut off at the cap still holds the first 2,000: the resource may be among them.
+    let (objects, truncated, version) = reader_listing(
+        cache,
+        client_cache,
+        core,
+        plugin,
+        &reader.name,
+        context,
+        scope,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    let link = link_at_version(plugin, &reader.name, &version, &link.id)?;
+    let uid = metadata["uid"].as_str();
+    let object = objects
+        .iter()
+        .find(|object| {
+            let found = &object["metadata"];
+            found["name"].as_str() == Some(name)
+                && found["namespace"].as_str().unwrap_or("") == namespace
+                && match (uid, found["uid"].as_str()) {
+                    (Some(want), Some(have)) => want == have,
+                    _ => true,
+                }
+        })
+        .cloned()
+        .ok_or_else(|| {
+            let at = if namespace.is_empty() {
+                name.to_owned()
+            } else {
+                format!("{namespace}/{name}")
+            };
+            if truncated {
+                // Not among what was read is not absent: the read stopped short.
+                format!(
+                    "The host read the first 2,000 {} and {at} is not among them, so its path cannot be read",
+                    link.from
+                )
+            } else {
+                format!(
+                    "The host's read of {} does not hold {at}; refresh the view",
+                    link.from
+                )
+            }
+        })?;
+    Ok((object, link))
+}
+
 /// Finds each reference in `objects`, the granted list of `kind`.
 ///
 /// A namespaced reference goes through the join index (`match_joined` with a
@@ -276,7 +564,8 @@ pub(super) fn lookup(
 }
 
 /// One link for one resource: its references, then (only when there are any)
-/// the granted list of `to`, read once through the join snapshot cache.
+/// the list of `to` — the declared reader's, or the built-in kind's metadata —
+/// read once through the join snapshot cache.
 #[allow(clippy::too_many_arguments)]
 async fn resolve_link(
     cache: &JoinCache,
@@ -287,20 +576,23 @@ async fn resolve_link(
     context: &str,
     resource: &Value,
 ) -> Result<(String, Vec<LinkTarget>), (String, String)> {
-    let binding = plugin
-        .manifest
-        .capabilities
-        .iter()
-        .find(|binding| Manifest::reader_kind(binding).as_deref() == Some(link.to.as_str()))
-        .ok_or_else(|| {
-            (
-                String::new(),
-                "No declared reader lists the link's target".to_owned(),
-            )
-        })?;
-    let capability = binding.name.clone();
+    let target = Listed::of(&plugin.manifest, &link.to).ok_or_else(|| {
+        (
+            String::new(),
+            "No declared reader lists the link's target, and it is not a built-in kind this host lists"
+                .to_owned(),
+        )
+    })?;
+    let capability = target.capability();
     let failed = |why: String| (capability.clone(), why);
-    let references = references(link, resource).map_err(failed)?;
+    let references = if link.match_by.path.is_some() {
+        let (object, link) = read_from(cache, client_cache, core, plugin, link, context, resource)
+            .await
+            .map_err(failed)?;
+        path_references(&link, &object).map_err(failed)?
+    } else {
+        references(link, resource).map_err(failed)?
+    };
     if references.is_empty() {
         return Ok((capability, vec![]));
     }
@@ -309,33 +601,237 @@ async fn resolve_link(
         let targets = lookup(&references, &[], &link.to, true).map_err(failed)?;
         return Ok((capability, targets));
     }
-    let namespaced = binding
-        .arguments
-        .get("namespaced")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
+    let namespaced = target.namespaced();
     // One namespace's list when every reference names the same one, so a
     // namespace-scoped grant is enough; otherwise the whole cluster's.
     let scope = list_scope(&references, namespaced).map_err(failed)?;
-    let join = Join {
-        id: link.id.clone(),
-        capability: capability.clone(),
-        match_by: JoinMatch {
-            label: None,
-            kind_label: None,
-            owner_reference: false,
-            annotation: None,
-            name: true,
-        },
-    };
     // Listed at the version the target's reader resolves to on this cluster (#547). A
     // link reads only names from it, so no path depends on which version that is.
-    let (objects, _version) =
-        join_objects(cache, client_cache, core, plugin, &join, context, &scope)
-            .await
-            .map_err(|error| failed(error.to_string()))?;
+    let (objects, truncated, _version) = read_listed(
+        cache,
+        client_cache,
+        core,
+        plugin,
+        target,
+        &link.to,
+        context,
+        &scope,
+    )
+    .await
+    .map_err(|error| failed(error.to_string()))?;
+    // A target past the cut could exist: "not found" would be a guess.
+    if truncated {
+        return Err(failed(format!(
+            "The {} list reached its 2,000-object limit, so a target past it cannot be looked up",
+            link.to
+        )));
+    }
     let targets = lookup(&references, &objects, &link.to, namespaced).map_err(failed)?;
     Ok((capability, targets))
+}
+
+/// The resource a reverse view is shown for: the target a link's references
+/// are held against.
+pub(super) struct Target<'a> {
+    namespace: Option<&'a str>,
+    name: &'a str,
+    uid: Option<&'a str>,
+}
+
+/// Whether one reference names the target: yes, no, or maybe and why.
+#[derive(Debug, PartialEq, Eq)]
+enum Names {
+    Yes,
+    Maybe(String),
+    No,
+}
+
+/// Whether `reference` names `target`, a resource of a namespaced kind or not.
+///
+/// The forward lookup's rule held the other way round: the name, the uid an
+/// owner reference also carries, and the namespace, which a cluster-scoped
+/// target has none of. A reference that leaves the namespace unsaid — an
+/// unplaced Argo CD name, or a cluster-scoped resource's label — might name
+/// this target or a namesake elsewhere, and is reported as that.
+fn names(reference: &Reference, target: &Target, namespaced: bool) -> Names {
+    if reference.name != target.name {
+        return Names::No;
+    }
+    if let (Some(want), Some(have)) = (reference.uid.as_deref(), target.uid) {
+        if want != have {
+            return Names::No;
+        }
+    }
+    if !namespaced {
+        return Names::Yes;
+    }
+    if reference.unplaced {
+        return Names::Maybe(
+            "namespace unknown: the app declares no defaultNamespace for a bare name".into(),
+        );
+    }
+    match reference.namespace.as_deref() {
+        Some(namespace) if Some(namespace) == target.namespace => Names::Yes,
+        Some(_) => Names::No,
+        None => Names::Maybe(
+            "the reference names no namespace, so a namesake in another namespace may be the one meant"
+                .into(),
+        ),
+    }
+}
+
+/// The resources in `objects` whose `link` names `target`, and a sentence for
+/// those whose link could not be read on them.
+///
+/// Each object's references are read exactly as the forward link reads them —
+/// its metadata, or its path — so the two views cannot disagree about a
+/// resource the host read. One whose link could not be read is counted rather
+/// than dropped: it is neither a source nor known not to be one.
+pub(super) fn sources(
+    link: &ResourceLink,
+    objects: &[Value],
+    target: &Target,
+    namespaced: bool,
+) -> (Vec<LinkTarget>, Option<String>) {
+    let mut found = Vec::new();
+    let mut unread = 0usize;
+    let mut first = None;
+    for object in objects {
+        let metadata = &object["metadata"];
+        let name = metadata["name"].as_str().unwrap_or("");
+        let namespace = metadata["namespace"]
+            .as_str()
+            .filter(|namespace| !namespace.is_empty());
+        let read = if link.match_by.path.is_some() {
+            path_references(link, object)
+        } else {
+            references(link, object)
+        };
+        let references = match read {
+            Ok(references) => references,
+            Err(why) => {
+                unread += 1;
+                first.get_or_insert_with(|| match namespace {
+                    Some(namespace) => format!("{namespace}/{name}: {why}"),
+                    None => format!("{name}: {why}"),
+                });
+                continue;
+            }
+        };
+        // A definite reference outweighs an uncertain one on the same resource.
+        let mut verdict: Option<Option<String>> = None;
+        for reference in &references {
+            match names(reference, target, namespaced) {
+                Names::Yes => {
+                    verdict = Some(None);
+                    break;
+                }
+                Names::Maybe(why) => {
+                    verdict.get_or_insert(Some(why));
+                }
+                Names::No => {}
+            }
+        }
+        if let Some(unverified) = verdict {
+            found.push(LinkTarget {
+                namespace: namespace.map(str::to_owned),
+                name: name.to_owned(),
+                exists: true,
+                unverified,
+            });
+        }
+    }
+    let unreadable = first.map(|first| {
+        format!(
+            "{unread} {} could not be read for this link ({first})",
+            if unread == 1 { "resource" } else { "resources" }
+        )
+    });
+    (found, unreadable)
+}
+
+/// The namespace to list `from` in for a target's reverse view: the target's
+/// own when the link can only name a target beside the resource it is read
+/// from, and the whole cluster otherwise.
+///
+/// A label without a namespace label, an annotation read as a name, an owner
+/// reference and a same-name match all name a target in the resource's own
+/// namespace — when both kinds are namespaced. A namespace label, an Argo CD
+/// tracking id and a path may name one anywhere, and a cluster-scoped target is
+/// named from every namespace.
+fn reverse_scope(
+    link: &ResourceLink,
+    from_namespaced: bool,
+    target_namespaced: bool,
+    target_namespace: Option<&str>,
+) -> String {
+    let matching = &link.match_by;
+    let beside =
+        matching.path.is_none() && matching.namespace_label.is_none() && matching.parse.is_none();
+    match target_namespace {
+        Some(namespace) if beside && from_namespaced && target_namespaced => namespace.to_owned(),
+        _ => String::new(),
+    }
+}
+
+/// One link read the other way round for `target`, a resource of the link's `to`:
+/// the resources whose link names it, whether the read of `from` stopped at its
+/// cap, and a sentence for those the link could not be read on.
+#[allow(clippy::too_many_arguments)]
+async fn reverse_sources(
+    cache: &JoinCache,
+    client_cache: &srelens_kube::client_cache::ClientCache,
+    core: &Registry,
+    plugin: &Installed,
+    link: &ResourceLink,
+    context: &str,
+    target: &Target<'_>,
+    target_namespaced: bool,
+) -> Result<(Vec<LinkTarget>, bool, Option<String>), String> {
+    let from = Listed::of(&plugin.manifest, &link.from).ok_or_else(|| {
+        format!(
+            "The host lists no {}: no declared reader lists it and it is not a built-in kind, so what names this resource is unknown",
+            link.from
+        )
+    })?;
+    let scope = reverse_scope(link, from.namespaced(), target_namespaced, target.namespace);
+    let (objects, truncated, version) = read_listed(
+        cache,
+        client_cache,
+        core,
+        plugin,
+        from,
+        &link.from,
+        context,
+        &scope,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    let link = match (from, &version) {
+        (Listed::Reader(reader), Some(version)) => {
+            link_at_version(plugin, &reader.name, version, &link.id)?
+        }
+        _ => link.clone(),
+    };
+    let (sources, unreadable) = sources(&link, &objects, target, target_namespaced);
+    Ok((sources, truncated, unreadable))
+}
+
+/// The link `id` as the manifest reads `reader`'s objects at `version`, where they
+/// were read (#547): a path is one of the reader's paths, and an override may move it.
+fn link_at_version(
+    plugin: &Installed,
+    reader: &str,
+    version: &str,
+    id: &str,
+) -> Result<ResourceLink, String> {
+    read_at(&plugin.manifest, reader, version)
+        .map_err(|error| error.to_string())?
+        .contributions
+        .resource_links
+        .into_iter()
+        .find(|declared| declared.id == id)
+        .ok_or_else(|| "The link is no longer declared; refresh the view".to_owned())
 }
 
 pub(super) fn register(
@@ -345,6 +841,13 @@ pub(super) fn register(
     client_cache: Arc<srelens_kube::client_cache::ClientCache>,
     cache: JoinCache,
 ) {
+    register_reverse(
+        reg,
+        path.clone(),
+        core.clone(),
+        client_cache.clone(),
+        cache.clone(),
+    );
     reg.register(Capability::typed::<ResolveLinks, ResolvedLinks, _, _>(
         "extensions.resolveLinks",
         "Resolve an app's resource relationship links for a resource Inspector",
@@ -412,6 +915,102 @@ pub(super) fn register(
                             .as_str()
                             .unwrap_or("")
                             .to_owned(),
+                    },
+                    links,
+                })
+            }
+        },
+    ));
+}
+
+/// `extensions.resolveReverseLinks` (#728): an app's links read the other way
+/// round, for the Inspector of a resource of their `to` kind.
+fn register_reverse(
+    reg: &mut Registry,
+    path: Store,
+    core: Arc<Registry>,
+    client_cache: Arc<srelens_kube::client_cache::ClientCache>,
+    cache: JoinCache,
+) {
+    reg.register(Capability::typed::<ResolveLinks, ReverseLinks, _, _>(
+        "extensions.resolveReverseLinks",
+        "Resolve the resources whose app resource links name a resource, for its Inspector",
+        Annotations::READ_ONLY,
+        move |input| {
+            let path = path.clone();
+            let core = core.clone();
+            let client_cache = client_cache.clone();
+            let cache = cache.clone();
+            async move {
+                check_resource_scope(
+                    "Link",
+                    &input.id,
+                    &input.context,
+                    &input.namespace,
+                    &input.kind,
+                    &input.resource,
+                )?;
+                let (state, index, context) = resolver_app(
+                    path,
+                    &core,
+                    &client_cache,
+                    &input.id,
+                    input.revision,
+                    input.context,
+                )
+                .await?;
+                let plugin = &state.plugins[index];
+                let metadata = &input.resource["metadata"];
+                let target = Target {
+                    namespace: Some(input.namespace.as_str()).filter(|n| !n.is_empty()),
+                    name: metadata["name"].as_str().unwrap_or(""),
+                    uid: metadata["uid"].as_str(),
+                };
+                let target_namespaced = Listed::of(&plugin.manifest, &input.kind)
+                    .map_or(target.namespace.is_some(), Listed::namespaced);
+                let mut links = Vec::new();
+                for link in plugin
+                    .manifest
+                    .contributions
+                    .resource_links
+                    .iter()
+                    .filter(|link| link.to == input.kind)
+                {
+                    let resolved = reverse_sources(
+                        &cache,
+                        &client_cache,
+                        &core,
+                        plugin,
+                        link,
+                        &context,
+                        &target,
+                        target_namespaced,
+                    )
+                    .await;
+                    let (sources, truncated, unreadable, error) = match resolved {
+                        Ok((sources, truncated, unreadable)) => {
+                            (sources, truncated, unreadable, None)
+                        }
+                        Err(why) => (vec![], false, None, Some(why)),
+                    };
+                    links.push(ReverseLink {
+                        id: link.id.clone(),
+                        relation: link.relation,
+                        from: link.from.clone(),
+                        capability: Listed::of(&plugin.manifest, &link.from)
+                            .map(Listed::capability)
+                            .unwrap_or_default(),
+                        sources,
+                        truncated,
+                        unreadable,
+                        error,
+                    });
+                }
+                Ok(ReverseLinks {
+                    to: ResourceRef {
+                        kind: input.kind.clone(),
+                        namespace: target.namespace.map(str::to_owned),
+                        name: target.name.to_owned(),
                     },
                     links,
                 })
@@ -981,5 +1580,801 @@ mod tests {
         assert!(references(&secret, &resource)
             .unwrap_err()
             .contains("redacted"));
+    }
+
+    // ---- Built-in targets, spec paths and reverse views (#728) ----
+
+    fn path_link(from: &str, to: &str, path: &str) -> ResourceLink {
+        link(
+            json!({"id":"path","from":from,"to":to,"relation":"references",
+            "match":{"path":path}}),
+        )
+    }
+
+    fn route() -> Value {
+        json!({"apiVersion":"gateway.networking.k8s.io/v1","kind":"HTTPRoute",
+        "metadata":{"name":"web","namespace":"team"},
+        "spec":{"rules":[
+            {"backendRefs":[{"name":"api","port":80}]},
+            {"backendRefs":[
+                {"group":"","kind":"Service","name":"web","port":80},
+                {"name":"old","namespace":"legacy","port":80},
+                {"group":"multicluster.x-k8s.io","kind":"ServiceImport","name":"far","port":80}
+            ]}
+        ]}})
+    }
+
+    #[test]
+    fn a_path_names_its_targets_by_name_or_by_a_reference_to_the_links_kind() {
+        // HTTPRoute → Service: every backend of every rule; a backend without a
+        // kind is a Service, as Gateway API defaults it, and one of another kind
+        // or group is some other link's.
+        let backends = path_link(
+            "gateway.networking.k8s.io/HTTPRoute",
+            "/Service",
+            ".spec.rules[*].backendRefs[*]",
+        );
+        assert_eq!(
+            path_references(&backends, &route()),
+            Ok(vec![
+                reference(Some("team"), "api"),
+                reference(Some("team"), "web"),
+                reference(Some("legacy"), "old"),
+            ])
+        );
+        // Kustomization → GitRepository: the source reference's kind and
+        // apiVersion group choose the link, and its namespace defaults to the
+        // Kustomization's own.
+        let source = path_link(
+            "kustomize.toolkit.fluxcd.io/Kustomization",
+            "source.toolkit.fluxcd.io/GitRepository",
+            ".spec.sourceRef",
+        );
+        let kustomization = |source_ref: Value| {
+            json!({"apiVersion":"kustomize.toolkit.fluxcd.io/v1","kind":"Kustomization",
+                "metadata":{"name":"apps","namespace":"flux-system"},"spec":{"sourceRef":source_ref}})
+        };
+        assert_eq!(
+            path_references(
+                &source,
+                &kustomization(json!({"kind":"GitRepository","name":"repo"}))
+            ),
+            Ok(vec![reference(Some("flux-system"), "repo")])
+        );
+        assert_eq!(
+            path_references(
+                &source,
+                &kustomization(
+                    json!({"kind":"GitRepository","name":"repo","namespace":"infra",
+                    "apiVersion":"source.toolkit.fluxcd.io/v1"})
+                )
+            ),
+            Ok(vec![reference(Some("infra"), "repo")])
+        );
+        for other in [
+            json!({"kind":"OCIRepository","name":"repo"}),
+            json!({"kind":"GitRepository","name":"repo","apiVersion":"example.io/v1"}),
+        ] {
+            assert_eq!(
+                path_references(&source, &kustomization(other.clone())),
+                Ok(vec![]),
+                "{other}"
+            );
+        }
+        // ExternalSecret → Secret: the path holds the name itself.
+        let secret = path_link(
+            "external-secrets.io/ExternalSecret",
+            "/Secret",
+            ".spec.target.name",
+        );
+        let external = json!({"apiVersion":"external-secrets.io/v1beta1","kind":"ExternalSecret",
+            "metadata":{"name":"db","namespace":"team"},"spec":{"target":{"name":"db-creds"}}});
+        assert_eq!(
+            path_references(&secret, &external),
+            Ok(vec![reference(Some("team"), "db-creds")])
+        );
+        // Unset, null or empty: no reference, and an answer.
+        for unset in [
+            json!({}),
+            json!({"spec":{"target":null}}),
+            json!({"spec":{"target":{"name":""}}}),
+        ] {
+            assert_eq!(path_references(&secret, &unset), Ok(vec![]), "{unset}");
+        }
+    }
+
+    #[test]
+    fn a_path_value_that_is_no_reference_is_an_error_not_no_link() {
+        let backends = path_link(
+            "gateway.networking.k8s.io/HTTPRoute",
+            "/Service",
+            ".spec.rules[*].backendRefs",
+        );
+        let error = path_references(&backends, &route()).unwrap_err();
+        assert!(error.contains("[*]"), "{error}");
+        let nameless = path_link(
+            "gateway.networking.k8s.io/HTTPRoute",
+            "/Service",
+            ".spec.rules[*].backendRefs[*]",
+        );
+        let route = json!({"metadata":{"name":"web","namespace":"team"},
+            "spec":{"rules":[{"backendRefs":[{"port":80}]}]}});
+        assert!(path_references(&nameless, &route)
+            .unwrap_err()
+            .contains("no name"));
+        let number = path_link(
+            "gateway.networking.k8s.io/HTTPRoute",
+            "/Service",
+            ".spec.port",
+        );
+        assert!(path_references(&number, &json!({"spec":{"port":80}})).is_err());
+    }
+
+    /// Deployments as the host's metadata read of them holds them.
+    fn tracked(namespace: &str, name: &str, id: Option<&str>) -> Value {
+        let annotations = match id {
+            Some(id) => json!({"argocd.argoproj.io/tracking-id": id}),
+            None => json!({}),
+        };
+        json!({"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":name,
+            "namespace":namespace,"annotations":annotations}})
+    }
+
+    fn guestbook() -> Target<'static> {
+        Target {
+            namespace: Some("argocd"),
+            name: "guestbook",
+            uid: Some("u-app"),
+        }
+    }
+
+    #[test]
+    fn a_reverse_view_finds_the_resources_whose_link_names_the_target() {
+        let mut link = argo_link();
+        link.match_by.default_namespace = Some("argocd".into());
+        let objects = vec![
+            tracked("team", "api", Some("guestbook:apps/Deployment:team/api")),
+            tracked(
+                "web",
+                "front",
+                Some("argocd_guestbook:apps/Deployment:web/front"),
+            ),
+            // Another application, and a copied id that names another workload.
+            tracked("team", "other", Some("billing:apps/Deployment:team/other")),
+            tracked("team", "clone", Some("guestbook:apps/Deployment:team/api")),
+            // A namesake application in another namespace.
+            tracked(
+                "team",
+                "elsewhere",
+                Some("apps_guestbook:apps/Deployment:team/elsewhere"),
+            ),
+            tracked("team", "plain", None),
+        ];
+        let (found, unreadable) = sources(&link, &objects, &guestbook(), true);
+        assert_eq!(
+            found,
+            vec![
+                target(Some("team"), "api", true),
+                target(Some("web"), "front", true)
+            ]
+        );
+        assert_eq!(unreadable, None);
+        // Without a default namespace a bare name may be this application or a
+        // namesake: reported, and said why, never counted as certain.
+        let (found, _) = sources(&argo_link(), &objects, &guestbook(), true);
+        assert_eq!(found.len(), 2, "{found:?}");
+        assert!(found[0]
+            .unverified
+            .as_deref()
+            .is_some_and(|why| why.contains("namespace")));
+        assert_eq!(found[1], target(Some("web"), "front", true));
+    }
+
+    #[test]
+    fn a_reverse_view_holds_owner_references_to_the_targets_uid() {
+        let owned = link(
+            json!({"id":"owner","from":"/Secret","to":"external-secrets.io/ExternalSecret",
+            "relation":"ownedBy","match":{"ownerReference":true}}),
+        );
+        let secret = |name: &str, uid: &str| {
+            json!({"apiVersion":"v1","kind":"Secret","metadata":{"name":name,"namespace":"team",
+                "ownerReferences":[{"apiVersion":"external-secrets.io/v1beta1",
+                    "kind":"ExternalSecret","name":"db","uid":uid}]}})
+        };
+        let target = Target {
+            namespace: Some("team"),
+            name: "db",
+            uid: Some("u-es"),
+        };
+        // The second is owned by an ExternalSecret of the same name that was
+        // deleted and recreated: not this one.
+        let (found, _) = sources(
+            &owned,
+            &[secret("db-creds", "u-es"), secret("stale", "u-old")],
+            &target,
+            true,
+        );
+        assert_eq!(found, vec![self::target(Some("team"), "db-creds", true)]);
+    }
+
+    #[test]
+    fn a_reverse_view_counts_what_it_could_not_read_instead_of_dropping_it() {
+        let flux = link(json!({"id":"flux","from":"apps/Deployment",
+            "to":"kustomize.toolkit.fluxcd.io/Kustomization","relation":"managedBy",
+            "match":{"label":"kustomize.toolkit.fluxcd.io/name",
+                "namespaceLabel":"kustomize.toolkit.fluxcd.io/namespace"}}));
+        let labelled = |name: &str, labels: Value| json!({"metadata":{"name":name,"namespace":"team","labels":labels}});
+        let objects = vec![
+            labelled(
+                "api",
+                json!({"kustomize.toolkit.fluxcd.io/name":"apps",
+                "kustomize.toolkit.fluxcd.io/namespace":"flux-system"}),
+            ),
+            // Named, but with no namespace label: which Kustomization is unknown.
+            labelled("half", json!({"kustomize.toolkit.fluxcd.io/name":"apps"})),
+            labelled("plain", json!({})),
+        ];
+        let apps = Target {
+            namespace: Some("flux-system"),
+            name: "apps",
+            uid: None,
+        };
+        let (found, unreadable) = sources(&flux, &objects, &apps, true);
+        assert_eq!(found, vec![target(Some("team"), "api", true)]);
+        let unreadable = unreadable.expect("the half-labelled Deployment is reported");
+        assert!(
+            unreadable.starts_with("1 resource could not be read"),
+            "{unreadable}"
+        );
+        assert!(unreadable.contains("team/half"), "{unreadable}");
+    }
+
+    #[test]
+    fn a_reverse_view_lists_one_namespace_only_when_the_link_cannot_leave_it() {
+        let by = |matching: Value| {
+            link(
+                json!({"id":"l","from":"apps/Deployment","to":"acme.io/Stack",
+                "relation":"ownedBy","match":matching}),
+            )
+        };
+        // Named beside the resource: the target's namespace is enough.
+        for beside in [
+            json!({"ownerReference":true}),
+            json!({"name":true}),
+            json!({"label":"acme.io/stack"}),
+            json!({"annotation":"acme.io/stack"}),
+        ] {
+            assert_eq!(
+                reverse_scope(&by(beside.clone()), true, true, Some("team")),
+                "team",
+                "{beside}"
+            );
+            // A cluster-scoped target is named from every namespace, and a
+            // cluster-scoped source has none.
+            assert_eq!(
+                reverse_scope(&by(beside.clone()), true, false, None),
+                "",
+                "{beside}"
+            );
+            assert_eq!(
+                reverse_scope(&by(beside.clone()), false, true, Some("team")),
+                "",
+                "{beside}"
+            );
+        }
+        // Named from anywhere: the whole cluster.
+        for anywhere in [
+            json!({"label":"acme.io/stack","namespaceLabel":"acme.io/namespace"}),
+            json!({"annotation":"argocd.argoproj.io/tracking-id","parse":"argocd-tracking-id"}),
+            json!({"path":".spec.stackRef"}),
+        ] {
+            assert_eq!(
+                reverse_scope(&by(anywhere.clone()), true, true, Some("team")),
+                "",
+                "{anywhere}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_builtin_link_kind_is_one_kube_reads_in_that_group() {
+        for builtin in srelens_plugin_host::BUILTIN_LINK_KINDS {
+            let (gvk, namespaced) = srelens_kube::manifest::gvk_for(builtin.kind)
+                .unwrap_or_else(|| panic!("{} is not a kind kube knows", builtin.kind));
+            assert_eq!(
+                (
+                    gvk.group.as_str(),
+                    gvk.version.as_str(),
+                    gvk.kind.as_str(),
+                    namespaced
+                ),
+                (
+                    builtin.group,
+                    builtin.version,
+                    builtin.kind,
+                    builtin.namespaced
+                ),
+            );
+        }
+    }
+
+    // ---- The resolvers end to end, against a fake API server (#728) ----
+
+    const PLAINTEXT: [&str; 3] = ["hunter2", "aHVudGVyMg==", "password"];
+
+    /// A Secret as a server that ignored the metadata-only request would send it.
+    fn secret_object(name: &str, owner_uid: &str) -> Value {
+        json!({"apiVersion":"v1","kind":"Secret",
+            "metadata":{"name":name,"namespace":"team","uid":format!("u-{name}"),
+                "annotations":{"note":"hunter2"},
+                "ownerReferences":[{"apiVersion":"external-secrets.io/v1beta1",
+                    "kind":"ExternalSecret","name":"db","uid":owner_uid}]},
+            "data":{"password":"aHVudGVyMg=="},"stringData":{"password":"hunter2"}})
+    }
+
+    fn external_secret() -> Value {
+        json!({"apiVersion":"external-secrets.io/v1beta1","kind":"ExternalSecret",
+            "metadata":{"name":"db","namespace":"team","uid":"u-es"},
+            "spec":{"target":{"name":"db-creds"}}})
+    }
+
+    /// One page of 2,500 Deployments, 500 at a time: `api` on the first tracks the
+    /// Argo CD Application argocd/guestbook, and `late` on the last does too.
+    fn deployments_page(query: &str) -> Value {
+        let page = page_of(query);
+        let mut items: Vec<Value> = (0..500)
+            .map(|i| tracked("team", &format!("d-{page}-{i}"), None))
+            .collect();
+        if page == 1 {
+            items[0] = tracked(
+                "team",
+                "api",
+                Some("argocd_guestbook:apps/Deployment:team/api"),
+            );
+        }
+        if page == 5 {
+            items[0] = tracked(
+                "team",
+                "late",
+                Some("argocd_guestbook:apps/Deployment:team/late"),
+            );
+        }
+        let next = (page < 5).then(|| format!("p{}", page + 1));
+        json!({"apiVersion":"v1","kind":"List","metadata":{"continue":next},"items":items})
+    }
+
+    /// Which of five pages a list request asks for, by its continue token.
+    fn page_of(query: &str) -> usize {
+        query
+            .split('&')
+            .find_map(|pair| pair.strip_prefix("continue=p"))
+            .and_then(|page| page.parse().ok())
+            .unwrap_or(1)
+    }
+
+    /// One page of the 2,500 ExternalSecrets in namespace `busy`, 500 at a time:
+    /// `early` is on the first page, and `late`, on the last, is past the cut.
+    fn busy_external_secrets_page(query: &str) -> Value {
+        let page = page_of(query);
+        let secret = |name: String| {
+            json!({"apiVersion":"external-secrets.io/v1beta1","kind":"ExternalSecret",
+                "metadata":{"name":name,"namespace":"busy"},"spec":{"target":{"name":"db-creds"}}})
+        };
+        let mut items: Vec<Value> = (0..500).map(|i| secret(format!("es-{page}-{i}"))).collect();
+        if page == 1 {
+            items[0] = secret("early".into());
+        }
+        if page == 5 {
+            items[0] = secret("late".into());
+        }
+        let next = (page < 5).then(|| format!("p{}", page + 1));
+        json!({"apiVersion":"v1","kind":"List","metadata":{"continue":next},"items":items})
+    }
+
+    /// A cluster with ExternalSecrets (2,500 of them in `busy`), Secrets, an
+    /// HTTPRoute, Services and 2,500 Deployments, and every request it was asked.
+    fn cluster() -> (
+        srelens_kube::test_support::Client,
+        Arc<std::sync::Mutex<Vec<srelens_kube::test_support::Seen>>>,
+    ) {
+        srelens_kube::test_support::fake_api(|seen| {
+            let list = |items: Vec<Value>| json!({"apiVersion":"v1","kind":"List","metadata":{},"items":items});
+            match seen.path.as_str() {
+                "/apis/external-secrets.io/v1beta1/namespaces/team/externalsecrets" => {
+                    list(vec![external_secret()])
+                }
+                "/api/v1/namespaces/team/secrets" => list(vec![
+                    secret_object("db-creds", "u-es"),
+                    // Owned by an ExternalSecret `db` since deleted and recreated.
+                    secret_object("stale", "u-old"),
+                ]),
+                "/apis/apps/v1/deployments" | "/apis/apps/v1/namespaces/team/deployments" => {
+                    deployments_page(&seen.query)
+                }
+                "/apis/external-secrets.io/v1beta1/namespaces/busy/externalsecrets" => {
+                    busy_external_secrets_page(&seen.query)
+                }
+                "/apis/gateway.networking.k8s.io/v1/namespaces/team/httproutes"
+                | "/apis/gateway.networking.k8s.io/v1/httproutes" => list(vec![route()]),
+                "/api/v1/services" | "/api/v1/namespaces/team/services" => list(vec![
+                    json!({"apiVersion":"v1","kind":"Service","metadata":{"name":"api","namespace":"team"}}),
+                    json!({"apiVersion":"v1","kind":"Service","metadata":{"name":"old","namespace":"legacy"}}),
+                ]),
+                _ => list(vec![]),
+            }
+        })
+    }
+
+    /// Installs `links` in an app with ExternalSecret and HTTPRoute readers, on a
+    /// host whose context `fake` is the fake cluster.
+    async fn installed_on_fake(
+        links: Value,
+    ) -> (
+        tempfile::TempDir,
+        Registry,
+        u64,
+        Arc<std::sync::Mutex<Vec<srelens_kube::test_support::Seen>>>,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("apps.json");
+        let mut core = crate::build_registry_with_paths(
+            srelens_kube::client_cache::ClientCache::new_many(vec![]),
+            vec![],
+        );
+        super::super::tests::serve_crds(
+            &mut core,
+            &[
+                "externalsecrets.external-secrets.io/v1beta1",
+                "httproutes.gateway.networking.k8s.io/v1",
+                "applications.argoproj.io/v1alpha1",
+            ],
+        );
+        let core = Arc::new(core);
+        let reader = |name: &str, group: &str, version: &str, kind: &str| {
+            json!({"name":name,"title":format!("List {name}"),"target":"k8s.listCustomResource",
+                "arguments":{"group":group,"version":version,"plural":name,"kind":kind,"namespaced":true},
+                "inputs":["context","namespace"]})
+        };
+        let manifest = json!({"id":"org.example.links","name":"Links","version":"0.1.0",
+            "srelensApiVersion":"^0.5","kind":"declarative","permissions":["k8s.listCustomResource"],
+            "capabilities":[
+                reader("externalsecrets","external-secrets.io","v1beta1","ExternalSecret"),
+                reader("httproutes","gateway.networking.k8s.io","v1","HTTPRoute"),
+                reader("applications","argoproj.io","v1alpha1","Application"),
+            ],
+            "contributions":{"pages":[
+                {"id":"externalsecrets","title":"External secrets","capability":"externalsecrets"},
+                {"id":"httproutes","title":"Routes","capability":"httproutes"}],
+                "detailTabs":[],"detailLinks":[],"resourceLinks":links}});
+        let revision = mutate(
+            &path,
+            core.clone(),
+            Configure::Install {
+                signature: None,
+                manifest: manifest.to_string(),
+                grants: vec!["k8s.listCustomResource".into()],
+                reviewed_revision: None,
+            },
+        )
+        .unwrap()
+        .plugins[0]
+            .revision;
+        let (client, seen) = cluster();
+        let clients = srelens_kube::client_cache::ClientCache::new_many(vec![]);
+        clients.preload("fake", client).await;
+        let mut reg = Registry::new();
+        super::super::register(&mut reg, path, core, clients);
+        (dir, reg, revision, seen)
+    }
+
+    fn call(revision: u64, kind: &str, resource: Value) -> Value {
+        json!({"id":"org.example.links","revision":revision,"context":"fake",
+            "namespace":"team","kind":kind,"resource":resource})
+    }
+
+    /// What the Inspector sends: identity and metadata, never the body.
+    fn identity(object: &Value) -> Value {
+        json!({"apiVersion":object["apiVersion"],"kind":object["kind"],"metadata":object["metadata"]})
+    }
+
+    fn assert_no_plaintext(out: &Value) {
+        let text = out.to_string();
+        for secret in PLAINTEXT {
+            assert!(!text.contains(secret), "{secret} left the host: {text}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_path_link_reads_its_resource_through_the_reader_and_finds_a_secret_by_identity() {
+        let (_dir, reg, revision, seen) = installed_on_fake(json!([{"id":"target",
+            "from":"external-secrets.io/ExternalSecret","to":"/Secret","relation":"references",
+            "match":{"path":".spec.target.name"}}]))
+        .await;
+        let out = reg
+            .invoke(
+                "extensions.resolveLinks",
+                call(
+                    revision,
+                    "external-secrets.io/ExternalSecret",
+                    identity(&external_secret()),
+                ),
+            )
+            .await
+            .unwrap();
+        let link = &out["links"][0];
+        assert!(link.get("error").is_none(), "{out}");
+        // A built-in target opens in the host's own Inspector: no reader names it.
+        assert_eq!(link["capability"], "");
+        assert_eq!(link["to"], "/Secret");
+        assert_eq!(
+            link["targets"],
+            json!([{"namespace":"team","name":"db-creds","exists":true}])
+        );
+        assert_no_plaintext(&out);
+        let seen = seen.lock().unwrap();
+        // The spec came from the host's own read, not from the caller, which sent none.
+        assert!(
+            seen.iter()
+                .any(|s| s.path.ends_with("/namespaces/team/externalsecrets")),
+            "{seen:?}"
+        );
+        let secrets = seen
+            .iter()
+            .find(|s| s.path == "/api/v1/namespaces/team/secrets")
+            .expect("secrets listed");
+        assert!(
+            secrets.accept.contains("PartialObjectMetadataList"),
+            "{secrets:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_secrets_reverse_view_reads_its_owner_references_and_no_value() {
+        let (_dir, reg, revision, seen) = installed_on_fake(json!([{"id":"owner","from":"/Secret",
+            "to":"external-secrets.io/ExternalSecret","relation":"ownedBy",
+            "match":{"ownerReference":true}}]))
+        .await;
+        let out = reg
+            .invoke(
+                "extensions.resolveReverseLinks",
+                call(
+                    revision,
+                    "external-secrets.io/ExternalSecret",
+                    identity(&external_secret()),
+                ),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            out["to"],
+            json!({"kind":"external-secrets.io/ExternalSecret","namespace":"team","name":"db"})
+        );
+        let link = &out["links"][0];
+        assert!(link.get("error").is_none(), "{out}");
+        assert_eq!(link["from"], "/Secret");
+        assert_eq!(link["relation"], "ownedBy");
+        assert_eq!(link["capability"], "");
+        assert_eq!(link["truncated"], false);
+        // Both name an owner `db`; only the one whose uid is this ExternalSecret's counts.
+        assert_eq!(
+            link["sources"],
+            json!([{"namespace":"team","name":"db-creds","exists":true}])
+        );
+        assert_no_plaintext(&out);
+        // Owner references name a target beside them: one namespace was listed.
+        let seen = seen.lock().unwrap();
+        let secrets = seen.iter().find(|s| s.path.ends_with("/secrets")).unwrap();
+        assert_eq!(secrets.path, "/api/v1/namespaces/team/secrets");
+    }
+
+    #[tokio::test]
+    async fn a_services_reverse_view_reads_every_routes_backends() {
+        let (_dir, reg, revision, _seen) = installed_on_fake(json!([{"id":"backends",
+            "from":"gateway.networking.k8s.io/HTTPRoute","to":"/Service","relation":"references",
+            "match":{"path":".spec.rules[*].backendRefs[*]"}}]))
+        .await;
+        let seen = _seen;
+        let service = json!({"apiVersion":"v1","kind":"Service","metadata":{"name":"web","namespace":"team"}});
+        let out = reg
+            .invoke(
+                "extensions.resolveReverseLinks",
+                call(revision, "/Service", service),
+            )
+            .await
+            .unwrap();
+        let link = &out["links"][0];
+        // A backend may name another namespace, so every route in the cluster is read.
+        assert!(seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|s| s.path == "/apis/gateway.networking.k8s.io/v1/httproutes"));
+        // The HTTPRoute is read through the app's reader and its capability is the page's.
+        assert_eq!(link["capability"], "httproutes");
+        assert_eq!(
+            link["sources"],
+            json!([{"namespace":"team","name":"web","exists":true}]),
+            "{out}"
+        );
+        // Forward, from the route: three backends are Services, one is not.
+        let out = reg
+            .invoke(
+                "extensions.resolveLinks",
+                call(
+                    revision,
+                    "gateway.networking.k8s.io/HTTPRoute",
+                    identity(&route()),
+                ),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            out["links"][0]["targets"],
+            json!([{"namespace":"team","name":"api","exists":true},
+                   {"namespace":"team","name":"web","exists":false},
+                   {"namespace":"legacy","name":"old","exists":true}]),
+            "{out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_path_link_on_a_resource_the_host_cannot_find_is_an_error_not_no_link() {
+        let (_dir, reg, revision, _seen) = installed_on_fake(json!([{"id":"target",
+            "from":"external-secrets.io/ExternalSecret","to":"/Secret","relation":"references",
+            "match":{"path":".spec.target.name"}}]))
+        .await;
+        let mut gone = external_secret();
+        gone["metadata"]["name"] = json!("gone");
+        let out = reg
+            .invoke(
+                "extensions.resolveLinks",
+                call(
+                    revision,
+                    "external-secrets.io/ExternalSecret",
+                    identity(&gone),
+                ),
+            )
+            .await
+            .unwrap();
+        let error = out["links"][0]["error"].as_str().expect("an error");
+        assert!(error.contains("does not hold team/gone"), "{error}");
+        assert_eq!(out["links"][0]["targets"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn the_reverse_resolver_takes_the_forward_payload_and_refuses_anything_else() {
+        let (_dir, reg, revision, _seen) =
+            installed_on_fake(json!([{"id":"owner","from":"/Secret",
+            "to":"external-secrets.io/ExternalSecret","relation":"ownedBy",
+            "match":{"ownerReference":true}}]))
+            .await;
+        let payload = call(
+            revision,
+            "external-secrets.io/ExternalSecret",
+            identity(&external_secret()),
+        );
+        // A kind no link points at has no reverse links, and needs no read.
+        let mut other = payload.clone();
+        other["kind"] = json!("gateway.networking.k8s.io/HTTPRoute");
+        other["resource"] = identity(&route());
+        let out = reg
+            .invoke("extensions.resolveReverseLinks", other)
+            .await
+            .unwrap();
+        assert_eq!(out["links"], json!([]));
+        let mut stale = payload.clone();
+        stale["revision"] = json!(revision + 1);
+        assert!(reg
+            .invoke("extensions.resolveReverseLinks", stale)
+            .await
+            .is_err());
+        let mut wrong = payload.clone();
+        wrong["targetKind"] = json!("external-secrets.io/ExternalSecret");
+        assert!(reg
+            .invoke("extensions.resolveReverseLinks", wrong)
+            .await
+            .is_err());
+        let mut mismatched = payload;
+        mismatched["namespace"] = json!("other");
+        assert!(reg
+            .invoke("extensions.resolveReverseLinks", mismatched)
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn a_reverse_view_past_the_list_cap_says_so_and_keeps_what_it_found() {
+        let (_dir, reg, revision, _seen) = installed_on_fake(json!([{"id":"argocd-owner",
+            "from":"apps/Deployment","to":"argoproj.io/Application","relation":"managedBy",
+            "match":{"annotation":"argocd.argoproj.io/tracking-id","parse":"argocd-tracking-id",
+                "defaultNamespace":"argocd"}}]))
+        .await;
+        let application = json!({"apiVersion":"argoproj.io/v1alpha1","kind":"Application",
+            "metadata":{"name":"guestbook","namespace":"argocd"}});
+        let mut payload = call(revision, "argoproj.io/Application", application);
+        payload["namespace"] = json!("argocd");
+        let out = reg
+            .invoke("extensions.resolveReverseLinks", payload)
+            .await
+            .unwrap();
+        let link = &out["links"][0];
+        assert!(link.get("error").is_none(), "{out}");
+        // 2,000 of 2,500 were read: `api` is among them, `late` is past the cut, and
+        // the answer says there may be more rather than claiming it is whole.
+        assert_eq!(link["truncated"], true);
+        assert_eq!(
+            link["sources"],
+            json!([{"namespace":"team","name":"api","exists":true}])
+        );
+    }
+
+    #[tokio::test]
+    async fn a_target_past_the_list_cap_is_an_error_not_missing() {
+        // An HTTPRoute backend read as a Deployment's name, so the target list is
+        // one namespace of 2,500 Deployments: `d-5-1` exists, past the cut.
+        let (_dir, reg, revision, _seen) = installed_on_fake(json!([{"id":"deploy",
+            "from":"gateway.networking.k8s.io/HTTPRoute","to":"apps/Deployment",
+            "relation":"references","match":{"path":".spec.rules[0].backendRefs[0].name"}}]))
+        .await;
+        let out = reg
+            .invoke(
+                "extensions.resolveLinks",
+                call(
+                    revision,
+                    "gateway.networking.k8s.io/HTTPRoute",
+                    identity(&route()),
+                ),
+            )
+            .await
+            .unwrap();
+        let link = &out["links"][0];
+        assert!(
+            link["error"]
+                .as_str()
+                .is_some_and(|why| why.contains("2,000")),
+            "{out}"
+        );
+        assert_eq!(link["targets"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn a_path_link_reads_its_resource_from_a_cut_off_list_and_names_the_cut() {
+        // 2,500 ExternalSecrets in one namespace: the host reads 2,000 of them.
+        let (_dir, reg, revision, _seen) = installed_on_fake(json!([{"id":"target",
+            "from":"external-secrets.io/ExternalSecret","to":"/Secret","relation":"references",
+            "match":{"path":".spec.target.name"}}]))
+        .await;
+        let inspect = |name: &str| {
+            let mut payload = call(
+                revision,
+                "external-secrets.io/ExternalSecret",
+                json!({"apiVersion":"external-secrets.io/v1beta1","kind":"ExternalSecret",
+                    "metadata":{"name":name,"namespace":"busy"}}),
+            );
+            payload["namespace"] = json!("busy");
+            payload
+        };
+        // Among what was read: answered, though the list was cut.
+        let out = reg
+            .invoke("extensions.resolveLinks", inspect("early"))
+            .await
+            .unwrap();
+        let link = &out["links"][0];
+        assert!(link.get("error").is_none(), "{out}");
+        assert_eq!(
+            link["targets"],
+            json!([{"namespace":"busy","name":"db-creds","exists":false}])
+        );
+        // Past the cut: the limit is the reason, not an absence a refresh would fix.
+        let out = reg
+            .invoke("extensions.resolveLinks", inspect("late"))
+            .await
+            .unwrap();
+        let error = out["links"][0]["error"].as_str().expect("an error");
+        assert!(
+            error.contains("2,000") && error.contains("busy/late"),
+            "{error}"
+        );
+        assert!(!error.contains("refresh"), "{error}");
     }
 }

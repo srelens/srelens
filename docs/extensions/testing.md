@@ -45,7 +45,7 @@ handler's consent gate.
 
 | Suite | Covers |
 |---|---|
-| `cargo test -p srelens-plugin-host` | Manifest parsing and validation, API version negotiation, broker registration, revocation, consent, that `schemas/extension-manifest.v0.4.json` equals the generated schema, and that a field missing from the frozen 0.3 schema is gated in `API_FIELDS` |
+| `cargo test -p srelens-plugin-host` | Manifest parsing and validation, API version negotiation, broker registration, revocation, consent, that `schemas/extension-manifest.v0.5.json` equals the generated schema, and that a field missing from the frozen 0.3 and 0.4 schemas is gated in `API_FIELDS` |
 | `cargo test -p srelens-plugin-host --lib fuzzing` | Manifest decoding, validation and parsing on arbitrary bytes and on edits of the example manifests: no panic, a value or a coded problem, the 256 KiB limit to the byte, and an accepted manifest re-serializes to an equal one |
 | `cargo test -p srelens-registry` | Inventory lifecycle, quarantine, catalog parsing and caching, signing, app capabilities |
 | `cargo test -p srelens-registry --lib package` | The `.srelens-extension` format ([packages.md](packages.md)): tampered, missing and extra files, links, traversal and layout paths, oversized archives and bombs, trailing data, the digest list's exact form, and a valid package that installs, reverifies, updates, rolls back and is pruned. The fixture packages' digest lists are regenerated, and the signed one re-signed with the test publisher's key, by `UPDATE_CATALOG=1 cargo test -p srelens-registry` |

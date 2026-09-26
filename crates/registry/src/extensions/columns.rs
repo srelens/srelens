@@ -11,7 +11,10 @@ use std::{
 
 const CACHE_TTL: Duration = Duration::from_secs(5);
 const CACHE_LIMIT: usize = 32;
-pub(super) type Snapshot = (Instant, Arc<Vec<Value>>);
+/// When a list was read, what it held, and whether it stopped at the list cap with more
+/// unread. A cut-off list is kept like a complete one: a caller that needs every object
+/// refuses it, and one that reports the cut (a target's reverse links, #728) says so.
+pub(super) type Snapshot = (Instant, Arc<Vec<Value>>, bool);
 pub(super) type SlotState = Result<Option<Snapshot>, (Instant, CapabilityError)>;
 #[derive(Clone, Hash, PartialEq, Eq)]
 pub(super) struct CacheKey {
@@ -201,21 +204,23 @@ fn key_for_join(app: &str, revision: u64, context: &str, namespace: &str, join: 
     reader_key(app, revision, context, namespace, &join.capability, "v1")
 }
 
-async fn cached_objects<F, Fut>(
+/// The objects `load` lists, and whether it was cut off at the list cap, through the
+/// snapshot `key` names.
+pub(super) async fn cached_objects<F, Fut>(
     cache: &JoinCache,
     key: CacheKey,
     load: F,
-) -> Result<Arc<Vec<Value>>, CapabilityError>
+) -> Result<(Arc<Vec<Value>>, bool), CapabilityError>
 where
     F: FnOnce() -> Fut,
-    Fut: Future<Output = Result<Vec<Value>, CapabilityError>>,
+    Fut: Future<Output = Result<(Vec<Value>, bool), CapabilityError>>,
 {
     let started_at = Instant::now();
     let slot = cache_slot(cache, key);
     let mut state = slot.lock().await;
-    if let Ok(Some((time, objects))) = &*state {
+    if let Ok(Some((time, objects, truncated))) = &*state {
         if time.elapsed() < CACHE_TTL {
-            return Ok(Arc::clone(objects));
+            return Ok((Arc::clone(objects), *truncated));
         }
     }
     if let Err((failed_at, error)) = &*state {
@@ -228,15 +233,15 @@ where
     }
     // Release an expired large list even if its replacement fails.
     *state = Ok(None);
-    let objects = match load().await {
-        Ok(objects) => Arc::new(objects),
+    let (objects, truncated) = match load().await {
+        Ok((objects, truncated)) => (Arc::new(objects), truncated),
         Err(error) => {
             *state = Err((Instant::now(), copy_error(&error)));
             return Err(error);
         }
     };
     let loaded_at = Instant::now();
-    *state = Ok(Some((loaded_at, Arc::clone(&objects))));
+    *state = Ok(Some((loaded_at, Arc::clone(&objects), truncated)));
     drop(state);
     // Idle cache entries must release their raw CRs after the TTL as well.
     let weak = Arc::downgrade(&slot);
@@ -244,12 +249,12 @@ where
         tokio::time::sleep(CACHE_TTL).await;
         if let Some(slot) = weak.upgrade() {
             let mut state = slot.lock().await;
-            if matches!(&*state, Ok(Some((time, _))) if *time == loaded_at) {
+            if matches!(&*state, Ok(Some((time, _, _))) if *time == loaded_at) {
                 *state = Ok(None);
             }
         }
     });
-    Ok(objects)
+    Ok((objects, truncated))
 }
 
 pub(super) async fn join_objects(
@@ -291,6 +296,35 @@ pub(super) async fn reader_objects(
     context: &str,
     namespace: &str,
 ) -> Result<ReaderObjects, CapabilityError> {
+    let (objects, truncated, version) = reader_listing(
+        cache,
+        client_cache,
+        core,
+        plugin,
+        reader,
+        context,
+        namespace,
+    )
+    .await?;
+    if truncated {
+        return Err(CapabilityError::Handler(
+            "Resource list reached its 2,000-object limit; joined values and dashboard figures read from it would be incomplete".into(),
+        ));
+    }
+    Ok((objects, version))
+}
+
+/// [`reader_objects`], keeping a list that stopped at the 2,000-object cap, with
+/// whether it did: for a caller that reports the cut rather than refusing it (#728).
+pub(super) async fn reader_listing(
+    cache: &JoinCache,
+    client_cache: &srelens_kube::client_cache::ClientCache,
+    core: &Registry,
+    plugin: &Installed,
+    reader: &str,
+    context: &str,
+    namespace: &str,
+) -> Result<(Arc<Vec<Value>>, bool, String), CapabilityError> {
     let (manifest, version) = crd::resolved(core, context, &plugin.manifest, reader).await?;
     let binding = manifest
         .capabilities
@@ -317,19 +351,20 @@ pub(super) async fn reader_objects(
         .get("namespaced")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let objects = cached_objects(cache, key, || async {
-        let (objects, truncated) = srelens_kube::crds::list_custom_resource_join_objects(
-            client_cache, context, namespace, argument("group"), argument("version"),
-            argument("kind"), argument("plural"), namespaced,
-        ).await?;
-        if truncated {
-            return Err(CapabilityError::Handler(
-                "Resource list reached its 2,000-object limit; joined values and dashboard figures read from it would be incomplete".into(),
-            ));
-        }
-        Ok(objects)
-    }).await?;
-    Ok((objects, version))
+    let (objects, truncated) = cached_objects(cache, key, || {
+        srelens_kube::crds::list_custom_resource_join_objects(
+            client_cache,
+            context,
+            namespace,
+            argument("group"),
+            argument("version"),
+            argument("kind"),
+            argument("plural"),
+            namespaced,
+        )
+    })
+    .await?;
+    Ok((objects, truncated, version))
 }
 
 /// A reader's objects, and the API version they were read at (#547). Whatever reads
@@ -621,24 +656,22 @@ pub(super) fn register(
                         // A built-in kind's metadata is not read through an app's version.
                         version: String::new(),
                     };
-                    Some(
-                        cached_objects(&cache, key, || async {
-                            let (objects, truncated) = srelens_kube::crds::list_builtin_metadata(
-                                &client_cache,
-                                &context,
-                                &input.namespace,
-                                &input.kind,
-                            )
-                            .await?;
-                            if truncated {
-                                return Err(CapabilityError::Handler(
-                                    "Row metadata reached its 2,000-object limit; badges would be incomplete".into(),
-                                ));
-                            }
-                            Ok(objects)
-                        })
-                        .await?,
-                    )
+                    let (objects, truncated) = cached_objects(&cache, key, || {
+                        srelens_kube::crds::list_builtin_metadata(
+                            &client_cache,
+                            &context,
+                            &input.namespace,
+                            &input.kind,
+                        )
+                    })
+                    .await?;
+                    if truncated {
+                        return Err(CapabilityError::Handler(
+                            "Row metadata reached its 2,000-object limit; badges would be incomplete"
+                                .into(),
+                        ));
+                    }
+                    Some(objects)
                 } else {
                     None
                 };
@@ -810,11 +843,12 @@ mod tests {
                 key_for_join("app", 2, "prod", "team", &join),
                 || async {
                     calls.fetch_add(1, Ordering::SeqCst);
-                    Ok(vec![json!({"metadata":{"name":"report","namespace":"team","labels":{"target":"report"}}})])
+                    Ok((vec![json!({"metadata":{"name":"report","namespace":"team","labels":{"target":"report"}}})], false))
                 },
             )
             .await
-            .unwrap();
+            .unwrap()
+            .0;
             assert_eq!(result.len(), 1);
             if let Some(first) = &first_snapshot {
                 assert!(Arc::ptr_eq(first, &result));
@@ -879,9 +913,9 @@ mod tests {
         );
         assert_eq!(calls.load(Ordering::SeqCst), 1);
 
-        let objects = cached_objects(&cache, key, || async {
+        let (objects, _) = cached_objects(&cache, key, || async {
             calls.fetch_add(1, Ordering::SeqCst);
-            Ok(vec![json!({"metadata":{"name":"report"}})])
+            Ok((vec![json!({"metadata":{"name":"report"}})], false))
         })
         .await
         .unwrap();
@@ -917,14 +951,14 @@ mod tests {
         let calls = AtomicUsize::new(0);
         let later = cached_objects(&cache, key, || async {
             calls.fetch_add(1, Ordering::SeqCst);
-            Ok(vec![json!({"metadata":{"name":"recovered"}})])
+            Ok((vec![json!({"metadata":{"name":"recovered"}})], false))
         });
         let release = async {
             tokio::task::yield_now().await;
             drop(guard);
         };
         let (result, ()) = tokio::join!(later, release);
-        assert_eq!(result.unwrap()[0]["metadata"]["name"], "recovered");
+        assert_eq!(result.unwrap().0[0]["metadata"]["name"], "recovered");
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
@@ -947,6 +981,7 @@ mod tests {
         *slot.lock().await = Ok(Some((
             Instant::now() - CACHE_TTL - Duration::from_secs(1),
             Arc::new(vec![json!({"large":"old"})]),
+            false,
         )));
         assert!(cached_objects(&cache, key, || async {
             Err(CapabilityError::Handler("offline".into()))
@@ -975,7 +1010,7 @@ mod tests {
         let key = key_for_join("app", 2, "prod", "team", &join);
         let slot = cache_slot(&cache, key.clone());
         let objects = cached_objects(&cache, key, || async {
-            Ok(vec![json!({"large":"raw CR"})])
+            Ok((vec![json!({"large":"raw CR"})], false))
         })
         .await
         .unwrap();

@@ -3897,6 +3897,7 @@ mod tests {
             "extensions.resolveCards",
             "extensions.resolvePanels",
             "extensions.resolveLinks",
+            "extensions.resolveReverseLinks",
             "extensions.catalog",
             "extensions.catalogManifest",
             "extensions.packageManifest",

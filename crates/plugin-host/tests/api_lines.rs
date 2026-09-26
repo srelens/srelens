@@ -255,3 +255,89 @@ fn a_0_4_manifest_is_incompatible_with_a_host_that_implements_only_0_3() {
         );
     }
 }
+
+/// Each thing API 0.5 added (#728), used validly, with the `API_FIELDS` entry it uses:
+/// a link's spec `path`, and a link's `to` naming a built-in kind. API 0.4 was published
+/// in srelens builds without them, so a `^0.4` manifest may use neither.
+fn uses_of_0_5() -> Vec<(&'static str, Use)> {
+    vec![
+        ("contributions.resourceLinks[].match.path", |v| {
+            // Toward the reader's own kind, so the path is the only new thing.
+            v["contributions"]["resourceLinks"] = json!([{"id":"parent",
+                "from":"argoproj.io/Application","to":"argoproj.io/Application",
+                "relation":"references","match":{"path":".spec.parentRefs[*]"}}]);
+        }),
+        ("contributions.resourceLinks[].to", |v| {
+            v["contributions"]["resourceLinks"] = json!([{"id":"account",
+                "from":"apps/Deployment","to":"/ServiceAccount","relation":"references",
+                "match":{"label":"example.io/service-account"}}]);
+        }),
+    ]
+}
+
+#[test]
+fn every_0_5_addition_under_a_0_4_range_is_told_it_requires_api_0_5() {
+    for (field, apply) in uses_of_0_5() {
+        let mut value = manifest();
+        apply(&mut value);
+        for range in ["^0.5", ">=0.5, <0.6"] {
+            Manifest::parse(&with_range(value.clone(), range))
+                .unwrap_or_else(|e| panic!("{field} under {range}: {e}"));
+        }
+        // A range that admits 0.4 claims the hosts published on that line.
+        for range in ["^0.4", ">=0.4, <0.6"] {
+            let errors = Manifest::parse(&with_range(value.clone(), range))
+                .expect_err(&format!("{field} under {range}"))
+                .0;
+            assert_eq!(errors.len(), 1, "{field} under {range}: {errors:?}");
+            let error = &errors[0];
+            assert_eq!(error.code, ValidationCode::ApiIncompatible, "{error:?}");
+            assert_eq!(error.path, "srelensApiVersion", "{error:?}");
+            assert!(
+                error.message.contains("requires API 0.5.0")
+                    && error.message.contains("admits API 0.4.0")
+                    && error.message.contains(&format!("`{field}`")),
+                "{error:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn every_0_5_entry_in_the_table_has_a_case_above() {
+    let covered: Vec<&str> = uses_of_0_5().iter().map(|(field, _)| *field).collect();
+    let gated: Vec<&str> = API_FIELDS
+        .iter()
+        .filter(|field| field.introduced == "0.5.0")
+        .map(|field| field.path)
+        .collect();
+    assert_eq!(gated.len(), covered.len(), "{gated:?}");
+    for path in &gated {
+        assert!(covered.contains(path), "{path} has no case");
+    }
+}
+
+#[test]
+fn a_link_to_a_kind_a_reader_lists_stays_a_0_4_link() {
+    // The built-in form is decided by the value: `to` naming a reader's kind is what API
+    // 0.4 already had, and a `^0.4` manifest keeps writing it.
+    let mut value = manifest();
+    value["contributions"]["resourceLinks"] = json!([{"id":"owner","from":"apps/Deployment",
+        "to":"argoproj.io/Application","relation":"managedBy",
+        "match":{"label":"argocd.argoproj.io/instance"}}]);
+    Manifest::parse(&with_range(value, "^0.4")).expect("a reader target is 0.4");
+}
+
+#[test]
+fn a_0_5_manifest_is_incompatible_with_a_host_on_the_0_4_line() {
+    // What the published 0.4 hosts (srelens 0.15.1-186 and -187) check first.
+    let published = ["0.3.0", "0.4.0"];
+    for range in ["^0.5", ">=0.5, <0.6"] {
+        let range = semver::VersionReq::parse(range).unwrap();
+        assert!(matching_api_versions_in(&range, &published).is_empty());
+        assert_eq!(
+            negotiate_api_version(&range).map(|v| v.to_string()),
+            Some("0.5.0".into())
+        );
+    }
+}

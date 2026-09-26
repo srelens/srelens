@@ -114,12 +114,18 @@ export interface ExtensionLinkMatch {
   /** With `parse: "argocd-tracking-id"`: the namespace of an application written as a bare name. */
   defaultNamespace?: string;
   name?: boolean;
+  /**
+   * API 0.5 (#728): a path on the `from` resource, in the predicate grammar plus `[*]`,
+   * whose values name the target — its name, or an object reference with `name` and an
+   * optional `namespace`, `kind`, and `group` or `apiVersion`.
+   */
+  path?: string;
 }
 export interface ExtensionResourceLink {
   id: string;
   /** Qualified kind the link is read from, e.g. `apps/Deployment`. */
   from: string;
-  /** Qualified kind of the target; a declared reader lists it. */
+  /** Qualified kind of the target; a declared reader lists it, or it is a built-in kind (API 0.5, #728). */
   to: string;
   relation: ExtensionLinkRelation;
   match: ExtensionLinkMatch;
@@ -626,22 +632,52 @@ export const resolveExtensionPanels = (
 });
 /** One endpoint of a resolved link; `namespace` is null when cluster-scoped or unknown. */
 export interface ExtensionLinkEndpoint { kind: string; namespace: string | null; name: string }
+/**
+ * One resource at the other end of a link. `exists: false`: the resource names a target
+ * the cluster does not have — unless `unverified` says why the host did not look it up,
+ * or, for a source in a reverse view, why it may name a namesake instead.
+ */
+export interface ExtensionLinkTarget { namespace: string | null; name: string; exists: boolean; unverified?: string }
 /** One declared link resolved for one resource: an edge set a topology can also draw. */
 export interface ExtensionResolvedLink {
   id: string;
   relation: ExtensionLinkRelation;
   /** Target kind, qualified. */
   to: string;
-  /** The reader binding that lists `to`. */
+  /** The reader binding that lists `to`; empty for a built-in kind, which opens in the host's own Inspector (#728). */
   capability: string;
-  /** `exists: false`: the resource names a target the cluster does not have — unless `unverified` says why the host did not look it up. */
-  targets: Array<{ namespace: string | null; name: string; exists: boolean; unverified?: string }>;
+  targets: ExtensionLinkTarget[];
   /** Why the host could not answer; distinct from an empty `targets`. */
   error?: string;
 }
 export const resolveExtensionLinks = (
   id: string, revision: number, context: string, namespace: string, kind: string, resource: object,
 ) => invokeCapability<{ from: ExtensionLinkEndpoint; links: ExtensionResolvedLink[] }>("extensions.resolveLinks", {
+  id, revision, context, namespace, kind, resource,
+});
+/**
+ * One declared link read the other way round, for the Inspector of a resource of its `to`
+ * kind (#728): the resources of kind `from` whose link names this one. The same edges as
+ * {@link ExtensionResolvedLink}, seen from their target.
+ */
+export interface ExtensionReverseLink {
+  id: string;
+  relation: ExtensionLinkRelation;
+  /** Source kind, qualified. */
+  from: string;
+  /** The reader binding that lists `from`; empty for a built-in kind. */
+  capability: string;
+  sources: ExtensionLinkTarget[];
+  /** The host's read of `from` stopped at its 2,000-object limit: there may be more sources. */
+  truncated: boolean;
+  /** Resources of `from` the link could not be read on, and why the first could not. */
+  unreadable?: string;
+  /** Why the host could not answer; distinct from an empty `sources`. */
+  error?: string;
+}
+export const resolveExtensionReverseLinks = (
+  id: string, revision: number, context: string, namespace: string, kind: string, resource: object,
+) => invokeCapability<{ to: ExtensionLinkEndpoint; links: ExtensionReverseLink[] }>("extensions.resolveReverseLinks", {
   id, revision, context, namespace, kind, resource,
 });
 export function extensionRoute(
