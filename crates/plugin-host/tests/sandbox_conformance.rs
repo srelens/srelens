@@ -490,6 +490,9 @@ async fn the_host_environment_does_not_reach_the_sidecar() {
         .unwrap()
         .iter()
         .filter_map(Value::as_str)
+        // Set by LLVM's coverage runtime inside an instrumented probe, as it
+        // starts: not passed by the host.
+        .filter(|n| *n != "__LLVM_PROFILE_RT_INIT_ONCE")
         .collect();
     names.sort_unstable();
     // On Windows, `SystemRoot` for Winsock, and the three variables Windows

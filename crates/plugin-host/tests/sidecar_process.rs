@@ -19,6 +19,11 @@ use std::time::Duration;
 
 const PROBE: &str = env!("CARGO_BIN_EXE_srelens-sidecar-probe");
 
+/// Variables a process's own runtime sets in its environment as it starts,
+/// which no host passed it. LLVM's coverage runtime sets this one in every
+/// instrumented binary, so the probe has it under `cargo llvm-cov`.
+const SET_BY_THE_RUNTIME: &[&str] = &["__LLVM_PROFILE_RT_INIT_ONCE"];
+
 /// Starts the probe with no sandbox. Test support only: it claims the kernel
 /// enforces limits it does not set, so that the supervisor will run it.
 #[derive(Default)]
@@ -192,8 +197,31 @@ async fn the_sidecar_gets_only_the_environment_it_is_given() {
         .unwrap()
         .iter()
         .filter_map(|n| n.as_str())
+        .filter(|n| !SET_BY_THE_RUNTIME.contains(n))
         .collect();
     assert_eq!(names, ["PROBE_MARK"]);
+    supervisor.stop().await;
+}
+
+#[tokio::test]
+async fn an_allocation_too_large_to_count_is_refused_not_wrapped() {
+    // 2^45 MiB is past what a 64-bit byte count holds: multiplied unchecked,
+    // it would panic in a debug build and wrap to a small size in a release
+    // build, which the memory check would read as a successful allocation.
+    let (supervisor, _) = start(config(&[]));
+    running(&supervisor).await;
+    let error = supervisor
+        .request("allocate", json!({"mib": 1u64 << 45}))
+        .await
+        .unwrap_err();
+    let RequestError::Failed(error) = &error else {
+        panic!("{error:?}")
+    };
+    assert_eq!(
+        error.data.as_ref().unwrap()["kind"],
+        "InvalidInput",
+        "{error:?}"
+    );
     supervisor.stop().await;
 }
 

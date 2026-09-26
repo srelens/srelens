@@ -211,8 +211,13 @@ fn handle(method: &str, params: &Value) -> Result<Action, Fail> {
             answer(json!({"status": status.to_string()}))
         }
         "allocate" => {
-            let mib = params["mib"].as_u64().ok_or("missing mib".to_owned())? as usize;
-            let len = mib * 1024 * 1024;
+            let mib = params["mib"].as_u64().ok_or("missing mib".to_owned())?;
+            // Checked: a wrapped length would be a small allocation reported
+            // as a large one, a false pass for the memory check.
+            let len = usize::try_from(mib)
+                .ok()
+                .and_then(|mib| mib.checked_mul(1024 * 1024))
+                .ok_or_else(|| Fail::new("InvalidInput", format!("{mib} MiB is too large")))?;
             let mut buf: Vec<u8> = Vec::new();
             buf.try_reserve_exact(len).map_err(|e| {
                 Fail::new(
