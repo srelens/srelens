@@ -356,6 +356,37 @@ export interface ExtensionInventory {
    * answer; read it from the list.
    */
   secretStore?: ExtensionSecretStoreState;
+  /**
+   * The administrator's policy the host holds these apps to (#578), reported by every
+   * read on a host that has one (the web server). Never stored, and never written over
+   * the API.
+   */
+  policy?: ExtensionPolicy;
+}
+/**
+ * What an administrator allows apps to be and do on a host (#578). A `null` list
+ * allows everything of its kind; the host refuses what the policy does not allow, at
+ * install and on every call.
+ */
+export interface ExtensionPolicy {
+  /** Only these app IDs may be installed and used; `null` allows any. */
+  allowedApps?: string[] | null;
+  /** These app IDs may not be installed or used. */
+  blockedApps: string[];
+  /** Signed apps only from these publishers; `null` allows every one the host trusts. */
+  allowedPublishers?: string[] | null;
+  /** Whether apps with no publisher signature may be installed and used at all. */
+  allowUnsignedApps: boolean;
+  /** The host capabilities an app may be granted; `null` allows every one. */
+  allowedCapabilities?: string[] | null;
+  /** Whether an app may declare write actions. */
+  allowWriteActions: boolean;
+  /** The most `network.http` may reach; empty reaches no host. */
+  networkCeiling: string[];
+  /** Always false until executable apps have a per-user sidecar identity (#521). */
+  allowExecutableApps: boolean;
+  /** Apps every user keeps: one that is installed cannot be removed or disabled. */
+  requiredApps: string[];
 }
 /** The host's secret store, as `extensions.list` reports it (#543). */
 export interface ExtensionSecretStoreState {

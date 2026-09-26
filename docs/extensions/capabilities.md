@@ -207,11 +207,26 @@ reports the request as accepted rather than as complete.
   (`extension_stream_open`, `extension_stream_cancel`, `extension_stream_close_view`)
   are refused, so pages, columns and cards read on Refresh and say they are not live;
   see [streams.md](streams.md#hosts).
-- **No `network.http` on the web.** A request there would leave from the shared
-  server — from its network position, and to its own loopback — not from the person's
-  computer. A web user's registry has no `network.http` (#568), so an app that binds it
-  is refused there with `EXTENSION_UNSUPPORTED_TARGET` ("This host does not provide
-  network.http"), and `extensions.read` has nothing to send.
+- **`network.http` on the web only under the operator's ceiling.** A request there
+  leaves from the shared server, from its network position, not from the person's
+  computer. So a web user's registry has `network.http` (#568) only when the server's
+  extension policy names hosts in `networkCeiling`. Without one, an app that binds it
+  is refused with `EXTENSION_UNSUPPORTED_TARGET` ("This host does not provide
+  network.http"), and `extensions.read` has nothing to send. With one, every request
+  and redirect must go to a host both the app and the ceiling allow, over HTTPS only:
+  plain HTTP to loopback would reach the server itself, so the per-app loopback switch
+  is refused there.
+- **Held to the operator's extension policy** ([#578](https://github.com/srelens/srelens/issues/578)).
+  The server's policy (`AppPolicy` in `crates/registry/src/extensions/app_policy.rs`,
+  read from `SRELENS_EXTENSION_POLICY`; see [WEB.md](../WEB.md#extension-policy)) says
+  which app IDs, publishers, capabilities and hosts are allowed, whether unsigned apps
+  and write actions are, and which apps users must keep. Every read of a user's
+  inventory applies the policy in force. An app it refuses is reported as
+  `policyBlocked` and disabled, and every `extensions.*` call through it is refused,
+  including for an app installed before the policy changed. `extensions.validate`
+  reports the refusal as `EXTENSION_POLICY_REFUSED`, and install, update, rollback and
+  enable refuse it. A required app can't be removed or disabled. `extensions.list`
+  reports the policy as `policy`, which is never saved with the inventory.
 - **No app secrets on the web yet.** A web user's registry has no secret store, so
   `extension.secretStore` is not registered there (and is refused before dispatch
   too), and `extensions.list` reports the store unavailable: the web host keeps no app

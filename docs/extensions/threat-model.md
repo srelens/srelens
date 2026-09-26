@@ -80,6 +80,7 @@ Out of scope, and assumed:
 | Network attacker | Untrusted | Anything on the wire: responses, DNS answers, redirects. |
 | MCP client or agent | Authenticated, but may act on injected instructions | Any tool call. |
 | Other web user | Untrusted with respect to you | Requests to the same web host. |
+| Web server operator | Trusted | The server's deployment config, including the extension policy every user's apps are held to (`SRELENS_EXTENSION_POLICY`). |
 
 ## Trust boundaries
 
@@ -336,7 +337,28 @@ Another user of a shared `srelens-server`.
 | WEB-1 | Read or change another user's apps, grants or settings | I, T | Each user's registry is built over that user's own inventory, their row of `extension_inventories` in the server database (`DbInventory` in `crates/server/src/app_inventory.rs`, passed by `UserEnvs::env_for` in `crates/server/src/users.rs` to `build_registry_for_user` in `crates/registry/src/lib.rs`). No capability takes a user or an inventory as input, so another user's app ID and revision name nothing (`two_users_see_only_their_own_apps` in `crates/server/src/api.rs`). `/api/settings` rows are a separate table and cannot place an inventory. A web user's registry has no secret store, so `extension.secretStore` is not registered (and is in `WEB_DENIED_CAPABILITIES` too), and `@srelens/core` refuses to send a secret on the web (`setExtensionSecret`), so the value never leaves the page. The row is read one byte past 1 MiB and parsed and re-verified exactly as the desktop file is. One lock per user, kept across environment rebuilds, orders that user's writes. | Shipped ([#515]) |
 | WEB-2 | Start a GitOps write with no consent prompt | E | The host action primitives are in `WEB_DENIED_CAPABILITIES`, so a caller cannot name a kind and a template directly (`host_action_primitives_are_denied_on_web` in `crates/server/src/api.rs`). A declared action reaches its primitive only through `extensions.action`, over the user's own installed manifest, with the exact group/kind/plural allowlist, a recheck of revision, grants and cluster scope, and UID/resourceVersion preconditions, after the host confirmation the app's screen shows. The web host has no MCP server and no agent, so no request there is answered on a person's behalf. | Shipped ([#515]) |
 | WEB-3 | Poison the catalog another user installs from | T | One catalog cache serves every user, and only the server writes it: users' `extensions.catalog` and `extensions.catalogManifest` read it and never fetch into it (`SharedCatalog` in `crates/registry/src/extensions/catalog.rs`, `no_capability_fetches_into_or_writes_the_shared_catalog`). The server fills it from the fixed catalog URL, validated as a desktop's is (`refresh_if_stale`, scheduled in `serve`, `crates/server/src/lib.rs`). A release is downloaded and verified again for each install, per user. | Shipped ([#515]) |
-| WEB-4 | Use the shared server as a proxy into its network, or into its own loopback | I, E | A web user's registry has no `network.http` ([#568]): `build_registry_for_user` builds the broker without it (`BrokeredNetwork::Off` in `crates/registry/src/lib.rs`), so an app that binds it is refused at install with "This host does not provide network.http", a stored one is refused the same way on every read (`validate_app`, run by `extensions.read` before it dispatches), and there is nothing to send (`a_web_users_apps_cannot_send_network_requests`). A request from the desktop leaves from the person's own computer, as their browser's would. | Shipped |
+| WEB-4 | Use the shared server as a proxy into its network, or into its own loopback | I, E | A web user's registry has `network.http` ([#568]) only when the server's extension policy names hosts in `networkCeiling` ([#578]): otherwise `build_registry_for_user` builds the broker without it (`BrokeredNetwork::Off` in `crates/registry/src/lib.rs`), so an app that binds it is refused at install with "This host does not provide network.http", a stored one is refused the same way on every read (`validate_app`, run by `extensions.read` before it dispatches), and there is nothing to send (`a_web_users_apps_cannot_send_network_requests`, `a_web_users_apps_reach_the_network_only_under_a_ceiling`). With a ceiling (`BrokeredNetwork::Ceiling`), every request and every redirect must be to a host and port both the app's hosts and the ceiling allow, over HTTPS only (`Policy::check` in `crates/registry/src/extensions/network.rs`), and the ceiling is the policy the app was read under on that call. Plain HTTP is refused under a policy, and so is the per-app loopback switch, which a load also clears in what it reports, because loopback is the server itself (`govern` in `crates/registry/src/extensions/app_policy.rs`; `under_a_policy_an_app_cannot_open_plain_http_to_the_host` and `network_http_under_a_policy_reaches_only_hosts_its_ceiling_allows` in `crates/registry/src/extensions/app_policy_tests.rs`, `a_network_host_outside_the_ceiling_is_refused` in `crates/server/src/extension_policy.rs`). A request from the desktop leaves from the person's own computer, as their browser's would. | Shipped. See residual risk |
+| WEB-5 | Install or use an app, publisher, capability or write the server's operator does not allow | E | The server reads an extension policy from its deployment config at startup, checked whole, and refuses to start on one it cannot read or that names an app, publisher, capability or host that could never match (`load` in `crates/server/src/extension_policy.rs`, `AppPolicy` in `crates/registry/src/extensions/app_policy.rs`). Every user's apps are held to it through their inventory store (`Apps::governed_by`), so every read of the inventory, which every `extensions.*` call makes, applies the policy in force then: an app it refuses is marked `policyBlocked` and disabled, and each reader, resource read, action, resolver and stream refuses it, including an app installed before the policy changed (`govern`, `read` in `crates/registry/src/extensions.rs`; `a_capability_outside_the_policy_is_refused_at_call_time_for_an_app_installed_before_it`, `a_blocked_app_can_be_neither_installed_nor_called`). Install, update, rollback and enable refuse such an app, and `extensions.validate` reports it as `EXTENSION_POLICY_REFUSED`. A signed app's publisher is taken from a signature that verified on that load; one that no longer verifies counts as unsigned. The verdict is never saved (`configure` changes the inventory as saved and governs only its answer), so a user cannot keep an app enabled past a policy, and lifting the policy does not leave apps disabled. A required app cannot be removed or disabled. Every signed-in user can read the policy (`GET /api/extension-policy`, and `policy` in `extensions.list`); nothing writes it over the API (`the_policy_is_read_over_the_api_and_written_nowhere`). | Shipped. Administrator role and policy administration planned in [#739] |
+
+Residual risk:
+
+- **A ceiling host is reached from the server's network position.** The operator chooses
+  the ceiling, but a wildcard covers every one-label subdomain, including ones created
+  later, and a name that resolves to an internal address is reached like any other.
+  Within the ceiling, APP-2's residual risk about allowed hosts applies.
+- **The policy changes only when the server restarts.** There is no administrator role,
+  so nothing may change it while the server runs; [#739] adds one, and a write path
+  behind it (`SharedPolicy::replace`).
+- **A refusal is whole.** An app that requests one capability the policy does not allow,
+  or declares a write action when writes are off, can't be used at all, its views
+  included.
+- **Required apps are kept, not provided.** The server never installs an app for
+  anyone: a user who has not installed a required app is told to, and until then does
+  not have it. A user can still limit a required app to clusters of their choosing, and
+  a required app that another rule refuses stays disabled.
+- **A policy change alone does not end an open app stream.** A read stream is checked
+  again at its next read, and a watch at the next inventory write or reconnect. The web
+  host runs no app streams today.
 
 ### Tampered local state
 
@@ -357,12 +379,14 @@ Out of scope as an attacker (see [Scope](#scope)), but the host still checks wha
 | [#563] | APP-8, PUB-4: update checks and downgrade protection |
 | [#572] ([#521]) | VULN-1: sandboxed executable apps: the supervisor, its sandbox backends and their escape-hardening review, building on the [#571] findings |
 | [#713] ([#521]) | VULN-1: host-enforced memory and CPU limits for sidecars on macOS, weaker than kernel enforcement |
-| [#578] ([#522]) | WEB-1: administrator policy for apps on the web host |
+| [#578] ([#522]) | WEB-5: a catalog source and version pin for each app the operator makes available |
+| [#739] ([#522]) | WEB-5: an administrator role, policy administration in the web settings, and enabling apps for users |
 | [#39] | Scope: CSP, update chain and the rest of the host |
 
 [#39]: https://github.com/srelens/srelens/issues/39
 [#515]: https://github.com/srelens/srelens/issues/515
 [#578]: https://github.com/srelens/srelens/issues/578
+[#739]: https://github.com/srelens/srelens/issues/739
 [#521]: https://github.com/srelens/srelens/issues/521
 [#522]: https://github.com/srelens/srelens/issues/522
 [#528]: https://github.com/srelens/srelens/issues/528
