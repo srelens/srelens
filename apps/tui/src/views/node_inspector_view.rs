@@ -4,7 +4,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{
         canvas::{Canvas, Line as CanvasLine},
-        Block, Borders, Gauge, Paragraph,
+        Block, Borders, Gauge, Paragraph, Wrap,
     },
     Frame,
 };
@@ -120,6 +120,7 @@ pub fn render_node_inspector_view(f: &mut Frame, area: Rect, state: &NodeInspect
             "\n  ⏳ Inspecting node '{}'...\n  Fetching hardware capacity, GPU allocations, and scheduled pods...",
             state.node_name
         ))
+        .wrap(Wrap { trim: false })
         .block(loading_block)
         .style(Style::default().fg(Theme::CYAN));
         f.render_widget(p, area);
@@ -136,6 +137,7 @@ pub fn render_node_inspector_view(f: &mut Frame, area: Rect, state: &NodeInspect
                 "\n  ❌ Failed to inspect node '{}':\n\n  {}\n\n  Press <Esc> or <q> to return, or <r> to retry.",
                 state.node_name, err
             ))
+            .wrap(Wrap { trim: false })
             .block(error_block)
             .style(Style::default().fg(Theme::RED));
             f.render_widget(p, area);
@@ -156,16 +158,31 @@ pub fn render_node_inspector_view(f: &mut Frame, area: Rect, state: &NodeInspect
     // 6. Footer Key Hints (height: 1)
     let show_sparklines = area.height >= 26;
     let sparkline_height = if show_sparklines { 4 } else { 0 };
+    let text_width = area.width.saturating_sub(2).max(1);
+    let header_height = (Paragraph::new(node_header_lines(d))
+        .wrap(Wrap { trim: true })
+        .line_count(text_width) as u16)
+        .saturating_add(2)
+        .max(4);
+    let conditions_height = (Paragraph::new(node_condition_line(d))
+        .wrap(Wrap { trim: true })
+        .line_count(text_width) as u16)
+        .saturating_add(2)
+        .max(3);
+    let footer_height = (Paragraph::new(node_footer_line(d))
+        .wrap(Wrap { trim: true })
+        .line_count(area.width.max(1)) as u16)
+        .clamp(1, 3);
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(4),                // Header
+            Constraint::Length(header_height),
             Constraint::Length(4),                // Gauges
             Constraint::Length(sparkline_height), // Live Metrics Timeline
-            Constraint::Length(3),                // Conditions & Taints
-            Constraint::Min(6),                   // Pods table
-            Constraint::Length(1),                // Footer
+            Constraint::Length(conditions_height),
+            Constraint::Min(6), // Pods table
+            Constraint::Length(footer_height),
         ])
         .split(area);
 
@@ -477,19 +494,7 @@ fn render_metrics_timeline_card(
     }
 }
 
-fn render_header_card(f: &mut Frame, area: Rect, d: &NodeInspectorDetails) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Theme::BORDER))
-        .title(Span::styled(
-            format!(" 🖥️  Node: {} ", d.name),
-            Style::default()
-                .fg(Theme::ACCENT)
-                .add_modifier(Modifier::BOLD),
-        ));
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-
+fn node_header_lines(d: &NodeInspectorDetails) -> Vec<Line<'_>> {
     let status_color = if d.status == "Ready" {
         Theme::GREEN
     } else {
@@ -562,7 +567,23 @@ fn render_header_card(f: &mut Frame, area: Rect, d: &NodeInspectorDetails) {
         row2_spans.push(Span::styled(ip, Theme::header_val()));
     }
 
-    let p = Paragraph::new(vec![Line::from(row1_spans), Line::from(row2_spans)]);
+    vec![Line::from(row1_spans), Line::from(row2_spans)]
+}
+
+fn render_header_card(f: &mut Frame, area: Rect, d: &NodeInspectorDetails) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Theme::BORDER))
+        .title(Span::styled(
+            format!(" 🖥️  Node: {} ", d.name),
+            Style::default()
+                .fg(Theme::ACCENT)
+                .add_modifier(Modifier::BOLD),
+        ));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let p = Paragraph::new(node_header_lines(d)).wrap(Wrap { trim: true });
     f.render_widget(p, inner);
 }
 
@@ -736,14 +757,7 @@ fn render_gauges_card(f: &mut Frame, area: Rect, d: &NodeInspectorDetails) {
     }
 }
 
-fn render_conditions_and_taints(f: &mut Frame, area: Rect, d: &NodeInspectorDetails) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Theme::BORDER))
-        .title(" Health Conditions & Taints ");
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-
+fn node_condition_line(d: &NodeInspectorDetails) -> Line<'_> {
     let mut spans = Vec::new();
 
     // Conditions
@@ -799,7 +813,18 @@ fn render_conditions_and_taints(f: &mut Frame, area: Rect, d: &NodeInspectorDeta
         }
     }
 
-    let p = Paragraph::new(Line::from(spans));
+    Line::from(spans)
+}
+
+fn render_conditions_and_taints(f: &mut Frame, area: Rect, d: &NodeInspectorDetails) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Theme::BORDER))
+        .title(" Health Conditions & Taints ");
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let p = Paragraph::new(node_condition_line(d)).wrap(Wrap { trim: true });
     f.render_widget(p, inner);
 }
 
@@ -844,6 +869,7 @@ fn render_pods_table(
 
     if d.pods.is_empty() {
         let empty_p = Paragraph::new("\n  No pods currently scheduled on this node.")
+            .wrap(Wrap { trim: false })
             .style(Style::default().fg(Theme::dim()));
         f.render_widget(empty_p, inner);
         return;
@@ -1159,7 +1185,7 @@ fn render_pods_table(
     f.render_widget(p, inner);
 }
 
-fn render_footer_hints(f: &mut Frame, area: Rect, d: &NodeInspectorDetails) {
+fn node_footer_line(d: &NodeInspectorDetails) -> Line<'static> {
     let cordon_hint = if d.unschedulable {
         ("<c>", "Uncordon")
     } else {
@@ -1204,7 +1230,11 @@ fn render_footer_hints(f: &mut Frame, area: Rect, d: &NodeInspectorDetails) {
         ));
     }
 
-    let p = Paragraph::new(Line::from(spans));
+    Line::from(spans)
+}
+
+fn render_footer_hints(f: &mut Frame, area: Rect, d: &NodeInspectorDetails) {
+    let p = Paragraph::new(node_footer_line(d)).wrap(Wrap { trim: true });
     f.render_widget(p, area);
 }
 

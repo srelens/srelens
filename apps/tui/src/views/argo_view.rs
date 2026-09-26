@@ -2,7 +2,7 @@ use ratatui::{
     layout::{Constraint, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Cell, Paragraph, Row, Table},
+    widgets::{Block, Borders, Cell, Paragraph, Row, Table, Wrap},
     Frame,
 };
 use srelens_kube::argo::ArgoApplication;
@@ -233,6 +233,7 @@ pub fn render_argo_view(f: &mut Frame, area: Rect, state: &ArgoViewState) {
 
     if state.is_loading {
         let loading_msg = Paragraph::new("⟳ Loading ArgoCD applications...")
+            .wrap(Wrap { trim: true })
             .style(Style::default().fg(Theme::cyan()));
         f.render_widget(loading_msg, inner);
         return;
@@ -270,7 +271,7 @@ pub fn render_argo_view(f: &mut Frame, area: Rect, state: &ArgoViewState) {
                 ),
             ]),
         ];
-        let p = Paragraph::new(lines).wrap(ratatui::widgets::Wrap { trim: true });
+        let p = Paragraph::new(lines).wrap(Wrap { trim: true });
         f.render_widget(p, inner);
         return;
     }
@@ -285,7 +286,9 @@ pub fn render_argo_view(f: &mut Frame, area: Rect, state: &ArgoViewState) {
         } else {
             "No ArgoCD applications found in cluster."
         };
-        let empty_msg = Paragraph::new(msg).style(Style::default().fg(Theme::dim()));
+        let empty_msg = Paragraph::new(msg)
+            .wrap(Wrap { trim: true })
+            .style(Style::default().fg(Theme::dim()));
         f.render_widget(empty_msg, inner);
         return;
     }
@@ -295,6 +298,7 @@ pub fn render_argo_view(f: &mut Frame, area: Rect, state: &ArgoViewState) {
             "No applications matching filter '{}'",
             state.filter_query
         ))
+        .wrap(Wrap { trim: true })
         .style(Style::default().fg(Theme::dim()));
         f.render_widget(empty_msg, inner);
         return;

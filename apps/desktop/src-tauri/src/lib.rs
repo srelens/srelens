@@ -35,6 +35,7 @@ mod toolbox;
 mod updater;
 mod watch;
 mod window;
+mod window_streams;
 
 use app_log::{app_log_path, read_app_log, reveal_app_log};
 use bridge::{invoke_capability, AppAudit, AppRegistry};
@@ -461,6 +462,10 @@ pub fn run() {
         .manage(AppRegistry(registry))
         .manage(ExtensionSecrets(extension_secrets))
         .manage(extension_streams::AppExtensionStreams(app_streams))
+        // Which window opened each stream, so a window that closes or reloads
+        // ends exactly its own (#700).
+        .manage(window_streams::WindowStreams::default())
+        .on_window_event(window_streams::on_window_event)
         // The cache itself, for commands that need the live kubeconfig paths
         // (overview_snapshot resolves context → cluster identity from them).
         .manage(cache.clone())
@@ -504,6 +509,7 @@ pub fn run() {
             extension_streams::extension_stream_open,
             extension_streams::extension_stream_cancel,
             extension_streams::extension_stream_close_view,
+            window_streams::window_streams_reset,
             start_pod_exec,
             exec_input,
             exec_resize,

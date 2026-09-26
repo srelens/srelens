@@ -236,4 +236,25 @@ describe("describeStreamEnd", () => {
       "The host stopped the stream: App a sent more than 50 stream messages per second",
     );
   });
+
+  // #700: the host ends a window's streams when it closes or reloads.
+  it("says a stream ended with its window, as an ending", () => {
+    expect(describeStreamEnd({ type: "close", reason: "windowClosed" })).toBe("The window that opened the stream closed.");
+    expect(describeStreamEnd({ type: "close", reason: "windowReloaded" })).toBe("The window that opened the stream reloaded.");
+  });
+});
+
+describe("a window's ending (#700)", () => {
+  it("reaches onEnd as a close with its reason, and nothing after it", async () => {
+    const onEnd = vi.fn();
+    const onData = vi.fn();
+    const view = openExtensionView("org.example.argocd", "page:applications");
+    await view.open(request, { onData, onEnd });
+    const [channel] = [...channels.keys()];
+    emit(channel, { type: "close", stream: "s-1", reason: "windowReloaded" });
+    emit(channel, { type: "data", stream: "s-1", seq: 1, data: {} });
+    expect(onEnd).toHaveBeenCalledWith({ type: "close", reason: "windowReloaded" } satisfies ExtensionStreamEnd);
+    expect(onData).not.toHaveBeenCalled();
+    expect(channels.get(channel)?.dispose).toHaveBeenCalled();
+  });
 });

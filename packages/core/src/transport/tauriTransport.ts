@@ -20,8 +20,36 @@ export async function invokeCapability<T>(id: string, input: unknown = null): Pr
   }
 }
 
+/**
+ * The commands that open a stream the calling window owns (#700). The host
+ * ends a window's streams when it closes; a reload keeps the window and loses
+ * the page, so the new page asks the host to end what the old one held — and
+ * none of these may run before that, or the reset would end the new page's
+ * stream as well.
+ */
+const OPENS_A_STREAM = new Set(["start_resource_watch", "start_pod_exec", "extension_stream_open"]);
+
+let windowReset: Promise<void> | null = null;
+
+/**
+ * End every stream this window held before this page loaded: once a page, and
+ * before its first stream opens. Called as the transport loads, and awaited by
+ * every command that opens a stream. The host reads the window from the call
+ * itself, so a page can only ever end its own window's streams.
+ */
+export function resetWindowStreams(): Promise<void> {
+  windowReset ??= invoke("window_streams_reset").then(
+    () => {},
+    // Opening the page's streams matters more than the old ones: they still
+    // end when the window closes.
+    (e) => console.warn("srelens: could not end this window's streams from before the reload", e),
+  );
+  return windowReset;
+}
+
 /** Invoke a raw Tauri command (for streaming primitives like watches). */
 export async function invokeCommand<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+  if (OPENS_A_STREAM.has(command)) await resetWindowStreams();
   return invoke<T>(command, args);
 }
 

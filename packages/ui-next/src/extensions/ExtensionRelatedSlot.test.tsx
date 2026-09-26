@@ -1,12 +1,12 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
-vi.mock("@srelens/core", async original => ({ ...await original<typeof import("@srelens/core")>(), resolveExtensionLinks:vi.fn() }));
+vi.mock("@srelens/core", async original => ({ ...await original<typeof import("@srelens/core")>(), listContexts:vi.fn(), resolveExtensionLinks:vi.fn() }));
 vi.mock("./inventoryStore", () => ({ useExtensions:vi.fn() }));
 vi.mock("./contextIds", () => ({ useContextLookup:vi.fn(), refreshContextIds:vi.fn() }));
 vi.mock("../lib/tabsStore", () => ({ openTab:vi.fn() }));
 vi.mock("../lib/clusters", () => ({ useContexts:vi.fn() }));
-import { describeError, extensionClusterResourceRoute, resolveExtensionLinks, type ExtensionResolvedLink, type InstalledExtension } from "@srelens/core";
+import { describeError, extensionClusterResourceRoute, listContexts, resolveExtensionLinks, type ExtensionResolvedLink, type InstalledExtension } from "@srelens/core";
 import { useExtensions } from "./inventoryStore";
 import { useContextLookup } from "./contextIds";
 import { openTab } from "../lib/tabsStore";
@@ -87,6 +87,23 @@ it("links from an app resource page, which names its cluster by the pinned ID it
   vi.mocked(resolveExtensionLinks).mockResolvedValue(answer([link({ targets:[{ namespace:"argocd", name:"guestbook", exists:true }] })]));
   render(<ExtensionRelatedSlot context="srelens-context:/kube/a%23b#c" resource={resource}/>);
   await userEvent.click(await screen.findByRole("button", { name:/argocd\/guestbook/ }));
+  expect(vi.mocked(openTab).mock.calls[0]).toEqual([
+    "/extension-contexts/%2Fkube%2Fa%2523b%23c/org.example.argocd/applications/argocd/guestbook", { clusterName:"c" },
+  ]);
+});
+
+it("shows a cluster-limited app's links on its own resource page, which asks the host by pinned ID", async () => {
+  // The page's pinned ID goes through the real lookup: the Inspector's display name is not the only way in.
+  const { useContextLookup: lookup } = await vi.importActual<typeof import("./contextIds")>("./contextIds");
+  vi.mocked(useContextLookup).mockImplementation(lookup);
+  vi.mocked(listContexts).mockResolvedValue({ contexts:shared } as never);
+  vi.mocked(useContexts).mockReturnValue(shared as never);
+  vi.mocked(useExtensions).mockReturnValue({ status:"ready", data:{ plugins:[{ ...plugin, contexts:["/kube/a%23b#c"] }] }, reload:vi.fn() } as never);
+  vi.mocked(resolveExtensionLinks).mockResolvedValue(answer([link({ targets:[{ namespace:"argocd", name:"guestbook", exists:true }] })]));
+  render(<ExtensionRelatedSlot context="srelens-context:/kube/a%23b#c" resource={resource}/>);
+  await userEvent.click(await screen.findByRole("button", { name:/argocd\/guestbook/ }));
+  expect(resolveExtensionLinks).toHaveBeenCalledWith("org.example.argocd", 4, "srelens-context:/kube/a%23b#c", "team", "apps/Deployment", resource);
+  // The link's route carries the key, as every app route does.
   expect(vi.mocked(openTab).mock.calls[0]).toEqual([
     "/extension-contexts/%2Fkube%2Fa%2523b%23c/org.example.argocd/applications/argocd/guestbook", { clusterName:"c" },
   ]);

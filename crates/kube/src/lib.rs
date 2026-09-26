@@ -59,7 +59,6 @@ pub fn creation_timestamp_iso(creation: Option<&Time>) -> String {
     }
 }
 
-
 /// Abbreviate PV/PVC access modes ("ReadWriteOnce" → "RWO"), comma-joined.
 pub(crate) fn abbreviate_access_modes(modes: Option<&Vec<String>>) -> String {
     modes
@@ -124,60 +123,61 @@ pub mod action_primitives;
 pub mod actions;
 pub mod argo;
 pub mod auth_resolver;
+pub mod bgp;
+pub mod changed;
 pub mod client_cache;
 pub mod cluster;
 pub mod cluster_synth;
-pub mod crds;
-pub mod connect;
-pub mod context_resolve;
-pub mod debug;
-pub mod contexts;
 pub mod configmaps;
+pub mod connect;
+pub mod connections;
+pub mod context_resolve;
+pub mod contexts;
+pub mod crds;
 pub mod cronjobs;
 pub mod daemonsets;
+pub mod debug;
 pub mod deployments;
-pub mod endpointslices;
 pub mod endpoint_query;
+pub mod endpointslices;
 pub mod events;
 pub mod exec;
 pub mod forward;
+pub mod gitops;
+pub mod gpu_info;
 pub mod helm;
 pub mod helm_cli;
 pub mod ingresses;
 pub mod jobs;
 pub mod kubeconfig;
 pub mod limitranges;
+pub mod lineage;
+pub mod list_cap;
 pub mod local_cluster;
 pub mod logs;
 pub mod manifest;
 pub mod metrics;
 pub mod networkpolicies;
+pub mod node_inspector;
+pub mod node_ssh;
 pub mod nodes;
 pub mod oidc_detect;
 pub mod persistentvolumes;
 pub mod pod_count;
-pub mod connections;
 pub mod pod_overview;
 pub mod prometheus;
-pub mod topology;
 pub mod pvcs;
 pub mod resourcequotas;
 pub mod rolebindings;
 pub mod roles;
 pub mod schema;
-pub mod toolbox;
-pub mod toolbox_install;
 pub mod secrets;
 pub mod serviceaccounts;
 pub mod services;
 pub mod statefulsets;
 pub mod storageclasses;
+pub mod toolbox;
+pub mod toolbox_install;
+pub mod topology;
 pub mod watch;
 pub mod workloads;
-pub mod lineage;
-pub mod list_cap;
-pub mod node_inspector;
-pub mod gpu_info;
-pub mod node_ssh;
-pub mod gitops;
-pub mod bgp;

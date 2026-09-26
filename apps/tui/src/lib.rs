@@ -14,6 +14,7 @@ pub mod sink;
 pub mod theme;
 pub mod tui_config;
 pub mod ui;
+pub mod quick_rca;
 pub mod views;
 
 pub use ai_config::{AiProvider, AiSettings};

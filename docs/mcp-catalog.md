@@ -7,11 +7,11 @@ Everything this server exposes over MCP, generated from the live registry so it 
 
 ## Tools
 
-119 tools, grouped by area and then by how a call is gated. Argument schemas are not reproduced here — call `tools/list` for those, which cannot go stale.
+120 tools, grouped by area and then by how a call is gated. Argument schemas are not reproduced here — call `tools/list` for those, which cannot go stale.
 
 **Impact** is how much a successful call disturbs — `low`, `medium` or `high` — and is a different question from the section heading, which is how the call is gated. A capability that accepts several named operations carries the highest level any of them reaches; the per-operation level travels with the resource.
 
-### Kubernetes — read-only (55)
+### Kubernetes — read-only (56)
 
 | Tool | Impact | Summary |
 | --- | --- | --- |
@@ -24,6 +24,7 @@ Everything this server exposes over MCP, generated from the live registry so it 
 | `k8s.getManifest` | low | fetch a resource's manifest as YAML (any supported kind) |
 | `k8s.getObject` | low | fetch a resource as a structured JSON object (any supported kind) |
 | `k8s.listCRDs` | low | list installed CustomResourceDefinitions (group, kind, plural, scope) |
+| `k8s.listChanges` | low | holistic deployment and change incident triage: evaluates recent rollouts, GitOps release info, pod crash loops, compute/storage blockers, and error log snippets |
 | `k8s.listClusterRoleBindings` | low | list ClusterRoleBindings of a connected kube context (cluster-scoped) |
 | `k8s.listClusterRoles` | low | list ClusterRoles of a connected kube context (cluster-scoped) |
 | `k8s.listConfigMaps` | low | list ConfigMaps in a namespace of a connected kube context |

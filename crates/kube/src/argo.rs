@@ -5,6 +5,7 @@
 //! deployed to remote spoke clusters.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
@@ -14,7 +15,33 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::client_cache::ClientCache;
-use crate::connect::request_timeout;
+use crate::connect::{request_timeout, MAX_TIMEOUT_SECS, MIN_TIMEOUT_SECS};
+
+/// Timeout for ArgoCD reads, in seconds; 0 means "follow the process-wide
+/// request timeout". A remote hub with thousands of Applications can need far
+/// longer than one list of Pods, so it is settable on its own (the TUI's
+/// `:config`) without slowing every other call. Kept as an atomic, like the
+/// request timeout, so a change applies to the next fetch with no threading.
+static ARGO_TIMEOUT_SECS: AtomicU64 = AtomicU64::new(0);
+
+/// The budget for one ArgoCD read: the Application list (local and hub) and
+/// the Application detail. The cluster-secret lookups keep their own 2s fast
+/// path, and writes (sync, auto-sync, hard refresh) are not bounded by it,
+/// because timing out a write does not cancel it on the server.
+pub fn argo_timeout() -> Duration {
+    match ARGO_TIMEOUT_SECS.load(Ordering::Relaxed) {
+        0 => request_timeout(),
+        secs => Duration::from_secs(secs),
+    }
+}
+
+/// Set the ArgoCD read timeout, clamped to the request-timeout bounds, or
+/// `None` to follow the request timeout. Returns the value applied.
+pub fn set_argo_timeout_secs(secs: Option<u64>) -> Option<u64> {
+    let applied = secs.map(|s| s.clamp(MIN_TIMEOUT_SECS, MAX_TIMEOUT_SECS));
+    ARGO_TIMEOUT_SECS.store(applied.unwrap_or(0), Ordering::Relaxed);
+    applied
+}
 
 pub fn argo_application_resource() -> ApiResource {
     ApiResource {
@@ -735,7 +762,7 @@ pub async fn fetch_argo_applications_cached(
         _ => Api::all_with(local_client.clone(), &ar),
     };
 
-    let timeout_dur = request_timeout();
+    let timeout_dur = argo_timeout();
     let local_res = tokio::time::timeout(timeout_dur, local_api.list(&ListParams::default())).await;
 
     match local_res {
@@ -898,12 +925,23 @@ pub async fn fetch_argo_application_detail(
     let ar = argo_application_resource();
     let api: Api<DynamicObject> = Api::namespaced_with(client, namespace, &ar);
 
-    let obj = api.get(name).await.map_err(|e| {
-        format!(
-            "Failed to get ArgoCD Application '{}/{}': {}",
-            namespace, name, e
-        )
-    })?;
+    let timeout_dur = argo_timeout();
+    let obj = tokio::time::timeout(timeout_dur, api.get(name))
+        .await
+        .map_err(|_| {
+            format!(
+                "Timed out after {}s getting ArgoCD Application '{}/{}'.",
+                timeout_dur.as_secs(),
+                namespace,
+                name
+            )
+        })?
+        .map_err(|e| {
+            format!(
+                "Failed to get ArgoCD Application '{}/{}': {}",
+                namespace, name, e
+            )
+        })?;
 
     let val = serde_json::to_value(&obj).unwrap_or_default();
     Ok(ArgoApplication::from_json(&val))
@@ -1093,6 +1131,34 @@ pub async fn trigger_argo_hard_refresh(
 
 #[cfg(test)]
 mod tests {
+    /// Serialises the tests that move the process-wide ArgoCD timeout.
+    static ARGO_TIMEOUT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn argo_timeout_follows_the_request_timeout_until_set() {
+        let _argo = ARGO_TIMEOUT_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _request = crate::list_cap::test_support::hold_request_timeout(8);
+
+        assert_eq!(set_argo_timeout_secs(None), None);
+        assert_eq!(
+            argo_timeout(),
+            Duration::from_secs(8),
+            "inherits the request timeout"
+        );
+
+        assert_eq!(set_argo_timeout_secs(Some(30)), Some(30));
+        assert_eq!(argo_timeout(), Duration::from_secs(30));
+
+        // Clamped to the same bounds as the request timeout.
+        assert_eq!(set_argo_timeout_secs(Some(0)), Some(MIN_TIMEOUT_SECS));
+        assert_eq!(set_argo_timeout_secs(Some(10_000)), Some(MAX_TIMEOUT_SECS));
+        assert_eq!(argo_timeout(), Duration::from_secs(MAX_TIMEOUT_SECS));
+
+        // Clearing goes back to following it.
+        set_argo_timeout_secs(None);
+        assert_eq!(argo_timeout(), Duration::from_secs(8));
+    }
+
     use super::*;
 
     #[test]

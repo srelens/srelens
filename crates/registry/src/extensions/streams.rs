@@ -25,6 +25,7 @@ use srelens_kube::watch::{CustomWatchTarget, KindSignal};
 use srelens_plugin_host::Binding;
 use srelens_streams::app::{
     AppStreamMetrics, AppStreams, CloseReason, StreamEmitter, StreamLimits, StreamOwner,
+    StreamWindow,
 };
 use srelens_streams::EventSink;
 use std::collections::HashMap;
@@ -215,11 +216,40 @@ pub struct ExtensionStreams {
 }
 
 impl ExtensionStreams {
-    /// Open a stream for one view. `input` is the caller's JSON, parsed here
-    /// so the host command and the tests read it the same way.
+    /// Open a stream for one view, owned by no window. `input` is the
+    /// caller's JSON, parsed here so the host command and the tests read it
+    /// the same way.
     pub async fn open(
         &self,
         sink: Arc<dyn EventSink>,
+        input: Value,
+    ) -> Result<OpenStreamOut, String> {
+        self.open_owned(sink, None, input).await
+    }
+
+    /// [`ExtensionStreams::open`], owned by the window labelled `window` as
+    /// well as by its view, so [`ExtensionStreams::end_window`] ends it. The
+    /// label is the host's, read off the connection the call came in on —
+    /// never a value the page sent. The window's epoch is read here, before
+    /// anything awaits: if the window ends while this open is authorizing,
+    /// the open is refused when it lands.
+    pub async fn open_in_window(
+        &self,
+        sink: Arc<dyn EventSink>,
+        window: &str,
+        input: Value,
+    ) -> Result<OpenStreamOut, String> {
+        let window = StreamWindow {
+            label: window.to_owned(),
+            epoch: self.streams.window_epoch(window),
+        };
+        self.open_owned(sink, Some(window), input).await
+    }
+
+    async fn open_owned(
+        &self,
+        sink: Arc<dyn EventSink>,
+        window: Option<StreamWindow>,
         input: Value,
     ) -> Result<OpenStreamOut, String> {
         let input: OpenStreamIn =
@@ -235,7 +265,7 @@ impl ExtensionStreams {
                 capability,
                 interval_seconds,
             } => (capability.clone(), *interval_seconds),
-            StreamSourceIn::Watch { .. } => return self.open_watch(sink, input).await,
+            StreamSourceIn::Watch { .. } => return self.open_watch(sink, window, input).await,
         };
         let interval = interval_seconds.unwrap_or(DEFAULT_INTERVAL);
         if !(MIN_INTERVAL..=MAX_INTERVAL).contains(&interval) {
@@ -277,6 +307,7 @@ impl ExtensionStreams {
             app: input.id.clone(),
             revision: input.revision,
             view: input.view,
+            window,
         };
         let ask = ReadAsk {
             id: input.id,
@@ -338,6 +369,13 @@ impl ExtensionStreams {
         self.streams.close_view(view)
     }
 
+    /// End every stream the window labelled `window` opened, with `reason`
+    /// (`windowClosed` or `windowReloaded`), and refuse any open it began
+    /// before this. Returns how many ended.
+    pub fn end_window(&self, window: &str, reason: CloseReason) -> usize {
+        self.streams.end_window(window, reason)
+    }
+
     pub fn metrics(&self) -> Vec<AppStreamMetrics> {
         self.streams.metrics()
     }
@@ -361,6 +399,7 @@ impl ExtensionStreams {
     async fn open_watch(
         &self,
         sink: Arc<dyn EventSink>,
+        window: Option<StreamWindow>,
         input: OpenStreamIn,
     ) -> Result<OpenStreamOut, String> {
         let StreamSourceIn::Watch { capability } = &input.source else {
@@ -392,6 +431,7 @@ impl ExtensionStreams {
             app: input.id.clone(),
             revision: input.revision,
             view: input.view,
+            window,
         };
         let follow = Follow {
             ask,
@@ -1162,6 +1202,71 @@ mod tests {
         let out = reg.invoke("extensions.streams", json!({})).await.unwrap();
         assert_eq!(out["apps"][0]["refused"], 1, "{out}");
         assert_eq!(streams.close_view("v"), 8);
+    }
+
+    /// A window that reloads never closes its views (#700): the host ends
+    /// what that window opened — reads and watches alike — and nothing
+    /// another window opened, though it is the same app on the same page.
+    /// After any number of reloads the app can still open up to its cap, and
+    /// the metrics count what the reloads ended.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_reloaded_window_frees_its_streams_and_no_other_windows() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, reg, streams) = setup(dir.path());
+        let revision = install(&path, fake_core());
+        let (session, _) = scripted(vec![]);
+        streams.script_watches(session, FAST);
+        let sink = Arc::new(TestSink::default());
+        streams
+            .open_in_window(
+                sink.clone(),
+                "ctx-1",
+                watch(APP, revision, "page#1", "extstream:other"),
+            )
+            .await
+            .unwrap();
+        for reload in 0..3 {
+            for n in 0..7 {
+                let channel = format!("extstream:{reload}-{n}");
+                let input = if n == 0 {
+                    watch(APP, revision, "page#1", &channel)
+                } else {
+                    request(APP, revision, "page#1", &channel)
+                };
+                streams
+                    .open_in_window(sink.clone(), "main", input)
+                    .await
+                    .unwrap_or_else(|e| panic!("reload {reload}, stream {n}: {e}"));
+            }
+            let over = request(APP, revision, "page#1", "extstream:over");
+            let refused = streams.open_in_window(sink.clone(), "main", over).await;
+            assert!(refused.unwrap_err().contains("already has 8 open streams"));
+            assert_eq!(streams.end_window("main", CloseReason::WindowReloaded), 7);
+            for n in 0..7 {
+                let channel = format!("extstream:{reload}-{n}");
+                assert_eq!(
+                    sink.payloads_for(&channel).last().unwrap()["reason"],
+                    "windowReloaded",
+                    "{channel}"
+                );
+            }
+        }
+        assert!(
+            !types(&sink, "extstream:other").contains(&"close".to_owned()),
+            "the other window's watch is untouched"
+        );
+        assert_eq!(streams.end_window("ctx-1", CloseReason::WindowClosed), 1);
+        assert_eq!(
+            sink.payloads_for("extstream:other").last().unwrap()["reason"],
+            "windowClosed"
+        );
+        let out = reg.invoke("extensions.streams", json!({})).await.unwrap();
+        let app = &out["apps"][0];
+        assert_eq!(
+            (&app["openStreams"], &app["windowEnded"], &app["refused"]),
+            (&json!(0), &json!(22), &json!(3)),
+            "{out}"
+        );
     }
 
     // ---- The `watch` source (#566) ----

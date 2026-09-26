@@ -215,6 +215,8 @@ mod tests {
             helm_refreshing: false,
             argo_tick_counter: 0,
             argo_refreshing: false,
+            changed_tick_counter: 0,
+            changed_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -321,6 +323,8 @@ mod tests {
             helm_refreshing: false,
             argo_tick_counter: 0,
             argo_refreshing: false,
+            changed_tick_counter: 0,
+            changed_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -439,6 +443,8 @@ mod tests {
             helm_refreshing: false,
             argo_tick_counter: 0,
             argo_refreshing: false,
+            changed_tick_counter: 0,
+            changed_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -660,6 +666,8 @@ mod tests {
             helm_refreshing: false,
             argo_tick_counter: 0,
             argo_refreshing: false,
+            changed_tick_counter: 0,
+            changed_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -886,6 +894,8 @@ mod tests {
             helm_refreshing: false,
             argo_tick_counter: 0,
             argo_refreshing: false,
+            changed_tick_counter: 0,
+            changed_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -1117,6 +1127,8 @@ mod tests {
             helm_refreshing: false,
             argo_tick_counter: 0,
             argo_refreshing: false,
+            changed_tick_counter: 0,
+            changed_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -1276,6 +1288,8 @@ mod tests {
             helm_refreshing: false,
             argo_tick_counter: 0,
             argo_refreshing: false,
+            changed_tick_counter: 0,
+            changed_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -1651,6 +1665,8 @@ mod tests {
             helm_refreshing: false,
             argo_tick_counter: 0,
             argo_refreshing: false,
+            changed_tick_counter: 0,
+            changed_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -1806,6 +1822,8 @@ mod tests {
             helm_refreshing: false,
             argo_tick_counter: 0,
             argo_refreshing: false,
+            changed_tick_counter: 0,
+            changed_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -1816,7 +1834,7 @@ mod tests {
 
         // 1. Test paste handling into Assistant input
         app.handle_paste("paste line 1\npaste line 2".to_string());
-        assert_eq!(app.assistant_state.input, "paste line 1 paste line 2");
+        assert_eq!(app.assistant_state.input, "paste line 1\npaste line 2");
 
         // 2. Test mouse selection and copy with 'c'
         *app.assistant_state.plain_lines.borrow_mut() =
@@ -1912,6 +1930,8 @@ mod tests {
             helm_refreshing: false,
             argo_tick_counter: 0,
             argo_refreshing: false,
+            changed_tick_counter: 0,
+            changed_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -2012,6 +2032,8 @@ mod tests {
             helm_refreshing: false,
             argo_tick_counter: 0,
             argo_refreshing: false,
+            changed_tick_counter: 0,
+            changed_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -2160,6 +2182,8 @@ mod tests {
             helm_refreshing: false,
             argo_tick_counter: 0,
             argo_refreshing: false,
+            changed_tick_counter: 0,
+            changed_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -2343,6 +2367,8 @@ mod tests {
             helm_refreshing: false,
             argo_tick_counter: 0,
             argo_refreshing: false,
+            changed_tick_counter: 0,
+            changed_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -2535,6 +2561,8 @@ mod tests {
             helm_refreshing: false,
             argo_tick_counter: 0,
             argo_refreshing: false,
+            changed_tick_counter: 0,
+            changed_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -2658,6 +2686,8 @@ mod tests {
             helm_refreshing: false,
             argo_tick_counter: 0,
             argo_refreshing: false,
+            changed_tick_counter: 0,
+            changed_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -3181,6 +3211,8 @@ mod tests {
             helm_refreshing: false,
             argo_tick_counter: 0,
             argo_refreshing: false,
+            changed_tick_counter: 0,
+            changed_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -3345,6 +3377,8 @@ mod tests {
             helm_refreshing: false,
             argo_tick_counter: 0,
             argo_refreshing: false,
+            changed_tick_counter: 0,
+            changed_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -3626,6 +3660,8 @@ mod tests {
             helm_refreshing: false,
             argo_tick_counter: 0,
             argo_refreshing: false,
+            changed_tick_counter: 0,
+            changed_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -3777,6 +3813,8 @@ mod tests {
             helm_refreshing: false,
             argo_tick_counter: 0,
             argo_refreshing: false,
+            changed_tick_counter: 0,
+            changed_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -3923,6 +3961,8 @@ mod tests {
             helm_refreshing: false,
             argo_tick_counter: 0,
             argo_refreshing: false,
+            changed_tick_counter: 0,
+            changed_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -4140,6 +4180,8 @@ mod tests {
             helm_refreshing: false,
             argo_tick_counter: 0,
             argo_refreshing: false,
+            changed_tick_counter: 0,
+            changed_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -4355,6 +4397,8 @@ mod tests {
             helm_refreshing: false,
             argo_tick_counter: 0,
             argo_refreshing: false,
+            changed_tick_counter: 0,
+            changed_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -4973,8 +5017,11 @@ mod tests {
 
         app.active_view = ActiveView::Assistant;
 
-        // Initially caveman mode is off
-        assert_eq!(app.assistant_state.caveman_level, None);
+        // Initially caveman mode is ultra: the default until the user chooses
+        assert_eq!(
+            app.assistant_state.caveman_level,
+            Some(srelens_tui::ai_skills::CavemanLevel::Ultra)
+        );
 
         // 1. Enter `/caveman ultra`
         app.assistant_state.input = "/caveman ultra".to_string();
@@ -5379,6 +5426,8 @@ mod tests {
             helm_refreshing: false,
             argo_tick_counter: 0,
             argo_refreshing: false,
+            changed_tick_counter: 0,
+            changed_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -5595,6 +5644,8 @@ mod tests {
             helm_refreshing: false,
             argo_tick_counter: 0,
             argo_refreshing: false,
+            changed_tick_counter: 0,
+            changed_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -5865,6 +5916,8 @@ mod tests {
             helm_refreshing: false,
             argo_tick_counter: 0,
             argo_refreshing: false,
+            changed_tick_counter: 0,
+            changed_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -6018,6 +6071,8 @@ mod tests {
             helm_refreshing: false,
             argo_tick_counter: 0,
             argo_refreshing: false,
+            changed_tick_counter: 0,
+            changed_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -7117,6 +7172,8 @@ mod tests {
             helm_refreshing: false,
             argo_tick_counter: 0,
             argo_refreshing: false,
+            changed_tick_counter: 0,
+            changed_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -7326,6 +7383,8 @@ mod tests {
             helm_refreshing: false,
             argo_tick_counter: 0,
             argo_refreshing: false,
+            changed_tick_counter: 0,
+            changed_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -7487,6 +7546,8 @@ mod tests {
             helm_refreshing: false,
             argo_tick_counter: 0,
             argo_refreshing: false,
+            changed_tick_counter: 0,
+            changed_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -7682,6 +7743,8 @@ mod tests {
             helm_refreshing: false,
             argo_tick_counter: 0,
             argo_refreshing: false,
+            changed_tick_counter: 0,
+            changed_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -7800,7 +7863,7 @@ mod tests {
                 },
             ],
         };
-        detail_state.set_detail(mock_detail);
+        detail_state.set_detail(mock_detail.clone());
 
         // Verify resource parsing from manifest
         let counts = detail_state.parse_manifest_resource_counts();
@@ -7869,6 +7932,16 @@ mod tests {
         assert!(rev_diff
             .iter()
             .any(|l| matches!(l.kind, DiffKind::Add) && l.text.contains("replicaCount: 3")));
+
+        // If revision is unchanged, previous_detail is preserved
+        detail_state.set_detail(mock_detail.clone());
+        assert!(detail_state.previous_detail.is_some());
+
+        // If revision changes, previous_detail is cleared
+        let mut new_rev_detail = mock_detail.clone();
+        new_rev_detail.revision = 4;
+        detail_state.set_detail(new_rev_detail);
+        assert!(detail_state.previous_detail.is_none());
 
         // Revision selection
         detail_state.set_tab(HelmDetailTab::Revisions);

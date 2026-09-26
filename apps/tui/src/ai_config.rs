@@ -278,12 +278,24 @@ impl AiSettings {
         self.timeout_seconds = seconds;
     }
 
+    /// The Assistant's caveman level. Never set means ultra, the default;
+    /// `"off"` (what turning it off stores) means off.
     pub fn get_caveman_level(&self) -> Option<crate::ai_skills::CavemanLevel> {
-        self.caveman_level.as_deref().and_then(crate::ai_skills::CavemanLevel::parse)
+        match self.caveman_level.as_deref() {
+            None => Some(crate::ai_skills::CavemanLevel::Ultra),
+            Some(stored) => crate::ai_skills::CavemanLevel::parse(stored),
+        }
     }
 
+    /// Store the level. Off is stored as `"off"`, not left unset, so a user
+    /// who turned it off is never mistaken for one who never chose and put
+    /// back on the ultra default.
     pub fn set_caveman_level(&mut self, level: Option<crate::ai_skills::CavemanLevel>) {
-        self.caveman_level = level.map(|l| l.display_name().to_string());
+        self.caveman_level = Some(
+            level
+                .map(|l| l.display_name().to_string())
+                .unwrap_or_else(|| "off".to_string()),
+        );
     }
 
     pub fn resolve_provider_config(&self, kind: AiProvider) -> Option<ProviderConfig> {
@@ -324,7 +336,30 @@ mod tests {
         assert_eq!(s.get_model(AiProvider::Cursor), "default");
         assert_eq!(s.get_timeout_seconds(AiProvider::Anthropic), 120);
         assert_eq!(s.get_timeout_seconds(AiProvider::Cursor), 120);
-        assert_eq!(s.get_caveman_level(), None);
+        assert_eq!(
+            s.get_caveman_level(),
+            Some(crate::ai_skills::CavemanLevel::Ultra),
+            "ultra until the user chooses"
+        );
+    }
+
+    #[test]
+    fn caveman_choices_survive_a_save_including_off() {
+        let mut s = AiSettings::default();
+        s.set_caveman_level(None);
+        let back: AiSettings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(back.caveman_level.as_deref(), Some("off"));
+        assert_eq!(back.get_caveman_level(), None, "off stays off");
+
+        s.set_caveman_level(Some(crate::ai_skills::CavemanLevel::Lite));
+        let back: AiSettings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(back.get_caveman_level(), Some(crate::ai_skills::CavemanLevel::Lite));
+
+        // A settings file from before the level existed: ultra.
+        let mut raw = serde_json::to_value(AiSettings::default()).unwrap();
+        raw.as_object_mut().unwrap().retain(|k, _| !k.to_lowercase().contains("caveman"));
+        let old: AiSettings = serde_json::from_value(raw).unwrap();
+        assert_eq!(old.get_caveman_level(), Some(crate::ai_skills::CavemanLevel::Ultra));
     }
 
     #[test]

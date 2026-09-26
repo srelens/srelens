@@ -223,7 +223,10 @@ pub fn render_settings_view(f: &mut Frame, area: Rect, state: &SettingsViewState
             Style::default().fg(Theme::DIM),
         )]),
     ];
-    f.render_widget(Paragraph::new(desc_lines), chunks[0]);
+    f.render_widget(
+        Paragraph::new(desc_lines).wrap(Wrap { trim: true }),
+        chunks[0],
+    );
 
     // 2. Providers List (5 providers now!)
     let provider_constraints: Vec<Constraint> = ALL_PROVIDERS
@@ -443,7 +446,7 @@ pub fn render_settings_view(f: &mut Frame, area: Rect, state: &SettingsViewState
             ]));
         }
 
-        f.render_widget(Paragraph::new(lines), card_inner);
+        f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), card_inner);
     }
 
     // 3. Bottom Key Hints
@@ -492,7 +495,9 @@ pub fn render_settings_view(f: &mut Frame, area: Rect, state: &SettingsViewState
         Span::styled(" Back", Theme::header_label()),
     ]);
     f.render_widget(
-        Paragraph::new(hints_line).alignment(Alignment::Center),
+        Paragraph::new(hints_line)
+            .wrap(Wrap { trim: true })
+            .alignment(Alignment::Center),
         chunks[2],
     );
 
@@ -536,7 +541,8 @@ pub fn render_settings_view(f: &mut Frame, area: Rect, state: &SettingsViewState
             ])
             .split(edit_inner);
 
-        let prompt = Paragraph::new(format!("Enter new value for {}:", field_name));
+        let prompt = Paragraph::new(format!("Enter new value for {}:", field_name))
+            .wrap(Wrap { trim: true });
         f.render_widget(prompt, edit_chunks[0]);
 
         let input_line = Line::from(vec![
@@ -582,7 +588,9 @@ pub fn render_settings_view(f: &mut Frame, area: Rect, state: &SettingsViewState
             Span::styled("Cancel", Theme::header_label()),
         ]);
         f.render_widget(
-            Paragraph::new(help).alignment(Alignment::Center),
+            Paragraph::new(help)
+                .wrap(Wrap { trim: true })
+                .alignment(Alignment::Center),
             edit_chunks[2],
         );
     }

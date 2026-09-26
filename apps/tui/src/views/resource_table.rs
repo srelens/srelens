@@ -2,7 +2,7 @@ use ratatui::{
     layout::{Constraint, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Cell, Paragraph, Row, Table},
+    widgets::{Block, Borders, Cell, Paragraph, Row, Table, Wrap},
     Frame,
 };
 use serde_json::Value;
@@ -86,6 +86,7 @@ pub struct ResourceTableState {
     pub last_area_width: std::cell::Cell<u16>,
     /// Active port forwards: (namespace, name) -> Vec<(local_port, remote_port, forward_id)>
     pub active_port_forwards: HashMap<(String, String), Vec<(u16, u16, String)>>,
+    pub error: Option<String>,
 }
 
 impl ResourceTableState {
@@ -111,7 +112,17 @@ impl ResourceTableState {
             last_start_idx: std::cell::Cell::new(0),
             last_area_width: std::cell::Cell::new(0),
             active_port_forwards: HashMap::new(),
+            error: None,
         }
+    }
+
+    pub fn set_error(&mut self, err: String) {
+        self.error = Some(err);
+        self.is_loading = false;
+        self.raw_items.clear();
+        self.filtered_indices.clear();
+        self.selected_idx = 0;
+        self.scroll_offset = 0;
     }
 
     pub fn toggle_reason_rail_focus(&mut self) {
@@ -145,6 +156,7 @@ impl ResourceTableState {
     pub fn set_items(&mut self, items: Vec<Value>, filter_query: &str) {
         self.raw_items = items;
         self.is_loading = false;
+        self.error = None;
         self.apply_filter(filter_query);
     }
 
@@ -160,7 +172,8 @@ impl ResourceTableState {
         };
         let q_lower = q.to_lowercase();
 
-        self.filtered_indices = self.raw_items
+        self.filtered_indices = self
+            .raw_items
             .iter()
             .enumerate()
             .filter(|(_, item)| {
@@ -182,7 +195,9 @@ impl ResourceTableState {
                 }
 
                 // Segment filter for Workloads
-                if self.kind == ResourceKind::Workloads && self.workload_segment != WorkloadSegment::All {
+                if self.kind == ResourceKind::Workloads
+                    && self.workload_segment != WorkloadSegment::All
+                {
                     let k = item.get("kind").and_then(|v| v.as_str()).unwrap_or("");
                     if k != self.workload_segment.display_name() {
                         return false;
@@ -193,13 +208,23 @@ impl ResourceTableState {
                     return true;
                 }
 
-                let name = item.get("name")
+                let name = item
+                    .get("name")
                     .and_then(|v| v.as_str())
-                    .or_else(|| item.get("metadata").and_then(|m| m.get("name")).and_then(|v| v.as_str()))
+                    .or_else(|| {
+                        item.get("metadata")
+                            .and_then(|m| m.get("name"))
+                            .and_then(|v| v.as_str())
+                    })
                     .unwrap_or("");
-                let ns = item.get("namespace")
+                let ns = item
+                    .get("namespace")
                     .and_then(|v| v.as_str())
-                    .or_else(|| item.get("metadata").and_then(|m| m.get("namespace")).and_then(|v| v.as_str()))
+                    .or_else(|| {
+                        item.get("metadata")
+                            .and_then(|m| m.get("namespace"))
+                            .and_then(|v| v.as_str())
+                    })
                     .unwrap_or("");
                 let full_str = item.to_string();
 
@@ -222,7 +247,8 @@ impl ResourceTableState {
     }
 
     pub fn select_next(&mut self) {
-        if !self.filtered_indices.is_empty() && self.selected_idx + 1 < self.filtered_indices.len() {
+        if !self.filtered_indices.is_empty() && self.selected_idx + 1 < self.filtered_indices.len()
+        {
             self.selected_idx += 1;
         }
     }
@@ -245,7 +271,8 @@ impl ResourceTableState {
 
     pub fn page_down(&mut self, page_size: usize) {
         if !self.filtered_indices.is_empty() {
-            self.selected_idx = (self.selected_idx + page_size).min(self.filtered_indices.len() - 1);
+            self.selected_idx =
+                (self.selected_idx + page_size).min(self.filtered_indices.len() - 1);
         }
     }
 
@@ -273,7 +300,11 @@ impl ResourceTableState {
         let item = self.selected_item()?;
         item.get("name")
             .and_then(|v| v.as_str())
-            .or_else(|| item.get("metadata").and_then(|m| m.get("name")).and_then(|v| v.as_str()))
+            .or_else(|| {
+                item.get("metadata")
+                    .and_then(|m| m.get("name"))
+                    .and_then(|v| v.as_str())
+            })
             .map(String::from)
     }
 
@@ -281,7 +312,11 @@ impl ResourceTableState {
         let item = self.selected_item()?;
         item.get("namespace")
             .and_then(|v| v.as_str())
-            .or_else(|| item.get("metadata").and_then(|m| m.get("namespace")).and_then(|v| v.as_str()))
+            .or_else(|| {
+                item.get("metadata")
+                    .and_then(|m| m.get("namespace"))
+                    .and_then(|v| v.as_str())
+            })
             .map(String::from)
     }
 
@@ -297,175 +332,679 @@ impl ResourceTableState {
 pub fn default_columns_for_kind(kind: &ResourceKind) -> Vec<ColumnDef> {
     match kind {
         ResourceKind::Workloads => vec![
-            ColumnDef { name: "NAMESPACE", key: "namespace", width: Constraint::Length(16) },
-            ColumnDef { name: "KIND", key: "kind", width: Constraint::Length(12) },
-            ColumnDef { name: "NAME", key: "name", width: Constraint::Min(24) },
-            ColumnDef { name: "READY", key: "ready", width: Constraint::Length(8) },
-            ColumnDef { name: "STATUS", key: "status", width: Constraint::Length(14) },
-            ColumnDef { name: "RESTARTS", key: "restarts", width: Constraint::Length(9) },
-            ColumnDef { name: "CPU", key: "cpu", width: Constraint::Length(8) },
-            ColumnDef { name: "MEM", key: "memory", width: Constraint::Length(8) },
-            ColumnDef { name: "AGE", key: "age", width: Constraint::Length(8) },
-            ColumnDef { name: "IMAGE", key: "image", width: Constraint::Min(25) },
+            ColumnDef {
+                name: "NAMESPACE",
+                key: "namespace",
+                width: Constraint::Length(16),
+            },
+            ColumnDef {
+                name: "KIND",
+                key: "kind",
+                width: Constraint::Length(12),
+            },
+            ColumnDef {
+                name: "NAME",
+                key: "name",
+                width: Constraint::Min(24),
+            },
+            ColumnDef {
+                name: "READY",
+                key: "ready",
+                width: Constraint::Length(8),
+            },
+            ColumnDef {
+                name: "STATUS",
+                key: "status",
+                width: Constraint::Length(14),
+            },
+            ColumnDef {
+                name: "RESTARTS",
+                key: "restarts",
+                width: Constraint::Length(9),
+            },
+            ColumnDef {
+                name: "CPU",
+                key: "cpu",
+                width: Constraint::Length(8),
+            },
+            ColumnDef {
+                name: "MEM",
+                key: "memory",
+                width: Constraint::Length(8),
+            },
+            ColumnDef {
+                name: "AGE",
+                key: "age",
+                width: Constraint::Length(8),
+            },
+            ColumnDef {
+                name: "IMAGE",
+                key: "image",
+                width: Constraint::Min(25),
+            },
         ],
         ResourceKind::Pods => vec![
-            ColumnDef { name: "NAMESPACE", key: "namespace", width: Constraint::Length(18) },
-            ColumnDef { name: "NAME", key: "name", width: Constraint::Min(25) },
-            ColumnDef { name: "READY", key: "ready", width: Constraint::Length(8) },
-            ColumnDef { name: "STATUS", key: "status", width: Constraint::Length(14) },
-            ColumnDef { name: "RESTARTS", key: "restarts", width: Constraint::Length(10) },
-            ColumnDef { name: "CPU", key: "cpu", width: Constraint::Length(8) },
-            ColumnDef { name: "MEM", key: "memory", width: Constraint::Length(8) },
-            ColumnDef { name: "IP", key: "podIp", width: Constraint::Length(16) },
-            ColumnDef { name: "NODE", key: "nodeName", width: Constraint::Length(20) },
-            ColumnDef { name: "AGE", key: "age", width: Constraint::Length(8) },
+            ColumnDef {
+                name: "NAMESPACE",
+                key: "namespace",
+                width: Constraint::Length(18),
+            },
+            ColumnDef {
+                name: "NAME",
+                key: "name",
+                width: Constraint::Min(25),
+            },
+            ColumnDef {
+                name: "READY",
+                key: "ready",
+                width: Constraint::Length(8),
+            },
+            ColumnDef {
+                name: "STATUS",
+                key: "status",
+                width: Constraint::Length(14),
+            },
+            ColumnDef {
+                name: "RESTARTS",
+                key: "restarts",
+                width: Constraint::Length(10),
+            },
+            ColumnDef {
+                name: "CPU",
+                key: "cpu",
+                width: Constraint::Length(8),
+            },
+            ColumnDef {
+                name: "MEM",
+                key: "memory",
+                width: Constraint::Length(8),
+            },
+            ColumnDef {
+                name: "IP",
+                key: "podIp",
+                width: Constraint::Length(16),
+            },
+            ColumnDef {
+                name: "NODE",
+                key: "nodeName",
+                width: Constraint::Length(20),
+            },
+            ColumnDef {
+                name: "AGE",
+                key: "age",
+                width: Constraint::Length(8),
+            },
         ],
         ResourceKind::Deployments => vec![
-            ColumnDef { name: "NAMESPACE", key: "namespace", width: Constraint::Length(18) },
-            ColumnDef { name: "NAME", key: "name", width: Constraint::Min(25) },
-            ColumnDef { name: "READY", key: "ready", width: Constraint::Length(10) },
-            ColumnDef { name: "UP-TO-DATE", key: "upToDate", width: Constraint::Length(12) },
-            ColumnDef { name: "AVAILABLE", key: "available", width: Constraint::Length(12) },
-            ColumnDef { name: "AGE", key: "age", width: Constraint::Length(8) },
+            ColumnDef {
+                name: "NAMESPACE",
+                key: "namespace",
+                width: Constraint::Length(18),
+            },
+            ColumnDef {
+                name: "NAME",
+                key: "name",
+                width: Constraint::Min(25),
+            },
+            ColumnDef {
+                name: "READY",
+                key: "ready",
+                width: Constraint::Length(10),
+            },
+            ColumnDef {
+                name: "UP-TO-DATE",
+                key: "upToDate",
+                width: Constraint::Length(12),
+            },
+            ColumnDef {
+                name: "AVAILABLE",
+                key: "available",
+                width: Constraint::Length(12),
+            },
+            ColumnDef {
+                name: "AGE",
+                key: "age",
+                width: Constraint::Length(8),
+            },
         ],
         ResourceKind::StatefulSets => vec![
-            ColumnDef { name: "NAMESPACE", key: "namespace", width: Constraint::Length(18) },
-            ColumnDef { name: "NAME", key: "name", width: Constraint::Min(25) },
-            ColumnDef { name: "READY", key: "ready", width: Constraint::Length(10) },
-            ColumnDef { name: "AGE", key: "age", width: Constraint::Length(8) },
+            ColumnDef {
+                name: "NAMESPACE",
+                key: "namespace",
+                width: Constraint::Length(18),
+            },
+            ColumnDef {
+                name: "NAME",
+                key: "name",
+                width: Constraint::Min(25),
+            },
+            ColumnDef {
+                name: "READY",
+                key: "ready",
+                width: Constraint::Length(10),
+            },
+            ColumnDef {
+                name: "AGE",
+                key: "age",
+                width: Constraint::Length(8),
+            },
         ],
         ResourceKind::DaemonSets => vec![
-            ColumnDef { name: "NAMESPACE", key: "namespace", width: Constraint::Length(18) },
-            ColumnDef { name: "NAME", key: "name", width: Constraint::Min(25) },
-            ColumnDef { name: "DESIRED", key: "desired", width: Constraint::Length(10) },
-            ColumnDef { name: "CURRENT", key: "current", width: Constraint::Length(10) },
-            ColumnDef { name: "READY", key: "ready", width: Constraint::Length(10) },
-            ColumnDef { name: "UP-TO-DATE", key: "upToDate", width: Constraint::Length(12) },
-            ColumnDef { name: "AVAILABLE", key: "available", width: Constraint::Length(12) },
-            ColumnDef { name: "AGE", key: "age", width: Constraint::Length(8) },
+            ColumnDef {
+                name: "NAMESPACE",
+                key: "namespace",
+                width: Constraint::Length(18),
+            },
+            ColumnDef {
+                name: "NAME",
+                key: "name",
+                width: Constraint::Min(25),
+            },
+            ColumnDef {
+                name: "DESIRED",
+                key: "desired",
+                width: Constraint::Length(10),
+            },
+            ColumnDef {
+                name: "CURRENT",
+                key: "current",
+                width: Constraint::Length(10),
+            },
+            ColumnDef {
+                name: "READY",
+                key: "ready",
+                width: Constraint::Length(10),
+            },
+            ColumnDef {
+                name: "UP-TO-DATE",
+                key: "upToDate",
+                width: Constraint::Length(12),
+            },
+            ColumnDef {
+                name: "AVAILABLE",
+                key: "available",
+                width: Constraint::Length(12),
+            },
+            ColumnDef {
+                name: "AGE",
+                key: "age",
+                width: Constraint::Length(8),
+            },
         ],
         ResourceKind::Jobs => vec![
-            ColumnDef { name: "NAMESPACE", key: "namespace", width: Constraint::Length(18) },
-            ColumnDef { name: "NAME", key: "name", width: Constraint::Min(25) },
-            ColumnDef { name: "COMPLETIONS", key: "completions", width: Constraint::Length(14) },
-            ColumnDef { name: "DURATION", key: "duration", width: Constraint::Length(12) },
-            ColumnDef { name: "AGE", key: "age", width: Constraint::Length(8) },
+            ColumnDef {
+                name: "NAMESPACE",
+                key: "namespace",
+                width: Constraint::Length(18),
+            },
+            ColumnDef {
+                name: "NAME",
+                key: "name",
+                width: Constraint::Min(25),
+            },
+            ColumnDef {
+                name: "COMPLETIONS",
+                key: "completions",
+                width: Constraint::Length(14),
+            },
+            ColumnDef {
+                name: "DURATION",
+                key: "duration",
+                width: Constraint::Length(12),
+            },
+            ColumnDef {
+                name: "AGE",
+                key: "age",
+                width: Constraint::Length(8),
+            },
         ],
         ResourceKind::CronJobs => vec![
-            ColumnDef { name: "NAMESPACE", key: "namespace", width: Constraint::Length(18) },
-            ColumnDef { name: "NAME", key: "name", width: Constraint::Min(25) },
-            ColumnDef { name: "SCHEDULE", key: "schedule", width: Constraint::Length(18) },
-            ColumnDef { name: "SUSPEND", key: "suspend", width: Constraint::Length(10) },
-            ColumnDef { name: "ACTIVE", key: "active", width: Constraint::Length(8) },
-            ColumnDef { name: "LAST SCHEDULE", key: "lastSchedule", width: Constraint::Length(16) },
-            ColumnDef { name: "AGE", key: "age", width: Constraint::Length(8) },
+            ColumnDef {
+                name: "NAMESPACE",
+                key: "namespace",
+                width: Constraint::Length(18),
+            },
+            ColumnDef {
+                name: "NAME",
+                key: "name",
+                width: Constraint::Min(25),
+            },
+            ColumnDef {
+                name: "SCHEDULE",
+                key: "schedule",
+                width: Constraint::Length(18),
+            },
+            ColumnDef {
+                name: "SUSPEND",
+                key: "suspend",
+                width: Constraint::Length(10),
+            },
+            ColumnDef {
+                name: "ACTIVE",
+                key: "active",
+                width: Constraint::Length(8),
+            },
+            ColumnDef {
+                name: "LAST SCHEDULE",
+                key: "lastSchedule",
+                width: Constraint::Length(16),
+            },
+            ColumnDef {
+                name: "AGE",
+                key: "age",
+                width: Constraint::Length(8),
+            },
         ],
         ResourceKind::Services => vec![
-            ColumnDef { name: "NAMESPACE", key: "namespace", width: Constraint::Length(18) },
-            ColumnDef { name: "NAME", key: "name", width: Constraint::Min(25) },
-            ColumnDef { name: "TYPE", key: "type", width: Constraint::Length(14) },
-            ColumnDef { name: "CLUSTER-IP", key: "clusterIP", width: Constraint::Length(16) },
-            ColumnDef { name: "EXTERNAL-IP", key: "externalIP", width: Constraint::Length(18) },
-            ColumnDef { name: "PORTS", key: "ports", width: Constraint::Min(20) },
-            ColumnDef { name: "AGE", key: "age", width: Constraint::Length(8) },
+            ColumnDef {
+                name: "NAMESPACE",
+                key: "namespace",
+                width: Constraint::Length(18),
+            },
+            ColumnDef {
+                name: "NAME",
+                key: "name",
+                width: Constraint::Min(25),
+            },
+            ColumnDef {
+                name: "TYPE",
+                key: "type",
+                width: Constraint::Length(14),
+            },
+            ColumnDef {
+                name: "CLUSTER-IP",
+                key: "clusterIP",
+                width: Constraint::Length(16),
+            },
+            ColumnDef {
+                name: "EXTERNAL-IP",
+                key: "externalIP",
+                width: Constraint::Length(18),
+            },
+            ColumnDef {
+                name: "PORTS",
+                key: "ports",
+                width: Constraint::Min(20),
+            },
+            ColumnDef {
+                name: "AGE",
+                key: "age",
+                width: Constraint::Length(8),
+            },
         ],
         ResourceKind::Ingresses => vec![
-            ColumnDef { name: "NAMESPACE", key: "namespace", width: Constraint::Length(18) },
-            ColumnDef { name: "NAME", key: "name", width: Constraint::Min(25) },
-            ColumnDef { name: "CLASS", key: "class", width: Constraint::Length(14) },
-            ColumnDef { name: "HOSTS", key: "hosts", width: Constraint::Min(25) },
-            ColumnDef { name: "ADDRESS", key: "address", width: Constraint::Length(18) },
-            ColumnDef { name: "PORTS", key: "ports", width: Constraint::Length(12) },
-            ColumnDef { name: "AGE", key: "age", width: Constraint::Length(8) },
+            ColumnDef {
+                name: "NAMESPACE",
+                key: "namespace",
+                width: Constraint::Length(18),
+            },
+            ColumnDef {
+                name: "NAME",
+                key: "name",
+                width: Constraint::Min(25),
+            },
+            ColumnDef {
+                name: "CLASS",
+                key: "class",
+                width: Constraint::Length(14),
+            },
+            ColumnDef {
+                name: "HOSTS",
+                key: "hosts",
+                width: Constraint::Min(25),
+            },
+            ColumnDef {
+                name: "ADDRESS",
+                key: "address",
+                width: Constraint::Length(18),
+            },
+            ColumnDef {
+                name: "PORTS",
+                key: "ports",
+                width: Constraint::Length(12),
+            },
+            ColumnDef {
+                name: "AGE",
+                key: "age",
+                width: Constraint::Length(8),
+            },
         ],
         ResourceKind::EndpointSlices => vec![
-            ColumnDef { name: "NAMESPACE", key: "namespace", width: Constraint::Length(18) },
-            ColumnDef { name: "NAME", key: "name", width: Constraint::Min(25) },
-            ColumnDef { name: "ADDRESS-TYPE", key: "addressType", width: Constraint::Length(14) },
-            ColumnDef { name: "PORTS", key: "ports", width: Constraint::Min(20) },
-            ColumnDef { name: "ENDPOINTS", key: "endpoints", width: Constraint::Min(20) },
-            ColumnDef { name: "AGE", key: "age", width: Constraint::Length(8) },
+            ColumnDef {
+                name: "NAMESPACE",
+                key: "namespace",
+                width: Constraint::Length(18),
+            },
+            ColumnDef {
+                name: "NAME",
+                key: "name",
+                width: Constraint::Min(25),
+            },
+            ColumnDef {
+                name: "ADDRESS-TYPE",
+                key: "addressType",
+                width: Constraint::Length(14),
+            },
+            ColumnDef {
+                name: "PORTS",
+                key: "ports",
+                width: Constraint::Min(20),
+            },
+            ColumnDef {
+                name: "ENDPOINTS",
+                key: "endpoints",
+                width: Constraint::Min(20),
+            },
+            ColumnDef {
+                name: "AGE",
+                key: "age",
+                width: Constraint::Length(8),
+            },
         ],
         ResourceKind::ConfigMaps => vec![
-            ColumnDef { name: "NAMESPACE", key: "namespace", width: Constraint::Length(18) },
-            ColumnDef { name: "NAME", key: "name", width: Constraint::Min(30) },
-            ColumnDef { name: "DATA", key: "dataCount", width: Constraint::Length(10) },
-            ColumnDef { name: "AGE", key: "age", width: Constraint::Length(8) },
+            ColumnDef {
+                name: "NAMESPACE",
+                key: "namespace",
+                width: Constraint::Length(18),
+            },
+            ColumnDef {
+                name: "NAME",
+                key: "name",
+                width: Constraint::Min(30),
+            },
+            ColumnDef {
+                name: "DATA",
+                key: "dataCount",
+                width: Constraint::Length(10),
+            },
+            ColumnDef {
+                name: "AGE",
+                key: "age",
+                width: Constraint::Length(8),
+            },
         ],
         ResourceKind::Secrets => vec![
-            ColumnDef { name: "NAMESPACE", key: "namespace", width: Constraint::Length(18) },
-            ColumnDef { name: "NAME", key: "name", width: Constraint::Min(30) },
-            ColumnDef { name: "TYPE", key: "type", width: Constraint::Length(25) },
-            ColumnDef { name: "DATA", key: "dataCount", width: Constraint::Length(10) },
-            ColumnDef { name: "AGE", key: "age", width: Constraint::Length(8) },
+            ColumnDef {
+                name: "NAMESPACE",
+                key: "namespace",
+                width: Constraint::Length(18),
+            },
+            ColumnDef {
+                name: "NAME",
+                key: "name",
+                width: Constraint::Min(30),
+            },
+            ColumnDef {
+                name: "TYPE",
+                key: "type",
+                width: Constraint::Length(25),
+            },
+            ColumnDef {
+                name: "DATA",
+                key: "dataCount",
+                width: Constraint::Length(10),
+            },
+            ColumnDef {
+                name: "AGE",
+                key: "age",
+                width: Constraint::Length(8),
+            },
         ],
         ResourceKind::PersistentVolumeClaims => vec![
-            ColumnDef { name: "NAMESPACE", key: "namespace", width: Constraint::Length(18) },
-            ColumnDef { name: "NAME", key: "name", width: Constraint::Min(25) },
-            ColumnDef { name: "STATUS", key: "status", width: Constraint::Length(12) },
-            ColumnDef { name: "VOLUME", key: "volume", width: Constraint::Min(20) },
-            ColumnDef { name: "CAPACITY", key: "capacity", width: Constraint::Length(12) },
-            ColumnDef { name: "ACCESS MODES", key: "accessModes", width: Constraint::Length(14) },
-            ColumnDef { name: "STORAGECLASS", key: "storageClass", width: Constraint::Length(16) },
-            ColumnDef { name: "AGE", key: "age", width: Constraint::Length(8) },
+            ColumnDef {
+                name: "NAMESPACE",
+                key: "namespace",
+                width: Constraint::Length(18),
+            },
+            ColumnDef {
+                name: "NAME",
+                key: "name",
+                width: Constraint::Min(25),
+            },
+            ColumnDef {
+                name: "STATUS",
+                key: "status",
+                width: Constraint::Length(12),
+            },
+            ColumnDef {
+                name: "VOLUME",
+                key: "volume",
+                width: Constraint::Min(20),
+            },
+            ColumnDef {
+                name: "CAPACITY",
+                key: "capacity",
+                width: Constraint::Length(12),
+            },
+            ColumnDef {
+                name: "ACCESS MODES",
+                key: "accessModes",
+                width: Constraint::Length(14),
+            },
+            ColumnDef {
+                name: "STORAGECLASS",
+                key: "storageClass",
+                width: Constraint::Length(16),
+            },
+            ColumnDef {
+                name: "AGE",
+                key: "age",
+                width: Constraint::Length(8),
+            },
         ],
         ResourceKind::PersistentVolumes => vec![
-            ColumnDef { name: "NAME", key: "name", width: Constraint::Min(30) },
-            ColumnDef { name: "CAPACITY", key: "capacity", width: Constraint::Length(12) },
-            ColumnDef { name: "ACCESS MODES", key: "accessModes", width: Constraint::Length(14) },
-            ColumnDef { name: "RECLAIM POLICY", key: "reclaimPolicy", width: Constraint::Length(16) },
-            ColumnDef { name: "STATUS", key: "status", width: Constraint::Length(12) },
-            ColumnDef { name: "CLAIM", key: "claim", width: Constraint::Min(25) },
-            ColumnDef { name: "STORAGECLASS", key: "storageClass", width: Constraint::Length(16) },
-            ColumnDef { name: "AGE", key: "age", width: Constraint::Length(8) },
+            ColumnDef {
+                name: "NAME",
+                key: "name",
+                width: Constraint::Min(30),
+            },
+            ColumnDef {
+                name: "CAPACITY",
+                key: "capacity",
+                width: Constraint::Length(12),
+            },
+            ColumnDef {
+                name: "ACCESS MODES",
+                key: "accessModes",
+                width: Constraint::Length(14),
+            },
+            ColumnDef {
+                name: "RECLAIM POLICY",
+                key: "reclaimPolicy",
+                width: Constraint::Length(16),
+            },
+            ColumnDef {
+                name: "STATUS",
+                key: "status",
+                width: Constraint::Length(12),
+            },
+            ColumnDef {
+                name: "CLAIM",
+                key: "claim",
+                width: Constraint::Min(25),
+            },
+            ColumnDef {
+                name: "STORAGECLASS",
+                key: "storageClass",
+                width: Constraint::Length(16),
+            },
+            ColumnDef {
+                name: "AGE",
+                key: "age",
+                width: Constraint::Length(8),
+            },
         ],
         ResourceKind::StorageClasses => vec![
-            ColumnDef { name: "NAME", key: "name", width: Constraint::Min(30) },
-            ColumnDef { name: "PROVISIONER", key: "provisioner", width: Constraint::Min(30) },
-            ColumnDef { name: "RECLAIMPOLICY", key: "reclaimPolicy", width: Constraint::Length(16) },
-            ColumnDef { name: "VOLUMEBINDINGMODE", key: "volumeBindingMode", width: Constraint::Length(22) },
-            ColumnDef { name: "ALLOWEXPANSION", key: "allowVolumeExpansion", width: Constraint::Length(16) },
-            ColumnDef { name: "AGE", key: "age", width: Constraint::Length(8) },
+            ColumnDef {
+                name: "NAME",
+                key: "name",
+                width: Constraint::Min(30),
+            },
+            ColumnDef {
+                name: "PROVISIONER",
+                key: "provisioner",
+                width: Constraint::Min(30),
+            },
+            ColumnDef {
+                name: "RECLAIMPOLICY",
+                key: "reclaimPolicy",
+                width: Constraint::Length(16),
+            },
+            ColumnDef {
+                name: "VOLUMEBINDINGMODE",
+                key: "volumeBindingMode",
+                width: Constraint::Length(22),
+            },
+            ColumnDef {
+                name: "ALLOWEXPANSION",
+                key: "allowVolumeExpansion",
+                width: Constraint::Length(16),
+            },
+            ColumnDef {
+                name: "AGE",
+                key: "age",
+                width: Constraint::Length(8),
+            },
         ],
         ResourceKind::Nodes => vec![
-            ColumnDef { name: "NAME", key: "name", width: Constraint::Length(24) },
-            ColumnDef { name: "STATUS", key: "status", width: Constraint::Length(26) },
-            ColumnDef { name: "ROLES", key: "roles", width: Constraint::Length(16) },
-            ColumnDef { name: "VERSION", key: "version", width: Constraint::Length(14) },
-            ColumnDef { name: "CPU", key: "allocatableCpuMillicores", width: Constraint::Length(12) },
-            ColumnDef { name: "MEMORY", key: "allocatableMemoryMiB", width: Constraint::Length(12) },
-            ColumnDef { name: "PODS", key: "allocatablePods", width: Constraint::Length(10) },
-            ColumnDef { name: "AGE", key: "age", width: Constraint::Length(8) },
+            ColumnDef {
+                name: "NAME",
+                key: "name",
+                width: Constraint::Length(24),
+            },
+            ColumnDef {
+                name: "STATUS",
+                key: "status",
+                width: Constraint::Length(26),
+            },
+            ColumnDef {
+                name: "ROLES",
+                key: "roles",
+                width: Constraint::Length(16),
+            },
+            ColumnDef {
+                name: "VERSION",
+                key: "version",
+                width: Constraint::Length(14),
+            },
+            ColumnDef {
+                name: "CPU",
+                key: "allocatableCpuMillicores",
+                width: Constraint::Length(12),
+            },
+            ColumnDef {
+                name: "MEMORY",
+                key: "allocatableMemoryMiB",
+                width: Constraint::Length(12),
+            },
+            ColumnDef {
+                name: "PODS",
+                key: "allocatablePods",
+                width: Constraint::Length(10),
+            },
+            ColumnDef {
+                name: "AGE",
+                key: "age",
+                width: Constraint::Length(8),
+            },
         ],
         ResourceKind::Namespaces => vec![
-            ColumnDef { name: "NAME", key: "name", width: Constraint::Min(35) },
-            ColumnDef { name: "STATUS", key: "status", width: Constraint::Length(14) },
-            ColumnDef { name: "AGE", key: "age", width: Constraint::Length(8) },
+            ColumnDef {
+                name: "NAME",
+                key: "name",
+                width: Constraint::Min(35),
+            },
+            ColumnDef {
+                name: "STATUS",
+                key: "status",
+                width: Constraint::Length(14),
+            },
+            ColumnDef {
+                name: "AGE",
+                key: "age",
+                width: Constraint::Length(8),
+            },
         ],
         ResourceKind::Events => vec![
-            ColumnDef { name: "NAMESPACE", key: "namespace", width: Constraint::Length(18) },
-            ColumnDef { name: "LAST SEEN", key: "age", width: Constraint::Length(12) },
-            ColumnDef { name: "TYPE", key: "type", width: Constraint::Length(10) },
-            ColumnDef { name: "REASON", key: "reason", width: Constraint::Length(18) },
-            ColumnDef { name: "OBJECT", key: "involvedObject", width: Constraint::Length(25) },
-            ColumnDef { name: "MESSAGE", key: "message", width: Constraint::Min(40) },
+            ColumnDef {
+                name: "NAMESPACE",
+                key: "namespace",
+                width: Constraint::Length(18),
+            },
+            ColumnDef {
+                name: "LAST SEEN",
+                key: "age",
+                width: Constraint::Length(12),
+            },
+            ColumnDef {
+                name: "TYPE",
+                key: "type",
+                width: Constraint::Length(10),
+            },
+            ColumnDef {
+                name: "REASON",
+                key: "reason",
+                width: Constraint::Length(18),
+            },
+            ColumnDef {
+                name: "OBJECT",
+                key: "involvedObject",
+                width: Constraint::Length(25),
+            },
+            ColumnDef {
+                name: "MESSAGE",
+                key: "message",
+                width: Constraint::Min(40),
+            },
         ],
         ResourceKind::CustomResourceDefinitions => vec![
-            ColumnDef { name: "NAME", key: "name", width: Constraint::Min(35) },
-            ColumnDef { name: "GROUP", key: "group", width: Constraint::Length(25) },
-            ColumnDef { name: "VERSION", key: "version", width: Constraint::Length(12) },
-            ColumnDef { name: "SCOPE", key: "scope", width: Constraint::Length(14) },
-            ColumnDef { name: "AGE", key: "age", width: Constraint::Length(8) },
+            ColumnDef {
+                name: "NAME",
+                key: "name",
+                width: Constraint::Min(35),
+            },
+            ColumnDef {
+                name: "GROUP",
+                key: "group",
+                width: Constraint::Length(25),
+            },
+            ColumnDef {
+                name: "VERSION",
+                key: "version",
+                width: Constraint::Length(12),
+            },
+            ColumnDef {
+                name: "SCOPE",
+                key: "scope",
+                width: Constraint::Length(14),
+            },
+            ColumnDef {
+                name: "AGE",
+                key: "age",
+                width: Constraint::Length(8),
+            },
         ],
         ResourceKind::CustomResource(crd) => {
             let mut cols = Vec::new();
             if crd.namespaced {
-                cols.push(ColumnDef { name: "NAMESPACE", key: "namespace", width: Constraint::Length(18) });
+                cols.push(ColumnDef {
+                    name: "NAMESPACE",
+                    key: "namespace",
+                    width: Constraint::Length(18),
+                });
             }
-            cols.push(ColumnDef { name: "NAME", key: "name", width: Constraint::Min(25) });
+            cols.push(ColumnDef {
+                name: "NAME",
+                key: "name",
+                width: Constraint::Min(25),
+            });
 
             if crd.printer_columns.is_empty() {
-                cols.push(ColumnDef { name: "AGE", key: "age", width: Constraint::Length(8) });
+                cols.push(ColumnDef {
+                    name: "AGE",
+                    key: "age",
+                    width: Constraint::Length(8),
+                });
             } else {
                 let mut has_age = false;
                 for pc in &crd.printer_columns {
@@ -487,7 +1026,8 @@ pub fn default_columns_for_kind(kind: &ResourceKind) -> Vec<ColumnDef> {
                         _ => Constraint::Length(16),
                     };
                     let name_str: &'static str = Box::leak(pc.name.to_uppercase().into_boxed_str());
-                    let key_str: &'static str = Box::leak(format!("printer:{}", pc.json_path).into_boxed_str());
+                    let key_str: &'static str =
+                        Box::leak(format!("printer:{}", pc.json_path).into_boxed_str());
                     cols.push(ColumnDef {
                         name: name_str,
                         key: key_str,
@@ -495,15 +1035,31 @@ pub fn default_columns_for_kind(kind: &ResourceKind) -> Vec<ColumnDef> {
                     });
                 }
                 if !has_age {
-                    cols.push(ColumnDef { name: "AGE", key: "age", width: Constraint::Length(8) });
+                    cols.push(ColumnDef {
+                        name: "AGE",
+                        key: "age",
+                        width: Constraint::Length(8),
+                    });
                 }
             }
             cols
         }
         _ => vec![
-            ColumnDef { name: "NAMESPACE", key: "namespace", width: Constraint::Length(18) },
-            ColumnDef { name: "NAME", key: "name", width: Constraint::Min(30) },
-            ColumnDef { name: "AGE", key: "age", width: Constraint::Length(8) },
+            ColumnDef {
+                name: "NAMESPACE",
+                key: "namespace",
+                width: Constraint::Length(18),
+            },
+            ColumnDef {
+                name: "NAME",
+                key: "name",
+                width: Constraint::Min(30),
+            },
+            ColumnDef {
+                name: "AGE",
+                key: "age",
+                width: Constraint::Length(8),
+            },
         ],
     }
 }
@@ -528,7 +1084,8 @@ fn raw_value_to_string(v: &Value) -> Option<String> {
 }
 
 pub fn is_event_warning_or_failure(item: &Value) -> bool {
-    let type_str = item.get("type")
+    let type_str = item
+        .get("type")
         .or_else(|| item.get("type_"))
         .and_then(|v| v.as_str())
         .unwrap_or("");
@@ -536,13 +1093,24 @@ pub fn is_event_warning_or_failure(item: &Value) -> bool {
         return true;
     }
 
-    let reason = item.get("reason")
+    let reason = item
+        .get("reason")
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_lowercase();
     let critical_reasons = [
-        "fail", "backoff", "crashloop", "oom", "evict", "unhealthy", 
-        "killing", "notready", "error", "warn", "invalidspec", "pressure"
+        "fail",
+        "backoff",
+        "crashloop",
+        "oom",
+        "evict",
+        "unhealthy",
+        "killing",
+        "notready",
+        "error",
+        "warn",
+        "invalidspec",
+        "pressure",
     ];
     for cr in critical_reasons {
         if reason.contains(cr) {
@@ -550,11 +1118,16 @@ pub fn is_event_warning_or_failure(item: &Value) -> bool {
         }
     }
 
-    let msg = item.get("message")
+    let msg = item
+        .get("message")
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_lowercase();
-    if msg.contains("oomkilled") || msg.contains("crashloopbackoff") || msg.contains("failed") || msg.contains("evicted") {
+    if msg.contains("oomkilled")
+        || msg.contains("crashloopbackoff")
+        || msg.contains("failed")
+        || msg.contains("evicted")
+    {
         return true;
     }
 
@@ -615,7 +1188,10 @@ fn parse_json_path_segments(path: &str) -> Vec<PathSegment> {
                 let inner = inner.trim_end_matches(|c| c == ']' || c == ')' || c == ' ');
                 if let Some((k, v)) = inner.split_once("==") {
                     let match_key = k.trim().to_string();
-                    let match_val = v.trim().trim_matches(|c| c == '"' || c == '\'' || c == ')' || c == ']').to_string();
+                    let match_val = v
+                        .trim()
+                        .trim_matches(|c| c == '"' || c == '\'' || c == ')' || c == ']')
+                        .to_string();
                     segments.push(PathSegment::Filter {
                         field: field.to_string(),
                         match_key,
@@ -670,7 +1246,11 @@ pub fn eval_crd_json_path(val: &Value, raw_path: &str) -> String {
                     return "-".to_string();
                 }
             }
-            PathSegment::Filter { field, match_key, match_val } => {
+            PathSegment::Filter {
+                field,
+                match_key,
+                match_val,
+            } => {
                 let target = if field.is_empty() {
                     Some(current)
                 } else {
@@ -705,9 +1285,12 @@ fn format_crd_cell_value(val: &Value) -> String {
                 return "-".to_string();
             }
             // Check if RFC3339 timestamp (e.g. 2026-09-03T09:04:38Z)
-            if (s.contains('T') && s.ends_with('Z')) || (s.len() >= 20 && s.contains('-') && s.contains(':')) {
+            if (s.contains('T') && s.ends_with('Z'))
+                || (s.len() >= 20 && s.contains('-') && s.contains(':'))
+            {
                 if let Ok(ts) = s.parse::<srelens_kube::k8s_openapi::jiff::Timestamp>() {
-                    let k8s_time = srelens_kube::k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(ts);
+                    let k8s_time =
+                        srelens_kube::k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(ts);
                     let age = srelens_kube::humanize_age(Some(&k8s_time));
                     if !age.is_empty() {
                         return age;
@@ -717,11 +1300,19 @@ fn format_crd_cell_value(val: &Value) -> String {
             s.clone()
         }
         Value::Bool(b) => {
-            if *b { "True".to_string() } else { "False".to_string() }
+            if *b {
+                "True".to_string()
+            } else {
+                "False".to_string()
+            }
         }
         Value::Number(n) => n.to_string(),
         Value::Array(arr) => {
-            let strs: Vec<_> = arr.iter().map(format_crd_cell_value).filter(|s| s != "-").collect();
+            let strs: Vec<_> = arr
+                .iter()
+                .map(format_crd_cell_value)
+                .filter(|s| s != "-")
+                .collect();
             if strs.is_empty() {
                 "-".to_string()
             } else {
@@ -771,7 +1362,11 @@ pub fn extract_field_str<'a>(val: &'a Value, key: &str) -> String {
         }
     }
     if key_lower == "type" || key_lower == "type_" {
-        if let Some(t) = val.get("type").or_else(|| val.get("type_")).and_then(|v| v.as_str()) {
+        if let Some(t) = val
+            .get("type")
+            .or_else(|| val.get("type_"))
+            .and_then(|v| v.as_str())
+        {
             if !t.is_empty() {
                 return t.to_string();
             }
@@ -788,10 +1383,17 @@ pub fn extract_field_str<'a>(val: &'a Value, key: &str) -> String {
 
         let mut status_str = if let Some(s) = val.get("status").and_then(|v| v.as_str()) {
             s.to_string()
-        } else if let Some(phase) = val.get("phase").or_else(|| val.pointer("/status/phase")).and_then(|v| v.as_str()) {
+        } else if let Some(phase) = val
+            .get("phase")
+            .or_else(|| val.pointer("/status/phase"))
+            .and_then(|v| v.as_str())
+        {
             phase.to_string()
         } else if let Some(conds) = val.pointer("/status/conditions").and_then(|v| v.as_array()) {
-            if let Some(ready_cond) = conds.iter().find(|c| c.get("type").and_then(|t| t.as_str()) == Some("Ready")) {
+            if let Some(ready_cond) = conds
+                .iter()
+                .find(|c| c.get("type").and_then(|t| t.as_str()) == Some("Ready"))
+            {
                 if ready_cond.get("status").and_then(|s| s.as_str()) == Some("True") {
                     "Ready".to_string()
                 } else {
@@ -822,7 +1424,11 @@ pub fn extract_field_str<'a>(val: &'a Value, key: &str) -> String {
             .and_then(|v| v.as_bool())
             .or_else(|| val.pointer("/spec/unschedulable").and_then(|v| v.as_bool()))
             .unwrap_or(false);
-        return if is_unschedulable { "true".to_string() } else { "false".to_string() };
+        return if is_unschedulable {
+            "true".to_string()
+        } else {
+            "false".to_string()
+        };
     }
 
     // 1. Direct key lookup
@@ -880,10 +1486,17 @@ pub fn extract_field_str<'a>(val: &'a Value, key: &str) -> String {
 
     if key_lower == "externalip" {
         // Check load-balancer ingress (IP or Hostname)
-        if let Some(ingresses) = val.pointer("/status/loadBalancer/ingress").and_then(|v| v.as_array()) {
+        if let Some(ingresses) = val
+            .pointer("/status/loadBalancer/ingress")
+            .and_then(|v| v.as_array())
+        {
             let ips: Vec<_> = ingresses
                 .iter()
-                .filter_map(|ing| ing.get("ip").or_else(|| ing.get("hostname")).and_then(|v| v.as_str()))
+                .filter_map(|ing| {
+                    ing.get("ip")
+                        .or_else(|| ing.get("hostname"))
+                        .and_then(|v| v.as_str())
+                })
                 .collect();
             if !ips.is_empty() {
                 return ips.join(", ");
@@ -896,7 +1509,10 @@ pub fn extract_field_str<'a>(val: &'a Value, key: &str) -> String {
             }
         }
         // If it's a Service with type LoadBalancer but no ingress yet:
-        let svc_type = val.get("type").or_else(|| val.pointer("/spec/type")).and_then(|v| v.as_str());
+        let svc_type = val
+            .get("type")
+            .or_else(|| val.pointer("/spec/type"))
+            .and_then(|v| v.as_str());
         if svc_type == Some("LoadBalancer") {
             return "<pending>".to_string();
         }
@@ -907,17 +1523,30 @@ pub fn extract_field_str<'a>(val: &'a Value, key: &str) -> String {
 
     // 5. Pod specific lookups (status -> phase, nodeName -> node, podIP)
     if key_lower == "status" {
-        if let Some(phase) = val.get("phase").or_else(|| val.pointer("/status/phase")).and_then(|v| v.as_str()) {
+        if let Some(phase) = val
+            .get("phase")
+            .or_else(|| val.pointer("/status/phase"))
+            .and_then(|v| v.as_str())
+        {
             return phase.to_string();
         }
     }
     if key_lower == "nodename" || key_lower == "node" {
-        if let Some(node) = val.get("node").or_else(|| val.pointer("/spec/nodeName")).and_then(|v| v.as_str()) {
+        if let Some(node) = val
+            .get("node")
+            .or_else(|| val.pointer("/spec/nodeName"))
+            .and_then(|v| v.as_str())
+        {
             return node.to_string();
         }
     }
     if key_lower == "podip" || key_lower == "ip" {
-        if let Some(ip) = val.get("podIp").or_else(|| val.get("podIP")).or_else(|| val.pointer("/status/podIP")).and_then(|v| v.as_str()) {
+        if let Some(ip) = val
+            .get("podIp")
+            .or_else(|| val.get("podIP"))
+            .or_else(|| val.pointer("/status/podIP"))
+            .and_then(|v| v.as_str())
+        {
             return ip.to_string();
         }
     }
@@ -934,12 +1563,19 @@ pub fn extract_field_str<'a>(val: &'a Value, key: &str) -> String {
         }
     }
     if key_lower == "cpu" {
-        if let Some(cpu) = val.get("cpu").or_else(|| val.get("cpuUsage")).and_then(|v| v.as_str()) {
+        if let Some(cpu) = val
+            .get("cpu")
+            .or_else(|| val.get("cpuUsage"))
+            .and_then(|v| v.as_str())
+        {
             if !cpu.is_empty() && cpu != "-" {
                 return cpu.to_string();
             }
         }
-        if let Some(req_cpu) = val.pointer("/spec/containers/0/resources/requests/cpu").and_then(|v| v.as_str()) {
+        if let Some(req_cpu) = val
+            .pointer("/spec/containers/0/resources/requests/cpu")
+            .and_then(|v| v.as_str())
+        {
             return req_cpu.to_string();
         }
         if val.get("kind").is_some() {
@@ -947,12 +1583,19 @@ pub fn extract_field_str<'a>(val: &'a Value, key: &str) -> String {
         }
     }
     if key_lower == "memory" || key_lower == "mem" {
-        if let Some(mem) = val.get("memory").or_else(|| val.get("memUsage")).and_then(|v| v.as_str()) {
+        if let Some(mem) = val
+            .get("memory")
+            .or_else(|| val.get("memUsage"))
+            .and_then(|v| v.as_str())
+        {
             if !mem.is_empty() && mem != "-" {
                 return mem.to_string();
             }
         }
-        if let Some(req_mem) = val.pointer("/spec/containers/0/resources/requests/memory").and_then(|v| v.as_str()) {
+        if let Some(req_mem) = val
+            .pointer("/spec/containers/0/resources/requests/memory")
+            .and_then(|v| v.as_str())
+        {
             return req_mem.to_string();
         }
         if val.get("kind").is_some() {
@@ -965,7 +1608,10 @@ pub fn extract_field_str<'a>(val: &'a Value, key: &str) -> String {
                 return img.to_string();
             }
         }
-        if let Some(img) = val.pointer("/spec/template/spec/containers/0/image").and_then(|v| v.as_str()) {
+        if let Some(img) = val
+            .pointer("/spec/template/spec/containers/0/image")
+            .and_then(|v| v.as_str())
+        {
             if !img.is_empty() {
                 return img.to_string();
             }
@@ -993,10 +1639,7 @@ pub fn render_resource_table(f: &mut Frame, area: Rect, state: &ResourceTableSta
     if state.kind == ResourceKind::Events && area.width >= 110 {
         let chunks = ratatui::layout::Layout::default()
             .direction(ratatui::layout::Direction::Horizontal)
-            .constraints([
-                Constraint::Min(65),
-                Constraint::Length(32),
-            ])
+            .constraints([Constraint::Min(65), Constraint::Length(32)])
             .split(area);
 
         render_single_resource_table(f, chunks[0], state);
@@ -1017,7 +1660,10 @@ pub fn render_resource_table(f: &mut Frame, area: Rect, state: &ResourceTableSta
 
 fn render_single_resource_table(f: &mut Frame, area: Rect, state: &ResourceTableState) {
     let segment_badge = if state.kind == ResourceKind::Workloads {
-        format!(" [Segment: {} (Tab to cycle)]", state.workload_segment.display_name())
+        format!(
+            " [Segment: {} (Tab to cycle)]",
+            state.workload_segment.display_name()
+        )
     } else {
         String::new()
     };
@@ -1034,21 +1680,36 @@ fn render_single_resource_table(f: &mut Frame, area: Rect, state: &ResourceTable
         String::new()
     };
 
-    let count_badge = if !state.is_loading && state.filtered_indices.len() != state.raw_items.len() {
-        format!(" [{}/{}]", state.filtered_indices.len(), state.raw_items.len())
+    let count_badge = if !state.is_loading && state.filtered_indices.len() != state.raw_items.len()
+    {
+        format!(
+            " [{}/{}]",
+            state.filtered_indices.len(),
+            state.raw_items.len()
+        )
     } else if state.is_loading {
         " [Loading...]".to_string()
     } else {
         format!(" [{}]", state.filtered_indices.len())
     };
 
-    let pf_badge = if !state.active_port_forwards.is_empty() && (state.kind == ResourceKind::Pods || state.kind == ResourceKind::Services) {
+    let pf_badge = if !state.active_port_forwards.is_empty()
+        && (state.kind == ResourceKind::Pods || state.kind == ResourceKind::Services)
+    {
         format!(" [PF: {} active]", state.active_port_forwards.len())
     } else {
         String::new()
     };
 
-    let title = format!(" {}{}{}{}{}{} ", state.kind.display_name(), segment_badge, count_badge, pf_badge, triage_badge, reason_badge);
+    let title = format!(
+        " {}{}{}{}{}{} ",
+        state.kind.display_name(),
+        segment_badge,
+        count_badge,
+        pf_badge,
+        triage_badge,
+        reason_badge
+    );
 
     let border_color = if state.kind == ResourceKind::Events && state.reason_rail_focused {
         Theme::border()
@@ -1061,36 +1722,120 @@ fn render_single_resource_table(f: &mut Frame, area: Rect, state: &ResourceTable
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(border_color))
-        .title(Span::styled(title, if state.kind == ResourceKind::Events && state.warning_triage && !state.reason_rail_focused {
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
-        } else {
-            Theme::title()
-        }));
+        .title(Span::styled(
+            title,
+            if state.kind == ResourceKind::Events
+                && state.warning_triage
+                && !state.reason_rail_focused
+            {
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Theme::title()
+            },
+        ));
 
     let inner = block.inner(area);
     f.render_widget(block, area);
 
     if state.is_loading {
         let loading_msg = Paragraph::new(Line::from(vec![
-            Span::styled("⚡ Loading ", Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD)),
-            Span::styled(format!("{} from cluster API...", state.kind.display_name()), Style::default().fg(Theme::dim())),
-        ]));
+            Span::styled(
+                "⚡ Loading ",
+                Style::default()
+                    .fg(Theme::cyan())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("{} from cluster API...", state.kind.display_name()),
+                Style::default().fg(Theme::dim()),
+            ),
+        ]))
+        .wrap(Wrap { trim: true });
         f.render_widget(loading_msg, inner);
         return;
     }
 
+    if let Some(ref err) = state.error {
+        let is_not_found = err.contains("404") || err.to_ascii_lowercase().contains("not found");
+        let title_line = if is_not_found {
+            Line::from(vec![Span::styled(
+                "⚡ Resource definition unavailable on this cluster",
+                Style::default()
+                    .fg(Theme::yellow())
+                    .add_modifier(Modifier::BOLD),
+            )])
+        } else {
+            Line::from(vec![Span::styled(
+                "⚠ Failed to load resource",
+                Style::default()
+                    .fg(Theme::red())
+                    .add_modifier(Modifier::BOLD),
+            )])
+        };
+        let detail_line = Line::from(vec![
+            Span::styled(
+                if is_not_found {
+                    format!(
+                        "  {} was not found on this cluster: ",
+                        state.kind.display_name()
+                    )
+                } else {
+                    format!(
+                        "  {} could not be loaded from the cluster: ",
+                        state.kind.display_name()
+                    )
+                },
+                Style::default().fg(Theme::dim()),
+            ),
+            Span::styled(err.as_str(), Style::default().fg(Theme::fg())),
+        ]);
+        let hint_line = Line::from(vec![
+            Span::styled("  Press ", Style::default().fg(Theme::dim())),
+            Span::styled(
+                "<Esc>",
+                Style::default()
+                    .fg(Theme::accent())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                " to return, or navigate using ",
+                Style::default().fg(Theme::dim()),
+            ),
+            Span::styled(":crd", Style::default().fg(Theme::cyan())),
+            Span::styled(", ", Style::default().fg(Theme::dim())),
+            Span::styled(":pods", Style::default().fg(Theme::cyan())),
+            Span::styled(", ", Style::default().fg(Theme::dim())),
+            Span::styled(":workloads", Style::default().fg(Theme::cyan())),
+        ]);
+        let error_msg = Paragraph::new(vec![
+            title_line,
+            Line::from(""),
+            detail_line,
+            Line::from(""),
+            hint_line,
+        ])
+        .wrap(Wrap { trim: true });
+        f.render_widget(error_msg, inner);
+        return;
+    }
+
     if state.filtered_indices.is_empty() {
-        let empty_msg = Paragraph::new(Line::from(vec![
-            Span::styled(format!("No {} found in this scope.", state.kind.display_name()), Style::default().fg(Theme::dim())),
-        ]));
+        let empty_msg = Paragraph::new(Line::from(vec![Span::styled(
+            format!("No {} found in this scope.", state.kind.display_name()),
+            Style::default().fg(Theme::dim()),
+        )]))
+        .wrap(Wrap { trim: true });
         f.render_widget(empty_msg, inner);
         return;
     }
 
     // Prepare table headers
-    let header_cells = state.columns.iter().map(|col| {
-        Cell::from(col.name).style(Theme::table_header())
-    });
+    let header_cells = state
+        .columns
+        .iter()
+        .map(|col| Cell::from(col.name).style(Theme::table_header()));
     let header = Row::new(header_cells).height(1).bottom_margin(1);
 
     // Prepare rows
@@ -1118,24 +1863,43 @@ fn render_single_resource_table(f: &mut Frame, area: Rect, state: &ResourceTable
                 let text = super::sanitize_span_text(&extract_field_str(item, col.key));
                 let is_crd = matches!(state.kind, ResourceKind::CustomResource(_));
                 let is_status_col = col.key == "status"
-                    || (state.kind == ResourceKind::Events && (col.key == "type" || col.key == "reason"))
-                    || (is_crd && (col.name == "STATUS" || col.name == "READY" || col.name == "HEALTH" || col.name == "SYNC"));
+                    || (state.kind == ResourceKind::Events
+                        && (col.key == "type" || col.key == "reason"))
+                    || (is_crd
+                        && (col.name == "STATUS"
+                            || col.name == "READY"
+                            || col.name == "HEALTH"
+                            || col.name == "SYNC"));
 
                 let cell_style = if is_status_col {
                     status_style(&text)
                 } else if is_selected {
-                    Style::default().fg(Theme::sel_fg()).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(Theme::sel_fg())
+                        .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().fg(Theme::fg())
                 };
 
-                let prefix = if col.key == "name" && is_marked { "✔ " } else { "" };
-                let is_pf_resource = state.kind == ResourceKind::Pods || state.kind == ResourceKind::Services || state.kind == ResourceKind::Workloads;
+                let prefix = if col.key == "name" && is_marked {
+                    "✔ "
+                } else {
+                    ""
+                };
+                let is_pf_resource = state.kind == ResourceKind::Pods
+                    || state.kind == ResourceKind::Services
+                    || state.kind == ResourceKind::Workloads;
                 if col.key == "name" && is_pf_resource {
                     let ns = extract_field_str(item, "namespace");
                     let name = extract_field_str(item, "name");
-                    let active_forwards = state.active_port_forwards.get(&(ns.clone(), name.clone()))
-                        .or_else(|| state.active_port_forwards.get(&(String::new(), name.clone())));
+                    let active_forwards = state
+                        .active_port_forwards
+                        .get(&(ns.clone(), name.clone()))
+                        .or_else(|| {
+                            state
+                                .active_port_forwards
+                                .get(&(String::new(), name.clone()))
+                        });
 
                     if let Some(forwards) = active_forwards {
                         if !forwards.is_empty() {
@@ -1156,7 +1920,9 @@ fn render_single_resource_table(f: &mut Frame, area: Rect, state: &ResourceTable
                                 Span::raw(" "),
                                 Span::styled(
                                     format!("[PF: {}]", pf_str),
-                                    Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD),
+                                    Style::default()
+                                        .fg(Theme::cyan())
+                                        .add_modifier(Modifier::BOLD),
                                 ),
                             ]);
                             return Cell::from(line);
@@ -1228,14 +1994,20 @@ fn render_single_resource_table(f: &mut Frame, area: Rect, state: &ResourceTable
                     let prefix_len = if col.key == "name" && is_marked { 2 } else { 0 };
                     let mut total_len = prefix_len + text.chars().count();
 
-                    let is_pf_resource = state.kind == ResourceKind::Pods || state.kind == ResourceKind::Services || state.kind == ResourceKind::Workloads;
+                    let is_pf_resource = state.kind == ResourceKind::Pods
+                        || state.kind == ResourceKind::Services
+                        || state.kind == ResourceKind::Workloads;
                     if col.key == "name" && is_pf_resource {
                         let ns = extract_field_str(item, "namespace");
                         let name = extract_field_str(item, "name");
                         let active_forwards = state
                             .active_port_forwards
                             .get(&(ns.clone(), name.clone()))
-                            .or_else(|| state.active_port_forwards.get(&(String::new(), name.clone())));
+                            .or_else(|| {
+                                state
+                                    .active_port_forwards
+                                    .get(&(String::new(), name.clone()))
+                            });
                         if let Some(forwards) = active_forwards {
                             if !forwards.is_empty() {
                                 let pf_str = forwards
@@ -1443,9 +2215,15 @@ mod tests {
 
         // Field extraction
         assert_eq!(extract_field_str(&ev1, "object"), "Pod/frontend-web");
-        assert_eq!(extract_field_str(&ev1, "involvedObject"), "Pod/frontend-web");
+        assert_eq!(
+            extract_field_str(&ev1, "involvedObject"),
+            "Pod/frontend-web"
+        );
         assert_eq!(extract_field_str(&ev3, "object"), "Pod/ml-worker-gpu-0");
-        assert_eq!(extract_field_str(&ev3, "involvedObject"), "Pod/ml-worker-gpu-0");
+        assert_eq!(
+            extract_field_str(&ev3, "involvedObject"),
+            "Pod/ml-worker-gpu-0"
+        );
 
         // Warning triage check
         assert!(!is_event_warning_or_failure(&ev1));
@@ -1575,12 +2353,36 @@ mod tests {
         });
 
         // Test field extraction
-        assert_eq!(extract_field_str(&es_json, "printer:.spec.secretStoreRef.kind"), "SecretStore");
-        assert_eq!(extract_field_str(&es_json, "printer:.spec.secretStoreRef.name"), "trv-acc-ident-pipeline-prod");
-        assert_eq!(extract_field_str(&es_json, "printer:.spec.refreshInterval"), "1h");
-        assert_eq!(extract_field_str(&es_json, "printer:.status.conditions[?(@.type==\"Ready\")].reason"), "SecretSyncedError");
-        assert_eq!(extract_field_str(&es_json, "printer:.status.conditions[?(@.type==\"Ready\")].status"), "False");
-        assert_eq!(extract_field_str(&es_json, "printer:.status.refreshTime"), "-");
+        assert_eq!(
+            extract_field_str(&es_json, "printer:.spec.secretStoreRef.kind"),
+            "SecretStore"
+        );
+        assert_eq!(
+            extract_field_str(&es_json, "printer:.spec.secretStoreRef.name"),
+            "trv-acc-ident-pipeline-prod"
+        );
+        assert_eq!(
+            extract_field_str(&es_json, "printer:.spec.refreshInterval"),
+            "1h"
+        );
+        assert_eq!(
+            extract_field_str(
+                &es_json,
+                "printer:.status.conditions[?(@.type==\"Ready\")].reason"
+            ),
+            "SecretSyncedError"
+        );
+        assert_eq!(
+            extract_field_str(
+                &es_json,
+                "printer:.status.conditions[?(@.type==\"Ready\")].status"
+            ),
+            "False"
+        );
+        assert_eq!(
+            extract_field_str(&es_json, "printer:.status.refreshTime"),
+            "-"
+        );
 
         // Test with healthy item having refreshTime
         let healthy_es = json!({
@@ -1604,9 +2406,24 @@ mod tests {
             }
         });
 
-        assert_eq!(extract_field_str(&healthy_es, "printer:.status.conditions[?(@.type==\"Ready\")].reason"), "SecretSynced");
-        assert_eq!(extract_field_str(&healthy_es, "printer:.status.conditions[?(@.type==\"Ready\")].status"), "True");
-        assert_ne!(extract_field_str(&healthy_es, "printer:.status.refreshTime"), "-");
+        assert_eq!(
+            extract_field_str(
+                &healthy_es,
+                "printer:.status.conditions[?(@.type==\"Ready\")].reason"
+            ),
+            "SecretSynced"
+        );
+        assert_eq!(
+            extract_field_str(
+                &healthy_es,
+                "printer:.status.conditions[?(@.type==\"Ready\")].status"
+            ),
+            "True"
+        );
+        assert_ne!(
+            extract_field_str(&healthy_es, "printer:.status.refreshTime"),
+            "-"
+        );
     }
 
     #[test]
@@ -1646,24 +2463,39 @@ mod tests {
         });
         assert_eq!(extract_field_str(&normal_node, "status"), "Ready");
         assert_eq!(extract_field_str(&normal_node, "unschedulable"), "false");
-        assert_eq!(status_style(&extract_field_str(&normal_node, "status")), Theme::status_ok());
+        assert_eq!(
+            status_style(&extract_field_str(&normal_node, "status")),
+            Theme::status_ok()
+        );
 
         let cordoned_node = json!({
             "name": "worker-2",
             "status": "Ready",
             "unschedulable": true
         });
-        assert_eq!(extract_field_str(&cordoned_node, "status"), "Ready,SchedulingDisabled");
+        assert_eq!(
+            extract_field_str(&cordoned_node, "status"),
+            "Ready,SchedulingDisabled"
+        );
         assert_eq!(extract_field_str(&cordoned_node, "unschedulable"), "true");
-        assert_eq!(status_style(&extract_field_str(&cordoned_node, "status")), Theme::status_warn());
+        assert_eq!(
+            status_style(&extract_field_str(&cordoned_node, "status")),
+            Theme::status_warn()
+        );
 
         let notready_cordoned = json!({
             "name": "worker-3",
             "status": "NotReady",
             "unschedulable": true
         });
-        assert_eq!(extract_field_str(&notready_cordoned, "status"), "NotReady,SchedulingDisabled");
-        assert_eq!(status_style(&extract_field_str(&notready_cordoned, "status")), Theme::status_error());
+        assert_eq!(
+            extract_field_str(&notready_cordoned, "status"),
+            "NotReady,SchedulingDisabled"
+        );
+        assert_eq!(
+            status_style(&extract_field_str(&notready_cordoned, "status")),
+            Theme::status_error()
+        );
 
         // Raw k8s node json format
         let raw_cordoned = json!({
@@ -1675,6 +2507,9 @@ mod tests {
                 ]
             }
         });
-        assert_eq!(extract_field_str(&raw_cordoned, "status"), "Ready,SchedulingDisabled");
+        assert_eq!(
+            extract_field_str(&raw_cordoned, "status"),
+            "Ready,SchedulingDisabled"
+        );
     }
 }

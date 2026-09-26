@@ -9,6 +9,12 @@
 //! a view that closes ends its streams, an app that is disabled, removed or
 //! updated ends every stream it opened, and nothing else is touched.
 //!
+//! A host may also name the **window** — the client connection — a stream was
+//! opened through, so a window that closes or reloads ends what it opened
+//! even though its views never said so (#700). Each window has an epoch that
+//! every such ending bumps: an open that began before it is refused when it
+//! lands.
+//!
 //! Every stream carries the same frames on its channel, in this order:
 //!
 //! - `open` once, before anything else;
@@ -39,6 +45,18 @@ pub struct StreamOwner {
     pub app: String,
     pub revision: u64,
     pub view: String,
+    /// The window it was opened through, when the host names one. Never
+    /// taken from the client: the host reads it off the connection.
+    pub window: Option<StreamWindow>,
+}
+
+/// The window a stream was opened through, and that window's epoch — from
+/// [`AppStreams::window_epoch`] — when the open began.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StreamWindow {
+    /// The host's name for the window, e.g. a desktop window's label.
+    pub label: String,
+    pub epoch: u64,
 }
 
 /// Per-app caps, counted across every view of the app.
@@ -75,6 +93,10 @@ pub enum CloseReason {
     AppUpdated,
     /// The app was removed.
     AppRemoved,
+    /// The window that opened it closed.
+    WindowClosed,
+    /// The window that opened it reloaded: the page that owned it is gone.
+    WindowReloaded,
 }
 
 /// Why a stream failed. Sent as `error.code`, camelCase.
@@ -90,7 +112,14 @@ pub enum ErrorCode {
 /// A refused `open`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OpenError {
-    TooManyStreams { app: String, limit: usize },
+    TooManyStreams {
+        app: String,
+        limit: usize,
+    },
+    /// The window closed or reloaded after the open began.
+    WindowGone {
+        window: String,
+    },
 }
 
 impl std::fmt::Display for OpenError {
@@ -99,6 +128,10 @@ impl std::fmt::Display for OpenError {
             OpenError::TooManyStreams { app, limit } => write!(
                 f,
                 "App {app} already has {limit} open streams, the most one app may have; close a view or cancel a stream first"
+            ),
+            OpenError::WindowGone { window } => write!(
+                f,
+                "The window {window} closed or reloaded while this stream was opening; nothing is left to receive it"
             ),
         }
     }
@@ -142,6 +175,8 @@ pub struct AppStreamMetrics {
     pub rate_limited: u64,
     /// Open refused because the app was at its cap.
     pub refused: u64,
+    /// Streams ended because the window that opened them closed or reloaded.
+    pub window_ended: u64,
     pub streams: Vec<StreamMetrics>,
 }
 
@@ -179,6 +214,9 @@ struct Inner {
 struct State {
     streams: HashMap<String, Entry>,
     apps: HashMap<String, AppCounters>,
+    /// Each named window's epoch; absent is 0. Kept after a window closes:
+    /// a label can be reused, and a late open must still be refused.
+    windows: HashMap<String, u64>,
 }
 
 struct Entry {
@@ -198,6 +236,7 @@ struct AppCounters {
     bytes: u64,
     rate_limited: u64,
     refused: u64,
+    window_ended: u64,
     /// Token bucket over `messages_per_second`: tokens left, and when it was last topped up.
     tokens: f64,
     topped: Option<Instant>,
@@ -265,6 +304,16 @@ impl AppStreams {
         let app = owner.app.clone();
         {
             let mut state = self.inner.state.lock().unwrap();
+            // Checked under the lock `end_window` bumps the epoch under: an
+            // open either lands before that ending and is ended by it, or is
+            // refused here.
+            if let Some(window) = &owner.window {
+                if state.windows.get(&window.label).copied().unwrap_or(0) != window.epoch {
+                    return Err(OpenError::WindowGone {
+                        window: window.label.clone(),
+                    });
+                }
+            }
             let limit = self.inner.limits.max_open_per_app;
             let open = state
                 .streams
@@ -335,6 +384,38 @@ impl AppStreams {
         self.end_where(|owner| (owner.view == view).then_some(CloseReason::ViewClosed))
     }
 
+    /// `window`'s epoch now. A host reads it before an open does anything
+    /// that awaits, and names it in the owner's [`StreamWindow`].
+    pub fn window_epoch(&self, window: &str) -> u64 {
+        let state = self.inner.state.lock().unwrap();
+        state.windows.get(window).copied().unwrap_or(0)
+    }
+
+    /// End every stream `window` opened with `reason` (`windowClosed` or
+    /// `windowReloaded`), and bump its epoch so an open that began before
+    /// this is refused. Returns how many ended.
+    pub fn end_window(&self, window: &str, reason: CloseReason) -> usize {
+        let chosen: Vec<(String, String)> = {
+            let mut state = self.inner.state.lock().unwrap();
+            *state.windows.entry(window.to_owned()).or_default() += 1;
+            state
+                .streams
+                .iter()
+                .filter(|(_, e)| e.owner.window.as_ref().is_some_and(|w| w.label == window))
+                .map(|(id, e)| (id.clone(), e.owner.app.clone()))
+                .collect()
+        };
+        let mut ended = 0;
+        for (id, app) in chosen {
+            if self.inner.finish(&id, close_frame(&id, reason)) {
+                ended += 1;
+                let mut state = self.inner.state.lock().unwrap();
+                state.apps.entry(app).or_default().window_ended += 1;
+            }
+        }
+        ended
+    }
+
     /// End every stream for which `decide` names a reason. Lifecycle changes
     /// (disable, update, removal) come through here.
     pub fn end_where(&self, decide: impl Fn(&StreamOwner) -> Option<CloseReason>) -> usize {
@@ -374,6 +455,7 @@ impl AppStreams {
                     bytes: counters.bytes,
                     rate_limited: counters.rate_limited,
                     refused: counters.refused,
+                    window_ended: counters.window_ended,
                     streams: open
                         .into_iter()
                         .map(|e| StreamMetrics {
@@ -524,6 +606,18 @@ mod tests {
             app: app.into(),
             revision,
             view: view.into(),
+            window: None,
+        }
+    }
+
+    /// `owner`, opened through `window` at the epoch it has now.
+    fn in_window(streams: &AppStreams, app: &str, view: &str, window: &str) -> StreamOwner {
+        StreamOwner {
+            window: Some(StreamWindow {
+                label: window.into(),
+                epoch: streams.window_epoch(window),
+            }),
+            ..owner(app, 1, view)
         }
     }
 
@@ -996,6 +1090,137 @@ mod tests {
             serde_json::to_value(a).unwrap()["openStreams"],
             0,
             "camelCase on the wire"
+        );
+    }
+
+    /// A window that closes ends every stream it opened, of every app and
+    /// view, with `windowClosed` — and not one stream another window opened,
+    /// though it is the same app on the same page.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ending_a_window_ends_its_streams_and_no_other_windows() {
+        let streams = AppStreams::new(StreamLimits::default());
+        let sink = Arc::new(TestSink::default());
+        for (o, ch) in [
+            (in_window(&streams, "a", "page#1", "main"), "extstream:m1"),
+            (in_window(&streams, "a", "page#2", "main"), "extstream:m2"),
+            (in_window(&streams, "b", "card#1", "main"), "extstream:m3"),
+            (in_window(&streams, "a", "page#3", "ctx-1"), "extstream:c1"),
+            (owner("a", 1, "unowned"), "extstream:u1"),
+        ] {
+            streams
+                .open(o, "test", sink.clone(), ch.into(), forever)
+                .unwrap();
+        }
+        assert_eq!(streams.end_window("main", CloseReason::WindowClosed), 3);
+        assert_eq!(
+            streams.end_window("main", CloseReason::WindowClosed),
+            0,
+            "ending it again ends nothing"
+        );
+        for ch in ["extstream:m1", "extstream:m2", "extstream:m3"] {
+            assert_eq!(types(&sink, ch), ["open", "close"]);
+            assert_eq!(sink.payloads_for(ch)[1]["reason"], "windowClosed");
+        }
+        for ch in ["extstream:c1", "extstream:u1"] {
+            assert_eq!(types(&sink, ch), ["open"], "{ch} is not the main window's");
+        }
+        let metrics = streams.metrics();
+        let ended: Vec<_> = metrics
+            .iter()
+            .map(|m| (m.app.as_str(), m.window_ended, m.open_streams))
+            .collect();
+        assert_eq!(ended, [("a", 2, 2), ("b", 1, 0)]);
+        assert_eq!(
+            serde_json::to_value(&metrics[0]).unwrap()["windowEnded"],
+            2,
+            "camelCase on the wire"
+        );
+    }
+
+    /// An open that began before its window reloaded — the old page asked,
+    /// then went away while the host was still authorizing — is refused when
+    /// it lands, with no frame, rather than left running for nobody.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_open_begun_before_its_window_reloaded_is_refused() {
+        let streams = AppStreams::new(StreamLimits::default());
+        let sink = Arc::new(TestSink::default());
+        let stale = in_window(&streams, "a", "page#1", "main");
+        assert_eq!(streams.end_window("main", CloseReason::WindowReloaded), 0);
+        let refused = streams
+            .open(
+                stale,
+                "test",
+                sink.clone(),
+                "extstream:late".into(),
+                forever,
+            )
+            .unwrap_err();
+        assert_eq!(
+            refused,
+            OpenError::WindowGone {
+                window: "main".into()
+            }
+        );
+        assert!(
+            refused.to_string().contains("closed or reloaded"),
+            "{refused}"
+        );
+        assert!(sink.payloads_for("extstream:late").is_empty());
+        assert!(streams.owners().is_empty());
+        // The reloaded page opens at the new epoch, and another window never
+        // had its epoch moved.
+        streams
+            .open(
+                in_window(&streams, "a", "page#2", "main"),
+                "test",
+                sink.clone(),
+                "extstream:new".into(),
+                forever,
+            )
+            .unwrap();
+        assert_eq!(streams.window_epoch("ctx-1"), 0);
+        let a = &streams.metrics()[0];
+        assert_eq!((a.opened, a.refused, a.open_streams), (1, 0, 1));
+    }
+
+    /// Reloads used to pin an app at its cap with nothing listening (#700):
+    /// every reload now frees what the page before it held.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn after_many_reloads_an_app_can_still_open_up_to_its_cap() {
+        let streams = AppStreams::new(StreamLimits::default());
+        let sink = Arc::new(TestSink::default());
+        let cap = streams.limits().max_open_per_app;
+        for reload in 0..5 {
+            for n in 0..cap {
+                streams
+                    .open(
+                        in_window(&streams, "a", &format!("page#{reload}"), "main"),
+                        "test",
+                        sink.clone(),
+                        format!("extstream:{reload}-{n}"),
+                        forever,
+                    )
+                    .unwrap_or_else(|e| panic!("reload {reload}, stream {n}: {e}"));
+            }
+            assert!(streams
+                .open(
+                    in_window(&streams, "a", "page", "main"),
+                    "test",
+                    sink.clone(),
+                    "extstream:over".into(),
+                    forever,
+                )
+                .is_err());
+            assert_eq!(streams.end_window("main", CloseReason::WindowReloaded), cap);
+        }
+        let a = &streams.metrics()[0];
+        assert_eq!(
+            (a.open_streams, a.opened, a.window_ended, a.refused),
+            (0, 5 * cap as u64, 5 * cap as u64, 5)
+        );
+        assert_eq!(
+            sink.payloads_for("extstream:4-0")[1]["reason"],
+            "windowReloaded"
         );
     }
 }

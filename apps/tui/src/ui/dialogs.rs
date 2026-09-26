@@ -255,7 +255,9 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
                 ),
                 Span::styled(" to Cancel", Style::default().fg(Theme::DIM)),
             ]);
-            let prompt_widget = Paragraph::new(prompt_line).alignment(Alignment::Center);
+            let prompt_widget = Paragraph::new(prompt_line)
+                .wrap(Wrap { trim: true })
+                .alignment(Alignment::Center);
             f.render_widget(prompt_widget, chunks[1]);
         }
         Modal::InputConfirm {
@@ -364,7 +366,9 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
                 ),
                 Span::styled(" Cancel", Style::default().fg(Theme::dim())),
             ]);
-            let prompt_widget = Paragraph::new(prompt_line).alignment(Alignment::Center);
+            let prompt_widget = Paragraph::new(prompt_line)
+                .wrap(Wrap { trim: true })
+                .alignment(Alignment::Center);
             f.render_widget(prompt_widget, chunks[2]);
         }
         Modal::Scale {
@@ -414,6 +418,7 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
                 Span::styled("[Esc]", Theme::key_hint_key()),
                 Span::styled(" Cancel", Theme::key_hint_desc()),
             ]))
+            .wrap(Wrap { trim: true })
             .alignment(Alignment::Center);
             f.render_widget(hints, chunks[2]);
         }
@@ -422,7 +427,7 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
             destination_input,
             cursor_pos,
         } => {
-            let modal_area = centered_rect(55, 30, area);
+            let modal_area = centered_rect(55, 45, area);
             f.render_widget(Clear, modal_area);
 
             let block = Block::default()
@@ -437,13 +442,14 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Length(1),
+                    Constraint::Length(2),
                     Constraint::Length(3),
                     Constraint::Length(2),
                 ])
                 .split(inner);
 
             let info = Paragraph::new("Direct SSH to host OS (works when kubelet is down)")
+                .wrap(Wrap { trim: true })
                 .style(Style::default().fg(Theme::DIM))
                 .alignment(Alignment::Center);
             f.render_widget(info, chunks[0]);
@@ -472,6 +478,7 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
                 Span::styled("[Esc]", Theme::key_hint_key()),
                 Span::styled(" Cancel", Theme::key_hint_desc()),
             ]))
+            .wrap(Wrap { trim: true })
             .alignment(Alignment::Center);
             f.render_widget(hints, chunks[2]);
         }
@@ -532,6 +539,7 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
                 Span::styled("[Esc]", Theme::key_hint_key()),
                 Span::styled(" Cancel", Theme::key_hint_desc()),
             ]))
+            .wrap(Wrap { trim: true })
             .alignment(Alignment::Center);
             f.render_widget(hints, chunks[2]);
         }
@@ -1274,7 +1282,12 @@ pub fn render_add_cluster_modal(
             Theme::BORDER
         }))
         .title(" Status & Context Preview ");
-    f.render_widget(Paragraph::new(status_lines).block(status_block), chunks[1]);
+    f.render_widget(
+        Paragraph::new(status_lines)
+            .wrap(Wrap { trim: true })
+            .block(status_block),
+        chunks[1],
+    );
 
     // 3. Footer
     let footer = Paragraph::new(Line::from(vec![
@@ -1344,7 +1357,7 @@ pub fn render_feature_banner_modal(
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3), // Top description & update alert
+            Constraint::Length(4), // Top description & update alert, with a wrap row
             Constraint::Min(13),   // Features list
             Constraint::Length(3), // Checkbox and key hints
         ])
@@ -1428,7 +1441,10 @@ pub fn render_feature_banner_modal(
         header_hint,
         Style::default().fg(Theme::dim()),
     )]));
-    f.render_widget(Paragraph::new(header_lines), chunks[0]);
+    f.render_widget(
+        Paragraph::new(header_lines).wrap(Wrap { trim: true }),
+        chunks[0],
+    );
 
     // 2. Feature highlights
     let update_desc = if let Some(ver) = update_available {
@@ -1739,5 +1755,8 @@ pub fn render_feature_banner_modal(
         Line::from(footer_spans),
     ];
 
-    f.render_widget(Paragraph::new(footer_lines), chunks[2]);
+    f.render_widget(
+        Paragraph::new(footer_lines).wrap(Wrap { trim: true }),
+        chunks[2],
+    );
 }

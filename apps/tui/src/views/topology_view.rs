@@ -3,7 +3,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders, Paragraph, Wrap},
     Frame,
 };
 use srelens_kube::topology::{
@@ -255,7 +255,8 @@ pub fn render_topology_view(f: &mut Frame, area: Rect, state: &TopologyViewState
         let msg = Paragraph::new(Line::from(vec![
             Span::styled("⚡ Building topology graph ", Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD)),
             Span::styled("resolving ingresses, services, selectors & dependencies...", Style::default().fg(Theme::dim())),
-        ]));
+        ]))
+        .wrap(Wrap { trim: true });
         f.render_widget(msg, inner);
         return;
     }
@@ -266,13 +267,14 @@ pub fn render_topology_view(f: &mut Frame, area: Rect, state: &TopologyViewState
             Line::from(Span::styled(err.clone(), Style::default().fg(Theme::fg()))),
             Line::from(""),
             Line::from(Span::styled("Press <r> to retry or <Esc> to return.", Style::default().fg(Theme::dim()))),
-        ]);
+        ])
+        .wrap(Wrap { trim: true });
         f.render_widget(msg, inner);
         return;
     }
 
     let Some(graph) = &state.graph else {
-        let msg = Paragraph::new("No topology graph available.");
+        let msg = Paragraph::new("No topology graph available.").wrap(Wrap { trim: true });
         f.render_widget(msg, inner);
         return;
     };
@@ -280,7 +282,8 @@ pub fn render_topology_view(f: &mut Frame, area: Rect, state: &TopologyViewState
     if graph.nodes.is_empty() {
         let msg = Paragraph::new(Line::from(vec![
             Span::styled("No workloads, services or ingresses found in this namespace scope.", Style::default().fg(Theme::dim())),
-        ]));
+        ]))
+        .wrap(Wrap { trim: true });
         f.render_widget(msg, inner);
         return;
     }
@@ -340,7 +343,11 @@ pub fn render_topology_view(f: &mut Frame, area: Rect, state: &TopologyViewState
             f.render_widget(lane_block, lane_area);
 
             if lane_col.node_indices.is_empty() {
-                let empty_msg = Paragraph::new(Span::styled(" (none)", Style::default().fg(Theme::dim())));
+                let empty_msg = Paragraph::new(Span::styled(
+                    " (none)",
+                    Style::default().fg(Theme::dim()),
+                ))
+                .wrap(Wrap { trim: true });
                 f.render_widget(empty_msg, lane_inner);
                 continue;
             }
@@ -349,7 +356,7 @@ pub fn render_topology_view(f: &mut Frame, area: Rect, state: &TopologyViewState
             // ┌ Kind: Name ──┐
             // │ ● 3/3 ready  │
             // └──────────────┘
-            let card_height = 3usize;
+            let card_height = 4usize;
             let visible_cards = (lane_inner.height as usize) / card_height;
             let sel_in_lane = if is_lane_focused { state.selected_in_lane } else { 0 };
 
@@ -370,7 +377,7 @@ pub fn render_topology_view(f: &mut Frame, area: Rect, state: &TopologyViewState
                     x: lane_inner.x,
                     y: card_y,
                     width: lane_inner.width,
-                    height: 3,
+                    height: card_height as u16,
                 };
 
                 let (health_dot, health_style) = match node.health {
@@ -451,7 +458,8 @@ pub fn render_topology_view(f: &mut Frame, area: Rect, state: &TopologyViewState
                     Span::styled(crate::views::sanitize_span_text(&detail_text), Style::default().fg(Theme::dim())),
                 ]);
 
-                let card_content = Paragraph::new(vec![name_line, status_line]);
+                let card_content =
+                    Paragraph::new(vec![name_line, status_line]).wrap(Wrap { trim: true });
                 f.render_widget(card_content, card_inner);
             }
         }
@@ -550,10 +558,15 @@ pub fn render_topology_view(f: &mut Frame, area: Rect, state: &TopologyViewState
                 Span::styled(crate::views::sanitize_span_text(&out_summary), Style::default().fg(Theme::fg())),
             ]);
 
-            let inspector_content = Paragraph::new(vec![l1, l2, l3]);
+            let inspector_content =
+                Paragraph::new(vec![l1, l2, l3]).wrap(Wrap { trim: true });
             f.render_widget(inspector_content, inspector_inner);
         } else {
-            let msg = Paragraph::new(Span::styled("Select a node above to inspect its traffic path and dependencies.", Style::default().fg(Theme::dim())));
+            let msg = Paragraph::new(Span::styled(
+                "Select a node above to inspect its traffic path and dependencies.",
+                Style::default().fg(Theme::dim()),
+            ))
+            .wrap(Wrap { trim: true });
             f.render_widget(msg, inspector_inner);
         }
     }

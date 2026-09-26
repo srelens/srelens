@@ -255,6 +255,7 @@ async fn native_turn(
         prompt.to_string(),
         "kind-dev".into(),
         "payments".into(),
+        None,
         tx,
         30,
     )
@@ -704,6 +705,7 @@ async fn a_boxed_cursor_turn_reports_a_missing_binary_and_finishes() {
         "what is wrong?".into(),
         "kind-dev".into(),
         "default".into(),
+        None,
         cache,
         vec![],
         tx,
@@ -1155,8 +1157,16 @@ fn caveman_level_setting_round_trips_and_clears() {
     s.set_caveman_level(Some(CavemanLevel::WenyanFull));
     assert_eq!(s.caveman_level.as_deref(), Some("wenyan-full"));
     assert_eq!(s.get_caveman_level(), Some(CavemanLevel::WenyanFull));
+    // Off is stored as "off", so it is not mistaken for "never set" (ultra).
     s.set_caveman_level(None);
-    assert_eq!(s.caveman_level, None);
+    assert_eq!(s.caveman_level.as_deref(), Some("off"));
+    assert_eq!(s.get_caveman_level(), None);
+    s.caveman_level = None;
+    assert_eq!(
+        s.get_caveman_level(),
+        Some(CavemanLevel::Ultra),
+        "unset is ultra"
+    );
     s.caveman_level = Some("garbage".into());
     assert_eq!(s.get_caveman_level(), None);
 }
@@ -1945,6 +1955,8 @@ fn tui_config_file_paths_clamping_and_round_trip() {
         check_updates: true,
         argo_hub_context: None,
         argo_hub_kubeconfig: None,
+        argo_ui_url: None,
+        argo_timeout_secs: None,
         update_available: None,
     };
     cfg.save().expect("save succeeds");
@@ -1965,6 +1977,8 @@ fn tui_config_file_paths_clamping_and_round_trip() {
         check_updates: true,
         argo_hub_context: None,
         argo_hub_kubeconfig: None,
+        argo_ui_url: None,
+        argo_timeout_secs: None,
         update_available: None,
     };
     clamped.clamp();
@@ -1982,6 +1996,8 @@ fn tui_config_file_paths_clamping_and_round_trip() {
         check_updates: false,
         argo_hub_context: None,
         argo_hub_kubeconfig: None,
+        argo_ui_url: None,
+        argo_timeout_secs: None,
         update_available: None,
     };
     low.clamp();

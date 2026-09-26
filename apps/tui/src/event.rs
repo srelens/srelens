@@ -1,8 +1,10 @@
-use std::time::Duration;
 use crossterm::event::{Event as CrosstermEvent, EventStream, KeyEvent, MouseEvent};
 use futures::StreamExt;
 use serde_json::Value;
-use tokio::sync::mpsc::{error::TryRecvError, unbounded_channel, UnboundedReceiver, UnboundedSender};
+use std::time::Duration;
+use tokio::sync::mpsc::{
+    error::TryRecvError, unbounded_channel, UnboundedReceiver, UnboundedSender,
+};
 use tokio::sync::watch;
 
 #[derive(Debug)]
@@ -69,6 +71,17 @@ pub enum AppEvent {
     BgpResult {
         context: String,
         result: Result<srelens_kube::bgp::BgpClusterSummary, String>,
+    },
+    ChangedTriageResult {
+        context: String,
+        namespace: Option<String>,
+        result: Result<srelens_kube::changed::ChangedTriageReport, String>,
+    },
+    /// A Quick AI RCA reply for the `:changed` card entry under `key`: the
+    /// model's raw text, or why the call failed.
+    ChangedQuickRcaResult {
+        key: String,
+        result: Result<String, String>,
     },
 }
 
