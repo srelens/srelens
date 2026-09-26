@@ -83,6 +83,11 @@ pub enum AppEvent {
         key: String,
         result: Result<String, String>,
     },
+    /// GitHub's answer to why the `:changed` rollout under `key` happened.
+    ChangedCauseResult {
+        key: String,
+        result: Result<srelens_registry::github::RolloutCause, String>,
+    },
 }
 
 pub struct EventHandler {

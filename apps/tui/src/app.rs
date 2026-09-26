@@ -11135,6 +11135,12 @@ impl App {
         changed
             .ai_summaries
             .insert(key.clone(), entry(QuickRcaStatus::Loading));
+        let cause = changed_view::cause_ask(&d)
+            .and_then(Result::ok)
+            .and_then(|ask| match changed.causes.get(&ask.key) {
+                Some(changed_view::CauseLookup::Ready(c)) => Some(c.clone()),
+                _ => None,
+            });
         let context = changed.context.clone();
         let cache = self.client_cache.clone();
         let event_tx = self.event_tx.clone();
@@ -11161,7 +11167,7 @@ impl App {
                 },
                 None => LogEvidence::NeverRan,
             };
-            let prompt = crate::quick_rca::build_prompt(&d, &logs);
+            let prompt = crate::quick_rca::build_prompt_with_cause(&d, &logs, cause.as_ref());
             let result = crate::quick_rca::run(config, prompt, timeout_seconds).await;
             let _ = event_tx.send(crate::event::AppEvent::ChangedQuickRcaResult { key, result });
         });
@@ -11184,6 +11190,57 @@ impl App {
                 Theme::status_ok(),
             ),
             Ok(()) => {}
+        }
+    }
+
+    /// Ask GitHub why the selected `:changed` row's Argo sync rolled out,
+    /// once per rollout: an answer about two fixed commits never changes.
+    pub fn ensure_changed_cause(&mut self) {
+        let ActiveView::Changed(changed) = &mut self.active_view else {
+            return;
+        };
+        let Some(ask) = changed.next_cause_ask() else {
+            return;
+        };
+        changed
+            .causes
+            .insert(ask.key.clone(), changed_view::CauseLookup::Loading);
+        let event_tx = self.event_tx.clone();
+        tokio::spawn(async move {
+            let result = srelens_registry::github::rollout_cause(
+                &ask.repo_url,
+                &ask.revision,
+                ask.previous.as_deref(),
+                &ask.path,
+            )
+            .await
+            .map_err(|e| e.to_string());
+            let _ = event_tx.send(crate::event::AppEvent::ChangedCauseResult {
+                key: ask.key,
+                result,
+            });
+        });
+    }
+
+    /// Land a GitHub answer on the `:changed` view that asked, whether it is
+    /// on screen or waiting under a Describe or YAML view opened from it.
+    pub fn handle_changed_cause_result(
+        &mut self,
+        key: &str,
+        result: Result<srelens_registry::github::RolloutCause, String>,
+    ) {
+        let lookup = match result {
+            Ok(cause) => changed_view::CauseLookup::Ready(cause),
+            Err(e) => changed_view::CauseLookup::Failed(e),
+        };
+        let views = std::iter::once(&mut self.active_view).chain(self.nav_stack.iter_mut());
+        for view in views {
+            if let ActiveView::Changed(changed) = view {
+                if let Some(entry) = changed.causes.get_mut(key) {
+                    *entry = lookup;
+                    return;
+                }
+            }
         }
     }
 

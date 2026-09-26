@@ -6975,3 +6975,38 @@ async fn switch_namespace_while_in_changed_view_clears_stale_report() {
         panic!("expected ActiveView::Changed");
     }
 }
+
+#[tokio::test]
+async fn a_github_answer_lands_on_the_changed_view_under_describe() {
+    use srelens_tui::views::changed_view::CauseLookup;
+    let settings = common::env::isolate_settings();
+    let (mut app, _rx) = changed_app_with_report(&settings).await;
+    if let ActiveView::Changed(changed) = &mut app.active_view {
+        changed.causes.insert("k".into(), CauseLookup::Loading);
+    }
+    // Enter opened Describe on top of `:changed` while GitHub was answering.
+    let changed = std::mem::replace(
+        &mut app.active_view,
+        ActiveView::Changed(srelens_tui::views::changed_view::ChangedViewState::new()),
+    );
+    app.nav_stack.push(changed);
+
+    app.handle_changed_cause_result("k", Err("could not reach GitHub: timed out".into()));
+    let Some(ActiveView::Changed(parked)) = app.nav_stack.last() else {
+        panic!("expected the parked :changed view");
+    };
+    assert_eq!(
+        parked.causes.get("k"),
+        Some(&CauseLookup::Failed(
+            "could not reach GitHub: timed out".into()
+        ))
+    );
+    app.handle_changed_cause_result("unasked", Err("x".into()));
+    let Some(ActiveView::Changed(parked)) = app.nav_stack.last() else {
+        unreachable!()
+    };
+    assert!(
+        !parked.causes.contains_key("unasked"),
+        "an answer nobody asked for is dropped"
+    );
+}

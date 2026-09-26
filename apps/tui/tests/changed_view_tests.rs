@@ -5,13 +5,15 @@ mod common;
 use ratatui::backend::TestBackend;
 use ratatui::{Frame, Terminal};
 use srelens_kube::changed::{
-    AppDeploymentChange, ChangedTriageReport, FailureCategory, GitOpsReleaseInfo, IncidentStatus,
-    InfraChangeItem, PodIncidentDetail, RolloutStatus, TriageSummary,
+    AppDeploymentChange, ArgoRollout, ChangedTriageReport, FailureCategory, GitOpsReleaseInfo,
+    IncidentStatus, InfraChangeItem, PodIncidentDetail, RolloutStatus, TriageSummary,
 };
 use srelens_kube::events::EventSummary;
+use srelens_registry::github::{CausePull, RolloutCause};
 use srelens_tui::commands::{resolve_command, CommandTarget, ResourceKind};
 use srelens_tui::views::changed_view::{
-    render_changed_view, ChangedTab, ChangedViewState, IncidentFilter, QuickRca, QuickRcaStatus,
+    render_changed_view, CauseLookup, ChangedTab, ChangedViewState, IncidentFilter, QuickRca,
+    QuickRcaStatus,
 };
 
 fn render_lines<F>(width: u16, height: u16, draw: F) -> Vec<String>
@@ -953,4 +955,238 @@ fn narrow_terminal_allocates_multiline_footer() {
     let footer_text = last_three.join(" ");
     assert!(footer_text.contains("Filter"), "{footer_text}");
     assert!(footer_text.contains("Search"), "{footer_text}");
+}
+
+const SYNCED: &str = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
+const PREVIOUS: &str = "9f8e7d6c5b4a39281706f5e4d3c2b1a098765432";
+
+fn sync_rollout() -> ArgoRollout {
+    ArgoRollout {
+        history_id: 17,
+        revision: SYNCED.to_string(),
+        previous_revision: Some(PREVIOUS.to_string()),
+        deployed_at: "2026-09-23T10:00:00Z".to_string(),
+        initiated_by: Some("alice".to_string()),
+        repo_url: "https://github.com/org/checkout.git".to_string(),
+        path: "apps/checkout".to_string(),
+        is_chart: false,
+        approximate: false,
+    }
+}
+
+/// The sample report with its first row (checkout-api) changed by `edit`.
+fn why_state(edit: impl FnOnce(&mut AppDeploymentChange)) -> ChangedViewState {
+    let mut report = sample_report();
+    edit(&mut report.deployments[0]);
+    let mut state = ChangedViewState::new();
+    state.set_report(report);
+    state
+}
+
+fn with_sync(d: &mut AppDeploymentChange) {
+    let g = d.gitops.as_mut().unwrap();
+    g.matched_by = "trackingId".to_string();
+    g.rollout = Some(sync_rollout());
+}
+
+fn answer(state: &mut ChangedViewState, lookup: CauseLookup) {
+    let ask = state.next_cause_ask().expect("a GitHub question");
+    state.causes.insert(ask.key, lookup);
+}
+
+fn pr(number: u64, title: &str, user: &str, is_bot: bool) -> CausePull {
+    CausePull {
+        number,
+        title: title.to_string(),
+        user: user.to_string(),
+        is_bot,
+        ..Default::default()
+    }
+}
+
+#[test]
+fn the_card_says_which_sync_and_which_prs_caused_the_rollout() {
+    let _settings = common::env::isolate_settings();
+    let mut state = why_state(with_sync);
+    answer(
+        &mut state,
+        CauseLookup::Ready(RolloutCause {
+            revision: SYNCED.to_string(),
+            previous_revision: Some(PREVIOUS.to_string()),
+            path: "apps/checkout".to_string(),
+            pulls: vec![
+                pr(1842, "fix: bump checkout timeout", "bob", false),
+                pr(1843, "chore(deps): bump checkout", "renovate[bot]", true),
+            ],
+            other_commits: 2,
+            ..Default::default()
+        }),
+    );
+    let rendered = render_card(&state);
+    assert!(
+        rendered.contains("Why: Argo sync #17 to a1b2c3d from 9f8e7d6, by alice"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("[via tracking id]"), "{rendered}");
+    assert!(
+        rendered.contains("PR #1842 \"fix: bump checkout timeout\" by bob"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("Bot PR #1843"), "{rendered}");
+    assert!(
+        rendered.contains("(image v2.0.0 ➔ v2.1.0)"),
+        "the bump names its image: {rendered}"
+    );
+    assert!(
+        rendered.contains("2 other commits in this range changed other paths"),
+        "{rendered}"
+    );
+    assert!(
+        !rendered.contains("ArgoCD Rollout:"),
+        "the Why line names the sync once: {rendered}"
+    );
+}
+
+#[test]
+fn github_is_asked_once_per_rollout_and_a_failure_is_retried_on_refresh() {
+    let _settings = common::env::isolate_settings();
+    let mut state = why_state(with_sync);
+    assert!(render_card(&state).contains("GitHub: looking up the pull requests"));
+
+    let ask = state.next_cause_ask().unwrap();
+    assert_eq!(ask.revision, SYNCED);
+    assert_eq!(ask.previous.as_deref(), Some(PREVIOUS));
+    assert_eq!(ask.path, "apps/checkout");
+    state.causes.insert(ask.key.clone(), CauseLookup::Loading);
+    assert_eq!(state.next_cause_ask(), None, "in flight: not asked again");
+
+    state.causes.insert(
+        ask.key.clone(),
+        CauseLookup::Failed(
+            "not found on GitHub, or the repository is private and no GITHUB_TOKEN is set"
+                .to_string(),
+        ),
+    );
+    let rendered = render_card(&state);
+    assert!(
+        rendered.contains("private and no GITHUB_TOKEN is set"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("[r] to retry"), "{rendered}");
+    assert_eq!(
+        state.next_cause_ask(),
+        None,
+        "a failure waits for a refresh"
+    );
+
+    let report = state.report.clone().unwrap();
+    state.set_report(report);
+    assert_eq!(state.next_cause_ask().map(|a| a.key), Some(ask.key));
+
+    state.active_tab = ChangedTab::Infra;
+    assert_eq!(state.next_cause_ask(), None, "only for the Deployments tab");
+}
+
+#[test]
+fn a_sync_github_cannot_explain_says_why_and_asks_nothing() {
+    let _settings = common::env::isolate_settings();
+    let chart = why_state(|d| {
+        with_sync(d);
+        let r = d.gitops.as_mut().unwrap().rollout.as_mut().unwrap();
+        r.is_chart = true;
+        r.revision = "1.4.3".to_string();
+        r.previous_revision = Some("1.4.2".to_string());
+    });
+    let rendered = render_card(&chart);
+    assert!(
+        rendered.contains("Argo sync #17 to 1.4.3 from 1.4.2"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("chart source, chart version 1.4.3"),
+        "{rendered}"
+    );
+    assert_eq!(chart.next_cause_ask(), None);
+
+    let gitlab = why_state(|d| {
+        with_sync(d);
+        d.gitops
+            .as_mut()
+            .unwrap()
+            .rollout
+            .as_mut()
+            .unwrap()
+            .repo_url = "https://gitlab.com/org/checkout.git".to_string();
+    });
+    assert!(render_card(&gitlab).contains("not a github.com repository"));
+    assert_eq!(gitlab.next_cause_ask(), None);
+}
+
+#[test]
+fn what_could_not_be_found_out_is_said_as_such() {
+    let _settings = common::env::isolate_settings();
+    let unresolved = why_state(|d| {
+        d.gitops = None;
+        d.gitops_unresolved = Some(
+            "tracking id names Argo app checkout-prod; Argo unavailable: list timed out"
+                .to_string(),
+        );
+    });
+    assert!(render_card(&unresolved)
+        .contains("Why: tracking id names Argo app checkout-prod; Argo unavailable"));
+
+    let mut report = sample_report();
+    report.deployments[0].gitops = None;
+    report.argo_error = Some("Failed to list ArgoCD Applications: 403".to_string());
+    let mut argo_down = ChangedViewState::new();
+    argo_down.set_report(report);
+    assert!(render_card(&argo_down)
+        .contains("Why: unknown, Argo unavailable: Failed to list ArgoCD Applications: 403"));
+
+    let restarted = why_state(|d| {
+        with_sync(d);
+        d.local_cause = Some("rollout restart at 2026-09-23T10:00:00Z".to_string());
+    });
+    let rendered = render_card(&restarted);
+    assert!(
+        rendered.contains("Why: rollout restart at 2026-09-23T10:00:00Z"),
+        "{rendered}"
+    );
+    assert!(
+        !rendered.contains("GitHub:"),
+        "a restart brought no commits: {rendered}"
+    );
+
+    let unmatched = why_state(|d| {
+        d.gitops.as_mut().unwrap().rollout_unmatched =
+            Some("no Argo sync around this rollout: a change made outside Argo".to_string());
+    });
+    assert!(render_card(&unmatched).contains("Why: no Argo sync around this rollout"));
+
+    let unmanaged = why_state(|d| d.gitops = None);
+    assert!(
+        !render_card(&unmanaged).contains("Why:"),
+        "no Argo, nothing to say"
+    );
+}
+
+#[test]
+fn a_range_with_nothing_under_the_app_path_says_so() {
+    let _settings = common::env::isolate_settings();
+    let mut state = why_state(with_sync);
+    answer(
+        &mut state,
+        CauseLookup::Ready(RolloutCause {
+            revision: SYNCED.to_string(),
+            previous_revision: Some(PREVIOUS.to_string()),
+            path: "apps/checkout".to_string(),
+            other_commits: 3,
+            ..Default::default()
+        }),
+    );
+    let rendered = render_card(&state);
+    assert!(
+        rendered.contains("GitHub: no commits under apps/checkout between 9f8e7d6 and a1b2c3d"),
+        "{rendered}"
+    );
 }

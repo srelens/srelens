@@ -515,6 +515,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 AppEvent::ChangedQuickRcaResult { key, result } => {
                     app.handle_changed_quick_rca_result(&key, result);
                 }
+                AppEvent::ChangedCauseResult { key, result } => {
+                    app.handle_changed_cause_result(&key, result);
+                }
             }
 
             if !app.is_running {
@@ -529,6 +532,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             current_event = events.try_recv().ok();
         }
     }
+
+        // The selected `:changed` row's GitHub cause, asked once per rollout.
+        app.ensure_changed_cause();
 
         // Handle external tool suspend actions ($EDITOR, Pod shell, etc.)
         // Refuse an edit with nothing to edit before leaving the screen, so a

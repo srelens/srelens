@@ -9,6 +9,7 @@ use srelens_kube::changed::{
     AppDeploymentChange, ChangeKind, ChangedTriageReport, FailureCategory, IncidentStatus,
     InfraChangeItem, PodIncidentDetail, RolloutStatus,
 };
+use srelens_registry::github::RolloutCause;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -204,8 +205,60 @@ pub struct QuickRca {
     pub updated_at: Instant,
 }
 
+/// Where one GitHub lookup of a rollout's cause stands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CauseLookup {
+    Loading,
+    Ready(RolloutCause),
+    Failed(String),
+}
+
+/// What to ask GitHub about one row's Argo sync.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CauseAsk {
+    /// Repo, both revisions and path: an answer about fixed commits, so it
+    /// is valid for as long as the view lives.
+    pub key: String,
+    pub repo_url: String,
+    pub revision: String,
+    pub previous: Option<String>,
+    pub path: String,
+}
+
+/// The GitHub question a row's Argo sync poses. `None` when the row names
+/// no sync, so there is nothing to ask; `Err` when there is one but GitHub
+/// cannot explain it, with the reason to show instead.
+pub fn cause_ask(d: &AppDeploymentChange) -> Option<Result<CauseAsk, String>> {
+    let r = d.gitops.as_ref()?.rollout.as_ref()?;
+    if r.is_chart {
+        return Some(Err(format!(
+            "chart source, chart version {}: no git history to look up",
+            r.revision
+        )));
+    }
+    if srelens_registry::github::parse_github_repo(&r.repo_url).is_none() {
+        return Some(Err(format!("not a github.com repository ({})", r.repo_url)));
+    }
+    Some(Ok(CauseAsk {
+        key: format!(
+            "{}|{}|{}|{}",
+            r.repo_url,
+            r.previous_revision.as_deref().unwrap_or(""),
+            r.revision,
+            r.path
+        ),
+        repo_url: r.repo_url.clone(),
+        revision: r.revision.clone(),
+        previous: r.previous_revision.clone(),
+        path: r.path.clone(),
+    }))
+}
+
 pub struct ChangedViewState {
     pub report: Option<ChangedTriageReport>,
+    /// GitHub answers by [`CauseAsk::key`], fetched for the selected row
+    /// only. Failed ones are dropped on refresh, so `r` retries them.
+    pub causes: HashMap<String, CauseLookup>,
     /// The context `report` was fetched from. The view outlives a context
     /// switch, and regional clusters run workloads of the same name, so the
     /// RCA cache is keyed by it.
@@ -234,6 +287,7 @@ impl ChangedViewState {
     pub fn new() -> Self {
         Self {
             report: None,
+            causes: HashMap::new(),
             context: String::new(),
             ai_summaries: HashMap::new(),
             selected_idx: 0,
@@ -354,7 +408,19 @@ impl ChangedViewState {
         self.report = Some(report);
         self.is_loading = false;
         self.error = None;
+        self.causes
+            .retain(|_, c| !matches!(c, CauseLookup::Failed(_)));
         self.clamp_selection();
+    }
+
+    /// The GitHub question the selected Deployments-tab row poses and has
+    /// not asked yet.
+    pub fn next_cause_ask(&self) -> Option<CauseAsk> {
+        if self.active_tab != ChangedTab::Deployments {
+            return None;
+        }
+        let ask = cause_ask(self.selected_deployment()?)?.ok()?;
+        (!self.causes.contains_key(&ask.key)).then_some(ask)
     }
 
     pub fn set_error(&mut self, err: String) {
@@ -1075,8 +1141,10 @@ fn render_deployment_diagnostic_card(f: &mut Frame, area: Rect, state: &ChangedV
         ),
     ]));
 
-    // Line 1b: ArgoCD Rollout in Window (if detected)
-    if let Some(ref argo_msg) = d.argo_rollout_in_window {
+    // Line 1b: ArgoCD Rollout in Window, when the Why block below does not
+    // already name the sync.
+    let names_sync = d.gitops.as_ref().is_some_and(|g| g.rollout.is_some());
+    if let (Some(argo_msg), false) = (&d.argo_rollout_in_window, names_sync) {
         lines.push(Line::from(vec![
             Span::styled("🐙 ArgoCD Rollout: ", Theme::header_label()),
             Span::styled(
@@ -1131,6 +1199,7 @@ fn render_deployment_diagnostic_card(f: &mut Frame, area: Rect, state: &ChangedV
             ]));
         }
     }
+    lines.extend(why_lines(d, state));
 
     // Why a non-rollout row is listed, with the rollout age for contrast.
     match d.change_kind {
@@ -1297,6 +1366,213 @@ fn render_deployment_diagnostic_card(f: &mut Frame, area: Rect, state: &ChangedV
 
     let p = Paragraph::new(lines).block(block).wrap(Wrap { trim: true });
     f.render_widget(p, area);
+}
+
+/// Pull requests and commits the Why block lists before counting the rest.
+const MAX_CAUSE_LINES: usize = 5;
+
+fn short_sha(rev: &str) -> String {
+    rev.chars().take(7).collect()
+}
+
+fn indented(text: &str, style: Style) -> Line<'static> {
+    Line::from(vec![
+        Span::raw("   "),
+        Span::styled(sanitize_span_text(text), style),
+    ])
+}
+
+/// Why the workload rolled out: a restart the cluster recorded, or the Argo
+/// sync behind it and the pull requests GitHub names for it — or what could
+/// not be found out, said as such.
+pub fn why_lines(d: &AppDeploymentChange, state: &ChangedViewState) -> Vec<Line<'static>> {
+    let label = || Span::styled("Why: ", Theme::header_label());
+    let dim = Style::default().fg(Theme::dim());
+    let warn = Style::default()
+        .fg(Theme::yellow())
+        .add_modifier(Modifier::BOLD);
+    let strong = Style::default()
+        .fg(Theme::fg())
+        .add_modifier(Modifier::BOLD);
+    let said = |text: &str, style: Style| {
+        vec![Line::from(vec![
+            label(),
+            Span::styled(sanitize_span_text(text), style),
+        ])]
+    };
+
+    if let Some(cause) = &d.local_cause {
+        return said(cause, strong);
+    }
+    if let Some(msg) = &d.gitops_unresolved {
+        return said(msg, warn);
+    }
+    let Some(g) = &d.gitops else {
+        return match state.report.as_ref().and_then(|r| r.argo_error.as_deref()) {
+            Some(err) => said(&format!("unknown, Argo unavailable: {err}"), warn),
+            None => Vec::new(),
+        };
+    };
+    let Some(r) = &g.rollout else {
+        return match &g.rollout_unmatched {
+            Some(why) => said(why, dim),
+            None => Vec::new(),
+        };
+    };
+
+    let rev = |s: &str| {
+        if r.is_chart {
+            s.to_string()
+        } else {
+            short_sha(s)
+        }
+    };
+    let mut sync = format!("Argo sync #{} to {}", r.history_id, rev(&r.revision));
+    if let Some(prev) = &r.previous_revision {
+        sync.push_str(&format!(" from {}", rev(prev)));
+    }
+    if let Some(who) = &r.initiated_by {
+        sync.push_str(&format!(", by {who}"));
+    }
+    if let Ok(at) = r
+        .deployed_at
+        .parse::<srelens_kube::k8s_openapi::jiff::Timestamp>()
+    {
+        let secs = srelens_kube::k8s_openapi::jiff::Timestamp::now()
+            .duration_since(at)
+            .as_secs();
+        sync.push_str(&format!(", {} ago", srelens_kube::format_age(secs.max(0))));
+    }
+    if r.approximate {
+        sync.push_str(" (latest sync in the window)");
+    }
+    let via = match g.matched_by.as_str() {
+        "trackingId" => "tracking id",
+        "resources" => "app resources",
+        "label" => "instance label",
+        other => other,
+    };
+    sync.push_str(&format!(" [via {via}]"));
+    let mut lines = said(
+        &sync,
+        Style::default()
+            .fg(Theme::cyan())
+            .add_modifier(Modifier::BOLD),
+    );
+
+    let ask = match cause_ask(d) {
+        Some(Ok(ask)) => ask,
+        Some(Err(reason)) => {
+            lines.push(indented(&reason, dim));
+            return lines;
+        }
+        None => return lines,
+    };
+    match state.causes.get(&ask.key) {
+        None | Some(CauseLookup::Loading) => lines.push(indented(
+            "GitHub: looking up the pull requests behind this sync...",
+            dim,
+        )),
+        Some(CauseLookup::Failed(e)) => {
+            lines.push(indented(&format!("GitHub: {e}. [r] to retry."), warn))
+        }
+        Some(CauseLookup::Ready(c)) => lines.extend(cause_lines(c, d, strong, dim, warn)),
+    }
+    lines
+}
+
+fn cause_lines(
+    c: &RolloutCause,
+    d: &AppDeploymentChange,
+    strong: Style,
+    dim: Style,
+    warn: Style,
+) -> Vec<Line<'static>> {
+    let mut out = Vec::new();
+    if c.rolled_back {
+        out.push(indented(
+            "Rollback: this sync undid the changes below",
+            warn,
+        ));
+    }
+    let image_changed = !d.previous_images.is_empty() && d.previous_images != d.current_images;
+
+    let mut items: Vec<(String, Style)> = Vec::new();
+    for p in &c.pulls {
+        if p.is_bot {
+            let mut text = format!("Bot PR #{} \"{}\" by {}", p.number, p.title, p.user);
+            if image_changed {
+                text.push_str(&format!(" (image {})", d.image_diff));
+            }
+            items.push((text, Style::default().fg(Theme::fg())));
+        } else {
+            items.push((
+                format!("PR #{} \"{}\" by {}", p.number, p.title, p.user),
+                strong,
+            ));
+        }
+    }
+    for sha in &c.direct_commits {
+        let Some(cm) = c.commits.iter().find(|x| &x.sha == sha) else {
+            continue;
+        };
+        let what = if cm.is_bot {
+            "Bot commit"
+        } else {
+            "Direct commit"
+        };
+        items.push((
+            format!(
+                "{what} {} \"{}\" by {} (no PR)",
+                short_sha(&cm.sha),
+                cm.subject,
+                cm.author
+            ),
+            Style::default().fg(Theme::fg()),
+        ));
+    }
+
+    if items.is_empty() {
+        let place = if c.path.is_empty() {
+            String::new()
+        } else {
+            format!(" under {}", c.path)
+        };
+        let range = match &c.previous_revision {
+            Some(p) => format!("between {} and {}", short_sha(p), short_sha(&c.revision)),
+            None => format!("in {}", short_sha(&c.revision)),
+        };
+        out.push(indented(&format!("GitHub: no commits{place} {range}"), dim));
+    }
+    let hidden = items.len().saturating_sub(MAX_CAUSE_LINES);
+    for (text, style) in items.into_iter().take(MAX_CAUSE_LINES) {
+        out.push(indented(&text, style));
+    }
+    if hidden > 0 {
+        let link = c
+            .compare_url
+            .as_deref()
+            .map(|u| format!(": {u}"))
+            .unwrap_or_default();
+        out.push(indented(&format!("+{hidden} more{link}"), dim));
+    }
+    if c.other_commits > 0 {
+        out.push(indented(
+            &format!(
+                "{} other commit{} in this range changed other paths",
+                c.other_commits,
+                if c.other_commits == 1 { "" } else { "s" }
+            ),
+            dim,
+        ));
+    }
+    if c.truncated {
+        out.push(indented(
+            "GitHub returned part of this range; the list may be incomplete",
+            warn,
+        ));
+    }
+    out
 }
 
 fn render_infra_tab(f: &mut Frame, area: Rect, state: &ChangedViewState) {
