@@ -244,7 +244,8 @@ it("says it cannot tell which cluster a name means when the name is also another
   });
   const { ClassicAppPage } = await import("./Extensions");
   render(<ClassicAppPage context="srelens-context:/kube/a%23b#c" id={manifest.id} page={manifest.contributions.pages[0].id} onPage={vi.fn()} />);
-  expect(await screen.findByText(/cannot tell which one it is for/)).toBeTruthy();
+  // Which of the two the page was opened for is not known, so the message names neither.
+  expect(await screen.findByText(/^One context is named after another's ID, so this page cannot tell which one it is for\./)).toBeTruthy();
   expect(screen.queryByText(/not enabled for this cluster/)).toBeNull();
   expect(readExtension).not.toHaveBeenCalled();
 });

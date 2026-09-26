@@ -130,6 +130,9 @@ export function useContextLookup(context: string): ContextLookup {
   return lookup ?? { status: "loading" };
 }
 
-/** What an app surface says when its cluster's name is also another context's pinned ID. */
+/**
+ * What an app surface says when the string it was handed is one context's name and another's
+ * pinned ID. Which of the two it was opened for is not known, so the message names neither.
+ */
 export const AMBIGUOUS_CONTEXT_MESSAGE =
-  "This cluster's name is also another context's ID, so this page cannot tell which one it is for. Rename one of them in your kubeconfig files.";
+  "One context is named after another's ID, so this page cannot tell which one it is for. Rename one of them in your kubeconfig files.";
