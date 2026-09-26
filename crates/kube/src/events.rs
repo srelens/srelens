@@ -21,7 +21,7 @@ pub struct ListEventsIn {
     pub object_name: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct EventSummary {
     /// The Event's own object name — a stable unique key for the watch/table.
     pub name: String,
@@ -68,17 +68,58 @@ pub struct ListEventsOut {
     pub truncated: bool,
 }
 
+pub(crate) fn event_last_timestamp(ev: &Event) -> Option<k8s_openapi::jiff::Timestamp> {
+    ev.last_timestamp
+        .as_ref()
+        .map(|t| t.0)
+        .or_else(|| {
+            ev.series
+                .as_ref()
+                .and_then(|s| s.last_observed_time.as_ref().map(|t| t.0))
+        })
+        .or_else(|| ev.event_time.as_ref().map(|t| t.0))
+        .or_else(|| ev.metadata.creation_timestamp.as_ref().map(|t| t.0))
+}
+
+pub(crate) fn event_first_timestamp(ev: &Event) -> Option<k8s_openapi::jiff::Timestamp> {
+    ev.first_timestamp
+        .as_ref()
+        .map(|t| t.0)
+        .or_else(|| ev.event_time.as_ref().map(|t| t.0))
+        .or_else(|| ev.metadata.creation_timestamp.as_ref().map(|t| t.0))
+}
+
 pub(crate) fn summarise(ev: Event) -> EventSummary {
     let object = format!(
         "{}/{}",
         ev.involved_object.kind.clone().unwrap_or_default(),
         ev.involved_object.name.clone().unwrap_or_default()
     );
-    // An Event's age is when it LAST fired, not when it was created —
-    // carry the same source so the live age keeps that meaning (#405).
-    let created = crate::creation_rfc3339(ev.last_timestamp.as_ref());
-    let age = crate::humanize_age(ev.last_timestamp.as_ref());
-    let created_at = crate::creation_timestamp_iso(ev.last_timestamp.as_ref());
+    let last_ts = event_last_timestamp(&ev);
+    let created = last_ts.map(|t| t.to_string());
+    let age = last_ts
+        .map(|t| {
+            crate::format_age(
+                k8s_openapi::jiff::Timestamp::now()
+                    .duration_since(t)
+                    .as_secs(),
+            )
+        })
+        .unwrap_or_else(|| "-".to_string());
+    let created_at = last_ts.map(|t| t.to_string()).unwrap_or_default();
+
+    let first_ts = event_first_timestamp(&ev);
+    let first_age = first_ts
+        .map(|t| {
+            crate::format_age(
+                k8s_openapi::jiff::Timestamp::now()
+                    .duration_since(t)
+                    .as_secs(),
+            )
+        })
+        .unwrap_or_else(|| "-".to_string());
+    let first_created = first_ts.map(|t| t.to_string());
+
     let namespace = ev.metadata.namespace.clone().unwrap_or_default();
     let own_name = ev.metadata.name.clone().unwrap_or_default();
     // One derivation, so the reported namespace and the key it is prefixed to
@@ -94,16 +135,8 @@ pub(crate) fn summarise(ev: Event) -> EventSummary {
         type_: ev.type_.clone().unwrap_or_default(),
         reason: ev.reason.clone().unwrap_or_default(),
         object,
-        first_age: crate::humanize_age(
-            ev.first_timestamp
-                .as_ref()
-                .or(ev.metadata.creation_timestamp.as_ref()),
-        ),
-        first_created: crate::creation_rfc3339(
-            ev.first_timestamp
-                .as_ref()
-                .or(ev.metadata.creation_timestamp.as_ref()),
-        ),
+        first_age,
+        first_created,
         object_api_version: ev.involved_object.api_version.clone().unwrap_or_default(),
         source: ev
             .reporting_component
@@ -181,6 +214,12 @@ mod tests {
         assert_eq!(value["firstCreated"], "2026-09-13T12:00:00Z");
         assert_eq!(value["created"], "2026-09-13T12:00:10Z");
         event.first_timestamp = None;
+        event.event_time = Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::MicroTime(
+            "2026-09-13T11:59:30Z".parse().unwrap(),
+        ));
+        let value = serde_json::to_value(summarise(event.clone())).unwrap();
+        assert_eq!(value["firstCreated"], "2026-09-13T11:59:30Z");
+        event.event_time = None;
         let value = serde_json::to_value(summarise(event.clone())).unwrap();
         assert_eq!(value["firstCreated"], "2026-09-13T11:59:00Z");
         event.metadata.creation_timestamp = None;
@@ -328,6 +367,46 @@ mod tests {
             Some("involvedObject.name=web-1,involvedObject.kind=Pod")
         );
         assert_eq!(event_list_params("", "").field_selector, None);
+    }
+
+    #[test]
+    fn event_timestamp_fallback_chain_handles_all_variants() {
+        use k8s_openapi::apimachinery::pkg::apis::meta::v1::{MicroTime, Time};
+        use k8s_openapi::jiff::Timestamp;
+
+        let t1 = Timestamp::from_second(1_700_000_000).unwrap();
+        let t2 = Timestamp::from_second(1_700_000_100).unwrap();
+        let t3 = Timestamp::from_second(1_700_000_200).unwrap();
+        let t4 = Timestamp::from_second(1_700_000_300).unwrap();
+
+        // 1. last_timestamp takes precedence
+        let mut ev1 = Event::default();
+        ev1.last_timestamp = Some(Time(t1));
+        ev1.series = Some(k8s_openapi::api::core::v1::EventSeries {
+            last_observed_time: Some(MicroTime(t2)),
+            ..Default::default()
+        });
+        assert_eq!(event_last_timestamp(&ev1), Some(t1));
+
+        // 2. series.last_observed_time used when last_timestamp is None
+        let mut ev2 = Event::default();
+        ev2.series = Some(k8s_openapi::api::core::v1::EventSeries {
+            last_observed_time: Some(MicroTime(t2)),
+            ..Default::default()
+        });
+        ev2.event_time = Some(MicroTime(t3));
+        assert_eq!(event_last_timestamp(&ev2), Some(t2));
+
+        // 3. event_time used when series is None
+        let mut ev3 = Event::default();
+        ev3.event_time = Some(MicroTime(t3));
+        ev3.metadata.creation_timestamp = Some(Time(t4));
+        assert_eq!(event_last_timestamp(&ev3), Some(t3));
+
+        // 4. metadata.creation_timestamp is final fallback
+        let mut ev4 = Event::default();
+        ev4.metadata.creation_timestamp = Some(Time(t4));
+        assert_eq!(event_last_timestamp(&ev4), Some(t4));
     }
 
     #[test]

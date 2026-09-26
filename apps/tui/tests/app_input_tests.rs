@@ -540,6 +540,236 @@ async fn tick_schedules_helm_refreshes_and_keys_trigger_manual_refresh() {
     assert!(app.modal.is_none());
 }
 
+/// Put `app` in the Argo detail view of "payments", as Enter on it in
+/// `:argo` would.
+fn open_argo_detail(app: &mut App) {
+    let mut state = srelens_tui::views::argo_detail_view::ArgoDetailViewState::new(
+        "payments".to_string(),
+        "argocd".to_string(),
+        None,
+    );
+    state.set_application(srelens_kube::argo::ArgoApplication::from_json(
+        &serde_json::json!({
+            "metadata": { "name": "payments", "namespace": "argocd" },
+            "status": { "health": { "status": "Healthy" }, "sync": { "status": "Synced" } }
+        }),
+    ));
+    app.active_view = ActiveView::ArgoDetail(state);
+}
+
+#[tokio::test]
+async fn argo_detail_a_without_a_ui_url_points_at_config() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app_with("fake-cluster", "default").await;
+    open_argo_detail(&mut app);
+    app.tui_config.argo_ui_url = None;
+
+    let screen = common::render_app(&mut app, 220, 40);
+    assert!(
+        !screen.contains("<a> ArgoCD"),
+        "not advertised without a URL"
+    );
+
+    press(&mut app, ch('a')).await;
+
+    assert_eq!(
+        toast(&app),
+        "Set the ArgoCD UI URL in :config to open apps in the browser"
+    );
+    assert!(
+        matches!(app.active_view, ActiveView::ArgoDetail(_)),
+        "stays put"
+    );
+}
+
+#[tokio::test]
+async fn argo_detail_advertises_a_once_a_ui_url_is_set() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app_with("fake-cluster", "default").await;
+    open_argo_detail(&mut app);
+    app.tui_config.argo_ui_url = Some("https://argocd.example.com".to_string());
+
+    let screen = common::render_app(&mut app, 220, 40);
+    assert!(screen.contains("<a> ArgoCD"), "title hint: {screen}");
+    assert!(
+        screen.contains("<a> ArgoCD UI"),
+        "status-bar hint: {screen}"
+    );
+    // The link `a` opens (not pressed here: it would launch a real browser).
+    assert_eq!(
+        app.tui_config.argo_app_url("argocd", "payments").as_deref(),
+        Some("https://argocd.example.com/applications/payments")
+    );
+}
+
+#[tokio::test]
+async fn config_edit_keys_reach_every_text_field() {
+    // The gate once named fields "4 or 5"; after a field was inserted at 4,
+    // the hub kubeconfig (6) could not be edited or cleared from the keys.
+    use srelens_tui::views::tui_config_view::{
+        FIELD_ARGO_HUB_KUBECONFIG, FIELD_ARGO_UI_URL, FIELD_STARTUP_UPDATES,
+    };
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app_with("fake-cluster", "default").await;
+    common::type_str(&mut app, ":config").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+
+    for field in [FIELD_ARGO_HUB_KUBECONFIG, FIELD_ARGO_UI_URL] {
+        if let ActiveView::TuiConfig(ref mut c) = app.active_view {
+            c.selected_field = field;
+        }
+        press(&mut app, ch('e')).await;
+        match &app.active_view {
+            ActiveView::TuiConfig(c) => assert!(c.is_editing, "field {field} opens the editor"),
+            _ => panic!("expected :config"),
+        }
+        press(&mut app, key(KeyCode::Esc)).await;
+    }
+
+    // A toggle is not a text field: `e` does not open the editor on it.
+    if let ActiveView::TuiConfig(ref mut c) = app.active_view {
+        c.selected_field = FIELD_STARTUP_UPDATES;
+    }
+    press(&mut app, ch('e')).await;
+    match &app.active_view {
+        ActiveView::TuiConfig(c) => assert!(!c.is_editing),
+        _ => panic!("expected :config"),
+    }
+
+    // A rejected URL keeps the modal open and says why; nothing is saved.
+    if let ActiveView::TuiConfig(ref mut c) = app.active_view {
+        c.selected_field = FIELD_ARGO_UI_URL;
+    }
+    press(&mut app, ch('e')).await;
+    common::type_str(&mut app, "argo.local").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert!(
+        toast(&app).contains("must start with https://"),
+        "{}",
+        toast(&app)
+    );
+    match &app.active_view {
+        ActiveView::TuiConfig(c) => assert!(c.is_editing, "modal stays open"),
+        _ => panic!("expected :config"),
+    }
+    assert_eq!(app.tui_config.argo_ui_url, None);
+
+    // Fixed and saved: the toast names the field.
+    if let ActiveView::TuiConfig(ref mut c) = app.active_view {
+        c.clear_input();
+    }
+    common::type_str(&mut app, "https://argocd.example.com").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(toast(&app), "Saved ArgoCD UI URL");
+    assert_eq!(
+        app.tui_config.argo_ui_url.as_deref(),
+        Some("https://argocd.example.com")
+    );
+}
+
+#[tokio::test]
+async fn config_timeout_change_says_the_value_now_in_effect() {
+    use srelens_tui::views::tui_config_view::FIELD_ARGO_TIMEOUT;
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app_with("fake-cluster", "default").await;
+    common::type_str(&mut app, ":config").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    if let ActiveView::TuiConfig(ref mut c) = app.active_view {
+        c.selected_field = FIELD_ARGO_TIMEOUT;
+    }
+
+    press(&mut app, ch('l')).await;
+    assert_eq!(toast(&app), "ArgoCD fetch timeout: 5s");
+    press(&mut app, ch('l')).await;
+    assert_eq!(toast(&app), "ArgoCD fetch timeout: 10s");
+    assert_eq!(
+        srelens_kube::argo::argo_timeout(),
+        std::time::Duration::from_secs(10)
+    );
+
+    press(&mut app, ch('c')).await;
+    assert!(
+        toast(&app).starts_with("Reset ArgoCD fetch timeout to inherit ("),
+        "{}",
+        toast(&app)
+    );
+    assert_eq!(app.tui_config.argo_timeout_secs, None);
+}
+
+#[tokio::test]
+async fn tick_schedules_argo_detail_refreshes_silently() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app_with("fake-cluster", "default").await;
+
+    let mut state = srelens_tui::views::argo_detail_view::ArgoDetailViewState::new(
+        "my-app".to_string(),
+        "argocd".to_string(),
+        None,
+    );
+
+    let mut app_data = srelens_kube::argo::ArgoApplication::from_json(&serde_json::json!({
+        "metadata": { "name": "my-app", "namespace": "argocd" },
+        "status": {
+            "health": { "status": "Degraded", "message": "1 pod crashing" },
+            "sync": { "status": "OutOfSync" }
+        }
+    }));
+    state.set_application(app_data.clone());
+    app.active_view = ActiveView::ArgoDetail(state);
+
+    // 1. First tick triggers silent refresh
+    app.handle_tick();
+    assert_eq!(app.argo_tick_counter, 1);
+    assert!(
+        app.argo_refreshing,
+        "argo_refreshing must be true while detail fetch is in-flight"
+    );
+
+    if let ActiveView::ArgoDetail(detail) = &app.active_view {
+        assert!(
+            !detail.is_loading,
+            "silent background refresh must not trigger loading spinner flicker"
+        );
+        assert_eq!(
+            detail.application.as_ref().unwrap().health_status,
+            "Degraded"
+        );
+    } else {
+        panic!("expected ArgoDetail view");
+    }
+
+    // 2. Updated application payload arrives (e.g. app recovered to Healthy & Synced)
+    app_data.health_status = "Healthy".to_string();
+    app_data.sync_status = "Synced".to_string();
+    app.handle_argo_detail_result("fake-cluster", "argocd", "my-app", Ok(app_data));
+
+    assert!(
+        !app.argo_refreshing,
+        "argo_refreshing is cleared after result is applied"
+    );
+    if let ActiveView::ArgoDetail(detail) = &app.active_view {
+        assert_eq!(
+            detail.application.as_ref().unwrap().health_status,
+            "Healthy"
+        );
+        assert_eq!(detail.application.as_ref().unwrap().sync_status, "Synced");
+    } else {
+        panic!("expected ArgoDetail view");
+    }
+
+    // 3. Advancing 40 ticks triggers the next periodic background refresh
+    for _ in 0..39 {
+        app.handle_tick();
+    }
+    assert_eq!(app.argo_tick_counter, 40);
+    app.handle_tick();
+    assert_eq!(app.argo_tick_counter, 41);
+    assert!(
+        app.argo_refreshing,
+        "tick 41 triggers another periodic refresh"
+    );
+}
+
 #[tokio::test]
 async fn failed_helm_refresh_keeps_rows_stale_and_blocks_rollback_until_success() {
     let _settings = common::env::isolate_settings();
@@ -2353,6 +2583,63 @@ async fn test_argo_app_handlers_and_interactions() {
     // Press Esc to return to Argo list view
     press(&mut app, key(KeyCode::Esc)).await;
     assert!(matches!(app.active_view, ActiveView::Argo(_)));
+}
+
+#[tokio::test]
+async fn assistant_modified_enter_breaks_the_line_and_plain_enter_sends() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.active_view = ActiveView::Assistant;
+
+    for modifier in [
+        KeyModifiers::CONTROL,
+        KeyModifiers::SHIFT,
+        KeyModifiers::ALT,
+    ] {
+        app.assistant_state.input.clear();
+        app.assistant_state.input_cursor = None;
+        press(&mut app, ch('a')).await;
+        press(&mut app, KeyEvent::new(KeyCode::Enter, modifier)).await;
+        press(&mut app, ch('b')).await;
+        assert_eq!(
+            app.assistant_state.input, "a\nb",
+            "{modifier:?}+Enter is a line break"
+        );
+        assert!(
+            !app.assistant_state.is_busy,
+            "{modifier:?}+Enter did not send"
+        );
+    }
+
+    // Plain Enter sends: the input is taken for the turn.
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert!(app.assistant_state.input.is_empty(), "plain Enter submits");
+}
+
+#[tokio::test]
+async fn assistant_paste_keeps_line_breaks_and_lands_at_the_cursor() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.active_view = ActiveView::Assistant;
+    app.assistant_state.input = "see: ".to_string();
+    app.assistant_state.input_cursor = None;
+
+    app.handle_paste("line one\r\nline two\rline three".to_string());
+
+    assert_eq!(
+        app.assistant_state.input,
+        "see: line one\nline two\nline three"
+    );
+}
+
+#[tokio::test]
+async fn assistant_opens_in_caveman_ultra_until_the_user_chooses() {
+    let _settings = common::env::isolate_settings();
+    let (app, _rx) = common::app().await;
+    assert_eq!(
+        app.assistant_state.caveman_level,
+        Some(srelens_tui::ai_skills::CavemanLevel::Ultra)
+    );
 }
 
 #[tokio::test]
@@ -4691,6 +4978,433 @@ async fn bgp_view_namespaced_metallb_peer_and_pool_drilldown() {
 }
 
 #[tokio::test]
+async fn changed_view_command_and_interaction_flow() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app_with("fake-cluster", "default").await;
+
+    // Type `:changed` to switch to Changed view
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "changed").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert!(matches!(app.active_view, ActiveView::Changed(_)));
+
+    if let ActiveView::Changed(ref mut changed) = app.active_view {
+        assert_eq!(changed.current_window_label(), "1h");
+        assert_eq!(
+            changed.active_tab,
+            srelens_tui::views::changed_view::ChangedTab::Deployments
+        );
+    } else {
+        panic!("expected ActiveView::Changed");
+    }
+
+    // Cycle duration window with ']' and '['
+    press(&mut app, ch(']')).await;
+    if let ActiveView::Changed(ref changed) = app.active_view {
+        assert_eq!(changed.current_window_label(), "3h");
+    }
+
+    press(&mut app, ch('[')).await;
+    if let ActiveView::Changed(ref changed) = app.active_view {
+        assert_eq!(changed.current_window_label(), "1h");
+    }
+
+    // Toggle tab with Tab
+    press(&mut app, key(KeyCode::Tab)).await;
+    if let ActiveView::Changed(ref changed) = app.active_view {
+        assert_eq!(
+            changed.active_tab,
+            srelens_tui::views::changed_view::ChangedTab::Infra
+        );
+    }
+
+    press(&mut app, key(KeyCode::Tab)).await;
+    if let ActiveView::Changed(ref changed) = app.active_view {
+        assert_eq!(
+            changed.active_tab,
+            srelens_tui::views::changed_view::ChangedTab::Deployments
+        );
+    }
+
+    // Cycle filter with 'f'
+    press(&mut app, ch('f')).await;
+    if let ActiveView::Changed(ref changed) = app.active_view {
+        assert_eq!(
+            changed.incident_filter,
+            srelens_tui::views::changed_view::IncidentFilter::CrashingOnly
+        );
+    }
+
+    // Test `:changed 15m` argument handling
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "changed 15m").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    if let ActiveView::Changed(ref changed) = app.active_view {
+        assert_eq!(changed.current_window_label(), "15m");
+    }
+
+    // Press Esc to exit back to previous view (pops both :changed invocations)
+    press(&mut app, key(KeyCode::Esc)).await;
+    press(&mut app, key(KeyCode::Esc)).await;
+    assert!(!matches!(app.active_view, ActiveView::Changed(_)));
+}
+
+#[tokio::test]
+async fn changed_view_drops_a_result_for_a_window_it_no_longer_shows() {
+    use srelens_kube::changed::{ChangedTriageReport, TriageSummary};
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app_with("fake-cluster", "default").await;
+
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "changed").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+
+    let report = |window_seconds: u64| ChangedTriageReport {
+        window_seconds,
+        window_label: String::new(),
+        namespace: Some("default".to_string()),
+        summary: TriageSummary {
+            total_deployments: 0,
+            crashing_count: 0,
+            oom_count: 0,
+            error_count: 0,
+            pending_count: 0,
+            rolling_count: 0,
+            healthy_count: 0,
+            headline_message: String::new(),
+        },
+        deployments: vec![],
+        infra_changes: vec![],
+        includes_failing: false,
+        includes_scaled: false,
+    };
+
+    // The view shows 1h; a 15m answer from before a window change is stale.
+    app.handle_changed_triage_result("fake-cluster", Some("default"), Ok(report(900)));
+    match &app.active_view {
+        ActiveView::Changed(c) => {
+            assert!(c.report.is_none(), "a stale window's report was shown");
+            assert!(c.is_loading);
+        }
+        _ => panic!("expected ActiveView::Changed"),
+    }
+    assert!(
+        app.changed_refreshing,
+        "the current window is fetched again"
+    );
+
+    app.handle_changed_triage_result("fake-cluster", Some("default"), Ok(report(3600)));
+    match &app.active_view {
+        ActiveView::Changed(c) => assert!(c.report.is_some()),
+        _ => panic!("expected ActiveView::Changed"),
+    }
+}
+
+/// A report with one failing workload, as the `:changed` view receives it.
+fn changed_report_with_one_workload() -> srelens_kube::changed::ChangedTriageReport {
+    serde_json::from_value(serde_json::json!({
+        "windowSeconds": 3600, "windowLabel": "1h", "namespace": "default",
+        "summary": {"totalDeployments": 1, "crashingCount": 1, "pendingCount": 0,
+                    "rollingCount": 0, "healthyCount": 0, "headlineMessage": ""},
+        "deployments": [{
+            "appName": "payment-api", "kind": "Deployment", "namespace": "default",
+            "incidentStatus": "crashLoop", "failureCategory": "app",
+            "failureDetail": "payment terminated with Exit Code 1",
+            "deployedAge": "5d", "currentRevision": "3",
+            "currentImages": [], "previousImages": [], "imageDiff": "payment:v2",
+            "desiredReplicas": 2, "updatedReplicas": 2, "readyReplicas": 0, "availableReplicas": 0,
+            "rolloutStatus": "failed", "failingPodsCount": 1, "crashLoopCount": 1,
+            "oomKilledCount": 0, "probeFailureCount": 0, "restartCount": 9,
+            "primarySymptoms": [], "failingPodNames": ["payment-api-1"], "topEvents": [],
+            "errorLogPod": "payment-api-1", "errorLogContainer": "payment"
+        }],
+        "infraChanges": []
+    }))
+    .expect("report JSON matches the wire shape")
+}
+
+async fn changed_app_with_report(
+    settings: &common::env::SettingsGuard,
+) -> (
+    srelens_tui::App,
+    tokio::sync::mpsc::UnboundedReceiver<srelens_tui::event::AppEvent>,
+) {
+    let _ = settings;
+    let (mut app, rx) = common::app_with("fake-cluster", "default").await;
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "changed").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    app.handle_changed_triage_result(
+        "fake-cluster",
+        Some("default"),
+        Ok(changed_report_with_one_workload()),
+    );
+    (app, rx)
+}
+
+fn only_rca(app: &srelens_tui::App) -> srelens_tui::views::changed_view::QuickRca {
+    match &app.active_view {
+        ActiveView::Changed(c) => {
+            assert_eq!(c.ai_summaries.len(), 1, "exactly one RCA entry");
+            c.ai_summaries.values().next().unwrap().clone()
+        }
+        _ => panic!("expected ActiveView::Changed"),
+    }
+}
+
+#[tokio::test]
+async fn quick_rca_with_cursor_says_it_needs_an_http_provider() {
+    use srelens_tui::views::changed_view::QuickRcaStatus;
+    let settings = common::env::isolate_settings();
+    let (mut app, _rx) = changed_app_with_report(&settings).await;
+    app.ai_settings.default_provider = srelens_tui::AiProvider::Cursor;
+
+    press(&mut app, ch('s')).await;
+
+    let rca = only_rca(&app);
+    match rca.status {
+        QuickRcaStatus::Error(msg) => {
+            assert!(msg.contains("needs an HTTP provider"), "{msg}");
+            assert!(msg.contains("[a]"), "points at the Assistant: {msg}");
+            assert!(
+                !msg.contains("API key"),
+                "Cursor's problem is not a key: {msg}"
+            );
+        }
+        other => panic!("expected an error, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn quick_rca_without_a_key_names_the_setting_and_the_variable() {
+    use srelens_tui::views::changed_view::QuickRcaStatus;
+    let mut settings = common::env::isolate_settings();
+    settings.remove_env("ANTHROPIC_API_KEY");
+    let (mut app, _rx) = changed_app_with_report(&settings).await;
+    app.ai_settings.default_provider = srelens_tui::AiProvider::Anthropic;
+    app.ai_settings.api_keys.clear();
+
+    press(&mut app, ch('s')).await;
+
+    match only_rca(&app).status {
+        QuickRcaStatus::Error(msg) => {
+            assert!(msg.contains("No API key configured"), "{msg}");
+            assert!(msg.contains(":ai-settings"), "{msg}");
+            assert!(msg.contains("ANTHROPIC_API_KEY"), "{msg}");
+            assert!(!msg.contains("Ctrl+s"), "{msg}");
+        }
+        other => panic!("expected an error, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn quick_rca_reply_lands_on_its_entry_and_errors_offer_a_retry() {
+    use srelens_tui::views::changed_view::{QuickRca, QuickRcaStatus};
+    let settings = common::env::isolate_settings();
+    let (mut app, _rx) = changed_app_with_report(&settings).await;
+
+    let key = match &mut app.active_view {
+        ActiveView::Changed(c) => {
+            let d = c.selected_deployment().unwrap().clone();
+            let key = c.rca_key(&d);
+            assert_eq!(key, "fake-cluster|default/Deployment/payment-api@3");
+            c.ai_summaries.insert(
+                key.clone(),
+                QuickRca {
+                    pod_name: d.error_log_pod.clone(),
+                    provider: "Anthropic (Claude)".to_string(),
+                    status: QuickRcaStatus::Loading,
+                    updated_at: std::time::Instant::now(),
+                },
+            );
+            key
+        }
+        _ => panic!("expected ActiveView::Changed"),
+    };
+
+    // A second press while one is in flight does not start another.
+    press(&mut app, ch('s')).await;
+    assert_eq!(only_rca(&app).status, QuickRcaStatus::Loading);
+
+    app.handle_changed_quick_rca_result(
+        &key,
+        Ok("**Root Cause:** DB_HOST points nowhere.\nAction Item: Fix the ConfigMap.".to_string()),
+    );
+    assert_eq!(
+        only_rca(&app).status,
+        QuickRcaStatus::Ready {
+            root_cause: "DB_HOST points nowhere.".to_string(),
+            action_item: "Fix the ConfigMap.".to_string(),
+        }
+    );
+
+    app.handle_changed_quick_rca_result(&key, Err("rate limited (429)".to_string()));
+    match only_rca(&app).status {
+        QuickRcaStatus::Error(msg) => {
+            assert!(
+                msg.contains("Anthropic (Claude) did not answer: rate limited (429)"),
+                "{msg}"
+            );
+            assert!(msg.contains("Press [s] to retry"), "{msg}");
+        }
+        other => panic!("expected an error, got {other:?}"),
+    }
+
+    // A reply for an entry that no longer exists changes nothing.
+    app.handle_changed_quick_rca_result("other|x/Deployment/y@1", Ok("Root Cause: z".to_string()));
+    assert_eq!(
+        match &app.active_view {
+            ActiveView::Changed(c) => c.ai_summaries.len(),
+            _ => 0,
+        },
+        1
+    );
+}
+
+/// The same one-workload report, twice, so selection can move.
+fn changed_report_with_two_workloads(
+    includes_failing: bool,
+) -> srelens_kube::changed::ChangedTriageReport {
+    let mut report = changed_report_with_one_workload();
+    let mut second = report.deployments[0].clone();
+    second.app_name = "payment-worker".to_string();
+    report.deployments.push(second);
+    report.includes_failing = includes_failing;
+    report
+}
+
+fn changed_state(app: &srelens_tui::App) -> &srelens_tui::views::changed_view::ChangedViewState {
+    match &app.active_view {
+        ActiveView::Changed(c) => c,
+        _ => panic!("expected ActiveView::Changed"),
+    }
+}
+
+#[tokio::test]
+async fn changed_view_moves_with_arrows_and_ignores_j_and_k() {
+    let settings = common::env::isolate_settings();
+    let (mut app, _rx) = changed_app_with_report(&settings).await;
+    app.handle_changed_triage_result(
+        "fake-cluster",
+        Some("default"),
+        Ok(changed_report_with_two_workloads(false)),
+    );
+    assert_eq!(changed_state(&app).selected_idx, 0);
+
+    press(&mut app, ch('j')).await;
+    assert_eq!(
+        changed_state(&app).selected_idx,
+        0,
+        "j is not bound in :changed"
+    );
+
+    press(&mut app, key(KeyCode::Down)).await;
+    assert_eq!(changed_state(&app).selected_idx, 1);
+
+    press(&mut app, ch('k')).await;
+    assert_eq!(
+        changed_state(&app).selected_idx,
+        1,
+        "k is not bound in :changed"
+    );
+
+    press(&mut app, key(KeyCode::Up)).await;
+    assert_eq!(changed_state(&app).selected_idx, 0);
+}
+
+#[tokio::test]
+async fn changed_view_u_widens_the_scope_and_drops_the_narrow_answer() {
+    let settings = common::env::isolate_settings();
+    let (mut app, _rx) = changed_app_with_report(&settings).await;
+    assert!(!changed_state(&app).include_failing, "strict by default");
+    app.changed_refreshing = false;
+
+    press(&mut app, ch('u')).await;
+    let c = changed_state(&app);
+    assert!(c.include_failing);
+    assert!(c.is_loading);
+    assert!(app.changed_refreshing, "the wider scope is fetched");
+
+    // The strict answer from before the toggle lands late: dropped, refetched.
+    app.handle_changed_triage_result(
+        "fake-cluster",
+        Some("default"),
+        Ok(changed_report_with_two_workloads(false)),
+    );
+    let c = changed_state(&app);
+    assert!(
+        c.report.as_ref().is_some_and(|r| r.deployments.len() == 1),
+        "still the report from before"
+    );
+    assert!(c.is_loading);
+
+    app.handle_changed_triage_result(
+        "fake-cluster",
+        Some("default"),
+        Ok(changed_report_with_two_workloads(true)),
+    );
+    let c = changed_state(&app);
+    assert_eq!(c.report.as_ref().unwrap().deployments.len(), 2);
+    assert!(!c.is_loading);
+}
+
+#[tokio::test]
+async fn changed_view_capital_s_includes_scaled_and_drops_the_narrow_answer() {
+    let settings = common::env::isolate_settings();
+    let (mut app, _rx) = changed_app_with_report(&settings).await;
+    assert!(
+        !changed_state(&app).include_scaled,
+        "scale-only rows hidden by default"
+    );
+    app.changed_refreshing = false;
+
+    press(&mut app, ch('S')).await;
+    let c = changed_state(&app);
+    assert!(c.include_scaled);
+    assert!(!c.include_failing, "S is not u");
+    assert!(app.changed_refreshing, "the wider scope is fetched");
+
+    // The answer from before the toggle is dropped and refetched.
+    app.handle_changed_triage_result(
+        "fake-cluster",
+        Some("default"),
+        Ok(changed_report_with_two_workloads(false)),
+    );
+    assert!(changed_state(&app).is_loading);
+
+    let mut wide = changed_report_with_two_workloads(false);
+    wide.includes_scaled = true;
+    app.handle_changed_triage_result("fake-cluster", Some("default"), Ok(wide));
+    let c = changed_state(&app);
+    assert!(!c.is_loading);
+    assert_eq!(c.report.as_ref().unwrap().deployments.len(), 2);
+}
+
+#[tokio::test]
+async fn changed_view_status_bar_keeps_only_app_wide_keys() {
+    let settings = common::env::isolate_settings();
+    let (mut app, _rx) = changed_app_with_report(&settings).await;
+
+    let screen = common::render_app(&mut app, 200, 50);
+    let status = screen
+        .lines()
+        .rev()
+        .find(|l| l.contains("<:>"))
+        .expect("a status bar with hints");
+    assert!(status.contains("<:> Cmd"), "{status}");
+    assert!(status.contains("<?> Help"), "{status}");
+    assert!(status.contains("<Esc> Back"), "{status}");
+    for gone in [
+        "<j/k>", "<l>", "<y>", "<s>", "<a>", "<Enter>", "<f>", "<Tab>",
+    ] {
+        assert!(
+            !status.contains(gone),
+            "{gone} belongs to the view, not the status bar: {status}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn node_inspector_press_b_jumps_to_bgp_dashboard() {
     let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app_with("fake-cluster", "default").await;
@@ -6105,4 +6819,153 @@ async fn test_table_ctrl_d_bulk_delete_tagged_pods_opens_confirm_modal() {
     assert!(app.modal.is_some());
     press(&mut app, key(KeyCode::Enter)).await;
     assert!(app.modal.is_none());
+}
+
+#[tokio::test]
+async fn switch_context_while_in_changed_view_clears_report_and_handles_stale_results() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    let mut changed_state = srelens_tui::views::changed_view::ChangedViewState::new();
+    changed_state.window_idx = 2;
+    changed_state.context = "cluster-1".to_string();
+    changed_state.set_report(srelens_kube::changed::ChangedTriageReport {
+        window_seconds: 3600,
+        window_label: "1h".to_string(),
+        namespace: None,
+        summary: srelens_kube::changed::TriageSummary {
+            total_deployments: 1,
+            crashing_count: 0,
+            oom_count: 0,
+            error_count: 0,
+            pending_count: 0,
+            rolling_count: 0,
+            healthy_count: 1,
+            headline_message: "OK".to_string(),
+        },
+        deployments: vec![],
+        infra_changes: vec![],
+        includes_failing: true,
+        includes_scaled: false,
+    });
+    app.active_view = ActiveView::Changed(changed_state);
+    app.active_context = "cluster-1".to_string();
+    app.active_namespace = String::new();
+    app.changed_refreshing = true; // In-flight refresh for cluster-1
+
+    // Switch to cluster-2
+    app.switch_context("cluster-2".to_string()).await;
+    assert_eq!(app.active_context, "cluster-2");
+    if let ActiveView::Changed(ref mut changed) = app.active_view {
+        assert!(changed.report.is_none(), "report cleared on context switch");
+        assert!(changed.is_loading, "loading true on context switch");
+        assert_eq!(changed.context, "cluster-2");
+        changed.window_idx = 2;
+    } else {
+        panic!("expected ActiveView::Changed");
+    }
+
+    // Stale result from cluster-1 arrives
+    let stale_report = srelens_kube::changed::ChangedTriageReport {
+        window_seconds: 3600,
+        window_label: "1h".to_string(),
+        namespace: None,
+        summary: srelens_kube::changed::TriageSummary {
+            total_deployments: 1,
+            crashing_count: 1,
+            oom_count: 0,
+            error_count: 0,
+            pending_count: 0,
+            rolling_count: 0,
+            healthy_count: 0,
+            headline_message: "CRITICAL".to_string(),
+        },
+        deployments: vec![],
+        infra_changes: vec![],
+        includes_failing: true,
+        includes_scaled: false,
+    };
+    app.handle_changed_triage_result("cluster-1", None, Ok(stale_report));
+
+    // Stale result must NOT be accepted on cluster-2
+    if let ActiveView::Changed(ref changed) = app.active_view {
+        assert!(
+            changed.report.is_none(),
+            "stale cluster-1 report must not populate cluster-2"
+        );
+    }
+
+    // Valid cluster-2 result arrives
+    let cluster2_report = srelens_kube::changed::ChangedTriageReport {
+        window_seconds: 3600,
+        window_label: "1h".to_string(),
+        namespace: None,
+        summary: srelens_kube::changed::TriageSummary {
+            total_deployments: 2,
+            crashing_count: 0,
+            oom_count: 0,
+            error_count: 0,
+            pending_count: 0,
+            rolling_count: 0,
+            healthy_count: 2,
+            headline_message: "ALL HEALTHY".to_string(),
+        },
+        deployments: vec![],
+        infra_changes: vec![],
+        includes_failing: false,
+        includes_scaled: false,
+    };
+    app.handle_changed_triage_result("cluster-2", None, Ok(cluster2_report));
+
+    if let ActiveView::Changed(ref changed) = app.active_view {
+        assert!(changed.report.is_some());
+        assert!(!changed.is_loading);
+        assert_eq!(
+            changed.report.as_ref().unwrap().summary.headline_message,
+            "ALL HEALTHY"
+        );
+    }
+}
+
+#[tokio::test]
+async fn switch_namespace_while_in_changed_view_clears_stale_report() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    let mut changed_state = srelens_tui::views::changed_view::ChangedViewState::new();
+    changed_state.window_idx = 2;
+    changed_state.context = "cluster-1".to_string();
+    changed_state.set_report(srelens_kube::changed::ChangedTriageReport {
+        window_seconds: 3600,
+        window_label: "1h".to_string(),
+        namespace: Some("default".to_string()),
+        summary: srelens_kube::changed::TriageSummary {
+            total_deployments: 1,
+            crashing_count: 0,
+            oom_count: 0,
+            error_count: 0,
+            pending_count: 0,
+            rolling_count: 0,
+            healthy_count: 1,
+            headline_message: "OK".to_string(),
+        },
+        deployments: vec![],
+        infra_changes: vec![],
+        includes_failing: true,
+        includes_scaled: false,
+    });
+    app.active_view = ActiveView::Changed(changed_state);
+    app.active_context = "cluster-1".to_string();
+    app.active_namespace = "default".to_string();
+
+    // Switch namespace to staging
+    app.switch_namespace("staging".to_string()).await;
+    assert_eq!(app.active_namespace, "staging");
+    if let ActiveView::Changed(ref changed) = app.active_view {
+        assert!(
+            changed.report.is_none(),
+            "stale namespace report cleared on namespace switch"
+        );
+        assert!(changed.is_loading, "loading set true on namespace switch");
+    } else {
+        panic!("expected ActiveView::Changed");
+    }
 }

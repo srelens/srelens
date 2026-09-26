@@ -484,6 +484,9 @@ fn build_with(
         cache.clone(),
     ));
     reg.register(srelens_kube::events::list_events_capability(cache.clone()));
+    reg.register(srelens_kube::changed::list_changes_capability(
+        cache.clone(),
+    ));
     reg.register(srelens_kube::metrics::node_metrics_capability(
         cache.clone(),
     ));
@@ -700,11 +703,15 @@ mod tests {
             .ids()
             .into_iter()
             .filter(|id| {
-                reg.get(id)
-                    .is_some_and(|c| c.annotations.requires_confirm && c.annotations.confirm.is_none())
+                reg.get(id).is_some_and(|c| {
+                    c.annotations.requires_confirm && c.annotations.confirm.is_none()
+                })
             })
             .collect();
-        assert!(silent.is_empty(), "gated with no confirmation text: {silent:?}");
+        assert!(
+            silent.is_empty(),
+            "gated with no confirmation text: {silent:?}"
+        );
     }
 
     #[test]
@@ -712,7 +719,10 @@ mod tests {
         let reg = build_registry();
         let app = reg.get("extensions.action").unwrap().annotations;
         assert!(app.requires_confirm);
-        assert_eq!(app.impact, reg.get("k8s.mergePatch").unwrap().annotations.impact);
+        assert_eq!(
+            app.impact,
+            reg.get("k8s.mergePatch").unwrap().annotations.impact
+        );
     }
 
     #[test]

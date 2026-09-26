@@ -2,7 +2,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, Paragraph},
+    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
     Frame,
 };
 
@@ -216,9 +216,29 @@ pub const SAMPLE_SUGGESTIONS: &[(&str, &[&str], &str, &str, &str)] = &[
     ),
 ];
 
+// Field indices. General settings are 0-4; the ArgoCD group is 5-8. Name a
+// field by its constant, never by a literal: the edit/clear gate in `app.rs`
+// once hard-coded "4 or 5", and when the update-check field was inserted at 4
+// it silently stopped the hub kubeconfig from being editable.
+pub const FIELD_POPUP_WIDTH: usize = 0;
+pub const FIELD_VISIBLE_ROWS: usize = 1;
+pub const FIELD_DENSITY: usize = 2;
+pub const FIELD_STARTUP_BANNER: usize = 3;
+pub const FIELD_STARTUP_UPDATES: usize = 4;
+pub const FIELD_ARGO_HUB_CONTEXT: usize = 5;
+pub const FIELD_ARGO_HUB_KUBECONFIG: usize = 6;
+pub const FIELD_ARGO_UI_URL: usize = 7;
+pub const FIELD_ARGO_TIMEOUT: usize = 8;
+pub const FIELD_COUNT: usize = 9;
+
+/// The ArgoCD group's fields, in display order.
+pub const ARGO_FIELDS: std::ops::RangeInclusive<usize> =
+    FIELD_ARGO_HUB_CONTEXT..=FIELD_ARGO_TIMEOUT;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TuiConfigViewState {
-    pub selected_field: usize, // 0 = Width, 1 = Visible Rows, 2 = Text Size / Density, 3 = Startup Banner, 4 = Startup Updates, 5 = Argo Hub Context, 6 = Argo Hub Kubeconfig
+    /// One of the `FIELD_*` constants.
+    pub selected_field: usize,
     pub is_editing: bool,
     pub edit_buffer: String,
     pub edit_cursor: usize,
@@ -246,7 +266,7 @@ impl TuiConfigViewState {
         if self.is_editing {
             return;
         }
-        self.selected_field = (self.selected_field + 1) % 7;
+        self.selected_field = (self.selected_field + 1) % FIELD_COUNT;
     }
 
     pub fn select_prev_field(&mut self) {
@@ -254,9 +274,38 @@ impl TuiConfigViewState {
             return;
         }
         if self.selected_field == 0 {
-            self.selected_field = 6;
+            self.selected_field = FIELD_COUNT - 1;
         } else {
             self.selected_field -= 1;
+        }
+    }
+
+    /// Fields edited as free text in the modal.
+    pub fn is_text_field(&self) -> bool {
+        matches!(
+            self.selected_field,
+            FIELD_ARGO_HUB_CONTEXT | FIELD_ARGO_HUB_KUBECONFIG | FIELD_ARGO_UI_URL
+        )
+    }
+
+    /// Fields `c` clears back to their default.
+    pub fn is_clearable_field(&self) -> bool {
+        ARGO_FIELDS.contains(&self.selected_field)
+    }
+
+    /// The selected field's name, for save and clear messages.
+    pub fn field_label(&self) -> &'static str {
+        match self.selected_field {
+            FIELD_POPUP_WIDTH => "command popup width",
+            FIELD_VISIBLE_ROWS => "command popup rows",
+            FIELD_DENSITY => "command popup density",
+            FIELD_STARTUP_BANNER => "startup banner",
+            FIELD_STARTUP_UPDATES => "startup update check",
+            FIELD_ARGO_HUB_CONTEXT => "ArgoCD hub context",
+            FIELD_ARGO_HUB_KUBECONFIG => "ArgoCD hub kubeconfig",
+            FIELD_ARGO_UI_URL => "ArgoCD UI URL",
+            FIELD_ARGO_TIMEOUT => "ArgoCD fetch timeout",
+            _ => "setting",
         }
     }
 
@@ -276,6 +325,11 @@ impl TuiConfigViewState {
                 self.edit_cursor = self.edit_buffer.chars().count();
                 self.is_editing = true;
             }
+            FIELD_ARGO_UI_URL => {
+                self.edit_buffer = config.argo_ui_url.clone().unwrap_or_default();
+                self.edit_cursor = self.edit_buffer.chars().count();
+                self.is_editing = true;
+            }
             _ => {}
         }
     }
@@ -286,9 +340,16 @@ impl TuiConfigViewState {
         self.edit_cursor = 0;
     }
 
+    /// Apply the edit and save. A value that fails validation (an ArgoCD UI
+    /// URL without http(s)://) changes nothing, keeps the modal open so the
+    /// reader can fix it, and returns the reason; the caller tells the two
+    /// errors apart by `is_editing`, which stays true only for that case.
     pub fn finish_editing(&mut self, config: &mut TuiConfig) -> Result<(), String> {
         let val = self.edit_buffer.trim().to_string();
         match self.selected_field {
+            FIELD_ARGO_UI_URL => {
+                config.argo_ui_url = crate::tui_config::normalize_argo_ui_url(&val)?;
+            }
             5 => {
                 config.argo_hub_context = if val.is_empty() { None } else { Some(val) };
             }
@@ -410,6 +471,11 @@ impl TuiConfigViewState {
         match self.selected_field {
             5 => config.argo_hub_context = None,
             6 => config.argo_hub_kubeconfig = None,
+            FIELD_ARGO_UI_URL => config.argo_ui_url = None,
+            FIELD_ARGO_TIMEOUT => {
+                config.argo_timeout_secs = None;
+                config.apply_argo_timeout();
+            }
             _ => {}
         }
         config.save()
@@ -464,6 +530,11 @@ impl TuiConfigViewState {
                     config.argo_hub_kubeconfig = None;
                 }
             }
+            FIELD_ARGO_TIMEOUT => {
+                // `[`/`]` pass ±5: step one choice per unit, like h/l.
+                config.step_argo_timeout(delta);
+                config.apply_argo_timeout();
+            }
             _ => {}
         }
         config.save()
@@ -502,8 +573,17 @@ impl TuiConfigViewState {
             5 => {
                 self.start_editing(config);
             }
-            6 => {
+            6 | FIELD_ARGO_UI_URL => {
                 self.start_editing(config);
+            }
+            FIELD_ARGO_TIMEOUT => {
+                // Space/Enter walk forward and wrap back to "inherit".
+                let before = config.argo_timeout_secs;
+                config.step_argo_timeout(1);
+                if config.argo_timeout_secs == before {
+                    config.argo_timeout_secs = None;
+                }
+                config.apply_argo_timeout();
             }
             _ => {}
         }
@@ -512,6 +592,7 @@ impl TuiConfigViewState {
 
     pub fn reset_defaults(&mut self, config: &mut TuiConfig) -> Result<(), String> {
         *config = TuiConfig::default();
+        config.apply_argo_timeout();
         config.save()
     }
 }
@@ -521,6 +602,154 @@ fn render_slider(value: f32, total_width: usize) -> String {
     let filled = (clamped * total_width as f32).round() as usize;
     let empty = total_width.saturating_sub(filled);
     format!("[{}{}]", "█".repeat(filled), "░".repeat(empty))
+}
+
+/// The ArgoCD settings as one box: a row per field with its value, `▶` on
+/// the selected one, and a last line naming the selected row's keys.
+fn render_argo_settings_box(
+    f: &mut Frame,
+    area: Rect,
+    state: &TuiConfigViewState,
+    config: &TuiConfig,
+) {
+    let in_group = ARGO_FIELDS.contains(&state.selected_field);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(Theme::border_type())
+        .border_style(Style::default().fg(if in_group {
+            Theme::cyan()
+        } else {
+            Theme::border()
+        }))
+        .title(Span::styled(
+            " ArgoCD (:argo) ",
+            if in_group {
+                Style::default()
+                    .fg(Theme::cyan())
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Theme::fg())
+            },
+        ));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let set = Style::default()
+        .fg(Theme::cyan())
+        .add_modifier(Modifier::BOLD);
+    let unset = Style::default().fg(Theme::dim());
+    let rows: [(usize, &str, String, Style); 4] = [
+        (
+            FIELD_ARGO_HUB_CONTEXT,
+            "Hub Context",
+            match &config.argo_hub_context {
+                Some(ctx) if !ctx.trim().is_empty() => ctx.clone(),
+                _ => "(none - local cluster)".to_string(),
+            },
+            if config
+                .argo_hub_context
+                .as_deref()
+                .is_some_and(|c| !c.trim().is_empty())
+            {
+                set
+            } else {
+                unset
+            },
+        ),
+        (
+            FIELD_ARGO_HUB_KUBECONFIG,
+            "Hub Kubeconfig",
+            match &config.argo_hub_kubeconfig {
+                Some(p) if !p.as_os_str().is_empty() => p.display().to_string(),
+                _ => "(default: in-cluster / $KUBECONFIG)".to_string(),
+            },
+            if config.argo_hub_kubeconfig.is_some() {
+                set
+            } else {
+                unset
+            },
+        ),
+        (
+            FIELD_ARGO_UI_URL,
+            "UI URL",
+            config
+                .argo_ui_url
+                .clone()
+                .unwrap_or_else(|| "not set (a in app details is off)".to_string()),
+            if config.argo_ui_url.is_some() {
+                set
+            } else {
+                unset
+            },
+        ),
+        (
+            FIELD_ARGO_TIMEOUT,
+            "Fetch Timeout",
+            config.argo_timeout_label(),
+            if config.argo_timeout_secs.is_some() {
+                set
+            } else {
+                unset
+            },
+        ),
+    ];
+
+    let mut lines: Vec<Line> = rows
+        .into_iter()
+        .map(|(field, label, value, value_style)| {
+            let selected = state.selected_field == field;
+            Line::from(vec![
+                Span::styled(
+                    if selected { "▶ " } else { "  " },
+                    Style::default().fg(Theme::cyan()),
+                ),
+                Span::styled(
+                    format!("{label:<15}"),
+                    if selected {
+                        Style::default()
+                            .fg(Theme::cyan())
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Theme::fg())
+                    },
+                ),
+                Span::styled(crate::views::sanitize_span_text(&value), value_style),
+            ])
+        })
+        .collect();
+
+    let key = Style::default().fg(Theme::yellow());
+    let dim = Style::default().fg(Theme::dim());
+    let hint = match state.selected_field {
+        FIELD_ARGO_HUB_CONTEXT => vec![
+            Span::styled("e/Enter", key),
+            Span::styled(" Edit · ", dim),
+            Span::styled("h/l", key),
+            Span::styled(" Cycle · ", dim),
+            Span::styled("c", key),
+            Span::styled(" Clear", dim),
+        ],
+        FIELD_ARGO_HUB_KUBECONFIG | FIELD_ARGO_UI_URL => vec![
+            Span::styled("e/Enter", key),
+            Span::styled(" Edit · ", dim),
+            Span::styled("c", key),
+            Span::styled(" Clear", dim),
+        ],
+        FIELD_ARGO_TIMEOUT => vec![
+            Span::styled("h/l", key),
+            Span::styled(" Change · ", dim),
+            Span::styled("c", key),
+            Span::styled(" Reset to inherit", dim),
+        ],
+        _ => vec![Span::styled("j/k to select an ArgoCD setting", dim)],
+    };
+    lines.push(Line::from(
+        std::iter::once(Span::raw("  "))
+            .chain(hint)
+            .collect::<Vec<_>>(),
+    ));
+
+    f.render_widget(Paragraph::new(lines), inner);
 }
 
 pub fn render_tui_config_view(
@@ -540,7 +769,7 @@ pub fn render_tui_config_view(
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(2), // Top description
+            Constraint::Length(3), // Top description, with a row for wrap
             Constraint::Min(10),   // Controls and Live Preview
             Constraint::Length(1), // Bottom key hints
         ])
@@ -560,7 +789,10 @@ pub fn render_tui_config_view(
             Style::default().fg(Theme::dim()),
         )]),
     ];
-    f.render_widget(Paragraph::new(desc_lines), chunks[0]);
+    f.render_widget(
+        Paragraph::new(desc_lines).wrap(Wrap { trim: true }),
+        chunks[0],
+    );
 
     // 2. Middle Region: Controls (left) & Live Preview (right) or stacked if narrow
     let (controls_area, preview_area) = if chunks[1].width >= 90 {
@@ -577,18 +809,23 @@ pub fn render_tui_config_view(
         (v_chunks[0], v_chunks[1])
     };
 
-    // Setting cards: 7 cards total (0..=6)
-    let card_height = if controls_area.height >= 26 { 4 } else { 3 };
+    // Five general setting cards, then one ArgoCD box holding fields 5-8:
+    // two borders, one row per field, and one line of the selected row's keys.
+    let argo_box_height = 2 + ARGO_FIELDS.count() as u16 + 1;
+    let card_height = if controls_area.height >= 5 * 4 + argo_box_height {
+        4
+    } else {
+        3
+    };
     let control_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(card_height), // 0: Popup Width
-            Constraint::Length(card_height), // 1: Visible Rows
-            Constraint::Length(card_height), // 2: Text Size / Density
-            Constraint::Length(card_height), // 3: Startup Feature Banner
-            Constraint::Length(card_height), // 4: Startup Update Check
-            Constraint::Length(card_height), // 5: ArgoCD Hub Context
-            Constraint::Length(card_height), // 6: ArgoCD Hub Kubeconfig Path
+            Constraint::Length(card_height),     // 0: Popup Width
+            Constraint::Length(card_height),     // 1: Visible Rows
+            Constraint::Length(card_height),     // 2: Text Size / Density
+            Constraint::Length(card_height),     // 3: Startup Feature Banner
+            Constraint::Length(card_height),     // 4: Startup Update Check
+            Constraint::Length(argo_box_height), // 5-8: ArgoCD group
             Constraint::Min(0),
         ])
         .split(controls_area);
@@ -652,7 +889,10 @@ pub fn render_tui_config_view(
             Span::styled(" to adjust", Style::default().fg(Theme::dim())),
         ]),
     ];
-    f.render_widget(Paragraph::new(width_lines), width_inner);
+    f.render_widget(
+        Paragraph::new(width_lines).wrap(Wrap { trim: true }),
+        width_inner,
+    );
 
     // Setting 1: Command Popup Max Visible Rows
     let is_rows_selected = state.selected_field == 1;
@@ -713,7 +953,10 @@ pub fn render_tui_config_view(
             Span::styled(" to adjust", Style::default().fg(Theme::dim())),
         ]),
     ];
-    f.render_widget(Paragraph::new(rows_lines), rows_inner);
+    f.render_widget(
+        Paragraph::new(rows_lines).wrap(Wrap { trim: true }),
+        rows_inner,
+    );
 
     // Setting 2: Command Popup Text Size / Density
     let is_density_selected = state.selected_field == 2;
@@ -782,7 +1025,10 @@ pub fn render_tui_config_view(
             Span::styled(" to adjust", Style::default().fg(Theme::dim())),
         ]),
     ];
-    f.render_widget(Paragraph::new(density_lines), density_inner);
+    f.render_widget(
+        Paragraph::new(density_lines).wrap(Wrap { trim: true }),
+        density_inner,
+    );
 
     // Setting 3: Startup Feature Banner
     let is_banner_selected = state.selected_field == 3;
@@ -864,7 +1110,10 @@ pub fn render_tui_config_view(
             Span::styled(" to toggle", Style::default().fg(Theme::dim())),
         ]),
     ];
-    f.render_widget(Paragraph::new(banner_lines), banner_inner);
+    f.render_widget(
+        Paragraph::new(banner_lines).wrap(Wrap { trim: true }),
+        banner_inner,
+    );
 
     // Setting 4: Startup Update Check
     let is_update_selected = state.selected_field == 4;
@@ -944,120 +1193,13 @@ pub fn render_tui_config_view(
             Span::styled(" to toggle", Style::default().fg(Theme::dim())),
         ]),
     ];
-    f.render_widget(Paragraph::new(update_lines), update_inner);
+    f.render_widget(
+        Paragraph::new(update_lines).wrap(Wrap { trim: true }),
+        update_inner,
+    );
 
-    // Setting 5: ArgoCD Hub Context
-    let is_hub_ctx_selected = state.selected_field == 5;
-    let hub_ctx_border_color = if is_hub_ctx_selected {
-        Theme::cyan()
-    } else {
-        Theme::border()
-    };
-    let hub_ctx_title = if is_hub_ctx_selected {
-        " ▶ ArgoCD Hub Context "
-    } else {
-        "   ArgoCD Hub Context "
-    };
-    let hub_ctx_block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(Theme::border_type())
-        .border_style(Style::default().fg(hub_ctx_border_color))
-        .title(Span::styled(
-            hub_ctx_title,
-            if is_hub_ctx_selected {
-                Style::default()
-                    .fg(Theme::cyan())
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Theme::fg())
-            },
-        ));
-    let hub_ctx_inner = hub_ctx_block.inner(control_chunks[5]);
-    f.render_widget(hub_ctx_block, control_chunks[5]);
-
-    let (ctx_display, ctx_style) = match &config.argo_hub_context {
-        Some(ctx) if !ctx.trim().is_empty() => (
-            ctx.as_str(),
-            Style::default()
-                .fg(Theme::cyan())
-                .add_modifier(Modifier::BOLD),
-        ),
-        _ => ("(none - local cluster)", Style::default().fg(Theme::dim())),
-    };
-
-    let mut hub_ctx_lines = vec![Line::from(vec![
-        Span::styled("Context: ", Style::default().fg(Theme::dim())),
-        Span::styled(ctx_display, ctx_style),
-    ])];
-    if hub_ctx_inner.height > 1 {
-        hub_ctx_lines.push(Line::from(vec![
-            Span::styled("Action: ", Style::default().fg(Theme::dim())),
-            Span::styled("e/Enter", Style::default().fg(Theme::yellow())),
-            Span::styled(" Edit  |  ", Style::default().fg(Theme::dim())),
-            Span::styled("h/l", Style::default().fg(Theme::yellow())),
-            Span::styled(" Cycle  |  ", Style::default().fg(Theme::dim())),
-            Span::styled("c", Style::default().fg(Theme::yellow())),
-            Span::styled(" Clear", Style::default().fg(Theme::dim())),
-        ]));
-    }
-    f.render_widget(Paragraph::new(hub_ctx_lines), hub_ctx_inner);
-
-    // Setting 6: ArgoCD Hub Kubeconfig Path
-    let is_hub_cfg_selected = state.selected_field == 6;
-    let hub_cfg_border_color = if is_hub_cfg_selected {
-        Theme::cyan()
-    } else {
-        Theme::border()
-    };
-    let hub_cfg_title = if is_hub_cfg_selected {
-        " ▶ ArgoCD Hub Kubeconfig Path "
-    } else {
-        "   ArgoCD Hub Kubeconfig Path "
-    };
-    let hub_cfg_block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(Theme::border_type())
-        .border_style(Style::default().fg(hub_cfg_border_color))
-        .title(Span::styled(
-            hub_cfg_title,
-            if is_hub_cfg_selected {
-                Style::default()
-                    .fg(Theme::cyan())
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Theme::fg())
-            },
-        ));
-    let hub_cfg_inner = hub_cfg_block.inner(control_chunks[6]);
-    f.render_widget(hub_cfg_block, control_chunks[6]);
-
-    let (cfg_display, cfg_style) = match &config.argo_hub_kubeconfig {
-        Some(p) if !p.as_os_str().is_empty() => (
-            p.display().to_string(),
-            Style::default()
-                .fg(Theme::cyan())
-                .add_modifier(Modifier::BOLD),
-        ),
-        _ => (
-            "(default: in-cluster / $KUBECONFIG)".to_string(),
-            Style::default().fg(Theme::dim()),
-        ),
-    };
-
-    let mut hub_cfg_lines = vec![Line::from(vec![
-        Span::styled("Path: ", Style::default().fg(Theme::dim())),
-        Span::styled(cfg_display, cfg_style),
-    ])];
-    if hub_cfg_inner.height > 1 {
-        hub_cfg_lines.push(Line::from(vec![
-            Span::styled("Action: ", Style::default().fg(Theme::dim())),
-            Span::styled("e/Enter", Style::default().fg(Theme::yellow())),
-            Span::styled(" Edit Path  |  ", Style::default().fg(Theme::dim())),
-            Span::styled("c", Style::default().fg(Theme::yellow())),
-            Span::styled(" Clear to Default", Style::default().fg(Theme::dim())),
-        ]));
-    }
-    f.render_widget(Paragraph::new(hub_cfg_lines), hub_cfg_inner);
+    // Settings 5-8: the ArgoCD group, one box.
+    render_argo_settings_box(f, control_chunks[5], state, config);
 
     // 3. Live Preview (Feature Banner, ArgoCD GitOps, or Command Popup)
     if state.selected_field == 3 {
@@ -1220,9 +1362,9 @@ pub fn render_tui_config_view(
             ]),
         ];
 
-        let p = Paragraph::new(lines).wrap(ratatui::widgets::Wrap { trim: true });
+        let p = Paragraph::new(lines).wrap(Wrap { trim: true });
         f.render_widget(p, preview_inner);
-    } else if state.selected_field == 5 || state.selected_field == 6 {
+    } else if ARGO_FIELDS.contains(&state.selected_field) {
         let preview_block = Block::default()
             .borders(Borders::ALL)
             .border_type(Theme::border_type())
@@ -1280,6 +1422,28 @@ pub fn render_tui_config_view(
                     Style::default().fg(Theme::fg()),
                 ),
             ]),
+            Line::from(vec![
+                Span::styled("UI Link:       ", Theme::header_label()),
+                match config.argo_app_url("argocd", "<application>") {
+                    Some(url) => Span::styled(url, Style::default().fg(Theme::cyan())),
+                    None => Span::styled("not set", Style::default().fg(Theme::dim())),
+                },
+            ]),
+            Line::from(Span::styled(
+                "               Opened by a in an :argo app's details.",
+                Style::default().fg(Theme::dim()),
+            )),
+            Line::from(vec![
+                Span::styled("Fetch Timeout: ", Theme::header_label()),
+                Span::styled(
+                    config.argo_timeout_label(),
+                    Style::default().fg(Theme::fg()),
+                ),
+            ]),
+            Line::from(Span::styled(
+                "               Bounds list and detail reads; never cuts off a sync.",
+                Style::default().fg(Theme::dim()),
+            )),
             Line::from(""),
             Line::from(vec![Span::styled(
                 "How ArgoCD Hub-and-Spoke Works:",
@@ -1389,7 +1553,7 @@ pub fn render_tui_config_view(
             Span::styled(" Jump to ArgoCD", Style::default().fg(Theme::dim())),
         ]));
 
-        let p = Paragraph::new(lines).wrap(ratatui::widgets::Wrap { trim: true });
+        let p = Paragraph::new(lines).wrap(Wrap { trim: true });
         f.render_widget(p, preview_inner);
     } else {
         let preview_block = Block::default()
@@ -1830,7 +1994,10 @@ pub fn render_tui_config_view(
         ),
         Span::styled("Back", Style::default().fg(Theme::dim())),
     ]);
-    f.render_widget(Paragraph::new(hints_line), chunks[2]);
+    f.render_widget(
+        Paragraph::new(hints_line).wrap(Wrap { trim: true }),
+        chunks[2],
+    );
 
     // 5. Edit Modal Dialog (if currently editing field 5 or 6)
     if state.is_editing {
@@ -1840,6 +2007,7 @@ pub fn render_tui_config_view(
         let title = match state.selected_field {
             5 => " Edit ArgoCD Hub Context ",
             6 => " Edit ArgoCD Hub Kubeconfig Path ",
+            FIELD_ARGO_UI_URL => " Edit ArgoCD UI URL ",
             _ => " Edit Setting ",
         };
 
@@ -1869,9 +2037,12 @@ pub fn render_tui_config_view(
         let prompt_text = match state.selected_field {
             5 => "Enter context name pointing to the ArgoCD cluster (leave empty to clear):",
             6 => "Enter absolute path to the kubeconfig for ArgoCD (leave empty to clear):",
+            FIELD_ARGO_UI_URL => "Base URL of the ArgoCD web UI, e.g. https://argocd.example.com (leave empty to clear):",
             _ => "Enter new value:",
         };
-        let prompt_p = Paragraph::new(prompt_text).style(Style::default().fg(Theme::dim()));
+        let prompt_p = Paragraph::new(prompt_text)
+            .wrap(Wrap { trim: true })
+            .style(Style::default().fg(Theme::dim()));
         f.render_widget(prompt_p, v_chunks[0]);
 
         let chars: Vec<char> = state.edit_buffer.chars().collect();
@@ -1947,6 +2118,9 @@ pub fn render_tui_config_view(
             ),
             Span::styled("Clear", Style::default().fg(Theme::dim())),
         ]);
-        f.render_widget(Paragraph::new(hint_line), v_chunks[2]);
+        f.render_widget(
+            Paragraph::new(hint_line).wrap(Wrap { trim: true }),
+            v_chunks[2],
+        );
     }
 }

@@ -52,6 +52,7 @@ pub enum ActiveView {
     GpuInfo(gpu_view::GpuViewState),
     Bgp(bgp_view::BgpViewState),
     Top(top_view::TopViewState),
+    Changed(changed_view::ChangedViewState),
 }
 
 pub struct App {
@@ -104,6 +105,8 @@ pub struct App {
     pub helm_refreshing: bool,
     pub argo_tick_counter: usize,
     pub argo_refreshing: bool,
+    pub changed_tick_counter: usize,
+    pub changed_refreshing: bool,
     pub node_metrics_history:
         HashMap<String, std::collections::VecDeque<srelens_kube::metrics::MetricSample>>,
     pub pod_metrics_history:
@@ -157,6 +160,85 @@ pub fn delete_prev_word(s: &mut String) {
             break;
         }
     }
+}
+
+/// One CRD table row from a listed object: its fields and metadata, the
+/// `name`/`namespace`/`age`/`createdAt` the table reads, and `apiVersion` and
+/// `kind`, as the watch path's rows carry. A list returns objects without
+/// their type (it is on the list), so without these a row could not say what
+/// it is.
+pub fn crd_row_value(
+    item: kube::core::DynamicObject,
+    api_version: &str,
+    kind: &str,
+) -> serde_json::Value {
+    let mut val = item.data;
+    if !val.is_object() {
+        val = serde_json::Value::Object(Default::default());
+    }
+    if let Some(obj) = val.as_object_mut() {
+        let (av, k) = match &item.types {
+            Some(t) => (t.api_version.clone(), t.kind.clone()),
+            None => (api_version.to_string(), kind.to_string()),
+        };
+        obj.insert("apiVersion".to_string(), serde_json::Value::String(av));
+        obj.insert("kind".to_string(), serde_json::Value::String(k));
+        if let Ok(meta_val) = serde_json::to_value(&item.metadata) {
+            obj.insert("metadata".to_string(), meta_val);
+        }
+        if let Some(n) = &item.metadata.name {
+            obj.insert("name".to_string(), serde_json::Value::String(n.clone()));
+        }
+        if let Some(ns_name) = &item.metadata.namespace {
+            obj.insert(
+                "namespace".to_string(),
+                serde_json::Value::String(ns_name.clone()),
+            );
+        }
+        if let Some(ts) = &item.metadata.creation_timestamp {
+            obj.insert(
+                "age".to_string(),
+                serde_json::Value::String(srelens_kube::humanize_age(Some(ts))),
+            );
+            obj.insert(
+                "createdAt".to_string(),
+                serde_json::Value::String(srelens_kube::creation_timestamp_iso(Some(ts))),
+            );
+        }
+    }
+    val
+}
+
+/// `\r\n` and lone `\r` as `\n`, for text entering a multi-line input.
+/// Why a live manifest could not be fetched: the object, its namespace when
+/// it has one, and each attempt's own error, one per line.
+pub fn manifest_fetch_error(
+    kind: &str,
+    name: &str,
+    namespace: Option<&str>,
+    failures: &[String],
+) -> String {
+    let mut msg = match namespace.filter(|ns| !ns.is_empty()) {
+        Some(ns) => format!("Unable to fetch live manifest for {kind}/{name} in namespace {ns}"),
+        None => format!("Unable to fetch live manifest for {kind}/{name}"),
+    };
+    if failures.is_empty() {
+        msg.push_str(": no lookup applied to this kind");
+    } else {
+        msg.push(':');
+        for f in failures {
+            let f = f.trim();
+            if !f.is_empty() {
+                msg.push_str("\n  ");
+                msg.push_str(f);
+            }
+        }
+    }
+    msg
+}
+
+pub fn normalize_line_breaks(text: &str) -> String {
+    text.replace("\r\n", "\n").replace('\r', "\n")
 }
 
 pub fn open_browser_url(url: &str) -> Result<(), String> {
@@ -332,6 +414,9 @@ impl App {
         };
 
         let tui_config = crate::tui_config::TuiConfig::load();
+        // Every ArgoCD read consults the kube crate's timeout; give it the
+        // configured one before the first `:argo` fetch.
+        tui_config.apply_argo_timeout();
 
         let mut app = Self {
             active_context: active_context.clone(),
@@ -382,6 +467,8 @@ impl App {
             helm_refreshing: false,
             argo_tick_counter: 0,
             argo_refreshing: false,
+            changed_tick_counter: 0,
+            changed_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -496,24 +583,50 @@ impl App {
             self.sync_port_forwards();
         }
 
-        // Periodically refresh Helm releases every ~3.5 seconds (35 ticks at 100ms)
+        // Periodically refresh Helm releases or Helm release detail every ~3.5 seconds (35 ticks at 100ms)
         if matches!(self.active_view, ActiveView::Helm(_)) {
             self.helm_tick_counter = self.helm_tick_counter.saturating_add(1);
             if self.helm_tick_counter % 35 == 1 && !self.helm_refreshing {
                 self.refresh_helm_releases();
             }
+        } else if let ActiveView::HelmDetail(detail) = &self.active_view {
+            self.helm_tick_counter = self.helm_tick_counter.saturating_add(1);
+            if self.helm_tick_counter % 35 == 1 && !self.helm_refreshing {
+                let name = detail.release_name.clone();
+                let ns = detail.namespace.clone();
+                self.refresh_helm_detail_silent(&name, &ns);
+            }
         } else {
             self.helm_tick_counter = 0;
         }
 
-        // Periodically refresh ArgoCD applications every ~4 seconds (40 ticks at 100ms)
+        // Periodically refresh ArgoCD applications or ArgoCD Application detail every ~4 seconds (40 ticks at 100ms)
         if matches!(self.active_view, ActiveView::Argo(_)) {
             self.argo_tick_counter = self.argo_tick_counter.saturating_add(1);
             if self.argo_tick_counter % 40 == 1 && !self.argo_refreshing {
                 self.refresh_argo_applications();
             }
+        } else if let ActiveView::ArgoDetail(detail) = &self.active_view {
+            self.argo_tick_counter = self.argo_tick_counter.saturating_add(1);
+            if self.argo_tick_counter % 40 == 1 && !self.argo_refreshing {
+                let name = detail.app_name.clone();
+                let ns = detail.app_namespace.clone();
+                self.refresh_argo_detail_silent(&name, &ns);
+            }
         } else {
             self.argo_tick_counter = 0;
+        }
+
+        // Refresh the Changed triage report every ~10 seconds (100 ticks at
+        // 100ms). Each refresh lists seven kinds cluster-wide and tails logs,
+        // so it runs slower than the cheap views; `r` refreshes on demand.
+        if matches!(self.active_view, ActiveView::Changed(_)) {
+            self.changed_tick_counter = self.changed_tick_counter.saturating_add(1);
+            if self.changed_tick_counter % 100 == 1 && !self.changed_refreshing {
+                self.refresh_changed_triage();
+            }
+        } else {
+            self.changed_tick_counter = 0;
         }
     }
 
@@ -1230,31 +1343,54 @@ impl App {
 
     pub fn handle_crd_instances_update(&mut self, title: &str, json_str: &str) {
         if let Ok(items) = serde_json::from_str::<Vec<serde_json::Value>>(json_str) {
-            let crd_kind = title.strip_prefix("crd_instances:").unwrap_or(title);
+            let crd_identifier = title.strip_prefix("crd_instances:").unwrap_or(title);
             let ctx = self.active_context.clone();
-            let ns = self.active_namespace.clone();
-            self.resource_cache.insert(
-                (ctx.clone(), ns.clone(), crd_kind.to_string()),
-                items.clone(),
-            );
-            if let Some(discovered) = self
+            // Cache under the scope `restart_active_watch` reads: a cluster-
+            // scoped CRD's list belongs to no namespace. Keyed by the active
+            // namespace instead, it was never found again, and a table shown
+            // after an apply sat on Loading.
+            let discovered = self
                 .crds
                 .iter()
-                .find(|c| c.kind == crd_kind || c.plural == crd_kind || c.crd_name == crd_kind)
-            {
+                .find(|c| c.crd_name == crd_identifier)
+                .cloned()
+                .or_else(|| {
+                    self.crds
+                        .iter()
+                        .find(|c| c.kind == crd_identifier || c.plural == crd_identifier)
+                        .cloned()
+                });
+            let cluster_scoped = discovered.as_ref().is_some_and(|c| !c.namespaced);
+            let ns = if cluster_scoped {
+                String::new()
+            } else {
+                self.active_namespace.clone()
+            };
+            self.resource_cache.insert(
+                (ctx.clone(), ns.clone(), crd_identifier.to_string()),
+                items.clone(),
+            );
+            if let Some(ref d) = discovered {
                 self.resource_cache
-                    .insert((ctx, ns, discovered.crd_name.clone()), items.clone());
+                    .insert((ctx.clone(), ns.clone(), d.crd_name.clone()), items.clone());
+                self.resource_cache
+                    .insert((ctx.clone(), ns.clone(), d.kind.clone()), items.clone());
+                self.resource_cache
+                    .insert((ctx.clone(), ns.clone(), d.plural.clone()), items.clone());
             }
 
             if let ActiveView::Table(table) = &mut self.active_view {
                 if let ResourceKind::CustomResource(crd) = &mut table.kind {
-                    if crd.kind == crd_kind || crd.plural == crd_kind || crd.crd_name == crd_kind {
+                    let matches_table = crd.crd_name == crd_identifier
+                        || (discovered
+                            .as_ref()
+                            .is_some_and(|d| d.crd_name == crd.crd_name))
+                        || crd.kind == crd_identifier
+                        || crd.plural == crd_identifier;
+                    if matches_table {
                         if crd.printer_columns.is_empty() {
-                            if let Some(discovered) = self.crds.iter().find(|c| {
-                                c.crd_name == crd.crd_name
-                                    || (c.group == crd.group && c.kind == crd.kind)
-                            }) {
-                                crd.printer_columns = discovered.printer_columns.clone();
+                            if let Some(ref d) = discovered {
+                                crd.printer_columns = d.printer_columns.clone();
                                 table.columns =
                                     crate::views::resource_table::default_columns_for_kind(
                                         &table.kind,
@@ -1262,6 +1398,8 @@ impl App {
                             }
                         }
                         table.set_items(items, &self.filter_buffer);
+                        table.is_loading = false;
+                        table.error = None;
                     }
                 }
             }
@@ -1269,17 +1407,27 @@ impl App {
     }
 
     pub fn handle_crd_instances_failed(&mut self, title: &str, err: &str) {
-        let crd_kind = title.strip_prefix("crd_instances_failed:").unwrap_or(title);
+        let crd_identifier = title
+            .strip_prefix("crd_instances_failed:")
+            .or_else(|| title.strip_prefix("crd_instances:"))
+            .unwrap_or(title);
+        let mut toast_kind = None;
         if let ActiveView::Table(table) = &mut self.active_view {
             if let ResourceKind::CustomResource(crd) = &table.kind {
-                if crd.kind == crd_kind || crd.plural == crd_kind || crd.crd_name == crd_kind {
+                if crd.crd_name == crd_identifier
+                    || crd.kind == crd_identifier
+                    || crd.plural == crd_identifier
+                {
                     table.is_loading = false;
-                    self.set_toast(
-                        format!("Failed to list {}: {}", crd_kind, err),
-                        Theme::status_error(),
-                    );
+                    toast_kind = Some(crd.kind.clone());
                 }
             }
+        }
+        if let Some(kind) = toast_kind {
+            self.set_toast(
+                format!("Failed to list {}: {}", kind, err),
+                Theme::status_error(),
+            );
         }
     }
 
@@ -1360,6 +1508,29 @@ impl App {
             ),
             Theme::status_error(),
         );
+    }
+
+    /// When the YAML view holds no manifest because the fetch failed, say
+    /// why and return true: the caller must not open `$EDITOR` on it.
+    pub fn refuse_edit_without_manifest(&mut self) -> bool {
+        let reason = match &self.active_view {
+            ActiveView::Yaml(yaml) => yaml.load_error.as_ref().map(|reason| {
+                format!(
+                    "Can't edit {}/{}: {}",
+                    yaml.resource_kind,
+                    yaml.resource_name,
+                    reason.replace('\n', " ")
+                )
+            }),
+            _ => None,
+        };
+        match reason {
+            Some(msg) => {
+                self.set_toast(msg, Theme::status_error());
+                true
+            }
+            None => false,
+        }
     }
 
     pub fn handle_yaml_error(&mut self, err: &str) {
@@ -1828,6 +1999,14 @@ impl App {
             d.is_reachable = true;
             ov.set_data(d);
         }
+        if let ActiveView::Table(table) = &mut self.active_view {
+            table.error = None;
+            table.raw_items.clear();
+            table.filtered_indices.clear();
+            table.selected_idx = 0;
+            table.scroll_offset = 0;
+            table.is_loading = true;
+        }
         if let ActiveView::Helm(helm) = &mut self.active_view {
             helm.releases.clear();
             helm.is_loading = true;
@@ -1838,6 +2017,14 @@ impl App {
             argo.all_applications.clear();
             argo.is_loading = true;
             self.refresh_argo_applications();
+        }
+        if let ActiveView::Changed(changed) = &mut self.active_view {
+            self.changed_refreshing = false;
+            changed.context = self.active_context.clone();
+            changed.report = None;
+            changed.error = None;
+            changed.is_loading = true;
+            self.refresh_changed_triage();
         }
         self.set_toast(
             format!("Switched to context '{}'", self.active_context),
@@ -1965,6 +2152,27 @@ impl App {
             let name = detail.app_name.clone();
             let ns = detail.app_namespace.clone();
             self.reload_argo_detail(&name, &ns);
+            return;
+        }
+
+        if let ActiveView::Changed(changed) = &mut self.active_view {
+            let cur_ns = if self.active_namespace.is_empty() {
+                None
+            } else {
+                Some(self.active_namespace.as_str())
+            };
+            let is_stale_ns = changed
+                .report
+                .as_ref()
+                .is_some_and(|r| r.namespace.as_deref() != cur_ns);
+            if changed.context != self.active_context || is_stale_ns {
+                self.changed_refreshing = false;
+                changed.context = self.active_context.clone();
+                changed.report = None;
+                changed.error = None;
+                changed.is_loading = true;
+            }
+            self.refresh_changed_triage();
             return;
         }
 
@@ -2101,6 +2309,7 @@ impl App {
                         self.resource_cache
                             .get(&(ctx.clone(), ns.clone(), crd.plural.clone()))
                     });
+                let cache_missed = cached.is_none();
                 if let Some(cached) = cached {
                     table.set_items(cached.clone(), &self.filter_buffer);
                     table.is_loading = false;
@@ -2141,6 +2350,12 @@ impl App {
                     if let Some(pos) = self.active_watch_pool.iter().position(|c| c == &channel) {
                         let ch = self.active_watch_pool.remove(pos);
                         self.active_watch_pool.push(ch);
+                    }
+                    // A warm watch sends only changes, not the list. After an
+                    // apply cleared the cache, nothing would refill the table
+                    // until the next change: fetch it now.
+                    if cache_missed {
+                        self.fetch_crd_instances(crd.clone());
                     }
                 }
             }
@@ -3942,8 +4157,10 @@ impl App {
             return;
         }
 
-        if matches!(self.active_view, ActiveView::TuiConfig(_)) {
-            if key.code == KeyCode::Char(':') {
+        if let ActiveView::TuiConfig(cfg) = &self.active_view {
+            // While a value is being typed, `:` is text (every URL has one),
+            // not the command palette. Settings guards the same way above.
+            if !cfg.is_editing && key.code == KeyCode::Char(':') {
                 self.input_mode = InputMode::Command;
                 self.command_buffer.clear();
                 return;
@@ -3979,6 +4196,9 @@ impl App {
                         self.filter_buffer = detail.search_query.clone()
                     }
                     ActiveView::Bgp(bgp) => self.filter_buffer = bgp.search_query.clone(),
+                    ActiveView::Changed(changed) => {
+                        self.filter_buffer = changed.filter_query.clone()
+                    }
                     _ => {}
                 }
             }
@@ -4066,6 +4286,10 @@ impl App {
                     }
                     if self.assistant_state.selection.is_some() {
                         self.assistant_state.clear_selection();
+                        return;
+                    }
+                    if self.assistant_state.is_busy {
+                        self.cancel_assistant_turn();
                         return;
                     }
                 }
@@ -4160,6 +4384,10 @@ impl App {
                     detail.next_tab();
                     return;
                 }
+                if let ActiveView::Changed(ref mut changed) = self.active_view {
+                    changed.toggle_tab();
+                    return;
+                }
                 if let Some(seg_name) = cycled_segment {
                     self.set_toast(format!("Segment: {}", seg_name), Theme::status_ok());
                     return;
@@ -4188,6 +4416,18 @@ impl App {
                         .unwrap_or_else(|| table.kind.to_string())
                 };
                 let table_kind = table.kind.clone();
+                // A CRD row knows its group and version. Pin them, so the
+                // object is fetched from that CRD and not from whichever
+                // CRD in discovery happens to share its kind name.
+                let crd_api_version = match &table.kind {
+                    ResourceKind::CustomResource(crd) if crd.group.is_empty() => {
+                        Some(crd.version.clone())
+                    }
+                    ResourceKind::CustomResource(crd) => {
+                        Some(format!("{}/{}", crd.group, crd.version))
+                    }
+                    _ => None,
+                };
 
                 if table.kind == ResourceKind::Events && table.reason_rail_focused {
                     let tallies = crate::views::reason_rail::tally_event_reasons(&table.raw_items);
@@ -4934,8 +5174,13 @@ impl App {
                                 }
                             }
                         } else if let Some(name) = sel_name.clone() {
-                            self.open_yaml_view(name, kind_str.clone(), sel_ns.clone())
-                                .await;
+                            self.open_yaml_view_in_group(
+                                name,
+                                kind_str.clone(),
+                                sel_ns.clone(),
+                                crd_api_version.clone(),
+                            )
+                            .await;
                         }
                     }
                     KeyCode::Char('d') => {
@@ -4949,15 +5194,25 @@ impl App {
                                 }
                             }
                         } else if let Some(name) = sel_name.clone() {
-                            self.open_describe_view(name, kind_str.clone(), sel_ns.clone())
-                                .await;
+                            self.open_describe_view_in_group(
+                                name,
+                                kind_str.clone(),
+                                sel_ns.clone(),
+                                crd_api_version.clone(),
+                            )
+                            .await;
                         }
                     }
                     KeyCode::Char('e') => {
                         // Edit YAML in $EDITOR
                         if let Some(name) = sel_name.clone() {
-                            self.open_yaml_view(name, kind_str.clone(), sel_ns.clone())
-                                .await;
+                            self.open_yaml_view_in_group(
+                                name,
+                                kind_str.clone(),
+                                sel_ns.clone(),
+                                crd_api_version.clone(),
+                            )
+                            .await;
                             self.requires_terminal_suspend = Some(SuspendAction::EditYaml);
                         }
                     }
@@ -5107,7 +5362,13 @@ impl App {
                             }
                         } else {
                             if let Some(name) = sel_name {
-                                self.open_describe_view(name, kind_str, sel_ns).await;
+                                self.open_describe_view_in_group(
+                                    name,
+                                    kind_str,
+                                    sel_ns,
+                                    crd_api_version,
+                                )
+                                .await;
                             }
                         }
                     }
@@ -5764,6 +6025,10 @@ impl App {
                     && (key.modifiers.contains(KeyModifiers::CONTROL)
                         || key.modifiers.contains(KeyModifiers::SUPER))
                 {
+                    if ai.is_busy && ai.selection.is_none() {
+                        self.cancel_assistant_turn();
+                        return;
+                    }
                     if let Some(selected) = ai.get_selected_text() {
                         let _ = copy_to_clipboard(&selected);
                         self.set_toast(
@@ -5907,8 +6172,7 @@ impl App {
                             || key.modifiers.contains(KeyModifiers::SUPER) =>
                     {
                         if let Some(clip) = get_clipboard_text() {
-                            let cleaned = clip.replace("\r\n", " ").replace('\n', " ");
-                            ai.insert_str(&cleaned);
+                            ai.insert_str(&normalize_line_breaks(&clip));
                         }
                     }
                     KeyCode::Backspace => {
@@ -5924,9 +6188,20 @@ impl App {
                     {
                         ai.insert_char(c);
                     }
+                    // A line break, not a send. Ctrl+Enter and Shift+Enter
+                    // reach us only on terminals that speak the enhanced
+                    // keyboard protocol (enabled in main.rs); Alt+Enter works
+                    // on the rest, where Option/Alt is sent as Meta.
+                    KeyCode::Enter
+                        if key.modifiers.intersects(
+                            KeyModifiers::CONTROL | KeyModifiers::SHIFT | KeyModifiers::ALT,
+                        ) =>
+                    {
+                        ai.insert_char('\n');
+                    }
                     KeyCode::Enter => {
                         if ai.is_busy {
-                            self.set_toast("⚠️ Assistant is busy processing a query. Please wait or press <Ctrl+l> to clear.".to_string(), Theme::status_warn());
+                            self.set_toast("⚠️ Assistant is busy. Press <Esc> or <Ctrl+c> to cancel, or <Ctrl+l> to clear.".to_string(), Theme::status_warn());
                             return;
                         }
                         let raw_input = ai.input.trim().to_string();
@@ -6230,16 +6505,25 @@ impl App {
                         KeyCode::Esc => {
                             cfg_state.cancel_editing();
                         }
-                        KeyCode::Enter => match cfg_state.finish_editing(&mut self.tui_config) {
-                            Ok(()) => self.set_toast(
-                                "Saved ArgoCD Hub setting".to_string(),
-                                Theme::status_ok(),
-                            ),
-                            Err(err) => self.set_toast(
-                                format!("Settings applied for this session but not saved: {err}"),
-                                Theme::status_error(),
-                            ),
-                        },
+                        KeyCode::Enter => {
+                            let label = cfg_state.field_label();
+                            match cfg_state.finish_editing(&mut self.tui_config) {
+                                Ok(()) => {
+                                    self.set_toast(format!("Saved {label}"), Theme::status_ok())
+                                }
+                                // Still editing: the value was rejected and
+                                // nothing changed. Say why; the modal stays.
+                                Err(err) if cfg_state.is_editing => {
+                                    self.set_toast(err, Theme::status_warn())
+                                }
+                                Err(err) => self.set_toast(
+                                    format!(
+                                        "Settings applied for this session but not saved: {err}"
+                                    ),
+                                    Theme::status_error(),
+                                ),
+                            }
+                        }
                         KeyCode::Left => {
                             cfg_state.move_cursor_left();
                         }
@@ -6312,54 +6596,53 @@ impl App {
                         cfg_state.select_prev_field()
                     }
                     KeyCode::Char('h') | KeyCode::Left | KeyCode::Char('-') => {
-                        if let Err(err) = cfg_state.adjust_current(-1, &mut self.tui_config) {
-                            self.set_toast(
-                                format!("Settings applied for this session but not saved: {err}"),
-                                Theme::status_error(),
-                            );
-                        }
+                        let field = cfg_state.selected_field;
+                        let res = cfg_state.adjust_current(-1, &mut self.tui_config);
+                        self.report_config_change(field, res);
                     }
                     KeyCode::Char('l')
                     | KeyCode::Right
                     | KeyCode::Char('+')
                     | KeyCode::Char('=') => {
-                        if let Err(err) = cfg_state.adjust_current(1, &mut self.tui_config) {
-                            self.set_toast(
-                                format!("Settings applied for this session but not saved: {err}"),
-                                Theme::status_error(),
-                            );
-                        }
+                        let field = cfg_state.selected_field;
+                        let res = cfg_state.adjust_current(1, &mut self.tui_config);
+                        self.report_config_change(field, res);
                     }
                     KeyCode::Enter => {
-                        if cfg_state.selected_field == 4 || cfg_state.selected_field == 5 {
+                        if cfg_state.is_text_field() {
                             cfg_state.start_editing(&self.tui_config);
-                        } else if let Err(err) = cfg_state.cycle_current(&mut self.tui_config) {
-                            self.set_toast(
-                                format!("Settings applied for this session but not saved: {err}"),
-                                Theme::status_error(),
-                            );
+                        } else {
+                            let field = cfg_state.selected_field;
+                            let res = cfg_state.cycle_current(&mut self.tui_config);
+                            self.report_config_change(field, res);
                         }
                     }
                     KeyCode::Char(' ') => {
-                        if let Err(err) = cfg_state.cycle_current(&mut self.tui_config) {
-                            self.set_toast(
-                                format!("Settings applied for this session but not saved: {err}"),
-                                Theme::status_error(),
-                            );
-                        }
+                        let field = cfg_state.selected_field;
+                        let res = cfg_state.cycle_current(&mut self.tui_config);
+                        self.report_config_change(field, res);
                     }
                     KeyCode::Char('e') | KeyCode::Char('E') => {
-                        if cfg_state.selected_field == 4 || cfg_state.selected_field == 5 {
+                        if cfg_state.is_text_field() {
                             cfg_state.start_editing(&self.tui_config);
                         }
                     }
                     KeyCode::Char('c') | KeyCode::Char('C') => {
-                        if cfg_state.selected_field == 4 || cfg_state.selected_field == 5 {
+                        if cfg_state.is_clearable_field() {
+                            let label = cfg_state.field_label();
+                            let is_timeout = cfg_state.selected_field
+                                == crate::views::tui_config_view::FIELD_ARGO_TIMEOUT;
                             match cfg_state.clear_current(&mut self.tui_config) {
-                                Ok(()) => self.set_toast(
-                                    "Cleared ArgoCD Hub setting".to_string(),
+                                Ok(()) if is_timeout => self.set_toast(
+                                    format!(
+                                        "Reset {label} to {}",
+                                        self.tui_config.argo_timeout_label()
+                                    ),
                                     Theme::status_ok(),
                                 ),
+                                Ok(()) => {
+                                    self.set_toast(format!("Cleared {label}"), Theme::status_ok())
+                                }
                                 Err(err) => self.set_toast(
                                     format!(
                                         "Settings applied for this session but not saved: {err}"
@@ -6370,20 +6653,14 @@ impl App {
                         }
                     }
                     KeyCode::Char('[') | KeyCode::Char('{') => {
-                        if let Err(err) = cfg_state.adjust_current(-5, &mut self.tui_config) {
-                            self.set_toast(
-                                format!("Settings applied for this session but not saved: {err}"),
-                                Theme::status_error(),
-                            );
-                        }
+                        let field = cfg_state.selected_field;
+                        let res = cfg_state.adjust_current(-5, &mut self.tui_config);
+                        self.report_config_change(field, res);
                     }
                     KeyCode::Char(']') | KeyCode::Char('}') => {
-                        if let Err(err) = cfg_state.adjust_current(5, &mut self.tui_config) {
-                            self.set_toast(
-                                format!("Settings applied for this session but not saved: {err}"),
-                                Theme::status_error(),
-                            );
-                        }
+                        let field = cfg_state.selected_field;
+                        let res = cfg_state.adjust_current(5, &mut self.tui_config);
+                        self.report_config_change(field, res);
                     }
                     KeyCode::Char('r') | KeyCode::Char('R') | KeyCode::Char('d') => {
                         match cfg_state.reset_defaults(&mut self.tui_config) {
@@ -7156,6 +7433,199 @@ impl App {
                 },
                 _ => {}
             },
+            ActiveView::Changed(changed) => match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => {
+                    if let Some(prev) = self.nav_stack.pop() {
+                        self.active_view = prev;
+                    } else {
+                        self.switch_view_to_kind(ResourceKind::Deployments).await;
+                    }
+                }
+                KeyCode::Tab | KeyCode::BackTab => {
+                    changed.toggle_tab();
+                }
+                // Arrows only: j/k are deliberately not bound in :changed.
+                KeyCode::Up => {
+                    changed.select_prev();
+                }
+                KeyCode::Down => {
+                    changed.select_next();
+                }
+                KeyCode::Char('u') => {
+                    changed.toggle_include_failing();
+                    self.refresh_changed_triage();
+                }
+                KeyCode::Char('S') => {
+                    changed.toggle_include_scaled();
+                    self.refresh_changed_triage();
+                }
+                KeyCode::Char('g') | KeyCode::Home => {
+                    changed.select_first();
+                }
+                KeyCode::Char('G') | KeyCode::End => {
+                    changed.select_last();
+                }
+                KeyCode::Char('[') => {
+                    changed.prev_window();
+                    self.refresh_changed_triage();
+                }
+                KeyCode::Char(']') => {
+                    changed.next_window();
+                    self.refresh_changed_triage();
+                }
+                KeyCode::Char('1') => {
+                    changed.set_window_by_str("15m");
+                    self.refresh_changed_triage();
+                }
+                KeyCode::Char('2') => {
+                    changed.set_window_by_str("30m");
+                    self.refresh_changed_triage();
+                }
+                KeyCode::Char('3') => {
+                    changed.set_window_by_str("1h");
+                    self.refresh_changed_triage();
+                }
+                KeyCode::Char('4') => {
+                    changed.set_window_by_str("3h");
+                    self.refresh_changed_triage();
+                }
+                KeyCode::Char('5') => {
+                    changed.set_window_by_str("24h");
+                    self.refresh_changed_triage();
+                }
+                KeyCode::Char('f') => {
+                    changed.cycle_filter();
+                }
+                KeyCode::Char('/') => {
+                    self.input_mode = InputMode::Filter;
+                    self.filter_buffer = changed.filter_query.clone();
+                }
+                KeyCode::Char('r') => {
+                    let msg = if self.changed_refreshing {
+                        "Triage report is already refreshing"
+                    } else {
+                        "Refreshing triage report..."
+                    };
+                    self.refresh_changed_triage();
+                    self.set_toast(msg.to_string(), Theme::status_ok());
+                }
+                KeyCode::Enter | KeyCode::Char('d') => match changed.active_tab {
+                    changed_view::ChangedTab::Deployments => {
+                        let target = changed
+                            .selected_deployment()
+                            .map(|d| (d.app_name.clone(), d.kind.clone(), d.namespace.clone()));
+                        if let Some((name, kind, ns)) = target {
+                            self.open_describe_view(name, kind, Some(ns)).await;
+                        }
+                    }
+                    changed_view::ChangedTab::Infra => {
+                        let target = changed
+                            .selected_infra()
+                            .map(|i| (i.name.clone(), i.kind.clone(), i.namespace.clone()));
+                        if let Some((name, kind, ns)) = target {
+                            self.open_describe_view(name, kind, Some(ns)).await;
+                        }
+                    }
+                },
+                KeyCode::Char('y') => match changed.active_tab {
+                    changed_view::ChangedTab::Deployments => {
+                        let target = changed
+                            .selected_deployment()
+                            .map(|d| (d.app_name.clone(), d.kind.clone(), d.namespace.clone()));
+                        if let Some((name, kind, ns)) = target {
+                            self.open_yaml_view(name, kind, Some(ns)).await;
+                        }
+                    }
+                    changed_view::ChangedTab::Infra => {
+                        let target = changed
+                            .selected_infra()
+                            .map(|i| (i.name.clone(), i.kind.clone(), i.namespace.clone()));
+                        if let Some((name, kind, ns)) = target {
+                            self.open_yaml_view(name, kind, Some(ns)).await;
+                        }
+                    }
+                },
+                KeyCode::Char('l') => {
+                    let target = changed.selected_deployment().map(|d| {
+                        (
+                            d.app_name.clone(),
+                            d.namespace.clone(),
+                            d.error_log_pod
+                                .clone()
+                                .or_else(|| d.pod_symptoms.first().map(|ps| ps.pod_name.clone()))
+                                .or_else(|| d.failing_pod_names.first().cloned()),
+                            d.error_log_container.clone(),
+                        )
+                    });
+                    if let Some((app_name, ns, pod_opt, container_opt)) = target {
+                        if let Some(pod_name) = pod_opt {
+                            if let Some(container) = container_opt {
+                                self.open_logs_view(pod_name, Some(ns), Some(container))
+                                    .await;
+                            } else {
+                                self.prompt_pod_logs(pod_name, Some(ns)).await;
+                            }
+                        } else {
+                            self.set_toast(
+                                format!("No failing pods listed for {} to tail logs", app_name),
+                                Theme::status_warn(),
+                            );
+                        }
+                    }
+                }
+                KeyCode::Char('a') => {
+                    let prompt_opt = changed.selected_deployment().map(|d| {
+                        let symptoms_str = if !d.pod_symptoms.is_empty() {
+                            d.pod_symptoms
+                                .iter()
+                                .map(|ps| {
+                                    if !ps.detail_message.is_empty() {
+                                        format!("{}: {} | {}", ps.pod_name, ps.status, ps.detail_message)
+                                    } else {
+                                        format!("{}: {}", ps.pod_name, ps.status)
+                                    }
+                                })
+                                .collect::<Vec<_>>()
+                                .join("; ")
+                        } else if !d.primary_symptoms.is_empty() {
+                            d.primary_symptoms.join("; ")
+                        } else {
+                            "None".to_string()
+                        };
+                        format!(
+                            "Analyze incident for {}/{} ({}):\nStatus: {}\nRoot Cause: {} {}\nRevision: {} (previous: {:?})\nImage Diff: {}\nReplicas: {}/{} Ready\nSymptoms: {}\nWhat is the root cause, and what steps should I take to remediate or rollback?",
+                            d.namespace,
+                            d.app_name,
+                            d.kind,
+                            d.incident_status.label(),
+                            d.failure_category.badge(),
+                            d.failure_detail,
+                            d.current_revision,
+                            d.previous_revision,
+                            d.image_diff,
+                            d.ready_replicas,
+                            d.desired_replicas,
+                            symptoms_str,
+                        )
+                    });
+                    if let Some(prompt) = prompt_opt {
+                        let old = std::mem::replace(&mut self.active_view, ActiveView::Assistant);
+                        self.nav_stack.push(old);
+                        self.submit_assistant_query(prompt.clone(), prompt);
+                        self.set_toast(
+                            "Diagnosing deployment failure with AI Assistant...".to_string(),
+                            Theme::status_ok(),
+                        );
+                    }
+                }
+                KeyCode::Char('e') => {
+                    self.switch_view_to_kind(ResourceKind::Events).await;
+                }
+                KeyCode::Char('s') => {
+                    self.start_quick_rca();
+                }
+                _ => {}
+            },
             ActiveView::HelmDetail(detail) => match key.code {
                 KeyCode::Esc | KeyCode::Char('q') => {
                     if let Some(prev) = self.nav_stack.pop() {
@@ -7396,6 +7866,27 @@ impl App {
                             self.trigger_argo_hard_refresh(&app.name, &app.namespace);
                         }
                     }
+                    KeyCode::Char('a') => {
+                        if let Some(ref app) = app_opt {
+                            match self.tui_config.argo_app_url(&app.namespace, &app.name) {
+                                Some(url) => match open_browser_url(&url) {
+                                    Ok(_) => self.set_toast(
+                                        format!("Opened ArgoCD: {url}"),
+                                        Theme::status_ok(),
+                                    ),
+                                    Err(err) => self.set_toast(
+                                        format!("Could not open browser: {err}"),
+                                        Theme::status_error(),
+                                    ),
+                                },
+                                None => self.set_toast(
+                                    "Set the ArgoCD UI URL in :config to open apps in the browser"
+                                        .to_string(),
+                                    Theme::status_warn(),
+                                ),
+                            }
+                        }
+                    }
                     KeyCode::Char('g') => {
                         if let Some(ref app) = app_opt {
                             if !app.repo_url.is_empty() {
@@ -7496,8 +7987,20 @@ impl App {
         }
     }
 
+    pub fn cancel_assistant_turn(&mut self) {
+        let ai = &mut self.assistant_state;
+        if ai.is_busy {
+            ai.cancel_turn();
+            self.set_toast(
+                "✓ Assistant generation cancelled".to_string(),
+                Theme::status_ok(),
+            );
+        }
+    }
+
     pub fn submit_assistant_query(&mut self, clean_query: String, agent_query: String) {
         let ai = &mut self.assistant_state;
+        ai.cancel_turn();
         ai.slash_suggestions.clear();
         ai.start_turn(clean_query);
         let query = if let Some(lvl) = ai.caveman_level {
@@ -7508,6 +8011,15 @@ impl App {
         let provider = self.ai_settings.default_provider;
         let active_ctx = self.active_context.clone();
         let active_ns = self.active_namespace.clone();
+        let argo_hub_ctx = self.tui_config.resolved_argo_hub_context();
+        let argo_hub_kc = self.tui_config.resolved_argo_hub_kubeconfig();
+
+        let mut kubeconfig_paths = self.kubeconfig_paths.clone();
+        if let Some(ref hub_kc) = argo_hub_kc {
+            if !kubeconfig_paths.contains(hub_kc) {
+                kubeconfig_paths.push(hub_kc.clone());
+            }
+        }
 
         if provider == crate::ai_config::AiProvider::Cursor {
             if let Some(cursor_bin) = crate::ai_config::find_cursor_binary() {
@@ -7515,10 +8027,13 @@ impl App {
                 let model = self.ai_settings.get_model(provider);
                 let api_key = self.ai_settings.get_api_key(provider);
                 let cache = self.client_cache.clone();
-                let kubeconfig_paths = self.kubeconfig_paths.clone();
                 let timeout_seconds = self.ai_settings.get_timeout_seconds(provider);
+                let hub_kc_opt = argo_hub_kc.clone();
 
-                tokio::spawn(async move {
+                let handle = tokio::spawn(async move {
+                    if let Some(ref hub_kc) = hub_kc_opt {
+                        cache.ensure_paths(vec![hub_kc.clone()]).await;
+                    }
                     crate::agent::run_boxed_cursor_turn(
                         cursor_bin,
                         model,
@@ -7526,6 +8041,7 @@ impl App {
                         query,
                         active_ctx,
                         active_ns,
+                        argo_hub_ctx,
                         cache,
                         kubeconfig_paths,
                         event_tx,
@@ -7533,19 +8049,21 @@ impl App {
                     )
                     .await;
                 });
+                ai.task = Some(handle.abort_handle());
             } else {
                 ai.add_assistant_message("cursor-agent CLI was not found on PATH. Install from https://docs.cursor.com/en/cli/overview or ensure ~/.local/bin is in your PATH.".to_string());
             }
         } else if let Some(config) = self.ai_settings.resolve_provider_config(provider) {
             let event_tx = self.event_tx.clone();
             let cache = self.client_cache.clone();
-            let kubeconfig_paths = self.kubeconfig_paths.clone();
-            let active_ctx = self.active_context.clone();
-            let active_ns = self.active_namespace.clone();
             let history = ai.native_history.clone();
             let timeout_seconds = self.ai_settings.get_timeout_seconds(provider);
+            let hub_kc_opt = argo_hub_kc.clone();
 
-            tokio::spawn(async move {
+            let handle = tokio::spawn(async move {
+                if let Some(ref hub_kc) = hub_kc_opt {
+                    cache.ensure_paths(vec![hub_kc.clone()]).await;
+                }
                 let server = crate::agent::build_mcp_server(cache, kubeconfig_paths);
                 let invoker = std::sync::Arc::new(crate::agent::McpToolInvoker::new(server));
                 crate::agent::run_native_agent_turn(
@@ -7555,11 +8073,13 @@ impl App {
                     query,
                     active_ctx,
                     active_ns,
+                    argo_hub_ctx,
                     event_tx,
                     timeout_seconds,
                 )
                 .await;
             });
+            ai.task = Some(handle.abort_handle());
         } else {
             let env_var = crate::ai_config::env_var_for_provider(provider);
             let prov_name = crate::ai_config::provider_display_name(provider);
@@ -8009,6 +8529,10 @@ impl App {
                 bgp.search_query = filter;
                 bgp.clamp_selection();
             }
+            ActiveView::Changed(changed) => {
+                changed.filter_query = filter;
+                changed.clamp_selection();
+            }
             _ => {}
         }
     }
@@ -8049,6 +8573,9 @@ impl App {
                 bgp.search_query.clear();
                 bgp.clamp_selection();
             }
+            ActiveView::Changed(changed) => {
+                changed.filter_query.clear();
+            }
             _ => {}
         }
     }
@@ -8066,8 +8593,10 @@ impl App {
             return;
         }
         if let ActiveView::Assistant = &mut self.active_view {
-            let cleaned = text.replace("\r\n", " ").replace('\n', " ");
-            self.assistant_state.input.push_str(&cleaned);
+            // The Assistant input is multi-line: keep a pasted log's lines,
+            // and paste at the cursor rather than at the end.
+            self.assistant_state
+                .insert_str(&normalize_line_breaks(&text));
             return;
         }
         if let ActiveView::Settings(ref mut settings) = self.active_view {
@@ -8304,6 +8833,13 @@ impl App {
                 if !arg.is_empty() {
                     if let ActiveView::Argo(ref mut argo) = self.active_view {
                         argo.filter_query = arg.to_string();
+                    } else if let ActiveView::Changed(ref mut changed) = self.active_view {
+                        if srelens_kube::changed::parse_duration(arg).is_ok() {
+                            changed.set_window_by_str(arg);
+                            self.refresh_changed_triage();
+                        } else {
+                            changed.filter_query = arg.to_string();
+                        }
                     }
                 }
             }
@@ -8847,12 +9383,18 @@ impl App {
         let cache = self.client_cache.clone();
         let event_tx = self.event_tx.clone();
 
+        let crd_identifier = if crd.crd_name.is_empty() {
+            crd.kind.clone()
+        } else {
+            crd.crd_name.clone()
+        };
+
         tokio::spawn(async move {
             let client = match cache.get(&ctx).await {
                 Ok(c) => c,
                 Err(e) => {
                     let _ = event_tx.send(AppEvent::ActionResult {
-                        title: format!("crd_instances_failed:{}", crd.kind),
+                        title: format!("crd_instances_failed:{}", crd_identifier),
                         result: Err(e.to_string()),
                     });
                     return;
@@ -8884,50 +9426,17 @@ impl App {
                     let items: Vec<serde_json::Value> = list
                         .items
                         .into_iter()
-                        .map(|item| {
-                            let mut val = item.data;
-                            if let Ok(meta_val) = serde_json::to_value(&item.metadata) {
-                                if let Some(obj) = val.as_object_mut() {
-                                    obj.insert("metadata".to_string(), meta_val.clone());
-                                    if let Some(n) = &item.metadata.name {
-                                        obj.insert(
-                                            "name".to_string(),
-                                            serde_json::Value::String(n.clone()),
-                                        );
-                                    }
-                                    if let Some(ns_name) = &item.metadata.namespace {
-                                        obj.insert(
-                                            "namespace".to_string(),
-                                            serde_json::Value::String(ns_name.clone()),
-                                        );
-                                    }
-                                    if let Some(ts) = &item.metadata.creation_timestamp {
-                                        let age = srelens_kube::humanize_age(Some(ts));
-                                        obj.insert(
-                                            "age".to_string(),
-                                            serde_json::Value::String(age),
-                                        );
-                                        obj.insert(
-                                            "createdAt".to_string(),
-                                            serde_json::Value::String(
-                                                srelens_kube::creation_timestamp_iso(Some(ts)),
-                                            ),
-                                        );
-                                    }
-                                }
-                            }
-                            val
-                        })
+                        .map(|item| crd_row_value(item, &ar.api_version, &crd.kind))
                         .collect();
 
                     let _ = event_tx.send(AppEvent::ActionResult {
-                        title: format!("crd_instances:{}", crd.kind),
+                        title: format!("crd_instances:{}", crd_identifier),
                         result: Ok(serde_json::to_string(&items).unwrap_or_default()),
                     });
                 }
                 Err(e) => {
                     let _ = event_tx.send(AppEvent::ActionResult {
-                        title: format!("crd_instances_failed:{}", crd.kind),
+                        title: format!("crd_instances_failed:{}", crd_identifier),
                         result: Err(e.to_string()),
                     });
                 }
@@ -9056,6 +9565,42 @@ impl App {
                 let (pods, nodes) = self.build_top_rows();
                 top_state.set_data(pods, nodes);
                 ActiveView::Top(top_state)
+            }
+            ResourceKind::Changed => {
+                let changed_state = changed_view::ChangedViewState::new();
+                let window = changed_state.current_window();
+                let opts = srelens_kube::changed::TriageOptions {
+                    include_failing: changed_state.include_failing,
+                    include_scaled: changed_state.include_scaled,
+                    log_snippets: false,
+                };
+                let ctx = self.active_context.clone();
+                let ns = if self.active_namespace.is_empty() {
+                    None
+                } else {
+                    Some(self.active_namespace.clone())
+                };
+                let cache = self.client_cache.clone();
+                let event_tx = self.event_tx.clone();
+                self.changed_refreshing = true;
+
+                tokio::spawn(async move {
+                    let res = srelens_kube::changed::fetch_changed_triage(
+                        &cache,
+                        &ctx,
+                        ns.as_deref(),
+                        window,
+                        opts,
+                    )
+                    .await;
+                    let _ = event_tx.send(crate::event::AppEvent::ChangedTriageResult {
+                        context: ctx,
+                        namespace: ns,
+                        result: res,
+                    });
+                });
+
+                ActiveView::Changed(changed_state)
             }
             _ => {
                 let mut table = ResourceTableState::new(kind.clone());
@@ -9639,6 +10184,21 @@ impl App {
         }
     }
 
+    /// `api_resource_for_api_version` guesses the plural from the kind
+    /// ("Prometheus" -> ?). When discovery knows this CRD, use its real
+    /// plural: the name-only path always did, and pinning must not regress
+    /// a CRD whose plural is not the regular one.
+    fn with_discovered_plural(&self, mut ar: kube::core::ApiResource) -> kube::core::ApiResource {
+        if let Some(crd) = self
+            .crds
+            .iter()
+            .find(|c| c.group == ar.group && c.kind.eq_ignore_ascii_case(&ar.kind))
+        {
+            ar.plural = crd.plural.clone();
+        }
+        ar
+    }
+
     pub async fn open_yaml_view(&mut self, name: String, kind: String, namespace: Option<String>) {
         self.open_yaml_view_in_group(name, kind, namespace, None)
             .await;
@@ -9662,7 +10222,8 @@ impl App {
         let kubeconfig_paths = self.kubeconfig_paths.clone();
         let pinned = api_version
             .as_deref()
-            .and_then(|v| srelens_kube::manifest::api_resource_for_api_version(v, &k));
+            .and_then(|v| srelens_kube::manifest::api_resource_for_api_version(v, &k))
+            .map(|ar| self.with_discovered_plural(ar));
         let crd_opt = if pinned.is_some() {
             None
         } else {
@@ -9718,9 +10279,16 @@ impl App {
         };
         let pinned_api_version = pinned.as_ref().map(|ar| ar.api_version.clone());
 
-        let yaml_text = tokio::task::spawn(async move {
+        let fetched = tokio::task::spawn(async move {
             let ns = ns_task;
-            if let Ok(client) = cache.get(&ctx).await {
+            // Why each attempt failed, so a failure can say what happened
+            // instead of "unable to fetch" (AGENTS.md: say what you know).
+            let mut failures: Vec<String> = Vec::new();
+            let client_res = cache.get(&ctx).await;
+            if let Err(ref e) = client_res {
+                failures.push(format!("connect to '{ctx}': {e}"));
+            }
+            if let Ok(client) = client_res {
                 if let Some(ar) = pinned.clone() {
                     let api: kube::Api<kube::core::DynamicObject> = match ns.as_deref() {
                         Some(ns) if !ns.is_empty() => {
@@ -9728,11 +10296,14 @@ impl App {
                         }
                         _ => kube::Api::all_with(client.clone(), &ar),
                     };
-                    if let Ok(mut obj) = api.get(&n).await {
-                        obj.metadata.managed_fields = None;
-                        if let Ok(y) = serde_yaml::to_string(&obj) {
-                            return y;
+                    match api.get(&n).await {
+                        Ok(mut obj) => {
+                            obj.metadata.managed_fields = None;
+                            if let Ok(y) = serde_yaml::to_string(&obj) {
+                                return Ok(y);
+                            }
                         }
+                        Err(e) => failures.push(format!("apiserver ({}): {e}", ar.api_version)),
                     }
                 }
 
@@ -9758,11 +10329,14 @@ impl App {
                     } else {
                         kube::Api::all_with(client.clone(), &ar)
                     };
-                    if let Ok(mut obj) = api.get(&n).await {
-                        obj.metadata.managed_fields = None;
-                        if let Ok(y) = serde_yaml::to_string(&obj) {
-                            return y;
+                    match api.get(&n).await {
+                        Ok(mut obj) => {
+                            obj.metadata.managed_fields = None;
+                            if let Ok(y) = serde_yaml::to_string(&obj) {
+                                return Ok(y);
+                            }
                         }
+                        Err(e) => failures.push(format!("apiserver ({}): {e}", ar.api_version)),
                     }
                 }
 
@@ -9781,11 +10355,14 @@ impl App {
                     } else {
                         kube::Api::all_with(client.clone(), &ar)
                     };
-                    if let Ok(mut obj) = api.get(&n).await {
-                        obj.metadata.managed_fields = None;
-                        if let Ok(y) = serde_yaml::to_string(&obj) {
-                            return y;
+                    match api.get(&n).await {
+                        Ok(mut obj) => {
+                            obj.metadata.managed_fields = None;
+                            if let Ok(y) = serde_yaml::to_string(&obj) {
+                                return Ok(y);
+                            }
                         }
+                        Err(e) => failures.push(format!("apiserver ({}): {e}", ar.api_version)),
                     }
                 }
 
@@ -9814,7 +10391,7 @@ impl App {
                         if let Ok(mut obj) = api.get(&n).await {
                             obj.metadata.managed_fields = None;
                             if let Ok(y) = serde_yaml::to_string(&obj) {
-                                return y;
+                                return Ok(y);
                             }
                         }
                     }
@@ -9830,7 +10407,7 @@ impl App {
                     if let Ok(mut obj) = api.get(&n).await {
                         obj.metadata.managed_fields = None;
                         if let Ok(y) = serde_yaml::to_string(&obj) {
-                            return y;
+                            return Ok(y);
                         }
                     }
                 }
@@ -9860,31 +10437,47 @@ impl App {
                 cmd.env("KUBECONFIG", joined);
             }
 
-            if let Ok(output) = cmd.output().await {
-                if output.status.success() {
+            match cmd.output().await {
+                Ok(output) if output.status.success() => {
                     let text = String::from_utf8_lossy(&output.stdout).to_string();
                     if !text.trim().is_empty() {
-                        return text;
+                        return Ok(text);
                     }
+                    failures.push("kubectl: returned an empty manifest".to_string());
                 }
+                Ok(output) => failures.push(format!(
+                    "kubectl: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                )),
+                Err(e) => failures.push(format!("kubectl: could not run: {e}")),
             }
 
-            if is_cluster_scoped || ns.is_none() {
-                format!("# Error: Unable to fetch live manifest for {}/{}\n", k, n)
+            let scope_ns = if is_cluster_scoped {
+                None
             } else {
-                format!(
-                    "# Error: Unable to fetch live manifest for {}/{} in namespace {}\n",
-                    k,
-                    n,
-                    ns.as_deref().unwrap_or("default")
-                )
-            }
+                ns.as_deref()
+            };
+            Err(manifest_fetch_error(&k, &n, scope_ns, &failures))
         })
         .await
-        .unwrap_or_default();
+        .unwrap_or_else(|e| Err(format!("Manifest fetch task failed: {e}")));
 
+        // A failed fetch is shown as what it is, and edit refuses to open on
+        // it: an editor on an error comment ended in "No YAML documents
+        // found", which named nothing that went wrong.
+        let (yaml_text, load_error) = match fetched {
+            Ok(text) => (text, None),
+            Err(reason) => (
+                reason
+                    .lines()
+                    .map(|l| format!("# {l}\n"))
+                    .collect::<String>(),
+                Some(reason),
+            ),
+        };
         let mut yaml_state = YamlViewState::new(name, kind, ns, yaml_text);
         yaml_state.pinned_api_version = pinned_api_version;
+        yaml_state.load_error = load_error;
         let old_view = std::mem::replace(&mut self.active_view, ActiveView::Yaml(yaml_state));
         self.nav_stack.push(old_view);
     }
@@ -9915,7 +10508,8 @@ impl App {
         let kubeconfig_paths = self.kubeconfig_paths.clone();
         let pinned = api_version
             .as_deref()
-            .and_then(|v| srelens_kube::manifest::api_resource_for_api_version(v, &k));
+            .and_then(|v| srelens_kube::manifest::api_resource_for_api_version(v, &k))
+            .map(|ar| self.with_discovered_plural(ar));
         let crd_opt = if pinned.is_some() {
             None
         } else {
@@ -10391,6 +10985,241 @@ impl App {
         }
     }
 
+    pub fn refresh_changed_triage(&mut self) {
+        if self.changed_refreshing {
+            return;
+        }
+        let (window, ns, opts) = if let ActiveView::Changed(changed) = &mut self.active_view {
+            if changed.report.is_none() {
+                changed.is_loading = true;
+            }
+            let ns = if self.active_namespace.is_empty() {
+                None
+            } else {
+                Some(self.active_namespace.clone())
+            };
+            // The card links to full logs (`l`) and Quick RCA fetches its
+            // own tail, so a refresh makes no log calls.
+            let opts = srelens_kube::changed::TriageOptions {
+                include_failing: changed.include_failing,
+                include_scaled: changed.include_scaled,
+                log_snippets: false,
+            };
+            (changed.current_window(), ns, opts)
+        } else {
+            return;
+        };
+
+        self.changed_refreshing = true;
+        let ctx = self.active_context.clone();
+        let cache = self.client_cache.clone();
+        let event_tx = self.event_tx.clone();
+
+        tokio::spawn(async move {
+            let res = srelens_kube::changed::fetch_changed_triage(
+                &cache,
+                &ctx,
+                ns.as_deref(),
+                window,
+                opts,
+            )
+            .await;
+            let _ = event_tx.send(crate::event::AppEvent::ChangedTriageResult {
+                context: ctx,
+                namespace: ns,
+                result: res,
+            });
+        });
+    }
+
+    /// `s` on the `:changed` Deployments tab: one tool-less completion over
+    /// the selected workload's card plus a 20-line log tail, rendered inline.
+    /// A cached answer for the same revision is re-run on purpose: the key is
+    /// how the reader asks for a fresh one.
+    pub fn start_quick_rca(&mut self) {
+        use changed_view::{QuickRca, QuickRcaStatus};
+        let provider = self.ai_settings.default_provider;
+        let provider_name = crate::ai_config::provider_display_name(provider).to_string();
+        let timeout_seconds = self.ai_settings.get_timeout_seconds(provider);
+        let config = self.ai_settings.resolve_provider_config(provider);
+
+        let ActiveView::Changed(changed) = &mut self.active_view else {
+            return;
+        };
+        if changed.active_tab != changed_view::ChangedTab::Deployments {
+            self.set_toast(
+                "Quick AI RCA works on workloads; press Tab for the Deployments tab".to_string(),
+                Theme::status_warn(),
+            );
+            return;
+        }
+        let Some(d) = changed.selected_deployment().cloned() else {
+            self.set_toast("Select a workload first".to_string(), Theme::status_warn());
+            return;
+        };
+        let key = changed.rca_key(&d);
+        if matches!(
+            changed.ai_summaries.get(&key).map(|r| &r.status),
+            Some(QuickRcaStatus::Loading)
+        ) {
+            self.set_toast(
+                format!("Already analyzing {}", d.app_name),
+                Theme::status_warn(),
+            );
+            return;
+        }
+
+        let entry = |status| QuickRca {
+            pod_name: d.error_log_pod.clone(),
+            provider: provider_name.clone(),
+            status,
+            updated_at: std::time::Instant::now(),
+        };
+
+        // Said before any request goes out, and said precisely: Cursor has a
+        // key but no HTTP path, so "no API key" would be false for it.
+        let config = if provider == crate::ai_config::AiProvider::Cursor {
+            Err(format!(
+                "Quick AI RCA needs an HTTP provider; {provider_name} runs only through the \
+                 Assistant. Press [a] for it, or pick another provider in :ai-settings."
+            ))
+        } else {
+            config.ok_or_else(|| {
+                format!(
+                    "No API key configured for {provider_name}. Add one in :ai-settings, or set {}.",
+                    crate::ai_config::env_var_for_provider(provider)
+                )
+            })
+        };
+        let config = match config {
+            Ok(c) => c,
+            Err(msg) => {
+                changed
+                    .ai_summaries
+                    .insert(key, entry(QuickRcaStatus::Error(msg)));
+                return;
+            }
+        };
+
+        changed
+            .ai_summaries
+            .insert(key.clone(), entry(QuickRcaStatus::Loading));
+        let context = changed.context.clone();
+        let cache = self.client_cache.clone();
+        let event_tx = self.event_tx.clone();
+
+        tokio::spawn(async move {
+            // Fetch the longer tail from the pod and container the report
+            // chose. A failed fetch is said as such in the prompt, not
+            // passed off as a pod that never ran.
+            use crate::quick_rca::LogEvidence;
+            let logs = match d.error_log_pod.as_deref() {
+                Some(pod) => match srelens_kube::changed::fetch_error_log_tail(
+                    &cache,
+                    &context,
+                    &d.namespace,
+                    pod,
+                    d.error_log_container.as_deref(),
+                    crate::quick_rca::LOG_TAIL_LINES,
+                )
+                .await
+                {
+                    Ok(Some(lines)) => LogEvidence::Lines(lines),
+                    Ok(None) => LogEvidence::NeverRan,
+                    Err(e) => LogEvidence::Unavailable(e),
+                },
+                None => LogEvidence::NeverRan,
+            };
+            let prompt = crate::quick_rca::build_prompt(&d, &logs);
+            let result = crate::quick_rca::run(config, prompt, timeout_seconds).await;
+            let _ = event_tx.send(crate::event::AppEvent::ChangedQuickRcaResult { key, result });
+        });
+    }
+
+    /// After a `:config` adjust or cycle: a save error says so, and a change
+    /// to the ArgoCD fetch timeout says the value now in effect, since the
+    /// setting's whole point is the number the next `:argo` fetch will use.
+    fn report_config_change(&mut self, field: usize, res: Result<(), String>) {
+        match res {
+            Err(err) => self.set_toast(
+                format!("Settings applied for this session but not saved: {err}"),
+                Theme::status_error(),
+            ),
+            Ok(()) if field == crate::views::tui_config_view::FIELD_ARGO_TIMEOUT => self.set_toast(
+                format!(
+                    "ArgoCD fetch timeout: {}",
+                    self.tui_config.argo_timeout_label()
+                ),
+                Theme::status_ok(),
+            ),
+            Ok(()) => {}
+        }
+    }
+
+    pub fn handle_changed_quick_rca_result(&mut self, key: &str, result: Result<String, String>) {
+        use changed_view::QuickRcaStatus;
+        // Left the view, or a different report took its place: nothing to
+        // update. The key carries cluster and revision, so a late reply can
+        // only land on the entry that asked for it.
+        let ActiveView::Changed(changed) = &mut self.active_view else {
+            return;
+        };
+        let Some(entry) = changed.ai_summaries.get_mut(key) else {
+            return;
+        };
+        entry.status = match result.and_then(|text| crate::quick_rca::parse_reply(&text)) {
+            Ok(reply) => QuickRcaStatus::Ready {
+                root_cause: reply.root_cause,
+                action_item: reply.action_item,
+            },
+            Err(e) => QuickRcaStatus::Error(format!(
+                "{} did not answer: {}. Press [s] to retry.",
+                entry.provider,
+                e.trim_end_matches('.')
+            )),
+        };
+        entry.updated_at = std::time::Instant::now();
+    }
+
+    pub fn handle_changed_triage_result(
+        &mut self,
+        context: &str,
+        namespace: Option<&str>,
+        result: Result<srelens_kube::changed::ChangedTriageReport, String>,
+    ) {
+        self.changed_refreshing = false;
+        if let ActiveView::Changed(changed) = &mut self.active_view {
+            let cur_ns = if self.active_namespace.is_empty() {
+                None
+            } else {
+                Some(self.active_namespace.as_str())
+            };
+            if self.active_context != context || cur_ns != namespace {
+                self.refresh_changed_triage();
+                return;
+            }
+            // A window change while a fetch was in flight could not start its
+            // own fetch (one at a time); drop the old window's answer rather
+            // than show it under the new window's label, and fetch again.
+            // The same holds for the `u` scope toggle.
+            let wanted = changed.current_window().as_secs();
+            let wanted_scope = (changed.include_failing, changed.include_scaled);
+            match result {
+                Ok(report)
+                    if report.window_seconds != wanted
+                        || (report.includes_failing, report.includes_scaled) != wanted_scope =>
+                {
+                    self.refresh_changed_triage();
+                }
+                Ok(report) => {
+                    changed.context = context.to_string();
+                    changed.set_report(report);
+                }
+                Err(err) => changed.set_error(err),
+            }
+        }
+    }
+
     pub fn refresh_helm_releases(&mut self) {
         if self.helm_refreshing {
             return;
@@ -10501,6 +11330,31 @@ impl App {
         });
     }
 
+    pub fn refresh_helm_detail_silent(&mut self, name: &str, namespace: &str) {
+        if self.helm_refreshing {
+            return;
+        }
+        self.helm_refreshing = true;
+        let ctx = self.active_context.clone();
+        let cache = self.client_cache.clone();
+        let event_tx = self.event_tx.clone();
+        let name_c = name.to_string();
+        let ns_c = namespace.to_string();
+
+        tokio::spawn(async move {
+            let res =
+                srelens_kube::helm::fetch_helm_release_detail(&cache, &ctx, &ns_c, &name_c, None)
+                    .await;
+            let _ = event_tx.send(crate::event::AppEvent::HelmDetailResult {
+                context: ctx,
+                namespace: ns_c,
+                name: name_c,
+                revision: None,
+                result: res,
+            });
+        });
+    }
+
     pub fn handle_helm_detail_result(
         &mut self,
         context: &str,
@@ -10509,6 +11363,7 @@ impl App {
         revision: Option<i64>,
         result: Result<srelens_kube::helm::HelmReleaseDetail, String>,
     ) {
+        self.helm_refreshing = false;
         if let ActiveView::HelmDetail(detail) = &mut self.active_view {
             if self.active_context == context
                 && detail.namespace == namespace
@@ -10763,6 +11618,48 @@ impl App {
         });
     }
 
+    pub fn refresh_argo_detail_silent(&mut self, name: &str, namespace: &str) {
+        if self.argo_refreshing {
+            return;
+        }
+        self.argo_refreshing = true;
+        let hub_ctx = if let ActiveView::ArgoDetail(detail) = &self.active_view {
+            detail.hub_context.clone()
+        } else {
+            self.argo_refreshing = false;
+            return;
+        };
+        let hub_kubeconfig = if hub_ctx.is_some() {
+            self.tui_config.resolved_argo_hub_kubeconfig()
+        } else {
+            None
+        };
+        let query_ctx = hub_ctx
+            .as_deref()
+            .unwrap_or(&self.active_context)
+            .to_string();
+        let cache = self.client_cache.clone();
+        let event_tx = self.event_tx.clone();
+        let name_c = name.to_string();
+        let ns_c = namespace.to_string();
+
+        tokio::spawn(async move {
+            if let Some(ref path) = hub_kubeconfig {
+                cache.ensure_paths(vec![path.clone()]).await;
+            }
+            let res = srelens_kube::argo::fetch_argo_application_detail(
+                &cache, &query_ctx, &name_c, &ns_c,
+            )
+            .await;
+            let _ = event_tx.send(crate::event::AppEvent::ArgoDetailResult {
+                context: query_ctx,
+                namespace: ns_c,
+                name: name_c,
+                result: res,
+            });
+        });
+    }
+
     pub fn handle_argo_detail_result(
         &mut self,
         context: &str,
@@ -10770,6 +11667,7 @@ impl App {
         name: &str,
         result: Result<srelens_kube::argo::ArgoApplication, String>,
     ) {
+        self.argo_refreshing = false;
         if let ActiveView::ArgoDetail(detail) = &mut self.active_view {
             let expected_ctx = detail
                 .hub_context
@@ -12779,10 +13677,26 @@ impl App {
         if let Some(err_msg) = payload.get("error").and_then(|v| v.as_str()) {
             if let Some(cur_ch) = &self.current_watch_channel {
                 if *cur_ch == channel {
+                    let clean_err = if err_msg.contains("404")
+                        || err_msg.to_ascii_lowercase().contains("not found")
+                    {
+                        "Resource definition not found on cluster (404 Not Found)".to_string()
+                    } else if err_msg.to_ascii_lowercase().contains("forbidden") {
+                        "Access forbidden by RBAC permissions (403 Forbidden)".to_string()
+                    } else {
+                        let first_line = err_msg.lines().next().unwrap_or(err_msg);
+                        first_line
+                            .split(" (Status {")
+                            .next()
+                            .unwrap_or(first_line)
+                            .trim()
+                            .to_string()
+                    };
+
                     if let ActiveView::Table(table) = &mut self.active_view {
-                        table.is_loading = false;
+                        table.set_error(clean_err.clone());
                     }
-                    self.set_toast(format!("Watch error: {}", err_msg), Theme::status_error());
+                    self.set_toast(format!("Watch error: {}", clean_err), Theme::status_error());
                 }
             }
             return;
@@ -12950,6 +13864,7 @@ impl App {
                 top_view::TopTab::Pods => "Top Pods Hotspots",
                 top_view::TopTab::Nodes => "Top Nodes Hotspots",
             },
+            ActiveView::Changed(_) => "Changed & Triage",
         };
 
         let active_pods_count = if let ActiveView::Table(t) = &self.active_view {
@@ -13021,9 +13936,12 @@ impl App {
             ActiveView::Helm(helm) => render_helm_view(f, chunks[1], helm),
             ActiveView::HelmDetail(detail) => render_helm_detail_view(f, chunks[1], detail),
             ActiveView::Argo(argo) => argo_view::render_argo_view(f, chunks[1], argo),
-            ActiveView::ArgoDetail(detail) => {
-                argo_detail_view::render_argo_detail_view(f, chunks[1], detail)
-            }
+            ActiveView::ArgoDetail(detail) => argo_detail_view::render_argo_detail_view_with(
+                f,
+                chunks[1],
+                detail,
+                self.tui_config.argo_ui_url.is_some(),
+            ),
             ActiveView::Overview(ov) => render_overview_view(f, chunks[1], ov),
             ActiveView::Toolbox(tb) => render_toolbox_view(f, chunks[1], tb),
             ActiveView::Assistant => {
@@ -13037,6 +13955,7 @@ impl App {
             ActiveView::GpuInfo(gpu) => gpu_view::render(f, chunks[1], gpu),
             ActiveView::Bgp(bgp) => render_bgp_view(f, chunks[1], bgp),
             ActiveView::Top(top) => top_view::render_top_view(f, chunks[1], top),
+            ActiveView::Changed(changed) => render_changed_view(f, chunks[1], changed),
         }
 
         // 3. Render Status Bar
@@ -13087,6 +14006,26 @@ impl App {
                 true,
             ),
             ActiveView::ArgoDetail(_) => (0, 0, false),
+            ActiveView::Changed(changed) => match changed.active_tab {
+                changed_view::ChangedTab::Deployments => (
+                    changed.filtered_deployments().len(),
+                    changed
+                        .report
+                        .as_ref()
+                        .map(|r| r.deployments.len())
+                        .unwrap_or(0),
+                    false,
+                ),
+                changed_view::ChangedTab::Infra => (
+                    changed.filtered_infra().len(),
+                    changed
+                        .report
+                        .as_ref()
+                        .map(|r| r.infra_changes.len())
+                        .unwrap_or(0),
+                    false,
+                ),
+            },
             _ => (0, 0, false),
         };
 
@@ -13245,6 +14184,11 @@ impl App {
                     ("<?>", "Help"),
                 ][..],
             ),
+            // The view's own footer and card carry its keys; only the
+            // app-wide ones live here.
+            ActiveView::Changed(_) => {
+                Some(&[("<:>", "Cmd"), ("<?>", "Help"), ("<Esc>", "Back")][..])
+            }
             ActiveView::Topology(_) => Some(
                 &[
                     ("<:>", "Cmd"),
@@ -13562,6 +14506,22 @@ impl App {
                     ("<p>", "Auto-Sync"),
                     ("<R>", "Hard Refresh"),
                     ("<g>", "Git"),
+                    ("<r>", "Reload"),
+                    ("<Esc>", "Back"),
+                    ("<?>", "Help"),
+                ][..],
+            ),
+            // `a` is advertised only when there is a UI URL to open.
+            ActiveView::ArgoDetail(_) if self.tui_config.argo_ui_url.is_some() => Some(
+                &[
+                    ("<:>", "Cmd"),
+                    ("<1-4>", "Tabs"),
+                    ("<x>", "Actions / AI"),
+                    ("<s>", "Sync"),
+                    ("<p>", "Auto-Sync"),
+                    ("<R>", "Hard Refresh"),
+                    ("<g>", "Git"),
+                    ("<a>", "ArgoCD UI"),
                     ("<r>", "Reload"),
                     ("<Esc>", "Back"),
                     ("<?>", "Help"),

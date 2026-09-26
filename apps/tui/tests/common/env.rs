@@ -71,7 +71,10 @@ impl Drop for EnvGuard {
 pub fn isolate_settings() -> SettingsGuard {
     let mut env = lock();
     let dir = tempfile::tempdir().expect("scratch configuration directory");
-    env.set("SRELENS_AI_SETTINGS_PATH", dir.path().join("ai_settings.json"));
+    env.set(
+        "SRELENS_AI_SETTINGS_PATH",
+        dir.path().join("ai_settings.json"),
+    );
     env.set("SRELENS_TUI_CONFIG_PATH", dir.path().join("tui.json"));
     SettingsGuard {
         _env: env,
@@ -83,4 +86,13 @@ pub struct SettingsGuard {
     // Restore the environment before deleting the files it pointed at.
     _env: EnvGuard,
     _dir: tempfile::TempDir,
+}
+
+impl SettingsGuard {
+    /// Unset `name` for this test, restored on drop. For settings that also
+    /// read the environment, such as a provider's API key variable.
+    #[allow(dead_code)]
+    pub fn remove_env(&mut self, name: &'static str) {
+        self._env.remove(name);
+    }
 }

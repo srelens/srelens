@@ -230,6 +230,17 @@ fn source_tag(path: &Path) -> String {
         .to_string()
 }
 
+/// Helper to resolve the cluster server URL for a context in a SourceConfig.
+fn context_server_url(sc: &SourceConfig, cluster_name: &str) -> String {
+    sc.config
+        .clusters
+        .iter()
+        .find(|cluster| cluster.name == cluster_name)
+        .and_then(|cluster| cluster.cluster.as_ref())
+        .and_then(|cluster| cluster.server.clone())
+        .unwrap_or_default()
+}
+
 /// Enumerate every context across the parsed configs (in file order), assigning
 /// each a unique display name. Pure over parsed input so it is unit-testable
 /// without touching the filesystem.
@@ -241,14 +252,32 @@ pub fn resolve_from(configs: &[SourceConfig]) -> Vec<ResolvedContext> {
         .find_map(|sc| sc.config.current_context.clone())
         .filter(|current| !current.is_empty());
 
-    // Count each original name across all files so we only prefix real clashes.
-    let mut counts: HashMap<&str, usize> = HashMap::new();
+    // Track identical duplicate definitions across files: if an earlier file
+    // already defined context `X` pointing to a known server `S` with user `U`, subsequent definitions
+    // of `(X, S, U)` are exact duplicates. They should not be emitted and should not
+    // inflate collision counts.
+    let mut seen_canonical: std::collections::HashSet<(String, String, String)> =
+        std::collections::HashSet::new();
+
+    // Count each original name across all files (excluding identical duplicates)
+    // so we only prefix real clashes between different clusters.
+    let mut counts: HashMap<String, usize> = HashMap::new();
     for sc in configs {
         for named in &sc.config.contexts {
-            *counts.entry(named.name.as_str()).or_default() += 1;
+            let original = &named.name;
+            let context = named.context.as_ref();
+            let cluster_name = context.map(|c| c.cluster.as_str()).unwrap_or_default();
+            let user_name = context.and_then(|c| c.user.as_deref()).unwrap_or_default();
+            let server = context_server_url(sc, cluster_name);
+            let is_duplicate = !server.is_empty()
+                && !seen_canonical.insert((original.clone(), server, user_name.to_string()));
+            if !is_duplicate {
+                *counts.entry(original.clone()).or_default() += 1;
+            }
         }
     }
 
+    seen_canonical.clear();
     let mut used: HashMap<String, usize> = HashMap::new();
     let mut current_taken = false;
     let mut out = Vec::new();
@@ -257,8 +286,20 @@ pub fn resolve_from(configs: &[SourceConfig]) -> Vec<ResolvedContext> {
         let tag = source_tag(&sc.source);
         for named in &sc.config.contexts {
             let original = named.name.clone();
-            // Prefix only names that appear in more than one file.
-            let base = if counts.get(original.as_str()).copied().unwrap_or(0) > 1 {
+            let context = named.context.clone().unwrap_or_default();
+            let cluster_name = context.cluster;
+            let user_name = context.user.clone().unwrap_or_default();
+            let server = context_server_url(sc, &cluster_name);
+
+            // Skip identical duplicates already registered from an earlier file.
+            if !server.is_empty()
+                && !seen_canonical.insert((original.clone(), server.clone(), user_name))
+            {
+                continue;
+            }
+
+            // Prefix only names that appear in more than one distinct cluster/file.
+            let base = if counts.get(&original).copied().unwrap_or(0) > 1 {
                 format!("{tag}/{original}")
             } else {
                 original.clone()
@@ -267,19 +308,13 @@ pub fn resolve_from(configs: &[SourceConfig]) -> Vec<ResolvedContext> {
             // with the same stem and context name): suffix with a counter.
             let seen = used.entry(base.clone()).or_insert(0);
             *seen += 1;
-            let display_name = if *seen == 1 { base.clone() } else { format!("{base} ({seen})") };
+            let display_name = if *seen == 1 {
+                base.clone()
+            } else {
+                format!("{base} ({seen})")
+            };
 
-            let context = named.context.clone().unwrap_or_default();
-            let cluster_name = context.cluster;
             let user_name = context.user.unwrap_or_default();
-            let server = sc
-                .config
-                .clusters
-                .iter()
-                .find(|cluster| cluster.name == cluster_name)
-                .and_then(|cluster| cluster.cluster.as_ref())
-                .and_then(|cluster| cluster.server.clone())
-                .unwrap_or_default();
             let auth = sc
                 .config
                 .auth_infos
@@ -292,12 +327,9 @@ pub fn resolve_from(configs: &[SourceConfig]) -> Vec<ResolvedContext> {
             let auth_provider = auth
                 .and_then(|info| info.auth_provider.as_ref())
                 .map(|provider| provider.name.clone());
-            let auth_kind = auth
-                .map(auth_kind_of)
-                .unwrap_or_else(|| "none".to_string());
+            let auth_kind = auth.map(auth_kind_of).unwrap_or_else(|| "none".to_string());
 
-            let is_current = !current_taken
-                && global_current.as_deref() == Some(original.as_str());
+            let is_current = !current_taken && global_current.as_deref() == Some(original.as_str());
             if is_current {
                 current_taken = true;
             }
@@ -453,7 +485,12 @@ fn resolve_contexts_with(
 ) -> Vec<ResolvedContext> {
     let configs: Vec<SourceConfig> = paths
         .iter()
-        .filter_map(|path| read(path).map(|config| SourceConfig { source: path.clone(), config }))
+        .filter_map(|path| {
+            read(path).map(|config| SourceConfig {
+                source: path.clone(),
+                config,
+            })
+        })
         .collect();
     resolve_from(&configs)
 }
@@ -550,7 +587,10 @@ mod tests {
         AuthInfo {
             auth_provider: Some(kube::config::AuthProviderConfig {
                 name: provider.to_string(),
-                config: config.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+                config: config
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect(),
                 other: Default::default(),
             }),
             ..Default::default()
@@ -559,7 +599,10 @@ mod tests {
 
     #[test]
     fn auth_kind_names_the_mechanism_and_never_the_secret() {
-        assert_eq!(auth_kind_of(&exec_auth("gcloud", &["--client-id", "s3cr3t"])), "exec plugin · gcloud");
+        assert_eq!(
+            auth_kind_of(&exec_auth("gcloud", &["--client-id", "s3cr3t"])),
+            "exec plugin · gcloud"
+        );
         assert_eq!(auth_kind_of(&token_auth("eyJhbGciOi.very.secret")), "token");
         assert_eq!(auth_kind_of(&client_cert_auth()), "client certificate");
         assert_eq!(auth_kind_of(&empty_auth()), "none");
@@ -568,9 +611,15 @@ mod tests {
     #[test]
     fn auth_kind_leaks_no_credential_material() {
         let kind = auth_kind_of(&token_auth("eyJhbGciOi.very.secret"));
-        assert!(!kind.contains("eyJ"), "auth kind must not carry the token: {kind}");
+        assert!(
+            !kind.contains("eyJ"),
+            "auth kind must not carry the token: {kind}"
+        );
         let exec = auth_kind_of(&exec_auth("gcloud", &["--client-id", "s3cr3t"]));
-        assert!(!exec.contains("s3cr3t"), "auth kind must not carry exec args: {exec}");
+        assert!(
+            !exec.contains("s3cr3t"),
+            "auth kind must not carry exec args: {exec}"
+        );
     }
 
     #[test]
@@ -599,7 +648,10 @@ mod tests {
         assert_eq!(auth_kind_of(&auth_provider("gcp", &[])), "gcp");
         assert_eq!(auth_kind_of(&auth_provider("azure", &[])), "azure");
         assert_eq!(auth_kind_of(&auth_provider("oidc", &[])), "oidc");
-        assert_eq!(auth_kind_of(&auth_provider("my-custom-plugin", &[])), "my-custom-plugin");
+        assert_eq!(
+            auth_kind_of(&auth_provider("my-custom-plugin", &[])),
+            "my-custom-plugin"
+        );
     }
 
     /// **The account is gone, and a real address is the case that proves it.**
@@ -677,7 +729,14 @@ mod tests {
 
         // Control, bidi and zero-width characters, which a table renders
         // invisibly or in reverse.
-        for hostile in ["oi\u{0}dc", "oid\u{202E}c", "oi\u{200B}dc", "oidc\u{FEFF}", "oi dc", "oidc\n"] {
+        for hostile in [
+            "oi\u{0}dc",
+            "oid\u{202E}c",
+            "oi\u{200B}dc",
+            "oidc\u{FEFF}",
+            "oi dc",
+            "oidc\n",
+        ] {
             let kind = auth_kind_of(&auth_provider(hostile, &[]));
             assert_eq!(kind, "auth provider", "rejected: {hostile:?}");
         }
@@ -698,7 +757,12 @@ mod tests {
         let long = auth_kind_of(&exec_auth(&format!("/usr/bin/{}", "a".repeat(200)), &[]));
         assert_eq!(long, "exec plugin");
 
-        for hostile in ["gcl\u{200B}oud", "gcloud\u{202E}", "gcl\u{0}oud", "get token.sh"] {
+        for hostile in [
+            "gcl\u{200B}oud",
+            "gcloud\u{202E}",
+            "gcl\u{0}oud",
+            "get token.sh",
+        ] {
             let kind = auth_kind_of(&exec_auth(hostile, &[]));
             assert_eq!(kind, "exec plugin", "rejected: {hostile:?}");
         }
@@ -706,7 +770,10 @@ mod tests {
         // An exec block naming no command at all: the mechanism, no invented
         // plugin name.
         let nameless = auth_kind_of(&AuthInfo {
-            exec: Some(kube::config::ExecConfig { command: None, ..Default::default() }),
+            exec: Some(kube::config::ExecConfig {
+                command: None,
+                ..Default::default()
+            }),
             ..Default::default()
         });
         assert_eq!(nameless, "exec plugin");
@@ -733,7 +800,14 @@ mod tests {
                 "a real plugin name must not be swallowed: {command}"
             );
         }
-        for provider in ["gcp", "azure", "oidc", "openstack", "azure-ad", "my-custom-plugin"] {
+        for provider in [
+            "gcp",
+            "azure",
+            "oidc",
+            "openstack",
+            "azure-ad",
+            "my-custom-plugin",
+        ] {
             assert_eq!(auth_kind_of(&auth_provider(provider, &[])), provider);
         }
     }
@@ -774,7 +848,10 @@ mod tests {
         );
         let resolved = resolve_from(&[a]);
         assert_eq!(
-            resolved.iter().map(|c| c.display_name.as_str()).collect::<Vec<_>>(),
+            resolved
+                .iter()
+                .map(|c| c.display_name.as_str())
+                .collect::<Vec<_>>(),
             vec!["ctx-a", "ctx-b"],
         );
         assert_eq!(resolved[0].original_name, "ctx-a");
@@ -802,7 +879,11 @@ mod tests {
             "/kube/main",
             "clusters:\n  - name: c\n    cluster: { server: https://m }\ncontexts:\n  - name: my-cluster\n    context: { cluster: c, user: u }\n",
         );
-        let resolved = resolve_from(&[uniq, cfg("/kube/kube_prod.yaml", PROD), cfg("/kube/kube_stage.yaml", STAGE)]);
+        let resolved = resolve_from(&[
+            uniq,
+            cfg("/kube/kube_prod.yaml", PROD),
+            cfg("/kube/kube_stage.yaml", STAGE),
+        ]);
         let names: Vec<_> = resolved.iter().map(|c| c.display_name.as_str()).collect();
         assert!(names.contains(&"my-cluster"));
         assert!(names.contains(&"kube_prod/default"));
@@ -815,6 +896,21 @@ mod tests {
         let resolved = resolve_from(&[cfg("/a/config", PROD), cfg("/b/config", STAGE)]);
         assert_eq!(resolved[0].display_name, "config/default");
         assert_eq!(resolved[1].display_name, "config/default (2)");
+    }
+
+    #[test]
+    fn identical_contexts_across_files_are_deduplicated_without_collision_prefix() {
+        // ~/.kube/config has PROD context, and ~/.kube/prod_snippet.yaml has the EXACT SAME PROD context.
+        let resolved = resolve_from(&[
+            cfg("/home/.kube/config", PROD),
+            cfg("/home/.kube/prod_snippet.yaml", PROD),
+        ]);
+        // The duplicate is dropped, only 1 context is emitted, and it is NOT prefixed as config/default.
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].display_name, "default");
+        assert_eq!(resolved[0].original_name, "default");
+        assert_eq!(resolved[0].server, "https://prod:6443");
+        assert_eq!(resolved[0].source, PathBuf::from("/home/.kube/config"));
     }
 
     #[test]
@@ -836,7 +932,10 @@ mod tests {
             cfg("/kube/kube_prod.yaml", PROD),
             cfg("/kube/kube_stage.yaml", STAGE),
         ]);
-        let by_display = resolved.iter().find(|c| c.display_name == "kube_stage/default").unwrap();
+        let by_display = resolved
+            .iter()
+            .find(|c| c.display_name == "kube_stage/default")
+            .unwrap();
         assert_eq!(by_display.source, PathBuf::from("/kube/kube_stage.yaml"));
         assert_eq!(by_display.original_name, "default");
     }
@@ -955,17 +1054,17 @@ mod tests {
     #[test]
     fn paths_that_are_not_utf8_get_distinct_keys() {
         use std::os::unix::ffi::OsStrExt;
-        let source = |bytes: &[u8]| SourceConfig {
+        let source = |bytes: &[u8], yaml: &str| SourceConfig {
             source: PathBuf::from(std::ffi::OsStr::from_bytes(bytes)),
-            config: Kubeconfig::from_yaml(PROD).unwrap(),
+            config: Kubeconfig::from_yaml(yaml).unwrap(),
         };
-        let both = resolve_from(&[source(b"/kube/a\x80"), source(b"/kube/a\x81")]);
+        let both = resolve_from(&[source(b"/kube/a\x80", PROD), source(b"/kube/a\x81", STAGE)]);
         assert_eq!(both[0].stable_id(), both[1].stable_id(), "display is lossy");
         assert_ne!(both[0].key(), both[1].key());
         assert_ne!(both[0].pinned_id(), both[1].pinned_id());
         assert_eq!(both[0].key(), "/kube/a%80#default");
         // A valid path that literally reads the same as an escape stays distinct.
-        let literal = resolve_from(&[source(b"/kube/a%80")]).remove(0);
+        let literal = resolve_from(&[source(b"/kube/a%80", PROD)]).remove(0);
         assert_eq!(literal.key(), "/kube/a%2580#default");
         // The pinned ID is reserved with its byte escapes, so once its context is gone a
         // context literally named after it never takes a request pinned to it.
@@ -979,13 +1078,13 @@ mod tests {
     #[test]
     fn paths_that_are_not_utf16_get_distinct_keys() {
         use std::os::windows::ffi::OsStringExt;
-        let source = |units: &[u16]| SourceConfig {
+        let source = |units: &[u16], yaml: &str| SourceConfig {
             source: PathBuf::from(std::ffi::OsString::from_wide(units)),
-            config: Kubeconfig::from_yaml(PROD).unwrap(),
+            config: Kubeconfig::from_yaml(yaml).unwrap(),
         };
         let a: Vec<u16> = "C:\\kube\\a".encode_utf16().chain([0xD800]).collect();
         let b: Vec<u16> = "C:\\kube\\a".encode_utf16().chain([0xD801]).collect();
-        let both = resolve_from(&[source(&a), source(&b)]);
+        let both = resolve_from(&[source(&a, PROD), source(&b, STAGE)]);
         assert_eq!(both[0].stable_id(), both[1].stable_id(), "display is lossy");
         assert_ne!(both[0].key(), both[1].key());
         assert_ne!(both[0].pinned_id(), both[1].pinned_id());
@@ -1086,9 +1185,16 @@ mod tests {
 
         assert_eq!(resolved.len(), 3, "all three contexts in the file resolve");
         for context in &resolved {
-            assert_eq!(context.auth_kind, "token", "auth_kind still computed correctly");
+            assert_eq!(
+                context.auth_kind, "token",
+                "auth_kind still computed correctly"
+            );
         }
-        assert_eq!(reads.get(), 1, "the file must be read once, not once per context");
+        assert_eq!(
+            reads.get(),
+            1,
+            "the file must be read once, not once per context"
+        );
     }
 
     #[test]

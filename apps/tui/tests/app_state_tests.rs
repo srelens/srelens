@@ -1839,10 +1839,12 @@ async fn assistant_editing_keys_shape_the_input_buffer() {
     app.handle_key_event(alt('u')).await;
     assert_eq!(app.assistant_state.input, "");
 
-    // Ctrl+v appends the clipboard when there is one; either way the buffer
-    // stays a single line.
+    // Ctrl+v inserts the clipboard when there is one. The composer is
+    // multi-line, so its lines are kept; normalized, there is never a `\r`.
+    // (The system clipboard's content is the machine's, so only that is
+    // asserted here; line handling is tested with handle_paste below.)
     app.handle_key_event(common::ctrl('v')).await;
-    assert!(!app.assistant_state.input.contains('\n'));
+    assert!(!app.assistant_state.input.contains('\r'));
     app.assistant_state.input.clear();
 
     // 'c' with no assistant answer at all is plain typing.
@@ -1939,6 +1941,119 @@ async fn assistant_history_and_slash_suggestions_drive_the_arrow_keys() {
         app.assistant_state.messages.len(),
         before,
         "nothing was submitted"
+    );
+}
+
+#[tokio::test]
+async fn assistant_busy_turn_can_be_cancelled_with_esc_or_ctrl_c() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.active_view = ActiveView::Assistant;
+
+    // 1. Cancel via Esc
+    app.assistant_state.is_busy = true;
+    let task1 = tokio::spawn(async {
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+    });
+    app.assistant_state.task = Some(task1.abort_handle());
+
+    app.handle_key_event(common::key(KeyCode::Esc)).await;
+    assert!(
+        !app.assistant_state.is_busy,
+        "Esc cancels busy assistant state"
+    );
+    assert!(
+        app.assistant_state.task.is_none(),
+        "assistant task handle was taken"
+    );
+    assert_eq!(toast(&app), "✓ Assistant generation cancelled");
+    assert!(app
+        .assistant_state
+        .messages
+        .last()
+        .unwrap()
+        .content
+        .contains("[Cancelled by user]"));
+    let res1 = tokio::time::timeout(std::time::Duration::from_millis(500), task1).await;
+    assert!(
+        res1.is_ok() && res1.unwrap().unwrap_err().is_cancelled(),
+        "task1 was aborted"
+    );
+
+    // 2. Cancel via Ctrl+c when busy and no selection, and verify running tool call is closed
+    app.assistant_state.is_busy = true;
+    let task2 = tokio::spawn(async {
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+    });
+    app.assistant_state.task = Some(task2.abort_handle());
+    app.assistant_state.add_tool_call_start(
+        "call_1".to_string(),
+        "k8s.listPods".to_string(),
+        "namespace: default".to_string(),
+    );
+
+    app.handle_key_event(common::ctrl('c')).await;
+    assert!(
+        !app.assistant_state.is_busy,
+        "Ctrl+c cancels busy assistant state"
+    );
+    assert!(app.assistant_state.task.is_none());
+    assert_eq!(toast(&app), "✓ Assistant generation cancelled");
+    let res2 = tokio::time::timeout(std::time::Duration::from_millis(500), task2).await;
+    assert!(
+        res2.is_ok() && res2.unwrap().unwrap_err().is_cancelled(),
+        "task2 was aborted"
+    );
+    let last_msg = app.assistant_state.messages.last().unwrap();
+    assert_eq!(
+        last_msg.tool_calls.first().unwrap().status,
+        srelens_tui::views::assistant_view::ToolCallStatus::Error("Cancelled by user".to_string())
+    );
+
+    // 3. Ctrl+l aborts task while clearing conversation
+    app.assistant_state.is_busy = true;
+    let task3 = tokio::spawn(async {
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+    });
+    let abort3 = task3.abort_handle();
+    app.assistant_state.task = Some(abort3);
+
+    app.handle_key_event(common::ctrl('l')).await;
+    assert!(!app.assistant_state.is_busy);
+    assert!(app.assistant_state.task.is_none());
+    assert_eq!(toast(&app), "✓ Conversation cleared");
+    let res3 = tokio::time::timeout(std::time::Duration::from_millis(500), task3).await;
+    assert!(
+        res3.is_ok() && res3.unwrap().unwrap_err().is_cancelled(),
+        "task3 was aborted"
+    );
+}
+
+#[tokio::test]
+async fn submitting_second_query_after_completed_turn_does_not_mark_prior_cancelled() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.active_view = ActiveView::Assistant;
+
+    // Simulate completed first query and answer
+    app.assistant_state.start_turn("First query".to_string());
+    app.assistant_state
+        .append_stream_chunk("First answer complete.");
+    app.assistant_state.finish_turn();
+
+    assert!(!app.assistant_state.is_busy);
+    assert!(app.assistant_state.task.is_none());
+
+    // Submit second query via submit_assistant_query
+    app.submit_assistant_query("Second query".to_string(), "Second query".to_string());
+
+    // Verify first answer in history was NOT modified to include [Cancelled by user]
+    let first_answer = &app.assistant_state.messages[2]; // 0: welcome, 1: user first, 2: assistant first
+    assert_eq!(first_answer.role, "assistant");
+    assert_eq!(first_answer.content, "First answer complete.");
+    assert!(
+        !first_answer.content.contains("Cancelled"),
+        "completed turn must not be marked cancelled on next query"
     );
 }
 
@@ -2518,8 +2633,11 @@ async fn pasted_text_lands_in_the_active_input() {
 
     app.input_mode = InputMode::Normal;
     app.active_view = ActiveView::Assistant;
-    app.handle_paste("multi\nline".into());
-    assert_eq!(app.assistant_state.input, "multi line");
+    app.handle_paste("multi\r\nline".into());
+    assert_eq!(
+        app.assistant_state.input, "multi\nline",
+        "the Assistant composer is multi-line: a paste keeps its lines"
+    );
 
     let mut settings = srelens_tui::views::settings_view::SettingsViewState::new();
     settings.is_editing = true;
