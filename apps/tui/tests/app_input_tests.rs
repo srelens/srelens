@@ -5764,7 +5764,6 @@ async fn argo_view_x_opens_action_palette_with_ai_diagnose_and_actions() {
             assert!(action_ids.contains(&srelens_tui::ui::dialogs::QuickActionId::AskAi));
             assert!(action_ids
                 .contains(&srelens_tui::ui::dialogs::QuickActionId::PlaybookArgoProgressing));
-            assert!(action_ids.contains(&srelens_tui::ui::dialogs::QuickActionId::ArgoDetails));
             assert!(action_ids.contains(&srelens_tui::ui::dialogs::QuickActionId::ArgoSync));
             assert!(action_ids.contains(&srelens_tui::ui::dialogs::QuickActionId::ArgoRefresh));
             assert!(action_ids.contains(&srelens_tui::ui::dialogs::QuickActionId::ArgoOpenGit));

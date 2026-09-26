@@ -12177,12 +12177,6 @@ impl App {
                             .to_string(),
                 },
                 QuickActionItem {
-                    id: QuickActionId::ArgoDetails,
-                    key_hint: "Enter".to_string(),
-                    title: "🔍 View Application Details".to_string(),
-                    description: "Inspect managed resources, manifest drift & history".to_string(),
-                },
-                QuickActionItem {
                     id: QuickActionId::ArgoSync,
                     key_hint: "s".to_string(),
                     title: "🔄 Trigger Sync".to_string(),
@@ -12489,25 +12483,6 @@ impl App {
                         self.assistant_state.update_slash_suggestions();
                         let old = std::mem::replace(&mut self.active_view, ActiveView::Assistant);
                         self.nav_stack.push(old);
-                    }
-                    QuickActionId::ArgoDetails => {
-                        let (app_opt, hub_ctx) =
-                            if let ActiveView::Argo(ref argo) = self.active_view {
-                                (
-                                    argo.applications
-                                        .iter()
-                                        .find(|a| a.name == resource_name)
-                                        .cloned(),
-                                    argo.hub_context_name.clone(),
-                                )
-                            } else if let ActiveView::ArgoDetail(ref detail) = self.active_view {
-                                (detail.application.clone(), detail.hub_context.clone())
-                            } else {
-                                (None, None)
-                            };
-                        if let Some(app) = app_opt {
-                            self.open_argo_detail(app, hub_ctx);
-                        }
                     }
                     QuickActionId::ArgoSync => {
                         let ns = namespace.unwrap_or_else(|| "argocd".to_string());

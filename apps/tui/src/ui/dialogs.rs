@@ -101,7 +101,6 @@ pub enum QuickActionId {
     PlaybookEndpoints,
     PlaybookNodePressure,
     PlaybookArgoProgressing,
-    ArgoDetails,
     ArgoSync,
     ArgoRefresh,
     ArgoOpenGit,
