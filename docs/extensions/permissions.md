@@ -25,7 +25,8 @@ cluster's RBAC.
   incoming manifest's access with the installed revision's: the grants, what each
   reader binds, the settings it keeps secrets for, each action, and each host
   `network.http` may reach (#568), so another host is changed access even under the
-  same grant. The review in
+  same grant — and likewise each namespace a pod permission grants, and what each pod
+  binding runs and whose pods it reaches (#567). The review in
   Settings → Apps lists what is added and removed before what is unchanged, and the
   consent prompt for an install over MCP names the added and removed access. The
   update must name the installed revision it was reviewed against, and is refused if
@@ -85,6 +86,38 @@ a fixed GET, and holds it and every redirect to that allowlist:
 `network.http` is the broker's alone: it is not in the capability catalog or MCP, so
 nothing can call it except through an installed app's binding. See
 [manifest.md](manifest.md#network-requests).
+
+## What an app may reach in pods
+
+Logs, exec and port-forwards (API 0.5, [#567](https://github.com/srelens/srelens/issues/567)),
+each a separate permission: `k8s.streamLogs`, `k8s.exec` and `k8s.portForward`.
+
+- **Only pods in scope.** A pod binding names a reader whose objects select pods, and
+  reaches only the pods one object's own label selector selects, in its namespace; or
+  it names none, and reaches any pod in the namespaces its permission grants,
+  `{"capability": "k8s.exec", "namespaces": [...]}`. The host reads the object and the
+  pod with the user's credentials on every open and matches the pod itself, so a pod
+  outside the scope is refused, and the cluster's RBAC still decides the rest.
+- **Only the manifest's command.** An exec binding runs one fixed command, without a
+  shell and never a shell itself, and a view cannot send another. Every run needs the
+  host confirmation naming the cluster, the pod, the container and the exact command,
+  and the app; the host runs a session only when the view sends back exactly what that
+  confirmation named. `k8s.exec` is sensitive and `high` impact, and an unsigned app
+  that binds it needs **Allow unsigned apps to modify clusters and run code**.
+- **Only the port the host picks.** A forward listens on `127.0.0.1` at a port the host
+  chooses and reaches the binding's one port on a pod in scope, directly or through a
+  Service that selects one. It ends with the view that opened it, and with it the port
+  and every connection through it.
+- **On the record.** Every exec and port-forward session, started or refused, is in the
+  local audit trail with the app, the cluster, the pod and what ran.
+- **In the review.** The install review lists the namespaces each pod permission
+  grants, and for each binding whose pods it reaches and what it does there: the
+  command argument by argument, the port. The update review's access items name each
+  granted namespace, each command and scope, so another command, another namespace or a
+  scope moved to another kind is changed access under the same grants.
+
+See [manifest.md](manifest.md#logs-exec-and-port-forwards) and
+[streams.md](streams.md#pod-sources).
 
 ## What an app may write
 

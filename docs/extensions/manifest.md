@@ -7,21 +7,24 @@ and [flux.json](../../examples/extensions/flux.json).
 
 ## JSON Schema
 
-The schema for API 0.4 is committed at
-[`schemas/extension-manifest.v0.4.json`](../../schemas/extension-manifest.v0.4.json).
-Point your editor at it by naming it in the manifest:
+The schema for API 0.5 is committed at
+[`schemas/extension-manifest.v0.5.json`](../../schemas/extension-manifest.v0.5.json).
+Point your editor at the file of the line your manifest targets by naming it in the
+manifest:
 
 ```json
 {
-  "$schema": "https://raw.githubusercontent.com/srelens/srelens/main/schemas/extension-manifest.v0.4.json",
+  "$schema": "https://raw.githubusercontent.com/srelens/srelens/main/schemas/extension-manifest.v0.5.json",
   "id": "io.example.cert-manager"
 }
 ```
 
 The file is generated from the host's `Manifest` type, and `cargo test` fails when the
-two differ. [`schemas/extension-manifest.v0.3.json`](../../schemas/extension-manifest.v0.3.json)
-is the API 0.3 contract, kept as it was when 0.4 was cut, for manifests that still
-require `^0.3`. After changing a manifest field, regenerate the newest file with:
+two differ. [`schemas/extension-manifest.v0.4.json`](../../schemas/extension-manifest.v0.4.json)
+and [`schemas/extension-manifest.v0.3.json`](../../schemas/extension-manifest.v0.3.json)
+are the API 0.4 and 0.3 contracts, each kept as it was when the next line was cut, for
+manifests that still require `^0.4` or `^0.3`. The examples target API 0.4 and name its
+file. After changing a manifest field, regenerate the newest file with:
 
 ```sh
 UPDATE_CATALOG=1 cargo test -p srelens-plugin-host --test schema
@@ -40,9 +43,9 @@ before publishing.
 | `id` | Yes | Reverse-domain identifier. See [Identifiers](specification.md#identifiers). |
 | `name` | Yes | Display name, 1–120 characters, with no control characters and no bidirectional or invisible format characters. See [Identifiers](specification.md#identifiers). |
 | `version` | Yes | The app's own SemVer version. |
-| `srelensApiVersion` | Yes | A SemVer range of extension API versions, for example `^0.4`. The fields marked **API 0.4** on this page need a range that admits only 0.4 or later; see [Versioning](specification.md#versioning). |
+| `srelensApiVersion` | Yes | A SemVer range of extension API versions, for example `^0.4`. The fields marked **API 0.4** on this page need a range that admits only 0.4 or later, and those marked **API 0.5** one that admits only 0.5 or later; see [Versioning](specification.md#versioning). |
 | `kind` | Yes | `declarative`. No other kind is accepted. |
-| `permissions` | Yes | The exact host capability IDs the bindings use. `network.http` is written `{ "capability": "network.http", "hosts": [...] }` (API 0.4). See [Network requests](#network-requests). |
+| `permissions` | Yes | The exact host capability IDs the bindings use. `network.http` is written `{ "capability": "network.http", "hosts": [...] }` (API 0.4); see [Network requests](#network-requests). A pod capability may be written `{ "capability": "k8s.streamLogs", "namespaces": [...] }` (API 0.5); see [Logs, exec and port-forwards](#logs-exec-and-port-forwards). |
 | `capabilities` | Yes | 1–32 bindings, below. |
 | `actions` | No | Up to 32 declared mutations, below. |
 | `settings` | No | **API 0.4.** Up to 32 typed settings, drawn as a host form. See [Settings](#settings). |
@@ -878,14 +881,115 @@ at the revision the view knows, on a cluster it is enabled for, with its grants.
 stream (`extensions.streams`) refuses a `network.http` binding, so nothing calls another
 system on a timer.
 
+## Logs, exec and port-forwards
+
+API 0.5 ([#567](https://github.com/srelens/srelens/issues/567)). Three **pod bindings**
+reach the pods of a workload an app knows about, for troubleshooting: follow a
+container's logs, run a command the manifest fixes, or forward a port. Each is a
+binding like any other — its target is its permission — but it never names a pod.
+It names **where its pods come from**, and the host holds every session to that.
+
+```json
+"permissions": [
+  "k8s.listDeployments",
+  { "capability": "k8s.streamLogs", "namespaces": ["cert-manager"] },
+  "k8s.exec", "k8s.portForward"
+],
+"capabilities": [
+  { "name": "controllers", "title": "Controllers", "target": "k8s.listDeployments",
+    "inputs": ["context", "namespace"], "arguments": {} },
+  { "name": "controllerLogs", "title": "Controller logs", "target": "k8s.streamLogs",
+    "inputs": [], "arguments": { "resource": "controllers" } },
+  { "name": "namespaceLogs", "title": "Logs in cert-manager", "target": "k8s.streamLogs",
+    "inputs": [], "arguments": {} },
+  { "name": "status", "title": "cmctl status", "target": "k8s.exec", "inputs": [],
+    "arguments": { "resource": "controllers", "container": "cert-manager-controller",
+                   "command": ["cmctl", "status", "certificate", "--all-namespaces"] } },
+  { "name": "metrics", "title": "Controller metrics", "target": "k8s.portForward", "inputs": [],
+    "arguments": { "resource": "controllers", "port": 9402 } }
+]
+```
+
+| Target | Does | Arguments |
+|---|---|---|
+| `k8s.streamLogs` | Follows one container's logs, as an app stream. | Scope; optional `container`. |
+| `k8s.exec` | Runs `command` once in a container, with no stdin and no terminal, after the host confirmation. | Scope; `command`; optional `container`. |
+| `k8s.portForward` | Listens on a port of this computer the host picks, and forwards each connection to `port` of a pod in scope, for as long as the view that opened it is open. | Scope; `port`; optional `service`. |
+
+A pod binding declares no `inputs`: the host supplies the cluster, the object, and the
+pod and container the person picks. Unknown arguments are refused.
+
+### Scope
+
+Exactly one of:
+
+- **`resource`**: a reader binding in the same manifest whose objects select pods — a
+  `k8s.listDeployments`, `k8s.listStatefulSets` or `k8s.listDaemonSets` reader, or a
+  namespaced `k8s.listCustomResource` reader. The view names one object of that kind;
+  the host reads it, with the user's credentials, and takes **its own label selector**:
+  `.spec.selector` for a built-in workload (the binding may not say otherwise), and the
+  path the binding names in `selector` for a custom resource — plain dot-separated keys,
+  for example `.spec.selector`. The selector may be a `matchLabels`/`matchExpressions`
+  selector or a plain map of labels. Only pods it selects, in the object's namespace, are
+  in scope. An object with no selector there, or one that selects every pod, is no scope.
+- **no `resource`**: the namespaces the binding's permission grants,
+  `{"capability": "k8s.streamLogs", "namespaces": ["cert-manager"]}` — 1–16 namespace
+  names, each once. Any pod in one of them is in scope. Only the three pod capabilities
+  are granted namespaces, and a namespace is a name, never a setting.
+
+The host matches every pod itself, on every open: it reads the pod the view names and
+checks its namespace and labels against the scope, rather than trusting what the
+cluster answered to a query. A Node, an Event reader, or another pod binding is no
+scope, and neither is a cluster-scoped custom resource.
+
+### Commands
+
+`command` is the program and its arguments, 1–32 of them, each 1–1024 characters with
+no control or invisible format characters. The host runs it as written, without a
+shell, so there is no quoting, globbing or expansion, and it reads no setting: what the
+person reviewed at install is what runs. The program may not be a shell (`sh`, `bash`,
+`ash`, `dash`, `zsh`, `ksh`, `mksh`, `csh`, `tcsh`, `fish`, `pwsh`, by any path), or
+`env`, `busybox` or `toybox` running one, because `sh -c` would turn the reviewed command
+into whatever its script says. That is a guard against the obvious, not a sandbox: the
+review, which shows the exact command, is the control, and so is the confirmation
+before every run.
+
+`k8s.exec` is **sensitive** and `high` impact. Every session needs the host confirmation
+(#552), which names the cluster, the pod, the container and the exact command, and the
+app that asked; the host refuses a session unless the view sends back exactly what that
+confirmation named. An unsigned app that binds `k8s.exec` needs **Allow unsigned apps to
+modify clusters and run code**, as one that declares actions does.
+
+A session ends when its command exits, after 300 seconds, after 1 MiB of output, or when
+its view closes. Ending one closes its connection to the cluster; a command that ignores
+its closed output may run on in the container until it exits.
+
+### Port-forwards
+
+`port` is the remote port, 1–65535. Without `service`, it is the pod's port and the view
+names a pod in scope. With `"service": true`, it is a Service's port and the view names a
+Service in the scope's namespace: the host resolves it to a running pod the Service
+selects **that the scope admits**, at the Service's target port. A Service only names a
+pod here; it never widens the scope. The host picks the local port, on `127.0.0.1` only,
+and says which. The forward ends when the view that opened it closes, the app is
+disabled, updated or removed, or its pod leaves the scope; a forward to a pod ends when
+the pod stops running, and one through a Service follows the Service to another pod in
+scope.
+
+The frames each source sends are in [streams.md](streams.md#logs).
+
 ## Rules the desktop app adds
 
 The desktop app accepts a narrower surface than the developer broker:
 
-- Targets are `k8s.listCustomResource`, `k8s.listEvents` or `network.http`. A reader
-  target must be read-only with no confirmation, sensitive or destructive annotation;
-  `network.http` is held to [its own rules](#network-requests).
-- A reader's inputs are only `context` and `namespace`; a `network.http` binding takes none.
+- Targets are `k8s.listCustomResource`, `k8s.listEvents`, the built-in workload and
+  node summary readers, `network.http`, or a pod capability (`k8s.streamLogs`,
+  `k8s.exec`, `k8s.portForward`). A reader target must be read-only with no
+  confirmation, sensitive or destructive annotation; `network.http` and the pod
+  capabilities are held to [their](#network-requests) [own](#logs-exec-and-port-forwards)
+  rules.
+- A reader's inputs are only `context` and `namespace`; a `network.http` binding and a
+  pod binding take none.
 - A `k8s.listCustomResource` binding fixes a non-empty `group`, `version`, `plural`
   and `kind` (letters, digits, `.` and `-`) and a boolean `namespaced`, or lists
   `versions` held to the same characters instead of fixing `version`. It must accept

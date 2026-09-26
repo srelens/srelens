@@ -155,6 +155,33 @@ of at most 500 events each; if pages remain, the panel says how many events it r
 that it shows the newest of those, rather than claiming they are the latest. Event RBAC
 failures are shown separately and keep the rest of the overview.
 
+## Pod logs, commands and port-forwards
+
+API 0.5 ([#567](https://github.com/srelens/srelens/issues/567)). An app's pod bindings
+appear as a **pods** section of the Inspector, after the host's own sections and the
+app's detail panels (`ExtensionPodSlot` in
+`packages/ui-next/src/extensions/ExtensionPodTools.tsx`): on a resource of a kind a
+binding's `resource` reader lists — an app's own custom resource, or a Deployment,
+StatefulSet or DaemonSet — for that object's pods; and on a Pod in a namespace a pod
+permission grants, for that pod. The section lists the pods the host says the binding
+may reach, in the host's words for the scope ("Pods selected by Deployment web"), with a
+container picker and a control per binding:
+
+- **Logs** follows the container in a pane below, through the pod log view's own buffer
+  and status (`useLogStream` with the app's log source), and says when it is
+  reconnecting, when lines were dropped, and why it ended.
+- **Run** opens the host confirmation first: the level, the host's sentence, the
+  cluster, the pod, the container, the command argument by argument, and the app that
+  asked. Nothing runs until **Run command**; the output then streams in, stderr marked
+  in words, and the exit code ends it.
+- **Forward** opens a local port the host picks and says which, and where it reaches.
+  A binding that forwards through a Service lists the Services that reach a pod in
+  scope instead.
+
+Each section is one app stream view: closing the Inspector, switching resources or
+closing the window ends every session it opened, forwards and their ports included. On
+the web the section says that app streams run in the desktop app.
+
 ## Actions and refresh
 
 The details footer offers the installed manifest's explicitly granted actions (see [capabilities.md](capabilities.md#declared-gitops-actions)). Each opens a

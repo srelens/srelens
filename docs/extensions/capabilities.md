@@ -14,6 +14,7 @@ Consent rules are in [permissions.md](permissions.md).
 | `extensions.resolvePanels` | Read-only | Resolve installed declarative detail panels for a selected resource. The host rechecks the revision, grants and cluster scope, and uses only declared join readers. |
 | `extensions.resolveLinks` | Read-only | Resolve an app's `resourceLinks` for a selected resource: `{ from, links: [{ id, relation, to, capability, targets: [{ namespace, name, exists, unverified? }], error? }] }`. A target the host did not look up (a bare Argo CD name with no `defaultNamespace`) carries `unverified` with why, and is never `exists`. Targets are looked up only in the granted reader for `to`, and only when the resource names one. A failed read is an `error` on that link, never an empty `targets`. |
 | `extensions.resource` | Read-only | Inspect one resource of an enabled app, with its events and supported actions. |
+| `extensions.pods` | Read-only | The pods one of an app's pod bindings may reach now (#567), for a view to offer: `{id, revision, capability, context, namespace, name?}` in, `{pods: [{name, namespace, containers, phase, ready}], services?, truncated?, scope}` out. Held to the authority and scope a stream open is: the object `name` names and its own selector, or the namespaces the permission grants; the host matches every pod itself. See [streams.md](streams.md#pod-sources). |
 | `extensions.streams` | Read-only | The open app streams in this process and what each app has sent: open, opened, messages, payload bytes, streams stopped for the rate and opens refused for the cap, with the limits. For the Inspector ([#575](https://github.com/srelens/srelens/issues/575)); the streams themselves are opened by host commands, not capabilities. See [streams.md](streams.md). |
 | `extensions.catalog` | Read-only | Browse the catalog, from a 24-hour cache. Reports the host's supported API versions as `hostApiVersions`; the deprecated `hostApiVersion` still gives the newest. |
 | `extensions.catalogManifest` | Read-only | Download and verify one catalog release for review. Does not install it. |
@@ -26,6 +27,20 @@ Consent rules are in [permissions.md](permissions.md).
 registered beside the broker's CRD check and never in the registry the catalog and MCP
 are built from, because called directly it would fetch any URL; its declaration is what
 a binding is checked against, and `extensions.read` is the one way to send a request.
+
+So are the pod capabilities (#567), on both hosts, and for the same reason: called
+directly, each would reach any pod.
+
+| Capability | Kind | Runs as |
+|---|---|---|
+| `k8s.streamLogs` | Read-only, `low` impact | The `logs` app stream. |
+| `k8s.exec` | Sensitive, confirmation-gated, `high` impact, "Run this app's command[ in {resource}][ in cluster {cluster}]?" | The `exec` app stream, after the host confirmation names the pod, container and command. |
+| `k8s.portForward` | Read-only, `medium` impact: it changes nothing in the cluster, but opens a port on this computer | The `portForward` app stream. |
+
+Their declarations (`crates/registry/src/extensions/pods.rs`) are what a binding is
+checked against, and their handlers refuse; the stream sources in
+[streams.md](streams.md#pod-sources) are the only way to run one. Since they are not in
+the catalog, Settings → Apps states these facts itself.
 
 The app facade refuses a host reader with stronger consent annotations than the
 declarative contract allows. App-installed operations go through `extensions.read`;
