@@ -449,10 +449,10 @@ pub struct Ended {
     pub memory_events: Option<MemoryEvents>,
 }
 
-/// The two counters in a cgroup's `memory.events` that point to its own limit having
-/// killed a process. They are running totals, so they are evidence, not a record of what
-/// sent a given `SIGKILL`. The sidecar's cgroup is a fresh leaf, so both start at 0 and
-/// count only its own events.
+/// Two OOM counters from a cgroup's `memory.events`, defined on the fields. The sidecar's
+/// cgroup is a fresh leaf, so both start at 0 and count only its own events. They are
+/// running totals: positive values show OOM activity in the cgroup, and do not prove that
+/// its limit caused a particular `SIGKILL`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MemoryEvents {
     /// Times the cgroup's usage reached `memory.max` and an allocation was about to fail.
