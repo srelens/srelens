@@ -273,11 +273,25 @@ impl ExtensionStreams {
     /// Open a stream for one view, owned by no window. `input` is the
     /// caller's JSON, parsed here so the host command and the tests read it
     /// the same way.
+    ///
+    /// It records nothing, so it refuses the sources that must be recorded —
+    /// exec and port-forward sessions (#555, #567) — rather than open one
+    /// unrecorded: a host opens those through [`ExtensionStreams::open_in_window`],
+    /// with its audit trail.
     pub async fn open(
         &self,
         sink: Arc<dyn EventSink>,
         input: Value,
     ) -> Result<OpenStreamOut, String> {
+        if matches!(
+            input.pointer("/source/kind").and_then(Value::as_str),
+            Some("exec" | "portForward")
+        ) {
+            return Err(
+                "An exec or port-forward session is recorded in the host's audit trail; open it with one"
+                    .into(),
+            );
+        }
         self.open_owned(sink, None, Arc::new(NoopAudit), input)
             .await
     }

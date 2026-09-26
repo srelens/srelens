@@ -116,6 +116,8 @@ struct Cluster {
     connected: Mutex<Vec<(String, u16)>>,
     /// Exec never ends by itself when set.
     exec_hangs: std::sync::atomic::AtomicBool,
+    /// Every port-forward connection is refused with this, when set.
+    refuse_connect: Mutex<Option<&'static str>>,
 }
 
 /// Counts itself out of `open` when the connection it echoes on ends.
@@ -281,6 +283,9 @@ impl PodCluster for Cluster {
         port: u16,
     ) -> Result<Box<dyn Upstream>, String> {
         self.connected.lock().unwrap().push((pod.to_owned(), port));
+        if let Some(why) = *self.refuse_connect.lock().unwrap() {
+            return Err(why.into());
+        }
         // The far side echoes what it is sent, for as long as the connection lives.
         let (near, mut far) = tokio::io::duplex(4096);
         self.open.fetch_add(1, Ordering::SeqCst);
@@ -1407,4 +1412,104 @@ fn an_unsigned_app_that_binds_exec_needs_the_unsigned_app_setting() {
         json!({"action": "install", "manifest": without_exec.to_string(), "grants": grants}),
     )
     .unwrap_or_else(|e| panic!("logs and forwards need no policy: {e}"));
+}
+
+/// Exec and port-forward sessions are recorded, so the entry point that takes no
+/// audit trail refuses them rather than opening one unrecorded. A log stream is a
+/// read, and opens there.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_session_that_must_be_recorded_is_not_opened_without_a_trail() {
+    let host = host();
+    for source in [
+        exec("web-1", Some(confirmed("web-1"))),
+        json!({"kind": "portForward", "capability": "metrics", "name": "web", "pod": "web-1"}),
+    ] {
+        let refused = host
+            .streams
+            .open(
+                host.sink.clone(),
+                host.request("v", "extstream:unaudited", "team", source.clone()),
+            )
+            .await
+            .unwrap_err();
+        assert!(refused.contains("audit trail"), "{source}: {refused}");
+    }
+    assert!(host.cluster.exec_asks.lock().unwrap().is_empty());
+    assert!(host.frames("extstream:unaudited").is_empty());
+    host.cluster
+        .logs
+        .lock()
+        .unwrap()
+        .push_back(vec![LogStep::Line("ok")]);
+    host.streams
+        .open(
+            host.sink.clone(),
+            host.request(
+                "v",
+                "extstream:read",
+                "team",
+                logs("controllerLogs", Some("web"), "web-1"),
+            ),
+        )
+        .await
+        .expect("a log stream is a read");
+}
+
+/// A connection the cluster refuses is said, not dropped in silence: the view
+/// keeps saying "Forwarding" otherwise while every connection fails. However
+/// many fail, they are reported at most once a check, with how many.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_forward_says_when_its_connections_fail() {
+    let host = host();
+    *host.cluster.refuse_connect.lock().unwrap() =
+        Some("pods \"web-1\" is forbidden: cannot create resource \"pods/portforward\"");
+    host.open(
+        "v",
+        "extstream:fail",
+        "team",
+        json!({"kind": "portForward", "capability": "metrics", "name": "web", "pod": "web-1"}),
+    )
+    .await
+    .unwrap();
+    let local = ready(&host, "extstream:fail").await["localPort"]
+        .as_u64()
+        .unwrap() as u16;
+    for _ in 0..3 {
+        let mut client = tokio::net::TcpStream::connect(("127.0.0.1", local))
+            .await
+            .unwrap();
+        let mut rest = [0u8; 4];
+        let read = tokio::time::timeout(Duration::from_secs(2), client.read(&mut rest))
+            .await
+            .expect("a refused connection is closed");
+        assert!(matches!(read, Ok(0) | Err(_)), "{read:?}");
+    }
+    eventually("the failure is said", || {
+        host.data("extstream:fail")
+            .iter()
+            .map(|d| {
+                if d["event"] == "connectionFailed" {
+                    d["count"].as_u64().unwrap_or(0)
+                } else {
+                    0
+                }
+            })
+            .sum::<u64>()
+            == 3
+    })
+    .await;
+    let failed = host
+        .data("extstream:fail")
+        .into_iter()
+        .find(|d| d["event"] == "connectionFailed")
+        .unwrap();
+    assert!(
+        failed["message"].as_str().unwrap().contains("forbidden"),
+        "{failed}"
+    );
+    // The forward itself is still open: the next connection may succeed.
+    assert!(host
+        .frames("extstream:fail")
+        .iter()
+        .all(|f| f["type"] != "close" && f["type"] != "error"));
 }

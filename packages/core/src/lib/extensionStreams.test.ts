@@ -319,6 +319,8 @@ describe("pod source frames (#567)", () => {
     expect(isExtensionExecEvent({ event: "output", chunks: [{ stream: "stdin", text: "x" }] })).toBe(false);
     expect(isExtensionForwardEvent({ event: "ready", localPort: 54321, pod: "p", port: 9402 })).toBe(true);
     expect(isExtensionForwardEvent({ event: "ready", localPort: "54321", pod: "p", port: 9402 })).toBe(false);
+    expect(isExtensionForwardEvent({ event: "connectionFailed", count: 3, message: "forbidden" })).toBe(true);
+    expect(isExtensionForwardEvent({ event: "connectionFailed", count: "3", message: "forbidden" })).toBe(false);
   });
 
   it("reads the pods a binding may reach through extensions.pods", async () => {

@@ -269,7 +269,7 @@ the first follow; a reconnect asks for nothing already sent.
 
 | `data` | Meaning |
 |---|---|
-| `{ "event": "lines", "lines": [{ "source": "pod/container", "line": "…", "truncated"?: true }], "dropped"?: n }` | Up to 500 lines. A line past 16,384 characters is cut and says so. `dropped` counts lines the host let go because they arrived faster than it sends them (it holds up to 5000). |
+| `{ "event": "lines", "lines": [{ "source": "pod/container", "line": "…", "truncated"?: true }], "dropped"?: n }` | Up to 500 lines and 512 KiB of text (a single longer line goes alone). A line past 16 KiB is cut, on a character boundary, and says so. `dropped` counts lines the host let go because they arrived faster than it sends them: it holds up to 5000 lines and 4 MiB of text. |
 | `{ "event": "status", "source": "pod/container", "status": "live" \| "reconnecting" \| "completed", "message"?: "…" }` | The follow's state, tagged like its lines. `reconnecting` says why; `completed` says the pod is gone or finished, and is followed by `close: completed`. |
 
 A lost stream reconnects after 2 s, from nothing new, while the app may still reach
@@ -318,6 +318,7 @@ it cannot open refuses the open — and there is no field for the view to choose
 | `data` | Meaning |
 |---|---|
 | `{ "event": "ready", "localPort": n, "pod": "…", "port": n, "service"?: "…", "servicePort"?: n }` | Listening on `localPort`; each connection reaches `port` of `pod`. Sent again when a Service's forward follows another pod. |
+| `{ "event": "connectionFailed", "count": n, "message": "…" }` | `count` connections through the forward were refused by the cluster since the last report (RBAC `pods/portforward`, a closed container port), the last with `message`. Each was closed at once on this computer's side. Sent at most once per 2 s check, so a client retrying in a loop cannot take the app past its message rate. The forward is still listening. |
 
 The source owns the listener and every connection through it. When the stream ends —
 cancelled, its view closed, its window closed or reloaded, the app disabled, updated or

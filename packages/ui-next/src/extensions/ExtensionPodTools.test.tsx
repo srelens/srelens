@@ -154,6 +154,8 @@ describe("the pod tools on a Deployment (#567)", () => {
     });
     const log = await within(tools).findByRole("log", { name: "Logs of web-1/controller" });
     await waitFor(() => expect(log.textContent).toContain("certificate issued"));
+    // It scrolls both ways, so a keyboard must be able to reach it.
+    expect(log.getAttribute("tabindex")).toBe("0");
     expect(within(tools).getByText("Following")).toBeTruthy();
     // A failure reads as one.
     act(() => stream.opened[0].handlers.onEnd?.({ type: "error", code: "source", message: "pods \"web-1\" is forbidden" }));
@@ -190,6 +192,7 @@ describe("the pod tools on a Deployment (#567)", () => {
     });
     const output = await within(tools).findByLabelText("Command output");
     expect(output.textContent).toBe("Ready: False\nstderr expired\n");
+    expect(output.getAttribute("tabindex")).toBe("0");
     expect(within(tools).getByText("The command exited with code 3.")).toBeTruthy();
   });
 
@@ -211,6 +214,14 @@ describe("the pod tools on a Deployment (#567)", () => {
     const status = await within(tools).findByText(/Forwarding/);
     expect(status.textContent).toContain("127.0.0.1:54321");
     expect(status.textContent).toContain("web-1 port 9402");
+    // A connection the cluster refused is said, beside where the forward still listens.
+    act(() =>
+      stream.opened[0].handlers.onData({ event: "connectionFailed", count: 2, message: "pods \"web-1\" is forbidden" }, 2),
+    );
+    expect(
+      (await within(tools).findByText(/2 connections through it failed/)).textContent,
+    ).toContain('the last because: pods "web-1" is forbidden');
+    expect(within(tools).getByText(/Forwarding/).textContent).toContain("127.0.0.1:54321");
     fireEvent.click(within(tools).getByRole("button", { name: "Stop forwarding" }));
     await waitFor(() => expect(stream.opened[0].cancel).toHaveBeenCalled());
   });

@@ -72,18 +72,22 @@ export type ExtensionExecEvent =
   | { event: "exit"; code: number };
 
 /**
- * A port-forward's `data`: it is listening on `localPort` of this computer, and
- * reaches `port` of `pod` (through `service`'s `servicePort`, for a forward through
- * a Service). Sent again when a Service's forward follows another pod.
+ * A port-forward's `data`. `ready`: it is listening on `localPort` of this computer,
+ * and reaches `port` of `pod` (through `service`'s `servicePort`, for a forward through
+ * a Service); sent again when a Service's forward follows another pod.
+ * `connectionFailed`: `count` connections through it were refused by the cluster
+ * since the last report, the last with `message`. The forward is still listening.
  */
-export type ExtensionForwardEvent = {
-  event: "ready";
-  localPort: number;
-  pod: string;
-  port: number;
-  service?: string;
-  servicePort?: number;
-};
+export type ExtensionForwardEvent =
+  | {
+      event: "ready";
+      localPort: number;
+      pod: string;
+      port: number;
+      service?: string;
+      servicePort?: number;
+    }
+  | { event: "connectionFailed"; count: number; message: string };
 
 const record = (value: unknown): Record<string, unknown> | null =>
   value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
@@ -116,6 +120,7 @@ export function isExtensionExecEvent(data: unknown): data is ExtensionExecEvent 
 
 export function isExtensionForwardEvent(data: unknown): data is ExtensionForwardEvent {
   const d = record(data);
+  if (d?.event === "connectionFailed") return typeof d.count === "number" && typeof d.message === "string";
   return d?.event === "ready" && typeof d.localPort === "number" && typeof d.pod === "string" && typeof d.port === "number";
 }
 

@@ -536,7 +536,8 @@ function LogsSession({
         {status}
         {dropped > 0 && ` · ${dropped.toLocaleString("en-US")} lines were dropped because they arrived faster than the host sends them`}
       </p>
-      <div className="extension-pod-log" role="log" aria-label={`Logs of ${label}`}>
+      {/* Focusable: it scrolls both ways, and a keyboard must be able to reach the rest. */}
+      <div className="extension-pod-log" role="log" aria-label={`Logs of ${label}`} tabIndex={0}>
         {stream.lines.length === 0 ? (
           <p className="extension-message">{end || stream.status === "error" ? "No lines." : "Nothing logged yet."}</p>
         ) : (
@@ -617,7 +618,7 @@ function ExecSession({
         <code className="extension-command">{session.command.map(commandArgument).join(" ")}</code>
       </p>
       {output.length > 0 && (
-        <pre className="extension-pod-output" aria-label="Command output">
+        <pre className="extension-pod-output" aria-label="Command output" tabIndex={0}>
           {output.map((chunk, index) => (
             <span key={index} data-stream={chunk.stream}>
               {/* Said in a word, not only by its tint. */}
@@ -648,7 +649,8 @@ function ForwardSession({
   place: PodPlace;
   session: Extract<Session, { kind: "forward" }>;
 }) {
-  const [ready, setReady] = useState<ExtensionForwardEvent | null>(null);
+  const [ready, setReady] = useState<Extract<ExtensionForwardEvent, { event: "ready" }> | null>(null);
+  const [failed, setFailed] = useState<{ count: number; message: string } | null>(null);
   const [end, setEnd] = useState<ExtensionStreamEnd | null>(null);
   const [refused, setRefused] = useState<string | null>(null);
   useStream(
@@ -664,7 +666,9 @@ function ForwardSession({
       },
     }),
     (data) => {
-      if (isExtensionForwardEvent(data)) setReady(data);
+      if (!isExtensionForwardEvent(data)) return;
+      if (data.event === "ready") setReady(data);
+      else setFailed((was) => ({ count: (was?.count ?? 0) + data.count, message: data.message }));
     },
     setEnd,
     setRefused,
@@ -673,10 +677,19 @@ function ForwardSession({
   if (end) return <p className="extension-message" role="status">{describeStreamEnd(end)}</p>;
   if (!ready) return <p className="extension-message" role="status">Opening a local port…</p>;
   return (
-    <p className="extension-message" role="status">
-      Forwarding <code>127.0.0.1:{ready.localPort}</code> to <code>{plainText(ready.pod)}</code> port {ready.port}
-      {ready.service ? ` (through Service ${plainText(ready.service)})` : ""}. The forward ends when you stop it or close this view.
-    </p>
+    <>
+      <p className="extension-message" role="status">
+        Forwarding <code>127.0.0.1:{ready.localPort}</code> to <code>{plainText(ready.pod)}</code> port {ready.port}
+        {ready.service ? ` (through Service ${plainText(ready.service)})` : ""}. The forward ends when you stop it or close this view.
+      </p>
+      {failed && (
+        // The cluster refused connections through it; the forward itself still listens.
+        <p className="extension-message extension-stale-notice" role="alert">
+          {failed.count === 1 ? "1 connection through it failed" : `${failed.count.toLocaleString("en-US")} connections through it failed`}
+          , the last because: {plainText(failed.message)}
+        </p>
+      )}
+    </>
   );
 }
 

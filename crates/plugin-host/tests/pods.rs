@@ -395,6 +395,15 @@ fn an_exec_command_is_one_fixed_program_and_never_a_shell() {
         json!(["/bin/bash", "-lc", "id"]),
         json!(["/usr/bin/env", "sh", "-c", "id"]),
         json!(["busybox", "ash"]),
+        // A wrapper's own options and assignments come before the program it runs.
+        json!(["env", "-i", "sh", "-c", "id"]),
+        json!(["/usr/bin/env", "FOO=1", "bash", "-c", "id"]),
+        json!(["env", "-u", "HOME", "sh"]),
+        json!(["env", "--unset=HOME", "-C", "/tmp", "--", "sh"]),
+        // -S re-splits one argument into a command line, so it is refused outright.
+        json!(["env", "-S", "sh -c id"]),
+        json!(["env", "--split-string=cmctl status"]),
+        json!(["env", "-iS", "sh -c id"]),
     ] {
         let error = one(&command(shell.clone()));
         assert_eq!(error.path, "capabilities[5].arguments.command", "{shell}");
@@ -417,6 +426,8 @@ fn an_exec_command_is_one_fixed_program_and_never_a_shell() {
     // `env` or `busybox` running a program that is not a shell is a program.
     parse(&command(json!(["busybox", "nslookup", "example.com"])));
     parse(&command(json!(["/usr/bin/env", "cmctl", "version"])));
+    parse(&command(json!(["env", "-i", "LANG=C", "cmctl", "version"])));
+    parse(&command(json!(["env", "-u", "sh", "cmctl", "version"])));
 }
 
 #[test]

@@ -36,7 +36,17 @@ directly, each would reach any pod.
 |---|---|---|
 | `k8s.streamLogs` | Read-only, `low` impact | The `logs` app stream. |
 | `k8s.exec` | Sensitive, confirmation-gated, `high` impact, "Run this app's command[ in {resource}][ in cluster {cluster}]?" | The `exec` app stream, after the host confirmation names the pod, container and command. |
-| `k8s.portForward` | Read-only, `medium` impact: it changes nothing in the cluster, but opens a port on this computer | The `portForward` app stream. |
+| `k8s.portForward` | Read-only, `medium` impact, not confirmation-gated | The `portForward` app stream. |
+
+`k8s.portForward` is the one row that breaks [the rule below](#impact) that an ungated
+read is `low`, on purpose. It changes nothing in the cluster, but while it is open any
+program on this computer may connect to its port, which is host state a person would
+want to know about. It needs no confirmation because a person starts each forward in
+the view, which says where it listens, and every forward is audited. The rule's check,
+`assert_impact_matches_the_gate`, walks the registry the catalog and MCP are built
+from, and the pod capabilities are not in it, so it does not cover them;
+`the_review_states_the_hosts_own_facts_for_the_pod_capabilities` pins their rows
+instead.
 
 Their declarations (`crates/registry/src/extensions/pods.rs`) are what a binding is
 checked against, and their handlers refuse; the stream sources in
@@ -88,7 +98,9 @@ answers the other question:
 The level and the gate cannot disagree: anything `destructive` is `high`,
 anything gated is at least `medium`, and an ungated read is `low`.
 `assert_impact_matches_the_gate` (`crates/mcp/src/completeness.rs`) fails the
-build over the whole registry otherwise.
+build over the whole registry otherwise. The broker-only capabilities are not in
+that registry; `k8s.portForward` is an ungated read at `medium`, for the reason
+[above](#extensions).
 
 A capability that accepts several named operations publishes **the highest level
 any of them reaches**, because `tools/list` and the catalog carry one row per

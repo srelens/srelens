@@ -308,12 +308,14 @@ impl Selector {
             Some(value) => text_map(value)?,
         };
         let mut expressions = Vec::new();
-        for expression in fields
-            .get("matchExpressions")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-        {
+        // Absent or null is no expressions; anything but a list is refused, since
+        // reading it as none would select more pods than the object says.
+        let listed: &[Value] = match fields.get("matchExpressions") {
+            None | Some(Value::Null) => &[],
+            Some(Value::Array(expressions)) => expressions,
+            Some(_) => return Err("has a matchExpressions that is not a list".into()),
+        };
+        for expression in listed {
             let key = expression["key"].as_str().filter(|key| label_key(key));
             let operator = match expression["operator"].as_str() {
                 Some("In") => Some(Operator::In),
@@ -952,6 +954,19 @@ mod tests {
         ] {
             assert!(Selector::parse(&bad).is_err(), "{bad}");
         }
+        // A `matchExpressions` that is not a list is refused, never read as none:
+        // dropping it would widen the scope to every pod the labels alone select.
+        for bad in [
+            json!({"matchLabels": {"app": "web"}, "matchExpressions": {"key": "tier", "operator": "In", "values": ["api"]}}),
+            json!({"matchLabels": {"app": "web"}, "matchExpressions": "tier in (api)"}),
+            json!({"matchLabels": "app=web"}),
+        ] {
+            assert!(Selector::parse(&bad).is_err(), "{bad}");
+        }
+        let nulls =
+            Selector::parse(&json!({"matchLabels": {"app": "web"}, "matchExpressions": null}))
+                .unwrap();
+        assert!(nulls.matches(&labels(&[("app", "web")])));
         assert!(Selector::parse(&json!({"app.kubernetes.io/name": "cert-manager"})).is_ok());
     }
 

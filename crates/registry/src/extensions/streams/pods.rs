@@ -39,8 +39,13 @@ pub const MAX_TAIL_LINES: i64 = 5000;
 pub const MAX_LINES_PER_FRAME: usize = 500;
 /// Lines held for the next frames at most; beyond it, lines are dropped and counted.
 pub const MAX_PENDING_LINES: usize = 5000;
-/// One log line is cut after this many characters and marked `truncated`.
-pub const MAX_LINE_CHARS: usize = 16 * 1024;
+/// Bytes of line text held for the next frames at most; beyond it, likewise.
+pub const MAX_PENDING_BYTES: usize = 4 * 1024 * 1024;
+/// Bytes of line text one `lines` frame carries at most (one longer line goes alone).
+pub const MAX_FRAME_BYTES: usize = 512 * 1024;
+/// One log line is cut after this many bytes, on a character boundary, and marked
+/// `truncated`.
+pub const MAX_LINE_BYTES: usize = 16 * 1024;
 /// The most output one exec session may write, stdout and stderr together.
 pub const MAX_EXEC_OUTPUT: usize = 1024 * 1024;
 
@@ -207,11 +212,15 @@ fn check_names(
     Ok(())
 }
 
-/// Cut one log line to [`MAX_LINE_CHARS`], saying so.
-fn line_frame(source: &str, line: String) -> Value {
-    if line.chars().count() > MAX_LINE_CHARS {
-        let cut: String = line.chars().take(MAX_LINE_CHARS).collect();
-        json!({"source": source, "line": cut, "truncated": true})
+/// Cut one log line to [`MAX_LINE_BYTES`], on a character boundary, saying so.
+fn line_frame(source: &str, mut line: String) -> Value {
+    if line.len() > MAX_LINE_BYTES {
+        let mut end = MAX_LINE_BYTES;
+        while !line.is_char_boundary(end) {
+            end -= 1;
+        }
+        line.truncate(end);
+        json!({"source": source, "line": line, "truncated": true})
     } else {
         json!({"source": source, "line": line})
     }
@@ -636,29 +645,49 @@ struct LogFollow {
     inventory: tokio::sync::watch::Receiver<u64>,
 }
 
-/// Lines waiting for the next frame.
+/// Lines waiting for the next frame, bounded by count and by bytes of text.
 #[derive(Default)]
 struct Pending {
     lines: Vec<Value>,
+    /// Bytes of line text in `lines`.
+    bytes: usize,
     dropped: u64,
+}
+
+/// Bytes of text one line frame carries.
+fn text_bytes(line: &Value) -> usize {
+    line["line"].as_str().map_or(0, str::len)
 }
 
 impl Pending {
     fn push(&mut self, frame: Value) {
-        if self.lines.len() >= MAX_PENDING_LINES {
+        let size = text_bytes(&frame);
+        if self.lines.len() >= MAX_PENDING_LINES || self.bytes + size > MAX_PENDING_BYTES {
             self.dropped += 1;
         } else {
+            self.bytes += size;
             self.lines.push(frame);
         }
     }
 
-    /// One `lines` frame of at most [`MAX_LINES_PER_FRAME`], or `None` when
-    /// nothing is waiting.
+    /// One `lines` frame of at most [`MAX_LINES_PER_FRAME`] lines and
+    /// [`MAX_FRAME_BYTES`] of text, or `None` when nothing is waiting.
     fn frame(&mut self) -> Option<Value> {
         if self.lines.is_empty() && self.dropped == 0 {
             return None;
         }
-        let take = self.lines.len().min(MAX_LINES_PER_FRAME);
+        let mut take = 0;
+        let mut size = 0;
+        for line in self.lines.iter().take(MAX_LINES_PER_FRAME) {
+            let next = text_bytes(line);
+            // Always at least one line, however long, so nothing waits forever.
+            if take > 0 && size + next > MAX_FRAME_BYTES {
+                break;
+            }
+            take += 1;
+            size += next;
+        }
+        self.bytes -= size;
         let lines: Vec<Value> = self.lines.drain(..take).collect();
         let mut frame = json!({"event": "lines", "lines": lines});
         if self.dropped > 0 {
@@ -934,6 +963,12 @@ impl Forward {
             return Ok(());
         }
         let mut connections = JoinSet::new();
+        // A connection the cluster refuses closes at once on the client's side,
+        // and is said here: how many failed since the last check, and why the
+        // last one did. At most one frame a check, so a client retrying in a
+        // loop cannot take the app past its message rate.
+        let (failures, mut failed) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let mut unreported: Option<(u64, String)> = None;
         let mut monitor =
             tokio::time::interval_at(Instant::now() + self.timing.monitor, self.timing.monitor);
         loop {
@@ -941,17 +976,34 @@ impl Forward {
                 accepted = self.listener.accept() => {
                     let (mut socket, _) = accepted.map_err(|e| format!("The local port stopped accepting: {e}"))?;
                     let cluster = self.cluster.clone();
+                    let failures = failures.clone();
                     let (context, namespace, pod, port) = (
                         self.context.clone(), self.scope.namespace.clone(), self.pod.name.clone(), self.remote,
                     );
                     connections.spawn(async move {
-                        if let Ok(mut upstream) = cluster.connect(&context, &namespace, &pod, port).await {
-                            let _ = tokio::io::copy_bidirectional(&mut socket, &mut upstream).await;
+                        match cluster.connect(&context, &namespace, &pod, port).await {
+                            Ok(mut upstream) => {
+                                let _ = tokio::io::copy_bidirectional(&mut socket, &mut upstream).await;
+                            }
+                            Err(why) => {
+                                log::warn!("app port-forward to {namespace}/{pod}:{port} on {context} failed: {why}");
+                                let _ = failures.send(why);
+                            }
                         }
                     });
                 }
                 Some(_) = connections.join_next(), if !connections.is_empty() => {}
+                Some(why) = failed.recv() => {
+                    let count = unreported.as_ref().map_or(0, |(count, _)| *count);
+                    unreported = Some((count + 1, why));
+                }
                 _ = monitor.tick() => {
+                    if let Some((count, message)) = unreported.take() {
+                        let frame = json!({"event": "connectionFailed", "count": count, "message": message});
+                        if send(&tx, frame).is_err() {
+                            return Ok(());
+                        }
+                    }
                     match self.cluster.pod(&self.context, &self.scope.namespace, &self.pod.name).await {
                         Ok(Some(pod)) if !self.scope.admits(&pod) => {
                             return Err(self.scope.refusal(&self.app, &self.pod.name));
@@ -1004,5 +1056,65 @@ impl Forward {
         self.pod = pod;
         self.remote = remote;
         send(tx, self.ready()).map_err(|_| "The stream ended".to_owned())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Lines are held by bytes as well as by count: a container writing long lines
+    /// faster than the host sends them cannot grow the buffer past its budget, and
+    /// what it let go is counted, as a line past the count is.
+    #[test]
+    fn pending_lines_are_bounded_by_bytes_and_each_frame_by_its_size() {
+        let mut pending = Pending::default();
+        let long = "x".repeat(MAX_LINE_BYTES);
+        let fits = MAX_PENDING_BYTES / MAX_LINE_BYTES;
+        for _ in 0..fits + 10 {
+            pending.push(line_frame("web-1/app", long.clone()));
+        }
+        assert_eq!(pending.lines.len(), fits);
+        assert_eq!(pending.dropped, 10);
+        assert!(pending.bytes <= MAX_PENDING_BYTES);
+        let mut carried = 0;
+        let mut first = true;
+        while let Some(frame) = pending.frame() {
+            let size: usize = frame["lines"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|line| line["line"].as_str().unwrap().len())
+                .sum();
+            assert!(size <= MAX_FRAME_BYTES, "a frame of {size} bytes");
+            // What was dropped is said once, on the next frame.
+            assert_eq!(frame.get("dropped").is_some(), first);
+            first = false;
+            carried += frame["lines"].as_array().unwrap().len();
+        }
+        assert_eq!(carried, fits);
+        assert_eq!(pending.bytes, 0);
+        // One line over the frame's size still goes, alone, rather than never.
+        let mut pending = Pending::default();
+        pending.push(json!({"source": "s", "line": "y".repeat(MAX_FRAME_BYTES + 1)}));
+        assert_eq!(
+            pending.frame().unwrap()["lines"].as_array().unwrap().len(),
+            1
+        );
+    }
+
+    /// A long line is cut by bytes, on a character boundary, and says so.
+    #[test]
+    fn a_long_line_is_cut_on_a_character_boundary() {
+        let line = "é".repeat(MAX_LINE_BYTES);
+        let frame = line_frame("s", line);
+        let cut = frame["line"].as_str().unwrap();
+        assert!(cut.len() <= MAX_LINE_BYTES && cut.len() > MAX_LINE_BYTES - 4);
+        assert!(cut.chars().all(|c| c == 'é'));
+        assert_eq!(frame["truncated"], true);
+        assert_eq!(
+            line_frame("s", "short".into()),
+            json!({"source": "s", "line": "short"})
+        );
     }
 }

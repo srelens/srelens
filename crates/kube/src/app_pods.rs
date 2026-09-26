@@ -291,6 +291,30 @@ pub fn exit_code(status: Option<&Status>) -> Result<i32, String> {
         .unwrap_or_else(|| "The command failed without saying why".into()))
 }
 
+/// The text `bytes` completes, appended to what `carry` held back from the last
+/// read. A read can end inside a multi-byte character; that incomplete tail is
+/// kept in `carry` for the next read instead of being decoded as U+FFFD. Bytes
+/// that are not UTF-8 at all are decoded lossily at once, never held.
+fn decode(carry: &mut Vec<u8>, bytes: &[u8]) -> String {
+    carry.extend_from_slice(bytes);
+    let complete = match std::str::from_utf8(carry) {
+        Ok(_) => carry.len(),
+        // Only an incomplete sequence at the very end is worth waiting for.
+        Err(e) if e.error_len().is_none() => e.valid_up_to(),
+        Err(_) => carry.len(),
+    };
+    let text = String::from_utf8_lossy(&carry[..complete]).into_owned();
+    carry.drain(..complete);
+    text
+}
+
+/// What `carry` still holds when its stream closes, lossily.
+fn flush(carry: &mut Vec<u8>) -> String {
+    let text = String::from_utf8_lossy(carry).into_owned();
+    carry.clear();
+    text
+}
+
 /// Run `command` in `container` of `pod` once, with no stdin and no terminal,
 /// handing each chunk of stdout and stderr to `on_output` as it arrives.
 /// Returns the command's exit code; see [`exit_code`].
@@ -324,16 +348,29 @@ where
     let mut stdout = attached.stdout().ok_or("exec: no stdout")?;
     let mut stderr = attached.stderr().ok_or("exec: no stderr")?;
     let (mut out_buf, mut err_buf) = (vec![0u8; 8192], vec![0u8; 8192]);
+    // Each stream's incomplete trailing character, until its next read.
+    let (mut out_carry, mut err_carry) = (Vec::new(), Vec::new());
     let (mut out_open, mut err_open) = (true, true);
+    let mut emit = |stream: Output, text: String| {
+        if !text.is_empty() {
+            on_output(stream, text);
+        }
+    };
     while out_open || err_open {
         tokio::select! {
             read = stdout.read(&mut out_buf), if out_open => match read {
-                Ok(0) | Err(_) => out_open = false,
-                Ok(n) => on_output(Output::Stdout, String::from_utf8_lossy(&out_buf[..n]).into_owned()),
+                Ok(0) | Err(_) => {
+                    out_open = false;
+                    emit(Output::Stdout, flush(&mut out_carry));
+                }
+                Ok(n) => emit(Output::Stdout, decode(&mut out_carry, &out_buf[..n])),
             },
             read = stderr.read(&mut err_buf), if err_open => match read {
-                Ok(0) | Err(_) => err_open = false,
-                Ok(n) => on_output(Output::Stderr, String::from_utf8_lossy(&err_buf[..n]).into_owned()),
+                Ok(0) | Err(_) => {
+                    err_open = false;
+                    emit(Output::Stderr, flush(&mut err_carry));
+                }
+                Ok(n) => emit(Output::Stderr, decode(&mut err_carry, &err_buf[..n])),
             },
         }
     }
@@ -451,6 +488,28 @@ mod tests {
         let unreadable =
             status(json!({"status": "Failure", "reason": "NonZeroExitCode", "message": "exit"}));
         assert!(exit_code(Some(&unreadable)).is_err());
+    }
+
+    /// A character split across two reads is one character, not two U+FFFD.
+    #[test]
+    fn a_character_split_across_reads_decodes_whole() {
+        let text = "réseau 日本";
+        let bytes = text.as_bytes();
+        for cut in 1..bytes.len() {
+            let mut carry = Vec::new();
+            let mut out = decode(&mut carry, &bytes[..cut]);
+            out.push_str(&decode(&mut carry, &bytes[cut..]));
+            out.push_str(&flush(&mut carry));
+            assert_eq!(out, text, "cut at {cut}");
+        }
+        // Bytes that are not UTF-8 at all are still shown, lossily, not held forever.
+        let mut carry = Vec::new();
+        assert_eq!(decode(&mut carry, b"a\xffb"), "a\u{fffd}b");
+        assert!(carry.is_empty());
+        // An incomplete sequence at the end of the stream is flushed lossily.
+        let mut carry = Vec::new();
+        assert_eq!(decode(&mut carry, &"é".as_bytes()[..1]), "");
+        assert_eq!(flush(&mut carry), "\u{fffd}");
     }
 
     #[test]

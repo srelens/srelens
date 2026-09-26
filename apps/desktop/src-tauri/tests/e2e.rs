@@ -2566,6 +2566,8 @@ async fn app_pod_streams(h: &mut Harness, ctx: &str, settings: &TempSettings) {
     );
     let streams = streams.expect("a build with settings has app streams");
     let sink = Arc::new(srelens_streams::test_util::TestSink::default());
+    // Exec and port-forward sessions go to an audit trail; this one is the suite's own.
+    let trail = Arc::new(Trail::default());
     let request = |view: &str, channel: &str, workload: &str, mut source: Value| {
         source["name"] = json!(workload);
         json!({"id": id, "revision": revision, "view": view, "channel": channel,
@@ -2610,13 +2612,20 @@ async fn app_pod_streams(h: &mut Harness, ctx: &str, settings: &TempSettings) {
         source
     };
     let refused = streams
-        .open(sink.clone(), request("e2e/pods#1", "extstream:e2e-noexec", DEPLOY, echo(None)))
+        .open_in_window(
+            sink.clone(),
+            "e2e",
+            trail.clone(),
+            request("e2e/pods#1", "extstream:e2e-noexec", DEPLOY, echo(None)),
+        )
         .await
         .unwrap_err();
     assert!(refused.contains("needs the host confirmation"), "{refused}");
     streams
-        .open(
+        .open_in_window(
             sink.clone(),
+            "e2e",
+            trail.clone(),
             request("e2e/pods#1", "extstream:e2e-exec", DEPLOY,
                 echo(Some(json!({"pod": web, "container": "app", "command": ["echo", "e2e-exec"]})))),
         )
@@ -2637,8 +2646,10 @@ async fn app_pod_streams(h: &mut Harness, ctx: &str, settings: &TempSettings) {
 
     // A pod the Deployment does not select is refused, whoever confirmed it.
     let refused = streams
-        .open(
+        .open_in_window(
             sink.clone(),
+            "e2e",
+            trail.clone(),
             request("e2e/pods#1", "extstream:e2e-out", DEPLOY,
                 json!({"kind": "exec", "capability": "echo", "pod": http, "container": "app",
                        "confirmed": {"pod": http, "container": "app", "command": ["echo", "e2e-exec"]}})),
@@ -2649,8 +2660,10 @@ async fn app_pod_streams(h: &mut Harness, ctx: &str, settings: &TempSettings) {
 
     // Port-forward: the host picks the port, and the fixture answers through it.
     streams
-        .open(
+        .open_in_window(
             sink.clone(),
+            "e2e",
+            trail.clone(),
             request("e2e/pods#2", "extstream:e2e-fwd", HTTP_DEPLOY,
                 json!({"kind": "portForward", "capability": "http", "pod": http})),
         )
@@ -2690,8 +2703,36 @@ async fn app_pod_streams(h: &mut Harness, ctx: &str, settings: &TempSettings) {
     }
     assert!(closed, "the forward's port stops listening with its view");
     assert_eq!(streams.close_view("e2e/pods#1"), 1, "the log stream was still open");
+    // Each exec and forward session was recorded, the refused ones with why.
+    let recorded: Vec<(String, &str)> = trail
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|r| (r.tool.clone(), r.outcome))
+        .collect();
+    assert_eq!(
+        recorded,
+        [
+            ("k8s.exec".to_owned(), "rejected"),
+            ("k8s.exec".to_owned(), "ok"),
+            ("k8s.exec".to_owned(), "rejected"),
+            ("k8s.portForward".to_owned(), "ok"),
+        ],
+        "{recorded:?}"
+    );
 
     h.ok("extensions.configure", json!({"action": "remove", "id": id})).await;
+}
+
+/// An audit sink that keeps what it is given, for the suite to read back.
+#[derive(Default)]
+struct Trail(std::sync::Mutex<Vec<srelens_capability::audit::AuditRecord>>);
+
+impl srelens_capability::audit::AuditSink for Trail {
+    fn record(&self, rec: srelens_capability::audit::AuditRecord) {
+        self.0.lock().unwrap().push(rec);
+    }
 }
 
 /// The first running, ready pod the Deployment `workload` selects, as `extensions.pods`

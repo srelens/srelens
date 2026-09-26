@@ -67,8 +67,10 @@
   overflow-x: auto;
 }
 
-/* A command runs whole in one line and scrolls: every argument is shown, none
-   cut, and a line break inside one would read as two. */
+/* A command runs whole in one line: every argument is shown, none cut, and a
+   line break inside one would read as two. It scrolls as every fact does, from
+   `.host-confirm-facts dd` above (`overflow-x: auto`, `min-width: 0`, in a
+   `minmax(0, 1fr)` track); this only keeps its spaces as written. */
 .host-confirm-command {
   white-space: pre;
 }
