@@ -1,6 +1,5 @@
 import { useContext, useState } from "react";
 import {
-  CAPABILITY_CATALOG,
   NETWORK_HTTP,
   clearExtensionSecret,
   isTauri,
@@ -8,59 +7,20 @@ import {
   permissionName,
   type ExtensionChange,
   type ExtensionPreviousVersion,
-  type ExtensionSource,
   type InstalledExtension,
 } from "@srelens/core";
 import { CodeEditor } from "@srelens/ui-kit";
 import { saveOrDownload } from "../lib/saveOrDownload";
 import { ExtensionClusters } from "./ExtensionClusters";
 import { ExtensionNetwork } from "./ExtensionNetwork";
-import { ExtensionBindings, POD_FACTS } from "./ExtensionBindings";
+import { ExtensionBindings } from "./ExtensionBindings";
+import { describeGrant, installedOn, origin } from "./detailsText";
 import { networkReach, networkRequests, reachText } from "./networkText";
 import { ExtensionControls } from "./ExtensionControls";
+import { ExtensionInspector } from "./ExtensionInspector";
+import { ExtensionLogs } from "./ExtensionLogs";
 import { escapeFormatCharacters } from "./displayText";
 import { extensionLabel } from "./inventoryStore";
-
-const facts = new Map(CAPABILITY_CATALOG.map((capability) => [capability.id, capability]));
-
-/** What a granted host capability can do, from the backend registry's own annotations. */
-function describeGrant(id: string): string {
-  // The broker's own capability (#568): never offered to MCP or the catalog, since
-  // called directly it would fetch any URL. That is not "not provided".
-  if (id === NETWORK_HTTP) return "Read-only · GET requests to this app's hosts only, sent by the host";
-  // Likewise the pod capabilities (#567), which run only as the app's streams.
-  if (POD_FACTS[id]) return `${POD_FACTS[id]} · only pods this app's bindings may reach`;
-  const fact = facts.get(id);
-  if (!fact) return "Not provided by this host";
-  return [
-    fact.readOnly ? "Read-only" : "Changes resources",
-    fact.requiresConfirm && "Asks for confirmation",
-    fact.sensitive && "Sensitive",
-    fact.destructive && "Destructive",
-  ]
-    .filter(Boolean)
-    .join(" · ");
-}
-
-const from: Record<ExtensionSource, string> = { catalog: "from the Catalog", local: "local manifest" };
-
-/**
- * Says only what the host verified. The installed version's proof is rechecked on every
- * load, and a failure quarantines the app; a kept version's is checked when it is restored.
- */
-function origin(version: InstalledExtension | ExtensionPreviousVersion) {
-  const installed = "history" in version;
-  const signer = !version.signatureProof
-    ? "Unsigned"
-    : !installed
-      ? "Signed; verified when restored"
-      : version.quarantined
-        ? "Signature not verified"
-        : "Signed by srelens";
-  return `${signer} · ${from[version.source]}`;
-}
-
-const installedOn = (seconds: number) => new Date(seconds * 1000).toLocaleString();
 
 /**
  * What a reset keeps: the saved values of required settings, which have no
@@ -76,7 +36,12 @@ function requiredSettings(plugin: InstalledExtension): Record<string, unknown> {
   return kept;
 }
 
-/** The manifest, grants, source, settings and kept versions of one installed app. */
+type DetailsTab = "overview" | "inspector" | "logs";
+
+/**
+ * One installed app's Details: the Overview (its manifest, grants, source, settings and
+ * kept versions), the Inspector (what it is running and how, #575) and its Logs.
+ */
 export function ExtensionDetails({
   plugin,
   busy,
@@ -88,7 +53,9 @@ export function ExtensionDetails({
   change(action: ExtensionChange): Promise<boolean>;
   onError(message: string): void;
 }) {
-  const { Button } = useContext(ExtensionControls);
+  const { Button, Tabs } = useContext(ExtensionControls);
+  // The Overview first, as Details opened before the Inspector and Logs (#575) existed.
+  const [tab, setTab] = useState<DetailsTab>("overview");
   const [resetting, setResetting] = useState(false);
   const [rollback, setRollback] = useState<ExtensionPreviousVersion | null>(null);
   const { manifest } = plugin;
@@ -141,131 +108,150 @@ export function ExtensionDetails({
 
   return (
     <section className="extension-details" aria-label={`${extensionLabel(plugin)} details`}>
-      <p className="extension-message">
-        {origin(plugin)} · version {manifest.version}, revision {plugin.revision} · installed{" "}
-        {installedOn(plugin.installedAt)}
-      </p>
-
-      <ExtensionClusters key={JSON.stringify(plugin.contexts ?? null)} plugin={plugin} busy={busy} change={change} />
-      <ExtensionNetwork plugin={plugin} busy={busy} change={change} />
-
-      <h3>Granted capabilities</h3>
-      <ul className="extension-grants" aria-label="Granted capabilities">
-        {plugin.grants.map((grant) => (
-          <li key={grant}>
-            <code>{grant}</code> <span>{describeGrant(grant)}</span>
-          </li>
-        ))}
-      </ul>
-
-      <h3>Manifest</h3>
-      {/* A stored manifest can carry a format character this host now refuses (an app
-          installed before the rule is quarantined, not rewritten), so they are written as
-          JSON escapes rather than drawn. The install review shows manifests the same way. */}
-      <CodeEditor
-        value={escapeFormatCharacters(JSON.stringify(manifest, null, 2))}
-        readOnly
-        language="none"
-        copy
-        ariaLabel={`${extensionLabel(plugin)} manifest`}
-        minHeight={160}
-        maxHeight={360}
+      <Tabs
+        variant="underline"
+        label="App details"
+        tabs={[
+          { id: "overview", label: "Overview" },
+          { id: "inspector", label: "Inspector" },
+          { id: "logs", label: "Logs" },
+        ]}
+        active={tab}
+        onChange={(next) => setTab(next as DetailsTab)}
       />
-
-      <h3>Settings</h3>
-      <p className="extension-message">
-        Settings are exported as saved. A secret is never saved in settings, so an export never holds one.
-      </p>
-      <div className="extension-toolbar">
-        <Button variant="secondary" disabled={busy} onClick={() => void exportSettings()}>
-          Export settings
-        </Button>
-        <Button variant="secondary" disabled={busy} onClick={() => setResetting(true)}>
-          Reset settings
-        </Button>
-      </div>
-      {resetting && (
-        <div
-          className="extension-install"
-          role="alertdialog"
-          aria-label="Reset settings"
-          onKeyDown={(e) => {
-            if (e.key === "Escape" && !busy) setResetting(false);
-          }}
-        >
-          <p>
-            Reset {extensionLabel(plugin)} to its default settings? Its saved settings are removed, except the
-            required ones, which have no default
-            {keepsSecrets ? ", and its secrets are deleted from srelens's secrets vault." : "."}
+      {tab === "overview" && (
+        <>
+          <p className="extension-message">
+            {origin(plugin)} · version {manifest.version}, revision {plugin.revision} · installed{" "}
+            {installedOn(plugin.installedAt)}
           </p>
-          <Button variant="secondary" autoFocus disabled={busy} onClick={() => setResetting(false)}>
-            Cancel
-          </Button>
-          <Button
-            variant="danger"
-            disabled={busy}
-            onClick={() => void reset()}
-          >
-            Reset to defaults
-          </Button>
-        </div>
-      )}
 
-      <h3>Previous versions</h3>
-      {plugin.history.length === 0 ? (
-        <p className="extension-message">No earlier version is kept. Each update keeps up to three.</p>
-      ) : (
-        <ul className="extension-versions" aria-label="Previous versions">
-          {plugin.history.map((version) => (
-            <li key={version.revision}>
-              <span>
-                {version.manifest.version} · {origin(version)} · installed {installedOn(version.installedAt)}
-              </span>
-              <Button variant="secondary" size="xs" disabled={busy} onClick={() => setRollback(version)}>
-                Roll back to {version.manifest.version}
+          <ExtensionClusters key={JSON.stringify(plugin.contexts ?? null)} plugin={plugin} busy={busy} change={change} />
+          <ExtensionNetwork plugin={plugin} busy={busy} change={change} />
+
+          <h3>Granted capabilities</h3>
+          <ul className="extension-grants" aria-label="Granted capabilities">
+            {plugin.grants.map((grant) => (
+              <li key={grant}>
+                <code>{grant}</code> <span>{describeGrant(grant)}</span>
+              </li>
+            ))}
+          </ul>
+
+          <h3>Manifest</h3>
+          {/* A stored manifest can carry a format character this host now refuses (an app
+              installed before the rule is quarantined, not rewritten), so they are written as
+              JSON escapes rather than drawn. The install review shows manifests the same way. */}
+          <CodeEditor
+            value={escapeFormatCharacters(JSON.stringify(manifest, null, 2))}
+            readOnly
+            language="none"
+            copy
+            ariaLabel={`${extensionLabel(plugin)} manifest`}
+            minHeight={160}
+            maxHeight={360}
+          />
+
+          <h3>Settings</h3>
+          <p className="extension-message">
+            Settings are exported as saved. A secret is never saved in settings, so an export never holds one.
+          </p>
+          <div className="extension-toolbar">
+            <Button variant="secondary" disabled={busy} onClick={() => void exportSettings()}>
+              Export settings
+            </Button>
+            <Button variant="secondary" disabled={busy} onClick={() => setResetting(true)}>
+              Reset settings
+            </Button>
+          </div>
+          {resetting && (
+            <div
+              className="extension-install"
+              role="alertdialog"
+              aria-label="Reset settings"
+              onKeyDown={(e) => {
+                if (e.key === "Escape" && !busy) setResetting(false);
+              }}
+            >
+              <p>
+                Reset {extensionLabel(plugin)} to its default settings? Its saved settings are removed, except the
+                required ones, which have no default
+                {keepsSecrets ? ", and its secrets are deleted from srelens's secrets vault." : "."}
+              </p>
+              <Button variant="secondary" autoFocus disabled={busy} onClick={() => setResetting(false)}>
+                Cancel
               </Button>
-            </li>
-          ))}
-        </ul>
+              <Button
+                variant="danger"
+                disabled={busy}
+                onClick={() => void reset()}
+              >
+                Reset to defaults
+              </Button>
+            </div>
+          )}
+
+          <h3>Previous versions</h3>
+          {plugin.history.length === 0 ? (
+            <p className="extension-message">No earlier version is kept. Each update keeps up to three.</p>
+          ) : (
+            <ul className="extension-versions" aria-label="Previous versions">
+              {plugin.history.map((version) => (
+                <li key={version.revision}>
+                  <span>
+                    {version.manifest.version} · {origin(version)} · installed {installedOn(version.installedAt)}
+                  </span>
+                  <Button variant="secondary" size="xs" disabled={busy} onClick={() => setRollback(version)}>
+                    Roll back to {version.manifest.version}
+                  </Button>
+                </li>
+              ))}
+            </ul>
+          )}
+          {rollback && (
+            <section className="extension-install extension-permission-review" aria-label="Review rollback">
+              <p>
+                Roll {extensionLabel(plugin)} back to {rollback.manifest.version}?{" "}
+                {changesGrants ? (
+                  <>
+                    It requests: {requested.join(", ") || "no permissions"}.
+                    {dropped.length > 0 && ` It no longer uses: ${dropped.join(", ")}.`}
+                    {changesHosts &&
+                      ` It reaches: ${reaches.map((host) => reachText(rollback!.manifest, host)).join(", ") || "no hosts"}.`}
+                    {changesRequests && " Its network requests differ from this version's; they are listed below."}
+                  </>
+                ) : (
+                  "It uses the permissions granted now."
+                )}{" "}
+                Settings are kept, and the versions after it are discarded.
+              </p>
+              {changesRequests && <ExtensionBindings manifest={rollback.manifest} permissions={[NETWORK_HTTP]} />}
+              <Button
+                disabled={busy}
+                onClick={() =>
+                  void change({
+                    action: "rollback",
+                    id: manifest.id,
+                    revision: rollback.revision,
+                    grants: requested,
+                  }).then((done) => {
+                    if (done) setRollback(null);
+                  })
+                }
+              >
+                {changesGrants ? "Roll back and grant permissions" : "Roll back"}
+              </Button>
+              <Button variant="secondary" onClick={() => setRollback(null)}>
+                Cancel
+              </Button>
+            </section>
+          )}
+        </>
       )}
-      {rollback && (
-        <section className="extension-install extension-permission-review" aria-label="Review rollback">
-          <p>
-            Roll {extensionLabel(plugin)} back to {rollback.manifest.version}?{" "}
-            {changesGrants ? (
-              <>
-                It requests: {requested.join(", ") || "no permissions"}.
-                {dropped.length > 0 && ` It no longer uses: ${dropped.join(", ")}.`}
-                {changesHosts &&
-                  ` It reaches: ${reaches.map((host) => reachText(rollback!.manifest, host)).join(", ") || "no hosts"}.`}
-                {changesRequests && " Its network requests differ from this version's; they are listed below."}
-              </>
-            ) : (
-              "It uses the permissions granted now."
-            )}{" "}
-            Settings are kept, and the versions after it are discarded.
-          </p>
-          {changesRequests && <ExtensionBindings manifest={rollback.manifest} permissions={[NETWORK_HTTP]} />}
-          <Button
-            disabled={busy}
-            onClick={() =>
-              void change({
-                action: "rollback",
-                id: manifest.id,
-                revision: rollback.revision,
-                grants: requested,
-              }).then((done) => {
-                if (done) setRollback(null);
-              })
-            }
-          >
-            {changesGrants ? "Roll back and grant permissions" : "Roll back"}
-          </Button>
-          <Button variant="secondary" onClick={() => setRollback(null)}>
-            Cancel
-          </Button>
-        </section>
+      {tab === "inspector" && (
+        <ExtensionInspector plugin={plugin} busy={busy} change={change} onViewLogs={() => setTab("logs")} />
       )}
+      {tab === "logs" && <ExtensionLogs plugin={plugin} />}
     </section>
   );
 }

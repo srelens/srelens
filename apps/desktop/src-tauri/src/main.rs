@@ -269,17 +269,26 @@ fn run_mcp_http(
                 vault.clone(),
             )),
         );
-        let server = srelens_mcp::McpServer::new(Arc::new(registry));
+        let audit: Arc<dyn srelens_capability::audit::AuditSink> = Arc::new(
+            srelens_mcp::audit::JsonlAuditLog::new(mcp_audit_path(), MCP_AUDIT_CAP_BYTES),
+        );
+        let registry = Arc::new(registry);
+        let server = srelens_mcp::McpServer::new(registry.clone());
         let server = match app_tools {
-            Some(tools) => server.with_app_tools(tools),
+            Some(tools) => {
+                // Headless: nobody to ask, so a sidecar's writes are all refused (#573).
+                tools.serve_sidecars(srelens_registry::SidecarHost {
+                    registry,
+                    consent: Arc::new(srelens_registry::NoConsent),
+                    audit: audit.clone(),
+                });
+                server.with_app_tools(tools)
+            }
             None => server,
         };
         let server = server
             .with_policy(policy)
-            .with_audit(Arc::new(srelens_mcp::audit::JsonlAuditLog::new(
-                mcp_audit_path(),
-                MCP_AUDIT_CAP_BYTES,
-            )))
+            .with_audit(audit)
             .with_prompts(srelens_mcp::prompts::PromptLibrary::new(Some(
                 mcp_prompts_dir(),
             )))
@@ -378,17 +387,26 @@ fn run_mcp_stdio(allow_destructive: bool, allow_sensitive_reads: bool) {
                 mcp_dir(),
             )),
         );
-        let server = srelens_mcp::McpServer::new(Arc::new(registry));
+        let audit: Arc<dyn srelens_capability::audit::AuditSink> = Arc::new(
+            srelens_mcp::audit::JsonlAuditLog::new(mcp_audit_path(), MCP_AUDIT_CAP_BYTES),
+        );
+        let registry = Arc::new(registry);
+        let server = srelens_mcp::McpServer::new(registry.clone());
         let server = match app_tools {
-            Some(tools) => server.with_app_tools(tools),
+            Some(tools) => {
+                // Headless: nobody to ask, so a sidecar's writes are all refused (#573).
+                tools.serve_sidecars(srelens_registry::SidecarHost {
+                    registry,
+                    consent: Arc::new(srelens_registry::NoConsent),
+                    audit: audit.clone(),
+                });
+                server.with_app_tools(tools)
+            }
             None => server,
         };
         let server = server
             .with_policy(policy)
-            .with_audit(Arc::new(srelens_mcp::audit::JsonlAuditLog::new(
-                mcp_audit_path(),
-                MCP_AUDIT_CAP_BYTES,
-            )))
+            .with_audit(audit)
             .with_prompts(srelens_mcp::prompts::PromptLibrary::new(Some(
                 mcp_prompts_dir(),
             )))

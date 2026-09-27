@@ -28,8 +28,8 @@
 //! replaces is revoked ([`Registration::revoke`]): a caller still holding it sees its
 //! tools and cannot run them.
 use super::{
-    columns, package, read, read_contribution, resource, sidecars::AppSidecars, validate_app,
-    Inventory, Read, Store, MAX_INVENTORY_BYTES,
+    columns, package, read_contribution, resource, sidecars::AppSidecars, validate_app, Inventory,
+    Read, Store, MAX_INVENTORY_BYTES,
 };
 use serde_json::{Map, Value};
 use srelens_capability::{BoxFuture, CapabilityError, Registry};
@@ -112,6 +112,18 @@ impl AppTools {
         self.inner.refresh();
     }
 
+    /// Answer the calls of executable apps' sidecars through `host` (#573): its registry,
+    /// who confirms a write, and the audit trail. An MCP host calls this once it holds its
+    /// registry; a sidecar started before keeps the broker it was started with.
+    pub fn serve_sidecars(&self, host: super::sidecars::SidecarHost) {
+        self.inner.sidecars.serve(host);
+    }
+
+    /// End at once the sidecars of apps `state` no longer holds. Blocking-safe.
+    pub(super) fn end_uninstalled(&self, state: &Inventory) {
+        self.inner.sidecars.end_uninstalled(state);
+    }
+
     /// Start sidecars with `launcher` from now on. Test support.
     #[cfg(test)]
     pub(super) fn script_sidecars(
@@ -154,7 +166,7 @@ impl Inner {
         }
         // An inventory that cannot be read offers no tools: fail closed, as every read
         // through the broker does.
-        let state = read(&self.store).unwrap_or_else(|why| {
+        let state = self.store.read().unwrap_or_else(|why| {
             log::warn!("app tools: {why}");
             Inventory::default()
         });
@@ -301,7 +313,7 @@ async fn run_operation(
     name: &str,
     input: Map<String, Value>,
 ) -> Result<Value, CapabilityError> {
-    let state = tokio::task::spawn_blocking(move || read(&store))
+    let state = tokio::task::spawn_blocking(move || store.read())
         .await
         .map_err(|e| CapabilityError::Handler(e.to_string()))?
         .map_err(CapabilityError::Handler)?;

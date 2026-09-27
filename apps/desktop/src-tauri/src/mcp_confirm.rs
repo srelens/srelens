@@ -65,6 +65,21 @@ pub struct PendingRequest {
     /// What the HOST read out of the call: the cluster it is pinned to, the
     /// object it names, and the app it was made through. See [`ConfirmTarget`].
     pub target: ConfirmTarget,
+    /// The app that asked, when the host knows it: only for a call an app's
+    /// sidecar made through the broker (#573), whose process the supervisor
+    /// started for exactly this app and revision. Never for an MCP call, whose
+    /// caller is a bearer token (see [`ConfirmTarget`]). An ID and a revision,
+    /// and nothing else: the window looks the name and publisher up in its own
+    /// inventory, so nothing on this wire names or vouches for an app.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requester: Option<Requester>,
+}
+
+/// Which installed app asked, as the host that started its sidecar knows it.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Requester {
+    pub id: String,
+    pub revision: u64,
 }
 
 /// The facts the one confirmation names under its question (#552), as the host
@@ -156,6 +171,33 @@ impl PendingRequest {
                 name: field("name"),
                 kind: field("kind"),
             },
+            requester: None,
+        }
+    }
+
+    /// What the window is asked for a gated call an app's sidecar made through the
+    /// broker (#573). The broker rendered the host's sentence from the capability's
+    /// template and knows which app asked; the facts under the question are read
+    /// from the arguments through the same closed vocabulary as an MCP call's.
+    pub fn from_sidecar(id: String, request: &srelens_registry::SidecarConsentRequest) -> Self {
+        let fields = srelens_capability::confirm_fields(&request.args);
+        let field = |key: &str| fields.get(key).cloned();
+        Self {
+            id,
+            tool: request.tool.clone(),
+            args: request.args.clone(),
+            prompt: request.confirm_text.clone(),
+            impact: request.impact.as_str().to_string(),
+            target: ConfirmTarget {
+                cluster: field("cluster"),
+                namespace: field("namespace"),
+                name: field("name"),
+                kind: field("kind"),
+            },
+            requester: Some(Requester {
+                id: request.app.id.clone(),
+                revision: request.app.revision,
+            }),
         }
     }
 }
@@ -303,12 +345,37 @@ impl<R: Runtime> ConfirmPolicy for PromptUser<R> {
     /// the same metadata, which is what makes that a merge rather than a
     /// rewrite.
     async fn confirm(&self, request: &srelens_mcp::policy::ConsentRequest) -> Decision {
+        let id = uuid::Uuid::new_v4().to_string();
+        self.ask(PendingRequest::from_consent(id, request)).await
+    }
+}
+
+/// The desktop's answer to a sidecar's gated call (#573): the one host confirmation
+/// an agent's gated call gets (#552), with the app that asked named by the host from
+/// its own inventory. Declined, unanswered or with no window, the call never runs,
+/// and the sidecar is told why.
+impl<R: Runtime> srelens_registry::SidecarConsent for PromptUser<R> {
+    fn confirm<'a>(
+        &'a self,
+        request: &'a srelens_registry::SidecarConsentRequest,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async move {
+            let id = uuid::Uuid::new_v4().to_string();
+            match self.ask(PendingRequest::from_sidecar(id, request)).await {
+                Decision::Approved => Ok(()),
+                Decision::Denied(why) => Err(why),
+            }
+        })
+    }
+}
+
+impl<R: Runtime> PromptUser<R> {
+    /// Put `pending` to the person, and wait for the answer or the timeout.
+    async fn ask(&self, pending: PendingRequest) -> Decision {
         use tauri::{Emitter, Manager};
 
-        let tool = request.tool.as_str();
-
-        let id = uuid::Uuid::new_v4().to_string();
-        let pending = PendingRequest::from_consent(id.clone(), request);
+        let tool = pending.tool.clone();
+        let id = pending.id.clone();
         let (tx, rx) = oneshot::channel();
         // Registered — with the request itself — BEFORE the emit below, and the
         // order is load-bearing for the frontend's replay: a subscriber that
@@ -369,6 +436,7 @@ mod tests {
                 name: Some(id.into()),
                 ..ConfirmTarget::default()
             },
+            requester: None,
         }
     }
 
@@ -681,13 +749,80 @@ mod tests {
         );
         let payload = serde_json::to_value(&got).unwrap();
         assert!(
-            payload.get("app").is_none() && payload["target"].get("app").is_none(),
+            payload.get("app").is_none()
+                && payload["target"].get("app").is_none()
+                && payload.get("requester").is_none(),
             "no app identity may cross this wire: {payload}"
         );
         // What the host DID read is still carried, because none of it is a
         // claim about who asked.
         assert_eq!(got.target.cluster.as_deref(), Some("prod"));
         assert_eq!(got.target.name.as_deref(), Some("api"));
+    }
+
+    /// A sidecar's gated call (#573) is the one case the host knows who asked: the
+    /// supervisor started that process for this app at this revision. So the request
+    /// names it — by ID and revision only, for the window to look up in its own
+    /// inventory — and still carries the host's sentence and the facts it read.
+    fn sidecar_request(args: serde_json::Value) -> srelens_registry::SidecarConsentRequest {
+        let annotations = Annotations::MUTATING
+            .with_impact(Impact::High)
+            .with_confirm("Run the declared action[ ({action})][ on {resource}][ in cluster {cluster}]?");
+        srelens_registry::SidecarConsentRequest {
+            app: srelens_registry::SidecarApp {
+                id: "org.example.argocd".into(),
+                revision: 4,
+                name: "Argo CD".into(),
+                publisher: None,
+            },
+            tool: "extensions.action".into(),
+            confirm_text: annotations.confirm_text(&args),
+            impact: annotations.impact,
+            cluster_id: "prod".into(),
+            namespace: Some("argocd".into()),
+            args,
+        }
+    }
+
+    #[test]
+    fn a_sidecars_call_names_the_app_the_host_started_it_for_and_nothing_more() {
+        let args = json!({
+            "resource": {"id": "org.example.argocd", "revision": 4, "capability": "applications",
+                "context": "prod", "namespace": "argocd", "name": "web"},
+            "action": "refresh", "uid": "u-1", "resourceVersion": "7",
+        });
+        let got = PendingRequest::from_sidecar("id-s".into(), &sidecar_request(args));
+        assert_eq!(
+            got.requester,
+            Some(Requester { id: "org.example.argocd".into(), revision: 4 })
+        );
+        assert_eq!(
+            got.prompt.as_deref(),
+            Some("Run the declared action (refresh) on argocd/web in cluster prod?")
+        );
+        assert_eq!(got.impact, "high");
+        assert_eq!(got.target.cluster.as_deref(), Some("prod"));
+        assert_eq!(got.target.name.as_deref(), Some("web"));
+        // The name and the publisher are the window's to look up, never this wire's.
+        let payload = serde_json::to_value(&got).unwrap();
+        assert_eq!(payload["requester"], json!({"id": "org.example.argocd", "revision": 4}));
+        assert!(!payload.to_string().contains("Argo CD"), "{payload}");
+    }
+
+    /// With no window to ask in, a sidecar's write is refused, never let through.
+    #[tokio::test]
+    async fn a_sidecars_write_with_no_window_to_ask_in_is_refused() {
+        use srelens_registry::SidecarConsent;
+        let app = tauri::test::mock_app();
+        let prompt = PromptUser::new(
+            app.handle().clone(),
+            Arc::new(Pending::default()),
+            Duration::from_secs(1),
+        );
+        let why = SidecarConsent::confirm(&prompt, &sidecar_request(json!({"action": "refresh"})))
+            .await
+            .unwrap_err();
+        assert!(why.contains("no window"), "{why}");
     }
 
     /// The target travels through the same escaping and the same 80-character

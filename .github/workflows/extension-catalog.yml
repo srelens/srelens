@@ -1,10 +1,11 @@
 name: Extension catalog
 
 # The live catalog and release check (#536). `public_catalog_release_smoke` in
-# crates/registry/src/extensions/catalog.rs downloads the public catalog and
-# every release manifest it lists, then checks each one as installing it from
-# Settings -> Apps would: the catalog checksum, the pinned publisher signature
-# for official apps, and this host's manifest rules.
+# crates/registry/src/extensions/catalog.rs downloads the signed public catalog
+# and every release manifest it lists, then checks each one as installing it
+# from Settings -> Apps would: the catalog's signature under the root a release
+# pins (#559), the catalog checksum, the signature of the publisher delegated
+# each app's namespace, and this host's manifest rules.
 #
 # Every other job skips it (`#[ignore]`) because what it tests changes without
 # a commit here. A re-uploaded release asset, a signature made with the wrong

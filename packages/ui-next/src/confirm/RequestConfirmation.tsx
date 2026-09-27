@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import type { ConfirmRequest } from "@srelens/core";
-import { HostConfirmation } from "./HostConfirmation";
+import { HostConfirmation, type ConfirmationApp } from "./HostConfirmation";
+import { useConfirmationApp } from "./confirmationApp";
 import { confirmSubject } from "./confirmRequest";
 
 /**
@@ -19,18 +20,20 @@ import { confirmSubject } from "./confirmRequest";
  * answer) and `actions` its own buttons, for a frame whose chrome has none.
  * Neither can change the question.
  *
- * **It names no app, deliberately.** "Requested by app X (signed by Y)" is
- * the host vouching for who asked, and for a request that arrived over MCP
- * the host has no grounds for it: `extensions.action` is reachable there, the
- * registry checks only that the call's `resource.id` and `revision` name an
- * installed, enabled app, and nothing authenticates the caller AS that app.
- * Attribution read off the request would be provenance chosen by the party
- * being vouched for — the spoof this whole component exists to prevent — so
- * the requester line is left off rather than filled in from the payload. An
- * app's own screens pass a real `app` to {@link HostConfirmation} because
- * they have host context for it; this adapter never does, and the line
- * returns here only when an authenticated host-owned execution context
- * carries the app (#549).
+ * **It names an app only when the host knows who asked.** "Requested by app
+ * X (signed by Y)" is the host vouching for who asked, and for a request that
+ * arrived over MCP the host has no grounds for it: `extensions.action` is
+ * reachable there, the registry checks only that the call's `resource.id` and
+ * `revision` name an installed, enabled app, and nothing authenticates the
+ * caller AS that app. Attribution read off the arguments would be provenance
+ * chosen by the party being vouched for — the spoof this whole component
+ * exists to prevent — so an MCP request draws no requester line. The one
+ * authenticated, host-owned execution context is an app's sidecar calling
+ * back (#573): the supervisor started that process for one app and revision,
+ * and the backend sends that reference as `requester`. Even then only the
+ * reference crosses the wire; the name and publisher come from this window's
+ * own inventory ({@link useConfirmationApp}), and a revision it no longer has
+ * draws no line.
  *
  * **The seam for the patch.** {@link HostConfirmation} draws the exact patch
  * through the same collapsing diff renderer the Edit screen uses, and nothing
@@ -38,21 +41,41 @@ import { confirmSubject } from "./confirmRequest";
  * it arrives as `DiffRow[]` on `ConfirmRequest` and is handed straight to
  * `patch` — the component, its collapsing and its tests are already here.
  */
-export function RequestConfirmation({
-  request,
-  frame,
-  details,
-  actions,
-}: {
+interface RequestConfirmationProps {
   request: ConfirmRequest;
   frame?: "dialog" | "card";
   details?: ReactNode;
   actions?: ReactNode;
-}) {
+}
+
+export function RequestConfirmation(props: RequestConfirmationProps) {
+  // Only a sidecar's request names its app, and only then is the inventory read:
+  // an MCP request has no one to look up, and fetches nothing.
+  return props.request.requester ? (
+    <Requested {...props} requester={props.request.requester} />
+  ) : (
+    <Confirmation {...props} app={null} />
+  );
+}
+
+/** A sidecar's request: the app it names, looked up in this window's inventory. */
+function Requested(props: RequestConfirmationProps & { requester: { id: string; revision: number } }) {
+  const app = useConfirmationApp(props.requester);
+  return <Confirmation {...props} app={app} />;
+}
+
+function Confirmation({
+  request,
+  frame,
+  details,
+  actions,
+  app,
+}: RequestConfirmationProps & { app: ConfirmationApp | null }) {
   return (
     <HostConfirmation
       question={request.prompt ?? null}
       impact={request.impact ?? null}
+      app={app}
       cluster={request.target?.cluster ?? null}
       subject={confirmSubject(request.target)}
       frame={frame}

@@ -2,7 +2,9 @@
 //! installing an app adds its tools and tells the client, disabling, updating or
 //! removing it withdraws them from every snapshot, and each kind of tool runs through
 //! the path the app's own screens use.
-use super::executable_tests::{install_package, install_scanner, scanner_package, SCANNER};
+use super::executable_tests::{
+    install_package, install_scanner, package_with_binaries, scanner_package, SCANNER,
+};
 use super::sidecars::fake::FakeSidecar;
 use super::tests::{configure, fake_core, manifest};
 use super::*;
@@ -485,4 +487,184 @@ async fn a_sidecar_operation_is_a_sensitive_read_only_tool_its_sidecar_answers()
     let answer: Value =
         serde_json::from_str(ran["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
     assert_eq!(answer["launch"], 2);
+}
+
+/// Every call a sidecar's broker put to a person, approved or not.
+struct Asked {
+    approve: bool,
+    requests: Mutex<Vec<srelens_plugin_host::sidecar::ConsentRequest>>,
+}
+
+impl srelens_plugin_host::sidecar::Consent for Asked {
+    fn confirm<'a>(
+        &'a self,
+        request: &'a srelens_plugin_host::sidecar::ConsentRequest,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>> {
+        self.requests.lock().unwrap().push(request.clone());
+        let approve = self.approve;
+        Box::pin(async move {
+            if approve {
+                Ok(())
+            } else {
+                Err("the person declined".into())
+            }
+        })
+    }
+}
+
+/// Argo CD, as an executable app: a reader, a declared refresh, and a sidecar whose
+/// `relay` operation makes one call back into the host.
+fn relaying_app() -> Value {
+    let mut app: Value = serde_json::from_str(&manifest()).unwrap();
+    app["srelensApiVersion"] = json!("^0.6");
+    app["kind"] = json!("executable");
+    app["permissions"] = json!(["k8s.listCustomResource", "k8s.annotate"]);
+    app["actions"] = json!([{"name":"refresh","title":"Refresh","target":"k8s.annotate",
+        "resource":"applications","arguments":{"key":"argocd.argoproj.io/refresh","value":"normal"}}]);
+    let binaries: serde_json::Map<String, Value> = srelens_plugin_host::SIDECAR_PLATFORMS
+        .iter()
+        .map(|platform| {
+            (
+                platform.to_string(),
+                json!(format!("bin/{platform}/argocd-helper")),
+            )
+        })
+        .collect();
+    app["sidecar"] = json!({"binaries": binaries, "operations": [{"name": "relay",
+        "title": "Relay a call", "inputs": [
+            {"name": "method", "type": "string", "required": true},
+            {"name": "params", "type": "string", "required": true, "maxLength": 4096}]}]});
+    app
+}
+
+/// The relaying app installed over the broker's own facade, its sidecar a fake, its
+/// calls answered with `consent` and recorded to `audit`.
+fn relaying(
+    consent: Arc<dyn srelens_plugin_host::sidecar::Consent>,
+    audit: Arc<Spy>,
+) -> (Setup, McpServer, FakeSidecar) {
+    let mut core = (*acting_core()).clone();
+    let mut read = core.get("k8s.getCustomResource").unwrap().clone();
+    read.handler = Arc::new(|args| Box::pin(async move { Ok(args) }));
+    core.register(read);
+    let setup = setup(Arc::new(core));
+    configure(
+        &setup.path,
+        json!({"action": "unsignedApps", "allowUnsignedApps": true}),
+    )
+    .unwrap();
+    use base64::Engine as _;
+    configure(
+        &setup.path,
+        json!({"action": "installPackage", "grants": ["k8s.listCustomResource", "k8s.annotate"],
+            "package": base64::engine::general_purpose::STANDARD.encode(package_with_binaries(&relaying_app()))}),
+    )
+    .unwrap();
+    let fake = FakeSidecar::default();
+    setup.tools.script_sidecars(Arc::new(fake.clone()));
+    setup.tools.serve_sidecars(sidecars::SidecarHost {
+        registry: Arc::new(setup.registry.clone()),
+        consent,
+        audit,
+    });
+    let mcp = server(&setup, Arc::new(FlagGated::new(true, true)));
+    (setup, mcp, fake)
+}
+
+const RELAY: &str = "plugin/org.example.argocd/relay";
+
+async fn relay(mcp: &McpServer, method: &str, params: Value) -> Value {
+    let called = srelens_mcp::stdio::handle_request(
+        mcp,
+        &call(
+            RELAY,
+            json!({"method": method, "params": params.to_string(), "_confirm": true}),
+        ),
+        Transport::Stdio,
+    )
+    .await
+    .unwrap();
+    assert_eq!(called["result"]["isError"], false, "{called}");
+    serde_json::from_str(called["result"]["content"][0]["text"].as_str().unwrap()).unwrap()
+}
+
+#[tokio::test]
+async fn a_sidecar_reads_through_the_broker_and_each_write_it_asks_for_is_confirmed_naming_the_app()
+{
+    let asked = Arc::new(Asked {
+        approve: true,
+        requests: Mutex::default(),
+    });
+    let (setup, mcp, _fake) = relaying(asked.clone(), Arc::new(Spy::default()));
+    // Its app declares a write the sidecar may ask for, so the operation itself is gated.
+    assert_eq!(
+        mcp.consent_kind(RELAY),
+        Some(srelens_mcp::policy::ConsentKind::Destructive)
+    );
+    let context = json!({"clusterId": "cluster/a", "namespace": "team"});
+
+    // A read through the app's own reader, bound to its kind; nobody is asked.
+    let read = relay(
+        &mcp,
+        "host/read",
+        json!({"capability": "applications", "context": context}),
+    )
+    .await;
+    assert_eq!(read["answer"]["group"], "argoproj.io", "{read}");
+    assert!(asked.requests.lock().unwrap().is_empty());
+
+    // A write: put to the person first, naming the app the host started the sidecar for.
+    let wrote = relay(
+        &mcp,
+        "host/action",
+        json!({"capability": "applications", "name": "web",
+        "action": "refresh", "uid": "u-1", "resourceVersion": "7", "context": context}),
+    )
+    .await;
+    assert_eq!(
+        wrote["answer"]["key"], "argocd.argoproj.io/refresh",
+        "{wrote}"
+    );
+    let requests = asked.requests.lock().unwrap().clone();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].tool, "extensions.action");
+    assert_eq!(requests[0].app.id, "org.example.argocd");
+    assert_eq!(
+        requests[0].app.publisher, None,
+        "an unsigned app is named as unsigned"
+    );
+
+    // The Inspector sees its process (#575).
+    let inspected = setup
+        .registry
+        .invoke("extensions.inspect", json!({"id": "org.example.argocd"}))
+        .await
+        .unwrap();
+    assert!(inspected["process"].is_object(), "{inspected}");
+}
+
+#[tokio::test]
+async fn where_nobody_can_be_asked_a_sidecars_write_is_refused_and_recorded() {
+    let audit = Arc::new(Spy::default());
+    let (_setup, mcp, _fake) = relaying(
+        Arc::new(srelens_plugin_host::sidecar::NoConsent),
+        audit.clone(),
+    );
+    let refused = relay(
+        &mcp,
+        "host/action",
+        json!({"capability": "applications", "name": "web",
+        "action": "refresh", "uid": "u-1", "resourceVersion": "7",
+        "context": {"clusterId": "cluster/a", "namespace": "team"}}),
+    )
+    .await;
+    let why = refused["refused"]["message"].as_str().unwrap_or_default();
+    assert!(why.contains("needs a person's confirmation"), "{refused}");
+    let records = audit.0.lock().unwrap().clone();
+    assert!(
+        records
+            .iter()
+            .any(|record| record.tool == "extensions.action" && record.decision == "denied"),
+        "the refusal is in the audit trail"
+    );
 }

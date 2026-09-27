@@ -21,11 +21,18 @@ mod settings;
 #[doc(hidden)]
 pub use extensions::fuzzing;
 pub use extensions::streams::{ExtensionStreams, OpenStreamOut, INVENTORY_CHANNEL};
-/// Installed apps' operations as MCP tools (#574), from [`ExtensionStreams::app_tools`].
+/// Installed apps' operations as MCP tools (#574), from [`ExtensionStreams::app_tools`],
+/// and what their sidecars' calls are answered with ([`AppTools::serve_sidecars`]).
+pub use extensions::sidecars::SidecarHost;
 pub use extensions::tools::AppTools;
+/// Who confirms a sidecar's gated call (#573): a host's own, or `NoConsent`.
+pub use srelens_plugin_host::sidecar::{
+    AppIdentity as SidecarApp, Consent as SidecarConsent, ConsentRequest as SidecarConsentRequest,
+    NoConsent,
+};
 pub use extensions::{
     AppPolicy, Apps, InventoryKey, InventoryLock, InventoryStore, SharedCatalog, SharedPolicy,
-    MAX_POLICY_BYTES,
+    TrustRoot, MAX_POLICY_BYTES,
 };
 /// Making `.srelens-extension` packages (#562): what a publisher runs before a release, and
 /// what `cargo run -p srelens-registry --example pack-extension` wraps.
@@ -339,10 +346,45 @@ pub fn build_registry_app_streams_and_secrets(
     settings_path: Option<PathBuf>,
     secrets: Arc<dyn SecretStore>,
 ) -> (Registry, Option<Arc<ExtensionStreams>>) {
+    build_desktop(
+        cache,
+        kubeconfig_paths,
+        settings_path,
+        secrets,
+        TrustRoot::pinned(),
+    )
+}
+
+/// [`build_registry_with_paths_and_settings`], with the apps' catalog and publisher
+/// signatures verified against `trust` rather than the root this build pins (#559): for
+/// the end-to-end suite, whose catalog a test root signs.
+pub fn build_registry_with_paths_settings_and_trust(
+    cache: Arc<ClientCache>,
+    kubeconfig_paths: Vec<PathBuf>,
+    settings_path: PathBuf,
+    trust: TrustRoot,
+) -> Registry {
+    build_desktop(
+        cache,
+        kubeconfig_paths,
+        Some(settings_path),
+        Arc::new(srelens_plugin_host::NoSecretStore),
+        trust,
+    )
+    .0
+}
+
+fn build_desktop(
+    cache: Arc<ClientCache>,
+    kubeconfig_paths: Vec<PathBuf>,
+    settings_path: Option<PathBuf>,
+    secrets: Arc<dyn SecretStore>,
+    trust: TrustRoot,
+) -> (Registry, Option<Arc<ExtensionStreams>>) {
     // The desktop keeps its apps in one file beside its settings.
     let apps = settings_path
         .as_ref()
-        .map(|path| Apps::from(path.with_extension("extensions.json")));
+        .map(|path| Apps::with_trust(path.with_extension("extensions.json"), trust));
     let (mut reg, app_streams) = build_with(
         cache,
         kubeconfig_paths,
@@ -870,6 +912,82 @@ mod tests {
         assert!(silent.is_empty(), "gated with no confirmation text: {silent:?}");
     }
 
+    /// An app's logs and runtime metrics are local (#575): srelens's own UI
+    /// reads them, and nothing sends them anywhere. The one path out of the
+    /// registry to someone else is MCP, whose agent hands its context to an
+    /// LLM provider; so they are not tools. Exactly these two are UI-only: a
+    /// third is a decision to make here, not a way around the rule above.
+    #[tokio::test]
+    async fn app_logs_and_metrics_never_leave_through_mcp_or_the_audit_trail() {
+        let reg = build_registry();
+        let ui_only: Vec<&str> = reg
+            .entries()
+            .filter(|capability| capability.ui_only)
+            .map(|capability| capability.id.as_str())
+            .collect();
+        assert_eq!(ui_only, ["extensions.inspect", "extensions.logs"]);
+        for id in &ui_only {
+            assert!(reg.get(id).unwrap().annotations.read_only, "{id}");
+        }
+
+        let server = McpServer::new(Arc::new(reg.clone()));
+        let tools: Vec<String> = server.list_tools().into_iter().map(|t| t.name).collect();
+        for id in &ui_only {
+            assert!(!tools.iter().any(|tool| tool == id), "{id} is an MCP tool");
+            let args = serde_json::json!({"id": "org.example.argocd"});
+            for transport in [srelens_mcp::Transport::Stdio, srelens_mcp::Transport::Http] {
+                assert!(matches!(
+                    server.call_tool_audited(id, args.clone(), transport, "auto").await,
+                    Err(srelens_capability::CapabilityError::NotFound(_))
+                ));
+            }
+        }
+        let catalog = crate::mcp_docs::render_tools(&reg);
+        for id in &ui_only {
+            assert!(!catalog.contains(id), "{id} is in the MCP catalog");
+        }
+
+        // The UI's own reads of them are not recorded either.
+        #[derive(Default)]
+        struct Spy(std::sync::Mutex<usize>);
+        impl srelens_capability::audit::AuditSink for Spy {
+            fn record(&self, _: srelens_capability::audit::AuditRecord) {
+                *self.0.lock().unwrap() += 1;
+            }
+        }
+        let spy = Spy::default();
+        for id in &ui_only {
+            let _ = reg
+                .invoke_audited(
+                    id,
+                    serde_json::json!({"id": "org.example.argocd"}),
+                    &spy,
+                    srelens_capability::audit::Source::Ui,
+                    "auto",
+                )
+                .await;
+        }
+        assert_eq!(*spy.0.lock().unwrap(), 0);
+    }
+
+    /// A tripwire for the same rule: the code that keeps and reads an app's
+    /// log and metrics names no network client. A change that needs one is a
+    /// change to #575's "never transmitted", to make on purpose.
+    #[test]
+    fn the_code_that_holds_app_logs_and_metrics_opens_no_connection() {
+        let sources = [
+            include_str!("extensions/inspector.rs"),
+            include_str!("../../plugin-host/src/app_log.rs"),
+            include_str!("../../plugin-host/src/app_log/redact.rs"),
+            include_str!("../../plugin-host/src/sidecar/metrics.rs"),
+        ];
+        for source in sources {
+            for client in ["reqwest", "hyper", "ureq", "std::net", "tokio::net", "TcpStream", "UdpSocket"] {
+                assert!(!source.contains(client), "names {client}");
+            }
+        }
+    }
+
     /// The host-owned metadata #548 adds, checked over the whole live registry
     /// rather than over a preset: a capability that spells its own annotations
     /// out is exactly the one that gets the level wrong, and a confirmation
@@ -1010,6 +1128,132 @@ mod tests {
         ] {
             assert!(reg.get(id).is_none());
         }
+    }
+
+    /// The desktop e2e's catalog steps (`extensions_and_gitops` in
+    /// `apps/desktop/src-tauri/tests/e2e.rs`) with no cluster, on the builder it uses (#559):
+    /// the test root and its shipped delegations reserve `org.srelens.` before any catalog is
+    /// read, and a seeded signed catalog is read, checked and refused as the suite expects.
+    /// The e2e runs only on a kind cluster, where a trust root without its delegations once
+    /// let an unsigned `org.srelens.flux` through.
+    #[tokio::test]
+    async fn the_desktop_e2e_catalog_steps_hold_under_the_test_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = dir.path().join("settings.json");
+        let trust = TrustRoot::from_signed_documents(
+            include_bytes!("../tests/fixtures/trust/root.json"),
+            include_bytes!("../tests/fixtures/trust/publishers.json"),
+        )
+        .unwrap();
+        let reg = build_registry_with_paths_settings_and_trust(
+            ClientCache::new_many(vec![]),
+            vec![],
+            settings.clone(),
+            trust,
+        );
+        let flux = include_str!("../../../examples/extensions/flux.json");
+        let grants =
+            serde_json::from_str::<serde_json::Value>(flux).unwrap()["permissions"].clone();
+        let codes = |report: &serde_json::Value| -> Vec<String> {
+            report["errors"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|error| {
+                    format!(
+                        "{} {}",
+                        error["code"].as_str().unwrap(),
+                        error["path"].as_str().unwrap()
+                    )
+                })
+                .collect()
+        };
+        let out = reg
+            .invoke(
+                "extensions.validate",
+                json!({"manifest": flux, "grants": grants}),
+            )
+            .await
+            .unwrap();
+        assert!(
+            codes(&out).contains(&"EXTENSION_RESERVED_ID id".into()),
+            "{out}"
+        );
+        let local = flux.replacen("\"id\": \"org.srelens.", "\"id\": \"org.example.", 1);
+        let out = reg
+            .invoke(
+                "extensions.validate",
+                json!({"manifest": local, "grants": grants}),
+            )
+            .await
+            .unwrap();
+        assert!(
+            !codes(&out)
+                .iter()
+                .any(|code| code.starts_with("EXTENSION_RESERVED_ID")),
+            "{out}"
+        );
+
+        // The cache as the e2e seeds it: the signed fixture, fetched now.
+        let fetched_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let signed: serde_json::Value = serde_json::from_slice(include_bytes!(
+            "../tests/fixtures/extension-catalog.signed.json"
+        ))
+        .unwrap();
+        std::fs::write(
+            settings.with_extension("extensions.catalog.json"),
+            serde_json::to_vec(&json!({"signedCatalog": signed, "fetchedAt": fetched_at})).unwrap(),
+        )
+        .unwrap();
+        let catalog = reg
+            .invoke("extensions.catalog", json!({"refresh": false}))
+            .await
+            .unwrap();
+        assert_eq!(catalog["fetchedAt"], fetched_at, "{catalog}");
+        assert_eq!(catalog["stale"], false, "{catalog}");
+        let sha256 = catalog["catalog"]["extensions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["id"] == "org.srelens.argocd")
+            .unwrap()["release"]["sha256"]
+            .clone();
+        let argocd = include_str!("../tests/fixtures/argocd-manifest.json");
+        let argocd_grants =
+            serde_json::from_str::<serde_json::Value>(argocd).unwrap()["permissions"].clone();
+        let signature = include_bytes!("../tests/fixtures/argocd-manifest.sig").to_vec();
+        let old = reg
+            .invoke(
+                "extensions.validate",
+                json!({"manifest": argocd, "grants": argocd_grants, "signature": signature}),
+            )
+            .await
+            .unwrap();
+        let old_codes = codes(&old);
+        assert!(
+            old_codes
+                .iter()
+                .any(|code| code.starts_with("EXTENSION_API_INCOMPATIBLE")),
+            "{old}"
+        );
+        assert!(
+            !old_codes
+                .iter()
+                .any(|code| code.starts_with("EXTENSION_INVALID_SIGNATURE")),
+            "{old}"
+        );
+        let refused = reg
+            .invoke(
+                "extensions.catalogManifest",
+                json!({"id": "org.srelens.argocd", "sha256": sha256}),
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(refused.contains("different host API version"), "{refused}");
     }
 
     /// A web user's registry (#515) has every capability the desktop's has except the

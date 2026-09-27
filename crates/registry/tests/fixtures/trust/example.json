@@ -1,0 +1,10 @@
+{
+  "payloadType": "application/vnd.srelens.publisher+json",
+  "payload": "ewogICJfdHlwZSI6ICJwdWJsaXNoZXIiLAogICJ2ZXJzaW9uIjogMSwKICAiaWQiOiAiZXhhbXBsZSIsCiAgIm5hbWUiOiAiRXhhbXBsZSBMYWJzIiwKICAia2V5cyI6IFsKICAgIHsKICAgICAgImtleXR5cGUiOiAiZWQyNTUxOSIsCiAgICAgICJzY2hlbWUiOiAiZWQyNTUxOSIsCiAgICAgICJrZXl2YWwiOiB7CiAgICAgICAgInB1YmxpYyI6ICIyNWZjMzJjNDc4YTVhNGY4NGU0NTU3YTAzNDJlMDgyNzhjODgzNjQxYjYxNDliZGIwYjRhOTg2YWI2YzJjYjc4IgogICAgICB9CiAgICB9CiAgXSwKICAibmFtZXNwYWNlcyI6IFsKICAgICJjb20uZXhhbXBsZS1sYWJzIgogIF0KfQo=",
+  "signatures": [
+    {
+      "keyid": "7c43b35c4bd15e85e504bfab0807c6ff00b4656a8195046b9766e1db0b0a0d1a",
+      "sig": "y8uDoe7wJPXmRpBVdU9TGhzeQ3EeCHbHmc0b9U8pI6kxxPh3p5+JTyehsA2XIv1MFDgnYzWj90e2+2iUBET4Bg=="
+    }
+  ]
+}

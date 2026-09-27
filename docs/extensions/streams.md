@@ -12,7 +12,7 @@ or the limits.
 | The contract: frames, ownership, limits, metrics | `crates/streams/src/app.rs` (`AppStreams`) |
 | Who may open what, lifecycle, the `read` and `watch` sources | `crates/registry/src/extensions/streams.rs` (`ExtensionStreams`) |
 | The pod sources `logs`, `exec`, `portForward` (#567) | `crates/registry/src/extensions/streams/pods.rs`; scopes in `crates/registry/src/extensions/pods.rs`, cluster calls in `crates/kube/src/app_pods.rs` |
-| Desktop commands, frames as Tauri events | `apps/desktop/src-tauri/src/extension_streams.rs` |
+| Desktop commands, frames on the opener's channel | `apps/desktop/src-tauri/src/extension_streams.rs` |
 | Client | `packages/core/src/lib/extensionStreams.ts` (`openExtensionView`) |
 
 ## Frames
@@ -87,6 +87,22 @@ another's streams.
   app, the same page — are untouched. The desktop's built-in resource watches
   and pod exec sessions end the same way; a shell's task is aborted, which
   drops its connection to the cluster.
+- **Only the window that opened a stream may end it or hear it**
+  ([#733](https://github.com/srelens/srelens/issues/733)). Cancelling a
+  stream another window opened, or one no window opened, is refused ("Stream
+  … was not opened by this window"), and the stream runs on. Closing a view
+  ends only the calling window's streams for that view id, so two windows
+  whose view ids happen to match cannot end each other's. The built-in
+  watches and exec sessions are held the same way: another window's
+  `stop_watch`, `exec_input`, `exec_resize` or `exec_close` is refused, since
+  a shell's session id alone must not let a window type into it. Frames never
+  go out as events every window hears. Each command that opens a stream is
+  passed `onEvent`, a `tauri::ipc::Channel` of that open's own, and the host
+  sends the stream's frames on it as `{ event, payload }`. Tauri answers a
+  channel only in the page that made the call. `emit_to` would not do: it still
+  reaches a listener registered for any target, which is what `listen()`
+  registers. `@srelens/core`'s transport hands each frame to the page's
+  subscription for `event`.
 
 The lifecycle rule holds whichever registry made the change. Every inventory
 write is announced to the streams of that inventory, and those are shared by
@@ -408,8 +424,9 @@ streams that ended because their window closed or reloaded. `extensionStreamMetr
 
 ## Hosts
 
-- **Desktop:** frames are Tauri events on the stream's channel, through the
-  same `EventSink` every other stream uses.
+- **Desktop:** frames travel on the `onEvent` IPC channel the opening page
+  passed, as `{ event, payload }`, through a `ChannelSink`, so only that page
+  receives them ([#733](https://github.com/srelens/srelens/issues/733)).
 - **Web:** the three commands are refused (`WEB_DENIED_COMMANDS`). Each user
   has their own apps there ([#515](https://github.com/srelens/srelens/issues/515)),
   but the server does not yet open a user's streams or carry their frames, so

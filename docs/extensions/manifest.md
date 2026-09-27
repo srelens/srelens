@@ -1086,9 +1086,10 @@ The frames each source sends are in [streams.md](streams.md#logs).
 `executable` also runs a **sidecar**: a program it ships, which srelens starts in the
 operating system's sandbox and talks JSON-RPC to over stdio
 ([sidecar-protocol.md](sidecar-protocol.md)). It has no kubeconfig, no network, no
-environment of srelens's and one writable directory, and until the broker
-([#573](https://github.com/srelens/srelens/issues/573)) it can call nothing in the host.
-An executable app may declare everything a declarative one does as well.
+environment of srelens's and one writable directory. It reaches the host only through
+the broker ([#573](https://github.com/srelens/srelens/issues/573)): what the app's
+readers read, and the app's declared actions, each put to a person first. An
+executable app may declare everything a declarative one does as well.
 
 ```json
 {
@@ -1143,8 +1144,9 @@ An executable app may declare everything a declarative one does as well.
   called in a process, not at install. Before it starts, its binary is checked against
   the digest list its package was unpacked with; one changed on disk since is refused,
   not run. It stops when the app is disabled, updated, rolled back, blocked or removed,
-  and when srelens exits. Its one writable directory, `*.extensions.data/<app ID>/`
-  beside the inventory, goes with the app when it is removed.
+  and when srelens exits. Its one writable directory, its app's data directory under
+  `*.extensions.data/` beside the inventory, goes with the app when it is removed
+  ([sidecar-protocol.md](sidecar-protocol.md#data-directory)).
 - **It runs only in a sandbox.** Linux and Windows run sidecars in the backends
   [sidecar-protocol.md](sidecar-protocol.md#sandbox) describes. On Linux the sandbox
   launcher is found beside the srelens binary or at `SRELENS_SANDBOX_LAUNCHER`, and the
@@ -1157,9 +1159,11 @@ An executable app may declare everything a declarative one does as well.
   within 256 KiB. The sidecar receives the checked object as the request's `params`.
 
 Each operation is an MCP tool, `plugin/<id>/<name>`, alongside the app's readers and
-actions. It is read-only and not gated, since the sidecar can change nothing outside
-its sandbox, and sensitive, so the audit log redacts its arguments whole
-([MCP.md](../MCP.md#installed-apps-tools)).
+actions. For an app that declares no action it is read-only and not gated, since the
+sidecar can change nothing outside its sandbox. For one that declares actions it is
+gated as the strongest of them, because the sidecar may ask the broker to run them;
+each such write is then confirmed again, naming the app. Either way it is sensitive,
+so the audit log redacts its arguments whole ([MCP.md](../MCP.md#installed-apps-tools)).
 
 ## Rules the desktop app adds
 

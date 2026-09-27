@@ -140,6 +140,14 @@ impl UserEnvs {
         }
     }
 
+    /// These environments with the shared catalog, and every user's app signatures,
+    /// verified against `trust` rather than the root this build pins: a test's root.
+    pub fn with_catalog_trust(mut self, trust: srelens_registry::TrustRoot) -> Self {
+        self.catalog =
+            srelens_registry::SharedCatalog::with_trust(shared_catalog_path(&self.data_dir), trust);
+        self
+    }
+
     /// The app catalog every user reads, for the server to keep fresh.
     pub fn catalog(&self) -> &srelens_registry::SharedCatalog {
         &self.catalog

@@ -69,12 +69,13 @@ it("does not open a review that a newer one replaced while the release downloade
   await waitFor(() => expect(review).toHaveBeenCalledWith({ manifest: '{"name":"Flux","permissions":[]}' }, { id: entry.id, sha256: "abc" }));
 });
 
-it("passes the backend-verified signature into installation review",async()=>{
+it("passes the backend-verified signature and the key it names into installation review",async()=>{
  const review=vi.fn();
- vi.mocked(reviewCatalogExtension).mockResolvedValue({manifest:'{"name":"Flux","permissions":[]}',signature:[1,2,3]});
+ const keyId="ab".repeat(32);
+ vi.mocked(reviewCatalogExtension).mockResolvedValue({manifest:'{"name":"Flux","permissions":[]}',signature:[1,2,3],keyId});
  render(<ExtensionCatalog onReview={review} installed={[]} autoLoad/>);
  fireEvent.click(await screen.findByText("Review installation"));
- await waitFor(()=>expect(review).toHaveBeenCalledWith({manifest:'{"name":"Flux","permissions":[]}',signature:[1,2,3]},{id:entry.id,sha256:"abc"}));
+ await waitFor(()=>expect(review).toHaveBeenCalledWith({manifest:'{"name":"Flux","permissions":[]}',signature:[1,2,3],keyId},{id:entry.id,sha256:"abc"}));
 });
 
 /** On the web the catalog is the server's shared copy (#515): a Refresh there reads it, never fetches. */

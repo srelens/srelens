@@ -234,3 +234,13 @@ describe("renderConfirmTemplate", () => {
     expect(renderConfirmTemplate(mutating, {})).toBe("Allow this change?");
   });
 });
+
+describe("UI-only capabilities (#575)", () => {
+  it("are an app's log and metrics, read-only, marked only where true", () => {
+    const uiOnly = CAPABILITY_CATALOG.filter((c) => c.uiOnly).map((c) => c.id);
+    expect(uiOnly).toEqual(["extensions.inspect", "extensions.logs"]);
+    expect(CAPABILITY_CATALOG.filter((c) => c.uiOnly).every((c) => c.readOnly && !c.requiresConfirm)).toBe(true);
+    // Every other row leaves the field out rather than writing `false`.
+    expect(catalog.filter((row) => "uiOnly" in row).map((row) => row.id)).toEqual(uiOnly);
+  });
+});

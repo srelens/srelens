@@ -9,9 +9,10 @@
 //! An operation is reached as `plugin/<id>/<operation>`, like a binding.
 //!
 //! The sidecar runs under the supervisor (#572) in the OS sandbox, with no
-//! kubeconfig, no network and one writable directory. Until the broker exists
-//! (#573) it can call nothing in the host, so an operation changes nothing
-//! outside that sandbox: see [`SIDECAR_OPERATION`].
+//! kubeconfig, no network and one writable directory. It reaches the host only
+//! through the broker (#573): its app's readers, and its app's declared actions,
+//! each confirmed by a person. What an operation runs under follows from that:
+//! see [`sidecar_operation_annotations`].
 use super::{identifier, label, unique, Manifest, ManifestKind};
 use crate::{ValidationCode as Code, ValidationErrors};
 use schemars::JsonSchema;
@@ -46,22 +47,49 @@ pub const MAX_INPUT_BYTES: u32 = 64 * 1024;
 /// field has its own limit too; this bounds them together.
 pub const MAX_OPERATION_CALL_BYTES: usize = 256 * 1024;
 
-/// What a sidecar operation runs under: host metadata, the same for every
-/// operation of every app, which nothing in a manifest raises or lowers.
+/// What a sidecar operation of an app that declares no actions runs under:
+/// host metadata, which nothing in a manifest raises or lowers.
 ///
 /// - **Read-only.** A sidecar has no kubeconfig, no network and no path but
-///   its own data directory, and until the broker (#573) it can call nothing
-///   in the host. An operation cannot change anything outside the sandbox, so
-///   it is not consent-gated, like a declarative reader. When the broker
-///   lands, an operation will inherit the strongest annotations of the host
-///   capabilities the app is granted, and this row stops being the whole
-///   answer.
+///   its own data directory. Through the broker (#573) it can read what its
+///   app's readers read and run its app's declared actions, and an app with
+///   none can change nothing outside the sandbox. So its operations are not
+///   consent-gated, like a declarative reader.
 /// - **Sensitive.** Its inputs are named by the app, so the audit log cannot
 ///   tell which of them hold a credential; it redacts every argument instead.
 pub const SIDECAR_OPERATION: Annotations = Annotations {
     sensitive: true,
     ..Annotations::READ_ONLY
 };
+
+/// The host's sentence for an operation of an app that declares actions: what
+/// is asked, and that every change it leads to is asked about again.
+pub const SIDECAR_OPERATION_CONFIRM: &str =
+    "Let this app's sidecar run its operation? It may ask to run the app's declared actions, and each one is confirmed on its own.";
+
+/// What a sidecar operation runs under, given the host rows of the actions its
+/// app declares (`actions`).
+///
+/// With none, [`SIDECAR_OPERATION`]. With any, the sidecar may ask the broker
+/// to run them, so the operation is not a read: it inherits the strongest of
+/// their rows through [`Annotations::for_binding`] — gated, at least their
+/// impact, destructive if one is — and the host's own
+/// [`SIDECAR_OPERATION_CONFIRM`] in place of any one primitive's sentence,
+/// which would describe a write the operation may never make. Each write it
+/// then asks for is confirmed again by the broker's consent, with the app
+/// named.
+pub fn sidecar_operation_annotations(
+    actions: impl IntoIterator<Item = Annotations>,
+) -> Annotations {
+    let mut actions = actions.into_iter().peekable();
+    if actions.peek().is_none() {
+        return SIDECAR_OPERATION;
+    }
+    let reach = actions.fold(Annotations::WEAKEST, Annotations::at_least);
+    let mut row = Annotations::for_binding(reach, SIDECAR_OPERATION);
+    row.confirm = Some(SIDECAR_OPERATION_CONFIRM);
+    row
+}
 
 /// The sidecar an executable app runs.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]

@@ -3,6 +3,7 @@
 //! No package code is loaded into the host. A trusted installer supplies
 //! explicit grants for native srelens manifests. Executable apps (#574) run
 //! out of process, sandboxed, under [`sidecar::Supervisor`] (#572).
+pub mod app_log;
 #[cfg(any(test, feature = "fuzzing"))]
 #[doc(hidden)]
 pub mod fuzzing;
@@ -481,7 +482,9 @@ impl PluginHost {
     /// an action takes [`ACTION_INPUTS`]; both run under their target's
     /// annotations through [`Annotations::for_binding`], so a manifest cannot
     /// make a write look like a read. A sidecar operation's schema is built
-    /// from its declared inputs, and it runs under [`SIDECAR_OPERATION`].
+    /// from its declared inputs, and it runs under
+    /// [`sidecar_operation_annotations`] of the app's declared actions, which
+    /// its sidecar may ask the broker to run.
     ///
     /// A call is checked here first — only the inputs the tool takes, each of
     /// the right type and within its limit, the required ones present — and
@@ -514,6 +517,8 @@ impl PluginHost {
         };
         // Every tool, checked before any is registered.
         let mut tools: Vec<Tool> = Vec::new();
+        // What the app's sidecar may ask the broker to run: its declared actions.
+        let mut writes = Vec::new();
         for (index, binding) in manifest.capabilities.iter().enumerate() {
             if is_pod_target(&binding.target) {
                 continue;
@@ -567,6 +572,7 @@ impl PluginHost {
                 .collect();
             schema["required"] = json!(required);
             let annotations = Annotations::for_binding(target.annotations, Annotations::WEAKEST);
+            writes.push(target.annotations);
             let inputs = ToolInputs::Strings {
                 names: binding.inputs.clone(),
                 required,
@@ -580,6 +586,7 @@ impl PluginHost {
                 inputs,
             });
         }
+        let operation_row = sidecar_operation_annotations(writes);
         for operation in manifest.sidecar.iter().flat_map(|sidecar| &sidecar.operations) {
             tools.push(Tool {
                 name: operation.name.clone(),
@@ -587,7 +594,7 @@ impl PluginHost {
                 schema: operation.input_schema(),
                 // What a sidecar answers is its own.
                 output: Value::Null,
-                annotations: SIDECAR_OPERATION,
+                annotations: operation_row,
                 inputs: ToolInputs::Operation(operation.clone()),
             });
         }
@@ -621,6 +628,8 @@ impl PluginHost {
                 bound_arguments: None,
                 settable: Vec::new(),
                 secret_slots: Vec::new(),
+                // An app's tool is an MCP tool by definition.
+                ui_only: false,
                 handler: Arc::new(move |input| {
                     let enabled = enabled.clone();
                     let route = route.clone();
@@ -766,6 +775,8 @@ impl PluginHost {
                 // A registered binding is the app's; the host injects a
                 // secret into the target it calls, never into this facade.
                 secret_slots: Vec::new(),
+                // An app's own reader is a tool like its target.
+                ui_only: false,
                 handler: Arc::new(move |input| {
                     let handler = handler.clone();
                     let enabled = enabled.clone();

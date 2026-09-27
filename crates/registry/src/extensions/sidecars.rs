@@ -5,18 +5,23 @@
 //! that never calls one never runs it. Before every start, the restarts after a crash
 //! included, its binary is checked against the digest list its package was unpacked
 //! with ([`Verifying`]), so a file changed on disk since the install is refused, not
-//! run. It gets one writable directory of its own, beside the inventory, and none of
-//! this process's environment.
+//! run. It gets its app's data directory (#573) and none of this process's environment,
+//! and it calls back into the host only through the broker (#573) the MCP host set up
+//! ([`SidecarHost`]). Its log and its process are the Inspector's to read (#575).
 //!
 //! An announced inventory write ([`AppSidecars::reconcile`]) stops every sidecar whose
 //! app is gone, off, blocked, quarantined or at another revision; its callers still
 //! waiting are answered at once. The next call to an updated app starts its new version.
+use super::inspector::AppRuntime;
 use super::{package, Installed, Inventory};
 use serde_json::{Map, Value};
-use srelens_capability::CapabilityError;
+use srelens_capability::audit::AuditSink;
+use srelens_capability::{CapabilityError, Registry};
+use srelens_plugin_host::sidecar::data::DataDir;
 use srelens_plugin_host::sidecar::{
-    Enforcement, LaunchError, Launched, Launcher, Limits, NoBroker, OsSandbox, Policy,
-    SandboxConfig, SidecarCommand, SidecarConfig, SidecarStatus, Supervisor,
+    AppIdentity, Broker, CapabilityBroker, Consent, Enforcement, LaunchError, Launched, Launcher,
+    Limits, NoBroker, OsSandbox, Policy, SandboxConfig, SidecarCommand, SidecarConfig,
+    SidecarStatus, Supervisor,
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -104,6 +109,19 @@ impl Launcher for Verifying {
     }
 }
 
+/// What the host answers a sidecar's calls with (#573): its registry, with the
+/// `extensions.*` facade the broker calls; who confirms a call that needs a person;
+/// and the audit trail every write is recorded in. An MCP host sets it once it holds
+/// its registry (`AppTools::serve_sidecars`); until then a sidecar's calls are refused.
+#[derive(Clone)]
+pub struct SidecarHost {
+    pub registry: Arc<Registry>,
+    /// The desktop's host confirmation (#552), or `NoConsent` where nobody can be
+    /// asked: a headless process, whose sidecars' writes are then all refused.
+    pub consent: Arc<dyn Consent>,
+    pub audit: Arc<dyn AuditSink>,
+}
+
 /// The sidecar of one app, at the revision it was started for.
 struct Running {
     revision: u64,
@@ -114,21 +132,37 @@ struct Running {
 pub(super) struct AppSidecars {
     /// Where installed packages are unpacked; `None` on a host that keeps no app files.
     packages: Option<PathBuf>,
-    /// Where each app's sidecar gets its one writable directory.
+    /// The root of the apps' data directories (`Apps::data_root`, #573).
     data: Option<PathBuf>,
+    /// Each app's log and the Inspector's view of its process (#575).
+    runtime: Arc<AppRuntime>,
+    /// What each sidecar's broker answers with; `None` until a host says.
+    host: Mutex<Option<SidecarHost>>,
     /// The sandbox every sidecar is started in; replaced by tests.
     launcher: Mutex<Arc<dyn Launcher>>,
     running: Mutex<HashMap<String, Running>>,
 }
 
 impl AppSidecars {
-    pub(super) fn new(packages: Option<PathBuf>, data: Option<PathBuf>) -> Self {
+    pub(super) fn new(
+        packages: Option<PathBuf>,
+        data: Option<PathBuf>,
+        runtime: Arc<AppRuntime>,
+    ) -> Self {
         Self {
             packages,
             data,
+            runtime,
+            host: Mutex::default(),
             launcher: Mutex::new(Arc::new(OsSandbox::new(sandbox_config()))),
             running: Mutex::default(),
         }
+    }
+
+    /// Answer the calls of every sidecar started from now on through `host`. A sidecar
+    /// already running keeps the broker it was started with.
+    pub(super) fn serve(&self, host: SidecarHost) {
+        *self.host.lock().unwrap() = Some(host);
     }
 
     /// Start sidecars with `launcher` from now on. Test support.
@@ -179,17 +213,34 @@ impl AppSidecars {
             inner: self.launcher.lock().unwrap().clone(),
             binary,
         });
+        let broker: Arc<dyn Broker> = match self.host.lock().unwrap().clone() {
+            Some(host) => Arc::new(CapabilityBroker::new(
+                host.registry,
+                identity(app),
+                host.audit,
+                host.consent,
+            )),
+            // No host has said what answers a sidecar: every call it makes is refused.
+            None => Arc::new(NoBroker),
+        };
+        let id = &app.manifest.id;
         let mut running = self.running.lock().unwrap();
         // Another call may have started it meanwhile.
         if let Some(current) = running
-            .get(&app.manifest.id)
+            .get(id)
             .filter(|current| current.revision == app.revision)
         {
             return Ok(current.supervisor.clone());
         }
-        let supervisor = Arc::new(Supervisor::start(config, launcher, Arc::new(NoBroker)));
+        let supervisor = Arc::new(Supervisor::start_with_log(
+            config,
+            launcher,
+            broker,
+            self.runtime.log(id),
+        ));
+        self.runtime.attach(id, supervisor.clone());
         let replaced = running.insert(
-            app.manifest.id.clone(),
+            id.clone(),
             Running {
                 revision: app.revision,
                 supervisor: supervisor.clone(),
@@ -225,13 +276,31 @@ impl AppSidecars {
             .collect();
         for id in ended {
             if let Some(ended) = running.remove(&id) {
+                self.runtime.detach(&id);
                 stop(ended.supervisor);
             }
         }
     }
 
-    /// The status of `id`'s sidecar in this process, if one was started. Test support,
-    /// and the seam for the Inspector (#575).
+    /// End at once the sidecar of every app `state` no longer holds, before its data
+    /// directory and, on Windows, its AppContainer profile are removed: the last handle
+    /// dropped kills the process. A call still in flight holds its own handle, and the
+    /// process ends when that call does.
+    pub(super) fn end_uninstalled(&self, state: &Inventory) {
+        let installed = |id: &String| state.plugins.iter().any(|app| &app.manifest.id == id);
+        let mut running = self.running.lock().unwrap();
+        let gone: Vec<String> = running
+            .keys()
+            .filter(|id| !installed(id))
+            .cloned()
+            .collect();
+        for id in gone {
+            running.remove(&id);
+            self.runtime.detach(&id);
+        }
+    }
+
+    /// The status of `id`'s sidecar in this process, if one was started. Test support.
     #[cfg(test)]
     pub(super) fn status(&self, id: &str) -> Option<SidecarStatus> {
         self.running
@@ -239,6 +308,22 @@ impl AppSidecars {
             .unwrap()
             .get(id)
             .map(|current| current.supervisor.status())
+    }
+}
+
+/// Who a sidecar is, for its broker: the app and revision it was started for, and the
+/// name and publisher a confirmation names it by — the publisher the host verified on
+/// this read (#559), or `None` for an unsigned app.
+fn identity(app: &Installed) -> AppIdentity {
+    AppIdentity {
+        id: app.manifest.id.clone(),
+        revision: app.revision,
+        name: app.manifest.name.clone(),
+        publisher: app
+            .signed_by
+            .as_ref()
+            .filter(|_| app.quarantined.is_none())
+            .map(|signer| signer.name.clone()),
     }
 }
 
@@ -278,11 +363,11 @@ fn config_for(
     // Checked here too, so a changed binary is the call's refusal rather than a
     // supervisor that starts only to refuse.
     let program = package::installed_binary(packages, &manifest.id, digest, binary)?;
-    // Beside the inventory, one directory per app, as its packages are. The per-app,
-    // size-limited data directory is #573's; this is the one path it may write today.
-    let data_dir = data.join(manifest.id.to_ascii_lowercase());
-    crate::durable::create_private_dir_all(&data_dir)
-        .map_err(|e| format!("Could not create the app's data directory: {e}"))?;
+    // The app's own directory under the data root (#573): private, and removed with it.
+    let data_dir = DataDir::for_app(data, &manifest.id)
+        .map_err(|e| format!("Could not open the app's data directory: {e}"))?
+        .path()
+        .to_path_buf();
     let config = SidecarConfig {
         command: SidecarCommand {
             app_id: manifest.id.clone(),
@@ -303,34 +388,6 @@ fn config_for(
         path: binary.to_owned(),
     };
     Ok((config, binary))
-}
-
-/// Removes the data directory of every app `state` no longer holds. Called with the
-/// inventory's lock held, after the save that removed them.
-pub(super) fn prune_data(data: &Path, state: &Inventory) {
-    let kept: std::collections::BTreeSet<String> = state
-        .plugins
-        .iter()
-        .map(|app| app.manifest.id.to_ascii_lowercase())
-        .collect();
-    let Ok(entries) = std::fs::read_dir(data) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        if name.to_str().is_some_and(|name| kept.contains(name)) {
-            continue;
-        }
-        let path = entry.path();
-        let removed = match std::fs::symlink_metadata(&path) {
-            Ok(metadata) if metadata.is_dir() => std::fs::remove_dir_all(&path),
-            Ok(_) => std::fs::remove_file(&path),
-            Err(_) => continue,
-        };
-        if let Err(error) = removed {
-            log::warn!("could not remove {}: {error}", path.display());
-        }
-    }
 }
 
 /// A sidecar that runs as a task in the test's runtime, behind the public `Launcher`
@@ -429,6 +486,34 @@ pub(super) mod fake {
                         "fail" => json!({"error": {"code": 1, "message": "the scan failed"}}),
                         // Dies without answering, as a crash would.
                         "crash" => break,
+                        // Makes one call back into the host (#573): `method`, with
+                        // `params` as JSON text, and answers with what came back.
+                        "relay" => {
+                            let params = &message["params"];
+                            let call = json!({"jsonrpc": "2.0", "id": "host-1",
+                                "method": params["method"],
+                                "params": serde_json::from_str::<Value>(
+                                    params["params"].as_str().unwrap_or("{}")).unwrap()});
+                            if stdout
+                                .write_all(format!("{call}\n").as_bytes())
+                                .await
+                                .is_err()
+                            {
+                                break;
+                            }
+                            let mut came_back = Value::Null;
+                            while let Ok(Some(line)) = lines.next_line().await {
+                                let reply: Value = serde_json::from_str(&line).unwrap();
+                                if reply["id"] == "host-1" && reply.get("method").is_none() {
+                                    came_back = reply;
+                                    break;
+                                }
+                            }
+                            match came_back.get("error") {
+                                Some(error) => json!({"result": {"refused": error}}),
+                                None => json!({"result": {"answer": came_back["result"]}}),
+                            }
+                        }
                         _ => json!({"result": {"operation": method,
                             "params": message["params"], "launch": launch}}),
                     };
@@ -479,6 +564,7 @@ mod tests {
         let sidecars = AppSidecars::new(
             Some(path.with_extension("packages")),
             Some(path.with_extension("data")),
+            Arc::default(),
         );
         sidecars.script(Arc::new(fake.clone()));
         sidecars
@@ -537,7 +623,12 @@ mod tests {
             "{}",
             command.program.display()
         );
-        assert_eq!(command.data_dir, path.with_extension("data").join(SCANNER));
+        // The app's own data directory (#573), named for its ID.
+        assert_eq!(
+            command.data_dir,
+            path.with_extension("data")
+                .join(srelens_plugin_host::sidecar::data::directory_name(SCANNER))
+        );
         assert!(command.data_dir.is_dir());
         #[cfg(unix)]
         {
@@ -714,14 +805,16 @@ mod tests {
         assert_eq!(answer["launch"], 3);
 
         // Removed: stopped, and its data directory goes with it.
-        let data = path.with_extension("data");
-        assert!(data.join(SCANNER).is_dir());
+        let data = path
+            .with_extension("data")
+            .join(srelens_plugin_host::sidecar::data::directory_name(SCANNER));
+        assert!(data.is_dir());
         let state = configure(&path, json!({"action":"remove","id":SCANNER})).unwrap();
         sidecars.reconcile(&state);
         eventually("the removed app's sidecar exits", || {
             fake.exited().contains(&3)
         })
         .await;
-        assert!(!data.join(SCANNER).exists());
+        assert!(!data.exists());
     }
 }

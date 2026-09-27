@@ -493,6 +493,8 @@ pub(crate) mod tests {
             "extensions.resolveReverseLinks",
             "extensions.streams",
             "extensions.pods",
+            "extensions.inspect",
+            "extensions.logs",
         ] {
             let (status, _) = post(&format!("/api/capability/{id}"), Body::from("{}")).await;
             assert_eq!(status, StatusCode::NOT_FOUND, "{id}");
@@ -541,7 +543,18 @@ pub(crate) mod tests {
 
     /// A server whose users get the registry `srelens-server` builds for them (#515).
     pub(crate) async fn apps_state() -> AppState {
-        AppState::for_tests_with(Arc::new(srelens_registry::build_registry_for_user)).await
+        // The test root, whose catalog these tests can sign: this crate's build pins what a
+        // release pins, and nothing a test holds is signed by that (#559).
+        let trust = srelens_registry::TrustRoot::from_signed_documents(
+            include_bytes!("../../registry/tests/fixtures/trust/root.json"),
+            include_bytes!("../../registry/tests/fixtures/trust/publishers.json"),
+        )
+        .expect("the test root verifies");
+        AppState::for_tests_with_catalog_trust(
+            Arc::new(srelens_registry::build_registry_for_user),
+            trust,
+        )
+        .await
     }
 
     pub(crate) async fn sign_in(state: &AppState, sub: &str) -> (i64, String) {
@@ -768,7 +781,10 @@ pub(crate) mod tests {
         let catalog = state.user_envs.catalog().clone();
         tokio::task::spawn_blocking(move || {
             catalog.refresh_if_stale_with(|| {
-                Ok(include_bytes!("../../registry/tests/fixtures/extension-catalog.json").to_vec())
+                Ok(
+                    include_bytes!("../../registry/tests/fixtures/extension-catalog.signed.json")
+                        .to_vec(),
+                )
             })
         })
         .await

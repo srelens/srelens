@@ -45,9 +45,7 @@ impl FakeTools {
 }
 
 /// A snapshot of `tools`, each answering with its text while the snapshot is current.
-fn snapshot(
-    tools: &[Spec],
-) -> (Arc<Registry>, Arc<AtomicBool>) {
+fn snapshot(tools: &[Spec]) -> (Arc<Registry>, Arc<AtomicBool>) {
     let active = Arc::new(AtomicBool::new(true));
     let mut registry = Registry::new();
     for (id, annotations, answer) in tools {

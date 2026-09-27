@@ -19,6 +19,8 @@ vi.mock("@srelens/core", async (importOriginal) => ({
   setExtensionSecret: vi.fn(),
   clearExtensionSecret: vi.fn(),
   onExtensionInventoryChanged: vi.fn(),
+  inspectExtension: vi.fn(),
+  extensionLogs: vi.fn(),
 }));
 import {
   listExtensionCatalog,
@@ -34,6 +36,9 @@ import {
   setExtensionSecret,
   clearExtensionSecret,
   onExtensionInventoryChanged,
+  inspectExtension,
+  extensionLogs,
+  type ExtensionInspection,
 } from "@srelens/core";
 import { ExtensionManager, ExtensionResults } from "./Extensions";
 
@@ -321,7 +326,7 @@ it("reviews a package file as a whole and installs the bytes that were reviewed 
   const install = await screen.findByText("Install and grant permissions");
   expect(reviewExtensionPackage).toHaveBeenCalledWith(content);
   // The signature is over the digest list, so the check gets the list with it.
-  expect(validateExtension).toHaveBeenCalledWith(source, plugin.manifest.permissions, [1, 2, 3], packaged.digests);
+  expect(validateExtension).toHaveBeenCalledWith(source, plugin.manifest.permissions, [1, 2, 3], packaged.digests, undefined);
   const review = screen.getByRole("region", { name: "Review app permissions" });
   expect(within(review).getByText(/Package: 2 files, 915 B/)).toBeTruthy();
   expect(within(review).getByText("icons/icon.svg")).toBeTruthy();
@@ -482,7 +487,7 @@ it("lists every manifest problem with its path and does not offer to install", a
     expect(items[index].textContent).toContain(error.message);
     expect(items[index].textContent).toContain(error.code);
   });
-  expect(validateExtension).toHaveBeenCalledWith(source, plugin.manifest.permissions, undefined);
+  expect(validateExtension).toHaveBeenCalledWith(source, plugin.manifest.permissions, undefined, undefined, undefined);
   expect(screen.queryByText("Install and grant permissions")).toBeNull();
   expect(configureExtensions).not.toHaveBeenCalled();
 });
@@ -585,7 +590,7 @@ it("says the manifest check failed, offers a retry and does not offer to install
   fireEvent.click(within(alert).getByRole("button", { name: "Retry" }));
   await screen.findByText("Install and grant permissions");
   expect(validateExtension).toHaveBeenCalledTimes(2);
-  expect(validateExtension).toHaveBeenLastCalledWith(source, plugin.manifest.permissions, undefined);
+  expect(validateExtension).toHaveBeenLastCalledWith(source, plugin.manifest.permissions, undefined, undefined, undefined);
   expect(configureExtensions).not.toHaveBeenCalled();
 });
 it("applies a manifest check only to the review that asked for it", async () => {
@@ -622,6 +627,7 @@ const updated = () => ({
   source: "catalog",
   installedAt: 1_700_000_000,
   signatureProof: { manifest: "{}", signature: [1] },
+  signedBy: { id: "example", name: "Example Labs" },
   history: [
     { manifest: { ...plugin.manifest, version: "0.1.0" }, grants: ["k8s.listCustomResource"], revision: 2, source: "local", installedAt: 1_690_000_000 },
   ],
@@ -634,10 +640,94 @@ async function openDetails(app: ReturnType<typeof updated>) {
   fireEvent.click(await screen.findByRole("button", { name: `Details for ${label}` }));
   return screen.getByRole("region", { name: `${label} details` });
 }
+/** `updated()` with the manifest fields the Inspector names, which the shared fixture leaves out. */
+const inspected = () => {
+  const app = updated();
+  return {
+    ...app,
+    manifest: {
+      ...app.manifest,
+      srelensApiVersion: "^0.5",
+      kind: "declarative",
+      capabilities: [{ name: "list", title: "Applications", target: "k8s.listCustomResource", arguments: {}, inputs: [] }],
+    },
+  } as unknown as ReturnType<typeof updated>;
+};
+const noActivity = {
+  open: [], watches: [], opened: 0, messages: 0, bytes: 0, rateLimited: 0, refused: 0, windowEnded: 0, maxOpen: 8,
+};
+const declarativeInspection: ExtensionInspection = {
+  id: "org.test.gitops", runtime: "declarative", process: null, streams: noActivity, recentErrors: [],
+  log: { lines: 0, capacity: 1000, dropped: 0 },
+};
+it("opens Details on the Overview, with the Inspector and Logs beside it and neither read yet (#575)", async () => {
+  const details = await openDetails(updated());
+  const tabs = within(details).getByRole("tablist", { name: "App details" });
+  expect(within(tabs).getAllByRole("tab").map((tab) => [tab.textContent, tab.getAttribute("aria-selected")])).toEqual([
+    ["Overview", "true"],
+    ["Inspector", "false"],
+    ["Logs", "false"],
+  ]);
+  expect(within(details).getByRole("list", { name: "Granted capabilities" })).toBeTruthy();
+  expect(within(details).getByRole("textbox", { name: "GitOps manifest" })).toBeTruthy();
+  expect(inspectExtension).not.toHaveBeenCalled();
+  expect(extensionLogs).not.toHaveBeenCalled();
+});
+it("says in the Inspector and Logs that a declarative app has no process (#575)", async () => {
+  vi.mocked(inspectExtension).mockResolvedValue(declarativeInspection);
+  vi.mocked(extensionLogs).mockResolvedValue({ runtime: "declarative", lines: [], capacity: 1000, dropped: 0 });
+  const details = await openDetails(inspected());
+  fireEvent.click(within(details).getByRole("tab", { name: "Inspector" }));
+  expect(await within(details).findByText(/^No process\. This is a declarative app/)).toBeTruthy();
+  expect(within(details).getByText("No open streams.")).toBeTruthy();
+  expect(within(details).getByText("No watches.")).toBeTruthy();
+  // The Overview's own content is not drawn under another tab.
+  expect(within(details).queryByRole("textbox", { name: "GitOps manifest" })).toBeNull();
+  fireEvent.click(within(details).getByRole("tab", { name: "Logs" }));
+  expect(await within(details).findByText("This app has no process, so nothing writes to its log.")).toBeTruthy();
+  expect(extensionLogs).toHaveBeenCalledWith("org.test.gitops", { minLevel: "trace" });
+  fireEvent.click(within(details).getByRole("tab", { name: "Overview" }));
+  expect(within(details).getByRole("textbox", { name: "GitOps manifest" })).toBeTruthy();
+});
+it("takes a crashed sidecar's View logs to its log, and its Disable through the host (#575)", async () => {
+  const crashed: ExtensionInspection = {
+    ...declarativeInspection,
+    runtime: "sidecar",
+    process: {
+      state: "disabled", reason: "It exited with status 101 three times in a minute.",
+      message: "Extension process exited unexpectedly", actions: ["restart", "viewLogs", "disable"],
+      apiVersion: null, pid: null, startedAt: null, restart: null, launches: 3, unexpectedExits: 3,
+      memory: { bytes: null, limitBytes: 256 * 1024 * 1024, enforcement: "host" }, cpus: 1,
+      rpc: { answered: 0, failed: 0, timedOut: 0, refused: 0, inFlight: 0, latency: { samples: 0, p50Ms: null, p95Ms: null, maxMs: null } },
+      streams: { open: 0, opened: 0, limit: 16 },
+    },
+  };
+  vi.mocked(inspectExtension).mockResolvedValue(crashed);
+  vi.mocked(extensionLogs).mockResolvedValue({
+    runtime: "sidecar", capacity: 1000, dropped: 0,
+    lines: [{ seq: 1, at: Date.UTC(2026, 8, 27, 12), level: "error", source: "sidecar", text: "thread 'main' panicked" }],
+  });
+  const details = await openDetails(inspected());
+  fireEvent.click(within(details).getByRole("tab", { name: "Inspector" }));
+  const alert = await within(details).findByRole("alert");
+  expect(within(alert).getByText("Extension process exited unexpectedly")).toBeTruthy();
+  expect(within(alert).getByText("It exited with status 101 three times in a minute.")).toBeTruthy();
+  expect(within(details).queryByRole("button", { name: /restart/i })).toBeNull();
+  fireEvent.click(within(alert).getByRole("button", { name: "View logs" }));
+  expect(within(details).getByRole("tab", { name: "Logs" }).getAttribute("aria-selected")).toBe("true");
+  const log = await within(details).findByRole("log", { name: "GitOps log" });
+  expect(log.textContent).toContain("thread 'main' panicked");
+  fireEvent.click(within(details).getByRole("tab", { name: "Inspector" }));
+  fireEvent.click(within(await within(details).findByRole("alert")).getByRole("button", { name: "Disable" }));
+  await waitFor(() =>
+    expect(configureExtensions).toHaveBeenCalledWith({ action: "enable", id: "org.test.gitops", enabled: false }),
+  );
+});
 it("inspects an installed app's source, grants and manifest, and exports or resets its settings", async () => {
   vi.mocked(saveTextFile).mockResolvedValue("/tmp/settings.json");
   const details = await openDetails(updated());
-  expect(details.textContent).toContain("Signed by srelens");
+  // The publisher the host verified (#559), not one assumed from the proof.
+  expect(details.textContent).toContain("Signed by Example Labs");
   expect(details.textContent).toContain("from the Catalog");
   expect(details.textContent).toContain("revision 4");
   const grants = within(details).getByRole("list", { name: "Granted capabilities" });
@@ -1025,7 +1115,14 @@ it("does not call a quarantined app's signature verified", async () => {
   const details = await openDetails(app);
   const source = within(details).getByText(/revision 4/);
   expect(source.textContent).toContain("Signature not verified");
-  expect(source.textContent).not.toContain("Signed by srelens");
+  expect(source.textContent).not.toContain("Signed by");
+});
+it("names no publisher for a proof the host did not verify", async () => {
+  const { signedBy: _unverified, ...app } = updated();
+  const details = await openDetails(app);
+  const source = within(details).getByText(/revision 4/);
+  expect(source.textContent).toContain("Signature not verified");
+  expect(source.textContent).not.toContain("Signed by");
 });
 it("only confirms a rollback whose grants are unchanged", async () => {
   const app = updated();
@@ -1537,17 +1634,54 @@ it("queues lifecycle refreshes behind one pending poll and discards its stale re
 it.each([undefined, [1,2,3]])("installs catalog bytes and signature %j only after explicit review and grants", async (signature) => {
   vi.mocked(listExtensions).mockResolvedValue({ schemaVersion: 1, nextRevision: 1, plugins: [] });
   const source = JSON.stringify(plugin.manifest);
-  vi.mocked(reviewCatalogExtension).mockResolvedValue({ manifest: source, signature });
+  const keyId = signature ? "ab".repeat(32) : undefined;
+  vi.mocked(reviewCatalogExtension).mockResolvedValue({ manifest: source, signature, keyId });
   vi.mocked(listExtensionCatalog).mockResolvedValue({ catalog: { extensions: [{ id: plugin.manifest.id, name: "Catalog GitOps", description: "GitOps resources", repository: "https://github.com/example/gitops", license: "MIT", release: { version: "0.1.0", sha256: "digest", srelensApiVersion: "^0.1", prerelease: true } }] }, fetchedAt: 1, stale: false, error: null, hostApiVersions: ["0.1.0"], incompatible: [] } as any);
   render(<ExtensionManager />);
   fireEvent.click(await screen.findByRole("tab", { name: "Catalog" }));
   fireEvent.click(await screen.findByText("Review installation"));
   const install = await screen.findByText("Install and grant permissions");
-  expect(validateExtension).toHaveBeenCalledWith(source, plugin.manifest.permissions, signature);
+  expect(validateExtension).toHaveBeenCalledWith(source, plugin.manifest.permissions, signature, undefined, keyId);
   expect(configureExtensions).not.toHaveBeenCalled();
   expect(readExtension).not.toHaveBeenCalled();
   fireEvent.click(install);
-  await waitFor(() => expect(configureExtensions).toHaveBeenCalledWith({ action: "install", manifest: source, grants: plugin.manifest.permissions, ...(signature ? {signature} : {}) }));
+  await waitFor(() => expect(configureExtensions).toHaveBeenCalledWith({ action: "install", manifest: source, grants: plugin.manifest.permissions, ...(signature ? {signature, keyId} : {}) }));
+});
+/**
+ * The review names a publisher only once the host has verified the signature over these
+ * exact bytes (#559): its `signedBy`, never an assumed "srelens".
+ */
+it("says who signed a catalog release only after the host verified it", async () => {
+  vi.mocked(listExtensions).mockResolvedValue({ schemaVersion: 1, nextRevision: 1, plugins: [] });
+  const source = JSON.stringify(plugin.manifest);
+  vi.mocked(reviewCatalogExtension).mockResolvedValue({ manifest: source, signature: [1, 2, 3] });
+  vi.mocked(listExtensionCatalog).mockResolvedValue({ catalog: { extensions: [{ id: plugin.manifest.id, name: "Catalog GitOps", description: "GitOps resources", repository: "https://github.com/example/gitops", license: "MIT", release: { version: "0.1.0", sha256: "digest", srelensApiVersion: "^0.1", prerelease: true } }] }, fetchedAt: 1, stale: false, error: null, hostApiVersions: ["0.1.0"], incompatible: [] } as any);
+  let answer: (report: any) => void = () => {};
+  vi.mocked(validateExtension).mockReturnValueOnce(new Promise((resolve) => { answer = resolve; }));
+  render(<ExtensionManager />);
+  fireEvent.click(await screen.findByRole("tab", { name: "Catalog" }));
+  fireEvent.click(await screen.findByText("Review installation"));
+  const review = await screen.findByLabelText("Review app permissions");
+  expect(review.textContent).toContain("Checking the signature");
+  expect(review.textContent).not.toContain("verified");
+  answer({ errors: [], permissionDiff: { previousRevision: null, added: [], removed: [], unchanged: [] }, signedBy: { id: "example", name: "Example Labs" } });
+  await waitFor(() => expect(review.textContent).toContain("Signature verified · Example Labs"));
+  // A check that found a problem and verified no signature says so.
+  vi.mocked(validateExtension).mockResolvedValueOnce({ errors: [{ code: "EXTENSION_INVALID_SIGNATURE", path: "", message: "App publisher signature is invalid" }] });
+  fireEvent.click(within(review).getByRole("button", { name: "Cancel" }));
+  fireEvent.click(await screen.findByText("Review installation"));
+  const again = await screen.findByLabelText("Review app permissions");
+  await waitFor(() => expect(again.textContent).toContain("Signature not verified"));
+  expect(again.textContent).not.toContain("Signature verified");
+  // A check that could not run is not still running, and verified nothing.
+  vi.mocked(validateExtension).mockRejectedValueOnce(new Error("bridge timed out"));
+  fireEvent.click(within(again).getByRole("button", { name: "Cancel" }));
+  fireEvent.click(await screen.findByText("Review installation"));
+  const failed = await screen.findByLabelText("Review app permissions");
+  await waitFor(() => expect(failed.textContent).toContain("Signature could not be checked"));
+  expect(failed.textContent).toContain("bridge timed out");
+  expect(failed.textContent).not.toContain("Checking the signature");
+  expect(failed.textContent).not.toContain("Signature verified");
 });
 it("installs a catalog release's package by the release and the package that were reviewed (#562)", async () => {
   vi.mocked(listExtensions).mockResolvedValue({ schemaVersion: 1, nextRevision: 1, plugins: [] });
@@ -1558,7 +1692,7 @@ it("installs a catalog release's package by the release and the package that wer
   fireEvent.click(await screen.findByRole("tab", { name: "Catalog" }));
   fireEvent.click(await screen.findByText("Review installation"));
   const install = await screen.findByText("Install and grant permissions");
-  expect(validateExtension).toHaveBeenCalledWith(source, plugin.manifest.permissions, [1, 2, 3], packaged.digests);
+  expect(validateExtension).toHaveBeenCalledWith(source, plugin.manifest.permissions, [1, 2, 3], packaged.digests, undefined);
   fireEvent.click(install);
   await waitFor(() => expect(configureExtensions).toHaveBeenCalledWith({
     action: "installCatalogPackage", id: plugin.manifest.id, sha256: "digest", packageSha256: packaged.sha256,

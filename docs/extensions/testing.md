@@ -55,10 +55,10 @@ handler's consent gate.
 | `cargo test -p srelens-plugin-host --test sandbox_conformance -- --ignored --test-threads=1` | The #571 spike's sandbox checks and two more, through the production backend for this OS. Needs the OS sandbox, a network, and on Linux `SRELENS_SANDBOX_CGROUP_ROOT` naming a delegated cgroup. The `sandbox-conformance` CI job runs it on Linux and Windows ([sidecar-protocol.md](sidecar-protocol.md#sandbox)) |
 | `cargo test -p srelens-plugin-host --lib fuzzing` | Manifest decoding, validation and parsing on arbitrary bytes and on edits of the example manifests: no panic, a value or a coded problem, the 256 KiB limit to the byte, and an accepted manifest re-serializes to an equal one |
 | `cargo test -p srelens-registry` | Inventory lifecycle, quarantine, catalog parsing and caching, signing, app capabilities |
-| `cargo test -p srelens-registry --lib -- tools_tests sidecars executable_tests` | Apps' MCP tools and sidecars (#574): an installed app's tools appear and the client is told; a disabled, updated or removed app's tools are withdrawn from every snapshot; a change another process made is found; actions stay behind the consent gate; an executable app installs only from its package, and its sidecar starts on first use from a verified binary, with no environment, and stops with its app. The sidecars are an in-process fake behind the `Launcher` trait |
+| `cargo test -p srelens-registry --lib -- tools_tests sidecars executable_tests` | Apps' MCP tools and sidecars (#574): an installed app's tools appear and the client is told; a disabled, updated or removed app's tools are withdrawn from every snapshot; a change another process made is found; actions stay behind the consent gate; an executable app installs only from its package, and its sidecar starts on first use from a verified binary, with no environment, and stops with its app; a sidecar reads through the broker, and each write it asks for is confirmed first, naming the app, or refused where nobody can be asked; its process shows in the Inspector. The sidecars are an in-process fake behind the `Launcher` trait |
 | `cargo test -p srelens-mcp --lib app_tools` | The transports' half: `tools.listChanged`, `notifications/tools/list_changed` on stdio and the HTTP stream, a change another process made found by the poll, and a call held to the snapshot it was asked about |
-| `cargo test -p srelens-registry --lib package` | The `.srelens-extension` format ([packages.md](packages.md)): tampered, missing and extra files, links, traversal and layout paths, oversized archives and bombs, trailing data, the digest list's exact form, and a valid package that installs, reverifies, updates, rolls back and is pruned. The fixture packages' digest lists are regenerated, and the signed one re-signed with the test publisher's key, by `UPDATE_CATALOG=1 cargo test -p srelens-registry` |
-| `cargo test -p srelens-registry --lib fuzzing` | The same properties for catalog parsing, publisher signature verification, the package reader (on arbitrary bytes, on archives of arbitrary entries and on edits of the fixture packages) and the inventory reader with its legacy migration, starting from `crates/registry/tests/fixtures` |
+| `cargo test -p srelens-registry --lib package` | The `.srelens-extension` format ([packages.md](packages.md)): tampered, missing and extra files, links, traversal and layout paths, oversized archives and bombs, trailing data, the digest list's exact form, a package signed outside its publisher's namespace, and a valid package that installs, reverifies, updates, rolls back and is pruned. The fixture packages' digest lists are regenerated, and the signed one re-signed with the test publisher's key, by `UPDATE_CATALOG=1 cargo test -p srelens-registry` |
+| `cargo test -p srelens-registry --lib fuzzing` | The same properties for catalog parsing, signed catalog and trust metadata verification, publisher signature verification, the package reader (on arbitrary bytes, on archives of arbitrary entries and on edits of the fixture packages) and the inventory reader with its legacy migration, starting from `crates/registry/tests/fixtures` |
 | `cargo test -p srelens-kube --lib gitops` | Resource inspection, events, GitOps action allowlist, guards and conditional PATCH |
 | `cargo test -p srelens-server` | Web-host denials, including every `plugin/…` id |
 | `packages/core/src/lib/extensionManifestSchema.test.ts` | Every example manifest validates against the committed schema and names it in `$schema` |
@@ -152,12 +152,16 @@ number of installed apps; at 50 it is close to its target. See
 ## Fuzzing
 
 The parsers that read extension input from outside the host have cargo-fuzz targets in
-`fuzz/`: `manifest`, `catalog`, `signed-manifest`, `package` and `inventory`.
-`signed-manifest` reads one byte giving the signature's length, the signature, then the
-manifest. `package` reads one mode byte, then a package: when the byte is odd, an
-uncompressed tar that the target compresses itself, so the fuzzer explores the archive and
-its checks rather than guessing gzip checksums. Its seeds are the fixture packages in
-`crates/registry/tests/fixtures/packages`.
+`fuzz/`: `manifest`, `catalog`, `signed-manifest`, `package`, `inventory`, `signed-catalog`
+and `trust-metadata`. `signed-manifest` reads one byte giving the signature's length, the
+signature, then the manifest. `package` reads one mode byte, then a package: when the byte
+is odd, an uncompressed tar that the target compresses itself, so the fuzzer explores the
+archive and its checks rather than guessing gzip checksums. Its seeds are the fixture
+packages in `crates/registry/tests/fixtures/packages`. `signed-catalog` verifies a signed
+catalog as a download is, and `trust-metadata` reads the same bytes as a signed root, a
+publisher delegation and a release signature file. These three check signatures against the
+test root in `crates/registry/tests/fixtures/trust`, and accept nothing its keys did not
+sign: a fuzzer cannot sign, so anything else accepted would be a forgery.
 
 Each target calls one function in its crate's `fuzzing` module, and the `fuzzing` property
 tests above call the same function, so a property is written once. `cargo test` runs a

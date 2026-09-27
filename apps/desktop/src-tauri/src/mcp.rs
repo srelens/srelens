@@ -126,17 +126,29 @@ impl McpHttpManager {
             ),
             None => (build_registry_with(self.cache.clone()), None),
         };
-        let server = srelens_mcp::McpServer::new(Arc::new(registry));
+        let registry = Arc::new(registry);
+        let prompt = Arc::new(crate::mcp_confirm::PromptUser::new(
+            app.clone(),
+            pending.clone(),
+            std::time::Duration::from_secs(60),
+        ));
+        let server = srelens_mcp::McpServer::new(registry.clone());
         let server = match app_tools {
-            Some(tools) => server.with_app_tools(tools),
+            Some(tools) => {
+                // An app's sidecar calls back through this registry, and a write it
+                // asks for is put to the person through the same prompt an agent's
+                // gated call is (#573, #552), naming the app.
+                tools.serve_sidecars(srelens_registry::SidecarHost {
+                    registry,
+                    consent: prompt.clone(),
+                    audit: audit.clone(),
+                });
+                server.with_app_tools(tools)
+            }
             None => server,
         };
         server
-            .with_policy(Arc::new(crate::mcp_confirm::PromptUser::new(
-                app.clone(),
-                pending.clone(),
-                std::time::Duration::from_secs(60),
-            )))
+            .with_policy(prompt)
             .with_audit(audit)
             .with_prompts(srelens_mcp::prompts::PromptLibrary::new(Some(prompts_dir.to_path_buf())))
             .with_kind_resolver(srelens_registry::kind_resolver())

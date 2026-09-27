@@ -70,8 +70,12 @@ async fn install_preview(server: &McpServer, args: &Value) -> Result<Value, Stri
         }
         _ => {
             let mut preview = json!({"manifest": args["manifest"], "grants": args["grants"]});
-            if let Some(signature) = args.get("signature") {
-                preview["signature"] = signature.clone();
+            // The signature and the key it names (#559), so the preview checks the install
+            // exactly as it will run.
+            for field in ["signature", "keyId"] {
+                if let Some(value) = args.get(field) {
+                    preview[field] = value.clone();
+                }
             }
             return Ok(preview);
         }
@@ -91,6 +95,9 @@ async fn install_preview(server: &McpServer, args: &Value) -> Result<Value, Stri
     });
     if review["signature"].is_array() {
         preview["signature"] = review["signature"].clone();
+        if review["keyId"].is_string() {
+            preview["keyId"] = review["keyId"].clone();
+        }
     }
     Ok(preview)
 }
@@ -1384,6 +1391,43 @@ mod tests {
         assert!(prompt.contains("1 unchanged access item"), "{prompt}");
         assert!(!prompt.contains("Grant k8s.listCustomResource"), "{prompt}");
         assert_eq!(executed.lock().unwrap().as_ref().unwrap()["reviewedRevision"], 7);
+    }
+
+    /// The consent preview validates the signature and the key it names (#559), so it
+    /// cannot pass an install that then fails on its key, or the other way round.
+    #[tokio::test]
+    async fn extension_install_preview_checks_the_signature_and_key_the_install_names() {
+        use srelens_capability::Annotations;
+        use std::sync::Mutex;
+        struct Yes;
+        #[async_trait::async_trait]
+        impl crate::policy::ConfirmPolicy for Yes {
+            async fn confirm(&self, _: &crate::policy::ConsentRequest) -> crate::policy::Decision {
+                crate::policy::Decision::Approved
+            }
+        }
+        let previewed = Arc::new(Mutex::new(None));
+        let mut reg = Registry::new();
+        let capture = previewed.clone();
+        reg.register(Capability::read_only("extensions.validate", "preview", move |args| {
+            let capture = capture.clone();
+            async move {
+                *capture.lock().unwrap() = Some(args);
+                Ok(json!({"errors":[],"permissionDiff":{"previousRevision":null,"added":[],"removed":[],"unchanged":[]}}))
+            }
+        }));
+        let mut configure = Capability::read_only("extensions.configure", "configure", |_| async {
+            Ok(json!({"done":true}))
+        });
+        configure.annotations = Annotations::MUTATING;
+        reg.register(configure);
+        let server = McpServer::new(Arc::new(reg)).with_policy(Arc::new(Yes));
+        let key_id = "ab".repeat(32);
+        let response = handle_request(&server, &json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"extensions.configure","arguments":{"action":"install","manifest":"{}","grants":[],"signature":[1,2,3],"keyId":key_id}}}), Transport::Stdio).await.unwrap();
+        assert_eq!(response["result"]["isError"], false, "{response}");
+        let previewed = previewed.lock().unwrap().clone().unwrap();
+        assert_eq!(previewed["signature"], json!([1, 2, 3]));
+        assert_eq!(previewed["keyId"], json!(key_id));
     }
 
     /// A package install over MCP (#562) is previewed as `install` is: from the manifest,

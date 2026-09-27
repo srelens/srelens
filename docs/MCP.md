@@ -254,7 +254,16 @@ critical clusters.
 
 [mcp-catalog.md](mcp-catalog.md) enumerates every tool, the built-in prompts,
 and every resource URI, grouped by area (Kubernetes, Helm, Toolbox, Server)
-and, for tools, by **safety class**. There are exactly four:
+and, for tools, by **safety class**.
+
+Every capability is a tool except the **UI-only** ones (`Capability::ui_only`).
+Those are `extensions.inspect` and `extensions.logs`, an app's runtime metrics
+and its log ([extensions/inspector.md](extensions/inspector.md)).
+`McpServer::new` drops them, so no MCP path can list or call them. An agent's
+context goes to its LLM provider, and a sidecar's log is text a third party
+wrote.
+
+There are exactly four safety classes:
 
 | Class | Confirm gate? | Headless flag needed |
 | --- | --- | --- |
@@ -370,11 +379,21 @@ host capability's row through the same rule every binding does, so it can be rai
 above that row and never lowered: a reader is read-only and ungated, and an action
 is gated at its primitive's impact, in its primitive's own confirmation sentence. The
 [catalog](mcp-catalog.md#app-tools) lists which row each kind inherits. A sidecar
-operation runs under one host row for every operation: read-only and not gated,
-because its sidecar has no kubeconfig, no network and no path but its own data
-directory, and cannot call the host yet
-([#573](https://github.com/srelens/srelens/issues/573)); and **sensitive**, because its
-arguments are the app's own vocabulary, so the audit log redacts them whole.
+has no kubeconfig, no network and no path but its own data directory, and reaches the
+host only through the broker ([#573](https://github.com/srelens/srelens/issues/573)):
+what its app's readers read, and its app's declared actions. So an operation of an
+app that declares no action is read-only and not gated; one of an app that declares
+actions is gated as the strongest of them, in the host's own sentence for an
+operation. Either way it is **sensitive**: its arguments are the app's own
+vocabulary, so the audit log redacts them whole.
+
+**A sidecar's writes are asked about again, naming the app.** Every write a sidecar
+asks the broker for is put to a person before it runs. In the app that is the same
+host confirmation an agent's gated call gets (#552), with "Requested by app …" read
+from the app's own inventory, since the host started that process and knows which app
+asked. Headless (`--mcp-stdio`, `--mcp-http`) nobody can be asked, so a sidecar's
+writes are refused there, whatever flags the process was started with; the refusal is
+recorded in the audit log.
 
 **The same checks as the app's own screens.** A reader runs through
 `extensions.read`'s path and an action through `extensions.action`'s: the app still

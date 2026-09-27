@@ -355,6 +355,18 @@ pub fn render_client_configs() -> String {
 /// table sorted by id. Empty combinations are skipped rather than rendered as
 /// an empty table.
 pub fn render_tools(reg: &srelens_capability::Registry) -> String {
+    // What MCP offers: without the UI-only capabilities (#575), as
+    // `McpServer::new` drops them.
+    let mut reg = reg.clone();
+    let hidden: Vec<String> = reg
+        .entries()
+        .filter(|cap| cap.ui_only)
+        .map(|cap| cap.id.clone())
+        .collect();
+    for id in hidden {
+        reg.unregister(&id);
+    }
+    let reg = &reg;
     let mut out = String::new();
     out.push_str(&format!(
         "## Tools\n\n{} tools, grouped by area and then by how a call is gated. ",
@@ -470,16 +482,34 @@ pub fn render_app_tools(reg: &srelens_capability::Registry) -> String {
             .annotations;
         row("declared action", &format!("`{primitive}`"), host);
     }
-    let sidecar = srelens_plugin_host::SIDECAR_OPERATION;
+    let reads = srelens_plugin_host::SIDECAR_OPERATION;
     out.push_str(&format!(
-        "| sidecar operation | none: the app's sandboxed sidecar | {} | {} |\n\n",
-        classify(&sidecar).label(),
-        sidecar.impact.as_str()
+        "| sidecar operation, of an app that declares no action | its app's readers, through the broker | {} | {} |\n",
+        classify(&reads).label(),
+        reads.impact.as_str()
+    ));
+    // The weakest primitive gives the floor; the row is at least that, and at least
+    // the level of whichever action the app declares.
+    let writes = srelens_plugin_host::sidecar_operation_annotations(
+        srelens_kube::action_primitives::PRIMITIVES
+            .iter()
+            .filter_map(|primitive| reg.get(primitive).map(|c| c.annotations))
+            .min_by_key(|annotations| annotations.impact),
+    );
+    out.push_str(&format!(
+        "| sidecar operation, of an app that declares actions | its app's readers and declared actions, through the broker | {} | at least {}, and at least its highest action's |\n\n",
+        classify(&writes).label(),
+        writes.impact.as_str()
     ));
     out.push_str(
-        "A sidecar operation is not gated because its sidecar has no kubeconfig, no network \
-         and no path but its own data directory, and cannot call the host yet ([#573](https://github.com/srelens/srelens/issues/573)). Its \
-         arguments are the app's own vocabulary, so the audit log redacts them whole.\n\n",
+        "An executable app's sidecar reaches the host only through the broker \
+         ([#573](https://github.com/srelens/srelens/issues/573)): what its app's readers read, \
+         and its app's declared actions. So an operation of an app that declares none is not \
+         gated: it can change nothing outside its sandbox. One of an app that declares actions \
+         is gated as the strongest of them, and each write the sidecar then asks for is put to \
+         a person again, naming the app; where nobody can be asked, headless, it is refused. \
+         Either way an operation's arguments are the app's own vocabulary, so the audit log \
+         redacts them whole.\n\n",
     );
     out
 }
@@ -705,16 +735,21 @@ mod tests {
         assert!(md.contains("| `k8s.listPods` |"), "got:\n{md}");
     }
 
-    /// Every tool appears exactly once across all sections. Renders the id in
+    /// Every tool appears exactly once across all sections, and a UI-only
+    /// capability (#575), which is not a tool, not at all. Renders the id in
     /// backticks inside a table cell, so counting that exact pattern counts rows.
     #[test]
     fn every_tool_appears_exactly_once() {
         let reg = crate::build_registry();
         let md = render_tools(&reg);
-        for id in reg.ids() {
+        for capability in reg.entries() {
+            let id = &capability.id;
             let cell = format!("| `{id}` |");
-            assert_eq!(md.matches(&cell).count(), 1, "{id} should appear exactly once");
+            let want = if capability.ui_only { 0 } else { 1 };
+            assert_eq!(md.matches(&cell).count(), want, "{id} should appear {want} times");
         }
+        let tools = reg.entries().filter(|capability| !capability.ui_only).count();
+        assert!(md.contains(&format!("{tools} tools, grouped")), "the count is of tools");
     }
 
     /// `diffManifest` is sensitive but un-gated, so it must render under

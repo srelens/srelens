@@ -72,6 +72,12 @@ pub struct Capability {
     /// inventory, an MCP response or a log. Empty for every capability today,
     /// so no current consumer can receive a secret.
     pub secret_slots: Vec<String>,
+    /// Offered to srelens's own UI and never to MCP: not listed as a tool, and
+    /// not callable as one (`McpServer::new` drops it). For what must not leave
+    /// the host through an agent, whose context goes to its LLM provider: an
+    /// app's logs, which a third party wrote, and its runtime metrics (#575).
+    /// `false` for every capability but those.
+    pub ui_only: bool,
 }
 
 impl Capability {
@@ -91,6 +97,7 @@ impl Capability {
             bound_arguments: None,
             settable: Vec::new(),
             secret_slots: Vec::new(),
+            ui_only: false,
         }
     }
 
@@ -127,6 +134,7 @@ impl Capability {
             bound_arguments: None,
             settable: Vec::new(),
             secret_slots: Vec::new(),
+            ui_only: false,
         }
     }
 
@@ -184,6 +192,13 @@ impl Capability {
     /// Whether the host may inject a secret into `argument`.
     pub fn takes_secret(&self, argument: &str) -> bool {
         self.secret_slots.iter().any(|slot| slot == argument)
+    }
+
+    /// The same capability, for srelens's own UI only (see
+    /// [`Capability::ui_only`]).
+    pub fn only_in_the_ui(mut self) -> Self {
+        self.ui_only = true;
+        self
     }
 }
 
@@ -268,8 +283,10 @@ impl Registry {
         // the bridge logs the refusal. MCP records it, as it records every
         // other call it is asked to make.
         let audited = match source {
-            audit::Source::Ui => annotations.as_ref().is_some_and(audit::is_audited_from_ui),
-            _ => true,
+            audit::Source::Ui | audit::Source::Sidecar => {
+                annotations.as_ref().is_some_and(audit::is_audited_from_ui)
+            }
+            audit::Source::McpStdio | audit::Source::McpHttp => true,
         };
         if !audited {
             return self.invoke(id, input).await;
@@ -338,6 +355,17 @@ mod registry_tests {
         let reg = Registry::new();
         let err = reg.invoke("nope", json!(null)).await.unwrap_err();
         assert!(matches!(err, CapabilityError::NotFound(_)));
+    }
+
+    #[test]
+    fn a_capability_is_offered_everywhere_unless_marked_ui_only() {
+        let offered = Capability::read_only("a", "", |_| async { Ok(json!(null)) });
+        assert!(!offered.ui_only);
+        let typed = Capability::typed::<Value, Value, _, _>("b", "", Annotations::READ_ONLY, |v| async move {
+            Ok(v)
+        });
+        assert!(!typed.ui_only);
+        assert!(typed.only_in_the_ui().ui_only);
     }
 
     #[test]
@@ -428,6 +456,30 @@ mod registry_tests {
         let seen = spy.seen();
         assert_eq!(seen.len(), 1, "expected only the MCP read, got {seen:?}");
         assert_eq!(seen[0].source, audit::Source::McpStdio);
+    }
+
+    /// A sidecar's calls back into the host (#573) are recorded on the UI's
+    /// line: its writes and sensitive reads. A scanner lists far more than a
+    /// resource screen does, and every read in a 5 MB trail would bury the
+    /// write that answers "what did this app change?".
+    #[tokio::test]
+    async fn a_sidecar_is_recorded_for_its_writes_not_its_reads() {
+        let reg = reg_with_a_read_and_a_write();
+        let spy = Spy::default();
+        let args = json!({ "context": "prod", "namespace": "team", "name": "web-0" });
+
+        reg.invoke_audited("k8s.listPods", json!({}), &spy, audit::Source::Sidecar, "auto")
+            .await
+            .unwrap();
+        reg.invoke_audited("k8s.deletePod", args, &spy, audit::Source::Sidecar, "approved")
+            .await
+            .unwrap();
+
+        let seen = spy.seen();
+        assert_eq!(seen.len(), 1, "expected only the write, got {seen:?}");
+        assert_eq!(seen[0].tool, "k8s.deletePod");
+        assert_eq!(seen[0].source.as_str(), "app");
+        assert_eq!(seen[0].decision, "approved");
     }
 
     /// The same capability from either surface lands in the trail in the same

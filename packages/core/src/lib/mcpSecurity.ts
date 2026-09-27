@@ -75,6 +75,19 @@ export interface ConfirmRequest {
    * when the call named nothing.
    */
   target?: ConfirmTarget | null;
+  /**
+   * The installed app that asked, when the HOST knows it: only for a call an
+   * executable app's sidecar made back into srelens (#573), whose process the
+   * supervisor started for exactly this app and revision. Never for an MCP
+   * call, whose caller is a bearer token and not an app (see
+   * {@link ConfirmTarget}).
+   *
+   * An ID and a revision, and nothing more: the window looks the name and the
+   * publisher up in its own installed inventory, so nothing on this wire names
+   * or vouches for an app, and a revision the window no longer has draws no
+   * requester line.
+   */
+  requester?: { id: string; revision: number } | null;
 }
 
 /**
@@ -104,10 +117,13 @@ export interface ConfirmRequest {
  */
 export interface AuditEntry {
   ts: number;
-  /** Who made the call: the app's own UI, or an MCP client. */
-  source: "ui" | "mcp";
-  /** How it reached the registry. `"ui"` is the Tauri bridge. */
-  transport: "ui" | "stdio" | "http";
+  /**
+   * Who made the call: the app's own UI, an MCP client, or an installed
+   * app's sidecar calling back into the host (#573), which `app` names.
+   */
+  source: "ui" | "mcp" | "app";
+  /** How it reached the registry. `"ui"` is the Tauri bridge; `"sidecar"` an app's sidecar pipe. */
+  transport: "ui" | "stdio" | "http" | "sidecar";
   tool: string;
   args: Record<string, unknown>;
   /** The app the call was made through, when it was made through one. */

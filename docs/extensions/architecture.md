@@ -40,7 +40,10 @@ of process, as supervised sidecars in the OS sandbox, speaking JSON-RPC over std
 ([sidecar-protocol.md](sidecar-protocol.md)). The supervisor and its per-OS backends are
 in `crates/plugin-host/src/sidecar/`; the registry starts one per executable app in use,
 on its first operation call, and stops it when the app changes
-(`crates/registry/src/extensions/sidecars.rs`). See
+(`crates/registry/src/extensions/sidecars.rs`). Each is started with its app's data
+directory, a broker over the MCP host's registry, and its app's log, and shows in the
+Inspector. The broker's consent is the MCP host's: the desktop app's confirmation
+prompt, naming the app, or `NoConsent` headless. See
 [Executable apps](manifest.md#executable-apps).
 
 ## App lifecycle
@@ -100,8 +103,9 @@ extension replaced by `extensions.json`, so `settings.extensions.json`.
 ## Quarantine
 
 Every load re-verifies each installed app: its manifest against this host's supported
-API versions and rules, and a signed app's stored proof against the trusted publisher
-table. An app that fails is **quarantined on its own**:
+API versions and rules, and a signed app's stored proof against the publisher delegation
+that vouched for it, under the root the host pins ([trust.md](trust.md#installed-apps)).
+An app that fails is **quarantined on its own**:
 
 - it loads disabled, with its reason shown in Settings → Apps
 - it cannot be re-enabled until it is reinstalled or removed

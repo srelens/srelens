@@ -102,6 +102,25 @@ const FROM_THE_UI: AuditEntry = {
   err: null,
 };
 
+/**
+ * #573: an app's own sidecar calling back into the host. Neither the reader
+ * nor an agent made this call, so it must not be drawn as either: the source
+ * is the app, the transport its sidecar pipe, and the app is named.
+ */
+const FROM_A_SIDECAR: AuditEntry = {
+  ts: 1_700_000_500,
+  source: "app",
+  transport: "sidecar",
+  tool: "extensions.action",
+  args: { action: "refresh" },
+  app: { id: "org.example.scanner", revision: 2 },
+  cluster: "prod-eu",
+  resource: "checkout/web",
+  decision: "approved",
+  outcome: "ok",
+  err: null,
+};
+
 describe("AuditPane", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -172,6 +191,15 @@ describe("AuditPane", () => {
     // And the app it went through, revision included: an update rolls the
     // revision and leaves the ID alone.
     expect(screen.getByTestId("audit-app").textContent).toContain("org.example.flux@4");
+  });
+
+  it("shows a call an app's sidecar made as the app's, over its sidecar", async () => {
+    core.auditTail.mockResolvedValue([FROM_A_SIDECAR, ALLOWED]);
+    render(<AuditPane />);
+    expect(await screen.findByText("extensions.action")).toBeTruthy();
+    const sources = screen.getAllByTestId("audit-source").map((el) => el.textContent);
+    expect(sources[0]).toBe("app · sidecar");
+    expect(screen.getByTestId("audit-app").textContent).toContain("org.example.scanner@2");
   });
 
   /**

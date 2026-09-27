@@ -52,3 +52,17 @@ path = "fuzz_targets/package.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "signed-catalog"
+path = "fuzz_targets/signed-catalog.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "trust-metadata"
+path = "fuzz_targets/trust-metadata.rs"
+test = false
+doc = false
+bench = false

@@ -22,7 +22,7 @@ pub(super) const LIMITS_MISSING: &str = "srelens cannot limit an app's memory an
 pub(super) fn launch(
     config: &SandboxConfig,
     command: &SidecarCommand,
-    _limits: &Limits,
+    limits: &Limits,
 ) -> Result<Launched, LaunchError> {
     let launcher = config.launcher.as_ref().ok_or_else(|| {
         LaunchError::Unavailable(
@@ -48,10 +48,13 @@ pub(super) fn launch(
     let child = tokio::process::Command::new(launcher)
         .arg("--data")
         .arg(&data)
+        .arg("--max-file-bytes")
+        .arg(limits.data_bytes.to_string())
         .arg("--")
         .arg(&program)
         .args(&command.args)
         .env_clear()
+        .envs(super::temporary_directory(command, &data))
         .envs(command.env.iter().map(|(k, v)| (k, v)))
         .current_dir(&data)
         .stdin(Stdio::piped())

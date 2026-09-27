@@ -3,7 +3,15 @@ import { invoke } from "@tauri-apps/api/core";
 import { invokeCapability } from "./tauriTransport";
 import { requestClusterLogin } from "../lib/clusterLogin";
 
-vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: vi.fn(),
+  Channel: class {
+    onmessage: (message: unknown) => void;
+    constructor(onmessage?: (message: unknown) => void) {
+      this.onmessage = onmessage ?? (() => {});
+    }
+  },
+}));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
 vi.mock("@tauri-apps/api/app", () => ({ getVersion: vi.fn() }));
 vi.mock("@tauri-apps/plugin-process", () => ({ relaunch: vi.fn() }));
@@ -181,5 +189,75 @@ describe("tauriTransport window stream reset", () => {
     await transport.resetWindowStreams();
     await transport.invokeCommand("extension_stream_open", { input: {} });
     expect(invoke.mock.calls.map(([c]) => c)).toEqual(["window_streams_reset", "extension_stream_open"]);
+  });
+});
+
+/**
+ * #733: a stream's frames reach only the page that opened it. The host sends
+ * them on a Tauri channel the transport passes with each open, where an
+ * emitted event would reach every window listening on its name; the
+ * transport hands each frame to this page's subscription for its event name.
+ */
+describe("tauriTransport stream frames", () => {
+  afterEach(() => { vi.clearAllMocks(); vi.restoreAllMocks(); vi.resetModules(); });
+
+  async function fresh() {
+    vi.resetModules();
+    const core = await import("@tauri-apps/api/core");
+    const event = await import("@tauri-apps/api/event");
+    const invoke = vi.mocked(core.invoke);
+    invoke.mockResolvedValue(undefined);
+    vi.mocked(event.listen).mockResolvedValue(() => {});
+    return { invoke, Channel: core.Channel, transport: await import("./tauriTransport") };
+  }
+
+  /** The channel the host was handed with the `index`th call to `command`. */
+  function sentChannel(invoke: ReturnType<typeof vi.fn>, command: string, index = 0) {
+    const call = invoke.mock.calls.filter(([c]) => c === command)[index];
+    return (call?.[1] as { onEvent?: { onmessage: (m: unknown) => void } } | undefined)?.onEvent;
+  }
+
+  it.each(["start_resource_watch", "start_pod_exec", "extension_stream_open"])(
+    "passes %s its own channel and hands its frames to this page's subscription",
+    async (command) => {
+      const { invoke, Channel, transport } = await fresh();
+      const rows: unknown[] = [];
+      const others: unknown[] = [];
+      await transport.subscribe("ch:1", (p) => rows.push(p));
+      await transport.subscribe("ch:other", (p) => others.push(p));
+      await transport.invokeCommand(command, { channel: "ch:1" });
+
+      const onEvent = sentChannel(invoke, command);
+      expect(onEvent).toBeInstanceOf(Channel);
+      onEvent!.onmessage({ event: "ch:1", payload: [{ name: "a" }] });
+      onEvent!.onmessage({ event: "ch:unheard", payload: 1 });
+      expect(rows).toEqual([[{ name: "a" }]]);
+      expect(others).toEqual([]);
+    },
+  );
+
+  it("gives each open a channel of its own, and a command that opens nothing none", async () => {
+    const { invoke, transport } = await fresh();
+    await transport.invokeCommand("start_resource_watch", { channel: "w1" });
+    await transport.invokeCommand("start_resource_watch", { channel: "w2" });
+    await transport.invokeCommand("stop_watch", { channel: "w1" });
+    expect(sentChannel(invoke, "start_resource_watch", 0)).not.toBe(
+      sentChannel(invoke, "start_resource_watch", 1),
+    );
+    expect(sentChannel(invoke, "stop_watch")).toBeUndefined();
+  });
+
+  it("stops handing frames to a subscription once it is disposed", async () => {
+    const { invoke, transport } = await fresh();
+    const rows: unknown[] = [];
+    const dispose = await transport.subscribe("ch:1", (p) => rows.push(p));
+    const off = transport.on("ch:1", (p) => rows.push(`on:${String(p)}`));
+    await transport.invokeCommand("start_pod_exec", { channel: "ch:1" });
+    const onEvent = sentChannel(invoke, "start_pod_exec")!;
+    onEvent.onmessage({ event: "ch:1", payload: "x" });
+    dispose();
+    off();
+    onEvent.onmessage({ event: "ch:1", payload: "y" });
+    expect(rows).toEqual(["x", "on:x"]);
   });
 });

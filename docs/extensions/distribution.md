@@ -1,6 +1,6 @@
 # Distribution
 
-How apps reach users: the catalog, signed official releases, and local installation. An
+How apps reach users: the signed catalog, signed releases, and local installation. An
 app is released as one manifest file, or as a `.srelens-extension` package that carries its
 logo and files as well ([packages.md](packages.md)).
 
@@ -11,15 +11,18 @@ apps; a collapsed **Install a local manifest** section holds the JSON installer.
 **Catalog** tab loads on first opening and keeps its search and list state when you
 switch tabs.
 
-The catalog comes from [srelens/extensions](https://github.com/srelens/extensions).
-Each entry points to its own repository and a versioned GitHub release asset. The
+The catalog comes from [srelens/extensions](https://github.com/srelens/extensions), signed
+([Signed releases and publishers](#signed-releases-and-publishers)). Each entry points to
+its own repository and a versioned GitHub release asset. The
 initial entries are [Flux](https://github.com/srelens/extension-flux) and
 [Argo CD](https://github.com/srelens/extension-argocd). Search by name, ID or
 description.
 
-- The backend caches validated metadata for 24 hours in `*.extensions.catalog.json`,
-  next to the inventory. **Refresh catalog** checks immediately. A failed refresh keeps
-  the cache and shows the failure and the original timestamp.
+- The backend caches the verified catalog for 24 hours in `*.extensions.catalog.json`,
+  next to the inventory, and verifies its signature again whenever it reads it. **Refresh
+  catalog** checks immediately, and so does opening a catalog that has expired. A failed
+  or refused refresh keeps the cache and shows the failure and the original timestamp. An
+  expired catalog is shown, but not installed from.
 - Browsing does not connect clusters or install anything.
 - Catalog metadata is additive: hosts ignore fields they do not recognize (see
   [Unknown fields](specification.md#unknown-fields)).
@@ -61,47 +64,51 @@ A catalog change invalidates the selected checksum and requires a new review. Re
 an installed ID is explicit and keeps its settings. There are no automatic updates or
 downgrade decisions ([#563](https://github.com/srelens/srelens/issues/563)).
 
-## Signed official releases
+## Signed releases and publishers
 
-Official Flux and Argo CD releases carry a detached Ed25519 signature
-(`manifest.json.sig`) over the exact manifest bytes. The host pins a **trusted-publisher
-table** in `crates/registry/src/extensions/signing.rs`, holding for each publisher:
+Since [#559](https://github.com/srelens/srelens/issues/559) the catalog is signed, and it
+says which publisher may sign which apps. The formats, the key ceremony and the runbooks
+are in [trust.md](trust.md); in short:
 
-- the public key
-- the app ID namespace reserved for it (`org.srelens.` for srelens)
-- the only repository each of its apps may be released from
-
-Catalog metadata cannot supply a trusted key.
-
-- A catalog entry that names a reserved ID *or* a trusted publisher's repository must
-  be signed. Missing signatures, modified bytes and repository substitution are rejected
-  before review.
-- Repository URLs are compared case-insensitively, because GitHub resolves owner and
-  repository names that way: `https://github.com/SRELENS/extension-argocd` is the
-  trusted repository and needs the same signature. A lookalike owner such as `srelensx`
-  is a different repository, and its apps are ordinary unsigned third-party apps. The
-  release asset URL itself must still equal the pinned repository's
-  `v<version>/manifest.json`.
-- Installation re-verifies the proof and stores it, and every inventory load checks it
-  against the installed manifest ([architecture.md](architecture.md#quarantine)).
+- The host pins a root, and trusts a catalog only when the root's catalog role signed it.
+  A catalog that is unsigned, wrongly signed, expired, or older than the last one the host
+  verified is refused, and the last verified catalog stays in use, marked stale, with the
+  reason.
+- The catalog delegates app ID namespaces to publishers: `org.srelens` to srelens, and
+  others to third parties. A release in a delegated namespace carries a detached Ed25519
+  signature (`manifest.json.sig`) over the exact manifest bytes, made by one of that
+  publisher's keys, and is refused before review without it. A publisher's key cannot
+  sign an ID outside its namespaces.
+- A release signature names its key: `{"keyid": "<key ID>", "sig": "<base64>"}`. The
+  releases published before #559 carry the 64 signature bytes alone, and still verify.
+- A repository URL grants nothing. Neither a repository nor an ID prefix makes an entry
+  signed; only a delegated namespace does.
+- Installation re-verifies the signature and stores it, with the delegation that vouched
+  for it, and every inventory load checks both against the installed manifest with no
+  catalog needed ([architecture.md](architecture.md#quarantine)).
 - Permission review is still required. A checksum alone is not a publisher signature.
 
-IDs in a reserved namespace install **only** with that publisher's signature. A pasted
-manifest cannot use an `org.srelens.` ID, and cannot replace a signed installation.
-Apps with IDs outside reserved namespaces install unsigned and are labelled **Unsigned
-local**.
+IDs in a delegated namespace install **only** with that publisher's signature. A pasted
+manifest cannot use an `org.srelens.` ID, or another publisher's, and cannot replace a
+signed installation. Signed apps are labelled **Signed by** the publisher the host
+verified; apps with IDs outside delegated namespaces install unsigned and are labelled
+**Unsigned local**.
 
-## Releasing an official app
+## Releasing a signed app
 
-The release workflows in the app repositories require `APP_SIGNING_PRIVATE_KEY`
-(PKCS#8 Ed25519 PEM) in GitHub Actions secrets, check it against `signing-public.pem`,
-and publish a 64-byte binary signature. The private key must never be committed. The
-current public key is also stored as raw 32 bytes in
-`crates/registry/src/extensions/srelens-apps.pub`.
+The Flux and Argo CD release workflows sign with `APP_SIGNING_PRIVATE_KEY` (PKCS#8
+Ed25519 PEM) in GitHub Actions secrets, check it against `signing-public.pem`, and publish
+`manifest.json.sig`. The private key must never be committed. Since #559 the signature
+file names its key; [Signing a release](trust.md#signing-a-release) has the change to
+`scripts/sign.mjs`, and [Adding a publisher](trust.md#adding-a-publisher) covers a third
+party's first release.
 
-Key rotation needs a host update that trusts the new key before new release signatures
-are published ([#560](https://github.com/srelens/srelens/issues/560)). A host that stops
-trusting a stored signature quarantines only that app.
+Releases are listed in `catalog.signed.json`. Hosts released before #559 read the unsigned
+`catalog.json`, which stays frozen at the releases they can verify
+([Publishing the signed catalog](trust.md#publishing-the-signed-catalog)).
+
+Rotating a key without losing installed apps is [#560](https://github.com/srelens/srelens/issues/560).
+A host that stops trusting a stored signature quarantines only that app.
 
 ## Local installation
 

@@ -274,6 +274,8 @@ pub struct ExtensionStreams {
     data: Option<std::path::PathBuf>,
     /// Installed apps' tools, once an MCP server asks for them.
     tools: OnceLock<Arc<super::tools::AppTools>>,
+    /// The apps' logs and sidecars, which the Inspector reads (#575).
+    runtime: Arc<super::inspector::AppRuntime>,
 }
 
 impl ExtensionStreams {
@@ -469,6 +471,21 @@ impl ExtensionStreams {
         self.streams.close_view(view)
     }
 
+    /// Cancel one stream for the window labelled `window` (#733): refused,
+    /// and left running, when another window opened it or none did.
+    /// `Ok(false)` when it had already ended.
+    pub fn cancel_in_window(&self, stream: &str, window: &str) -> Result<bool, String> {
+        self.streams
+            .cancel_in_window(stream, window)
+            .map_err(|e| e.to_string())
+    }
+
+    /// End the streams the window labelled `window` opened for `view`, and
+    /// no other window's. Returns how many.
+    pub fn close_view_in_window(&self, view: &str, window: &str) -> usize {
+        self.streams.close_view_in_window(view, window)
+    }
+
     /// End every stream the window labelled `window` opened, with `reason`
     /// (`windowClosed` or `windowReloaded`), and refuse any open it began
     /// before this. Returns how many ended.
@@ -478,6 +495,17 @@ impl ExtensionStreams {
 
     pub fn metrics(&self) -> Vec<AppStreamMetrics> {
         self.streams.metrics()
+    }
+
+    /// The limits every app's streams are held to.
+    pub fn stream_limits(&self) -> StreamLimits {
+        self.streams.limits()
+    }
+
+    /// The apps' logs and sidecars in this process (#575): where a host that
+    /// starts a sidecar gets its app's log, and shows its process.
+    pub fn runtime(&self) -> Arc<super::inspector::AppRuntime> {
+        self.runtime.clone()
     }
 
     /// Tell `sink` of every inventory write this process announces, as
@@ -500,7 +528,11 @@ impl ExtensionStreams {
                     self.cache.clone(),
                     self.snapshots.clone(),
                     self.secrets.clone(),
-                    super::sidecars::AppSidecars::new(self.packages.clone(), self.data.clone()),
+                    super::sidecars::AppSidecars::new(
+                        self.packages.clone(),
+                        self.data.clone(),
+                        self.runtime.clone(),
+                    ),
                 ))
             })
             .clone()
@@ -603,6 +635,7 @@ impl ExtensionStreams {
                 Some(_) => None,
             }
         });
+        self.runtime.forget_removed(state);
         // After the endings above, so a stream the lifecycle ended hears
         // that, and not a recheck's refusal.
         self.inventory.send_modify(|generation| *generation += 1);
@@ -890,6 +923,16 @@ fn live() -> &'static Mutex<HashMap<InventoryKey, Weak<ExtensionStreams>>> {
     LIVE.get_or_init(Default::default)
 }
 
+/// Before an app's files are removed: end the sidecars of the apps `state`, just
+/// saved, no longer holds (#574), so none is still running out of the directories
+/// about to go.
+pub(super) fn end_uninstalled_sidecars(key: &InventoryKey, state: &Inventory) {
+    let streams = live().lock().unwrap().get(key).and_then(Weak::upgrade);
+    if let Some(tools) = streams.as_ref().and_then(|streams| streams.tools.get()) {
+        tools.end_uninstalled(state);
+    }
+}
+
 /// Tell the streams of the inventory `key` names that it was written as `state`.
 pub(super) fn announce(key: &InventoryKey, state: &Inventory) {
     let streams = live().lock().unwrap().get(key).and_then(Weak::upgrade);
@@ -945,6 +988,7 @@ pub(super) fn register(
                     packages: apps.packages.clone(),
                     data: apps.data.clone(),
                     tools: OnceLock::new(),
+                    runtime: Arc::default(),
                 });
                 live.retain(|_, weak| weak.strong_count() > 0);
                 live.insert(key, Arc::downgrade(&streams));
@@ -1429,6 +1473,46 @@ mod tests {
             (&json!(0), &json!(22), &json!(3)),
             "{out}"
         );
+    }
+
+    /// A window may end only what it opened (#733): cancelling another
+    /// window's stream is refused and leaves it running, and closing a view
+    /// ends only the calling window's streams under that view's name.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_window_ends_only_its_own_streams() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, _reg, streams) = setup(dir.path());
+        let revision = install(&path, fake_core());
+        let sink = Arc::new(TestSink::default());
+        let mut opened = vec![];
+        for (window, channel) in [("main", "extstream:main"), ("ctx-1", "extstream:ctx")] {
+            let out = streams
+                .open_in_window(
+                    sink.clone(),
+                    window,
+                    Arc::new(NoopAudit),
+                    request(APP, revision, "page#1", channel),
+                )
+                .await
+                .unwrap();
+            opened.push(out.stream);
+        }
+        let (mine, theirs) = (&opened[0], &opened[1]);
+
+        let refused = streams.cancel_in_window(theirs, "main").unwrap_err();
+        assert!(refused.contains("not opened by this window"), "{refused}");
+        assert_eq!(streams.close_view_in_window("page#1", "main"), 1);
+        assert!(!types(&sink, "extstream:ctx").contains(&"close".to_owned()));
+        assert_eq!(
+            sink.payloads_for("extstream:main").last().unwrap()["reason"],
+            "viewClosed"
+        );
+        assert_eq!(
+            streams.cancel_in_window(mine, "main"),
+            Ok(false),
+            "already ended"
+        );
+        assert_eq!(streams.cancel_in_window(theirs, "ctx-1"), Ok(true));
     }
 
     // ---- The `watch` source (#566) ----
@@ -2004,6 +2088,61 @@ mod tests {
         assert_eq!(streams.close_view("v"), 8);
     }
 
+    /// The Inspector (#575) lists what an app's views have open now, its
+    /// watches apart from its other streams, and forgets each as it ends.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_inspector_reflects_an_apps_open_streams_and_watches() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, reg, streams) = setup(dir.path());
+        let revision = install(&path, fake_core());
+        let (session, _) = scripted(vec![]);
+        streams.script_watches(session, FAST);
+        let sink = Arc::new(TestSink::default());
+        open(
+            &streams,
+            &sink,
+            request(APP, revision, "page#1", "extstream:r1"),
+        )
+        .await;
+        streams
+            .open(sink.clone(), watch(APP, revision, "tab#2", "extstream:w1"))
+            .await
+            .unwrap();
+        let inspect = || async {
+            reg.invoke("extensions.inspect", json!({"id": APP}))
+                .await
+                .unwrap()["streams"]
+                .clone()
+        };
+        let now = inspect().await;
+        let open_streams = now["open"].as_array().unwrap();
+        assert_eq!(open_streams.len(), 1, "{now}");
+        assert_eq!(open_streams[0]["source"], "read");
+        assert_eq!(open_streams[0]["view"], "page#1");
+        assert_eq!(open_streams[0]["revision"], revision);
+        assert!(open_streams[0]["messages"].as_u64().unwrap() >= 1, "{now}");
+        let watches = now["watches"].as_array().unwrap();
+        assert_eq!(watches.len(), 1, "{now}");
+        assert_eq!(watches[0]["source"], "watch");
+        assert_eq!(watches[0]["view"], "tab#2");
+        assert_eq!(
+            (now["opened"].clone(), now["maxOpen"].clone()),
+            (json!(2), json!(8))
+        );
+
+        assert_eq!(streams.close_view("page#1"), 1);
+        let now = inspect().await;
+        assert_eq!(now["open"], json!([]));
+        assert_eq!(now["watches"].as_array().unwrap().len(), 1);
+        assert_eq!(streams.close_view("tab#2"), 1);
+        let now = inspect().await;
+        assert_eq!(
+            (now["open"].clone(), now["watches"].clone()),
+            (json!([]), json!([]))
+        );
+        assert_eq!(now["opened"], 2, "what was opened is still counted");
+    }
+
     /// Whatever the cluster serves on a watch — here a Secret, values and
     /// all — the stream carries only that something changed.
     #[tokio::test(flavor = "multi_thread")]
@@ -2224,6 +2363,7 @@ mod tests {
             core,
             super::super::Configure::Install {
                 signature: None,
+                key_id: None,
                 manifest: manifest.to_string(),
                 grants: vec!["k8s.listDeployments".into()],
                 reviewed_revision: None,

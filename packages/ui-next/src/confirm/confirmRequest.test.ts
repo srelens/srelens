@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { renderConfirmTemplate } from "@srelens/core";
-import { confirmSubject, asConfirmTarget, confirmFields } from "./confirmRequest";
+import { confirmSubject, asConfirmRequest, asConfirmTarget, confirmFields } from "./confirmRequest";
 
 describe("the fields a host template may name", () => {
   /** `{resource}` is `kind namespace/name`, exactly as `confirm_fields` derives it in Rust. */
@@ -100,5 +100,29 @@ describe("what a confirmation request says it is about", () => {
     expect(asConfirmTarget(undefined)).toBeNull();
     expect(asConfirmTarget("prod")).toBeNull();
     expect(asConfirmTarget(null)).toBeNull();
+  });
+});
+
+describe("the app a sidecar's request names", () => {
+  const base = { id: "r1", tool: "extensions.action", args: {} };
+
+  it("keeps an ID and a whole revision, and nothing else", () => {
+    expect(asConfirmRequest({ ...base, requester: { id: "org.example.flux", revision: 2, name: "x" } })?.requester)
+      .toEqual({ id: "org.example.flux", revision: 2 });
+  });
+
+  it("drops a reference that is not one", () => {
+    for (const requester of [
+      null,
+      "org.example.flux",
+      { id: "", revision: 1 },
+      { id: "org.example.flux" },
+      { id: "org.example.flux", revision: "2" },
+      { id: "org.example.flux", revision: 1.5 },
+      { id: "org.example.flux", revision: -1 },
+    ]) {
+      expect(asConfirmRequest({ ...base, requester })?.requester, JSON.stringify(requester)).toBeNull();
+    }
+    expect(asConfirmRequest(base)?.requester).toBeNull();
   });
 });

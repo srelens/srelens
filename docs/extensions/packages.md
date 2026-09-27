@@ -68,10 +68,13 @@ It is read only in this exact form:
 `digests.json.sig` is 64 raw bytes of Ed25519 over the exact bytes of `digests.json`. This
 is the scheme a single-file release uses, applied to the list instead of the manifest. The
 host looks the key up the same way, by the app ID (`verify_for` in
-`crates/registry/src/extensions/signing.rs`). An `org.srelens.` package must be signed by
-srelens. A signature on any other app ID is refused, because no other publisher is trusted
-yet ([#559](https://github.com/srelens/srelens/issues/559)). Because the list covers every
+`crates/registry/src/extensions/signing.rs`): among the keys of the publisher the signed
+catalog delegates that ID's namespace to ([trust.md](trust.md),
+[#559](https://github.com/srelens/srelens/issues/559)). An `org.srelens.` package must be
+signed by srelens, and a publisher's key signs no package outside its own namespaces. A
+signature on an app ID in no delegated namespace is refused. Because the list covers every
 file, a changed, missing or extra file fails verification just as a changed manifest does.
+The signature file names no key; the host tries each of the publisher's.
 
 An unsigned package installs as an unsigned local app. The digest list still checks the
 archive's integrity and completeness, but it does not say who made the package.
@@ -169,8 +172,8 @@ app's initials. A file changed on disk since the install is not shown, and neith
 logo of a quarantined app.
 
 **A logo never implies trust.** A package can carry any image, including another project's
-logo. Who published an app is shown only by its signature label: **Signed by srelens**,
-**Unsigned local** or **Signature not verified**. Nothing is chosen by app ID. Official apps
+logo. Who published an app is shown only by its signature label: **Signed by** the publisher the
+host verified, **Unsigned local** or **Signature not verified**. Nothing is chosen by app ID. Official apps
 get no bundled logo either: Flux and Argo CD show their initials until their releases ship
 as packages.
 
@@ -195,12 +198,13 @@ A catalog release may list its package:
 - The field is additive. A host that predates packages ignores it and installs
   `manifestUrl`, so a release with a package keeps publishing its single-file manifest.
 - `package.url` must be a GitHub release asset whose name ends in `.srelens-extension`.
-  For an official app, it must also be in its pinned repository's release for that
-  version, beside `manifest.json`.
+  For an app in a delegated namespace, it must also be in the same release as its
+  `manifest.json`, beside it.
 - The package's `extension.json` must be the release's manifest, byte for byte: its SHA-256
   is the release's `sha256`. The release's ID, version and API range checks apply to it
   unchanged.
-- An official app's package must be signed. Any other app's package must not be.
+- A package in a delegated namespace must be signed by its publisher. Any other app's
+  package must not be signed.
 
 ## Making a package
 

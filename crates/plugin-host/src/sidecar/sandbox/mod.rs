@@ -50,10 +50,27 @@ pub struct SidecarCommand {
     /// The whole environment the sidecar gets. The host's own is never
     /// inherited: it may hold `KUBECONFIG`, cloud credentials or tokens.
     pub env: Vec<(OsString, OsString)>,
-    /// The only path it may write, and its working directory. The per-app,
-    /// size-limited data directory is #573's; the supervisor takes whatever
-    /// directory it is given.
+    /// The only path it may write, and its working directory: the app's
+    /// [`super::data::DataDir`] (#573). The supervisor refuses one that is
+    /// over its limit, not private, or a link, and passes it to the sidecar
+    /// in `initialize`.
     pub data_dir: PathBuf,
+}
+
+/// `TMPDIR`, set to the data directory unless the command names its own
+/// (#573): the one place a sidecar may write, so its temporary files go where
+/// they can be written and are counted against its limit. Linux and macOS;
+/// Windows points `TEMP` into the AppContainer's folder itself.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn temporary_directory<'a>(
+    command: &SidecarCommand,
+    data_dir: &'a std::path::Path,
+) -> Option<(&'static str, &'a std::path::Path)> {
+    let named = command
+        .env
+        .iter()
+        .any(|(name, _)| name.as_os_str() == "TMPDIR");
+    (!named).then_some(("TMPDIR", data_dir))
 }
 
 /// Who enforces a sidecar's memory and CPU limits.
@@ -178,11 +195,15 @@ fn signal_name(signal: i32) -> Option<&'static str> {
     }
 }
 
+/// Reads a running sidecar's memory use now, in bytes; `None` once it cannot.
+pub type MemoryProbe = Arc<dyn Fn() -> Option<u64> + Send + Sync>;
+
 /// A running sidecar process: a way to stop it, and its exit.
 pub struct Process {
     pid: Option<u32>,
     kill: Arc<dyn Fn() + Send + Sync>,
     exit: Pin<Box<dyn Future<Output = Exit> + Send>>,
+    memory: Option<MemoryProbe>,
 }
 
 impl Process {
@@ -198,7 +219,25 @@ impl Process {
             pid,
             kill: Arc::new(kill),
             exit: Box::pin(exit),
+            memory: None,
         }
+    }
+
+    /// The same process, with a way to read its memory use for the Inspector
+    /// (#575): the cgroup's `memory.current` on Linux. A backend that cannot
+    /// measure it leaves it out, and the Inspector says so rather than
+    /// showing a number. macOS's watchdog samples the same figure (#713).
+    pub fn with_memory(
+        mut self,
+        probe: impl Fn() -> Option<u64> + Send + Sync + 'static,
+    ) -> Process {
+        self.memory = Some(Arc::new(probe));
+        self
+    }
+
+    /// The memory reader, when the backend has one.
+    pub fn memory(&self) -> Option<MemoryProbe> {
+        self.memory.clone()
     }
 
     pub fn pid(&self) -> Option<u32> {

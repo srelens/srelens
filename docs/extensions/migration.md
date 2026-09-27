@@ -62,7 +62,7 @@ app changes, on any line.
 An installed executable app is stored with the package it came from. A host from
 before 0.6 cannot read an inventory that holds one, since installed apps are read
 strictly: remove it before going back. Its sidecar's data directory,
-`*.extensions.data/<app ID>/`, is removed with it.
+under `*.extensions.data/`, is removed with it.
 
 ## Plain HTTP to this computer (#568)
 

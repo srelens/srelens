@@ -6,7 +6,9 @@
 //! make a tool look weaker than the host capability behind it.
 use serde_json::{json, Map, Value};
 use srelens_capability::{Annotations, CapabilityError, Impact, Registry};
-use srelens_plugin_host::{Manifest, PluginHost, ToolRoute, SIDECAR_OPERATION};
+use srelens_plugin_host::{
+    Manifest, PluginHost, ToolRoute, SIDECAR_OPERATION, SIDECAR_OPERATION_CONFIRM,
+};
 use std::sync::{Arc, Mutex};
 
 /// Argo CD with a reader, a logs binding and a declared action, plus a sidecar.
@@ -141,8 +143,28 @@ fn a_tool_runs_under_its_host_capabilitys_annotations() {
     assert!(!action.read_only && action.requires_confirm);
     assert!(action.impact >= Impact::Medium);
     assert_eq!(action.confirm, primitive.confirm);
-    // The sidecar operation: the host's row for every operation.
-    assert_eq!(annotations("diff"), SIDECAR_OPERATION);
+    // The sidecar operation: its sidecar may ask the broker to run the app's refresh,
+    // so it is gated as that write is, in the host's own words for an operation.
+    let operation = annotations("diff");
+    assert!(!operation.read_only && operation.requires_confirm && operation.sensitive);
+    assert!(operation.impact >= primitive.impact);
+    assert_eq!(operation.confirm, Some(SIDECAR_OPERATION_CONFIRM));
+}
+
+#[test]
+fn a_sidecar_operation_is_a_read_when_its_app_declares_no_action() {
+    let (route, _) = recording();
+    let mut value = manifest();
+    value.as_object_mut().unwrap().remove("actions");
+    value["permissions"] = json!(["k8s.listCustomResource", "k8s.streamLogs"]);
+    let (reg, _) = register(&value, route).unwrap();
+    let operation = reg
+        .get("plugin/org.example.gitops/diff")
+        .unwrap()
+        .annotations;
+    assert_eq!(operation, SIDECAR_OPERATION);
+    // Nothing it can reach changes anything outside its sandbox, so it is not gated.
+    assert!(operation.read_only && !operation.requires_confirm);
 }
 
 #[tokio::test]

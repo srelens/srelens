@@ -1189,4 +1189,68 @@ describe("the host's own words", () => {
     expect(screen.queryByTestId("host-confirm-requester")).toBeNull();
     expect(screen.getByRole("dialog").textContent).not.toContain("Flux Tools");
   });
+
+  /**
+   * **A sidecar's call names the app the host started it for** (#573). The
+   * supervisor knows which app's process asked, so the backend sends that
+   * reference; the name and publisher still come from this window's inventory,
+   * and a revision it does not hold names nobody.
+   */
+  it("names the app a sidecar's call came from, from the window's own inventory", async () => {
+    const flux = {
+      manifest: {
+        id: "org.example.flux",
+        name: "Flux Tools",
+        version: "1.0.0",
+        srelensApiVersion: "^0.6",
+        kind: "executable",
+        permissions: [],
+        capabilities: [],
+        contributions: { pages: [], detailTabs: [], detailLinks: [] },
+      },
+      enabled: true,
+      revision: 2,
+      grants: [],
+      settings: {},
+      source: "local",
+      installedAt: 0,
+      history: [],
+    };
+    core.listExtensions.mockResolvedValue({ schemaVersion: 1, nextRevision: 3, plugins: [flux] } as never);
+    await mount();
+    askWith({
+      id: "s1",
+      tool: "extensions.action",
+      args: { resource: { id: "org.example.flux", revision: 2 }, action: "suspend" },
+      prompt: "Run the declared action (suspend) on team/api in cluster prod?",
+      impact: "high",
+      target: { cluster: "prod", namespace: "team", name: "api" },
+      requester: { id: "org.example.flux", revision: 2, name: "Not the name the host knows" },
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId("host-confirm-requester").textContent).toBe(
+        "Requested by app Flux Tools (unsigned)",
+      ),
+    );
+    expect(screen.getByRole("dialog").textContent).not.toContain("Not the name the host knows");
+  });
+
+  it("names nobody for a sidecar's call at a revision the window does not hold", async () => {
+    core.listExtensions.mockResolvedValue({ schemaVersion: 1, nextRevision: 1, plugins: [] } as never);
+    await mount();
+    askWith({
+      id: "s2",
+      tool: "extensions.action",
+      args: {},
+      prompt: "Run the declared action?",
+      impact: "high",
+      target: {},
+      requester: { id: "org.example.flux", revision: 9 },
+    });
+    expect((await screen.findByTestId("host-confirm-question")).textContent).toBe(
+      "Run the declared action?",
+    );
+    await waitFor(() => expect(core.listExtensions).toHaveBeenCalled());
+    expect(screen.queryByTestId("host-confirm-requester")).toBeNull();
+  });
 });

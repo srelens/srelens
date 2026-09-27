@@ -17,7 +17,8 @@
 //!
 //! Only `extension.json` and `digests.json` are required. The signature is the one scheme a
 //! single-file release uses: Ed25519 over exact bytes, with the key found by
-//! [`signing::verify_for`] for the app ID. There it covers `manifest.json`; here it covers the
+//! [`signing::verify_for`] for the app ID, among the keys of the publisher delegated its
+//! namespace (#559). There it covers `manifest.json`; here it covers the
 //! digest list, and the list covers everything else, so a changed, missing or extra file
 //! fails verification just as a changed manifest does.
 //!
@@ -27,6 +28,7 @@
 //! reads it a second time into a private staging directory, which a durable rename then
 //! moves into place; nothing is written until the whole package has verified.
 use super::signing;
+use super::trust::{Delegations, Signer};
 use crate::durable;
 use base64::Engine as _;
 use schemars::JsonSchema;
@@ -444,9 +446,14 @@ pub(super) fn check_manifest_listed(digests: &str, manifest: &str) -> Result<Dig
 /// A package's publisher signature: over the exact bytes of `digests`, by the publisher of
 /// the app the list names, and `manifest` is the list's `extension.json`. What an install,
 /// a review and every inventory load check a signed package's stored proof with.
-pub(super) fn verify_signed(digests: &str, signature: &[u8], manifest: &str) -> Result<(), String> {
+pub(super) fn verify_signed(
+    digests: &str,
+    signature: &[u8],
+    manifest: &str,
+    delegations: &Delegations,
+) -> Result<Signer, String> {
     let list = check_manifest_listed(digests, manifest)?;
-    signing::verify_for(&list.id, digests.as_bytes(), signature)
+    signing::verify_for(&list.id, digests.as_bytes(), signature, None, delegations)
 }
 
 /// An icon checked to be what its name says, as the UI will show it.
@@ -507,6 +514,8 @@ pub(super) struct Package {
     /// The exact text of `digests.json`.
     pub(super) digests: String,
     pub(super) signature: Option<Vec<u8>>,
+    /// Who signed it, when it is signed: the publisher delegated its app ID's namespace.
+    pub(super) signer: Option<Signer>,
     /// The exact text of `extension.json`.
     pub(super) manifest: String,
     /// SHA-256 of the package file, lowercase hex: what a catalog release names.
@@ -760,7 +769,11 @@ fn unreadable(error: io::Error) -> String {
 /// documentation for the rules. A package is refused whole: the error says why, and the
 /// sink may have been given files of a package that is then refused, which is why
 /// [`unpack`] reads a package into its directory only after reading it into [`Discard`].
-pub(super) fn read(archive: &[u8], sink: &mut dyn Sink) -> Result<Package, String> {
+pub(super) fn read(
+    archive: &[u8],
+    sink: &mut dyn Sink,
+    delegations: &Delegations,
+) -> Result<Package, String> {
     if archive.len() > MAX_PACKAGE_BYTES {
         return Err(format!(
             "The package exceeds {} MiB",
@@ -894,12 +907,21 @@ pub(super) fn read(archive: &[u8], sink: &mut dyn Sink) -> Result<Package, Strin
     let list = parse_digests(&digests)?;
     let digests = String::from_utf8(digests).map_err(|_| "digests.json is not UTF-8")?;
     let signature = kept.remove(SIGNATURE);
-    if let Some(signature) = &signature {
-        if signature.len() as u64 != SIGNATURE_BYTES {
-            return Err("digests.json.sig is not a 64-byte Ed25519 signature".into());
+    let signer = match &signature {
+        Some(signature) => {
+            if signature.len() as u64 != SIGNATURE_BYTES {
+                return Err("digests.json.sig is not a 64-byte Ed25519 signature".into());
+            }
+            Some(signing::verify_for(
+                &list.id,
+                digests.as_bytes(),
+                signature,
+                None,
+                delegations,
+            )?)
         }
-        signing::verify_for(&list.id, digests.as_bytes(), signature)?;
-    }
+        None => None,
+    };
     // Every file is listed, and every listed file is here, exactly as listed.
     let mut listed: BTreeMap<&str, &FileDigest> = list
         .files
@@ -946,6 +968,7 @@ pub(super) fn read(archive: &[u8], sink: &mut dyn Sink) -> Result<Package, Strin
         list,
         digests,
         signature,
+        signer,
         manifest,
         sha256,
         icon,
@@ -968,7 +991,14 @@ fn app_directory(root: &Path, id: &str) -> PathBuf {
 /// Installing the version is the inventory's save that names it afterwards, an atomic
 /// replace of its own; until then nothing uses this directory, and [`prune`] removes it
 /// if that save never happens.
-pub(super) fn unpack(root: &Path, archive: &[u8], package: &Package) -> Result<(), String> {
+/// `delegations` are the ones `package` was read under, so the second read checks the
+/// signature as the first did.
+pub(super) fn unpack(
+    root: &Path,
+    archive: &[u8],
+    package: &Package,
+    delegations: &Delegations,
+) -> Result<(), String> {
     let app = app_directory(root, &package.list.id);
     durable::create_private_dir_all(&app)
         .map_err(|e| format!("Could not create the app's directory: {e}"))?;
@@ -985,6 +1015,7 @@ pub(super) fn unpack(root: &Path, archive: &[u8], package: &Package) -> Result<(
         &mut Writer {
             root: staging.path(),
         },
+        delegations,
     )?;
     if again.digest != package.digest {
         return Err("The package changed while it was being unpacked".into());

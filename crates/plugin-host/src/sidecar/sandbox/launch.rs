@@ -3,8 +3,8 @@
 //! `exec`s the sidecar, which inherits every layer.
 //!
 //! ```text
-//! srelens-sandbox-launch --cgroup DIR --data DIR -- PROGRAM [ARGS...]   Linux
-//! srelens-sandbox-launch --data DIR -- PROGRAM [ARGS...]                macOS
+//! srelens-sandbox-launch --cgroup DIR --data DIR --max-file-bytes N -- PROGRAM [ARGS...]   Linux
+//! srelens-sandbox-launch --data DIR --max-file-bytes N -- PROGRAM [ARGS...]                macOS
 //! ```
 //!
 //! It is srelens's own code, so it runs unconfined until it has applied the
@@ -12,9 +12,14 @@
 //!
 //! 1. **Every inherited descriptor above stderr is closed**, so nothing the
 //!    host held open without close-on-exec reaches the sidecar.
-//! 2. Linux: **it joins the cgroup** the host created with the limits. This
+//! 2. **No file can grow past the data directory's limit** (#573):
+//!    `RLIMIT_FSIZE` is set to `--max-file-bytes`, and `SIGXFSZ` is ignored, so
+//!    a write past it fails with `EFBIG` instead of killing the sidecar. The
+//!    directory's total is the supervisor's to measure (`sidecar::data`); this
+//!    is the part of the limit the kernel holds between two measurements.
+//! 3. Linux: **it joins the cgroup** the host created with the limits. This
 //!    has to come before Landlock, which would refuse the write.
-//! 3. Linux: **Landlock**, targeting ABI 5 as the spike did (the filesystem
+//! 4. Linux: **Landlock**, targeting ABI 5 as the spike did (the filesystem
 //!    rights of ABIs 1 to 5, and TCP bind and connect from ABI 4), plus the
 //!    ABI 6 scopes (abstract Unix sockets, signals to processes outside the
 //!    sandbox). Best effort, so an older kernel enforces the subset it knows,
@@ -22,14 +27,15 @@
 //!    directory, read and execute on the program, reads under `/usr`, `/lib`
 //!    and `/lib64` for the dynamic loader and libc, and the few `/etc` files
 //!    libc's resolver opens.
-//! 4. Linux: **the seccomp filter**: `socket` of any family fails with
+//! 5. Linux: **the seccomp filter**: `socket` of any family fails with
 //!    `EPERM` (the spike allowed `AF_UNIX`; its stdio is pipes, so nothing
 //!    needs one, and the ADR names the D-Bus session bus as what one reaches),
-//!    as do `io_uring_setup`, `fork`, `vfork` and `clone` without
-//!    `CLONE_THREAD`; `clone3` fails with `ENOSYS`, so libc falls back to an
-//!    inspectable `clone`. It is a deny-list, which the ADR says a production
+//!    as do `io_uring_setup`, `fork`, `vfork`, `clone` without
+//!    `CLONE_THREAD`, and changing a file's mode, owner or extended
+//!    attributes by path (#573), which Landlock does not cover; `clone3` fails
+//!    with `ENOSYS`, so libc falls back to an inspectable `clone`. It is a deny-list, which the ADR says a production
 //!    filter should not be; an allow-list is the escape-hardening review's.
-//! 5. macOS: **`exec` of `/usr/bin/sandbox-exec`** with the Seatbelt profile
+//! 6. macOS: **`exec` of `/usr/bin/sandbox-exec`** with the Seatbelt profile
 //!    (`seatbelt.sb`) and the program and data directory as its parameters.
 //!
 //! Any failure exits with [`LAYER_FAILED`] before the sidecar runs.
@@ -50,6 +56,7 @@ pub const SEATBELT_PROFILE: &str = include_str!("seatbelt.sb");
 struct Args {
     cgroup: Option<PathBuf>,
     data: PathBuf,
+    max_file_bytes: u64,
     program: Vec<OsString>,
 }
 
@@ -57,6 +64,7 @@ fn parse(args: Vec<OsString>) -> Result<Args, String> {
     let mut args = args.into_iter();
     let mut cgroup = None;
     let mut data = None;
+    let mut max_file_bytes = None;
     let mut program = Vec::new();
     while let Some(arg) = args.next() {
         match arg.to_str() {
@@ -64,6 +72,16 @@ fn parse(args: Vec<OsString>) -> Result<Args, String> {
                 cgroup = Some(args.next().ok_or("--cgroup needs a directory")?.into())
             }
             Some("--data") => data = Some(args.next().ok_or("--data needs a directory")?.into()),
+            Some("--max-file-bytes") => {
+                let value = args
+                    .next()
+                    .ok_or("--max-file-bytes needs a number of bytes")?;
+                let bytes = value
+                    .to_str()
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .ok_or("--max-file-bytes takes a number of bytes")?;
+                max_file_bytes = Some(bytes);
+            }
             Some("--") => {
                 program = args.by_ref().collect();
                 break;
@@ -75,12 +93,15 @@ fn parse(args: Vec<OsString>) -> Result<Args, String> {
     if program.is_empty() {
         return Err("missing -- PROGRAM".into());
     }
+    let max_file_bytes = max_file_bytes
+        .ok_or("missing --max-file-bytes N: the data directory's limit is required")?;
     if cfg!(target_os = "linux") && cgroup.is_none() {
         return Err("missing --cgroup DIR: every Linux layer is required".into());
     }
     Ok(Args {
         cgroup,
         data,
+        max_file_bytes,
         program,
     })
 }
@@ -95,6 +116,7 @@ pub fn main() -> ! {
 fn run(args: Vec<OsString>) -> Result<Infallible, String> {
     let args = parse(args)?;
     close_inherited_descriptors()?;
+    limit_file_size(args.max_file_bytes)?;
     #[cfg(target_os = "linux")]
     {
         linux::join_cgroup(args.cgroup.as_deref().expect("parse requires it"))?;
@@ -125,6 +147,31 @@ fn exec(program: &OsString, args: &[OsString]) -> Result<Infallible, String> {
         "could not start {}: {error}",
         program.to_string_lossy()
     ))
+}
+
+/// Hold every file the sidecar writes to `bytes`: `RLIMIT_FSIZE`, which
+/// `exec` keeps, with `SIGXFSZ` ignored, which `exec` keeps too, so that a
+/// write past it fails with `EFBIG` rather than killing the process.
+fn limit_file_size(bytes: u64) -> Result<(), String> {
+    let limit = libc::rlimit {
+        rlim_cur: bytes as libc::rlim_t,
+        rlim_max: bytes as libc::rlim_t,
+    };
+    // SAFETY: a valid rlimit for this process.
+    if unsafe { libc::setrlimit(libc::RLIMIT_FSIZE, &limit) } != 0 {
+        return Err(format!(
+            "could not limit file size to {bytes} bytes: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    // SAFETY: setting a signal's disposition to "ignore" has no handler to run.
+    if unsafe { libc::signal(libc::SIGXFSZ, libc::SIG_IGN) } == libc::SIG_ERR {
+        return Err(format!(
+            "could not ignore SIGXFSZ: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(())
 }
 
 /// Close every descriptor above 2. The ones Rust opens are close-on-exec
@@ -267,13 +314,40 @@ mod linux {
         Ok(())
     }
 
-    /// The two filters: `clone3` answered with `ENOSYS`, then the deny-list.
-    pub(super) fn filters() -> Result<(BpfProgram, BpfProgram), String> {
+    /// Syscalls newer than the `libc` crate's table for every architecture
+    /// srelens builds for. Every syscall from 424 on has one number on every
+    /// architecture, so these are the same on x86-64 and arm64.
+    pub(super) const SYS_FCHMODAT2: i64 = 452;
+    pub(super) const SYS_SETXATTRAT: i64 = 463;
+    pub(super) const SYS_REMOVEXATTRAT: i64 = 466;
+
+    /// What the deny-list refuses with `EPERM`, and when.
+    pub(super) fn refused() -> Result<BTreeMap<i64, Vec<SeccompRule>>, String> {
         let fail = |e: &dyn std::fmt::Display| format!("seccomp: {e}");
         let always = Vec::<SeccompRule>::new;
         let mut eperm: BTreeMap<i64, Vec<SeccompRule>> = BTreeMap::new();
         eperm.insert(libc::SYS_socket, always());
         eperm.insert(libc::SYS_io_uring_setup, always());
+        // A file's mode, owner and extended attributes, by path (#573).
+        // Landlock has no right for them, so without this a sidecar could
+        // `chmod` a kubeconfig outside its grant readable to every user, or
+        // unreadable to srelens. The same calls on a file it has open
+        // (`fchmod`, `fchown`, `fsetxattr`) stay allowed: it can open for
+        // writing only what is in its data directory. Timestamps
+        // (`utimensat`) are not refused, since unpacking an archive sets them.
+        for syscall in [
+            libc::SYS_fchmodat,
+            SYS_FCHMODAT2,
+            libc::SYS_fchownat,
+            libc::SYS_setxattr,
+            libc::SYS_lsetxattr,
+            libc::SYS_removexattr,
+            libc::SYS_lremovexattr,
+            SYS_SETXATTRAT,
+            SYS_REMOVEXATTRAT,
+        ] {
+            eperm.insert(syscall, always());
+        }
         let without_thread = SeccompCondition::new(
             0,
             SeccompCmpArgLen::Qword,
@@ -289,7 +363,19 @@ mod linux {
         {
             eperm.insert(libc::SYS_fork, always());
             eperm.insert(libc::SYS_vfork, always());
+            // The older forms arm64 never had.
+            eperm.insert(libc::SYS_chmod, always());
+            eperm.insert(libc::SYS_chown, always());
+            eperm.insert(libc::SYS_lchown, always());
         }
+        Ok(eperm)
+    }
+
+    /// The two filters: `clone3` answered with `ENOSYS`, then the deny-list.
+    pub(super) fn filters() -> Result<(BpfProgram, BpfProgram), String> {
+        let fail = |e: &dyn std::fmt::Display| format!("seccomp: {e}");
+        let always = Vec::<SeccompRule>::new;
+        let eperm = refused()?;
         let mut enosys: BTreeMap<i64, Vec<SeccompRule>> = BTreeMap::new();
         enosys.insert(libc::SYS_clone3, always());
         let arch: seccompiler::TargetArch = std::env::consts::ARCH
@@ -340,6 +426,37 @@ mod linux {
             assert!(err.is_some_and(|e| e.contains("/nonexistent-srelens-data")));
         }
 
+        /// Landlock has no right for a file's mode, owner or extended
+        /// attributes, so without these a sidecar could make a kubeconfig
+        /// outside its grant readable to every user (#573).
+        #[test]
+        fn the_filter_refuses_changing_a_files_metadata_by_path() {
+            let refused = refused().expect("the rules build");
+            for syscall in [
+                libc::SYS_fchmodat,
+                SYS_FCHMODAT2,
+                libc::SYS_fchownat,
+                libc::SYS_setxattr,
+                libc::SYS_lsetxattr,
+                libc::SYS_removexattr,
+                libc::SYS_lremovexattr,
+                SYS_SETXATTRAT,
+                SYS_REMOVEXATTRAT,
+            ] {
+                assert!(
+                    refused.contains_key(&syscall),
+                    "syscall {syscall} is allowed"
+                );
+            }
+            // Through a file it has open, in its own directory, it still may.
+            for syscall in [libc::SYS_fchmod, libc::SYS_fchown, libc::SYS_fsetxattr] {
+                assert!(
+                    !refused.contains_key(&syscall),
+                    "syscall {syscall} is refused"
+                );
+            }
+        }
+
         #[test]
         fn the_filters_compile_for_this_architecture() {
             let (no_clone3, deny) = filters().expect("the filters compile");
@@ -357,24 +474,60 @@ mod tests {
     }
 
     #[test]
-    fn the_command_line_names_the_data_directory_and_the_program() {
+    fn the_command_line_names_the_data_directory_its_file_limit_and_the_program() {
         let parsed = parse(args(&[
-            "--cgroup", "/cg", "--data", "/d", "--", "/bin/x", "--flag",
+            "--cgroup",
+            "/cg",
+            "--data",
+            "/d",
+            "--max-file-bytes",
+            "1073741824",
+            "--",
+            "/bin/x",
+            "--flag",
         ]))
         .expect("parses");
         assert_eq!(parsed.cgroup, Some(PathBuf::from("/cg")));
         assert_eq!(parsed.data, PathBuf::from("/d"));
+        assert_eq!(parsed.max_file_bytes, 1 << 30);
         assert_eq!(parsed.program, args(&["/bin/x", "--flag"]));
     }
 
     #[test]
     fn a_command_line_without_what_the_launcher_needs_is_refused() {
+        const LIMIT: [&str; 2] = ["--max-file-bytes", "4096"];
         for (list, says) in [
             (&["--cgroup", "/cg", "--", "/bin/x"][..], "--data"),
             (&["--cgroup", "/cg", "--data", "/d"][..], "PROGRAM"),
             (&["--cgroup", "/cg", "--data", "/d", "--"][..], "PROGRAM"),
             (&["--data"][..], "--data"),
             (&["--landlock", "/d"][..], "unknown argument --landlock"),
+            // The data directory's limit, which the kernel holds each file to.
+            (
+                &["--cgroup", "/cg", "--data", "/d", "--", "/bin/x"][..],
+                "--max-file-bytes",
+            ),
+            (
+                &["--cgroup", "/cg", "--data", "/d", "--max-file-bytes"][..],
+                "--max-file-bytes",
+            ),
+            (
+                &[
+                    "--cgroup",
+                    "/cg",
+                    "--data",
+                    "/d",
+                    "--max-file-bytes",
+                    "1G",
+                    "--",
+                    "/x",
+                ][..],
+                "a number of bytes",
+            ),
+            (
+                &["--cgroup", "/cg", "--data", "/d", LIMIT[0], LIMIT[1], "--"][..],
+                "PROGRAM",
+            ),
         ] {
             let err = parse(args(list)).expect_err("refused");
             assert!(err.contains(says), "{list:?}: {err}");
@@ -384,7 +537,15 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn on_linux_the_cgroup_is_required() {
-        let err = parse(args(&["--data", "/d", "--", "/bin/x"])).expect_err("refused");
+        let err = parse(args(&[
+            "--data",
+            "/d",
+            "--max-file-bytes",
+            "1",
+            "--",
+            "/bin/x",
+        ]))
+        .expect_err("refused");
         assert!(err.contains("--cgroup"), "{err}");
     }
 

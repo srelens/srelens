@@ -52,6 +52,21 @@ pub(super) fn package_of(manifest: &Value, binaries: &[(&str, &[u8])]) -> Vec<u8
     package::pack(dir.path()).unwrap()
 }
 
+/// A package of `manifest` with a stand-in binary at each path its sidecar names.
+pub(super) fn package_with_binaries(manifest: &Value) -> Vec<u8> {
+    let paths: Vec<String> = manifest["sidecar"]["binaries"]
+        .as_object()
+        .unwrap()
+        .values()
+        .map(|path| path.as_str().unwrap().to_owned())
+        .collect();
+    let binaries: Vec<(&str, &[u8])> = paths
+        .iter()
+        .map(|path| (path.as_str(), &b"#!/bin/false\n"[..]))
+        .collect();
+    package_of(manifest, &binaries)
+}
+
 /// The scanner's package, with the same stand-in binary for every platform.
 pub(super) fn scanner_package() -> Vec<u8> {
     let paths: Vec<String> = srelens_plugin_host::SIDECAR_PLATFORMS
@@ -186,7 +201,12 @@ async fn an_unsigned_executable_app_needs_the_unsigned_apps_setting_even_without
         fake_core(),
         srelens_kube::client_cache::ClientCache::new_many(vec![]),
     );
-    let verified = package::read(&scanner_package(), &mut package::Discard).unwrap();
+    let verified = package::read(
+        &scanner_package(),
+        &mut package::Discard,
+        &super::package::tests::shipped(),
+    )
+    .unwrap();
     let report = reg
         .invoke(
             "extensions.validate",

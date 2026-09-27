@@ -403,7 +403,7 @@ it("reviews network.http as the hosts it may reach and each request it sends (#5
   const source = JSON.stringify(metrics());
   const review = await reviewPasted(source);
   // A grant names the capability; the hosts are the manifest's, shown here and diffed by the host.
-  expect(validateExtension).toHaveBeenCalledWith(source, ["network.http", "extension.secretStore"], undefined);
+  expect(validateExtension).toHaveBeenCalledWith(source, ["network.http", "extension.secretStore"], undefined, undefined, undefined);
   const network = within(review).getByRole("listitem", { name: "network.http bindings" });
   expect(network.textContent).not.toContain("No binding uses this permission");
   const hosts = within(network).getByRole("list", { name: "Hosts network.http may reach" });

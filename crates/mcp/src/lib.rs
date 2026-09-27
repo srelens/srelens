@@ -95,6 +95,25 @@ impl From<Transport> for crate::audit::Source {
     }
 }
 
+/// `registry` without its UI-only capabilities (`Capability::ui_only`, #575).
+/// Dropped where the server takes its registry, so that no path through it —
+/// listing, calling, auditing, consent — can reach one.
+fn without_ui_only(registry: Arc<Registry>) -> Arc<Registry> {
+    if !registry.entries().any(|capability| capability.ui_only) {
+        return registry;
+    }
+    let mut offered = (*registry).clone();
+    let hidden: Vec<String> = offered
+        .entries()
+        .filter(|capability| capability.ui_only)
+        .map(|capability| capability.id.clone())
+        .collect();
+    for id in hidden {
+        offered.unregister(&id);
+    }
+    Arc::new(offered)
+}
+
 pub struct McpServer {
     registry: Arc<Registry>,
     /// Installed apps' tools, when the host has any (#574).
@@ -109,7 +128,7 @@ pub struct McpServer {
 impl McpServer {
     pub fn new(registry: Arc<Registry>) -> Self {
         Self {
-            registry,
+            registry: without_ui_only(registry),
             app_tools: None,
             // Fail closed: a host that wires nothing permits nothing.
             confirm_policy: Arc::new(crate::policy::AlwaysDeny),
@@ -461,6 +480,40 @@ mod tests {
         let server = McpServer::new(registry_with_ping());
         let out = server.call_tool("ping", json!("hi")).await.unwrap();
         assert_eq!(out, json!({ "echo": "hi" }));
+    }
+
+    /// An app's logs and runtime metrics are for srelens's own UI (#575): an
+    /// agent's context goes to its LLM provider, and a sidecar's stderr is text
+    /// a third party wrote. So a UI-only capability is neither a tool nor
+    /// callable as one, on any path the server has.
+    #[tokio::test]
+    async fn a_ui_only_capability_is_neither_listed_nor_callable() {
+        let mut reg = Registry::new();
+        reg.register(Capability::read_only("ping", "health check", |v| async move {
+            Ok(json!({ "echo": v }))
+        }));
+        reg.register(
+            Capability::read_only("app.logs", "an app's log", |_| async {
+                Ok(json!({"lines": ["srelens: the extension is running"]}))
+            })
+            .only_in_the_ui(),
+        );
+        let server = McpServer::new(Arc::new(reg));
+
+        let names: Vec<String> = server.list_tools().into_iter().map(|t| t.name).collect();
+        assert_eq!(names, ["ping"]);
+        assert!(matches!(
+            server.call_tool("app.logs", json!({})).await,
+            Err(CapabilityError::NotFound(_))
+        ));
+        assert!(matches!(
+            server
+                .call_tool_audited("app.logs", json!({}), Transport::Http, "auto")
+                .await,
+            Err(CapabilityError::NotFound(_))
+        ));
+        assert!(!server.is_sensitive("app.logs"));
+        assert_eq!(server.consent_kind("app.logs"), None);
     }
 
     /// The vulnerability this closes: a `SENSITIVE_READ` capability like
