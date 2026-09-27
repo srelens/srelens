@@ -595,12 +595,20 @@ impl Connection {
             (
                 std::mem::take(&mut state.pending),
                 std::mem::take(&mut state.open),
-                std::mem::take(&mut state.calls),
+                // Each call's cancellation is taken and its entry left: a
+                // worker whose answer was already chosen then finds it
+                // accepted, and answers that the call was cancelled. The
+                // worker removes the entry when it queues that answer.
+                state
+                    .calls
+                    .values_mut()
+                    .filter_map(Option::take)
+                    .collect::<Vec<_>>(),
             )
         };
         // No one will read the answers to the sidecar's calls: stop them. A
         // broker call that has begun a write finishes it on its own task.
-        for cancel in calls.into_values().flatten() {
+        for cancel in calls {
             let _ = cancel.send(());
         }
         for (_, waiter) in pending {
@@ -1407,6 +1415,39 @@ mod tests {
         let broker: Arc<dyn Broker> = Arc::new(CancelledAsItAnswers {
             connection: connection.clone(),
             id: json!("c-1"),
+        });
+        call_with(&connection, &broker, json!("c-1")).unwrap();
+        let reply = answered(&mut lines).await;
+        assert_eq!(reply["id"], "c-1");
+        assert_eq!(reply["error"]["code"], code::REQUEST_CANCELLED, "{reply}");
+    }
+
+    /// A broker whose answer is ready in the same moment the session ends.
+    struct EndedAsItAnswers {
+        connection: Connection,
+    }
+
+    impl Broker for EndedAsItAnswers {
+        fn call<'a>(
+            &'a self,
+            _method: &'a str,
+            _params: Value,
+        ) -> Pin<Box<dyn Future<Output = Result<Value, RpcError>> + Send + 'a>> {
+            Box::pin(async move {
+                self.connection.end("The extension was stopped");
+                Ok(json!({"rows": []}))
+            })
+        }
+    }
+
+    /// The session ending cancels every call still being answered, one whose
+    /// answer was already chosen included: `end` takes each call's
+    /// cancellation and leaves its entry, so the worker sees it accepted.
+    #[tokio::test(start_paused = true)]
+    async fn a_call_whose_answer_was_chosen_as_the_session_ended_is_answered_as_cancelled() {
+        let (connection, mut lines) = Connection::new(limits());
+        let broker: Arc<dyn Broker> = Arc::new(EndedAsItAnswers {
+            connection: connection.clone(),
         });
         call_with(&connection, &broker, json!("c-1")).unwrap();
         let reply = answered(&mut lines).await;
