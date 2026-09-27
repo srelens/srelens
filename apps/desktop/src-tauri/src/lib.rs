@@ -598,6 +598,23 @@ pub fn registry_for(
     registry_and_app_streams_for(cache, kubeconfig_paths, settings_path, secrets).0
 }
 
+/// [`registry_for`], for an MCP server: the registry, and installed apps' operations as
+/// tools (#574) to serve beside it with `McpServer::with_app_tools`. `None` when there is
+/// no settings path, so no apps either.
+pub fn mcp_registry_for(
+    cache: std::sync::Arc<ClientCache>,
+    kubeconfig_paths: Vec<std::path::PathBuf>,
+    settings_path: Option<std::path::PathBuf>,
+    secrets: std::sync::Arc<extension_secrets::VaultSecretStore>,
+) -> (
+    srelens_capability::Registry,
+    Option<std::sync::Arc<srelens_registry::AppTools>>,
+) {
+    let (registry, streams) =
+        registry_and_app_streams_for(cache, kubeconfig_paths, settings_path, secrets);
+    (registry, streams.map(|streams| streams.app_tools()))
+}
+
 /// [`registry_for`], plus the app streams (#565) the GUI opens streams through.
 pub fn registry_and_app_streams_for(
     cache: std::sync::Arc<ClientCache>,

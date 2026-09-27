@@ -283,9 +283,9 @@ fn every_call_is_held_to_the_declarations_before_the_sidecar_sees_it() {
 fn an_operation_runs_under_the_hosts_row_not_the_apps() {
     // Changes nothing outside the sandbox, so it is not gated; its arguments are the
     // app's own vocabulary, so the audit log redacts them whole.
-    assert!(SIDECAR_OPERATION.read_only);
-    assert!(!SIDECAR_OPERATION.requires_confirm);
-    assert!(!SIDECAR_OPERATION.destructive);
-    assert!(SIDECAR_OPERATION.sensitive);
-    assert_eq!(SIDECAR_OPERATION.impact, srelens_capability::Impact::Low);
+    let row = SIDECAR_OPERATION;
+    assert_eq!(
+        (row.read_only, row.requires_confirm, row.destructive, row.sensitive, row.impact),
+        (true, false, false, true, srelens_capability::Impact::Low)
+    );
 }

@@ -3,22 +3,22 @@ use super::*;
 use srelens_kube::gitops::ResourceIn;
 #[derive(Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-struct Selection {
-    id: String,
-    revision: u64,
-    capability: String,
-    context: String,
-    namespace: String,
-    name: String,
+pub(super) struct Selection {
+    pub(super) id: String,
+    pub(super) revision: u64,
+    pub(super) capability: String,
+    pub(super) context: String,
+    pub(super) namespace: String,
+    pub(super) name: String,
 }
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-struct Action {
-    resource: Selection,
-    action: String,
-    uid: String,
+pub(super) struct Action {
+    pub(super) resource: Selection,
+    pub(super) action: String,
+    pub(super) uid: String,
     #[serde(rename = "resourceVersion")]
-    resource_version: String,
+    pub(super) resource_version: String,
 }
 async fn resolve(
     path: Store,
@@ -138,19 +138,29 @@ pub(super) fn register(
     // The generic endpoint carries the highest primitive impact. Per-action
     // wording and impact come exclusively from the host primitive metadata.
     reg.register(Capability::typed::<Action, Value, _, _>("extensions.action", "Run a declared action on an app resource; requires explicit confirmation", Annotations::MUTATING.with_impact(srelens_capability::Impact::High).with_confirm("Run the declared action[ ({action})][ on {resource}][ in cluster {cluster}]?"), move |input| {
-        let p = path.clone(); let c = core.clone(); let k = cache.clone(); async move {
-            let binding_name = input.resource.capability.clone();
-            let (resource, plugin) = resolve(p,c.clone(),k,input.resource).await?;
-            if !plugin.manifest.actions.iter().any(|a| a.name == input.action && a.resource == binding_name) {
-                return Err(CapabilityError::InvalidInput("This action is not declared for the selected resource".into()));
-            }
-            let id = format!("plugin/{}/{}", plugin.manifest.id, input.action);
-            let mut registry = Registry::new();
-            // The settings as saved now, read with the app above (#542).
-            let _registration = PluginHost::new(c).register_with_settings(&mut registry, plugin.manifest, &plugin.grants, &plugin.settings).map_err(CapabilityError::Handler)?;
-            registry.invoke(&id, json!({"context":resource.context,"namespace":resource.namespace,"name":resource.name,"uid":input.uid,"resourceVersion":input.resource_version})).await
-        }
+        run_action(path.clone(), core.clone(), cache.clone(), input)
     }));
+}
+/// `extensions.action`: the app, its revision, the cluster and the kind checked again,
+/// then the declared action run through its primitive with the app's settings as saved
+/// now. An app's action tool (#574) runs through here too, so a write reaches a cluster
+/// by one path whoever asked for it.
+pub(super) async fn run_action(
+    path: Store,
+    core: Arc<Registry>,
+    cache: Arc<srelens_kube::client_cache::ClientCache>,
+    input: Action,
+) -> Result<Value, CapabilityError> {
+    let binding_name = input.resource.capability.clone();
+    let (resource, plugin) = resolve(path, core.clone(), cache, input.resource).await?;
+    if !plugin.manifest.actions.iter().any(|a| a.name == input.action && a.resource == binding_name) {
+        return Err(CapabilityError::InvalidInput("This action is not declared for the selected resource".into()));
+    }
+    let id = format!("plugin/{}/{}", plugin.manifest.id, input.action);
+    let mut registry = Registry::new();
+    // The settings as saved now, read with the app above (#542).
+    let _registration = PluginHost::new(core).register_with_settings(&mut registry, plugin.manifest, &plugin.grants, &plugin.settings).map_err(CapabilityError::Handler)?;
+    registry.invoke(&id, json!({"context":resource.context,"namespace":resource.namespace,"name":resource.name,"uid":input.uid,"resourceVersion":input.resource_version})).await
 }
 #[cfg(test)]
 mod tests {

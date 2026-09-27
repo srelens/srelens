@@ -127,6 +127,8 @@ struct StreamGuard {
     subs: Arc<SubscriptionRegistry>,
     session: String,
     id: u64,
+    /// Follows the app tools for this stream (#574); ends with it.
+    tools: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl Drop for StreamGuard {
@@ -149,6 +151,9 @@ impl Drop for StreamGuard {
             }
         }
         self.subs.abort_all();
+        if let Some(tools) = &self.tools {
+            tools.abort();
+        }
     }
 }
 
@@ -167,7 +172,9 @@ struct PushStream {
     /// because live watches hold wake-sender clones (see `PushChannels`).
     closed: tokio::sync::oneshot::Receiver<()>,
     dirty: Arc<Mutex<BTreeSet<String>>>,
-    pending: VecDeque<String>,
+    /// Set when the app tools changed since this stream last said so (#574).
+    tools_changed: Arc<std::sync::atomic::AtomicBool>,
+    pending: VecDeque<Value>,
     _guard: StreamGuard,
 }
 
@@ -187,19 +194,25 @@ impl futures_core::Stream for PushStream {
             if std::future::Future::poll(Pin::new(&mut this.closed), cx).is_ready() {
                 return Poll::Ready(None);
             }
-            if let Some(uri) = this.pending.pop_front() {
-                let msg = subscription_notification(&uri);
+            if let Some(msg) = this.pending.pop_front() {
                 return Poll::Ready(Some(Ok(Event::default().data(msg.to_string()))));
             }
             match this.wake.poll_recv(cx) {
                 Poll::Ready(Some(())) => {
+                    // However often the tools changed while unread, the client
+                    // is told once: it lists them again either way.
+                    if this.tools_changed.swap(false, Ordering::SeqCst) {
+                        this.pending
+                            .push_back(crate::tools_list_changed_notification());
+                    }
                     let uris = {
                         let mut guard = this.dirty.lock().unwrap_or_else(|e| e.into_inner());
                         std::mem::take(&mut *guard)
                     };
-                    // Loop: emit the first drained URI, or wait again on a
+                    // Loop: emit the first drained message, or wait again on a
                     // spurious wake that raced an earlier drain.
-                    this.pending.extend(uris);
+                    this.pending
+                        .extend(uris.iter().map(|uri| subscription_notification(uri)));
                 }
                 Poll::Ready(None) => return Poll::Ready(None),
                 Poll::Pending => return Poll::Pending,
@@ -273,6 +286,13 @@ async fn sse(State(st): State<AppState>, headers: axum::http::HeaderMap) -> Resp
     let session = presented_session(&headers).unwrap_or_else(|| DEFAULT_SESSION.to_string());
     let (wake_tx, wake_rx) = tokio::sync::mpsc::channel(1);
     let (close_tx, close_rx) = tokio::sync::oneshot::channel();
+    let tools_changed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // Subscribed here, not in the task: a change made before the task first runs
+    // must still count as one this stream has not told its client about.
+    let tools = st.server.app_tools().cloned().map(|source| {
+        let changes = source.changes();
+        tokio::spawn(follow_app_tools(source, changes, tools_changed.clone(), wake_tx.clone()))
+    });
     let chans = PushChannels {
         id: st.push.next_id.fetch_add(1, Ordering::Relaxed),
         subs: Arc::new(SubscriptionRegistry::new()),
@@ -284,12 +304,14 @@ async fn sse(State(st): State<AppState>, headers: axum::http::HeaderMap) -> Resp
         wake: wake_rx,
         closed: close_rx,
         dirty: chans.dirty.clone(),
+        tools_changed,
         pending: VecDeque::new(),
         _guard: StreamGuard {
             push: st.push.clone(),
             subs: chans.subs.clone(),
             session: session.clone(),
             id: chans.id,
+            tools,
         },
     };
     // Install as this session's stream (see `PushState::install` for
@@ -309,6 +331,35 @@ async fn sse(State(st): State<AppState>, headers: axum::http::HeaderMap) -> Resp
         ),
     )
         .into_response()
+}
+
+/// Follows the app tools for one stream (#574): marks the stream when they change and
+/// wakes it, and asks the source to catch up every poll interval, so a change another
+/// process made reaches this client too. Aborted when the stream ends.
+async fn follow_app_tools(
+    source: Arc<dyn crate::ToolSource>,
+    mut changes: tokio::sync::watch::Receiver<u64>,
+    changed: Arc<std::sync::atomic::AtomicBool>,
+    wake: tokio::sync::mpsc::Sender<()>,
+) {
+    let period = source.poll_interval();
+    let mut poll = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+    poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            result = changes.changed() => {
+                if result.is_err() {
+                    return;
+                }
+                changed.store(true, Ordering::SeqCst);
+                // A full channel already holds a wakeup, which will see the flag.
+                let _ = wake.try_send(());
+            }
+            _ = poll.tick() => {
+                source.tools().await;
+            }
+        }
+    }
 }
 
 /// The `Mcp-Session-Id` header name, surfaced on every `/mcp` response.

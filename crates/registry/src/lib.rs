@@ -21,6 +21,8 @@ mod settings;
 #[doc(hidden)]
 pub use extensions::fuzzing;
 pub use extensions::streams::{ExtensionStreams, OpenStreamOut, INVENTORY_CHANNEL};
+/// Installed apps' operations as MCP tools (#574), from [`ExtensionStreams::app_tools`].
+pub use extensions::tools::AppTools;
 pub use extensions::{Apps, InventoryKey, InventoryLock, InventoryStore, SharedCatalog};
 /// Making `.srelens-extension` packages (#562): what a publisher runs before a release, and
 /// what `cargo run -p srelens-registry --example pack-extension` wraps.
@@ -712,6 +714,144 @@ mod tests {
         let server = McpServer::new(Arc::new(reg.clone()));
         assert_eq!(assert_every_capability_has_a_tool(&reg, &server), Ok(()));
         srelens_mcp::completeness::assert_mutating_capabilities_are_gated(&reg);
+    }
+
+    /// #574: every installed app's reader, declared action and sidecar operation is
+    /// an MCP tool — and a pod binding, a session a view opens, is not — and the app
+    /// tools meet every rule the host's own capabilities do: listed, gated when they
+    /// mutate, at an impact that agrees with the gate, and with a renderable host
+    /// sentence wherever they are gated.
+    #[tokio::test]
+    async fn every_installed_apps_operation_is_mcp_exposed() {
+        use base64::Engine as _;
+        let dir = tempfile::tempdir().unwrap();
+        let (reg, streams) = build_registry_and_app_streams(
+            ClientCache::new_many(vec![]),
+            vec![],
+            Some(dir.path().join("settings.json")),
+        );
+        let configure = |input: serde_json::Value| reg.invoke("extensions.configure", input);
+        configure(json!({"action": "unsignedApps", "allowUnsignedApps": true}))
+            .await
+            .unwrap();
+        let mut sources: Vec<serde_json::Value> = [
+            include_str!("../../../examples/extensions/argocd.json"),
+            include_str!("../../../examples/extensions/flux.json"),
+        ]
+        .iter()
+        .map(|source| {
+            let mut value: serde_json::Value = serde_json::from_str(source).unwrap();
+            let id = value["id"].as_str().unwrap().replace("org.srelens.", "org.example.");
+            value["id"] = json!(id);
+            value
+        })
+        .collect();
+        sources.push(json!({
+            "id": "org.example.releases", "name": "Releases", "version": "0.1.0",
+            "srelensApiVersion": "^0.5", "kind": "declarative",
+            "permissions": [{"capability": "network.http", "hosts": ["api.github.com"]},
+                "k8s.listDeployments", {"capability": "k8s.streamLogs", "namespaces": ["web"]}],
+            "capabilities": [
+                {"name": "latest", "title": "Latest release", "target": "network.http",
+                 "arguments": {"url": "https://api.github.com", "path": "/repos/srelens/srelens/releases/latest"},
+                 "inputs": []},
+                {"name": "deployments", "title": "Deployments", "target": "k8s.listDeployments",
+                 "arguments": {}, "inputs": ["context", "namespace"]},
+                {"name": "logs", "title": "Logs", "target": "k8s.streamLogs",
+                 "arguments": {}, "inputs": []}],
+            "contributions": {"pages": [], "detailTabs": [], "detailLinks": []}
+        }));
+        for source in &sources {
+            let grants: Vec<String> = source["permissions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|p| p.as_str().or(p["capability"].as_str()).unwrap().to_owned())
+                .collect();
+            configure(json!({"action": "install", "manifest": source.to_string(), "grants": grants}))
+                .await
+                .unwrap_or_else(|e| panic!("{}: {e}", source["id"]));
+        }
+        // An executable app, from a package carrying a binary for every platform.
+        let package = tempfile::tempdir().unwrap();
+        let binaries: serde_json::Map<String, serde_json::Value> =
+            srelens_plugin_host::SIDECAR_PLATFORMS
+                .iter()
+                .map(|platform| {
+                    let path = format!("bin/{platform}/scanner");
+                    let file = package.path().join(&path);
+                    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+                    std::fs::write(file, b"#!/bin/false\n").unwrap();
+                    (platform.to_string(), json!(path))
+                })
+                .collect();
+        let scanner = json!({
+            "id": "org.example.scanner", "name": "Scanner", "version": "1.0.0",
+            "srelensApiVersion": "^0.6", "kind": "executable", "permissions": [], "capabilities": [],
+            "sidecar": {"binaries": binaries, "operations": [
+                {"name": "scan", "title": "Scan an image",
+                 "inputs": [{"name": "image", "type": "string", "required": true}]}]},
+            "contributions": {"pages": [], "detailTabs": [], "detailLinks": []}
+        });
+        std::fs::write(package.path().join("extension.json"), scanner.to_string()).unwrap();
+        std::fs::write(
+            package.path().join("digests.json"),
+            extension_package::digest_list(package.path()).unwrap(),
+        )
+        .unwrap();
+        let archive = extension_package::pack(package.path()).unwrap();
+        configure(json!({"action": "installPackage", "grants": [],
+            "package": base64::engine::general_purpose::STANDARD.encode(archive)}))
+        .await
+        .unwrap();
+
+        let tools = streams.unwrap().app_tools();
+        let server = McpServer::new(Arc::new(reg.clone())).with_app_tools(tools.clone());
+        let snapshot = srelens_mcp::ToolSource::tools(&*tools).await;
+        let listed = reg.invoke("extensions.list", json!({})).await.unwrap();
+        let mut operations = Vec::new();
+        let mut sessions = Vec::new();
+        for app in listed["plugins"].as_array().unwrap() {
+            let manifest = &app["manifest"];
+            let id = manifest["id"].as_str().unwrap();
+            let named = |item: &serde_json::Value| format!("plugin/{id}/{}", item["name"].as_str().unwrap());
+            for binding in manifest["capabilities"].as_array().unwrap() {
+                if srelens_plugin_host::is_pod_target(binding["target"].as_str().unwrap()) {
+                    sessions.push(named(binding));
+                } else {
+                    operations.push(named(binding));
+                }
+            }
+            for item in manifest["actions"].as_array().into_iter().flatten() {
+                operations.push(named(item));
+            }
+            for item in manifest["sidecar"]["operations"].as_array().into_iter().flatten() {
+                operations.push(named(item));
+            }
+        }
+        assert_eq!(listed["plugins"].as_array().unwrap().len(), 4);
+        assert!(operations.len() > 40, "{operations:?}");
+        assert_eq!(sessions, ["plugin/org.example.releases/logs"]);
+        assert_eq!(
+            srelens_mcp::completeness::assert_every_app_operation_has_a_tool(&operations, &server),
+            Ok(())
+        );
+        let tool_names: Vec<String> = server.list_tools().into_iter().map(|t| t.name).collect();
+        assert!(sessions.iter().all(|session| !tool_names.contains(session)));
+        assert_eq!(assert_every_capability_has_a_tool(&snapshot, &server), Ok(()));
+        srelens_mcp::completeness::assert_mutating_capabilities_are_gated(&snapshot);
+        srelens_mcp::completeness::assert_impact_matches_the_gate(&snapshot);
+        srelens_mcp::completeness::assert_confirm_templates_are_renderable(&snapshot);
+        let silent: Vec<&str> = snapshot
+            .ids()
+            .into_iter()
+            .filter(|id| {
+                snapshot.get(id).is_some_and(|c| {
+                    c.annotations.requires_confirm && c.annotations.confirm.is_none()
+                })
+            })
+            .collect();
+        assert!(silent.is_empty(), "gated with no confirmation text: {silent:?}");
     }
 
     /// The host-owned metadata #548 adds, checked over the whole live registry

@@ -73,6 +73,14 @@ pub const WEB_DENIED_CAPABILITIES: &[&str] = &[
     "toolbox.removePlugin",
 ];
 
+/// Installed apps' operations, `plugin/<id>/<operation>` (#574), are MCP tools, and
+/// the web host runs no MCP server. A web user reaches their apps only through the
+/// `extensions.*` capabilities, whose writes stop at the host confirmation the app's
+/// screen shows. An app's tool that needs consent would have nobody to ask here
+/// (#374, #512), so it is never served, let alone approved; none is in a web user's
+/// registry, and this refuses one before dispatch should one ever be.
+pub const WEB_DENIED_PREFIX: &str = "plugin/";
+
 /// Invoke a capability by id. The request body is the capability's input JSON;
 /// an empty body means null input. Unknown id → 404, invalid input (or a body
 /// that isn't JSON) → 400, handler failure (cluster unreachable, RBAC denial)
@@ -91,7 +99,7 @@ pub async fn invoke_capability(
     headers: axum::http::HeaderMap,
     body: Bytes,
 ) -> Response {
-    if WEB_DENIED_CAPABILITIES.contains(&id.as_str()) {
+    if WEB_DENIED_CAPABILITIES.contains(&id.as_str()) || id.starts_with(WEB_DENIED_PREFIX) {
         return error_response(
             StatusCode::BAD_REQUEST,
             "capability not available in web mode",
@@ -488,6 +496,41 @@ mod tests {
         ] {
             let (status, _) = post(&format!("/api/capability/{id}"), Body::from("{}")).await;
             assert_eq!(status, StatusCode::NOT_FOUND, "{id}");
+        }
+    }
+
+    /// An app's operations are MCP tools (#574), and the web host serves none: an
+    /// installed app adds no `plugin/…` capability to its user's registry, and one
+    /// named on this route, spelled as axum decodes it, is refused before dispatch.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_apps_operations_are_never_served_on_the_web() {
+        let state = apps_state().await;
+        let (_, alice) = sign_in(&state, "alice").await;
+        let (status, _) = call(
+            &state,
+            &alice,
+            "extensions.configure",
+            json!({"action": "install", "manifest": local_app(),
+                "grants": ["k8s.listCustomResource"]}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let registry = srelens_registry::build_registry_for_user(
+            srelens_kube::client_cache::ClientCache::new_many(vec![]),
+            vec![],
+            srelens_registry::Apps::with_shared_catalog(
+                Arc::new(std::path::PathBuf::from("/nonexistent/inventory.json")),
+                srelens_registry::SharedCatalog::new("/nonexistent/catalog.json".into()),
+            ),
+        );
+        assert!(!registry.ids().iter().any(|id| id.starts_with(super::WEB_DENIED_PREFIX)));
+        for id in [
+            "plugin%2Forg.example.argocd%2Fapplications",
+            "plugin%2Forg.example.argocd%2Fsync",
+        ] {
+            let (status, body) = call(&state, &alice, id, json!({"context": "prod"})).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{id}");
+            assert_eq!(body["error"], json!("capability not available in web mode"));
         }
     }
 

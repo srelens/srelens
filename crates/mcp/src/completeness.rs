@@ -21,6 +21,25 @@ pub fn assert_every_capability_has_a_tool(
     if missing.is_empty() { Ok(()) } else { Err(missing) }
 }
 
+/// Returns Err(missing) for every one of `operations` — `plugin/<id>/<name>` for each
+/// reader, declared action and sidecar operation an installed app declares (#574) —
+/// the server does not list as a tool. The app tools' own snapshot passes through
+/// [`assert_every_capability_has_a_tool`] and the metadata checks below like the host's
+/// registry does; this is the other direction, that no declared operation was dropped.
+pub fn assert_every_app_operation_has_a_tool(
+    operations: &[String],
+    server: &McpServer,
+) -> Result<(), Vec<String>> {
+    let tools = server.list_tools();
+    let tool_names: BTreeSet<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+    let missing: Vec<String> = operations
+        .iter()
+        .filter(|name| !tool_names.contains(name.as_str()))
+        .cloned()
+        .collect();
+    if missing.is_empty() { Ok(()) } else { Err(missing) }
+}
+
 /// A capability that mutates something (i.e. is not `read_only`) but is not
 /// confirm-gated would be executable by any client with no consent step —
 /// whether or not it also happens to be flagged `destructive`. A capability

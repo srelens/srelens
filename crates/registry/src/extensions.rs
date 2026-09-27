@@ -30,9 +30,13 @@ pub use secret_store::{declares_secret_setting, SECRET_STORE_ANNOTATIONS};
 mod secrets_tests;
 #[cfg(test)]
 mod settings_tests;
+mod sidecars;
 mod signing;
 mod store;
 pub mod streams;
+pub mod tools;
+#[cfg(test)]
+mod tools_tests;
 #[cfg(test)]
 mod version_tests;
 use app_settings::{checked_settings, drop_secret_values, setting_scope};
@@ -65,6 +69,9 @@ pub struct Apps {
     /// `None` on a host that keeps no files for its apps, which refuses to install a
     /// package and offers a catalog release's single-file manifest instead.
     packages: Option<PathBuf>,
+    /// Where each executable app's sidecar gets its one writable directory (#574).
+    /// `None` where `packages` is.
+    data: Option<PathBuf>,
 }
 
 impl Apps {
@@ -76,17 +83,20 @@ impl Apps {
             inventory,
             catalog: catalog::CatalogCache::Shared(catalog),
             packages: None,
+            data: None,
         }
     }
 }
 
-/// The desktop's layout: the inventory file, this host's own catalog cache beside it, and
-/// the directory installed packages are unpacked into beside that.
+/// The desktop's layout: the inventory file, this host's own catalog cache beside it, the
+/// directory installed packages are unpacked into beside that, and the one executable
+/// apps' sidecars write in.
 impl From<PathBuf> for Apps {
     fn from(path: PathBuf) -> Self {
         Self {
             catalog: catalog::CatalogCache::Owned(path.with_extension("catalog.json")),
             packages: Some(path.with_extension("packages")),
+            data: Some(path.with_extension("data")),
             inventory: Arc::new(path),
         }
     }
@@ -153,6 +163,11 @@ pub struct Installed {
 /// What the broker answers when an app is used on a cluster it is not enabled for.
 const NOT_ENABLED_FOR_CLUSTER: &str = "App is not enabled for this cluster";
 impl Installed {
+    /// Whether the app is in use: on, and neither blocked by policy nor quarantined.
+    fn runs(&self) -> bool {
+        self.enabled && self.policy_blocked.is_none() && self.quarantined.is_none()
+    }
+
     /// Refuses a limited app on a context outside its list. A context the host could not
     /// resolve is refused too, but with why: whether the app is enabled there is unknown.
     fn check_scope(
@@ -1006,6 +1021,15 @@ fn validate_app(
     }
     problems.into_result()
 }
+/// [`validate_app`] with every permission granted, for the MCP catalog's own check that
+/// it lists every reader an app may bind.
+#[cfg(test)]
+pub(crate) fn validate_app_for_tests(
+    manifest: &Manifest,
+    core: Arc<Registry>,
+) -> Result<(), ValidationErrors> {
+    validate_app(manifest, &manifest.permission_names(), core)
+}
 /// Why an app under `id` cannot be trusted without a publisher signature, when it has none
 /// and `id` is in a trusted publisher's namespace. Install refuses it; loading quarantines
 /// a stored one, which `enable` then refuses; rollback refuses to restore one.
@@ -1493,6 +1517,10 @@ fn configure(
     if let Some(root) = &apps.packages {
         package::prune(root, &kept_packages(&state));
     }
+    // A removed app's sidecar leaves nothing behind (#574).
+    if let Some(data) = &apps.data {
+        sidecars::prune_data(data, &state);
+    }
     secret_store::sweep(secrets, &state);
     streams::announce(&store.key(), &state);
     Ok(state)
@@ -1821,6 +1849,7 @@ fn register_apps(
         apps.packages.is_some(),
     );
     let packages = apps.packages.clone();
+    let runtime = apps.clone();
     resource::register(reg, path.clone(), core.clone(), cache.clone());
     // One snapshot of each granted reader, shared by table columns, dashboard
     // cards and a card's target page, so the three agree and list it once.
@@ -1935,7 +1964,7 @@ fn register_apps(
             )
         },
     ));
-    streams::register(reg, path, core, cache, snapshots)
+    streams::register(reg, &runtime, core, cache, snapshots, secrets)
 }
 
 /// `extensions.read`: every check it makes is made again on each call, which
@@ -2143,7 +2172,7 @@ async fn read_contribution(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use serde_json::json;
     use srelens_capability::Registry;
@@ -3669,7 +3698,7 @@ mod tests {
             .is_ok());
         assert_eq!(LISTED.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
-    pub(super) fn fake_core() -> Arc<Registry> {
+    pub(crate) fn fake_core() -> Arc<Registry> {
         let mut core = crate::build_registry_with_paths(
             srelens_kube::client_cache::ClientCache::new_many(vec![]),
             vec![],

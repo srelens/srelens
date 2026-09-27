@@ -150,6 +150,13 @@ pub async fn handle_request(
             let version = requested
                 .filter(|v| SUPPORTED_PROTOCOL_VERSIONS.contains(v))
                 .unwrap_or(PROTOCOL_VERSION);
+            // Installed apps' tools come and go while the server runs (#574); a
+            // server that has them says so, and sends `tools/list_changed`.
+            let tools = if server.app_tools().is_some() {
+                json!({ "listChanged": true })
+            } else {
+                json!({})
+            };
             Some(ok(
             id?,
             json!({
@@ -160,7 +167,7 @@ pub async fn handle_request(
                 // the resource list is two fixed entries plus templates and
                 // never changes at runtime.
                 "capabilities": {
-                    "tools": {},
+                    "tools": tools,
                     "prompts": {},
                     "resources": {
                         "subscribe": true,
@@ -174,6 +181,8 @@ pub async fn handle_request(
         "ping" => Some(ok(id?, json!({}))),
         "notifications/initialized" | "initialized" => None,
         "tools/list" => {
+            // The apps as they are now, including a change another process made.
+            server.refresh_app_tools().await;
             let tools: Vec<Value> = server
                 .list_tools()
                 .into_iter()
@@ -226,10 +235,13 @@ pub async fn handle_request(
                 .cloned()
                 .unwrap_or_else(|| json!({}));
 
-            let sensitive = server.is_sensitive(name);
+            // One registry for the whole call, consent included: an app's tool
+            // is asked about and run in the same snapshot (#574).
+            let registry = server.resolve(name).await;
+            let sensitive = McpServer::is_sensitive_in(&registry, name);
             let mut decision = "auto";
 
-            if let Some(mut request) = server.consent_request(name, &raw_args) {
+            if let Some(mut request) = McpServer::consent_request_in(&registry, name, &raw_args) {
                 if name == "extensions.configure"
                     && matches!(
                         args["action"].as_str(),
@@ -309,7 +321,7 @@ pub async fn handle_request(
             // outcome all live there, so a UI-sourced call of the same
             // capability lands in the trail in the identical shape (#555).
             let called = server
-                .call_tool_audited(name, args, transport, decision)
+                .call_tool_audited_in(&registry, name, args, transport, decision)
                 .await;
             let result = match called {
                 Ok(v) => json!({
@@ -808,6 +820,15 @@ where
     W: AsyncWrite + Unpin,
 {
     let mut lines = BoundedLines::new(reader, crate::MAX_REQUEST_BYTES);
+    // Installed apps' tools (#574): told of every change this process makes, and
+    // asked every so often, for the ones another process makes.
+    let mut tool_changes = server.app_tools().map(|tools| tools.changes());
+    let mut tool_poll = server.app_tools().map(|tools| {
+        let period = tools.poll_interval();
+        let mut poll = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+        poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        poll
+    });
 
     loop {
         tokio::select! {
@@ -831,6 +852,7 @@ where
                     // whatever is already pending before leaving. No wakeup
                     // token is needed here — the dirty set is read directly.
                     drain_notifications(writer, dirty).await?;
+                    drain_tool_changes(writer, &mut tool_changes).await?;
                     return Ok(());
                 };
                 let line = match line {
@@ -839,6 +861,7 @@ where
                         // The request was discarded unread, so its id is unknown.
                         write_line(writer, &request_too_large(lines.max)).await?;
                         drain_notifications(writer, dirty).await?;
+                        drain_tool_changes(writer, &mut tool_changes).await?;
                         continue;
                     }
                 };
@@ -870,6 +893,9 @@ where
                 // response is written before any notification a concurrent
                 // watch queued during its handling.
                 drain_notifications(writer, dirty).await?;
+                // The same for the tools: a request that installed an app is
+                // answered before the client hears the list changed.
+                drain_tool_changes(writer, &mut tool_changes).await?;
             }
 
             Some(()) = wake_rx.recv() => {
@@ -878,8 +904,51 @@ where
                 // rather than the channel.
                 drain_notifications(writer, dirty).await?;
             }
+
+            changed = async {
+                match tool_changes.as_mut() {
+                    Some(changes) => changes.changed().await.is_ok(),
+                    None => std::future::pending().await,
+                }
+            } => {
+                if changed {
+                    write_line(writer, &crate::tools_list_changed_notification()).await?;
+                } else {
+                    // The source is gone; nothing will change again.
+                    tool_changes = None;
+                }
+            }
+
+            _ = async {
+                match tool_poll.as_mut() {
+                    Some(poll) => poll.tick().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                // A change found here arrives on `tool_changes` like any other.
+                server.refresh_app_tools().await;
+            }
         }
     }
+}
+
+/// Write `notifications/tools/list_changed` once if the app tools changed since the
+/// client was last told, however many times they did.
+async fn drain_tool_changes<W>(
+    writer: &mut W,
+    changes: &mut Option<tokio::sync::watch::Receiver<u64>>,
+) -> std::io::Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    let Some(changes) = changes.as_mut() else {
+        return Ok(());
+    };
+    if changes.has_changed().unwrap_or(false) {
+        changes.borrow_and_update();
+        write_line(writer, &crate::tools_list_changed_notification()).await?;
+    }
+    Ok(())
 }
 
 /// Write one notification per URI currently in the dirty set, then clear it,

@@ -65,11 +65,18 @@ pub(super) fn scanner_package() -> Vec<u8> {
     package_of(&scanner_manifest(), &binaries)
 }
 
+/// `installPackage`, reviewed against the app's current revision.
 pub(super) fn install_package(path: &Path, archive: &[u8]) -> Result<Inventory, String> {
+    let reviewed = read(path)?
+        .plugins
+        .iter()
+        .find(|app| app.manifest.id == SCANNER)
+        .map(|app| app.revision);
     configure(
         path,
         json!({"action": "installPackage",
-            "package": base64::engine::general_purpose::STANDARD.encode(archive), "grants": []}),
+            "package": base64::engine::general_purpose::STANDARD.encode(archive), "grants": [],
+            "reviewedRevision": reviewed}),
     )
 }
 

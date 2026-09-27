@@ -267,6 +267,13 @@ pub struct ExtensionStreams {
     inventory: tokio::sync::watch::Sender<u64>,
     /// Windows told of every announced inventory write (#566).
     listeners: Mutex<Vec<Arc<dyn EventSink>>>,
+    /// What the app tools (#574) are built with: the store for apps' secret settings,
+    /// and where packages and sidecars' directories are.
+    secrets: Arc<dyn srelens_plugin_host::SecretStore>,
+    packages: Option<std::path::PathBuf>,
+    data: Option<std::path::PathBuf>,
+    /// Installed apps' tools, once an MCP server asks for them.
+    tools: OnceLock<Arc<super::tools::AppTools>>,
 }
 
 impl ExtensionStreams {
@@ -480,6 +487,25 @@ impl ExtensionStreams {
         self.listeners.lock().unwrap().push(sink);
     }
 
+    /// Installed apps' operations as MCP tools (#574), for an MCP server over this
+    /// inventory to serve with `McpServer::with_app_tools`. One set per inventory in
+    /// this process, whichever server asks, rebuilt on every announced write and
+    /// running each executable app's one sidecar here.
+    pub fn app_tools(&self) -> Arc<super::tools::AppTools> {
+        self.tools
+            .get_or_init(|| {
+                Arc::new(super::tools::AppTools::new(
+                    self.path.clone(),
+                    self.core.clone(),
+                    self.cache.clone(),
+                    self.snapshots.clone(),
+                    self.secrets.clone(),
+                    super::sidecars::AppSidecars::new(self.packages.clone(), self.data.clone()),
+                ))
+            })
+            .clone()
+    }
+
     /// Replace how watches follow a kind, and their clock. Test support.
     #[cfg(test)]
     pub(super) fn script_watches(&self, session: WatchSession, timing: WatchTiming) {
@@ -583,6 +609,11 @@ impl ExtensionStreams {
         let listeners = self.listeners.lock().unwrap().clone();
         for sink in listeners {
             sink.emit(INVENTORY_CHANNEL, json!({ "type": "changed" }));
+        }
+        // The app tools read the inventory again rather than trust `state`: what is
+        // in use is what a read says, whatever governs it.
+        if let Some(tools) = self.tools.get() {
+            tools.refresh();
         }
     }
 }
@@ -885,11 +916,13 @@ struct Empty {}
 /// traffic from.
 pub(super) fn register(
     reg: &mut Registry,
-    path: Store,
+    apps: &super::Apps,
     core: Arc<Registry>,
     cache: Arc<srelens_kube::client_cache::ClientCache>,
     snapshots: columns::JoinCache,
+    secrets: Arc<dyn srelens_plugin_host::SecretStore>,
 ) -> Arc<ExtensionStreams> {
+    let path = apps.inventory.clone();
     let streams = {
         let key = path.key();
         let mut live = live().lock().unwrap();
@@ -908,6 +941,10 @@ pub(super) fn register(
                     timing: Mutex::new(WatchTiming::default()),
                     inventory: tokio::sync::watch::channel(0).0,
                     listeners: Mutex::new(Vec::new()),
+                    secrets,
+                    packages: apps.packages.clone(),
+                    data: apps.data.clone(),
+                    tools: OnceLock::new(),
                 });
                 live.retain(|_, weak| weak.strong_count() > 0);
                 live.insert(key, Arc::downgrade(&streams));

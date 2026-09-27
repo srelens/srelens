@@ -189,6 +189,31 @@ Everything this server exposes over MCP, generated from the live registry so it 
 | `extensions.configure` | medium | Install, enable, remove or configure local extensions; requires approval |
 | `settings.set` | medium | atomically write or remove durable desktop settings |
 
+## App tools
+
+Every installed app that is on adds its operations as tools named `plugin/<app id>/<operation>`: each reader binding, each declared action and, for an executable app, each operation its sidecar answers. A pod binding (logs, exec, a port-forward) is a session an app's view opens, not a tool. Which tools there are depends on what is installed, so `tools/list` is the list: a server with app tools advertises `tools.listChanged`, and sends `notifications/tools/list_changed` whenever an app is installed, updated, rolled back, enabled, disabled, blocked or removed. A change another srelens process made is noticed the next time the tools are listed or called, or by a session that can be pushed to within a few seconds.
+
+A tool's schema and its gate are the host's, never the app's. A reader takes `context` and, when it takes one, `namespace`; an action takes `context`, `namespace`, `name`, `uid` and `resourceVersion`; a sidecar operation takes the typed inputs it declares, each held to its type and length before the sidecar sees it. Readers and actions run through the same broker paths as `extensions.read` and `extensions.action`, and a gated tool asks the same consent as any other gated tool. When an app changes, the tools it had are withdrawn: a caller still holding them is refused.
+
+| An app's | Host capability behind it | Gated as | Impact |
+| --- | --- | --- | --- |
+| reader | `k8s.listCustomResource` | read-only | low |
+| reader | `k8s.listEvents` | read-only | low |
+| reader | `k8s.listDeployments` | read-only | low |
+| reader | `k8s.listStatefulSets` | read-only | low |
+| reader | `k8s.listDaemonSets` | read-only | low |
+| reader | `k8s.listNodes` | read-only | low |
+| reader | `network.http` | read-only | low |
+| declared action | `k8s.annotate` | needs confirmation | medium |
+| declared action | `k8s.setFields` | needs confirmation | medium |
+| declared action | `k8s.setStatusCondition` | needs confirmation | medium |
+| declared action | `k8s.mergePatch` | needs confirmation | high |
+| declared action | `k8s.requestRolloutRestart` | needs confirmation | high |
+| declared action | `k8s.requestCordonNode` | needs confirmation | medium |
+| sidecar operation | none: the app's sandboxed sidecar | read-only | low |
+
+A sidecar operation is not gated because its sidecar has no kubeconfig, no network and no path but its own data directory, and cannot call the host yet ([#573](https://github.com/srelens/srelens/issues/573)). Its arguments are the app's own vocabulary, so the audit log redacts them whole.
+
 ## Prompts
 
 4 built-in prompts:
