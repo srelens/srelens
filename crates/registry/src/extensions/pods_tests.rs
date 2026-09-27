@@ -79,6 +79,9 @@ enum LogStep {
     Lines(usize),
     /// End the session, as the cluster ending the stream would.
     End,
+    /// End it once the test lets it go (`Cluster::let_go`): for a test that
+    /// changes the cluster first, and must not race the reconnect.
+    EndWhenLetGo,
     Fail(&'static str),
 }
 
@@ -121,6 +124,8 @@ struct Cluster {
     /// Object reads so far, and which of them (counted from 1) fail, and how.
     object_reads: AtomicUsize,
     failed_reads: Mutex<BTreeMap<usize, ReadError>>,
+    /// Lets an `EndWhenLetGo` session end.
+    let_go: std::sync::atomic::AtomicBool,
 }
 
 /// Counts itself out of `open` when the connection it echoes on ends.
@@ -267,6 +272,12 @@ impl PodCluster for Cluster {
                     }
                 }
                 LogStep::End => return Ok(()),
+                LogStep::EndWhenLetGo => {
+                    while !self.let_go.load(Ordering::SeqCst) {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                    return Ok(());
+                }
                 LogStep::Fail(why) => return Err(why.into()),
             }
         }
@@ -754,12 +765,15 @@ async fn a_log_stream_batches_lines_and_follows_again_without_repeating() {
 /// one relabelled out of the selector is refused, not followed on.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_log_stream_ends_when_its_pod_leaves_the_scope_or_the_cluster() {
+    // Each follow ends only after the pod has changed: a follow that ended at
+    // once could reconnect to the pod as it was, and then wait on a follow
+    // that never ends.
     let host = host();
     host.cluster
         .logs
         .lock()
         .unwrap()
-        .extend([vec![LogStep::End], vec![LogStep::End]]);
+        .push_back(vec![LogStep::EndWhenLetGo]);
     host.open(
         "v",
         "extstream:gone",
@@ -769,6 +783,7 @@ async fn a_log_stream_ends_when_its_pod_leaves_the_scope_or_the_cluster() {
     .await
     .unwrap();
     host.cluster.remove_pod("web-1");
+    host.cluster.let_go.store(true, Ordering::SeqCst);
     eventually("the stream ends", || {
         host.last("extstream:gone")["type"] == "close"
     })
@@ -785,6 +800,12 @@ async fn a_log_stream_ends_when_its_pod_leaves_the_scope_or_the_cluster() {
         .unwrap()
         .contains("no longer exists"));
 
+    let host = self::host();
+    host.cluster
+        .logs
+        .lock()
+        .unwrap()
+        .push_back(vec![LogStep::EndWhenLetGo]);
     host.open(
         "v",
         "extstream:moved",
@@ -798,6 +819,7 @@ async fn a_log_stream_ends_when_its_pod_leaves_the_scope_or_the_cluster() {
             pod.labels.insert("app".into(), "moved".into());
         }
     }
+    host.cluster.let_go.store(true, Ordering::SeqCst);
     eventually("the stream fails", || {
         host.last("extstream:moved")["type"] == "error"
     })
