@@ -1881,6 +1881,114 @@ it("persists the unsigned apps policy and explains affected apps without removin
   await waitFor(() => expect(policy.checked).toBe(true));
   expect((screen.getByLabelText("Enable GitOps") as HTMLInputElement).checked).toBe(false);
 });
+/** An administrator's policy (#578), as a web server reports it with the user's apps. */
+const serverPolicy = {
+  allowedApps: null,
+  blockedApps: ["org.test.blocked"],
+  allowedPublishers: ["srelens"],
+  allowUnsignedApps: false,
+  allowedCapabilities: ["k8s.listCustomResource", "network.http"],
+  allowWriteActions: false,
+  networkCeiling: ["api.example.com", "*.corp.example.com"],
+  allowExecutableApps: false,
+  requiredApps: ["org.test.gitops", "org.srelens.flux"],
+};
+it("says what the server's policy allows, keeps a required app, and points to a missing one", async () => {
+  host.tauri = false;
+  try {
+    vi.mocked(listExtensions).mockResolvedValue({
+      schemaVersion: 1, nextRevision: 2, plugins: [plugin], policy: serverPolicy,
+    } as any);
+    vi.mocked(listExtensionCatalog).mockResolvedValue({ catalog: { extensions: [] }, fetchedAt: 1, stale: false, error: null, hostApiVersions: ["0.4.0"], incompatible: [] } as any);
+    render(<ExtensionManager />);
+    const policy = await screen.findByRole("region", { name: "Server policy" });
+    const text = policy.textContent ?? "";
+    for (const rule of [
+      "Blocked apps: org.test.blocked",
+      "Signed apps from: srelens",
+      "Unsigned apps are not allowed",
+      "Capabilities apps may use: k8s.listCustomResource, network.http",
+      "Apps may not write to clusters",
+      "network.http may reach: api.example.com, *.corp.example.com",
+    ]) expect(text).toContain(rule);
+    expect(text).not.toContain("Only these apps");
+    // A required app the user has stays: neither removed nor turned off.
+    expect(screen.getByText("Required by this server")).toBeTruthy();
+    expect((screen.getByRole("button", { name: "Remove" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByLabelText("Enable GitOps") as HTMLInputElement).disabled).toBe(true);
+    // One they don't have is named, with the way to install it.
+    expect(text).toContain("This server requires an app you have not installed: org.srelens.flux");
+    fireEvent.click(within(policy).getByRole("button", { name: "Open Catalog" }));
+    await waitFor(() => expect(listExtensionCatalog).toHaveBeenCalled());
+    expect(screen.getByRole("tab", { name: "Catalog" }).getAttribute("aria-selected")).toBe("true");
+    // The user's own switch for unsigned apps cannot grant what the policy refuses.
+    const unsigned = screen.getByLabelText("Allow unsigned apps to modify clusters and run code") as HTMLInputElement;
+    expect(unsigned.disabled).toBe(true);
+    expect(screen.getByText("This server's policy allows only signed apps.")).toBeTruthy();
+  } finally {
+    host.tauri = true;
+  }
+});
+it("describes a policy that leaves apps open, and one whose ceiling lets network.http reach nothing", async () => {
+  vi.mocked(listExtensions).mockResolvedValue({
+    schemaVersion: 1, nextRevision: 2, plugins: [plugin],
+    policy: { ...serverPolicy, allowedApps: ["org.test.gitops"], blockedApps: [], allowedPublishers: null, allowUnsignedApps: true,
+      allowedCapabilities: null, allowWriteActions: true, networkCeiling: [], requiredApps: [] },
+  } as any);
+  render(<ExtensionManager />);
+  const text = (await screen.findByRole("region", { name: "Server policy" })).textContent ?? "";
+  expect(text).toContain("Only these apps: org.test.gitops");
+  expect(text).toContain("network.http may reach no host");
+  for (const absent of ["Blocked apps", "Signed apps from", "Unsigned apps are not allowed", "Capabilities apps may use", "may not write", "requires an app"])
+    expect(text).not.toContain(absent);
+  expect((screen.getByRole("button", { name: "Remove" }) as HTMLButtonElement).disabled).toBe(false);
+  expect((screen.getByLabelText("Allow unsigned apps to modify clusters and run code") as HTMLInputElement).disabled).toBe(false);
+});
+it("says nothing about a policy on a host that has none", async () => {
+  vi.mocked(listExtensions).mockResolvedValue({ schemaVersion: 1, nextRevision: 2, plugins: [plugin] } as any);
+  render(<ExtensionManager />);
+  await screen.findByText("GitOps");
+  expect(screen.queryByRole("region", { name: "Server policy" })).toBeNull();
+  expect(screen.queryByText("Required by this server")).toBeNull();
+});
+/** A required app the user turned off before it was required can be turned back on. */
+it("lets a required app that is off be enabled", async () => {
+  vi.mocked(listExtensions).mockResolvedValue({
+    schemaVersion: 1, nextRevision: 2, plugins: [{ ...plugin, enabled: false }], policy: serverPolicy,
+  } as any);
+  render(<ExtensionManager />);
+  const enable = (await screen.findByLabelText("Enable GitOps")) as HTMLInputElement;
+  expect(enable.disabled).toBe(false);
+  fireEvent.click(enable);
+  await waitFor(() =>
+    expect(configureExtensions).toHaveBeenCalledWith({ action: "enable", id: "org.test.gitops", enabled: true }),
+  );
+});
+/** A policy refusal is the server's rule, not something the manifest's author can fix. */
+it("says a policy refusal is the server's, and counts only the manifest's own problems as its to fix", async () => {
+  const refused = { code: "EXTENSION_POLICY_REFUSED", path: "id", message: "The administrator's policy blocks org.test.gitops" };
+  vi.mocked(validateExtension).mockResolvedValue({ errors: [refused] } as any);
+  render(<ExtensionManager />);
+  fireEvent.change(await screen.findByLabelText("Local app manifest (JSON)"), { target: { value: JSON.stringify(plugin.manifest) } });
+  fireEvent.click(screen.getByText("Review manifest"));
+  const review = await screen.findByLabelText("Review app permissions");
+  expect(await within(review).findByText("This server's policy does not allow installing this app:")).toBeTruthy();
+  expect(within(review).queryByText(/in the manifest before installing/)).toBeNull();
+  expect(within(review).queryByRole("button", { name: /grant permissions/ })).toBeNull();
+
+  fireEvent.click(within(review).getByRole("button", { name: "Cancel" }));
+  const invalid = { code: "EXTENSION_INVALID_VALUE", path: "name", message: "Must be 1–120 characters" };
+  vi.mocked(validateExtension).mockResolvedValue({ errors: [invalid, refused] } as any);
+  fireEvent.click(screen.getByText("Review manifest"));
+  const again = await screen.findByLabelText("Review app permissions");
+  // Only the manifest's own problem is counted as the manifest's to fix.
+  expect(await within(again).findByText("This server's policy does not allow installing this app, and the manifest has a problem to fix:")).toBeTruthy();
+  fireEvent.click(within(again).getByRole("button", { name: "Cancel" }));
+  vi.mocked(validateExtension).mockResolvedValue({ errors: [invalid, { ...invalid, path: "version" }] } as any);
+  fireEvent.click(screen.getByText("Review manifest"));
+  const manifestOnly = await screen.findByLabelText("Review app permissions");
+  expect(await within(manifestOnly).findByText("Fix these 2 problems in the manifest before installing:")).toBeTruthy();
+});
 // #567: the pod capabilities are the broker's alone too, and a granted one says what
 // the host holds it to rather than "not provided".
 it("describes a granted pod capability by the host's own facts", async () => {

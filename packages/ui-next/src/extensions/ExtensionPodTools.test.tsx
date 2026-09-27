@@ -150,10 +150,25 @@ describe("the pod tools on a Deployment (#567)", () => {
     });
     act(() => {
       stream.opened[0].handlers.onData({ event: "status", source: "web-1/controller", status: "live" }, 1);
-      stream.opened[0].handlers.onData({ event: "lines", lines: [{ source: "web-1/controller", line: "certificate issued" }] }, 2);
+      stream.opened[0].handlers.onData(
+        {
+          event: "lines",
+          lines: [
+            { source: "web-1/controller", line: "certificate issued" },
+            { source: "web-1/controller", line: "the start of a long one", truncated: true },
+          ],
+        },
+        2,
+      );
     });
     const log = await within(tools).findByRole("log", { name: "Logs of web-1/controller" });
     await waitFor(() => expect(log.textContent).toContain("certificate issued"));
+    // A line the host cut says so beside it, and only that one (#747).
+    const rows = Array.from(log.querySelectorAll(".extension-pod-line"));
+    expect(rows.map((row) => row.querySelector(".extension-pod-cut")?.textContent ?? null)).toEqual([
+      null,
+      "[line cut: too long]",
+    ]);
     // It scrolls both ways, so a keyboard must be able to reach it.
     expect(log.getAttribute("tabindex")).toBe("0");
     expect(within(tools).getByText("Following")).toBeTruthy();

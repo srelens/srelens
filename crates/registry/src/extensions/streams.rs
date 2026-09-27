@@ -19,9 +19,9 @@
 //! changes the frames.
 
 mod pods;
-#[cfg(test)]
-pub(super) use pods::MAX_LINES_PER_FRAME;
 pub use pods::{ExecConfirmed, PodTiming};
+#[cfg(test)]
+pub(super) use pods::{MAX_LINES_PER_FRAME, MAX_LINE_BYTES};
 
 use super::{columns, crd, read_contribution, resolver_app, Inventory, InventoryKey, Read, Store};
 use serde::{Deserialize, Serialize};

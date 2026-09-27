@@ -26,6 +26,7 @@ import {
 } from "@srelens/core";
 
 import { ExtensionCatalog } from "./ExtensionCatalog";
+import { ServerPolicy } from "./ServerPolicy";
 import { ExtensionControls } from "./ExtensionControls";
 export { ExtensionControlsProvider } from "./ExtensionControls";
 import { ErrorNotice, ExtensionResults } from "./ExtensionResults";
@@ -36,6 +37,16 @@ import { extensionLabel as label, useExtensions } from "./inventoryStore";
 export { useExtensions } from "./inventoryStore";
 export { AMBIGUOUS_CONTEXT_MESSAGE, SHARED_CONTEXT_ID_MESSAGE, refreshContextIds, useContextId, useContextLookup } from "./contextIds";
 
+/** What a review's problems ask of the reader: the manifest's own to fix, and the
+    server's policy refusal (#578), which is not the manifest's. */
+function problemsHeading(errors: ExtensionValidationError[]) {
+  const policy = errors.some((problem) => problem.code === "EXTENSION_POLICY_REFUSED");
+  const own = errors.filter((problem) => problem.code !== "EXTENSION_POLICY_REFUSED").length;
+  if (own === 0) return "This server's policy does not allow installing this app:";
+  if (policy)
+    return `This server's policy does not allow installing this app, and the manifest has ${own === 1 ? "a problem" : `${own} problems`} to fix:`;
+  return `Fix ${own === 1 ? "this problem" : `these ${own} problems`} in the manifest before installing:`;
+}
 /**
  * Where a reviewed manifest came from, which decides how it is installed: as its own text,
  * as the package file chosen here (sent again as base64, and verified again), or as a
@@ -226,6 +237,9 @@ export function ExtensionManager() {
   if (inventory.status === "error")
     return <ErrorNotice message={inventory.error} retry={inventory.reload} />;
   const state = inventory.data!;
+  /** Whether the administrator's policy makes every user keep this app (#578). */
+  const required = (plugin: InstalledExtension) => state.policy?.requiredApps.includes(plugin.manifest.id) ?? false;
+  const signedOnly = state.policy?.allowUnsignedApps === false;
   return (
     <div className="extension-manager">
       <div className="extension-toolbar">
@@ -239,6 +253,10 @@ export function ExtensionManager() {
           The apps you install here are yours: everyone who signs in to this server has their own.
         </p>
       )}
+      {state.policy && (
+        <ServerPolicy policy={state.policy} plugins={state.plugins}
+          openCatalog={() => { setTab("catalog"); setCatalogOpened(true); }} />
+      )}
       {inventory.updates?.mode === "polling" && (
         <p role="status" className="extension-message">
           Live updates to this list are unavailable ({inventory.updates.reason}); a change made elsewhere shows within five seconds.
@@ -246,10 +264,11 @@ export function ExtensionManager() {
       )}
       <div className="extension-install">
         <label>
-          <input type="checkbox" checked={state.allowUnsignedApps ?? false} disabled={busy}
+          <input type="checkbox" checked={state.allowUnsignedApps ?? false} disabled={busy || signedOnly}
             onChange={(event) => void change({ action: "unsignedApps", allowUnsignedApps: event.target.checked })} />{" "}
           Allow unsigned apps to modify clusters and run code
         </label>
+        {signedOnly && <p className="extension-message">This server's policy allows only signed apps.</p>}
         <p className="extension-message">Off by default. Read-only declarative apps need only their permission grants. Turning this off disables affected apps and keeps their settings. Turning it on does not re-enable them. Executable apps are not supported by this host.</p>
       </div>
       {error && (
@@ -334,7 +353,9 @@ export function ExtensionManager() {
             ) : review.errors.length > 0 ? (
               <div className="extension-problems">
                 <p>
-                  Fix {review.errors.length === 1 ? "this problem" : `these ${review.errors.length} problems`} in the manifest before installing:
+                  {/* A policy refusal is the server administrator's rule (#578): nothing
+                      in the manifest would fix it, so it is never counted as the manifest's. */}
+                  {problemsHeading(review.errors)}
                 </p>
                 <ul aria-label="Manifest problems">
                   {review.errors.map((problem, index) => (
@@ -431,12 +452,13 @@ export function ExtensionManager() {
             <ExtensionLogo icon={plugin.icon} name={label(plugin)} size={24} />
             <strong>{label(plugin)}</strong>
             <span>{plugin.manifest.version} · {!plugin.signatureProof ? (plugin.source === "catalog" ? "Unsigned · Catalog" : "Unsigned local") : plugin.quarantined ? "Signature not verified" : "Signed by srelens"}</span>
+            {required(plugin) && <span>Required by this server</span>}
             <label>
               <input
                 aria-label={`Enable ${label(plugin)}`}
                 type="checkbox"
                 checked={plugin.enabled}
-                disabled={busy || Boolean(plugin.quarantined) || Boolean(plugin.policyBlocked)}
+                disabled={busy || Boolean(plugin.quarantined) || Boolean(plugin.policyBlocked) || (required(plugin) && plugin.enabled)}
                 onChange={(e) =>
                   void change({
                     action: "enable",
@@ -466,7 +488,7 @@ export function ExtensionManager() {
             </Button>
             <Button
               variant="danger"
-              disabled={busy}
+              disabled={busy || required(plugin)}
               onClick={() =>
                 setRemoving(plugin)
               }

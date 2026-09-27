@@ -43,12 +43,16 @@ let streamSeq = 0;
  * event any target happened to send. The tag is the second argument so a
  * caller that only wants the state — classic's `LogsView` — keeps working
  * unchanged.
+ *
+ * `onLine`'s third argument says the host cut the line at its limit (#747):
+ * the backend reads at most so much of one line, drops the rest up to its
+ * newline, and marks what it kept (`crates/kube/src/logs.rs`).
  */
 export async function startLogStream(
   context: string,
   namespace: string,
   targets: LogTarget[],
-  onLine: (source: string, line: string) => void,
+  onLine: (source: string, line: string, truncated: boolean) => void,
   onStatus?: (status: LogStatus, source: string) => void,
   options: LogStreamOptions = {},
 ): Promise<LogStream> {
@@ -63,8 +67,8 @@ export async function startLogStream(
       const { status, source } = p as { status: LogStatus; source?: string };
       onStatus?.(status, source ?? "");
     } else {
-      const { source, line } = p as { source: string; line: string };
-      onLine(source, line);
+      const { source, line, truncated } = p as { source: string; line: string; truncated?: boolean };
+      onLine(source, line, truncated === true);
     }
   });
   try {

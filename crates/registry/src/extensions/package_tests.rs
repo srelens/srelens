@@ -616,3 +616,37 @@ fn a_package_the_cached_catalog_lists_is_recorded_as_from_the_catalog() {
     let state = install_package(&path, &example_at("1.0.1")).unwrap();
     assert_eq!(app(&state, "org.example.packaged").source, Source::Local);
 }
+
+/// #578: installing from a package is held to the administrator's policy as every other
+/// install is, and a package the policy refuses leaves nothing unpacked.
+#[test]
+fn a_package_the_policy_refuses_is_neither_installed_nor_unpacked() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("extensions.json");
+    let archive = packed("example");
+    let id = package::read(&archive, &mut package::Discard)
+        .unwrap()
+        .list
+        .id;
+    let policy = AppPolicy::parse(&json!({ "blockedApps": [id] }).to_string()).unwrap();
+    let apps = Apps::from(path.clone()).governed_by(SharedPolicy::new(policy));
+    let input = serde_json::from_value::<Configure>(
+        json!({"action": "installPackage", "package": encode(&archive), "grants": GRANTS}),
+    )
+    .unwrap();
+    let error = match super::configure(
+        &apps,
+        fake_core(),
+        &srelens_plugin_host::NoSecretStore,
+        input,
+    ) {
+        Ok(_) => panic!("the policy did not refuse the package"),
+        Err(error) => error,
+    };
+    assert!(
+        error.contains(&format!("The administrator's policy blocks {id}")),
+        "{error}"
+    );
+    assert!(read(&path).unwrap().plugins.is_empty());
+    assert!(!path.with_extension("packages").join(&id).exists());
+}

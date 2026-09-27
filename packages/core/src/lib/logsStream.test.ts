@@ -57,7 +57,7 @@ describe("startLogStream", () => {
 
     // Line payloads → onLine; {status} → onStatus.
     captured?.({ source: "", line: "hello" });
-    expect(onLine).toHaveBeenCalledWith("", "hello");
+    expect(onLine).toHaveBeenCalledWith("", "hello", false);
     captured?.({ source: "", status: "reconnecting" });
     expect(onStatus).toHaveBeenCalledWith("reconnecting", "");
     expect(onLine).toHaveBeenCalledTimes(1);
@@ -120,8 +120,25 @@ describe("startLogStream", () => {
     );
 
     captured?.({ source: "web-1", line: "status: live" });
-    expect(onLine).toHaveBeenCalledWith("web-1", "status: live");
+    expect(onLine).toHaveBeenCalledWith("web-1", "status: live", false);
     expect(onStatus).not.toHaveBeenCalled();
+  });
+
+  it("says when the host cut a line, and only then (#747)", async () => {
+    let captured: ((payload: unknown) => void) | undefined;
+    subscribeMock.mockImplementation(async (_ch: string, handler: (p: unknown) => void) => {
+      captured = handler;
+      return vi.fn();
+    });
+    invokeCommandMock.mockResolvedValue(undefined);
+    const onLine = vi.fn();
+    await startLogStream("kind-dev", "default", [{ pod: "web-1", label: "web-1" }], onLine);
+    captured?.({ source: "web-1", line: "the start of it", truncated: true });
+    captured?.({ source: "web-1", line: "whole" });
+    expect(onLine.mock.calls).toEqual([
+      ["web-1", "the start of it", true],
+      ["web-1", "whole", false],
+    ]);
   });
 
   it("reports an untagged status as the unlabelled source rather than dropping it", async () => {

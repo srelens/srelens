@@ -269,7 +269,7 @@ the first follow; a reconnect asks for nothing already sent.
 
 | `data` | Meaning |
 |---|---|
-| `{ "event": "lines", "lines": [{ "source": "pod/container", "line": "…", "truncated"?: true }], "dropped"?: n }` | Up to 500 lines and 512 KiB of text (a single longer line goes alone). A line past 16 KiB is cut, on a character boundary, and says so. `dropped` counts lines the host let go because they arrived faster than it sends them: it holds up to 5000 lines and 4 MiB of text. |
+| `{ "event": "lines", "lines": [{ "source": "pod/container", "line": "…", "truncated"?: true }], "dropped"?: n }` | Up to 500 lines and 512 KiB of text (a single longer line goes alone). A line past 16 KiB is cut, on a character boundary, and says so. The host reads no more of a line than that: the rest, up to its newline, is dropped as it arrives, so a line is never held whole to be cut afterwards (#747). Bytes that are not UTF-8 arrive as U+FFFD rather than ending the stream. `dropped` counts lines the host let go because they arrived faster than it sends them: it holds up to 5000 lines and 4 MiB of text. |
 | `{ "event": "status", "source": "pod/container", "status": "live" \| "reconnecting" \| "completed", "message"?: "…" }` | The follow's state, tagged like its lines. `reconnecting` says why; `completed` says the pod is gone or finished, and is followed by `close: completed`. |
 
 A lost stream reconnects after 2 s, from nothing new, while the app may still reach

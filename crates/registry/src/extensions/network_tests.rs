@@ -175,6 +175,7 @@ async fn server(answer: impl Fn(&str) -> Reply + Send + Sync + 'static) -> Serve
 fn policy(rules: Vec<HostRule>, loopback_http: bool) -> Policy {
     Policy {
         allowlist: rules,
+        ceiling: None,
         loopback_http,
         limits: Limits::default(),
     }

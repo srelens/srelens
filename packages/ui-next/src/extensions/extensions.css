@@ -302,6 +302,15 @@
   outline-offset: -2px;
 }
 .extension-install > button { justify-self: start; }
+/* The administrator's policy (#578): its rules a list, as an access diff's are, and its
+   messages flush with them inside the section's own padding. */
+.extension-server-policy > details > summary { cursor: pointer; }
+.extension-server-policy > details > summary:focus-visible {
+  outline: 2px solid var(--accent, var(--fl-color-primary));
+  outline-offset: 2px;
+}
+.extension-server-policy ul { margin: 6px 0; padding-left: 18px; list-style: disc; }
+.extension-server-policy .extension-message { padding: 0; }
 .extension-catalog-description { flex: 1 1 260px; min-width: 0; }
 .extension-catalog-description p { margin: 3px 0 0; }
 .extension-catalog-meta {
@@ -908,6 +917,7 @@
 .extension-pod-line:hover { background: var(--field, var(--fl-color-surface-alt)); }
 /* The level is a word on the line; its tint only helps. */
 .extension-pod-level { flex: none; text-transform: uppercase; color: var(--ink-muted, var(--fl-color-text-muted)); }
+.extension-pod-cut { flex: none; color: var(--ink-muted, var(--fl-color-text-muted)); }
 .extension-pod-level[data-level="error"],
 .extension-pod-level[data-level="fatal"] { color: var(--sev, var(--fl-color-danger)); }
 .extension-pod-level[data-level="warn"],

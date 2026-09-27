@@ -601,6 +601,8 @@ function LogsSession({
                   </span>
                 )}
                 <span>{plainText(line.text)}</span>
+                {/* The host cut it at its limit (#747): said beside the text, not in it. */}
+                {line.truncated && <span className="extension-pod-cut">[line cut: too long]</span>}
               </div>
             );
           })

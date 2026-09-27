@@ -23,7 +23,10 @@ pub use extensions::fuzzing;
 pub use extensions::streams::{ExtensionStreams, OpenStreamOut, INVENTORY_CHANNEL};
 /// Installed apps' operations as MCP tools (#574), from [`ExtensionStreams::app_tools`].
 pub use extensions::tools::AppTools;
-pub use extensions::{Apps, InventoryKey, InventoryLock, InventoryStore, SharedCatalog};
+pub use extensions::{
+    AppPolicy, Apps, InventoryKey, InventoryLock, InventoryStore, SharedCatalog, SharedPolicy,
+    MAX_POLICY_BYTES,
+};
 /// Making `.srelens-extension` packages (#562): what a publisher runs before a release, and
 /// what `cargo run -p srelens-registry --example pack-extension` wraps.
 pub mod extension_package {
@@ -254,17 +257,26 @@ pub fn build_registry_with_paths(
 /// registry runs in one process as one UID, so a file a caller names could be
 /// another user's kubeconfig, and the managed kubeconfig folder is the server
 /// host's.
+///
+/// `network.http` only when `apps` are held to an administrator's policy whose
+/// ceiling names a host (#578): each request then leaves from the shared server,
+/// so it goes only where the policy lets it, over HTTPS.
 pub fn build_registry_for_user(
     cache: Arc<ClientCache>,
     kubeconfig_paths: Vec<PathBuf>,
     apps: Apps,
 ) -> Registry {
+    let network = if apps.has_network_ceiling() {
+        BrokeredNetwork::Ceiling
+    } else {
+        BrokeredNetwork::Off
+    };
     build_with(
         cache,
         kubeconfig_paths,
         Some(apps),
         None,
-        BrokeredNetwork::Off,
+        network,
         Kubeconfigs::OwnOnly,
     )
     .0
@@ -647,6 +659,10 @@ enum BrokeredNetwork {
     /// The web host: a request would leave from the shared server — from its network
     /// position, and to its loopback — so there is none.
     Off,
+    /// The web host whose administrator's policy names hosts `network.http` may reach
+    /// (#578): a request leaves from the shared server, but every request and redirect
+    /// is held to that ceiling, over HTTPS, on every call.
+    Ceiling,
 }
 
 /// The capabilities only the extension broker calls. Kept out of the registry the
@@ -655,7 +671,7 @@ enum BrokeredNetwork {
 /// the pod capabilities (#567), which run only as app streams.
 fn broker_only(cache: Arc<ClientCache>, network: BrokeredNetwork) -> Vec<Capability> {
     let mut capabilities = vec![extensions::crd::check_capability(cache)];
-    if network == BrokeredNetwork::Desktop {
+    if network != BrokeredNetwork::Off {
         capabilities.push(extensions::network::capability());
     }
     // Logs, exec and port-forwards (#567) on both hosts, so an app that binds them
@@ -1090,6 +1106,50 @@ mod tests {
                 .iter()
                 .any(|capability| capability.id == srelens_plugin_host::NETWORK_HTTP)
         );
+    }
+
+    /// #578: a web user's broker offers `network.http` only when their apps are held
+    /// to a policy whose ceiling names a host, and then only toward those hosts.
+    #[tokio::test]
+    async fn a_web_users_apps_reach_the_network_only_under_a_ceiling() {
+        let releases = json!({
+            "id": "org.example.releases", "name": "Releases", "version": "0.1.0",
+            "srelensApiVersion": "^0.4", "kind": "declarative",
+            "permissions": [{"capability": "network.http", "hosts": ["api.github.com"]}],
+            "capabilities": [{"name": "latest", "title": "Latest release", "target": "network.http",
+                "arguments": {"url": "https://api.github.com", "path": "/repos/srelens/srelens/releases/latest"},
+                "inputs": []}],
+            "contributions": {"pages": [], "detailTabs": [], "detailLinks": []}
+        })
+        .to_string();
+        let validate = json!({"manifest": releases, "grants": ["network.http"]});
+        for (policy, provided) in [
+            (json!({}), false),
+            (json!({"networkCeiling": []}), false),
+            (json!({"networkCeiling": ["api.github.com"]}), true),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let policy = AppPolicy::parse(&policy.to_string()).unwrap();
+            let apps = Apps::with_shared_catalog(
+                Arc::new(dir.path().join("inventory.json")),
+                SharedCatalog::new(dir.path().join("catalog.json")),
+            )
+            .governed_by(SharedPolicy::new(policy));
+            let reg = build_registry_for_user(ClientCache::new_many(vec![]), vec![], apps);
+            let report = reg
+                .invoke("extensions.validate", validate.clone())
+                .await
+                .unwrap();
+            let missing = report["errors"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|error| error["message"] == "This host does not provide network.http");
+            assert_eq!(!missing, provided, "{report}");
+            if provided {
+                assert_eq!(report["errors"], json!([]), "{report}");
+            }
+        }
     }
 
     /// #543, then #568: the one place the host may put an app's secret is the

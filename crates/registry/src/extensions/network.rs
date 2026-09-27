@@ -19,11 +19,13 @@
 //!   person has allowed that for the app; no credentials or fragment; a host
 //!   and port on the allowlist resolved from the manifest and the app's saved
 //!   settings ([`srelens_plugin_host::Manifest::network_allowlist`]);
+//! - under an administrator's policy (#578), a host and port its ceiling allows
+//!   too, and HTTPS only: the host's loopback is not one person's to open;
 //! - a request carrying a secret follows no redirect to another origin;
 //! - GET only, fixed in the manifest: no caller input (#569 adds templates);
 //! - [`Limits`]: connect and total timeouts and a response size limit.
 use super::http_policy::{self, BodyError, UrlRules};
-use super::Installed;
+use super::{AppPolicy, Installed};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, CONTENT_TYPE};
 use reqwest::Url;
 use schemars::JsonSchema;
@@ -333,18 +335,27 @@ impl Default for Limits {
 /// Where one app's requests may go.
 pub(super) struct Policy {
     pub allowlist: Vec<HostRule>,
+    /// The most an administrator's policy lets any app reach (#578), when there is one.
+    /// A URL must be on both lists.
+    pub ceiling: Option<Vec<HostRule>>,
     /// A person's switch for the app: plain HTTP to this computer.
     pub loopback_http: bool,
     pub limits: Limits,
 }
 
 const NOT_ALLOWED: &str = "The URL's host and port are not among this app's network.http hosts";
+const OUTSIDE_CEILING: &str =
+    "The URL's host and port are outside the hosts the administrator's policy lets network.http reach";
+const HTTPS_ONLY: &str = "The administrator's policy allows network.http over HTTPS only";
 const SECRET_REDIRECT: &str =
     "A request carrying a secret header does not follow a redirect to another origin";
 
 impl Policy {
     /// Why `url` may not be fetched for this app. Never names the URL.
     pub fn check(&self, url: &Url) -> Result<(), &'static str> {
+        if self.ceiling.is_some() && url.scheme() == "http" {
+            return Err(HTTPS_ONLY);
+        }
         http_policy::check_url(
             url,
             UrlRules {
@@ -355,20 +366,29 @@ impl Policy {
         if !self.allowlist.iter().any(|rule| rule.allows(url)) {
             return Err(NOT_ALLOWED);
         }
+        if self
+            .ceiling
+            .as_ref()
+            .is_some_and(|ceiling| !ceiling.iter().any(|rule| rule.allows(url)))
+        {
+            return Err(OUTSIDE_CEILING);
+        }
         Ok(())
     }
 }
 
 /// `extensions.read` of a `network.http` binding. The caller has already made
 /// every check an app request makes (`resolver_app`'s): the app is enabled, at
-/// the reviewed revision, on a cluster it is enabled for, with its grants.
+/// the reviewed revision, on a cluster it is enabled for, with its grants, and
+/// allowed by `policy`, the administrator's policy the app was read under.
 pub(super) async fn read(
     core: &Registry,
     secrets: &dyn SecretStore,
     plugin: &Installed,
     name: &str,
+    policy: Option<&AppPolicy>,
 ) -> Result<Value, CapabilityError> {
-    read_with(core, secrets, plugin, name, Limits::default()).await
+    read_with(core, secrets, plugin, name, policy, Limits::default()).await
 }
 
 async fn read_with(
@@ -376,6 +396,7 @@ async fn read_with(
     secrets: &dyn SecretStore,
     plugin: &Installed,
     name: &str,
+    policy: Option<&AppPolicy>,
     limits: Limits,
 ) -> Result<Value, CapabilityError> {
     let failed = |why: String| CapabilityError::Handler(why);
@@ -405,7 +426,8 @@ async fn read_with(
     let url = request_url(&input).map_err(failed)?;
     let policy = Policy {
         allowlist: manifest.network_allowlist(&plugin.settings),
-        loopback_http: plugin.allow_loopback_http,
+        ceiling: policy.map(AppPolicy::ceiling),
+        loopback_http: plugin.allow_loopback_http && policy.is_none(),
         limits,
     };
     // Refused before any secret is read: a request that cannot go out has no

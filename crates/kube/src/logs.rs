@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use futures::{AsyncBufReadExt, StreamExt};
+use futures::{AsyncBufRead, AsyncBufReadExt};
 use k8s_openapi::api::core::v1::Pod;
 use kube::api::LogParams;
 use kube::Api;
@@ -15,14 +15,23 @@ use crate::connect::request_timeout;
 
 const DEFAULT_TAIL_LINES: i64 = 200;
 
+/// The most of one log line a follow keeps, in bytes (#747). The rest of a
+/// longer line is read up to its newline and dropped, and the line says it was
+/// cut, so a container that writes a very long line, or no newline at all,
+/// cannot grow what the host holds past this.
+pub const MAX_LOG_LINE_BYTES: usize = 64 * 1024;
+
 /// Per-stream options beyond the target itself: how much history to tail, an
-/// optional `sinceSeconds` window, and whether to prefix each line with an RFC
-/// 3339 timestamp. `Copy` so the resilient loop can tweak it per reconnect.
+/// optional `sinceSeconds` window, whether to prefix each line with an RFC
+/// 3339 timestamp, and where to cut a long line. `Copy` so the resilient loop
+/// can tweak it per reconnect.
 #[derive(Debug, Clone, Copy)]
 pub struct StreamOpts {
     pub tail_lines: i64,
     pub since_seconds: Option<i64>,
     pub timestamps: bool,
+    /// The most of one line kept, in bytes; see [`MAX_LOG_LINE_BYTES`].
+    pub max_line_bytes: usize,
 }
 
 impl Default for StreamOpts {
@@ -31,7 +40,106 @@ impl Default for StreamOpts {
             tail_lines: DEFAULT_TAIL_LINES,
             since_seconds: None,
             timestamps: false,
+            max_line_bytes: MAX_LOG_LINE_BYTES,
         }
+    }
+}
+
+/// One line of a log, as a follow hands it on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Line {
+    /// The line without its line ending. Bytes that are not UTF-8 read as
+    /// U+FFFD rather than ending the stream.
+    pub text: String,
+    /// The line was longer than the follow keeps, and `text` is its start.
+    pub truncated: bool,
+}
+
+impl Line {
+    /// A line kept whole: within the limit, or one the host writes itself,
+    /// such as why a follow failed.
+    pub fn whole(text: String) -> Self {
+        Self {
+            text,
+            truncated: false,
+        }
+    }
+}
+
+/// Read `reader` a line at a time, handing each to `on_line`, holding at most
+/// `max` bytes of any one line (#747).
+///
+/// This replaces `AsyncBufReadExt::lines`, which keeps everything up to the
+/// next newline in one `String` however long it grows, and ends the stream
+/// with an error at the first line that is not UTF-8. Here the bytes past
+/// `max` are read and dropped until the newline, the line is cut on a
+/// character boundary and marked, and bytes that are not UTF-8 are decoded
+/// lossily. A last line with no newline is still a line.
+pub async fn read_lines<R, F>(mut reader: R, max: usize, mut on_line: F) -> std::io::Result<()>
+where
+    R: AsyncBufRead + Unpin,
+    F: FnMut(Line),
+{
+    // One byte over `max`, so a `\r` just past it is a line ending and not a cut.
+    let keep = max.saturating_add(1);
+    let mut line = Vec::new();
+    let mut dropped = false;
+    loop {
+        let chunk = reader.fill_buf().await?;
+        if chunk.is_empty() {
+            if !line.is_empty() || dropped {
+                on_line(finish(&mut line, dropped, false, max));
+            }
+            return Ok(());
+        }
+        let (part, used, ends) = match chunk.iter().position(|&b| b == b'\n') {
+            Some(at) => (&chunk[..at], at + 1, true),
+            None => (chunk, chunk.len(), false),
+        };
+        let room = keep.saturating_sub(line.len()).min(part.len());
+        line.extend_from_slice(&part[..room]);
+        dropped |= room < part.len();
+        reader.consume_unpin(used);
+        if ends {
+            on_line(finish(&mut line, dropped, true, max));
+            dropped = false;
+        }
+    }
+}
+
+/// The line `bytes` holds, emptying it: its `\r\n` ending stripped, cut to
+/// `max` bytes on a character boundary, and decoded.
+fn finish(bytes: &mut Vec<u8>, dropped: bool, newline: bool, max: usize) -> Line {
+    if newline && !dropped && bytes.last() == Some(&b'\r') {
+        bytes.pop();
+    }
+    let truncated = dropped || bytes.len() > max;
+    if truncated {
+        bytes.truncate(max);
+        drop_partial_char(bytes);
+    }
+    let text = String::from_utf8_lossy(bytes).into_owned();
+    bytes.clear();
+    Line { text, truncated }
+}
+
+/// Drop the start of a character that a cut left at the end of `bytes`, so a
+/// cut line does not end in U+FFFD for a character it did not break.
+fn drop_partial_char(bytes: &mut Vec<u8>) {
+    let from = bytes.len().saturating_sub(3);
+    for at in (from..bytes.len()).rev() {
+        let width = match bytes[at] {
+            // A continuation byte: its character starts further back.
+            0x80..=0xBF => continue,
+            0xC0..=0xDF => 2,
+            0xE0..=0xEF => 3,
+            0xF0..=0xF7 => 4,
+            _ => 1,
+        };
+        if at + width > bytes.len() {
+            bytes.truncate(at);
+        }
+        return;
     }
 }
 
@@ -70,8 +178,9 @@ pub fn build_log_params(
 }
 
 /// Follow a pod/container's logs, invoking `on_line` for each line as it
-/// arrives. Runs until the stream closes (pod exits) or the task is aborted.
-/// Tauri-agnostic so the streaming logic stays reusable.
+/// arrives, each held to `opts.max_line_bytes` ([`read_lines`]). Runs until
+/// the stream closes (pod exits) or the task is aborted. Tauri-agnostic so the
+/// streaming logic stays reusable.
 pub async fn stream_pod_logs<F, G>(
     cache: Arc<ClientCache>,
     context: String,
@@ -83,7 +192,7 @@ pub async fn stream_pod_logs<F, G>(
     mut on_connected: G,
 ) -> Result<(), String>
 where
-    F: FnMut(String) + Send,
+    F: FnMut(Line) + Send,
     G: FnMut() + Send,
 {
     let client = cache.get(&context).await?;
@@ -101,11 +210,9 @@ where
         .map_err(|_| "open log stream timed out".to_string())?
         .map_err(|e| e.to_string())?;
     on_connected();
-    let mut lines = reader.lines();
-    while let Some(line) = lines.next().await {
-        on_line(line.map_err(|e| e.to_string())?);
-    }
-    Ok(())
+    read_lines(reader, opts.max_line_bytes, &mut on_line)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Backoff between log reconnect attempts.
@@ -207,7 +314,7 @@ pub async fn stream_pod_logs_resilient<F, G>(
     mut on_line: F,
     mut on_status: G,
 ) where
-    F: FnMut(String) + Send,
+    F: FnMut(Line) + Send,
     G: FnMut(&'static str) + Send,
 {
     let mut first = true;
@@ -228,7 +335,7 @@ pub async fn stream_pod_logs_resilient<F, G>(
             StreamOpts {
                 tail_lines: 0,
                 since_seconds: None,
-                timestamps: opts.timestamps,
+                ..opts
             }
         };
         let res = stream_pod_logs(
@@ -256,7 +363,7 @@ pub async fn stream_pod_logs_resilient<F, G>(
             }
         }
         if let Err(e) = res {
-            on_line(format!("[error: {}]", e));
+            on_line(Line::whole(format!("[error: {}]", e)));
         }
         first = false;
         // Stream ended or errored — signal the outage, back off, then retry.
@@ -481,7 +588,7 @@ mod tests {
                 "web".into(),
                 Some("setup".into()),
                 StreamOpts::default(),
-                |line| lines.push(line),
+                |line| lines.push(line.text),
                 |status| statuses.push(status),
             ),
         )
@@ -509,6 +616,148 @@ mod tests {
         assert!(
             final_read.contains("tailLines=200"),
             "must not discard the final attempt with tailLines=0"
+        );
+    }
+
+    /// `bytes` through [`read_lines`], handed over `chunk` bytes at a time as
+    /// network reads hand them.
+    async fn read_all(bytes: &[u8], chunk: usize, max: usize) -> Vec<Line> {
+        let reader =
+            futures::io::BufReader::with_capacity(chunk, futures::io::Cursor::new(bytes.to_vec()));
+        let mut lines = Vec::new();
+        read_lines(reader, max, |line| lines.push(line))
+            .await
+            .unwrap();
+        lines
+    }
+
+    fn whole(text: &str) -> Line {
+        Line {
+            text: text.into(),
+            truncated: false,
+        }
+    }
+
+    fn cut(text: &str) -> Line {
+        Line {
+            text: text.into(),
+            truncated: true,
+        }
+    }
+
+    /// A line past the limit is cut and marked, the rest of it up to its
+    /// newline is dropped, and the next line is whole — however the bytes
+    /// were split across reads.
+    #[tokio::test]
+    async fn a_long_line_is_cut_and_the_next_one_is_whole() {
+        let mut bytes = b"short\n".to_vec();
+        bytes.extend(std::iter::repeat_n(b'x', 100));
+        bytes.extend(b"\nafter\n");
+        for chunk in [1, 3, 7, 64, 4096] {
+            assert_eq!(
+                read_all(&bytes, chunk, 10).await,
+                [whole("short"), cut("xxxxxxxxxx"), whole("after")],
+                "read {chunk} bytes at a time"
+            );
+        }
+        // No newline at all: what is kept is the limit, not the stream.
+        let endless = vec![b'y'; 1024 * 1024];
+        let lines = read_all(&endless, 8192, MAX_LOG_LINE_BYTES).await;
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].text.len(), MAX_LOG_LINE_BYTES);
+        assert!(lines[0].truncated);
+    }
+
+    /// `\r\n` is one line ending, even split across reads; a lone `\r` is
+    /// text; a last line needs no newline. A line exactly at the limit is
+    /// whole, with or without its `\r`.
+    #[tokio::test]
+    async fn line_endings_and_a_last_line_without_one() {
+        for chunk in [1, 2, 4096] {
+            assert_eq!(
+                read_all(b"one\r\ntwo\rthree\nlast", chunk, 64).await,
+                [whole("one"), whole("two\rthree"), whole("last")],
+                "read {chunk} bytes at a time"
+            );
+        }
+        assert_eq!(read_all(b"abcd\r\n", 1, 4).await, [whole("abcd")]);
+        assert_eq!(read_all(b"abcd\n", 1, 4).await, [whole("abcd")]);
+        assert_eq!(read_all(b"abcde\r\n", 1, 4).await, [cut("abcd")]);
+        assert!(read_all(b"", 1, 4).await.is_empty());
+        assert_eq!(read_all(b"\n\n", 1, 4).await, [whole(""), whole("")]);
+    }
+
+    /// A line that is not UTF-8 is shown, lossily, and the lines after it
+    /// still arrive; `lines()` ended the stream there.
+    #[tokio::test]
+    async fn bytes_that_are_not_utf8_are_shown_and_the_stream_goes_on() {
+        assert_eq!(
+            read_all(b"before\n\xff\xfe\nafter\n", 2, 64).await,
+            [whole("before"), whole("\u{fffd}\u{fffd}"), whole("after")]
+        );
+    }
+
+    /// A cut through a character drops the whole character rather than
+    /// leaving half of it to read as U+FFFD.
+    #[tokio::test]
+    async fn a_cut_does_not_break_a_character() {
+        assert_eq!(read_all("abé\n".as_bytes(), 1, 3).await, [cut("ab")]);
+        assert_eq!(read_all("a日x\n".as_bytes(), 1, 3).await, [cut("a")]);
+        assert_eq!(read_all("a日x\n".as_bytes(), 1, 4).await, [cut("a日")]);
+    }
+
+    /// Through the API: a follow of a container that writes a long line and
+    /// bytes that are not UTF-8 hands on every line, cut where it is long, and
+    /// ends cleanly rather than with "stream did not contain valid UTF-8".
+    #[tokio::test]
+    async fn a_follow_reads_past_a_long_line_and_bytes_that_are_not_utf8() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config");
+        std::fs::write(&config, format!(
+            "apiVersion: v1\nkind: Config\ncurrent-context: test\nclusters:\n- name: c\n  cluster:\n    server: http://{address}\nusers:\n- name: u\n  user: {{}}\ncontexts:\n- name: test\n  context: {{cluster: c, user: u}}\n"
+        )).unwrap();
+        let mut body = b"before\n".to_vec();
+        body.extend(std::iter::repeat_n(b'x', 200_000));
+        body.extend(b"\n\xffbad\nafter\n");
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = vec![0; 8192];
+            let _ = socket.read(&mut request).await.unwrap();
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            socket.write_all(head.as_bytes()).await.unwrap();
+            socket.write_all(&body).await.unwrap();
+        });
+        let mut lines = Vec::new();
+        let result = stream_pod_logs(
+            ClientCache::new(config),
+            "test".into(),
+            "default".into(),
+            "web".into(),
+            Some("app".into()),
+            StreamOpts {
+                max_line_bytes: 16,
+                ..StreamOpts::default()
+            },
+            |line| lines.push(line),
+            || {},
+        )
+        .await;
+        server.await.unwrap();
+        assert_eq!(result, Ok(()));
+        assert_eq!(
+            lines,
+            [
+                whole("before"),
+                cut("xxxxxxxxxxxxxxxx"),
+                whole("\u{fffd}bad"),
+                whole("after")
+            ]
         );
     }
 
@@ -565,6 +814,7 @@ mod tests {
         assert_eq!(o.tail_lines, DEFAULT_TAIL_LINES);
         assert_eq!(o.since_seconds, None);
         assert!(!o.timestamps);
+        assert_eq!(o.max_line_bytes, MAX_LOG_LINE_BYTES);
         // The streaming params always follow and are never `previous`.
         let p = build_log_params(
             None,

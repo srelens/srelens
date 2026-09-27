@@ -196,4 +196,7 @@ admitted may finish.
 Each user of the multi-user web host grants permissions to their own apps; one user's
 grants never reach another's. Declared actions run only through `extensions.action`,
 after the host confirmation, and the host action primitives stay refused when called
-directly. See [capabilities.md](capabilities.md#web-host).
+directly. A grant is also held to the server's extension policy: an app that requests a
+capability the policy does not allow can't be installed, and one installed before the
+policy changed is refused on every call ([WEB.md](../WEB.md#extension-policy)). See
+[capabilities.md](capabilities.md#web-host).
