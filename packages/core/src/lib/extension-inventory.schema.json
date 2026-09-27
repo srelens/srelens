@@ -87,7 +87,7 @@
           "uniqueItems": true
         },
         "allowedPublishers": {
-          "description": "Signed apps only from these publishers; `null` allows every publisher the host trusts. An unsigned app is governed by `allowUnsignedApps` instead.",
+          "description": "Signed apps only from these publishers, each named by its delegation's ID (#559); `null` allows every publisher the host trusts. An unsigned app is governed by `allowUnsignedApps` instead.",
           "items": {
             "type": "string"
           },
