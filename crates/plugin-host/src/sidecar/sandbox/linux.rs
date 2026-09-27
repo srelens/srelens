@@ -65,9 +65,20 @@ pub(super) fn launch(
         ))
     })?;
     let memory = limits.memory_bytes;
+    let current = cgroup.path().join("memory.current");
     // The cgroup goes with the process: `describe` reads its OOM counters once
     // the sidecar has been reaped, then drops it, which removes the directory.
-    Launched::from_child(child, move |status| describe(status, cgroup, memory))
+    let mut launched = Launched::from_child(child, move |status| describe(status, cgroup, memory))?;
+    launched.process = launched
+        .process
+        .with_memory(move || memory_current(&current));
+    Ok(launched)
+}
+
+/// The cgroup's memory use now, from `memory.current`: `None` once the
+/// directory is gone with the process.
+fn memory_current(path: &Path) -> Option<u64> {
+    std::fs::read_to_string(path).ok()?.trim().parse().ok()
 }
 
 /// How the sidecar ended, with the cgroup's evidence when its memory limit
@@ -264,6 +275,16 @@ mod tests {
                 "{needle:?} missing from: {message}"
             );
         }
+    }
+
+    #[test]
+    fn memory_use_is_read_from_memory_current_until_the_cgroup_is_gone() {
+        let dir = fresh_dir();
+        let current = dir.path().join("memory.current");
+        std::fs::write(&current, "4194304\n").unwrap();
+        assert_eq!(memory_current(&current), Some(4_194_304));
+        std::fs::remove_file(&current).unwrap();
+        assert_eq!(memory_current(&current), None);
     }
 
     #[test]

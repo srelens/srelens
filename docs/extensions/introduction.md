@@ -44,6 +44,7 @@ Freelens and OpenLens packages are not supported.
 | [ui-contributions.md](ui-contributions.md) | Pages, dashboards, detail tabs, requirement checks, resource inspection |
 | [capabilities.md](capabilities.md) | The `extensions.*` capabilities, MCP, host GitOps actions |
 | [streams.md](streams.md) | The generic stream contract: frames, view ownership, limits, metrics |
+| [inspector.md](inspector.md) | The Extension Inspector and per-app logs: levels, redaction, local-only metrics |
 | [security.md](security.md) | Trust boundary and what is not yet protected |
 | [threat-model.md](threat-model.md) | Assets, adversaries, mitigations with their code, residual risk and open work |
 | [distribution.md](distribution.md) | Catalog, signed releases, local installation |

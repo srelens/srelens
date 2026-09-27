@@ -19,6 +19,8 @@ vi.mock("@srelens/core", async (importOriginal) => ({
   setExtensionSecret: vi.fn(),
   clearExtensionSecret: vi.fn(),
   onExtensionInventoryChanged: vi.fn(),
+  inspectExtension: vi.fn(),
+  extensionLogs: vi.fn(),
 }));
 import {
   listExtensionCatalog,
@@ -34,6 +36,9 @@ import {
   setExtensionSecret,
   clearExtensionSecret,
   onExtensionInventoryChanged,
+  inspectExtension,
+  extensionLogs,
+  type ExtensionInspection,
 } from "@srelens/core";
 import { ExtensionManager, ExtensionResults } from "./Extensions";
 
@@ -634,6 +639,89 @@ async function openDetails(app: ReturnType<typeof updated>) {
   fireEvent.click(await screen.findByRole("button", { name: `Details for ${label}` }));
   return screen.getByRole("region", { name: `${label} details` });
 }
+/** `updated()` with the manifest fields the Inspector names, which the shared fixture leaves out. */
+const inspected = () => {
+  const app = updated();
+  return {
+    ...app,
+    manifest: {
+      ...app.manifest,
+      srelensApiVersion: "^0.5",
+      kind: "declarative",
+      capabilities: [{ name: "list", title: "Applications", target: "k8s.listCustomResource", arguments: {}, inputs: [] }],
+    },
+  } as unknown as ReturnType<typeof updated>;
+};
+const noActivity = {
+  open: [], watches: [], opened: 0, messages: 0, bytes: 0, rateLimited: 0, refused: 0, windowEnded: 0, maxOpen: 8,
+};
+const declarativeInspection: ExtensionInspection = {
+  id: "org.test.gitops", runtime: "declarative", process: null, streams: noActivity, recentErrors: [],
+  log: { lines: 0, capacity: 1000, dropped: 0 },
+};
+it("opens Details on the Overview, with the Inspector and Logs beside it and neither read yet (#575)", async () => {
+  const details = await openDetails(updated());
+  const tabs = within(details).getByRole("tablist", { name: "App details" });
+  expect(within(tabs).getAllByRole("tab").map((tab) => [tab.textContent, tab.getAttribute("aria-selected")])).toEqual([
+    ["Overview", "true"],
+    ["Inspector", "false"],
+    ["Logs", "false"],
+  ]);
+  expect(within(details).getByRole("list", { name: "Granted capabilities" })).toBeTruthy();
+  expect(within(details).getByRole("textbox", { name: "GitOps manifest" })).toBeTruthy();
+  expect(inspectExtension).not.toHaveBeenCalled();
+  expect(extensionLogs).not.toHaveBeenCalled();
+});
+it("says in the Inspector and Logs that a declarative app has no process (#575)", async () => {
+  vi.mocked(inspectExtension).mockResolvedValue(declarativeInspection);
+  vi.mocked(extensionLogs).mockResolvedValue({ runtime: "declarative", lines: [], capacity: 1000, dropped: 0 });
+  const details = await openDetails(inspected());
+  fireEvent.click(within(details).getByRole("tab", { name: "Inspector" }));
+  expect(await within(details).findByText(/^No process\. This is a declarative app/)).toBeTruthy();
+  expect(within(details).getByText("No open streams.")).toBeTruthy();
+  expect(within(details).getByText("No watches.")).toBeTruthy();
+  // The Overview's own content is not drawn under another tab.
+  expect(within(details).queryByRole("textbox", { name: "GitOps manifest" })).toBeNull();
+  fireEvent.click(within(details).getByRole("tab", { name: "Logs" }));
+  expect(await within(details).findByText("This app has no process, so nothing writes to its log.")).toBeTruthy();
+  expect(extensionLogs).toHaveBeenCalledWith("org.test.gitops", { minLevel: "trace" });
+  fireEvent.click(within(details).getByRole("tab", { name: "Overview" }));
+  expect(within(details).getByRole("textbox", { name: "GitOps manifest" })).toBeTruthy();
+});
+it("takes a crashed sidecar's View logs to its log, and its Disable through the host (#575)", async () => {
+  const crashed: ExtensionInspection = {
+    ...declarativeInspection,
+    runtime: "sidecar",
+    process: {
+      state: "disabled", reason: "It exited with status 101 three times in a minute.",
+      message: "Extension process exited unexpectedly", actions: ["restart", "viewLogs", "disable"],
+      apiVersion: null, pid: null, startedAt: null, restart: null, launches: 3, unexpectedExits: 3,
+      memory: { bytes: null, limitBytes: 256 * 1024 * 1024, enforcement: "host" }, cpus: 1,
+      rpc: { answered: 0, failed: 0, timedOut: 0, refused: 0, inFlight: 0, latency: { samples: 0, p50Ms: null, p95Ms: null, maxMs: null } },
+      streams: { open: 0, opened: 0, limit: 16 },
+    },
+  };
+  vi.mocked(inspectExtension).mockResolvedValue(crashed);
+  vi.mocked(extensionLogs).mockResolvedValue({
+    runtime: "sidecar", capacity: 1000, dropped: 0,
+    lines: [{ seq: 1, at: Date.UTC(2026, 8, 27, 12), level: "error", source: "sidecar", text: "thread 'main' panicked" }],
+  });
+  const details = await openDetails(inspected());
+  fireEvent.click(within(details).getByRole("tab", { name: "Inspector" }));
+  const alert = await within(details).findByRole("alert");
+  expect(within(alert).getByText("Extension process exited unexpectedly")).toBeTruthy();
+  expect(within(alert).getByText("It exited with status 101 three times in a minute.")).toBeTruthy();
+  expect(within(details).queryByRole("button", { name: /restart/i })).toBeNull();
+  fireEvent.click(within(alert).getByRole("button", { name: "View logs" }));
+  expect(within(details).getByRole("tab", { name: "Logs" }).getAttribute("aria-selected")).toBe("true");
+  const log = await within(details).findByRole("log", { name: "GitOps log" });
+  expect(log.textContent).toContain("thread 'main' panicked");
+  fireEvent.click(within(details).getByRole("tab", { name: "Inspector" }));
+  fireEvent.click(within(await within(details).findByRole("alert")).getByRole("button", { name: "Disable" }));
+  await waitFor(() =>
+    expect(configureExtensions).toHaveBeenCalledWith({ action: "enable", id: "org.test.gitops", enabled: false }),
+  );
+});
 it("inspects an installed app's source, grants and manifest, and exports or resets its settings", async () => {
   vi.mocked(saveTextFile).mockResolvedValue("/tmp/settings.json");
   const details = await openDetails(updated());

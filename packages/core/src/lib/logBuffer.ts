@@ -24,6 +24,11 @@ export interface LogLine {
   /** "pod/container", or "" when there is exactly one source to blend into. */
   source: string;
   text: string;
+  /**
+   * The host cut the line at its limit, and `text` is its start (#747). Set
+   * only on a cut line.
+   */
+  truncated?: true;
 }
 
 /**

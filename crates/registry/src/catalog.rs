@@ -38,6 +38,10 @@ pub struct CatalogEntry {
     /// confirmation (#552) reads the same words the MCP gate does, rather than
     /// a second copy in UI constants — which is where they live today.
     pub confirm: Option<&'static str>,
+    /// For srelens's own UI only, never an MCP tool (`Capability::ui_only`,
+    /// #575): an app's logs and runtime metrics. Written only when true.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub ui_only: bool,
 }
 
 /// Project a registry into a sorted catalog for the frontend bridge.
@@ -52,6 +56,7 @@ pub fn catalog_of(reg: &Registry) -> Vec<CatalogEntry> {
             sensitive: c.annotations.sensitive,
             impact: c.annotations.impact,
             confirm: c.annotations.confirm,
+            ui_only: c.ui_only,
         })
         .collect();
     out.sort();

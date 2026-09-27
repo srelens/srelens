@@ -18,6 +18,9 @@ semver = "1"
 # credentials in it cannot hide behind unusual spelling. Already in the
 # workspace through srelens-capability.
 url = "2"
+# Redacting an app's log lines (#575): matching is linear in the line, so a
+# line a sidecar writes cannot make it slow. Already in the lockfile.
+regex = "1"
 # The sidecar supervisor (#572): child processes, their pipes, timers and the
 # channels between them. `fs` adapts the Windows backend's anonymous pipes,
 # which tokio has no async type for.

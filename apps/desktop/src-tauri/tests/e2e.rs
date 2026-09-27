@@ -2884,9 +2884,30 @@ async fn app_stream(h: &mut Harness, ctx: &str, settings: &TempSettings, flux_re
         .clone();
     assert_eq!(flux["openStreams"], 1, "{metrics}");
     assert_eq!(flux["streams"][0]["stream"], json!(opened.stream), "{metrics}");
+
+    // The Inspector (#575) sees the live stream, and a declarative app has no
+    // process and nothing in its log. The payloads are the ones
+    // `inspectExtension` and `extensionLogs` send.
+    let inspected = h.ok("extensions.inspect", json!({"id": "org.example.flux"})).await;
+    assert_eq!(inspected["runtime"], "declarative", "{inspected}");
+    assert_eq!(inspected["process"], Value::Null, "{inspected}");
+    let open = inspected["streams"]["open"].as_array().unwrap();
+    assert!(
+        open.iter().any(|s| s["stream"] == json!(opened.stream) && s["source"] == "read"),
+        "{inspected}"
+    );
+    assert_eq!(inspected["streams"]["watches"], json!([]), "{inspected}");
+    assert_eq!(inspected["recentErrors"], json!([]), "{inspected}");
+    let logs = h
+        .ok("extensions.logs", json!({"id": "org.example.flux", "after": 0, "minLevel": "trace"}))
+        .await;
+    assert_eq!(logs, json!({"runtime": "declarative", "lines": [], "capacity": 1000, "dropped": 0}));
+
     assert_eq!(streams.close_view("e2e/page#1"), 1);
     let last = sink.payloads_for(channel).pop().unwrap();
     assert_eq!(last, json!({"type": "close", "stream": opened.stream, "reason": "viewClosed"}));
+    let inspected = h.ok("extensions.inspect", json!({"id": "org.example.flux"})).await;
+    assert_eq!(inspected["streams"]["open"], json!([]), "a closed view's stream is gone: {inspected}");
 }
 
 /// #566: a `watch` stream on the Flux app's Kustomization reader lists the

@@ -195,11 +195,15 @@ fn signal_name(signal: i32) -> Option<&'static str> {
     }
 }
 
+/// Reads a running sidecar's memory use now, in bytes; `None` once it cannot.
+pub type MemoryProbe = Arc<dyn Fn() -> Option<u64> + Send + Sync>;
+
 /// A running sidecar process: a way to stop it, and its exit.
 pub struct Process {
     pid: Option<u32>,
     kill: Arc<dyn Fn() + Send + Sync>,
     exit: Pin<Box<dyn Future<Output = Exit> + Send>>,
+    memory: Option<MemoryProbe>,
 }
 
 impl Process {
@@ -215,7 +219,25 @@ impl Process {
             pid,
             kill: Arc::new(kill),
             exit: Box::pin(exit),
+            memory: None,
         }
+    }
+
+    /// The same process, with a way to read its memory use for the Inspector
+    /// (#575): the cgroup's `memory.current` on Linux. A backend that cannot
+    /// measure it leaves it out, and the Inspector says so rather than
+    /// showing a number. macOS's watchdog samples the same figure (#713).
+    pub fn with_memory(
+        mut self,
+        probe: impl Fn() -> Option<u64> + Send + Sync + 'static,
+    ) -> Process {
+        self.memory = Some(Arc::new(probe));
+        self
+    }
+
+    /// The memory reader, when the backend has one.
+    pub fn memory(&self) -> Option<MemoryProbe> {
+        self.memory.clone()
     }
 
     pub fn pid(&self) -> Option<u32> {

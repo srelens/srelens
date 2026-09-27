@@ -1,16 +1,18 @@
 //! Tauri adapter for app streams (#565): the contract and its lifecycle live
 //! in `srelens_streams::app` and `srelens_registry`; this module only maps the
-//! command surface and hands each stream a `TauriSink`, so its frames reach
-//! the WebView as events on the channel the caller already listens on.
+//! command surface and hands each stream a `ChannelSink` over the `onEvent`
+//! channel its page passed, so its frames reach that page and no other
+//! window (#733).
 
 use std::sync::Arc;
 
 use serde_json::Value;
 use srelens_registry::{ExtensionStreams, OpenStreamOut};
+use tauri::ipc::Channel;
 use tauri::{AppHandle, Runtime, State, Window};
 
 use crate::bridge::AppAudit;
-use crate::sink::TauriSink;
+use crate::sink::{ChannelSink, TauriSink};
 
 /// The registry's app streams, or `None` on a host built without apps.
 pub struct AppExtensionStreams(pub Option<Arc<ExtensionStreams>>);
@@ -41,15 +43,15 @@ pub fn listen_inventory<R: Runtime>(streams: &Option<Arc<ExtensionStreams>>, app
 #[tauri::command]
 pub async fn extension_stream_open<R: Runtime>(
     input: Value,
+    on_event: Channel<Value>,
     window: Window<R>,
-    app: AppHandle<R>,
     streams: State<'_, AppExtensionStreams>,
     audit: State<'_, AppAudit>,
 ) -> Result<OpenStreamOut, String> {
     streams
         .get()?
         .open_in_window(
-            Arc::new(TauriSink(app)),
+            Arc::new(ChannelSink(on_event)),
             window.label(),
             audit.0.clone(),
             input,
@@ -57,22 +59,26 @@ pub async fn extension_stream_open<R: Runtime>(
         .await
 }
 
-/// Cancel one stream. Idempotent: `false` when it had already ended.
+/// Cancel one stream the calling window opened (#733); another window's is
+/// refused. Idempotent: `false` when it had already ended.
 #[tauri::command]
-pub async fn extension_stream_cancel(
+pub async fn extension_stream_cancel<R: Runtime>(
     stream: String,
+    window: Window<R>,
     streams: State<'_, AppExtensionStreams>,
 ) -> Result<bool, String> {
-    Ok(streams.get()?.cancel(&stream))
+    streams.get()?.cancel_in_window(&stream, window.label())
 }
 
-/// End every stream a view opened, as the view closes.
+/// End every stream a view of the calling window opened, as the view closes.
+/// Another window's view of the same name is its own (#733).
 #[tauri::command]
-pub async fn extension_stream_close_view(
+pub async fn extension_stream_close_view<R: Runtime>(
     view: String,
+    window: Window<R>,
     streams: State<'_, AppExtensionStreams>,
 ) -> Result<usize, String> {
-    Ok(streams.get()?.close_view(&view))
+    Ok(streams.get()?.close_view_in_window(&view, window.label()))
 }
 
 #[cfg(test)]
@@ -105,22 +111,110 @@ mod tests {
         });
         let refused = extension_stream_open(
             input,
-            window,
-            app.handle().clone(),
+            crate::sink::tests::recording().0,
+            window.clone(),
             app.state(),
             app.state(),
         )
         .await
         .unwrap_err();
         assert!(refused.contains("removed"), "{refused}");
-        assert!(!extension_stream_cancel("s-1".into(), app.state())
-            .await
-            .unwrap());
+        assert!(
+            !extension_stream_cancel("s-1".into(), window.clone(), app.state())
+                .await
+                .unwrap()
+        );
         assert_eq!(
-            extension_stream_close_view("v".into(), app.state())
+            extension_stream_close_view("v".into(), window.clone(), app.state())
                 .await
                 .unwrap(),
             0
+        );
+    }
+
+    /// An app stream's frames reach only the page that opened it (#733): on
+    /// the channel passed with the open, tagged with the stream's channel
+    /// name, and never as an event every window would hear. Another window
+    /// cannot cancel it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_app_streams_frames_go_only_to_the_window_that_opened_it() {
+        use std::sync::Mutex;
+        use tauri::Listener;
+        let dir = tempfile::tempdir().unwrap();
+        let (registry, streams) = srelens_registry::build_registry_and_app_streams(
+            ClientCache::new_many(vec![]),
+            vec![],
+            Some(dir.path().join("settings.json")),
+        );
+        let manifest = json!({
+            "id": "org.example.one", "name": "One", "version": "0.1.0",
+            "srelensApiVersion": "^0.5", "kind": "declarative",
+            "permissions": ["k8s.listDeployments"],
+            "capabilities": [{"name": "workloads", "title": "Workloads",
+                "target": "k8s.listDeployments", "inputs": ["context", "namespace"],
+                "arguments": {}}],
+            "contributions": {"pages": [], "detailTabs": [], "detailLinks": []}
+        })
+        .to_string();
+        registry
+            .invoke(
+                "extensions.configure",
+                json!({"action": "unsignedApps", "allowUnsignedApps": true}),
+            )
+            .await
+            .unwrap();
+        let installed = registry
+            .invoke(
+                "extensions.configure",
+                json!({"action": "install", "manifest": manifest,
+                       "grants": ["k8s.listDeployments"]}),
+            )
+            .await
+            .unwrap();
+        let revision = installed["plugins"][0]["revision"].as_u64().unwrap();
+        let app = tauri::test::mock_app();
+        app.manage(AppExtensionStreams(streams));
+        app.manage(AppAudit(Arc::new(srelens_capability::audit::NoopAudit)));
+        let main = crate::window_streams::tests::mock_window(&app, "main");
+        let other = crate::window_streams::tests::mock_window(&app, "ctx-1");
+        let broadcast = Arc::new(Mutex::new(Vec::<String>::new()));
+        let heard = broadcast.clone();
+        app.listen_any("extstream:one", move |e| {
+            heard.lock().unwrap().push(e.payload().to_owned());
+        });
+
+        let (on_event, got) = crate::sink::tests::recording();
+        let opened = extension_stream_open(
+            json!({"id": "org.example.one", "revision": revision, "view": "page#1",
+                   "channel": "extstream:one", "context": "c", "namespace": "ns",
+                   "source": {"kind": "read", "capability": "workloads"}}),
+            on_event,
+            main.clone(),
+            app.state(),
+            app.state(),
+        )
+        .await
+        .unwrap();
+
+        let got = got.lock().unwrap().clone();
+        assert_eq!(
+            got.first(),
+            Some(&json!({"event": "extstream:one",
+                         "payload": {"type": "open", "stream": opened.stream}})),
+            "the open frame reached its window: {got:?}"
+        );
+        let refused = extension_stream_cancel(opened.stream.clone(), other, app.state())
+            .await
+            .unwrap_err();
+        assert!(refused.contains("not opened by this window"), "{refused}");
+        assert!(extension_stream_cancel(opened.stream, main, app.state())
+            .await
+            .unwrap());
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(
+            *broadcast.lock().unwrap(),
+            Vec::<String>::new(),
+            "nothing broadcast"
         );
     }
 
@@ -168,19 +262,23 @@ mod tests {
         let window = crate::window_streams::tests::mock_window(&app, "main");
         let refused = extension_stream_open(
             json!({}),
-            window,
-            app.handle().clone(),
+            crate::sink::tests::recording().0,
+            window.clone(),
             app.state(),
             app.state(),
         )
         .await
         .unwrap_err();
         assert_eq!(refused, "Apps are not available on this host");
-        assert!(extension_stream_cancel("s".into(), app.state())
-            .await
-            .is_err());
-        assert!(extension_stream_close_view("v".into(), app.state())
-            .await
-            .is_err());
+        assert!(
+            extension_stream_cancel("s".into(), window.clone(), app.state())
+                .await
+                .is_err()
+        );
+        assert!(
+            extension_stream_close_view("v".into(), window.clone(), app.state())
+                .await
+                .is_err()
+        );
     }
 }

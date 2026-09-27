@@ -7590,15 +7590,28 @@ mod tests {
                 "line": "POST /order 201"
             }),
         );
+        // A line the host cut arrives marked, and the mark reaches the view (#747).
+        app.handle_stream_event(
+            ch.clone(),
+            serde_json::json!({
+                "source": "api-server-abc",
+                "line": "the start of a long one",
+                "truncated": true
+            }),
+        );
 
         if let ActiveView::Logs(ref logs) = app.active_view {
-            assert_eq!(logs.entries.len(), 3); // 1 header banner + 2 log lines
+            assert_eq!(logs.entries.len(), 4); // 1 header banner + 3 log lines
             let e1 = &logs.entries[1];
             assert_eq!(e1.source.as_deref(), Some("api-server-abc"));
             assert_eq!(e1.line, "GET /health 200");
             let e2 = &logs.entries[2];
             assert_eq!(e2.source.as_deref(), Some("api-server-def"));
             assert_eq!(e2.line, "POST /order 201");
+            assert!(!e1.truncated && !e2.truncated);
+            let e3 = &logs.entries[3];
+            assert_eq!(e3.line, "the start of a long one");
+            assert!(e3.truncated);
         } else {
             panic!("Expected ActiveView::Logs");
         }

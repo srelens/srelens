@@ -25,6 +25,8 @@ pub enum Reply {
     Raw(&'static str),
     /// Answers, then exits with this status.
     ResultThenExit(Value, i32),
+    /// Answers after this long, still reading meanwhile.
+    Late(std::time::Duration, Value),
     /// Dies as an abort would.
     Crash,
 }
@@ -80,7 +82,8 @@ pub struct FakeLauncher {
     handler: Handler,
     enforcement: Enforcement,
     unavailable: Option<String>,
-    stderr: Option<&'static str>,
+    stderr: Vec<&'static str>,
+    memory: Option<u64>,
     launches: Arc<AtomicUsize>,
     record: Arc<Mutex<Record>>,
 }
@@ -93,7 +96,8 @@ impl FakeLauncher {
             handler: Arc::new(answer),
             enforcement: Enforcement::Kernel,
             unavailable: None,
-            stderr: None,
+            stderr: Vec::new(),
+            memory: None,
             launches: Arc::new(AtomicUsize::new(0)),
             record: Arc::default(),
         }
@@ -113,9 +117,15 @@ impl FakeLauncher {
         self
     }
 
-    /// Writes `line` to stderr when it starts.
+    /// Writes `line` to stderr when it starts, after any given before.
     pub fn logging(mut self, line: &'static str) -> FakeLauncher {
-        self.stderr = Some(line);
+        self.stderr.push(line);
+        self
+    }
+
+    /// Reports `bytes` as its memory use, as the Linux backend reads a cgroup's.
+    pub fn using_memory(mut self, bytes: u64) -> FakeLauncher {
+        self.memory = Some(bytes);
         self
     }
 
@@ -160,9 +170,9 @@ impl Launcher for FakeLauncher {
         let (host_stderr, mut stderr) = tokio::io::duplex(1 << 16);
         let handler = self.handler.clone();
         let record = self.record.clone();
-        let log = self.stderr;
+        let log = self.stderr.clone();
         let task = tokio::spawn(async move {
-            if let Some(line) = log {
+            for line in log {
                 let _ = stderr.write_all(format!("{line}\n").as_bytes()).await;
             }
             let (out, mut lines) = mpsc::unbounded_channel::<String>();
@@ -222,6 +232,14 @@ impl Launcher for FakeLauncher {
                         let _ = out.send(answer(result));
                         break status;
                     }
+                    Reply::Late(after, result) => {
+                        let out = out.clone();
+                        let line = answer(result);
+                        tokio::spawn(async move {
+                            tokio::time::sleep(after).await;
+                            let _ = out.send(line);
+                        });
+                    }
                     Reply::Hang => std::future::pending::<()>().await,
                     Reply::Crash => break -6,
                 }
@@ -247,11 +265,15 @@ impl Launcher for FakeLauncher {
                 Err(_) => exit_by_signal(9, "SIGKILL"),
             }
         };
+        let mut process = Process::new(Some(launch as u32), exit, move || killer.kill());
+        if let Some(bytes) = self.memory {
+            process = process.with_memory(move || Some(bytes));
+        }
         Ok(Launched {
             stdin: Box::new(stdin),
             stdout: Box::new(host_stdout),
             stderr: Box::new(host_stderr),
-            process: Process::new(Some(launch as u32), exit, move || killer.kill()),
+            process,
         })
     }
 }

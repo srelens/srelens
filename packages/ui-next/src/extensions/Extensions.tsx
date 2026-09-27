@@ -1,4 +1,5 @@
 import { ExtensionDetails } from "./ExtensionDetails";
+import { bytes, inactiveReason } from "./detailsText";
 import { ExtensionSettingsForm } from "./ExtensionSettingsForm";
 import { ExtensionBindings, ReviewManifest } from "./ExtensionBindings";
 import { plainText } from "./displayText";
@@ -57,10 +58,6 @@ type ReviewOrigin =
   | { kind: "packageFile"; package: ExtensionPackageReview; file: string }
   | { kind: "catalogPackage"; package: ExtensionPackageReview; id: string; sha256: string };
 const MANIFEST_ORIGIN: ReviewOrigin = { kind: "manifest" };
-/** A size as a reader measures it. */
-function bytes(size: number) {
-  return size < 1024 ? `${size} B` : size < 1024 * 1024 ? `${(size / 1024).toFixed(1)} KiB` : `${(size / (1024 * 1024)).toFixed(1)} MiB`;
-}
 
 export function ExtensionManager() {
   const { Button, Tabs } = useContext(ExtensionControls);
@@ -497,16 +494,11 @@ export function ExtensionManager() {
             </Button>
           </div>
           <p className="extension-message">{plugin.manifest.id}</p>
-          {!plugin.quarantined && plugin.policyBlocked && (
-            <p className="extension-error">Disabled: {plugin.policyBlocked}.</p>
+          {(plugin.quarantined || plugin.policyBlocked) && (
+            <p className="extension-error">Disabled: {inactiveReason(plugin)}</p>
           )}
           {!plugin.quarantined && !plugin.signatureProof && (plugin.manifest.actions?.length ?? 0) > 0 && (
             <p className="extension-message">Requires permission to run unsigned apps that modify clusters.</p>
-          )}
-          {plugin.quarantined && (
-            <p className="extension-error">
-              Disabled: {plugin.quarantined}. Remove it or reinstall it from the Catalog.
-            </p>
           )}
           {settingsFor === plugin.manifest.id && (
             <ExtensionSettingsForm

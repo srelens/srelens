@@ -14,25 +14,29 @@
 //! - [`data`]: its data directory (#573), the one path it may write: private
 //!   to its app, limited in size, removed with the app.
 //!
-//! No manifest kind runs a sidecar yet (#574); per-app logs are #575, the
-//! macOS memory and CPU watchdog #713.
+//! - [`Inspect`]: what the Inspector reads from a supervisor (#575), and
+//!   [`AppLog`], the app's log it writes to.
+//!
+//! No manifest kind runs a sidecar yet (#574); the macOS memory and CPU
+//! watchdog is #713.
 
 mod broker;
 mod connection;
 pub mod data;
 mod limits;
-mod logs;
+mod metrics;
 pub mod protocol;
 pub mod sandbox;
 mod supervisor;
 
+pub use crate::app_log::{AppLog, LogLevel, LogLine, LogSource, LOG_LINES, LOG_LINE_BYTES};
 pub use broker::{AppIdentity, CallContext, CapabilityBroker, Consent, ConsentRequest, NoConsent};
 pub use connection::{Broker, NoBroker, RequestError, SidecarStream, StreamEvent, STREAM_BUFFER};
 pub use limits::{Limits, Policy};
-pub use logs::{LogLine, LogSource, LOG_LINES, LOG_LINE_BYTES};
+pub use metrics::{Inspect, Latency, RequestMetrics, SidecarMetrics, LATENCY_SAMPLES};
 pub use protocol::SIDECAR_API_VERSIONS;
 pub use sandbox::{
-    Enforcement, Exit, LaunchError, Launched, Launcher, OsSandbox, Process, SandboxConfig,
-    SidecarCommand,
+    Enforcement, Exit, LaunchError, Launched, Launcher, MemoryProbe, OsSandbox, Process,
+    SandboxConfig, SidecarCommand,
 };
 pub use supervisor::{Action, SidecarConfig, SidecarStatus, Supervisor, UNEXPECTED_EXIT};
