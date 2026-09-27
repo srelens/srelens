@@ -191,9 +191,9 @@ const columns: Column<AuditEntry>[] = [
   {
     key: "source",
     // The first question this pane is opened with is "was that me or an
-    // agent?", so that is the column: `ui` or `mcp`, with the transport
-    // underneath it for the MCP rows because "which client do I go turn off"
-    // is the second question. It is not headed `Client`: §23 drew product
+    // agent?", so that is the column: `ui`, `mcp`, or `app` for an app's own
+    // sidecar (#573), with the transport beside it for everything but the UI
+    // because "which client do I go turn off" is the second question. It is not headed `Client`: §23 drew product
     // names there and #369 says plainly that srelens does not track which
     // client connected, so a `Client` header would claim exactly what that
     // issue says srelens cannot know. The MCP server pane declines to draw a
@@ -202,7 +202,7 @@ const columns: Column<AuditEntry>[] = [
     render: (entry) => (
       <span className="whitespace-nowrap" data-testid="audit-source">
         {entry.source}
-        {entry.source === "mcp" ? <span className="text-muted"> · {entry.transport}</span> : null}
+        {entry.source !== "ui" ? <span className="text-muted"> · {entry.transport}</span> : null}
       </span>
     ),
     getValue: (entry) => entry.source,
@@ -336,9 +336,9 @@ export function AuditPane() {
       <div className="flex flex-wrap items-start justify-between gap-2">
         <p className="min-w-0 flex-1 text-[0.75rem] leading-relaxed text-muted">
           Showing the most recent {LIMIT} capability calls. Older calls exist only in the log file itself, not here.
-          Every call an agent made over MCP is recorded; from srelens itself, only the calls that changed something
-          or read secret material are — an app's own reads are not events. The log is a file on this machine and
-          is never sent anywhere.
+          Every call an agent made over MCP is recorded; from srelens itself, and from an installed app's sidecar,
+          only the calls that changed something or read secret material are — reads alone are not events. The log
+          is a file on this machine and is never sent anywhere.
         </p>
         <Button
           variant="secondary"

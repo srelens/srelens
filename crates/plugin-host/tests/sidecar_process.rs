@@ -7,14 +7,16 @@
 //! waits. The sandbox itself is checked by `sandbox_conformance.rs`.
 
 use serde_json::json;
+use srelens_plugin_host::sidecar::data::DataDir;
 use srelens_plugin_host::sidecar::{
     Enforcement, Exit, LaunchError, Launched, Launcher, Limits, LogSource, NoBroker, OsSandbox,
     Policy, RequestError, SandboxConfig, SidecarCommand, SidecarConfig, SidecarStatus, Supervisor,
 };
 use std::ffi::OsString;
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 const PROBE: &str = env!("CARGO_BIN_EXE_srelens-sidecar-probe");
@@ -53,6 +55,19 @@ impl Launcher for Unconfined {
     }
 }
 
+/// A fresh, private data directory (#573) for one supervisor, under one root
+/// per test binary.
+fn data_dir() -> PathBuf {
+    static ROOT: OnceLock<tempfile::TempDir> = OnceLock::new();
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let root = ROOT.get_or_init(|| tempfile::tempdir().expect("a temporary directory"));
+    let n = NEXT.fetch_add(1, Ordering::SeqCst);
+    DataDir::for_app(&root.path().join(n.to_string()), "org.example.probe")
+        .expect("a data directory")
+        .path()
+        .to_owned()
+}
+
 fn config(env: &[(&str, &str)]) -> SidecarConfig {
     SidecarConfig {
         command: SidecarCommand {
@@ -63,7 +78,7 @@ fn config(env: &[(&str, &str)]) -> SidecarConfig {
                 .iter()
                 .map(|(k, v)| (OsString::from(k), OsString::from(v)))
                 .collect(),
-            data_dir: std::env::temp_dir(),
+            data_dir: data_dir(),
         },
         limits: Limits::default(),
         policy: Policy {

@@ -44,6 +44,13 @@ impl Call<'_> {
             .out
             .send(json!({"jsonrpc": "2.0", "method": method, "params": params}).to_string());
     }
+
+    /// Call the host, as a sidecar calls its broker (#573).
+    pub fn call_host(&self, id: &str, method: &str, params: Value) {
+        let _ = self.out.send(
+            json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}).to_string(),
+        );
+    }
 }
 
 type Handler = Arc<dyn Fn(&Call) -> Option<Reply> + Send + Sync>;

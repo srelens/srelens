@@ -1,7 +1,9 @@
 //! The sandbox conformance suite (#572): the #571 spike's seven checks
 //! (`spikes/sidecar-sandbox/tests/checks.rs`), run against the production
 //! backend for this OS through the supervisor, plus two for what the spike
-//! left open: the host's environment, and Unix sockets.
+//! left open: the host's environment, and Unix sockets. #573 adds three for
+//! the data directory: that it is the only path the sidecar may write, that a
+//! link inside it reaches nothing outside, and that its size limit holds.
 //!
 //! Every test is `#[ignore]`: each needs an OS sandbox, network access for
 //! its positive controls, and on Linux a delegated cgroup. The
@@ -25,6 +27,7 @@
 //! CPU checks are skipped.
 
 use serde_json::{json, Value};
+use srelens_plugin_host::sidecar::data::DataDir;
 use srelens_plugin_host::sidecar::{
     Enforcement, LaunchError, Launched, Launcher, Limits, NoBroker, OsSandbox, Policy,
     RequestError, SandboxConfig, SidecarCommand, SidecarConfig, SidecarStatus, Supervisor,
@@ -69,19 +72,25 @@ impl Launcher for IsolationOnly {
 ///
 /// ```text
 /// <root>/bin/probe[.exe]      the sidecar, copied here
-/// <root>/data/                the one directory it is granted
+/// <root>/apps/<digest>/       its data directory, the one it is granted (#573)
+/// <root>/apps/<digest>/       another app's data directory
 /// <root>/home/.kube/config    a stand-in kubeconfig
 /// <root>/outside/secret.txt   an ordinary file outside the grant
 /// ```
 struct Fixture {
     root: tempfile::TempDir,
+    data: DataDir,
+    other: DataDir,
 }
 
 impl Fixture {
     fn new() -> Fixture {
         let root = tempfile::tempdir().expect("a temporary directory");
-        let fixture = Fixture { root };
-        for dir in [fixture.path("bin"), fixture.data(), fixture.path("outside")] {
+        let apps = root.path().join("apps");
+        let data = DataDir::for_app(&apps, APP_ID).expect("the app's data directory");
+        let other = DataDir::for_app(&apps, "org.srelens.another-app").expect("another's");
+        let fixture = Fixture { root, data, other };
+        for dir in [fixture.path("bin"), fixture.path("outside")] {
             std::fs::create_dir_all(dir).unwrap();
         }
         std::fs::create_dir_all(fixture.kubeconfig().parent().unwrap()).unwrap();
@@ -99,7 +108,7 @@ impl Fixture {
             .join(format!("probe{}", std::env::consts::EXE_SUFFIX))
     }
     fn data(&self) -> PathBuf {
-        self.path("data")
+        self.data.path().to_owned()
     }
     fn kubeconfig(&self) -> PathBuf {
         self.path("home").join(".kube").join("config")
@@ -118,6 +127,11 @@ fn sandbox() -> OsSandbox {
 
 /// A running, sandboxed probe.
 async fn sidecar(fixture: &Fixture) -> Supervisor {
+    sidecar_with(fixture, limits()).await
+}
+
+/// A running, sandboxed probe under `limits`.
+async fn sidecar_with(fixture: &Fixture, limits: Limits) -> Supervisor {
     let config = SidecarConfig {
         command: SidecarCommand {
             app_id: APP_ID.into(),
@@ -126,7 +140,7 @@ async fn sidecar(fixture: &Fixture) -> Supervisor {
             env: vec![("PROBE_MARK".into(), "1".into())],
             data_dir: fixture.data(),
         },
-        limits: limits(),
+        limits,
         policy: Policy {
             // One start per test: a stop is what some checks look for.
             backoff: Vec::new(),
@@ -196,6 +210,9 @@ async fn call(sidecar: &Supervisor, method: &str, params: Value) -> Reply {
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 enum Denial {
     File,
+    /// A hard link to a file outside the grant: a filesystem refusal, or
+    /// Landlock's `EXDEV` for a link it will not let cross into the grant.
+    Link,
     Network,
     Dns,
     Process,
@@ -207,6 +224,7 @@ impl Denial {
         let kind = failure.kind.as_str();
         match self {
             Denial::File => matches!(kind, "PermissionDenied" | "NotFound" | "ReadOnlyFilesystem"),
+            Denial::Link => Denial::File.accepts(failure) || kind == "CrossesDevices",
             Denial::Network => matches!(
                 kind,
                 "PermissionDenied"
@@ -254,6 +272,13 @@ async fn assert_denied(
 
 fn host_reads(path: &Path) -> Result<(), String> {
     std::fs::read(path).map(|_| ()).map_err(|e| e.to_string())
+}
+
+/// The host writes `path` and removes it again: the positive control for a
+/// write the sidecar must be refused.
+fn host_writes(path: &Path) -> Result<(), String> {
+    std::fs::write(path, "control").map_err(|e| e.to_string())?;
+    std::fs::remove_file(path).map_err(|e| e.to_string())
 }
 
 #[tokio::test]
@@ -497,12 +522,24 @@ async fn the_host_environment_does_not_reach_the_sidecar() {
     names.sort_unstable();
     // On Windows, `SystemRoot` for Winsock, and the three variables Windows
     // reroutes into the AppContainer's own folder when it starts the process.
+    // On Linux and macOS, `TMPDIR`: the data directory, the one place its
+    // temporary files can go (#573).
     let expected: &[&str] = if cfg!(windows) {
         &["LOCALAPPDATA", "PROBE_MARK", "SystemRoot", "TEMP", "TMP"]
     } else {
-        &["PROBE_MARK"]
+        &["PROBE_MARK", "TMPDIR"]
     };
     assert_eq!(names, expected, "the host's own variables leaked");
+    #[cfg(unix)]
+    {
+        let tmpdir = answer["values"]["TMPDIR"].as_str().unwrap_or_default();
+        let data = std::fs::canonicalize(fixture.data()).unwrap();
+        assert_eq!(
+            std::fs::canonicalize(tmpdir).ok(),
+            Some(data),
+            "TMPDIR is {tmpdir}"
+        );
+    }
     #[cfg(windows)]
     for name in ["LOCALAPPDATA", "TEMP", "TMP"] {
         let theirs = answer["values"][name].as_str().unwrap_or_default();
@@ -547,4 +584,266 @@ async fn a_unix_socket_outside_the_grant_cannot_be_reached() {
 #[ignore = "run last by the sandbox-conformance CI job"]
 fn zz_cleanup_deletes_the_appcontainer_profile() {
     srelens_plugin_host::sidecar::sandbox::delete_profile(APP_ID).expect("the profile is deleted");
+}
+
+/// The sidecar may write its data directory and nowhere else (#573): not the
+/// directory beside it that holds the other apps' data, not another app's,
+/// not a temporary directory, not where its program is. On Windows its own
+/// temporary directory is the AppContainer's profile folder, which the backend
+/// denies it.
+#[tokio::test]
+#[ignore = "needs this OS's sandbox; run by the sandbox-conformance CI job"]
+async fn the_data_directory_is_the_only_path_the_sidecar_may_write() {
+    let fixture = Fixture::new();
+    let sidecar = sidecar(&fixture).await;
+    let written = fixture.data().join("cache.db");
+    let reply = call(
+        &sidecar,
+        "write_file",
+        json!({"path": written, "text": "ok"}),
+    )
+    .await;
+    assert!(
+        matches!(reply, Reply::Ok(_)),
+        "write in its data directory: {reply:?}"
+    );
+
+    // Its own temporary directory: on Linux and macOS its data directory,
+    // where a temporary file is written and counted against the limit; on
+    // Windows the AppContainer's folder, which it may not write.
+    let Reply::Ok(theirs) = call(&sidecar, "temp_dir", json!({})).await else {
+        panic!("temp_dir did not answer");
+    };
+    let theirs = PathBuf::from(theirs["path"].as_str().expect("a path"));
+    let canonical_data = std::fs::canonicalize(fixture.data()).unwrap();
+    if std::fs::canonicalize(&theirs).is_ok_and(|t| t.starts_with(&canonical_data)) {
+        let temporary = theirs.join("scratch");
+        let reply = call(
+            &sidecar,
+            "write_file",
+            json!({"path": temporary, "text": "ok"}),
+        )
+        .await;
+        assert!(
+            matches!(reply, Reply::Ok(_)),
+            "write in its temporary directory: {reply:?}"
+        );
+    }
+    let mut places: Vec<(&str, PathBuf)> = vec![
+        ("the data root, beside its directory", fixture.path("apps")),
+        (
+            "another app's data directory",
+            fixture.other.path().to_owned(),
+        ),
+        ("a directory outside the grant", fixture.path("outside")),
+        ("the directory holding its program", fixture.path("bin")),
+        ("the host's temporary directory", std::env::temp_dir()),
+    ];
+    if !std::fs::canonicalize(&theirs).is_ok_and(|t| t.starts_with(&canonical_data)) {
+        places.push(("its own temporary directory", theirs.clone()));
+    }
+    if cfg!(unix) {
+        places.push(("/tmp", PathBuf::from("/tmp")));
+        places.push(("/var/tmp", PathBuf::from("/var/tmp")));
+    }
+    if cfg!(target_os = "linux") {
+        places.push(("/dev/shm", PathBuf::from("/dev/shm")));
+    }
+    for (n, (what, dir)) in places.into_iter().enumerate() {
+        let name = format!("srelens-conformance-{}-{n}", std::process::id());
+        let control = host_writes(&dir.join(format!("{name}-control")));
+        let planted = dir.join(&name);
+        let params = json!({"path": planted, "text": "planted"});
+        assert_denied(
+            &sidecar,
+            &format!("write in {what} ({})", dir.display()),
+            control,
+            "write_file",
+            params,
+            Denial::File,
+        )
+        .await;
+        let leaked = planted.exists();
+        let _ = std::fs::remove_file(&planted);
+        assert!(!leaked, "{what}: the file was written");
+    }
+}
+
+/// A link made inside the data directory reaches nothing outside it: a hard
+/// link to the kubeconfig cannot be made, and a symbolic link, where it can be
+/// made at all, cannot be read through. The sandbox resolves the path; the
+/// supervisor's measuring and clearing never follow one (`sidecar::data`).
+#[tokio::test]
+#[ignore = "needs this OS's sandbox; run by the sandbox-conformance CI job"]
+async fn a_link_in_the_data_directory_reaches_nothing_outside_it() {
+    let fixture = Fixture::new();
+    let sidecar = sidecar(&fixture).await;
+    let control_link = fixture.path("outside").join("control-link");
+    let control = std::fs::hard_link(fixture.kubeconfig(), &control_link)
+        .map_err(|e| e.to_string())
+        .and_then(|()| std::fs::remove_file(&control_link).map_err(|e| e.to_string()));
+    let hard = fixture.data().join("kubeconfig-hard");
+    let params = json!({"from": fixture.kubeconfig(), "to": hard});
+    assert_denied(
+        &sidecar,
+        "hard-link the kubeconfig into the data directory",
+        control,
+        "hard_link",
+        params,
+        Denial::Link,
+    )
+    .await;
+    assert!(!hard.exists());
+
+    let soft = fixture.data().join("kubeconfig-soft");
+    let made = call(
+        &sidecar,
+        "symlink",
+        json!({"target": fixture.kubeconfig(), "link": soft}),
+    )
+    .await;
+    eprintln!("symlink to the kubeconfig: {made:?}");
+    match made {
+        // Made: reading through it is what must fail.
+        Reply::Ok(_) => {
+            assert!(std::fs::symlink_metadata(&soft).is_ok_and(|m| m.file_type().is_symlink()));
+            assert_denied(
+                &sidecar,
+                "read the kubeconfig through a symbolic link in the data directory",
+                host_reads(&fixture.kubeconfig()),
+                "read_file",
+                json!({"path": soft}),
+                Denial::File,
+            )
+            .await;
+        }
+        // Not made, as on Windows, where it takes a privilege an AppContainer
+        // lacks (ERROR_PRIVILEGE_NOT_HELD, 1314): then there is nothing to
+        // read through, and the refusal must be that one.
+        Reply::Refused(failure) => {
+            let privilege = cfg!(windows) && failure.os == Some(1314);
+            assert!(
+                privilege || Denial::File.accepts(&failure),
+                "the link was refused, but not as a sandbox refuses: {failure:?}"
+            );
+            assert!(std::fs::symlink_metadata(&soft).is_err());
+        }
+        Reply::Stopped(why) => panic!("the sidecar stopped: {why}"),
+    }
+}
+
+/// Nor may it change what it cannot write: the mode of a file outside the data
+/// directory, which would let it make a kubeconfig readable to every user on
+/// the machine, or unreadable to srelens. Landlock has no right for this, so
+/// on Linux the seccomp filter refuses changing a mode, owner or extended
+/// attribute by path, everywhere, and a sidecar sets one on a file it has
+/// open instead.
+#[tokio::test]
+#[ignore = "needs this OS's sandbox; run by the sandbox-conformance CI job"]
+async fn a_file_outside_the_data_directory_cannot_have_its_mode_changed() {
+    let fixture = Fixture::new();
+    let sidecar = sidecar(&fixture).await;
+    let target = fixture.kubeconfig();
+    let before = std::fs::metadata(&target).unwrap().permissions();
+    let control = fixture.path("outside").join("control-mode");
+    let host_control = std::fs::write(&control, "x")
+        .and_then(|()| {
+            let mut p = std::fs::metadata(&control)?.permissions();
+            p.set_readonly(true);
+            std::fs::set_permissions(&control, p)
+        })
+        .map_err(|e| e.to_string());
+    let params = json!({"path": target, "readonly": !before.readonly()});
+    assert_denied(
+        &sidecar,
+        "change the kubeconfig's mode",
+        host_control,
+        "set_readonly",
+        params,
+        Denial::File,
+    )
+    .await;
+    let after = std::fs::metadata(&target).unwrap().permissions();
+    assert_eq!(after, before, "the kubeconfig's mode changed");
+    // Within its own directory it may, through the file it has open.
+    let own = fixture.data().join("cache.db");
+    std::fs::write(&own, "x").unwrap();
+    let reply = call(&sidecar, "set_readonly", json!({"path": own, "by": "file"})).await;
+    assert!(
+        matches!(reply, Reply::Ok(_)),
+        "mode in its data directory: {reply:?}"
+    );
+    assert!(std::fs::metadata(&own).unwrap().permissions().readonly());
+}
+
+/// The data directory's size limit (#573). On Linux and macOS the kernel
+/// refuses a file past it (`EFBIG`, from the launcher's `RLIMIT_FSIZE`) and the
+/// sidecar lives on; everywhere, a directory that grows past it in several
+/// files gets the sidecar stopped, and it stays stopped.
+#[tokio::test]
+#[ignore = "needs this OS's sandbox; run by the sandbox-conformance CI job"]
+async fn the_data_directory_size_limit_holds() {
+    let fixture = Fixture::new();
+    let limit = 8u64 << 20;
+    let sidecar = sidecar_with(
+        &fixture,
+        Limits {
+            data_bytes: limit,
+            ..limits()
+        },
+    )
+    .await;
+    let one = fixture.data().join("one.bin");
+    let reply = call(
+        &sidecar,
+        "write_bytes",
+        json!({"path": one, "bytes": 2 * limit}),
+    )
+    .await;
+    eprintln!("write one file of twice the limit: {reply:?}");
+    #[cfg(unix)]
+    {
+        match &reply {
+            Reply::Refused(failure) => assert_eq!(
+                failure.os,
+                Some(libc::EFBIG as i64),
+                "refused, but not by the file size limit: {failure:?}"
+            ),
+            other => panic!("a file past the limit was written: {other:?}"),
+        }
+        let held = std::fs::metadata(&one).map(|m| m.len()).unwrap_or(0);
+        assert!(
+            held <= limit,
+            "the file holds {held} bytes, over the {limit}"
+        );
+        // It lived through the refusal: SIGXFSZ is ignored.
+        assert!(matches!(
+            call(&sidecar, "ping", json!({})).await,
+            Reply::Ok(_)
+        ));
+    }
+    // Under the per-file limit each, over the directory's between them.
+    for name in ["two.bin", "three.bin"] {
+        let path = fixture.data().join(name);
+        let _ = call(
+            &sidecar,
+            "write_bytes",
+            json!({"path": path, "bytes": limit / 2}),
+        )
+        .await;
+    }
+    let mut status = sidecar.watch();
+    let stopped = tokio::time::timeout(
+        Duration::from_secs(30),
+        status.wait_for(|s| matches!(s, SidecarStatus::Refused { .. })),
+    )
+    .await
+    .expect("the sidecar was stopped within 30 s")
+    .expect("the supervisor is running")
+    .clone();
+    let SidecarStatus::Refused { reason } = stopped else {
+        unreachable!()
+    };
+    eprintln!("stopped: {reason}");
+    assert!(reason.contains("over its 8 MiB limit"), "{reason}");
 }

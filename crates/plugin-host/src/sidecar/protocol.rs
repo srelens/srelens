@@ -16,6 +16,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::fmt;
+use std::path::Path;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt};
 
 use super::Limits;
@@ -58,6 +59,15 @@ pub mod method {
     pub const STREAM_ERROR: &str = "stream/error";
     /// Host → sidecar notification: `{"stream": n}`, stop sending it.
     pub const STREAM_CANCEL: &str = "stream/cancel";
+    /// Sidecar → host request (#573): read one of the app's declared readers
+    /// or `network.http` requests, through `extensions.read`.
+    pub const HOST_READ: &str = "host/read";
+    /// Sidecar → host request (#573): inspect one resource of a declared
+    /// custom-resource reader, through `extensions.resource`.
+    pub const HOST_RESOURCE: &str = "host/resource";
+    /// Sidecar → host request (#573): run one of the app's declared actions,
+    /// through `extensions.action`, once a person has confirmed it.
+    pub const HOST_ACTION: &str = "host/action";
 }
 
 /// Whether `name` is one of the host's own methods, which an app request may
@@ -80,8 +90,16 @@ pub mod code {
     /// A sidecar's answer to `initialize` when it speaks none of the offered
     /// versions. Its `data` may carry `{"supported": [...]}`.
     pub const UNSUPPORTED_API_VERSION: i64 = -32001;
-    /// The answer to a request the host cancelled. The value LSP uses.
+    /// The answer to a request the host cancelled, or to a sidecar's call it
+    /// cancelled itself. The value LSP uses.
     pub const REQUEST_CANCELLED: i64 = -32800;
+    /// A sidecar's call that needed a person's confirmation did not get it: a
+    /// person declined, or no one could be asked (#573). Nothing ran.
+    pub const CONSENT_DENIED: i64 = -32002;
+    /// A sidecar's call reached the host capability, which refused it or
+    /// failed: the app is not enabled for the cluster, a grant is missing, the
+    /// cluster said no. The message is the capability's own (#573).
+    pub const CAPABILITY_FAILED: i64 = -32003;
 }
 
 /// A JSON-RPC error object.
@@ -219,9 +237,10 @@ pub fn response(id: &Value, outcome: &Result<Value, RpcError>) -> String {
     .to_string()
 }
 
-/// `initialize`'s params: every version the host speaks, and the limits the
-/// sidecar runs under, so an SDK can hold itself to them.
-pub fn initialize_params(offered: &[&str], limits: &Limits) -> Value {
+/// `initialize`'s params: every version the host speaks, the limits the
+/// sidecar runs under, so an SDK can hold itself to them, and its data
+/// directory (#573), the one path it may write.
+pub fn initialize_params(offered: &[&str], limits: &Limits, data_dir: &Path) -> Value {
     json!({
         "apiVersions": offered,
         "host": {"name": "srelens", "version": env!("CARGO_PKG_VERSION")},
@@ -231,7 +250,10 @@ pub fn initialize_params(offered: &[&str], limits: &Limits) -> Value {
             "maxStreams": limits.max_streams,
             "memoryBytes": limits.memory_bytes,
             "cpus": limits.cpus,
+            "dataBytes": limits.data_bytes,
+            "dataEntries": limits.data_entries,
         },
+        "dataDirectory": data_dir.to_string_lossy(),
     })
 }
 
@@ -534,8 +556,11 @@ mod tests {
             max_streams: 5,
             memory_bytes: 256 * 1024 * 1024,
             cpus: 1.0,
+            data_bytes: 1 << 30,
+            data_entries: 100_000,
         };
-        let params = initialize_params(&["0.1.0", "0.2.0"], &limits);
+        let data = std::path::Path::new("/srv/srelens/data/0123");
+        let params = initialize_params(&["0.1.0", "0.2.0"], &limits, data);
         assert_eq!(params["apiVersions"], json!(["0.1.0", "0.2.0"]));
         assert_eq!(params["host"]["name"], "srelens");
         assert_eq!(
@@ -546,8 +571,13 @@ mod tests {
                 "maxStreams": 5,
                 "memoryBytes": 268435456u64,
                 "cpus": 1.0,
+                "dataBytes": 1073741824u64,
+                "dataEntries": 100000,
             })
         );
+        // The one path it may write, which is also its working directory, so
+        // an SDK need not rely on the latter.
+        assert_eq!(params["dataDirectory"], "/srv/srelens/data/0123");
     }
 
     #[test]

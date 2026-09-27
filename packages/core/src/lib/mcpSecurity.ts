@@ -104,10 +104,13 @@ export interface ConfirmRequest {
  */
 export interface AuditEntry {
   ts: number;
-  /** Who made the call: the app's own UI, or an MCP client. */
-  source: "ui" | "mcp";
-  /** How it reached the registry. `"ui"` is the Tauri bridge. */
-  transport: "ui" | "stdio" | "http";
+  /**
+   * Who made the call: the app's own UI, an MCP client, or an installed
+   * app's sidecar calling back into the host (#573), which `app` names.
+   */
+  source: "ui" | "mcp" | "app";
+  /** How it reached the registry. `"ui"` is the Tauri bridge; `"sidecar"` an app's sidecar pipe. */
+  transport: "ui" | "stdio" | "http" | "sidecar";
   tool: string;
   args: Record<string, unknown>;
   /** The app the call was made through, when it was made through one. */

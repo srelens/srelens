@@ -50,10 +50,27 @@ pub struct SidecarCommand {
     /// The whole environment the sidecar gets. The host's own is never
     /// inherited: it may hold `KUBECONFIG`, cloud credentials or tokens.
     pub env: Vec<(OsString, OsString)>,
-    /// The only path it may write, and its working directory. The per-app,
-    /// size-limited data directory is #573's; the supervisor takes whatever
-    /// directory it is given.
+    /// The only path it may write, and its working directory: the app's
+    /// [`super::data::DataDir`] (#573). The supervisor refuses one that is
+    /// over its limit, not private, or a link, and passes it to the sidecar
+    /// in `initialize`.
     pub data_dir: PathBuf,
+}
+
+/// `TMPDIR`, set to the data directory unless the command names its own
+/// (#573): the one place a sidecar may write, so its temporary files go where
+/// they can be written and are counted against its limit. Linux and macOS;
+/// Windows points `TEMP` into the AppContainer's folder itself.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn temporary_directory<'a>(
+    command: &SidecarCommand,
+    data_dir: &'a std::path::Path,
+) -> Option<(&'static str, &'a std::path::Path)> {
+    let named = command
+        .env
+        .iter()
+        .any(|(name, _)| name.as_os_str() == "TMPDIR");
+    (!named).then_some(("TMPDIR", data_dir))
 }
 
 /// Who enforces a sidecar's memory and CPU limits.

@@ -12,6 +12,13 @@
 //!   variables, and the few Windows needs ([`FROM_HOST`]). The spike passed no
 //!   block, so its probe inherited the host's environment.
 //!
+//! And one for #573: **the data directory is the only path it may write.**
+//! Windows lets an AppContainer write its own profile folder
+//! (`%LOCALAPPDATA%\Packages\<profile>`), which is where it points the
+//! sidecar's `TEMP`, `TMP` and `LOCALAPPDATA`. That folder is outside the size
+//! limit and outlives the app's data, so the container's SID is denied writing
+//! it ([`deny_profile_folder`]).
+//!
 //! Everything else is as the spike ran it: `CreateAppContainerProfile` (a SID
 //! only derived is refused by `CreateProcessW`), read and execute on the
 //! program and full control of the data directory granted to the container's
@@ -25,9 +32,9 @@ use sha2::{Digest, Sha256};
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io;
-use std::os::windows::ffi::OsStrExt;
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::ptr::{null, null_mut};
 use std::sync::Arc;
 use windows_sys::Win32::Foundation::{
@@ -35,9 +42,11 @@ use windows_sys::Win32::Foundation::{
 };
 use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
 use windows_sys::Win32::Security::Isolation::{
-    CreateAppContainerProfile, DeleteAppContainerProfile, DeriveAppContainerSidFromAppContainerName,
+    CreateAppContainerProfile, DeleteAppContainerProfile,
+    DeriveAppContainerSidFromAppContainerName, GetAppContainerFolderPath,
 };
 use windows_sys::Win32::Security::{FreeSid, PSID, SECURITY_ATTRIBUTES, SECURITY_CAPABILITIES};
+use windows_sys::Win32::System::Com::CoTaskMemFree;
 use windows_sys::Win32::System::JobObjects::{
     CreateJobObjectW, JobObjectCpuRateControlInformation, JobObjectExtendedLimitInformation,
     SetInformationJobObject, TerminateJobObject, JOBOBJECT_CPU_RATE_CONTROL_INFORMATION,
@@ -160,24 +169,73 @@ fn sid_string(sid: &Sid) -> io::Result<String> {
     }
 }
 
-/// Grant the container SID access to `path` with `icacls`, from System32 by
-/// its full path, not by a search of `PATH`.
-fn icacls(path: &Path, grant: &str) -> io::Result<()> {
+/// Change the ACL of `path` with `icacls` (`/grant` or `/deny` and its
+/// entry, and any options), from System32 by its full path, not by a search
+/// of `PATH`.
+fn icacls(path: &Path, args: &[&str]) -> io::Result<()> {
     let root = std::env::var_os("SystemRoot").unwrap_or_else(|| OsString::from(r"C:\Windows"));
     let icacls = Path::new(&root).join("System32").join("icacls.exe");
     let out = std::process::Command::new(icacls)
         .arg(path)
-        .arg("/grant")
-        .arg(grant)
+        .args(args)
         .output()?;
     if !out.status.success() {
         return Err(io::Error::other(format!(
-            "icacls {} /grant {grant}: {}",
+            "icacls {} {}: {}",
             path.display(),
+            args.join(" "),
             String::from_utf8_lossy(&out.stdout)
         )));
     }
     Ok(())
+}
+
+/// The AppContainer's own profile folder, `%LOCALAPPDATA%\Packages\<profile>`.
+/// `GetAppContainerFolderPath` names its `AC` subfolder, the one the container
+/// is granted; the deny goes on the profile folder above it, so it covers
+/// anything beside `AC` too.
+fn profile_folder(sid_text: &str) -> io::Result<PathBuf> {
+    let sid = wide(sid_text);
+    let mut path: *mut u16 = null_mut();
+    // SAFETY: a valid wide string and out-pointer; the buffer it returns is
+    // freed once, with CoTaskMemFree, after it is copied.
+    let folder = unsafe {
+        let hr = GetAppContainerFolderPath(sid.as_ptr(), &mut path);
+        if hr != 0 || path.is_null() {
+            return Err(io::Error::other(format!(
+                "GetAppContainerFolderPath: {hr:#x}"
+            )));
+        }
+        let len = (0..).take_while(|&i| *path.add(i) != 0).count();
+        let text = OsString::from_wide(std::slice::from_raw_parts(path, len));
+        CoTaskMemFree(path as *const std::ffi::c_void);
+        PathBuf::from(text)
+    };
+    Ok(match (folder.file_name(), folder.parent()) {
+        (Some(name), Some(parent)) if name.eq_ignore_ascii_case("AC") => parent.to_path_buf(),
+        _ => folder,
+    })
+}
+
+/// Deny the container writing its own profile folder, so the data directory
+/// is the only path it may write (#573). Reading is left as Windows set it.
+///
+/// The rights are named one by one, not as the simple `W`: that is
+/// `FILE_GENERIC_WRITE`, which carries `SYNCHRONIZE` and `READ_CONTROL`, and a
+/// deny of those would break opening a file there to read it. They are: write
+/// and append data (`WD`, `AD`, which for a folder are adding a file and a
+/// subfolder), write attributes and extended attributes (`WA`, `WEA`), delete
+/// and delete a child (`DE`, `DC`), and change the permissions or the owner
+/// (`WDAC`, `WO`), without which the container could remove this entry.
+///
+/// On the folder and, with `/T`, on everything already in it: an explicit
+/// deny outranks an explicit allow, but an inherited one does not, so a deny
+/// only inherited from the folder would lose to an allow Windows set on `AC`
+/// or below it. `(OI)(CI)` carries it to what is created there later.
+fn deny_profile_folder(sid_text: &str) -> io::Result<()> {
+    let folder = profile_folder(sid_text)?;
+    let ace = format!("*{sid_text}:(OI)(CI)(WD,AD,WA,WEA,DE,DC,WDAC,WO)");
+    icacls(&folder, &["/deny", &ace, "/T"])
 }
 
 /// Owned kernel handles, closed on drop.
@@ -379,8 +437,13 @@ pub(super) fn launch(command: &SidecarCommand, limits: &Limits) -> Result<Launch
         |e: io::Error| LaunchError::Failed(format!("srelens could not start the app: {e}"));
     let sid = container_sid(&command.app_id).map_err(unavailable)?;
     let sid_text = sid_string(&sid).map_err(unavailable)?;
-    icacls(&command.program, &format!("*{sid_text}:(RX)")).map_err(failed)?;
-    icacls(&command.data_dir, &format!("*{sid_text}:(OI)(CI)(F)")).map_err(failed)?;
+    icacls(&command.program, &["/grant", &format!("*{sid_text}:(RX)")]).map_err(failed)?;
+    icacls(
+        &command.data_dir,
+        &["/grant", &format!("*{sid_text}:(OI)(CI)(F)")],
+    )
+    .map_err(failed)?;
+    deny_profile_folder(&sid_text).map_err(unavailable)?;
     let job = job(limits).map_err(unavailable)?;
 
     let (stdin_parent, stdin_child) = pipe(true).map_err(failed)?;

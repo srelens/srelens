@@ -28,6 +28,8 @@ pub use secret_store::{declares_secret_setting, SECRET_STORE_ANNOTATIONS};
 mod secrets_tests;
 #[cfg(test)]
 mod settings_tests;
+#[cfg(test)]
+mod sidecar_tests;
 mod signing;
 mod store;
 pub mod streams;
@@ -63,6 +65,10 @@ pub struct Apps {
     /// `None` on a host that keeps no files for its apps, which refuses to install a
     /// package and offers a catalog release's single-file manifest instead.
     packages: Option<PathBuf>,
+    /// Where each app's sidecar data directory is kept (#573), one per app,
+    /// named by `srelens_plugin_host::sidecar::data`. Apart from `packages`,
+    /// whose pruning would remove it. `None` where no sidecar runs.
+    data: Option<PathBuf>,
 }
 
 impl Apps {
@@ -74,17 +80,28 @@ impl Apps {
             inventory,
             catalog: catalog::CatalogCache::Shared(catalog),
             packages: None,
+            data: None,
         }
+    }
+
+    /// The root of the apps' data directories: where the host that starts an
+    /// app's sidecar opens its [`srelens_plugin_host::sidecar::data::DataDir`].
+    /// Whatever is there for an app that is no longer installed is removed with
+    /// the next change to the inventory, so a later app with the same ID starts
+    /// empty.
+    pub fn data_root(&self) -> Option<&Path> {
+        self.data.as_deref()
     }
 }
 
-/// The desktop's layout: the inventory file, this host's own catalog cache beside it, and
-/// the directory installed packages are unpacked into beside that.
+/// The desktop's layout: the inventory file, this host's own catalog cache beside it, the
+/// directory installed packages are unpacked into beside that, and the apps' data.
 impl From<PathBuf> for Apps {
     fn from(path: PathBuf) -> Self {
         Self {
             catalog: catalog::CatalogCache::Owned(path.with_extension("catalog.json")),
             packages: Some(path.with_extension("packages")),
+            data: Some(path.with_extension("data")),
             inventory: Arc::new(path),
         }
     }
@@ -1482,6 +1499,13 @@ fn configure(
     // Under the same lock as every install, so no version is removed while one unpacks.
     if let Some(root) = &apps.packages {
         package::prune(root, &kept_packages(&state));
+    }
+    // And the data an uninstalled app's sidecar kept (#573). Best effort, as the
+    // packages are: a directory that cannot be removed now is tried again with the
+    // next change.
+    if let Some(root) = &apps.data {
+        let installed: Vec<&str> = state.plugins.iter().map(|app| app.manifest.id.as_str()).collect();
+        let _ = srelens_plugin_host::sidecar::data::prune(root, &installed);
     }
     secret_store::sweep(secrets, &state);
     streams::announce(&store.key(), &state);

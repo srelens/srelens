@@ -467,6 +467,7 @@ Where it departs from the spike:
 | The spike | The supervisor | Why |
 |---|---|---|
 | The seccomp filter allowed `AF_UNIX` sockets | It refuses every `socket` call | The sidecar's stdio is pipes, and an `AF_UNIX` socket reaches the D-Bus session bus (see [What the spike did not establish](#what-the-spike-did-not-establish)) |
+| The seccomp filter allowed changing a file's mode, owner and extended attributes by path, which Landlock has no right for | It refuses `chmod`, `chown`, `setxattr`, `removexattr` and their `*at` forms; the same on an open file stays allowed (#573) | A sidecar could `chmod` a kubeconfig outside its grant readable to every user. #571 and #572 did not check it; #573's conformance check found it |
 | Landlock ABI 5 | ABI 5, plus the ABI 6 scopes: abstract Unix sockets, and signals to processes outside the sandbox | Best effort, so kernels before 6.12 are unchanged; on newer ones a sidecar cannot signal srelens or the user's other processes |
 | A best-effort ruleset that a kernel without Landlock silently did not apply | The host refuses a kernel without Landlock, and the launcher refuses a ruleset the kernel enforces none of | A layer that is not there must refuse the app, not pass as applied |
 | The probe inherited the host's environment | The sidecar gets only the variables srelens names. On Windows it also gets `SystemRoot` and `LOCALAPPDATA`, `TEMP` and `TMP`, which Windows reroutes into the AppContainer's folder. A block without those three failed with error 203 on the first CI run | The environment may hold `KUBECONFIG`, cloud credentials or tokens |
@@ -474,6 +475,8 @@ Where it departs from the spike:
 | One AppContainer profile | One per app, named by a digest of its ID, with `delete_profile` for uninstall | The recommendation above; an app ID can be longer than a profile name |
 | On Windows, stderr joined stdout | Its own pipe | stdout is protocol only |
 | `icacls` found by `PATH` | Under `%SystemRoot%\System32` | A `PATH` entry must not choose it |
+| The AppContainer could write its own profile folder, where Windows points `TEMP` | The container is denied writing it (#573) | The app's data directory is the only path it may write, and the only one under its size limit |
+| One scratch directory the probe was given | A per-app data directory, owner-only, measured against a size limit before each start and every 2 s, each file capped by `RLIMIT_FSIZE` on Linux and macOS, removed with the app (#573) | Real tools need scratch space; see [Data directory](../extensions/sidecar-protocol.md#data-directory) |
 | macOS launcher set `RLIMIT_DATA`, `RLIMIT_AS` and a 60-second `RLIMIT_CPU` | None | The first two were refused. The third would kill a long-lived sidecar after a minute of CPU, which is not a limit |
 
 `crates/plugin-host/tests/sandbox_conformance.rs` is the conformance suite: the seven
@@ -556,9 +559,10 @@ are not run on macOS.
   decided above; this one is not.
 - One AppContainer profile per extension, or one per install? Where is the profile
   deleted if srelens is uninstalled with extensions still installed?
-- Can the host-side broker callbacks (#573) stay on stdio, so that no backend has to
-  open even loopback networking? Loopback is denied under the recommended Windows and
-  Linux backends.
+- ~~Can the host-side broker callbacks (#573) stay on stdio, so that no backend has to
+  open even loopback networking?~~ Answered by #573: yes. A sidecar's calls back into the
+  host are JSON-RPC requests on the same pipes, and every backend keeps the network closed
+  ([Calls from the sidecar](../extensions/sidecar-protocol.md#calls-from-the-sidecar)).
 - What are the Landlock ABI floor and target? ABI 1 already covers checks 1 and 2 when
   seccomp covers the network. The spike targets ABI 5, which leaves two gaps that a
   newer target would close on newer kernels. Both tie to the Unix-socket item under
@@ -577,7 +581,7 @@ What the supervisor (#572) does until these are decided:
 - **A missing limit layer:** it refuses the app, and says which layer is missing.
 - **AppContainer profiles:** one per app, and `delete_profile` removes one on uninstall.
   Nothing removes them when srelens itself is uninstalled.
-- **Broker callbacks:** the protocol carries them on stdio, and until #573 refuses them.
+- **Broker callbacks:** on stdio, answered by the app facade the UI calls (#573).
 - **Landlock:** the target is ABI 5 plus the ABI 6 scopes, best effort. The floor is any
   kernel that enforces some of the ruleset.
 

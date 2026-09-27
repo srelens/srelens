@@ -268,8 +268,10 @@ impl Registry {
         // the bridge logs the refusal. MCP records it, as it records every
         // other call it is asked to make.
         let audited = match source {
-            audit::Source::Ui => annotations.as_ref().is_some_and(audit::is_audited_from_ui),
-            _ => true,
+            audit::Source::Ui | audit::Source::Sidecar => {
+                annotations.as_ref().is_some_and(audit::is_audited_from_ui)
+            }
+            audit::Source::McpStdio | audit::Source::McpHttp => true,
         };
         if !audited {
             return self.invoke(id, input).await;
@@ -428,6 +430,30 @@ mod registry_tests {
         let seen = spy.seen();
         assert_eq!(seen.len(), 1, "expected only the MCP read, got {seen:?}");
         assert_eq!(seen[0].source, audit::Source::McpStdio);
+    }
+
+    /// A sidecar's calls back into the host (#573) are recorded on the UI's
+    /// line: its writes and sensitive reads. A scanner lists far more than a
+    /// resource screen does, and every read in a 5 MB trail would bury the
+    /// write that answers "what did this app change?".
+    #[tokio::test]
+    async fn a_sidecar_is_recorded_for_its_writes_not_its_reads() {
+        let reg = reg_with_a_read_and_a_write();
+        let spy = Spy::default();
+        let args = json!({ "context": "prod", "namespace": "team", "name": "web-0" });
+
+        reg.invoke_audited("k8s.listPods", json!({}), &spy, audit::Source::Sidecar, "auto")
+            .await
+            .unwrap();
+        reg.invoke_audited("k8s.deletePod", args, &spy, audit::Source::Sidecar, "approved")
+            .await
+            .unwrap();
+
+        let seen = spy.seen();
+        assert_eq!(seen.len(), 1, "expected only the write, got {seen:?}");
+        assert_eq!(seen[0].tool, "k8s.deletePod");
+        assert_eq!(seen[0].source.as_str(), "app");
+        assert_eq!(seen[0].decision, "approved");
     }
 
     /// The same capability from either surface lands in the trail in the same

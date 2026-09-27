@@ -6,13 +6,30 @@ mod fake;
 
 use fake::{FakeLauncher, Reply};
 use serde_json::{json, Value};
+use srelens_plugin_host::sidecar::data::DataDir;
 use srelens_plugin_host::sidecar::{
     Action, Enforcement, Limits, LogSource, NoBroker, Policy, RequestError, SidecarCommand,
     SidecarConfig, SidecarStatus, StreamEvent, Supervisor, SIDECAR_API_VERSIONS, UNEXPECTED_EXIT,
 };
-use std::sync::Arc;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use tokio::time::{sleep, Instant};
+
+/// A fresh, private data directory (#573) for one supervisor: the supervisor
+/// refuses a shared or world-readable one such as the system's temporary
+/// directory. Under one root per test binary, which outlives every test.
+fn data_dir() -> PathBuf {
+    static ROOT: OnceLock<tempfile::TempDir> = OnceLock::new();
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let root = ROOT.get_or_init(|| tempfile::tempdir().expect("a temporary directory"));
+    let n = NEXT.fetch_add(1, Ordering::SeqCst);
+    DataDir::for_app(&root.path().join(n.to_string()), "org.example.scanner")
+        .expect("a data directory")
+        .path()
+        .to_owned()
+}
 
 fn config() -> SidecarConfig {
     SidecarConfig {
@@ -21,7 +38,7 @@ fn config() -> SidecarConfig {
             program: "/opt/example/scanner".into(),
             args: Vec::new(),
             env: Vec::new(),
-            data_dir: std::env::temp_dir(),
+            data_dir: data_dir(),
         },
         limits: Limits::default(),
         policy: Policy::default(),
@@ -81,6 +98,8 @@ async fn the_handshake_offers_every_version_then_activates() {
         initialize["params"]["limits"]["memoryBytes"],
         268_435_456u64
     );
+    assert_eq!(initialize["params"]["limits"]["dataBytes"], 1u64 << 30);
+    assert!(initialize["params"]["dataDirectory"].is_string());
 }
 
 #[tokio::test(start_paused = true)]
@@ -586,4 +605,185 @@ async fn an_app_request_cannot_stop_the_sidecar() {
         }
     );
     assert!(!launcher.methods().contains(&"shutdown".to_owned()));
+}
+
+/// A supervisor for `launcher` whose data directory may hold `bytes`.
+fn with_data_limit(launcher: &FakeLauncher, bytes: u64) -> (Supervisor, PathBuf) {
+    let mut config = config();
+    config.limits.data_bytes = bytes;
+    let data = config.command.data_dir.clone();
+    let supervisor = Supervisor::start(config, Arc::new(launcher.clone()), Arc::new(NoBroker));
+    (supervisor, data)
+}
+
+async fn refused(supervisor: &Supervisor) -> String {
+    let status = until(supervisor, |s| matches!(s, SidecarStatus::Refused { .. })).await;
+    let SidecarStatus::Refused { reason } = status else {
+        unreachable!()
+    };
+    reason
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_data_directory_over_its_limit_is_refused_before_anything_starts() {
+    let launcher = FakeLauncher::well_behaved();
+    let mut config = config();
+    config.limits.data_bytes = 1024 * 1024;
+    std::fs::write(config.command.data_dir.join("cache.db"), vec![0u8; 2 << 20]).unwrap();
+    let supervisor = Supervisor::start(config, Arc::new(launcher.clone()), Arc::new(NoBroker));
+    let reason = refused(&supervisor).await;
+    assert!(reason.contains("over its 1 MiB limit"), "{reason}");
+    assert!(reason.contains("did not start it"), "{reason}");
+    sleep(secs(3600)).await;
+    assert_eq!(launcher.launches(), 0, "a start would fail the same way");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_sidecar_that_fills_its_data_directory_past_the_limit_is_stopped_and_not_restarted() {
+    let written = Arc::new(OnceLock::<PathBuf>::new());
+    let target = written.clone();
+    let launcher = FakeLauncher::new(move |call| {
+        (call.method == "fill").then(|| {
+            let path = target.get().expect("the data directory").join("trivy.db");
+            std::fs::write(path, vec![0u8; 3 << 20]).unwrap();
+            Reply::Result(json!({}))
+        })
+    });
+    let (supervisor, data) = with_data_limit(&launcher, 2 << 20);
+    written.set(data).unwrap();
+    running(&supervisor).await;
+    let started = Instant::now();
+    supervisor.request("fill", json!({})).await.unwrap();
+    let reason = refused(&supervisor).await;
+    assert!(reason.contains("holds 3 MiB, over its 2 MiB limit"), "{reason}");
+    assert!(reason.contains("so srelens stopped it"), "{reason}");
+    assert!(
+        started.elapsed() <= Policy::default().data_check_interval,
+        "measured only after {:?}",
+        started.elapsed()
+    );
+    assert_eq!(launcher.killed(), [1]);
+    sleep(secs(3600)).await;
+    assert_eq!(launcher.launches(), 1, "restarting it would only refill it");
+    let error = supervisor.request("echo", json!({})).await.unwrap_err();
+    assert_eq!(error, RequestError::Unavailable(reason));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_sidecar_within_its_data_limit_keeps_running() {
+    let launcher = FakeLauncher::well_behaved();
+    let (supervisor, data) = with_data_limit(&launcher, 2 << 20);
+    std::fs::write(data.join("small.db"), vec![0u8; 1 << 20]).unwrap();
+    running(&supervisor).await;
+    sleep(secs(60)).await;
+    assert!(matches!(supervisor.status(), SidecarStatus::Running { .. }));
+    assert!(launcher.killed().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_restart_after_clearing_the_data_directory_runs_again() {
+    let launcher = FakeLauncher::well_behaved();
+    let (supervisor, data) = with_data_limit(&launcher, 1024 * 1024);
+    running(&supervisor).await;
+    std::fs::write(data.join("big.db"), vec![0u8; 2 << 20]).unwrap();
+    refused(&supervisor).await;
+    std::fs::remove_file(data.join("big.db")).unwrap();
+    supervisor.restart();
+    running(&supervisor).await;
+    assert_eq!(launcher.launches(), 2);
+}
+
+#[cfg(unix)]
+#[tokio::test(start_paused = true)]
+async fn a_data_directory_other_users_can_read_is_refused_and_a_running_one_stopped() {
+    use std::os::unix::fs::PermissionsExt;
+    let open = |path: &std::path::Path| {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap()
+    };
+    // Before the start.
+    let launcher = FakeLauncher::well_behaved();
+    let config = config();
+    open(&config.command.data_dir);
+    let supervisor = Supervisor::start(config, Arc::new(launcher.clone()), Arc::new(NoBroker));
+    let reason = refused(&supervisor).await;
+    assert!(reason.contains("other users"), "{reason}");
+    assert_eq!(launcher.launches(), 0);
+    // While running: a sidecar can change its own directory's mode.
+    let launcher = FakeLauncher::well_behaved();
+    let (supervisor, data) = with_data_limit(&launcher, 1 << 30);
+    running(&supervisor).await;
+    open(&data);
+    let reason = refused(&supervisor).await;
+    assert!(reason.contains("other users"), "{reason}");
+    assert_eq!(launcher.killed(), [1]);
+}
+
+/// A broker whose calls wait for ever, as one waiting on a person's
+/// confirmation does, and which says when one starts and when one is dropped.
+struct Waiting {
+    started: tokio::sync::mpsc::UnboundedSender<()>,
+    dropped: Arc<std::sync::atomic::AtomicBool>,
+}
+
+struct Flag(Arc<std::sync::atomic::AtomicBool>);
+
+impl Drop for Flag {
+    fn drop(&mut self) {
+        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl srelens_plugin_host::sidecar::Broker for Waiting {
+    fn call<'a>(
+        &'a self,
+        _method: &'a str,
+        _params: Value,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<Value, srelens_plugin_host::sidecar::protocol::RpcError>,
+                > + Send
+                + 'a,
+        >,
+    > {
+        let flag = Flag(self.dropped.clone());
+        let _ = self.started.send(());
+        Box::pin(async move {
+            let _flag = flag;
+            std::future::pending::<()>().await;
+            Ok(Value::Null)
+        })
+    }
+}
+
+/// A confirmation must not outlive the process that asked for it: dropping
+/// the supervisor ends the session, and with it every call the sidecar made.
+#[tokio::test(start_paused = true)]
+async fn dropping_the_supervisor_drops_every_call_the_sidecar_is_waiting_on() {
+    let launcher = FakeLauncher::new(|call| {
+        (call.method == "ask").then(|| {
+            call.call_host("c-1", "host/action", json!({}));
+            Reply::Result(json!({}))
+        })
+    });
+    let (started, mut calls) = tokio::sync::mpsc::unbounded_channel();
+    let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let broker = Waiting {
+        started,
+        dropped: dropped.clone(),
+    };
+    let supervisor = Supervisor::start(config(), Arc::new(launcher.clone()), Arc::new(broker));
+    running(&supervisor).await;
+    supervisor.request("ask", json!({})).await.unwrap();
+    tokio::time::timeout(secs(3600), calls.recv())
+        .await
+        .expect("the sidecar's call reached the broker");
+    drop(supervisor);
+    for _ in 0..20 {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        dropped.load(std::sync::atomic::Ordering::SeqCst),
+        "the call outlived the supervisor"
+    );
 }

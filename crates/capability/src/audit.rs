@@ -40,23 +40,29 @@ pub enum Source {
     /// An MCP client over the loopback HTTP transport, including the
     /// in-process native agent, which calls `handle_request` directly.
     McpHttp,
+    /// An executable app's own sidecar, calling back into the host over its
+    /// JSON-RPC pipe (#573). The app is the record's `app`, which the broker
+    /// fills from the supervisor's identity, never from the sidecar.
+    Sidecar,
 }
 
 impl Source {
-    /// `ui` or `mcp`: who made the call.
+    /// `ui`, `mcp` or `app`: who made the call.
     pub fn as_str(self) -> &'static str {
         match self {
             Source::Ui => "ui",
             Source::McpStdio | Source::McpHttp => "mcp",
+            Source::Sidecar => "app",
         }
     }
 
-    /// `ui`, `stdio` or `http`: how the call reached the registry.
+    /// `ui`, `stdio`, `http` or `sidecar`: how the call reached the registry.
     pub fn transport(self) -> &'static str {
         match self {
             Source::Ui => "ui",
             Source::McpStdio => "stdio",
             Source::McpHttp => "http",
+            Source::Sidecar => "sidecar",
         }
     }
 }
@@ -125,6 +131,11 @@ impl AuditSink for NoopAudit {
 /// return secret material. That is exactly the set #555 asks for ("every
 /// mutating or sensitive capability invocation") and it is read off the
 /// annotations rather than a second list that would drift from them.
+///
+/// A sidecar's calls (#573) are held to the same line. It is third-party code
+/// like an agent, but a scanner reads far more than a screen does, so its
+/// reads would bury its writes just the same. What it was refused is still
+/// recorded: the broker writes a denied confirmation itself, as MCP does.
 pub fn is_audited_from_ui(annotations: &Annotations) -> bool {
     !annotations.read_only
         || annotations.destructive
@@ -1522,6 +1533,10 @@ mod tests {
         assert_eq!(Source::McpStdio.transport(), "stdio");
         assert_eq!(Source::McpHttp.as_str(), "mcp");
         assert_eq!(Source::McpHttp.transport(), "http");
+        // An app's own sidecar calling back (#573): neither the person nor an
+        // agent, so neither of their words.
+        assert_eq!(Source::Sidecar.as_str(), "app");
+        assert_eq!(Source::Sidecar.transport(), "sidecar");
     }
 
     /// #555's line for the UI path, read off the annotations rather than a
