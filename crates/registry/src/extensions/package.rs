@@ -32,7 +32,9 @@ use base64::Engine as _;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use srelens_plugin_host::{is_format_character, MAX_MANIFEST_BYTES};
+use srelens_plugin_host::{
+    is_format_character, Manifest, ValidationCode as Code, ValidationErrors, MAX_MANIFEST_BYTES,
+};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{self, Read};
@@ -48,14 +50,9 @@ pub(super) const SIGNATURE: &str = "digests.json.sig";
 /// same key can pass for one.
 const FORMAT: &str = "srelens-extension-package";
 const FORMAT_VERSION: u32 = 1;
-/// The platforms `bin/` may hold binaries for.
-pub(super) const PLATFORMS: [&str; 5] = [
-    "darwin-arm64",
-    "darwin-amd64",
-    "linux-amd64",
-    "linux-arm64",
-    "windows-amd64",
-];
+/// The platforms `bin/` may hold binaries for: the ones an executable app's sidecar may
+/// ship for (#574).
+pub(super) const PLATFORMS: [&str; 5] = srelens_plugin_host::SIDECAR_PLATFORMS;
 /// The app's logo, in the order it is looked for, with the media type it is shown as.
 const LOGOS: [(&str, &str); 2] = [
     ("icons/icon.svg", "image/svg+xml"),
@@ -532,14 +529,18 @@ impl std::fmt::Debug for Package {
 }
 
 impl Package {
-    /// Whether the package carries binaries. This host runs declarative apps only, so an
-    /// install refuses them until a manifest kind can run them (#574), which is what
-    /// starts the sandboxed sidecar supervisor (#572).
+    /// Whether the package carries binaries, which only an executable app's may (#574).
     pub(super) fn carries_binaries(&self) -> bool {
+        self.binaries().next().is_some()
+    }
+
+    /// The package path of every binary the package carries.
+    fn binaries(&self) -> impl Iterator<Item = &str> {
         self.list
             .files
             .iter()
-            .any(|file| file.path.starts_with("bin/"))
+            .map(|file| file.path.as_str())
+            .filter(|path| path.starts_with("bin/"))
     }
 
     pub(super) fn review(&self) -> PackageReview {
@@ -560,15 +561,66 @@ impl Package {
     }
 }
 
-/// Refuses a package this host cannot install.
+/// Refuses a package this host cannot install: one carrying a binary its manifest does not
+/// run. Only an executable app's package carries binaries (#574), and only the ones its
+/// `sidecar.binaries` names, so what a reviewer is shown the app runs is all it ships.
+/// That each binary it names is in the package is [`binary_problems`]'s, checked with the
+/// rest of the manifest.
 pub(super) fn check_installable(package: &Package) -> Result<(), String> {
-    if package.carries_binaries() {
+    if !package.carries_binaries() {
+        return Ok(());
+    }
+    let named: BTreeSet<String> = Manifest::decode(&package.manifest)
+        .ok()
+        .and_then(|manifest| manifest.sidecar)
+        .map(|sidecar| sidecar.binaries.into_values().collect())
+        .unwrap_or_default();
+    if named.is_empty() {
         return Err(
-            "This package carries binaries under bin/. This host runs declarative apps only; executable apps are not supported yet"
+            "This package carries binaries under bin/, but its manifest runs none: only an executable app's package may carry them"
                 .into(),
         );
     }
+    if let Some(extra) = package.binaries().find(|path| !named.contains(*path)) {
+        return Err(format!(
+            "This package carries {}, which its manifest does not run: an executable app's package carries only the binaries its sidecar names",
+            shown(extra)
+        ));
+    }
     Ok(())
+}
+
+/// Every binary an executable `manifest` names that the package with `digests` does not
+/// carry, or, with no package at all, that it has none to carry them in (#574).
+pub(super) fn binary_problems(
+    manifest: &Manifest,
+    digests: Option<&str>,
+    problems: &mut ValidationErrors,
+) {
+    let Some(sidecar) = &manifest.sidecar else {
+        return;
+    };
+    let Some(digests) = digests else {
+        problems.push(
+            Code::InvalidKind,
+            "kind",
+            "An executable app is installed from a package (.srelens-extension) that carries its binaries under bin/",
+        );
+        return;
+    };
+    // An unreadable list is the signature check's to report.
+    let Ok(list) = parse_digests(digests.as_bytes()) else {
+        return;
+    };
+    for (platform, path) in &sidecar.binaries {
+        if !list.files.iter().any(|file| &file.path == path) {
+            problems.push(
+                Code::InvalidValue,
+                format!("sidecar.binaries.{platform}"),
+                format!("The package carries no {}", shown(path)),
+            );
+        }
+    }
 }
 
 /// Where a package's files go as [`read`] verifies them.
@@ -608,8 +660,12 @@ impl Sink for Writer<'_> {
         }
         let mut options = fs::OpenOptions::new();
         options.write(true).create_new(true);
+        // A sidecar's binary is run by its owner (#574); nothing else is run at all.
         #[cfg(unix)]
-        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        std::os::unix::fs::OpenOptionsExt::mode(
+            &mut options,
+            if path.starts_with("bin/") { 0o700 } else { 0o600 },
+        );
         let mut file = options.open(&target)?;
         io::copy(content, &mut file)?;
         file.sync_all()
@@ -1091,6 +1147,52 @@ pub(super) fn installed_icon(
         return Icon::new(path, media_type, bytes).map(|icon| Some(icon.data_url()));
     }
     Ok(None)
+}
+
+/// The binary at `path` in the version of `id` unpacked under `root` as `digest`, checked
+/// against the digest list it was unpacked with before anything runs it (#574). A file
+/// changed on disk since the install is refused, not run.
+pub(super) fn installed_binary(
+    root: &Path,
+    id: &str,
+    digest: &str,
+    path: &str,
+) -> Result<PathBuf, String> {
+    if !is_hex(digest, 64) {
+        return Err("The installed package's digest is not a SHA-256".into());
+    }
+    let directory = app_directory(root, id).join(digest);
+    let digests = read_limited(&directory.join(DIGESTS), MAX_DIGESTS_BYTES as u64)?;
+    if sha256_hex(&digests) != digest {
+        return Err("digests.json no longer matches the installed package".into());
+    }
+    let list = parse_digests(&digests)?;
+    if list.id != id {
+        return Err("The installed package is another app's".into());
+    }
+    let file = list
+        .files
+        .iter()
+        .find(|file| file.path == path)
+        .ok_or_else(|| format!("The installed package carries no {}", shown(path)))?;
+    let binary = path
+        .split('/')
+        .fold(directory, |target, segment| target.join(segment));
+    // Hashed as it is read: a binary may be as large as the whole package.
+    let changed = || format!("{} no longer matches its digest", shown(path));
+    let why = |e: io::Error| format!("Could not read {}: {e}", binary.display());
+    let metadata = fs::symlink_metadata(&binary).map_err(why)?;
+    if !metadata.is_file() || metadata.len() != file.size {
+        return Err(changed());
+    }
+    let mut hasher = Sha256::new();
+    fs::File::open(&binary)
+        .and_then(|opened| io::copy(&mut opened.take(file.size), &mut hasher))
+        .map_err(why)?;
+    if format!("{:x}", hasher.finalize()) != file.sha256 {
+        return Err(changed());
+    }
+    Ok(binary)
 }
 
 /// Every file under `dir` a package would hold, by its package path, in byte order.

@@ -382,3 +382,77 @@ fn a_0_4_manifest_keeps_its_line_on_a_host_that_also_implements_0_5() {
     );
     assert!(matching_api_versions_in(&range, &["0.3.0", "0.4.0"]).is_empty());
 }
+
+/// What API 0.6 added (#574): an app of kind `executable` and the `sidecar` it runs. The
+/// two come together, so one case uses both, and the refusal names the first listed.
+fn uses_of_0_6() -> Vec<(&'static [&'static str], Use)> {
+    vec![(&["kind", "sidecar"], |v| {
+        v["kind"] = json!("executable");
+        v["sidecar"] = json!({"binaries":{"linux-amd64":"bin/linux-amd64/argocd-helper"},
+            "operations":[{"name":"diff","title":"Diff an application",
+                "inputs":[{"name":"application","type":"string","required":true}]}]});
+    })]
+}
+
+#[test]
+fn every_0_6_addition_under_a_0_5_range_is_told_it_requires_api_0_6() {
+    for (fields, apply) in uses_of_0_6() {
+        let mut value = manifest();
+        apply(&mut value);
+        for range in ["^0.6", ">=0.6, <0.7"] {
+            Manifest::parse(&with_range(value.clone(), range))
+                .unwrap_or_else(|e| panic!("{fields:?} under {range}: {e}"));
+        }
+        for range in ["^0.5", ">=0.5, <0.7"] {
+            let errors = Manifest::parse(&with_range(value.clone(), range))
+                .expect_err(&format!("{fields:?} under {range}"))
+                .0;
+            assert_eq!(errors.len(), 1, "{fields:?} under {range}: {errors:?}");
+            let error = &errors[0];
+            assert_eq!(error.code, ValidationCode::ApiIncompatible, "{error:?}");
+            assert_eq!(error.path, "srelensApiVersion", "{error:?}");
+            assert!(
+                error.message.contains("the executable kind in `kind` requires API 0.6.0")
+                    && error.message.contains("admits API 0.5.0"),
+                "{error:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn every_0_6_entry_in_the_table_has_a_case_above() {
+    let covered: Vec<&str> = uses_of_0_6()
+        .iter()
+        .flat_map(|(fields, _)| fields.iter().copied())
+        .collect();
+    let gated: Vec<&str> = API_FIELDS
+        .iter()
+        .filter(|field| field.introduced == "0.6.0")
+        .map(|field| field.path)
+        .collect();
+    assert_eq!(gated.len(), covered.len(), "{gated:?}");
+    for path in &gated {
+        assert!(covered.contains(path), "{path} has no case");
+    }
+}
+
+#[test]
+fn a_0_6_manifest_is_incompatible_with_a_host_on_the_0_5_line() {
+    // What a host that implements only up to 0.5 checks first.
+    let before = ["0.3.0", "0.4.0", "0.5.0"];
+    for range in ["^0.6", ">=0.6, <0.7"] {
+        let range = semver::VersionReq::parse(range).unwrap();
+        assert!(matching_api_versions_in(&range, &before).is_empty());
+        assert_eq!(
+            negotiate_api_version(&range).map(|v| v.to_string()),
+            Some("0.6.0".into())
+        );
+    }
+    // And a `^0.5` app keeps its line here.
+    let range = semver::VersionReq::parse("^0.5").unwrap();
+    assert_eq!(
+        negotiate_api_version(&range).map(|v| v.to_string()),
+        Some("0.5.0".into())
+    );
+}

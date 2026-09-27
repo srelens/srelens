@@ -6,6 +6,8 @@ mod cards;
 mod catalog;
 mod columns;
 pub(crate) mod crd;
+#[cfg(test)]
+mod executable_tests;
 #[cfg(any(test, feature = "fuzzing"))]
 pub mod fuzzing;
 mod http_policy;
@@ -504,13 +506,14 @@ fn read<S: InventoryStore + ?Sized>(store: &S) -> Result<Inventory, String> {
 
 const UNSIGNED_POLICY_REASON: &str = "Turn on \"Allow unsigned apps to modify clusters and run code\" in Settings → Apps to enable this app";
 
-/// This host accepts only declarative manifests. Keep the kind match exhaustive:
-/// any future executable kind must require verified signing or the policy even
-/// when it declares no write actions. Source labels and IDs grant no trust.
+/// Whether an unsigned app needs the unsigned-apps setting. Keep the kind match
+/// exhaustive: a new kind cannot be added without deciding. Source labels and IDs grant
+/// no trust.
 ///
 /// A declarative app needs it when it writes (declared actions) or runs code in
 /// the cluster (a `k8s.exec` binding, #567): a command can change whatever its
-/// container may.
+/// container may. An executable app (#574) always does, writes or not: it runs code
+/// on this computer, sandboxed or not.
 fn needs_unsigned_policy(manifest: &Manifest) -> bool {
     match manifest.kind {
         srelens_plugin_host::ManifestKind::Declarative => {
@@ -520,6 +523,7 @@ fn needs_unsigned_policy(manifest: &Manifest) -> bool {
                     .iter()
                     .any(|binding| binding.target == srelens_plugin_host::POD_EXEC)
         }
+        srelens_plugin_host::ManifestKind::Executable => true,
     }
 }
 fn check_unsigned_policy(manifest: &Manifest, verified: bool, allow: bool) -> Result<(), String> {
@@ -550,6 +554,10 @@ fn reverify(plugin: &Installed) -> Result<(), String> {
     plugin.manifest.validate()?;
     crd::group_problems(&plugin.manifest).into_result()?;
     check_package_name(plugin.package.as_deref())?;
+    // Its binaries are in its package, and there is none to run them from (#574).
+    if plugin.manifest.sidecar.is_some() && plugin.package.is_none() {
+        return Err("Installed executable app has no package to run its sidecar from".into());
+    }
     if let Some(proof) = &plugin.signature_proof {
         verify_proof(proof, &plugin.manifest, plugin.package.as_deref())?;
     }
@@ -1021,6 +1029,8 @@ fn check_install(
         .unwrap_or_default();
     // The rules a new install meets that an installed app is not re-held to.
     problems.0.extend(manifest.install_problems());
+    // An executable app's binaries come in its package (#574).
+    package::binary_problems(&manifest, digests, &mut problems);
     // Without this, a pasted manifest could replace a signed app, or take an
     // official ID and its logo, differing from the real one only by a label.
     if let Some(reason) = unsigned_reserved(&manifest.id, signature.is_some()) {
@@ -1874,8 +1884,9 @@ fn register_apps(
                 let (errors, permission_diff) = match check_install(&input.manifest, &input.grants, input.signature.as_deref(), input.digests.as_deref(), c) {
                     Err(problems) => (problems.0, None),
                     Ok(manifest) => {
-                        // Reported where the app writes or runs code: its actions, else its exec bindings.
-                        let at = if manifest.actions.is_empty() { "capabilities" } else { "actions" };
+                        // Reported where the app writes or runs code: its kind for an executable
+                        // app, else its actions, else its exec bindings.
+                        let at = if manifest.sidecar.is_some() { "kind" } else if manifest.actions.is_empty() { "capabilities" } else { "actions" };
                         let errors = check_unsigned_policy(&manifest, input.signature.is_some(), state.allow_unsigned_apps)
                             .err().map(|reason| vec![ValidationError::new(Code::InvalidValue, at, reason)])
                             .unwrap_or_default();

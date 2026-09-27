@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import inventorySchema from "./extension-inventory.schema.json";
 import type { ActionPredicate } from "./actionPredicates";
-import type { ExtensionInventory, ExtensionLinkRelation, ExtensionManifest, ExtensionScopedPermission, ExtensionStatusRule, InstalledExtension, NormalizedStatus } from "./extensions";
+import type { ExtensionInventory, ExtensionLinkRelation, ExtensionManifest, ExtensionOperation, ExtensionOperationInput, ExtensionScopedPermission, ExtensionSidecar, ExtensionStatusRule, InstalledExtension, NormalizedStatus } from "./extensions";
 
 // extension-inventory.schema.json is generated from the Rust inventory and manifest
 // types (crates/registry/src/extensions.rs keeps it current). Each table below is held
@@ -67,8 +67,14 @@ const tables: Record<string, Record<string, "required" | "optional">> = {
     capabilities: "required",
     actions: "optional",
     settings: "optional",
+    sidecar: "optional",
     contributions: "required",
   } satisfies Presence<ExtensionManifest>,
+  Sidecar: { binaries: "required", operations: "required" } satisfies Presence<ExtensionSidecar>,
+  Operation: { name: "required", title: "required", inputs: "optional" } satisfies Presence<ExtensionOperation>,
+  OperationInput: {
+    name: "required", title: "optional", type: "required", required: "optional", maxLength: "optional",
+  } satisfies Presence<ExtensionOperationInput>,
   Setting: {
     id: "required", type: "required", title: "required", description: "optional", required: "optional",
     default: "optional", options: "optional", minimum: "optional", maximum: "optional", integer: "optional",
@@ -173,7 +179,7 @@ const tables: Record<string, Record<string, "required" | "optional">> = {
   } satisfies Presence<Contributions["detailLinks"][number]>,
 };
 
-const kinds = { declarative: true } satisfies Record<ExtensionManifest["kind"], true>;
+const kinds = { declarative: true, executable: true } satisfies Record<ExtensionManifest["kind"], true>;
 
 interface ObjectSchema {
   properties?: Record<string, unknown>;
@@ -242,6 +248,7 @@ describe("extension TypeScript types match the Rust contract", () => {
     ["CardType", { count: true, countByStatus: true, metric: true, list: true } satisfies Record<Card["type"], true>],
     ["CardAggregate", { sum: true, min: true, max: true } satisfies Record<NonNullable<Card["metric"]>["aggregate"], true>],
     ["CardOrder", { asc: true, desc: true } satisfies Record<NonNullable<NonNullable<Card["list"]>["order"]>, true>],
+    ["InputType", { string: true, integer: true, number: true, boolean: true } satisfies Record<ExtensionOperationInput["type"], true>],
   ])("has the Rust %s values", (name, values) => {
     // A documented variant is its own `oneOf` branch rather than one `enum` entry.
     const definition = schema.definitions[name] as ObjectSchema & { oneOf?: ObjectSchema[] };
