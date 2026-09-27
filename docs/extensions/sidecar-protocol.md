@@ -482,8 +482,10 @@ The sandbox grants the data directory and no other writable path:
   AppContainer write and where it points the sidecar's `TEMP`, `TMP` and `LOCALAPPDATA`.
   That folder would be outside the size limit and outlive the app's data. The deny names
   the write rights one by one (data, attributes, deletion, and the ACL and owner, so the
-  container cannot take it off), on the folder and everything already in it, and leaves
-  reading as Windows set it.
+  container cannot take it off), and leaves reading as Windows set it. It is inheritable on
+  the folder, for what is created there later, and explicit on every entry already in it,
+  since Windows gives the container explicit allows on `AC` and below, which an inherited
+  deny does not outrank. `AC\Temp` is made first if it is missing, so it is among them.
 
 The conformance suite checks that a write fails everywhere else a sidecar might try: beside
 its directory where the other apps' are, in another app's, in the host's and its own

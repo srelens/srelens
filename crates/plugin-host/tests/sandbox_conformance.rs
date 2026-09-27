@@ -274,6 +274,17 @@ fn host_reads(path: &Path) -> Result<(), String> {
     std::fs::read(path).map(|_| ()).map_err(|e| e.to_string())
 }
 
+/// The ACL `icacls` reports for `path`.
+#[cfg(windows)]
+fn acl(path: &Path) -> String {
+    let root = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
+    std::process::Command::new(Path::new(&root).join("System32").join("icacls.exe"))
+        .arg(path)
+        .output()
+        .map(|out| String::from_utf8_lossy(&out.stdout).into_owned())
+        .unwrap_or_else(|e| format!("icacls failed: {e}"))
+}
+
 /// The host writes `path` and removes it again: the positive control for a
 /// write the sidecar must be refused.
 fn host_writes(path: &Path) -> Result<(), String> {
@@ -650,6 +661,12 @@ async fn the_data_directory_is_the_only_path_the_sidecar_may_write() {
         places.push(("/dev/shm", PathBuf::from("/dev/shm")));
     }
     for (n, (what, dir)) in places.into_iter().enumerate() {
+        // What Windows has on the folder, for the log: which entry lets a
+        // write through, if one does.
+        #[cfg(windows)]
+        if what == "its own temporary directory" {
+            eprintln!("{what}: {}", acl(&dir));
+        }
         let name = format!("srelens-conformance-{}-{n}", std::process::id());
         let control = host_writes(&dir.join(format!("{name}-control")));
         let planted = dir.join(&name);

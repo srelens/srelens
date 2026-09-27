@@ -190,16 +190,21 @@ fn icacls(path: &Path, args: &[&str]) -> io::Result<()> {
     Ok(())
 }
 
-/// The AppContainer's own profile folder, `%LOCALAPPDATA%\Packages\<profile>`.
-/// `GetAppContainerFolderPath` names its `AC` subfolder, the one the container
-/// is granted; the deny goes on the profile folder above it, so it covers
-/// anything beside `AC` too.
-fn profile_folder(sid_text: &str) -> io::Result<PathBuf> {
+/// The AppContainer's own folders: its profile folder,
+/// `%LOCALAPPDATA%\Packages\<profile>`, and the `AC` folder in it that
+/// `GetAppContainerFolderPath` names, which the container is granted and where
+/// Windows points its `TEMP`.
+struct ProfileFolders {
+    profile: PathBuf,
+    ac: PathBuf,
+}
+
+fn profile_folders(sid_text: &str) -> io::Result<ProfileFolders> {
     let sid = wide(sid_text);
     let mut path: *mut u16 = null_mut();
     // SAFETY: a valid wide string and out-pointer; the buffer it returns is
     // freed once, with CoTaskMemFree, after it is copied.
-    let folder = unsafe {
+    let ac = unsafe {
         let hr = GetAppContainerFolderPath(sid.as_ptr(), &mut path);
         if hr != 0 || path.is_null() {
             return Err(io::Error::other(format!(
@@ -211,10 +216,11 @@ fn profile_folder(sid_text: &str) -> io::Result<PathBuf> {
         CoTaskMemFree(path as *const std::ffi::c_void);
         PathBuf::from(text)
     };
-    Ok(match (folder.file_name(), folder.parent()) {
+    let profile = match (ac.file_name(), ac.parent()) {
         (Some(name), Some(parent)) if name.eq_ignore_ascii_case("AC") => parent.to_path_buf(),
-        _ => folder,
-    })
+        _ => ac.clone(),
+    };
+    Ok(ProfileFolders { profile, ac })
 }
 
 /// Deny the container writing its own profile folder, so the data directory
@@ -228,14 +234,26 @@ fn profile_folder(sid_text: &str) -> io::Result<PathBuf> {
 /// and delete a child (`DE`, `DC`), and change the permissions or the owner
 /// (`WDAC`, `WO`), without which the container could remove this entry.
 ///
-/// On the folder and, with `/T`, on everything already in it: an explicit
-/// deny outranks an explicit allow, but an inherited one does not, so a deny
-/// only inherited from the folder would lose to an allow Windows set on `AC`
-/// or below it. `(OI)(CI)` carries it to what is created there later.
+/// An explicit deny outranks an explicit allow, but an inherited one does not,
+/// and Windows gives the container explicit allows on `AC` and below. So the
+/// deny goes on in two passes: inheritable on the profile folder, for what is
+/// created there later, and explicit on every entry already in it, named by
+/// `icacls`'s own pattern match (`<folder>\*` with `/T`). The first CI run of
+/// this showed why the second is needed: with only `(OI)(CI)` and `/T` on the
+/// folder, `AC\Temp` stayed writable. `AC\Temp` is made first if it is
+/// missing, so it is among the entries denied rather than created after them.
 fn deny_profile_folder(sid_text: &str) -> io::Result<()> {
-    let folder = profile_folder(sid_text)?;
-    let ace = format!("*{sid_text}:(OI)(CI)(WD,AD,WA,WEA,DE,DC,WDAC,WO)");
-    icacls(&folder, &["/deny", &ace, "/T"])
+    const RIGHTS: &str = "(WD,AD,WA,WEA,DE,DC,WDAC,WO)";
+    let folders = profile_folders(sid_text)?;
+    std::fs::create_dir_all(folders.ac.join("Temp"))?;
+    icacls(
+        &folders.profile,
+        &["/deny", &format!("*{sid_text}:(OI)(CI){RIGHTS}")],
+    )?;
+    icacls(
+        &folders.profile.join("*"),
+        &["/deny", &format!("*{sid_text}:{RIGHTS}"), "/T"],
+    )
 }
 
 /// Owned kernel handles, closed on drop.
