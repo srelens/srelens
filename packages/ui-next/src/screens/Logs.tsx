@@ -268,6 +268,12 @@ interface Row {
   message: string;
   /** The line exactly as it arrived, stamp and all — what an export writes. */
   raw: string;
+  /**
+   * The host cut the line at its limit and `raw` is its start (#747). Said
+   * beside the line, never written into it, so the filter and an export read
+   * what the container wrote.
+   */
+  truncated: boolean;
   /** Lower-cased message + severity word, which is what the filter matches. */
   haystack: string;
 }
@@ -335,6 +341,7 @@ function toRow(line: StreamLine, byLabel: ReadonlyMap<string, LogTarget>): Row {
     health,
     message,
     raw: line.text,
+    truncated: line.truncated === true,
     haystack: `${message} ${health}`.toLowerCase(),
   };
 }
@@ -1371,7 +1378,19 @@ function LogsStream({
                   // screen; an override belongs to a line singled out for some
                   // reason OTHER than its level, and none is.
                   level={row.level}
-                  message={row.message}
+                  // A cut line says so at its end, in the message's own flow: the
+                  // trailing slot sits beside the message box, and with Wrap off a
+                  // long message runs past that box and under it.
+                  message={
+                    row.truncated ? (
+                      <>
+                        {row.message}
+                        <span className="text-faint"> [line cut: too long]</span>
+                      </>
+                    ) : (
+                      row.message
+                    )
+                  }
                 />
               ))}
               {window_.bottomPad > 0 && (

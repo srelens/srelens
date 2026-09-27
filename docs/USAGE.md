@@ -206,7 +206,12 @@ you:
 - **ts** — prefix each line with a timestamp.
 - **Search** — filter the buffer, with a match count.
 - **Live tail** (play/pause) — stream new lines as they arrive; the status shows
-  connecting / reconnecting / a green **live** dot.
+  connecting / reconnecting / a green **live** dot. A streamed line longer than
+  64 KiB shows its first 64 KiB followed by **[line cut: too long]**. The rest is
+  dropped up to its newline, so a container that writes a huge line, or none at
+  all, cannot fill srelens's memory. **Download all containers** fetches the
+  logs again, so it has the whole line. Output that is not valid UTF-8 shows as
+  `�` instead of stopping the stream.
 - **Wrap** — wrap long lines.
 - **Download** — save the current buffer to a `.log` file.
 - **Download all containers** — save a full dump of every container of every
