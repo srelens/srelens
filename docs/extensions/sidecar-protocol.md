@@ -471,11 +471,17 @@ macOS memory watchdog ([ADR](../design/plugin-architecture.md#decision-macos-lim
 for disk: a filesystem quota needs privileges srelens does not have.
 
 Measuring, clearing and removing never follow a symbolic link they find, so a link inside
-the directory cannot make srelens empty or delete anything outside it. One race is left for
-the escape review ([#744](https://github.com/srelens/srelens/issues/744)): a directory the
-sidecar swaps for a link between being listed and being read can make one measurement count
-what the link points to, sizes only, up to the entry limit. A directory it removes or swaps
-for a file in that moment is skipped.
+the directory cannot make srelens empty or delete anything outside it.
+
+**A measurement is a walk, not a snapshot.** A sidecar that renames, moves or swaps
+directories and files while srelens walks the directory can make one measurement count a
+subtree twice, count what a swapped-in link points to, or miss a subtree altogether. It
+cannot make it count past the entry limit. A sidecar that races the walk on purpose can
+therefore keep its directory past the limit without being stopped. On Linux and macOS each
+file is still capped at the limit by the kernel. Windows has no per-file cap. A cooperating
+sidecar is held to the limit; a hostile one is bounded only as far as that. Closing the race
+needs a stable view of the directory that no OS gives srelens unprivileged, and it is left for
+the escape review ([#744](https://github.com/srelens/srelens/issues/744)).
 
 ### Only that path
 

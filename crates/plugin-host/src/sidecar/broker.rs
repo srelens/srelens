@@ -687,6 +687,8 @@ mod tests {
             Some(json!({"clusterId": 7, "namespace": "team"})),
             Some(json!({"clusterId": "prod"})),
             Some(json!({"clusterId": "prod", "namespace": ""})),
+            // The spelling Rust would write, not the one the protocol takes.
+            Some(json!({"cluster_id": "prod", "namespace": "team"})),
             Some(json!({"clusterId": "prod", "namespace": 3})),
             Some(json!({"clusterId": "prod", "namespace": "Not_A_Namespace"})),
             Some(json!({"clusterId": "prod", "namespace": null, "current": true})),
@@ -880,6 +882,8 @@ mod tests {
             ("uid", "u\n1".to_owned()),
             ("resourceVersion", long.clone()),
             ("resourceVersion", String::new()),
+            // The spelling Rust would write, not the one the protocol takes.
+            ("resource_version", "42".to_owned()),
         ] {
             let mut params = action_params();
             params[field] = json!(value);

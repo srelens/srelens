@@ -19,9 +19,12 @@
 //!   kept.
 //!
 //! Nothing here follows a symbolic link it finds: not measuring, clearing or
-//! pruning. A directory the sidecar swaps for a link in the moment between
-//! being listed and being read can make a measurement count what the link
-//! points to, sizes only, up to the entry limit; that race is #744's.
+//! pruning. A measurement is a walk, not a snapshot: a sidecar that renames or
+//! swaps entries while it is walked can make it count what a swapped-in link
+//! points to, or miss a subtree, so one that races the walk on purpose can
+//! keep its directory past the limit. Each file is still capped on Linux and
+//! macOS. Closing that race is #744's (`docs/extensions/sidecar-protocol.md`,
+//! "Data directory").
 
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;

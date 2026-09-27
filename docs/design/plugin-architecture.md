@@ -610,8 +610,8 @@ Where it departs from the spike:
 | One AppContainer profile | One per app, named by a digest of its ID, with `delete_profile` for uninstall | The recommendation above; an app ID can be longer than a profile name |
 | On Windows, stderr joined stdout | Its own pipe | stdout is protocol only |
 | `icacls` found by `PATH` | Under `%SystemRoot%\System32` | A `PATH` entry must not choose it |
-| The AppContainer could write its own profile folder, where Windows points `TEMP` | The container is denied writing it (#573) | The app's data directory is the only path it may write, and the only one under its size limit |
-| One scratch directory the probe was given | A per-app data directory, owner-only, measured against a size limit before each start and every 2 s, each file capped by `RLIMIT_FSIZE` on Linux and macOS, removed with the app (#573) | Real tools need scratch space; see [Data directory](../extensions/sidecar-protocol.md#data-directory) |
+| The AppContainer could write its own profile folder, where Windows points `TEMP` | The folder is read-only to it: each launch removes the container's own entries from it and grants read and execute on `AC`. A deny entry did not work, since a deny for an AppContainer's own SID does not outweigh the full control Windows grants it there (#573) | The app's data directory is the only path it may write, and the only one under its size limit |
+| One scratch directory the probe was given | A per-app data directory, owner-only, measured against a size limit before each start and every 2 s, each file capped by `RLIMIT_FSIZE` on Linux and macOS. Removing the app removes it after the inventory change, best effort; one that cannot be removed then is tried again on the next change (#573) | Real tools need scratch space; see [Data directory](../extensions/sidecar-protocol.md#data-directory) |
 | macOS launcher set `RLIMIT_DATA`, `RLIMIT_AS` and a 60-second `RLIMIT_CPU` | None | The first two were refused. The third would kill a long-lived sidecar after a minute of CPU, which is not a limit |
 
 `crates/plugin-host/tests/sandbox_conformance.rs` is the conformance suite: the seven
