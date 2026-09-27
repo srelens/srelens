@@ -46,11 +46,13 @@ Settings → Apps stores **Allow unsigned apps to modify clusters and run code**
   `developerMode: true` does not grant the new permission. Legacy disabled entries
   remain disabled. The next atomic save persists the policy; transient denial reasons
   are recomputed, never trusted from disk.
-- All executable apps without a verified publisher require the same policy even if
-  they declare no writes. **This host does not yet support executable apps**: its
-  manifest parser rejects executable kinds regardless of this setting. A future
-  runtime must extend the exhaustive kind classifier and enforce this gate before
-  admitting code; enabling this setting does not enable an SDK or runtime today.
+- Every executable app ([API 0.6](#060)) without a verified publisher requires the same
+  setting, even if it declares no writes: it runs code on this computer, sandboxed or
+  not. The host decides which apps need it by an exhaustive match on the manifest
+  kind (`needs_unsigned_policy` in `crates/registry/src/extensions.rs`), so a new kind
+  cannot be added without deciding. Validation reports the setting at `kind`. The
+  setting never admits code on its own: an executable app still installs only from a
+  package, and its sidecar still runs only in the OS sandbox.
 
 The configuration payload is
 `{"action":"unsignedApps","allowUnsignedApps":true}` through the existing
@@ -89,9 +91,10 @@ permission grants, action confirmation, cluster scoping, or manifest validation.
    `0.MINOR` version. A `0.MINOR.PATCH` bump is for clarifications that do not change
    which manifests validate. From 1.0: MAJOR for breaking changes, MINOR for
    additive ones, PATCH for fixes.
-5. **Current supported lines.** This host implements **API 0.3, API 0.4 and API 0.5**.
-   A `^0.3` manifest is served under 0.3 and may use only what 0.3 has; a `^0.4` one may
-   also use what [0.4 added](#040), and a `^0.5` one what [0.5 added](#050). API 0.1 and API 0.2 are not supported. Existing
+5. **Current supported lines.** This host implements **API 0.3, API 0.4, API 0.5 and
+   API 0.6**. A `^0.3` manifest is served under 0.3 and may use only what 0.3 has; a
+   `^0.4` one may also use what [0.4 added](#040), a `^0.5` one what [0.5 added](#050),
+   and a `^0.6` one what [0.6 added](#060). API 0.1 and API 0.2 are not supported. Existing
    installations targeting a retired line are quarantined until replaced by a
    compatible manifest. Official manifests must receive a new version and publisher
    signature; editing an installed signed manifest invalidates its proof.
@@ -254,7 +257,7 @@ list, and the [developer harness](testing.md#developer-harness) prints one per l
 | `EXTENSION_INVALID_BINDING` | A binding's arguments or inputs break its target's rules. |
 | `EXTENSION_UNRESOLVED_CAPABILITY` | A contribution or dashboard names a capability the manifest does not declare. |
 | `EXTENSION_UNRESOLVED_PAGE` | A dashboard names a page the manifest does not declare. |
-| `EXTENSION_INVALID_KIND` | The manifest `kind` is not `declarative`, or a `forKinds` entry is not a qualified Kubernetes kind. |
+| `EXTENSION_INVALID_KIND` | The manifest `kind` is not `declarative` or `executable`, `kind` and `sidecar` disagree, an executable app is installed without the package that carries its binaries, or a `forKinds` entry is not a qualified Kubernetes kind. |
 
 ## Identifiers
 
@@ -271,7 +274,8 @@ list, and the [developer harness](testing.md#developer-harness) prints one per l
   already installed is an explicit replacement after permission review. It keeps the
   app's settings and assigns a new revision.
 - **Names inside a manifest.** Capability `name`s are unique, and an action's `name`
-  shares that space, since both become `plugin/<id>/<name>`. Contribution `id`s are
+  and a sidecar operation's share that space, since all three become
+  `plugin/<id>/<name>`. Contribution `id`s are
   unique across `pages`, `detailTabs` and `detailLinks`. Both use `A–Z`, `a–z`, `0–9`
   and `-`, up to 64 characters.
 - **Names, titles and groups.** The app `name`, every `title` and a page `group` are
@@ -299,6 +303,42 @@ list, and the [developer harness](testing.md#developer-harness) prints one per l
   [#563](https://github.com/srelens/srelens/issues/563).
 
 ## API changelog
+
+### 0.6.0
+
+New in this line ([#574](https://github.com/srelens/srelens/issues/574)):
+
+- **Executable apps.** `kind` may be `executable`, for an app that also runs a
+  **sidecar**: `sidecar.binaries` names the binary for each platform it ships for, a file
+  directly under `bin/<platform>/` in its package, and `sidecar.operations` declares
+  each request the sidecar answers, with typed inputs (`string`, `integer`, `number`,
+  `boolean`) and, for a string, a `maxLength`. `sidecar` is present exactly when the
+  kind is `executable`. An executable app may declare no capabilities at all. See
+  [Executable apps](manifest.md#executable-apps).
+- An operation's name shares the `plugin/<id>/<name>` space with capabilities and
+  actions, and may not be one of the sidecar protocol's own methods.
+- `API_FIELDS` gates both: the kind as a form of `kind`, a field every line has, and
+  `sidecar` as a field. A `^0.5` manifest of kind `executable` is refused with
+  `EXTENSION_API_INCOMPATIBLE`, "the executable kind in `kind` requires API 0.6.0". The
+  kind is a line of its own rather than an addition to 0.5, so no host that implements
+  0.5 meets it as a kind it cannot parse.
+- An executable app installs only from a package carrying exactly the binaries it names,
+  needs a verified publisher or the unsigned-app setting even without writes, and runs
+  its sidecar only in the OS sandbox, starting on its first operation call. See
+  [What the host holds a sidecar to](manifest.md#what-the-host-holds-a-sidecar-to).
+- The host supports API 0.3, 0.4, 0.5 and 0.6, and `extensions.catalog` reports all
+  four in `hostApiVersions`.
+- The manifest JSON Schema for this line is `schemas/extension-manifest.v0.6.json`.
+  `schemas/extension-manifest.v0.5.json` is the 0.5 contract, frozen as it was when 0.6
+  was cut.
+
+For existing manifests, with no manifest change (additive host behaviour):
+
+- Every installed app's readers and declared actions are MCP tools,
+  `plugin/<id>/<name>`, beside its sidecar operations, and a server with them sends
+  `notifications/tools/list_changed` as apps are installed, changed or removed. They
+  run through the same broker paths as `extensions.read` and `extensions.action`. See
+  [Installed apps' tools](../MCP.md#installed-apps-tools).
 
 ### 0.5.0
 

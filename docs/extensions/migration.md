@@ -52,6 +52,18 @@ An unsigned app that adds a `k8s.exec` binding needs **Allow unsigned apps to mo
 clusters and run code**, as one that declares actions does; installed without it, it is
 disabled with that reason.
 
+## Executable apps (#574)
+
+They are API 0.6. An app of kind `executable` requires `^0.6`; under `^0.5` it is told
+"the executable kind in `kind` requires API 0.6.0". A host from before 0.6 lists a
+`^0.6` release as incompatible rather than offering it. Nothing about a declarative
+app changes, on any line.
+
+An installed executable app is stored with the package it came from. A host from
+before 0.6 cannot read an inventory that holds one, since installed apps are read
+strictly: remove it before going back. Its sidecar's data directory,
+`*.extensions.data/<app ID>/`, is removed with it.
+
 ## Plain HTTP to this computer (#568)
 
 An installed app records **Allow plain HTTP to this computer** as `allowLoopbackHttp`,

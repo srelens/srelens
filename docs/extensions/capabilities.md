@@ -241,6 +241,12 @@ reports the request as accepted rather than as complete.
   computer. A web user's registry has no `network.http` (#568), so an app that binds it
   is refused there with `EXTENSION_UNSUPPORTED_TARGET` ("This host does not provide
   network.http"), and `extensions.read` has nothing to send.
+- **No executable apps and no app tools on the web** ([#574](https://github.com/srelens/srelens/issues/574)).
+  An executable app installs only from a package, and the web host keeps no files for
+  its apps, so it installs none and runs no sidecar. An app's operations are MCP tools,
+  and the web host runs no MCP server; its capability route refuses any `plugin/…` id
+  before dispatch, so no app tool, and least of all one that would need a consent
+  prompt nobody can answer there, is ever served or approved.
 - **No app secrets on the web yet.** A web user's registry has no secret store, so
   `extension.secretStore` is not registered there (and is refused before dispatch
   too), and `extensions.list` reports the store unavailable: the web host keeps no app

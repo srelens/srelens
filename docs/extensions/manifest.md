@@ -7,22 +7,24 @@ and [flux.json](../../examples/extensions/flux.json).
 
 ## JSON Schema
 
-The schema for API 0.5 is committed at
-[`schemas/extension-manifest.v0.5.json`](../../schemas/extension-manifest.v0.5.json).
+The schema for API 0.6 is committed at
+[`schemas/extension-manifest.v0.6.json`](../../schemas/extension-manifest.v0.6.json).
 Point your editor at it by naming it in the manifest:
 
 ```json
 {
-  "$schema": "https://raw.githubusercontent.com/srelens/srelens/main/schemas/extension-manifest.v0.5.json",
+  "$schema": "https://raw.githubusercontent.com/srelens/srelens/main/schemas/extension-manifest.v0.6.json",
   "id": "io.example.cert-manager"
 }
 ```
 
 The file is generated from the host's `Manifest` type, and `cargo test` fails when the
-two differ. [`schemas/extension-manifest.v0.4.json`](../../schemas/extension-manifest.v0.4.json)
+two differ. [`schemas/extension-manifest.v0.5.json`](../../schemas/extension-manifest.v0.5.json),
+[`schemas/extension-manifest.v0.4.json`](../../schemas/extension-manifest.v0.4.json)
 and [`schemas/extension-manifest.v0.3.json`](../../schemas/extension-manifest.v0.3.json)
-are the API 0.4 and 0.3 contracts, each kept as it was when the next line was cut, for
-manifests that still require `^0.4` or `^0.3`; name the one your range negotiates to.
+are the API 0.5, 0.4 and 0.3 contracts, each kept as it was when the next line was cut,
+for manifests that still require `^0.5`, `^0.4` or `^0.3`; name the one your range
+negotiates to.
 After changing a manifest field, regenerate the newest file with:
 
 ```sh
@@ -42,12 +44,13 @@ before publishing.
 | `id` | Yes | Reverse-domain identifier. See [Identifiers](specification.md#identifiers). |
 | `name` | Yes | Display name, 1–120 characters, with no control characters and no bidirectional or invisible format characters. See [Identifiers](specification.md#identifiers). |
 | `version` | Yes | The app's own SemVer version. |
-| `srelensApiVersion` | Yes | A SemVer range of extension API versions, for example `^0.5`. The fields marked **API 0.4** on this page need a range that admits only 0.4 or later, and those marked **API 0.5** one that admits only 0.5 or later; see [Versioning](specification.md#versioning). |
-| `kind` | Yes | `declarative`. No other kind is accepted. |
+| `srelensApiVersion` | Yes | A SemVer range of extension API versions, for example `^0.5`. The fields marked **API 0.4** on this page need a range that admits only 0.4 or later, those marked **API 0.5** one that admits only 0.5 or later, and those marked **API 0.6** one that admits only 0.6 or later; see [Versioning](specification.md#versioning). |
+| `kind` | Yes | `declarative`, or (**API 0.6**) `executable` for an app that also runs a sidecar; see [Executable apps](#executable-apps). |
 | `permissions` | Yes | The exact host capability IDs the bindings use. `network.http` is written `{ "capability": "network.http", "hosts": [...] }` (API 0.4); see [Network requests](#network-requests). A pod capability may be written `{ "capability": "k8s.streamLogs", "namespaces": [...] }` (API 0.5); see [Logs, exec and port-forwards](#logs-exec-and-port-forwards). |
-| `capabilities` | Yes | 1–32 bindings, below. |
+| `capabilities` | Yes | 1–32 bindings, below; 0–32 for an executable app, which may do all its work in its sidecar. |
 | `actions` | No | Up to 32 declared mutations, below. |
 | `settings` | No | **API 0.4.** Up to 32 typed settings, drawn as a host form. See [Settings](#settings). |
+| `sidecar` | For `executable` | **API 0.6.** The binaries an executable app runs and the operations they answer. Present exactly when `kind` is `executable`. See [Executable apps](#executable-apps). |
 | `contributions` | Yes | `pages`, `detailTabs`, `detailLinks`, and optional `joins`, `tableColumns`, `detailPanels`, `statusResolvers`, `badges`, `dashboardCards`, `commands` and `resourceLinks` (all **API 0.4**), below. |
 
 Unknown fields are errors at every level. A manifest is at most 256 KiB.
@@ -1073,6 +1076,87 @@ the pod stops running, and one through a Service follows the Service to another 
 scope.
 
 The frames each source sends are in [streams.md](streams.md#logs).
+
+## Executable apps
+
+**API 0.6** ([#574](https://github.com/srelens/srelens/issues/574)). An app of kind
+`executable` also runs a **sidecar**: a program it ships, which srelens starts in the
+operating system's sandbox and talks JSON-RPC to over stdio
+([sidecar-protocol.md](sidecar-protocol.md)). It has no kubeconfig, no network, no
+environment of srelens's and one writable directory, and until the broker
+([#573](https://github.com/srelens/srelens/issues/573)) it can call nothing in the host.
+An executable app may declare everything a declarative one does as well.
+
+```json
+{
+  "$schema": "https://raw.githubusercontent.com/srelens/srelens/main/schemas/extension-manifest.v0.6.json",
+  "id": "io.example.scanner",
+  "name": "Image scanner",
+  "version": "1.0.0",
+  "srelensApiVersion": "^0.6",
+  "kind": "executable",
+  "permissions": [],
+  "capabilities": [],
+  "sidecar": {
+    "binaries": {
+      "linux-amd64": "bin/linux-amd64/scanner",
+      "windows-amd64": "bin/windows-amd64/scanner.exe"
+    },
+    "operations": [
+      {
+        "name": "scan",
+        "title": "Scan an image",
+        "inputs": [
+          { "name": "image", "title": "Image reference", "type": "string", "required": true, "maxLength": 512 },
+          { "name": "fixable", "type": "boolean" }
+        ]
+      }
+    ]
+  },
+  "contributions": { "pages": [], "detailTabs": [], "detailLinks": [] }
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `binaries` | The binary run on each platform: `darwin-arm64`, `darwin-amd64`, `linux-amd64`, `linux-arm64` or `windows-amd64`, each a file directly under `bin/<platform>/` in the app's package. At least one. A platform left out does not run the app. |
+| `operations` | 1–32 requests the sidecar answers. |
+| `operations[].name` | Unique across `capabilities`, `actions` and `operations`, 1–64 letters, digits and `-`, and not one of the protocol's own methods (`initialize`, `activate`, `deactivate`, `health`, `shutdown`). Addressed as `plugin/<id>/<name>`. |
+| `operations[].title` | 1–120 characters, as every title. |
+| `operations[].inputs` | Up to 16 inputs, each `{ name, title?, type, required?, maxLength? }`. `type` is `string`, `integer`, `number` or `boolean`. `maxLength` is for a string: 1–65536 bytes, default 1024. |
+
+### What the host holds a sidecar to
+
+- **It installs from a package.** An executable app installs only from a
+  `.srelens-extension` package ([packages.md](packages.md)) carrying exactly the
+  binaries its `binaries` names: a named binary missing from the package, or a binary
+  the package carries that the manifest does not name, is refused. A pasted or
+  single-file manifest of this kind is refused, and so is any install on a host that
+  keeps no files for its apps, such as the web host.
+- **It needs a publisher or the setting.** An unsigned executable app needs
+  **Allow unsigned apps to modify clusters and run code**, whether or not it writes
+  ([specification.md](specification.md#unsigned-app-policy)).
+- **It starts on first use.** The sidecar starts when one of its operations is first
+  called in a process, not at install. Before it starts, its binary is checked against
+  the digest list its package was unpacked with; one changed on disk since is refused,
+  not run. It stops when the app is disabled, updated, rolled back, blocked or removed,
+  and when srelens exits. Its one writable directory, `*.extensions.data/<app ID>/`
+  beside the inventory, goes with the app when it is removed.
+- **It runs only in a sandbox.** Linux and Windows run sidecars in the backends
+  [sidecar-protocol.md](sidecar-protocol.md#sandbox) describes. On Linux the sandbox
+  launcher is found beside the srelens binary or at `SRELENS_SANDBOX_LAUNCHER`, and the
+  cgroup delegated to srelens is named by `SRELENS_SANDBOX_CGROUP_ROOT`; without them
+  the sidecar is refused with what is missing. macOS refuses every sidecar until its
+  host-enforced limits exist ([#713](https://github.com/srelens/srelens/issues/713)).
+- **Its input is the host's to check.** Every call is held to the operation's declared
+  inputs before the sidecar sees it: no field it does not declare, every required one
+  present, each of its type, each string within its `maxLength`, and the whole call
+  within 256 KiB. The sidecar receives the checked object as the request's `params`.
+
+Each operation is an MCP tool, `plugin/<id>/<name>`, alongside the app's readers and
+actions. It is read-only and not gated, since the sidecar can change nothing outside
+its sandbox, and sensitive, so the audit log redacts its arguments whole
+([MCP.md](../MCP.md#installed-apps-tools)).
 
 ## Rules the desktop app adds
 

@@ -43,9 +43,10 @@ The declarative broker inherits core capability annotations and binds fixed
 resource selectors. Callers cannot override those selectors or obtain ambient
 network, filesystem, process, kubeconfig or credential access.
 
-The developer broker can register `plugin/<id>/<operation>` capabilities for MCP.
-The app uses the revision-checked read facade; dynamic MCP discovery remains
-separate lifecycle work. Multi-user web installations remain disabled until
+Installed apps' operations are MCP tools, `plugin/<id>/<operation>`
+([#574](https://github.com/srelens/srelens/issues/574)): a snapshot per inventory that
+routes each call through the revision-checked read and action facades, rebuilt and
+announced with `tools/list_changed` as apps change, the old snapshot revoked. Multi-user web installations remain disabled until
 per-user inventory and lifecycle isolation are implemented.
 
 ## Native platform roadmap
@@ -86,9 +87,9 @@ Status:
 
 The supervisor ([#572](https://github.com/srelens/srelens/issues/572), under
 [#521](https://github.com/srelens/srelens/issues/521)) implements the recommended backend
-for each OS; see [The supervisor](#the-supervisor-572). Nothing runs it yet: no manifest
-kind starts a sidecar ([#574](https://github.com/srelens/srelens/issues/574)). The rest of
-this section is the spike's record.
+for each OS; see [The supervisor](#the-supervisor-572). An app of kind `executable`
+([#574](https://github.com/srelens/srelens/issues/574), API 0.6) runs it, starting its
+sidecar on the first operation call. The rest of this section is the spike's record.
 
 The spike asked one question: can each desktop OS's own sandbox facility enforce the
 restrictions an executable extension must run under, on ordinary operations? It is a

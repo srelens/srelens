@@ -9,12 +9,14 @@ Tracking: [#572](https://github.com/srelens/srelens/issues/572), part of
 [#521](https://github.com/srelens/srelens/issues/521). The code is
 `crates/plugin-host/src/sidecar/`.
 
-**Status: nothing starts a sidecar yet.** The manifest has no executable kind: it still
-accepts only `declarative`, and the unsigned-app policy for executables is to be
-enforced when the kind is added ([specification.md](specification.md#unsigned-app-policy)).
-Registering a sidecar's operations and wiring it into the app is
-[#574](https://github.com/srelens/srelens/issues/574). What is not built is listed under
-[Not yet](#not-yet).
+**Status.** An app of kind `executable` (API 0.6,
+[#574](https://github.com/srelens/srelens/issues/574)) names its sidecar's binaries and the
+operations it answers ([manifest.md](manifest.md#executable-apps)). srelens starts the
+sidecar under this supervisor the first time one of those operations is called in a
+process, and stops it when the app is disabled, updated or removed. Each operation is an
+MCP tool, `plugin/<id>/<operation>` ([MCP.md](../MCP.md#installed-apps-tools)). The
+registry's side is `crates/registry/src/extensions/sidecars.rs`. What is not built is
+listed under [Not yet](#not-yet).
 
 ## The wire
 
@@ -60,8 +62,9 @@ that is how it learns srelens has gone.
 
 The sidecar API has its own versions, listed in `SIDECAR_API_VERSIONS`
 (`crates/plugin-host/src/sidecar/protocol.rs`). Today there is one, `0.1.0`. It is not
-the extension API version (`SUPPORTED_API_VERSIONS`), because no manifest kind runs a
-sidecar yet. Whether the two merge when the executable kind lands is open (#574).
+the extension API version (`SUPPORTED_API_VERSIONS`), and the executable kind (#574) kept
+the two apart: a manifest names the extension API it is written for, and its sidecar
+negotiates this one at `initialize`, so each can move without the other.
 
 `initialize` offers every version srelens speaks, and the sidecar answers with the one it
 chose:
@@ -77,8 +80,12 @@ supervisor does not retry (see [States](#states)).
 
 ## Requests
 
-An app's request to its sidecar is an ordinary JSON-RPC request. The limits are host
-policy (`Limits` in `crates/plugin-host/src/sidecar/limits.rs`):
+An app's request to its sidecar is an ordinary JSON-RPC request. Today srelens sends one
+kind: a call of one of the operations the manifest declares, as a request named after the
+operation, whose `params` is the call's input after srelens has held it to the
+operation's declared inputs. A sidecar answers with any JSON result, which is what the
+caller gets. The limits are host policy (`Limits` in
+`crates/plugin-host/src/sidecar/limits.rs`):
 
 | Limit | Default | When it is reached |
 |---|---|---|
@@ -246,8 +253,9 @@ lacks only a limit layer should instead run the sidecar with a warning is still 
 
 What the sidecar gets:
 
-- **One writable directory**, which is also its working directory. The per-app,
-  size-limited data directory is #573's; the supervisor takes the directory it is given.
+- **One writable directory**, which is also its working directory: `*.extensions.data/<app
+  ID>/` beside the inventory, owner-only, removed with the app. A size limit on it is
+  #573's; the supervisor takes the directory it is given.
 - **Only the environment srelens names.** The host's own is never inherited: it may hold
   `KUBECONFIG`, cloud credentials or tokens. On Windows it also gets `SystemRoot`, which
   Winsock needs, and `LOCALAPPDATA`, `TEMP` and `TMP`, which Windows reroutes into the
@@ -268,7 +276,8 @@ Windows, and it runs on macOS by hand (the file's header says how).
 
 | What | Where |
 |---|---|
-| A manifest kind that runs a sidecar, and registering its operations as capabilities and MCP tools | [#574](https://github.com/srelens/srelens/issues/574) |
+| An operation that answers with a stream: the protocol has streams, and nothing opens one on an app's behalf yet | — |
+| Shipping `srelens-sandbox-launch` in the desktop bundles, and finding a delegated cgroup on a systemd desktop; until then Linux names them with `SRELENS_SANDBOX_LAUNCHER` and `SRELENS_SANDBOX_CGROUP_ROOT` | — |
 | Broker callbacks, and the per-app data directory | [#573](https://github.com/srelens/srelens/issues/573) |
 | Per-app logs, the Inspector, runtime metrics | [#575](https://github.com/srelens/srelens/issues/575) |
 | JSON Schema for these messages, and the Rust and Go SDKs | [#576](https://github.com/srelens/srelens/issues/576) |

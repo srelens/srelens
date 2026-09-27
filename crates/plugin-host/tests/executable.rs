@@ -289,3 +289,23 @@ fn an_operation_runs_under_the_hosts_row_not_the_apps() {
         (true, false, false, true, srelens_capability::Impact::Low)
     );
 }
+
+/// The manifest reference's example is a manifest this host accepts: a claim in prose
+/// is not a caller, so the example is parsed like one.
+#[test]
+fn the_reference_example_is_a_manifest_this_host_accepts() {
+    let reference = include_str!("../../../docs/extensions/manifest.md");
+    let section = reference
+        .split("\n## Executable apps\n")
+        .nth(1)
+        .expect("manifest.md has an Executable apps section");
+    let example = section
+        .split("```json\n")
+        .nth(1)
+        .and_then(|rest| rest.split("\n```").next())
+        .expect("the section opens with a JSON example");
+    let parsed = Manifest::parse(example).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(parsed.kind, ManifestKind::Executable);
+    let schema = parsed.operation("scan").unwrap().input_schema();
+    assert_eq!(schema["required"], json!(["image"]));
+}

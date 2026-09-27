@@ -18,12 +18,19 @@ Tracking: [#163](https://github.com/srelens/srelens/issues/163). Architecture de
 - Follow the logs of, run a fixed command in, or forward a port to the pods of a
   workload it reads, or of a namespace a person granted
   ([Logs, exec and port-forwards](manifest.md#logs-exec-and-port-forwards)).
+- As an executable app, run a program it ships as a sandboxed sidecar that answers the
+  operations it declares ([Executable apps](manifest.md#executable-apps)).
+- Offer its readers, actions and operations to AI agents as MCP tools, under the same
+  consent as the rest of srelens ([MCP.md](../MCP.md#installed-apps-tools)).
 
 ## What an app cannot do
 
-- Run code on this computer. No JavaScript, subprocess, iframe, npm install or
-  lifecycle script is executed. An exec binding runs one command the manifest fixes,
-  inside a pod, never a shell, and only after a person confirms that exact command.
+- Run code on this computer outside the OS sandbox. A declarative app runs no code: no
+  JavaScript, subprocess, iframe, npm install or lifecycle script is executed. An
+  executable app's program runs only as a sidecar in the sandbox, with no kubeconfig,
+  no network and no files but its own directory, and nowhere without one. An exec
+  binding runs one command the manifest fixes, inside a pod, never a shell, and only
+  after a person confirms that exact command.
 - Read kubeconfig, tokens or files. Every read goes through the host, under the
   selected cluster's RBAC.
 - Open a network connection. An app granted `network.http` asks the host to send a
