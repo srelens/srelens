@@ -267,6 +267,8 @@ pub struct ExtensionStreams {
     inventory: tokio::sync::watch::Sender<u64>,
     /// Windows told of every announced inventory write (#566).
     listeners: Mutex<Vec<Arc<dyn EventSink>>>,
+    /// The apps' logs and sidecars, which the Inspector reads (#575).
+    runtime: Arc<super::inspector::AppRuntime>,
 }
 
 impl ExtensionStreams {
@@ -473,6 +475,17 @@ impl ExtensionStreams {
         self.streams.metrics()
     }
 
+    /// The limits every app's streams are held to.
+    pub fn stream_limits(&self) -> StreamLimits {
+        self.streams.limits()
+    }
+
+    /// The apps' logs and sidecars in this process (#575): where a host that
+    /// starts a sidecar gets its app's log, and shows its process.
+    pub fn runtime(&self) -> Arc<super::inspector::AppRuntime> {
+        self.runtime.clone()
+    }
+
     /// Tell `sink` of every inventory write this process announces, as
     /// `{ "type": "changed" }` on [`INVENTORY_CHANNEL`]. The desktop host
     /// passes its window's sink, so the app list reads again instead of polling.
@@ -577,6 +590,7 @@ impl ExtensionStreams {
                 Some(_) => None,
             }
         });
+        self.runtime.forget_removed(state);
         // After the endings above, so a stream the lifecycle ended hears
         // that, and not a recheck's refusal.
         self.inventory.send_modify(|generation| *generation += 1);
@@ -908,6 +922,7 @@ pub(super) fn register(
                     timing: Mutex::new(WatchTiming::default()),
                     inventory: tokio::sync::watch::channel(0).0,
                     listeners: Mutex::new(Vec::new()),
+                    runtime: Arc::default(),
                 });
                 live.retain(|_, weak| weak.strong_count() > 0);
                 live.insert(key, Arc::downgrade(&streams));
@@ -1965,6 +1980,61 @@ mod tests {
         let metrics = streams.metrics();
         assert!(metrics[0].streams.iter().all(|s| s.source == "watch"));
         assert_eq!(streams.close_view("v"), 8);
+    }
+
+    /// The Inspector (#575) lists what an app's views have open now, its
+    /// watches apart from its other streams, and forgets each as it ends.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_inspector_reflects_an_apps_open_streams_and_watches() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, reg, streams) = setup(dir.path());
+        let revision = install(&path, fake_core());
+        let (session, _) = scripted(vec![]);
+        streams.script_watches(session, FAST);
+        let sink = Arc::new(TestSink::default());
+        open(
+            &streams,
+            &sink,
+            request(APP, revision, "page#1", "extstream:r1"),
+        )
+        .await;
+        streams
+            .open(sink.clone(), watch(APP, revision, "tab#2", "extstream:w1"))
+            .await
+            .unwrap();
+        let inspect = || async {
+            reg.invoke("extensions.inspect", json!({"id": APP}))
+                .await
+                .unwrap()["streams"]
+                .clone()
+        };
+        let now = inspect().await;
+        let open_streams = now["open"].as_array().unwrap();
+        assert_eq!(open_streams.len(), 1, "{now}");
+        assert_eq!(open_streams[0]["source"], "read");
+        assert_eq!(open_streams[0]["view"], "page#1");
+        assert_eq!(open_streams[0]["revision"], revision);
+        assert!(open_streams[0]["messages"].as_u64().unwrap() >= 1, "{now}");
+        let watches = now["watches"].as_array().unwrap();
+        assert_eq!(watches.len(), 1, "{now}");
+        assert_eq!(watches[0]["source"], "watch");
+        assert_eq!(watches[0]["view"], "tab#2");
+        assert_eq!(
+            (now["opened"].clone(), now["maxOpen"].clone()),
+            (json!(2), json!(8))
+        );
+
+        assert_eq!(streams.close_view("page#1"), 1);
+        let now = inspect().await;
+        assert_eq!(now["open"], json!([]));
+        assert_eq!(now["watches"].as_array().unwrap().len(), 1);
+        assert_eq!(streams.close_view("tab#2"), 1);
+        let now = inspect().await;
+        assert_eq!(
+            (now["open"].clone(), now["watches"].clone()),
+            (json!([]), json!([]))
+        );
+        assert_eq!(now["opened"], 2, "what was opened is still counted");
     }
 
     /// Whatever the cluster serves on a watch — here a Secret, values and

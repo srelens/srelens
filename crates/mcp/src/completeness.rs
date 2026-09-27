@@ -4,7 +4,9 @@ use srelens_capability::Registry;
 
 use crate::McpServer;
 
-/// Returns Err(missing_ids) if any registered capability has no MCP tool.
+/// Returns Err(ids) if any registered capability has no MCP tool, or if a
+/// UI-only one (`Capability::ui_only`, #575) has one: that one is kept off MCP
+/// on purpose, so it is reported with the words "UI-only".
 pub fn assert_every_capability_has_a_tool(
     registry: &Registry,
     server: &McpServer,
@@ -12,13 +14,18 @@ pub fn assert_every_capability_has_a_tool(
     // Bind the owned Vec so the &str borrows outlive the expression.
     let tools = server.list_tools();
     let tool_names: BTreeSet<&str> = tools.iter().map(|t| t.name.as_str()).collect();
-    let missing: Vec<String> = registry
-        .ids()
-        .into_iter()
-        .filter(|id| !tool_names.contains(id))
-        .map(str::to_string)
+    let wrong: Vec<String> = registry
+        .entries()
+        .filter_map(|capability| {
+            let id = capability.id.as_str();
+            match (capability.ui_only, tool_names.contains(id)) {
+                (false, false) => Some(id.to_string()),
+                (true, true) => Some(format!("{id} (UI-only, but offered as a tool)")),
+                _ => None,
+            }
+        })
         .collect();
-    if missing.is_empty() { Ok(()) } else { Err(missing) }
+    if wrong.is_empty() { Ok(()) } else { Err(wrong) }
 }
 
 /// A capability that mutates something (i.e. is not `read_only`) but is not

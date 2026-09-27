@@ -12,6 +12,7 @@ pub(crate) mod crd;
 #[cfg(any(test, feature = "fuzzing"))]
 pub mod fuzzing;
 mod http_policy;
+pub mod inspector;
 mod limits;
 mod links;
 pub(crate) mod network;
@@ -2051,7 +2052,9 @@ fn register_apps(
             )
         },
     ));
-    streams::register(reg, path, core, cache, snapshots)
+    let streams = streams::register(reg, path.clone(), core, cache, snapshots);
+    inspector::register(reg, path, streams.clone());
+    streams
 }
 
 /// `extensions.read`: every check it makes is made again on each call, which

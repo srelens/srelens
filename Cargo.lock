@@ -6560,6 +6560,7 @@ dependencies = [
  "landlock",
  "libc",
  "proptest",
+ "regex",
  "schemars 0.8.22",
  "seccompiler",
  "semver",

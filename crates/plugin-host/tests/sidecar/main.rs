@@ -7,8 +7,9 @@ mod fake;
 use fake::{FakeLauncher, Reply};
 use serde_json::{json, Value};
 use srelens_plugin_host::sidecar::{
-    Action, Enforcement, Limits, LogSource, NoBroker, Policy, RequestError, SidecarCommand,
-    SidecarConfig, SidecarStatus, StreamEvent, Supervisor, SIDECAR_API_VERSIONS, UNEXPECTED_EXIT,
+    Action, AppLog, Enforcement, Limits, LogLevel, LogSource, NoBroker, Policy, RequestError,
+    RequestMetrics, SidecarCommand, SidecarConfig, SidecarStatus, StreamEvent, Supervisor,
+    SIDECAR_API_VERSIONS, UNEXPECTED_EXIT,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -586,4 +587,270 @@ async fn an_app_request_cannot_stop_the_sidecar() {
         }
     );
     assert!(!launcher.methods().contains(&"shutdown".to_owned()));
+}
+
+// The Inspector's view of a sidecar (#575): `Supervisor::metrics` and the
+// app's log.
+
+#[tokio::test(start_paused = true)]
+async fn the_inspector_reads_a_running_sidecars_process_and_memory() {
+    let launcher = FakeLauncher::well_behaved().using_memory(48 * 1024 * 1024);
+    let supervisor = start(&launcher);
+    running(&supervisor).await;
+    let metrics = supervisor.metrics();
+    assert!(matches!(
+        &metrics.status,
+        SidecarStatus::Running { api_version, pid: Some(1) } if *api_version == semver::Version::new(0, 1, 0)
+    ));
+    assert!(metrics.started_at.is_some());
+    assert_eq!((metrics.launches, metrics.unexpected_exits), (1, 0));
+    assert_eq!(metrics.memory_bytes, Some(48 * 1024 * 1024));
+    assert_eq!(metrics.limits, Limits::default());
+    assert_eq!(metrics.enforcement, Enforcement::Kernel);
+    assert_eq!(metrics.requests, RequestMetrics::default());
+    assert_eq!((metrics.open_streams, metrics.streams_opened), (0, 0));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_backend_that_cannot_measure_memory_says_nothing_rather_than_zero() {
+    let launcher = FakeLauncher::well_behaved();
+    let supervisor = start(&launcher);
+    running(&supervisor).await;
+    assert_eq!(supervisor.metrics().memory_bytes, None);
+}
+
+#[tokio::test(start_paused = true)]
+async fn request_latency_and_failures_are_counted_and_failures_logged() {
+    let launcher = FakeLauncher::new(|call| match call.method {
+        "slow" => Some(Reply::Late(Duration::from_millis(250), json!({}))),
+        "broken" => Some(Reply::Error(-1, "the database is locked")),
+        "hang" => Some(Reply::Silent),
+        _ => None,
+    });
+    let supervisor = start(&launcher);
+    running(&supervisor).await;
+    supervisor.request("fast", json!({})).await.unwrap();
+    supervisor.request("slow", json!({})).await.unwrap();
+    supervisor.request("broken", json!({})).await.unwrap_err();
+    supervisor.request("hang", json!({})).await.unwrap_err();
+    assert_eq!(
+        supervisor.request("stream/data", json!({})).await,
+        Err(RequestError::Reserved {
+            method: "stream/data".into()
+        })
+    );
+
+    let requests = supervisor.metrics().requests;
+    assert_eq!(
+        (
+            requests.answered,
+            requests.failed,
+            requests.timed_out,
+            requests.refused
+        ),
+        (2, 1, 1, 1)
+    );
+    assert_eq!(requests.in_flight, 0);
+    // Answers with a result or an error: the timeout and the refusal are not round trips.
+    assert_eq!(requests.latency.samples, 3);
+    assert_eq!(requests.latency.max, Some(Duration::from_millis(250)));
+    assert_eq!(requests.latency.p50, Some(Duration::ZERO));
+
+    let errors: Vec<String> = supervisor
+        .log()
+        .recent_errors()
+        .into_iter()
+        .map(|l| l.text)
+        .collect();
+    assert_eq!(
+        errors,
+        [
+            "`broken` failed: The extension answered with an error: the database is locked",
+            "`hang` failed: The extension did not answer `hang` within 30 s",
+        ]
+    );
+    let refused = supervisor
+        .logs()
+        .into_iter()
+        .find(|l| l.text.starts_with("`stream/data`"))
+        .expect("the refusal is logged");
+    assert_eq!(
+        (refused.level, refused.source),
+        (LogLevel::Warn, LogSource::Host)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn requests_to_a_stopped_sidecar_are_counted_but_not_logged_each_time() {
+    let launcher = FakeLauncher::well_behaved();
+    let supervisor = start(&launcher);
+    running(&supervisor).await;
+    supervisor.stop().await;
+    let before = supervisor.logs().len();
+    for _ in 0..3 {
+        supervisor.request("scan", json!({})).await.unwrap_err();
+    }
+    assert_eq!(supervisor.metrics().requests.refused, 3);
+    assert_eq!(supervisor.logs().len(), before);
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_inspector_counts_the_sidecars_open_streams_and_requests_in_flight() {
+    let launcher = FakeLauncher::new(|call| (call.method == "slow").then_some(Reply::Silent));
+    let supervisor = Arc::new(start(&launcher));
+    running(&supervisor).await;
+    let first = supervisor.open_stream("watch", json!({})).await.unwrap();
+    let second = supervisor.open_stream("watch", json!({})).await.unwrap();
+    let waiting = tokio::spawn({
+        let supervisor = supervisor.clone();
+        async move { supervisor.request("slow", json!({})).await }
+    });
+    sleep(secs(1)).await;
+    let metrics = supervisor.metrics();
+    assert_eq!((metrics.open_streams, metrics.streams_opened), (2, 2));
+    assert_eq!(metrics.requests.in_flight, 1);
+    drop(first);
+    assert_eq!(supervisor.metrics().open_streams, 1);
+    drop(second);
+    waiting.abort();
+    sleep(secs(1)).await;
+    let metrics = supervisor.metrics();
+    assert_eq!((metrics.open_streams, metrics.streams_opened), (0, 2));
+    assert_eq!(metrics.requests.in_flight, 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_crashed_sidecar_reads_as_disabled_with_its_reason_and_view_logs() {
+    let launcher = FakeLauncher::new(|call| (call.method == "activate").then_some(Reply::Crash))
+        .using_memory(1024);
+    let supervisor = start(&launcher);
+    until(&supervisor, |s| matches!(s, SidecarStatus::Disabled { .. })).await;
+    let metrics = supervisor.metrics();
+    let SidecarStatus::Disabled { reason } = &metrics.status else {
+        panic!("{:?}", metrics.status)
+    };
+    assert!(reason.contains("SIGABRT"), "{reason}");
+    assert_eq!(metrics.status.message(), Some(UNEXPECTED_EXIT));
+    assert!(metrics.status.actions().contains(&Action::ViewLogs));
+    assert_eq!((metrics.launches, metrics.unexpected_exits), (4, 4));
+    assert_eq!(metrics.started_at, None);
+    assert_eq!(metrics.memory_bytes, None, "nothing is running to measure");
+    assert_eq!(metrics.open_streams, 0);
+
+    // What View logs opens: each exit, each restart, and the disable.
+    let log = supervisor.log();
+    let restarts: Vec<String> = log
+        .lines()
+        .into_iter()
+        .filter(|l| l.level == LogLevel::Warn)
+        .map(|l| l.text)
+        .collect();
+    assert_eq!(
+        restarts,
+        [
+            "Restarting the extension in 1 s (attempt 1 of 3)",
+            "Restarting the extension in 5 s (attempt 2 of 3)",
+            "Restarting the extension in 30 s (attempt 3 of 3)",
+        ]
+    );
+    let errors = log.recent_errors();
+    assert_eq!(errors.len(), 5);
+    assert!(
+        errors[..4].iter().all(|l| l.text.contains("SIGABRT")),
+        "{errors:?}"
+    );
+    assert!(errors[4].text.starts_with(UNEXPECTED_EXIT), "{errors:?}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_sidecars_stderr_is_kept_at_its_level_and_redacted() {
+    let launcher = FakeLauncher::well_behaved()
+        .logging("WARN registry is slow")
+        .logging("DEBUG pulling with token=ghp_0123456789abcdefghijABCDEFGHIJ012345")
+        .logging("opening database");
+    let supervisor = start(&launcher);
+    running(&supervisor).await;
+    // stderr is read beside the protocol; give it a moment.
+    sleep(secs(1)).await;
+    let sidecar: Vec<(LogLevel, String)> = supervisor
+        .logs()
+        .into_iter()
+        .filter(|l| l.source == LogSource::Sidecar)
+        .map(|l| (l.level, l.text))
+        .collect();
+    assert_eq!(
+        sidecar,
+        [
+            (LogLevel::Warn, "registry is slow".to_owned()),
+            (LogLevel::Debug, "pulling with token=<redacted>".to_owned()),
+            (LogLevel::Info, "opening database".to_owned()),
+        ]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_reason_that_quotes_the_sidecar_is_redacted_for_the_inspector() {
+    let launcher = FakeLauncher::new(|call| {
+        (call.method == "health").then_some(Reply::Error(-1, "cannot log in with password=hunter2"))
+    });
+    let supervisor = start(&launcher);
+    running(&supervisor).await;
+    until(&supervisor, |s| {
+        matches!(s, SidecarStatus::Restarting { .. })
+    })
+    .await;
+    let SidecarStatus::Restarting { reason, .. } = supervisor.metrics().status else {
+        panic!("not restarting")
+    };
+    assert!(reason.contains("unhealthy"), "{reason}");
+    assert!(!reason.contains("hunter2"), "{reason}");
+    let everything = format!("{:?}", supervisor.logs());
+    assert!(!everything.contains("hunter2"), "{everything}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_value_the_host_scrubs_never_reaches_the_log() {
+    let log = AppLog::new();
+    log.scrub("registry-robot-s3cret");
+    let launcher = FakeLauncher::well_behaved().logging("INFO logging in as registry-robot-s3cret");
+    let supervisor = Supervisor::start_with_log(
+        config(),
+        Arc::new(launcher.clone()),
+        Arc::new(NoBroker),
+        log.clone(),
+    );
+    running(&supervisor).await;
+    sleep(secs(1)).await;
+    let texts: Vec<String> = log.lines().into_iter().map(|l| l.text).collect();
+    assert!(
+        texts.contains(&"logging in as <redacted>".to_owned()),
+        "{texts:?}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_hosts_log_outlives_the_supervisor_that_wrote_to_it() {
+    let log = AppLog::new();
+    let launcher = FakeLauncher::well_behaved();
+    let supervisor = Supervisor::start_with_log(
+        config(),
+        Arc::new(launcher.clone()),
+        Arc::new(NoBroker),
+        log.clone(),
+    );
+    running(&supervisor).await;
+    drop(supervisor);
+    let restarted = Supervisor::start_with_log(
+        config(),
+        Arc::new(launcher.clone()),
+        Arc::new(NoBroker),
+        log.clone(),
+    );
+    running(&restarted).await;
+    let running_lines = log
+        .lines()
+        .into_iter()
+        .filter(|l| l.text == "The extension is running")
+        .count();
+    assert_eq!(running_lines, 2);
 }

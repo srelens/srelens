@@ -16,10 +16,11 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
 use super::connection::{self, human, Broker, Connection, ReadEnd, RequestError, SidecarStream};
-use super::logs::{LogLine, LogSource, LogTail};
+use super::metrics::{Inspect, Recorder, SidecarMetrics};
 use super::protocol::{self, method, BoundedLines, Line, SIDECAR_API_VERSIONS};
-use super::sandbox::{Enforcement, LaunchError, Launcher, Process, SidecarCommand};
+use super::sandbox::{Enforcement, LaunchError, Launcher, MemoryProbe, Process, SidecarCommand};
 use super::{Limits, Policy, LOG_LINE_BYTES};
+use crate::app_log::{AppLog, LogLevel, LogLine};
 
 /// What a person is told when the backoff has run out (#572).
 pub const UNEXPECTED_EXIT: &str = "Extension process exited unexpectedly";
@@ -29,7 +30,8 @@ pub const UNEXPECTED_EXIT: &str = "Extension process exited unexpectedly";
 pub enum Action {
     /// Start it again, with a fresh backoff: [`Supervisor::restart`].
     Restart,
-    /// Read what it wrote and what happened to it: [`Supervisor::logs`].
+    /// Read what it wrote and what happened to it: its app's log
+    /// ([`Supervisor::log`]), in Settings → Apps → app → Logs (#575).
     ViewLogs,
     /// Turn the app off. The inventory is the registry's; the host calls
     /// [`Supervisor::stop`] and disables the app there.
@@ -131,9 +133,15 @@ enum Control {
 struct Shared {
     status: watch::Sender<SidecarStatus>,
     policy: Policy,
+    limits: Limits,
+    enforcement: Enforcement,
     /// The session, while the sidecar is running.
     connection: Mutex<Option<Connection>>,
-    logs: Mutex<LogTail>,
+    /// The app's log: the host's, shared with the Inspector (#575).
+    log: AppLog,
+    recorder: Mutex<Recorder>,
+    /// Reads the running process's memory, when its backend can.
+    memory: Mutex<Option<MemoryProbe>>,
 }
 
 impl Shared {
@@ -141,11 +149,38 @@ impl Shared {
         self.status.send_replace(status);
     }
 
-    fn log(&self, source: LogSource, text: &str) {
-        self.logs
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .push(source, text.as_bytes());
+    /// A line srelens writes about the sidecar, in its app's log.
+    fn log(&self, level: LogLevel, text: &str) {
+        self.log.host(level, text);
+    }
+
+    fn recorder(&self) -> std::sync::MutexGuard<'_, Recorder> {
+        self.recorder.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Count one request's outcome, and write a failure to the log. A request
+    /// refused because the sidecar is not running is counted, not logged: its
+    /// state already says why, once.
+    fn record<T>(&self, name: &str, took: Duration, outcome: &Result<T, RequestError>) {
+        self.recorder().request(outcome, took);
+        let level = match outcome {
+            Ok(_) | Err(RequestError::Unavailable(_)) => return,
+            Err(
+                RequestError::Busy { .. }
+                | RequestError::TooManyStreams { .. }
+                | RequestError::Reserved { .. },
+            ) => LogLevel::Warn,
+            Err(_) => LogLevel::Error,
+        };
+        if let Err(error) = outcome {
+            self.log(level, &format!("`{name}` failed: {error}"));
+        }
+    }
+
+    /// The process now running came up, or ended.
+    fn running(&self, process: Option<&Process>) {
+        *self.memory.lock().unwrap_or_else(|p| p.into_inner()) = process.and_then(Process::memory);
+        self.recorder().started_at = process.map(|_| std::time::SystemTime::now());
     }
 
     fn connection(&self) -> Option<Connection> {
@@ -176,18 +211,34 @@ impl Drop for Supervisor {
 
 impl Supervisor {
     /// Start supervising: the sidecar is launched at once, on a task of its
-    /// own. Must be called within a tokio runtime.
+    /// own, logging to a log of its own. Must be called within a tokio runtime.
     pub fn start(
         config: SidecarConfig,
         launcher: Arc<dyn Launcher>,
         broker: Arc<dyn Broker>,
     ) -> Supervisor {
+        Supervisor::start_with_log(config, launcher, broker, AppLog::new())
+    }
+
+    /// [`Supervisor::start`], logging to `log`: the host's log for the app,
+    /// which outlives this supervisor, so a sidecar started again after an
+    /// update or a disable keeps its app's earlier lines (#575).
+    pub fn start_with_log(
+        config: SidecarConfig,
+        launcher: Arc<dyn Launcher>,
+        broker: Arc<dyn Broker>,
+        log: AppLog,
+    ) -> Supervisor {
         let (status, _) = watch::channel(SidecarStatus::Starting);
         let shared = Arc::new(Shared {
             status,
             policy: config.policy.clone(),
+            limits: config.limits.clone(),
+            enforcement: launcher.enforcement(),
             connection: Mutex::new(None),
-            logs: Mutex::new(LogTail::default()),
+            log,
+            recorder: Mutex::new(Recorder::default()),
+            memory: Mutex::new(None),
         });
         let (control, controls) = mpsc::unbounded_channel();
         let task = tokio::spawn(supervise(
@@ -223,7 +274,13 @@ impl Supervisor {
     /// Send the sidecar a request, under the request limits. Dropping the
     /// returned future cancels it.
     pub async fn request(&self, name: &str, params: Value) -> Result<Value, RequestError> {
-        self.running()?.request(name, params).await
+        let began = Instant::now();
+        let answer = match self.running() {
+            Ok(connection) => connection.request(name, params).await,
+            Err(refused) => Err(refused),
+        };
+        self.shared.record(name, began.elapsed(), &answer);
+        answer
     }
 
     /// Open a stream, under the stream limit.
@@ -232,7 +289,16 @@ impl Supervisor {
         name: &str,
         params: Value,
     ) -> Result<SidecarStream, RequestError> {
-        self.running()?.open_stream(name, params).await
+        let began = Instant::now();
+        let opened = match self.running() {
+            Ok(connection) => connection.open_stream(name, params).await,
+            Err(refused) => Err(refused),
+        };
+        self.shared.record(name, began.elapsed(), &opened);
+        if opened.is_ok() {
+            self.shared.recorder().stream_opened();
+        }
+        opened
     }
 
     /// Ask the sidecar `health` now, outside the request limit, with the
@@ -263,11 +329,72 @@ impl Supervisor {
     /// The recent log: what the sidecar wrote to stderr, and what the
     /// supervisor did. What View logs shows.
     pub fn logs(&self) -> Vec<LogLine> {
-        self.shared
-            .logs
+        self.shared.log.lines()
+    }
+
+    /// The app's log this supervisor writes to.
+    pub fn log(&self) -> AppLog {
+        self.shared.log.clone()
+    }
+
+    /// The sidecar now, as the Inspector reads it (#575).
+    pub fn metrics(&self) -> SidecarMetrics {
+        let log = &self.shared.log;
+        let status = match self.status() {
+            SidecarStatus::Restarting {
+                attempt,
+                of,
+                delay,
+                reason,
+            } => SidecarStatus::Restarting {
+                attempt,
+                of,
+                delay,
+                reason: log.redact(&reason),
+            },
+            SidecarStatus::Disabled { reason } => SidecarStatus::Disabled {
+                reason: log.redact(&reason),
+            },
+            SidecarStatus::Refused { reason } => SidecarStatus::Refused {
+                reason: log.redact(&reason),
+            },
+            other => other,
+        };
+        let (in_flight, open_streams) = self
+            .shared
+            .connection()
+            .filter(|connection| !connection.is_ended())
+            .map(|connection| connection.load())
+            .unwrap_or((0, 0));
+        let probe = self
+            .shared
+            .memory
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .lines()
+            .clone();
+        let memory_bytes = match status {
+            SidecarStatus::Running { .. } => probe.and_then(|read| read()),
+            _ => None,
+        };
+        let recorder = self.shared.recorder();
+        SidecarMetrics {
+            status,
+            started_at: recorder.started_at,
+            launches: recorder.launches,
+            unexpected_exits: recorder.unexpected_exits,
+            memory_bytes,
+            limits: self.shared.limits.clone(),
+            enforcement: self.shared.enforcement.clone(),
+            requests: recorder.requests(in_flight),
+            open_streams,
+            streams_opened: recorder.streams_opened(),
+        }
+    }
+}
+
+impl Inspect for Supervisor {
+    fn metrics(&self) -> SidecarMetrics {
+        Supervisor::metrics(self)
     }
 }
 
@@ -316,12 +443,15 @@ async fn supervise(
         let reason = match start(&shared, &config, &*launcher, &broker).await {
             Started::Running(running) => {
                 let started_at = Instant::now();
+                shared.running(Some(&running.process));
                 shared.set(SidecarStatus::Running {
                     api_version: running.api_version.clone(),
                     pid: running.process.pid(),
                 });
-                shared.log(LogSource::Host, "srelens: the extension is running");
-                match run(&shared, &config, running, &mut controls).await {
+                shared.log(LogLevel::Info, "The extension is running");
+                let ended = run(&shared, &config, running, &mut controls).await;
+                shared.running(None);
+                match ended {
                     Ended::Crashed(reason) => {
                         if started_at.elapsed() >= policy.backoff_reset_after {
                             failures = 0;
@@ -347,7 +477,7 @@ async fn supervise(
                 }
             }
             Started::Refused(reason) => {
-                shared.log(LogSource::Host, &format!("srelens: {reason}"));
+                shared.log(LogLevel::Error, &reason);
                 shared.set(SidecarStatus::Refused { reason });
                 match wait_for_restart(&shared, &mut controls).await {
                     true => {
@@ -360,8 +490,15 @@ async fn supervise(
             Started::Failed(reason) => reason,
         };
         failures += 1;
-        shared.log(LogSource::Host, &format!("srelens: {reason}"));
+        shared.recorder().unexpected_exits += 1;
+        shared.log(LogLevel::Error, &reason);
         let Some(&delay) = policy.backoff.get(failures - 1) else {
+            shared.log(
+                LogLevel::Error,
+                &format!(
+                    "{UNEXPECTED_EXIT}; srelens will not start it again until it is restarted"
+                ),
+            );
             shared.set(SidecarStatus::Disabled { reason });
             match wait_for_restart(&shared, &mut controls).await {
                 true => {
@@ -371,6 +508,14 @@ async fn supervise(
                 false => return,
             }
         };
+        shared.log(
+            LogLevel::Warn,
+            &format!(
+                "Restarting the extension in {} (attempt {failures} of {})",
+                human(delay),
+                policy.backoff.len()
+            ),
+        );
         shared.set(SidecarStatus::Restarting {
             attempt: failures,
             of: policy.backoff.len(),
@@ -425,7 +570,10 @@ async fn start(
         return Started::Refused(why);
     }
     let launched = match launcher.launch(&config.command, &config.limits) {
-        Ok(launched) => launched,
+        Ok(launched) => {
+            shared.recorder().launches += 1;
+            launched
+        }
         Err(LaunchError::Unavailable(why)) => return Started::Refused(why),
         Err(LaunchError::Failed(why)) => return Started::Failed(why),
     };
@@ -556,14 +704,10 @@ async fn read_log(shared: Arc<Shared>, stderr: Box<dyn tokio::io::AsyncRead + Se
     let mut lines = BoundedLines::new(tokio::io::BufReader::new(stderr), LOG_LINE_BYTES);
     loop {
         match lines.next_line().await {
-            Ok(Some(Line::Bytes(line))) => shared
-                .logs
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .push(LogSource::Sidecar, &line),
+            Ok(Some(Line::Bytes(line))) => shared.log.sidecar(&line),
             Ok(Some(Line::TooLong)) => shared.log(
-                LogSource::Host,
-                &format!("srelens: the extension wrote a log line longer than {LOG_LINE_BYTES} bytes, which was dropped"),
+                LogLevel::Warn,
+                &format!("The extension wrote a log line longer than {LOG_LINE_BYTES} bytes, which was dropped"),
             ),
             Ok(None) | Err(_) => return,
         }
@@ -691,9 +835,9 @@ async fn stop(
     connection.close_stdin();
     if tokio::time::timeout(grace, process.exit()).await.is_err() {
         shared.log(
-            LogSource::Host,
+            LogLevel::Warn,
             &format!(
-                "srelens: the extension did not exit within {} of shutdown, so srelens killed it",
+                "The extension did not exit within {} of shutdown, so srelens killed it",
                 human(grace)
             ),
         );
@@ -701,7 +845,7 @@ async fn stop(
         let _ = process.exit().await;
     }
     connection.end("The extension was stopped");
-    shared.log(LogSource::Host, "srelens: the extension was stopped");
+    shared.log(LogLevel::Info, "The extension was stopped");
 }
 
 #[cfg(test)]

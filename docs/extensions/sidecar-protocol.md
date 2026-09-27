@@ -216,10 +216,23 @@ to exit before killing it. Dropping the supervisor kills the sidecar at once.
 
 ### Logs
 
-The last 1,000 lines of each sidecar's stderr are kept, each cut at 4 KiB, beside what the
-supervisor did: each start, exit, restart and refusal. That is what **View logs** shows.
-Per-app log storage, levels and the Inspector are
-[#575](https://github.com/srelens/srelens/issues/575).
+stderr is the sidecar's log. Each line goes into its app's log: the last 1,000 lines, each
+cut at 4 KiB. Next to them are the lines srelens writes about the sidecar: each start,
+exit, restart and refusal, and each failed request. **View logs** opens that log in
+Settings → Apps → app → Logs.
+
+The sidecar chooses a line's level by starting the line with it:
+
+| The line starts with | Level | Kept as |
+|---|---|---|
+| `TRACE`, `DEBUG`, `INFO`, `WARN` or `WARNING`, `ERROR`, in any case, optionally `[`in brackets`]`, optionally followed by `:` | that level | the rest of the line |
+| `FATAL`, or `panic:` | error | the whole line |
+| anything else | info | the whole line |
+
+So `WARN registry is slow`, `[debug] 3 images queued` and `error: scan failed` are read as
+warn, debug and error. Every line is redacted before it is kept, including a secret or a
+token the sidecar printed by mistake. The log stays in srelens's memory: it is never written
+to disk and never offered to MCP. See [inspector.md](inspector.md).
 
 ## Sandbox
 

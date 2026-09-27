@@ -730,6 +730,82 @@ mod tests {
         srelens_mcp::completeness::assert_mutating_capabilities_are_gated(&reg);
     }
 
+    /// An app's logs and runtime metrics are local (#575): srelens's own UI
+    /// reads them, and nothing sends them anywhere. The one path out of the
+    /// registry to someone else is MCP, whose agent hands its context to an
+    /// LLM provider; so they are not tools. Exactly these two are UI-only: a
+    /// third is a decision to make here, not a way around the rule above.
+    #[tokio::test]
+    async fn app_logs_and_metrics_never_leave_through_mcp_or_the_audit_trail() {
+        let reg = build_registry();
+        let ui_only: Vec<&str> = reg
+            .entries()
+            .filter(|capability| capability.ui_only)
+            .map(|capability| capability.id.as_str())
+            .collect();
+        assert_eq!(ui_only, ["extensions.inspect", "extensions.logs"]);
+        for id in &ui_only {
+            assert!(reg.get(id).unwrap().annotations.read_only, "{id}");
+        }
+
+        let server = McpServer::new(Arc::new(reg.clone()));
+        let tools: Vec<String> = server.list_tools().into_iter().map(|t| t.name).collect();
+        for id in &ui_only {
+            assert!(!tools.iter().any(|tool| tool == id), "{id} is an MCP tool");
+            let args = serde_json::json!({"id": "org.example.argocd"});
+            for transport in [srelens_mcp::Transport::Stdio, srelens_mcp::Transport::Http] {
+                assert!(matches!(
+                    server.call_tool_audited(id, args.clone(), transport, "auto").await,
+                    Err(srelens_capability::CapabilityError::NotFound(_))
+                ));
+            }
+        }
+        let catalog = crate::mcp_docs::render_tools(&reg);
+        for id in &ui_only {
+            assert!(!catalog.contains(id), "{id} is in the MCP catalog");
+        }
+
+        // The UI's own reads of them are not recorded either.
+        #[derive(Default)]
+        struct Spy(std::sync::Mutex<usize>);
+        impl srelens_capability::audit::AuditSink for Spy {
+            fn record(&self, _: srelens_capability::audit::AuditRecord) {
+                *self.0.lock().unwrap() += 1;
+            }
+        }
+        let spy = Spy::default();
+        for id in &ui_only {
+            let _ = reg
+                .invoke_audited(
+                    id,
+                    serde_json::json!({"id": "org.example.argocd"}),
+                    &spy,
+                    srelens_capability::audit::Source::Ui,
+                    "auto",
+                )
+                .await;
+        }
+        assert_eq!(*spy.0.lock().unwrap(), 0);
+    }
+
+    /// A tripwire for the same rule: the code that keeps and reads an app's
+    /// log and metrics names no network client. A change that needs one is a
+    /// change to #575's "never transmitted", to make on purpose.
+    #[test]
+    fn the_code_that_holds_app_logs_and_metrics_opens_no_connection() {
+        let sources = [
+            include_str!("extensions/inspector.rs"),
+            include_str!("../../plugin-host/src/app_log.rs"),
+            include_str!("../../plugin-host/src/app_log/redact.rs"),
+            include_str!("../../plugin-host/src/sidecar/metrics.rs"),
+        ];
+        for source in sources {
+            for client in ["reqwest", "hyper", "ureq", "std::net", "tokio::net", "TcpStream", "UdpSocket"] {
+                assert!(!source.contains(client), "names {client}");
+            }
+        }
+    }
+
     /// The host-owned metadata #548 adds, checked over the whole live registry
     /// rather than over a preset: a capability that spells its own annotations
     /// out is exactly the one that gets the level wrong, and a confirmation

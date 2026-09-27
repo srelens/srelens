@@ -72,6 +72,12 @@ pub struct Capability {
     /// inventory, an MCP response or a log. Empty for every capability today,
     /// so no current consumer can receive a secret.
     pub secret_slots: Vec<String>,
+    /// Offered to srelens's own UI and never to MCP: not listed as a tool, and
+    /// not callable as one (`McpServer::new` drops it). For what must not leave
+    /// the host through an agent, whose context goes to its LLM provider: an
+    /// app's logs, which a third party wrote, and its runtime metrics (#575).
+    /// `false` for every capability but those.
+    pub ui_only: bool,
 }
 
 impl Capability {
@@ -91,6 +97,7 @@ impl Capability {
             bound_arguments: None,
             settable: Vec::new(),
             secret_slots: Vec::new(),
+            ui_only: false,
         }
     }
 
@@ -127,6 +134,7 @@ impl Capability {
             bound_arguments: None,
             settable: Vec::new(),
             secret_slots: Vec::new(),
+            ui_only: false,
         }
     }
 
@@ -184,6 +192,13 @@ impl Capability {
     /// Whether the host may inject a secret into `argument`.
     pub fn takes_secret(&self, argument: &str) -> bool {
         self.secret_slots.iter().any(|slot| slot == argument)
+    }
+
+    /// The same capability, for srelens's own UI only (see
+    /// [`Capability::ui_only`]).
+    pub fn only_in_the_ui(mut self) -> Self {
+        self.ui_only = true;
+        self
     }
 }
 
@@ -338,6 +353,17 @@ mod registry_tests {
         let reg = Registry::new();
         let err = reg.invoke("nope", json!(null)).await.unwrap_err();
         assert!(matches!(err, CapabilityError::NotFound(_)));
+    }
+
+    #[test]
+    fn a_capability_is_offered_everywhere_unless_marked_ui_only() {
+        let offered = Capability::read_only("a", "", |_| async { Ok(json!(null)) });
+        assert!(!offered.ui_only);
+        let typed = Capability::typed::<Value, Value, _, _>("b", "", Annotations::READ_ONLY, |v| async move {
+            Ok(v)
+        });
+        assert!(!typed.ui_only);
+        assert!(typed.only_in_the_ui().ui_only);
     }
 
     #[test]
