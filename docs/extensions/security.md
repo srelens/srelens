@@ -16,6 +16,13 @@ mitigation and the risk that remains.
   computer, per app, when a person allows it). The host sends each request and checks
   it and every redirect; a secret goes into a header by reference and never leaves for
   another origin ([manifest.md](manifest.md#network-requests)).
+- **Pods are reached only in scope.** Logs, exec and port-forwards reach only the pods
+  an object of a kind the app reads selects with its own selector, or pods in the
+  namespaces a person granted, and the host matches every pod itself on every open. An
+  exec binding runs one command fixed in the manifest, never a shell, and only after
+  the host confirmation names the pod, container and exact command; a forward listens
+  on a local port the host picks and closes, with every connection, when its view does
+  ([manifest.md](manifest.md#logs-exec-and-port-forwards)).
 - **Consent cannot be weakened.** Bindings inherit the host capability's annotations.
   Mutating operations stay behind the MCP consent gate, and every UI action opens a
   host-owned review.
@@ -24,7 +31,8 @@ mitigation and the risk that remains.
   ([capabilities.md](capabilities.md#declared-gitops-actions)).
 - **An update shows what access it changes.** The host compares the incoming manifest's
   access with the installed revision's: the grants, what each reader binds, the settings
-  it keeps secrets for, each action, and each host `network.http` may reach. The review
+  it keeps secrets for, each action, each host `network.http` may reach, and each
+  namespace, command and pod scope of its pod bindings. The review
   in Settings → Apps lists what is
   added and removed before what is unchanged, and the consent prompt for an install over
   MCP names the added and removed access. The update must name the installed revision it
@@ -74,7 +82,8 @@ mitigation and the risk that remains.
   revision it went through, the cluster, the object and the outcome. The sink
   sits beside the capability registry, which is the one place both paths meet
   (`crates/capability/src/audit.rs`), so a new surface cannot acquire writes
-  without acquiring the record
+  without acquiring the record. App exec and port-forward sessions, which run as
+  streams rather than calls, write to the same sink when they start or are refused
   ([threat-model.md](threat-model.md#mcp-client-abuse)). Argument values are
   redacted before anything is written, and the file never leaves the machine.
 

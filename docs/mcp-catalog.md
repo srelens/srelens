@@ -7,7 +7,7 @@ Everything this server exposes over MCP, generated from the live registry so it 
 
 ## Tools
 
-122 tools, grouped by area and then by how a call is gated. Argument schemas are not reproduced here — call `tools/list` for those, which cannot go stale.
+123 tools, grouped by area and then by how a call is gated. Argument schemas are not reproduced here — call `tools/list` for those, which cannot go stale.
 
 **Impact** is how much a successful call disturbs — `low`, `medium` or `high` — and is a different question from the section heading, which is how the call is gated. A capability that accepts several named operations carries the highest level any of them reaches; the per-operation level travels with the resource.
 
@@ -159,7 +159,7 @@ Everything this server exposes over MCP, generated from the live registry so it 
 | `toolbox.removePlugin` | medium | remove an installed krew plugin |
 | `toolbox.upgradePlugin` | medium | upgrade an installed krew plugin |
 
-### Server — read-only (15)
+### Server — read-only (16)
 
 | Tool | Impact | Summary |
 | --- | --- | --- |
@@ -167,6 +167,7 @@ Everything this server exposes over MCP, generated from the live registry so it 
 | `extensions.catalogManifest` | low | Download and checksum-verify a catalog manifest for permission review; does not install it |
 | `extensions.list` | low | List installed declarative extensions |
 | `extensions.packageManifest` | low | Verify an app package file (.srelens-extension) and return its manifest for permission review; does not install it |
+| `extensions.pods` | low | List the pods, and for a port-forward through a Service the Services, that one of an app's pod bindings may reach |
 | `extensions.read` | low | Read a declared custom-resource contribution, or send a declared network.http request, from an enabled extension |
 | `extensions.resolveCards` | low | Resolve the cluster dashboard cards an enabled extension declares, each to a figure or the reason it has none |
 | `extensions.resolveColumns` | low | Resolve native extension table columns and badges in one batch |

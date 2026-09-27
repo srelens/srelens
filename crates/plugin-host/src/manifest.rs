@@ -9,11 +9,13 @@ use std::collections::{BTreeMap, BTreeSet};
 mod builtin;
 mod cards;
 mod network;
+mod pods;
 mod settings;
 mod versions;
 pub use builtin::{builtin_link_kind, BuiltinKind, BUILTIN_LINK_KINDS};
 pub use cards::*;
 pub use network::*;
+pub use pods::*;
 pub use settings::*;
 pub use versions::{MAX_BINDING_VERSIONS, MAX_PATH_OVERRIDES};
 
@@ -150,7 +152,12 @@ fn uses_filter(_manifest: &Value, path: &str) -> bool {
     srelens_capability::path_uses_filter(path)
 }
 
-/// A field API 0.5 added (#728).
+/// Whether a binding's `target` is one of API 0.5's pod targets (#567).
+fn pod_target(_manifest: &Value, target: &str) -> bool {
+    is_pod_target(target)
+}
+
+/// A field API 0.5 added (#728, #567).
 const fn api_0_5(path: &'static str) -> ApiField {
     ApiField {
         path,
@@ -221,6 +228,17 @@ pub const API_FIELDS: &[ApiField] = &[
     // of their own rather than an addition to 0.4 in place.
     api_0_5("contributions.resourceLinks[].match.path"),
     api_0_5_builtin_target("contributions.resourceLinks[].to"),
+    // Logs, exec and port-forwards (#567), on the same line for the same reason. The
+    // namespaces a pod permission grants are a field, listed first because a grant always
+    // comes with a pod binding; the pod targets are values of a field every line has.
+    api_0_5("permissions[].namespaces"),
+    ApiField {
+        form: Some(ApiForm {
+            name: "the pod targets k8s.streamLogs, k8s.exec and k8s.portForward",
+            matches: pod_target,
+        }),
+        ..api_0_5("capabilities[].target")
+    },
 ];
 
 /// Rejects a field in `raw` that is missing from any of `versions`: every supported API
@@ -332,7 +350,8 @@ pub struct Manifest {
     pub api_version: String,
     pub kind: ManifestKind,
     /// The host capabilities the bindings target, each by id; `network.http`
-    /// with the hosts it may reach (#568).
+    /// with the hosts it may reach (#568), and a pod capability with the
+    /// namespaces it grants, if any (#567).
     pub permissions: Vec<Permission>,
     pub capabilities: Vec<Binding>,
     /// Declared mutations (#549). Absent in a manifest that only reads, and
@@ -1895,6 +1914,7 @@ impl Manifest {
         cards::card_problems(self, &mut problems);
         settings::setting_problems(self, &mut problems);
         network::permission_problems(self, &mut problems);
+        pods::pod_problems(self, &mut problems);
         self.command_problems(&mut problems);
         self.link_problems(&mut problems);
         problems

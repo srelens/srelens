@@ -15,7 +15,7 @@ import { CodeEditor } from "@srelens/ui-kit";
 import { saveOrDownload } from "../lib/saveOrDownload";
 import { ExtensionClusters } from "./ExtensionClusters";
 import { ExtensionNetwork } from "./ExtensionNetwork";
-import { ExtensionBindings } from "./ExtensionBindings";
+import { ExtensionBindings, POD_FACTS } from "./ExtensionBindings";
 import { networkReach, networkRequests, reachText } from "./networkText";
 import { ExtensionControls } from "./ExtensionControls";
 import { escapeFormatCharacters } from "./displayText";
@@ -28,6 +28,8 @@ function describeGrant(id: string): string {
   // The broker's own capability (#568): never offered to MCP or the catalog, since
   // called directly it would fetch any URL. That is not "not provided".
   if (id === NETWORK_HTTP) return "Read-only · GET requests to this app's hosts only, sent by the host";
+  // Likewise the pod capabilities (#567), which run only as the app's streams.
+  if (POD_FACTS[id]) return `${POD_FACTS[id]} · only pods this app's bindings may reach`;
   const fact = facts.get(id);
   if (!fact) return "Not provided by this host";
   return [

@@ -1,0 +1,14 @@
+{
+  "id": "org.example.certmanager",
+  "revision": 1,
+  "view": "org.example.certmanager/resource:controllers#1",
+  "channel": "extstream:5-z4c6v2",
+  "context": "cluster/a",
+  "namespace": "cert-manager",
+  "source": {
+    "kind": "portForward",
+    "capability": "webhook",
+    "name": "cert-manager",
+    "service": "cert-manager-webhook"
+  }
+}

@@ -1,6 +1,7 @@
 import { ExtensionResourceSlot } from "../../extensions/Extensions";
 import { ExtensionPanelSlot } from "../../extensions/ExtensionPanelSlot";
 import { ExtensionRelatedSlot } from "../../extensions/ExtensionRelatedSlot";
+import { ExtensionPodSlot } from "../../extensions/ExtensionPodTools";
 import { useId, type ReactNode } from "react";
 import {
   ageFromTimestamp,
@@ -340,6 +341,7 @@ export function ResourceTabView({ context, kind, namespace, name }: ResourceTabV
         <SectionMemory kind={kind}>{pane}</SectionMemory>
         {active === PANE_DETAILS && <ExtensionPanelSlot context={context} resource={object}/>}
         {active === PANE_DETAILS && <ExtensionRelatedSlot context={context} resource={object}/>}
+        {active === PANE_DETAILS && <ExtensionPodSlot context={context} resource={object}/>}
         {active === PANE_DETAILS && <ExtensionResourceSlot context={context} kind={object.kind ?? kind} group={object.apiVersion?.includes("/") ? object.apiVersion.split("/")[0] : ""} namespace={namespace} name={name} />}
       </div>
     </section>

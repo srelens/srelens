@@ -1108,7 +1108,7 @@
           "type": "string"
         },
         "permissions": {
-          "description": "The host capabilities the bindings target, each by id; `network.http` with the hosts it may reach (#568).",
+          "description": "The host capabilities the bindings target, each by id; `network.http` with the hosts it may reach (#568), and a pod capability with the namespaces it grants, if any (#567).",
           "items": {
             "$ref": "#/definitions/Permission"
           },
@@ -1245,10 +1245,10 @@
               "$ref": "#/definitions/ScopedPermission"
             }
           ],
-          "description": "A capability granted with a scope: today only `network.http`."
+          "description": "A capability granted with a scope: `network.http`'s hosts, or a pod capability's namespaces."
         }
       ],
-      "description": "One `permissions` entry: a host capability's id, or `network.http` with the hosts it may reach.\n\nA plain entry is stored as the string it was written as, so a manifest signed before scoped permissions existed still round-trips to its bytes."
+      "description": "One `permissions` entry: a host capability's id, `network.http` with the hosts it may reach, or a pod capability (#567) with the namespaces it grants.\n\nA plain entry is stored as the string it was written as, so a manifest signed before scoped permissions existed still round-trips to its bytes."
     },
     "Predicate": {
       "additionalProperties": false,
@@ -1387,13 +1387,20 @@
     },
     "ScopedPermission": {
       "additionalProperties": false,
-      "description": "`{\"capability\": \"network.http\", \"hosts\": [...]}`.",
+      "description": "`{\"capability\": \"network.http\", \"hosts\": [...]}`, or `{\"capability\": \"k8s.streamLogs\", \"namespaces\": [...]}` (#567).",
       "properties": {
         "capability": {
           "type": "string"
         },
         "hosts": {
-          "description": "Where the capability may reach: `host`, `host:port`, `*.example.com` (one subdomain label), an IP literal (`[::1]` for IPv6), or `${settings.<id>}` naming a `url` setting, whose host and port are read from the saved value on every request.",
+          "description": "Where `network.http` may reach: `host`, `host:port`, `*.example.com` (one subdomain label), an IP literal (`[::1]` for IPv6), or `${settings.<id>}` naming a `url` setting, whose host and port are read from the saved value on every request.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "namespaces": {
+          "description": "The namespaces a pod capability (`k8s.streamLogs`, `k8s.exec`, `k8s.portForward`) may reach any pod in, for a binding that names no `resource` (#567). API 0.5.",
           "items": {
             "type": "string"
           },
@@ -1401,8 +1408,7 @@
         }
       },
       "required": [
-        "capability",
-        "hosts"
+        "capability"
       ],
       "type": "object"
     },

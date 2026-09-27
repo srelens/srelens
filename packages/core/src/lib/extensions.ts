@@ -209,16 +209,27 @@ export interface ExtensionCommand {
   /** Action commands only: the qualified kind of the reader binding the action acts on. */
   forKinds?: string[];
 }
-/** The one capability granted with a scope (#568). */
+/** The capability granted with the hosts it may reach (#568). */
 export const NETWORK_HTTP = "network.http";
+/** Follow a pod's logs (#567). */
+export const POD_LOGS = "k8s.streamLogs";
+/** Run a command the manifest fixes in a pod, after the host confirmation (#567). */
+export const POD_EXEC = "k8s.exec";
+/** Forward a local port the host picks to a pod, while the view is open (#567). */
+export const POD_FORWARD = "k8s.portForward";
+/** The pod capabilities: the targets of a pod binding, and the only ones granted namespaces. */
+export const POD_TARGETS: readonly string[] = [POD_LOGS, POD_EXEC, POD_FORWARD];
 /**
- * `network.http` with the hosts it may reach (#568): `host`, `host:port`,
- * `*.example.com` (one subdomain label), an IP address, or `${settings.<id>}`
- * for a `url` setting, whose saved value's host the host allows.
+ * A capability granted with a scope: `network.http` with the hosts it may
+ * reach (#568) — `host`, `host:port`, `*.example.com` (one subdomain label), an
+ * IP address, or `${settings.<id>}` for a `url` setting, whose saved value's host
+ * the host allows — or a pod capability with the namespaces any of whose pods it
+ * may reach (#567, API 0.5).
  */
 export interface ExtensionScopedPermission {
   capability: string;
-  hosts: string[];
+  hosts?: string[];
+  namespaces?: string[];
 }
 /** One `permissions` entry: a host capability's id, or a scoped grant. */
 export type ExtensionPermission = string | ExtensionScopedPermission;
@@ -240,6 +251,16 @@ export function networkHosts(manifest: unknown): string[] {
   ) as { hosts?: unknown } | undefined;
   return Array.isArray(scoped?.hosts) ? scoped.hosts.filter((host): host is string => typeof host === "string") : [];
 }
+/** The namespaces a manifest's `capability` permission grants (#567); empty when it grants none. */
+export function podNamespaces(manifest: unknown, capability: string): string[] {
+  const permissions = (manifest as { permissions?: unknown } | null)?.permissions;
+  const scoped = (Array.isArray(permissions) ? permissions : []).find(
+    (permission) => permissionName(permission) === capability && typeof permission === "object",
+  ) as { namespaces?: unknown } | undefined;
+  return Array.isArray(scoped?.namespaces)
+    ? scoped.namespaces.filter((namespace): namespace is string => typeof namespace === "string")
+    : [];
+}
 export interface ExtensionManifest {
   /** Editor metadata naming the manifest's JSON Schema; the host ignores it. */
   $schema?: string;
@@ -248,7 +269,10 @@ export interface ExtensionManifest {
   version: string;
   srelensApiVersion: string;
   kind: "declarative";
-  /** The host capabilities the bindings target; `network.http` with its hosts (#568). */
+  /**
+   * The host capabilities the bindings target; `network.http` with its hosts (#568),
+   * and a pod capability with the namespaces it grants, if any (#567).
+   */
   permissions: ExtensionPermission[];
   capabilities: Array<{
     name: string;

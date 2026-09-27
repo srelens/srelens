@@ -1,0 +1,20 @@
+{
+  "id": "org.example.certmanager",
+  "revision": 1,
+  "view": "org.example.certmanager/resource:controllers#1",
+  "channel": "extstream:4-m3n8b1",
+  "context": "cluster/a",
+  "namespace": "cert-manager",
+  "source": {
+    "kind": "exec",
+    "capability": "status",
+    "name": "cert-manager",
+    "pod": "cert-manager-7d9f8b6c5-x2x9k",
+    "container": "cert-manager-controller",
+    "confirmed": {
+      "pod": "cert-manager-7d9f8b6c5-x2x9k",
+      "container": "cert-manager-controller",
+      "command": ["cmctl", "status", "certificate", "--all-namespaces"]
+    }
+  }
+}

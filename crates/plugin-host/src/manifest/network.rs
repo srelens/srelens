@@ -18,8 +18,8 @@ pub const NETWORK_HTTP: &str = "network.http";
 /// Most hosts one `network.http` permission may list.
 pub const MAX_NETWORK_HOSTS: usize = 16;
 
-/// One `permissions` entry: a host capability's id, or `network.http` with the
-/// hosts it may reach.
+/// One `permissions` entry: a host capability's id, `network.http` with the
+/// hosts it may reach, or a pod capability (#567) with the namespaces it grants.
 ///
 /// A plain entry is stored as the string it was written as, so a manifest
 /// signed before scoped permissions existed still round-trips to its bytes.
@@ -28,20 +28,28 @@ pub const MAX_NETWORK_HOSTS: usize = 16;
 pub enum Permission {
     /// A host capability the manifest binds, by id.
     Capability(String),
-    /// A capability granted with a scope: today only `network.http`.
+    /// A capability granted with a scope: `network.http`'s hosts, or a pod
+    /// capability's namespaces.
     Scoped(ScopedPermission),
 }
 
-/// `{"capability": "network.http", "hosts": [...]}`.
+/// `{"capability": "network.http", "hosts": [...]}`, or
+/// `{"capability": "k8s.streamLogs", "namespaces": [...]}` (#567).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ScopedPermission {
     pub capability: String,
-    /// Where the capability may reach: `host`, `host:port`, `*.example.com`
+    /// Where `network.http` may reach: `host`, `host:port`, `*.example.com`
     /// (one subdomain label), an IP literal (`[::1]` for IPv6), or
     /// `${settings.<id>}` naming a `url` setting, whose host and port are read
     /// from the saved value on every request.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hosts: Vec<String>,
+    /// The namespaces a pod capability (`k8s.streamLogs`, `k8s.exec`,
+    /// `k8s.portForward`) may reach any pod in, for a binding that names no
+    /// `resource` (#567). API 0.5.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub namespaces: Vec<String>,
 }
 
 impl Permission {
@@ -58,6 +66,14 @@ impl Permission {
         match self {
             Self::Capability(_) => &[],
             Self::Scoped(scoped) => &scoped.hosts,
+        }
+    }
+
+    /// The namespaces a scoped entry grants (#567); empty for a plain one.
+    pub fn namespaces(&self) -> &[String] {
+        match self {
+            Self::Capability(_) => &[],
+            Self::Scoped(scoped) => &scoped.namespaces,
         }
     }
 }
@@ -89,7 +105,7 @@ impl<'de> Deserialize<'de> for Permission {
         impl<'de> serde::de::Visitor<'de> for Entry {
             type Value = Permission;
             fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                f.write_str("a host capability id, or {\"capability\", \"hosts\"} for network.http")
+                f.write_str("a host capability id, {\"capability\", \"hosts\"} for network.http, or {\"capability\", \"namespaces\"} for a pod capability")
             }
             fn visit_str<E: serde::de::Error>(self, id: &str) -> Result<Permission, E> {
                 Ok(Permission::Capability(id.to_owned()))
@@ -269,8 +285,9 @@ impl Manifest {
 }
 
 /// The rules for `permissions` entries beyond their names: `network.http` is
-/// scoped, nothing else is, and every host it lists is one [`HostRule`] reads
-/// or a whole reference to a declared `url` setting.
+/// scoped by hosts, a pod capability may be scoped by namespaces (#567),
+/// nothing else is scoped, and every host `network.http` lists is one
+/// [`HostRule`] reads or a whole reference to a declared `url` setting.
 pub(super) fn permission_problems(manifest: &Manifest, problems: &mut ValidationErrors) {
     for (index, permission) in manifest.permissions.iter().enumerate() {
         let at = format!("permissions[{index}]");
@@ -286,11 +303,42 @@ pub(super) fn permission_problems(manifest: &Manifest, problems: &mut Validation
             Permission::Capability(_) => continue,
             Permission::Scoped(scoped) => scoped,
         };
-        if scoped.capability != NETWORK_HTTP {
+        let pod = super::pods::is_pod_target(&scoped.capability);
+        let mut misplaced = false;
+        if !scoped.hosts.is_empty() && scoped.capability != NETWORK_HTTP {
+            misplaced = true;
             problems.push(
                 Code::InvalidField,
                 format!("{at}.hosts"),
                 "Only network.http is granted with hosts",
+            );
+        }
+        if !scoped.namespaces.is_empty() && !pod {
+            misplaced = true;
+            problems.push(
+                Code::InvalidField,
+                format!("{at}.namespaces"),
+                format!(
+                    "Only {} are granted with namespaces",
+                    super::pods::POD_TARGETS.join(", ")
+                ),
+            );
+        }
+        if misplaced {
+            continue;
+        }
+        if pod {
+            super::pods::namespace_problems(&at, &scoped.namespaces, problems);
+            continue;
+        }
+        if scoped.capability != NETWORK_HTTP {
+            problems.push(
+                Code::InvalidValue,
+                at,
+                format!(
+                    "{} takes no scope; grant it by its id: \"{}\"",
+                    scoped.capability, scoped.capability
+                ),
             );
             continue;
         }

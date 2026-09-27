@@ -129,9 +129,13 @@ implementing 0.3 with none or only some of them had already been published. A si
 release using them under `^0.3` would have been offered by those hosts and then failed
 to parse on an unknown field. They moved to API 0.4 before any signed release used them
 ([#709](https://github.com/srelens/srelens/issues/709)), and the exception is retired.
-It stays retired: srelens builds implementing API 0.4 were published (the pre-releases
-`0.15.1-186` and `0.15.1-187`), so what [#728](https://github.com/srelens/srelens/issues/728)
-added to resource links is API 0.5, not an addition to 0.4 in place.
+It stays retired: a line is closed to additions once any published srelens build
+implements it, a prerelease included. Builds implementing API 0.4 were published (the
+pre-releases `0.15.1-186` and `0.15.1-187`, with `network.http`, #568, the last thing
+added to it), so what [#728](https://github.com/srelens/srelens/issues/728) added to
+resource links, and the logs, exec and port-forwards of
+[#567](https://github.com/srelens/srelens/issues/567), are [API 0.5](#050), not additions
+to 0.4 in place.
 
 The host enforces this. `API_FIELDS` in `crates/plugin-host/src/manifest.rs` lists every
 field whose availability differs across supported API lines, and every *form* of value
@@ -139,8 +143,10 @@ that a later line admits in a field all of them have — API 0.4's predicate pat
 in `actions[].preconditions` and `actions[].availableWhen`, which API 0.3 already had
 without it. A rename is a removal plus an addition. The schema file of each older
 supported line is kept as it was when the next line was cut
-(`schemas/extension-manifest.v0.3.json`), and CI fails when the host's contract has a
-field that file lacks and `API_FIELDS` does not list.
+(`schemas/extension-manifest.v0.3.json`, `schemas/extension-manifest.v0.4.json`), and CI
+fails when the host's contract has a field that file lacks and `API_FIELDS` does not
+list. A new allowed capability target is a form entry too: API 0.5's pod targets in
+`capabilities[].target`, a field every line has.
 
 A manifest may use a field only if the field is available in every supported API
 version its range admits, not just the one it negotiates to. Otherwise it is rejected
@@ -297,7 +303,7 @@ list, and the [developer harness](testing.md#developer-harness) prints one per l
 
 ### 0.5.0
 
-New in this line ([#728](https://github.com/srelens/srelens/issues/728)):
+New in this line ([#728](https://github.com/srelens/srelens/issues/728), [#567](https://github.com/srelens/srelens/issues/567)):
 
 - A resource link's `to` may name a built-in kind the host lists, such as `/Service`,
   `/Secret` or `/Namespace`, as well as a kind a declared reader lists. The host looks
@@ -312,6 +318,28 @@ New in this line ([#728](https://github.com/srelens/srelens/issues/728)):
   and subject to that reader's `jsonPathOverrides`. Each value is the target's name or
   an object reference; a reference to another kind or group is not the link's. See
   [`resourceLinks`](manifest.md#resourcelinks).
+- **Pod bindings.** Three targets reach the pods of a workload an app knows about:
+  `k8s.streamLogs` follows a container's logs, `k8s.exec` runs a command the manifest
+  fixes, and `k8s.portForward` forwards a local port the host picks to a pod's port, or
+  through a Service. Each is scoped by `resource` — a Deployment, StatefulSet or
+  DaemonSet reader, or a namespaced custom-resource reader with the `selector` path its
+  objects keep their pod selector at — so it reaches only the pods one object's own
+  selector selects; or by the namespaces its permission grants. A pod binding declares
+  no inputs. An exec `command` is 1–32 literal arguments, run without a shell, and may
+  not start a shell. The targets are gated as a form of `capabilities[].target`, so a
+  `^0.4` manifest binding one is told it requires API 0.5.
+- **Namespace grants.** `{"capability": "k8s.streamLogs", "namespaces": [...]}` grants a
+  pod capability 1–16 namespaces, any of whose pods a binding without `resource` may
+  reach. `permissions[].namespaces` requires API 0.5. From this line a scoped entry's
+  `hosts` is optional in the schema; the host still requires it for `network.http` and
+  refuses it on anything else.
+- The pod sources `logs`, `exec` and `portForward` run as app streams (#565), each held
+  to its binding's scope on every open. `exec` runs only when the view sends back what
+  the host confirmation named — pod, container and exact command — and is sensitive and
+  `high` impact; an unsigned app that binds it needs the unsigned-app setting. Exec and
+  port-forward sessions are audited. `extensions.pods` lists the pods a binding may
+  reach. See [Logs, exec and port-forwards](manifest.md#logs-exec-and-port-forwards) and
+  [streams.md](streams.md#pod-sources).
 - The host supports API 0.3, 0.4 and 0.5, and `extensions.catalog` reports all three in
   `hostApiVersions`. A host on the 0.4 line lists a `^0.5` release as incompatible
   rather than offering it.

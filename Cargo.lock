@@ -6580,6 +6580,7 @@ dependencies = [
 name = "srelens-registry"
 version = "0.15.0"
 dependencies = [
+ "async-trait",
  "base64 0.22.1",
  "dirs",
  "flate2",

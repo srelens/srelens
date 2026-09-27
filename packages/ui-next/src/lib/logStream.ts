@@ -8,6 +8,7 @@ import {
   type FriendlyError,
   type LogLine,
   type LogStatus,
+  type LogStream,
   type LogStreamOptions,
   type LogTarget,
 } from "@srelens/core";
@@ -77,9 +78,27 @@ import {
  * tone; this module deliberately owns no vocabulary of its own.
  */
 
+/**
+ * Where a log stream's lines come from. The cluster's own (`startLogStream`) is
+ * the default; an app's pod binding (#567) opens its `logs` app stream with the
+ * same callbacks (`startExtensionLogStream`), and a log provider (#569) will too,
+ * which is what lets the pod log view pick among them.
+ */
+export type LogSourceOpener = (
+  targets: LogTarget[],
+  onLine: (source: string, line: string) => void,
+  onStatus: (status: LogStatus, source: string) => void,
+  options: LogStreamOptions,
+) => Promise<LogStream>;
+
 export interface UseLogStreamOptions extends LogStreamOptions {
   /** How many lines the ring keeps before dropping the oldest. */
   capacity?: number;
+  /**
+   * Another source than the cluster's own. `key` names it: the stream reopens
+   * when the key changes, never because a new `open` function arrived.
+   */
+  source?: { key: string; open: LogSourceOpener };
 }
 
 /** Connection health, plus the states `startLogStream` itself can't report:
@@ -173,6 +192,11 @@ export function useLogStream(
   const sinceSeconds = options.sinceSeconds;
   const tailLines = options.tailLines;
   const key = targetsKey(targets);
+  const sourceKey = options.source?.key ?? "";
+  // Read at connect time, so a caller that passes a fresh function each render
+  // does not restart the stream; the key does.
+  const openRef = useRef(options.source?.open);
+  openRef.current = options.source?.open;
 
   const bufferRef = useRef(createLogBuffer(capacity));
   const pausedRef = useRef(false);
@@ -306,9 +330,10 @@ export function useLogStream(
       onLine(source, text);
     };
 
-    startLogStream(
-      context,
-      namespace,
+    const open: LogSourceOpener =
+      openRef.current ??
+      ((targets, line, status, options) => startLogStream(context, namespace, targets, line, status, options));
+    open(
       streamTargets,
       guardedOnLine,
       (s, source) => {
@@ -349,7 +374,7 @@ export function useLogStream(
       stopFn?.();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [context, namespace, key, sinceSeconds, tailLines, timestamps, capacity, onLine]);
+  }, [context, namespace, key, sourceKey, sinceSeconds, tailLines, timestamps, capacity, onLine]);
 
   return useMemo(
     () => ({

@@ -1989,3 +1989,25 @@ it("says a policy refusal is the server's, and counts only the manifest's own pr
   const manifestOnly = await screen.findByLabelText("Review app permissions");
   expect(await within(manifestOnly).findByText("Fix these 2 problems in the manifest before installing:")).toBeTruthy();
 });
+// #567: the pod capabilities are the broker's alone too, and a granted one says what
+// the host holds it to rather than "not provided".
+it("describes a granted pod capability by the host's own facts", async () => {
+  const app = {
+    ...updated(),
+    manifest: {
+      ...updated().manifest,
+      srelensApiVersion: "^0.5",
+      permissions: ["k8s.listDeployments", "k8s.exec"],
+      capabilities: [
+        { name: "controllers", title: "Controllers", target: "k8s.listDeployments", arguments: {}, inputs: ["context", "namespace"] },
+        { name: "status", title: "Status", target: "k8s.exec", inputs: [], arguments: { resource: "controllers", command: ["cmctl", "status"] } },
+      ],
+    },
+    grants: ["k8s.listDeployments", "k8s.exec"],
+  };
+  const details = await openDetails(app as unknown as ReturnType<typeof updated>);
+  const grants = within(details).getByRole("list", { name: "Granted capabilities" });
+  const grant = within(grants).getByText("k8s.exec").closest("li")!.textContent;
+  expect(grant).not.toContain("Not provided by this host");
+  expect(grant).toContain("Sensitive · high impact · confirmed on every run");
+});

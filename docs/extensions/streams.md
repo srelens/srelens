@@ -11,6 +11,7 @@ or the limits.
 |---|---|
 | The contract: frames, ownership, limits, metrics | `crates/streams/src/app.rs` (`AppStreams`) |
 | Who may open what, lifecycle, the `read` and `watch` sources | `crates/registry/src/extensions/streams.rs` (`ExtensionStreams`) |
+| The pod sources `logs`, `exec`, `portForward` (#567) | `crates/registry/src/extensions/streams/pods.rs`; scopes in `crates/registry/src/extensions/pods.rs`, cluster calls in `crates/kube/src/app_pods.rs` |
 | Desktop commands, frames as Tauri events | `apps/desktop/src-tauri/src/extension_streams.rs` |
 | Client | `packages/core/src/lib/extensionStreams.ts` (`openExtensionView`) |
 
@@ -230,9 +231,127 @@ announces nothing, so there the list is read when the window changes it and
 when the window gains focus, which is where a change made in another tab shows.
 It neither polls nor claims to be live.
 
-Logs, exec and port-forwards ([#567](https://github.com/srelens/srelens/issues/567))
-and metric providers ([#569](https://github.com/srelens/srelens/issues/569)) are
-further `source` kinds.
+Metric providers ([#569](https://github.com/srelens/srelens/issues/569)) are further
+`source` kinds.
+
+### Pod sources
+
+`logs`, `exec` and `portForward` ([#567](https://github.com/srelens/srelens/issues/567))
+go through one of an app's pod bindings (`capability`) to one pod its scope admits —
+selected by the object `name` names, in the stream's `namespace`, for a binding scoped
+by `resource`; or any pod in a namespace its permission grants, and then no `name`. See
+[manifest.md](manifest.md#logs-exec-and-port-forwards) for the bindings and their scopes.
+
+Every open is authorized as a read is (installed, enabled, this revision, enabled for
+this cluster, the manifest valid against its grants), then held to the scope: the host
+reads the object and its selector, then the pod the view names, and matches the pod's
+namespace and labels itself. A pod outside the scope is refused with why ("Pod db-1 is
+not selected by Deployment web in team, so app … may not reach it"), and nothing is
+opened. The app's part of the check runs again on every inventory write the host
+announces; the scope is read again whenever a log stream reconnects and whenever a
+Service's forward follows another pod.
+
+Frames are batched: lines and output gathered over **250 ms** go as one frame, so one
+stream sends at most about four a second and a chatty container cannot take the app
+past its 50 frames per second.
+
+#### `logs`
+
+```json
+{ "kind": "logs", "capability": "controllerLogs", "name": "cert-manager",
+  "pod": "cert-manager-7d9f8b6c5-x2x9k", "container": "cert-manager-controller",
+  "tailLines": 200, "sinceSeconds": 3600, "timestamps": true }
+```
+
+Follows one container: the binding's own `container`, else the one the view names,
+else the pod's only one. `tailLines` (0–5000, default 200) and `sinceSeconds` apply to
+the first follow; a reconnect asks for nothing already sent.
+
+| `data` | Meaning |
+|---|---|
+| `{ "event": "lines", "lines": [{ "source": "pod/container", "line": "…", "truncated"?: true }], "dropped"?: n }` | Up to 500 lines and 512 KiB of text (a single longer line goes alone). A line past 16 KiB is cut, on a character boundary, and says so. `dropped` counts lines the host let go because they arrived faster than it sends them: it holds up to 5000 lines and 4 MiB of text. |
+| `{ "event": "status", "source": "pod/container", "status": "live" \| "reconnecting" \| "completed", "message"?: "…" }` | The follow's state, tagged like its lines. `reconnecting` says why; `completed` says the pod is gone or finished, and is followed by `close: completed`. |
+
+A lost stream reconnects after 2 s, from nothing new, while the app may still reach
+the pod; Forbidden ends it with `error: source`, and so does a pod that has left the
+scope. Only an answer ends it: when the scope's read gets none — a timeout, an API
+server that is restarting, a network that went away, the usual reasons a stream is
+lost — it sends `reconnecting` with why and asks again 2 s later, and follows no
+sooner than the cluster answers. **This is the log contract a log source speaks**, not only this one: a log
+provider's stream (#569) sends the same two events, and `startExtensionLogStream` in
+`@srelens/core` hands them to the callbacks `startLogStream` takes, so the pod log
+view's buffer (`useLogStream`'s `source` option in `packages/ui-next/src/lib/logStream.ts`)
+follows any of them the same way.
+
+#### `exec`
+
+```json
+{ "kind": "exec", "capability": "status", "name": "cert-manager",
+  "pod": "cert-manager-7d9f8b6c5-x2x9k", "container": "cert-manager-controller",
+  "confirmed": { "pod": "cert-manager-7d9f8b6c5-x2x9k", "container": "cert-manager-controller",
+                 "command": ["cmctl", "status", "certificate", "--all-namespaces"] } }
+```
+
+Runs the binding's command once, as written, with no stdin and no terminal. There is no
+field for a command: it is the manifest's. `confirmed` is what the host confirmation
+named when the person approved it, and the open is refused — before anything runs —
+unless it names exactly the pod, container and command the host would run. A refusal
+says what it would have run, and ends "nothing ran".
+
+| `data` | Meaning |
+|---|---|
+| `{ "event": "output", "chunks": [{ "stream": "stdout" \| "stderr", "text": "…" }] }` | Output as it arrives, consecutive chunks of one stream joined. |
+| `{ "event": "exit", "code": n }` | The command exited, with its code; `close: completed` follows. A non-zero code is the command's answer, not the stream's failure. |
+
+A command the cluster could not run (no such container, no such program) ends with
+`error: source` and the cluster's own words, after any output it wrote first. So does
+one that runs past 300 s or writes more than 1 MiB: the host stops following it and
+says which. Closing the session need not end the process in the container, so the
+message says the command may still be running there.
+
+#### `portForward`
+
+```json
+{ "kind": "portForward", "capability": "webhook", "name": "cert-manager",
+  "service": "cert-manager-webhook" }
+```
+
+`pod` for a binding that forwards to a pod, `service` for one that forwards through a
+Service. The host binds `127.0.0.1` on a port it picks before the stream opens — a port
+it cannot open refuses the open — and there is no field for the view to choose one.
+
+| `data` | Meaning |
+|---|---|
+| `{ "event": "ready", "localPort": n, "pod": "…", "port": n, "service"?: "…", "servicePort"?: n }` | Listening on `localPort`; each connection reaches `port` of `pod`. Sent again when a Service's forward follows another pod. |
+| `{ "event": "connectionFailed", "count": n, "message": "…" }` | `count` connections through the forward were refused by the cluster since the last report (RBAC `pods/portforward`, a closed container port), the last with `message`. Each was closed at once on this computer's side. Sent at most once per 2 s check, so a client retrying in a loop cannot take the app past its message rate. The forward is still listening. |
+
+The source owns the listener and every connection through it. When the stream ends —
+cancelled, its view closed, its window closed or reloaded, the app disabled, updated or
+removed — the port stops listening and each connection is closed, on both sides. Every
+2 s it checks its pod: a pod that leaves the scope ends it with why; one that stops
+running ends a forward to a pod, and moves a Service's forward to another running pod
+in scope, or ends it when there is none. A read on the way that gets no answer does not
+end it: the next check asks again.
+
+#### Recorded sessions
+
+Exec and port-forward sessions are in the audit trail (#555), like every other
+sensitive or mutating call from the app: one record when a session starts, and one for
+every session refused once its binding was found, with the reason. Each names the app
+and revision, the cluster, `namespace/pod`, the binding, and the command (exec) or the
+ports (a forward). An exec record's decision is `approved` when the host confirmation
+was named, `denied` when it was not; a forward's is `auto`. Log streams are reads, and
+are not recorded.
+
+#### `extensions.pods`
+
+`extensions.pods` (read-only) answers the pods one pod binding may reach now, for a view
+to offer, held to the same authority and scope an open is — `{ "id", "revision",
+"capability", "context", "namespace", "name"? }` in, `{ "pods": [{ "name", "namespace",
+"containers", "phase", "ready" }], "services"?, "truncated"?, "scope" }` out, where
+`scope` is the host's own words ("pods selected by Deployment web") and `services`, for a
+forward through a Service, lists the Services that send to a pod in scope.
+`extensionPods()` in `@srelens/core` reads it.
 
 ## Opening a stream
 
@@ -253,12 +372,16 @@ snake_case spelling among them:
 ```
 
 That payload is committed as `packages/core/src/lib/extension-stream-open.json`:
-the TypeScript wrapper is tested to produce it and the Rust struct to accept it.
+the TypeScript wrapper is tested to produce it and the Rust struct to accept it. The
+watch and pod sources have theirs beside it (`extension-stream-watch.json`,
+`extension-stream-logs.json`, `extension-stream-exec.json`,
+`extension-stream-port-forward.json`).
 
 It answers `{ "stream", "channel" }`, or refuses with why: not installed,
 disabled or at another revision, not enabled for the cluster, no such reader,
-an interval out of range, a channel outside `extstream:`, a missing view, or
-the open-stream cap.
+an interval out of range, a channel outside `extstream:`, a missing view, the
+open-stream cap, or — for a pod source — a pod outside the binding's scope, an exec
+without the host confirmation, or a local port the host could not open.
 
 ## Metrics
 
@@ -290,6 +413,9 @@ streams that ended because their window closed or reloaded. `extensionStreamMetr
 - **Web:** the three commands are refused (`WEB_DENIED_COMMANDS`). Each user
   has their own apps there ([#515](https://github.com/srelens/srelens/issues/515)),
   but the server does not yet open a user's streams or carry their frames, so
-  `extensions.streams` answers with no open streams. Nothing in the contract is
+  `extensions.streams` answers with no open streams. An app that binds the pod
+  capabilities still installs there, and its pod tools say that app streams run in the
+  desktop app; running them on the server is [#727](https://github.com/srelens/srelens/issues/727),
+  and the pod sources need nothing of the contract changed to run there. Nothing in the contract is
   desktop-specific: the client goes through the transport shim, so on the web
   its frames would arrive as `/api/ws` frames on the same channel.

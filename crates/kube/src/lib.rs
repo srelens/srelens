@@ -119,6 +119,7 @@ mod age_tests {
 }
 
 pub mod access;
+pub mod app_pods;
 pub mod action_primitives;
 pub mod actions;
 pub mod argo;

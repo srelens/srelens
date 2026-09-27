@@ -87,7 +87,7 @@ const tables: Record<string, Record<string, "required" | "optional">> = {
     maxLength: "optional",
   } satisfies Presence<Setting>,
   SettingOption: { value: "required", label: "required" } satisfies Presence<NonNullable<Setting["options"]>[number]>,
-  ScopedPermission: { capability: "required", hosts: "required" } satisfies Presence<ExtensionScopedPermission>,
+  ScopedPermission: { capability: "required", hosts: "optional", namespaces: "optional" } satisfies Presence<ExtensionScopedPermission>,
   Binding: {
     name: "required",
     title: "required",

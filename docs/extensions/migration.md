@@ -40,6 +40,18 @@ versions** restores one:
   again means installing the newer release.
 - The app gets a new revision, so open views refresh against the restored version.
 
+## Logs, exec and port-forwards (#567)
+
+They are API 0.5. An app that binds `k8s.streamLogs`, `k8s.exec` or `k8s.portForward`,
+or grants one of them namespaces, requires `^0.5`; the same manifest under `^0.4` is
+told "requires API 0.5.0". Nothing else about a 0.4 app changes: it keeps its range,
+its schema file (`extension-manifest.v0.4.json`) and its signature. A host from before
+0.5 lists a `^0.5` release as incompatible rather than offering it.
+
+An unsigned app that adds a `k8s.exec` binding needs **Allow unsigned apps to modify
+clusters and run code**, as one that declares actions does; installed without it, it is
+disabled with that reason.
+
 ## Plain HTTP to this computer (#568)
 
 An installed app records **Allow plain HTTP to this computer** as `allowLoopbackHttp`,

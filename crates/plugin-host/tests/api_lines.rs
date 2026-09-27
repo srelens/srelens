@@ -272,6 +272,28 @@ fn uses_of_0_5() -> Vec<(&'static str, Use)> {
                 "from":"apps/Deployment","to":"/ServiceAccount","relation":"references",
                 "match":{"label":"example.io/service-account"}}]);
         }),
+        // Logs, exec and port-forwards (#567): a pod binding scoped by the object a
+        // reader lists is a new target, and no new field.
+        ("capabilities[].target", |v| {
+            v["permissions"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!("k8s.streamLogs"));
+            v["capabilities"].as_array_mut().unwrap().push(json!({"name":"logs",
+                "title":"Logs","target":"k8s.streamLogs","inputs":[],
+                "arguments":{"resource":"applications","selector":".spec.selector"}}));
+        }),
+        // One scoped by the namespaces its permission grants. A grant needs a pod
+        // binding, so it is listed before the target and is what the refusal names.
+        ("permissions[].namespaces", |v| {
+            v["permissions"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({"capability":"k8s.exec","namespaces":["argocd"]}));
+            v["capabilities"].as_array_mut().unwrap().push(json!({"name":"version",
+                "title":"Argo CD version","target":"k8s.exec","inputs":[],
+                "arguments":{"command":["argocd","version","--client"]}}));
+        }),
     ]
 }
 
@@ -340,4 +362,23 @@ fn a_0_5_manifest_is_incompatible_with_a_host_on_the_0_4_line() {
             Some("0.5.0".into())
         );
     }
+}
+
+#[test]
+fn a_0_4_manifest_keeps_its_line_on_a_host_that_also_implements_0_5() {
+    // `^0.4` pins its minor, so a 0.4 app is served under 0.4 here and keeps installing
+    // on a host that implements only 0.4 (#567).
+    for range in ["^0.4", ">=0.4, <0.5"] {
+        let range = semver::VersionReq::parse(range).unwrap();
+        assert_eq!(
+            negotiate_api_version(&range).map(|v| v.to_string()),
+            Some("0.4.0".into())
+        );
+    }
+    let range = semver::VersionReq::parse("^0.5").unwrap();
+    assert_eq!(
+        negotiate_api_version(&range).map(|v| v.to_string()),
+        Some("0.5.0".into())
+    );
+    assert!(matching_api_versions_in(&range, &["0.3.0", "0.4.0"]).is_empty());
 }

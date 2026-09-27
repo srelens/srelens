@@ -19,6 +19,9 @@ pub(crate) mod package;
 #[cfg(test)]
 mod package_tests;
 mod panels;
+pub mod pods;
+#[cfg(test)]
+mod pods_tests;
 #[cfg(test)]
 mod policy_tests;
 mod resource;
@@ -543,9 +546,19 @@ const UNSIGNED_POLICY_REASON: &str = "Turn on \"Allow unsigned apps to modify cl
 /// This host accepts only declarative manifests. Keep the kind match exhaustive:
 /// any future executable kind must require verified signing or the policy even
 /// when it declares no write actions. Source labels and IDs grant no trust.
+///
+/// A declarative app needs it when it writes (declared actions) or runs code in
+/// the cluster (a `k8s.exec` binding, #567): a command can change whatever its
+/// container may.
 fn needs_unsigned_policy(manifest: &Manifest) -> bool {
     match manifest.kind {
-        srelens_plugin_host::ManifestKind::Declarative => !manifest.actions.is_empty(),
+        srelens_plugin_host::ManifestKind::Declarative => {
+            !manifest.actions.is_empty()
+                || manifest
+                    .capabilities
+                    .iter()
+                    .any(|binding| binding.target == srelens_plugin_host::POD_EXEC)
+        }
     }
 }
 fn check_unsigned_policy(manifest: &Manifest, verified: bool, allow: bool) -> Result<(), String> {
@@ -689,6 +702,18 @@ fn validate_app(
                 );
             } else {
                 network::binding_problems(manifest, index, binding, &mut problems);
+            }
+            continue;
+        }
+        // Logs, exec and port-forwards (#567): their scope and what they run are the
+        // manifest's own rules; here, only whether this host provides them.
+        if srelens_plugin_host::is_pod_target(&binding.target) {
+            if core.get(&binding.target).is_none() {
+                problems.push(
+                    Code::UnsupportedTarget,
+                    format!("{at}.target"),
+                    format!("This host does not provide {}", binding.target),
+                );
             }
             continue;
         }
@@ -1703,7 +1728,21 @@ fn access_items(manifest: &Manifest, grants: &[String]) -> std::collections::BTr
         }
         canonical(&Value::Object(identity))
     };
+    // Which pods a pod permission reaches by namespace (#567), one item per
+    // namespace, as `network.http`'s hosts are.
+    for permission in &manifest.permissions {
+        for namespace in permission.namespaces() {
+            access.insert(format!(
+                "Reach any pod in namespace {namespace} with {}",
+                permission.capability()
+            ));
+        }
+    }
     for binding in &manifest.capabilities {
+        if let Some(item) = pod_access(manifest, binding, &reads) {
+            access.insert(item);
+            continue;
+        }
         access.insert(format!(
             "Read {} with {}{}",
             binding.target,
@@ -1754,6 +1793,65 @@ fn access_items(manifest: &Manifest, grants: &[String]) -> std::collections::BTr
         ));
     }
     access
+}
+
+/// What a pod binding (#567) reaches and does, in words: the command it runs,
+/// the port it forwards, and whose pods — each object of a reader's kind, by
+/// the reader's own identity and where its selector is read, or the granted
+/// namespaces. `None` for any other binding.
+fn pod_access(
+    manifest: &Manifest,
+    binding: &srelens_plugin_host::Binding,
+    reads: &dyn Fn(&srelens_plugin_host::Binding) -> String,
+) -> Option<String> {
+    use srelens_plugin_host::{PodScope, POD_EXEC, POD_FORWARD, POD_LOGS};
+    if !srelens_plugin_host::is_pod_target(&binding.target) {
+        return None;
+    }
+    let pods = match manifest.pod_scope(binding).ok()? {
+        PodScope::Namespaces(_) => "pods in a granted namespace".to_owned(),
+        PodScope::Selected { reader, selector } => {
+            let kind = srelens_plugin_host::builtin_reader_identity(&reader.target)
+                .and_then(|identity| identity["kind"].as_str().map(str::to_owned))
+                .or_else(|| {
+                    reader
+                        .arguments
+                        .get("kind")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                })
+                .unwrap_or_else(|| reader.name.clone());
+            let at = if srelens_plugin_host::builtin_reader_identity(&reader.target).is_some() {
+                String::new()
+            } else {
+                format!(" at {selector}")
+            };
+            format!(
+                "pods selected by each {kind} {} {} reads{at}",
+                reader.target,
+                reads(reader)
+            )
+        }
+    };
+    let container = srelens_plugin_host::pod_container(binding)
+        .map(|container| format!("container {container} of "))
+        .unwrap_or_default();
+    Some(match binding.target.as_str() {
+        POD_LOGS => format!("Stream logs of {container}{pods}, with {POD_LOGS}"),
+        POD_EXEC => format!(
+            "Run {} in {container}{pods}, with {POD_EXEC}",
+            canonical(binding.arguments.get("command").unwrap_or(&Value::Null))
+        ),
+        _ => {
+            let port = srelens_plugin_host::forward_port(binding).unwrap_or_default();
+            let via = if srelens_plugin_host::forward_via_service(binding) {
+                " through a Service to"
+            } else {
+                " of"
+            };
+            format!("Forward port {port}{via} {pods} to a local port, with {POD_FORWARD}")
+        }
+    })
 }
 
 fn permission_diff(
@@ -1898,8 +1996,10 @@ fn register_apps(
                 let (errors, permission_diff) = match check_install(&input.manifest, &input.grants, input.signature.as_deref(), input.digests.as_deref(), c) {
                     Err(problems) => (problems.0, None),
                     Ok(manifest) => {
+                        // Reported where the app writes or runs code: its actions, else its exec bindings.
+                        let at = if manifest.actions.is_empty() { "capabilities" } else { "actions" };
                         let mut errors = check_unsigned_policy(&manifest, input.signature.is_some(), state.allow_unsigned_apps)
-                            .err().map(|reason| vec![ValidationError::new(Code::InvalidValue, "actions", reason)])
+                            .err().map(|reason| vec![ValidationError::new(Code::InvalidValue, at, reason)])
                             .unwrap_or_default();
                         // The administrator's policy (#578), as install would apply it.
                         let publisher = input.signature.is_some().then(|| signing::publisher_name(&manifest.id)).flatten();
@@ -2046,6 +2146,18 @@ async fn read_contribution(
             state.policy.as_ref(),
         )
         .await;
+    }
+    // A pod binding (#567) is a session a view opens as a stream, never a read.
+    if let Some(binding) = plugin
+        .manifest
+        .capabilities
+        .iter()
+        .find(|b| b.name == input.capability && srelens_plugin_host::is_pod_target(&b.target))
+    {
+        return Err(CapabilityError::InvalidInput(format!(
+            "\"{}\" is a {} binding: a view opens it as a stream, not a read",
+            binding.name, binding.target
+        )));
     }
     // A custom-resource reader reads the version this cluster serves, through
     // that version's paths (#547); `crd::resolved` is also the #601 check. A
@@ -3689,8 +3801,11 @@ mod tests {
         cap.handler = Arc::new(|args| Box::pin(async move { Ok(args) }));
         core.register(cap);
         serve_crds(&mut core, &["applications.argoproj.io/v1alpha1"]);
-        // The broker's own, as `build_registry_and_app_streams` registers it (#568).
+        // The broker's own, as `build_registry_and_app_streams` registers them (#568, #567).
         core.register(network::capability());
+        for capability in pods::capabilities() {
+            core.register(capability);
+        }
         Arc::new(core)
     }
     /// Answers the broker's CRD check as a cluster whose CRDs serve exactly these
@@ -4037,6 +4152,7 @@ mod tests {
             "extensions.packageManifest",
             "extensions.validate",
             "extensions.streams",
+            "extensions.pods",
         ] {
             assert!(reg.get(id).unwrap().annotations.read_only);
         }
@@ -4045,7 +4161,7 @@ mod tests {
         let store = reg.get("extension.secretStore").unwrap().annotations;
         assert!(store.requires_confirm && store.sensitive && !store.read_only);
         let mcp = srelens_mcp::McpServer::new(Arc::new(reg));
-        assert_eq!(mcp.list_tools().len(), 16);
+        assert_eq!(mcp.list_tools().len(), 17);
         use srelens_mcp::{stdio::handle_request, Transport};
         for args in [
             json!({"action":"install","manifest":manifest(),"grants":["k8s.listCustomResource"]}),

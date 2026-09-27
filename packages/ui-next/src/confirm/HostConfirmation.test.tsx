@@ -180,6 +180,47 @@ describe("the one host-owned confirmation", () => {
    * refresh "Medium impact" because something had to go there would make the
    * badge worth less on the prompt where it matters.
    */
+  // #567: an app's exec session is confirmed with the pod, the container and the
+  // exact command, all of it — a command cut short is another command.
+  it("names the container and every argument of the command it runs, none cut", () => {
+    const long = "--selector=" + "a".repeat(300);
+    render(
+      <HostConfirmation
+        question="Run this app's command in Pod team/web-1 in cluster prod?"
+        impact="high"
+        cluster="prod"
+        subject={{ kind: "object", namespace: "team", name: "web-1" }}
+        command={{ container: "controller", argv: ["cmctl", "status", "certificate", long] }}
+      />,
+    );
+    expect(screen.getByTestId("host-confirm-container").textContent).toBe("controller");
+    const command = screen.getByTestId("host-confirm-command");
+    expect(command.textContent).toBe(`cmctl status certificate ${long}`);
+    expect([...command.querySelectorAll("[data-arg]")].map((arg) => arg.textContent)).toEqual([
+      "cmctl",
+      "status",
+      "certificate",
+      long,
+    ]);
+  });
+
+  it("draws where one argument ends and the next begins, and escapes what would hide it", () => {
+    render(
+      <HostConfirmation
+        question={null}
+        impact="high"
+        command={{ container: "c", argv: ["echo", "two words", "", `evil${RLO}txt`] }}
+      />,
+    );
+    const args = [...screen.getByTestId("host-confirm-command").querySelectorAll("[data-arg]")].map(
+      (arg) => arg.textContent,
+    );
+    expect(args[1]).toBe('"two words"');
+    expect(args[2]).toBe('""');
+    expect(args[3]).not.toContain(RLO);
+    expect(args[3]).toContain("\\u202e");
+  });
+
   it("names no level rather than inventing one the host did not send", () => {
     render(<HostConfirmation question="Refresh?" impact={null} cluster="prod" />);
     expect(screen.queryByTestId("host-confirm-impact")).toBeNull();

@@ -1,6 +1,7 @@
 import { NativeComponent } from "../native-components/NativeComponent";
 import { ExtensionPanelSlot } from "./ExtensionPanelSlot";
 import { ExtensionRelatedSlot } from "./ExtensionRelatedSlot";
+import { ExtensionPodSlot } from "./ExtensionPodTools";
 import { ExtensionResourceNavigation } from "./resourceNavigation";
 import { useContext, useEffect, useId, useMemo, useRef, useState } from "react";
 import { inspectExtensionResource, actOnExtensionResource, formatResourceManifest, onExtensionResourceChanged, renderConfirmTemplate, unmetPredicate, type ExtensionResourceDetail, type ExtensionResourceSelection } from "@srelens/core";
@@ -238,6 +239,7 @@ export function ExtensionResourceDetails({selection,onClose,fullPage=false}:{sel
         <details className="extension-detail-metadata"><summary>Labels and annotations</summary><Fields value={{labels:resource.metadata.labels??{},annotations:resource.metadata.annotations??{}}}/></details>
         <ExtensionPanelSlot context={selection.context} resource={resource}/>
         <ExtensionRelatedSlot context={selection.context} resource={resource}/>
+        <ExtensionPodSlot context={selection.context} resource={resource}/>
       </>}
     </>}
     </Inspector>
