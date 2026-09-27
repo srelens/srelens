@@ -25,8 +25,9 @@ use std::time::SystemTime;
 /// Lines kept per app. Older ones are dropped, and counted.
 pub const LOG_LINES: usize = 1000;
 
-/// The longest log line kept, in bytes. A longer one is cut at a character
-/// boundary and marked.
+/// The longest log line kept, in bytes. The supervisor drops a longer stderr
+/// line before it gets here, with a warning; [`AppLog::push`] cuts any other
+/// line at a character boundary, and marks it.
 pub const LOG_LINE_BYTES: usize = 4096;
 
 /// Errors kept apart from the lines, for the Inspector's "Recent errors".
@@ -190,8 +191,13 @@ impl AppLog {
     pub fn push(&self, level: LogLevel, source: LogSource, text: &str) {
         let mut ring = self.ring();
         // Redacted before it is cut, so a token that straddles the cut is
-        // still whole when the patterns look for it.
-        let mut text = ring.scrub.line(text);
+        // still whole when the patterns look for it. Only the sidecar's own
+        // lines follow a private key across lines: a host line can land in
+        // the middle of one, and must not end its redaction.
+        let mut text = match source {
+            LogSource::Sidecar => ring.scrub.line(text),
+            LogSource::Host => ring.scrub.text(text),
+        };
         if text.len() > LOG_LINE_BYTES {
             let mut cut = LOG_LINE_BYTES;
             while !text.is_char_boundary(cut) {
@@ -463,6 +469,29 @@ mod tests {
         let everything = lines.join("\n");
         assert!(!everything.contains("MIIEow"), "{everything}");
         assert!(!everything.contains("VTLw7on"), "{everything}");
+    }
+
+    /// The supervisor writes its lines while the sidecar's stderr is read on
+    /// another task, so one can land in the middle of a key. It must not end
+    /// the key's redaction: only the sidecar's own lines decide that.
+    #[test]
+    fn a_host_line_in_the_middle_of_a_private_key_does_not_end_its_redaction() {
+        let log = AppLog::new();
+        log.sidecar(b"-----BEGIN RSA PRIVATE KEY-----");
+        log.host(
+            LogLevel::Error,
+            "`scan` failed: The extension did not answer `scan` within 30 s",
+        );
+        log.sidecar(b"MIIEowIBAAKCAQEAu1SU1LfVLPHCozMxH2Mo4lgOEePzNm0tRgeLezV6ffAt0gun");
+        log.sidecar(b"-----END RSA PRIVATE KEY-----");
+        log.sidecar(b"INFO key loaded");
+        let lines = texts(&log);
+        assert!(!lines.join("\n").contains("MIIEow"), "{lines:?}");
+        assert_eq!(
+            lines[1],
+            "`scan` failed: The extension did not answer `scan` within 30 s"
+        );
+        assert_eq!(lines[4], "key loaded");
     }
 
     #[test]

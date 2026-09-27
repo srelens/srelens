@@ -40,7 +40,7 @@ const line = (seq: number, level: ExtensionLogLine["level"], text: string, sourc
 const read = (lines: ExtensionLogLine[], more: Partial<ExtensionLogRead> = {}): ExtensionLogRead => ({
   runtime: "sidecar",
   lines,
-  capacity: 2000,
+  capacity: 1000,
   dropped: 0,
   ...more,
 });
@@ -74,7 +74,7 @@ it("says a declarative app has no process to write its log, and that the log sta
   expect(screen.getByText("This app has no process, so nothing writes to its log.")).toBeTruthy();
   expect(
     screen.getByText(
-      "Kept in srelens's memory only: never written to disk, and never sent to an agent or anywhere else. The last 2,000 lines are kept.",
+      "Kept in srelens's memory only: never written to disk, and never sent to an agent or anywhere else. The last 1,000 lines are kept.",
     ),
   ).toBeTruthy();
   expect(screen.queryByText("Nothing logged yet.")).toBeNull();

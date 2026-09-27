@@ -55,7 +55,7 @@ const declarative = (more: Partial<ExtensionInspection> = {}): ExtensionInspecti
   process: null,
   streams: { open: [], watches: [], opened: 0, messages: 0, bytes: 0, rateLimited: 0, refused: 0, windowEnded: 0, maxOpen: 8 },
   recentErrors: [],
-  log: { lines: 0, capacity: 2000, dropped: 0 },
+  log: { lines: 0, capacity: 1000, dropped: 0 },
   ...more,
 });
 const running: ExtensionProcess = {
@@ -357,6 +357,33 @@ it("reads again every five seconds while open, and stops when closed", async () 
   view.unmount();
   await wait(20_000);
   expect(inspectExtension).toHaveBeenCalledTimes(2);
+});
+
+it("keeps the last read, labelled as such, when a later poll fails, and through a Retry", async () => {
+  const crashed = sidecar({
+    state: "disabled",
+    reason: "It exited with status 101.",
+    message: "Extension process exited unexpectedly",
+    actions: ["restart", "viewLogs", "disable"],
+  });
+  vi.mocked(inspectExtension)
+    .mockResolvedValueOnce(crashed)
+    .mockRejectedValueOnce(new Error("bridge timed out"))
+    .mockReturnValueOnce(new Promise(() => {}));
+  await open();
+  await wait(5000);
+  const notice = screen.getAllByRole("alert").find((alert) => alert.textContent?.includes("Could not inspect this app"));
+  expect(notice?.textContent).toContain("bridge timed out");
+  // The crash, and what a person can do about it, stay on screen.
+  expect(screen.getByText("Extension process exited unexpectedly")).toBeTruthy();
+  expect(screen.getByRole("button", { name: "View logs" })).toBeTruthy();
+  expect(screen.getByText(/^Showing the last read, from \d\d:\d\d:\d\d\. It may have changed since\.$/)).toBeTruthy();
+  await wait(20_000);
+  expect(inspectExtension).toHaveBeenCalledTimes(2);
+  fireEvent.click(within(notice!).getByRole("button", { name: "Retry" }));
+  await wait(0);
+  expect(inspectExtension).toHaveBeenCalledTimes(3);
+  expect(screen.getByText("Extension process exited unexpectedly")).toBeTruthy();
 });
 
 it("says a failed read failed, never that the app has no process or streams, and reads again on Retry", async () => {

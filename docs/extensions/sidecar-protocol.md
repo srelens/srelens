@@ -216,9 +216,10 @@ to exit before killing it. Dropping the supervisor kills the sidecar at once.
 
 ### Logs
 
-stderr is the sidecar's log. Each line goes into its app's log: the last 1,000 lines, each
-cut at 4 KiB. Next to them are the lines srelens writes about the sidecar: each start,
-exit, restart and refusal, and each failed request. **View logs** opens that log in
+stderr is the sidecar's log. Each line goes into its app's log, which keeps the last 1,000
+lines. A line longer than 4 KiB is dropped, and srelens logs a warning that it was. Next to
+them are the lines srelens writes about the sidecar: each start, exit, restart and refusal,
+and each failed request. **View logs** opens that log in
 Settings → Apps → app → Logs.
 
 The sidecar chooses a line's level by starting the line with it:

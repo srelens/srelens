@@ -58,8 +58,10 @@ receives a line of the other.
   ([sidecar-protocol.md](sidecar-protocol.md#logs)). srelens writes each start
   and stop at info, each restart and each refusal at a limit at warn, and each
   exit and failed request at error.
-- **Bounds:** the last 1,000 lines, each cut at 4 KiB, plus the last 20 errors
-  kept apart. Dropped lines are counted, and the Logs tab says how many.
+- **Bounds:** the last 1,000 lines, plus the last 20 errors kept apart. Dropped
+  lines are counted, and the Logs tab says how many. A sidecar line longer than
+  4 KiB is dropped, with a warning that it was. A line srelens writes is cut at
+  4 KiB, as is a line that redaction made longer.
 - **Reading:** `extensions.logs` answers the lines after the last one a reader
   has (`after`), at a level or above (`minLevel`). The Logs tab asks again
   every 2 seconds while it is open.

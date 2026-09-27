@@ -219,6 +219,8 @@ export function ExtensionInspector({
   const { manifest } = plugin;
   const id = manifest.id;
   const [inspection, setInspection] = useState<ExtensionInspection>();
+  /** When the host last answered, to say how old the answer is once a read fails. */
+  const [readAt, setReadAt] = useState<number>();
   const [error, setError] = useState<string>();
   const [attempt, setAttempt] = useState(0);
 
@@ -230,6 +232,8 @@ export function ExtensionInspector({
         (answer) => {
           if (!live) return;
           setInspection(answer);
+          setReadAt(Date.now());
+          setError(undefined);
           timer = setTimeout(read, POLL_MS);
         },
         // No read while a failure stands: the reader chooses when to try again.
@@ -242,9 +246,9 @@ export function ExtensionInspector({
     };
   }, [id, attempt]);
 
+  // The last answer stays on screen while the host is asked again: a crashed
+  // sidecar's headline and actions should not vanish over one failed read.
   function retry() {
-    setError(undefined);
-    setInspection(undefined);
     setAttempt((n) => n + 1);
   }
 
@@ -322,14 +326,20 @@ export function ExtensionInspector({
         )}
       </Part>
 
-      {error !== undefined ? (
-        <ErrorNotice title="Could not inspect this app" message={error} retry={retry} />
-      ) : !inspection ? (
-        <p role="status" className="extension-message">
-          Loading…
-        </p>
+      {error !== undefined && <ErrorNotice title="Could not inspect this app" message={error} retry={retry} />}
+      {!inspection ? (
+        error === undefined && (
+          <p role="status" className="extension-message">
+            Loading…
+          </p>
+        )
       ) : (
         <>
+          {error !== undefined && readAt !== undefined && (
+            <p className="extension-message">
+              Showing the last read, from {clock(readAt, false)}. It may have changed since.
+            </p>
+          )}
           <Part title="Process">
             <Process inspection={inspection} plugin={plugin} busy={busy} change={change} onViewLogs={onViewLogs} />
           </Part>

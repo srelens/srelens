@@ -657,7 +657,7 @@ const noActivity = {
 };
 const declarativeInspection: ExtensionInspection = {
   id: "org.test.gitops", runtime: "declarative", process: null, streams: noActivity, recentErrors: [],
-  log: { lines: 0, capacity: 2000, dropped: 0 },
+  log: { lines: 0, capacity: 1000, dropped: 0 },
 };
 it("opens Details on the Overview, with the Inspector and Logs beside it and neither read yet (#575)", async () => {
   const details = await openDetails(updated());
@@ -674,7 +674,7 @@ it("opens Details on the Overview, with the Inspector and Logs beside it and nei
 });
 it("says in the Inspector and Logs that a declarative app has no process (#575)", async () => {
   vi.mocked(inspectExtension).mockResolvedValue(declarativeInspection);
-  vi.mocked(extensionLogs).mockResolvedValue({ runtime: "declarative", lines: [], capacity: 2000, dropped: 0 });
+  vi.mocked(extensionLogs).mockResolvedValue({ runtime: "declarative", lines: [], capacity: 1000, dropped: 0 });
   const details = await openDetails(inspected());
   fireEvent.click(within(details).getByRole("tab", { name: "Inspector" }));
   expect(await within(details).findByText(/^No process\. This is a declarative app/)).toBeTruthy();
@@ -703,7 +703,7 @@ it("takes a crashed sidecar's View logs to its log, and its Disable through the 
   };
   vi.mocked(inspectExtension).mockResolvedValue(crashed);
   vi.mocked(extensionLogs).mockResolvedValue({
-    runtime: "sidecar", capacity: 2000, dropped: 0,
+    runtime: "sidecar", capacity: 1000, dropped: 0,
     lines: [{ seq: 1, at: Date.UTC(2026, 8, 27, 12), level: "error", source: "sidecar", text: "thread 'main' panicked" }],
   });
   const details = await openDetails(inspected());
