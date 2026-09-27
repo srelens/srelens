@@ -250,7 +250,16 @@ critical clusters.
 
 [mcp-catalog.md](mcp-catalog.md) enumerates every tool, the built-in prompts,
 and every resource URI, grouped by area (Kubernetes, Helm, Toolbox, Server)
-and, for tools, by **safety class**. There are exactly four:
+and, for tools, by **safety class**.
+
+Every capability is a tool except the **UI-only** ones (`Capability::ui_only`).
+Those are `extensions.inspect` and `extensions.logs`, an app's runtime metrics
+and its log ([extensions/inspector.md](extensions/inspector.md)).
+`McpServer::new` drops them, so no MCP path can list or call them. An agent's
+context goes to its LLM provider, and a sidecar's log is text a third party
+wrote.
+
+There are exactly four safety classes:
 
 | Class | Confirm gate? | Headless flag needed |
 | --- | --- | --- |

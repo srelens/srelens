@@ -86,7 +86,7 @@ import {
  */
 export type LogSourceOpener = (
   targets: LogTarget[],
-  onLine: (source: string, line: string) => void,
+  onLine: (source: string, line: string, truncated: boolean) => void,
   onStatus: (status: LogStatus, source: string) => void,
   options: LogStreamOptions,
 ) => Promise<LogStream>;
@@ -226,8 +226,10 @@ export function useLogStream(
   // Stable across restarts: the same ref keeps accumulating, so a target
   // change doesn't need a new callback, only a fresh buffer (below).
   const onLine = useCallback(
-    (source: string, text: string) => {
-      bufferRef.current = appendLogLines(bufferRef.current, [{ source, text }]);
+    (source: string, text: string, truncated = false) => {
+      // Marked only when the host cut it (#747), so a whole line is `{source, text}`.
+      const line = truncated ? { source, text, truncated: true as const } : { source, text };
+      bufferRef.current = appendLogLines(bufferRef.current, [line]);
       if (pausedRef.current) {
         pendingRef.current += 1;
         setPendingWhilePaused(pendingRef.current);
@@ -325,9 +327,9 @@ export function useLogStream(
     // arrive on the channel in the gap before its `.then()` gets around to
     // calling `stop()`. Without this guard those lines land, through the
     // shared `onLine`, in the buffer the new effect already cleared.
-    const guardedOnLine = (source: string, text: string) => {
+    const guardedOnLine = (source: string, text: string, truncated: boolean) => {
       if (cancelled) return;
-      onLine(source, text);
+      onLine(source, text, truncated);
     };
 
     const open: LogSourceOpener =

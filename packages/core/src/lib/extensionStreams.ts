@@ -443,7 +443,7 @@ export interface ExtensionLogStreamHandlers {
 export async function startExtensionLogStream(
   view: ExtensionView,
   request: ExtensionStreamRequest & { source: Extract<ExtensionStreamSource, { kind: "logs" }> },
-  onLine: (source: string, line: string) => void,
+  onLine: (source: string, line: string, truncated: boolean) => void,
   onStatus?: (status: LogStatus, source: string) => void,
   handlers: ExtensionLogStreamHandlers = {},
   options: LogStreamOptions = {},
@@ -466,7 +466,7 @@ export async function startExtensionLogStream(
           onStatus?.(data.status, data.source);
           return;
         }
-        for (const line of data.lines) onLine(line.source, line.line);
+        for (const line of data.lines) onLine(line.source, line.line, line.truncated === true);
         if (data.dropped) handlers.onDropped?.(data.dropped);
       },
       onEnd: (end) => {

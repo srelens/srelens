@@ -56,6 +56,8 @@ interface LogEntry {
   /** Source tag ("pod/container"); empty for a single target. */
   source: string;
   line: string;
+  /** The host cut the line at its limit (#747); said beside it, never in it. */
+  truncated?: true;
 }
 
 /** Classify a klog-style line (I/W/E0629 …) for colourising. */
@@ -306,8 +308,9 @@ export function LogsView({
       context,
       namespace,
       targets,
-      (sourceTag, line) => {
-        const next = [...entriesRef.current, { source: sourceTag, line }];
+      (sourceTag, line, truncated) => {
+        const entry: LogEntry = truncated ? { source: sourceTag, line, truncated: true } : { source: sourceTag, line };
+        const next = [...entriesRef.current, entry];
         if (next.length > MAX_LINES) next.splice(0, next.length - MAX_LINES);
         setBuffer(next);
       },
@@ -585,6 +588,7 @@ export function LogsView({
                     </span>
                   )}
                   {e.line || " "}
+                  {e.truncated && <span className="text-muted-foreground"> [line cut: too long]</span>}
                 </div>
               );
             })}

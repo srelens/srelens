@@ -4,6 +4,7 @@
 //! explicit grants for native srelens manifests. Executable apps are to run
 //! out of process, sandboxed, under [`sidecar::Supervisor`] (#572); no
 //! manifest kind starts one yet.
+pub mod app_log;
 #[cfg(any(test, feature = "fuzzing"))]
 #[doc(hidden)]
 pub mod fuzzing;
@@ -511,6 +512,8 @@ impl PluginHost {
                 // A registered binding is the app's; the host injects a
                 // secret into the target it calls, never into this facade.
                 secret_slots: Vec::new(),
+                // An app's own reader is a tool like its target.
+                ui_only: false,
                 handler: Arc::new(move |input| {
                     let handler = handler.clone();
                     let enabled = enabled.clone();

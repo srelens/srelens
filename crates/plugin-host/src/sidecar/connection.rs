@@ -549,6 +549,13 @@ impl Connection {
         self.state().ended.is_some()
     }
 
+    /// App requests in flight and streams open now, for the Inspector (#575).
+    pub(crate) fn load(&self) -> (usize, usize) {
+        let in_flight =
+            self.inner.limits.max_concurrent_requests - self.inner.requests.available_permits();
+        (in_flight, self.state().open.len())
+    }
+
     /// Read the sidecar's stdout until it closes or breaks the protocol.
     pub(crate) async fn read<R>(&self, stdout: R, broker: Arc<dyn Broker>) -> ReadEnd
     where

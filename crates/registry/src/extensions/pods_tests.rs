@@ -14,6 +14,7 @@ use srelens_capability::Registry;
 use srelens_kube::app_pods::{
     ContainerPort, Output, PodFacts, PortTarget, ReadError, ServiceFacts, ServicePort, Upstream,
 };
+use srelens_kube::logs::Line;
 use srelens_streams::test_util::TestSink;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -264,11 +265,11 @@ impl PodCluster for Cluster {
         for step in script.unwrap_or_default() {
             match step {
                 LogStep::Line(line) => {
-                    let _ = events.send(LogEvent::Line(line.into()));
+                    let _ = events.send(LogEvent::Line(Line::whole(line.into())));
                 }
                 LogStep::Lines(n) => {
                     for i in 0..n {
-                        let _ = events.send(LogEvent::Line(format!("line {i}")));
+                        let _ = events.send(LogEvent::Line(Line::whole(format!("line {i}"))));
                     }
                 }
                 LogStep::End => return Ok(()),
@@ -758,6 +759,10 @@ async fn a_log_stream_batches_lines_and_follows_again_without_repeating() {
     let asks = host.cluster.log_asks.lock().unwrap().clone();
     assert_eq!(asks[0].tail_lines, 50);
     assert_eq!(asks[1].tail_lines, 0, "a reconnect repeats no history");
+    // The reader cuts a long line where the source does, so none is held whole (#747).
+    assert!(asks
+        .iter()
+        .all(|ask| ask.max_line_bytes == super::streams::MAX_LINE_BYTES));
     assert_eq!(asks[0].container, "controller");
 }
 

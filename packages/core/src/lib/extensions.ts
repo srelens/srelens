@@ -931,3 +931,107 @@ export function onExtensionResourceChanged(listener: (resource: ExtensionResourc
 export function extensionResourceRoute(context:string,id:string,page:string,namespace:string,name:string) {
   return `${extensionRoute(context,id,page,namespace)}/${encodeURIComponent(name)}`;
 }
+
+/*
+ * An app's log and runtime metrics (#575). Both reads are for Settings → Apps only and are
+ * deliberately not MCP tools: an agent's context goes to its model provider, and a sidecar's
+ * stderr is third-party text. The host keeps both in memory only, never on disk.
+ */
+export type ExtensionLogLevel = "trace" | "debug" | "info" | "warn" | "error";
+/** The levels, least severe first: a minimum level shows itself and every one after it. */
+export const EXTENSION_LOG_LEVELS: readonly ExtensionLogLevel[] = ["trace", "debug", "info", "warn", "error"];
+export interface ExtensionLogLine {
+  /** Counts from 1 over the life of the app's log. */
+  seq: number;
+  /** Milliseconds since the Unix epoch. */
+  at: number;
+  level: ExtensionLogLevel;
+  /** `sidecar`: the app's own process wrote it on stderr; `host`: srelens wrote it. */
+  source: "sidecar" | "host";
+  /** Already redacted by the host. */
+  text: string;
+}
+/** Declarative apps have no process of their own. */
+export type ExtensionRuntime = "declarative" | "sidecar";
+export interface ExtensionOpenStream {
+  stream: string;
+  view: string;
+  revision: number;
+  source: string;
+  messages: number;
+  bytes: number;
+}
+export type ExtensionProcessState = "starting" | "running" | "restarting" | "disabled" | "refused" | "stopping" | "stopped";
+export type ExtensionProcessAction = "restart" | "viewLogs" | "disable";
+export interface ExtensionProcess {
+  state: ExtensionProcessState;
+  /** Why, in a sentence (redacted); for restarting, disabled and refused. */
+  reason: string | null;
+  /** The headline, such as "Extension process exited unexpectedly"; only when disabled. */
+  message: string | null;
+  /** What the supervisor offers from this state. */
+  actions: ExtensionProcessAction[];
+  /** The sidecar API version negotiated at start, while running. */
+  apiVersion: string | null;
+  pid: number | null;
+  /** Milliseconds since the Unix epoch, when the running process came up. */
+  startedAt: number | null;
+  /** While restarting. */
+  restart: { attempt: number; of: number; delayMs: number } | null;
+  launches: number;
+  unexpectedExits: number;
+  /** `bytes` is null where this OS does not measure it. */
+  memory: { bytes: number | null; limitBytes: number; enforcement: "kernel" | "host" | "missing" };
+  cpus: number;
+  rpc: {
+    answered: number;
+    failed: number;
+    timedOut: number;
+    refused: number;
+    inFlight: number;
+    latency: { samples: number; p50Ms: number | null; p95Ms: number | null; maxMs: number | null };
+  };
+  /** The sidecar's own JSON-RPC streams. */
+  streams: { open: number; opened: number; limit: number };
+}
+export interface ExtensionInspection {
+  id: string;
+  runtime: ExtensionRuntime;
+  /** Always null for a declarative app. */
+  process: ExtensionProcess | null;
+  streams: {
+    /** The app streams its views opened, except watches. */
+    open: ExtensionOpenStream[];
+    /** The app streams whose source is `watch`. */
+    watches: ExtensionOpenStream[];
+    opened: number;
+    messages: number;
+    bytes: number;
+    /** Streams stopped for exceeding the message rate. */
+    rateLimited: number;
+    /** Opens refused because the app was at its cap. */
+    refused: number;
+    /** Streams ended because their window closed or reloaded. */
+    windowEnded: number;
+    /** The per-app cap on open streams. */
+    maxOpen: number;
+  };
+  /** The last 20 error lines, oldest first. */
+  recentErrors: ExtensionLogLine[];
+  log: { lines: number; capacity: number; dropped: number };
+}
+export interface ExtensionLogRead {
+  runtime: ExtensionRuntime;
+  /** The lines after `after` at `minLevel` or above, oldest first. */
+  lines: ExtensionLogLine[];
+  capacity: number;
+  dropped: number;
+}
+export const inspectExtension = (id: string) => invokeCapability<ExtensionInspection>("extensions.inspect", { id });
+/** A field left out is not sent at all: the host denies one it does not know, and `null` is not a level. */
+export const extensionLogs = (id: string, { after, minLevel }: { after?: number; minLevel?: ExtensionLogLevel } = {}) =>
+  invokeCapability<ExtensionLogRead>("extensions.logs", {
+    id,
+    ...(after === undefined ? {} : { after }),
+    ...(minLevel === undefined ? {} : { minLevel }),
+  });

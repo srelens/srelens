@@ -355,6 +355,18 @@ pub fn render_client_configs() -> String {
 /// table sorted by id. Empty combinations are skipped rather than rendered as
 /// an empty table.
 pub fn render_tools(reg: &srelens_capability::Registry) -> String {
+    // What MCP offers: without the UI-only capabilities (#575), as
+    // `McpServer::new` drops them.
+    let mut reg = reg.clone();
+    let hidden: Vec<String> = reg
+        .entries()
+        .filter(|cap| cap.ui_only)
+        .map(|cap| cap.id.clone())
+        .collect();
+    for id in hidden {
+        reg.unregister(&id);
+    }
+    let reg = &reg;
     let mut out = String::new();
     out.push_str(&format!(
         "## Tools\n\n{} tools, grouped by area and then by how a call is gated. ",
@@ -623,16 +635,21 @@ mod tests {
         assert!(md.contains("| `k8s.listPods` |"), "got:\n{md}");
     }
 
-    /// Every tool appears exactly once across all sections. Renders the id in
+    /// Every tool appears exactly once across all sections, and a UI-only
+    /// capability (#575), which is not a tool, not at all. Renders the id in
     /// backticks inside a table cell, so counting that exact pattern counts rows.
     #[test]
     fn every_tool_appears_exactly_once() {
         let reg = crate::build_registry();
         let md = render_tools(&reg);
-        for id in reg.ids() {
+        for capability in reg.entries() {
+            let id = &capability.id;
             let cell = format!("| `{id}` |");
-            assert_eq!(md.matches(&cell).count(), 1, "{id} should appear exactly once");
+            let want = if capability.ui_only { 0 } else { 1 };
+            assert_eq!(md.matches(&cell).count(), want, "{id} should appear {want} times");
         }
+        let tools = reg.entries().filter(|capability| !capability.ui_only).count();
+        assert!(md.contains(&format!("{tools} tools, grouped")), "the count is of tools");
     }
 
     /// `diffManifest` is sensitive but un-gated, so it must render under

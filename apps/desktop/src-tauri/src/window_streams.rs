@@ -79,6 +79,31 @@ impl WindowStreams {
         })
     }
 
+    /// Whether `window` may act on watch `channel` (#733): `Ok(true)` when it
+    /// opened it, `Ok(false)` when no window holds it — it ended, or never
+    /// started — and refused when another window did.
+    pub fn check_watch(&self, window: &str, channel: &str) -> Result<bool, String> {
+        self.check(window, |owned| owned.watches.contains(channel))
+            .map_err(|()| format!("Watch {channel} was not opened by this window"))
+    }
+
+    /// [`WindowStreams::check_watch`], for exec `session`.
+    pub fn check_exec(&self, window: &str, session: u64) -> Result<bool, String> {
+        self.check(window, |owned| owned.execs.contains(&session))
+            .map_err(|()| format!("Shell session {session} was not opened by this window"))
+    }
+
+    fn check(&self, window: &str, holds: impl Fn(&Owned) -> bool) -> Result<bool, ()> {
+        let windows = self.windows.lock().unwrap();
+        if windows.get(window).is_some_and(&holds) {
+            return Ok(true);
+        }
+        if windows.values().any(holds) {
+            return Err(());
+        }
+        Ok(false)
+    }
+
     /// Forget watch `channel`, as the window stops it itself.
     pub fn disown_watch(&self, window: &str, channel: &str) {
         if let Some(owned) = self.windows.lock().unwrap().get_mut(window) {
@@ -336,8 +361,8 @@ pub(crate) mod tests {
             "pods".into(),
             channel.into(),
             vec![],
+            crate::sink::tests::recording().0,
             window.clone(),
-            app.handle().clone(),
             app.state(),
             app.state(),
         )
@@ -360,8 +385,8 @@ pub(crate) mod tests {
             channel.into(),
             None,
             None,
+            crate::sink::tests::recording().0,
             window.clone(),
-            app.handle().clone(),
             app.state(),
             app.state(),
         )
@@ -515,6 +540,66 @@ pub(crate) mod tests {
             1,
             "and is the window's to end"
         );
+    }
+
+    /// Another window cannot stop a watch or drive, resize or close a shell
+    /// it did not open (#733), though it knows the channel or the session id.
+    /// Each is refused by name, the stream runs on, and the window that
+    /// opened it still can.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_window_cannot_stop_or_drive_another_windows_streams() {
+        let server = Silent::start();
+        let (app, main, other) = server.app();
+        watch_in(&app, &main, "watch:main").await;
+        let shell = exec_in(&app, &main, "exec-main").await;
+        let watches = app.state::<WatchManager>();
+        let execs = app.state::<ExecManager>();
+        eventually("both reached the cluster", || server.open() >= 2).await;
+
+        let refused =
+            crate::watch::stop_watch("watch:main".into(), other.clone(), app.state(), app.state())
+                .await
+                .unwrap_err();
+        assert!(refused.contains("not opened by this window"), "{refused}");
+        let refused = crate::exec::exec_input(
+            shell,
+            "rm -rf /\n".into(),
+            other.clone(),
+            app.state(),
+            app.state(),
+        )
+        .await
+        .unwrap_err();
+        assert!(refused.contains("not opened by this window"), "{refused}");
+        assert!(
+            crate::exec::exec_resize(shell, 1, 1, other.clone(), app.state(), app.state())
+                .await
+                .is_err()
+        );
+        assert!(
+            crate::exec::exec_close(shell, other.clone(), app.state(), app.state())
+                .await
+                .is_err()
+        );
+        assert!(watches.has_channel("watch:main"), "the watch runs on");
+        assert!(execs.has_session(shell), "and the shell");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(server.open() >= 2, "no connection was dropped");
+
+        crate::exec::exec_input(shell, "ls\n".into(), main.clone(), app.state(), app.state())
+            .await
+            .unwrap();
+        crate::exec::exec_close(shell, main.clone(), app.state(), app.state())
+            .await
+            .unwrap();
+        crate::watch::stop_watch("watch:main".into(), main.clone(), app.state(), app.state())
+            .await
+            .unwrap();
+        assert!(!watches.has_channel("watch:main") && !execs.has_session(shell));
+        eventually("the owner's stops dropped the connections", || {
+            server.open() == 0
+        })
+        .await;
     }
 
     #[test]

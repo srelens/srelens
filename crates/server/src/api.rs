@@ -485,6 +485,8 @@ pub(crate) mod tests {
             "extensions.resolveReverseLinks",
             "extensions.streams",
             "extensions.pods",
+            "extensions.inspect",
+            "extensions.logs",
         ] {
             let (status, _) = post(&format!("/api/capability/{id}"), Body::from("{}")).await;
             assert_eq!(status, StatusCode::NOT_FOUND, "{id}");

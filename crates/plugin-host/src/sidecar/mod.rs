@@ -9,22 +9,26 @@
 //! - [`sandbox`]: the per-OS backends behind [`Launcher`]. On an OS without
 //!   one, a sidecar is refused.
 //!
+//! - [`Inspect`]: what the Inspector reads from a supervisor (#575), and
+//!   [`AppLog`], the app's log it writes to.
+//!
 //! No manifest kind runs a sidecar yet (#574); the broker a sidecar calls back
-//! into is #573, per-app logs #575, the macOS memory and CPU watchdog #713.
+//! into is #573, the macOS memory and CPU watchdog #713.
 
 mod connection;
 mod limits;
-mod logs;
+mod metrics;
 pub mod protocol;
 pub mod sandbox;
 mod supervisor;
 
+pub use crate::app_log::{AppLog, LogLevel, LogLine, LogSource, LOG_LINES, LOG_LINE_BYTES};
 pub use connection::{Broker, NoBroker, RequestError, SidecarStream, StreamEvent, STREAM_BUFFER};
 pub use limits::{Limits, Policy};
-pub use logs::{LogLine, LogSource, LOG_LINES, LOG_LINE_BYTES};
+pub use metrics::{Inspect, Latency, RequestMetrics, SidecarMetrics, LATENCY_SAMPLES};
 pub use protocol::SIDECAR_API_VERSIONS;
 pub use sandbox::{
-    Enforcement, Exit, LaunchError, Launched, Launcher, OsSandbox, Process, SandboxConfig,
-    SidecarCommand,
+    Enforcement, Exit, LaunchError, Launched, Launcher, MemoryProbe, OsSandbox, Process,
+    SandboxConfig, SidecarCommand,
 };
 pub use supervisor::{Action, SidecarConfig, SidecarStatus, Supervisor, UNEXPECTED_EXIT};
