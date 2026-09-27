@@ -1193,3 +1193,59 @@ fn a_default_namespace_is_only_for_argo_cd_tracking_ids_and_is_a_namespace_name(
         );
     }
 }
+
+/// The ID rule an administrator's policy file is held to (#578), so an entry that
+/// could never name an app, such as a wildcard, is refused instead of matching nothing.
+#[test]
+fn an_app_id_is_the_one_the_manifest_rule_accepts() {
+    for id in ["org.example.gitops", "io.acme.Argo-CD", "a.b"] {
+        assert!(srelens_plugin_host::is_app_id(id), "{id}");
+        let mut value = manifest();
+        value["id"] = json!(id);
+        assert!(Manifest::parse(&value.to_string()).is_ok(), "{id}");
+    }
+    for id in [
+        "gitops",
+        "org.srelens.*",
+        "org..gitops",
+        "org.example.",
+        "",
+        &"a.".repeat(65),
+    ] {
+        assert!(!srelens_plugin_host::is_app_id(id), "{id}");
+        let mut value = manifest();
+        value["id"] = json!(id);
+        assert!(
+            errors(&value)
+                .iter()
+                .any(|e| e.code == ValidationCode::InvalidId),
+            "{id}"
+        );
+    }
+}
+
+/// Every built-in summary reader has its host identity, and nothing else does.
+#[test]
+fn the_builtin_readers_are_exactly_those_with_a_host_identity() {
+    for target in srelens_plugin_host::BUILTIN_READERS {
+        assert!(
+            srelens_plugin_host::builtin_reader_identity(target).is_some(),
+            "{target}"
+        );
+    }
+    for target in ["k8s.listCustomResource", "k8s.listEvents", "k8s.listPods"] {
+        assert!(
+            srelens_plugin_host::builtin_reader_identity(target).is_none(),
+            "{target}"
+        );
+    }
+}
+
+#[test]
+fn a_policy_refusal_has_its_own_code() {
+    assert_eq!(
+        code(ValidationCode::PolicyRefused),
+        "EXTENSION_POLICY_REFUSED"
+    );
+    assert!(ValidationCode::ALL.contains(&ValidationCode::PolicyRefused));
+}

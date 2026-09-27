@@ -384,6 +384,15 @@ pub const ACTION_INPUTS: &[&str] = &["context", "namespace", "name", "uid", "res
 /// kind, so binding one is refused.
 pub const ACTION_IDENTITY: &[&str] = &["group", "version", "plural", "kind", "namespaced"];
 
+/// The built-in summary readers an app may bind, each with its identity in
+/// [`builtin_reader_identity`].
+pub const BUILTIN_READERS: &[&str] = &[
+    "k8s.listDeployments",
+    "k8s.listStatefulSets",
+    "k8s.listDaemonSets",
+    "k8s.listNodes",
+];
+
 /// Built-in summary readers usable to scope the host's narrow operational actions.
 /// Identity comes from the host, never from an app's bound arguments.
 pub fn builtin_reader_identity(target: &str) -> Option<Map<String, Value>> {
@@ -912,6 +921,11 @@ pub fn namespace_name(value: &str) -> bool {
         && !value.ends_with('-')
 }
 
+/// Whether `id` is an app ID: reverse-domain, at least two dot-separated segments of
+/// letters, digits and `-`, at most 128 characters.
+pub fn is_app_id(id: &str) -> bool {
+    id.len() <= 128 && id.contains('.') && id.split('.').all(identifier)
+}
 fn identifier(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 64
@@ -1293,7 +1307,7 @@ impl Manifest {
             "Must be 1–120 characters with no control characters and no bidirectional or invisible format characters";
         const IDENTIFIER: &str = "Must be 1–64 letters, digits and -";
         let mut problems = ValidationErrors::default();
-        if self.id.len() > 128 || !self.id.contains('.') || !self.id.split('.').all(identifier) {
+        if !is_app_id(&self.id) {
             problems.push(
                 Code::InvalidId,
                 "id",

@@ -739,3 +739,51 @@ fn the_access_review_names_the_secrets_an_app_keeps() {
         "an update that keeps another secret is new access: {diff:?}"
     );
 }
+
+/// #578: setting a secret is an inventory write, and under an administrator's
+/// policy it saves the inventory as its user left it, never the policy's verdicts.
+#[tokio::test]
+async fn a_secret_set_under_a_policy_saves_none_of_its_verdicts() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("extensions.json");
+    let rules = SharedPolicy::new(AppPolicy::default());
+    let store = Arc::new(MemoryStore::default());
+    let mut reg = Registry::new();
+    register_with_secrets(
+        &mut reg,
+        Apps::from(path.clone()).governed_by(rules.clone()),
+        fake_core(),
+        srelens_kube::client_cache::ClientCache::new_many(vec![]),
+        store.clone(),
+    );
+    install(&reg, with_secret(declared())).await;
+    let other = manifest().replace("org.example.argocd", "org.example.other");
+    reg.invoke(
+        "extensions.configure",
+        json!({"action":"install","manifest":other,"grants":["k8s.listCustomResource"]}),
+    )
+    .await
+    .unwrap();
+
+    rules.replace(AppPolicy::parse(r#"{"blockedApps":["org.example.other"]}"#).unwrap());
+    set(&reg, "token").await.unwrap();
+    let saved: Value = serde_json::from_str(&on_disk(&path)).unwrap();
+    assert_secret_absent(&saved.to_string(), "the inventory");
+    let blocked = saved["plugins"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|app| app["manifest"]["id"] == "org.example.other")
+        .unwrap();
+    assert_eq!(blocked["enabled"], json!(true));
+    assert!(saved.get("policy").is_none());
+    // What the user sees is still held to the policy.
+    let listed = listed(&reg).await;
+    let shown = listed["plugins"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|app| app["manifest"]["id"] == "org.example.other")
+        .unwrap();
+    assert_eq!(shown["enabled"], json!(false));
+}

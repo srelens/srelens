@@ -49,6 +49,88 @@
       ],
       "type": "object"
     },
+    "AppPolicy": {
+      "description": "What an administrator allows a host's apps to be and do. [`AppPolicy::default`] allows what a host with no policy does, except that `network.http` reaches no host, and no policy lets an app use plain HTTP to loopback.",
+      "properties": {
+        "allowExecutableApps": {
+          "description": "Always `false`: no host runs executable apps until they have a per-user sidecar identity (#521).",
+          "type": "boolean"
+        },
+        "allowUnsignedApps": {
+          "description": "Whether apps with no publisher signature may be installed and used at all. Each user's own \"Allow unsigned apps to modify clusters\" still applies on top.",
+          "type": "boolean"
+        },
+        "allowWriteActions": {
+          "description": "Whether an app may declare write actions (the host action primitives). Running commands in pods is `k8s.exec`, allowed or not by `allowedCapabilities`.",
+          "type": "boolean"
+        },
+        "allowedApps": {
+          "description": "Only these app IDs may be installed and used; `null` allows any.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ],
+          "uniqueItems": true
+        },
+        "allowedCapabilities": {
+          "description": "The host capabilities an app may be granted; `null` allows every one the host offers apps.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ],
+          "uniqueItems": true
+        },
+        "allowedPublishers": {
+          "description": "Signed apps only from these publishers; `null` allows every publisher the host trusts. An unsigned app is governed by `allowUnsignedApps` instead.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ],
+          "uniqueItems": true
+        },
+        "blockedApps": {
+          "description": "These app IDs may not be installed or used, whatever else allows them.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "networkCeiling": {
+          "description": "The most `network.http` may reach, written as an app's hosts are: `name`, `name:port`, `*.example.com` or an IP address. A request goes only to a host both this and the app allow. Empty: `network.http` reaches no host.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "requiredApps": {
+          "description": "Apps every user keeps: one they have installed cannot be removed or disabled. The policy never installs an app for anyone.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "allowExecutableApps",
+        "allowUnsignedApps",
+        "allowWriteActions",
+        "blockedApps",
+        "networkCeiling",
+        "requiredApps"
+      ],
+      "type": "object"
+    },
     "Badge": {
       "additionalProperties": false,
       "description": "A word on a built-in row. Without a `join`, the rules read the row's own `.metadata`; with one, they read the joined custom resource. The first rule that holds is the badge; when none does there is no badge.",
@@ -1681,6 +1763,18 @@
         "$ref": "#/definitions/Installed"
       },
       "type": "array"
+    },
+    "policy": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/AppPolicy"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "The administrator's policy this inventory is held to (#578), on a host that has one. Reported by every read, never read from disk and never written there.",
+      "readOnly": true
     },
     "schemaVersion": {
       "format": "uint32",

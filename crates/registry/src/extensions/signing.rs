@@ -2,9 +2,12 @@
 use super::*;
 use ring::signature::{UnparsedPublicKey, ED25519};
 
-/// A publisher this host trusts: its key, the app ID namespace reserved for it,
-/// and the only repository each of its apps may be released from.
+/// A publisher this host trusts: its name, its key, the app ID namespace reserved for
+/// it, and the only repository each of its apps may be released from.
 struct Publisher {
+    /// What an administrator's policy names it by (`allowedPublishers`, #578), and
+    /// what Settings → Apps says a signed app is signed by.
+    name: &'static str,
     key: &'static [u8; 32],
     namespace: &'static str,
     repository_owner: &'static str,
@@ -12,6 +15,7 @@ struct Publisher {
 }
 
 const SRELENS: Publisher = Publisher {
+    name: "srelens",
     key: include_bytes!("srelens-apps.pub"),
     namespace: "org.srelens.",
     repository_owner: "https://github.com/srelens/",
@@ -38,6 +42,7 @@ const PUBLISHERS: &[Publisher] = &[SRELENS];
 const PUBLISHERS: &[Publisher] = &[
     SRELENS,
     Publisher {
+        name: "test-publisher",
         key: include_bytes!("../../tests/fixtures/packages/test-publisher.pub"),
         namespace: "test.signed.",
         repository_owner: "https://github.com/srelens-test-publisher/",
@@ -84,6 +89,17 @@ fn publisher(id: &str) -> Option<(&'static Publisher, &'static str)> {
             .find(|(app, _)| *app == id)
             .map(|(_, repository)| (p, *repository))
     })
+}
+
+/// The name of the publisher whose signature an app under `id` carries, when one is
+/// trusted for it: what a verified signed app is held to by `allowedPublishers`.
+pub(super) fn publisher_name(id: &str) -> Option<&'static str> {
+    publisher(id).map(|(publisher, _)| publisher.name)
+}
+
+/// Every publisher this host trusts, by name.
+pub(super) fn publisher_names() -> impl Iterator<Item = &'static str> {
+    PUBLISHERS.iter().map(|publisher| publisher.name)
 }
 
 pub(super) fn repository(id: &str) -> Option<&'static str> {
@@ -165,6 +181,14 @@ pub(super) mod tests {
             Some("https://github.com/srelens/extension-argocd")
         );
         assert_eq!(repository("org.srelens.not-yet-released"), None);
+        assert_eq!(publisher_name("org.srelens.argocd"), Some("srelens"));
+        assert_eq!(publisher_name("org.srelens.not-yet-released"), None);
+        assert_eq!(publisher_name("org.example.argocd"), None);
+        // The test build trusts its own publisher too (#562); no other build does.
+        assert_eq!(
+            publisher_names().collect::<Vec<_>>(),
+            ["srelens", "test-publisher"]
+        );
         assert!(claims_official(
             "org.other.app",
             "https://github.com/srelens/app"

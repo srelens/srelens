@@ -25,6 +25,7 @@ pub mod cluster_tokens;
 pub mod config;
 pub mod crypto;
 pub mod db;
+pub mod extension_policy;
 pub mod oidc_provider;
 pub mod pf_proxy;
 pub mod stores;
@@ -99,6 +100,7 @@ impl AppState {
                 factory,
                 data_dir,
                 "http://127.0.0.1:8080".into(),
+                Default::default(),
             )),
             db: db::Db::open_in_memory().await.expect("in-memory db"),
             master_key: Arc::new(crypto::MasterKey::from_hex(&"ab".repeat(32)).expect("test key")),
@@ -154,6 +156,7 @@ pub fn router(state: AppState) -> Router {
             "/api/command/:command",
             axum::routing::post(api_command::dispatch),
         )
+        .route("/api/extension-policy", get(extension_policy::get))
         .route("/api/settings", get(api_settings::list))
         .route(
             "/api/settings/:key",
@@ -228,6 +231,10 @@ pub async fn serve(factory: RegistryFactory, config: ServerConfig) -> Result<(),
     let env_key = std::env::var("SRELENS_MASTER_KEY").ok();
     let master_key = crypto::MasterKey::require_env(env_key.as_deref())?;
     let db = db::Db::open(&config.data_dir.join("srelens.db")).await?;
+    // Read once and checked whole before anything is served: a policy the server
+    // could not read never leaves it running with none (#578).
+    let (policy, source) = extension_policy::from_env(std::env::var(extension_policy::POLICY_ENV))?;
+    eprintln!("srelens extension policy: {source}");
     let idp: Arc<dyn auth::idp::IdentityProvider> = match &auth_config.oidc {
         Some(settings) => {
             Arc::new(auth::oidc::OidcProvider::discover(settings, &auth_config.public_url).await?)
@@ -242,6 +249,7 @@ pub async fn serve(factory: RegistryFactory, config: ServerConfig) -> Result<(),
             factory,
             config.data_dir.clone(),
             auth_config.public_url.clone(),
+            srelens_registry::SharedPolicy::new(policy),
         )),
         db,
         master_key: Arc::new(master_key),

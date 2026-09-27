@@ -1,4 +1,7 @@
 //! Durable, native declarative extensions for desktop hosts.
+mod app_policy;
+#[cfg(test)]
+mod app_policy_tests;
 mod app_settings;
 #[cfg(test)]
 mod budget_tests;
@@ -49,6 +52,7 @@ use std::{
     sync::Arc,
 };
 
+pub use app_policy::{AppPolicy, SharedPolicy, MAX_POLICY_BYTES};
 pub use catalog::SharedCatalog;
 pub use store::{InventoryKey, InventoryLock, InventoryStore};
 
@@ -91,6 +95,26 @@ impl Apps {
     /// empty.
     pub fn data_root(&self) -> Option<&Path> {
         self.data.as_deref()
+    }
+
+    /// These apps, held to `policy` on every call (#578): each read of the inventory
+    /// applies the policy in force then, so replacing it governs the next call.
+    pub fn governed_by(self, policy: SharedPolicy) -> Self {
+        Self {
+            inventory: Arc::new(app_policy::Governed {
+                inventory: self.inventory,
+                policy,
+            }),
+            ..self
+        }
+    }
+
+    /// Whether these apps are held to an administrator's policy whose ceiling names a
+    /// host `network.http` may reach.
+    pub(crate) fn has_network_ceiling(&self) -> bool {
+        self.inventory
+            .policy()
+            .is_some_and(|policy| policy.reaches_network())
     }
 }
 
@@ -282,6 +306,10 @@ pub struct Inventory {
         skip_serializing_if = "Option::is_none"
     )]
     secret_store: Option<secret_store::SecretStoreState>,
+    /// The administrator's policy this inventory is held to (#578), on a host that has
+    /// one. Reported by every read, never read from disk and never written there.
+    #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
+    policy: Option<AppPolicy>,
 }
 
 impl Default for Inventory {
@@ -292,6 +320,7 @@ impl Default for Inventory {
             allow_unsigned_apps: false,
             plugins: vec![],
             secret_store: None,
+            policy: None,
         }
     }
 }
@@ -450,7 +479,17 @@ struct Read {
 #[serde(deny_unknown_fields)]
 struct Empty {}
 
+/// The inventory in `store`, checked as every load checks it, and held to the policy in
+/// force on this host, if any (#578). What every capability that uses an app reads.
 fn read<S: InventoryStore + ?Sized>(store: &S) -> Result<Inventory, String> {
+    let mut state = read_saved(store)?;
+    app_policy::govern(&mut state, store.policy().as_deref());
+    Ok(state)
+}
+
+/// The inventory as saved, checked as every load checks it, but not yet held to a
+/// policy: what `configure` changes and saves, so a policy's verdicts are never saved.
+fn read_saved<S: InventoryStore + ?Sized>(store: &S) -> Result<Inventory, String> {
     // One byte past the limit is enough to refuse it, so an oversized inventory is never
     // loaded whole.
     let Some(raw) = store.load(MAX_INVENTORY_BYTES)? else {
@@ -633,6 +672,7 @@ fn saved_form(state: &Inventory) -> Result<Vec<u8>, String> {
     let mut stored = serde_json::to_value(state).map_err(|e| e.to_string())?;
     if let Some(fields) = stored.as_object_mut() {
         fields.remove("secretStore");
+        fields.remove("policy");
     }
     if let Some(plugins) = stored.get_mut("plugins").and_then(Value::as_array_mut) {
         for plugin in plugins.iter_mut().filter_map(Value::as_object_mut) {
@@ -644,6 +684,12 @@ fn saved_form(state: &Inventory) -> Result<Vec<u8>, String> {
     serde_json::to_vec_pretty(&stored).map_err(|e| e.to_string())
 }
 fn write<S: InventoryStore + ?Sized>(store: &S, state: &Inventory) -> Result<(), String> {
+    // A policy's verdicts are its own, never the user's: whatever path reached here,
+    // an inventory a policy was applied to is refused, and the change goes back to
+    // `read_saved` (#578).
+    if state.policy.is_some() {
+        return Err("refusing to save an inventory held to a policy's verdicts".into());
+    }
     let raw = saved_form(state)?;
     if raw.len() > MAX_INVENTORY_BYTES {
         return Err("extension inventory exceeds 1 MiB".into());
@@ -1085,8 +1131,12 @@ struct Incoming {
     package: Option<String>,
 }
 /// Installs `incoming`, or updates the app it replaces, which must be the revision the
-/// caller reviewed.
-fn install(state: &mut Inventory, incoming: Incoming) -> Result<(), String> {
+/// caller reviewed, and one `policy` allows (#578): every way of installing comes here.
+fn install(
+    state: &mut Inventory,
+    incoming: Incoming,
+    policy: Option<&AppPolicy>,
+) -> Result<(), String> {
     let Incoming {
         manifest,
         grants,
@@ -1095,6 +1145,13 @@ fn install(state: &mut Inventory, incoming: Incoming) -> Result<(), String> {
         source: origin,
         package,
     } = incoming;
+    // A proof is kept only for a signature `check_install` verified.
+    let publisher = signature_proof
+        .as_ref()
+        .and_then(|_| signing::publisher_name(&manifest.id));
+    if let Some(refusal) = policy.and_then(|policy| policy.refusal(&manifest, publisher)) {
+        return Err(refusal.reason);
+    }
     let current_revision = state
         .plugins
         .iter()
@@ -1196,6 +1253,7 @@ fn install_package(
     archive: &[u8],
     grants: Vec<String>,
     reviewed_revision: Option<u64>,
+    policy: Option<&AppPolicy>,
 ) -> Result<(), String> {
     let root = apps.packages.as_deref().ok_or(NO_PACKAGES)?;
     let verified = package::read(archive, &mut package::Discard)?;
@@ -1232,6 +1290,7 @@ fn install_package(
             source: origin,
             package: Some(verified.digest.clone()),
         },
+        policy,
     )?;
     // Last, once nothing else can refuse the install.
     package::unpack(root, archive, &verified)
@@ -1316,11 +1375,44 @@ fn configure(
     };
     let store = &*apps.inventory;
     let _lock = store.lock()?;
-    let mut state = read(store)?;
+    // The inventory as saved: the policy's verdicts are applied to the answer, never
+    // saved, so lifting a policy restores each app as its user left it (#578).
+    let mut state = read_saved(store)?;
+    let policy = store.policy();
+    let refusal = |manifest: &Manifest, signed: bool| -> Result<(), String> {
+        let publisher = signed
+            .then(|| signing::publisher_name(&manifest.id))
+            .flatten();
+        match policy
+            .as_deref()
+            .and_then(|policy| policy.refusal(manifest, publisher))
+        {
+            Some(refusal) => Err(refusal.reason),
+            None => Ok(()),
+        }
+    };
+    let required = |id: &str, change: &str| -> Result<(), String> {
+        if policy.as_deref().is_some_and(|policy| policy.requires(id)) {
+            return Err(format!(
+                "The administrator's policy requires {id}, so it can't be {change}"
+            ));
+        }
+        Ok(())
+    };
     match input {
         Configure::UnsignedApps {
             allow_unsigned_apps,
         } => {
+            // Turning it off disables each unsigned app that writes, and a required
+            // one may not be disabled (#578).
+            if !allow_unsigned_apps {
+                for app in &state.plugins {
+                    let verified = app.signature_proof.is_some() && app.quarantined.is_none();
+                    if check_unsigned_policy(&app.manifest, verified, false).is_err() {
+                        required(&app.manifest.id, "disabled")?;
+                    }
+                }
+            }
             state.allow_unsigned_apps = allow_unsigned_apps;
         }
         Configure::Install {
@@ -1352,20 +1444,37 @@ fn configure(
                     source: origin,
                     package: None,
                 },
+                policy.as_deref(),
             )?;
         }
         Configure::InstallPackage {
             package,
             grants,
             reviewed_revision,
-        } => install_package(apps, &mut state, core, &package, grants, reviewed_revision)?,
+        } => install_package(
+            apps,
+            &mut state,
+            core,
+            &package,
+            grants,
+            reviewed_revision,
+            policy.as_deref(),
+        )?,
         Configure::InstallCatalogPackage {
             grants,
             reviewed_revision,
             ..
         } => {
             let archive = downloaded.ok_or("The catalog package was not downloaded")?;
-            install_package(apps, &mut state, core, &archive, grants, reviewed_revision)?;
+            install_package(
+                apps,
+                &mut state,
+                core,
+                &archive,
+                grants,
+                reviewed_revision,
+                policy.as_deref(),
+            )?;
         }
         Configure::Rollback {
             id,
@@ -1400,6 +1509,7 @@ fn configure(
                 target.signature_proof.is_some(),
                 state.allow_unsigned_apps,
             )?;
+            refusal(&target.manifest, target.signature_proof.is_some())?;
             // Going back discards the versions after the restored one.
             app.history.drain(..=index);
             app.signature_proof = target.signature_proof;
@@ -1431,6 +1541,13 @@ fn configure(
                     "{id} does not request {}",
                     srelens_plugin_host::NETWORK_HTTP
                 ));
+            }
+            // Under a policy, this computer is the host every user shares: its loopback
+            // is not one person's to open to an app.
+            if allow_loopback_http && policy.is_some() {
+                return Err(
+                    "The administrator's policy allows network.http over HTTPS only".into(),
+                );
             }
             app.allow_loopback_http = allow_loopback_http;
         }
@@ -1473,7 +1590,10 @@ fn configure(
                     p.signature_proof.is_some(),
                     state.allow_unsigned_apps,
                 )?;
+                refusal(&p.manifest, p.signature_proof.is_some())?;
                 validate_app(&p.manifest, &p.grants, core)?;
+            } else {
+                required(&id, "disabled")?;
             }
             p.enabled = enabled;
         }
@@ -1483,6 +1603,7 @@ fn configure(
                 .iter()
                 .position(|p| p.manifest.id == id)
                 .ok_or("Extension is not installed")?;
+            required(&id, "removed")?;
             state.plugins.remove(i);
         }
         Configure::Settings { id, settings } => {
@@ -1507,6 +1628,7 @@ fn configure(
         let installed: Vec<&str> = state.plugins.iter().map(|app| app.manifest.id.as_str()).collect();
         let _ = srelens_plugin_host::sidecar::data::prune(root, &installed);
     }
+    app_policy::govern(&mut state, policy.as_deref());
     secret_store::sweep(secrets, &state);
     streams::announce(&store.key(), &state);
     Ok(state)
@@ -1900,9 +2022,14 @@ fn register_apps(
                     Ok(manifest) => {
                         // Reported where the app writes or runs code: its actions, else its exec bindings.
                         let at = if manifest.actions.is_empty() { "capabilities" } else { "actions" };
-                        let errors = check_unsigned_policy(&manifest, input.signature.is_some(), state.allow_unsigned_apps)
+                        let mut errors = check_unsigned_policy(&manifest, input.signature.is_some(), state.allow_unsigned_apps)
                             .err().map(|reason| vec![ValidationError::new(Code::InvalidValue, at, reason)])
                             .unwrap_or_default();
+                        // The administrator's policy (#578), as install would apply it.
+                        let publisher = input.signature.is_some().then(|| signing::publisher_name(&manifest.id)).flatten();
+                        if let Some(refusal) = state.policy.as_ref().and_then(|policy| policy.refusal(&manifest, publisher)) {
+                            errors.push(ValidationError::new(Code::PolicyRefused, refusal.path, refusal.reason));
+                        }
                         let previous = state.plugins.iter().find(|app| app.manifest.id == manifest.id)
                             .map(|app| (&app.manifest, app.grants.as_slice(), app.revision));
                         let diff = errors.is_empty().then(|| permission_diff(previous, &manifest, &input.grants));
@@ -2035,7 +2162,14 @@ async fn read_contribution(
                     .into(),
             ));
         }
-        return network::read(&c, secrets.as_ref(), plugin, &input.capability).await;
+        return network::read(
+            &c,
+            secrets.as_ref(),
+            plugin,
+            &input.capability,
+            state.policy.as_ref(),
+        )
+        .await;
     }
     // A pod binding (#567) is a session a view opens as a stream, never a read.
     if let Some(binding) = plugin

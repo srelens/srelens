@@ -14,7 +14,7 @@
 //! Nothing here returns, logs or quotes a value: the answer is `{set}`, every
 //! refusal is written without the value, and the input's `secret` refuses a
 //! value it cannot take without repeating it.
-use super::{read, write, Installed, Inventory, InventoryStore, Store};
+use super::{read, read_saved, write, Installed, Inventory, InventoryStore, Store};
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
@@ -203,7 +203,8 @@ fn change(
     input: SecretIn,
 ) -> Result<SecretOut, String> {
     let _lock = inventory.lock()?;
-    let mut state = read(inventory)?;
+    // The inventory as saved, so no verdict of a policy is written back (#578).
+    let mut state = read_saved(inventory)?;
     let set = match input {
         SecretIn::Set {
             id,
@@ -261,7 +262,8 @@ fn change(
     write(inventory, &state)?;
     sweep(store, &state);
     // An inventory write like any other, so the app streams and the windows
-    // listening to them hear of it (#566). They hear only that it changed.
+    // listening to them hear of it (#566), with each app as the policy lets it be.
+    super::app_policy::govern(&mut state, inventory.policy().as_deref());
     super::streams::announce(&inventory.key(), &state);
     Ok(SecretOut { set })
 }

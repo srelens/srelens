@@ -70,6 +70,12 @@ mitigation and the risk that remains.
   row, the one shared catalog cache is written only by the server, and no app secret is
   kept there until per-user secret storage exists
   ([capabilities.md](capabilities.md#web-host)).
+- **The web host holds every user's apps to its operator's policy.** Allowed and
+  blocked apps, publishers, unsigned apps, capabilities, write actions, a host ceiling
+  for `network.http` and required apps are applied on every call, not only at install,
+  so an app installed before the policy changed is refused from its next call
+  ([WEB.md](../WEB.md#extension-policy)). The policy comes from deployment config and
+  nothing writes it over the API.
 - **Every write is recorded locally, wherever it came from.** A mutating or
   sensitive capability call is appended to `audit.jsonl` whether an agent made
   it over MCP or a person clicked it in srelens — with the source, the app and

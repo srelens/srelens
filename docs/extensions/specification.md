@@ -255,6 +255,7 @@ list, and the [developer harness](testing.md#developer-harness) prints one per l
 | `EXTENSION_UNRESOLVED_CAPABILITY` | A contribution or dashboard names a capability the manifest does not declare. |
 | `EXTENSION_UNRESOLVED_PAGE` | A dashboard names a page the manifest does not declare. |
 | `EXTENSION_INVALID_KIND` | The manifest `kind` is not `declarative`, or a `forKinds` entry is not a qualified Kubernetes kind. |
+| `EXTENSION_POLICY_REFUSED` | The host's administrator policy does not allow the app: its ID, its publisher or lack of a signature, a capability it requests, or its write actions. Only a host with a policy reports it, such as a web server whose operator set one ([WEB.md](../WEB.md#extension-policy)). |
 
 ## Identifiers
 
