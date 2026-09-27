@@ -6,7 +6,7 @@
 //! server holds every user's apps to one, read from its deployment config, and the
 //! broker applies it on every call, not only at install:
 //!
-//! - Every inventory load ([`super::read`]) marks each app the policy refuses as
+//! - Every inventory load ([`super::read_under`]) marks each app the policy refuses as
 //!   `policyBlocked`, and disabled. Every reader, resource read, action, resolver and
 //!   stream refuses such an app, so one installed before the policy changed is refused
 //!   from its next call. The mark is never saved: lifting the policy brings the app
@@ -22,7 +22,7 @@
 //! other deserialization, which goes through the same checks. An entry that could never
 //! match, such as an unknown publisher or capability, a wildcard app ID or a host that is
 //! not one, is refused rather than quietly allowing or blocking nothing.
-use super::{signing, Installed, Inventory, InventoryKey, InventoryLock, InventoryStore};
+use super::{Installed, Inventory, InventoryKey, InventoryLock, InventoryStore, TrustRoot};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use srelens_plugin_host::{HostRule, Manifest, ManifestKind, NETWORK_HTTP};
@@ -44,8 +44,9 @@ pub struct AppPolicy {
     /// These app IDs may not be installed or used, whatever else allows them.
     #[serde(rename = "blockedApps")]
     blocked_apps: BTreeSet<String>,
-    /// Signed apps only from these publishers; `null` allows every publisher the host
-    /// trusts. An unsigned app is governed by `allowUnsignedApps` instead.
+    /// Signed apps only from these publishers, each named by its delegation's ID (#559);
+    /// `null` allows every publisher the host trusts. An unsigned app is governed by
+    /// `allowUnsignedApps` instead.
     #[serde(rename = "allowedPublishers")]
     allowed_publishers: Option<BTreeSet<String>>,
     /// Whether apps with no publisher signature may be installed and used at all. Each
@@ -119,6 +120,18 @@ fn allowed() -> bool {
     true
 }
 
+/// The publishers a policy may name: those this build ships a delegation for, by ID
+/// (#559). Checked against the build, not the catalog, which a policy is read before and
+/// which may change after: a publisher only a catalog delegates to is not one yet.
+pub(super) fn publisher_ids() -> Vec<String> {
+    TrustRoot::pinned()
+        .shipped()
+        .publishers()
+        .iter()
+        .map(|publisher| publisher.id.clone())
+        .collect()
+}
+
 /// Every host capability an app can be granted on a host, as `validate_app` accepts
 /// them as targets (the pod bindings' since #567), and the secret store an app with
 /// secret settings asks for. A new target there has to be added here before a policy
@@ -158,9 +171,9 @@ impl TryFrom<Unchecked> for AppPolicy {
                 ));
             }
         }
-        let publishers: Vec<_> = signing::publisher_names().collect();
+        let publishers = publisher_ids();
         for name in policy.allowed_publishers.iter().flatten() {
-            if !publishers.contains(&name.as_str()) {
+            if !publishers.contains(name) {
                 problems.push(format!(
                     "allowedPublishers: {name:?} is not a publisher this host trusts ({})",
                     publishers.join(", ")
@@ -315,9 +328,7 @@ impl AppPolicy {
     /// Why this policy refuses the stored app `plugin`, taking its publisher from its
     /// signature only when that verified on this load.
     pub(super) fn refuses(&self, plugin: &Installed) -> Option<Refusal> {
-        let publisher = (plugin.signature_proof.is_some() && plugin.quarantined.is_none())
-            .then(|| signing::publisher_name(&plugin.manifest.id))
-            .flatten();
+        let publisher = plugin.signed_by.as_ref().map(|signer| signer.id.as_str());
         self.refusal(&plugin.manifest, publisher)
     }
 
@@ -402,7 +413,7 @@ impl SharedPolicy {
 }
 
 /// An inventory held to a policy: every read and save goes to the store it wraps, and
-/// [`super::read`] holds what it loads to the policy in force.
+/// [`super::read_under`] holds what it loads to the policy in force.
 pub(super) struct Governed {
     pub inventory: Arc<dyn InventoryStore>,
     pub policy: SharedPolicy,

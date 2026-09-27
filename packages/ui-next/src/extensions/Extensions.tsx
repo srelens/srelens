@@ -23,6 +23,7 @@ import {
   type ExtensionPackageReview,
   type ExtensionValidationError,
   type ExtensionPermissionDiff,
+  type ExtensionSigner,
   type InstalledExtension,
 } from "@srelens/core";
 
@@ -34,7 +35,7 @@ import { ErrorNotice, ExtensionResults } from "./ExtensionResults";
 export { ErrorNotice, ExtensionResults } from "./ExtensionResults";
 
 
-import { extensionLabel as label, useExtensions } from "./inventoryStore";
+import { extensionLabel as label, extensionSigner, useExtensions } from "./inventoryStore";
 export { useExtensions } from "./inventoryStore";
 export { AMBIGUOUS_CONTEXT_MESSAGE, SHARED_CONTEXT_ID_MESSAGE, refreshContextIds, useContextId, useContextLookup } from "./contextIds";
 
@@ -58,6 +59,18 @@ type ReviewOrigin =
   | { kind: "packageFile"; package: ExtensionPackageReview; file: string }
   | { kind: "catalogPackage"; package: ExtensionPackageReview; id: string; sha256: string };
 const MANIFEST_ORIGIN: ReviewOrigin = { kind: "manifest" };
+/**
+ * What a review may say about a signature: only what the host verified over these exact
+ * bytes (#559). A signature is named as verified, with its publisher, once the host's check
+ * returns `signedBy`; until then it is being checked, and after a check that did not verify
+ * it, it is not verified. A check that could not run says so: it found nothing either way.
+ */
+function signatureState(review: { signature?: number[]; signedBy?: ExtensionSigner; errors?: ExtensionValidationError[]; checkError?: string; origin: ReviewOrigin }) {
+  if (!review.signature) return review.origin.kind === "manifest" ? "Unsigned manifest" : "Unsigned package";
+  if (review.signedBy) return `Signature verified · ${plainText(review.signedBy.name)}`;
+  if (review.checkError) return "Signature could not be checked";
+  return review.errors ? "Signature not verified" : "Checking the signature";
+}
 
 export function ExtensionManager() {
   const { Button, Tabs } = useContext(ExtensionControls);
@@ -73,6 +86,10 @@ export function ExtensionManager() {
   const [review, setReview] = useState<{
     source: string;
     signature?: number[];
+    /** The key the signature names (#559), passed back to the install. */
+    keyId?: string;
+    /** Who signed it, once the host has verified the signature over these exact bytes. */
+    signedBy?: ExtensionSigner;
     /** How the reviewed manifest is installed; a package also shows what else it holds. */
     origin: ReviewOrigin;
     name: string;
@@ -141,7 +158,7 @@ export function ExtensionManager() {
     }
   }
   /** Opens the permission review, and offers to install only once the host finds no problems. */
-  async function reviewManifest(manifest: string, signature?: number[], origin: ReviewOrigin = MANIFEST_ORIGIN) {
+  async function reviewManifest(manifest: string, signature?: number[], origin: ReviewOrigin = MANIFEST_ORIGIN, keyId?: string) {
     let parsed: { name?: unknown; permissions?: unknown } = {};
     let value: unknown;
     // Shown indented, as Details shows an installed app: the same values the host checks,
@@ -167,6 +184,7 @@ export function ExtensionManager() {
       id: ++reviews.current,
       source: manifest,
       signature,
+      keyId,
       origin,
       name,
       permissions,
@@ -176,10 +194,10 @@ export function ExtensionManager() {
     try {
       // A package's signature is over its digest list, which names the manifest: the host
       // checks all three together, exactly as installing the package will.
-      const { errors, permissionDiff } = await (origin.kind === "manifest"
-        ? validateExtension(manifest, permissions, signature)
-        : validateExtension(manifest, permissions, signature, origin.package.digests));
-      setReview((current) => (current?.request === request ? { ...current, errors, permissionDiff } : current));
+      const { errors, permissionDiff, signedBy } = await (origin.kind === "manifest"
+        ? validateExtension(manifest, permissions, signature, undefined, keyId)
+        : validateExtension(manifest, permissions, signature, origin.package.digests, keyId));
+      setReview((current) => (current?.request === request ? { ...current, errors, permissionDiff, signedBy } : current));
     } catch (e) {
       // The check did not run, which says nothing about the manifest: keep the review
       // open with the reason and a retry, and do not offer to install.
@@ -205,7 +223,7 @@ export function ExtensionManager() {
       if (!verified.package) throw new Error("the host did not return what the package holds");
       void reviewManifest(verified.manifest, verified.signature ?? undefined, {
         kind: "packageFile", package: verified.package, file: encodePackage(content),
-      });
+      }, verified.keyId);
     } catch (e) {
       if (current()) setError(`Could not review ${file.name}: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
@@ -218,7 +236,14 @@ export function ExtensionManager() {
     const origin = current.origin;
     switch (origin.kind) {
       case "manifest":
-        return { action: "install", manifest: current.source, ...(current.signature ? { signature: current.signature } : {}), grants: current.permissions, ...reviewed };
+        return {
+          action: "install",
+          manifest: current.source,
+          ...(current.signature ? { signature: current.signature } : {}),
+          ...(current.signature && current.keyId ? { keyId: current.keyId } : {}),
+          grants: current.permissions,
+          ...reviewed,
+        };
       case "packageFile":
         return { action: "installPackage", package: origin.file, grants: current.permissions, ...reviewed };
       case "catalogPackage":
@@ -290,11 +315,11 @@ export function ExtensionManager() {
                   {/* The logo is drawn with the name, once the host has accepted both; it
                       is decoration, and the label beside it says who signed the app. */}
                   {review.origin.kind !== "manifest" && <ExtensionLogo icon={review.origin.package.icon} name={review.name} size={24} />}{" "}
-                  <strong>{plainText(review.name)}</strong> ({review.signature ? "Signature verified · srelens" : review.origin.kind === "manifest" ? "Unsigned manifest" : "Unsigned package"}) {!review.permissionDiff ? "could not have its access changes compared" : review.permissionDiff.previousRevision == null ? "requests a new installation" : "updates the installed app"}.
+                  <strong>{plainText(review.name)}</strong> ({signatureState(review)}) {!review.permissionDiff ? "could not have its access changes compared" : review.permissionDiff.previousRevision == null ? "requests a new installation" : "updates the installed app"}.
                 </>
               ) : (
                 <>
-                  <strong>This {review.origin.kind === "manifest" ? "manifest" : "package"}</strong> ({review.signature ? "Signature verified · srelens" : review.origin.kind === "manifest" ? "Unsigned manifest" : "Unsigned package"}) has
+                  <strong>This {review.origin.kind === "manifest" ? "manifest" : "package"}</strong> ({signatureState(review)}) has
                   not passed the host's checks, so its name and the permissions it requests are not shown.
                 </>
               )}
@@ -343,7 +368,7 @@ export function ExtensionManager() {
               <ErrorNotice
                 title="Could not check the manifest"
                 message={review.checkError}
-                retry={() => void reviewManifest(review.source, review.signature, review.origin)}
+                retry={() => void reviewManifest(review.source, review.signature, review.origin, review.keyId)}
               />
             ) : !review.errors ? (
               <p role="status" className="extension-message">Checking the manifest…</p>
@@ -364,7 +389,7 @@ export function ExtensionManager() {
                 </ul>
               </div>
             ) : !review.permissionDiff ? (
-              <ErrorNotice title="Could not review access changes" message="The host did not return an access comparison. Review this manifest again." retry={() => void reviewManifest(review.source, review.signature, review.origin)} />
+              <ErrorNotice title="Could not review access changes" message="The host did not return an access comparison. Review this manifest again." retry={() => void reviewManifest(review.source, review.signature, review.origin, review.keyId)} />
             ) : (
               <Button
                 disabled={busy}
@@ -384,6 +409,7 @@ export function ExtensionManager() {
         result.manifest,
         result.signature ?? undefined,
         result.package ? { kind: "catalogPackage", package: result.package, ...release } : MANIFEST_ORIGIN,
+        result.keyId,
       )} />
         )}
       </div>
@@ -448,7 +474,7 @@ export function ExtensionManager() {
           <div className="extension-toolbar">
             <ExtensionLogo icon={plugin.icon} name={label(plugin)} size={24} />
             <strong>{label(plugin)}</strong>
-            <span>{plugin.manifest.version} · {!plugin.signatureProof ? (plugin.source === "catalog" ? "Unsigned · Catalog" : "Unsigned local") : plugin.quarantined ? "Signature not verified" : "Signed by srelens"}</span>
+            <span>{plugin.manifest.version} · {!plugin.signatureProof ? (plugin.source === "catalog" ? "Unsigned · Catalog" : "Unsigned local") : plainText(extensionSigner(plugin))}</span>
             {required(plugin) && <span>Required by this server</span>}
             <label>
               <input

@@ -10,10 +10,20 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 corpus="$root/fuzz/corpus"
 fixtures="$root/crates/registry/tests/fixtures"
 
-mkdir -p "$corpus/manifest" "$corpus/catalog" "$corpus/signed-manifest" "$corpus/inventory" "$corpus/package"
+mkdir -p "$corpus/manifest" "$corpus/catalog" "$corpus/signed-manifest" "$corpus/inventory" "$corpus/package" \
+  "$corpus/signed-catalog" "$corpus/trust-metadata"
 cp "$root"/examples/extensions/*.json "$fixtures/argocd-manifest.json" "$corpus/manifest/"
-cp "$fixtures/extension-catalog.json" "$corpus/catalog/"
 cp "$fixtures"/extension-inventory*.json "$corpus/inventory/"
+cp "$fixtures/extension-catalog.signed.json" "$corpus/signed-catalog/"
+cp "$fixtures/trust/root.json" "$fixtures/trust/srelens.json" "$fixtures/trust/example.json" \
+  "$fixtures/trust/example-release.json.sig" "$fixtures/argocd-manifest.sig" "$corpus/trust-metadata/"
+
+# catalog reads the document a signed catalog carries: the signed fixture's payload.
+python3 -c 'import base64, json, sys; sys.stdout.buffer.write(base64.b64decode(json.load(open(sys.argv[1]))["payload"]))' \
+  "$fixtures/extension-catalog.signed.json" >"$corpus/catalog/extension-catalog.json"
+# A release signature that names its key, as releases since #559 publish them.
+python3 -c 'import base64, json, sys; print(json.dumps({"keyid": "ab" * 32, "sig": base64.b64encode(open(sys.argv[1], "rb").read()).decode()}))' \
+  "$fixtures/argocd-manifest.sig" >"$corpus/trust-metadata/keyed.sig"
 
 # signed-manifest reads a length byte, the signature, then the manifest. \100 is 64.
 {

@@ -15,6 +15,7 @@ type Page = Contributions["pages"][number];
 type Dashboard = NonNullable<Page["dashboard"]>;
 type Card = NonNullable<Contributions["dashboardCards"]>[number];
 type Setting = NonNullable<ExtensionManifest["settings"]>[number];
+type Delegation = NonNullable<NonNullable<InstalledExtension["signatureProof"]>["delegation"]>;
 
 const tables: Record<string, Record<string, "required" | "optional">> = {
   Inventory: {
@@ -41,6 +42,7 @@ const tables: Record<string, Record<string, "required" | "optional">> = {
     signatureProof: "optional",
     quarantined: "optional",
     policyBlocked: "optional",
+    signedBy: "optional",
     manifest: "required",
     grants: "required",
     enabled: "required",
@@ -67,7 +69,11 @@ const tables: Record<string, Record<string, "required" | "optional">> = {
     manifest: "required",
     signature: "required",
     digests: "optional",
+    delegation: "optional",
   } satisfies Presence<NonNullable<InstalledExtension["signatureProof"]>>,
+  Signer: { id: "required", name: "required" } satisfies Presence<NonNullable<InstalledExtension["signedBy"]>>,
+  Envelope: { payloadType: "required", payload: "required", signatures: "required" } satisfies Presence<Delegation>,
+  EnvelopeSignature: { keyid: "optional", sig: "required" } satisfies Presence<Delegation["signatures"][number]>,
   Manifest: {
     $schema: "optional",
     id: "required",

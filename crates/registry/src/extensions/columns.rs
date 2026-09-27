@@ -1463,7 +1463,7 @@ mod tests {
         let mut registry = Registry::new();
         register(
             &mut registry,
-            Arc::new(path.clone()),
+            Store::file(path.clone()),
             core,
             srelens_kube::client_cache::ClientCache::new_many(vec![]),
             JoinCache::default(),
@@ -1515,7 +1515,7 @@ mod tests {
         let mut registry = Registry::new();
         register(
             &mut registry,
-            Arc::new(path.clone()),
+            Store::file(path.clone()),
             core.clone(),
             srelens_kube::client_cache::ClientCache::new_many(vec![]),
             Arc::new(Mutex::new(HashMap::new())),

@@ -37,9 +37,7 @@ use base64::Engine;
 use futures::FutureExt;
 use serde_json::{json, Value};
 use srelens_capability::Registry;
-use srelens_desktop_lib::capabilities::{
-    build_registry_with, build_registry_with_paths_and_settings,
-};
+use srelens_desktop_lib::capabilities::build_registry_with;
 use srelens_kube::client_cache::ClientCache;
 
 const NS: &str = "srelens-e2e";
@@ -93,9 +91,16 @@ const SIGNED_ARGOCD: &str =
     include_str!("../../../../crates/registry/tests/fixtures/argocd-manifest.json");
 const SIGNED_ARGOCD_SIG: &[u8] =
     include_bytes!("../../../../crates/registry/tests/fixtures/argocd-manifest.sig");
-/// A catalog that lists that release by its checksum.
+/// A catalog that lists that release by its checksum, signed by the test root's catalog key
+/// (#559). The suite's registry trusts that root instead of the one a release pins.
 const CATALOG: &str =
-    include_str!("../../../../crates/registry/tests/fixtures/extension-catalog.json");
+    include_str!("../../../../crates/registry/tests/fixtures/extension-catalog.signed.json");
+const TEST_ROOT: &[u8] =
+    include_bytes!("../../../../crates/registry/tests/fixtures/trust/root.json");
+/// The delegations the test root ships, as a build ships its own: srelens's among them, so
+/// `org.srelens.` is reserved before any catalog is read.
+const TEST_PUBLISHERS: &[u8] =
+    include_bytes!("../../../../crates/registry/tests/fixtures/trust/publishers.json");
 
 fn context() -> String {
     std::env::var("SRELENS_E2E_CONTEXT").unwrap_or_else(|_| "kind-srelens-helm-e2e".to_string())
@@ -708,10 +713,12 @@ async fn full_capability_suite() {
 async fn run_suite() {
     let ctx = context();
     let settings = TempSettings::new();
-    let reg = build_registry_with_paths_and_settings(
+    let reg = srelens_registry::build_registry_with_paths_settings_and_trust(
         cache(),
         kubeconfig_paths(),
-        Some(settings.0.clone()),
+        settings.0.clone(),
+        srelens_registry::TrustRoot::from_signed_documents(TEST_ROOT, TEST_PUBLISHERS)
+            .expect("the test root verifies"),
     );
     let mut h = Harness::new(reg);
 
@@ -3009,14 +3016,15 @@ async fn extensions_and_gitops(h: &mut Harness, ctx: &str, settings: &TempSettin
     }
 
     // The catalog is a cache seeded with the committed fixture, so this suite never
-    // depends on the public catalog. extension-catalog.yml checks the live one.
+    // depends on the public catalog. extension-catalog.yml checks the live one. The cache
+    // holds the signed catalog as fetched, and the host verifies it again on reading it.
     let fetched_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs();
     let snapshot = json!({
-        "catalog": serde_json::from_str::<Value>(CATALOG).unwrap(),
-        "fetchedAt": fetched_at, "stale": false, "error": null, "incompatible": [],
+        "signedCatalog": serde_json::from_str::<Value>(CATALOG).unwrap(),
+        "fetchedAt": fetched_at,
     });
     std::fs::write(
         settings.catalog_cache(),

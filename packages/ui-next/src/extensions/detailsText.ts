@@ -6,6 +6,8 @@ import {
   type InstalledExtension,
 } from "@srelens/core";
 import { POD_FACTS } from "./ExtensionBindings";
+import { plainText } from "./displayText";
+import { extensionSigner } from "./inventoryStore";
 
 /*
  * The wording an installed app's Details use in more than one tab: the Overview and the
@@ -46,9 +48,7 @@ export function origin(version: InstalledExtension | ExtensionPreviousVersion) {
     ? "Unsigned"
     : !installed
       ? "Signed; verified when restored"
-      : version.quarantined
-        ? "Signature not verified"
-        : "Signed by srelens";
+      : plainText(extensionSigner(version));
   return `${signer} · ${from[version.source]}`;
 }
 

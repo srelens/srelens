@@ -46,6 +46,8 @@ const plugin: InstalledExtension = {
   source: "catalog",
   installedAt: 1_700_000_000,
   signatureProof: { manifest: "{}", signature: [1] },
+  // Who the host verified signed it (#559): the only source of "Signed by".
+  signedBy: { id: "srelens", name: "srelens" },
   history: [],
 };
 

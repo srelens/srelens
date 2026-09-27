@@ -78,7 +78,7 @@ jobs:
         # Every target runs even after one finds a crash, so one bug does not hide another.
         run: |
           status=0
-          for target in manifest catalog signed-manifest inventory package; do
+          for target in manifest catalog signed-manifest inventory package signed-catalog trust-metadata; do
             echo "::group::$target"
             cargo +nightly fuzz run --target "$FUZZ_TARGET_TRIPLE" "$target" -- \
               -dict=fuzz/extensions.dict \

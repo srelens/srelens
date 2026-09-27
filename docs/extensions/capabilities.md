@@ -225,7 +225,9 @@ reports the request as accepted rather than as complete.
   answered from the server's copy. The server checks it hourly and fetches it again
   once it is a day old. Verification is per install, per user, as on the desktop: each
   install downloads its release and checks the checksum, identity, API range and, for
-  official apps, the publisher signature; each load re-verifies every signed manifest.
+  an app in a delegated namespace, the publisher signature; each load re-verifies every
+  signed manifest. The server verifies the shared catalog's signature as a desktop does
+  ([trust.md](trust.md)).
 - **Declared actions run through `extensions.action` only.** It reaches a host
   primitive through the user's own installed app — the exact group/kind/plural its
   reader binds, its revision, grants and cluster scope rechecked on the call, and the

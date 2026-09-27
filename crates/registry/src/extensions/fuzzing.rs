@@ -1,24 +1,75 @@
 //! Test support for the cargo-fuzz targets in `fuzz/` and the property tests below: the
-//! catalog, publisher signature, package and inventory readers on arbitrary bytes. An entry
-//! point panics only when a reader breaks its contract, so the fuzzer and `cargo test` hold
-//! the same properties. Compiled for this crate's tests and under the `fuzzing` feature; not
-//! an API.
-use super::{package, read, saved_form, signing, MAX_INVENTORY_BYTES};
+//! catalog, trust metadata, publisher signature, package and inventory readers on arbitrary
+//! bytes. An entry point panics only when a reader breaks its contract, so the fuzzer and
+//! `cargo test` hold the same properties. Compiled for this crate's tests and under the
+//! `fuzzing` feature; not an API.
+//!
+//! Signatures are checked against the test root (`trust::testing`), never the pinned one: a
+//! fuzz build pins whatever a release pins, and its keys sign nothing a fuzzer is given.
+use super::trust::{self, testing, Delegations, Envelope, TrustRoot};
+use super::{package, read_under, saved_form, signing, MAX_INVENTORY_BYTES};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     io::Write as _,
+    sync::OnceLock,
 };
 
 /// The one release this suite holds a publisher signature for.
 const SIGNED: &[u8] = include_bytes!("../../tests/fixtures/argocd-manifest.json");
 const SIGNATURE: &[u8] = include_bytes!("../../tests/fixtures/argocd-manifest.sig");
 /// The one package this suite holds a publisher signature for: the digest list of the
-/// `signed` fixture, signed by the test publisher, which only this crate's unit tests trust.
+/// `signed` fixture, signed by the test publisher, which the test root delegates `test.signed`.
 const SIGNED_DIGESTS: &[u8] = include_bytes!("../../tests/fixtures/packages/signed/digests.json");
 const SIGNED_DIGESTS_SIGNATURE: &[u8] =
     include_bytes!("../../tests/fixtures/packages/signed/digests.json.sig");
+/// The signed documents this suite holds, all under the test root.
+const SIGNED_CATALOG: &[u8] = include_bytes!("../../tests/fixtures/extension-catalog.signed.json");
+const SIGNED_ROOT: &[u8] = include_bytes!("../../tests/fixtures/trust/root.json");
+const SIGNED_DELEGATIONS: [&[u8]; 2] = [
+    include_bytes!("../../tests/fixtures/trust/srelens.json"),
+    include_bytes!("../../tests/fixtures/trust/example.json"),
+];
+
+fn test_root() -> &'static TrustRoot {
+    static ROOT: OnceLock<TrustRoot> = OnceLock::new();
+    ROOT.get_or_init(testing::root)
+}
+
+/// The test root's shipped srelens and test publisher delegations, and Example Labs as a
+/// catalog delegates it.
+fn delegations() -> &'static Delegations {
+    static DELEGATIONS: OnceLock<Delegations> = OnceLock::new();
+    DELEGATIONS.get_or_init(|| {
+        let root = test_root();
+        let example: Envelope = serde_json::from_slice(SIGNED_DELEGATIONS[1]).unwrap();
+        let example = root
+            .publisher(&example)
+            .expect("the committed delegation verifies");
+        Delegations::merged(&root.shipped(), &Delegations::new(vec![example]).unwrap())
+    })
+}
+
+/// The SHA-256 of the payload of each envelope in `documents`: what a key really signed.
+fn signed_payloads(documents: &[&[u8]]) -> BTreeSet<String> {
+    documents
+        .iter()
+        .map(|raw| {
+            let envelope: Envelope = serde_json::from_slice(raw).unwrap();
+            let payload = trust::decode_base64(&envelope.payload, usize::MAX / 2).unwrap();
+            format!("{:x}", Sha256::digest(payload))
+        })
+        .collect()
+}
+
+/// The SHA-256 of an envelope's payload, if it has one that decodes.
+fn payload_digest(envelope: &Envelope) -> Option<String> {
+    trust::decode_base64(&envelope.payload, usize::MAX / 2)
+        .ok()
+        .map(|payload| format!("{:x}", Sha256::digest(payload)))
+}
 
 /// `parse_catalog` on arbitrary bytes. It does not panic; a catalog it accepts is within
 /// 1 MiB, is schema version 1 and lists each ID once; and it accepts that catalog again in
@@ -37,7 +88,7 @@ pub fn catalog(data: &[u8]) {
         data.len()
     );
     let value = serde_json::to_value(&catalog).expect("an accepted catalog serializes");
-    assert_eq!(value["schemaVersion"], 1);
+    assert_eq!(value["schemaVersion"], 2);
     let entries = value["extensions"]
         .as_array()
         .expect("a catalog lists extensions");
@@ -58,10 +109,70 @@ pub fn catalog(data: &[u8]) {
     );
 }
 
+/// A signed catalog on arbitrary input, as a download is accepted. It does not panic, and
+/// it accepts nothing but a catalog the test catalog key signed: a fuzzer cannot sign, so
+/// any other payload it got accepted would be a forgery. What it accepts is verified again
+/// from the form the cache writes, unchanged.
+pub fn signed_catalog(data: &[u8]) {
+    static SIGNED: OnceLock<BTreeSet<String>> = OnceLock::new();
+    let signed = SIGNED.get_or_init(|| signed_payloads(&[SIGNED_CATALOG]));
+    let Ok(envelope) = super::catalog::fuzz_accept(data, test_root()) else {
+        return;
+    };
+    let digest = payload_digest(&envelope).expect("an accepted catalog has a payload");
+    assert!(
+        signed.contains(&digest),
+        "a catalog nobody signed was accepted"
+    );
+    let cached = serde_json::to_vec(&envelope).expect("an accepted envelope serializes");
+    assert!(
+        super::catalog::fuzz_accept(&cached, test_root()).is_ok(),
+        "the cached form of an accepted catalog is refused"
+    );
+}
+
+/// The trust metadata readers on arbitrary input, all on the same bytes: a signed root, a
+/// publisher delegation under the test root, and a release signature file. None panics.
+/// Only documents the test keys signed are accepted as a root or a delegation, and a release
+/// signature that parses has its 64 bytes, and a well-formed key ID if it names one.
+pub fn trust_metadata(data: &[u8]) {
+    static ROOTS: OnceLock<BTreeSet<String>> = OnceLock::new();
+    static DELEGATIONS: OnceLock<BTreeSet<String>> = OnceLock::new();
+    let roots = ROOTS.get_or_init(|| signed_payloads(&[SIGNED_ROOT]));
+    let delegations = DELEGATIONS.get_or_init(|| signed_payloads(&SIGNED_DELEGATIONS));
+    if let Ok(envelope) = serde_json::from_slice::<Envelope>(data) {
+        if TrustRoot::from_signed_root(data).is_ok() {
+            let digest = payload_digest(&envelope).expect("an accepted root has a payload");
+            assert!(roots.contains(&digest), "a root nobody signed was accepted");
+        }
+        if let Ok(publisher) = test_root().publisher(&envelope) {
+            let digest = payload_digest(&envelope).expect("an accepted delegation has a payload");
+            assert!(
+                delegations.contains(&digest),
+                "a delegation nobody signed was accepted"
+            );
+            assert!(!publisher.keys.is_empty() && !publisher.namespaces.is_empty());
+        }
+    } else {
+        assert!(TrustRoot::from_signed_root(data).is_err());
+    }
+    match signing::parse_release_signature(data) {
+        Ok(signature) => {
+            assert_eq!(signature.bytes.len(), 64, "a release signature is 64 bytes");
+            if let Some(key_id) = &signature.key_id {
+                assert!(trust::is_key_id(key_id), "a key ID {key_id:?} was accepted");
+            }
+        }
+        Err(reason) => assert!(!reason.is_empty(), "a refused signature gives no reason"),
+    }
+}
+
 /// Publisher signature checks on arbitrary input, read as one byte giving the signature's
 /// length, the signature, then the manifest. Neither `verify` nor `verify_for` panics, and
 /// neither accepts anything but the release this suite holds the signature for: a fuzzer
-/// cannot sign, so anything else it got accepted would be a forgery.
+/// cannot sign, so anything else it got accepted would be a forgery. The signature is also
+/// read as a release signature file would be, in either form, and verified by the key it
+/// names.
 pub fn signed_manifest(data: &[u8]) {
     let (length, rest) = match data.split_first() {
         Some((length, rest)) => (usize::from(*length), rest),
@@ -69,9 +180,10 @@ pub fn signed_manifest(data: &[u8]) {
     };
     let (signature, raw) = rest.split_at(length.min(rest.len()));
     let published = raw == SIGNED && signature == SIGNATURE;
-    let verified = signing::verify(raw, signature);
+    let delegations = delegations();
+    let verified = signing::verify(raw, signature, None, delegations);
     match &verified {
-        Ok(()) => assert!(published, "a signature verified over bytes nobody signed"),
+        Ok(_) => assert!(published, "a signature verified over bytes nobody signed"),
         Err(reason) => assert!(!reason.is_empty(), "a refused signature gives no reason"),
     }
     // Installation checks the signature against the manifest's ID even when the manifest
@@ -80,14 +192,24 @@ pub fn signed_manifest(data: &[u8]) {
         .ok()
         .and_then(|value| value.get("id")?.as_str().map(str::to_owned));
     if let Some(id) = id {
-        match signing::verify_for(&id, raw, signature) {
-            Ok(()) => assert!(
+        match signing::verify_for(&id, raw, signature, None, delegations) {
+            Ok(_) => assert!(
                 published,
                 "a signature verified for {id} over bytes nobody signed"
             ),
             Err(reason) => {
                 assert!(!reason.is_empty(), "a refused signature gives no reason");
                 assert!(verified.is_err(), "verify accepted what verify_for refused");
+            }
+        }
+        if let Ok(file) = signing::parse_release_signature(signature) {
+            if signing::verify_for(&id, raw, &file.bytes, file.key_id.as_deref(), delegations)
+                .is_ok()
+            {
+                assert!(
+                    raw == SIGNED && file.bytes == SIGNATURE,
+                    "a release signature file verified for {id} over bytes nobody signed"
+                );
             }
         }
     }
@@ -129,7 +251,7 @@ pub fn package(data: &[u8]) {
         None => Vec::new(),
     };
     let mut recorded = Recorded::default();
-    let verified = match package::read(&archive, &mut recorded) {
+    let verified = match package::read(&archive, &mut recorded, delegations()) {
         Ok(verified) => verified,
         Err(reason) => {
             assert!(!reason.is_empty(), "a refused package gives no reason");
@@ -170,12 +292,18 @@ pub fn package(data: &[u8]) {
             verified.digests.as_bytes() == SIGNED_DIGESTS && signature == SIGNED_DIGESTS_SIGNATURE,
             "a package verified with a signature nobody made"
         );
-        package::verify_signed(&verified.digests, signature, &verified.manifest)
-            .expect("an accepted package's signature verifies on its own");
+        package::verify_signed(
+            &verified.digests,
+            signature,
+            &verified.manifest,
+            delegations(),
+        )
+        .expect("an accepted package's signature verifies on its own");
     }
-    let again = package::read(&archive, &mut package::Discard).unwrap_or_else(|reason| {
-        panic!("an accepted package is refused when read again: {reason}")
-    });
+    let again =
+        package::read(&archive, &mut package::Discard, delegations()).unwrap_or_else(|reason| {
+            panic!("an accepted package is refused when read again: {reason}")
+        });
     assert_eq!(again.digest, verified.digest);
     assert_eq!(
         serde_json::to_value(again.review()).expect("a review serializes"),
@@ -193,7 +321,7 @@ pub fn inventory(data: &[u8]) {
     }
     let path = DIRECTORY.with(|directory| directory.path().join("extensions.json"));
     fs::write(&path, data).expect("write the inventory under test");
-    let state = match read(&path) {
+    let state = match read_under(&path, test_root()) {
         Ok(state) => state,
         Err(reason) => {
             assert!(!reason.is_empty(), "a refused inventory gives no reason");
@@ -217,6 +345,11 @@ pub fn inventory(data: &[u8]) {
         "an inventory lists an app twice"
     );
     for plugin in &state.plugins {
+        assert!(
+            plugin.signed_by.is_none() || plugin.signature_proof.is_some(),
+            "{} is reported signed with no proof",
+            plugin.manifest.id
+        );
         if let Some(reason) = &plugin.quarantined {
             assert!(
                 !plugin.enabled,
@@ -238,8 +371,8 @@ pub fn inventory(data: &[u8]) {
     }
     // What `write` saves, without its sync and rename.
     fs::write(&path, &saved).expect("save the inventory under test");
-    let again =
-        read(&path).unwrap_or_else(|reason| panic!("a saved inventory does not load: {reason}"));
+    let again = read_under(&path, test_root())
+        .unwrap_or_else(|reason| panic!("a saved inventory does not load: {reason}"));
     assert_eq!(
         serde_json::to_value(&again).expect("an inventory serializes"),
         serde_json::to_value(&state).expect("an inventory serializes"),
@@ -256,7 +389,6 @@ mod tests {
     use srelens_plugin_host::fuzzing::mutate;
     use std::io::Read as _;
 
-    const CATALOG: &[u8] = include_bytes!("../../tests/fixtures/extension-catalog.json");
     const INVENTORY: &[u8] = include_bytes!("../../tests/fixtures/extension-inventory.json");
     const LEGACY_INVENTORY: &[u8] =
         include_bytes!("../../tests/fixtures/extension-inventory-legacy.json");
@@ -322,7 +454,14 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("extensions.json");
         fs::write(&path, data).unwrap();
-        read(&path)
+        read_under(&path, test_root())
+    }
+
+    /// The signed fixture's catalog document: what `parse_catalog` reads once the
+    /// signature has verified.
+    fn catalog_document() -> Vec<u8> {
+        let envelope: Envelope = serde_json::from_slice(SIGNED_CATALOG).unwrap();
+        trust::decode_base64(&envelope.payload, MAX_CATALOG).unwrap()
     }
 
     /// `seed` without its trailing newline, padded with spaces to exactly `len` bytes.
@@ -338,6 +477,8 @@ mod tests {
         #[test]
         fn arbitrary_bytes_are_read_or_refused(data in vec(any::<u8>(), 0..1024)) {
             catalog(&data);
+            signed_catalog(&data);
+            trust_metadata(&data);
             signed_manifest(&data);
             inventory(&data);
             package(&data);
@@ -380,7 +521,7 @@ mod tests {
             choices in vec(any::<u8>(), 0..96),
             pretty in any::<bool>(),
         ) {
-            catalog(&edited(CATALOG, &choices, pretty));
+            catalog(&edited(&catalog_document(), &choices, pretty));
         }
 
         #[test]
@@ -420,12 +561,72 @@ mod tests {
         }
     }
 
+    proptest! {
+        #![proptest_config(config())]
+
+        /// Edits to the signed documents' JSON: fields changed, added or dropped, inside the
+        /// envelope and around it. The payload is what is signed, so any edit to it is
+        /// refused, and an edit elsewhere that keeps it is accepted as the same document.
+        #[test]
+        fn signed_documents_a_few_edits_away_are_refused_or_unchanged(
+            choices in vec(any::<u8>(), 0..96),
+            pretty in any::<bool>(),
+            which in 0..4usize,
+        ) {
+            let seed = [SIGNED_CATALOG, SIGNED_ROOT, SIGNED_DELEGATIONS[0], SIGNED_DELEGATIONS[1]][which];
+            let data = edited(seed, &choices, pretty);
+            signed_catalog(&data);
+            trust_metadata(&data);
+        }
+
+        /// Bytes of a signed payload flipped: never accepted.
+        #[test]
+        fn a_flipped_payload_byte_is_never_accepted(
+            flips in vec((any::<Index>(), 1..=u8::MAX), 1..4),
+            which in 0..3usize,
+        ) {
+            let seed = [SIGNED_CATALOG, SIGNED_ROOT, SIGNED_DELEGATIONS[1]][which];
+            let mut envelope: Envelope = serde_json::from_slice(seed).unwrap();
+            let mut payload = trust::decode_base64(&envelope.payload, MAX_CATALOG).unwrap();
+            for (at, mask) in flips {
+                let index = at.index(payload.len());
+                payload[index] ^= mask;
+            }
+            envelope.payload = trust::encode_base64(&payload);
+            let data = serde_json::to_vec(&envelope).unwrap();
+            prop_assert!(super::super::catalog::fuzz_accept(&data, test_root()).is_err());
+            prop_assert!(TrustRoot::from_signed_root(&data).is_err());
+            prop_assert!(test_root().publisher(&envelope).is_err());
+            signed_catalog(&data);
+            trust_metadata(&data);
+        }
+    }
+
+    #[test]
+    fn the_signed_fixtures_are_accepted_by_the_entry_points() {
+        assert!(super::super::catalog::fuzz_accept(SIGNED_CATALOG, test_root()).is_ok());
+        signed_catalog(SIGNED_CATALOG);
+        assert!(TrustRoot::from_signed_root(SIGNED_ROOT).is_ok());
+        trust_metadata(SIGNED_ROOT);
+        for delegation in SIGNED_DELEGATIONS {
+            let envelope: Envelope = serde_json::from_slice(delegation).unwrap();
+            assert!(test_root().publisher(&envelope).is_ok());
+            trust_metadata(delegation);
+        }
+        trust_metadata(SIGNATURE);
+    }
+
     #[test]
     fn historic_fixtures_keep_authentic_signatures_but_require_a_retired_api() {
-        assert!(parse_catalog(CATALOG).is_ok());
-        catalog(CATALOG);
-        assert!(signing::verify_for("org.srelens.argocd", SIGNED, SIGNATURE).is_ok());
-        assert!(signing::verify(SIGNED, SIGNATURE).unwrap_err().contains("requires API ^0.1"));
+        assert!(parse_catalog(&catalog_document()).is_ok());
+        catalog(&catalog_document());
+        assert!(
+            signing::verify_for("org.srelens.argocd", SIGNED, SIGNATURE, None, delegations())
+                .is_ok()
+        );
+        assert!(signing::verify(SIGNED, SIGNATURE, None, delegations())
+            .unwrap_err()
+            .contains("requires API ^0.1"));
         signed_manifest(&signed_input(SIGNATURE, SIGNED));
 
         let state = read_bytes(INVENTORY).unwrap();
@@ -453,8 +654,12 @@ mod tests {
         for name in ["example", "signed"] {
             let archive = packed(name);
             package(&[&[0][..], &archive].concat());
-            let verified =
-                super::super::package::read(&archive, &mut super::super::package::Discard).unwrap();
+            let verified = super::super::package::read(
+                &archive,
+                &mut super::super::package::Discard,
+                delegations(),
+            )
+            .unwrap();
             assert_eq!(verified.signature.is_some(), name == "signed");
         }
     }
@@ -475,10 +680,11 @@ mod tests {
 
     #[test]
     fn readers_hold_their_size_limits_to_the_byte() {
-        assert!(parse_catalog(&padded(CATALOG, MAX_CATALOG)).is_ok());
-        assert!(parse_catalog(&padded(CATALOG, MAX_CATALOG + 1)).is_err());
-        catalog(&padded(CATALOG, MAX_CATALOG));
-        catalog(&padded(CATALOG, MAX_CATALOG + 1));
+        let document = catalog_document();
+        assert!(parse_catalog(&padded(&document, MAX_CATALOG)).is_ok());
+        assert!(parse_catalog(&padded(&document, MAX_CATALOG + 1)).is_err());
+        catalog(&padded(&document, MAX_CATALOG));
+        catalog(&padded(&document, MAX_CATALOG + 1));
 
         assert!(read_bytes(&padded(INVENTORY, MAX_INVENTORY_BYTES)).is_ok());
         assert!(read_bytes(&padded(INVENTORY, MAX_INVENTORY_BYTES + 1)).is_err());

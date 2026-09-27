@@ -16,7 +16,7 @@
 //! trail; it lives in this process's memory, bounded, and goes with it.
 
 use super::streams::ExtensionStreams;
-use super::{read, Inventory, Store};
+use super::{Inventory, Store};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use srelens_capability::{Annotations, Capability, CapabilityError, Registry};
@@ -385,7 +385,7 @@ impl From<SidecarMetrics> for ProcessOut {
 /// The installed app `id`, refused when there is none.
 async fn installed(path: &Store, id: &str) -> Result<(), CapabilityError> {
     let path = path.clone();
-    let state = tokio::task::spawn_blocking(move || read(&*path))
+    let state = tokio::task::spawn_blocking(move || path.read())
         .await
         .map_err(|e| CapabilityError::Handler(e.to_string()))?
         .map_err(CapabilityError::Handler)?;

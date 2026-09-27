@@ -61,8 +61,8 @@ install are yours alone ([#515](https://github.com/srelens/srelens/issues/515)).
 To exercise the local installer instead:
 
 1. Copy `examples/extensions/argocd.json` or `flux.json` and change its `id` to one
-   outside the reserved namespace, for example `org.example.argocd`. IDs under
-   `org.srelens.` install only as signed releases.
+   outside any publisher's namespace, for example `org.example.argocd`. IDs under
+   `org.srelens.` install only as releases signed by srelens.
 2. Open **Settings → Apps → Install a local manifest**, paste it, review the
    manifest, then install and grant `k8s.listCustomResource`. Flux also requests
    `k8s.listEvents` for its dashboard.

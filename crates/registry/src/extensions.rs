@@ -37,6 +37,7 @@ mod sidecar_tests;
 mod signing;
 mod store;
 pub mod streams;
+mod trust;
 #[cfg(test)]
 mod version_tests;
 use app_settings::{checked_settings, drop_secret_values, setting_scope};
@@ -56,9 +57,52 @@ use std::{
 pub use app_policy::{AppPolicy, SharedPolicy, MAX_POLICY_BYTES};
 pub use catalog::SharedCatalog;
 pub use store::{InventoryKey, InventoryLock, InventoryStore};
+pub use trust::TrustRoot;
 
-/// An inventory, as every capability that reads or changes one holds it.
-type Store = Arc<dyn InventoryStore>;
+/// An inventory, as every capability that reads or changes one holds it: where it is kept,
+/// and the root its apps' publisher signatures are verified against on every read.
+#[derive(Clone)]
+struct Store {
+    at: Arc<dyn InventoryStore>,
+    trust: TrustRoot,
+}
+
+impl Store {
+    /// The inventory, every app's manifest and signature proof verified again, held to
+    /// the policy in force (#578).
+    fn read(&self) -> Result<Inventory, String> {
+        read_under(&*self.at, &self.trust)
+    }
+
+    /// The inventory as saved, verified as [`Store::read`] verifies it, with no policy's
+    /// verdicts applied: what `configure` changes and saves.
+    fn read_saved(&self) -> Result<Inventory, String> {
+        read_saved_under(&*self.at, &self.trust)
+    }
+
+    /// The administrator's policy this inventory is held to now, if any (#578).
+    fn policy(&self) -> Option<Arc<AppPolicy>> {
+        self.at.policy()
+    }
+}
+
+#[cfg(test)]
+impl Store {
+    /// An inventory file under the root this build pins, as the tests name one.
+    fn file(path: impl Into<PathBuf>) -> Self {
+        Self {
+            at: Arc::new(path.into()),
+            trust: TrustRoot::pinned(),
+        }
+    }
+}
+
+impl std::ops::Deref for Store {
+    type Target = dyn InventoryStore;
+    fn deref(&self) -> &Self::Target {
+        &*self.at
+    }
+}
 
 /// Where one registry keeps its apps: the inventory, and the catalog cache that says
 /// which installed versions are catalog releases.
@@ -79,11 +123,16 @@ pub struct Apps {
 impl Apps {
     /// One web user's apps (#515): their own inventory, and the catalog every user of the
     /// server shares and none of them can write. The web host keeps no app files: a
-    /// package's directory would be on the shared server, not the user's (#562).
+    /// package's directory would be on the shared server, not the user's (#562). Their
+    /// signatures are verified against the root the shared catalog is.
     pub fn with_shared_catalog(inventory: Arc<dyn InventoryStore>, catalog: SharedCatalog) -> Self {
+        let catalog = catalog::CatalogCache::Shared(catalog);
         Self {
-            inventory,
-            catalog: catalog::CatalogCache::Shared(catalog),
+            inventory: Store {
+                at: inventory,
+                trust: catalog.trust().clone(),
+            },
+            catalog,
             packages: None,
             data: None,
         }
@@ -102,10 +151,13 @@ impl Apps {
     /// applies the policy in force then, so replacing it governs the next call.
     pub fn governed_by(self, policy: SharedPolicy) -> Self {
         Self {
-            inventory: Arc::new(app_policy::Governed {
-                inventory: self.inventory,
-                policy,
-            }),
+            inventory: Store {
+                at: Arc::new(app_policy::Governed {
+                    inventory: self.inventory.at,
+                    policy,
+                }),
+                trust: self.inventory.trust,
+            },
             ..self
         }
     }
@@ -117,18 +169,31 @@ impl Apps {
             .policy()
             .is_some_and(|policy| policy.reaches_network())
     }
+
+    /// The desktop's layout at `path`, with its catalog and every app's signature verified
+    /// against `trust` rather than the root this build pins: a test's root.
+    pub fn with_trust(path: PathBuf, trust: TrustRoot) -> Self {
+        Self {
+            catalog: catalog::CatalogCache::Owned {
+                path: path.with_extension("catalog.json"),
+                trust: trust.clone(),
+            },
+            packages: Some(path.with_extension("packages")),
+            data: Some(path.with_extension("data")),
+            inventory: Store {
+                at: Arc::new(path),
+                trust,
+            },
+        }
+    }
 }
 
 /// The desktop's layout: the inventory file, this host's own catalog cache beside it, the
-/// directory installed packages are unpacked into beside that, and the apps' data.
+/// directory installed packages are unpacked into beside that, and the apps' data, all
+/// verified against the root this build pins.
 impl From<PathBuf> for Apps {
     fn from(path: PathBuf) -> Self {
-        Self {
-            catalog: catalog::CatalogCache::Owned(path.with_extension("catalog.json")),
-            packages: Some(path.with_extension("packages")),
-            data: Some(path.with_extension("data")),
-            inventory: Arc::new(path),
-        }
+        Self::with_trust(path, TrustRoot::pinned())
     }
 }
 
@@ -152,6 +217,10 @@ pub struct Installed {
         skip_serializing_if = "Option::is_none"
     )]
     policy_blocked: Option<String>,
+    /// Who signed the installed version, when its proof verified on this read: "Signed by
+    /// <name>". Recomputed on every read, like `quarantined`, and never written to disk.
+    #[serde(default, rename = "signedBy", skip_serializing_if = "Option::is_none")]
+    signed_by: Option<trust::Signer>,
     manifest: Manifest,
     grants: Vec<String>,
     enabled: bool,
@@ -257,6 +326,12 @@ struct SignatureProof {
     /// whose signature covers `manifest` itself.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     digests: Option<String>,
+    /// The signed publisher delegation that vouched for the signature (#559), so the app
+    /// is verified again on every load with no catalog at hand. Absent when this build's
+    /// shipped delegations vouch for it, as they do for every release signed before
+    /// #559, which keeps those inventories readable by the hosts that wrote them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    delegation: Option<trust::Envelope>,
 }
 /// Where an installed version came from. The host decides: `catalog` means the exact
 /// bytes of a release listed in the cached catalog, whoever submitted them.
@@ -335,7 +410,7 @@ async fn resolver_app(
     context: String,
 ) -> Result<(Inventory, usize, String), CapabilityError> {
     let resolved = request_context(client_cache, &context).await;
-    let state = tokio::task::spawn_blocking(move || read(&inventory))
+    let state = tokio::task::spawn_blocking(move || inventory.read())
         .await
         .map_err(|error| CapabilityError::Handler(error.to_string()))?
         .map_err(CapabilityError::Handler)?;
@@ -376,6 +451,10 @@ enum Configure {
         #[serde(default, deserialize_with = "limits::signature")]
         #[schemars(length(equal = 64))]
         signature: Option<Vec<u8>>,
+        /// The key the signature names (#559): its ID, 64 lowercase hex characters.
+        #[serde(default, rename = "keyId", deserialize_with = "limits::key_id")]
+        #[schemars(length(equal = 64))]
+        key_id: Option<String>,
         /// The manifest text: at most 256 KiB.
         #[serde(deserialize_with = "limits::manifest")]
         #[schemars(length(max = 262144))]
@@ -480,17 +559,31 @@ struct Read {
 #[serde(deny_unknown_fields)]
 struct Empty {}
 
-/// The inventory in `store`, checked as every load checks it, and held to the policy in
-/// force on this host, if any (#578). What every capability that uses an app reads.
+/// [`read_under`] the root this build pins: for tests, which name an inventory by its file.
+#[cfg(test)]
 fn read<S: InventoryStore + ?Sized>(store: &S) -> Result<Inventory, String> {
-    let mut state = read_saved(store)?;
+    read_under(store, &TrustRoot::pinned())
+}
+
+/// The inventory in `store`, checked as every load checks it, each app's signature proof
+/// against `trust`, and held to the policy in force on this host, if any (#578). What
+/// every capability that uses an app reads.
+fn read_under<S: InventoryStore + ?Sized>(
+    store: &S,
+    trust: &TrustRoot,
+) -> Result<Inventory, String> {
+    let mut state = read_saved_under(store, trust)?;
     app_policy::govern(&mut state, store.policy().as_deref());
     Ok(state)
 }
 
-/// The inventory as saved, checked as every load checks it, but not yet held to a
-/// policy: what `configure` changes and saves, so a policy's verdicts are never saved.
-fn read_saved<S: InventoryStore + ?Sized>(store: &S) -> Result<Inventory, String> {
+/// The inventory as saved, checked as every load checks it, each app's manifest and
+/// signature proof verified again against `trust`, but not yet held to a policy: what
+/// `configure` changes and saves, so a policy's verdicts are never saved.
+fn read_saved_under<S: InventoryStore + ?Sized>(
+    store: &S,
+    trust: &TrustRoot,
+) -> Result<Inventory, String> {
     // One byte past the limit is enough to refuse it, so an oversized inventory is never
     // loaded whole.
     let Some(raw) = store.load(MAX_INVENTORY_BYTES)? else {
@@ -550,9 +643,16 @@ fn read_saved<S: InventoryStore + ?Sized>(store: &S) -> Result<Inventory, String
         drop_secret_values(plugin);
         // The logo is the host's to read from the package now, never the file's.
         plugin.icon = None;
-        plugin.quarantined = reverify(plugin).err();
-        if plugin.quarantined.is_some() {
-            plugin.enabled = false;
+        match reverify(plugin, trust) {
+            Ok(signed_by) => {
+                plugin.quarantined = None;
+                plugin.signed_by = signed_by;
+            }
+            Err(reason) => {
+                plugin.quarantined = Some(reason);
+                plugin.signed_by = None;
+                plugin.enabled = false;
+            }
         }
     }
     apply_unsigned_policy(&mut state);
@@ -598,19 +698,26 @@ fn apply_unsigned_policy(state: &mut Inventory) {
         }
     }
 }
-fn reverify(plugin: &Installed) -> Result<(), String> {
+/// Who signed a stored app, if anyone; an error when the host no longer trusts it.
+fn reverify(plugin: &Installed, trust: &TrustRoot) -> Result<Option<trust::Signer>, String> {
     // An entry stored before the namespace was reserved, or added by hand, gets no more
-    // trust from the file than an install would give it.
-    if let Some(reason) = unsigned_reserved(&plugin.manifest.id, plugin.signature_proof.is_some()) {
+    // trust from the file than an install would give it. Loading has no catalog at hand,
+    // so the namespaces checked are the ones this build ships a delegation for.
+    if let Some(reason) = unsigned_reserved(
+        &plugin.manifest.id,
+        plugin.signature_proof.is_some(),
+        &trust.shipped(),
+    ) {
         return Err(reason);
     }
     plugin.manifest.validate()?;
     crd::group_problems(&plugin.manifest).into_result()?;
     check_package_name(plugin.package.as_deref())?;
-    if let Some(proof) = &plugin.signature_proof {
-        verify_proof(proof, &plugin.manifest, plugin.package.as_deref())?;
-    }
-    Ok(())
+    plugin
+        .signature_proof
+        .as_ref()
+        .map(|proof| verify_proof(proof, &plugin.manifest, plugin.package.as_deref(), trust))
+        .transpose()
 }
 /// A package version is named by a SHA-256, as its directory is.
 fn check_package_name(package: Option<&str>) -> Result<(), String> {
@@ -624,18 +731,41 @@ fn check_package_name(package: Option<&str>) -> Result<(), String> {
     }
     Ok(())
 }
-/// The publisher signature verifies over the kept bytes, and those bytes are `manifest`:
-/// for a single-file manifest, the manifest's own; for a package (#562), the digest list,
-/// which names the manifest and is the one the version was `unpacked` as.
+/// Who signed the kept bytes, and that those bytes are `manifest`: for a single-file
+/// manifest, the manifest's own; for a package (#562), the digest list, which names the
+/// manifest and is the one the version was `unpacked` as. The publisher is the one the
+/// proof's own delegation names, verified under `trust`; a proof with none is verified
+/// under the delegations this build ships.
 fn verify_proof(
     proof: &SignatureProof,
     manifest: &Manifest,
     unpacked: Option<&str>,
-) -> Result<(), String> {
-    match &proof.digests {
-        None => signing::verify(proof.manifest.as_bytes(), &proof.signature)?,
-        Some(digests) => package::verify_signed(digests, &proof.signature, &proof.manifest)?,
+    trust: &TrustRoot,
+) -> Result<trust::Signer, String> {
+    if let Some(reason) = trust.unavailable() {
+        return Err(reason);
     }
+    let delegations = match &proof.delegation {
+        // A delegation this build ships for the same publisher at the same or a later
+        // version replaces the kept one, so a key a newer delegation withdrew stops
+        // vouching for what it signed.
+        Some(delegation) => trust::Delegations::merged(
+            &trust.shipped(),
+            &trust::Delegations::new(vec![trust.publisher(delegation)?])?,
+        ),
+        None => trust.shipped(),
+    };
+    let signer = match &proof.digests {
+        None => signing::verify(
+            proof.manifest.as_bytes(),
+            &proof.signature,
+            None,
+            &delegations,
+        )?,
+        Some(digests) => {
+            package::verify_signed(digests, &proof.signature, &proof.manifest, &delegations)?
+        }
+    };
     let proven = proof
         .digests
         .as_deref()
@@ -649,7 +779,7 @@ fn verify_proof(
     {
         return Err("Installed app does not match its signed manifest".into());
     }
-    Ok(())
+    Ok(signer)
 }
 /// The largest inventory `write` saves, measured in its saved form.
 const MAX_INVENTORY_BYTES: usize = 1024 * 1024;
@@ -680,6 +810,7 @@ fn saved_form(state: &Inventory) -> Result<Vec<u8>, String> {
             plugin.remove("quarantined");
             plugin.remove("policyBlocked");
             plugin.remove("icon");
+            plugin.remove("signedBy");
         }
     }
     serde_json::to_vec_pretty(&stored).map_err(|e| e.to_string())
@@ -687,7 +818,7 @@ fn saved_form(state: &Inventory) -> Result<Vec<u8>, String> {
 fn write<S: InventoryStore + ?Sized>(store: &S, state: &Inventory) -> Result<(), String> {
     // A policy's verdicts are its own, never the user's: whatever path reached here,
     // an inventory a policy was applied to is refused, and the change goes back to
-    // `read_saved` (#578).
+    // `Store::read_saved` (#578).
     if state.policy.is_some() {
         return Err("refusing to save an inventory held to a policy's verdicts".into());
     }
@@ -1063,11 +1194,22 @@ fn validate_app(
     problems.into_result()
 }
 /// Why an app under `id` cannot be trusted without a publisher signature, when it has none
-/// and `id` is in a trusted publisher's namespace. Install refuses it; loading quarantines
-/// a stored one, which `enable` then refuses; rollback refuses to restore one.
-fn unsigned_reserved(id: &str, signed: bool) -> Option<String> {
-    (!signed && signing::reserved(id))
-        .then(|| format!("App ID {id} is reserved for signed srelens releases"))
+/// and `id` is in a namespace delegated to a publisher. Install refuses it; loading
+/// quarantines a stored one, which `enable` then refuses; rollback refuses to restore one.
+fn unsigned_reserved(id: &str, signed: bool, delegations: &trust::Delegations) -> Option<String> {
+    let publisher = delegations.owner(id).filter(|_| !signed)?;
+    Some(format!(
+        "App ID {id} is reserved for releases signed by {}",
+        publisher.name
+    ))
+}
+/// A publisher signature an install verified, and the delegation to keep as its evidence.
+#[derive(Debug)]
+struct Signed {
+    signer: trust::Signer,
+    /// `None` when this build's shipped delegations vouch for it without one (see
+    /// [`SignatureProof::delegation`]).
+    delegation: Option<trust::Envelope>,
 }
 /// Every reason installing `source` with these grants and signature would be refused.
 /// With `digests`, `source` is a package's `extension.json` (#562), the list must name it,
@@ -1075,19 +1217,32 @@ fn unsigned_reserved(id: &str, signed: bool) -> Option<String> {
 fn check_install(
     source: &str,
     grants: &[String],
-    signature: Option<&[u8]>,
+    signature: Option<(&[u8], Option<&str>)>,
     digests: Option<&str>,
+    authority: &Result<catalog::Authority, String>,
+    trust: &TrustRoot,
     core: Arc<Registry>,
-) -> Result<Manifest, ValidationErrors> {
+) -> Result<(Manifest, Option<Signed>), ValidationErrors> {
     let manifest = Manifest::decode(source)?;
     let mut problems = validate_app(&manifest, grants, core)
         .err()
         .unwrap_or_default();
     // The rules a new install meets that an installed app is not re-held to.
     problems.0.extend(manifest.install_problems());
-    // Without this, a pasted manifest could replace a signed app, or take an
-    // official ID and its logo, differing from the real one only by a label.
-    if let Some(reason) = unsigned_reserved(&manifest.id, signature.is_some()) {
+    // With no root to verify against, which IDs are reserved for signed publishers is
+    // unknown, so nothing is installed: an unsigned app could otherwise take a publisher's
+    // ID and replace its signed installation.
+    let authority = match authority {
+        Ok(authority) => authority,
+        Err(reason) => {
+            problems.push(Code::ReservedId, "id", format!("{NO_ROOT}: {reason}"));
+            return Err(problems);
+        }
+    };
+    // Without this, a pasted manifest could replace a signed app, or take a publisher's
+    // ID and its logo, differing from the real one only by a label.
+    if let Some(reason) = unsigned_reserved(&manifest.id, signature.is_some(), &authority.reserved)
+    {
         problems.push(
             Code::ReservedId,
             "id",
@@ -1097,17 +1252,56 @@ fn check_install(
         );
     }
     // The signature covers the exact bytes, so it is checked whatever else is wrong.
-    let verified = match (signature, digests) {
-        (Some(signature), None) => signing::verify_for(&manifest.id, source.as_bytes(), signature),
-        (Some(signature), Some(digests)) => package::verify_signed(digests, signature, source),
-        (None, Some(digests)) => package::check_manifest_listed(digests, source).map(drop),
-        (None, None) => Ok(()),
-    };
-    if let Err(reason) = verified {
-        problems.push(Code::InvalidSignature, "", reason);
+    let mut signed = None;
+    match (signature, digests) {
+        (None, None) => {}
+        (None, Some(digests)) => {
+            if let Err(reason) = package::check_manifest_listed(digests, source) {
+                problems.push(Code::InvalidSignature, "", reason);
+            }
+        }
+        (Some((signature, key_id)), digests) => {
+            // A single-file manifest's signature covers the manifest; a package's (#562)
+            // covers its digest list, which names the manifest. Either way the key is
+            // looked up by the app's ID, under the same delegations.
+            let check = |delegations: &trust::Delegations, key_id: Option<&str>| match digests {
+                None => signing::verify_for(
+                    &manifest.id,
+                    source.as_bytes(),
+                    signature,
+                    key_id,
+                    delegations,
+                ),
+                Some(digests) => package::verify_signed(digests, signature, source, delegations),
+            };
+            let known = &authority.signers;
+            let verified = check(known, key_id).and_then(|signer| {
+                let publisher = known
+                    .owner(&manifest.id)
+                    .ok_or("the signing publisher vanished")?;
+                // Evidence only where this build's own delegations could not vouch for it
+                // on the next load.
+                let shipped = check(&trust.shipped(), None);
+                Ok(Signed {
+                    signer,
+                    delegation: shipped.is_err().then(|| publisher.envelope.clone()),
+                })
+            });
+            match verified {
+                Ok(verified) => signed = Some(verified),
+                Err(reason) => problems.push(
+                    Code::InvalidSignature,
+                    "",
+                    match &authority.expired {
+                        Some(expired) => format!("{reason} ({expired})"),
+                        None => reason,
+                    },
+                ),
+            }
+        }
     }
     problems.into_result()?;
-    Ok(manifest)
+    Ok((manifest, signed))
 }
 fn now() -> u64 {
     std::time::SystemTime::now()
@@ -1128,6 +1322,8 @@ struct Incoming {
     grants: Vec<String>,
     reviewed_revision: Option<u64>,
     signature_proof: Option<SignatureProof>,
+    /// Who signed it, as the install verified it (#559).
+    signed_by: Option<trust::Signer>,
     source: Source,
     package: Option<String>,
 }
@@ -1143,13 +1339,12 @@ fn install(
         grants,
         reviewed_revision,
         signature_proof,
+        signed_by,
         source: origin,
         package,
     } = incoming;
-    // A proof is kept only for a signature `check_install` verified.
-    let publisher = signature_proof
-        .as_ref()
-        .and_then(|_| signing::publisher_name(&manifest.id));
+    // A signer is known only for a signature `check_install` verified.
+    let publisher = signed_by.as_ref().map(|signer| signer.id.as_str());
     if let Some(refusal) = policy.and_then(|policy| policy.refusal(&manifest, publisher)) {
         return Err(refusal.reason);
     }
@@ -1212,6 +1407,7 @@ fn install(
         signature_proof,
         quarantined: None,
         policy_blocked: None,
+        signed_by,
         manifest,
         grants,
         enabled: true,
@@ -1247,6 +1443,32 @@ const NO_PACKAGES: &str = "This host keeps no files for its apps, so it cannot i
 /// Installs the package `archive` (#562): read and verified whole, checked as installing
 /// its manifest would be (with the signature over its digest list), then unpacked into
 /// its private directory. The inventory's save that follows is what installs it.
+/// Why nothing installs on a host with no usable root: which app IDs are reserved for
+/// signed publishers is unknown, so an unsigned app could take one.
+const NO_ROOT: &str =
+    "This host cannot tell which app IDs are reserved for signed publishers, so it installs nothing";
+/// The package `archive`, read under the publishers `authority` trusts, or refused for the
+/// cause its failure has: the missing root when there is none, as `check_install` says, and
+/// the expired catalog when only that catalog's delegations would have verified it. A
+/// failed trust lookup is not reported as a fact about the package.
+fn read_package(
+    archive: &[u8],
+    authority: &Result<catalog::Authority, String>,
+) -> Result<package::Package, String> {
+    let authority = authority
+        .as_ref()
+        .map_err(|reason| format!("{NO_ROOT}: {reason}"))?;
+    package::read(archive, &mut package::Discard, &authority.signers).map_err(|reason| {
+        match &authority.expired {
+            Some(expired)
+                if package::read(archive, &mut package::Discard, &authority.reserved).is_ok() =>
+            {
+                format!("{reason} ({expired})")
+            }
+            _ => reason,
+        }
+    })
+}
 fn install_package(
     apps: &Apps,
     state: &mut Inventory,
@@ -1257,13 +1479,19 @@ fn install_package(
     policy: Option<&AppPolicy>,
 ) -> Result<(), String> {
     let root = apps.packages.as_deref().ok_or(NO_PACKAGES)?;
-    let verified = package::read(archive, &mut package::Discard)?;
+    let authority = apps.catalog.authority();
+    let verified = read_package(archive, &authority)?;
     package::check_installable(&verified)?;
-    let manifest = check_install(
+    let (manifest, signed) = check_install(
         &verified.manifest,
         &grants,
-        verified.signature.as_deref(),
+        verified
+            .signature
+            .as_deref()
+            .map(|signature| (signature, None)),
         Some(&verified.digests),
+        &authority,
+        &apps.inventory.trust,
         core,
     )?;
     check_unsigned_policy(
@@ -1280,6 +1508,7 @@ fn install_package(
         manifest: verified.manifest.clone(),
         signature,
         digests: Some(verified.digests.clone()),
+        delegation: signed.as_ref().and_then(|signed| signed.delegation.clone()),
     });
     install(
         state,
@@ -1288,13 +1517,16 @@ fn install_package(
             grants,
             reviewed_revision,
             signature_proof,
+            signed_by: signed.map(|signed| signed.signer),
             source: origin,
             package: Some(verified.digest.clone()),
         },
         policy,
     )?;
-    // Last, once nothing else can refuse the install.
-    package::unpack(root, archive, &verified)
+    // Last, once nothing else can refuse the install. `read_package` has refused every
+    // package already when there is no authority.
+    let signers = &authority.as_ref().map_err(Clone::clone)?.signers;
+    package::unpack(root, archive, &verified, signers)
 }
 /// Every package version each app keeps, current and for rollback, by app ID.
 fn kept_packages(
@@ -1374,16 +1606,15 @@ fn configure(
         }
         _ => None,
     };
-    let store = &*apps.inventory;
+    let store = &apps.inventory;
     let _lock = store.lock()?;
     // The inventory as saved: the policy's verdicts are applied to the answer, never
     // saved, so lifting a policy restores each app as its user left it (#578).
-    let mut state = read_saved(store)?;
+    let mut state = store.read_saved()?;
     let policy = store.policy();
-    let refusal = |manifest: &Manifest, signed: bool| -> Result<(), String> {
-        let publisher = signed
-            .then(|| signing::publisher_name(&manifest.id))
-            .flatten();
+    // Held to the publisher that signed it, as verified now: none for an unsigned app.
+    let refusal = |manifest: &Manifest, signer: Option<&trust::Signer>| -> Result<(), String> {
+        let publisher = signer.map(|signer| signer.id.as_str());
         match policy
             .as_deref()
             .and_then(|policy| policy.refusal(manifest, publisher))
@@ -1420,9 +1651,20 @@ fn configure(
             manifest: source,
             grants,
             signature,
+            key_id,
             reviewed_revision,
         } => {
-            let manifest = check_install(&source, &grants, signature.as_deref(), None, core)?;
+            let (manifest, signed) = check_install(
+                &source,
+                &grants,
+                signature
+                    .as_deref()
+                    .map(|signature| (signature, key_id.as_deref())),
+                None,
+                &apps.catalog.authority(),
+                &store.trust,
+                core,
+            )?;
             check_unsigned_policy(&manifest, signature.is_some(), state.allow_unsigned_apps)?;
             let checksum = package::sha256_hex(source.as_bytes());
             let origin = if apps.catalog.lists_release(&manifest.id, &checksum) {
@@ -1434,6 +1676,7 @@ fn configure(
                 manifest: source,
                 signature,
                 digests: None,
+                delegation: signed.as_ref().and_then(|signed| signed.delegation.clone()),
             });
             install(
                 &mut state,
@@ -1442,6 +1685,7 @@ fn configure(
                     grants,
                     reviewed_revision,
                     signature_proof,
+                    signed_by: signed.map(|signed| signed.signer),
                     source: origin,
                     package: None,
                 },
@@ -1496,21 +1740,35 @@ fn configure(
             let target = app.history[index].clone();
             // A restored version is checked as installing it now would be: against its
             // publisher signature, and against this host's rules with the grants given now.
-            if let Some(reason) =
-                unsigned_reserved(&target.manifest.id, target.signature_proof.is_some())
-            {
+            let authority = apps.catalog.authority().map_err(|reason| {
+                format!("This host cannot tell which app IDs are reserved for signed publishers, so it restores nothing: {reason}")
+            })?;
+            if let Some(reason) = unsigned_reserved(
+                &target.manifest.id,
+                target.signature_proof.is_some(),
+                &authority.reserved,
+            ) {
                 return Err(format!("{reason}. Reinstall it from the Catalog."));
             }
-            if let Some(proof) = &target.signature_proof {
-                verify_proof(proof, &target.manifest, target.package.as_deref())?;
-            }
+            let signed_by = target
+                .signature_proof
+                .as_ref()
+                .map(|proof| {
+                    verify_proof(
+                        proof,
+                        &target.manifest,
+                        target.package.as_deref(),
+                        &store.trust,
+                    )
+                })
+                .transpose()?;
             validate_app(&target.manifest, &grants, core)?;
             check_unsigned_policy(
                 &target.manifest,
                 target.signature_proof.is_some(),
                 state.allow_unsigned_apps,
             )?;
-            refusal(&target.manifest, target.signature_proof.is_some())?;
+            refusal(&target.manifest, signed_by.as_ref())?;
             // Going back discards the versions after the restored one.
             app.history.drain(..=index);
             app.signature_proof = target.signature_proof;
@@ -1525,6 +1783,7 @@ fn configure(
             app.package = target.package;
             app.installed_at = target.installed_at;
             app.quarantined = None;
+            app.signed_by = signed_by;
             // A new revision, so views pinned to the rolled-away version refresh.
             app.revision = next;
         }
@@ -1591,7 +1850,7 @@ fn configure(
                     p.signature_proof.is_some(),
                     state.allow_unsigned_apps,
                 )?;
-                refusal(&p.manifest, p.signature_proof.is_some())?;
+                refusal(&p.manifest, p.signed_by.as_ref())?;
                 validate_app(&p.manifest, &p.grants, core)?;
             } else {
                 required(&id, "disabled")?;
@@ -1617,7 +1876,7 @@ fn configure(
         }
     }
     apply_unsigned_policy(&mut state);
-    write(store, &state)?;
+    write(&*store.at, &state)?;
     // Under the same lock as every install, so no version is removed while one unpacks.
     if let Some(root) = &apps.packages {
         package::prune(root, &kept_packages(&state));
@@ -1652,6 +1911,10 @@ struct ValidateIn {
     #[serde(default, deserialize_with = "limits::signature")]
     #[schemars(length(equal = 64))]
     signature: Option<Vec<u8>>,
+    /// The key the signature names (#559): its ID, 64 lowercase hex characters.
+    #[serde(default, rename = "keyId", deserialize_with = "limits::key_id")]
+    #[schemars(length(equal = 64))]
+    key_id: Option<String>,
     /// For a package's manifest (#562): the package's digest list, exactly as
     /// `extensions.packageManifest` or `extensions.catalogManifest` returned it, at most
     /// 64 KiB. The manifest must be the one it names, and `signature` is over the list.
@@ -1674,6 +1937,9 @@ struct ValidationReport {
     errors: Vec<ValidationError>,
     #[serde(rename = "permissionDiff", skip_serializing_if = "Option::is_none")]
     permission_diff: Option<PermissionDiff>,
+    /// Who signed it, when the signature verified: the publisher delegated its namespace.
+    #[serde(rename = "signedBy", skip_serializing_if = "Option::is_none")]
+    signed_by: Option<trust::Signer>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -1981,7 +2247,7 @@ fn register_apps(
             let packages = packages.clone();
             async move {
                 tokio::task::spawn_blocking(move || {
-                    let mut state = read(&p)?;
+                    let mut state = p.read()?;
                     secret_store::report(s.as_ref(), &mut state);
                     report_icons(packages.as_deref(), &mut state);
                     Ok(state)
@@ -1994,6 +2260,8 @@ fn register_apps(
     ));
     let c = core.clone();
     let s = secrets.clone();
+    let validate_catalog = apps.catalog.clone();
+    let package_catalog = apps.catalog.clone();
     reg.register(Capability::typed::<Configure, Inventory, _, _>(
         "extensions.configure",
         "Install, enable, remove or configure local extensions; requires approval",
@@ -2019,30 +2287,35 @@ fn register_apps(
         move |input: ValidateIn| {
             let c = c.clone();
             let p = p.clone();
+            let catalog = validate_catalog.clone();
             async move {
-                let state = tokio::task::spawn_blocking(move || read(&p))
+                let trust = p.trust.clone();
+                let (state, authority) = tokio::task::spawn_blocking(move || {
+                    p.read().map(|state| (state, catalog.authority()))
+                })
                     .await.map_err(|e| CapabilityError::Handler(e.to_string()))?
                     .map_err(CapabilityError::Handler)?;
-                let (errors, permission_diff) = match check_install(&input.manifest, &input.grants, input.signature.as_deref(), input.digests.as_deref(), c) {
-                    Err(problems) => (problems.0, None),
-                    Ok(manifest) => {
+                let signature = input.signature.as_deref().map(|signature| (signature, input.key_id.as_deref()));
+                let (errors, permission_diff, signed_by) = match check_install(&input.manifest, &input.grants, signature, input.digests.as_deref(), &authority, &trust, c) {
+                    Err(problems) => (problems.0, None, None),
+                    Ok((manifest, signed)) => {
                         // Reported where the app writes or runs code: its actions, else its exec bindings.
                         let at = if manifest.actions.is_empty() { "capabilities" } else { "actions" };
                         let mut errors = check_unsigned_policy(&manifest, input.signature.is_some(), state.allow_unsigned_apps)
                             .err().map(|reason| vec![ValidationError::new(Code::InvalidValue, at, reason)])
                             .unwrap_or_default();
                         // The administrator's policy (#578), as install would apply it.
-                        let publisher = input.signature.is_some().then(|| signing::publisher_name(&manifest.id)).flatten();
+                        let publisher = signed.as_ref().map(|signed| signed.signer.id.as_str());
                         if let Some(refusal) = state.policy.as_ref().and_then(|policy| policy.refusal(&manifest, publisher)) {
                             errors.push(ValidationError::new(Code::PolicyRefused, refusal.path, refusal.reason));
                         }
                         let previous = state.plugins.iter().find(|app| app.manifest.id == manifest.id)
                             .map(|app| (&app.manifest, app.grants.as_slice(), app.revision));
                         let diff = errors.is_empty().then(|| permission_diff(previous, &manifest, &input.grants));
-                        (errors, diff)
+                        (errors, diff, signed.map(|signed| signed.signer))
                     },
                 };
-                Ok::<_, CapabilityError>(ValidationReport { errors, permission_diff })
+                Ok::<_, CapabilityError>(ValidationReport { errors, permission_diff, signed_by })
             }
         },
     ));
@@ -2050,15 +2323,20 @@ fn register_apps(
         "extensions.packageManifest",
         "Verify an app package file (.srelens-extension) and return its manifest for permission review; does not install it",
         Annotations::READ_ONLY,
-        move |input: PackageIn| async move {
+        move |input: PackageIn| {
+            let catalog = package_catalog.clone();
+            async move {
             tokio::task::spawn_blocking(move || {
-                let verified = package::read(&input.package, &mut package::Discard)?;
+                // A package's signature is checked as an install checks it: by the publisher
+                // delegated its app ID's namespace (#559).
+                let verified = read_package(&input.package, &catalog.authority())?;
                 package::check_installable(&verified)?;
                 Ok(catalog::Review::of_package(&verified))
             })
             .await
             .map_err(|e| CapabilityError::Handler(e.to_string()))?
             .map_err(CapabilityError::Handler)
+            }
         },
     ));
     let reader_snapshots = snapshots.clone();
@@ -2125,7 +2403,7 @@ async fn read_contribution(
             "Namespace must be a Kubernetes namespace name".into(),
         ));
     }
-    let state = tokio::task::spawn_blocking(move || read(&p))
+    let state = tokio::task::spawn_blocking(move || p.read())
         .await
         .map_err(|e| CapabilityError::Handler(e.to_string()))?
         .map_err(CapabilityError::Handler)?;
@@ -2609,15 +2887,25 @@ mod tests {
         let path = dir.path().join("apps.json");
         let source = include_str!("../tests/fixtures/argocd-manifest.json");
         let signature = include_bytes!("../tests/fixtures/argocd-manifest.sig");
-        signing::verify_for("org.srelens.argocd", source.as_bytes(), signature).unwrap();
+        let shipped = TrustRoot::pinned().shipped();
+        signing::verify_for(
+            "org.srelens.argocd",
+            source.as_bytes(),
+            signature,
+            None,
+            &shipped,
+        )
+        .unwrap();
         let reason = mutate(&path, fake_core(), signed_argocd()).err().unwrap();
         assert!(reason.contains("requires API ^0.1"), "{reason}");
         assert!(read(&path).unwrap().plugins.is_empty());
         let tampered = check_install(
             &format!("{source} "),
             &["k8s.listCustomResource".into()],
-            Some(signature),
+            Some((signature, None)),
             None,
+            &Apps::from(path.clone()).catalog.authority(),
+            &TrustRoot::pinned(),
             fake_core(),
         )
         .unwrap_err();
@@ -2684,6 +2972,7 @@ mod tests {
     fn signed_argocd() -> Configure {
         Configure::Install {
             signature: Some(include_bytes!("../tests/fixtures/argocd-manifest.sig").to_vec()),
+            key_id: None,
             manifest: include_str!("../tests/fixtures/argocd-manifest.json").into(),
             grants: vec!["k8s.listCustomResource".into()],
             reviewed_revision: None,
@@ -2853,15 +3142,22 @@ mod tests {
         use sha2::Digest;
         entry["release"]["sha256"] =
             json!(format!("{:x}", sha2::Sha256::digest(source.as_bytes())));
-        fs::write(path.with_extension("catalog.json"), serde_json::to_vec(&json!({
-            "catalog": release, "fetchedAt": 0, "stale": false, "error": null, "incompatible": []
-        })).unwrap()).unwrap();
+        fs::write(
+            path.with_extension("catalog.json"),
+            catalog::test_cache(
+                &[trust::testing::srelens_publisher()],
+                release["extensions"].clone(),
+                0,
+            ),
+        )
+        .unwrap();
         mutate(
             &path,
             fake_core(),
             Configure::Install {
                 manifest: source,
                 signature: None,
+                key_id: None,
                 grants: vec!["k8s.listCustomResource".into()],
                 reviewed_revision: None,
             },
@@ -3664,6 +3960,7 @@ mod tests {
             bind_builtin(&mut source, group, plural, kind);
             Configure::Install {
                 signature: None,
+                key_id: None,
                 manifest: source.to_string(),
                 grants: vec!["k8s.listCustomResource".into()],
                 reviewed_revision: None,
@@ -3875,6 +4172,7 @@ mod tests {
             core,
             Configure::Install {
                 signature: None,
+                key_id: None,
                 manifest: manifest(),
                 grants: vec!["k8s.listCustomResource".into()],
                 reviewed_revision,
@@ -3909,6 +4207,7 @@ mod tests {
             core.clone(),
             Configure::Install {
                 signature: None,
+                key_id: None,
                 manifest: declared.to_string(),
                 grants: vec!["k8s.listCustomResource".into()],
                 reviewed_revision: None,
@@ -4109,6 +4408,7 @@ mod tests {
                 core.clone(),
                 Configure::Install {
                     signature: None,
+                    key_id: None,
                     manifest: source.to_string(),
                     grants: vec!["k8s.listCustomResource".into()],
                     reviewed_revision,
@@ -4133,6 +4433,7 @@ mod tests {
                 core.clone(),
                 Configure::Install {
                     signature: None,
+                    key_id: None,
                     manifest: source.to_string(),
                     grants: vec!["k8s.listCustomResource".into()],
                     reviewed_revision,
@@ -4228,6 +4529,7 @@ mod tests {
                         core,
                         Configure::Install {
                             signature: None,
+                            key_id: None,
                             manifest: source.to_string(),
                             grants: vec!["k8s.listCustomResource".into()],
                             reviewed_revision: None,
@@ -4269,7 +4571,9 @@ mod tests {
         assert!(signing::verify_for(
             &quarantined.manifest.id,
             proof.manifest.as_bytes(),
-            &proof.signature
+            &proof.signature,
+            None,
+            &TrustRoot::pinned().shipped(),
         )
         .unwrap_err()
         .contains("signature"));
@@ -4368,6 +4672,7 @@ mod tests {
         let official = include_str!("../tests/fixtures/argocd-manifest.json");
         let unsigned = |manifest: &str| Configure::Install {
             signature: None,
+            key_id: None,
             manifest: manifest.into(),
             grants: vec!["k8s.listCustomResource".into()],
             reviewed_revision: None,
@@ -4391,6 +4696,387 @@ mod tests {
             .replace("\"org.srelens.argocd\"", "\"org.srelensx.argocd\"")
             .replace("^0.1", "^0.3");
         assert!(mutate(&path, core, unsigned(&lookalike)).is_ok());
+    }
+    /// A catalog cache beside the inventory at `path` that delegates srelens and the test
+    /// publisher Example Labs, and lists nothing.
+    pub(super) fn cache_delegating_example_labs(path: &Path) {
+        fs::write(
+            path.with_extension("catalog.json"),
+            catalog::test_cache(
+                &[
+                    trust::testing::srelens_publisher(),
+                    trust::testing::example_publisher(),
+                ],
+                json!([]),
+                now(),
+            ),
+        )
+        .unwrap();
+    }
+    /// The example manifest as app `id`, and Example Labs' signature over it, naming its key.
+    pub(super) fn signed_by_example_labs(id: &str) -> (String, Vec<u8>, String) {
+        let key = trust::testing::key(trust::testing::EXAMPLE_SEED);
+        let source = manifest().replacen("org.example.argocd", id, 1);
+        let signature = key.sign(source.as_bytes()).as_ref().to_vec();
+        (source, signature, trust::testing::id(&key))
+    }
+    fn install_signed(source: &str, signature: Vec<u8>, key_id: Option<String>) -> Configure {
+        Configure::Install {
+            signature: Some(signature),
+            key_id,
+            manifest: source.into(),
+            grants: vec!["k8s.listCustomResource".into()],
+            reviewed_revision: None,
+        }
+    }
+    /// Acceptance (#559): a test publisher's key signs an app in its namespace, and the app
+    /// installs as signed by that publisher — and stays so on every load, with no catalog
+    /// at hand, because the install kept the delegation that vouched for it.
+    #[tokio::test]
+    async fn a_publisher_key_signs_an_app_in_its_namespace_and_it_installs_as_signed_by_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("extensions.json");
+        cache_delegating_example_labs(&path);
+        let (source, signature, key_id) = signed_by_example_labs("com.example-labs.gitops");
+
+        let mut reg = Registry::new();
+        register(
+            &mut reg,
+            path.clone(),
+            fake_core(),
+            srelens_kube::client_cache::ClientCache::new_many(vec![]),
+        );
+        // The review names the signer before anything is installed.
+        let report = reg
+            .invoke(
+                "extensions.validate",
+                json!({"manifest": source, "grants": ["k8s.listCustomResource"], "signature": signature, "keyId": key_id}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(report["errors"], json!([]), "{report}");
+        assert_eq!(
+            report["signedBy"],
+            json!({"id": "example", "name": "Example Labs"})
+        );
+
+        let state = mutate(
+            &path,
+            fake_core(),
+            install_signed(&source, signature.clone(), Some(key_id.clone())),
+        )
+        .unwrap();
+        let app = find(&state, "com.example-labs.gitops");
+        assert_eq!(app.signed_by.as_ref().unwrap().name, "Example Labs");
+        let proof = app.signature_proof.as_ref().unwrap();
+        assert!(
+            proof.delegation.is_some(),
+            "this build ships no delegation for Example Labs"
+        );
+        // Reported by `extensions.list` as the caller reads it, and never saved.
+        let listed = reg.invoke("extensions.list", json!({})).await.unwrap();
+        assert_eq!(
+            listed["plugins"][0]["signedBy"],
+            json!({"id": "example", "name": "Example Labs"})
+        );
+        let saved = fs::read_to_string(&path).unwrap();
+        assert!(!saved.contains("signedBy"), "{saved}");
+
+        // With the catalog gone, the kept delegation still vouches for it.
+        fs::remove_file(path.with_extension("catalog.json")).unwrap();
+        let state = read(&path).unwrap();
+        let app = find(&state, "com.example-labs.gitops");
+        assert!(app.enabled && app.quarantined.is_none());
+        assert_eq!(app.signed_by.as_ref().unwrap().name, "Example Labs");
+
+        // The same signature naming no key is verified against the publisher's keys.
+        let dir = tempfile::tempdir().unwrap();
+        let other = dir.path().join("extensions.json");
+        cache_delegating_example_labs(&other);
+        let state = mutate(
+            &other,
+            fake_core(),
+            install_signed(&source, signature, None),
+        )
+        .unwrap();
+        assert_eq!(
+            find(&state, "com.example-labs.gitops")
+                .signed_by
+                .as_ref()
+                .unwrap()
+                .name,
+            "Example Labs"
+        );
+    }
+    /// Acceptance (#559): the same key cannot sign an app in srelens's namespace, whether
+    /// the signature names it or not, and a kept delegation cannot be moved to such an app.
+    #[test]
+    fn a_publisher_key_cannot_sign_an_app_in_the_srelens_namespace() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("extensions.json");
+        cache_delegating_example_labs(&path);
+        let (source, signature, key_id) = signed_by_example_labs("org.srelens.gitops");
+        let refused = mutate(
+            &path,
+            fake_core(),
+            install_signed(&source, signature.clone(), Some(key_id)),
+        )
+        .err()
+        .unwrap();
+        assert!(refused.contains("signed only by srelens"), "{refused}");
+        let refused = mutate(
+            &path,
+            fake_core(),
+            install_signed(&source, signature.clone(), None),
+        )
+        .err()
+        .unwrap();
+        assert!(refused.contains("signature is invalid"), "{refused}");
+        assert!(read(&path).unwrap().plugins.is_empty());
+
+        // An inventory edited to give that app Example Labs' kept delegation: quarantined.
+        // The delegation does not cover the ID; srelens's does, and its key did not sign it.
+        let (own, own_signature, own_key) = signed_by_example_labs("com.example-labs.gitops");
+        mutate(
+            &path,
+            fake_core(),
+            install_signed(&own, own_signature, Some(own_key)),
+        )
+        .unwrap();
+        let mut stored: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        let app = &mut stored["plugins"][0];
+        app["manifest"] = serde_json::from_str(&source).unwrap();
+        app["signatureProof"]["manifest"] = json!(source);
+        app["signatureProof"]["signature"] = json!(signature);
+        fs::write(&path, serde_json::to_vec(&stored).unwrap()).unwrap();
+        let state = read(&path).unwrap();
+        let moved = find(&state, "org.srelens.gitops");
+        assert!(!moved.enabled && moved.signed_by.is_none());
+        let reason = moved.quarantined.as_deref().unwrap();
+        assert!(reason.contains("signature is invalid"), "{reason}");
+    }
+    /// A build with no usable root cannot tell which IDs are reserved, so it installs and
+    /// restores nothing, unsigned or not, and says why (#559).
+    #[test]
+    fn a_host_with_no_pinned_root_installs_and_restores_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("extensions.json");
+        let apps = Apps::with_trust(path.clone(), trust::testing::placeholder_root());
+        let unsigned = |id: &str| Configure::Install {
+            signature: None,
+            key_id: None,
+            manifest: manifest().replacen("org.example.argocd", id, 1),
+            grants: vec!["k8s.listCustomResource".into()],
+            reviewed_revision: None,
+        };
+        for id in ["org.srelens.argocd", "org.example.argocd"] {
+            let refused = super::configure(
+                &apps,
+                fake_core(),
+                &srelens_plugin_host::NoSecretStore,
+                unsigned(id),
+            )
+            .err()
+            .unwrap();
+            assert!(refused.contains("installs nothing"), "{id}: {refused}");
+            assert!(refused.contains("key ceremony"), "{id}: {refused}");
+        }
+        assert!(read(&path).unwrap().plugins.is_empty());
+        // A kept version is not restored either.
+        mutate(&path, fake_core(), unsigned("org.example.argocd")).unwrap();
+        mutate(
+            &path,
+            fake_core(),
+            Configure::Install {
+                signature: None,
+                key_id: None,
+                manifest: manifest_at("0.2.0"),
+                grants: vec!["k8s.listCustomResource".into()],
+                reviewed_revision: Some(1),
+            },
+        )
+        .unwrap();
+        let refused = super::configure(
+            &apps,
+            fake_core(),
+            &srelens_plugin_host::NoSecretStore,
+            Configure::Rollback {
+                id: "org.example.argocd".into(),
+                revision: 1,
+                grants: vec!["k8s.listCustomResource".into()],
+            },
+        )
+        .err()
+        .unwrap();
+        assert!(refused.contains("restores nothing"), "{refused}");
+    }
+    /// A delegation this build ships for a publisher, at the same or a later version,
+    /// replaces the one an install kept: a key the newer delegation withdrew stops
+    /// vouching for what it signed (#559).
+    #[test]
+    fn a_later_shipped_delegation_replaces_the_one_an_install_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("extensions.json");
+        cache_delegating_example_labs(&path);
+        let (source, signature, key_id) = signed_by_example_labs("com.example-labs.gitops");
+        mutate(
+            &path,
+            fake_core(),
+            install_signed(&source, signature, Some(key_id)),
+        )
+        .unwrap();
+        let example = |version, key| {
+            trust::testing::publisher_at(
+                version,
+                "example",
+                "Example Labs",
+                &[trust::testing::public(&trust::testing::key(key))],
+                &["com.example-labs"],
+            )
+        };
+        let srelens = trust::testing::srelens_publisher();
+        // A build shipping version 2 of Example Labs' delegation, without the key that
+        // signed the app: quarantined.
+        let rotated = trust::testing::root_shipping(&[srelens.clone(), example(2, 0x88)]);
+        let state = read_under(&path, &rotated).unwrap();
+        let app = find(&state, "com.example-labs.gitops");
+        assert!(
+            !app.enabled && app.signed_by.is_none(),
+            "{:?}",
+            app.quarantined
+        );
+        // One shipping the version the install kept: still signed by Example Labs.
+        let same =
+            trust::testing::root_shipping(&[srelens, example(1, trust::testing::EXAMPLE_SEED)]);
+        let state = read_under(&path, &same).unwrap();
+        assert_eq!(
+            find(&state, "com.example-labs.gitops")
+                .signed_by
+                .as_ref()
+                .unwrap()
+                .name,
+            "Example Labs"
+        );
+    }
+    /// A catalog that rotates a publisher this build ships changes who signs for it only
+    /// with a later version of its delegation (#559 review): at the same version the
+    /// shipped delegation stands, at install as on every later load, so an app is never
+    /// installed as signed and then quarantined on its next read.
+    #[test]
+    fn a_catalog_rotates_a_shipped_publisher_only_with_a_later_delegation() {
+        let rotated_key = trust::testing::key(0x77);
+        let id = "org.srelens.gitops";
+        let source = manifest().replacen("org.example.argocd", id, 1);
+        let signature = rotated_key.sign(source.as_bytes()).as_ref().to_vec();
+        let key_id = trust::testing::id(&rotated_key);
+        let catalog_rotating_srelens_at = |path: &Path, version| {
+            fs::write(
+                path.with_extension("catalog.json"),
+                catalog::test_cache(
+                    &[trust::testing::publisher_at(
+                        version,
+                        "srelens",
+                        "srelens",
+                        &[trust::testing::public(&rotated_key)],
+                        &["org.srelens"],
+                    )],
+                    json!([]),
+                    now(),
+                ),
+            )
+            .unwrap();
+        };
+        let install = || install_signed(&source, signature.clone(), Some(key_id.clone()));
+
+        // The shipped srelens delegation is version 1: a catalog's version 1 with another
+        // key does not replace it, so the install is refused up front.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("extensions.json");
+        catalog_rotating_srelens_at(&path, 1);
+        let Err(error) = mutate(&path, fake_core(), install()) else {
+            panic!("a same-version rotation replaced the shipped srelens delegation");
+        };
+        assert!(error.contains("srelens"), "{error}");
+        assert!(read(&path).unwrap().plugins.is_empty());
+
+        // Version 2 moves srelens on: the app installs, and its next load agrees.
+        catalog_rotating_srelens_at(&path, 2);
+        let state = mutate(&path, fake_core(), install()).unwrap();
+        let app = find(&state, id);
+        assert!(
+            app.enabled && app.quarantined.is_none(),
+            "{:?}",
+            app.quarantined
+        );
+        assert!(app.signature_proof.as_ref().unwrap().delegation.is_some());
+        let state = read(&path).unwrap();
+        let app = find(&state, id);
+        assert!(
+            app.enabled && app.quarantined.is_none(),
+            "{:?}",
+            app.quarantined
+        );
+        assert_eq!(app.signed_by.as_ref().unwrap().id, "srelens");
+    }
+    /// An expired catalog still reserves its namespaces but vouches for no key: a host kept
+    /// from newer catalogs does not go on trusting a key they may have withdrawn (#559).
+    #[test]
+    fn an_expired_catalog_reserves_namespaces_but_vouches_for_no_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("extensions.json");
+        fs::write(
+            path.with_extension("catalog.json"),
+            catalog::test_cache_expiring(
+                &[
+                    trust::testing::srelens_publisher(),
+                    trust::testing::example_publisher(),
+                ],
+                json!([]),
+                now(),
+                "2020-01-01T00:00:00Z",
+            ),
+        )
+        .unwrap();
+        let (source, signature, key_id) = signed_by_example_labs("com.example-labs.gitops");
+        let refused = mutate(
+            &path,
+            fake_core(),
+            install_signed(&source, signature, Some(key_id)),
+        )
+        .err()
+        .unwrap();
+        assert!(refused.contains("expired on 2020-01-01"), "{refused}");
+        let unsigned = Configure::Install {
+            signature: None,
+            key_id: None,
+            manifest: source,
+            grants: vec!["k8s.listCustomResource".into()],
+            reviewed_revision: None,
+        };
+        let refused = mutate(&path, fake_core(), unsigned).err().unwrap();
+        assert!(
+            refused.contains("reserved for releases signed by Example Labs"),
+            "{refused}"
+        );
+    }
+    /// Namespaces are lowercase, and a local manifest's ID may not be: a change of case does
+    /// not step outside a reservation.
+    #[test]
+    fn a_reserved_namespace_holds_whatever_the_case_of_the_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("extensions.json");
+        let unsigned = Configure::Install {
+            signature: None,
+            key_id: None,
+            manifest: manifest().replacen("org.example.argocd", "org.Srelens.argocd", 1),
+            grants: vec!["k8s.listCustomResource".into()],
+            reviewed_revision: None,
+        };
+        let refused = mutate(&path, fake_core(), unsigned).err().unwrap();
+        assert!(
+            refused.contains("reserved for releases signed by srelens"),
+            "{refused}"
+        );
     }
     /// The saved inventory with the signature proof stripped from the app at `pointer`.
     fn strip_proof(path: &Path, pointer: &str) {
@@ -4428,7 +5114,7 @@ mod tests {
         let reason = stored.quarantined.clone().unwrap();
         assert_eq!(
             reason,
-            "App ID org.srelens.argocd is reserved for signed srelens releases"
+            "App ID org.srelens.argocd is reserved for releases signed by srelens"
         );
         let local = find(&state, "org.example.argocd");
         assert!(local.enabled && local.quarantined.is_none());
@@ -4479,7 +5165,7 @@ mod tests {
         .err()
         .unwrap();
         assert!(
-            refused.contains("reserved for signed srelens releases"),
+            refused.contains("reserved for releases signed by srelens"),
             "{refused}"
         );
         assert_eq!(fs::read(&path).unwrap(), before);

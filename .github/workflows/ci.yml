@@ -76,6 +76,11 @@ jobs:
         # which (#31) — a wrong bucket silently publishes a bogus comparison.
         # Pure unit tests: no network, so they run on every PR.
         run: node --test scripts/perf/size-baseline.test.mjs
+      - name: Trust signing script tests
+        # What scripts/extensions/trust.mjs refuses to sign (#559): a root below its
+        # threshold, or a catalog missing its entries, which every host would refuse or
+        # publish as empty. Fresh keys, no network.
+        run: node --test scripts/extensions/trust.test.mjs
 
   backend:
     name: backend

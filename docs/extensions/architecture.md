@@ -91,8 +91,9 @@ extension replaced by `extensions.json`, so `settings.extensions.json`.
 ## Quarantine
 
 Every load re-verifies each installed app: its manifest against this host's supported
-API versions and rules, and a signed app's stored proof against the trusted publisher
-table. An app that fails is **quarantined on its own**:
+API versions and rules, and a signed app's stored proof against the publisher delegation
+that vouched for it, under the root the host pins ([trust.md](trust.md#installed-apps)).
+An app that fails is **quarantined on its own**:
 
 - it loads disabled, with its reason shown in Settings → Apps
 - it cannot be re-enabled until it is reinstalled or removed
