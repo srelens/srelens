@@ -294,7 +294,37 @@ fn uses_of_0_5() -> Vec<(&'static str, Use)> {
                 "title":"Argo CD version","target":"k8s.exec","inputs":[],
                 "arguments":{"command":["argocd","version","--client"]}}));
         }),
+        // Metric, log and trace providers (#569), each through a `network.http`
+        // binding, which API 0.4 already had: the provider list is the one new field.
+        ("contributions.metricProviders", |v| {
+            with_request(v, "/api/v1/query_range");
+            v["contributions"]["metricProviders"] = json!([{"id":"cpu","title":"CPU",
+                "capability":"request","language":"promql","forKinds":["apps/Deployment"],
+                "unit":"cores","query":"sum(rate(container_cpu_usage_seconds_total{namespace=\"${namespace}\"}[${step}]))"}]);
+        }),
+        ("contributions.logProviders", |v| {
+            with_request(v, "/loki/api/v1/query_range");
+            v["contributions"]["logProviders"] = json!([{"id":"loki","title":"Loki",
+                "capability":"request","language":"logql","forKinds":["/Pod"],
+                "query":"{namespace=\"${namespace}\", pod=\"${pod}\"}"}]);
+        }),
+        ("contributions.traceProviders", |v| {
+            with_request(v, "/api/search");
+            v["contributions"]["traceProviders"] = json!([{"id":"traces","title":"Traces",
+                "capability":"request","language":"traceql","forKinds":["/Pod"],
+                "query":"{ resource.k8s.pod.name = \"${pod}\" }"}]);
+        }),
     ]
+}
+
+/// A `network.http` binding named `request` to `path` on one granted host.
+fn with_request(v: &mut Value, path: &str) {
+    v["permissions"].as_array_mut().unwrap().push(
+        json!({"capability":"network.http","hosts":["observability.example.com"]}),
+    );
+    v["capabilities"].as_array_mut().unwrap().push(json!({"name":"request",
+        "title":"Query","target":"network.http","inputs":[],
+        "arguments":{"url":"https://observability.example.com","path":path}}));
 }
 
 #[test]
