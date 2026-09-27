@@ -271,17 +271,18 @@ pub(crate) mod tests {
             .window()
     }
 
-    /// An API server that accepts connections and never answers, so a watch
-    /// or exec aimed at it stays running until it is stopped. Counts the
-    /// connections it accepted and the ones the client has since dropped.
-    struct Silent {
+    /// An API server that accepts connections and never answers, so a watch,
+    /// exec or read aimed at it stays running until it is stopped. Counts the
+    /// connections it accepted and the ones the client has since dropped. Its
+    /// context is `silent`.
+    pub(crate) struct Silent {
         kubeconfig: tempfile::TempDir,
         accepted: Arc<AtomicUsize>,
         dropped: Arc<AtomicUsize>,
     }
 
     impl Silent {
-        fn start() -> Self {
+        pub(crate) fn start() -> Self {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             let port = listener.local_addr().unwrap().port();
             let accepted = Arc::new(AtomicUsize::new(0));
@@ -320,6 +321,14 @@ pub(crate) mod tests {
             self.accepted.load(Ordering::SeqCst) - self.dropped.load(Ordering::SeqCst)
         }
 
+        /// A client cache whose one context, `silent`, reaches this server.
+        pub(crate) fn cache(&self) -> Arc<srelens_kube::client_cache::ClientCache> {
+            srelens_kube::client_cache::ClientCache::new_many(vec![self
+                .kubeconfig
+                .path()
+                .join("config")])
+        }
+
         /// A MockRuntime app with every stream manager this module ends,
         /// reaching this server, and windows `main` and `ctx-1`.
         fn app(
@@ -329,10 +338,7 @@ pub(crate) mod tests {
             Window<MockRuntime>,
             Window<MockRuntime>,
         ) {
-            let cache = srelens_kube::client_cache::ClientCache::new_many(vec![self
-                .kubeconfig
-                .path()
-                .join("config")]);
+            let cache = self.cache();
             let app = tauri::test::mock_app();
             app.manage(WatchManager::new(cache.clone()));
             app.manage(ExecManager::new(cache));

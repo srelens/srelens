@@ -141,8 +141,13 @@ mod tests {
         use std::sync::Mutex;
         use tauri::Listener;
         let dir = tempfile::tempdir().unwrap();
+        // A cluster that accepts and never answers, so the stream's first read
+        // waits and the stream is still open when this test cancels it. Against
+        // a context that does not exist, the read fails at once and ends the
+        // stream, racing the cancels below.
+        let server = crate::window_streams::tests::Silent::start();
         let (registry, streams) = srelens_registry::build_registry_and_app_streams(
-            ClientCache::new_many(vec![]),
+            server.cache(),
             vec![],
             Some(dir.path().join("settings.json")),
         );
@@ -186,7 +191,7 @@ mod tests {
         let (on_event, got) = crate::sink::tests::recording();
         let opened = extension_stream_open(
             json!({"id": "org.example.one", "revision": revision, "view": "page#1",
-                   "channel": "extstream:one", "context": "c", "namespace": "ns",
+                   "channel": "extstream:one", "context": "silent", "namespace": "ns",
                    "source": {"kind": "read", "capability": "workloads"}}),
             on_event,
             main.clone(),
