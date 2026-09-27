@@ -2,10 +2,11 @@
 //! the revision it was started for.
 //!
 //! A sidecar starts on its app's first operation call here, not at install: a process
-//! that never calls one never runs it. Before it starts, its binary is checked against
-//! the digest list its package was unpacked with, so a file changed on disk since the
-//! install is refused, not run. It gets one writable directory of its own, beside the
-//! inventory, and none of this process's environment.
+//! that never calls one never runs it. Before every start, the restarts after a crash
+//! included, its binary is checked against the digest list its package was unpacked
+//! with ([`Verifying`]), so a file changed on disk since the install is refused, not
+//! run. It gets one writable directory of its own, beside the inventory, and none of
+//! this process's environment.
 //!
 //! An announced inventory write ([`AppSidecars::reconcile`]) stops every sidecar whose
 //! app is gone, off, blocked, quarantined or at another revision; its callers still
@@ -14,8 +15,8 @@ use super::{package, Installed, Inventory};
 use serde_json::{Map, Value};
 use srelens_capability::CapabilityError;
 use srelens_plugin_host::sidecar::{
-    Launcher, Limits, NoBroker, OsSandbox, Policy, SandboxConfig, SidecarCommand, SidecarConfig,
-    SidecarStatus, Supervisor,
+    Enforcement, LaunchError, Launched, Launcher, Limits, NoBroker, OsSandbox, Policy,
+    SandboxConfig, SidecarCommand, SidecarConfig, SidecarStatus, Supervisor,
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -56,6 +57,50 @@ fn sandbox_config() -> SandboxConfig {
     SandboxConfig {
         launcher,
         cgroup_root,
+    }
+}
+
+/// Starts a sidecar through `inner` only after checking its binary against the digest
+/// list its package was unpacked with, at every launch: the supervisor relaunches the
+/// same path after each crash, and a file replaced in between must not run unchecked.
+/// A binary that no longer matches is refused, as a missing sandbox is, and the
+/// supervisor does not retry it.
+///
+/// The check reads the whole binary on the supervisor's task. What it cannot close is
+/// the moment between the hash and the exec: binding the exec to the checked bytes
+/// needs an exec by descriptor, which the three launch backends do not share. The
+/// directory is the owner's alone (`0700`), so whatever could swap the file in that
+/// moment already runs as the person, with everything that grants.
+struct Verifying {
+    inner: Arc<dyn Launcher>,
+    binary: InstalledBinary,
+}
+
+/// Which file of which installed version a sidecar runs.
+struct InstalledBinary {
+    packages: PathBuf,
+    id: String,
+    digest: String,
+    /// Its package path, `bin/<platform>/<file>`.
+    path: String,
+}
+
+impl Launcher for Verifying {
+    fn enforcement(&self) -> Enforcement {
+        self.inner.enforcement()
+    }
+
+    fn launch(&self, command: &SidecarCommand, limits: &Limits) -> Result<Launched, LaunchError> {
+        let binary = &self.binary;
+        let program =
+            package::installed_binary(&binary.packages, &binary.id, &binary.digest, &binary.path)
+                .map_err(LaunchError::Unavailable)?;
+        if program != command.program {
+            return Err(LaunchError::Unavailable(
+                "The sidecar to start is not the binary its package names".into(),
+            ));
+        }
+        self.inner.launch(command, limits)
     }
 }
 
@@ -124,13 +169,16 @@ impl AppSidecars {
         // Checking the binary reads it whole; not on an executor thread, and not under
         // the lock.
         let (packages, data, checked) = (self.packages.clone(), self.data.clone(), app.clone());
-        let config = tokio::task::spawn_blocking(move || {
+        let (config, binary) = tokio::task::spawn_blocking(move || {
             config_for(packages.as_deref(), data.as_deref(), &checked)
         })
         .await
         .map_err(|e| CapabilityError::Handler(e.to_string()))?
         .map_err(CapabilityError::Handler)?;
-        let launcher = self.launcher.lock().unwrap().clone();
+        let launcher: Arc<dyn Launcher> = Arc::new(Verifying {
+            inner: self.launcher.lock().unwrap().clone(),
+            binary,
+        });
         let mut running = self.running.lock().unwrap();
         // Another call may have started it meanwhile.
         if let Some(current) = running
@@ -202,12 +250,13 @@ fn stop(supervisor: Arc<Supervisor>) {
     }
 }
 
-/// What starting `app`'s sidecar runs, or why it cannot here.
+/// What starting `app`'s sidecar runs, and the installed file each launch checks it
+/// against, or why it cannot run here.
 fn config_for(
     packages: Option<&Path>,
     data: Option<&Path>,
     app: &Installed,
-) -> Result<SidecarConfig, String> {
+) -> Result<(SidecarConfig, InstalledBinary), String> {
     let (Some(packages), Some(data)) = (packages, data) else {
         return Err(NO_FILES.into());
     };
@@ -226,13 +275,15 @@ fn config_for(
         .package
         .as_deref()
         .ok_or("This app has no package to run its sidecar from")?;
+    // Checked here too, so a changed binary is the call's refusal rather than a
+    // supervisor that starts only to refuse.
     let program = package::installed_binary(packages, &manifest.id, digest, binary)?;
     // Beside the inventory, one directory per app, as its packages are. The per-app,
     // size-limited data directory is #573's; this is the one path it may write today.
     let data_dir = data.join(manifest.id.to_ascii_lowercase());
     crate::durable::create_private_dir_all(&data_dir)
         .map_err(|e| format!("Could not create the app's data directory: {e}"))?;
-    Ok(SidecarConfig {
+    let config = SidecarConfig {
         command: SidecarCommand {
             app_id: manifest.id.clone(),
             program,
@@ -244,7 +295,14 @@ fn config_for(
         },
         limits: Limits::default(),
         policy: Policy::default(),
-    })
+    };
+    let binary = InstalledBinary {
+        packages: packages.to_path_buf(),
+        id: manifest.id.clone(),
+        digest: digest.to_owned(),
+        path: binary.to_owned(),
+    };
+    Ok((config, binary))
 }
 
 /// Removes the data directory of every app `state` no longer holds. Called with the
@@ -369,6 +427,8 @@ pub(super) mod fake {
                             json!({"result": {}})
                         }
                         "fail" => json!({"error": {"code": 1, "message": "the scan failed"}}),
+                        // Dies without answering, as a crash would.
+                        "crash" => break,
                         _ => json!({"result": {"operation": method,
                             "params": message["params"], "launch": launch}}),
                     };
@@ -518,6 +578,46 @@ mod tests {
             "{refused}"
         );
         assert_eq!(fake.launches(), 0);
+    }
+
+    /// The supervisor relaunches after a crash; a binary replaced in between is refused
+    /// at that relaunch, not run.
+    #[tokio::test]
+    async fn a_binary_changed_after_a_crash_is_refused_at_the_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("extensions.json");
+        install_scanner(&path);
+        let fake = FakeSidecar::default();
+        let sidecars = sidecars(&path, &fake);
+        let app = scanner(&path);
+        sidecars.request(&app, "scan", scan("nginx")).await.unwrap();
+        let platform = srelens_plugin_host::host_platform().unwrap();
+        let binary = path
+            .with_extension("packages")
+            .join(SCANNER)
+            .join(app.package.as_deref().unwrap())
+            .join("bin")
+            .join(platform)
+            .join("scanner");
+        std::fs::write(&binary, b"#!/bin/sh\necho swapped\n").unwrap();
+        // It dies; the supervisor waits out its first backoff and launches again.
+        assert!(sidecars.request(&app, "crash", Map::new()).await.is_err());
+        for _ in 0..500 {
+            if matches!(
+                sidecars.status(SCANNER),
+                Some(SidecarStatus::Refused { .. })
+            ) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        match sidecars.status(SCANNER) {
+            Some(SidecarStatus::Refused { reason }) => {
+                assert!(reason.contains("no longer matches its digest"), "{reason}")
+            }
+            other => panic!("the restart was not refused: {other:?}"),
+        }
+        assert_eq!(fake.launches(), 1, "the swapped binary was launched");
     }
 
     #[tokio::test]

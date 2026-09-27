@@ -46,8 +46,11 @@ network, filesystem, process, kubeconfig or credential access.
 Installed apps' operations are MCP tools, `plugin/<id>/<operation>`
 ([#574](https://github.com/srelens/srelens/issues/574)): a snapshot per inventory that
 routes each call through the revision-checked read and action facades, rebuilt and
-announced with `tools/list_changed` as apps change, the old snapshot revoked. Multi-user web installations remain disabled until
-per-user inventory and lifecycle isolation are implemented.
+announced with `tools/list_changed` as apps change, the old snapshot revoked. The web
+host keeps one inventory per user ([#515](https://github.com/srelens/srelens/issues/515)),
+held to the operator's extension policy
+([#578](https://github.com/srelens/srelens/issues/578)), but serves no app tools and runs
+no executable app: its capability route refuses every `plugin/…` id.
 
 ## Native platform roadmap
 

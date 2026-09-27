@@ -593,7 +593,14 @@ fn binaries_install_only_as_the_ones_an_executable_manifest_runs() {
         "{why}"
     );
     executable["sidecar"]["binaries"]["windows-amd64"] = json!("bin/windows-amd64/tool.exe");
-    check_installable(&with(Some(executable))).unwrap();
+    check_installable(&with(Some(executable.clone()))).unwrap();
+    // One that cannot be read is refused for that, not as running none.
+    let mut unreadable = executable;
+    unreadable["sidecar"]["entrypoint"] = json!("bin/linux-amd64/tool");
+    let why = check_installable(&with(Some(unreadable))).unwrap_err();
+    assert!(why.contains("its manifest cannot be read"), "{why}");
+    assert!(why.contains("unknown field `entrypoint`"), "{why}");
+    assert!(!why.contains("runs none"), "{why}");
 }
 
 fn entries(dir: &Path) -> Vec<String> {

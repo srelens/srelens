@@ -570,9 +570,15 @@ pub(super) fn check_installable(package: &Package) -> Result<(), String> {
     if !package.carries_binaries() {
         return Ok(());
     }
-    let named: BTreeSet<String> = Manifest::decode(&package.manifest)
-        .ok()
-        .and_then(|manifest| manifest.sidecar)
+    // A manifest that cannot be read says nothing about which binaries it runs: that is
+    // its own problem, reported as such, never "runs none".
+    let manifest = Manifest::decode(&package.manifest).map_err(|errors| {
+        format!(
+            "This package carries binaries under bin/, and its manifest cannot be read: {errors}"
+        )
+    })?;
+    let named: BTreeSet<String> = manifest
+        .sidecar
         .map(|sidecar| sidecar.binaries.into_values().collect())
         .unwrap_or_default();
     if named.is_empty() {

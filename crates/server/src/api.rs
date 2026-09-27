@@ -505,7 +505,7 @@ pub(crate) mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn an_apps_operations_are_never_served_on_the_web() {
         let state = apps_state().await;
-        let (_, alice) = sign_in(&state, "alice").await;
+        let (alice_id, alice) = sign_in(&state, "alice").await;
         let (status, _) = call(
             &state,
             &alice,
@@ -515,15 +515,20 @@ pub(crate) mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        let registry = srelens_registry::build_registry_for_user(
-            srelens_kube::client_cache::ClientCache::new_many(vec![]),
-            vec![],
-            srelens_registry::Apps::with_shared_catalog(
-                Arc::new(std::path::PathBuf::from("/nonexistent/inventory.json")),
-                srelens_registry::SharedCatalog::new("/nonexistent/catalog.json".into()),
-            ),
-        );
-        assert!(!registry.ids().iter().any(|id| id.starts_with(super::WEB_DENIED_PREFIX)));
+        // The registry her calls are dispatched to, with the app installed in it.
+        let env = state
+            .user_envs
+            .env_for(&state.db, &state.master_key, alice_id)
+            .await
+            .unwrap();
+        let (status, listed) = call(&state, &alice, "extensions.list", json!({})).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(apps(&listed), ["org.example.argocd"]);
+        assert!(!env
+            .registry
+            .ids()
+            .iter()
+            .any(|id| id.starts_with(super::WEB_DENIED_PREFIX)));
         for id in [
             "plugin%2Forg.example.argocd%2Fapplications",
             "plugin%2Forg.example.argocd%2Fsync",
