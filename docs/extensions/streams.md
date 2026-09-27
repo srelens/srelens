@@ -424,8 +424,9 @@ streams that ended because their window closed or reloaded. `extensionStreamMetr
 
 ## Hosts
 
-- **Desktop:** frames are Tauri events on the stream's channel, through the
-  same `EventSink` every other stream uses.
+- **Desktop:** frames travel on the `onEvent` IPC channel the opening page
+  passed, as `{ event, payload }`, through a `ChannelSink`, so only that page
+  receives them ([#733](https://github.com/srelens/srelens/issues/733)).
 - **Web:** the three commands are refused (`WEB_DENIED_COMMANDS`). Each user
   has their own apps there ([#515](https://github.com/srelens/srelens/issues/515)),
   but the server does not yet open a user's streams or carry their frames, so
