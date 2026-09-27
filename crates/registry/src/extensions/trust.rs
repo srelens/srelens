@@ -119,8 +119,10 @@ pub(super) struct Envelope {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub(super) struct EnvelopeSignature {
-    /// Which key made it. Only narrows which key is tried: a signature counts when that
-    /// key verifies it, and only if the role lists the key.
+    /// Which key made it: DSSE's optional, unauthenticated hint. One that names a key
+    /// narrows the search to that key; one left out, or empty, is tried against each of
+    /// the role's keys. Either way a signature counts only when a key the role lists
+    /// verifies it, and each key counts once.
     #[serde(default)]
     pub(super) keyid: String,
     /// The Ed25519 signature, in base64.
@@ -225,16 +227,18 @@ impl Role {
         // A key counts once, however many of its signatures an envelope repeats.
         let mut signed = BTreeSet::new();
         for signature in &envelope.signatures {
-            let Some(key) = self.keys.iter().find(|key| key.id == signature.keyid) else {
-                continue;
-            };
-            if signed.contains(&key.id) {
-                continue;
-            }
             let Ok(bytes) = decode_base64(&signature.sig, 64) else {
                 continue;
             };
-            if key.verify(&message, &bytes) {
+            // At most MAX_SIGNATURES of MAX_KEYS verifications, for an envelope that names
+            // no key.
+            let verified = self
+                .keys
+                .iter()
+                .filter(|key| signature.keyid.is_empty() || key.id == signature.keyid)
+                .filter(|key| !signed.contains(&key.id))
+                .find(|key| key.verify(&message, &bytes));
+            if let Some(key) = verified {
                 signed.insert(key.id.clone());
             }
         }
@@ -917,6 +921,24 @@ mod tests {
         let mut forged = sign_json(ROOT_TYPE, &payload, &[&keys[0], &stranger]);
         forged.signatures[1].keyid = id(&keys[1]);
         assert!(TrustRoot::from_signed_root(&serde_json::to_vec(&forged).unwrap()).is_err());
+        // DSSE's keyid is optional: signatures that leave it out are tried against each key.
+        let mut unnamed = serde_json::to_value(&both).unwrap();
+        for signature in unnamed["signatures"].as_array_mut().unwrap() {
+            signature.as_object_mut().unwrap().remove("keyid");
+        }
+        assert!(TrustRoot::from_signed_root(&serde_json::to_vec(&unnamed).unwrap()).is_ok());
+        // And each key still counts once, and a key the root does not list for nothing.
+        let unnamed_as = |mut envelope: Envelope| {
+            for signature in &mut envelope.signatures {
+                signature.keyid.clear();
+            }
+            TrustRoot::from_signed_root(&serde_json::to_vec(&envelope).unwrap())
+        };
+        let refused = unnamed_as(twice).unwrap_err();
+        assert!(refused.contains("1 of the 2"), "{refused}");
+        let refused =
+            unnamed_as(sign_json(ROOT_TYPE, &payload, &[&keys[0], &stranger])).unwrap_err();
+        assert!(refused.contains("1 of the 2"), "{refused}");
     }
 
     #[test]

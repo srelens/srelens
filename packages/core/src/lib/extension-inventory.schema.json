@@ -873,7 +873,7 @@
       "properties": {
         "keyid": {
           "default": "",
-          "description": "Which key made it. Only narrows which key is tried: a signature counts when that key verifies it, and only if the role lists the key.",
+          "description": "Which key made it: DSSE's optional, unauthenticated hint. One that names a key narrows the search to that key; one left out, or empty, is tried against each of the role's keys. Either way a signature counts only when a key the role lists verifies it, and each key counts once.",
           "type": "string"
         },
         "sig": {
