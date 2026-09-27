@@ -181,12 +181,13 @@ Node.js.
    `srelens-apps.pub` is the published release key's 32 raw bytes (the public half of
    `APP_SIGNING_PRIVATE_KEY`; it matches `signing-public.pem` in the app repositories).
 
-5. **Check and commit.** Remove the `#[ignore]` from
-   `the_pinned_root_verifies_and_delegates_org_srelens_to_the_release_key` in
-   `crates/registry/src/extensions/trust.rs`, then:
+5. **Check and commit.** `the_pinned_root_verifies_and_delegates_org_srelens_to_the_release_key`
+   in `crates/registry/src/extensions/trust.rs` checks the pinned documents. Run it and the
+   rest of the trust tests in a workspace build, whose features are the ones CI unifies
+   (`cargo test -p` can build the crate with others, see AGENTS.md):
 
    ```bash
-   cargo test -p srelens-registry --lib extensions::trust
+   cargo test --workspace --lib -- extensions::trust
    ```
 
    Commit `trust/root.json` and `trust/publishers.json`. Keep `srelens.json` for the
