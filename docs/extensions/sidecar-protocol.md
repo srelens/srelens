@@ -517,7 +517,7 @@ outside this: it is not a path, and whether a sidecar can write there was not ch
 |---|---|
 | A manifest kind that runs a sidecar, and registering its operations as capabilities and MCP tools | [#574](https://github.com/srelens/srelens/issues/574) |
 | Starting a sidecar for an installed app, its data directory under `Apps::data_root`, and the desktop's `Consent`: the host confirmation of [#552](https://github.com/srelens/srelens/issues/552) | [#574](https://github.com/srelens/srelens/issues/574) |
-| A "Clear data" action for an app refused for its data directory | [#575](https://github.com/srelens/srelens/issues/575) |
+| A "Clear data" action for an app refused for its data directory (`DataDir::clear` is there; the Inspector, #575, is where a person would find it) | not filed yet |
 | Per-app logs, the Inspector, runtime metrics | [#575](https://github.com/srelens/srelens/issues/575) |
 | JSON Schema for these messages, and the Rust and Go SDKs | [#576](https://github.com/srelens/srelens/issues/576) |
 | Memory and CPU limits on macOS | [#713](https://github.com/srelens/srelens/issues/713) |
