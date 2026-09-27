@@ -555,16 +555,24 @@ impl Connection {
         let connection = self.clone();
         tokio::spawn(async move {
             let outcome = tokio::select! {
-                outcome = broker.call(&name, params) => outcome,
+                // A cancellation already accepted wins over an answer ready
+                // in the same moment: the sidecar was told it is cancelled.
+                biased;
                 // Cancelled by the sidecar, or the session ended.
                 _ = cancelled => Err(RpcError::new(
                     code::REQUEST_CANCELLED,
                     format!("`{name}` was cancelled"),
                 )),
+                outcome = broker.call(&name, params) => outcome,
             };
             drop(permit);
-            connection.state().calls.remove(&key);
+            // The id is freed and the answer queued under the one lock the
+            // reader checks a new call's id under: a call reusing it is
+            // admitted only once this answer is ahead of its own.
+            let mut state = connection.state();
+            state.calls.remove(&key);
             place.send(protocol::response(&id, &outcome));
+            drop(state);
         });
         Ok(())
     }
@@ -1342,6 +1350,25 @@ mod tests {
         assert_eq!(reply["id"], "c-1");
         assert_eq!(reply["error"]["code"], code::REQUEST_CANCELLED);
         assert_eq!(dropped.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    /// A cancellation srelens accepted is what the sidecar is told, even when
+    /// the broker's answer was ready in the same moment: polled in random
+    /// order, the two would each win half the time.
+    #[tokio::test(start_paused = true)]
+    async fn an_accepted_cancellation_wins_over_an_answer_ready_at_the_same_time() {
+        for n in 0..64 {
+            let (connection, mut lines) = Connection::new(limits());
+            // NoBroker answers at once: its answer is ready when first polled.
+            call_from_sidecar(&connection, json!(n), "host/read").unwrap();
+            cancel_call(&connection, &broker(), json!(n));
+            let reply = answered(&mut lines).await;
+            assert_eq!(
+                reply["error"]["code"],
+                code::REQUEST_CANCELLED,
+                "round {n}: {reply}"
+            );
+        }
     }
 
     #[tokio::test(start_paused = true)]

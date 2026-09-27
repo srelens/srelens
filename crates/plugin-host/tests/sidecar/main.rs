@@ -757,6 +757,37 @@ impl srelens_plugin_host::sidecar::Broker for Waiting {
     }
 }
 
+/// The same while it is still starting: a sidecar may call the host before
+/// it has answered `initialize`, and its session is not yet the running one.
+#[tokio::test(start_paused = true)]
+async fn dropping_the_supervisor_while_it_starts_drops_the_calls_the_sidecar_made() {
+    let launcher = FakeLauncher::new(|call| {
+        (call.method == "initialize").then(|| {
+            call.call_host("c-1", "host/action", json!({}));
+            Reply::Silent
+        })
+    });
+    let (started, mut calls) = tokio::sync::mpsc::unbounded_channel();
+    let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let broker = Waiting {
+        started,
+        dropped: dropped.clone(),
+    };
+    let supervisor = Supervisor::start(config(), Arc::new(launcher.clone()), Arc::new(broker));
+    tokio::time::timeout(secs(3600), calls.recv())
+        .await
+        .expect("the sidecar's call reached the broker");
+    assert_eq!(supervisor.status(), SidecarStatus::Starting);
+    drop(supervisor);
+    for _ in 0..20 {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        dropped.load(std::sync::atomic::Ordering::SeqCst),
+        "the call outlived the supervisor"
+    );
+}
+
 /// A confirmation must not outlive the process that asked for it: dropping
 /// the supervisor ends the session, and with it every call the sidecar made.
 #[tokio::test(start_paused = true)]

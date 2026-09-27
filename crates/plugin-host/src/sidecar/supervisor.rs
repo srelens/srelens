@@ -139,6 +139,10 @@ struct Shared {
     enforcement: Enforcement,
     /// The session, while the sidecar is running.
     connection: Mutex<Option<Connection>>,
+    /// The latest session, from its launch until the next: what dropping the
+    /// supervisor ends, while it starts and stops too, when `connection` is
+    /// not set but the sidecar's calls to the host may be waiting (#573).
+    session: Mutex<Option<Connection>>,
     /// The app's log: the host's, shared with the Inspector (#575).
     log: AppLog,
     recorder: Mutex<Recorder>,
@@ -195,6 +199,10 @@ impl Shared {
     fn set_connection(&self, connection: Option<Connection>) {
         *self.connection.lock().unwrap_or_else(|p| p.into_inner()) = connection;
     }
+
+    fn set_session(&self, session: Connection) {
+        *self.session.lock().unwrap_or_else(|p| p.into_inner()) = Some(session);
+    }
 }
 
 /// Supervises one sidecar. Dropping it stops the sidecar at once.
@@ -207,9 +215,16 @@ pub struct Supervisor {
 impl Drop for Supervisor {
     fn drop(&mut self) {
         // The session first: every call the sidecar made is cancelled, so no
-        // confirmation it asked for is left open for a process that is gone.
-        if let Some(connection) = self.shared.connection() {
-            connection.end("The extension was stopped");
+        // confirmation it asked for is left open for a process that is gone,
+        // whether it was running, starting or being stopped.
+        let session = self
+            .shared
+            .session
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        if let Some(session) = session {
+            session.end("The extension was stopped");
         }
         // Aborting drops the process handle, which kills the sidecar.
         self.task.abort();
@@ -243,6 +258,7 @@ impl Supervisor {
             limits: config.limits.clone(),
             enforcement: launcher.enforcement(),
             connection: Mutex::new(None),
+            session: Mutex::new(None),
             log,
             recorder: Mutex::new(Recorder::default()),
             memory: Mutex::new(None),
@@ -602,6 +618,7 @@ async fn start(
         Err(LaunchError::Failed(why)) => return Started::Failed(why),
     };
     let (connection, lines) = Connection::new(config.limits.clone());
+    shared.set_session(connection.clone());
     tokio::spawn(connection::write(lines, launched.stdin));
     tokio::spawn(read_log(shared.clone(), launched.stderr));
     let mut reader = Some(tokio::spawn({

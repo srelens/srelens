@@ -253,8 +253,11 @@ call stops when the sidecar stops waiting for it.
 
 - **Cancelling.** A sidecar cancels its own call with the notification `$/cancelRequest`
   `{"id": <its id>}`. The call is answered at once with `-32800`, and whatever it was waiting
-  on, a person's confirmation included, is dropped. A write a person already approved
-  finishes (see above). A cancellation for a call already answered is ignored.
+  on, a person's confirmation included, is dropped. A cancellation srelens has accepted
+  is the answer even if the result was ready in the same moment. A write a person already
+  approved still finishes (see above), so for one `-32800` means srelens stopped waiting,
+  not that nothing ran: the audit trail has its outcome. A cancellation for a call already
+  answered is ignored.
 - **When the session ends**, and when the supervisor is dropped, every call still being
   answered is cancelled: no confirmation is left open for a process that is gone.
 - **Ids.** A call may not reuse the id of a call still being answered; that is a protocol
