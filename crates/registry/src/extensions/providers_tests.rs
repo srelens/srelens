@@ -73,6 +73,17 @@ async fn harness(server: &Server, context: &str) -> Harness {
 }
 
 async fn harness_with(server: &Server, context: &str, manifest: Value) -> Harness {
+    let url = format!("http://{}", server.addr);
+    harness_for(
+        context,
+        manifest,
+        json!({"prometheusUrl":url,"lokiUrl":url,"tempoUrl":url}),
+    )
+    .await
+}
+
+/// `manifest`, installed as [`APP`] with `settings` saved and loopback HTTP allowed.
+async fn harness_for(context: &str, manifest: Value, settings: Value) -> Harness {
     let dir = tempfile::tempdir().unwrap();
     let kubeconfig = kubeconfig(dir.path(), context);
     let path = dir.path().join("settings.extensions.json");
@@ -96,11 +107,9 @@ async fn harness_with(server: &Server, context: &str, manifest: Value) -> Harnes
         .await
         .unwrap();
     let revision = installed["plugins"][0]["revision"].clone();
-    let url = format!("http://{}", server.addr);
     reg.invoke(
         "extensions.configure",
-        json!({"action":"settings","id":APP,
-            "settings":{"prometheusUrl":url,"lokiUrl":url,"tempoUrl":url}}),
+        json!({"action":"settings","id":APP,"settings":settings}),
     )
     .await
     .unwrap();
@@ -642,4 +651,93 @@ fn the_access_review_lists_each_provider_with_its_query() {
                 && item.contains("every 5 s while a log view is open")),
         "{diff:?}"
     );
+}
+
+/// A reference example as written, under [`APP`]: the examples' `org.srelens` IDs are
+/// reserved for signed releases, which a test does not install.
+fn reference(source: &str) -> Value {
+    let mut manifest: Value = serde_json::from_str(source).unwrap();
+    manifest["id"] = json!(APP);
+    manifest
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_prometheus_reference_charts_each_workload_and_pod_query() {
+    let prometheus = server(|target| {
+        if target.starts_with("/api/v1/query_range?") {
+            matrix(target, 2)
+        } else {
+            Reply::Status(404, "Not Found")
+        }
+    })
+    .await;
+    let url = format!("http://{}", prometheus.addr);
+    let h = harness_for(
+        "kind-dev",
+        reference(include_str!("../../../../examples/extensions/prometheus.json")),
+        json!({"prometheusUrl": url}),
+    )
+    .await;
+    for (provider, kind, name) in [
+        ("cpu", "apps/Deployment", "web"),
+        ("memory", "apps/StatefulSet", "db"),
+        ("podCpu", "/Pod", "web-1"),
+        ("podMemory", "/Pod", "web-1"),
+    ] {
+        let answer = h
+            .query(json!({"provider":provider,"resourceKind":kind,"name":name}))
+            .await
+            .unwrap_or_else(|e| panic!("{provider}: {e}"));
+        assert_eq!(answer["kind"], "metrics", "{provider}");
+        assert_eq!(answer["chart"]["series"].as_array().unwrap().len(), 2, "{provider}");
+    }
+    let asked: Vec<String> = prometheus
+        .seen()
+        .iter()
+        .map(|seen| params(&seen.target)["query"].clone())
+        .collect();
+    assert_eq!(
+        asked[0],
+        "sum by (pod) (rate(container_cpu_usage_seconds_total{namespace=\"team\", pod=~\"web-.+\", container!=\"\"}[5m]))"
+    );
+    assert!(asked[2].contains("pod=\"web-1\""), "{}", asked[2]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_loki_reference_follows_a_pod_and_reads_a_workloads_lines() {
+    let loki = server(|target| {
+        if target.starts_with("/loki/api/v1/query_range?") {
+            streams(&[(1_700_000_000_000_000_000, "ready")])
+        } else {
+            Reply::Status(404, "Not Found")
+        }
+    })
+    .await;
+    let url = format!("http://{}", loki.addr);
+    let h = harness_for(
+        "kind-dev",
+        reference(include_str!("../../../../examples/extensions/loki.json")),
+        json!({"lokiUrl": url}),
+    )
+    .await;
+    let answer = h
+        .query(json!({"provider":"workload","resourceKind":"apps/Deployment","name":"web"}))
+        .await
+        .unwrap();
+    assert_eq!(answer["lines"][0]["line"], "ready");
+    assert_eq!(
+        params(&loki.seen()[0].target)["query"],
+        "{namespace=\"team\", pod=~\"web-.+\"}"
+    );
+    let sink = Arc::new(TestSink::default());
+    let mut input = follow(&h, "extstream:reference");
+    input["source"]["provider"] = json!("pod");
+    h.streams.open(sink.clone(), input).await.unwrap();
+    eventually("the reference's first line", || {
+        data(&sink, "extstream:reference")
+            .iter()
+            .any(|frame| frame.to_string().contains("ready"))
+    })
+    .await;
+    assert_eq!(h.streams.close_view("view-1"), 1);
 }

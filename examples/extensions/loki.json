@@ -1,0 +1,56 @@
+{
+  "$schema": "https://raw.githubusercontent.com/srelens/srelens/main/schemas/extension-manifest.v0.5.json",
+  "id": "org.srelens.loki",
+  "name": "Loki",
+  "version": "0.1.0",
+  "srelensApiVersion": "^0.5",
+  "kind": "declarative",
+  "permissions": [
+    { "capability": "network.http", "hosts": ["${settings.lokiUrl}"] }
+  ],
+  "settings": [
+    {
+      "id": "lokiUrl",
+      "type": "url",
+      "title": "Loki URL",
+      "description": "The base URL of a Loki HTTP API, such as its query frontend or gateway.",
+      "required": true
+    }
+  ],
+  "capabilities": [
+    {
+      "name": "rangeQuery",
+      "title": "Loki range query",
+      "target": "network.http",
+      "inputs": [],
+      "arguments": {
+        "url": "${settings.lokiUrl}",
+        "path": "/loki/api/v1/query_range",
+        "headers": { "Accept": "application/json" }
+      }
+    }
+  ],
+  "contributions": {
+    "pages": [],
+    "detailTabs": [],
+    "detailLinks": [],
+    "logProviders": [
+      {
+        "id": "pod",
+        "title": "Loki",
+        "capability": "rangeQuery",
+        "language": "logql",
+        "forKinds": ["/Pod"],
+        "query": "{namespace=\"${namespace}\", pod=\"${pod}\"}"
+      },
+      {
+        "id": "workload",
+        "title": "Loki",
+        "capability": "rangeQuery",
+        "language": "logql",
+        "forKinds": ["apps/Deployment", "apps/StatefulSet", "apps/DaemonSet"],
+        "query": "{namespace=\"${namespace}\", pod=~\"${workload:regex}-.+\"}"
+      }
+    ]
+  }
+}

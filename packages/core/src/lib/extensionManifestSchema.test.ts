@@ -153,3 +153,30 @@ describe("pod permissions (#567)", () => {
     expect(validate(single)).toBe(false);
   });
 });
+
+describe("metric, log and trace providers (#569)", () => {
+  const validate = new Ajv({ allErrors: true }).compile(schema);
+  const frozen = new Ajv({ allErrors: true }).compile(frozen0_4);
+
+  it.each(["examples/extensions/prometheus.json", "examples/extensions/loki.json"])(
+    "accepts the reference %s, which API 0.4's schema does not",
+    (path) => {
+      const manifest = JSON.parse(repoFile(path));
+      expect(validate(manifest), JSON.stringify(validate.errors)).toBe(true);
+      expect(frozen({ ...manifest, srelensApiVersion: "^0.4" })).toBe(false);
+    },
+  );
+
+  it("holds each list to its own language and a metric provider to a unit the chart formats", () => {
+    const prometheus = JSON.parse(repoFile("examples/extensions/prometheus.json"));
+    const inLogql = structuredClone(prometheus);
+    inLogql.contributions.metricProviders[0].language = "logql";
+    expect(validate(inLogql)).toBe(false);
+    const inPounds = structuredClone(prometheus);
+    inPounds.contributions.metricProviders[0].unit = "pounds";
+    expect(validate(inPounds)).toBe(false);
+    const extra = structuredClone(prometheus);
+    extra.contributions.metricProviders[0].html = "<b>CPU</b>";
+    expect(validate(extra)).toBe(false);
+  });
+});
