@@ -96,7 +96,6 @@ mitigation and the risk that remains.
 
 Declarative support does not claim these protections:
 
-- third-party publisher signing ([#559](https://github.com/srelens/srelens/issues/559))
 - signing key rotation ([#560](https://github.com/srelens/srelens/issues/560))
 - revocation and a kill switch ([#561](https://github.com/srelens/srelens/issues/561))
 - executable apps and OS sandboxing ([#521](https://github.com/srelens/srelens/issues/521))
