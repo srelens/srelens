@@ -61,7 +61,7 @@
           "type": "boolean"
         },
         "allowWriteActions": {
-          "description": "Whether an app may declare write actions (the host action primitives), or run commands in pods (`k8s.exec`, #567), which the host counts with them.",
+          "description": "Whether an app may declare write actions (the host action primitives). Running commands in pods is `k8s.exec`, allowed or not by `allowedCapabilities`.",
           "type": "boolean"
         },
         "allowedApps": {

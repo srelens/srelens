@@ -18,7 +18,7 @@ function rules(policy: ExtensionPolicy): string[] {
     said.push(policy.allowedCapabilities.length
       ? `Capabilities apps may use: ${list(policy.allowedCapabilities)}`
       : "Apps may use no host capability");
-  if (!policy.allowWriteActions) said.push("Apps may not write to clusters or run commands in them");
+  if (!policy.allowWriteActions) said.push("Apps may not write to clusters");
   said.push(policy.networkCeiling.length
     ? `network.http may reach: ${list(policy.networkCeiling)}`
     : "network.http may reach no host");

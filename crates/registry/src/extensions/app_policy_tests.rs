@@ -628,11 +628,11 @@ fn the_unsigned_switch_cannot_disable_a_required_app() {
     assert!(!state.plugins[0].enabled);
 }
 
-/// #567 added pod bindings. A policy names their capabilities as it names any other,
-/// and one that turns writes off also refuses an app that runs commands in pods: the
-/// host counts exec with the writes its unsigned-app setting guards.
+/// #567 added pod bindings. A policy names their capabilities as it names any other.
+/// Exec is not a write action: turning writes off leaves an app that runs commands in
+/// pods alone, and leaving `k8s.exec` out of the allowed capabilities is what refuses it.
 #[test]
-fn pod_capabilities_are_the_policys_to_allow_and_exec_counts_as_a_write() {
+fn pod_capabilities_are_the_policys_to_allow_and_exec_is_not_a_write() {
     let app = |binding: Value, permission: &str| {
         Manifest::parse(
             &json!({
@@ -666,13 +666,7 @@ fn pod_capabilities_are_the_policys_to_allow_and_exec_counts_as_a_write() {
     assert!(named.refusal(&logs, None).is_none());
 
     let no_writes = policy(json!({"allowWriteActions": false}));
-    let refused = no_writes.refusal(&exec, None).unwrap();
-    assert_eq!(refused.path, "capabilities");
-    assert!(
-        refused.reason.contains("run commands"),
-        "{}",
-        refused.reason
-    );
+    assert!(no_writes.refusal(&exec, None).is_none());
     assert!(no_writes.refusal(&logs, None).is_none());
 
     let without_exec =

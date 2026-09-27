@@ -56,8 +56,8 @@ pub struct AppPolicy {
     /// offers apps.
     #[serde(rename = "allowedCapabilities")]
     allowed_capabilities: Option<BTreeSet<String>>,
-    /// Whether an app may declare write actions (the host action primitives), or run
-    /// commands in pods (`k8s.exec`, #567), which the host counts with them.
+    /// Whether an app may declare write actions (the host action primitives). Running
+    /// commands in pods is `k8s.exec`, allowed or not by `allowedCapabilities`.
     #[serde(rename = "allowWriteActions")]
     allow_write_actions: bool,
     /// The most `network.http` may reach, written as an app's hosts are: `name`,
@@ -276,17 +276,12 @@ impl AppPolicy {
             }
             _ => {}
         }
-        // A command run in a pod can change anything the pod can, so the host counts
-        // exec with the writes its unsigned-app setting guards (#567).
-        let runs_commands = manifest
-            .capabilities
-            .iter()
-            .any(|binding| binding.target == srelens_plugin_host::POD_EXEC);
-        if !self.allow_write_actions && (!manifest.actions.is_empty() || runs_commands) {
+        // Write actions only: a command in a pod (`k8s.exec`, #567) is its own
+        // capability, which `allowedCapabilities` allows or refuses.
+        if !manifest.actions.is_empty() && !self.allow_write_actions {
             return refuse(
-                if manifest.actions.is_empty() { "capabilities" } else { "actions" },
-                "The administrator's policy does not allow apps that write to clusters or run commands in them"
-                    .into(),
+                "actions",
+                "The administrator's policy does not allow apps that write to clusters".into(),
             );
         }
         let permissions = manifest.permission_names();
