@@ -278,6 +278,24 @@ describe("the pod tools on a Deployment (#567)", () => {
     );
   });
 
+  it("starts over, with a new view, when the same resource is shown on another cluster", async () => {
+    const view = render(<ExtensionPodSlot context="kind-dev" resource={deployment} />);
+    const tools = await screen.findByRole("region", { name: "cert-manager pod tools" });
+    fireEvent.click(await within(tools).findByRole("button", { name: "Forward · Metrics (web-1)" }));
+    await waitFor(() => expect(stream.opened).toHaveLength(1));
+    act(() => stream.opened[0].handlers.onData({ event: "ready", localPort: 54321, pod: "web-1", port: 9402 }, 1));
+    await within(tools).findByText(/Forwarding/);
+    view.rerender(<ExtensionPodSlot context="kind-prod" resource={deployment} />);
+    await screen.findByRole("region", { name: "cert-manager pod tools" });
+    // Nothing of the first cluster's forward is left under the second.
+    expect(screen.queryByText(/Forwarding/)).toBeNull();
+    expect(stream.close).toHaveBeenCalledOnce();
+    expect(openExtensionView).toHaveBeenCalledTimes(2);
+    await waitFor(() =>
+      expect(extensionPods).toHaveBeenLastCalledWith(expect.objectContaining({ context: "kind-prod", name: "web" })),
+    );
+  });
+
   it("closes its view when it goes away, which ends every stream and forward it opened", async () => {
     const view = render(<ExtensionPodSlot context="kind-dev" resource={deployment} />);
     await screen.findByRole("region", { name: "cert-manager pod tools" });

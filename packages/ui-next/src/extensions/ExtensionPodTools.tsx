@@ -124,9 +124,10 @@ export function ExtensionPodSlot({ context, resource }: { context: string; resou
     <>
       {offered.map(({ plugin, bindings }) => (
         <ExtensionPodTools
-          // The resource is part of the identity: moving the Inspector to another
-          // one starts over, with a new view, and the old view's streams end.
-          key={`${plugin.manifest.id}/${plugin.revision}/${kind}/${namespace}/${resource.metadata.name}`}
+          // The cluster and the resource are part of the identity: moving the
+          // Inspector to another of either starts over, with a new view, and the
+          // old view's streams end.
+          key={`${plugin.manifest.id}/${plugin.revision}/${context}/${kind}/${namespace}/${resource.metadata.name}`}
           plugin={plugin}
           context={context}
           bindings={bindings}

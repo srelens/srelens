@@ -171,7 +171,8 @@ pub enum ReadError {
     /// The API server answered, and refused: Forbidden, an invalid request.
     Answered(String),
     /// No answer to go by: a timeout, a connection that failed or was never
-    /// made, or an API server that said it could not answer now (429, 5xx).
+    /// made, or an API server that said it could not answer now (408, 429,
+    /// 5xx).
     Unanswered(String),
 }
 
@@ -184,7 +185,8 @@ impl ReadError {
 
     fn of(error: kube::Error) -> Self {
         match &error {
-            kube::Error::Api(status) if status.code != 429 && status.code < 500 => {
+            // 408: the API server gave up waiting on the request, not an answer to it.
+            kube::Error::Api(status) if !matches!(status.code, 408 | 429 | 500..) => {
                 ReadError::Answered(error.to_string())
             }
             _ => ReadError::Unanswered(error.to_string()),
@@ -562,6 +564,22 @@ mod tests {
         let mut carry = Vec::new();
         assert_eq!(decode(&mut carry, &"é".as_bytes()[..1]), "");
         assert_eq!(flush(&mut carry), "\u{fffd}");
+    }
+
+    /// A refusal is an answer; a timeout, throttling or a server error is not.
+    #[test]
+    fn a_read_error_is_an_answer_only_when_the_server_refused() {
+        let api = |code: u16| {
+            ReadError::of(kube::Error::Api(Box::new(
+                kube::core::Status::failure("refused", "Refused").with_code(code),
+            )))
+        };
+        for code in [400, 401, 403, 404, 409, 410, 422] {
+            assert!(matches!(api(code), ReadError::Answered(_)), "{code}");
+        }
+        for code in [408, 429, 500, 503, 504] {
+            assert!(matches!(api(code), ReadError::Unanswered(_)), "{code}");
+        }
     }
 
     #[test]
