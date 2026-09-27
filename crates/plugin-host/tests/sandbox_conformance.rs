@@ -785,6 +785,15 @@ async fn a_file_outside_the_data_directory_cannot_have_its_mode_changed() {
     // Within its own directory it may, through the file it has open.
     let own = fixture.data().join("cache.db");
     std::fs::write(&own, "x").unwrap();
+    // On Linux, not by path even there: the filter cannot tell the data
+    // directory's paths from any other, so it refuses the call itself.
+    #[cfg(target_os = "linux")]
+    match call(&sidecar, "set_readonly", json!({"path": own})).await {
+        Reply::Refused(failure) if failure.os == Some(libc::EPERM as i64) => {}
+        other => {
+            panic!("chmod by path in its data directory was not refused by the filter: {other:?}")
+        }
+    }
     let reply = call(&sidecar, "set_readonly", json!({"path": own, "by": "file"})).await;
     assert!(
         matches!(reply, Reply::Ok(_)),

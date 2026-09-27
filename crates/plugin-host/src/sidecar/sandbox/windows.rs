@@ -16,8 +16,8 @@
 //! Windows lets an AppContainer write its own profile folder
 //! (`%LOCALAPPDATA%\Packages\<profile>`), which is where it points the
 //! sidecar's `TEMP`, `TMP` and `LOCALAPPDATA`. That folder is outside the size
-//! limit and outlives the app's data, so the container's SID is denied writing
-//! it ([`deny_profile_folder`]).
+//! limit and outlives the app's data, so it is made read-only to the
+//! container ([`read_only_profile_folder`]).
 //!
 //! Everything else is as the spike ran it: `CreateAppContainerProfile` (a SID
 //! only derived is refused by `CreateProcessW`), read and execute on the
@@ -223,37 +223,27 @@ fn profile_folders(sid_text: &str) -> io::Result<ProfileFolders> {
     Ok(ProfileFolders { profile, ac })
 }
 
-/// Deny the container writing its own profile folder, so the data directory
-/// is the only path it may write (#573). Reading is left as Windows set it.
+/// Make the container's own profile folder read-only to it, so the data
+/// directory is the only path it may write (#573).
 ///
-/// The rights are named one by one, not as the simple `W`: that is
-/// `FILE_GENERIC_WRITE`, which carries `SYNCHRONIZE` and `READ_CONTROL`, and a
-/// deny of those would break opening a file there to read it. They are: write
-/// and append data (`WD`, `AD`, which for a folder are adding a file and a
-/// subfolder), write attributes and extended attributes (`WA`, `WEA`), delete
-/// and delete a child (`DE`, `DC`), and change the permissions or the owner
-/// (`WDAC`, `WO`), without which the container could remove this entry.
-///
-/// An explicit deny outranks an explicit allow, but an inherited one does not,
-/// and Windows gives the container explicit allows on `AC` and below. So the
-/// deny goes on in two passes: inheritable on the profile folder, for what is
-/// created there later, and explicit on every entry already in it, named by
-/// `icacls`'s own pattern match (`<folder>\*` with `/T`). The first CI run of
-/// this showed why the second is needed: with only `(OI)(CI)` and `/T` on the
-/// folder, `AC\Temp` stayed writable. `AC\Temp` is made first if it is
-/// missing, so it is among the entries denied rather than created after them.
-fn deny_profile_folder(sid_text: &str) -> io::Result<()> {
-    const RIGHTS: &str = "(WD,AD,WA,WEA,DE,DC,WDAC,WO)";
+/// A deny does not do it. In an AppContainer's access check, a deny entry for
+/// its own SID does not outweigh the full control Windows grants that SID on
+/// `AC`: the second CI run of this had explicit `(DENY)(WD,AD,…)` entries for
+/// the container on `AC\Temp`, and the write still went through. So the grant
+/// goes instead. Every entry for the container's SID is removed from the
+/// profile folder and from everything already in it (`<folder>\*` with `/T`,
+/// `icacls`'s own pattern match), the denies earlier versions added included,
+/// which a deny-only version added again on every launch. Then `AC` grants it
+/// read and execute, inherited below, so it can still read what Windows keeps
+/// for it there. `AC\Temp`, where Windows points its `TEMP`, is made first if
+/// it is missing, so it is among the entries changed.
+fn read_only_profile_folder(sid_text: &str) -> io::Result<()> {
     let folders = profile_folders(sid_text)?;
     std::fs::create_dir_all(folders.ac.join("Temp"))?;
-    icacls(
-        &folders.profile,
-        &["/deny", &format!("*{sid_text}:(OI)(CI){RIGHTS}")],
-    )?;
-    icacls(
-        &folders.profile.join("*"),
-        &["/deny", &format!("*{sid_text}:{RIGHTS}"), "/T"],
-    )
+    let sid = format!("*{sid_text}");
+    icacls(&folders.profile, &["/remove", &sid])?;
+    icacls(&folders.profile.join("*"), &["/remove", &sid, "/T"])?;
+    icacls(&folders.ac, &["/grant", &format!("{sid}:(OI)(CI)(RX)")])
 }
 
 /// Owned kernel handles, closed on drop.
@@ -461,7 +451,7 @@ pub(super) fn launch(command: &SidecarCommand, limits: &Limits) -> Result<Launch
         &["/grant", &format!("*{sid_text}:(OI)(CI)(F)")],
     )
     .map_err(failed)?;
-    deny_profile_folder(&sid_text).map_err(unavailable)?;
+    read_only_profile_folder(&sid_text).map_err(unavailable)?;
     let job = job(limits).map_err(unavailable)?;
 
     let (stdin_parent, stdin_child) = pipe(true).map_err(failed)?;

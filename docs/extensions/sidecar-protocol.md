@@ -477,15 +477,15 @@ The sandbox grants the data directory and no other writable path:
   archive sets them, so a sidecar can change the times of a file it owns outside its
   directory.
 - **macOS:** the Seatbelt profile allows `file-write*` only beneath `DATA`.
-- **Windows:** the AppContainer is granted it, and **denied writing its own profile
-  folder** (`%LOCALAPPDATA%\Packages\<profile>`), which Windows otherwise lets an
-  AppContainer write and where it points the sidecar's `TEMP`, `TMP` and `LOCALAPPDATA`.
-  That folder would be outside the size limit and outlive the app's data. The deny names
-  the write rights one by one (data, attributes, deletion, and the ACL and owner, so the
-  container cannot take it off), and leaves reading as Windows set it. It is inheritable on
-  the folder, for what is created there later, and explicit on every entry already in it,
-  since Windows gives the container explicit allows on `AC` and below, which an inherited
-  deny does not outrank. `AC\Temp` is made first if it is missing, so it is among them.
+- **Windows:** the AppContainer is granted it, and its own profile folder
+  (`%LOCALAPPDATA%\Packages\<profile>`) is **made read-only to it**. Windows otherwise
+  lets an AppContainer write that folder, and points the sidecar's `TEMP`, `TMP` and
+  `LOCALAPPDATA` there; it would be outside the size limit and outlive the app's data. A
+  deny entry does not do it: in an AppContainer's access check, a deny for its own SID does
+  not outweigh the full control Windows grants it there (the CI run that showed this had
+  explicit denies on `AC\Temp` and the write went through). So on every launch srelens
+  removes the container's own entries from the folder and everything in it, and grants it
+  read and execute on `AC`. `AC\Temp` is made first if it is missing.
 
 The conformance suite checks that a write fails everywhere else a sidecar might try: beside
 its directory where the other apps' are, in another app's, in the host's and its own

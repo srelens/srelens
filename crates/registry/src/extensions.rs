@@ -1626,7 +1626,12 @@ fn configure(
     // next change.
     if let Some(root) = &apps.data {
         let installed: Vec<&str> = state.plugins.iter().map(|app| app.manifest.id.as_str()).collect();
-        let _ = srelens_plugin_host::sidecar::data::prune(root, &installed);
+        if let Err(error) = srelens_plugin_host::sidecar::data::prune(root, &installed) {
+            log::warn!(
+                "could not remove an uninstalled app's data under {}: {error}",
+                root.display()
+            );
+        }
     }
     app_policy::govern(&mut state, policy.as_deref());
     secret_store::sweep(secrets, &state);
