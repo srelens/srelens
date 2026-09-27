@@ -130,7 +130,9 @@ pub enum MetricUnit {
 }
 
 /// Which list a provider is in, and so what the host does with its answer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
 #[serde(rename_all = "camelCase")]
 pub enum ProviderKind {
     Metrics,
@@ -150,7 +152,9 @@ impl ProviderKind {
 }
 
 /// A query language the host knows how to escape for, send and read.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum QueryLanguage {
     Promql,
@@ -267,7 +271,9 @@ impl Manifest {
 
     /// The provider with this id, in whichever list.
     pub fn provider(&self, id: &str) -> Option<ProviderRef<'_>> {
-        self.providers().into_iter().find(|provider| provider.id == id)
+        self.providers()
+            .into_iter()
+            .find(|provider| provider.id == id)
     }
 }
 
@@ -334,7 +340,10 @@ enum Piece {
     Text(String),
     /// A name, inside a double-quoted string: escaped, and regex-quoted first
     /// when the template says `${name:regex}`.
-    Name { variable: Variable, regex: bool },
+    Name {
+        variable: Variable,
+        regex: bool,
+    },
     /// `${range}` or `${step}`, outside any string.
     Duration(Variable),
 }
@@ -574,7 +583,13 @@ pub struct QueryValues {
 impl QueryValues {
     /// The value of a name variable, held to what that name can be.
     fn name(&self, variable: Variable) -> Result<&str, String> {
-        let missing = || format!("This view names no {} for ${{{}}}", variable.name(), variable.name());
+        let missing = || {
+            format!(
+                "This view names no {} for ${{{}}}",
+                variable.name(),
+                variable.name()
+            )
+        };
         let (value, ok, what) = match variable {
             Variable::Cluster => (
                 self.cluster.as_str(),
@@ -637,7 +652,11 @@ pub(super) fn provider_problems(manifest: &Manifest, problems: &mut ValidationEr
     const IDENTIFIER: &str = "Must be 1–64 letters, digits and -";
     let providers = manifest.providers();
     let mut crowded = BTreeSet::new();
-    for kind in [ProviderKind::Metrics, ProviderKind::Logs, ProviderKind::Traces] {
+    for kind in [
+        ProviderKind::Metrics,
+        ProviderKind::Logs,
+        ProviderKind::Traces,
+    ] {
         if providers.iter().filter(|p| p.kind == kind).count() > MAX_PROVIDERS {
             crowded.insert(kind);
             problems.push(
@@ -690,7 +709,11 @@ pub(super) fn provider_problems(manifest: &Manifest, problems: &mut ValidationEr
             problems.push(
                 Code::InvalidValue,
                 kinds_at.clone(),
-                format!("forKinds lists 1–{} of {}", PROVIDER_KINDS.len(), PROVIDER_KINDS.join(", ")),
+                format!(
+                    "forKinds lists 1–{} of {}",
+                    PROVIDER_KINDS.len(),
+                    PROVIDER_KINDS.join(", ")
+                ),
             );
         }
         for (position, kind) in provider.for_kinds.iter().enumerate() {

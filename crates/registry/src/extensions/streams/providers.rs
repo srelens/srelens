@@ -93,9 +93,13 @@ impl ExtensionStreams {
         };
         let stream = self
             .streams
-            .open(owner, "logProvider", sink, input.channel.clone(), move |tx| {
-                follow.run(tx)
-            })
+            .open(
+                owner,
+                "logProvider",
+                sink,
+                input.channel.clone(),
+                move |tx| follow.run(tx),
+            )
             .map_err(|e| e.to_string())?;
         Ok(OpenStreamOut {
             stream,
@@ -144,9 +148,7 @@ impl Follow {
             let key = (entry.source.clone(), entry.line.clone());
             match self.cursor {
                 Some(cursor) if entry.nanos < cursor => continue,
-                Some(cursor) if entry.nanos == cursor && self.at_cursor.contains(&key) => {
-                    continue
-                }
+                Some(cursor) if entry.nanos == cursor && self.at_cursor.contains(&key) => continue,
                 Some(cursor) if entry.nanos == cursor => self.at_cursor.push(key),
                 _ => {
                     self.cursor = Some(entry.nanos);

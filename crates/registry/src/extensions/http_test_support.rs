@@ -205,4 +205,3 @@ impl SecretStore for Vault {
             .map(SecretValue::new))
     }
 }
-

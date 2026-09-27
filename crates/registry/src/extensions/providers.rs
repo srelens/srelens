@@ -102,7 +102,10 @@ pub(super) enum QueryOut {
     /// A metric provider's range query, as the chart it draws (#570).
     Metrics { chart: Chart },
     /// A log provider's lines, oldest first. `truncated` when there were more.
-    Logs { lines: Vec<LogLine>, truncated: bool },
+    Logs {
+        lines: Vec<LogLine>,
+        truncated: bool,
+    },
     /// A trace provider's traces, newest first. `truncated` when there were more.
     Traces { traces: Vec<Trace>, truncated: bool },
 }
@@ -281,12 +284,9 @@ impl Ask {
         .map_err(|e| e.to_string())?;
         let plugin = app.state.plugins[app.index].clone();
         let manifest = &plugin.manifest;
-        let provider = manifest.provider(&self.provider).ok_or_else(|| {
-            format!(
-                "App {} declares no provider \"{}\"",
-                self.id, self.provider
-            )
-        })?;
+        let provider = manifest
+            .provider(&self.provider)
+            .ok_or_else(|| format!("App {} declares no provider \"{}\"", self.id, self.provider))?;
         if let Some(expect) = expect.filter(|expect| *expect != provider.kind) {
             return Err(format!(
                 "\"{}\" is not a {} provider",
@@ -298,7 +298,7 @@ impl Ask {
                 }
             ));
         }
-        if !provider.for_kinds.iter().any(|kind| *kind == subject.resource_kind) {
+        if !provider.for_kinds.contains(&subject.resource_kind) {
             return Err(format!(
                 "Provider \"{}\" is not for {}; it is for {}",
                 provider.id,
@@ -381,7 +381,10 @@ impl Ask {
                     ("start", start.to_string()),
                     ("end", end.to_string()),
                     ("limit", limit.to_string()),
-                    ("direction", if backward { "backward" } else { "forward" }.into()),
+                    (
+                        "direction",
+                        if backward { "backward" } else { "forward" }.into(),
+                    ),
                 ],
             )
             .await?;
@@ -505,17 +508,31 @@ fn short(text: &str) -> String {
 }
 
 /// The `data` of a successful Prometheus or Loki answer, of `result_type`.
-fn success_data<'a>(body: &'a Value, backend: &str, result_type: &str, what: &str) -> Result<&'a Map<String, Value>, String> {
+fn success_data<'a>(
+    body: &'a Value,
+    backend: &str,
+    result_type: &str,
+    what: &str,
+) -> Result<&'a Map<String, Value>, String> {
     let Some(object) = body.as_object() else {
-        return Err(format!("The server's answer is not a {backend} query result"));
+        return Err(format!(
+            "The server's answer is not a {backend} query result"
+        ));
     };
     match object.get("status").and_then(Value::as_str) {
         Some("success") => {}
         Some("error") => {
-            let why = object.get("error").and_then(Value::as_str).unwrap_or("no reason given");
+            let why = object
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("no reason given");
             return Err(format!("{backend} refused the query: {}", quoted(why)));
         }
-        _ => return Err(format!("The server's answer is not a {backend} query result")),
+        _ => {
+            return Err(format!(
+                "The server's answer is not a {backend} query result"
+            ))
+        }
     }
     let data = object
         .get("data")
@@ -523,11 +540,10 @@ fn success_data<'a>(body: &'a Value, backend: &str, result_type: &str, what: &st
         .ok_or_else(|| format!("The server's answer is not a {backend} query result"))?;
     match data.get("resultType").and_then(Value::as_str) {
         Some(found) if found == result_type => Ok(data),
-        Some(found) => Err(format!(
-            "{what}; this query answered a {}",
-            quoted(found)
+        Some(found) => Err(format!("{what}; this query answered a {}", quoted(found))),
+        None => Err(format!(
+            "The server's answer is not a {backend} query result"
         )),
-        None => Err(format!("The server's answer is not a {backend} query result")),
     }
 }
 
@@ -587,17 +603,27 @@ fn read_matrix(body: &Value, bound: &Bound, grid: Grid) -> Result<Chart, String>
         let base = name.clone();
         let mut ordinal = 2;
         while names.contains(&name) {
-            name = format!("{} ({ordinal})", base.chars().take(MAX_TEXT - 8).collect::<String>());
+            name = format!(
+                "{} ({ordinal})",
+                base.chars().take(MAX_TEXT - 8).collect::<String>()
+            );
             ordinal += 1;
         }
         names.push(name.clone());
         let mut values = vec![None; times.len()];
-        for sample in entry.get("values").and_then(Value::as_array).into_iter().flatten() {
+        for sample in entry
+            .get("values")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
             let (Some(time), Some(value)) = (
                 sample.get(0).and_then(Value::as_f64),
                 sample.get(1).and_then(Value::as_str),
             ) else {
-                return Err("The server's answer holds a sample that is not [time, \"value\"]".into());
+                return Err(
+                    "The server's answer holds a sample that is not [time, \"value\"]".into(),
+                );
             };
             let at = (time * 1000.0).round() as i64;
             if let Some(position) = index.get(&at) {
@@ -652,7 +678,12 @@ fn read_streams(body: &Value, provider: &str) -> Result<Vec<Entry>, String> {
             _ => provider.to_owned(),
         };
         let source = short(&source);
-        for value in stream.get("values").and_then(Value::as_array).into_iter().flatten() {
+        for value in stream
+            .get("values")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
             let (Some(nanos), Some(line)) = (
                 value
                     .get(0)
@@ -709,7 +740,7 @@ fn read_traces(body: &Value) -> Result<(Vec<Trace>, bool), String> {
             duration_ms: trace.get("durationMs").and_then(Value::as_u64),
         });
     }
-    found.sort_by(|a, b| b.start.cmp(&a.start));
+    found.sort_by_key(|trace| std::cmp::Reverse(trace.start));
     let truncated = found.len() > MAX_TRACES;
     found.truncate(MAX_TRACES);
     Ok((found, truncated))
@@ -740,11 +771,16 @@ pub(super) fn rfc3339(nanos: i128) -> String {
     let z = days + 719_468;
     let era = z.div_euclid(146_097);
     let day_of_era = z.rem_euclid(146_097);
-    let year_of_era = (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
     let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
     let month_index = (5 * day_of_year + 2) / 153;
     let day = day_of_year - (153 * month_index + 2) / 5 + 1;
-    let month = if month_index < 10 { month_index + 3 } else { month_index - 9 };
+    let month = if month_index < 10 {
+        month_index + 3
+    } else {
+        month_index - 9
+    };
     let year = year_of_era + era * 400 + i64::from(month <= 2);
     format!(
         "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{fraction:09}Z",

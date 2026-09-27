@@ -174,17 +174,20 @@ fn a_provider_names_a_declared_network_http_binding() {
         .as_array_mut()
         .unwrap()
         .push(json!("k8s.listDeployments"));
-    value["capabilities"]
-        .as_array_mut()
-        .unwrap()
-        .push(json!({"name":"deployments","title":"Deployments","target":"k8s.listDeployments",
-            "inputs":["context","namespace"],"arguments":{}}));
+    value["capabilities"].as_array_mut().unwrap().push(
+        json!({"name":"deployments","title":"Deployments","target":"k8s.listDeployments",
+            "inputs":["context","namespace"],"arguments":{}}),
+    );
     value["contributions"]["logProviders"][0]["capability"] = json!("deployments");
     let found = errors(&value);
     assert_eq!(found.len(), 1, "{found:?}");
     assert_eq!(found[0].code, ValidationCode::InvalidBinding);
     assert_eq!(found[0].path, "contributions.logProviders[0].capability");
-    assert!(found[0].message.contains("network.http"), "{}", found[0].message);
+    assert!(
+        found[0].message.contains("network.http"),
+        "{}",
+        found[0].message
+    );
 }
 
 #[test]
@@ -356,7 +359,10 @@ fn unknown_variables_settings_and_malformed_templates_are_refused() {
         ("up{job=\"${job}\"}", "${job}"),
         // The settings rule's own refusal, at the same path: a setting reaches only a
         // binding argument its capability marks settable.
-        ("up{job=\"${settings.job}\"}", "Settings are interpolated only"),
+        (
+            "up{job=\"${settings.job}\"}",
+            "Settings are interpolated only",
+        ),
         ("up{job=\"${namespace:json}\"}", ":json"),
         ("up{job=\"${namespace\"}", "${"),
         ("up{job=\"unterminated}", "string"),
@@ -489,7 +495,10 @@ fn a_regex_variable_matches_the_name_literally() {
 
 #[test]
 fn a_value_a_query_cannot_carry_is_refused_not_passed_on() {
-    let template = template(QueryLanguage::Logql, "{namespace=\"${namespace}\", pod=\"${pod}\"}");
+    let template = template(
+        QueryLanguage::Logql,
+        "{namespace=\"${namespace}\", pod=\"${pod}\"}",
+    );
     let pod = |pod: &str| QueryValues {
         workload: None,
         pod: Some(pod.into()),

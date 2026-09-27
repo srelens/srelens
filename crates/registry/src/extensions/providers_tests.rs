@@ -165,7 +165,9 @@ fn params(target: &str) -> BTreeMap<String, String> {
 }
 
 fn number(params: &BTreeMap<String, String>, key: &str) -> i64 {
-    params[key].parse().unwrap_or_else(|_| panic!("{key}: {}", params[key]))
+    params[key]
+        .parse()
+        .unwrap_or_else(|_| panic!("{key}: {}", params[key]))
 }
 
 /// A Prometheus range query's answer: each series with a sample at the first,
@@ -277,7 +279,10 @@ async fn a_metric_query_is_bound_sent_through_network_http_and_drawn_as_a_chart(
     assert_eq!(series[0]["name"], "pod=\"web-1\"");
     let values = series[0]["values"].as_array().unwrap();
     assert_eq!(values.len(), 241);
-    assert_eq!(&values[..4], &[json!(1.0), json!(1.5), json!(0.25), Value::Null]);
+    assert_eq!(
+        &values[..4],
+        &[json!(1.0), json!(1.5), json!(0.25), Value::Null]
+    );
     // A NaN sample is a gap, never a number.
     assert_eq!(series[1]["values"][1], Value::Null);
 }
@@ -285,13 +290,18 @@ async fn a_metric_query_is_bound_sent_through_network_http_and_drawn_as_a_chart(
 #[tokio::test(flavor = "multi_thread")]
 async fn a_series_name_shows_an_invisible_character_as_an_escape() {
     let prometheus = server(|_| {
-        Reply::Json(json!({"status":"success","data":{"resultType":"matrix","result":[
-            {"metric":{"pod":"web-1\u{202e}2"},"values":[]}]}}))
+        Reply::Json(
+            json!({"status":"success","data":{"resultType":"matrix","result":[
+            {"metric":{"pod":"web-1\u{202e}2"},"values":[]}]}}),
+        )
     })
     .await;
     let h = harness(&prometheus, "kind-dev").await;
     let answer = h.query(json!({"provider":"cpu"})).await.unwrap();
-    let name = answer["chart"]["series"][0]["name"].as_str().unwrap().to_owned();
+    let name = answer["chart"]["series"][0]["name"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     assert!(!name.contains('\u{202e}'), "{name:?}");
     assert!(name.starts_with("pod=\"web-1"), "{name}");
 }
@@ -333,7 +343,10 @@ async fn a_host_outside_the_allowlist_is_refused_and_never_contacted() {
     let elsewhere = server(|target| matrix(target, 1)).await;
     // The request goes to a URL from another setting, which the hosts do not list.
     let mut manifest = observability();
-    manifest["settings"].as_array_mut().unwrap().push(json!({"id":"otherUrl","type":"url",
+    manifest["settings"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"id":"otherUrl","type":"url",
         "title":"Other URL","default":format!("http://{}", elsewhere.addr)}));
     manifest["capabilities"][0]["arguments"]["url"] = json!("${settings.otherUrl}");
     let h = harness_with(&allowed, "kind-dev", manifest).await;
@@ -460,13 +473,21 @@ fn streams(entries: &[(u64, &str)]) -> Reply {
         .iter()
         .map(|(ns, line)| json!([ns.to_string(), line]))
         .collect();
-    Reply::Json(json!({"status":"success","data":{"resultType":"streams","result":[
-        {"stream":{"namespace":"team","pod":"web-1","container":"app"},"values":values}]}}))
+    Reply::Json(
+        json!({"status":"success","data":{"resultType":"streams","result":[
+        {"stream":{"namespace":"team","pod":"web-1","container":"app"},"values":values}]}}),
+    )
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_log_query_answers_lines_oldest_first() {
-    let loki = server(|_| streams(&[(1_700_000_000_000_000_002, "second"), (1_700_000_000_000_000_001, "first")])).await;
+    let loki = server(|_| {
+        streams(&[
+            (1_700_000_000_000_000_002, "second"),
+            (1_700_000_000_000_000_001, "first"),
+        ])
+    })
+    .await;
     let h = harness(&loki, "kind-dev").await;
     let answer = h
         .query(json!({"provider":"loki","resourceKind":"/Pod","name":"web-1"}))
@@ -566,7 +587,10 @@ async fn a_log_provider_streams_its_history_then_each_new_line_once() {
         600_000_000_000
     );
     let poll = params(&seen[1].target);
-    assert_eq!((poll["direction"].as_str(), number(&poll, "start")), ("forward", 20));
+    assert_eq!(
+        (poll["direction"].as_str(), number(&poll, "start")),
+        ("forward", 20)
+    );
     // Closing the view ends the stream, and nothing is asked after it.
     assert_eq!(h.streams.close_view("view-1"), 1);
     let asked = loki.seen().len();
@@ -688,7 +712,9 @@ async fn the_prometheus_reference_charts_each_workload_and_pod_query() {
     let url = format!("http://{}", prometheus.addr);
     let h = harness_for(
         "kind-dev",
-        reference(include_str!("../../../../examples/extensions/prometheus.json")),
+        reference(include_str!(
+            "../../../../examples/extensions/prometheus.json"
+        )),
         json!({"prometheusUrl": url}),
     )
     .await;
@@ -703,7 +729,11 @@ async fn the_prometheus_reference_charts_each_workload_and_pod_query() {
             .await
             .unwrap_or_else(|e| panic!("{provider}: {e}"));
         assert_eq!(answer["kind"], "metrics", "{provider}");
-        assert_eq!(answer["chart"]["series"].as_array().unwrap().len(), 2, "{provider}");
+        assert_eq!(
+            answer["chart"]["series"].as_array().unwrap().len(),
+            2,
+            "{provider}"
+        );
     }
     let asked: Vec<String> = prometheus
         .seen()
