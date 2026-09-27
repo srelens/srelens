@@ -3237,7 +3237,7 @@ async fn extensions_and_gitops(h: &mut Harness, ctx: &str, settings: &TempSettin
     });
     let observability = json!({
         "id": "org.example.observability", "name": "Observability", "version": "0.1.0",
-        "srelensApiVersion": "^0.5", "kind": "declarative",
+        "srelensApiVersion": "^0.6", "kind": "declarative",
         "permissions": [{"capability": "network.http", "hosts": ["${settings.prometheusUrl}"]}],
         "settings": [{"id": "prometheusUrl", "type": "url", "title": "Prometheus URL", "required": true}],
         "capabilities": [{"name": "prom", "title": "Prometheus range query", "target": "network.http",

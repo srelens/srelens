@@ -201,7 +201,7 @@ the web the section says that app streams run in the desktop app.
 
 ## Metrics, logs and traces from providers
 
-API 0.5 ([#569](https://github.com/srelens/srelens/issues/569)). An app's providers
+API 0.6 ([#569](https://github.com/srelens/srelens/issues/569)). An app's providers
 ([manifest.md](manifest.md#metric-log-and-trace-providers)) are drawn by the host in two
 places, in the new design:
 
@@ -227,8 +227,9 @@ places, in the new design:
   again**; a provider the inventory no longer offers says so, and the view follows
   Kubernetes.
 
-The classic design does not draw providers. On the web there are none, since
-`network.http` is desktop only.
+The classic design does not draw providers. On the web, metric and trace panels answer
+only under the operator's network ceiling, as every `network.http` request there does,
+and the log view offers no provider, since the web host runs no app streams yet.
 
 ## Actions and refresh
 

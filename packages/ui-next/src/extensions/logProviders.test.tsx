@@ -3,6 +3,7 @@ import { act, renderHook } from "@testing-library/react";
 
 vi.mock("@srelens/core", async (original) => ({
   ...(await original<typeof import("@srelens/core")>()),
+  isTauri: vi.fn(() => true),
   listContexts: vi.fn(),
   openExtensionView: vi.fn(),
 }));
@@ -11,7 +12,7 @@ vi.mock("./inventoryStore", async (original) => ({
   useExtensions: vi.fn(),
 }));
 
-import { listContexts, openExtensionView, type ExtensionView, type InstalledExtension } from "@srelens/core";
+import { isTauri, listContexts, openExtensionView, type ExtensionView, type InstalledExtension } from "@srelens/core";
 import { useExtensions } from "./inventoryStore";
 import { refreshContextIds } from "./contextIds";
 import { useLogProviders, useLogProviderSource, type LogProviderChoice } from "./logProviders";
@@ -19,7 +20,7 @@ import { useLogProviders, useLogProviderSource, type LogProviderChoice } from ".
 function app(id: string, providers: unknown[], extra: Partial<InstalledExtension> = {}): InstalledExtension {
   return {
     manifest: {
-      id, name: id === "org.example.loki" ? "Loki logs" : "Other", version: "1.0.0", srelensApiVersion: "^0.5",
+      id, name: id === "org.example.loki" ? "Loki logs" : "Other", version: "1.0.0", srelensApiVersion: "^0.6",
       kind: "declarative", permissions: [], capabilities: [],
       contributions: { pages: [], detailTabs: [], detailLinks: [], logProviders: providers },
     },
@@ -72,6 +73,14 @@ describe("the log providers the log view offers (#569)", () => {
       ["org.example.loki/audit", "audit · Loki logs"],
     ]);
     expect(result.current[0]).toMatchObject({ appId: "org.example.loki", revision: 4, provider: "loki" });
+  });
+
+  it("offers none on the web, which runs no app streams yet", () => {
+    inventory([app("org.example.loki", [loki("loki")])]);
+    vi.mocked(isTauri).mockReturnValue(false);
+    expect(renderHook(() => useLogProviders("prod-eu", "/Pod")).result.current).toEqual([]);
+    vi.mocked(isTauri).mockReturnValue(true);
+    expect(renderHook(() => useLogProviders("prod-eu", "/Pod")).result.current).toHaveLength(1);
   });
 
   it("offers none for a kind no provider is for, or before the inventory has loaded", () => {

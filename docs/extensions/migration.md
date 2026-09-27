@@ -52,6 +52,14 @@ An unsigned app that adds a `k8s.exec` binding needs **Allow unsigned apps to mo
 clusters and run code**, as one that declares actions does; installed without it, it is
 disabled with that reason.
 
+## Metric, log and trace providers (#569)
+
+They are API 0.6. An app that declares `metricProviders`, `logProviders` or
+`traceProviders` requires `^0.6`; the same manifest under `^0.5` is told "requires API
+0.6.0". Nothing else about a 0.5 app changes: it keeps its range, its schema file
+(`extension-manifest.v0.5.json`) and its signature. A host from before 0.6 lists a
+`^0.6` release as incompatible rather than offering it.
+
 ## Plain HTTP to this computer (#568)
 
 An installed app records **Allow plain HTTP to this computer** as `allowLoopbackHttp`,

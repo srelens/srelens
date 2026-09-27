@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   extensionEnabledFor,
+  isTauri,
   openExtensionView,
   providersFor,
   startExtensionLogStream,
@@ -34,8 +35,9 @@ export interface LogProviderChoice {
 /**
  * The log providers of every enabled app, enabled for `context`, declared for
  * `resourceKind` (a qualified kind: `/Pod`, `apps/Deployment`), in inventory and
- * manifest order. None while the inventory has not loaded. The host checks the
- * same again when a stream opens.
+ * manifest order. None while the inventory has not loaded, and none on the web, which
+ * runs no app streams yet: a follow is one. The host checks the same again when a
+ * stream opens.
  */
 export function useLogProviders(context: string, resourceKind: string | undefined): LogProviderChoice[] {
   const inventory = useExtensions();
@@ -43,7 +45,7 @@ export function useLogProviders(context: string, resourceKind: string | undefine
   const contextKey = lookup.status === "found" ? lookup.id : undefined;
   const plugins = inventory.status === "ready" ? inventory.data?.plugins : undefined;
   return useMemo(() => {
-    if (!resourceKind || !plugins) return [];
+    if (!resourceKind || !plugins || !isTauri()) return [];
     return plugins
       .filter((plugin) => plugin.enabled && !plugin.quarantined && !plugin.policyBlocked && extensionEnabledFor(plugin, contextKey))
       .flatMap((plugin) =>

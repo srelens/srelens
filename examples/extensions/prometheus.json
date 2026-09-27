@@ -1,9 +1,9 @@
 {
-  "$schema": "https://raw.githubusercontent.com/srelens/srelens/main/schemas/extension-manifest.v0.5.json",
+  "$schema": "https://raw.githubusercontent.com/srelens/srelens/main/schemas/extension-manifest.v0.6.json",
   "id": "org.srelens.prometheus",
   "name": "Prometheus",
   "version": "0.1.0",
-  "srelensApiVersion": "^0.5",
+  "srelensApiVersion": "^0.6",
   "kind": "declarative",
   "permissions": [
     { "capability": "network.http", "hosts": ["${settings.prometheusUrl}"] }

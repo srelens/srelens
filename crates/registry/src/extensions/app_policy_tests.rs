@@ -611,6 +611,56 @@ async fn network_http_under_a_policy_reaches_only_hosts_its_ceiling_allows() {
     assert!(error.contains("lets network.http reach no host"), "{error}");
 }
 
+/// A provider's query (#569) goes through `network.http` with the policy the app was
+/// read under, so the operator's ceiling holds it as it holds a read.
+#[tokio::test]
+async fn a_provider_query_under_a_policy_reaches_only_hosts_its_ceiling_allows() {
+    let dir = tempfile::tempdir().unwrap();
+    let closed = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap();
+    let allowed = format!("127.0.0.1:{}", closed.port());
+    let mut metrics: Value = serde_json::from_str(&manifest()).unwrap();
+    metrics["srelensApiVersion"] = json!("^0.6");
+    metrics["permissions"] = json!(["k8s.listCustomResource",
+        {"capability":"network.http","hosts":[allowed, "metrics.example.invalid"]}]);
+    for (name, url) in [
+        ("inside", format!("https://{allowed}")),
+        ("outside", "https://metrics.example.invalid".to_owned()),
+    ] {
+        metrics["capabilities"].as_array_mut().unwrap().push(json!({"name":name,"title":name,
+            "target":"network.http","arguments":{"url":url,"path":"/api/v1/query_range"},"inputs":[]}));
+    }
+    metrics["contributions"]["metricProviders"] = json!(["inside", "outside"].map(|name| json!({
+        "id":name,"title":name,"capability":name,"language":"promql","forKinds":["apps/Deployment"],
+        "unit":"number","query":"up{namespace=\"${namespace}\"}"})));
+    let rules = SharedPolicy::new(policy(json!({"networkCeiling":[allowed]})));
+    let apps = governed(dir.path(), &rules);
+    let install = json!({"action":"install","manifest":metrics.to_string(),
+        "grants":["k8s.listCustomResource", "network.http"]});
+    let revision = change(&apps, install).unwrap().plugins[0].revision;
+    let registry = broker(&apps);
+    let query = |provider: &str| json!({"id":"org.example.argocd","revision":revision,"provider":provider,
+        "context":"cluster/a","namespace":"team","resourceKind":"apps/Deployment","name":"web"});
+    let error = registry
+        .invoke("extensions.queryProvider", query("outside"))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("outside the hosts the administrator's policy lets network.http reach"),
+        "{error}"
+    );
+    // Inside the ceiling it gets past the policy, to a connection that fails.
+    let error = registry
+        .invoke("extensions.queryProvider", query("inside"))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(!error.contains("administrator's policy"), "{error}");
+}
+
 #[test]
 fn a_saved_inventory_carries_no_policy_of_its_own() {
     let dir = tempfile::tempdir().unwrap();

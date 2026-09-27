@@ -89,9 +89,9 @@ permission grants, action confirmation, cluster scoping, or manifest validation.
    `0.MINOR` version. A `0.MINOR.PATCH` bump is for clarifications that do not change
    which manifests validate. From 1.0: MAJOR for breaking changes, MINOR for
    additive ones, PATCH for fixes.
-5. **Current supported lines.** This host implements **API 0.3, API 0.4 and API 0.5**.
+5. **Current supported lines.** This host implements **API 0.3, API 0.4, API 0.5 and API 0.6**.
    A `^0.3` manifest is served under 0.3 and may use only what 0.3 has; a `^0.4` one may
-   also use what [0.4 added](#040), and a `^0.5` one what [0.5 added](#050). API 0.1 and API 0.2 are not supported. Existing
+   also use what [0.4 added](#040), a `^0.5` one what [0.5 added](#050), and a `^0.6` one what [0.6 added](#060). API 0.1 and API 0.2 are not supported. Existing
    installations targeting a retired line are quarantined until replaced by a
    compatible manifest. Official manifests must receive a new version and publisher
    signature; editing an installed signed manifest invalidates its proof.
@@ -133,10 +133,11 @@ It stays retired: a line is closed to additions once any published srelens build
 implements it, a prerelease included. Builds implementing API 0.4 were published (the
 pre-releases `0.15.1-186` and `0.15.1-187`, with `network.http`, #568, the last thing
 added to it), so what [#728](https://github.com/srelens/srelens/issues/728) added to
-resource links, the logs, exec and port-forwards of
-[#567](https://github.com/srelens/srelens/issues/567), and the metric, log and trace
-providers of [#569](https://github.com/srelens/srelens/issues/569), are
-[API 0.5](#050), not additions to 0.4 in place.
+resource links, and the logs, exec and port-forwards of
+[#567](https://github.com/srelens/srelens/issues/567), are [API 0.5](#050), not additions
+to 0.4 in place. Builds implementing API 0.5 were published in turn (the pre-release
+`0.15.1-188`), so the metric, log and trace providers of
+[#569](https://github.com/srelens/srelens/issues/569) are [API 0.6](#060).
 
 The host enforces this. `API_FIELDS` in `crates/plugin-host/src/manifest.rs` lists every
 field whose availability differs across supported API lines, and every *form* of value
@@ -303,9 +304,37 @@ list, and the [developer harness](testing.md#developer-harness) prints one per l
 
 ## API changelog
 
+### 0.6.0
+
+New in this line ([#569](https://github.com/srelens/srelens/issues/569)):
+
+- **Providers.** `contributions.metricProviders`, `logProviders` and `traceProviders`
+  declare a PromQL, LogQL or TraceQL template that one of the app's `network.http`
+  bindings sends, for the workload and pod kinds in `forKinds`. The host binds
+  `${cluster}`, `${namespace}`, `${workload}` and `${pod}` — each only inside a
+  double-quoted string, with `\` and `"` escaped, and `${name:regex}` quoting RE2
+  metacharacters first — and a metric provider's `${range}` and `${step}`, and sets the
+  query and time range as the language's HTTP parameters, which the binding may not.
+  It reads a Prometheus range query into the timeseries chart (at most 8 series), a
+  Loki range query into log lines, and a Tempo search into a list of traces (at most
+  50). Each list is gated in `API_FIELDS`, so a `^0.5` manifest that declares a
+  provider is told it requires API 0.6. The new read-only capability
+  `extensions.queryProvider` runs one query; the `logProvider` stream source follows a
+  log provider, asking again every 5 seconds while its view is open. See
+  [Metric, log and trace providers](manifest.md#metric-log-and-trace-providers).
+- The reference providers are `examples/extensions/prometheus.json` and `loki.json`,
+  0.1.0 on `^0.6`. Publishing them is a separate signed release and catalog update.
+- The host supports API 0.3, 0.4, 0.5 and 0.6, and `extensions.catalog` reports all four
+  in `hostApiVersions`. A host on the 0.5 line lists a `^0.6` release as incompatible
+  rather than offering it.
+- The manifest JSON Schema for this line is `schemas/extension-manifest.v0.6.json`.
+  `schemas/extension-manifest.v0.5.json` is the 0.5 contract, without these fields,
+  frozen as it was when 0.6 was cut. The Flux example uses nothing 0.6 added and stays
+  on `^0.5`.
+
 ### 0.5.0
 
-New in this line ([#728](https://github.com/srelens/srelens/issues/728), [#567](https://github.com/srelens/srelens/issues/567), [#569](https://github.com/srelens/srelens/issues/569)):
+New in this line ([#728](https://github.com/srelens/srelens/issues/728), [#567](https://github.com/srelens/srelens/issues/567)):
 
 - A resource link's `to` may name a built-in kind the host lists, such as `/Service`,
   `/Secret` or `/Namespace`, as well as a kind a declared reader lists. The host looks
@@ -342,22 +371,6 @@ New in this line ([#728](https://github.com/srelens/srelens/issues/728), [#567](
   port-forward sessions are audited. `extensions.pods` lists the pods a binding may
   reach. See [Logs, exec and port-forwards](manifest.md#logs-exec-and-port-forwards) and
   [streams.md](streams.md#pod-sources).
-- **Providers.** `contributions.metricProviders`, `logProviders` and `traceProviders`
-  declare a PromQL, LogQL or TraceQL template that one of the app's `network.http`
-  bindings sends, for the workload and pod kinds in `forKinds`. The host binds
-  `${cluster}`, `${namespace}`, `${workload}` and `${pod}` — each only inside a
-  double-quoted string, with `\` and `"` escaped, and `${name:regex}` quoting RE2
-  metacharacters first — and a metric provider's `${range}` and `${step}`, and sets the
-  query and time range as the language's HTTP parameters, which the binding may not.
-  It reads a Prometheus range query into the timeseries chart (at most 8 series), a
-  Loki range query into log lines, and a Tempo search into a list of traces (at most
-  50). Each list is gated in `API_FIELDS`, so a `^0.4` manifest that declares a
-  provider is told it requires API 0.5. The new read-only capability
-  `extensions.queryProvider` runs one query; the `logProvider` stream source follows a
-  log provider, asking again every 5 seconds while its view is open. See
-  [Metric, log and trace providers](manifest.md#metric-log-and-trace-providers).
-- The reference providers are `examples/extensions/prometheus.json` and `loki.json`,
-  0.1.0 on `^0.5`. Publishing them is a separate signed release and catalog update.
 - The host supports API 0.3, 0.4 and 0.5, and `extensions.catalog` reports all three in
   `hostApiVersions`. A host on the 0.4 line lists a `^0.5` release as incompatible
   rather than offering it.

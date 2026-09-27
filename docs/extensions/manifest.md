@@ -9,13 +9,13 @@ and [flux.json](../../examples/extensions/flux.json), and the reference provider
 
 ## JSON Schema
 
-The schema for API 0.5 is committed at
-[`schemas/extension-manifest.v0.5.json`](../../schemas/extension-manifest.v0.5.json).
+The schema for API 0.6 is committed at
+[`schemas/extension-manifest.v0.6.json`](../../schemas/extension-manifest.v0.6.json).
 Point your editor at it by naming it in the manifest:
 
 ```json
 {
-  "$schema": "https://raw.githubusercontent.com/srelens/srelens/main/schemas/extension-manifest.v0.5.json",
+  "$schema": "https://raw.githubusercontent.com/srelens/srelens/main/schemas/extension-manifest.v0.6.json",
   "id": "io.example.cert-manager"
 }
 ```
@@ -44,7 +44,7 @@ before publishing.
 | `id` | Yes | Reverse-domain identifier. See [Identifiers](specification.md#identifiers). |
 | `name` | Yes | Display name, 1–120 characters, with no control characters and no bidirectional or invisible format characters. See [Identifiers](specification.md#identifiers). |
 | `version` | Yes | The app's own SemVer version. |
-| `srelensApiVersion` | Yes | A SemVer range of extension API versions, for example `^0.5`. The fields marked **API 0.4** on this page need a range that admits only 0.4 or later, and those marked **API 0.5** one that admits only 0.5 or later; see [Versioning](specification.md#versioning). |
+| `srelensApiVersion` | Yes | A SemVer range of extension API versions, for example `^0.5`. The fields marked **API 0.4** on this page need a range that admits only 0.4 or later, those marked **API 0.5** one that admits only 0.5 or later, and those marked **API 0.6** one that admits only 0.6 or later; see [Versioning](specification.md#versioning). |
 | `kind` | Yes | `declarative`. No other kind is accepted. |
 | `permissions` | Yes | The exact host capability IDs the bindings use. `network.http` is written `{ "capability": "network.http", "hosts": [...] }` (API 0.4); see [Network requests](#network-requests). A pod capability may be written `{ "capability": "k8s.streamLogs", "namespaces": [...] }` (API 0.5); see [Logs, exec and port-forwards](#logs-exec-and-port-forwards). |
 | `capabilities` | Yes | 1–32 bindings, below. |
@@ -926,7 +926,7 @@ declared `url` setting. Problems are reported at `permissions[i].hosts[j]`.
 ### A request
 
 A `network.http` binding is one fixed GET. It takes no `inputs`: a
-[provider](#metric-log-and-trace-providers) (API 0.5) that sends its query through the
+[provider](#metric-log-and-trace-providers) (API 0.6) that sends its query through the
 binding adds only the query and time range the host binds, as parameters the host sets.
 
 | Argument | Meaning |
@@ -981,7 +981,7 @@ the app cannot set.
 
 ## Metric, log and trace providers
 
-API 0.5 ([#569](https://github.com/srelens/srelens/issues/569)). A provider is a query
+API 0.6 ([#569](https://github.com/srelens/srelens/issues/569)). A provider is a query
 template that one of the app's `network.http` bindings sends: a PromQL range query drawn
 as a chart on a workload's or a pod's overview, a LogQL query the log view can follow as
 a source beside Kubernetes, or a TraceQL search listed on an overview. The app writes the
@@ -1076,7 +1076,9 @@ The host adds these parameters after the binding's own, which may not set them:
   status rules are `network.http`'s.
 
 `extensions.queryProvider` runs one query of a metric, log or trace provider for a
-resource; see [capabilities.md](capabilities.md). **Desktop only**, as `network.http` is.
+resource; see [capabilities.md](capabilities.md). On the web host it answers only under
+the operator's network ceiling, as every `network.http` request there does, and a log
+provider's follow is an app stream, which the web host does not run yet.
 
 ### Log providers
 
@@ -1207,7 +1209,8 @@ The desktop app accepts a narrower surface than the developer broker:
 - Targets are `k8s.listCustomResource`, `k8s.listEvents`, the built-in workload and
   node summary readers, `network.http`, or a pod capability (`k8s.streamLogs`,
   `k8s.exec`, `k8s.portForward`). A provider sends its query through a `network.http`
-  binding, so an app with providers is refused where `network.http` is (the web host).
+  binding, so an app with providers is refused wherever `network.http` is (on the web,
+  without the operator's network ceiling).
   A reader target must be read-only with no
   confirmation, sensitive or destructive annotation; `network.http` and the pod
   capabilities are held to [their](#network-requests) [own](#logs-exec-and-port-forwards)

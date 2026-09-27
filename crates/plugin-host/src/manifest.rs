@@ -24,7 +24,7 @@ pub use versions::{MAX_BINDING_VERSIONS, MAX_PATH_OVERRIDES};
 /// Extension API versions this host implements, oldest first. A manifest is accepted when
 /// its `srelensApiVersion` range matches any of them. How versions are added and retired
 /// is specified in docs/extensions/specification.md.
-pub const SUPPORTED_API_VERSIONS: &[&str] = &["0.3.0", "0.4.0", "0.5.0"];
+pub const SUPPORTED_API_VERSIONS: &[&str] = &["0.3.0", "0.4.0", "0.5.0", "0.6.0"];
 
 /// The `format` values JSON Schema draft-07 defines.
 const STANDARD_FORMATS: &[&str] = &[
@@ -169,6 +169,16 @@ const fn api_0_5(path: &'static str) -> ApiField {
     }
 }
 
+/// A field API 0.6 added (#569).
+const fn api_0_6(path: &'static str) -> ApiField {
+    ApiField {
+        path,
+        introduced: "0.6.0",
+        removed: None,
+        form: None,
+    }
+}
+
 /// A link `to` naming a built-in kind, which API 0.5 added to a field API 0.4 had (#728).
 const fn api_0_5_builtin_target(path: &'static str) -> ApiField {
     ApiField {
@@ -241,12 +251,13 @@ pub const API_FIELDS: &[ApiField] = &[
         }),
         ..api_0_5("capabilities[].target")
     },
-    // Metric, log and trace providers (#569), on the same line, which no published
-    // build implements yet: each sends its query through a `network.http` binding,
-    // which API 0.4 already had, so each list is the one new field.
-    api_0_5("contributions.metricProviders"),
-    api_0_5("contributions.logProviders"),
-    api_0_5("contributions.traceProviders"),
+    // Metric, log and trace providers (#569). API 0.5 had been published in srelens
+    // builds without them (0.15.1-188), so they are a line of their own. Each sends its
+    // query through a `network.http` binding, which API 0.4 already had, so each list
+    // is the one new field.
+    api_0_6("contributions.metricProviders"),
+    api_0_6("contributions.logProviders"),
+    api_0_6("contributions.traceProviders"),
 ];
 
 /// Rejects a field in `raw` that is missing from any of `versions`: every supported API

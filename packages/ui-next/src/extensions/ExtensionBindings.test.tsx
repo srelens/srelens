@@ -428,7 +428,7 @@ it("reviews network.http as the hosts it may reach and each request it sends (#5
 
 it("reviews each provider under the request it queries through, with its whole template (#569)", async () => {
   const observed = metrics();
-  observed.srelensApiVersion = "^0.5";
+  observed.srelensApiVersion = "^0.6";
   observed.capabilities[0].arguments = { url: "${settings.prometheusUrl}", path: "/api/v1/query_range" } as never;
   observed.contributions = {
     pages: [], detailTabs: [], detailLinks: [],

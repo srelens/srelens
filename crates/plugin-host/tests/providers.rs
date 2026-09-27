@@ -13,7 +13,7 @@ use srelens_plugin_host::{
 fn manifest() -> Value {
     json!({
         "id":"org.example.observability", "name":"Observability", "version":"0.1.0",
-        "srelensApiVersion":"^0.5", "kind":"declarative",
+        "srelensApiVersion":"^0.6", "kind":"declarative",
         "permissions":[{"capability":"network.http","hosts":["prometheus.example.com","loki.example.com","tempo.example.com"]}],
         "capabilities":[
             {"name":"prom","title":"Prometheus range query","target":"network.http","inputs":[],
