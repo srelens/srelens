@@ -627,3 +627,60 @@ fn the_unsigned_switch_cannot_disable_a_required_app() {
     .unwrap();
     assert!(!state.plugins[0].enabled);
 }
+
+/// #567 added pod bindings. A policy names their capabilities as it names any other,
+/// and one that turns writes off also refuses an app that runs commands in pods: the
+/// host counts exec with the writes its unsigned-app setting guards.
+#[test]
+fn pod_capabilities_are_the_policys_to_allow_and_exec_counts_as_a_write() {
+    let app = |binding: Value, permission: &str| {
+        Manifest::parse(
+            &json!({
+                "id": "org.example.certmanager", "name": "cert-manager", "version": "0.1.0",
+                "srelensApiVersion": "^0.5", "kind": "declarative",
+                "permissions": ["k8s.listDeployments", permission],
+                "capabilities": [
+                    {"name": "controllers", "title": "Controllers", "target": "k8s.listDeployments",
+                        "inputs": ["context", "namespace"], "arguments": {}},
+                    binding,
+                ],
+                "contributions": {"pages": [], "detailTabs": [], "detailLinks": []}
+            })
+            .to_string(),
+        )
+        .unwrap_or_else(|e| panic!("{e}"))
+    };
+    let exec = app(
+        json!({"name": "status", "title": "cmctl status", "target": "k8s.exec", "inputs": [],
+            "arguments": {"resource": "controllers", "command": ["cmctl", "status"]}}),
+        "k8s.exec",
+    );
+    let logs = app(
+        json!({"name": "logs", "title": "Logs", "target": "k8s.streamLogs", "inputs": [],
+            "arguments": {"resource": "controllers"}}),
+        "k8s.streamLogs",
+    );
+    let named = policy(json!({"allowedCapabilities": [
+        "k8s.listDeployments", "k8s.streamLogs", "k8s.exec", "k8s.portForward"]}));
+    assert!(named.refusal(&exec, None).is_none());
+    assert!(named.refusal(&logs, None).is_none());
+
+    let no_writes = policy(json!({"allowWriteActions": false}));
+    let refused = no_writes.refusal(&exec, None).unwrap();
+    assert_eq!(refused.path, "capabilities");
+    assert!(
+        refused.reason.contains("run commands"),
+        "{}",
+        refused.reason
+    );
+    assert!(no_writes.refusal(&logs, None).is_none());
+
+    let without_exec =
+        policy(json!({"allowedCapabilities": ["k8s.listDeployments", "k8s.streamLogs"]}));
+    let refused = without_exec.refusal(&exec, None).unwrap();
+    assert!(
+        refused.reason.contains("does not allow k8s.exec"),
+        "{}",
+        refused.reason
+    );
+}

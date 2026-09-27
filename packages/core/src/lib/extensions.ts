@@ -431,7 +431,7 @@ export interface ExtensionPolicy {
   allowUnsignedApps: boolean;
   /** The host capabilities an app may be granted; `null` allows every one. */
   allowedCapabilities?: string[] | null;
-  /** Whether an app may declare write actions. */
+  /** Whether an app may declare write actions, or run commands in pods (`k8s.exec`). */
   allowWriteActions: boolean;
   /** The most `network.http` may reach; empty reaches no host. */
   networkCeiling: string[];

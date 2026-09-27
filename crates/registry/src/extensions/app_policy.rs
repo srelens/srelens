@@ -56,7 +56,8 @@ pub struct AppPolicy {
     /// offers apps.
     #[serde(rename = "allowedCapabilities")]
     allowed_capabilities: Option<BTreeSet<String>>,
-    /// Whether an app may declare write actions (the host action primitives).
+    /// Whether an app may declare write actions (the host action primitives), or run
+    /// commands in pods (`k8s.exec`, #567), which the host counts with them.
     #[serde(rename = "allowWriteActions")]
     allow_write_actions: bool,
     /// The most `network.http` may reach, written as an app's hosts are: `name`,
@@ -119,8 +120,9 @@ fn allowed() -> bool {
 }
 
 /// Every host capability an app can be granted on a host, as `validate_app` accepts
-/// them as targets, and the secret store an app with secret settings asks for. A new
-/// target there has to be added here before a policy can name it.
+/// them as targets (the pod bindings' since #567), and the secret store an app with
+/// secret settings asks for. A new target there has to be added here before a policy
+/// can name it.
 fn grantable() -> impl Iterator<Item = &'static str> {
     [
         "k8s.listCustomResource",
@@ -130,6 +132,7 @@ fn grantable() -> impl Iterator<Item = &'static str> {
     ]
     .into_iter()
     .chain(srelens_plugin_host::BUILTIN_READERS.iter().copied())
+    .chain(srelens_plugin_host::POD_TARGETS.iter().copied())
     .chain(srelens_kube::action_primitives::PRIMITIVES.iter().copied())
 }
 
@@ -273,10 +276,17 @@ impl AppPolicy {
             }
             _ => {}
         }
-        if !manifest.actions.is_empty() && !self.allow_write_actions {
+        // A command run in a pod can change anything the pod can, so the host counts
+        // exec with the writes its unsigned-app setting guards (#567).
+        let runs_commands = manifest
+            .capabilities
+            .iter()
+            .any(|binding| binding.target == srelens_plugin_host::POD_EXEC);
+        if !self.allow_write_actions && (!manifest.actions.is_empty() || runs_commands) {
             return refuse(
-                "actions",
-                "The administrator's policy does not allow apps that write to clusters".into(),
+                if manifest.actions.is_empty() { "capabilities" } else { "actions" },
+                "The administrator's policy does not allow apps that write to clusters or run commands in them"
+                    .into(),
             );
         }
         let permissions = manifest.permission_names();
