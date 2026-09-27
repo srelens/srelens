@@ -199,6 +199,36 @@ Each section is one app stream view: closing the Inspector, switching resources 
 closing the window ends every session it opened, forwards and their ports included. On
 the web the section says that app streams run in the desktop app.
 
+## Metrics, logs and traces from providers
+
+API 0.5 ([#569](https://github.com/srelens/srelens/issues/569)). An app's providers
+([manifest.md](manifest.md#metric-log-and-trace-providers)) are drawn by the host in two
+places, in the new design:
+
+- **Overviews.** On a Deployment, StatefulSet, DaemonSet or Pod a metric or trace
+  provider is for, the Overview (and the Inspector's Details) gains a **Metrics and
+  traces from apps** section after the app's detail panels (`ExtensionProviderSlot` in
+  `packages/ui-next/src/extensions/ExtensionProviderSlot.tsx`): one range picker (15
+  minutes to 7 days, an hour by default) and **Refresh**, then a
+  [timeseries chart](native-components.md#timeseries) per metric provider and a table of
+  traces per trace provider, each saying which app it is from. A panel asks when it
+  opens, when the range changes and on Refresh, never on a timer. Loading, a failure
+  (with its reason and Retry) and a query that matched nothing each look different; a
+  failure is never drawn as an empty chart.
+- **The log view.** On `/logs/<kind>/<namespace>/<name>`, when an installed, enabled
+  app has a log provider for the kind and the cluster, the controls bar gains a
+  **source** picker: **Kubernetes**, then each provider as "title · app". Choosing one
+  follows it through the view's own buffer, pause, filters and readout (`useLogStream`'s
+  `source`, from `packages/ui-next/src/extensions/logProviders.ts`), on an app stream
+  view of its own that closes when the source changes or the screen closes. The
+  **Previous instance** control is the cluster's and is not drawn for a provider. A
+  provider's stream that ended says how, as an ending or a failure, with **Follow
+  again**; a provider the inventory no longer offers says so, and the view follows
+  Kubernetes.
+
+The classic design does not draw providers. On the web there are none, since
+`network.http` is desktop only.
+
 ## Actions and refresh
 
 The details footer offers the installed manifest's explicitly granted actions (see [capabilities.md](capabilities.md#declared-gitops-actions)). Each opens a

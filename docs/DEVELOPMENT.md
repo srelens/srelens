@@ -142,7 +142,7 @@ Watches, pod exec, log tails, terminals, helm operations, and port-forwards don'
 
 The frontend side is identical in both cases and lives in `@srelens/core` (`packages/core/src/lib/`: `watch.ts`, `exec.ts`, `logsStream.ts`, `forward.ts`).
 
-Streams an app's views open go through one generic contract instead of a manager per kind: `crates/streams/src/app.rs` (frames, view ownership, per-app limits, metrics), with the extension broker deciding what an app may open. A new app stream source is a new `source` kind, not a new command: an app's logs, exec and port-forwards (#567) are the `logs`, `exec` and `portForward` sources, held to the binding's pod scope in `crates/registry/src/extensions/pods.rs`, rather than more uses of the core log, exec and forward managers. See [docs/extensions/streams.md](extensions/streams.md).
+Streams an app's views open go through one generic contract instead of a manager per kind: `crates/streams/src/app.rs` (frames, view ownership, per-app limits, metrics), with the extension broker deciding what an app may open. A new app stream source is a new `source` kind, not a new command: an app's logs, exec and port-forwards (#567) are the `logs`, `exec` and `portForward` sources, held to the binding's pod scope in `crates/registry/src/extensions/pods.rs`, rather than more uses of the core log, exec and forward managers. A log provider (#569) is the `logProvider` source, which polls its backend through `network.http` while its view is open. See [docs/extensions/streams.md](extensions/streams.md).
 
 ### The transport shim
 

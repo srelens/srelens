@@ -93,11 +93,12 @@ function MetricPanel(ask: Ask) {
 
 const when = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "medium" });
 
+/** One trace as a row of text: a backend's names with invisible characters shown, as every app value is. */
 function traceRow(trace: ExtensionTrace) {
   return [
-    trace.traceId,
-    trace.rootService ?? "—",
-    trace.rootName ?? "—",
+    plainText(trace.traceId),
+    trace.rootService === undefined ? "—" : plainText(trace.rootService),
+    trace.rootName === undefined ? "—" : plainText(trace.rootName),
     trace.start === undefined ? "—" : when.format(new Date(trace.start)),
     trace.durationMs === undefined ? "—" : `${trace.durationMs.toLocaleString("en-US")} ms`,
   ];

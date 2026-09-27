@@ -580,7 +580,9 @@ fn read_matrix(body: &Value, bound: &Bound, grid: Grid) -> Result<Chart, String>
                 .get("__name__")
                 .map_or_else(|| bound.title.clone(), |metric| (*metric).to_owned());
         }
-        let mut name = short(&name);
+        // A label value is the backend's text: shown with invisible characters as escapes,
+        // so a name cannot display as another series'.
+        let mut name = short(&srelens_capability::escape_invisible(&name));
         // One name per series: two label sets cut to the same text are told apart.
         let base = name.clone();
         let mut ordinal = 2;

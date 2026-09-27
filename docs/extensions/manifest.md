@@ -3,7 +3,9 @@
 Every app is one JSON manifest. The rules for versioning, identifiers and unknown
 fields are normative and live in [specification.md](specification.md); this page is
 the field reference. Complete examples: [argocd.json](../../examples/extensions/argocd.json)
-and [flux.json](../../examples/extensions/flux.json).
+and [flux.json](../../examples/extensions/flux.json), and the reference providers
+[prometheus.json](../../examples/extensions/prometheus.json) and
+[loki.json](../../examples/extensions/loki.json).
 
 ## JSON Schema
 
@@ -923,8 +925,9 @@ declared `url` setting. Problems are reported at `permissions[i].hosts[j]`.
 
 ### A request
 
-A `network.http` binding is one fixed GET. It takes no `inputs` in API 0.4; templated
-queries are [#569](https://github.com/srelens/srelens/issues/569)'s.
+A `network.http` binding is one fixed GET. It takes no `inputs`: a
+[provider](#metric-log-and-trace-providers) (API 0.5) that sends its query through the
+binding adds only the query and time range the host binds, as parameters the host sets.
 
 | Argument | Meaning |
 |---|---|
@@ -969,7 +972,127 @@ user's registry has no `network.http` and an app that binds it is refused there
 `extensions.read` sends a request, with every check an app read makes: the app enabled,
 at the revision the view knows, on a cluster it is enabled for, with its grants. A read
 stream (`extensions.streams`) refuses a `network.http` binding, so nothing calls another
-system on a timer.
+system on a timer. The one exception is a [log provider](#log-providers) the log view
+follows: the host asks it again every 5 seconds while the view is open, at an interval
+the app cannot set.
+
+## Metric, log and trace providers
+
+API 0.5 ([#569](https://github.com/srelens/srelens/issues/569)). A provider is a query
+template that one of the app's `network.http` bindings sends: a PromQL range query drawn
+as a chart on a workload's or a pod's overview, a LogQL query the log view can follow as
+a source beside Kubernetes, or a TraceQL search listed on an overview. The app writes the
+template. The host binds the view's cluster, namespace, workload or pod and time range
+into it, sends it through the binding with every rule [a request](#what-the-host-holds-a-request-to)
+is held to, reads the answer, and draws it itself. A provider supplies data, never markup.
+
+```json
+"permissions": [{ "capability": "network.http", "hosts": ["${settings.prometheusUrl}"] }],
+"settings": [{ "id": "prometheusUrl", "type": "url", "title": "Prometheus URL", "required": true }],
+"capabilities": [
+  { "name": "rangeQuery", "title": "Prometheus range query", "target": "network.http", "inputs": [],
+    "arguments": { "url": "${settings.prometheusUrl}", "path": "/api/v1/query_range" } }
+],
+"contributions": {
+  "metricProviders": [
+    { "id": "cpu", "title": "CPU by pod", "capability": "rangeQuery", "language": "promql",
+      "forKinds": ["apps/Deployment", "apps/StatefulSet", "apps/DaemonSet"], "unit": "cores",
+      "query": "sum by (pod) (rate(container_cpu_usage_seconds_total{namespace=\"${namespace}\", pod=~\"${workload:regex}-.+\"}[5m]))" }
+  ]
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `id` | 1–64 letters, digits and `-`, unique across all three lists. |
+| `title` | 1–120 characters, no control or format characters. The panel's or the source's name. |
+| `capability` | A `network.http` binding in `capabilities`. Its `path` is the endpoint: `/api/v1/query_range`, `/loki/api/v1/query_range`, `/api/search`. |
+| `language` | `promql` in `metricProviders`, `logql` in `logProviders`, `traceql` in `traceProviders`. |
+| `forKinds` | 1–4 of `apps/Deployment`, `apps/StatefulSet`, `apps/DaemonSet` and `/Pod`, each once: where the provider is shown. |
+| `query` | The template, 1–2048 characters on one line. See below. |
+| `unit` | Metric providers only: `number`, `percent`, `ratio`, `bytes`, `bytesPerSecond`, `seconds`, `cores` or `perSecond`. |
+
+Each list holds at most 16 providers.
+
+### Variables
+
+| Variable | Is | Known on |
+|---|---|---|
+| `${cluster}` | The kubeconfig context's name, as its file declares it. | Every kind. |
+| `${namespace}` | The view's namespace. | Every kind. |
+| `${workload}` | The Deployment, StatefulSet or DaemonSet the view shows. | The three workload kinds. |
+| `${pod}` | The Pod the view shows. | `/Pod`. |
+| `${range}` | The panel's whole time range, as a duration: `3600s`. | Metric providers. |
+| `${step}` | The panel's resolution, as a duration: `15s`. | Metric providers. |
+
+A variable must be known on every kind in `forKinds`, so `${pod}` needs `forKinds` to be
+`["/Pod"]` alone, and `${workload}` is refused beside `/Pod`.
+
+**Where a variable may stand.** The host reads the template the way the language reads
+its strings, and a name — `cluster`, `namespace`, `workload`, `pod` — may stand only
+inside a double-quoted string: `namespace="${namespace}"`. There the host escapes `\` and
+`"` in the value, the two escapes PromQL, LogQL and TraceQL all have, so a value is the
+text of one string and never query syntax, whatever it holds: a context named
+`prod"} or vector(1) #` is bound as `"prod\"} or vector(1) #"`. A value with a control or
+invisible format character, which not every language can carry, is refused rather than
+sent. `${name:regex}` escapes the value's RE2 metacharacters first, so
+`pod=~"${workload:regex}-.+"` matches a workload named `api.v2` literally. `${range}` and
+`${step}` are the host's own durations and stand outside strings: `[${range}]`.
+
+Refused at install, at `contributions.<list>[i].query`: a name outside a double-quoted
+string (bare, in a raw string between backticks, or in a PromQL single-quoted string); a
+duration inside a string; an unknown variable or format; `#`, which would start a
+comment that hides the rest of the line; a control character; an unclosed string; a
+string delimiter the language lacks (LogQL has no single-quoted string, and TraceQL
+strings are double-quoted only); and `${settings.…}`, since a setting never reaches a
+query.
+
+The values themselves are checked on every query: a namespace, workload or pod must be a
+Kubernetes name, and the cluster's name 1–1024 characters.
+
+### What the host sends and reads
+
+The host adds these parameters after the binding's own, which may not set them:
+
+| Language | Endpoint | Parameters the host sets | Read as |
+|---|---|---|---|
+| PromQL | Prometheus `query_range` | `query`, `start`, `end`, `step` (seconds) | The [timeseries chart](native-components.md#timeseries): one series per result, named by its labels. |
+| LogQL | Loki `query_range` | `query`, `start`, `end` (nanoseconds), `limit`, `direction` | Log lines, oldest first, each tagged `pod/container` from its stream's labels. |
+| TraceQL | Tempo `search` | `q`, `start`, `end` (seconds), `limit` | Traces, newest first: ID, root service, root operation, start and duration. |
+
+- **Metrics.** A range of 5 minutes to 7 days, ending at the last whole step; the step is
+  at least 15 seconds and makes at most 251 points. At most 8 series: more is refused
+  with a request to aggregate them, never cut. A sample that is not a finite number
+  (`NaN`, `+Inf`) is a gap. A query that matches nothing is a chart that says no data
+  was reported.
+- **Logs.** At most 1,000 lines a query, and a line past 16 KiB is cut and marked.
+- **Traces.** At most 50; a search that finds more says so.
+- **Failures.** An answer that is not the language's (a login page, a metric query's
+  matrix where lines were expected) is refused with why, and so is one Prometheus or Loki
+  answers with `"status": "error"`, quoting its reason. The 4 MiB limit, timeouts and
+  status rules are `network.http`'s.
+
+`extensions.queryProvider` runs one query of a metric, log or trace provider for a
+resource; see [capabilities.md](capabilities.md). **Desktop only**, as `network.http` is.
+
+### Log providers
+
+A log provider is a source of the log view (`/logs/<kind>/<namespace>/<name>`) for each
+kind in `forKinds`. The view follows it as the `logProvider` stream source
+([streams.md](streams.md#logprovider)): the history the view asks for (its tail length
+and how far back), then a query every 5 seconds for what is newer than the last line it
+sent, for as long as the view is open. Closing the view, or choosing another source, ends
+it.
+
+### What to write
+
+The labels a query matches are the backend's, not Kubernetes': the reference manifests
+assume a collector that labels series and streams with `namespace`, `pod` and
+`container`, as the common Kubernetes scrape and log configurations do. A workload's
+pods are matched by name, `pod=~"${workload:regex}-.+"`, which also matches the pods of
+a workload whose name starts with this one's and a `-`. A backend that needs a
+credential takes it through the binding's `secretHeaders`, such as `Authorization` after
+`Bearer `, and a multi-tenant Loki's `X-Scope-OrgID` is a literal header.
 
 ## Logs, exec and port-forwards
 
@@ -1080,7 +1203,9 @@ The desktop app accepts a narrower surface than the developer broker:
 
 - Targets are `k8s.listCustomResource`, `k8s.listEvents`, the built-in workload and
   node summary readers, `network.http`, or a pod capability (`k8s.streamLogs`,
-  `k8s.exec`, `k8s.portForward`). A reader target must be read-only with no
+  `k8s.exec`, `k8s.portForward`). A provider sends its query through a `network.http`
+  binding, so an app with providers is refused where `network.http` is (the web host).
+  A reader target must be read-only with no
   confirmation, sensitive or destructive annotation; `network.http` and the pod
   capabilities are held to [their](#network-requests) [own](#logs-exec-and-port-forwards)
   rules.

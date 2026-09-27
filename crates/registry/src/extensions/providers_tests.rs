@@ -283,6 +283,20 @@ async fn a_metric_query_is_bound_sent_through_network_http_and_drawn_as_a_chart(
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_series_name_shows_an_invisible_character_as_an_escape() {
+    let prometheus = server(|_| {
+        Reply::Json(json!({"status":"success","data":{"resultType":"matrix","result":[
+            {"metric":{"pod":"web-1\u{202e}2"},"values":[]}]}}))
+    })
+    .await;
+    let h = harness(&prometheus, "kind-dev").await;
+    let answer = h.query(json!({"provider":"cpu"})).await.unwrap();
+    let name = answer["chart"]["series"][0]["name"].as_str().unwrap().to_owned();
+    assert!(!name.contains('\u{202e}'), "{name:?}");
+    assert!(name.starts_with("pod=\"web-1"), "{name}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_cluster_name_reaches_the_query_as_one_escaped_string() {
     // A kubeconfig context name is free text, and here it tries to end the string.
     let context = "prod\"} or vector(1) #";
