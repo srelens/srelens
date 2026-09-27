@@ -124,7 +124,9 @@ export function ExtensionPodSlot({ context, resource }: { context: string; resou
     <>
       {offered.map(({ plugin, bindings }) => (
         <ExtensionPodTools
-          key={`${plugin.manifest.id}/${plugin.revision}`}
+          // The resource is part of the identity: moving the Inspector to another
+          // one starts over, with a new view, and the old view's streams end.
+          key={`${plugin.manifest.id}/${plugin.revision}/${kind}/${namespace}/${resource.metadata.name}`}
           plugin={plugin}
           context={context}
           bindings={bindings}
@@ -169,6 +171,8 @@ export function ExtensionPodTools({
   const [sessions, setSessions] = useState<Session[]>([]);
   const [pending, setPending] = useState<Omit<Extract<Session, { kind: "exec" }>, "id"> | null>(null);
   const next = useRef(1);
+  // The control that opened the exec review, which gets focus back when it closes.
+  const opener = useRef<HTMLElement | null>(null);
   const start = (session: NewSession) =>
     setSessions((open) => [...open, { ...session, id: next.current++ } as Session]);
   const stop = (id: number) => setSessions((open) => open.filter((session) => session.id !== id));
@@ -199,7 +203,10 @@ export function ExtensionPodTools({
           place={place}
           bindings={group}
           onLogs={(binding, pod, container) => start({ kind: "logs", binding, pod, container })}
-          onRun={(binding, pod, container, command) => setPending({ kind: "exec", binding, pod, container, command })}
+          onRun={(binding, pod, container, command, trigger) => {
+            opener.current = trigger;
+            setPending({ kind: "exec", binding, pod, container, command });
+          }}
           onForward={(binding, target) => start({ kind: "forward", binding, ...target })}
         />
       ))}
@@ -209,6 +216,7 @@ export function ExtensionPodTools({
           context={context}
           namespace={place.namespace}
           pending={pending}
+          opener={opener}
           onCancel={() => setPending(null)}
           onRun={() => {
             start(pending);
@@ -252,7 +260,7 @@ function PodGroup({
   place: PodPlace;
   bindings: PodBinding[];
   onLogs(binding: PodBinding, pod: string, container: string): void;
-  onRun(binding: PodBinding, pod: string, container: string, command: string[]): void;
+  onRun(binding: PodBinding, pod: string, container: string, command: string[], trigger: HTMLElement): void;
   onForward(binding: PodBinding, target: { pod?: string; service?: string }): void;
 }) {
   // Asked through a binding that forwards through a Service when the group has one: its
@@ -329,10 +337,16 @@ function PodGroup({
                           size="sm"
                           aria-label={`${name} (${pod.name})`}
                           title={fixed ? `Runs in container ${fixed}` : undefined}
-                          onClick={() => {
+                          onClick={(event) => {
                             if (binding.target === POD_LOGS) onLogs(binding, pod.name, container);
                             else if (binding.target === POD_EXEC)
-                              onRun(binding, pod.name, container, (binding.arguments.command as string[]) ?? []);
+                              onRun(
+                                binding,
+                                pod.name,
+                                container,
+                                (binding.arguments.command as string[]) ?? [],
+                                event.currentTarget,
+                              );
                             else onForward(binding, { pod: pod.name });
                           }}
                         >
@@ -387,6 +401,7 @@ function ExecReview({
   context,
   namespace,
   pending,
+  opener,
   onCancel,
   onRun,
 }: {
@@ -394,12 +409,21 @@ function ExecReview({
   context: string;
   namespace: string;
   pending: Omit<Extract<Session, { kind: "exec" }>, "id">;
+  opener: { current: HTMLElement | null };
   onCancel(): void;
   onRun(): void;
 }) {
   const app = useConfirmationApp({ id: plugin.manifest.id, revision: plugin.revision });
   const region = useRef<HTMLDivElement>(null);
-  useEffect(() => region.current?.focus(), []);
+  // Focus moves in, and goes back to what opened it when the review closes —
+  // on Cancel, Escape or Run alike — rather than falling to the page.
+  useEffect(() => {
+    // Named by the click, not read off `document.activeElement`: a click does not
+    // focus a button in every browser.
+    const back = opener.current;
+    region.current?.focus();
+    return () => back?.focus();
+  }, [opener]);
   return (
     <div
       className="extension-review"

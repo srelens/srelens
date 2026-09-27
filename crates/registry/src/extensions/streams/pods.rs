@@ -14,7 +14,7 @@
 //! chatty container cannot take the app past its message rate.
 
 use super::super::pods::{
-    self as scope, ExecAsk, LogEvent, LogsAsk, PodCluster, PodsIn, PodsOut, Scope,
+    self as scope, ExecAsk, LogEvent, LogsAsk, PodCluster, PodsIn, PodsOut, Scope, ScopeError,
 };
 use super::{ExtensionStreams, OpenStreamIn, OpenStreamOut, StreamSourceIn};
 use serde::Deserialize;
@@ -420,7 +420,7 @@ impl ExtensionStreams {
             name.as_deref(),
         )
         .await
-        .map_err(|why| refuse(why, container.as_deref(), approved))?;
+        .map_err(|why| refuse(why.into(), container.as_deref(), approved))?;
         let facts = scope::admitted_pod(cluster.as_ref(), &context, &scope, &input.id, pod)
             .await
             .map_err(|why| refuse(why, container.as_deref(), approved))?;
@@ -539,7 +539,7 @@ impl ExtensionStreams {
             name.as_deref(),
         )
         .await
-        .map_err(refuse)?;
+        .map_err(|why| refuse(why.into()))?;
         let via_service = srelens_plugin_host::forward_via_service(&binding);
         let (facts, remote) = match (via_service, pod, service) {
             (false, Some(pod), None) => {
@@ -554,7 +554,7 @@ impl ExtensionStreams {
             (true, None, Some(service)) => {
                 scope::service_target(cluster.as_ref(), &context, &scope, &input.id, service, port)
                     .await
-                    .map_err(refuse)?
+                    .map_err(|why| refuse(why.into()))?
             }
             (false, _, Some(_)) => {
                 return Err(refuse(format!(
@@ -783,16 +783,38 @@ impl LogFollow {
             // Following again is reaching the pod again: only while the app
             // may, while the object still selects it, and while it is there.
             self.authority.check().await?;
-            self.scope = scope::scope(
-                self.cluster.as_ref(),
-                &self.core,
-                &self.ask.context,
-                &self.manifest,
-                &self.binding,
-                &self.ask.namespace,
-                self.object.as_deref(),
-            )
-            .await?;
+            // Whether the wait before following again was already had, and said.
+            let mut waited = false;
+            loop {
+                match scope::scope(
+                    self.cluster.as_ref(),
+                    &self.core,
+                    &self.ask.context,
+                    &self.manifest,
+                    &self.binding,
+                    &self.ask.namespace,
+                    self.object.as_deref(),
+                )
+                .await
+                {
+                    Ok(scope) => {
+                        self.scope = scope;
+                        break;
+                    }
+                    Err(ScopeError::Refused(why)) => return Err(why),
+                    // The API server or the network going away is the usual
+                    // reason a follow is lost, and it says nothing of the
+                    // app's reach: ask again later rather than end.
+                    Err(ScopeError::Unanswered(why)) => {
+                        if send(&tx, self.status("reconnecting", Some(&why))).is_err() {
+                            return Ok(());
+                        }
+                        tokio::time::sleep(self.timing.reconnect).await;
+                        self.authority.check().await?;
+                        waited = true;
+                    }
+                }
+            }
             match self
                 .cluster
                 .pod(&self.ask.context, &self.ask.namespace, &self.ask.pod)
@@ -817,14 +839,16 @@ impl LogFollow {
                 }
                 Ok(Some(_)) | Err(_) => {}
             }
-            let message = match &ended {
-                Ok(()) => "The log stream ended; following again".to_owned(),
-                Err(why) => why.clone(),
-            };
-            if send(&tx, self.status("reconnecting", Some(&message))).is_err() {
-                return Ok(());
+            if !waited {
+                let message = match &ended {
+                    Ok(()) => "The log stream ended; following again".to_owned(),
+                    Err(why) => why.clone(),
+                };
+                if send(&tx, self.status("reconnecting", Some(&message))).is_err() {
+                    return Ok(());
+                }
+                tokio::time::sleep(self.timing.reconnect).await;
             }
-            tokio::time::sleep(self.timing.reconnect).await;
             // Only what is new: the history was sent on the first follow.
             self.ask.tail_lines = 0;
             self.ask.since_seconds = None;
@@ -883,7 +907,7 @@ impl ExecRun {
                     if take(&mut chunks, stream, text) > MAX_EXEC_OUTPUT {
                         let _ = flush(&mut chunks, &tx);
                         return Err(format!(
-                            "The command wrote more than {} KiB of output, the most the host keeps for an app's command; the host stopped it",
+                            "The command wrote more than {} KiB of output, the most the host keeps for an app's command; the host stopped following it, and it may still be running in the container",
                             MAX_EXEC_OUTPUT / 1024
                         ));
                     }
@@ -902,11 +926,12 @@ impl ExecRun {
                 () = &mut limit => {
                     let _ = flush(&mut chunks, &tx);
                     return Err(format!(
-                        "The command ran past {} seconds, the most an app's command may run; the host stopped it",
+                        "The command ran past {} seconds, the most an app's command may run; the host stopped following it, and it may still be running in the container",
                         self.timing.exec_limit.as_secs()
                     ));
                 }
-                result = &mut session => break result?,
+                // Kept, not returned: what arrived before a failure is sent first.
+                result = &mut session => break result,
             }
         };
         while let Ok((stream, text)) = output.try_recv() {
@@ -915,6 +940,7 @@ impl ExecRun {
         if flush(&mut chunks, &tx).is_err() {
             return Ok(());
         }
+        let code = code?;
         let _ = send(&tx, json!({"event": "exit", "code": code}));
         Ok(())
     }
@@ -1025,7 +1051,9 @@ impl Forward {
     }
 
     /// The pod went away. A forward to a pod ends with why; one through a
-    /// Service follows it to another pod in scope, and says which.
+    /// Service follows it to another pod in scope, and says which. A read that
+    /// gets no answer is asked again on the next check, and the forward stays
+    /// on the pod it had until then.
     async fn retarget(&mut self, tx: &StreamEmitter) -> Result<(), String> {
         let Some(service) = self.service.clone() else {
             return Err(format!(
@@ -1034,7 +1062,27 @@ impl Forward {
             ));
         };
         self.authority.check().await?;
-        self.scope = scope::scope(
+        match self.target(&service).await {
+            Ok((scope, pod, remote)) => {
+                self.scope = scope;
+                self.pod = pod;
+                self.remote = remote;
+                send(tx, self.ready()).map_err(|_| "The stream ended".to_owned())
+            }
+            Err(ScopeError::Refused(why)) => Err(why),
+            Err(ScopeError::Unanswered(why)) => {
+                log::warn!(
+                    "app port-forward through Service {service} on {} could not find its next pod yet: {why}",
+                    self.context
+                );
+                Ok(())
+            }
+        }
+    }
+
+    /// The scope as it is now, and the pod and port `service` sends to in it.
+    async fn target(&self, service: &str) -> Result<(Scope, PodFacts, u16), ScopeError> {
+        let scope = scope::scope(
             self.cluster.as_ref(),
             &self.core,
             &self.context,
@@ -1047,15 +1095,13 @@ impl Forward {
         let (pod, remote) = scope::service_target(
             self.cluster.as_ref(),
             &self.context,
-            &self.scope,
+            &scope,
             &self.app,
-            &service,
+            service,
             self.port,
         )
         .await?;
-        self.pod = pod;
-        self.remote = remote;
-        send(tx, self.ready()).map_err(|_| "The stream ended".to_owned())
+        Ok((scope, pod, remote))
     }
 }
 

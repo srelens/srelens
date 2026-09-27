@@ -404,6 +404,23 @@ fn an_exec_command_is_one_fixed_program_and_never_a_shell() {
         json!(["env", "-S", "sh -c id"]),
         json!(["env", "--split-string=cmctl status"]),
         json!(["env", "-iS", "sh -c id"]),
+        // A wrapper running a wrapper, and the other programs that run the
+        // program named after them.
+        json!(["env", "busybox", "sh", "-c", "id"]),
+        json!(["busybox", "env", "sh", "-c", "id"]),
+        json!(["env", "--", "toybox", "sh"]),
+        json!(["env", "env", "-S", "sh -c id"]),
+        json!(["nice", "sh", "-c", "id"]),
+        json!(["nice", "-n", "5", "bash"]),
+        json!(["nohup", "sh", "-c", "id"]),
+        json!(["timeout", "30", "sh", "-c", "id"]),
+        json!(["timeout", "-k", "5", "30", "env", "sh"]),
+        json!(["setsid", "-f", "sh"]),
+        json!(["stdbuf", "-oL", "sh", "-c", "id"]),
+        json!(["xargs", "-0", "sh", "-c"]),
+        // Its name anywhere after a wrapper is refused, even as an option's value:
+        // the host does not parse every wrapper's options to guess the program.
+        json!(["env", "-u", "sh", "cmctl", "version"]),
     ] {
         let error = one(&command(shell.clone()));
         assert_eq!(error.path, "capabilities[5].arguments.command", "{shell}");
@@ -427,7 +444,11 @@ fn an_exec_command_is_one_fixed_program_and_never_a_shell() {
     parse(&command(json!(["busybox", "nslookup", "example.com"])));
     parse(&command(json!(["/usr/bin/env", "cmctl", "version"])));
     parse(&command(json!(["env", "-i", "LANG=C", "cmctl", "version"])));
-    parse(&command(json!(["env", "-u", "sh", "cmctl", "version"])));
+    parse(&command(json!(["timeout", "30", "cmctl", "status"])));
+    parse(&command(json!(["nice", "-n", "5", "cmctl", "status"])));
+    // Without a wrapper, only the program is read: an argument named like a
+    // shell is the program's own business.
+    parse(&command(json!(["cmctl", "check", "--shell", "sh"])));
 }
 
 #[test]

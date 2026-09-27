@@ -162,6 +162,58 @@ pub fn service_facts(service: &Service) -> ServiceFacts {
     }
 }
 
+/// Why a read gave nothing back. Kept apart because the two mean different
+/// things to a caller that is following something: an answer is the cluster's
+/// word and stands; no answer says nothing either way, and asking again later
+/// may get one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ReadError {
+    /// The API server answered, and refused: Forbidden, an invalid request.
+    Answered(String),
+    /// No answer to go by: a timeout, a connection that failed or was never
+    /// made, or an API server that said it could not answer now (429, 5xx).
+    Unanswered(String),
+}
+
+impl ReadError {
+    pub fn message(&self) -> &str {
+        match self {
+            ReadError::Answered(why) | ReadError::Unanswered(why) => why,
+        }
+    }
+
+    fn of(error: kube::Error) -> Self {
+        match &error {
+            kube::Error::Api(status) if status.code != 429 && status.code < 500 => {
+                ReadError::Answered(error.to_string())
+            }
+            _ => ReadError::Unanswered(error.to_string()),
+        }
+    }
+
+    fn of_list(error: crate::list_cap::ListCappedError, what: &str) -> Self {
+        match error {
+            crate::list_cap::ListCappedError::Api(error) => ReadError::of(error),
+            timeout @ crate::list_cap::ListCappedError::Timeout { .. } => {
+                ReadError::Unanswered(format!("{what} timed out: {timeout}"))
+            }
+            stuck => ReadError::Answered(format!("{what} failed: {stuck}")),
+        }
+    }
+}
+
+impl std::fmt::Display for ReadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.message())
+    }
+}
+
+impl From<ReadError> for String {
+    fn from(error: ReadError) -> Self {
+        error.message().to_owned()
+    }
+}
+
 /// One namespaced object of any kind, as the API serves it: `None` when the
 /// cluster says there is none.
 #[allow(clippy::too_many_arguments)]
@@ -174,16 +226,16 @@ pub async fn get_object(
     plural: &str,
     namespace: &str,
     name: &str,
-) -> Result<Option<Value>, String> {
-    let client = cache.get(context).await?;
+) -> Result<Option<Value>, ReadError> {
+    let client = cache.get(context).await.map_err(ReadError::Unanswered)?;
     let resource = crate::crds::custom_api_resource(group, version, kind, plural);
     let api: Api<DynamicObject> = Api::namespaced_with(client, namespace, &resource);
     let object = tokio::time::timeout(request_timeout(), api.get_opt(name))
         .await
-        .map_err(|_| format!("reading {kind} {namespace}/{name} timed out"))?
-        .map_err(|e| e.to_string())?;
+        .map_err(|_| ReadError::Unanswered(format!("reading {kind} {namespace}/{name} timed out")))?
+        .map_err(ReadError::of)?;
     object
-        .map(|object| serde_json::to_value(object).map_err(|e| e.to_string()))
+        .map(|object| serde_json::to_value(object).map_err(|e| ReadError::Answered(e.to_string())))
         .transpose()
 }
 
@@ -194,8 +246,8 @@ pub async fn list_pods(
     context: &str,
     namespace: &str,
     labels: &str,
-) -> Result<(Vec<PodFacts>, bool), String> {
-    let client = cache.get(context).await?;
+) -> Result<(Vec<PodFacts>, bool), ReadError> {
+    let client = cache.get(context).await.map_err(ReadError::Unanswered)?;
     let api: Api<Pod> = Api::namespaced(client, namespace);
     let params = if labels.is_empty() {
         ListParams::default()
@@ -205,7 +257,7 @@ pub async fn list_pods(
     // Each page has its own time budget inside `list_capped`.
     let (pods, truncated) = crate::list_cap::list_capped(&api, params)
         .await
-        .map_err(|e| e.into_capability_error("list pods").to_string())?;
+        .map_err(|e| ReadError::of_list(e, "list pods"))?;
     Ok((pods.iter().map(pod_facts).collect(), truncated))
 }
 
@@ -215,13 +267,13 @@ pub async fn get_pod(
     context: &str,
     namespace: &str,
     name: &str,
-) -> Result<Option<PodFacts>, String> {
-    let client = cache.get(context).await?;
+) -> Result<Option<PodFacts>, ReadError> {
+    let client = cache.get(context).await.map_err(ReadError::Unanswered)?;
     let api: Api<Pod> = Api::namespaced(client, namespace);
     let pod = tokio::time::timeout(request_timeout(), api.get_opt(name))
         .await
-        .map_err(|_| format!("reading pod {namespace}/{name} timed out"))?
-        .map_err(|e| e.to_string())?;
+        .map_err(|_| ReadError::Unanswered(format!("reading pod {namespace}/{name} timed out")))?
+        .map_err(ReadError::of)?;
     Ok(pod.as_ref().map(pod_facts))
 }
 
@@ -230,12 +282,12 @@ pub async fn list_services(
     cache: &ClientCache,
     context: &str,
     namespace: &str,
-) -> Result<Vec<ServiceFacts>, String> {
-    let client = cache.get(context).await?;
+) -> Result<Vec<ServiceFacts>, ReadError> {
+    let client = cache.get(context).await.map_err(ReadError::Unanswered)?;
     let api: Api<Service> = Api::namespaced(client, namespace);
     let (services, _) = crate::list_cap::list_capped(&api, ListParams::default())
         .await
-        .map_err(|e| e.into_capability_error("list services").to_string())?;
+        .map_err(|e| ReadError::of_list(e, "list services"))?;
     Ok(services.iter().map(service_facts).collect())
 }
 

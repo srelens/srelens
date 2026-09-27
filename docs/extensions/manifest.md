@@ -1038,11 +1038,17 @@ scope, and neither is a cluster-scoped custom resource.
 no control or invisible format characters. The host runs it as written, without a
 shell, so there is no quoting, globbing or expansion, and it reads no setting: what the
 person reviewed at install is what runs. The program may not be a shell (`sh`, `bash`,
-`ash`, `dash`, `zsh`, `ksh`, `mksh`, `csh`, `tcsh`, `fish`, `pwsh`, by any path), or
-`env`, `busybox` or `toybox` running one, because `sh -c` would turn the reviewed command
-into whatever its script says. That is a guard against the obvious, not a sandbox: the
-review, which shows the exact command, is the control, and so is the confirmation
-before every run.
+`ash`, `dash`, `zsh`, `ksh`, `mksh`, `csh`, `tcsh`, `fish`, `pwsh`, by any path), because
+`sh -c` would turn the reviewed command into whatever its script says. Nor may it be a
+program that runs the program named after it — `env`, `busybox`, `toybox`, `nice`,
+`nohup`, `timeout`, `setsid`, `stdbuf` or `xargs` — when a shell's name is any later
+argument, or when an option splits one argument into a command line (`env -S`,
+`--split-string`). After such a wrapper the rule is coarse on purpose: the host does not
+parse each wrapper's options to find the program it runs, so a nested wrapper or an
+unfamiliar option cannot hide a shell, and a wrapped command whose own arguments merely
+name one (`env -u sh cmctl …`) is refused too. Drop the wrapper, and only the program is
+read. That is a guard against the obvious, not a sandbox: the review, which shows the
+exact command, is the control, and so is the confirmation before every run.
 
 `k8s.exec` is **sensitive** and `high` impact. Every session needs the host confirmation
 (#552), which names the cluster, the pod, the container and the exact command, and the

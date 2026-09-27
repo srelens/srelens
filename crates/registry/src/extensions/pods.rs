@@ -17,7 +17,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use srelens_capability::{Annotations, Capability, CapabilityError, Impact, Registry};
-use srelens_kube::app_pods::{Output, PodFacts, ServiceFacts, Upstream};
+use srelens_kube::app_pods::{Output, PodFacts, ReadError, ServiceFacts, Upstream};
 use srelens_kube::client_cache::ClientCache;
 use srelens_plugin_host::{Binding, Manifest, PodScope, POD_EXEC, POD_FORWARD, POD_LOGS};
 use std::collections::BTreeMap;
@@ -65,7 +65,8 @@ pub struct ExecAsk {
 }
 
 /// The cluster, as the pod sources need it. Every call is made with the
-/// user's own credentials and is held to the cluster's RBAC.
+/// user's own credentials and is held to the cluster's RBAC; a read that fails
+/// says whether the cluster answered ([`ReadError`]).
 #[async_trait::async_trait]
 pub trait PodCluster: Send + Sync {
     /// One namespaced object, as the API serves it; `None` when there is none.
@@ -75,7 +76,7 @@ pub trait PodCluster: Send + Sync {
         kind: &KindRef,
         namespace: &str,
         name: &str,
-    ) -> Result<Option<Value>, String>;
+    ) -> Result<Option<Value>, ReadError>;
     /// The pods in `namespace` a label selector query selects, and whether the
     /// list stopped at the host's cap. The host matches every one again.
     async fn pods(
@@ -83,15 +84,19 @@ pub trait PodCluster: Send + Sync {
         context: &str,
         namespace: &str,
         labels: &str,
-    ) -> Result<(Vec<PodFacts>, bool), String>;
+    ) -> Result<(Vec<PodFacts>, bool), ReadError>;
     /// One pod; `None` when there is none.
     async fn pod(
         &self,
         context: &str,
         namespace: &str,
         name: &str,
-    ) -> Result<Option<PodFacts>, String>;
-    async fn services(&self, context: &str, namespace: &str) -> Result<Vec<ServiceFacts>, String>;
+    ) -> Result<Option<PodFacts>, ReadError>;
+    async fn services(
+        &self,
+        context: &str,
+        namespace: &str,
+    ) -> Result<Vec<ServiceFacts>, ReadError>;
     /// Follow one container's logs until the cluster ends the stream.
     async fn logs(&self, ask: &LogsAsk, events: UnboundedSender<LogEvent>) -> Result<(), String>;
     /// Run a command once; its exit code, or why it did not run to one.
@@ -121,7 +126,7 @@ impl PodCluster for KubePods {
         kind: &KindRef,
         namespace: &str,
         name: &str,
-    ) -> Result<Option<Value>, String> {
+    ) -> Result<Option<Value>, ReadError> {
         srelens_kube::app_pods::get_object(
             &self.0,
             context,
@@ -139,7 +144,7 @@ impl PodCluster for KubePods {
         context: &str,
         namespace: &str,
         labels: &str,
-    ) -> Result<(Vec<PodFacts>, bool), String> {
+    ) -> Result<(Vec<PodFacts>, bool), ReadError> {
         srelens_kube::app_pods::list_pods(&self.0, context, namespace, labels).await
     }
     async fn pod(
@@ -147,10 +152,14 @@ impl PodCluster for KubePods {
         context: &str,
         namespace: &str,
         name: &str,
-    ) -> Result<Option<PodFacts>, String> {
+    ) -> Result<Option<PodFacts>, ReadError> {
         srelens_kube::app_pods::get_pod(&self.0, context, namespace, name).await
     }
-    async fn services(&self, context: &str, namespace: &str) -> Result<Vec<ServiceFacts>, String> {
+    async fn services(
+        &self,
+        context: &str,
+        namespace: &str,
+    ) -> Result<Vec<ServiceFacts>, ReadError> {
         srelens_kube::app_pods::list_services(&self.0, context, namespace).await
     }
     async fn logs(&self, ask: &LogsAsk, events: UnboundedSender<LogEvent>) -> Result<(), String> {
@@ -452,7 +461,11 @@ impl Scope {
 
 /// The kind a scope's reader lists, at the version a read of it resolves to
 /// on this cluster. A built-in reader's kind is the host's, never the app's.
-async fn reader_kind(core: &Registry, context: &str, reader: &Binding) -> Result<KindRef, String> {
+async fn reader_kind(
+    core: &Registry,
+    context: &str,
+    reader: &Binding,
+) -> Result<KindRef, ScopeError> {
     if let Some(identity) = srelens_plugin_host::builtin_reader_identity(&reader.target) {
         let field = |key: &str| identity[key].as_str().unwrap_or_default().to_owned();
         return Ok(KindRef {
@@ -462,9 +475,11 @@ async fn reader_kind(core: &Registry, context: &str, reader: &Binding) -> Result
             plural: field("plural"),
         });
     }
-    let version = crd::resolve(core, context, reader)
-        .await
-        .map_err(|e| e.to_string())?;
+    let version = match crd::serves(core, context, reader).await {
+        crd::Served::Yes(version) => version,
+        crd::Served::No(why) => return Err(ScopeError::Refused(why)),
+        crd::Served::Unknown(why) => return Err(ScopeError::Unanswered(why)),
+    };
     let field = |key: &str| {
         reader
             .arguments
@@ -489,6 +504,41 @@ fn at_path<'a>(object: &'a Value, path: &str) -> Option<&'a Value> {
         .filter(|value| !value.is_null())
 }
 
+/// Why a pod binding reaches no pod now.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ScopeError {
+    /// It may not: the manifest, the view or the cluster's own answer says so.
+    /// That stands, so a stream or forward that meets it ends.
+    Refused(String),
+    /// A read it needs got no answer: a timeout, an API server that is
+    /// restarting, a network that went away. That says nothing about the app's
+    /// reach, so a stream or forward that meets it asks again later.
+    Unanswered(String),
+}
+
+impl From<String> for ScopeError {
+    fn from(why: String) -> Self {
+        ScopeError::Refused(why)
+    }
+}
+
+impl From<ReadError> for ScopeError {
+    fn from(error: ReadError) -> Self {
+        match error {
+            ReadError::Answered(why) => ScopeError::Refused(why),
+            ReadError::Unanswered(why) => ScopeError::Unanswered(why),
+        }
+    }
+}
+
+impl From<ScopeError> for String {
+    fn from(error: ScopeError) -> Self {
+        match error {
+            ScopeError::Refused(why) | ScopeError::Unanswered(why) => why,
+        }
+    }
+}
+
 /// The scope of `binding` on this cluster, for a view in `namespace` naming
 /// the object `name` — or why there is none. The object is read now, and its
 /// selector with it, so a changed selector changes the scope.
@@ -500,9 +550,13 @@ pub async fn scope(
     binding: &Binding,
     namespace: &str,
     name: Option<&str>,
-) -> Result<Scope, String> {
+) -> Result<Scope, ScopeError> {
     if !super::cards::namespace_name(namespace) {
-        return Err("Name the namespace the pods are in: a Kubernetes namespace name".into());
+        return Err(
+            "Name the namespace the pods are in: a Kubernetes namespace name"
+                .to_owned()
+                .into(),
+        );
     }
     let name = name.filter(|name| !name.is_empty());
     match manifest.pod_scope(binding)? {
@@ -511,7 +565,8 @@ pub async fn scope(
                 return Err(format!(
                     "\"{}\" reaches pods by the namespaces its permission grants; it names no object",
                     binding.name
-                ));
+                )
+                .into());
             }
             if !granted.iter().any(|granted| granted == namespace) {
                 return Err(format!(
@@ -519,7 +574,8 @@ pub async fn scope(
                     manifest.id,
                     binding.name,
                     granted.join(", ")
-                ));
+                )
+                .into());
             }
             Ok(Scope {
                 namespace: namespace.to_owned(),
@@ -532,7 +588,8 @@ pub async fn scope(
                 return Err(format!(
                     "Name the {} whose pods \"{}\" reaches",
                     kind.kind, binding.name
-                ));
+                )
+                .into());
             };
             let object = cluster
                 .object(context, &kind, namespace, name)
@@ -550,7 +607,8 @@ pub async fn scope(
                 return Err(format!(
                     "{} {namespace}/{name} selects every pod in its namespace; the host does not take that as a scope",
                     kind.kind
-                ));
+                )
+                .into());
             }
             Ok(Scope {
                 namespace: namespace.to_owned(),
@@ -852,26 +910,28 @@ pub async fn service_target(
     app: &str,
     name: &str,
     port: u16,
-) -> Result<(PodFacts, u16), String> {
+) -> Result<(PodFacts, u16), ScopeError> {
     let service = cluster
         .services(context, &scope.namespace)
         .await?
         .into_iter()
         .find(|service| service.name == name)
-        .ok_or_else(|| format!("Service {}/{name} does not exist", scope.namespace))?;
+        .ok_or_else(|| {
+            ScopeError::Refused(format!("Service {}/{name} does not exist", scope.namespace))
+        })?;
     let service_port = service
         .ports
         .iter()
         .find(|p| p.port == port)
-        .ok_or_else(|| format!("Service {name} has no port {port}"))?;
+        .ok_or_else(|| ScopeError::Refused(format!("Service {name} has no port {port}")))?;
     let selector = Selector {
         labels: service.selector.clone(),
         expressions: Vec::new(),
     };
     if selector.is_empty() {
-        return Err(format!(
-            "Service {name} selects no pods, so there is no pod to forward to"
-        ));
+        return Err(
+            format!("Service {name} selects no pods, so there is no pod to forward to").into(),
+        );
     }
     let (pods, _) = cluster
         .pods(context, &scope.namespace, &selector.query())
@@ -880,7 +940,11 @@ pub async fn service_target(
         .into_iter()
         .filter(|pod| selector.matches(&pod.labels) && scope.admits(pod) && pod.running())
         .find(|pod| service_port.on(pod).is_some())
-        .ok_or_else(|| format!("Service {name} sends to no running pod app {app} may reach"))?;
+        .ok_or_else(|| {
+            ScopeError::Refused(format!(
+                "Service {name} sends to no running pod app {app} may reach"
+            ))
+        })?;
     let target = service_port.on(&pod).expect("filtered above");
     Ok((pod, target))
 }

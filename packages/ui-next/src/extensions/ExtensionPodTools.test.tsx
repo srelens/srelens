@@ -177,6 +177,8 @@ describe("the pod tools on a Deployment (#567)", () => {
     fireEvent.click(within(review).getByRole("button", { name: "Cancel" }));
     expect(within(tools).queryByRole("region", { name: "Review command" })).toBeNull();
     expect(stream.opened).toHaveLength(0);
+    // Focus goes back where it came from, not to the page.
+    expect(document.activeElement).toBe(within(tools).getByRole("button", { name: "Run · cmctl status (web-1)" }));
 
     fireEvent.click(within(tools).getByRole("button", { name: "Run · cmctl status (web-1)" }));
     fireEvent.click(within(tools).getByRole("button", { name: "Run command" }));
@@ -255,6 +257,25 @@ describe("the pod tools on a Deployment (#567)", () => {
     expect(stream.opened[0].request.source).toEqual({ kind: "portForward", capability: "webhook", name: "web", service: "web" });
     // The pods are the same scope's, and still offered.
     expect(within(tools).getByRole("listitem", { name: "Pod web-1" })).toBeTruthy();
+  });
+
+  // The Inspector reuses its slot as the reader moves between resources: a review
+  // or a session opened on one must never show under the next.
+  it("starts over, with a new view, when the resource it is on changes", async () => {
+    const view = render(<ExtensionPodSlot context="kind-dev" resource={deployment} />);
+    const tools = await screen.findByRole("region", { name: "cert-manager pod tools" });
+    fireEvent.click(await within(tools).findByRole("button", { name: "Run · cmctl status (web-1)" }));
+    expect(within(tools).getByRole("region", { name: "Review command" })).toBeTruthy();
+    view.rerender(
+      <ExtensionPodSlot context="kind-dev" resource={{ ...deployment, metadata: { name: "api", namespace: "team" } }} />,
+    );
+    await screen.findByRole("region", { name: "cert-manager pod tools" });
+    expect(screen.queryByRole("region", { name: "Review command" })).toBeNull();
+    expect(stream.close).toHaveBeenCalledOnce();
+    expect(openExtensionView).toHaveBeenCalledTimes(2);
+    await waitFor(() =>
+      expect(extensionPods).toHaveBeenLastCalledWith(expect.objectContaining({ name: "api" })),
+    );
   });
 
   it("closes its view when it goes away, which ends every stream and forward it opened", async () => {

@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 use srelens_capability::audit::{AuditRecord, AuditSink};
 use srelens_capability::Registry;
 use srelens_kube::app_pods::{
-    ContainerPort, Output, PodFacts, PortTarget, ServiceFacts, ServicePort, Upstream,
+    ContainerPort, Output, PodFacts, PortTarget, ReadError, ServiceFacts, ServicePort, Upstream,
 };
 use srelens_streams::test_util::TestSink;
 use std::collections::BTreeMap;
@@ -118,6 +118,9 @@ struct Cluster {
     exec_hangs: std::sync::atomic::AtomicBool,
     /// Every port-forward connection is refused with this, when set.
     refuse_connect: Mutex<Option<&'static str>>,
+    /// Object reads so far, and which of them (counted from 1) fail, and how.
+    object_reads: AtomicUsize,
+    failed_reads: Mutex<BTreeMap<usize, ReadError>>,
 }
 
 /// Counts itself out of `open` when the connection it echoes on ends.
@@ -190,7 +193,11 @@ impl PodCluster for Cluster {
         kind: &KindRef,
         namespace: &str,
         name: &str,
-    ) -> Result<Option<Value>, String> {
+    ) -> Result<Option<Value>, ReadError> {
+        let read = self.object_reads.fetch_add(1, Ordering::SeqCst) + 1;
+        if let Some(failure) = self.failed_reads.lock().unwrap().get(&read) {
+            return Err(failure.clone());
+        }
         Ok(self
             .objects
             .lock()
@@ -203,7 +210,7 @@ impl PodCluster for Cluster {
         _context: &str,
         namespace: &str,
         _labels: &str,
-    ) -> Result<(Vec<PodFacts>, bool), String> {
+    ) -> Result<(Vec<PodFacts>, bool), ReadError> {
         // Every pod in the namespace, whatever the query: the host must match
         // them itself, and these tests would catch it trusting the cluster.
         Ok((
@@ -222,7 +229,7 @@ impl PodCluster for Cluster {
         _context: &str,
         namespace: &str,
         name: &str,
-    ) -> Result<Option<PodFacts>, String> {
+    ) -> Result<Option<PodFacts>, ReadError> {
         Ok(self
             .pods
             .lock()
@@ -231,7 +238,11 @@ impl PodCluster for Cluster {
             .find(|p| p.namespace == namespace && p.name == name)
             .cloned())
     }
-    async fn services(&self, _context: &str, namespace: &str) -> Result<Vec<ServiceFacts>, String> {
+    async fn services(
+        &self,
+        _context: &str,
+        namespace: &str,
+    ) -> Result<Vec<ServiceFacts>, ReadError> {
         Ok(self
             .services
             .lock()
@@ -790,6 +801,86 @@ async fn a_log_stream_ends_when_its_pod_leaves_the_scope_or_the_cluster() {
         .contains("not selected"));
 }
 
+/// A re-read of the object that gets no answer — the API server restarting,
+/// the network gone, the usual reason a follow is lost — says nothing of the
+/// app's reach: the stream says it is reconnecting, and why, and follows again
+/// once the cluster answers, on a scope read again. An answer that refuses —
+/// Forbidden — ends it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_log_stream_reconnects_through_a_read_that_gets_no_answer() {
+    let host = host();
+    host.cluster.logs.lock().unwrap().extend([
+        vec![LogStep::Line("before"), LogStep::End],
+        vec![LogStep::Line("after")],
+    ]);
+    // The open's read is the first; the reconnect's is the second.
+    host.cluster.failed_reads.lock().unwrap().insert(
+        2,
+        ReadError::Unanswered("the API server did not answer in time".into()),
+    );
+    host.open(
+        "v",
+        "extstream:r",
+        "team",
+        logs("controllerLogs", Some("web"), "web-1"),
+    )
+    .await
+    .unwrap();
+    eventually("the second follow", || {
+        host.data("extstream:r")
+            .iter()
+            .any(|d| d["event"] == "lines" && d["lines"][0]["line"] == "after")
+    })
+    .await;
+    let statuses: Vec<Value> = host
+        .data("extstream:r")
+        .into_iter()
+        .filter(|d| d["event"] == "status")
+        .collect();
+    let names: Vec<&str> = statuses
+        .iter()
+        .map(|d| d["status"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["live", "reconnecting", "live"]);
+    assert!(
+        statuses[1]["message"]
+            .as_str()
+            .unwrap()
+            .contains("did not answer"),
+        "{}",
+        statuses[1]
+    );
+    assert_eq!(host.cluster.object_reads.load(Ordering::SeqCst), 3);
+
+    let host = self::host();
+    host.cluster
+        .logs
+        .lock()
+        .unwrap()
+        .push_back(vec![LogStep::End]);
+    host.cluster.failed_reads.lock().unwrap().insert(
+        2,
+        ReadError::Answered("deployments.apps \"web\" is forbidden".into()),
+    );
+    host.open(
+        "v",
+        "extstream:f",
+        "team",
+        logs("controllerLogs", Some("web"), "web-1"),
+    )
+    .await
+    .unwrap();
+    eventually("the stream fails", || {
+        host.last("extstream:f")["type"] == "error"
+    })
+    .await;
+    assert!(host.last("extstream:f")["message"]
+        .as_str()
+        .unwrap()
+        .contains("forbidden"));
+    assert_eq!(host.cluster.log_asks.lock().unwrap().len(), 1);
+}
+
 /// Forbidden does not heal, and is not a close.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_forbidden_log_stream_is_an_error_not_a_close() {
@@ -1009,6 +1100,80 @@ async fn a_command_that_does_not_run_is_an_error() {
         .contains("executable file not found"));
 }
 
+/// A command past its limit is left, not killed: the host stops following it
+/// and closes the connection, and says the command may still be running, since
+/// closing an exec connection does not stop the process in the container.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_command_past_its_limit_says_what_the_host_did_and_did_not_do() {
+    let host = host();
+    host.cluster.exec_hangs.store(true, Ordering::SeqCst);
+    host.streams.script_pods(
+        host.cluster.clone(),
+        PodTiming {
+            exec_limit: Duration::from_millis(50),
+            ..FAST
+        },
+    );
+    host.open(
+        "v",
+        "extstream:slow",
+        "team",
+        exec("web-1", Some(confirmed("web-1"))),
+    )
+    .await
+    .unwrap();
+    eventually("the limit", || {
+        host.last("extstream:slow")["type"] == "error"
+    })
+    .await;
+    let message = host.last("extstream:slow")["message"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        message.contains("stopped following it") && message.contains("may still be running"),
+        "{message}"
+    );
+    assert!(!message.contains("the host stopped it"), "{message}");
+}
+
+/// Output that arrived before a session failed is still sent, before the error:
+/// the last lines before a failure are usually the ones that say why.
+#[tokio::test(flavor = "multi_thread")]
+async fn output_before_a_failure_is_sent_before_the_error() {
+    let host = host();
+    *host.cluster.exec_output.lock().unwrap() = vec![(Output::Stderr, "panic: lost the lease\n")];
+    *host.cluster.exec_exit.lock().unwrap() = Some(Err(
+        "The connection ended before the command reported how it exited".into(),
+    ));
+    host.open(
+        "v",
+        "extstream:lost",
+        "team",
+        exec("web-1", Some(confirmed("web-1"))),
+    )
+    .await
+    .unwrap();
+    eventually("the error", || {
+        host.last("extstream:lost")["type"] == "error"
+    })
+    .await;
+    let frames = host.frames("extstream:lost");
+    let output = frames
+        .iter()
+        .position(|f| f["data"]["event"] == "output")
+        .expect("the output was sent");
+    assert_eq!(
+        frames[output]["data"]["chunks"][0]["text"],
+        "panic: lost the lease\n"
+    );
+    assert_eq!(
+        output,
+        frames.len() - 2,
+        "right before the error: {frames:?}"
+    );
+}
+
 // ---- Port-forwards ----
 
 async fn ready(host: &Host, channel: &str) -> Value {
@@ -1126,6 +1291,43 @@ async fn a_forward_through_a_service_reaches_only_a_pod_in_scope() {
             .count(),
         3
     );
+}
+
+/// A forward through a Service whose pod goes away follows the Service to
+/// another pod in scope, and says which. A read that gets no answer on the way
+/// does not end it: it is asked again on the next check.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_service_forward_follows_to_another_pod_through_a_read_that_gets_no_answer() {
+    let host = host();
+    // The open's read is the first; the first retarget's is the second.
+    host.cluster.failed_reads.lock().unwrap().insert(
+        2,
+        ReadError::Unanswered("the API server did not answer in time".into()),
+    );
+    host.open(
+        "v",
+        "extstream:follow",
+        "team",
+        json!({"kind": "portForward", "capability": "webhook", "name": "web", "service": "web"}),
+    )
+    .await
+    .unwrap();
+    let first = ready(&host, "extstream:follow").await;
+    let gone = first["pod"].as_str().unwrap().to_owned();
+    host.cluster.remove_pod(&gone);
+    let readies = || -> Vec<Value> {
+        host.data("extstream:follow")
+            .into_iter()
+            .filter(|d| d["event"] == "ready")
+            .collect()
+    };
+    eventually("the forward on another pod", || readies().len() == 2).await;
+    let next = readies().pop().unwrap();
+    assert_ne!(next["pod"], gone);
+    assert!(["web-1", "web-2"].contains(&next["pod"].as_str().unwrap()));
+    assert_eq!(next["port"], 10250);
+    assert!(host.cluster.object_reads.load(Ordering::SeqCst) >= 3);
+    assert_ne!(host.last("extstream:follow")["type"], "error");
 }
 
 /// A forward to a pod ends when the pod does.

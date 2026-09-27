@@ -274,7 +274,10 @@ the first follow; a reconnect asks for nothing already sent.
 
 A lost stream reconnects after 2 s, from nothing new, while the app may still reach
 the pod; Forbidden ends it with `error: source`, and so does a pod that has left the
-scope. **This is the log contract a log source speaks**, not only this one: a log
+scope. Only an answer ends it: when the scope's read gets none — a timeout, an API
+server that is restarting, a network that went away, the usual reasons a stream is
+lost — it sends `reconnecting` with why and asks again 2 s later, and follows no
+sooner than the cluster answers. **This is the log contract a log source speaks**, not only this one: a log
 provider's stream (#569) sends the same two events, and `startExtensionLogStream` in
 `@srelens/core` hands them to the callbacks `startLogStream` takes, so the pod log
 view's buffer (`useLogStream`'s `source` option in `packages/ui-next/src/lib/logStream.ts`)
@@ -301,8 +304,10 @@ says what it would have run, and ends "nothing ran".
 | `{ "event": "exit", "code": n }` | The command exited, with its code; `close: completed` follows. A non-zero code is the command's answer, not the stream's failure. |
 
 A command the cluster could not run (no such container, no such program) ends with
-`error: source` and the cluster's own words. So does one that runs past 300 s or writes
-more than 1 MiB: the host stops it and says which.
+`error: source` and the cluster's own words, after any output it wrote first. So does
+one that runs past 300 s or writes more than 1 MiB: the host stops following it and
+says which. Closing the session need not end the process in the container, so the
+message says the command may still be running there.
 
 #### `portForward`
 
@@ -325,7 +330,8 @@ cancelled, its view closed, its window closed or reloaded, the app disabled, upd
 removed — the port stops listening and each connection is closed, on both sides. Every
 2 s it checks its pod: a pod that leaves the scope ends it with why; one that stops
 running ends a forward to a pod, and moves a Service's forward to another running pod
-in scope, or ends it when there is none.
+in scope, or ends it when there is none. A read on the way that gets no answer does not
+end it: the next check asks again.
 
 #### Recorded sessions
 

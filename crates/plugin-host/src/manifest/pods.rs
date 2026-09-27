@@ -44,7 +44,9 @@ const SHELLS: &[&str] = &[
 ];
 /// Programs that run the program named after them. One of these running a shell
 /// is a shell.
-const WRAPPERS: &[&str] = &["env", "busybox", "toybox"];
+const WRAPPERS: &[&str] = &[
+    "env", "busybox", "toybox", "nice", "nohup", "timeout", "setsid", "stdbuf", "xargs",
+];
 
 /// Whether `target` is a pod binding's.
 pub fn is_pod_target(target: &str) -> bool {
@@ -78,18 +80,15 @@ fn program(argument: &str) -> &str {
     argument.rsplit('/').next().unwrap_or(argument)
 }
 
-/// A wrapper's short options that take the next argument as their value:
-/// `env`'s `-u NAME`, `-C DIR`, `-a ARG0` and BSD's `-P PATH`.
-const VALUE_SHORT: &[char] = &['u', 'C', 'a', 'P'];
-/// The long spellings of those, which also accept `--name=value`.
-const VALUE_LONG: &[&str] = &["--unset", "--chdir", "--argv0"];
-
 /// Whether `command` starts a shell, directly or through a wrapper.
 ///
-/// After a wrapper, its own options (a cluster such as `-iu NAME` included)
-/// and `NAME=value` assignments are skipped, and the program they lead to is
-/// the one checked. `-S`/`--split-string` is refused outright: it splits one
-/// argument into a whole command line, which no list of arguments reviews.
+/// A command whose program is a shell is one. So is a command whose program is
+/// a wrapper when a shell's name is any later argument — the program it runs,
+/// a wrapper it runs, or an option's value alike — or when an option splits one
+/// argument into a whole command line (`env -S`, `--split-string`), which no
+/// list of arguments reviews. Deliberately coarse: the host does not parse each
+/// wrapper's options to guess which argument is the program it runs, so a
+/// nested or unfamiliar option cannot hide one.
 fn runs_a_shell(command: &[&str]) -> bool {
     let Some((first, rest)) = command.split_first() else {
         return false;
@@ -100,47 +99,15 @@ fn runs_a_shell(command: &[&str]) -> bool {
     if !WRAPPERS.contains(&program(first)) {
         return false;
     }
-    let mut args = rest.iter();
-    while let Some(arg) = args.next() {
-        if *arg == "--" {
-            return args
-                .next()
-                .is_some_and(|next| SHELLS.contains(&program(next)));
-        }
-        if let Some(long) = arg.strip_prefix("--") {
-            let name = long.split('=').next().unwrap_or(long);
-            if name == "split-string" {
-                return true;
-            }
-            if VALUE_LONG.contains(&format!("--{name}").as_str()) && !long.contains('=') {
-                args.next();
-            }
-            continue;
-        }
-        if let Some(cluster) = arg.strip_prefix('-').filter(|cluster| !cluster.is_empty()) {
-            for (at, flag) in cluster.char_indices() {
-                if flag == 'S' {
-                    return true;
-                }
-                if VALUE_SHORT.contains(&flag) {
-                    // The value is the rest of the cluster, or the next argument.
-                    if at + flag.len_utf8() == cluster.len() {
-                        args.next();
-                    }
-                    break;
-                }
-            }
-            continue;
-        }
-        if arg
-            .split_once('=')
-            .is_some_and(|(name, _)| !name.is_empty())
-        {
-            continue;
-        }
-        return SHELLS.contains(&program(arg));
-    }
-    false
+    rest.iter().any(|arg| {
+        let splits = match arg.strip_prefix("--") {
+            Some(long) => long.split('=').next() == Some("split-string"),
+            None => arg
+                .strip_prefix('-')
+                .is_some_and(|flags| flags.contains('S')),
+        };
+        splits || SHELLS.contains(&program(arg))
+    })
 }
 
 impl Manifest {
