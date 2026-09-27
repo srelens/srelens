@@ -806,6 +806,23 @@ fn removing_an_app_removes_its_data_directory_and_keeps_the_others() {
     assert!(!kept.path().exists(), "the removed app's data outlived it");
 }
 
+/// Which apps a change uninstalled: on Windows, whose AppContainer profile
+/// goes with them (#573).
+#[test]
+fn the_apps_a_change_uninstalled_are_the_ones_no_longer_installed() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.extensions.json");
+    super::tests::install(&path, fake_core());
+    let ids = |state: &Inventory| -> Vec<String> {
+        state.plugins.iter().map(|app| app.manifest.id.clone()).collect()
+    };
+    let before = ids(&read(&path).unwrap());
+    let disabled = super::tests::configure(&path, json!({"action":"enable","id":WRITER,"enabled":false})).unwrap();
+    assert!(uninstalled(&before, &disabled).is_empty(), "disabling uninstalls nothing");
+    let removed = super::tests::configure(&path, json!({"action":"remove","id":WRITER})).unwrap();
+    assert_eq!(uninstalled(&before, &removed), [WRITER]);
+}
+
 #[test]
 fn a_host_that_keeps_no_app_files_has_no_data_root() {
     let apps = Apps::with_shared_catalog(

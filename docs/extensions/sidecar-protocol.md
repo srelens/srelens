@@ -438,7 +438,8 @@ directory it may write, and nothing else.
   inventory, so a later app with the same ID starts empty. An update keeps it. A sidecar may
   have taken its own access away from a directory in it; srelens gives the owner access back
   before removing, and a directory it cannot remove now is tried again with the next change,
-  without holding up the others.
+  without holding up the others. On Windows the app's AppContainer profile is deleted too,
+  with its folder and its registry storage.
 
 ### Size limit
 

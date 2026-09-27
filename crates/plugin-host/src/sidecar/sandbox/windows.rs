@@ -141,12 +141,23 @@ fn container_sid(app_id: &str) -> io::Result<Sid> {
     Ok(Sid(sid))
 }
 
-/// Remove the AppContainer profile of `app_id`, when the app is uninstalled.
-/// Where the profiles go when srelens itself is uninstalled with apps still
-/// installed is open (ADR, "Open questions").
+/// Remove the AppContainer profile of `app_id`, with its folder and its
+/// registry storage, when the app is uninstalled: the registry calls it for
+/// every app a change uninstalls (#573). A profile that was never made, as for
+/// an app that never ran a sidecar, is nothing to do. Where the profiles go
+/// when srelens itself is uninstalled with apps still installed is open (ADR,
+/// "Open questions").
 pub fn delete_profile(app_id: &str) -> io::Result<()> {
+    // `HRESULT_FROM_WIN32` of `ERROR_FILE_NOT_FOUND` and of `ERROR_NOT_FOUND`:
+    // what a profile that does not exist may be reported as. Which of the two
+    // `DeleteAppContainerProfile` returns is not documented, so both count.
+    const FILE_NOT_FOUND: i32 = 0x80070002_u32 as i32;
+    const NOT_FOUND: i32 = 0x80070490_u32 as i32;
     // SAFETY: valid wide string.
     let hr = unsafe { DeleteAppContainerProfile(wide(profile_name(app_id)).as_ptr()) };
+    if hr == FILE_NOT_FOUND || hr == NOT_FOUND {
+        return Ok(());
+    }
     if hr != 0 {
         return Err(io::Error::other(format!(
             "DeleteAppContainerProfile: {hr:#x}"
@@ -600,6 +611,13 @@ pub(super) fn launch(command: &SidecarCommand, limits: &Limits) -> Result<Launch
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Uninstalling an app deletes its profile whether or not it ever ran a
+    /// sidecar, and most apps never do (#573).
+    #[test]
+    fn deleting_a_profile_that_was_never_made_is_nothing_to_do() {
+        delete_profile("org.srelens.never-installed-573").expect("nothing to delete");
+    }
 
     #[test]
     fn a_profile_name_fits_windows_whatever_the_app_id() {

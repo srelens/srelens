@@ -1611,6 +1611,14 @@ fn configure(
     // The inventory as saved: the policy's verdicts are applied to the answer, never
     // saved, so lifting a policy restores each app as its user left it (#578).
     let mut state = store.read_saved()?;
+    // The apps installed now, so that those this change uninstalls can be told
+    // apart afterwards (their AppContainer profiles, on Windows).
+    #[cfg(windows)]
+    let installed_before: Vec<String> = state
+        .plugins
+        .iter()
+        .map(|app| app.manifest.id.clone())
+        .collect();
     let policy = store.policy();
     // Held to the publisher that signed it, as verified now: none for an unsigned app.
     let refusal = |manifest: &Manifest, signer: Option<&trust::Signer>| -> Result<(), String> {
@@ -1893,10 +1901,31 @@ fn configure(
             );
         }
     }
+    // And, on Windows, an uninstalled app's AppContainer profile (#573): its folder
+    // and its registry storage, both of which its sidecar could write outside its
+    // data directory. Best effort, as the rest is. Nothing starts a sidecar yet
+    // (#574); when something does, it stops the app's sidecar before this runs.
+    #[cfg(windows)]
+    for id in uninstalled(&installed_before, &state) {
+        if let Err(error) = srelens_plugin_host::sidecar::sandbox::delete_profile(id) {
+            log::warn!("could not delete the AppContainer profile of the uninstalled app {id}: {error}");
+        }
+    }
     app_policy::govern(&mut state, policy.as_deref());
     secret_store::sweep(secrets, &state);
     streams::announce(&store.key(), &state);
     Ok(state)
+}
+
+/// Of the apps in `before`, the ones `after` no longer holds: what a change
+/// uninstalled.
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+fn uninstalled<'a>(before: &'a [String], after: &Inventory) -> Vec<&'a str> {
+    before
+        .iter()
+        .filter(|id| !after.plugins.iter().any(|app| app.manifest.id == **id))
+        .map(String::as_str)
+        .collect()
 }
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
