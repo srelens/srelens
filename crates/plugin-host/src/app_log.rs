@@ -431,17 +431,21 @@ mod tests {
         );
         log.sidecar(b"DEBUG token=ghp_0123456789abcdefghijABCDEFGHIJ012345");
         let everything = format!("{:?} {:?}", log.lines(), log.recent_errors());
-        for secret in [
+        // Named by position, not printed: a test that fails must not write
+        // what it planted to the CI log either.
+        let planted = [
             "hunter2-registry-password",
             "s3cr3t",
             "abc.def.ghi-123456",
             "ghp_0123456789abcdefghijABCDEFGHIJ012345",
-        ] {
-            assert!(
-                !everything.contains(secret),
-                "{secret} reached the log: {everything}"
-            );
-        }
+        ];
+        let leaked: Vec<usize> = (0..planted.len())
+            .filter(|&n| everything.contains(planted[n]))
+            .collect();
+        assert!(
+            leaked.is_empty(),
+            "planted values {leaked:?} reached the log"
+        );
         // What is not secret is still there to read.
         assert!(
             everything.contains("registry.example/v2 -> 401"),

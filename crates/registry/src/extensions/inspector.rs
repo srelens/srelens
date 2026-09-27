@@ -781,16 +781,17 @@ mod tests {
                 .unwrap(),
             inspect(&reg).await
         );
-        for secret in [
+        // Named by position, not printed: a test that fails must not write
+        // what it planted to the CI log either.
+        let planted = [
             "registry-robot-hunter2",
             "s3cr3t-pw",
             "eyJhbGciOiJSUzI1NiJ9",
-        ] {
-            assert!(
-                !answers.contains(secret),
-                "{secret} was returned: {answers}"
-            );
-        }
+        ];
+        let leaked: Vec<usize> = (0..planted.len())
+            .filter(|&n| answers.contains(planted[n]))
+            .collect();
+        assert!(leaked.is_empty(), "planted values {leaked:?} were returned");
         assert!(answers.contains("registry.example/v2/"), "{answers}");
     }
 
