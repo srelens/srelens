@@ -127,6 +127,23 @@ is listed as *not found*, without a link. A link the host could not answer shows
 *Couldn't read* with its reason and a Retry; only when every link answered with
 nothing does the section say *No related resources.*
 
+A built-in target (API 0.5, #728) — a Service an HTTPRoute sends to, the Secret an
+ExternalSecret writes — opens in the host's own Inspector, whose route follows the
+rail. So it is a link only when the rail shows the cluster this Inspector is for;
+from an app page pinned to another cluster it is named as plain text rather than
+opening the rail cluster's namesake.
+
+The section also appears on a resource of a link's **target** kind, and lists the
+resources whose links name it, read from the same declarations (#728). They are
+grouped under the relation as it reads from here — **Owns**, **Manages**,
+**Exposes**, **Referenced by** — one row per resource ("Deployment team/api"), each
+opening like a target does. A list the host read only 2,000 of says the resources
+shown were found among the first 2,000 and there may be more; resources the link
+could not be read on are counted, with the first one's reason; a reverse link that
+failed shows *Couldn't read* and the Retry. None of these reads as *No related
+resources.* The Inspector sends the resolvers the resource's identity and metadata
+only, in both directions.
+
 ## Requirement checks
 
 When a page opens, the host checks the CRDs and served versions it needs, including

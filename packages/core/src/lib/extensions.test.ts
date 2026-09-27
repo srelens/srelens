@@ -12,6 +12,7 @@ import {
   readExtension,
   resolveExtensionColumns,
   resolveExtensionLinks,
+  resolveExtensionReverseLinks,
   extensionRoute,
   parseExtensionRoute,
   itemStatus,
@@ -114,6 +115,14 @@ describe("extension contract", () => {
       id: "org.test.app", revision: 3, context: "cluster/a", namespace: "team", kind: "apps/Deployment", resource,
     });
   });
+  it("sends a reverse link resolve with the forward resolver's field names (#728)", async () => {
+    const resource = { apiVersion: "argoproj.io/v1alpha1", kind: "Application", metadata: { name: "guestbook", namespace: "argocd" } };
+    await resolveExtensionReverseLinks("org.test.app", 3, "cluster/a", "argocd", "argoproj.io/Application", resource);
+    // Both resolvers deserialize `ResolveLinks`, which denies unknown fields.
+    expect(invokeCapability).toHaveBeenLastCalledWith("extensions.resolveReverseLinks", {
+      id: "org.test.app", revision: 3, context: "cluster/a", namespace: "argocd", kind: "argoproj.io/Application", resource,
+    });
+  });
   it("pins cluster and namespace in route identity", () => {
     const route = extensionRoute("cluster/a", "org.test.app", "page", "ns/a");
     expect(parseExtensionRoute(route)).toEqual({
@@ -189,6 +198,47 @@ it("validates the exact reviewed manifest with its grants and optional signature
     manifest: "{}",
     grants: [],
     signature: [1, 2],
+  });
+});
+
+it("sends a package's digest list with its manifest and signature for the check (#562)", async () => {
+  const { validateExtension } = await import("./extensions");
+  await validateExtension("{}", ["k8s.listCustomResource"], [1, 2], "{\"format\":\"srelens-extension-package\"}");
+  expect(invokeCapability).toHaveBeenLastCalledWith("extensions.validate", {
+    manifest: "{}",
+    grants: ["k8s.listCustomResource"],
+    signature: [1, 2],
+    digests: "{\"format\":\"srelens-extension-package\"}",
+  });
+  // An unsigned package still sends its list, so the host checks the manifest against it.
+  await validateExtension("{}", [], undefined, "{}");
+  expect(invokeCapability).toHaveBeenLastCalledWith("extensions.validate", { manifest: "{}", grants: [], digests: "{}" });
+});
+
+it("sends a package file as base64, for review and for install (#562)", async () => {
+  const { reviewExtensionPackage, encodePackage } = await import("./extensions");
+  const bytes = new Uint8Array([0x1f, 0x8b, 0x08, 0x00, 0xff]);
+  expect(encodePackage(bytes)).toBe("H4sIAP8=");
+  // Larger than one chunk of the encoder, so the chunks are joined in order.
+  const large = Uint8Array.from({ length: 0x8000 * 2 + 5 }, (_, at) => at % 251);
+  expect(atob(encodePackage(large)).length).toBe(large.length);
+  expect(Uint8Array.from(atob(encodePackage(large)), (c) => c.charCodeAt(0))).toEqual(large);
+  await reviewExtensionPackage(bytes);
+  expect(invokeCapability).toHaveBeenLastCalledWith("extensions.packageManifest", { package: "H4sIAP8=" });
+  await configureExtensions({ action: "installPackage", package: "H4sIAP8=", grants: ["k8s.listCustomResource"], reviewedRevision: 2 });
+  expect(invokeCapability).toHaveBeenLastCalledWith("extensions.configure", {
+    action: "installPackage",
+    package: "H4sIAP8=",
+    grants: ["k8s.listCustomResource"],
+    reviewedRevision: 2,
+  });
+  await configureExtensions({ action: "installCatalogPackage", id: "org.srelens.flux", sha256: "a", packageSha256: "b", grants: [] });
+  expect(invokeCapability).toHaveBeenLastCalledWith("extensions.configure", {
+    action: "installCatalogPackage",
+    id: "org.srelens.flux",
+    sha256: "a",
+    packageSha256: "b",
+    grants: [],
   });
 });
 

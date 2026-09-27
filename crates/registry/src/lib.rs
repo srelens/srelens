@@ -25,6 +25,11 @@ pub use extensions::{
     AppPolicy, Apps, InventoryKey, InventoryLock, InventoryStore, SharedCatalog, SharedPolicy,
     MAX_POLICY_BYTES,
 };
+/// Making `.srelens-extension` packages (#562): what a publisher runs before a release, and
+/// what `cargo run -p srelens-registry --example pack-extension` wraps.
+pub mod extension_package {
+    pub use crate::extensions::package::{digest_list, pack};
+}
 pub use settings::default_settings_path;
 /// The secret store a host supplies for apps' secret settings (#543), so a
 /// host implements it against this crate alone.

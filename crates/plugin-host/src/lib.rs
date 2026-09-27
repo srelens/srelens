@@ -1,12 +1,15 @@
 //! Native extension contract and declarative capability broker.
 //!
-//! No package code is loaded here. A trusted installer supplies explicit
-//! grants for native srelens manifests.
+//! No package code is loaded into the host. A trusted installer supplies
+//! explicit grants for native srelens manifests. Executable apps are to run
+//! out of process, sandboxed, under [`sidecar::Supervisor`] (#572); no
+//! manifest kind starts one yet.
 #[cfg(any(test, feature = "fuzzing"))]
 #[doc(hidden)]
 pub mod fuzzing;
 mod manifest;
 mod secrets;
+pub mod sidecar;
 mod validation;
 pub use manifest::*;
 pub use secrets::*;

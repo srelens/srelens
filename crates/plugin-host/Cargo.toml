@@ -18,6 +18,37 @@ semver = "1"
 # credentials in it cannot hide behind unusual spelling. Already in the
 # workspace through srelens-capability.
 url = "2"
+# The sidecar supervisor (#572): child processes, their pipes, timers and the
+# channels between them. `fs` adapts the Windows backend's anonymous pipes,
+# which tokio has no async type for.
+tokio = { version = "1", features = ["rt", "sync", "time", "io-util", "process", "macros", "fs"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# The Linux sandbox layers the #571 spike chose, applied by the trusted launcher
+# (`src/bin/srelens-sandbox-launch.rs`): Landlock for the filesystem and TCP,
+# a seccomp filter for sockets, io_uring and new processes. The cgroup is plain
+# files and needs no crate.
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock = "0.4"
+seccompiler = "0.5"
+
+# The Windows backend the spike chose: an AppContainer inside a Job Object.
+# The version the spike ran against, already in the lockfile.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Security_Authorization",
+  "Win32_Security_Isolation",
+  "Win32_System_JobObjects",
+  "Win32_System_Pipes",
+  "Win32_System_Threading",
+] }
+# An AppContainer name is at most 64 characters and an app ID up to 128, so the
+# profile is named by a digest of the ID. Already in the lockfile.
+sha2 = "0.10"
 
 [features]
 # Exposes `srelens_plugin_host::fuzzing` to the fuzz targets in `fuzz/` and to
@@ -27,5 +58,6 @@ fuzzing = []
 [dev-dependencies]
 srelens-registry = { path = "../registry" }
 srelens-mcp = { path = "../mcp" }
-tokio = { version = "1", features = ["macros", "rt", "io-std"] }
+tokio = { version = "1", features = ["macros", "rt", "io-std", "test-util"] }
+tempfile = "3"
 proptest = { version = "1", default-features = false, features = ["std"] }

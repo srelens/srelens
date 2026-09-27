@@ -41,6 +41,12 @@ url = "2"
 sha2 = "0.10"
 ring = "0.17"
 semver = "1"
+# `.srelens-extension` packages (#562) are gzip-compressed tar archives, and a package file
+# chosen in the app reaches `extensions.configure` as base64. All three are already in the
+# workspace through srelens-kube, which uses each of them; no new crate is built.
+tar = "0.4"
+flate2 = "1"
+base64 = "0.22"
 
 # Windows: `durable::replace` renames with `MoveFileExW` and `MOVEFILE_WRITE_THROUGH`.
 # Already in the lockfile through tempfile and others; no new crate is built.
@@ -56,6 +62,8 @@ fuzzing = []
 # The property tests start from valid documents and edit them with plugin-host's
 # test support.
 srelens-plugin-host = { path = "../plugin-host", features = ["fuzzing"] }
+# The fake API server the resource link tests drive the resolvers against (#728).
+srelens-kube = { path = "../kube", features = ["test-support"] }
 proptest = { version = "1", default-features = false, features = ["std"] }
 # net and io-util: the `network.http` tests (#568) answer from a local socket.
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "test-util", "net", "io-util"] }

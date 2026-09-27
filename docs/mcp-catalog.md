@@ -7,7 +7,7 @@ Everything this server exposes over MCP, generated from the live registry so it 
 
 ## Tools
 
-120 tools, grouped by area and then by how a call is gated. Argument schemas are not reproduced here — call `tools/list` for those, which cannot go stale.
+122 tools, grouped by area and then by how a call is gated. Argument schemas are not reproduced here — call `tools/list` for those, which cannot go stale.
 
 **Impact** is how much a successful call disturbs — `low`, `medium` or `high` — and is a different question from the section heading, which is how the call is gated. A capability that accepts several named operations carries the highest level any of them reaches; the per-operation level travels with the resource.
 
@@ -159,18 +159,20 @@ Everything this server exposes over MCP, generated from the live registry so it 
 | `toolbox.removePlugin` | medium | remove an installed krew plugin |
 | `toolbox.upgradePlugin` | medium | upgrade an installed krew plugin |
 
-### Server — read-only (13)
+### Server — read-only (15)
 
 | Tool | Impact | Summary |
 | --- | --- | --- |
 | `extensions.catalog` | low | Browse the native extension catalog with a durable cache; never connects clusters |
 | `extensions.catalogManifest` | low | Download and checksum-verify a catalog manifest for permission review; does not install it |
 | `extensions.list` | low | List installed declarative extensions |
+| `extensions.packageManifest` | low | Verify an app package file (.srelens-extension) and return its manifest for permission review; does not install it |
 | `extensions.read` | low | Read a declared custom-resource contribution, or send a declared network.http request, from an enabled extension |
 | `extensions.resolveCards` | low | Resolve the cluster dashboard cards an enabled extension declares, each to a figure or the reason it has none |
 | `extensions.resolveColumns` | low | Resolve native extension table columns and badges in one batch |
 | `extensions.resolveLinks` | low | Resolve an app's resource relationship links for a resource Inspector |
 | `extensions.resolvePanels` | low | Resolve declarative app panels for a resource Inspector |
+| `extensions.resolveReverseLinks` | low | Resolve the resources whose app resource links name a resource, for its Inspector |
 | `extensions.resource` | low | Inspect the selected resource of an enabled app |
 | `extensions.streams` | low | Report the open app streams in this process and the traffic each app has sent |
 | `extensions.validate` | low | Check a declarative extension manifest exactly as installing it would and return every problem; does not install it |

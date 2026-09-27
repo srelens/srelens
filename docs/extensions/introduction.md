@@ -43,6 +43,7 @@ Freelens and OpenLens packages are not supported.
 | [security.md](security.md) | Trust boundary and what is not yet protected |
 | [threat-model.md](threat-model.md) | Assets, adversaries, mitigations with their code, residual risk and open work |
 | [distribution.md](distribution.md) | Catalog, signed releases, local installation |
+| [packages.md](packages.md) | The `.srelens-extension` package: layout, digest list, signature, limits, logos |
 | [testing.md](testing.md) | Developer harness and the test suites |
 | [migration.md](migration.md) | Upgrading, downgrading and moving between API versions |
 

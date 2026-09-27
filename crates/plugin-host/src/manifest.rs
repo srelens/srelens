@@ -6,10 +6,12 @@ use srelens_capability::status::{self, StatusRule};
 use srelens_capability::{Predicate, ReferenceFormat, MAX_PREDICATES};
 use std::collections::{BTreeMap, BTreeSet};
 
+mod builtin;
 mod cards;
 mod network;
 mod settings;
 mod versions;
+pub use builtin::{builtin_link_kind, BuiltinKind, BUILTIN_LINK_KINDS};
 pub use cards::*;
 pub use network::*;
 pub use settings::*;
@@ -18,7 +20,7 @@ pub use versions::{MAX_BINDING_VERSIONS, MAX_PATH_OVERRIDES};
 /// Extension API versions this host implements, oldest first. A manifest is accepted when
 /// its `srelensApiVersion` range matches any of them. How versions are added and retired
 /// is specified in docs/extensions/specification.md.
-pub const SUPPORTED_API_VERSIONS: &[&str] = &["0.3.0", "0.4.0"];
+pub const SUPPORTED_API_VERSIONS: &[&str] = &["0.3.0", "0.4.0", "0.5.0"];
 
 /// The `format` values JSON Schema draft-07 defines.
 const STANDARD_FORMATS: &[&str] = &[
@@ -118,8 +120,9 @@ pub struct ApiField {
 pub struct ApiForm {
     /// What the refusal calls it, e.g. "the `[?(@.key==\"text\")]` filter".
     pub name: &'static str,
-    /// Whether a string value is written in this form.
-    pub matches: fn(&str) -> bool,
+    /// Whether a string value is written in this form, given the whole manifest it is in:
+    /// a built-in `to` is the later form only when no reader of the manifest lists it.
+    pub matches: fn(&Value, &str) -> bool,
 }
 
 /// A field API 0.4 added (#709).
@@ -137,10 +140,53 @@ const fn api_0_4_filter(path: &'static str) -> ApiField {
     ApiField {
         form: Some(ApiForm {
             name: "the `[?(@.key==\"text\")]` filter",
-            matches: srelens_capability::path_uses_filter,
+            matches: uses_filter,
         }),
         ..api_0_4(path)
     }
+}
+
+fn uses_filter(_manifest: &Value, path: &str) -> bool {
+    srelens_capability::path_uses_filter(path)
+}
+
+/// A field API 0.5 added (#728).
+const fn api_0_5(path: &'static str) -> ApiField {
+    ApiField {
+        path,
+        introduced: "0.5.0",
+        removed: None,
+        form: None,
+    }
+}
+
+/// A link `to` naming a built-in kind, which API 0.5 added to a field API 0.4 had (#728).
+const fn api_0_5_builtin_target(path: &'static str) -> ApiField {
+    ApiField {
+        form: Some(ApiForm {
+            name: "a built-in kind",
+            matches: builtin_target,
+        }),
+        ..api_0_5(path)
+    }
+}
+
+/// Whether `to` is a built-in kind that no custom-resource reader of `manifest` lists.
+/// One a reader lists is what API 0.4 already accepted there, whatever its name.
+fn builtin_target(manifest: &Value, to: &str) -> bool {
+    let listed = manifest["capabilities"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|binding| binding["target"] == "k8s.listCustomResource")
+        .any(|binding| {
+            let arguments = &binding["arguments"];
+            match (arguments["group"].as_str(), arguments["kind"].as_str()) {
+                (Some(group), Some(kind)) => format!("{group}/{kind}") == to,
+                _ => false,
+            }
+        });
+    !listed && builtin_link_kind(to).is_some()
 }
 
 /// Manifest fields, and forms of a field's value, added or removed after the oldest
@@ -170,6 +216,11 @@ pub const API_FIELDS: &[ApiField] = &[
     // also gates the capability as a binding target.
     api_0_4("permissions[].hosts"),
     api_0_4("permissions[].capability"),
+    // Resource links by spec path and to built-in kinds (#728). API 0.4 had already been
+    // published in srelens builds without them (0.15.1-186 and later), so they are a line
+    // of their own rather than an addition to 0.4 in place.
+    api_0_5("contributions.resourceLinks[].match.path"),
+    api_0_5_builtin_target("contributions.resourceLinks[].to"),
 ];
 
 /// Rejects a field in `raw` that is missing from any of `versions`: every supported API
@@ -190,7 +241,7 @@ pub fn check_api_fields_in(
             None => values.iter().any(|value| contributes(value)),
             Some(form) => values
                 .iter()
-                .any(|value| value.as_str().is_some_and(form.matches)),
+                .any(|value| value.as_str().is_some_and(|text| (form.matches)(raw, text))),
         };
         if !used {
             continue;
@@ -505,21 +556,25 @@ pub enum CommandTarget {
 pub const MAX_RESOURCE_LINKS: usize = 32;
 
 /// A relationship from a resource of kind `from` to resources of kind `to`,
-/// found by reading the `from` resource's own metadata (#545).
+/// found by reading the `from` resource's own metadata (#545), or a declared
+/// path on it (#728).
 ///
-/// The `match` selectors are a join's (`joins[].match`), read the other way
+/// The metadata selectors are a join's (`joins[].match`), read the other way
 /// round: a join indexes the *listed* resources by a key that names the row,
 /// while a link reads the key on the resource being inspected, and the key
 /// names the target. The target is then looked up by name in the list of the
-/// declared reader for `to`, through the same index a join uses.
+/// declared reader for `to`, or of the built-in kind `to` names, through the
+/// same index a join uses. The target's own Inspector shows the same links the
+/// other way round, computed from these declarations.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ResourceLink {
     pub id: String,
     /// The qualified kind of the resource the link is read from, e.g. `apps/Deployment`.
     pub from: String,
-    /// The qualified kind of the target. A declared `k8s.listCustomResource`
-    /// reader must list it: that is how the host knows the target exists.
+    /// The qualified kind of the target: one a declared `k8s.listCustomResource`
+    /// reader lists, or a built-in kind this host lists (API 0.5, #728). That is how
+    /// the host knows the target exists.
     pub to: String,
     pub relation: LinkRelation,
     #[serde(rename = "match")]
@@ -537,7 +592,7 @@ pub enum LinkRelation {
 }
 
 /// Where on the `from` resource the target's name is written. Exactly one of
-/// `label`, `ownerReference`, `annotation` and `name`.
+/// `label`, `ownerReference`, `annotation`, `name` and `path`.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct LinkMatch {
@@ -575,6 +630,15 @@ pub struct LinkMatch {
     /// The target has the `from` resource's own name and namespace.
     #[serde(default, skip_serializing_if = "is_false")]
     pub name: bool,
+    /// A path on the `from` resource whose value names the target (API 0.5, #728):
+    /// the predicate grammar, plus `[*]` for every element of a list, such as
+    /// `.spec.rules[*].backendRefs[*]`. Each value is the target's name, or an
+    /// object reference with `name` and an optional `namespace`, `kind`, and
+    /// `group` or `apiVersion`; a reference to another kind is not this link's.
+    /// Without a `namespace` the target is in the `from` resource's namespace.
+    /// The host reads the path through the declared reader of `from`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -1977,12 +2041,12 @@ impl Manifest {
             qualified_kind(problems, format!("{at}.from"), &link.from);
             qualified_kind(problems, format!("{at}.to"), &link.to);
             let kinds_ok = problems.0.len() == before;
-            if kinds_ok && !readable.contains(&link.to) {
+            if kinds_ok && !readable.contains(&link.to) && builtin_link_kind(&link.to).is_none() {
                 problems.push(
                     Code::UnresolvedCapability,
                     format!("{at}.to"),
                     format!(
-                        "No declared k8s.listCustomResource reader lists {}",
+                        "No declared k8s.listCustomResource reader lists {}, and it is not a built-in kind this host lists",
                         link.to
                     ),
                 );
@@ -1991,13 +2055,38 @@ impl Manifest {
             let selectors = usize::from(matching.label.is_some())
                 + usize::from(matching.owner_reference)
                 + usize::from(matching.annotation.is_some())
-                + usize::from(matching.name);
+                + usize::from(matching.name)
+                + usize::from(matching.path.is_some());
             if selectors != 1 {
                 problems.push(
                     Code::InvalidBinding,
                     format!("{at}.match"),
-                    "Choose exactly one of label, ownerReference, annotation or name",
+                    "Choose exactly one of label, ownerReference, annotation, name or path",
                 );
+            }
+            if let Some(path) = &matching.path {
+                let path_at = format!("{at}.match.path");
+                if let Err(why) = srelens_capability::check_link_path(path) {
+                    problems.push(Code::InvalidBinding, path_at, why);
+                } else if link.from == "/Secret" {
+                    // A Secret's body is its values: the host reads none of it for an app.
+                    problems.push(
+                        Code::InvalidBinding,
+                        path_at,
+                        "A Secret's body holds its values, which the host never reads for an app; match a Secret by label, ownerReference or name",
+                    );
+                } else if kinds_ok && !readable.contains(&link.from) {
+                    // The host reads the path through the app's own grant, for the link
+                    // and for the target's reverse view alike.
+                    problems.push(
+                        Code::UnresolvedCapability,
+                        path_at,
+                        format!(
+                            "A path is read on the linked-from resource through a declared k8s.listCustomResource reader; none lists {}",
+                            link.from
+                        ),
+                    );
+                }
             }
             if matching.namespace_label.is_some() && matching.label.is_none() {
                 problems.push(

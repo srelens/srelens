@@ -249,6 +249,19 @@ impl Manifest {
                 visit_rules(&mut resolver.rules, &at, &mut |path, _| visit(path, &site));
             }
         }
+        // Link paths read the linked-from resource (#728), which this reader lists.
+        for (position, link) in contributions.resource_links.iter_mut().enumerate() {
+            if kind.as_ref() != Some(&link.from) {
+                continue;
+            }
+            let site = by_kind(
+                format!("contributions.resourceLinks[{position}]"),
+                std::slice::from_ref(&link.from),
+            );
+            if let Some(path) = &mut link.match_by.path {
+                visit(path, &site);
+            }
+        }
         // Cards over it.
         for (position, card) in contributions.dashboard_cards.iter_mut().enumerate() {
             if card.source != binding {

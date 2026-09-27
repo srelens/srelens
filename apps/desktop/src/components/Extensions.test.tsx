@@ -94,6 +94,18 @@ it("opens native app pages from classic's connected-cluster navigation without a
   expect(screen.queryByText("Choose a cluster")).toBeNull();
 });
 
+const packageIcon = `data:image/svg+xml;base64,${btoa("<svg xmlns=\"http://www.w3.org/2000/svg\"/>")}`;
+it("draws an installed package's logo on its app in classic's navigation (#562)", async () => {
+  vi.mocked(listExtensions).mockResolvedValue({ schemaVersion: 1, nextRevision: 2, plugins: [{ ...plugin, icon: packageIcon }] });
+  const { ClassicAppsNav } = await import("./Extensions");
+  const { container } = render(<ClassicAppsNav context="cluster/a" onOpen={vi.fn()} />);
+  fireEvent.click(await screen.findByText("Apps"));
+  await screen.findByRole("button", { name: "Open Applications" });
+  const logo = container.querySelector("[data-extension-logo]");
+  expect(logo?.getAttribute("data-extension-logo")).toBe("package");
+  expect(logo?.querySelector("image")?.getAttribute("href")).toBe(packageIcon);
+});
+
 /** The web server keeps each user's own apps (#515), so classic's app tabs open there too. */
 it("opens app pages from classic's cluster navigation on the web", async () => {
   host.tauri = false;

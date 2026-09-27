@@ -48,6 +48,19 @@ struct Release {
     #[serde(rename = "srelensApiVersion")]
     srelens_api_version: String,
     prerelease: bool,
+    /// The same release as a `.srelens-extension` package (#562), which carries the app's
+    /// logo and files as well. A host that predates packages ignores it and installs
+    /// `manifestUrl`, which a release with a package goes on publishing; so does a host
+    /// that keeps no app files (the web host).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    package: Option<ReleasePackage>,
+}
+#[derive(Clone, Serialize, Deserialize, JsonSchema)]
+struct ReleasePackage {
+    /// A GitHub release asset whose name ends `.srelens-extension`.
+    url: String,
+    /// SHA-256 of the package file, lowercase hex.
+    sha256: String,
 }
 // Also the on-disk cache. Its host fields are recomputed on every load, so a cache written
 // by an older host (without `hostApiVersions`) is still read rather than refetched.
@@ -79,10 +92,25 @@ struct ManifestIn {
     id: String,
     sha256: String,
 }
+/// What a reviewer is shown before an install: the exact manifest, its publisher
+/// signature, and for a package (#562) what else it holds.
 #[derive(Debug, Serialize, JsonSchema)]
-struct Review {
+pub(super) struct Review {
     manifest: String,
+    /// Over the manifest; for a package, over its digest list.
     signature: Option<Vec<u8>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    package: Option<package::PackageReview>,
+}
+impl Review {
+    /// The review of a package [`package::read`] verified.
+    pub(super) fn of_package(verified: &package::Package) -> Self {
+        Self {
+            manifest: verified.manifest.clone(),
+            signature: verified.signature.clone(),
+            package: Some(verified.review()),
+        }
+    }
 }
 fn now() -> u64 {
     SystemTime::now()
@@ -189,6 +217,21 @@ pub(super) fn parse_catalog(raw: &[u8]) -> Result<Catalog, String> {
         }
         if !hex(&entry.release.sha256, 64) || !hex(&entry.tested_host.revision, 40) {
             return Err("Invalid catalog checksum or tested revision".into());
+        }
+        if let Some(release) = &entry.release.package {
+            let url = https_url(&release.url)?;
+            if url.host_str() != Some("github.com")
+                || !allowed_download(&url)
+                || !url.path().ends_with(".srelens-extension")
+            {
+                return Err(
+                    "Catalog packages must be GitHub release assets named *.srelens-extension"
+                        .into(),
+                );
+            }
+            if !hex(&release.sha256, 64) {
+                return Err("Invalid catalog package checksum".into());
+            }
         }
         semver::Version::parse(&entry.release.version).map_err(|_| "Invalid release version")?;
         semver::VersionReq::parse(&entry.release.srelens_api_version)
@@ -326,12 +369,56 @@ impl CatalogCache {
     }
     /// Whether the cached catalog, fresh or stale, lists this exact release. Never fetches.
     pub(super) fn lists_release(&self, id: &str, sha256: &str) -> bool {
-        let path = match self {
+        cached_release(self.path(), id, sha256)
+    }
+    /// Whether the cached catalog, fresh or stale, lists this exact package (#562). Never
+    /// fetches.
+    pub(super) fn lists_package(&self, id: &str, sha256: &str) -> bool {
+        cached_entry(self.path(), |entry| {
+            entry.id == id
+                && entry
+                    .release
+                    .package
+                    .as_ref()
+                    .is_some_and(|package| package.sha256 == sha256)
+        })
+    }
+    fn path(&self) -> &Path {
+        match self {
             Self::Owned(path) => path,
             Self::Shared(shared) => &shared.path,
-        };
-        cached_release(path, id, sha256)
+        }
     }
+    /// The package of the release `sha256` names, downloaded and verified as a review
+    /// verifies it, and exactly the package `package_sha256` names: what was reviewed.
+    pub(super) fn download_package(
+        &self,
+        id: &str,
+        sha256: &str,
+        package_sha256: &str,
+    ) -> Result<Vec<u8>, String> {
+        let state = self.snapshot(false)?;
+        let entry = release(&state, id, sha256)?;
+        if entry.release.package.as_ref().map(|p| p.sha256.as_str()) != Some(package_sha256) {
+            return Err(CHANGED.into());
+        }
+        fetch_package(entry).map(|(_, archive)| archive)
+    }
+}
+/// Why an install or review is refused when the catalog no longer lists what was asked for.
+const CHANGED: &str = "Catalog release changed; refresh and review it again";
+/// The release `sha256` names for `id`, if this host can install it.
+fn release<'a>(state: &'a Snapshot, id: &str, sha256: &str) -> Result<&'a Entry, String> {
+    let entry = state
+        .catalog
+        .extensions
+        .iter()
+        .find(|e| e.id == id && e.release.sha256 == sha256)
+        .ok_or(CHANGED)?;
+    if !compatible(&entry.release.srelens_api_version) {
+        return Err("Extension requires a different host API version".to_string());
+    }
+    Ok(entry)
 }
 /// The catalog cache every user of one web server shares (#515).
 ///
@@ -407,16 +494,16 @@ impl SharedCatalog {
 }
 /// Whether the cached catalog, fresh or stale, lists this exact release. Never fetches.
 pub(super) fn cached_release(path: &Path, id: &str, sha256: &str) -> bool {
+    cached_entry(path, |entry| {
+        entry.id == id && entry.release.sha256 == sha256
+    })
+}
+/// Whether the cached catalog, fresh or stale, has an entry `matches`. Never fetches.
+fn cached_entry(path: &Path, matches: impl Fn(&Entry) -> bool) -> bool {
     load_with(path, false, || {
         Err("the cached catalog is read without fetching".into())
     })
-    .is_ok_and(|snapshot| {
-        snapshot
-            .catalog
-            .extensions
-            .iter()
-            .any(|entry| entry.id == id && entry.release.sha256 == sha256)
-    })
+    .is_ok_and(|snapshot| snapshot.catalog.extensions.iter().any(matches))
 }
 fn verify_manifest(entry: &Entry, raw: &[u8]) -> Result<String, String> {
     if raw.len() > MAX_MANIFEST_BYTES {
@@ -469,9 +556,66 @@ fn verify_release(entry: &Entry, raw: &[u8], signature: Option<Vec<u8>>) -> Resu
     Ok(Review {
         manifest,
         signature,
+        package: None,
     })
 }
-pub(super) fn register(reg: &mut Registry, cache: CatalogCache, core: Arc<Registry>) {
+/// An official app's package is published beside its manifest, in its pinned repository's
+/// release for this version, as the manifest is (see [`signature_url`]).
+fn check_package_url(entry: &Entry, release: &ReleasePackage) -> Result<(), String> {
+    if signature_url(entry)?.is_none() {
+        return Ok(());
+    }
+    let repository =
+        super::signing::repository(&entry.id).ok_or("Unknown official app signing identity")?;
+    let prefix = format!("{repository}/releases/download/v{}/", entry.release.version);
+    let name = release.url.strip_prefix(&prefix).unwrap_or_default();
+    if name.is_empty() || name.contains('/') || !name.ends_with(".srelens-extension") {
+        return Err("Official app package does not match its trusted repository".into());
+    }
+    Ok(())
+}
+/// The package `archive` is the release: the checksum the catalog gives, and a manifest
+/// that is the release's own (the exact bytes `manifestUrl` serves, which the catalog's
+/// `sha256` names). An official app's package is signed; any other's signature is
+/// refused, as a single-file release's is.
+fn verify_package(entry: &Entry, archive: &[u8]) -> Result<package::Package, String> {
+    let release = entry
+        .release
+        .package
+        .as_ref()
+        .ok_or("This catalog release has no package")?;
+    check_package_url(entry, release)?;
+    if package::sha256_hex(archive) != release.sha256 {
+        return Err("Extension package checksum does not match the catalog".into());
+    }
+    let verified = package::read(archive, &mut package::Discard)?;
+    package::check_installable(&verified)?;
+    verify_manifest(entry, verified.manifest.as_bytes())?;
+    match (signature_url(entry)?, &verified.signature) {
+        (Some(_), None) => Err("Official app package is not signed".into()),
+        (None, Some(_)) => Err("Unrecognized app publisher signature".into()),
+        _ => Ok(verified),
+    }
+}
+/// A catalog release's package, downloaded and verified.
+fn fetch_package(entry: &Entry) -> Result<(package::Package, Vec<u8>), String> {
+    let release = entry
+        .release
+        .package
+        .as_ref()
+        .ok_or("This catalog release has no package")?;
+    check_package_url(entry, release)?;
+    let archive = download(&release.url, package::MAX_PACKAGE_BYTES)?;
+    verify_package(entry, &archive).map(|verified| (verified, archive))
+}
+/// The catalog's capabilities. `packages` says whether this host installs packages
+/// (#562): when it does, a release that has one is reviewed as its package.
+pub(super) fn register(
+    reg: &mut Registry,
+    cache: CatalogCache,
+    core: Arc<Registry>,
+    packages: bool,
+) {
     let c = cache.clone();
     reg.register(Capability::typed::<ListIn, Snapshot, _, _>(
         "extensions.catalog",
@@ -491,10 +635,13 @@ pub(super) fn register(reg: &mut Registry, cache: CatalogCache, core: Arc<Regist
         let cache = cache.clone(); let core = core.clone();
         async move { tokio::task::spawn_blocking(move || {
             let state = cache.snapshot(false)?;
-            let entry = state.catalog.extensions.iter().find(|e| e.id == input.id && e.release.sha256 == input.sha256).ok_or("Catalog release changed; refresh and review it again")?;
-            if !compatible(&entry.release.srelens_api_version) { return Err("Extension requires a different host API version".to_string()); }
-            let signature = signature_url(entry)?.map(|url| download(&url, 64)).transpose()?;
-            let review = verify_release(entry, &download(&entry.release.manifest_url, MAX_MANIFEST_BYTES)?, signature)?;
+            let entry = release(&state, &input.id, &input.sha256)?;
+            let review = if packages && entry.release.package.is_some() {
+                Review::of_package(&fetch_package(entry)?.0)
+            } else {
+                let signature = signature_url(entry)?.map(|url| download(&url, 64)).transpose()?;
+                verify_release(entry, &download(&entry.release.manifest_url, MAX_MANIFEST_BYTES)?, signature)?
+            };
             let manifest = &review.manifest;
             let parsed = Manifest::parse(&manifest)?;
             super::validate_app(&parsed, &parsed.permission_names(), core)?;
@@ -666,7 +813,7 @@ mod tests {
 
         let mut reg = Registry::new();
         let core = Arc::new(Registry::new());
-        register(&mut reg, CatalogCache::Owned(path), core);
+        register(&mut reg, CatalogCache::Owned(path), core, true);
 
         let cap_list = reg.get("extensions.catalog").unwrap();
         let list_res = (cap_list.handler)(serde_json::json!({"refresh": false}))
@@ -693,6 +840,7 @@ mod tests {
             &mut reg,
             CatalogCache::Shared(shared.clone()),
             Arc::new(Registry::new()),
+            false,
         );
         let refresh = json!({"refresh": true});
 
@@ -811,6 +959,197 @@ mod tests {
             .unwrap();
         let kept = read_cache(&shared.path).unwrap();
         assert_eq!(kept.catalog.extensions.len(), 1);
+    }
+    /// A catalog entry for the `signed` fixture package: an app of the test publisher,
+    /// which only this crate's unit tests trust, released from its pinned repository.
+    fn packaged_entry(archive: &[u8]) -> Entry {
+        let manifest =
+            std::fs::read(super::super::package::tests::fixture("signed").join(package::MANIFEST))
+                .unwrap();
+        let mut value: Value = serde_json::from_slice(&fixture()).unwrap();
+        let entry = &mut value["extensions"][0];
+        let repository = "https://github.com/srelens-test-publisher/extension-packaged";
+        entry["id"] = json!("test.signed.packaged");
+        entry["repository"] = json!(repository);
+        entry["release"]["version"] = json!("1.0.0");
+        entry["release"]["srelensApiVersion"] = json!("^0.4");
+        entry["release"]["manifestUrl"] = json!(format!(
+            "{repository}/releases/download/v1.0.0/manifest.json"
+        ));
+        entry["release"]["sha256"] = json!(package::sha256_hex(&manifest));
+        entry["release"]["package"] = json!({
+            "url": format!("{repository}/releases/download/v1.0.0/packaged.srelens-extension"),
+            "sha256": package::sha256_hex(archive),
+        });
+        parse_catalog(&serde_json::to_vec(&value).unwrap())
+            .unwrap()
+            .extensions
+            .remove(0)
+    }
+    #[test]
+    fn a_catalog_package_is_verified_as_the_release_it_is_listed_for() {
+        let archive = super::super::package::tests::packed("signed");
+        let entry = packaged_entry(&archive);
+        let verified = verify_package(&entry, &archive).unwrap();
+        assert!(verified.signature.is_some());
+        let review = serde_json::to_value(Review::of_package(&verified)).unwrap();
+        assert_eq!(review["manifest"], json!(verified.manifest));
+        assert!(review["package"]["icon"]
+            .as_str()
+            .unwrap()
+            .starts_with("data:image/png"));
+
+        // Other bytes than the catalog lists.
+        let mut changed = archive.clone();
+        changed.push(0);
+        assert!(verify_package(&entry, &changed)
+            .unwrap_err()
+            .contains("checksum"));
+        // A package whose manifest is not the release's own, the one manifestUrl serves.
+        let mut other = entry.clone();
+        other.release.sha256 = "0".repeat(64);
+        assert!(verify_package(&other, &archive)
+            .unwrap_err()
+            .contains("checksum"));
+        // An official app's package is published beside its manifest, nowhere else.
+        let mut other = entry.clone();
+        other.release.package.as_mut().unwrap().url = "https://github.com/srelens-test-publisher/extension-packaged/releases/download/v0.9.0/packaged.srelens-extension".into();
+        assert!(verify_package(&other, &archive)
+            .unwrap_err()
+            .contains("trusted repository"));
+        let mut other = entry.clone();
+        other.release.package.as_mut().unwrap().url = "https://github.com/attacker/extension-packaged/releases/download/v1.0.0/packaged.srelens-extension".into();
+        assert!(verify_package(&other, &archive)
+            .unwrap_err()
+            .contains("trusted repository"));
+        // And it is signed: the same files without the signature are refused.
+        let unsigned = {
+            use std::io::Read as _;
+            let mut tar = Vec::new();
+            flate2::read::GzDecoder::new(&archive[..])
+                .read_to_end(&mut tar)
+                .unwrap();
+            let mut entries = tar::Archive::new(&tar[..]);
+            let raw = entries.entries().unwrap().fold(
+                super::super::package::tests::Raw::new(),
+                |raw, entry| {
+                    let mut entry = entry.unwrap();
+                    let path = entry.path().unwrap().to_string_lossy().into_owned();
+                    let mut data = Vec::new();
+                    entry.read_to_end(&mut data).unwrap();
+                    if path == package::SIGNATURE {
+                        raw
+                    } else {
+                        raw.file(&path, &data)
+                    }
+                },
+            );
+            raw.gz()
+        };
+        let mut other = entry.clone();
+        other.release.package.as_mut().unwrap().sha256 = package::sha256_hex(&unsigned);
+        assert!(verify_package(&other, &unsigned)
+            .unwrap_err()
+            .contains("not signed"));
+        // A third party's package carries no signature this host could check.
+        let example = super::super::package::tests::packed("example");
+        let mut value: Value = serde_json::from_slice(&fixture()).unwrap();
+        let third = &mut value["extensions"][0];
+        let manifest =
+            std::fs::read(super::super::package::tests::fixture("example").join(package::MANIFEST))
+                .unwrap();
+        third["id"] = json!("org.example.packaged");
+        third["repository"] = json!("https://github.com/example/packaged");
+        third["release"]["version"] = json!("1.0.0");
+        third["release"]["srelensApiVersion"] = json!("^0.4");
+        third["release"]["manifestUrl"] =
+            json!("https://github.com/example/packaged/releases/download/v1.0.0/manifest.json");
+        third["release"]["sha256"] = json!(package::sha256_hex(&manifest));
+        third["release"]["package"] = json!({
+            "url": "https://github.com/example/packaged/releases/download/v1.0.0/app.srelens-extension",
+            "sha256": package::sha256_hex(&example),
+        });
+        let third = parse_catalog(&serde_json::to_vec(&value).unwrap())
+            .unwrap()
+            .extensions
+            .remove(0);
+        assert!(verify_package(&third, &example)
+            .unwrap()
+            .signature
+            .is_none());
+    }
+    #[test]
+    fn a_catalog_package_must_be_a_github_release_asset_with_a_checksum() {
+        let base: Value = serde_json::from_slice(&fixture()).unwrap();
+        for (package, why) in [
+            (
+                json!({"url": "https://example.com/app.srelens-extension", "sha256": "0".repeat(64)}),
+                "GitHub release assets",
+            ),
+            (
+                json!({"url": "https://github.com/a/b/releases/download/v1/app.tar.gz", "sha256": "0".repeat(64)}),
+                "GitHub release assets",
+            ),
+            (
+                json!({"url": "http://github.com/a/b/releases/download/v1/app.srelens-extension", "sha256": "0".repeat(64)}),
+                "HTTPS",
+            ),
+            (
+                json!({"url": "https://github.com/a/b/releases/download/v1/app.srelens-extension", "sha256": "abc"}),
+                "package checksum",
+            ),
+            (
+                json!({"url": "https://github.com/a/b/releases/download/v1/app.srelens-extension"}),
+                "Invalid extension catalog",
+            ),
+        ] {
+            let mut value = base.clone();
+            value["extensions"][0]["release"]["package"] = package.clone();
+            let refused = parse_catalog(&serde_json::to_vec(&value).unwrap()).map(|_| ());
+            assert!(
+                refused.as_ref().is_err_and(|reason| reason.contains(why)),
+                "{package}: {refused:?}"
+            );
+        }
+        let mut value = base;
+        value["extensions"][0]["release"]["package"] = json!({
+            "url": "https://github.com/a/b/releases/download/v1/app.srelens-extension",
+            "sha256": "0".repeat(64),
+        });
+        let catalog = parse_catalog(&serde_json::to_vec(&value).unwrap()).unwrap();
+        // It survives the cache, which a host that predates packages reads without it.
+        let cached = serde_json::to_value(&catalog).unwrap();
+        assert!(cached["extensions"][0]["release"]["package"].is_object());
+        assert!(
+            serde_json::to_value(&parse_catalog(&fixture()).unwrap()).unwrap()["extensions"][0]
+                ["release"]
+                .get("package")
+                .is_none()
+        );
+    }
+    #[test]
+    fn a_package_install_is_refused_when_the_catalog_no_longer_lists_what_was_reviewed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.json");
+        let archive = super::super::package::tests::packed("signed");
+        let entry = packaged_entry(&archive);
+        let mut value: Value = serde_json::from_slice(&fixture()).unwrap();
+        value["extensions"][0] = serde_json::to_value(&entry).unwrap();
+        let catalog = serde_json::to_vec(&value).unwrap();
+        load_with(&path, true, || Ok(catalog.clone())).unwrap();
+        let cache = CatalogCache::Owned(path);
+        assert!(cache.lists_package(&entry.id, &package::sha256_hex(&archive)));
+        assert!(!cache.lists_package(&entry.id, &"0".repeat(64)));
+        // Neither a release nor a package the catalog does not list is downloaded.
+        for (sha256, package_sha256) in [
+            ("0".repeat(64), package::sha256_hex(&archive)),
+            (entry.release.sha256.clone(), "0".repeat(64)),
+        ] {
+            let refused = cache
+                .download_package(&entry.id, &sha256, &package_sha256)
+                .unwrap_err();
+            assert_eq!(refused, CHANGED);
+        }
     }
     #[test]
     fn additive_catalog_fields_do_not_break_released_hosts() {

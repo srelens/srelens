@@ -379,7 +379,7 @@ export function ExtensionWorkspace({
         className="extension-toolbar extension-navigation"
         aria-label={`${plugin.manifest.name} pages`}
       >
-        <ExtensionLogo id={plugin.manifest.id} name={plugin.manifest.name} />
+        <ExtensionLogo icon={plugin.icon} name={plugin.manifest.name} />
         {groups.map((group) => (
           <Button
             key={group}

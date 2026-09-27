@@ -108,19 +108,38 @@ fn replace_with(
 /// flushed via `MOVEFILE_WRITE_THROUGH`. That is the same platform limit as the
 /// rename path — not a separate hole.
 pub(crate) fn create_dir_all(dir: &Path) -> io::Result<()> {
-    create_dir_all_with(dir, &sync_opened)
+    create_dir_all_with(dir, &sync_opened, &|dir| std::fs::create_dir(dir))
+}
+
+/// [`create_dir_all`] for a directory only its owner may open: every directory
+/// it creates is `0700` on Unix. Directories that already existed keep their
+/// mode, as they do there.
+pub(crate) fn create_private_dir_all(dir: &Path) -> io::Result<()> {
+    create_dir_all_with(dir, &sync_opened, &create_private_dir)
+}
+
+/// One directory, owner-only on Unix.
+pub(crate) fn create_private_dir(dir: &Path) -> io::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    builder.create(dir)
 }
 
 /// [`create_dir_all`], with the post-create directory sync supplied by the
-/// caller so a test can make it fail.
-fn create_dir_all_with(dir: &Path, sync: &dyn Fn(Directory) -> io::Result<()>) -> io::Result<()> {
+/// caller so a test can make it fail, and the creation of one directory.
+fn create_dir_all_with(
+    dir: &Path,
+    sync: &dyn Fn(Directory) -> io::Result<()>,
+    create: &dyn Fn(&Path) -> io::Result<()>,
+) -> io::Result<()> {
     if dir.as_os_str().is_empty() || dir.is_dir() {
         return Ok(());
     }
     let parent = parent_of(dir);
-    create_dir_all_with(parent, sync)?;
+    create_dir_all_with(parent, sync, create)?;
     let directory = open_directory(parent)?;
-    match std::fs::create_dir(dir) {
+    match create(dir) {
         Ok(()) => {}
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists && dir.is_dir() => {}
         Err(error) => return Err(error),
@@ -130,6 +149,91 @@ fn create_dir_all_with(dir: &Path, sync: &dyn Fn(Directory) -> io::Result<()>) -
             "created {} but could not sync {}: {error}; it may not survive a power loss",
             dir.display(),
             parent.display(),
+        );
+    }
+    Ok(())
+}
+
+/// Durably move a directory that has been written in full into place, for a
+/// store that is a tree of files rather than one file (an unpacked app
+/// package, #562).
+///
+/// `staging` holds the finished tree, each of its files synced as it was
+/// written. `publish_dir`:
+///
+/// 1. syncs every directory in `staging`, deepest first, so each entry is on
+///    disk before any name points at the tree;
+/// 2. renames `staging` to `target` in one step, so a reader finds no
+///    directory at `target` or the whole tree, never part of it. `target` must
+///    not exist: a rename would replace an empty directory there on Unix, and
+///    a store that means to replace one moves it aside first;
+/// 3. syncs the parent directory of each, as [`replace`] syncs its file's.
+///
+/// The same contract as [`replace`]. Every failure up to and including the
+/// rename returns `Err`, with `target` absent and `staging` where it was. A
+/// directory that cannot be *synced*, before the rename or after it, is logged
+/// as a warning instead: some file systems refuse to sync a directory at all,
+/// and after the rename the tree is in place, so reporting that as a failure
+/// would be false.
+///
+/// **Windows**: directories cannot be synced without administrator rights, so
+/// steps 1 and 3 do nothing and the rename's durability rests on the file
+/// system's metadata journal, the limit [`replace`] documents.
+pub(crate) fn publish_dir(staging: &Path, target: &Path) -> io::Result<()> {
+    publish_dir_with(staging, target, &sync_opened)
+}
+
+/// [`publish_dir`], with the directory sync supplied by the caller so a test
+/// can make it fail.
+fn publish_dir_with(
+    staging: &Path,
+    target: &Path,
+    sync: &dyn Fn(Directory) -> io::Result<()>,
+) -> io::Result<()> {
+    sync_tree(staging, sync)?;
+    let (from, to) = (parent_of(staging), parent_of(target));
+    let from_directory = open_directory(from)?;
+    let to_directory = (from != to).then(|| open_directory(to)).transpose()?;
+    match std::fs::symlink_metadata(target) {
+        Ok(_) => {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("{} already exists", target.display()),
+            ))
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    std::fs::rename(staging, target)?;
+    let parents = std::iter::once((from_directory, from))
+        .chain(to_directory.map(|directory| (directory, to)));
+    for (directory, parent) in parents {
+        if let Err(error) = sync(directory) {
+            log::warn!(
+                "moved {} into place but could not sync {}: {error}; it may not survive a power loss",
+                target.display(),
+                parent.display(),
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Sync every directory under `dir`, and `dir` itself, deepest first. Files
+/// are not synced here: whoever wrote each one synced it. A directory that
+/// cannot be listed or opened is an error; one that cannot be synced is a
+/// warning, as [`publish_dir`] says.
+fn sync_tree(dir: &Path, sync: &dyn Fn(Directory) -> io::Result<()>) -> io::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            sync_tree(&entry.path(), sync)?;
+        }
+    }
+    if let Err(error) = sync(open_directory(dir)?) {
+        log::warn!(
+            "could not sync {}: {error}; it may not survive a power loss",
+            dir.display(),
         );
     }
     Ok(())
@@ -396,9 +500,92 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let nested = dir.path().join("a").join("b");
 
-        create_dir_all_with(&nested, &failing_sync).unwrap();
+        create_dir_all_with(&nested, &failing_sync, &|dir| fs::create_dir(dir)).unwrap();
 
         assert!(nested.is_dir());
+    }
+
+    /// A staged tree with a file at its top and one in a subdirectory.
+    fn staged(parent: &Path) -> std::path::PathBuf {
+        let staging = parent.join(".staging");
+        fs::create_dir_all(staging.join("icons")).unwrap();
+        fs::write(staging.join("extension.json"), b"{}").unwrap();
+        fs::write(staging.join("icons").join("icon.svg"), b"<svg/>").unwrap();
+        staging
+    }
+
+    #[test]
+    fn publish_dir_moves_the_whole_tree_into_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let staging = staged(dir.path());
+        let target = dir.path().join("app").join("version");
+        fs::create_dir(dir.path().join("app")).unwrap();
+
+        publish_dir(&staging, &target).unwrap();
+
+        assert!(!staging.exists());
+        assert_eq!(fs::read(target.join("extension.json")).unwrap(), b"{}");
+        assert_eq!(
+            fs::read(target.join("icons").join("icon.svg")).unwrap(),
+            b"<svg/>"
+        );
+    }
+
+    /// `rename` would replace an empty directory on Unix; a target that exists
+    /// in any form is refused, and nothing moves.
+    #[test]
+    fn publish_dir_refuses_a_target_that_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let staging = staged(dir.path());
+        let target = dir.path().join("version");
+        fs::create_dir(&target).unwrap();
+
+        let refused = publish_dir(&staging, &target).unwrap_err();
+
+        assert_eq!(refused.kind(), io::ErrorKind::AlreadyExists);
+        assert!(staging.join("extension.json").is_file());
+        assert_eq!(entries(&target), Vec::<String>::new());
+    }
+
+    #[test]
+    fn publish_dir_into_a_missing_parent_is_an_error_and_moves_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let staging = staged(dir.path());
+
+        assert!(publish_dir(&staging, &dir.path().join("missing").join("version")).is_err());
+        assert!(staging.join("extension.json").is_file());
+    }
+
+    /// Syncing is best effort, as it is for `replace`: the tree still moves.
+    #[test]
+    fn a_failed_directory_sync_still_publishes() {
+        let dir = tempfile::tempdir().unwrap();
+        let staging = staged(dir.path());
+        let target = dir.path().join("version");
+
+        publish_dir_with(&staging, &target, &failing_sync).unwrap();
+
+        assert!(target.join("icons").join("icon.svg").is_file());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_directories_are_owner_only_on_unix() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("packages").join("org.example.app");
+
+        create_private_dir_all(&nested).unwrap();
+        create_private_dir_all(&nested).unwrap();
+
+        for created in [nested.parent().unwrap(), &nested] {
+            assert_eq!(
+                fs::metadata(created).unwrap().permissions().mode() & 0o777,
+                0o700,
+                "{}",
+                created.display()
+            );
+        }
     }
 
     #[test]

@@ -51,6 +51,8 @@ const tables: Record<string, Record<string, "required" | "optional">> = {
     history: "required",
     contexts: "optional",
     allowLoopbackHttp: "optional",
+    package: "optional",
+    icon: "optional",
   } satisfies Presence<InstalledExtension>,
   PreviousVersion: {
     signatureProof: "optional",
@@ -59,10 +61,12 @@ const tables: Record<string, Record<string, "required" | "optional">> = {
     revision: "required",
     source: "required",
     installedAt: "required",
+    package: "optional",
   } satisfies Presence<InstalledExtension["history"][number]>,
   SignatureProof: {
     manifest: "required",
     signature: "required",
+    digests: "optional",
   } satisfies Presence<NonNullable<InstalledExtension["signatureProof"]>>,
   Manifest: {
     $schema: "optional",
@@ -125,7 +129,7 @@ const tables: Record<string, Record<string, "required" | "optional">> = {
   } satisfies Presence<Contributions>,
   PaletteCommand: { id:"required", title:"required", target:"required", forKinds:"optional" } satisfies Presence<NonNullable<Contributions["commands"]>[number]>,
   ResourceLink: { id:"required", from:"required", to:"required", relation:"required", match:"required" } satisfies Presence<NonNullable<Contributions["resourceLinks"]>[number]>,
-  LinkMatch: { label:"optional", namespaceLabel:"optional", ownerReference:"optional", annotation:"optional", parse:"optional", defaultNamespace:"optional", name:"optional" } satisfies Presence<NonNullable<Contributions["resourceLinks"]>[number]["match"]>,
+  LinkMatch: { label:"optional", namespaceLabel:"optional", ownerReference:"optional", annotation:"optional", parse:"optional", defaultNamespace:"optional", name:"optional", path:"optional" } satisfies Presence<NonNullable<Contributions["resourceLinks"]>[number]["match"]>,
   StatusResolver: { forKinds:"required", rules:"required" } satisfies Presence<NonNullable<Contributions["statusResolvers"]>[number]>,
   Badge: { id:"required", forKinds:"required", join:"optional", rules:"required" } satisfies Presence<NonNullable<Contributions["badges"]>[number]>,
   StatusRule: { when:"required", status:"required", label:"required", reason:"optional" } satisfies Presence<ExtensionStatusRule>,

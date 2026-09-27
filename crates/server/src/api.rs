@@ -482,6 +482,7 @@ pub(crate) mod tests {
             "extensions.resolveCards",
             "extensions.resolvePanels",
             "extensions.resolveLinks",
+            "extensions.resolveReverseLinks",
             "extensions.streams",
         ] {
             let (status, _) = post(&format!("/api/capability/{id}"), Body::from("{}")).await;

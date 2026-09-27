@@ -242,7 +242,8 @@ it("groups app pages under their display name", async () => {
   expect(screen.getByRole("treeitem",{name:"Cluster"}).compareDocumentPosition(apps) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   expect(apps.compareDocumentPosition(screen.getByRole("treeitem",{name:"Workloads"})) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   const fluxNode = await screen.findByRole("treeitem", { name: "Flux" });
-  expect(fluxNode.querySelector("[data-extension-logo]")?.getAttribute("data-extension-logo")).toBe("org.srelens.flux");
+  // No package, so no logo but initials: nothing is chosen by the app's ID (#562).
+  expect(fluxNode.querySelector("[data-extension-logo]")?.getAttribute("data-extension-logo")).toBe("initials");
   await userEvent.click(fluxNode);
   await userEvent.click(await screen.findByRole("treeitem", { name: "Kustomizations" }));
   expect(tabFor("/extension-contexts/id%3Aprod-eu/org.srelens.flux/kustomizations/")?.sub).toBe("prod-eu");
@@ -250,6 +251,20 @@ it("groups app pages under their display name", async () => {
   await userEvent.click(screen.getByRole("treeitem", { name: "Sources" }));
   await userEvent.click(screen.getByRole("treeitem", { name: "Git repositories" }));
   expect(tabFor("/extension-contexts/id%3Aprod-eu/org.srelens.flux/repositories/")?.sub).toBe("prod-eu");
+});
+
+const packageIcon = `data:image/svg+xml;base64,${btoa("<svg xmlns=\"http://www.w3.org/2000/svg\"/>")}`;
+it("draws an installed package's logo on its app in the sidebar (#562)", async () => {
+  extensionState.data = { plugins: [
+    { enabled: true, icon: packageIcon, manifest: { id: "org.example.packaged", name: "Packaged", contributions: { pages: [
+      { id: "applications", title: "Applications" },
+    ] } } },
+  ] };
+  render(<Nav contexts={[PROD]} />);
+  await userEvent.click(await screen.findByRole("treeitem", { name: "Apps" }));
+  const app = await screen.findByRole("treeitem", { name: "Packaged" });
+  expect(app.querySelector("[data-extension-logo]")?.getAttribute("data-extension-logo")).toBe("package");
+  expect(app.querySelector("image")?.getAttribute("href")).toBe(packageIcon);
 });
 
 describe("two contexts that share a stable ID (#695)", () => {

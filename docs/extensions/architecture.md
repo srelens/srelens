@@ -27,6 +27,13 @@ finish. A host must rebuild its MCP snapshot after a lifecycle change to refresh
 discovery. An older snapshot may still list a revoked tool but cannot execute it, so
 live tool-list updates are not advertised yet.
 
+## Sidecars
+
+Executable apps are to run out of process, as supervised sidecars in the OS sandbox,
+speaking JSON-RPC over stdio ([sidecar-protocol.md](sidecar-protocol.md)). The
+supervisor and its per-OS backends are in `crates/plugin-host/src/sidecar/`. No manifest
+kind starts one yet ([#574](https://github.com/srelens/srelens/issues/574)).
+
 ## App lifecycle
 
 Both desktop designs manage apps through **Settings → Apps**, from the catalog or a

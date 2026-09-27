@@ -7,21 +7,23 @@ and [flux.json](../../examples/extensions/flux.json).
 
 ## JSON Schema
 
-The schema for API 0.4 is committed at
-[`schemas/extension-manifest.v0.4.json`](../../schemas/extension-manifest.v0.4.json).
+The schema for API 0.5 is committed at
+[`schemas/extension-manifest.v0.5.json`](../../schemas/extension-manifest.v0.5.json).
 Point your editor at it by naming it in the manifest:
 
 ```json
 {
-  "$schema": "https://raw.githubusercontent.com/srelens/srelens/main/schemas/extension-manifest.v0.4.json",
+  "$schema": "https://raw.githubusercontent.com/srelens/srelens/main/schemas/extension-manifest.v0.5.json",
   "id": "io.example.cert-manager"
 }
 ```
 
 The file is generated from the host's `Manifest` type, and `cargo test` fails when the
-two differ. [`schemas/extension-manifest.v0.3.json`](../../schemas/extension-manifest.v0.3.json)
-is the API 0.3 contract, kept as it was when 0.4 was cut, for manifests that still
-require `^0.3`. After changing a manifest field, regenerate the newest file with:
+two differ. [`schemas/extension-manifest.v0.4.json`](../../schemas/extension-manifest.v0.4.json)
+and [`schemas/extension-manifest.v0.3.json`](../../schemas/extension-manifest.v0.3.json)
+are the API 0.4 and 0.3 contracts, each kept as it was when the next line was cut, for
+manifests that still require `^0.4` or `^0.3`; name the one your range negotiates to.
+After changing a manifest field, regenerate the newest file with:
 
 ```sh
 UPDATE_CATALOG=1 cargo test -p srelens-plugin-host --test schema
@@ -40,7 +42,7 @@ before publishing.
 | `id` | Yes | Reverse-domain identifier. See [Identifiers](specification.md#identifiers). |
 | `name` | Yes | Display name, 1–120 characters, with no control characters and no bidirectional or invisible format characters. See [Identifiers](specification.md#identifiers). |
 | `version` | Yes | The app's own SemVer version. |
-| `srelensApiVersion` | Yes | A SemVer range of extension API versions, for example `^0.4`. The fields marked **API 0.4** on this page need a range that admits only 0.4 or later; see [Versioning](specification.md#versioning). |
+| `srelensApiVersion` | Yes | A SemVer range of extension API versions, for example `^0.5`. The fields marked **API 0.4** on this page need a range that admits only 0.4 or later, and those marked **API 0.5** one that admits only 0.5 or later; see [Versioning](specification.md#versioning). |
 | `kind` | Yes | `declarative`. No other kind is accepted. |
 | `permissions` | Yes | The exact host capability IDs the bindings use. `network.http` is written `{ "capability": "network.http", "hosts": [...] }` (API 0.4). See [Network requests](#network-requests). |
 | `capabilities` | Yes | 1–32 bindings, below. |
@@ -572,9 +574,12 @@ and the usual identifier, label, count, kind and duplicate rules.
 ### `resourceLinks`
 
 An app can say how a resource of one kind relates to resources of another: a
-Deployment is managed by an Argo CD Application, or by a Flux Kustomization.
-The Inspector shows these as a **Related** section of links, and the resolved
-links are edges (`from`, `relation`, targets) a topology view can draw too.
+Deployment is managed by an Argo CD Application, or by a Flux Kustomization; a
+Kustomization references its GitRepository; an HTTPRoute sends traffic to a
+Service. The Inspector shows these as a **Related** section of links, on both
+ends: the resource a link is read from shows its targets, and each target shows
+the resources whose links name it. The resolved links are edges (`from`,
+`relation`, targets) a topology view can draw too.
 
 ```json
 "resourceLinks": [
@@ -585,7 +590,12 @@ links are edges (`from`, `relation`, targets) a topology view can draw too.
   { "id": "kustomization", "from": "apps/Deployment", "to": "kustomize.toolkit.fluxcd.io/Kustomization",
     "relation": "managedBy",
     "match": { "label": "kustomize.toolkit.fluxcd.io/name",
-               "namespaceLabel": "kustomize.toolkit.fluxcd.io/namespace" } }
+               "namespaceLabel": "kustomize.toolkit.fluxcd.io/namespace" } },
+  { "id": "git-source", "from": "kustomize.toolkit.fluxcd.io/Kustomization",
+    "to": "source.toolkit.fluxcd.io/GitRepository", "relation": "references",
+    "match": { "path": ".spec.sourceRef" } },
+  { "id": "backends", "from": "gateway.networking.k8s.io/HTTPRoute", "to": "/Service",
+    "relation": "references", "match": { "path": ".spec.rules[*].backendRefs[*]" } }
 ]
 ```
 
@@ -593,9 +603,9 @@ links are edges (`from`, `relation`, targets) a topology view can draw too.
 | --- | --- |
 | `id` | 1–64 letters, digits and `-`; unique among the app's links. |
 | `from` | The group-qualified kind the link is read from (`apps/Deployment`, `/Pod`). Built-in or custom. |
-| `to` | The group-qualified kind of the target. A declared `k8s.listCustomResource` reader must list it: that list is where the host looks the target up, so it can say whether it exists. The Inspector opens a target only when one of the app's `pages` is backed by that reader; otherwise it names the target as text. |
+| `to` | The group-qualified kind of the target: one a declared `k8s.listCustomResource` reader lists, or (**API 0.5**) a [built-in kind](#built-in-targets) the host lists. That list is where the host looks the target up, so it can say whether it exists. The Inspector opens an app's kind only when one of the app's `pages` is backed by that reader, and a built-in kind in its own Inspector; otherwise it names the target as text. |
 | `relation` | `ownedBy`, `managedBy`, `exposedBy` or `references` — what `from` is to `to`. |
-| `match` | Exactly one of `label`, `ownerReference`, `annotation` and `name`. |
+| `match` | Exactly one of `label`, `ownerReference`, `annotation`, `name` and (**API 0.5**) `path`. |
 
 `match` uses a join's selectors, read the other way round: a join indexes the
 listed resources by a key that names the row, while a link reads the key on
@@ -626,6 +636,24 @@ then found by name through the same index a join uses.
   match by annotation.
 - `name: true`: the target has the resource's own name and namespace. Not
   allowed from a kind to itself.
+- `path` (**API 0.5**): a path on the resource whose values name the target, in
+  the [predicate grammar](#preconditions-and-availability) plus `[*]`, which
+  reads every element of a list: `.spec.sourceRef`,
+  `.spec.rules[*].backendRefs[*]`. Each value is the target's name, or an object
+  reference with a `name` and, optionally, a `namespace`, a `kind`, and a
+  `group` or an `apiVersion`. A reference whose `kind` or group is not `to`'s is
+  some other link's and is skipped — a Flux `sourceRef` to an OCIRepository, a
+  Gateway API backend that is a ServiceImport — so one path can serve several
+  links, one per kind. Without a `namespace` the target is in the resource's
+  own. An unset field, a null and an empty name are no reference; a list read
+  without `[*]`, a number, or a reference with no `name` is a failure on the
+  link. A path may reach at most 256 values. The path is checked at install. The
+  host reads it on the resource as **its own read** through the app's reader of
+  `from` — the Inspector sends only identity and metadata — so `from` must be a
+  kind a declared `k8s.listCustomResource` reader lists, never `/Secret`. It is
+  one of that reader's paths, so a version's `jsonPathOverrides` may rewrite it
+  ([Several served versions](#several-served-versions)). A path may link a kind
+  to itself (`.spec.dependsOn[*]`).
 
 A cluster-scoped resource (a Namespace, a Node) has no namespace of its own, so a
 target it names without one is found by name: in a cluster-scoped kind directly,
@@ -635,8 +663,73 @@ one has that name.
 At most 32 links may be declared. Each resolution rechecks the installed
 revision, grants and cluster scope. A resource that names no target shows no
 link; a target the resource names but the cluster does not have is listed as
-not found; a failed list or an ambiguous name is shown as a failure with its
-reason and a Retry — never as "No related resources".
+not found; a failed list, an ambiguous name, or a target list that reached its
+2,000-object limit is shown as a failure with its reason and a Retry — never as
+"No related resources" or "not found".
+
+#### Built-in targets
+
+**API 0.5.** `to` may name a Kubernetes built-in kind the host lists: `/Pod`,
+`/Service`, `/Endpoints`, `/ConfigMap`, `/Secret`, `/ServiceAccount`,
+`/PersistentVolumeClaim`, `/PersistentVolume`, `/ResourceQuota`, `/LimitRange`,
+`/Namespace`, `/Node`, `apps/Deployment`, `apps/StatefulSet`, `apps/DaemonSet`,
+`apps/ReplicaSet`, `batch/Job`, `batch/CronJob`,
+`autoscaling/HorizontalPodAutoscaler`, `policy/PodDisruptionBudget`,
+`networking.k8s.io/Ingress`, `networking.k8s.io/IngressClass`,
+`networking.k8s.io/NetworkPolicy`, `discovery.k8s.io/EndpointSlice`, the four
+`rbac.authorization.k8s.io` kinds, `storage.k8s.io/StorageClass`,
+`scheduling.k8s.io/PriorityClass`, `node.k8s.io/RuntimeClass`,
+`coordination.k8s.io/Lease`, and the two `admissionregistration.k8s.io` webhook
+configurations. An Event is a record about a resource and is not a target.
+No permission is declared for it: the host lists the kind's **metadata only**
+(a `PartialObjectMetadataList` request, so no spec or status is sent), under
+the user's own RBAC. The resolved link's `capability` is empty, and the target
+opens in the host's own Inspector — only when the rail shows the cluster the
+Inspector is for, because that Inspector follows the rail.
+
+A **Secret** target is found by identity alone. Its values never leave the API
+server, and the host keeps a Secret's name, namespace, uid, labels and owner
+references, never its annotations, which it redacts on every ungated read. An
+ExternalSecret's `spec.target.name`, for example, links it to the Secret it
+writes:
+
+```json
+{ "id": "target", "from": "external-secrets.io/ExternalSecret", "to": "/Secret",
+  "relation": "references", "match": { "path": ".spec.target.name" } }
+```
+
+A link to a kind a reader lists means what it did in API 0.4, whatever the
+kind's name.
+
+#### The target's view
+
+The Inspector of a resource of a link's `to` kind shows the same declarations
+read the other way round (`extensions.resolveReverseLinks`): the resources of
+`from` whose link names this one, grouped under the relation as it reads from
+the target — **Owns**, **Manages**, **Exposes**, **Referenced by**. No manifest
+change asks for it; an API 0.4 app's links get it too.
+
+- The host lists `from` — through the app's reader, or as a built-in kind's
+  metadata, as above — and reads each resource's link exactly as the forward
+  link reads it. The list is shared with joins, columns, panels and cards through
+  the same five-second snapshot.
+- It lists one namespace, the target's, when the link can only name a target
+  beside the resource it is read from: a `label` without `namespaceLabel`, an
+  `annotation` without `parse`, `ownerReference` and `name`, when both kinds are
+  namespaced. A `namespaceLabel`, an Argo CD tracking id or a `path` may name a
+  target in any namespace, and a cluster-scoped target is named from every
+  namespace, so those list the cluster.
+- The list stops at 2,000 objects. When it does, the link says so
+  (`truncated`): the sources shown are those found among what was read, and
+  there may be more.
+- A resource whose link cannot be read — a name label with its namespace label
+  unset, a path that holds a list — is counted and described (`unreadable`),
+  not dropped and not listed.
+- An owner reference counts only when its uid is the target's. A reference that
+  leaves the namespace unsaid (a bare Argo CD name without `defaultNamespace`,
+  a cluster-scoped resource's label) is listed with why it may mean a namesake.
+- A `from` the host cannot list — a custom kind no declared reader lists — is a
+  failure on that link, never "nothing refers to this".
 
 ## Settings
 

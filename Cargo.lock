@@ -3468,6 +3468,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "landlock"
+version = "0.4.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4cca98e95f35b29d469dade6724c6f96cec9236640f745a0e99b0334ec320ab1"
+dependencies = [
+ "enumflags2",
+ "libc",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5657,6 +5668,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "seccompiler"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a4ae55de56877481d112a559bbc12667635fdaf5e005712fd4e2b2fa50ffc884"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "secrecy"
 version = "0.10.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6537,24 +6557,32 @@ dependencies = [
 name = "srelens-plugin-host"
 version = "0.15.0"
 dependencies = [
+ "landlock",
+ "libc",
  "proptest",
  "schemars 0.8.22",
+ "seccompiler",
  "semver",
  "serde",
  "serde_json",
  "serde_path_to_error",
+ "sha2 0.10.9",
  "srelens-capability",
  "srelens-mcp",
  "srelens-registry",
+ "tempfile",
  "tokio",
  "url",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
 name = "srelens-registry"
 version = "0.15.0"
 dependencies = [
+ "base64 0.22.1",
  "dirs",
+ "flate2",
  "libc",
  "log",
  "proptest",
@@ -6571,6 +6599,7 @@ dependencies = [
  "srelens-mcp",
  "srelens-plugin-host",
  "srelens-streams",
+ "tar",
  "tempfile",
  "tokio",
  "url",

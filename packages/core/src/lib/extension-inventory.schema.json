@@ -878,6 +878,13 @@
           },
           "type": "array"
         },
+        "icon": {
+          "description": "The package's logo as a `data:` URL, as `extensions.list` reports it: read from the package's files and checked against its digest list. Decoration only, never a sign of who published the app. Recomputed for every list, ignored when read from disk and never written there.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "installedAt": {
           "description": "When this version was installed, in seconds since the Unix epoch.",
           "format": "uint64",
@@ -886,6 +893,13 @@
         },
         "manifest": {
           "$ref": "#/definitions/Manifest"
+        },
+        "package": {
+          "description": "The SHA-256 of the digest list of the package this version was unpacked from (#562), which names its directory; absent for a single-file manifest.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "policyBlocked": {
           "description": "Recomputed policy denial, distinct from a failed publisher verification.",
@@ -989,7 +1003,7 @@
     },
     "LinkMatch": {
       "additionalProperties": false,
-      "description": "Where on the `from` resource the target's name is written. Exactly one of `label`, `ownerReference`, `annotation` and `name`.",
+      "description": "Where on the `from` resource the target's name is written. Exactly one of `label`, `ownerReference`, `annotation`, `name` and `path`.",
       "properties": {
         "annotation": {
           "description": "The annotation whose value is the target's name, or, with `parse`, a reference in a host-known format that names it.",
@@ -1037,6 +1051,13 @@
             }
           ],
           "description": "With `annotation`: the format the value is written in. The host accepts a reference only when it names the `from` resource itself."
+        },
+        "path": {
+          "description": "A path on the `from` resource whose value names the target (API 0.5, #728): the predicate grammar, plus `[*]` for every element of a list, such as `.spec.rules[*].backendRefs[*]`. Each value is the target's name, or an object reference with `name` and an optional `namespace`, `kind`, and `group` or `apiVersion`; a reference to another kind is not this link's. Without a `namespace` the target is in the `from` resource's namespace. The host reads the path through the declared reader of `from`.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "type": "object"
@@ -1286,6 +1307,13 @@
         "manifest": {
           "$ref": "#/definitions/Manifest"
         },
+        "package": {
+          "description": "The package it was unpacked from, as [`Installed`] names it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "revision": {
           "format": "uint64",
           "minimum": 0.0,
@@ -1328,7 +1356,7 @@
     },
     "ResourceLink": {
       "additionalProperties": false,
-      "description": "A relationship from a resource of kind `from` to resources of kind `to`, found by reading the `from` resource's own metadata (#545).\n\nThe `match` selectors are a join's (`joins[].match`), read the other way round: a join indexes the *listed* resources by a key that names the row, while a link reads the key on the resource being inspected, and the key names the target. The target is then looked up by name in the list of the declared reader for `to`, through the same index a join uses.",
+      "description": "A relationship from a resource of kind `from` to resources of kind `to`, found by reading the `from` resource's own metadata (#545), or a declared path on it (#728).\n\nThe metadata selectors are a join's (`joins[].match`), read the other way round: a join indexes the *listed* resources by a key that names the row, while a link reads the key on the resource being inspected, and the key names the target. The target is then looked up by name in the list of the declared reader for `to`, or of the built-in kind `to` names, through the same index a join uses. The target's own Inspector shows the same links the other way round, computed from these declarations.",
       "properties": {
         "from": {
           "description": "The qualified kind of the resource the link is read from, e.g. `apps/Deployment`.",
@@ -1344,7 +1372,7 @@
           "$ref": "#/definitions/LinkRelation"
         },
         "to": {
-          "description": "The qualified kind of the target. A declared `k8s.listCustomResource` reader must list it: that is how the host knows the target exists.",
+          "description": "The qualified kind of the target: one a declared `k8s.listCustomResource` reader lists, or a built-in kind this host lists (API 0.5, #728). That is how the host knows the target exists.",
           "type": "string"
         }
       },
@@ -1556,6 +1584,13 @@
     "SignatureProof": {
       "additionalProperties": false,
       "properties": {
+        "digests": {
+          "description": "For a package (#562): the exact digest list `signature` covers, which names `manifest` as the package's `extension.json`. Absent for a single-file manifest, whose signature covers `manifest` itself.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "manifest": {
           "type": "string"
         },

@@ -1,0 +1,33 @@
+{
+  "format": "srelens-extension-package",
+  "formatVersion": 1,
+  "id": "org.example.packaged",
+  "version": "1.0.0",
+  "files": [
+    {
+      "path": "LICENSE",
+      "size": 68,
+      "sha256": "ee246b7ed7cb0ce3e8ec2f52b1b9a93ff0d3b4d0dca8c7217daf2dd82b759dec"
+    },
+    {
+      "path": "README.md",
+      "size": 171,
+      "sha256": "f9c61eefce0c9206c496219f581dd6debf03225a24962f43e818e5ab0c0216eb"
+    },
+    {
+      "path": "extension.json",
+      "size": 799,
+      "sha256": "bc396e76563451cb3dfb8e4ab1d6e047a633ebd16af1103bdc35ab1eaa2175fc"
+    },
+    {
+      "path": "icons/icon.svg",
+      "size": 211,
+      "sha256": "045a5a223e0280227a5b5a3d2ce209c0ec3ba1ac436192cf8aa9ddc5a70cdd4f"
+    },
+    {
+      "path": "schemas/settings.schema.json",
+      "size": 84,
+      "sha256": "a0311c353aec0c57946a8ca657370a474532175265455995160cfe83d8ce2b4f"
+    }
+  ]
+}

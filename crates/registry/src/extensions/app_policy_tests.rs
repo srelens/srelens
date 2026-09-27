@@ -128,7 +128,7 @@ fn a_policy_is_checked_whole_and_what_it_leaves_out_is_allowed() {
         ),
         (
             json!({"allowedPublishers":["acme"]}),
-            "\"acme\" is not a publisher this host trusts (srelens)",
+            "\"acme\" is not a publisher this host trusts (srelens",
         ),
         (
             json!({"allowedCapabilities":["k8s.listPods"]}),

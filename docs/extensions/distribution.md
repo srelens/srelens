@@ -1,6 +1,8 @@
 # Distribution
 
-How apps reach users: the catalog, signed official releases, and local installation.
+How apps reach users: the catalog, signed official releases, and local installation. An
+app is released as one manifest file, or as a `.srelens-extension` package that carries its
+logo and files as well ([packages.md](packages.md)).
 
 ## The catalog
 
@@ -25,17 +27,35 @@ description.
   stay visible but cannot be installed. The catalog shows the host's versions.
 - Preview labels come from catalog metadata. `testedHost.revision` records test
   provenance, not an exact-build restriction.
-- Flux and Argo CD use bundled project logos; other apps get an initials mark. Logos
-  identify an integration and do not indicate trust or signing.
+- An installed app's logo comes from its package; every other app, and every catalog
+  entry, gets an initials mark. Nothing is chosen by app ID, and a logo never indicates
+  trust or signing ([packages.md](packages.md#logos)).
+- A release may also be published as a package (`release.package`). A host that installs
+  packages reviews that instead; a host that predates them, and the web host, install
+  `manifestUrl` ([packages.md](packages.md#in-the-catalog)).
 
 ## Reviewing an installation
 
-**Review installation** downloads a size-bounded manifest over HTTPS, checks its
-SHA-256 against the selected catalog release, verifies its ID, version and API range
-against the entry, and validates the desktop app's capability rules. The exact verified
-bytes then go through the permission review and install action. The review lists what
-each permission is bound to and opens the full manifest on request, so a catalog app can
-be read before it is installed (see [permissions.md](permissions.md#declaring-and-granting)).
+**Review installation** downloads the release over HTTPS and checks it before the
+permission review. What it downloads depends on the release and the host:
+
+- **A single-file release**, or any release on a host that keeps no app files (the web
+  host): a size-bounded manifest. Its SHA-256 must match the selected catalog release,
+  its ID, version and API range must match the entry, and it must pass the desktop app's
+  capability rules. The exact verified bytes then go through the permission review, and
+  the install action sends those bytes.
+- **A release with a package** (`release.package`) on a host that installs packages: the
+  package, at most 16 MiB. Its SHA-256 must match `release.package.sha256`, it is verified
+  whole ([packages.md](packages.md#what-the-host-refuses)), and its `extension.json` must be
+  the release's manifest: its SHA-256 is the release's `sha256`. The ID, version, API range
+  and capability checks above then apply to that manifest. The install action sends no
+  bytes. It names the release and the package checksum that was reviewed, and the host
+  downloads the package again and verifies it the same way. It refuses the install if the
+  catalog now lists another package ([packages.md](packages.md#installing)).
+
+Either way, the review lists what each permission is bound to and opens the full manifest
+on request, so a catalog app can be read before it is installed (see
+[permissions.md](permissions.md#declaring-and-granting)).
 
 A catalog change invalidates the selected checksum and requires a new review. Replacing
 an installed ID is explicit and keeps its settings. There are no automatic updates or
@@ -85,6 +105,8 @@ trusting a stored signature quarantines only that app.
 
 ## Local installation
 
-Paste a manifest under **Settings → Apps → Install a local manifest**. It goes through
-the same validation and permission review, with an ID outside reserved namespaces. See
-[introduction.md](introduction.md#try-an-app) for a walkthrough.
+Paste a manifest under **Settings → Apps → Install a local manifest or package**, or choose
+a `.srelens-extension` file there on the desktop. Either goes through the same validation
+and permission review; a package is verified whole first, every file against its digest
+list ([packages.md](packages.md#installing)). Unsigned, its ID must be outside reserved
+namespaces. See [introduction.md](introduction.md#try-an-app) for a walkthrough.

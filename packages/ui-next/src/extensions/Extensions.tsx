@@ -7,15 +7,19 @@ import { refreshContextIds, useContextLookup } from "./contextIds";
 import { ExtensionLogo } from "./ExtensionLogo";
 import { useContext, useRef, useState } from "react";
 import {
+  MAX_EXTENSION_PACKAGE_BYTES,
   clearExtensionSecret,
   configureExtensions,
   contributionKind,
+  encodePackage,
   setExtensionSecret,
   extensionEnabledFor,
   isTauri,
   permissionName,
+  reviewExtensionPackage,
   validateExtension,
   type ExtensionChange,
+  type ExtensionPackageReview,
   type ExtensionValidationError,
   type ExtensionPermissionDiff,
   type InstalledExtension,
@@ -43,6 +47,21 @@ function problemsHeading(errors: ExtensionValidationError[]) {
     return `This server's policy does not allow installing this app, and the manifest has ${own === 1 ? "a problem" : `${own} problems`} to fix:`;
   return `Fix ${own === 1 ? "this problem" : `these ${own} problems`} in the manifest before installing:`;
 }
+/**
+ * Where a reviewed manifest came from, which decides how it is installed: as its own text,
+ * as the package file chosen here (sent again as base64, and verified again), or as a
+ * catalog release's package, which the host downloads again (#562).
+ */
+type ReviewOrigin =
+  | { kind: "manifest" }
+  | { kind: "packageFile"; package: ExtensionPackageReview; file: string }
+  | { kind: "catalogPackage"; package: ExtensionPackageReview; id: string; sha256: string };
+const MANIFEST_ORIGIN: ReviewOrigin = { kind: "manifest" };
+/** A size as a reader measures it. */
+function bytes(size: number) {
+  return size < 1024 ? `${size} B` : size < 1024 * 1024 ? `${(size / 1024).toFixed(1)} KiB` : `${(size / (1024 * 1024)).toFixed(1)} MiB`;
+}
+
 export function ExtensionManager() {
   const { Button, Tabs } = useContext(ExtensionControls);
   const [tab, setTab] = useState("installed");
@@ -57,6 +76,8 @@ export function ExtensionManager() {
   const [review, setReview] = useState<{
     source: string;
     signature?: number[];
+    /** How the reviewed manifest is installed; a package also shows what else it holds. */
+    origin: ReviewOrigin;
     name: string;
     permissions: string[];
     /** The parsed manifest, whose bindings the review summarizes; undefined when it is not JSON. */
@@ -77,6 +98,19 @@ export function ExtensionManager() {
     request: object;
   } | null>(null);
   const reviews = useRef(0);
+  /**
+   * Counts the reviews started from every entry point: pasted text, a package file, the
+   * catalog. One whose manifest loads slowly (a package read and verified, a catalog
+   * download) is dropped if another was started after it, rather than replacing it.
+   */
+  const latestReview = useRef(0);
+  /** Starts a review, and answers whether it is still the one most recently started. */
+  function beginReview() {
+    const ticket = ++latestReview.current;
+    return () => ticket === latestReview.current;
+  }
+  /** The package file input, hidden and opened by a kit button: its own label cannot be styled. */
+  const packageInput = useRef<HTMLInputElement>(null);
   /** The ID of the app whose settings form is open. */
   const [settingsFor, setSettingsFor] = useState<string | null>(null);
   /** Saves through the host, which checks every value; rejects with its reason (#542). */
@@ -100,7 +134,7 @@ export function ExtensionManager() {
       await configureExtensions(action);
       inventory.reload();
       setReview(null);
-      if (action.action === "install") setTab("installed");
+      if (action.action === "install" || action.action === "installPackage" || action.action === "installCatalogPackage") setTab("installed");
       return true;
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -110,7 +144,7 @@ export function ExtensionManager() {
     }
   }
   /** Opens the permission review, and offers to install only once the host finds no problems. */
-  async function reviewManifest(manifest: string, signature?: number[]) {
+  async function reviewManifest(manifest: string, signature?: number[], origin: ReviewOrigin = MANIFEST_ORIGIN) {
     let parsed: { name?: unknown; permissions?: unknown } = {};
     let value: unknown;
     // Shown indented, as Details shows an installed app: the same values the host checks,
@@ -128,6 +162,7 @@ export function ExtensionManager() {
     const names = Array.isArray(parsed.permissions) ? parsed.permissions.map(permissionName) : [];
     const permissions = names.every((name) => name !== undefined) ? (names as string[]) : [];
     const name = typeof parsed.name === "string" ? parsed.name : "This manifest";
+    beginReview();
     const request = {};
     setError("");
     setReview({
@@ -135,19 +170,62 @@ export function ExtensionManager() {
       id: ++reviews.current,
       source: manifest,
       signature,
+      origin,
       name,
       permissions,
       manifest: value,
       text,
     });
     try {
-      const { errors, permissionDiff } = await validateExtension(manifest, permissions, signature);
+      // A package's signature is over its digest list, which names the manifest: the host
+      // checks all three together, exactly as installing the package will.
+      const { errors, permissionDiff } = await (origin.kind === "manifest"
+        ? validateExtension(manifest, permissions, signature)
+        : validateExtension(manifest, permissions, signature, origin.package.digests));
       setReview((current) => (current?.request === request ? { ...current, errors, permissionDiff } : current));
     } catch (e) {
       // The check did not run, which says nothing about the manifest: keep the review
       // open with the reason and a retry, and do not offer to install.
       const checkError = e instanceof Error ? e.message : String(e);
       setReview((current) => (current?.request === request ? { ...current, checkError } : current));
+    }
+  }
+  /** Reads a package file chosen here, has the host verify it, and opens its review. */
+  async function reviewPackageFile(file: File | undefined) {
+    if (!file) return;
+    const current = beginReview();
+    setError("");
+    setReview(null);
+    if (file.size > MAX_EXTENSION_PACKAGE_BYTES) {
+      setError(`${file.name} is ${bytes(file.size)}; a package may be at most ${bytes(MAX_EXTENSION_PACKAGE_BYTES)}.`);
+      return;
+    }
+    setBusy(true);
+    try {
+      const content = new Uint8Array(await file.arrayBuffer());
+      const verified = await reviewExtensionPackage(content);
+      if (!current()) return;
+      if (!verified.package) throw new Error("the host did not return what the package holds");
+      void reviewManifest(verified.manifest, verified.signature ?? undefined, {
+        kind: "packageFile", package: verified.package, file: encodePackage(content),
+      });
+    } catch (e) {
+      if (current()) setError(`Could not review ${file.name}: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+  /** The install that grants what was reviewed, for where the manifest came from. */
+  function installation(current: NonNullable<typeof review>): ExtensionChange {
+    const reviewed = current.permissionDiff?.previousRevision == null ? {} : { reviewedRevision: current.permissionDiff.previousRevision };
+    const origin = current.origin;
+    switch (origin.kind) {
+      case "manifest":
+        return { action: "install", manifest: current.source, ...(current.signature ? { signature: current.signature } : {}), grants: current.permissions, ...reviewed };
+      case "packageFile":
+        return { action: "installPackage", package: origin.file, grants: current.permissions, ...reviewed };
+      case "catalogPackage":
+        return { action: "installCatalogPackage", id: origin.id, sha256: origin.sha256, packageSha256: origin.package.sha256, grants: current.permissions, ...reviewed };
     }
   }
   if (inventory.status === "loading")
@@ -212,15 +290,30 @@ export function ExtensionManager() {
                   then either. */}
               {review.errors?.length === 0 ? (
                 <>
-                  <strong>{plainText(review.name)}</strong> ({review.signature ? "Signature verified · srelens" : "Unsigned manifest"}) {!review.permissionDiff ? "could not have its access changes compared" : review.permissionDiff.previousRevision == null ? "requests a new installation" : "updates the installed app"}.
+                  {/* The logo is drawn with the name, once the host has accepted both; it
+                      is decoration, and the label beside it says who signed the app. */}
+                  {review.origin.kind !== "manifest" && <ExtensionLogo icon={review.origin.package.icon} name={review.name} size={24} />}{" "}
+                  <strong>{plainText(review.name)}</strong> ({review.signature ? "Signature verified · srelens" : review.origin.kind === "manifest" ? "Unsigned manifest" : "Unsigned package"}) {!review.permissionDiff ? "could not have its access changes compared" : review.permissionDiff.previousRevision == null ? "requests a new installation" : "updates the installed app"}.
                 </>
               ) : (
                 <>
-                  <strong>This manifest</strong> ({review.signature ? "Signature verified · srelens" : "Unsigned manifest"}) has
+                  <strong>This {review.origin.kind === "manifest" ? "manifest" : "package"}</strong> ({review.signature ? "Signature verified · srelens" : review.origin.kind === "manifest" ? "Unsigned manifest" : "Unsigned package"}) has
                   not passed the host's checks, so its name and the permissions it requests are not shown.
                 </>
               )}
             </p>
+            {review.origin.kind !== "manifest" && (
+              <details className="extension-package-files">
+                <summary>
+                  Package: {review.origin.package.files.length} file{review.origin.package.files.length === 1 ? "" : "s"}, {bytes(review.origin.package.files.reduce((total, file) => total + file.size, 0))}, each checked against its digest
+                </summary>
+                <ul aria-label="Package files">
+                  {review.origin.package.files.map((file) => (
+                    <li key={file.path}><code>{file.path}</code> <span className="extension-package-size">{bytes(file.size)}</span></li>
+                  ))}
+                </ul>
+              </details>
+            )}
             {review.errors?.length === 0 && review.permissionDiff && (
               <div aria-label="Access changes" className="extension-access-diff">
                 <strong>{review.permissionDiff.previousRevision == null ? "Requested access" : "Access changes"}</strong>
@@ -253,7 +346,7 @@ export function ExtensionManager() {
               <ErrorNotice
                 title="Could not check the manifest"
                 message={review.checkError}
-                retry={() => void reviewManifest(review.source, review.signature)}
+                retry={() => void reviewManifest(review.source, review.signature, review.origin)}
               />
             ) : !review.errors ? (
               <p role="status" className="extension-message">Checking the manifest…</p>
@@ -274,19 +367,11 @@ export function ExtensionManager() {
                 </ul>
               </div>
             ) : !review.permissionDiff ? (
-              <ErrorNotice title="Could not review access changes" message="The host did not return an access comparison. Review this manifest again." retry={() => void reviewManifest(review.source, review.signature)} />
+              <ErrorNotice title="Could not review access changes" message="The host did not return an access comparison. Review this manifest again." retry={() => void reviewManifest(review.source, review.signature, review.origin)} />
             ) : (
               <Button
                 disabled={busy}
-                onClick={() =>
-                  void change({
-                    action: "install",
-                    manifest: review.source,
-                    ...(review.signature ? {signature: review.signature} : {}),
-                    grants: review.permissions,
-                    ...(review.permissionDiff?.previousRevision == null ? {} : { reviewedRevision: review.permissionDiff.previousRevision }),
-                  })
-                }
+                onClick={() => void change(installation(review))}
               >
                 {review.permissionDiff.previousRevision == null ? "Install and grant permissions" : "Update and grant permissions"}
               </Button>
@@ -298,12 +383,16 @@ export function ExtensionManager() {
         )}
       <div hidden={tab !== "catalog"}>
         {catalogOpened && (
-      <ExtensionCatalog autoLoad installed={state.plugins} onReview={(manifest, signature) => void reviewManifest(manifest, signature)} />
+      <ExtensionCatalog autoLoad installed={state.plugins} onReviewStart={beginReview} onReview={(result, release) => void reviewManifest(
+        result.manifest,
+        result.signature ?? undefined,
+        result.package ? { kind: "catalogPackage", package: result.package, ...release } : MANIFEST_ORIGIN,
+      )} />
         )}
       </div>
       <div hidden={tab !== "installed"}>
       <details className="extension-local-tools">
-        <summary>Install a local manifest</summary>
+        <summary>{isTauri() ? "Install a local manifest or package" : "Install a local manifest"}</summary>
       <div className="extension-install">
         <label htmlFor="extension-manifest">
           Local app manifest (JSON)
@@ -326,6 +415,31 @@ export function ExtensionManager() {
           Review manifest
         </Button>
       </div>
+      {/* A package's files live in a directory of the app's own on this computer (#562);
+          the web host keeps none, so it installs single-file manifests only. */}
+      {isTauri() && (
+        <div className="extension-install">
+          <label htmlFor="extension-package">Local app package (.srelens-extension)</label>
+          <Button variant="secondary" disabled={busy} onClick={() => packageInput.current?.click()}>
+            Choose a package file…
+          </Button>
+          <input
+            ref={packageInput}
+            id="extension-package"
+            type="file"
+            accept=".srelens-extension"
+            hidden
+            disabled={busy}
+            onChange={(event) => {
+              const file = event.target.files?.[0];
+              // Cleared, so choosing the same file again reviews it again.
+              event.target.value = "";
+              void reviewPackageFile(file);
+            }}
+          />
+          <p className="extension-message">Verified as a whole before review: every file against the package's digest list, and the list against its signature when it has one.</p>
+        </div>
+      )}
       </details>
 
       <p className="extension-message extension-catalog-meta">Apps are installed app-wide and are available on every cluster unless an app's Details limit it to chosen clusters. Each page checks the APIs it needs when opened.</p>
@@ -335,7 +449,7 @@ export function ExtensionManager() {
       {state.plugins.map((plugin) => (
         <section className="extension-installed" key={plugin.manifest.id}>
           <div className="extension-toolbar">
-            <ExtensionLogo id={plugin.manifest.id} name={label(plugin)} size={24} />
+            <ExtensionLogo icon={plugin.icon} name={label(plugin)} size={24} />
             <strong>{label(plugin)}</strong>
             <span>{plugin.manifest.version} · {!plugin.signatureProof ? (plugin.source === "catalog" ? "Unsigned · Catalog" : "Unsigned local") : plugin.quarantined ? "Signature not verified" : "Signed by srelens"}</span>
             {required(plugin) && <span>Required by this server</span>}
