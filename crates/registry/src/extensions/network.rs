@@ -20,7 +20,8 @@
 //!   and port on the allowlist resolved from the manifest and the app's saved
 //!   settings ([`srelens_plugin_host::Manifest::network_allowlist`]);
 //! - a request carrying a secret follows no redirect to another origin;
-//! - GET only, fixed in the manifest: no caller input (#569 adds templates);
+//! - GET only, fixed in the manifest: no caller input; a provider's query (#569)
+//!   adds only the parameters the host sets, after the binding's own;
 //! - [`Limits`]: connect and total timeouts and a response size limit.
 use super::http_policy::{self, BodyError, UrlRules};
 use super::Installed;
@@ -114,10 +115,31 @@ struct SecretHeader {
 /// when the server says it is JSON and as text otherwise.
 #[derive(Debug, Serialize, JsonSchema)]
 pub(super) struct HttpOut {
-    status: u16,
+    pub status: u16,
     #[serde(rename = "contentType", skip_serializing_if = "Option::is_none")]
-    content_type: Option<String>,
-    body: Value,
+    pub content_type: Option<String>,
+    pub body: Value,
+}
+
+/// Why a request came back with no answer to read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum RequestError {
+    /// It may not be sent, or what came back is not an answer to it: a rule of
+    /// the app's, the allowlist, a redirect, a status the server chose, a body
+    /// too large or unreadable as what it says it is. Asking again gets the same.
+    Refused(String),
+    /// Nothing answered it: the connection failed, it timed out, or the server
+    /// said it is unavailable (5xx, 429). Asking again later may.
+    Unanswered(String),
+}
+
+impl RequestError {
+    /// What went wrong, in the host's words.
+    pub fn message(&self) -> &str {
+        match self {
+            Self::Refused(why) | Self::Unanswered(why) => why,
+        }
+    }
 }
 
 /// The declaration a `network.http` binding is checked against. Its handler
@@ -161,6 +183,12 @@ fn check_arguments(arguments: &Map<String, Value>) -> Result<(), String> {
 /// The URL a binding GETs: `url`, then `path` appended to its path, then
 /// `query` added to its query.
 fn request_url(input: &HttpIn) -> Result<Url, String> {
+    request_url_with(input, &[])
+}
+
+/// [`request_url`], then `extra` added after the binding's own query: the
+/// parameters the host sets for a provider (#569), which the binding may not.
+fn request_url_with(input: &HttpIn, extra: &[(&str, String)]) -> Result<Url, String> {
     let mut url = Url::parse(&input.url).map_err(|_| "`url` is not a URL")?;
     if !matches!(url.scheme(), "https" | "http") {
         return Err("`url` is an https URL".into());
@@ -193,9 +221,12 @@ fn request_url(input: &HttpIn) -> Result<Url, String> {
     }) {
         return Err("A query parameter has a name, and no control characters".into());
     }
-    if !input.query.is_empty() {
+    if !input.query.is_empty() || !extra.is_empty() {
         let mut pairs = url.query_pairs_mut();
         for (key, value) in &input.query {
+            pairs.append_pair(key, value);
+        }
+        for (key, value) in extra {
             pairs.append_pair(key, value);
         }
     }
@@ -378,7 +409,25 @@ async fn read_with(
     name: &str,
     limits: Limits,
 ) -> Result<Value, CapabilityError> {
-    let failed = |why: String| CapabilityError::Handler(why);
+    let answer = request(core, secrets, plugin, name, &[], limits)
+        .await
+        .map_err(|error| CapabilityError::Handler(error.message().to_owned()))?;
+    serde_json::to_value(answer).map_err(|e| CapabilityError::Handler(e.to_string()))
+}
+
+/// Sends the `network.http` binding `name` of `plugin`, with `extra` query
+/// parameters after the binding's own: the one path a request takes, for a
+/// read and for a provider's query (#569) alike. Every rule is checked here, on
+/// every call, before anything is sent.
+pub(super) async fn request(
+    core: &Registry,
+    secrets: &dyn SecretStore,
+    plugin: &Installed,
+    name: &str,
+    extra: &[(&str, String)],
+    limits: Limits,
+) -> Result<HttpOut, RequestError> {
+    let failed = RequestError::Refused;
     let manifest = &plugin.manifest;
     let binding = manifest
         .capabilities
@@ -402,7 +451,13 @@ async fn read_with(
     check_arguments(&arguments).map_err(failed)?;
     let input: HttpIn = serde_json::from_value(Value::Object(arguments))
         .map_err(|e| failed(format!("network.http arguments: {e}")))?;
-    let url = request_url(&input).map_err(failed)?;
+    // A parameter the host sets is never also the binding's own.
+    if let Some((key, _)) = extra.iter().find(|(key, _)| input.query.contains_key(*key)) {
+        return Err(failed(format!(
+            "The host sets `{key}` on this request, and the binding sets it too"
+        )));
+    }
+    let url = request_url_with(&input, extra).map_err(failed)?;
     let policy = Policy {
         allowlist: manifest.network_allowlist(&plugin.settings),
         loopback_http: plugin.allow_loopback_http,
@@ -439,22 +494,34 @@ async fn read_with(
         headers.insert(name, value);
     }
     let carries_secret = !input.secret_headers.is_empty();
-    let answer = send(url, headers, carries_secret, policy)
-        .await
-        .map_err(failed)?;
-    serde_json::to_value(answer).map_err(|e| failed(e.to_string()))
+    exchange(url, headers, carries_secret, policy).await
 }
 
 /// GETs `url` under `policy`, and reads what comes back. Every reason is the
 /// host's own words, with the URL and its host scrubbed out of whatever the
-/// connection reported.
+/// connection reported. The tests' door to [`exchange`]; the broker sends
+/// through [`request`].
+#[cfg(test)]
 pub(super) async fn send(
     url: Url,
     headers: HeaderMap,
     carries_secret: bool,
     policy: Policy,
 ) -> Result<HttpOut, String> {
-    policy.check(&url)?;
+    exchange(url, headers, carries_secret, policy)
+        .await
+        .map_err(|error| error.message().to_owned())
+}
+
+/// [`send`], saying whether asking again could get an answer.
+async fn exchange(
+    url: Url,
+    headers: HeaderMap,
+    carries_secret: bool,
+    policy: Policy,
+) -> Result<HttpOut, RequestError> {
+    use RequestError::{Refused, Unanswered};
+    policy.check(&url).map_err(|why| Refused(why.into()))?;
     http_policy::install_crypto_provider();
     let limits = policy.limits;
     let origin = url.origin();
@@ -475,7 +542,7 @@ pub(super) async fn send(
     if http_policy::is_loopback(&url) {
         builder = builder.no_proxy();
     }
-    let client = builder.build().map_err(|e| describe(e, &url))?;
+    let client = builder.build().map_err(|e| Refused(describe(e, &url)))?;
     let reported = url.clone();
     let exchange = async move {
         let mut response = client
@@ -483,10 +550,17 @@ pub(super) async fn send(
             .headers(headers)
             .send()
             .await
-            .map_err(|e| describe(e, &reported))?;
+            .map_err(|e| classify(e, &reported))?;
         let status = response.status();
         if !status.is_success() {
-            return Err(format!("The server answered HTTP {status}"));
+            let why = format!("The server answered HTTP {status}");
+            return Err(
+                if status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                    Unanswered(why)
+                } else {
+                    Refused(why)
+                },
+            );
         }
         let content_type = response
             .headers()
@@ -496,18 +570,30 @@ pub(super) async fn send(
         let raw = http_policy::read_limited(&mut response, limits.body)
             .await
             .map_err(|error| match error {
-                BodyError::TooLarge(why) => why,
-                BodyError::Read(error) => describe(error, &reported),
+                BodyError::TooLarge(why) => Refused(why),
+                BodyError::Read(error) => Unanswered(describe(error, &reported)),
             })?;
         Ok(HttpOut {
             status: status.as_u16(),
-            body: decode(content_type.as_deref(), &raw)?,
+            body: decode(content_type.as_deref(), &raw).map_err(Refused)?,
             content_type,
         })
     };
     tokio::time::timeout(limits.total, exchange)
         .await
-        .map_err(|_| timed_out(limits.total))?
+        .map_err(|_| Unanswered(timed_out(limits.total)))?
+}
+
+/// [`describe`], and whether it could answer another time: a refused redirect
+/// will be refused again; a connection that failed or timed out may not be.
+fn classify(error: reqwest::Error, url: &Url) -> RequestError {
+    let refused = http_policy::redirect_refusal(&error).is_some();
+    let why = describe(error, url);
+    if refused {
+        RequestError::Refused(why)
+    } else {
+        RequestError::Unanswered(why)
+    }
 }
 
 fn timed_out(total: Duration) -> String {

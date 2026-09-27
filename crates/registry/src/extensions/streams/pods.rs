@@ -213,7 +213,7 @@ fn check_names(
 }
 
 /// Cut one log line to [`MAX_LINE_BYTES`], on a character boundary, saying so.
-fn line_frame(source: &str, mut line: String) -> Value {
+pub(super) fn line_frame(source: &str, mut line: String) -> Value {
     if line.len() > MAX_LINE_BYTES {
         let mut end = MAX_LINE_BYTES;
         while !line.is_char_boundary(end) {
@@ -647,8 +647,8 @@ struct LogFollow {
 
 /// Lines waiting for the next frame, bounded by count and by bytes of text.
 #[derive(Default)]
-struct Pending {
-    lines: Vec<Value>,
+pub(super) struct Pending {
+    pub(super) lines: Vec<Value>,
     /// Bytes of line text in `lines`.
     bytes: usize,
     dropped: u64,
@@ -660,7 +660,7 @@ fn text_bytes(line: &Value) -> usize {
 }
 
 impl Pending {
-    fn push(&mut self, frame: Value) {
+    pub(super) fn push(&mut self, frame: Value) {
         let size = text_bytes(&frame);
         if self.lines.len() >= MAX_PENDING_LINES || self.bytes + size > MAX_PENDING_BYTES {
             self.dropped += 1;
@@ -672,7 +672,7 @@ impl Pending {
 
     /// One `lines` frame of at most [`MAX_LINES_PER_FRAME`] lines and
     /// [`MAX_FRAME_BYTES`] of text, or `None` when nothing is waiting.
-    fn frame(&mut self) -> Option<Value> {
+    pub(super) fn frame(&mut self) -> Option<Value> {
         if self.lines.is_empty() && self.dropped == 0 {
             return None;
         }

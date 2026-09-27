@@ -14,13 +14,15 @@
 //! everything a single read would; and `watch` (#566), which follows the kind
 //! a declared reader lists and says when it changed, so the view reads again
 //! through that same path. Logs, exec and port-forwards (#567) are the pod
-//! sources (`pods`): each reaches only pods its binding's scope admits. Metric
-//! providers (#569) are further `source` kinds on the same wire; none of them
-//! changes the frames.
+//! sources (`pods`): each reaches only pods its binding's scope admits. A log
+//! provider (#569) is the `logProvider` source (`providers`): it follows a
+//! LogQL query with the same frames a pod's `logs` source sends.
 
 mod pods;
+mod providers;
 #[cfg(test)]
 pub(super) use pods::MAX_LINES_PER_FRAME;
+pub(super) use pods::MAX_LINE_BYTES;
 pub use pods::{ExecConfirmed, PodTiming};
 
 use super::{columns, crd, read_contribution, resolver_app, Inventory, InventoryKey, Read, Store};
@@ -130,6 +132,24 @@ pub enum StreamSourceIn {
         pod: Option<String>,
         #[serde(default)]
         service: Option<String>,
+    },
+    /// Follow one of the app's log providers (#569) for the resource the view
+    /// shows: its history, then what is new, in the frames `logs` sends.
+    #[serde(rename = "logProvider")]
+    LogProvider {
+        provider: String,
+        /// The qualified kind of the resource, e.g. `/Pod`.
+        #[serde(rename = "resourceKind")]
+        resource_kind: String,
+        name: String,
+        /// Lines of history to start with: 0–5000, default 200.
+        #[serde(default, rename = "tailLines")]
+        tail_lines: Option<i64>,
+        /// How far back the history reaches: 1 s to 7 days, default an hour.
+        #[serde(default, rename = "sinceSeconds")]
+        since_seconds: Option<i64>,
+        #[serde(default)]
+        timestamps: bool,
     },
 }
 
@@ -262,6 +282,10 @@ pub struct ExtensionStreams {
     /// The cluster the pod sources reach (#567); replaced by tests.
     cluster: Mutex<Arc<dyn super::pods::PodCluster>>,
     pod_timing: Mutex<PodTiming>,
+    /// The secrets a log provider's request may carry by reference (#569).
+    secrets: Arc<dyn srelens_plugin_host::SecretStore>,
+    /// How often a log provider is asked for what is new; replaced by tests.
+    provider_timing: Mutex<super::providers::ProviderTiming>,
     /// Bumped on every announced inventory write, after the lifecycle's own
     /// endings: every watch rechecks what it may still follow.
     inventory: tokio::sync::watch::Sender<u64>,
@@ -358,6 +382,9 @@ impl ExtensionStreams {
             StreamSourceIn::Exec { .. } => return self.open_exec(sink, window, audit, input).await,
             StreamSourceIn::PortForward { .. } => {
                 return self.open_forward(sink, window, audit, input).await
+            }
+            StreamSourceIn::LogProvider { .. } => {
+                return self.open_log_provider(sink, window, input).await
             }
         };
         let interval = interval_seconds.unwrap_or(DEFAULT_INTERVAL);
@@ -492,6 +519,12 @@ impl ExtensionStreams {
     pub(super) fn script_pods(&self, cluster: Arc<dyn super::pods::PodCluster>, timing: PodTiming) {
         *self.cluster.lock().unwrap() = cluster;
         *self.pod_timing.lock().unwrap() = timing;
+    }
+
+    /// Replace how often a log provider is asked for what is new. Test support.
+    #[cfg(test)]
+    pub(super) fn set_provider_timing(&self, timing: super::providers::ProviderTiming) {
+        *self.provider_timing.lock().unwrap() = timing;
     }
 
     /// The cluster the pod sources reach.
@@ -889,6 +922,7 @@ pub(super) fn register(
     core: Arc<Registry>,
     cache: Arc<srelens_kube::client_cache::ClientCache>,
     snapshots: columns::JoinCache,
+    secrets: Arc<dyn srelens_plugin_host::SecretStore>,
 ) -> Arc<ExtensionStreams> {
     let streams = {
         let key = path.key();
@@ -902,6 +936,8 @@ pub(super) fn register(
                     watcher: Mutex::new(kube_session(cache.clone())),
                     cluster: Mutex::new(Arc::new(super::pods::KubePods(cache.clone()))),
                     pod_timing: Mutex::new(PodTiming::default()),
+                    secrets,
+                    provider_timing: Mutex::new(super::providers::ProviderTiming::default()),
                     cache,
                     snapshots,
                     streams: AppStreams::new(StreamLimits::default()),

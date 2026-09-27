@@ -485,6 +485,7 @@ mod tests {
             "extensions.resolveReverseLinks",
             "extensions.streams",
             "extensions.pods",
+            "extensions.queryProvider",
         ] {
             let (status, _) = post(&format!("/api/capability/{id}"), Body::from("{}")).await;
             assert_eq!(status, StatusCode::NOT_FOUND, "{id}");

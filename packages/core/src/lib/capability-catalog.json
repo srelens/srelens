@@ -72,6 +72,15 @@
     "confirm": null
   },
   {
+    "id": "extensions.queryProvider",
+    "readOnly": true,
+    "destructive": false,
+    "requiresConfirm": false,
+    "sensitive": false,
+    "impact": "low",
+    "confirm": null
+  },
+  {
     "id": "extensions.read",
     "readOnly": true,
     "destructive": false,
