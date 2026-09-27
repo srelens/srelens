@@ -188,7 +188,7 @@ mod tests {
             heard.lock().unwrap().push(e.payload().to_owned());
         });
 
-        let (on_event, got) = crate::sink::tests::recording();
+        let (on_event, frames) = crate::sink::tests::recording();
         let opened = extension_stream_open(
             json!({"id": "org.example.one", "revision": revision, "view": "page#1",
                    "channel": "extstream:one", "context": "silent", "namespace": "ns",
@@ -201,7 +201,7 @@ mod tests {
         .await
         .unwrap();
 
-        let got = got.lock().unwrap().clone();
+        let got = frames.lock().unwrap().clone();
         assert_eq!(
             got.first(),
             Some(&json!({"event": "extstream:one",
@@ -212,9 +212,17 @@ mod tests {
             .await
             .unwrap_err();
         assert!(refused.contains("not opened by this window"), "{refused}");
-        assert!(extension_stream_cancel(opened.stream, main, app.state())
-            .await
-            .unwrap());
+        assert!(
+            extension_stream_cancel(opened.stream.clone(), main, app.state())
+                .await
+                .unwrap()
+        );
+        // The close frame is sent before the cancel returns, to the same window.
+        assert_eq!(
+            frames.lock().unwrap().last(),
+            Some(&json!({"event": "extstream:one",
+                         "payload": {"type": "close", "stream": opened.stream, "reason": "cancelled"}})),
+        );
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         assert_eq!(
             *broadcast.lock().unwrap(),
