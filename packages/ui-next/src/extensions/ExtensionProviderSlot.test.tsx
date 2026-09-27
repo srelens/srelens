@@ -140,6 +140,16 @@ describe("provider panels on an overview (#569)", () => {
     await within(panel).findByRole("img");
   });
 
+  it("names the panel whose query matched nothing, rather than a bare 'no data'", async () => {
+    const drawn = chart as Extract<ExtensionProviderResult, { kind: "metrics" }>;
+    const quiet: ExtensionProviderResult = { kind: "metrics", chart: { ...drawn.chart, series: [{ name: "CPU", values: [null, null, null, null] }] } };
+    answer({ cpu: quiet, traces });
+    render(<ExtensionProviderSlot context="prod-eu" resource={deployment} />);
+    const panel = await screen.findByRole("region", { name: "CPU from Observability" });
+    expect((await within(panel).findByText("No data reported for CPU")).textContent).toBe("No data reported for CPU");
+    expect(within(panel).queryByRole("img")).toBeNull();
+  });
+
   it("draws nothing, and asks nothing, for a kind no provider is for", () => {
     const service = { apiVersion: "v1", kind: "Service", metadata: { name: "web", namespace: "team" } };
     const { container } = render(<ExtensionProviderSlot context="prod-eu" resource={service} />);

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Button, Eyebrow, Select } from "@srelens/ui-kit";
+import { Button, EmptyState, Eyebrow, Section, Select } from "@srelens/ui-kit";
 import {
   contributionKind,
   extensionEnabledFor,
@@ -72,35 +72,52 @@ function panelName(ask: Ask) {
   return `${plainText(ask.provider.title)} from ${plainText(extensionLabel(ask.plugin))}`;
 }
 
+/** Which app a panel came from, after what it shows. */
+function Origin({ plugin }: { plugin: InstalledExtension }) {
+  return <p className="extension-provider-origin">From {plainText(extensionLabel(plugin))}</p>;
+}
+
 function MetricPanel(ask: Ask) {
   const answer = useProvider(ask);
   const name = panelName(ask);
   const chart = answer.data?.kind === "metrics" ? answer.data.chart : undefined;
+  const title = plainText(ask.provider.title);
+  // The chart draws its own title; an empty one is named here, since "No data reported"
+  // alone would not say which of an app's panels matched nothing.
+  const empty = chart !== undefined && chart.series.every((series) => series.values.every((value) => value === null));
   return (
     <section className="extension-provider" aria-label={name}>
-      <p className="extension-provider-origin">From {plainText(extensionLabel(ask.plugin))}</p>
-      <NativeComponent
-        label={plainText(ask.provider.title)}
-        payload={chart && { version: 1, type: "Timeseries", data: chart }}
-        state={answer.status === "loading" ? { status: "loading" }
-          : answer.status === "error" ? { status: "error", error: answer.error }
-          : chart ? undefined : { status: "error", error: "The provider did not answer a chart" }}
-        onRetry={answer.reload}
-      />
+      {empty ? (
+        <EmptyState title={`No data reported for ${title}`} hint="The query matched no samples in this range." compact />
+      ) : (
+        <NativeComponent
+          label={title}
+          payload={chart && { version: 1, type: "Timeseries", data: chart }}
+          state={answer.status === "loading" ? { status: "loading" }
+            : answer.status === "error" ? { status: "error", error: answer.error }
+            : chart ? undefined : { status: "error", error: "The provider did not answer a chart" }}
+          onRetry={answer.reload}
+        />
+      )}
+      <Origin plugin={ask.plugin} />
     </section>
   );
 }
 
-const when = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "medium" });
+const when = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" });
 
-/** One trace as a row of text: a backend's names with invisible characters shown, as every app value is. */
+/**
+ * One trace as a row of text: a backend's names with invisible characters shown, as every
+ * app value is. What a reader scans first leads — the operation, its service and how long
+ * it took — and the long identifier is last, so a narrow Inspector shows the readable part.
+ */
 function traceRow(trace: ExtensionTrace) {
   return [
-    plainText(trace.traceId),
-    trace.rootService === undefined ? "—" : plainText(trace.rootService),
     trace.rootName === undefined ? "—" : plainText(trace.rootName),
-    trace.start === undefined ? "—" : when.format(new Date(trace.start)),
+    trace.rootService === undefined ? "—" : plainText(trace.rootService),
     trace.durationMs === undefined ? "—" : `${trace.durationMs.toLocaleString("en-US")} ms`,
+    trace.start === undefined ? "—" : when.format(new Date(trace.start)),
+    plainText(trace.traceId),
   ];
 }
 
@@ -111,7 +128,6 @@ function TracePanel(ask: Ask) {
   return (
     <section className="extension-provider" aria-label={name}>
       <h5 className="extension-provider-title">{plainText(ask.provider.title)}</h5>
-      <p className="extension-provider-origin">From {plainText(extensionLabel(ask.plugin))}</p>
       <NativeComponent
         label={plainText(ask.provider.title)}
         payload={found && {
@@ -119,11 +135,11 @@ function TracePanel(ask: Ask) {
           type: "Table",
           data: {
             columns: [
-              { key: "trace", label: "Trace ID" },
-              { key: "service", label: "Service" },
               { key: "operation", label: "Operation" },
-              { key: "started", label: "Started" },
+              { key: "service", label: "Service" },
               { key: "duration", label: "Duration" },
+              { key: "started", label: "Started" },
+              { key: "trace", label: "Trace ID" },
             ],
             rows: found.traces.map(traceRow),
           },
@@ -138,6 +154,7 @@ function TracePanel(ask: Ask) {
           The search found more traces than the {MAX_TRACES} listed; the newest are shown.
         </p>
       )}
+      <Origin plugin={ask.plugin} />
     </section>
   );
 }
@@ -167,9 +184,8 @@ export function ExtensionProviderSlot({ context, resource }: { context: string; 
   const traces = plugins.flatMap((plugin) => providersFor(plugin.manifest, "traces", kind).map((provider) => ({ ...base, plugin, provider })));
   if (metrics.length + traces.length === 0) return null;
   return (
-    <section className="section extension-providers" aria-label="Metrics and traces from apps">
-      <div className="extension-providers-head">
-        <h4 className="extension-providers-heading">Metrics and traces from apps</h4>
+    <Section title="Metrics and traces from apps" padded={false} className="extension-providers">
+      <div className="extension-providers-controls">
         <Eyebrow>range</Eyebrow>
         <Select value={range} onValueChange={setRange} options={RANGES} aria-label="range" />
         <Button type="button" variant="secondary" size="xs" aria-label="Refresh app metrics and traces"
@@ -179,6 +195,6 @@ export function ExtensionProviderSlot({ context, resource }: { context: string; 
       </div>
       {metrics.map((ask) => <MetricPanel key={`${ask.plugin.manifest.id}/${ask.plugin.revision}/${ask.provider.id}`} {...ask} />)}
       {traces.map((ask) => <TracePanel key={`${ask.plugin.manifest.id}/${ask.plugin.revision}/${ask.provider.id}`} {...ask} />)}
-    </section>
+    </Section>
   );
 }

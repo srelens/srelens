@@ -800,14 +800,23 @@ function LogsStream({
   const [picked, setPicked] = useState<{ key: string; label: string } | null>(null);
   const chosen = picked ? providers.find((p) => p.key === picked.key) : undefined;
   const provider = useLogProviderSource(chosen, { context, namespace, resourceKind: resourceKind ?? "", name });
+  /**
+   * The restarts the "Scrollback cleared" notice is not about. That notice says a
+   * change of window reopened the stream and nothing already sent comes back; after a
+   * change of source, or Follow again, the new stream sends its own history, so it
+   * would be false. The next restart is marked as seen when either is asked for.
+   */
+  const restarts = useRef(0);
+  const expectRestart = useCallback(() => setSeenRestart(restarts.current + 1), []);
   const chooseSource = useCallback(
     (key: string) => {
       const next = providers.find((p) => p.key === key);
       setPicked(next ? { key: next.key, label: next.label } : null);
+      expectRestart();
       // A previous instance is the cluster's to hand back, never a provider's.
       if (next) setPrevious(false);
     },
-    [providers],
+    [providers, expectRestart],
   );
 
   const sinceSeconds = SINCE.find((s) => s.value === since)?.seconds;
@@ -819,6 +828,7 @@ function LogsStream({
     tailLines: TAIL_LINES,
     source: provider.source,
   });
+  restarts.current = stream.restartCount;
 
   const byLabel = useMemo(() => indexTargets(targets), [targets]);
   const liveRows = useMemo(
@@ -1069,11 +1079,21 @@ function LogsStream({
     measure();
   }
 
-  const signal = connectionSignal(stream.status, stream.paused);
+  // A provider's stream that ended sends no more statuses, so the hook's last one
+  // would go on saying it follows: the ending is what the readout says instead.
+  const ended = chosen ? provider.end : null;
+  const signal = ended
+    ? logConnectionStatus(ended.type === "error" ? "error" : "completed")
+    : connectionSignal(stream.status, stream.paused);
   /** Whether new lines are arriving in THIS pane. A snapshot is not followed,
    *  however healthy the connection underneath it is. */
   const following = !previous && !stream.paused;
-  const restarted = stream.restartCount > seenRestart;
+  // A provider sends its history again on every restart, so none of its restarts
+  // cleared anything; the notice is about the cluster's own stream alone.
+  const restarted = !chosen && stream.restartCount > seenRestart;
+  useEffect(() => {
+    if (chosen) setSeenRestart(stream.restartCount);
+  }, [chosen, stream.restartCount]);
   const window_ = computeLogWindow({
     total: filtered.length,
     scrollTop: metrics.scrollTop,
@@ -1206,7 +1226,9 @@ function LogsStream({
         >
           {providers.length > 0 && (
             <div className="flex items-center gap-1.5">
-              <Eyebrow>source</Eyebrow>
+              {/* "from", not "source": the rail's Sources are the pods, and one
+                  word must not name two things on one screen. */}
+              <Eyebrow>from</Eyebrow>
               <Select
                 value={chosen ? chosen.key : KUBERNETES_SOURCE}
                 onValueChange={chooseSource}
@@ -1217,7 +1239,7 @@ function LogsStream({
                 // The snapshot of a terminated container is the cluster's; a
                 // provider is a source of the live tail.
                 disabled={previous}
-                aria-label="source"
+                aria-label="Log source"
               />
             </div>
           )}
@@ -1303,7 +1325,7 @@ function LogsStream({
             <LiveSignal
               label={connectionLabel(
                 signal,
-                stream.liveTargets,
+                ended ? 0 : stream.liveTargets,
                 stream.totalTargets,
                 stream.completedTargets,
               )}
@@ -1332,7 +1354,14 @@ function LogsStream({
             title={describeStreamEnd(provider.end)}
             className="mx-3 mt-3"
           >
-            <Button variant="secondary" size="xs" onClick={provider.retry}>
+            <Button
+              variant="secondary"
+              size="xs"
+              onClick={() => {
+                expectRestart();
+                provider.retry();
+              }}
+            >
               Follow again
             </Button>
           </Alert>

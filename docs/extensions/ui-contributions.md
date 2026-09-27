@@ -217,7 +217,8 @@ places, in the new design:
   failure is never drawn as an empty chart.
 - **The log view.** On `/logs/<kind>/<namespace>/<name>`, when an installed, enabled
   app has a log provider for the kind and the cluster, the controls bar gains a
-  **source** picker: **Kubernetes**, then each provider as "title · app". Choosing one
+  **from** picker (the log source; the rail's Sources are the pods): **Kubernetes**,
+  then each provider as "title · app". Choosing one
   follows it through the view's own buffer, pause, filters and readout (`useLogStream`'s
   `source`, from `packages/ui-next/src/extensions/logProviders.ts`), on an app stream
   view of its own that closes when the source changes or the screen closes. The

@@ -1825,13 +1825,13 @@ describe("log sources (#569)", () => {
   it("offers no source picker while no installed app provides logs", async () => {
     draw();
     await screen.findByRole("log");
-    expect(screen.queryByRole("combobox", { name: "source" })).toBeNull();
+    expect(screen.queryByRole("combobox", { name: "Log source" })).toBeNull();
   });
 
   it("offers Kubernetes first, then each installed log provider for the subject's kind", async () => {
     h.plugins = [observability()];
     draw();
-    const picker = await screen.findByRole("combobox", { name: "source" });
+    const picker = await screen.findByRole("combobox", { name: "Log source" });
     expect(within(picker).getAllByRole("option").map((o) => o.textContent)).toEqual([
       "Kubernetes",
       "Loki · Observability",
@@ -1842,7 +1842,7 @@ describe("log sources (#569)", () => {
   it("follows the chosen provider through the view's own stream, without the Kubernetes-only controls", async () => {
     h.plugins = [observability()];
     draw();
-    const picker = await screen.findByRole("combobox", { name: "source" });
+    const picker = await screen.findByRole("combobox", { name: "Log source" });
     expect(screen.getByRole("button", { name: /Previous instance/ })).toBeTruthy();
     fireEvent.change(picker, { target: { value: "org.example.observability/loki" } });
     await waitFor(() => expect(h.seen.at(-1)?.options.source?.key).toContain("org.example.observability/loki"));
@@ -1867,10 +1867,36 @@ describe("log sources (#569)", () => {
     expect(h.views[0].close).toHaveBeenCalled();
   });
 
+  it("does not call a change of source a cleared scrollback: the new source sends its own history", async () => {
+    h.plugins = [observability()];
+    draw();
+    const picker = await screen.findByRole("combobox", { name: "Log source" });
+    const restart = (count: number) =>
+      act(() => {
+        h.state.restarts = count;
+        notify();
+      });
+    fireEvent.change(picker, { target: { value: "org.example.observability/loki" } });
+    await waitFor(() => expect(h.seen.at(-1)?.options.source).toBeDefined());
+    restart(1);
+    expect(screen.queryByText("Scrollback cleared")).toBeNull();
+    // A provider sends its history again for a new window too.
+    fireEvent.change(screen.getByRole("combobox", { name: "since" }), { target: { value: "5m" } });
+    restart(2);
+    expect(screen.queryByText("Scrollback cleared")).toBeNull();
+    fireEvent.change(picker, { target: { value: "kubernetes" } });
+    restart(3);
+    expect(screen.queryByText("Scrollback cleared")).toBeNull();
+    // The cluster does not: a change of window on Kubernetes still clears the scrollback.
+    fireEvent.change(screen.getByRole("combobox", { name: "since" }), { target: { value: "15m" } });
+    restart(4);
+    expect(await screen.findByText("Scrollback cleared")).toBeTruthy();
+  });
+
   it("says how a provider's stream ended, as a failure, and follows it again", async () => {
     h.plugins = [observability()];
     draw();
-    fireEvent.change(await screen.findByRole("combobox", { name: "source" }), {
+    fireEvent.change(await screen.findByRole("combobox", { name: "Log source" }), {
       target: { value: "org.example.observability/loki" },
     });
     await waitFor(() => expect(h.seen.at(-1)?.options.source).toBeDefined());
@@ -1882,6 +1908,9 @@ describe("log sources (#569)", () => {
     expect((await screen.findByRole("alert")).textContent).toContain(
       "The stream failed: The server answered HTTP 403 Forbidden",
     );
+    // The readout says so too: a failed stream is not one still followed.
+    expect(document.body.textContent).toContain("Stream stopped — 0 of");
+    expect(document.body.textContent).not.toMatch(/Following — \d+ of/);
     fireEvent.click(screen.getByRole("button", { name: "Follow again" }));
     await waitFor(() => expect(h.seen.at(-1)?.options.source?.key).not.toBe(first.key));
     expect(screen.queryByRole("alert")).toBeNull();
