@@ -117,10 +117,16 @@ the delegation, with no catalog needed. When the build's shipped delegations alr
 vouch for a signature, as they do for srelens releases, no delegation is kept, and an
 inventory written this way stays readable by hosts from before #559.
 
-A delegation the build ships for the same publisher, at the same or a later version,
-replaces the kept one. So a key that a later delegation withdrew stops vouching for what it
-signed once a build shipping that delegation loads the inventory, and the apps it signed
-are quarantined. Raise a delegation's `version` whenever its keys change.
+The delegations the build ships stand over any other, the catalog's and a kept one alike,
+at install and on every load (`Delegations::merged`). Another delegation replaces a
+shipped one only when it is the same publisher's at a strictly later version. At the same
+version the shipped one stands, and no other publisher takes a namespace the build ships.
+Install and every later load use the same rule, so an app is never installed as signed
+and then quarantined on its next read. A key that a later delegation withdrew stops
+vouching for what it signed once a build shipping that delegation loads the inventory,
+and the apps it signed are quarantined. Raise a delegation's `version` whenever its keys
+or namespaces change: for a publisher the build ships, a catalog's change at the same
+version is ignored.
 
 The host reports who signed each app as `signedBy` (`{id, name}`), recomputed on every
 read and never saved. The UI's "Signed by <name>" is that field and nothing else.
@@ -219,6 +225,8 @@ the change that repository needs; this repository does not make it.
   every host stops offering installs when it passes.
 - **Keep the delegations** (`publishers/*.json`) in the repository, signed once each, and
   re-sign one only when that publisher's keys or namespaces change, raising its `version`.
+  A change at the same version does not take effect for a publisher the build ships, such
+  as srelens.
 
 ## Adding a publisher
 

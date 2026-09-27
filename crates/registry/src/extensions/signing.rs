@@ -166,7 +166,7 @@ pub(super) mod tests {
     fn delegations() -> Delegations {
         let root = testing::root();
         let example = root.publisher(&testing::example_publisher()).unwrap();
-        Delegations::merged(&Delegations::new(vec![example]).unwrap(), &root.shipped())
+        Delegations::merged(&root.shipped(), &Delegations::new(vec![example]).unwrap())
     }
 
     fn keyed(key: &Ed25519KeyPair, raw: &[u8]) -> ReleaseSignature {

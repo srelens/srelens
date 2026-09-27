@@ -48,7 +48,7 @@ fn delegations() -> &'static Delegations {
         let example = root
             .publisher(&example)
             .expect("the committed delegation verifies");
-        Delegations::merged(&Delegations::new(vec![example]).unwrap(), &root.shipped())
+        Delegations::merged(&root.shipped(), &Delegations::new(vec![example]).unwrap())
     })
 }
 

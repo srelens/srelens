@@ -4907,6 +4907,66 @@ mod tests {
             "Example Labs"
         );
     }
+    /// A catalog that rotates a publisher this build ships changes who signs for it only
+    /// with a later version of its delegation (#559 review): at the same version the
+    /// shipped delegation stands, at install as on every later load, so an app is never
+    /// installed as signed and then quarantined on its next read.
+    #[test]
+    fn a_catalog_rotates_a_shipped_publisher_only_with_a_later_delegation() {
+        let rotated_key = trust::testing::key(0x77);
+        let id = "org.srelens.gitops";
+        let source = manifest().replacen("org.example.argocd", id, 1);
+        let signature = rotated_key.sign(source.as_bytes()).as_ref().to_vec();
+        let key_id = trust::testing::id(&rotated_key);
+        let catalog_rotating_srelens_at = |path: &Path, version| {
+            fs::write(
+                path.with_extension("catalog.json"),
+                catalog::test_cache(
+                    &[trust::testing::publisher_at(
+                        version,
+                        "srelens",
+                        "srelens",
+                        &[trust::testing::public(&rotated_key)],
+                        &["org.srelens"],
+                    )],
+                    json!([]),
+                    now(),
+                ),
+            )
+            .unwrap();
+        };
+        let install = || install_signed(&source, signature.clone(), Some(key_id.clone()));
+
+        // The shipped srelens delegation is version 1: a catalog's version 1 with another
+        // key does not replace it, so the install is refused up front.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("extensions.json");
+        catalog_rotating_srelens_at(&path, 1);
+        let Err(error) = mutate(&path, fake_core(), install()) else {
+            panic!("a same-version rotation replaced the shipped srelens delegation");
+        };
+        assert!(error.contains("srelens"), "{error}");
+        assert!(read(&path).unwrap().plugins.is_empty());
+
+        // Version 2 moves srelens on: the app installs, and its next load agrees.
+        catalog_rotating_srelens_at(&path, 2);
+        let state = mutate(&path, fake_core(), install()).unwrap();
+        let app = find(&state, id);
+        assert!(
+            app.enabled && app.quarantined.is_none(),
+            "{:?}",
+            app.quarantined
+        );
+        assert!(app.signature_proof.as_ref().unwrap().delegation.is_some());
+        let state = read(&path).unwrap();
+        let app = find(&state, id);
+        assert!(
+            app.enabled && app.quarantined.is_none(),
+            "{:?}",
+            app.quarantined
+        );
+        assert_eq!(app.signed_by.as_ref().unwrap().id, "srelens");
+    }
     /// An expired catalog still reserves its namespaces but vouches for no key: a host kept
     /// from newer catalogs does not go on trusting a key they may have withdrawn (#559).
     #[test]

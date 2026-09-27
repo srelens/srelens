@@ -530,12 +530,14 @@ impl Delegations {
         Ok(Self(publishers))
     }
 
-    /// `newer`'s publishers, then each of `older`'s whose namespaces none of `newer`'s
-    /// touch: a catalog's delegation replaces the one this build shipped for the same
-    /// namespace, and does not leave the shipped one standing beside it. The exception is
-    /// the same publisher at a higher version in `older`: a catalog cannot hand back a
-    /// delegation this build has already moved past.
-    pub(super) fn merged(newer: &Self, older: &Self) -> Self {
+    /// The delegations this build `shipped`, then each of `other`'s (a catalog's, or the
+    /// one an install kept) that touches none of their IDs, keys or namespaces. `other`
+    /// moves a shipped publisher on only with a later version of that publisher's
+    /// delegation: at the same version the shipped one stands, and no other publisher
+    /// takes a namespace the build ships. One rule for every caller, so an install and
+    /// each later load agree on who signed an app, and a changed delegation must carry a
+    /// higher version, as TUF requires of changed metadata.
+    pub(super) fn merged(shipped: &Self, other: &Self) -> Self {
         fn clash(left: &Publisher, right: &Publisher) -> bool {
             left.id == right.id
                 || left.keys.iter().any(|key| right.keys.contains(key))
@@ -544,8 +546,8 @@ impl Delegations {
                     .iter()
                     .any(|ns| right.namespaces.iter().any(|theirs| overlap(ns, theirs)))
         }
-        let mut publishers = newer.0.clone();
-        for publisher in &older.0 {
+        let mut publishers = shipped.0.clone();
+        for publisher in &other.0 {
             match publishers.iter().position(|known| known.id == publisher.id) {
                 Some(index) if publishers[index].version < publisher.version => {
                     let others_clear = publishers
@@ -1070,17 +1072,29 @@ mod tests {
             ))
             .unwrap();
         assert!(Delegations::new(vec![example.clone(), shared]).is_err());
-        // A catalog's delegation replaces the shipped one for its namespace.
-        let rotated = root
-            .publisher(&publisher(
-                "srelens",
-                "srelens",
-                &[public(&key(0x77))],
-                &["org.srelens"],
-            ))
-            .unwrap();
-        let merged =
-            Delegations::merged(&Delegations::new(vec![rotated]).unwrap(), &root.shipped());
+        // A catalog moves a shipped publisher on only with a later version of its
+        // delegation: at the same version the shipped one stands, so an install and every
+        // later load agree on which keys sign for it.
+        let rotated_at = |version| {
+            Delegations::new(vec![root
+                .publisher(&publisher_at(
+                    version,
+                    "srelens",
+                    "srelens",
+                    &[public(&key(0x77))],
+                    &["org.srelens"],
+                ))
+                .unwrap()])
+            .unwrap()
+        };
+        let shipped_key = root.shipped().owner("org.srelens.flux").unwrap().keys[0].clone();
+        let rotated_key = PublicKey::parse(&KeySpec::ed25519(&public(&key(0x77)))).unwrap();
+        let merged = Delegations::merged(&root.shipped(), &rotated_at(1));
+        assert_eq!(
+            merged.owner("org.srelens.flux").unwrap().keys,
+            [shipped_key]
+        );
+        let merged = Delegations::merged(&root.shipped(), &rotated_at(2));
         // The rotated srelens delegation, and the shipped ones no catalog delegation touches.
         assert_eq!(
             merged
@@ -1091,24 +1105,29 @@ mod tests {
             1
         );
         assert_eq!(
-            merged.owner("org.srelens.flux").unwrap().keys[0],
-            PublicKey::parse(&KeySpec::ed25519(&public(&key(0x77)))).unwrap()
+            merged.owner("org.srelens.flux").unwrap().keys,
+            [rotated_key]
         );
-        // Unless the build shipped a later version of that publisher's delegation.
+        assert!(merged.owner("test.signed.packaged").is_some());
+        // Nor can a catalog hand back a delegation the build has already moved past.
         let mut later = root.shipped().publishers()[0].clone();
-        later.version = 2;
+        later.version = 3;
         let shipped_later = Delegations::new(vec![later]).unwrap();
-        let catalog = Delegations::new(vec![root
+        let merged = Delegations::merged(&shipped_later, &rotated_at(2));
+        assert_eq!(merged.owner("org.srelens.flux").unwrap().version, 3);
+        // Nor give a namespace the build ships to another publisher.
+        let usurper = Delegations::new(vec![root
             .publisher(&publisher(
-                "srelens",
-                "srelens",
-                &[public(&key(0x77))],
+                "usurper",
+                "Usurper",
+                &[public(&key(0x78))],
                 &["org.srelens"],
             ))
             .unwrap()])
         .unwrap();
-        let merged = Delegations::merged(&catalog, &shipped_later);
-        assert_eq!(merged.owner("org.srelens.flux").unwrap().version, 2);
+        let merged = Delegations::merged(&root.shipped(), &usurper);
+        assert_eq!(merged.owner("org.srelens.flux").unwrap().id, "srelens");
+        assert!(merged.publishers().iter().all(|p| p.id != "usurper"));
     }
 
     #[test]

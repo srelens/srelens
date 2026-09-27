@@ -631,7 +631,7 @@ impl CatalogCache {
             return Err(CHANGED.into());
         }
         let delegations =
-            Delegations::merged(&loaded.verified.delegations, &self.trust().shipped());
+            Delegations::merged(&self.trust().shipped(), &loaded.verified.delegations);
         fetch_package(entry, &delegations).map(|(_, archive)| archive)
     }
     /// Who may sign what, as an install checks it. Never fetches. Refused when the root
@@ -649,7 +649,7 @@ impl CatalogCache {
                 expired: None,
             });
         };
-        let known = Delegations::merged(&loaded.verified.delegations, &shipped);
+        let known = Delegations::merged(&shipped, &loaded.verified.delegations);
         // An expired catalog still says which namespaces are taken, but vouches for no key:
         // a host kept from newer catalogs must not go on trusting a key they withdrew.
         Ok(if loaded.verified.expired() {
@@ -979,7 +979,7 @@ pub(super) fn register(
             let loaded = cache.load(false)?;
             current(&loaded)?;
             let entry = release(&loaded.verified.catalog, &input.id, &input.sha256)?;
-            let delegations = Delegations::merged(&loaded.verified.delegations, &cache.trust().shipped());
+            let delegations = Delegations::merged(&cache.trust().shipped(), &loaded.verified.delegations);
             let review = if packages && entry.release.package.is_some() {
                 Review::of_package(&fetch_package(entry, &delegations)?.0)
             } else {
@@ -1045,7 +1045,7 @@ mod tests {
     fn delegations() -> Delegations {
         let trust = trust();
         let example = trust.publisher(&testing::example_publisher()).unwrap();
-        Delegations::merged(&Delegations::new(vec![example]).unwrap(), &trust.shipped())
+        Delegations::merged(&trust.shipped(), &Delegations::new(vec![example]).unwrap())
     }
     fn owned(path: &Path) -> CatalogCache {
         CatalogCache::Owned {
@@ -2138,7 +2138,7 @@ mod tests {
             srelens_kube::client_cache::ClientCache::new_many(vec![]),
             vec![],
         ));
-        let delegations = Delegations::merged(&loaded.verified.delegations, &trust.shipped());
+        let delegations = Delegations::merged(&trust.shipped(), &loaded.verified.delegations);
         assert!(!loaded.verified.catalog.extensions.is_empty());
         for entry in &loaded.verified.catalog.extensions {
             let raw = download(&entry.release.manifest_url, MAX_MANIFEST_BYTES).unwrap();
