@@ -335,3 +335,34 @@ describe("the pod tools on a pod in a granted namespace", () => {
     expect(screen.queryByRole("region", { name: "cert-manager pod tools" })).toBeNull();
   });
 });
+
+describe("the pod tools when a listing fails", () => {
+  it("says the installed apps could not be listed, with a retry, rather than showing none", async () => {
+    const reload = vi.fn();
+    vi.mocked(useExtensions).mockReturnValue({ status: "error", error: "extensions.json is unreadable", reload } as never);
+    render(<ExtensionPodSlot context="kind-dev" resource={deployment} />);
+    const tools = await screen.findByRole("region", { name: "App pod tools" });
+    const alert = within(tools).getByRole("alert");
+    expect(alert.textContent).toContain("Could not list the installed apps");
+    fireEvent.click(within(alert).getByRole("button", { name: "Retry" }));
+    expect(reload).toHaveBeenCalledOnce();
+  });
+
+  it("says the clusters could not be listed when an app limited to some has pod tools here", async () => {
+    vi.mocked(useExtensions).mockReturnValue({
+      status: "ready",
+      data: { plugins: [{ ...plugin, contexts: ["/kube/config#kind-dev"] }] },
+      reload: vi.fn(),
+    } as never);
+    vi.mocked(listContexts).mockResolvedValue({ error: "kubeconfig is unreadable" } as never);
+    render(<ExtensionPodSlot context="kind-dev" resource={deployment} />);
+    const tools = await screen.findByRole("region", { name: "App pod tools" });
+    expect(within(tools).getByRole("alert").textContent).toContain("Could not list the clusters");
+    expect(screen.queryByRole("region", { name: "cert-manager pod tools" })).toBeNull();
+    // Once the clusters list, and this is one the app is enabled for, its tools are there.
+    vi.mocked(listContexts).mockResolvedValue({ contexts: [{ name: "kind-dev", key: "/kube/config#kind-dev" }] } as never);
+    fireEvent.click(within(tools).getByRole("button", { name: "Retry" }));
+    await screen.findByRole("region", { name: "cert-manager pod tools" });
+    expect(screen.queryByRole("region", { name: "App pod tools" })).toBeNull();
+  });
+});

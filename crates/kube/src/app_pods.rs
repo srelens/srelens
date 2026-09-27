@@ -588,7 +588,7 @@ mod tests {
             "metadata": {"name": "web-1", "namespace": "team", "labels": {"app": "web"}},
             "spec": {"containers": [
                 {"name": "app", "image": "x", "ports": [{"name": "metrics", "containerPort": 9402}],
-                 "env": [{"name": "TOKEN", "value": "s3cr3t"}]},
+                 "env": [{"name": "MARKER", "value": "env-value-not-kept"}]},
                 {"name": "sidecar", "image": "y"}
             ]},
             "status": {"phase": "Running", "containerStatuses": [
@@ -608,7 +608,7 @@ mod tests {
                 port: 9402
             }]
         );
-        assert!(!format!("{facts:?}").contains("s3cr3t"));
+        assert!(!format!("{facts:?}").contains("env-value-not-kept"));
     }
 
     #[test]

@@ -41,7 +41,7 @@ import { confirmFields } from "../confirm/confirmRequest";
 import { EXEC_CONFIRM } from "./ExtensionBindings";
 import { useLogStream, type LogSourceOpener } from "../lib/logStream";
 import { useResource } from "../lib/useResource";
-import { useContextLookup } from "./contextIds";
+import { refreshContextIds, useContextLookup } from "./contextIds";
 import { commandArgument, plainText } from "./displayText";
 import { ErrorNotice } from "./ExtensionResults";
 import { extensionLabel, useExtensions } from "./inventoryStore";
@@ -111,17 +111,40 @@ export function ExtensionPodSlot({ context, resource }: { context: string; resou
   const inventory = useExtensions();
   const lookup = useContextLookup(context);
   if (!slotResource(resource)) return null;
+  // A failed listing is said, with a retry, and never drawn as no app having pod tools here.
+  if (inventory.status === "error")
+    return (
+      <section className="section extension-pod-tools" aria-label="App pod tools">
+        <h4 className="extension-detail-heading">App pod tools</h4>
+        <ErrorNotice title="Could not list the installed apps" message={inventory.error} retry={inventory.reload} />
+      </section>
+    );
   const group = resource.apiVersion.includes("/") ? resource.apiVersion.split("/")[0] : "";
   const kind = contributionKind(resource.kind, group);
   const namespace = resource.metadata.namespace ?? "";
   const contextId = lookup.status === "found" ? lookup.id : undefined;
-  const offered = (inventory.data?.plugins ?? [])
+  const candidates = (inventory.data?.plugins ?? [])
     .filter((plugin) => plugin.enabled && !plugin.quarantined && !plugin.policyBlocked)
-    .filter((plugin) => extensionEnabledFor(plugin, contextId))
     .map((plugin) => ({ plugin, bindings: podBindingsFor(plugin.manifest, kind, namespace, resource.metadata.name) }))
     .filter(({ bindings }) => bindings.length > 0);
+  const offered = candidates.filter(({ plugin }) => extensionEnabledFor(plugin, contextId));
+  // An app limited to chosen clusters is shown only once this cluster is known to be one.
+  const limited = candidates.some(({ plugin }) => plugin.contexts && !extensionEnabledFor(plugin, contextId));
   return (
     <>
+      {limited && lookup.status === "failed" && (
+        <section className="section extension-pod-tools" aria-label="App pod tools">
+          <h4 className="extension-detail-heading">App pod tools</h4>
+          <ErrorNotice
+            title="Could not list the clusters, so pod tools from apps limited to some clusters are not shown"
+            message={lookup.error}
+            retry={() => void refreshContextIds()}
+          />
+        </section>
+      )}
+      {limited && lookup.status === "loading" && (
+        <p className="extension-message">Checking which clusters app pod tools are enabled for…</p>
+      )}
       {offered.map(({ plugin, bindings }) => (
         <ExtensionPodTools
           // The cluster and the resource are part of the identity: moving the
