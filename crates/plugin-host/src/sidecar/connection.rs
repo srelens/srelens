@@ -554,23 +554,29 @@ impl Connection {
         }
         let connection = self.clone();
         tokio::spawn(async move {
+            let cancelled_error =
+                || RpcError::new(code::REQUEST_CANCELLED, format!("`{name}` was cancelled"));
             let outcome = tokio::select! {
                 // A cancellation already accepted wins over an answer ready
                 // in the same moment: the sidecar was told it is cancelled.
                 biased;
                 // Cancelled by the sidecar, or the session ended.
-                _ = cancelled => Err(RpcError::new(
-                    code::REQUEST_CANCELLED,
-                    format!("`{name}` was cancelled"),
-                )),
+                _ = cancelled => Err(cancelled_error()),
                 outcome = broker.call(&name, params) => outcome,
             };
             drop(permit);
-            // The id is freed and the answer queued under the one lock the
-            // reader checks a new call's id under: a call reusing it is
-            // admitted only once this answer is ahead of its own.
+            // Settled under the lock the reader takes a cancellation under,
+            // and checks a new call's id under: if it took this call's
+            // cancellation before now, even after the answer above was
+            // chosen, that is the answer; and a call reusing the id is
+            // admitted only once this answer is queued ahead of its own.
             let mut state = connection.state();
-            state.calls.remove(&key);
+            let accepted = matches!(state.calls.remove(&key), Some(None));
+            let outcome = if accepted {
+                Err(cancelled_error())
+            } else {
+                outcome
+            };
             place.send(protocol::response(&id, &outcome));
             drop(state);
         });
@@ -1369,6 +1375,43 @@ mod tests {
                 "round {n}: {reply}"
             );
         }
+    }
+
+    /// A broker whose answer is ready in the same moment the reader accepts
+    /// the sidecar's cancellation of it: it hands the connection the
+    /// `$/cancelRequest` itself, as the reader would, then answers.
+    struct CancelledAsItAnswers {
+        connection: Connection,
+        id: Value,
+    }
+
+    impl Broker for CancelledAsItAnswers {
+        fn call<'a>(
+            &'a self,
+            _method: &'a str,
+            _params: Value,
+        ) -> Pin<Box<dyn Future<Output = Result<Value, RpcError>> + Send + 'a>> {
+            Box::pin(async move {
+                cancel_call(&self.connection, &broker(), self.id.clone());
+                Ok(json!({"rows": []}))
+            })
+        }
+    }
+
+    /// Past the point the broker's answer was chosen, a cancellation the
+    /// reader accepts before the answer is queued still wins: which answer the
+    /// sidecar gets is settled under the lock the cancellation is taken under.
+    #[tokio::test(start_paused = true)]
+    async fn a_cancellation_accepted_after_the_answer_is_chosen_but_before_it_is_queued_wins() {
+        let (connection, mut lines) = Connection::new(limits());
+        let broker: Arc<dyn Broker> = Arc::new(CancelledAsItAnswers {
+            connection: connection.clone(),
+            id: json!("c-1"),
+        });
+        call_with(&connection, &broker, json!("c-1")).unwrap();
+        let reply = answered(&mut lines).await;
+        assert_eq!(reply["id"], "c-1");
+        assert_eq!(reply["error"]["code"], code::REQUEST_CANCELLED, "{reply}");
     }
 
     #[tokio::test(start_paused = true)]
