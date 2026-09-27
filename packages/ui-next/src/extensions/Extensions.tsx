@@ -62,11 +62,12 @@ const MANIFEST_ORIGIN: ReviewOrigin = { kind: "manifest" };
  * What a review may say about a signature: only what the host verified over these exact
  * bytes (#559). A signature is named as verified, with its publisher, once the host's check
  * returns `signedBy`; until then it is being checked, and after a check that did not verify
- * it, it is not verified.
+ * it, it is not verified. A check that could not run says so: it found nothing either way.
  */
-function signatureState(review: { signature?: number[]; signedBy?: ExtensionSigner; errors?: ExtensionValidationError[]; origin: ReviewOrigin }) {
+function signatureState(review: { signature?: number[]; signedBy?: ExtensionSigner; errors?: ExtensionValidationError[]; checkError?: string; origin: ReviewOrigin }) {
   if (!review.signature) return review.origin.kind === "manifest" ? "Unsigned manifest" : "Unsigned package";
   if (review.signedBy) return `Signature verified · ${plainText(review.signedBy.name)}`;
+  if (review.checkError) return "Signature could not be checked";
   return review.errors ? "Signature not verified" : "Checking the signature";
 }
 /** A size as a reader measures it. */

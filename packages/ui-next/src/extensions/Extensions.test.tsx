@@ -1585,6 +1585,15 @@ it("says who signed a catalog release only after the host verified it", async ()
   const again = await screen.findByLabelText("Review app permissions");
   await waitFor(() => expect(again.textContent).toContain("Signature not verified"));
   expect(again.textContent).not.toContain("Signature verified");
+  // A check that could not run is not still running, and verified nothing.
+  vi.mocked(validateExtension).mockRejectedValueOnce(new Error("bridge timed out"));
+  fireEvent.click(within(again).getByRole("button", { name: "Cancel" }));
+  fireEvent.click(await screen.findByText("Review installation"));
+  const failed = await screen.findByLabelText("Review app permissions");
+  await waitFor(() => expect(failed.textContent).toContain("Signature could not be checked"));
+  expect(failed.textContent).toContain("bridge timed out");
+  expect(failed.textContent).not.toContain("Checking the signature");
+  expect(failed.textContent).not.toContain("Signature verified");
 });
 it("installs a catalog release's package by the release and the package that were reviewed (#562)", async () => {
   vi.mocked(listExtensions).mockResolvedValue({ schemaVersion: 1, nextRevision: 1, plugins: [] });
