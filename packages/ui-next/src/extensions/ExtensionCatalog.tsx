@@ -1,12 +1,19 @@
 import { ExtensionLogo } from "./ExtensionLogo";
 import { useContext, useEffect, useRef, useState } from "react";
-import { isTauri, listExtensionCatalog, reviewCatalogExtension, openExternal, type ExtensionCatalogSnapshot, type InstalledExtension } from "@srelens/core";
+import { isTauri, listExtensionCatalog, reviewCatalogExtension, openExternal, type ExtensionCatalogSnapshot, type ExtensionReview, type InstalledExtension } from "@srelens/core";
 import { ExtensionControls } from "./ExtensionControls";
 
-export function ExtensionCatalog({ installed, onReview, autoLoad = false }: {
+export function ExtensionCatalog({ installed, onReview, onReviewStart, autoLoad = false }: {
   autoLoad?: boolean;
   installed: InstalledExtension[];
-  onReview: (manifest: string, signature?: number[]) => void;
+  /**
+   * Called as a review starts; what it returns says, once the release has downloaded,
+   * whether this is still the review most recently started from anywhere. A stale one is
+   * not passed to `onReview`.
+   */
+  onReviewStart?: () => () => boolean;
+  /** The host-verified review, and the release it is of, which a package install names again. */
+  onReview: (review: ExtensionReview, release: { id: string; sha256: string }) => void;
 }) {
   const { Button } = useContext(ExtensionControls);
   const [data, setData] = useState<ExtensionCatalogSnapshot>();
@@ -52,7 +59,7 @@ export function ExtensionCatalog({ installed, onReview, autoLoad = false }: {
         const incompatible = data.incompatible.includes(entry.id);
         return <article className="extension-installed extension-catalog-entry" aria-label={entry.name} key={entry.id}>
           <div className="extension-toolbar">
-            <ExtensionLogo id={entry.id} name={entry.name} size={28} />
+            <ExtensionLogo name={entry.name} size={28} />
             <div className="extension-catalog-description">
               <strong>{entry.name}</strong>
               <p>{entry.description}</p>
@@ -62,9 +69,10 @@ export function ExtensionCatalog({ installed, onReview, autoLoad = false }: {
             <Button variant="secondary" disabled={busy} onClick={() => void run(() => openExternal(entry.repository))}>Repository</Button>
             <Button disabled={busy || incompatible} onClick={() => {
               const request = ++generation.current;
+              const current = onReviewStart?.() ?? (() => true);
               void run(async () => {
                 const result = await reviewCatalogExtension(entry.id, entry.release.sha256);
-                if (request === generation.current) onReview(result.manifest, result.signature ?? undefined);
+                if (request === generation.current && current()) onReview(result, { id: entry.id, sha256: entry.release.sha256 });
               });
             }}>{current ? "Review replacement" : "Review installation"}</Button>
           </div>

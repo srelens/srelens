@@ -235,14 +235,23 @@ pub fn redact(args: &Value, sensitive: bool) -> Value {
     /// `data`/`stringData` on a Secret write (`k8s.updateConfigData` — a
     /// Secret's own keys are things like `username` and `ca.crt`), `yaml` on
     /// `k8s.applyManifest` and `manifest` on `extensions.configure` (opaque
-    /// strings holding whole manifests), and
+    /// strings holding whole manifests), `package` on `extensions.configure`
+    /// and `extensions.packageManifest` (a whole app package as base64, up to
+    /// 16 MiB of it, #562), and
     /// `values` on the helm install/upgrade/template capabilities (user YAML
     /// that routinely holds registry credentials and database passwords).
     ///
     /// Matched EXACTLY, not as substrings, so `metadata` stays readable — the
     /// point is to keep the shape of a call auditable while dropping the part
     /// that carries secrets.
-    const PAYLOAD_FIELDS: [&str; 5] = ["data", "stringdata", "yaml", "values", "manifest"];
+    const PAYLOAD_FIELDS: [&str; 6] = [
+        "data",
+        "stringdata",
+        "yaml",
+        "values",
+        "manifest",
+        "package",
+    ];
     /// Fields holding a map of caller-chosen names to caller-chosen values,
     /// where the NAMES are the auditable shape and every VALUE is treated as a
     /// secret: `settings` on `extensions.configure` (#605). An app's settings
@@ -521,10 +530,13 @@ pub fn redact_error(error: &str, args: &Value, redacted: &Value) -> String {
 }
 
 /// An install error can echo any substring of an opaque manifest, including
-/// values inside malformed JSON. The audit cannot prove such text is clean, so
-/// keep the result and target but omit the caller-derived error details.
+/// values inside malformed JSON, or of a package's files (#562). The audit
+/// cannot prove such text is clean, so keep the result and target but omit the
+/// caller-derived error details.
 pub fn redact_call_error(tool: &str, error: &str, args: &Value, redacted: &Value) -> String {
-    if tool == "extensions.configure" && args.get("manifest").is_some() {
+    if tool == "extensions.configure"
+        && (args.get("manifest").is_some() || args.get("package").is_some())
+    {
         return "App install failed; details omitted from audit".into();
     }
     redact_error(error, args, redacted)
@@ -1240,6 +1252,32 @@ mod tests {
         assert_eq!(out["action"], "install");
         assert_eq!(out["manifest"], REDACTED);
         assert!(!out.to_string().contains("hunter2"));
+    }
+
+    /// A package is a whole app as base64 (#562): opaque, and up to 16 MiB, so
+    /// neither its bytes nor an error that could quote its files is kept.
+    #[test]
+    fn redacts_a_package_and_the_errors_its_install_can_raise() {
+        let args = json!({
+            "action": "installPackage",
+            "package": "H4sIAAAAAAAAA+3OMQ6CQBCG4a09",
+            "grants": ["k8s.listCustomResource"]
+        });
+        let out = redact(&args, false);
+        assert_eq!(out["action"], "installPackage");
+        assert_eq!(out["package"], REDACTED);
+        assert_eq!(out["grants"], json!(["k8s.listCustomResource"]));
+        assert_eq!(
+            redact_call_error(
+                "extensions.configure",
+                "README.md does not match its digest: credential hunter2",
+                &args,
+                &out
+            ),
+            "App install failed; details omitted from audit"
+        );
+        let review = json!({"package": "H4sIAAAAAAAAA+3OMQ6CQBCG4a09"});
+        assert_eq!(redact(&review, false)["package"], REDACTED);
     }
 
     #[test]

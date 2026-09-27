@@ -60,6 +60,19 @@ inventory written without it reads as off. A host from before #568 cannot read a
 inventory in which an app has it on, since installed apps are read strictly: turn it off
 before going back to an older srelens.
 
+## Packages (#562)
+
+An app installed from a `.srelens-extension` package records the package as `package`,
+and a signed one keeps its digest list in `signatureProof` as `digests`. Both are written
+only for such an app, so an inventory with none reads as before. A host from before #562
+cannot read an inventory that holds one, since installed apps are read strictly: remove
+the packaged apps, or reinstall them from single-file manifests, before going back to an
+older srelens. Their unpacked files sit beside the inventory in
+`settings.extensions.packages/`, which an older host ignores and which can be deleted.
+
+Flux and Argo CD no longer have logos bundled into srelens: an app's logo comes from its
+package, so they show their initials until their releases ship as packages.
+
 ## Reserved IDs
 
 Since #528, IDs under `org.srelens.` install only with the srelens signature:

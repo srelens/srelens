@@ -6,6 +6,7 @@ vi.mock("@srelens/core", async (importOriginal) => ({
   isTauri: () => host.tauri,
   listExtensionCatalog: vi.fn(),
   reviewCatalogExtension: vi.fn(),
+  reviewExtensionPackage: vi.fn(),
   listExtensions: vi.fn(),
   configureExtensions: vi.fn(),
   validateExtension: vi.fn(),
@@ -22,6 +23,7 @@ vi.mock("@srelens/core", async (importOriginal) => ({
 import {
   listExtensionCatalog,
   reviewCatalogExtension,
+  reviewExtensionPackage,
   listExtensions,
   configureExtensions,
   validateExtension,
@@ -44,6 +46,20 @@ if (!("ResizeObserver" in globalThis)) {
     unobserve() {}
     disconnect() {}
   };
+}
+// jsdom's Blob has no arrayBuffer(), which every WebView the app runs in has; a package
+// file chosen in Settings is read with it (#562).
+if (!("arrayBuffer" in Blob.prototype)) {
+  Object.defineProperty(Blob.prototype, "arrayBuffer", {
+    value(this: Blob) {
+      return new Promise<ArrayBuffer>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result as ArrayBuffer);
+        reader.onerror = () => reject(reader.error);
+        reader.readAsArrayBuffer(this);
+      });
+    },
+  });
 }
 const elementProto = window.HTMLElement.prototype as unknown as Record<string, unknown>;
 elementProto.scrollIntoView ??= () => {};
@@ -270,9 +286,129 @@ it("refreshes an open list only when an action on one of its own resources is ac
 });
 it("offers native installation without a developer-mode toggle", async () => {
   render(<ExtensionManager />);
-  expect(await screen.findByText("Install a local manifest")).toBeTruthy();
+  expect(await screen.findByText("Install a local manifest or package")).toBeTruthy();
+  expect(screen.getByLabelText("Local app package (.srelens-extension)")).toBeTruthy();
   expect(screen.queryByLabelText("App developer mode")).toBeNull();
   expect(configureExtensions).not.toHaveBeenCalled();
+});
+
+it("offers no package file on the web, whose host keeps no app files (#562)", async () => {
+  host.tauri = false;
+  try {
+    render(<ExtensionManager />);
+    expect(await screen.findByText("Install a local manifest")).toBeTruthy();
+    expect(screen.queryByLabelText("Local app package (.srelens-extension)")).toBeNull();
+  } finally {
+    host.tauri = true;
+  }
+});
+
+/** What the host returns for a verified package (#562). */
+const packaged = {
+  sha256: "f".repeat(64),
+  digests: '{"format":"srelens-extension-package"}',
+  files: [{ path: "extension.json", size: 700 }, { path: "icons/icon.svg", size: 215 }],
+  icon: `data:image/svg+xml;base64,${btoa("<svg/>")}`,
+};
+
+it("reviews a package file as a whole and installs the bytes that were reviewed (#562)", async () => {
+  const source = JSON.stringify(plugin.manifest);
+  vi.mocked(reviewExtensionPackage).mockResolvedValue({ manifest: source, signature: [1, 2, 3], package: packaged });
+  render(<ExtensionManager />);
+  const input = await screen.findByLabelText("Local app package (.srelens-extension)");
+  const content = new Uint8Array([0x1f, 0x8b, 0x08, 0x00, 0xff]);
+  fireEvent.change(input, { target: { files: [new File([content], "gitops.srelens-extension")] } });
+  const install = await screen.findByText("Install and grant permissions");
+  expect(reviewExtensionPackage).toHaveBeenCalledWith(content);
+  // The signature is over the digest list, so the check gets the list with it.
+  expect(validateExtension).toHaveBeenCalledWith(source, plugin.manifest.permissions, [1, 2, 3], packaged.digests);
+  const review = screen.getByRole("region", { name: "Review app permissions" });
+  expect(within(review).getByText(/Package: 2 files, 915 B/)).toBeTruthy();
+  expect(within(review).getByText("icons/icon.svg")).toBeTruthy();
+  expect(review.querySelector("[data-extension-logo]")?.getAttribute("data-extension-logo")).toBe("package");
+  fireEvent.click(install);
+  await waitFor(() => expect(configureExtensions).toHaveBeenCalledWith({
+    action: "installPackage", package: "H4sIAP8=", grants: plugin.manifest.permissions,
+  }));
+});
+
+it("says why a package file was refused, and refuses one over the limit before reading it (#562)", async () => {
+  vi.mocked(reviewExtensionPackage).mockRejectedValue(new Error("README.md does not match its digest"));
+  render(<ExtensionManager />);
+  const input = await screen.findByLabelText("Local app package (.srelens-extension)");
+  fireEvent.change(input, { target: { files: [new File([new Uint8Array([1])], "tampered.srelens-extension")] } });
+  expect((await screen.findByRole("alert")).textContent).toBe(
+    "Could not review tampered.srelens-extension: README.md does not match its digest",
+  );
+  expect(screen.queryByRole("region", { name: "Review app permissions" })).toBeNull();
+  const large = new File([new Uint8Array([1])], "large.srelens-extension");
+  Object.defineProperty(large, "size", { value: 17 * 1024 * 1024 });
+  fireEvent.change(input, { target: { files: [large] } });
+  expect((await screen.findByRole("alert")).textContent).toBe(
+    "large.srelens-extension is 17.0 MiB; a package may be at most 16.0 MiB.",
+  );
+  expect(reviewExtensionPackage).toHaveBeenCalledTimes(1);
+  expect(configureExtensions).not.toHaveBeenCalled();
+});
+
+/** A promise the test settles when it chooses. */
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((settle) => { resolve = settle; });
+  return { promise, resolve };
+}
+/** A catalog listing one release of the test app. */
+const oneRelease = () => ({ catalog: { extensions: [{ id: plugin.manifest.id, name: "Catalog GitOps", description: "GitOps resources",
+  repository: "https://github.com/example/gitops", license: "MIT",
+  release: { version: "0.1.0", sha256: "digest", srelensApiVersion: "^0.1", prerelease: false } }] },
+  fetchedAt: 1, stale: false, error: null, hostApiVersions: ["0.1.0"], incompatible: [] }) as any;
+const named = (name: string) => JSON.stringify({ ...plugin.manifest, name });
+
+it("drops a package review that finishes loading after a catalog review started later (#562)", async () => {
+  const load = deferred<Awaited<ReturnType<typeof reviewExtensionPackage>>>();
+  vi.mocked(reviewExtensionPackage).mockReturnValue(load.promise);
+  vi.mocked(reviewCatalogExtension).mockResolvedValue({ manifest: named("From the catalog") });
+  vi.mocked(listExtensionCatalog).mockResolvedValue(oneRelease());
+  render(<ExtensionManager />);
+  fireEvent.change(await screen.findByLabelText("Local app package (.srelens-extension)"),
+    { target: { files: [new File([new Uint8Array([1])], "slow.srelens-extension")] } });
+  fireEvent.click(screen.getByRole("tab", { name: "Catalog" }));
+  fireEvent.click(await screen.findByText("Review installation"));
+  expect(await screen.findByText("From the catalog")).toBeTruthy();
+  await act(async () => { load.resolve({ manifest: named("From the file"), package: packaged }); });
+  expect(screen.queryByText("From the file")).toBeNull();
+  expect(screen.getByText("From the catalog")).toBeTruthy();
+  expect(validateExtension).toHaveBeenCalledTimes(1);
+});
+
+it("drops a catalog review that finishes downloading after a package review started later (#562)", async () => {
+  const download = deferred<Awaited<ReturnType<typeof reviewCatalogExtension>>>();
+  vi.mocked(reviewCatalogExtension).mockReturnValue(download.promise);
+  vi.mocked(reviewExtensionPackage).mockResolvedValue({ manifest: named("From the file"), package: packaged });
+  vi.mocked(listExtensionCatalog).mockResolvedValue(oneRelease());
+  render(<ExtensionManager />);
+  fireEvent.click(await screen.findByRole("tab", { name: "Catalog" }));
+  fireEvent.click(await screen.findByText("Review installation"));
+  await waitFor(() => expect(reviewCatalogExtension).toHaveBeenCalledTimes(1));
+  fireEvent.change(screen.getByLabelText("Local app package (.srelens-extension)"),
+    { target: { files: [new File([new Uint8Array([1])], "later.srelens-extension")] } });
+  expect(await screen.findByText("From the file")).toBeTruthy();
+  await act(async () => { download.resolve({ manifest: named("From the catalog") }); });
+  expect(screen.queryByText("From the catalog")).toBeNull();
+  expect(screen.getByText("From the file")).toBeTruthy();
+  expect(validateExtension).toHaveBeenCalledTimes(1);
+});
+
+it("shows an installed app's package logo, and its initials without one (#562)", async () => {
+  vi.mocked(listExtensions).mockResolvedValue({ schemaVersion: 1, nextRevision: 3, plugins: [
+    { ...plugin, icon: packaged.icon },
+    { ...plugin, manifest: { ...plugin.manifest, id: "org.test.plain", name: "Plain" } },
+  ] } as any);
+  render(<ExtensionManager />);
+  await screen.findByText("Plain");
+  const logos = [...document.querySelectorAll(".extension-installed [data-extension-logo]")]
+    .map((logo) => logo.getAttribute("data-extension-logo"));
+  expect(logos).toEqual(["package", "initials"]);
 });
 
 it("reads the pinned context and distinguishes failed reads from empty results", async () => {
@@ -1412,6 +1548,22 @@ it.each([undefined, [1,2,3]])("installs catalog bytes and signature %j only afte
   expect(readExtension).not.toHaveBeenCalled();
   fireEvent.click(install);
   await waitFor(() => expect(configureExtensions).toHaveBeenCalledWith({ action: "install", manifest: source, grants: plugin.manifest.permissions, ...(signature ? {signature} : {}) }));
+});
+it("installs a catalog release's package by the release and the package that were reviewed (#562)", async () => {
+  vi.mocked(listExtensions).mockResolvedValue({ schemaVersion: 1, nextRevision: 1, plugins: [] });
+  const source = JSON.stringify(plugin.manifest);
+  vi.mocked(reviewCatalogExtension).mockResolvedValue({ manifest: source, signature: [1, 2, 3], package: packaged });
+  vi.mocked(listExtensionCatalog).mockResolvedValue({ catalog: { extensions: [{ id: plugin.manifest.id, name: "Catalog GitOps", description: "GitOps resources", repository: "https://github.com/example/gitops", license: "MIT", release: { version: "0.1.0", sha256: "digest", srelensApiVersion: "^0.1", prerelease: false, package: { url: "https://github.com/example/gitops/releases/download/v0.1.0/gitops.srelens-extension", sha256: packaged.sha256 } } }] }, fetchedAt: 1, stale: false, error: null, hostApiVersions: ["0.1.0"], incompatible: [] } as any);
+  render(<ExtensionManager />);
+  fireEvent.click(await screen.findByRole("tab", { name: "Catalog" }));
+  fireEvent.click(await screen.findByText("Review installation"));
+  const install = await screen.findByText("Install and grant permissions");
+  expect(validateExtension).toHaveBeenCalledWith(source, plugin.manifest.permissions, [1, 2, 3], packaged.digests);
+  fireEvent.click(install);
+  await waitFor(() => expect(configureExtensions).toHaveBeenCalledWith({
+    action: "installCatalogPackage", id: plugin.manifest.id, sha256: "digest", packageSha256: packaged.sha256,
+    grants: plugin.manifest.permissions,
+  }));
 });
 it("reviews a signed catalog replacement against the installed revision before submitting it", async () => {
   vi.mocked(listExtensions).mockResolvedValue({ schemaVersion: 1, nextRevision: 8, plugins: [{ ...plugin, revision: 7 }] } as any);

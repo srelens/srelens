@@ -1,15 +1,24 @@
 //! Test support for the cargo-fuzz targets in `fuzz/` and the property tests below: the
-//! catalog, publisher signature and inventory readers on arbitrary bytes. An entry point
-//! panics only when a reader breaks its contract, so the fuzzer and `cargo test` hold the
-//! same properties. Compiled for this crate's tests and under the `fuzzing` feature; not an
-//! API.
-use super::{read, saved_form, signing, MAX_INVENTORY_BYTES};
+//! catalog, publisher signature, package and inventory readers on arbitrary bytes. An entry
+//! point panics only when a reader breaks its contract, so the fuzzer and `cargo test` hold
+//! the same properties. Compiled for this crate's tests and under the `fuzzing` feature; not
+//! an API.
+use super::{package, read, saved_form, signing, MAX_INVENTORY_BYTES};
 use serde_json::Value;
-use std::{collections::BTreeSet, fs};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    io::Write as _,
+};
 
 /// The one release this suite holds a publisher signature for.
 const SIGNED: &[u8] = include_bytes!("../../tests/fixtures/argocd-manifest.json");
 const SIGNATURE: &[u8] = include_bytes!("../../tests/fixtures/argocd-manifest.sig");
+/// The one package this suite holds a publisher signature for: the digest list of the
+/// `signed` fixture, signed by the test publisher, which only this crate's unit tests trust.
+const SIGNED_DIGESTS: &[u8] = include_bytes!("../../tests/fixtures/packages/signed/digests.json");
+const SIGNED_DIGESTS_SIGNATURE: &[u8] =
+    include_bytes!("../../tests/fixtures/packages/signed/digests.json.sig");
 
 /// `parse_catalog` on arbitrary bytes. It does not panic; a catalog it accepts is within
 /// 1 MiB, is schema version 1 and lists each ID once; and it accepts that catalog again in
@@ -84,6 +93,96 @@ pub fn signed_manifest(data: &[u8]) {
     }
 }
 
+/// A sink that keeps each file's path and SHA-256, to hold `read` to giving it exactly the
+/// files it verified.
+#[derive(Default)]
+struct Recorded(BTreeMap<String, String>);
+
+impl package::Sink for Recorded {
+    fn file(&mut self, path: &str, content: &mut dyn std::io::Read) -> std::io::Result<()> {
+        let mut bytes = Vec::new();
+        content.read_to_end(&mut bytes)?;
+        let previous = self.0.insert(path.to_owned(), package::sha256_hex(&bytes));
+        assert!(previous.is_none(), "{path} was given to the sink twice");
+        Ok(())
+    }
+}
+
+fn gzip(bytes: &[u8]) -> Vec<u8> {
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    encoder.write_all(bytes).expect("compress in memory");
+    encoder.finish().expect("compress in memory")
+}
+
+/// `package::read` on arbitrary input. The first byte chooses what the rest is: when it is
+/// odd, an uncompressed tar, compressed here so a fuzzer explores the archive and its checks
+/// rather than guessing gzip's checksums; when even, the package file as it is.
+///
+/// It does not panic. A package it accepts is within every limit, and it gave the sink
+/// exactly the files its digest list names, as listed, with the list and its signature;
+/// the manifest is the one the list names; it is signed only if it is the one package this
+/// suite signed, since a fuzzer cannot sign; and reading it again gives the same package.
+pub fn package(data: &[u8]) {
+    let archive = match data.split_first() {
+        Some((mode, rest)) if mode & 1 == 1 => gzip(rest),
+        Some((_, rest)) => rest.to_vec(),
+        None => Vec::new(),
+    };
+    let mut recorded = Recorded::default();
+    let verified = match package::read(&archive, &mut recorded) {
+        Ok(verified) => verified,
+        Err(reason) => {
+            assert!(!reason.is_empty(), "a refused package gives no reason");
+            return;
+        }
+    };
+    assert!(
+        archive.len() <= package::MAX_PACKAGE_BYTES,
+        "a {}-byte package was accepted",
+        archive.len()
+    );
+    let files = &verified.list.files;
+    assert!(files.len() <= package::MAX_ENTRIES);
+    assert!(files.iter().map(|file| file.size).sum::<u64>() <= package::MAX_UNPACKED_BYTES);
+    let mut given = recorded.0;
+    assert_eq!(
+        given.remove(package::DIGESTS),
+        Some(verified.digest.clone()),
+        "the sink was not given the digest list that was verified"
+    );
+    assert_eq!(
+        given.remove(package::SIGNATURE),
+        verified.signature.as_deref().map(package::sha256_hex),
+        "the sink was not given the signature that was verified"
+    );
+    let listed: BTreeMap<String, String> = files
+        .iter()
+        .map(|file| (file.path.clone(), file.sha256.clone()))
+        .collect();
+    assert_eq!(
+        given, listed,
+        "the sink was given other files than the list names"
+    );
+    package::check_manifest_listed(&verified.digests, &verified.manifest)
+        .expect("an accepted package's manifest is the one its list names");
+    if let Some(signature) = &verified.signature {
+        assert!(
+            verified.digests.as_bytes() == SIGNED_DIGESTS && signature == SIGNED_DIGESTS_SIGNATURE,
+            "a package verified with a signature nobody made"
+        );
+        package::verify_signed(&verified.digests, signature, &verified.manifest)
+            .expect("an accepted package's signature verifies on its own");
+    }
+    let again = package::read(&archive, &mut package::Discard).unwrap_or_else(|reason| {
+        panic!("an accepted package is refused when read again: {reason}")
+    });
+    assert_eq!(again.digest, verified.digest);
+    assert_eq!(
+        serde_json::to_value(again.review()).expect("a review serializes"),
+        serde_json::to_value(verified.review()).expect("a review serializes"),
+    );
+}
+
 /// `read` on arbitrary file contents, legacy migration included. It does not panic; an
 /// inventory it loads is within 1 MiB, lists each app once and has disabled every app it
 /// quarantined; and what `write` would save of it loads back unchanged.
@@ -150,10 +249,12 @@ pub fn inventory(data: &[u8]) {
 
 #[cfg(test)]
 mod tests {
+    use super::super::package::tests::{packed, Raw};
     use super::super::{catalog::parse_catalog, catalog::MAX_CATALOG, Inventory};
     use super::*;
     use proptest::{collection::vec, prelude::*, sample::Index, test_runner::RngSeed};
     use srelens_plugin_host::fuzzing::mutate;
+    use std::io::Read as _;
 
     const CATALOG: &[u8] = include_bytes!("../../tests/fixtures/extension-catalog.json");
     const INVENTORY: &[u8] = include_bytes!("../../tests/fixtures/extension-inventory.json");
@@ -169,6 +270,37 @@ mod tests {
         }
         config
     }
+
+    /// Every kind of tar entry a package might hold, or be refused for.
+    const ENTRY_KINDS: [tar::EntryType; 8] = [
+        tar::EntryType::Regular,
+        tar::EntryType::Directory,
+        tar::EntryType::Symlink,
+        tar::EntryType::Link,
+        tar::EntryType::Fifo,
+        tar::EntryType::XHeader,
+        tar::EntryType::GNULongName,
+        tar::EntryType::GNUSparse,
+    ];
+    /// What package paths are made of, good and bad.
+    const PATH_PIECES: [&str; 16] = [
+        "extension.json",
+        "digests.json",
+        "digests.json.sig",
+        "README.md",
+        "LICENSE",
+        "icons",
+        "icon.svg",
+        "schemas",
+        "a.json",
+        "bin",
+        "linux-amd64",
+        "tool",
+        "..",
+        ".",
+        "",
+        "Icons",
+    ];
 
     /// The input [`signed_manifest`] reads for this signature and manifest.
     fn signed_input(signature: &[u8], raw: &[u8]) -> Vec<u8> {
@@ -208,6 +340,39 @@ mod tests {
             catalog(&data);
             signed_manifest(&data);
             inventory(&data);
+            package(&data);
+        }
+
+        /// Archives of arbitrary entries, of every kind, at paths built from the pieces
+        /// a traversal or a layout mistake is made of.
+        #[test]
+        fn archives_of_arbitrary_entries_are_read_or_refused(
+            entries in vec((0..ENTRY_KINDS.len(), vec(0..PATH_PIECES.len(), 1..5), vec(any::<u8>(), 0..64)), 0..8),
+        ) {
+            let raw = entries.iter().fold(Raw::new(), |raw, (kind, pieces, data)| {
+                let path = pieces.iter().map(|piece| PATH_PIECES[*piece]).collect::<Vec<_>>().join("/");
+                raw.entry(ENTRY_KINDS[*kind], path.as_bytes(), data)
+            });
+            package(&[&[1][..], &raw.tar()].concat());
+        }
+
+        /// The fixture packages with bytes of their uncompressed archive changed. Some
+        /// changes leave a valid package (padding, a header field no one reads); every
+        /// one that is accepted still holds the properties `package` checks.
+        #[test]
+        fn edited_packages_are_read_or_refused(
+            signed in any::<bool>(),
+            flips in vec((any::<Index>(), 1..=u8::MAX), 1..4),
+        ) {
+            let mut tar = Vec::new();
+            flate2::read::GzDecoder::new(&packed(if signed { "signed" } else { "example" })[..])
+                .read_to_end(&mut tar)
+                .unwrap();
+            for (at, mask) in flips {
+                let index = at.index(tar.len());
+                tar[index] ^= mask;
+            }
+            package(&[&[1][..], &tar].concat());
         }
 
         #[test]
@@ -281,6 +446,17 @@ mod tests {
             .iter()
             .all(|plugin| !plugin.enabled && plugin.quarantined.as_deref().is_some_and(|reason| reason.contains("requires API ^0.1"))));
         inventory(LEGACY_INVENTORY);
+    }
+
+    #[test]
+    fn the_fixture_packages_are_read_and_only_the_signed_one_is_signed() {
+        for name in ["example", "signed"] {
+            let archive = packed(name);
+            package(&[&[0][..], &archive].concat());
+            let verified =
+                super::super::package::read(&archive, &mut super::super::package::Discard).unwrap();
+            assert_eq!(verified.signature.is_some(), name == "signed");
+        }
     }
 
     #[test]

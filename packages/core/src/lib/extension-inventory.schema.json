@@ -796,6 +796,13 @@
           },
           "type": "array"
         },
+        "icon": {
+          "description": "The package's logo as a `data:` URL, as `extensions.list` reports it: read from the package's files and checked against its digest list. Decoration only, never a sign of who published the app. Recomputed for every list, ignored when read from disk and never written there.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "installedAt": {
           "description": "When this version was installed, in seconds since the Unix epoch.",
           "format": "uint64",
@@ -804,6 +811,13 @@
         },
         "manifest": {
           "$ref": "#/definitions/Manifest"
+        },
+        "package": {
+          "description": "The SHA-256 of the digest list of the package this version was unpacked from (#562), which names its directory; absent for a single-file manifest.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "policyBlocked": {
           "description": "Recomputed policy denial, distinct from a failed publisher verification.",
@@ -1211,6 +1225,13 @@
         "manifest": {
           "$ref": "#/definitions/Manifest"
         },
+        "package": {
+          "description": "The package it was unpacked from, as [`Installed`] names it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "revision": {
           "format": "uint64",
           "minimum": 0.0,
@@ -1487,6 +1508,13 @@
     "SignatureProof": {
       "additionalProperties": false,
       "properties": {
+        "digests": {
+          "description": "For a package (#562): the exact digest list `signature` covers, which names `manifest` as the package's `extension.json`. Absent for a single-file manifest, whose signature covers `manifest` itself.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "manifest": {
           "type": "string"
         },

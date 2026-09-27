@@ -1,7 +1,7 @@
 name: Fuzz
 
 # The parsers that take extension input from outside the host -- manifests, the catalog,
-# publisher signatures and the stored inventory -- under cargo-fuzz (#580). `cargo test`
+# publisher signatures, packages (#562) and the stored inventory -- under cargo-fuzz (#580). `cargo test`
 # already holds the same properties over a fixed set of cases on every change, on stable
 # and on every platform. This keeps looking for inputs that break them, with coverage
 # guidance, which is what needs nightly and libFuzzer and so cannot live in the backend job.
@@ -78,7 +78,7 @@ jobs:
         # Every target runs even after one finds a crash, so one bug does not hide another.
         run: |
           status=0
-          for target in manifest catalog signed-manifest inventory; do
+          for target in manifest catalog signed-manifest inventory package; do
             echo "::group::$target"
             cargo +nightly fuzz run --target "$FUZZ_TARGET_TRIPLE" "$target" -- \
               -dict=fuzz/extensions.dict \

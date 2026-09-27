@@ -12,6 +12,9 @@ mod http_policy;
 mod limits;
 mod links;
 pub(crate) mod network;
+pub(crate) mod package;
+#[cfg(test)]
+mod package_tests;
 mod panels;
 pub mod pods;
 #[cfg(test)]
@@ -56,24 +59,32 @@ type Store = Arc<dyn InventoryStore>;
 pub struct Apps {
     inventory: Store,
     catalog: catalog::CatalogCache,
+    /// Where installed packages are unpacked (#562), one private directory per app.
+    /// `None` on a host that keeps no files for its apps, which refuses to install a
+    /// package and offers a catalog release's single-file manifest instead.
+    packages: Option<PathBuf>,
 }
 
 impl Apps {
     /// One web user's apps (#515): their own inventory, and the catalog every user of the
-    /// server shares and none of them can write.
+    /// server shares and none of them can write. The web host keeps no app files: a
+    /// package's directory would be on the shared server, not the user's (#562).
     pub fn with_shared_catalog(inventory: Arc<dyn InventoryStore>, catalog: SharedCatalog) -> Self {
         Self {
             inventory,
             catalog: catalog::CatalogCache::Shared(catalog),
+            packages: None,
         }
     }
 }
 
-/// The desktop's layout: the inventory file, and this host's own catalog cache beside it.
+/// The desktop's layout: the inventory file, this host's own catalog cache beside it, and
+/// the directory installed packages are unpacked into beside that.
 impl From<PathBuf> for Apps {
     fn from(path: PathBuf) -> Self {
         Self {
             catalog: catalog::CatalogCache::Owned(path.with_extension("catalog.json")),
+            packages: Some(path.with_extension("packages")),
             inventory: Arc::new(path),
         }
     }
@@ -126,6 +137,16 @@ pub struct Installed {
         skip_serializing_if = "std::ops::Not::not"
     )]
     allow_loopback_http: bool,
+    /// The SHA-256 of the digest list of the package this version was unpacked from
+    /// (#562), which names its directory; absent for a single-file manifest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    package: Option<String>,
+    /// The package's logo as a `data:` URL, as `extensions.list` reports it: read from the
+    /// package's files and checked against its digest list. Decoration only, never a sign
+    /// of who published the app. Recomputed for every list, ignored when read from disk
+    /// and never written there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    icon: Option<String>,
 }
 /// What the broker answers when an app is used on a cluster it is not enabled for.
 const NOT_ENABLED_FOR_CLUSTER: &str = "App is not enabled for this cluster";
@@ -189,6 +210,11 @@ async fn request_context(
 struct SignatureProof {
     manifest: String,
     signature: Vec<u8>,
+    /// For a package (#562): the exact digest list `signature` covers, which names
+    /// `manifest` as the package's `extension.json`. Absent for a single-file manifest,
+    /// whose signature covers `manifest` itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    digests: Option<String>,
 }
 /// Where an installed version came from. The host decides: `catalog` means the exact
 /// bytes of a release listed in the cached catalog, whoever submitted them.
@@ -214,6 +240,9 @@ struct PreviousVersion {
     source: Source,
     #[serde(rename = "installedAt")]
     installed_at: u64,
+    /// The package it was unpacked from, as [`Installed`] names it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    package: Option<String>,
 }
 /// How many replaced versions each app keeps for rollback.
 const KEPT_VERSIONS: usize = 3;
@@ -307,6 +336,32 @@ enum Configure {
         grants: Vec<String>,
         /// Revision displayed by the host preview. An update must name it so a
         /// different version cannot be silently replaced after consent.
+        #[serde(default, rename = "reviewedRevision")]
+        reviewed_revision: Option<u64>,
+    },
+    /// Installs or updates from a package file (#562), sent as base64. The host reads and
+    /// verifies the package again, whatever was reviewed; `grants` and `reviewedRevision`
+    /// are the caller's consent, as for `install`.
+    #[serde(rename = "installPackage")]
+    InstallPackage {
+        /// The `.srelens-extension` file as base64: at most 16 MiB once decoded.
+        #[serde(deserialize_with = "limits::package")]
+        #[schemars(with = "String")]
+        package: Vec<u8>,
+        grants: Vec<String>,
+        #[serde(default, rename = "reviewedRevision")]
+        reviewed_revision: Option<u64>,
+    },
+    /// Installs or updates a catalog release's package (#562), which the host downloads
+    /// and verifies again. `sha256` names the release, as `extensions.catalogManifest`
+    /// takes it; `packageSha256` is the exact package that was reviewed.
+    #[serde(rename = "installCatalogPackage")]
+    InstallCatalogPackage {
+        id: String,
+        sha256: String,
+        #[serde(rename = "packageSha256")]
+        package_sha256: String,
+        grants: Vec<String>,
         #[serde(default, rename = "reviewedRevision")]
         reviewed_revision: Option<u64>,
     },
@@ -436,6 +491,8 @@ fn read<S: InventoryStore + ?Sized>(store: &S) -> Result<Inventory, String> {
     // version it dropped) is disabled on its own instead of failing every other app.
     for plugin in &mut state.plugins {
         drop_secret_values(plugin);
+        // The logo is the host's to read from the package now, never the file's.
+        plugin.icon = None;
         plugin.quarantined = reverify(plugin).err();
         if plugin.quarantined.is_some() {
             plugin.enabled = false;
@@ -492,14 +549,43 @@ fn reverify(plugin: &Installed) -> Result<(), String> {
     }
     plugin.manifest.validate()?;
     crd::group_problems(&plugin.manifest).into_result()?;
+    check_package_name(plugin.package.as_deref())?;
     if let Some(proof) = &plugin.signature_proof {
-        verify_proof(proof, &plugin.manifest)?;
+        verify_proof(proof, &plugin.manifest, plugin.package.as_deref())?;
     }
     Ok(())
 }
-/// The publisher signature verifies over the kept bytes, and those bytes are `manifest`.
-fn verify_proof(proof: &SignatureProof, manifest: &Manifest) -> Result<(), String> {
-    signing::verify(proof.manifest.as_bytes(), &proof.signature)?;
+/// A package version is named by a SHA-256, as its directory is.
+fn check_package_name(package: Option<&str>) -> Result<(), String> {
+    if package.is_some_and(|package| {
+        package.len() != 64
+            || !package
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    }) {
+        return Err("Installed app names its package by something other than a SHA-256".into());
+    }
+    Ok(())
+}
+/// The publisher signature verifies over the kept bytes, and those bytes are `manifest`:
+/// for a single-file manifest, the manifest's own; for a package (#562), the digest list,
+/// which names the manifest and is the one the version was `unpacked` as.
+fn verify_proof(
+    proof: &SignatureProof,
+    manifest: &Manifest,
+    unpacked: Option<&str>,
+) -> Result<(), String> {
+    match &proof.digests {
+        None => signing::verify(proof.manifest.as_bytes(), &proof.signature)?,
+        Some(digests) => package::verify_signed(digests, &proof.signature, &proof.manifest)?,
+    }
+    let proven = proof
+        .digests
+        .as_deref()
+        .map(|digests| package::sha256_hex(digests.as_bytes()));
+    if proven.as_deref() != unpacked {
+        return Err("Installed app does not match its signed package".into());
+    }
     let parsed = Manifest::parse(&proof.manifest)?;
     if serde_json::to_value(parsed).map_err(|e| e.to_string())?
         != serde_json::to_value(manifest).map_err(|e| e.to_string())?
@@ -535,6 +621,7 @@ fn saved_form(state: &Inventory) -> Result<Vec<u8>, String> {
         for plugin in plugins.iter_mut().filter_map(Value::as_object_mut) {
             plugin.remove("quarantined");
             plugin.remove("policyBlocked");
+            plugin.remove("icon");
         }
     }
     serde_json::to_vec_pretty(&stored).map_err(|e| e.to_string())
@@ -919,10 +1006,13 @@ fn unsigned_reserved(id: &str, signed: bool) -> Option<String> {
         .then(|| format!("App ID {id} is reserved for signed srelens releases"))
 }
 /// Every reason installing `source` with these grants and signature would be refused.
+/// With `digests`, `source` is a package's `extension.json` (#562), the list must name it,
+/// and `signature` is over the list.
 fn check_install(
     source: &str,
     grants: &[String],
     signature: Option<&[u8]>,
+    digests: Option<&str>,
     core: Arc<Registry>,
 ) -> Result<Manifest, ValidationErrors> {
     let manifest = Manifest::decode(source)?;
@@ -943,10 +1033,14 @@ fn check_install(
         );
     }
     // The signature covers the exact bytes, so it is checked whatever else is wrong.
-    if let Some(signature) = signature {
-        if let Err(reason) = signing::verify_for(&manifest.id, source.as_bytes(), signature) {
-            problems.push(Code::InvalidSignature, "", reason);
-        }
+    let verified = match (signature, digests) {
+        (Some(signature), None) => signing::verify_for(&manifest.id, source.as_bytes(), signature),
+        (Some(signature), Some(digests)) => package::verify_signed(digests, signature, source),
+        (None, Some(digests)) => package::check_manifest_listed(digests, source).map(drop),
+        (None, None) => Ok(()),
+    };
+    if let Err(reason) = verified {
+        problems.push(Code::InvalidSignature, "", reason);
     }
     problems.into_result()?;
     Ok(manifest)
@@ -963,6 +1057,210 @@ fn take_revision(state: &mut Inventory) -> Result<u64, String> {
         .checked_add(1)
         .ok_or("extension revision limit reached")?;
     Ok(revision)
+}
+/// A version about to be installed, with everything install checks already checked.
+struct Incoming {
+    manifest: Manifest,
+    grants: Vec<String>,
+    reviewed_revision: Option<u64>,
+    signature_proof: Option<SignatureProof>,
+    source: Source,
+    package: Option<String>,
+}
+/// Installs `incoming`, or updates the app it replaces, which must be the revision the
+/// caller reviewed.
+fn install(state: &mut Inventory, incoming: Incoming) -> Result<(), String> {
+    let Incoming {
+        manifest,
+        grants,
+        reviewed_revision,
+        signature_proof,
+        source: origin,
+        package,
+    } = incoming;
+    let current_revision = state
+        .plugins
+        .iter()
+        .find(|app| app.manifest.id == manifest.id)
+        .map(|app| app.revision);
+    if current_revision != reviewed_revision {
+        return Err("App changed since permission review; review this update again".into());
+    }
+    let revision = take_revision(state)?;
+    let previous = state
+        .plugins
+        .iter()
+        .position(|p| p.manifest.id == manifest.id)
+        .map(|i| state.plugins.remove(i));
+    // An update keeps the app's settings and clusters, and the version it replaces
+    // for rollback.
+    let (settings, history, contexts, allow_loopback_http) = match previous {
+        Some(Installed {
+            signature_proof: replaced_proof,
+            manifest: replaced,
+            grants: replaced_grants,
+            revision: replaced_revision,
+            source: replaced_source,
+            installed_at: replaced_at,
+            settings,
+            mut history,
+            contexts,
+            allow_loopback_http,
+            package: replaced_package,
+            ..
+        }) => {
+            history.insert(
+                0,
+                PreviousVersion {
+                    signature_proof: replaced_proof,
+                    manifest: replaced,
+                    grants: replaced_grants,
+                    revision: replaced_revision,
+                    source: replaced_source,
+                    installed_at: replaced_at,
+                    package: replaced_package,
+                },
+            );
+            history.truncate(KEPT_VERSIONS);
+            // Only what the new version still declares, and still
+            // accepts, carries over (#542).
+            (
+                manifest.retain_settings(settings),
+                history,
+                contexts,
+                allow_loopback_http,
+            )
+        }
+        None => (Default::default(), Vec::new(), None, false),
+    };
+    state.plugins.push(Installed {
+        signature_proof,
+        quarantined: None,
+        policy_blocked: None,
+        manifest,
+        grants,
+        enabled: true,
+        revision,
+        settings,
+        source: origin,
+        installed_at: now(),
+        history,
+        contexts,
+        allow_loopback_http,
+        package,
+        icon: None,
+    });
+    state
+        .plugins
+        .sort_by(|a, b| a.manifest.id.cmp(&b.manifest.id));
+    // Kept versions give way, oldest first, before the saved inventory outgrows its
+    // limit; the update itself is not refused. Other apps' versions are left alone.
+    while saved_form(state)?.len() > MAX_INVENTORY_BYTES {
+        let updated = state
+            .plugins
+            .iter_mut()
+            .find(|p| p.revision == revision)
+            .ok_or("the updated app is missing from the inventory")?;
+        if updated.history.pop().is_none() {
+            break;
+        }
+    }
+    Ok(())
+}
+/// Why a host with no directory for its apps' files refuses a package.
+const NO_PACKAGES: &str = "This host keeps no files for its apps, so it cannot install a package; install the app's single-file manifest instead";
+/// Installs the package `archive` (#562): read and verified whole, checked as installing
+/// its manifest would be (with the signature over its digest list), then unpacked into
+/// its private directory. The inventory's save that follows is what installs it.
+fn install_package(
+    apps: &Apps,
+    state: &mut Inventory,
+    core: Arc<Registry>,
+    archive: &[u8],
+    grants: Vec<String>,
+    reviewed_revision: Option<u64>,
+) -> Result<(), String> {
+    let root = apps.packages.as_deref().ok_or(NO_PACKAGES)?;
+    let verified = package::read(archive, &mut package::Discard)?;
+    package::check_installable(&verified)?;
+    let manifest = check_install(
+        &verified.manifest,
+        &grants,
+        verified.signature.as_deref(),
+        Some(&verified.digests),
+        core,
+    )?;
+    check_unsigned_policy(
+        &manifest,
+        verified.signature.is_some(),
+        state.allow_unsigned_apps,
+    )?;
+    let origin = if apps.catalog.lists_package(&manifest.id, &verified.sha256) {
+        Source::Catalog
+    } else {
+        Source::Local
+    };
+    let signature_proof = verified.signature.clone().map(|signature| SignatureProof {
+        manifest: verified.manifest.clone(),
+        signature,
+        digests: Some(verified.digests.clone()),
+    });
+    install(
+        state,
+        Incoming {
+            manifest,
+            grants,
+            reviewed_revision,
+            signature_proof,
+            source: origin,
+            package: Some(verified.digest.clone()),
+        },
+    )?;
+    // Last, once nothing else can refuse the install.
+    package::unpack(root, archive, &verified)
+}
+/// Every package version each app keeps, current and for rollback, by app ID.
+fn kept_packages(
+    state: &Inventory,
+) -> std::collections::BTreeMap<String, std::collections::BTreeSet<String>> {
+    state
+        .plugins
+        .iter()
+        .map(|app| {
+            let versions = app
+                .package
+                .iter()
+                .chain(
+                    app.history
+                        .iter()
+                        .filter_map(|version| version.package.as_ref()),
+                )
+                .cloned()
+                .collect();
+            (app.manifest.id.clone(), versions)
+        })
+        .collect()
+}
+/// Each installed package's logo, for `extensions.list`, read from its files and checked
+/// against its digest list. A quarantined app shows none: a logo is decoration, and a
+/// familiar one beside an app the host no longer trusts would say otherwise.
+fn report_icons(packages: Option<&Path>, state: &mut Inventory) {
+    let Some(root) = packages else {
+        return;
+    };
+    for plugin in &mut state.plugins {
+        let Some(digest) = plugin
+            .package
+            .as_deref()
+            .filter(|_| plugin.quarantined.is_none())
+        else {
+            continue;
+        };
+        match package::installed_icon(root, &plugin.manifest.id, digest) {
+            Ok(icon) => plugin.icon = icon,
+            Err(reason) => log::warn!("{}: no logo shown: {reason}", plugin.manifest.id),
+        }
+    }
 }
 /// [`configure`] on the desktop's layout with no secret store, for the lifecycle tests
 /// that name an inventory by its file (see [`Apps`]'s `From<PathBuf>`).
@@ -985,6 +1283,20 @@ fn configure(
     secrets: &dyn srelens_plugin_host::SecretStore,
     input: Configure,
 ) -> Result<Inventory, String> {
+    // A catalog package is downloaded before the inventory is locked: every other change
+    // waits on that lock, and a download may take the whole of its timeout.
+    let downloaded = match &input {
+        Configure::InstallCatalogPackage {
+            id,
+            sha256,
+            package_sha256,
+            ..
+        } => {
+            apps.packages.as_ref().ok_or(NO_PACKAGES)?;
+            Some(apps.catalog.download_package(id, sha256, package_sha256)?)
+        }
+        _ => None,
+    };
     let store = &*apps.inventory;
     let _lock = store.lock()?;
     let mut state = read(store)?;
@@ -1000,20 +1312,9 @@ fn configure(
             signature,
             reviewed_revision,
         } => {
-            let manifest = check_install(&source, &grants, signature.as_deref(), core)?;
+            let manifest = check_install(&source, &grants, signature.as_deref(), None, core)?;
             check_unsigned_policy(&manifest, signature.is_some(), state.allow_unsigned_apps)?;
-            let current_revision = state
-                .plugins
-                .iter()
-                .find(|app| app.manifest.id == manifest.id)
-                .map(|app| app.revision);
-            if current_revision != reviewed_revision {
-                return Err("App changed since permission review; review this update again".into());
-            }
-            let checksum = format!(
-                "{:x}",
-                <sha2::Sha256 as sha2::Digest>::digest(source.as_bytes())
-            );
+            let checksum = package::sha256_hex(source.as_bytes());
             let origin = if apps.catalog.lists_release(&manifest.id, &checksum) {
                 Source::Catalog
             } else {
@@ -1022,82 +1323,32 @@ fn configure(
             let signature_proof = signature.map(|signature| SignatureProof {
                 manifest: source,
                 signature,
+                digests: None,
             });
-            let revision = take_revision(&mut state)?;
-            let previous = state
-                .plugins
-                .iter()
-                .position(|p| p.manifest.id == manifest.id)
-                .map(|i| state.plugins.remove(i));
-            // An update keeps the app's settings and clusters, and the version it replaces
-            // for rollback.
-            let (settings, history, contexts, allow_loopback_http) = match previous {
-                Some(Installed {
-                    signature_proof: replaced_proof,
-                    manifest: replaced,
-                    grants: replaced_grants,
-                    revision: replaced_revision,
-                    source: replaced_source,
-                    installed_at: replaced_at,
-                    settings,
-                    mut history,
-                    contexts,
-                    allow_loopback_http,
-                    ..
-                }) => {
-                    history.insert(
-                        0,
-                        PreviousVersion {
-                            signature_proof: replaced_proof,
-                            manifest: replaced,
-                            grants: replaced_grants,
-                            revision: replaced_revision,
-                            source: replaced_source,
-                            installed_at: replaced_at,
-                        },
-                    );
-                    history.truncate(KEPT_VERSIONS);
-                    // Only what the new version still declares, and still
-                    // accepts, carries over (#542).
-                    (
-                        manifest.retain_settings(settings),
-                        history,
-                        contexts,
-                        allow_loopback_http,
-                    )
-                }
-                None => (Default::default(), Vec::new(), None, false),
-            };
-            state.plugins.push(Installed {
-                signature_proof,
-                quarantined: None,
-                policy_blocked: None,
-                manifest,
-                grants,
-                enabled: true,
-                revision,
-                settings,
-                source: origin,
-                installed_at: now(),
-                history,
-                contexts,
-                allow_loopback_http,
-            });
-            state
-                .plugins
-                .sort_by(|a, b| a.manifest.id.cmp(&b.manifest.id));
-            // Kept versions give way, oldest first, before the saved inventory outgrows its
-            // limit; the update itself is not refused. Other apps' versions are left alone.
-            while saved_form(&state)?.len() > MAX_INVENTORY_BYTES {
-                let updated = state
-                    .plugins
-                    .iter_mut()
-                    .find(|p| p.revision == revision)
-                    .ok_or("the updated app is missing from the inventory")?;
-                if updated.history.pop().is_none() {
-                    break;
-                }
-            }
+            install(
+                &mut state,
+                Incoming {
+                    manifest,
+                    grants,
+                    reviewed_revision,
+                    signature_proof,
+                    source: origin,
+                    package: None,
+                },
+            )?;
+        }
+        Configure::InstallPackage {
+            package,
+            grants,
+            reviewed_revision,
+        } => install_package(apps, &mut state, core, &package, grants, reviewed_revision)?,
+        Configure::InstallCatalogPackage {
+            grants,
+            reviewed_revision,
+            ..
+        } => {
+            let archive = downloaded.ok_or("The catalog package was not downloaded")?;
+            install_package(apps, &mut state, core, &archive, grants, reviewed_revision)?;
         }
         Configure::Rollback {
             id,
@@ -1124,7 +1375,7 @@ fn configure(
                 return Err(format!("{reason}. Reinstall it from the Catalog."));
             }
             if let Some(proof) = &target.signature_proof {
-                verify_proof(proof, &target.manifest)?;
+                verify_proof(proof, &target.manifest, target.package.as_deref())?;
             }
             validate_app(&target.manifest, &grants, core)?;
             check_unsigned_policy(
@@ -1143,6 +1394,7 @@ fn configure(
             app.manifest = target.manifest;
             app.grants = grants;
             app.source = target.source;
+            app.package = target.package;
             app.installed_at = target.installed_at;
             app.quarantined = None;
             // A new revision, so views pinned to the rolled-away version refresh.
@@ -1227,6 +1479,10 @@ fn configure(
     }
     apply_unsigned_policy(&mut state);
     write(store, &state)?;
+    // Under the same lock as every install, so no version is removed while one unpacks.
+    if let Some(root) = &apps.packages {
+        package::prune(root, &kept_packages(&state));
+    }
     secret_store::sweep(secrets, &state);
     streams::announce(&store.key(), &state);
     Ok(state)
@@ -1244,6 +1500,21 @@ struct ValidateIn {
     #[serde(default, deserialize_with = "limits::signature")]
     #[schemars(length(equal = 64))]
     signature: Option<Vec<u8>>,
+    /// For a package's manifest (#562): the package's digest list, exactly as
+    /// `extensions.packageManifest` or `extensions.catalogManifest` returned it, at most
+    /// 64 KiB. The manifest must be the one it names, and `signature` is over the list.
+    #[serde(default, deserialize_with = "limits::digests")]
+    #[schemars(length(max = 65536))]
+    digests: Option<String>,
+}
+/// `extensions.packageManifest`: a package file to verify for review.
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct PackageIn {
+    /// The `.srelens-extension` file as base64: at most 16 MiB once decoded.
+    #[serde(deserialize_with = "limits::package")]
+    #[schemars(with = "String")]
+    package: Vec<u8>,
 }
 #[derive(Serialize, Deserialize, JsonSchema)]
 struct ValidationReport {
@@ -1533,7 +1804,13 @@ fn register_apps(
         }
         None => Arc::new(srelens_plugin_host::NoSecretStore),
     };
-    catalog::register(reg, apps.catalog.clone(), core.clone());
+    catalog::register(
+        reg,
+        apps.catalog.clone(),
+        core.clone(),
+        apps.packages.is_some(),
+    );
+    let packages = apps.packages.clone();
     resource::register(reg, path.clone(), core.clone(), cache.clone());
     // One snapshot of each granted reader, shared by table columns, dashboard
     // cards and a card's target page, so the three agree and list it once.
@@ -1549,10 +1826,12 @@ fn register_apps(
         move |_| {
             let p = p.clone();
             let s = s.clone();
+            let packages = packages.clone();
             async move {
                 tokio::task::spawn_blocking(move || {
                     let mut state = read(&p)?;
                     secret_store::report(s.as_ref(), &mut state);
+                    report_icons(packages.as_deref(), &mut state);
                     Ok(state)
                 })
                 .await
@@ -1592,7 +1871,7 @@ fn register_apps(
                 let state = tokio::task::spawn_blocking(move || read(&p))
                     .await.map_err(|e| CapabilityError::Handler(e.to_string()))?
                     .map_err(CapabilityError::Handler)?;
-                let (errors, permission_diff) = match check_install(&input.manifest, &input.grants, input.signature.as_deref(), c) {
+                let (errors, permission_diff) = match check_install(&input.manifest, &input.grants, input.signature.as_deref(), input.digests.as_deref(), c) {
                     Err(problems) => (problems.0, None),
                     Ok(manifest) => {
                         // Reported where the app writes or runs code: its actions, else its exec bindings.
@@ -1608,6 +1887,21 @@ fn register_apps(
                 };
                 Ok::<_, CapabilityError>(ValidationReport { errors, permission_diff })
             }
+        },
+    ));
+    reg.register(Capability::typed::<PackageIn, catalog::Review, _, _>(
+        "extensions.packageManifest",
+        "Verify an app package file (.srelens-extension) and return its manifest for permission review; does not install it",
+        Annotations::READ_ONLY,
+        move |input: PackageIn| async move {
+            tokio::task::spawn_blocking(move || {
+                let verified = package::read(&input.package, &mut package::Discard)?;
+                package::check_installable(&verified)?;
+                Ok(catalog::Review::of_package(&verified))
+            })
+            .await
+            .map_err(|e| CapabilityError::Handler(e.to_string()))?
+            .map_err(CapabilityError::Handler)
         },
     ));
     let reader_snapshots = snapshots.clone();
@@ -2157,6 +2451,7 @@ mod tests {
             &format!("{source} "),
             &["k8s.listCustomResource".into()],
             Some(signature),
+            None,
             fake_core(),
         )
         .unwrap_err();
@@ -2203,6 +2498,7 @@ mod tests {
                 revision: previous.revision,
                 source: previous.source,
                 installed_at: previous.installed_at,
+                package: previous.package,
             });
         }
         state.plugins.push(app);
@@ -3719,6 +4015,7 @@ mod tests {
             "extensions.resolveReverseLinks",
             "extensions.catalog",
             "extensions.catalogManifest",
+            "extensions.packageManifest",
             "extensions.validate",
             "extensions.streams",
             "extensions.pods",
@@ -3730,7 +4027,7 @@ mod tests {
         let store = reg.get("extension.secretStore").unwrap().annotations;
         assert!(store.requires_confirm && store.sensitive && !store.read_only);
         let mcp = srelens_mcp::McpServer::new(Arc::new(reg));
-        assert_eq!(mcp.list_tools().len(), 16);
+        assert_eq!(mcp.list_tools().len(), 17);
         use srelens_mcp::{stdio::handle_request, Transport};
         for args in [
             json!({"action":"install","manifest":manifest(),"grants":["k8s.listCustomResource"]}),

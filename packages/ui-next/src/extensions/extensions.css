@@ -316,6 +316,11 @@
 .extension-access-diff { min-width: 0; }
 .extension-access-diff ul { margin: 4px 0; padding-left: 18px; }
 .extension-access-diff li { max-width: 100%; overflow-x: auto; white-space: nowrap; font-family: var(--font-mono); }
+/* A package's files (#562): machine paths, one line each, each with its size. */
+.extension-package-files { min-width: 0; }
+.extension-package-files ul { margin: 4px 0; padding-left: 18px; }
+.extension-package-files li { max-width: 100%; overflow-x: auto; white-space: nowrap; }
+.extension-package-size { color: var(--ink-muted, var(--fl-color-text-muted)); }
 .extension-problems { color: var(--sev, var(--fl-color-danger)); }
 .extension-problems p { margin: 0; }
 .extension-problems ul { display: grid; gap: 4px; margin: 6px 0 0; padding-left: 18px; }

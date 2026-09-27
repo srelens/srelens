@@ -92,6 +92,15 @@ it("keeps the legend's counts exact when the ring exaggerates a sliver", async (
   expect(screen.getByText("Error: 1")).toBeTruthy();
 });
 
+const packageIcon = `data:image/svg+xml;base64,${btoa("<svg xmlns=\"http://www.w3.org/2000/svg\"/>")}`;
+it("draws the installed package's logo in the app's page navigation (#562)", async () => {
+  const packaged = { ...plugin, icon: packageIcon } as unknown as InstalledExtension;
+  render(<ExtensionWorkspace plugin={packaged} page={packaged.manifest.contributions.pages[1]} context="staging" />);
+  const navigation = await screen.findByRole("navigation", { name: "Flux pages" });
+  expect(navigation.querySelector("[data-extension-logo]")?.getAttribute("data-extension-logo")).toBe("package");
+  expect(navigation.querySelector("image")?.getAttribute("href")).toBe(packageIcon);
+});
+
 it("parts adjacent segments with the surface, so two neutrals never meet edge to edge", () => {
   // Suspended and Unknown are both neutral inks, too close to tell apart by
   // colour; a surface gap between them reads at 3:1 or better in every theme.

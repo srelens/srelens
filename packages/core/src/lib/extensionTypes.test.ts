@@ -39,6 +39,8 @@ const tables: Record<string, Record<string, "required" | "optional">> = {
     history: "required",
     contexts: "optional",
     allowLoopbackHttp: "optional",
+    package: "optional",
+    icon: "optional",
   } satisfies Presence<InstalledExtension>,
   PreviousVersion: {
     signatureProof: "optional",
@@ -47,10 +49,12 @@ const tables: Record<string, Record<string, "required" | "optional">> = {
     revision: "required",
     source: "required",
     installedAt: "required",
+    package: "optional",
   } satisfies Presence<InstalledExtension["history"][number]>,
   SignatureProof: {
     manifest: "required",
     signature: "required",
+    digests: "optional",
   } satisfies Presence<NonNullable<InstalledExtension["signatureProof"]>>,
   Manifest: {
     $schema: "optional",

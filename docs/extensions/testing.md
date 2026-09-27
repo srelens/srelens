@@ -51,7 +51,8 @@ handler's consent gate.
 | `cargo test -p srelens-plugin-host --test sandbox_conformance -- --ignored --test-threads=1` | The #571 spike's sandbox checks and two more, through the production backend for this OS. Needs the OS sandbox, a network, and on Linux `SRELENS_SANDBOX_CGROUP_ROOT` naming a delegated cgroup. The `sandbox-conformance` CI job runs it on Linux and Windows ([sidecar-protocol.md](sidecar-protocol.md#sandbox)) |
 | `cargo test -p srelens-plugin-host --lib fuzzing` | Manifest decoding, validation and parsing on arbitrary bytes and on edits of the example manifests: no panic, a value or a coded problem, the 256 KiB limit to the byte, and an accepted manifest re-serializes to an equal one |
 | `cargo test -p srelens-registry` | Inventory lifecycle, quarantine, catalog parsing and caching, signing, app capabilities |
-| `cargo test -p srelens-registry --lib fuzzing` | The same properties for catalog parsing, publisher signature verification and the inventory reader with its legacy migration, starting from `crates/registry/tests/fixtures` |
+| `cargo test -p srelens-registry --lib package` | The `.srelens-extension` format ([packages.md](packages.md)): tampered, missing and extra files, links, traversal and layout paths, oversized archives and bombs, trailing data, the digest list's exact form, and a valid package that installs, reverifies, updates, rolls back and is pruned. The fixture packages' digest lists are regenerated, and the signed one re-signed with the test publisher's key, by `UPDATE_CATALOG=1 cargo test -p srelens-registry` |
+| `cargo test -p srelens-registry --lib fuzzing` | The same properties for catalog parsing, publisher signature verification, the package reader (on arbitrary bytes, on archives of arbitrary entries and on edits of the fixture packages) and the inventory reader with its legacy migration, starting from `crates/registry/tests/fixtures` |
 | `cargo test -p srelens-kube --lib gitops` | Resource inspection, events, GitOps action allowlist, guards and conditional PATCH |
 | `cargo test -p srelens-server` | Web-host denials |
 | `packages/core/src/lib/extensionManifestSchema.test.ts` | Every example manifest validates against the committed schema and names it in `$schema` |
@@ -145,8 +146,12 @@ number of installed apps; at 50 it is close to its target. See
 ## Fuzzing
 
 The parsers that read extension input from outside the host have cargo-fuzz targets in
-`fuzz/`: `manifest`, `catalog`, `signed-manifest` and `inventory`. `signed-manifest` reads
-one byte giving the signature's length, the signature, then the manifest.
+`fuzz/`: `manifest`, `catalog`, `signed-manifest`, `package` and `inventory`.
+`signed-manifest` reads one byte giving the signature's length, the signature, then the
+manifest. `package` reads one mode byte, then a package: when the byte is odd, an
+uncompressed tar that the target compresses itself, so the fuzzer explores the archive and
+its checks rather than guessing gzip checksums. Its seeds are the fixture packages in
+`crates/registry/tests/fixtures/packages`.
 
 Each target calls one function in its crate's `fuzzing` module, and the `fuzzing` property
 tests above call the same function, so a property is written once. `cargo test` runs a
