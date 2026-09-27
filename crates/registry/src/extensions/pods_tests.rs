@@ -565,8 +565,14 @@ async fn a_pod_outside_the_selector_or_the_grant_is_refused() {
     ] {
         assert!(host.frames(channel).is_empty(), "{channel} was opened");
     }
-    // Every follow the cluster was asked for was one the scope admitted.
-    let asked: Vec<String> = host
+    // Every follow the cluster was asked for was one the scope admitted. Each
+    // follow starts on its own task, after its open returned: wait for all three,
+    // in whatever order they reached the cluster.
+    eventually("the three follows", || {
+        host.cluster.log_asks.lock().unwrap().len() >= 3
+    })
+    .await;
+    let mut asked: Vec<String> = host
         .cluster
         .log_asks
         .lock()
@@ -574,9 +580,10 @@ async fn a_pod_outside_the_selector_or_the_grant_is_refused() {
         .iter()
         .map(|a| format!("{}/{}", a.namespace, a.pod))
         .collect();
+    asked.sort();
     assert_eq!(
         asked,
-        ["team/web-1", "team/web-2", "cert-manager/webhook-1"]
+        ["cert-manager/webhook-1", "team/web-1", "team/web-2"]
     );
 }
 
