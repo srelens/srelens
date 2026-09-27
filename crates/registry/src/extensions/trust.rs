@@ -1190,7 +1190,6 @@ mod tests {
     /// and its shipped srelens delegation holds the key every published release was
     /// signed with, so apps installed before #559 go on verifying.
     #[test]
-    #[ignore = "until the key ceremony replaces trust/root.json and trust/publishers.json (#559)"]
     fn the_pinned_root_verifies_and_delegates_org_srelens_to_the_release_key() {
         let pinned = TrustRoot::open(
             include_bytes!("trust/root.json"),

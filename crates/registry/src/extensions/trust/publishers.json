@@ -1,3 +1,12 @@
-{
-  "placeholder": "The publisher delegations this build ships go here: a JSON array of signed publisher documents, written by the key ceremony in docs/extensions/trust.md."
-}
+[
+  {
+    "payloadType": "application/vnd.srelens.publisher+json",
+    "payload": "ewogICJfdHlwZSI6ICJwdWJsaXNoZXIiLAogICJ2ZXJzaW9uIjogMSwKICAiaWQiOiAic3JlbGVucyIsCiAgIm5hbWUiOiAic3JlbGVucyIsCiAgImtleXMiOiBbCiAgICB7CiAgICAgICJrZXl0eXBlIjogImVkMjU1MTkiLAogICAgICAic2NoZW1lIjogImVkMjU1MTkiLAogICAgICAia2V5dmFsIjogewogICAgICAgICJwdWJsaWMiOiAiMGRhNGZiOGM5M2NhMmY4MTRmYjIxZDI0OWQzYmNmMGE5NjNhYmRmZjE3ZTY4YTg2YjJlYWFlZWU2ZDY5ODdlNSIKICAgICAgfQogICAgfQogIF0sCiAgIm5hbWVzcGFjZXMiOiBbCiAgICAib3JnLnNyZWxlbnMiCiAgXQp9Cg==",
+    "signatures": [
+      {
+        "keyid": "5fe7412b6449372a315109f192c89d9146bfc83cc7cf1b2bd0ba531222a1b062",
+        "sig": "0eUWs/MK7/vnOlAWEgUp5sUyfGyOWMoJVMBwO1gYsHS4dSrnnehCv018lUYM0lIa5A2QmrCZBiwoDDp9jwYtAQ=="
+      }
+    ]
+  }
+]
