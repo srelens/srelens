@@ -714,9 +714,9 @@ are not run on macOS.
 What the supervisor (#572) does until these are decided:
 
 - **A missing limit layer:** it refuses the app, and says which layer is missing.
-- **AppContainer profiles:** one per app. Uninstalling an app deletes its profile, with
-  its folder and its registry storage (#573). Nothing removes them when srelens itself is
-  uninstalled.
+- **AppContainer profiles:** one per app. Uninstalling an app tries to delete its profile,
+  with its folder and its registry storage (#573). A profile that cannot be deleted is
+  logged and stays. Nothing removes them when srelens itself is uninstalled.
 - **Broker callbacks:** on stdio, answered by the app facade the UI calls (#573).
 - **Landlock:** the target is ABI 5 plus the ABI 6 scopes, best effort. The floor is any
   kernel that enforces some of the ruleset.

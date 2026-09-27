@@ -438,8 +438,9 @@ directory it may write, and nothing else.
   inventory, so a later app with the same ID starts empty. An update keeps it. A sidecar may
   have taken its own access away from a directory in it; srelens gives the owner access back
   before removing, and a directory it cannot remove now is tried again with the next change,
-  without holding up the others. On Windows the app's AppContainer profile is deleted too,
-  with its folder and its registry storage.
+  without holding up the others. On Windows srelens also deletes the app's AppContainer
+  profile, with its folder and its registry storage. That is best effort too: a profile it
+  cannot delete is logged and left, and the change goes ahead.
 
 ### Size limit
 
@@ -464,10 +465,13 @@ How it is held:
   `RLIMIT_FSIZE`, and ignores `SIGXFSZ`, so a write past it fails with `EFBIG` and the
   sidecar lives on.
 
-What this guarantees, plainly: no single file past the limit on Linux and macOS, and a
-directory past it for at most one measurement interval everywhere. Between two
-measurements a sidecar can write several files each under the limit, so the directory can
-exceed it by what the sidecar can write in 2 s. That is the same kind of guarantee as the
+What this guarantees, plainly:
+- **On Linux and macOS,** no single file past the limit, for any sidecar.
+- **For a sidecar that does not race the walk** (below), a directory past the limit for at
+  most one measurement interval, everywhere. Between two measurements such a sidecar can
+  write several files each under the limit, so the directory can exceed it by what the
+  sidecar can write in 2 s.
+- **For a sidecar that does race the walk,** the directory limit does not hold. That is the same kind of guarantee as the
 macOS memory watchdog ([ADR](../design/plugin-architecture.md#decision-macos-limits-are-host-enforced)),
 for disk: a filesystem quota needs privileges srelens does not have.
 
@@ -517,8 +521,12 @@ temporary directories, in `/tmp`, `/var/tmp` and `/dev/shm`, and where its progr
 checks that a hard link to the kubeconfig cannot be made inside the directory, that one
 cannot be read through a symbolic link there, that the kubeconfig's mode cannot be
 changed, and that the size limit holds. On macOS 27.0 arm64 all of them passed by hand, and
-on Linux (kernel 7.0, arm64) in a privileged container with a delegated cgroup. The Windows AppContainer's own registry storage is
-outside this: it is not a path, and whether a sidecar can write there was not checked
+on Linux (kernel 7.0, arm64) in a privileged container with a delegated cgroup.
+
+The Windows AppContainer's own registry storage is outside this: it is not a path, and it
+may be writable to the sidecar while the app is installed. Whether it is was not checked,
+and nothing counts it against the limit. It goes with the profile when the app is
+uninstalled; locking it down while the app is installed is left for the escape review
 ([#744](https://github.com/srelens/srelens/issues/744)).
 
 ## Not yet
