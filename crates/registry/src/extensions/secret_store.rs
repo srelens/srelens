@@ -14,7 +14,7 @@
 //! Nothing here returns, logs or quotes a value: the answer is `{set}`, every
 //! refusal is written without the value, and the input's `secret` refuses a
 //! value it cannot take without repeating it.
-use super::{read, write, Installed, Inventory, InventoryStore, Store};
+use super::{read_under, write, Installed, Inventory, Store, TrustRoot};
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
@@ -165,7 +165,9 @@ pub(super) fn report(store: &dyn SecretStore, state: &mut Inventory) {
 /// caller's text, and a caller can put a secret there. An inventory that
 /// cannot be read answers `false`, which shows less, never more.
 pub fn declares_secret_setting(inventory: &Path, id: &str, setting: Option<&str>) -> bool {
-    let Ok(state) = read(inventory) else {
+    // Only the declarations are read, so the root the proofs are checked against does not
+    // change the answer.
+    let Ok(state) = read_under(inventory, &TrustRoot::pinned()) else {
         return false;
     };
     state
@@ -198,12 +200,13 @@ fn is_secret(app: &Installed, setting: &str) -> bool {
 }
 
 fn change(
-    inventory: &dyn InventoryStore,
+    inventory: &Store,
     store: &dyn SecretStore,
     input: SecretIn,
 ) -> Result<SecretOut, String> {
     let _lock = inventory.lock()?;
-    let mut state = read(inventory)?;
+    // The inventory as saved, so no verdict of a policy is written back (#578).
+    let mut state = inventory.read_saved()?;
     let set = match input {
         SecretIn::Set {
             id,
@@ -258,10 +261,11 @@ fn change(
             false
         }
     };
-    write(inventory, &state)?;
+    write(&**inventory, &state)?;
     sweep(store, &state);
     // An inventory write like any other, so the app streams and the windows
-    // listening to them hear of it (#566). They hear only that it changed.
+    // listening to them hear of it (#566), with each app as the policy lets it be.
+    super::app_policy::govern(&mut state, inventory.policy().as_deref());
     super::streams::announce(&inventory.key(), &state);
     Ok(SecretOut { set })
 }
@@ -275,7 +279,7 @@ pub(super) fn register(reg: &mut Registry, inventory: Store, store: Arc<dyn Secr
             let inventory = inventory.clone();
             let store = store.clone();
             async move {
-                tokio::task::spawn_blocking(move || change(&*inventory, store.as_ref(), input))
+                tokio::task::spawn_blocking(move || change(&inventory, store.as_ref(), input))
                     .await
                     .map_err(|e| CapabilityError::Handler(e.to_string()))?
                     .map_err(CapabilityError::Handler)

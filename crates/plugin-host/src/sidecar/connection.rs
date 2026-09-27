@@ -105,8 +105,9 @@ pub enum StreamEvent {
     Failed(String),
 }
 
-/// Host capabilities a sidecar may call. #573 implements the broker; until
-/// then [`NoBroker`] refuses every call.
+/// Host capabilities a sidecar may call: [`super::CapabilityBroker`] (#573),
+/// or [`NoBroker`], which refuses every call. A call is dropped unfinished
+/// when the sidecar cancels it or the session ends.
 pub trait Broker: Send + Sync + 'static {
     fn call<'a>(
         &'a self,
@@ -115,7 +116,8 @@ pub trait Broker: Send + Sync + 'static {
     ) -> Pin<Box<dyn Future<Output = Result<Value, RpcError>> + Send + 'a>>;
 }
 
-/// Refuses every call a sidecar makes, until #573.
+/// Refuses every call a sidecar makes: for a sidecar the host gives no
+/// capabilities, and for tests.
 pub struct NoBroker;
 
 impl Broker for NoBroker {
@@ -127,7 +129,7 @@ impl Broker for NoBroker {
         Box::pin(async move {
             Err(RpcError::new(
                 code::METHOD_NOT_FOUND,
-                format!("srelens does not take calls from sidecars yet; `{method}` was refused"),
+                format!("srelens takes no calls from this sidecar; `{method}` was refused"),
             ))
         })
     }
@@ -176,6 +178,10 @@ struct State {
     /// The id the next stream gets; every id below it has been opened.
     next_stream: u64,
     open: HashMap<u64, OpenStream>,
+    /// The sidecar's own calls being answered, by their id as JSON text (so
+    /// `1` and `"1"` differ), each with the way to cancel it: taken when it is
+    /// cancelled, the entry itself removed once its answer is queued.
+    calls: HashMap<String, Option<oneshot::Sender<()>>>,
     /// Why the session ended, once it has.
     ended: Option<String>,
 }
@@ -413,6 +419,21 @@ impl Connection {
                 self.answer_call(id, method, params, broker.clone())
             }
             Incoming::Notification { method, params } => match method.as_str() {
+                // The sidecar cancelling one of its own calls. One already
+                // answered, or never made, crossed the answer: ignored.
+                method::CANCEL => {
+                    if let Some(id) = params.get("id") {
+                        let cancel = self
+                            .state()
+                            .calls
+                            .get_mut(&id.to_string())
+                            .and_then(Option::take);
+                        if let Some(cancel) = cancel {
+                            let _ = cancel.send(());
+                        }
+                    }
+                    Ok(())
+                }
                 method::STREAM_DATA => {
                     let stream = self.stream_of(&params)?;
                     let Some(data) = params.get("data") else {
@@ -436,9 +457,7 @@ impl Connection {
                     self.finish(stream, StreamEvent::Failed(message.to_owned()));
                     Ok(())
                 }
-                // Nothing else is sent to the host yet: a sidecar's
-                // cancellation of its own call (no call takes long enough
-                // to cancel until #573), or a method from a newer SDK.
+                // Nothing else is sent to the host: a method from a newer SDK.
                 _ => Ok(()),
             },
         }
@@ -500,6 +519,14 @@ impl Connection {
         params: Value,
         broker: Arc<dyn Broker>,
     ) -> Result<(), Violation> {
+        // An id is how the sidecar cancels a call and matches its answer, so
+        // two in flight at once could not be told apart.
+        let key = id.to_string();
+        if self.state().calls.contains_key(&key) {
+            return Err(Violation(format!(
+                "sent call {key} while srelens is still answering its earlier call with that id"
+            )));
+        }
         let Ok(place) = self.inner.answers.clone().try_reserve_owned() else {
             return Err(Violation(format!(
                 "is not reading its standard input: {ANSWER_BUFFER} answers to its calls are waiting for it"
@@ -516,18 +543,51 @@ impl Connection {
             place.send(protocol::response(&id, &Err(error)));
             return Ok(());
         };
+        let (cancel, cancelled) = oneshot::channel();
+        {
+            let mut state = self.state();
+            if state.ended.is_some() {
+                // Nothing is waiting for the answer; the call is not made.
+                return Ok(());
+            }
+            state.calls.insert(key.clone(), Some(cancel));
+        }
+        let connection = self.clone();
         tokio::spawn(async move {
-            let outcome = broker.call(&name, params).await;
+            let cancelled_error =
+                || RpcError::new(code::REQUEST_CANCELLED, format!("`{name}` was cancelled"));
+            let outcome = tokio::select! {
+                // A cancellation already accepted wins over an answer ready
+                // in the same moment: the sidecar was told it is cancelled.
+                biased;
+                // Cancelled by the sidecar, or the session ended.
+                _ = cancelled => Err(cancelled_error()),
+                outcome = broker.call(&name, params) => outcome,
+            };
             drop(permit);
+            // Settled under the lock the reader takes a cancellation under,
+            // and checks a new call's id under: if it took this call's
+            // cancellation before now, even after the answer above was
+            // chosen, that is the answer; and a call reusing the id is
+            // admitted only once this answer is queued ahead of its own.
+            let mut state = connection.state();
+            let accepted = matches!(state.calls.remove(&key), Some(None));
+            let outcome = if accepted {
+                Err(cancelled_error())
+            } else {
+                outcome
+            };
             place.send(protocol::response(&id, &outcome));
+            drop(state);
         });
         Ok(())
     }
 
     /// End the session: every request still waiting gets `why`, every open
-    /// stream fails with it, and nothing new is admitted.
+    /// stream fails with it, every call of the sidecar's is cancelled, and
+    /// nothing new is admitted.
     pub(crate) fn end(&self, why: &str) {
-        let (pending, open) = {
+        let (pending, open, calls) = {
             let mut state = self.state();
             if state.ended.is_none() {
                 state.ended = Some(why.to_owned());
@@ -535,8 +595,22 @@ impl Connection {
             (
                 std::mem::take(&mut state.pending),
                 std::mem::take(&mut state.open),
+                // Each call's cancellation is taken and its entry left: a
+                // worker whose answer was already chosen then finds it
+                // accepted, and answers that the call was cancelled. The
+                // worker removes the entry when it queues that answer.
+                state
+                    .calls
+                    .values_mut()
+                    .filter_map(Option::take)
+                    .collect::<Vec<_>>(),
             )
         };
+        // No one will read the answers to the sidecar's calls: stop them. A
+        // broker call that has begun a write finishes it on its own task.
+        for cancel in calls {
+            let _ = cancel.send(());
+        }
         for (_, waiter) in pending {
             let _ = waiter.send(Err(RequestError::Ended(why.to_owned())));
         }
@@ -547,6 +621,13 @@ impl Connection {
 
     pub(crate) fn is_ended(&self) -> bool {
         self.state().ended.is_some()
+    }
+
+    /// App requests in flight and streams open now, for the Inspector (#575).
+    pub(crate) fn load(&self) -> (usize, usize) {
+        let in_flight =
+            self.inner.limits.max_concurrent_requests - self.inner.requests.available_permits();
+        (in_flight, self.state().open.len())
     }
 
     /// Read the sidecar's stdout until it closes or breaks the protocol.
@@ -1198,6 +1279,222 @@ mod tests {
             call_from_sidecar(&connection, json!("c-2"), "k8s.listPods"),
             Ok(())
         );
+    }
+
+    /// A broker whose calls never finish on their own, and which counts the
+    /// ones dropped unfinished.
+    struct Pending {
+        dropped: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    struct Dropped(Arc<std::sync::atomic::AtomicUsize>);
+
+    impl Drop for Dropped {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    impl Broker for Pending {
+        fn call<'a>(
+            &'a self,
+            _method: &'a str,
+            _params: Value,
+        ) -> Pin<Box<dyn Future<Output = Result<Value, RpcError>> + Send + 'a>> {
+            let dropped = Dropped(self.dropped.clone());
+            Box::pin(async move {
+                let _dropped = dropped;
+                std::future::pending::<()>().await;
+                Ok(Value::Null)
+            })
+        }
+    }
+
+    fn pending() -> (Arc<dyn Broker>, Arc<std::sync::atomic::AtomicUsize>) {
+        let dropped = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let broker: Arc<dyn Broker> = Arc::new(Pending {
+            dropped: dropped.clone(),
+        });
+        (broker, dropped)
+    }
+
+    fn call_with(
+        connection: &Connection,
+        broker: &Arc<dyn Broker>,
+        id: Value,
+    ) -> Result<(), Violation> {
+        connection.handle(
+            Incoming::Request {
+                id,
+                method: "host/read".into(),
+                params: json!({}),
+            },
+            broker,
+        )
+    }
+
+    fn cancel_call(connection: &Connection, broker: &Arc<dyn Broker>, id: Value) {
+        connection
+            .handle(
+                Incoming::Notification {
+                    method: method::CANCEL.into(),
+                    params: json!({ "id": id }),
+                },
+                broker,
+            )
+            .expect("a cancellation is not a violation");
+    }
+
+    /// The next answer to one of the sidecar's calls, failing at a virtual
+    /// deadline like `sent`.
+    async fn answered(lines: &mut Outbox) -> Value {
+        let next = tokio::time::timeout(Duration::from_secs(24 * 3600), lines.answers.recv());
+        let line = next.await.expect("no answer came").expect("an answer");
+        serde_json::from_str(&line).expect("JSON")
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_call_the_sidecar_cancels_is_answered_as_cancelled_and_its_work_dropped() {
+        let (connection, mut lines) = Connection::new(limits());
+        let (broker, dropped) = pending();
+        call_with(&connection, &broker, json!("c-1")).unwrap();
+        tokio::task::yield_now().await;
+        cancel_call(&connection, &broker, json!("c-1"));
+        let reply = answered(&mut lines).await;
+        assert_eq!(reply["id"], "c-1");
+        assert_eq!(reply["error"]["code"], code::REQUEST_CANCELLED);
+        assert_eq!(dropped.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    /// A cancellation srelens accepted is what the sidecar is told, even when
+    /// the broker's answer was ready in the same moment: polled in random
+    /// order, the two would each win half the time.
+    #[tokio::test(start_paused = true)]
+    async fn an_accepted_cancellation_wins_over_an_answer_ready_at_the_same_time() {
+        for n in 0..64 {
+            let (connection, mut lines) = Connection::new(limits());
+            // NoBroker answers at once: its answer is ready when first polled.
+            call_from_sidecar(&connection, json!(n), "host/read").unwrap();
+            cancel_call(&connection, &broker(), json!(n));
+            let reply = answered(&mut lines).await;
+            assert_eq!(
+                reply["error"]["code"],
+                code::REQUEST_CANCELLED,
+                "round {n}: {reply}"
+            );
+        }
+    }
+
+    /// A broker whose answer is ready in the same moment the reader accepts
+    /// the sidecar's cancellation of it: it hands the connection the
+    /// `$/cancelRequest` itself, as the reader would, then answers.
+    struct CancelledAsItAnswers {
+        connection: Connection,
+        id: Value,
+    }
+
+    impl Broker for CancelledAsItAnswers {
+        fn call<'a>(
+            &'a self,
+            _method: &'a str,
+            _params: Value,
+        ) -> Pin<Box<dyn Future<Output = Result<Value, RpcError>> + Send + 'a>> {
+            Box::pin(async move {
+                cancel_call(&self.connection, &broker(), self.id.clone());
+                Ok(json!({"rows": []}))
+            })
+        }
+    }
+
+    /// Past the point the broker's answer was chosen, a cancellation the
+    /// reader accepts before the answer is queued still wins: which answer the
+    /// sidecar gets is settled under the lock the cancellation is taken under.
+    #[tokio::test(start_paused = true)]
+    async fn a_cancellation_accepted_after_the_answer_is_chosen_but_before_it_is_queued_wins() {
+        let (connection, mut lines) = Connection::new(limits());
+        let broker: Arc<dyn Broker> = Arc::new(CancelledAsItAnswers {
+            connection: connection.clone(),
+            id: json!("c-1"),
+        });
+        call_with(&connection, &broker, json!("c-1")).unwrap();
+        let reply = answered(&mut lines).await;
+        assert_eq!(reply["id"], "c-1");
+        assert_eq!(reply["error"]["code"], code::REQUEST_CANCELLED, "{reply}");
+    }
+
+    /// A broker whose answer is ready in the same moment the session ends.
+    struct EndedAsItAnswers {
+        connection: Connection,
+    }
+
+    impl Broker for EndedAsItAnswers {
+        fn call<'a>(
+            &'a self,
+            _method: &'a str,
+            _params: Value,
+        ) -> Pin<Box<dyn Future<Output = Result<Value, RpcError>> + Send + 'a>> {
+            Box::pin(async move {
+                self.connection.end("The extension was stopped");
+                Ok(json!({"rows": []}))
+            })
+        }
+    }
+
+    /// The session ending cancels every call still being answered, one whose
+    /// answer was already chosen included: `end` takes each call's
+    /// cancellation and leaves its entry, so the worker sees it accepted.
+    #[tokio::test(start_paused = true)]
+    async fn a_call_whose_answer_was_chosen_as_the_session_ended_is_answered_as_cancelled() {
+        let (connection, mut lines) = Connection::new(limits());
+        let broker: Arc<dyn Broker> = Arc::new(EndedAsItAnswers {
+            connection: connection.clone(),
+        });
+        call_with(&connection, &broker, json!("c-1")).unwrap();
+        let reply = answered(&mut lines).await;
+        assert_eq!(reply["id"], "c-1");
+        assert_eq!(reply["error"]["code"], code::REQUEST_CANCELLED, "{reply}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_call_id_still_being_answered_cannot_be_used_again_until_it_is() {
+        let (connection, mut lines) = Connection::new(limits());
+        let (broker, _) = pending();
+        call_with(&connection, &broker, json!(1)).unwrap();
+        // The number 1 and the string "1" are different ids.
+        call_with(&connection, &broker, json!("1")).unwrap();
+        let Err(Violation(why)) = call_with(&connection, &broker, json!(1)) else {
+            panic!("a second call 1 was taken while the first was in flight");
+        };
+        assert!(why.contains("still answering"), "{why}");
+        cancel_call(&connection, &broker, json!(1));
+        assert_eq!(answered(&mut lines).await["id"], 1);
+        assert_eq!(call_with(&connection, &broker, json!(1)), Ok(()));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_cancellation_for_a_call_already_answered_or_never_made_is_ignored() {
+        let (connection, mut lines) = Connection::new(limits());
+        call_from_sidecar(&connection, json!("c-1"), "host/read").unwrap();
+        answered(&mut lines).await;
+        cancel_call(&connection, &broker(), json!("c-1"));
+        cancel_call(&connection, &broker(), json!("never"));
+        let quiet = tokio::time::timeout(Duration::from_secs(1), lines.answers.recv()).await;
+        assert!(quiet.is_err(), "a second answer was written: {quiet:?}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ending_the_session_cancels_every_call_in_flight() {
+        let (connection, _lines) = Connection::new(limits());
+        let (broker, dropped) = pending();
+        for id in 0..3 {
+            call_with(&connection, &broker, json!(id)).unwrap();
+        }
+        tokio::task::yield_now().await;
+        connection.end("The extension process exited unexpectedly");
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(dropped.load(std::sync::atomic::Ordering::SeqCst), 3);
     }
 
     #[tokio::test(start_paused = true)]

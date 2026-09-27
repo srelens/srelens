@@ -6560,6 +6560,7 @@ dependencies = [
  "landlock",
  "libc",
  "proptest",
+ "regex",
  "schemars 0.8.22",
  "seccompiler",
  "semver",
@@ -6582,6 +6583,7 @@ version = "0.15.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
+ "chrono",
  "dirs",
  "flate2",
  "libc",

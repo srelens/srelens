@@ -45,9 +45,14 @@ mitigation and the risk that remains.
   such comparison: its review compares capability IDs, and for `network.http` the hosts
   and requests, but not reader or action bindings
   ([threat-model.md](threat-model.md#malicious-app)).
-- **Official identities are reserved.** IDs under `org.srelens.` install only with the
-  srelens publisher signature, so a pasted manifest cannot take an official app's ID
-  ([distribution.md](distribution.md#signed-official-releases)).
+- **Publisher identities are reserved.** The signed catalog delegates app ID namespaces
+  to publishers, `org.srelens` to srelens, and an ID in one installs only with that
+  publisher's signature, as a manifest or as a package. A pasted manifest cannot take a
+  publisher's ID, and a publisher's key cannot sign outside its namespaces
+  ([distribution.md](distribution.md#signed-releases-and-publishers), [trust.md](trust.md)).
+- **The catalog is signed.** The host trusts a catalog only when the catalog role of
+  the root it pins signed it, and refuses one that has expired or is older than the last
+  it verified, keeping that one ([trust.md](trust.md#what-the-host-refuses)).
 - **A logo never implies trust.** An app's logo comes only from its installed package, as
   an image checked against the package's digest list; nothing is chosen by app ID, and the
   signature label, not the logo, says who published an app ([packages.md](packages.md#logos)).
@@ -75,6 +80,12 @@ mitigation and the risk that remains.
   row, the one shared catalog cache is written only by the server, and no app secret is
   kept there until per-user secret storage exists
   ([capabilities.md](capabilities.md#web-host)).
+- **The web host holds every user's apps to its operator's policy.** Allowed and
+  blocked apps, publishers, unsigned apps, capabilities, write actions, a host ceiling
+  for `network.http` and required apps are applied on every call, not only at install,
+  so an app installed before the policy changed is refused from its next call
+  ([WEB.md](../WEB.md#extension-policy)). The policy comes from deployment config and
+  nothing writes it over the API.
 - **Every write is recorded locally, wherever it came from.** A mutating or
   sensitive capability call is appended to `audit.jsonl` whether an agent made
   it over MCP or a person clicked it in srelens — with the source, the app and
@@ -90,7 +101,6 @@ mitigation and the risk that remains.
 
 Declarative support does not claim these protections:
 
-- third-party publisher signing ([#559](https://github.com/srelens/srelens/issues/559))
 - signing key rotation ([#560](https://github.com/srelens/srelens/issues/560))
 - revocation and a kill switch ([#561](https://github.com/srelens/srelens/issues/561))
 - executable apps and OS sandboxing ([#521](https://github.com/srelens/srelens/issues/521))

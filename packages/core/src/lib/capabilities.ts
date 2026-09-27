@@ -57,6 +57,13 @@ export interface CapabilityFacts {
    * asked to approve. Render it with {@link renderConfirmTemplate}.
    */
   confirm: string | null;
+  /**
+   * For srelens's own UI only, and never an MCP tool: an app's log and runtime
+   * metrics (#575), which an agent would hand to its LLM provider. Written only
+   * where true (a JSON import reads it as `boolean`), so every other row is an
+   * MCP tool.
+   */
+  uiOnly?: boolean;
 }
 
 /** See {@link CapabilityFacts.impact}. */

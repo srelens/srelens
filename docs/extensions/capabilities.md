@@ -18,6 +18,8 @@ Consent rules are in [permissions.md](permissions.md).
 | `extensions.queryProvider` | Read-only | Run one query of an app's metric, log or trace provider (#569) for a resource: `{id, revision, provider, context, namespace, resourceKind, name, rangeSeconds?}` in (`resourceKind` one of the provider's `forKinds`, `rangeSeconds` 300–604800, default 3600), and `{kind: "metrics", chart}` (the [timeseries](native-components.md#timeseries) data), `{kind: "logs", lines: [{time, source, line, truncated?}], truncated}` or `{kind: "traces", traces: [{traceId, rootService?, rootName?, start?, durationMs?}], truncated}` out. Authorized as `extensions.read` is; the query goes through the provider's `network.http` binding with every rule a request is held to. Desktop only, since `network.http` is. See [Metric, log and trace providers](manifest.md#metric-log-and-trace-providers). |
 | `extensions.pods` | Read-only | The pods one of an app's pod bindings may reach now (#567), for a view to offer: `{id, revision, capability, context, namespace, name?}` in, `{pods: [{name, namespace, containers, phase, ready}], services?, truncated?, scope}` out. Held to the authority and scope a stream open is: the object `name` names and its own selector, or the namespaces the permission grants; the host matches every pod itself. See [streams.md](streams.md#pod-sources). |
 | `extensions.streams` | Read-only | The open app streams in this process and what each app has sent: open, opened, messages, payload bytes, streams stopped for the rate and opens refused for the cap, with the limits. For the Inspector ([#575](https://github.com/srelens/srelens/issues/575)); the streams themselves are opened by host commands, not capabilities. See [streams.md](streams.md). |
+| `extensions.inspect` | Read-only, **UI-only** | What an installed app is doing now: its process state and reason, the supervisor's actions, memory against its limit, requests and latency, open streams and watches, recent errors. Never an MCP tool. See [inspector.md](inspector.md). |
+| `extensions.logs` | Read-only, **UI-only** | An installed app's log, trace to error, redacted: the lines after `after` at `minLevel` or above. Never an MCP tool. See [inspector.md](inspector.md). |
 | `extensions.catalog` | Read-only | Browse the catalog, from a 24-hour cache. Reports the host's supported API versions as `hostApiVersions`; the deprecated `hostApiVersion` still gives the newest. |
 | `extensions.catalogManifest` | Read-only | Download and verify one catalog release for review. Does not install it. On a host that installs packages, a release that lists one is reviewed as its package, and the answer adds `package: {sha256, digests, files, icon?}` ([packages.md](packages.md#in-the-catalog)). |
 | `extensions.packageManifest` | Read-only | Verify a `.srelens-extension` file, sent as base64 (`{"package"}`, at most 16 MiB decoded), and answer `{manifest, signature, package}` for review, as `extensions.catalogManifest` does. Does not install it. A package that fails any check is refused with why ([packages.md](packages.md#what-the-host-refuses)). |
@@ -224,7 +226,9 @@ reports the request as accepted rather than as complete.
   answered from the server's copy. The server checks it hourly and fetches it again
   once it is a day old. Verification is per install, per user, as on the desktop: each
   install downloads its release and checks the checksum, identity, API range and, for
-  official apps, the publisher signature; each load re-verifies every signed manifest.
+  an app in a delegated namespace, the publisher signature; each load re-verifies every
+  signed manifest. The server verifies the shared catalog's signature as a desktop does
+  ([trust.md](trust.md)).
 - **Declared actions run through `extensions.action` only.** It reaches a host
   primitive through the user's own installed app — the exact group/kind/plural its
   reader binds, its revision, grants and cluster scope rechecked on the call, and the
@@ -237,12 +241,28 @@ reports the request as accepted rather than as complete.
   (`extension_stream_open`, `extension_stream_cancel`, `extension_stream_close_view`)
   are refused, so pages, columns and cards read on Refresh and say they are not live;
   see [streams.md](streams.md#hosts).
-- **No `network.http` on the web.** A request there would leave from the shared
-  server — from its network position, and to its own loopback — not from the person's
-  computer. A web user's registry has no `network.http` (#568), so an app that binds it
-  is refused there with `EXTENSION_UNSUPPORTED_TARGET` ("This host does not provide
-  network.http"), and `extensions.read` has nothing to send. A provider (#569) sends its
-  query through a `network.http` binding, so there are no providers on the web either.
+- **`network.http` on the web only under the operator's ceiling.** A request there
+  leaves from the shared server, from its network position, not from the person's
+  computer. So a web user's registry has `network.http` (#568) only when the server's
+  extension policy names hosts in `networkCeiling`. Without one, an app that binds it
+  is refused with `EXTENSION_UNSUPPORTED_TARGET` ("This host does not provide
+  network.http"), and `extensions.read` has nothing to send. With one, every request
+  and redirect must go to a host both the app and the ceiling allow, over HTTPS only:
+  plain HTTP to loopback would reach the server itself, so the per-app loopback switch
+  is refused there. A provider (#569) sends its query through a `network.http`
+  binding, so `extensions.queryProvider` answers there under the same ceiling; a log
+  provider's follow is an app stream, which the web does not run yet.
+- **Held to the operator's extension policy** ([#578](https://github.com/srelens/srelens/issues/578)).
+  The server's policy (`AppPolicy` in `crates/registry/src/extensions/app_policy.rs`,
+  read from `SRELENS_EXTENSION_POLICY`; see [WEB.md](../WEB.md#extension-policy)) says
+  which app IDs, publishers, capabilities and hosts are allowed, whether unsigned apps
+  and write actions are, and which apps users must keep. Every read of a user's
+  inventory applies the policy in force. An app it refuses is reported as
+  `policyBlocked` and disabled, and every `extensions.*` call through it is refused,
+  including for an app installed before the policy changed. `extensions.validate`
+  reports the refusal as `EXTENSION_POLICY_REFUSED`, and install, update, rollback and
+  enable refuse it. A required app can't be removed or disabled. `extensions.list`
+  reports the policy as `policy`, which is never saved with the inventory.
 - **No app secrets on the web yet.** A web user's registry has no secret store, so
   `extension.secretStore` is not registered there (and is refused before dispatch
   too), and `extensions.list` reports the store unavailable: the web host keeps no app

@@ -18,6 +18,7 @@ use super::super::providers::{
 use super::pods::{line_frame, Pending};
 use super::{ExtensionStreams, OpenStreamIn, OpenStreamOut, StreamSourceIn};
 use serde_json::{json, Value};
+use srelens_kube::logs::Line;
 use srelens_plugin_host::ProviderKind;
 use srelens_streams::app::{StreamEmitter, StreamOwner, StreamWindow};
 use srelens_streams::EventSink;
@@ -155,7 +156,10 @@ impl Follow {
                     self.at_cursor = vec![key];
                 }
             }
-            pending.push(line_frame(&entry.source, entry.text(self.timestamps)));
+            pending.push(line_frame(
+                &entry.source,
+                Line::whole(entry.text(self.timestamps)),
+            ));
         }
         while let Some(frame) = pending.frame() {
             send(tx, frame)?;

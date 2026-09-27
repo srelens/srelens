@@ -47,6 +47,7 @@ Freelens and OpenLens packages are not supported.
 | [ui-contributions.md](ui-contributions.md) | Pages, dashboards, detail tabs, requirement checks, resource inspection |
 | [capabilities.md](capabilities.md) | The `extensions.*` capabilities, MCP, host GitOps actions |
 | [streams.md](streams.md) | The generic stream contract: frames, view ownership, limits, metrics |
+| [inspector.md](inspector.md) | The Extension Inspector and per-app logs: levels, redaction, local-only metrics |
 | [security.md](security.md) | Trust boundary and what is not yet protected |
 | [threat-model.md](threat-model.md) | Assets, adversaries, mitigations with their code, residual risk and open work |
 | [distribution.md](distribution.md) | Catalog, signed releases, local installation |
@@ -63,8 +64,8 @@ install are yours alone ([#515](https://github.com/srelens/srelens/issues/515)).
 To exercise the local installer instead:
 
 1. Copy `examples/extensions/argocd.json` or `flux.json` and change its `id` to one
-   outside the reserved namespace, for example `org.example.argocd`. IDs under
-   `org.srelens.` install only as signed releases.
+   outside any publisher's namespace, for example `org.example.argocd`. IDs under
+   `org.srelens.` install only as releases signed by srelens.
 2. Open **Settings → Apps → Install a local manifest**, paste it, review the
    manifest, then install and grant `k8s.listCustomResource`. Flux also requests
    `k8s.listEvents` for its dashboard.

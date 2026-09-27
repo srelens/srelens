@@ -13652,7 +13652,9 @@ impl App {
                         .and_then(|v| v.as_str())
                         .map(String::from);
                     if let Some(line) = payload.get("line").and_then(|v| v.as_str()) {
-                        logs.push_entry(source, line.to_string());
+                        let truncated =
+                            payload.get("truncated").and_then(|v| v.as_bool()) == Some(true);
+                        logs.push_log_line(source, line.to_string(), truncated);
                     } else if let Some(status) = payload.get("status").and_then(|v| v.as_str()) {
                         logs.push_entry(source, format!("--- log status: {} ---", status));
                     }

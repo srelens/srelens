@@ -13,13 +13,19 @@ pub(in crate::extensions) fn fixture(name: &str) -> PathBuf {
         .join(name)
 }
 
+/// Who may sign what in these tests: the delegations the test root ships, the test
+/// publisher's `test.signed` among them (#559).
+pub(in crate::extensions) fn shipped() -> Delegations {
+    crate::extensions::TrustRoot::pinned().shipped()
+}
+
 /// A fixture package, packed.
 pub(in crate::extensions) fn packed(name: &str) -> Vec<u8> {
     pack(&fixture(name)).unwrap()
 }
 
 /// Every file of a fixture package, `digests.json` and its signature included.
-fn files_of(name: &str) -> BTreeMap<String, Vec<u8>> {
+pub(in crate::extensions) fn files_of(name: &str) -> BTreeMap<String, Vec<u8>> {
     files_under(&fixture(name))
         .unwrap()
         .into_iter()
@@ -68,7 +74,7 @@ impl Raw {
         self.entry(tar::EntryType::Regular, path.as_bytes(), data)
     }
 
-    fn files(self, files: &BTreeMap<String, Vec<u8>>) -> Self {
+    pub(in crate::extensions) fn files(self, files: &BTreeMap<String, Vec<u8>>) -> Self {
         files
             .iter()
             .fold(self, |raw, (path, data)| raw.file(path, data))
@@ -84,7 +90,11 @@ impl Raw {
 }
 
 /// The digest list for `files` (which must not hold one), for `id` at `version`.
-fn digests_for(files: &BTreeMap<String, Vec<u8>>, id: &str, version: &str) -> Vec<u8> {
+pub(in crate::extensions) fn digests_for(
+    files: &BTreeMap<String, Vec<u8>>,
+    id: &str,
+    version: &str,
+) -> Vec<u8> {
     let files: Vec<Value> = files
         .iter()
         .filter(|(path, _)| path.as_str() != DIGESTS && path.as_str() != SIGNATURE)
@@ -97,7 +107,7 @@ fn digests_for(files: &BTreeMap<String, Vec<u8>>, id: &str, version: &str) -> Ve
 }
 
 fn refused(archive: &[u8]) -> String {
-    match read(archive, &mut Discard) {
+    match read(archive, &mut Discard, &shipped()) {
         Ok(package) => panic!("accepted a package for {}", package.list.id),
         Err(reason) => reason,
     }
@@ -139,6 +149,7 @@ fn fixture_digest_lists_are_current() {
         &digests,
         &fs::read(signed.join(SIGNATURE)).unwrap(),
         &manifest,
+        &shipped(),
     )
     .unwrap();
 }
@@ -146,7 +157,7 @@ fn fixture_digest_lists_are_current() {
 #[test]
 fn a_valid_package_is_read_whole() {
     let archive = packed("example");
-    let package = read(&archive, &mut Discard).unwrap();
+    let package = read(&archive, &mut Discard, &shipped()).unwrap();
     assert_eq!(package.list.id, "org.example.packaged");
     assert_eq!(package.list.version, "1.0.0");
     assert_eq!(package.signature, None);
@@ -183,12 +194,19 @@ fn a_valid_package_is_read_whole() {
 
 #[test]
 fn a_signed_package_carries_its_publishers_signature_over_the_digest_list() {
-    let package = read(&packed("signed"), &mut Discard).unwrap();
+    let package = read(&packed("signed"), &mut Discard, &shipped()).unwrap();
     assert_eq!(package.list.id, "test.signed.packaged");
     let signature = package.signature.as_deref().unwrap();
-    verify_signed(&package.digests, signature, &package.manifest).unwrap();
+    verify_signed(&package.digests, signature, &package.manifest, &shipped()).unwrap();
     // The signature is over the list, not the manifest.
-    assert!(signing::verify_for(&package.list.id, package.manifest.as_bytes(), signature).is_err());
+    assert!(signing::verify_for(
+        &package.list.id,
+        package.manifest.as_bytes(),
+        signature,
+        None,
+        &shipped()
+    )
+    .is_err());
     let icon = package.review().icon.unwrap();
     assert!(icon.starts_with("data:image/png;base64,"), "{icon}");
 }
@@ -249,12 +267,40 @@ fn a_digest_list_changed_after_signing_is_refused() {
     files.insert(SIGNATURE.into(), test_publisher_sign(&digests));
     assert_refused(
         &Raw::new().files(&files).gz(),
-        "not trusted for this app ID",
+        "No publisher is trusted to sign",
     );
     // Not an Ed25519 signature at all.
     let mut files = files_of("signed");
     files.insert(SIGNATURE.into(), vec![0; 12]);
     assert_refused(&Raw::new().files(&files).gz(), "64-byte Ed25519 signature");
+}
+
+/// A package signer is held to its publisher's namespaces as a single-file release's is
+/// (#559): the test publisher, delegated `test.signed`, cannot sign a package that names an
+/// app of srelens's, and the signature naming its key does not get it past that.
+#[test]
+fn a_package_signed_outside_its_publishers_namespace_is_refused() {
+    let mut files = files_of("signed");
+    let manifest = String::from_utf8(files[MANIFEST].clone())
+        .unwrap()
+        .replace("test.signed.packaged", "org.srelens.packaged");
+    files.insert(MANIFEST.into(), manifest.into_bytes());
+    let digests = digests_for(&files, "org.srelens.packaged", "1.0.0");
+    files.insert(SIGNATURE.into(), test_publisher_sign(&digests));
+    files.insert(DIGESTS.into(), digests.clone());
+    assert_refused(&Raw::new().files(&files).gz(), "signature is invalid");
+    let manifest = String::from_utf8(files[MANIFEST].clone()).unwrap();
+    let refused = verify_signed(
+        std::str::from_utf8(&digests).unwrap(),
+        &test_publisher_sign(&digests),
+        &manifest,
+        &shipped(),
+    )
+    .unwrap_err();
+    assert!(refused.contains("signature is invalid"), "{refused}");
+    // In its own namespace, the same key is its publisher's.
+    let package = read(&packed("signed"), &mut Discard, &shipped()).unwrap();
+    assert_eq!(package.signer.unwrap().name, "Test Publisher");
 }
 
 #[test]
@@ -349,7 +395,7 @@ fn paths_outside_the_package_or_its_layout_are_refused() {
         .entry(tar::EntryType::Directory, b"bin/linux-arm64/", b"")
         .files(&files)
         .gz();
-    read(&archive, &mut Discard).unwrap();
+    read(&archive, &mut Discard, &shipped()).unwrap();
 }
 
 #[test]
@@ -568,7 +614,7 @@ fn binaries_are_carried_but_not_installable_here() {
         DIGESTS.into(),
         digests_for(&files, "org.example.packaged", "1.0.0"),
     );
-    let package = read(&Raw::new().files(&files).gz(), &mut Discard).unwrap();
+    let package = read(&Raw::new().files(&files).gz(), &mut Discard, &shipped()).unwrap();
     assert!(package.carries_binaries());
     assert!(check_installable(&package)
         .unwrap_err()
@@ -588,8 +634,8 @@ fn entries(dir: &Path) -> Vec<String> {
 fn unpacking_puts_the_verified_files_in_the_apps_private_directory() {
     let root = tempfile::tempdir().unwrap();
     let archive = packed("example");
-    let package = read(&archive, &mut Discard).unwrap();
-    unpack(root.path(), &archive, &package).unwrap();
+    let package = read(&archive, &mut Discard, &shipped()).unwrap();
+    unpack(root.path(), &archive, &package, &shipped()).unwrap();
     let app = root.path().join("org.example.packaged");
     assert_eq!(entries(&app), [package.digest.clone()]);
     let version = app.join(&package.digest);
@@ -617,7 +663,7 @@ fn unpacking_puts_the_verified_files_in_the_apps_private_directory() {
 
     // Unpacked again, the copy is replaced and nothing else is left behind.
     fs::write(version.join("README.md"), b"changed on disk").unwrap();
-    unpack(root.path(), &archive, &package).unwrap();
+    unpack(root.path(), &archive, &package, &shipped()).unwrap();
     assert_eq!(entries(&app), [package.digest.clone()]);
     assert_eq!(
         fs::read(version.join("README.md")).unwrap(),
@@ -645,10 +691,12 @@ fn pruning_keeps_exactly_the_versions_the_inventory_names() {
     let root = tempfile::tempdir().unwrap();
     for name in ["example", "signed"] {
         let archive = packed(name);
-        let package = read(&archive, &mut Discard).unwrap();
-        unpack(root.path(), &archive, &package).unwrap();
+        let package = read(&archive, &mut Discard, &shipped()).unwrap();
+        unpack(root.path(), &archive, &package, &shipped()).unwrap();
     }
-    let example = read(&packed("example"), &mut Discard).unwrap().digest;
+    let example = read(&packed("example"), &mut Discard, &shipped())
+        .unwrap()
+        .digest;
     let app = root.path().join("org.example.packaged");
     // An older version, and what an install that stopped part-way leaves.
     fs::create_dir(app.join("0".repeat(64))).unwrap();
@@ -687,8 +735,8 @@ fn pruning_keeps_exactly_the_versions_the_inventory_names() {
 fn an_interrupted_reinstall_gets_its_replaced_copy_back() {
     let root = tempfile::tempdir().unwrap();
     let archive = packed("example");
-    let package = read(&archive, &mut Discard).unwrap();
-    unpack(root.path(), &archive, &package).unwrap();
+    let package = read(&archive, &mut Discard, &shipped()).unwrap();
+    unpack(root.path(), &archive, &package, &shipped()).unwrap();
     let app = root.path().join("org.example.packaged");
     let version = app.join(&package.digest);
     let aside = app.join(format!("{REPLACED_PREFIX}{}", package.digest));

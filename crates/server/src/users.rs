@@ -59,6 +59,9 @@ pub struct UserEnvs {
     /// The app catalog every user of this server reads (#515). Only the server
     /// refreshes it (`serve`); users' capabilities never write it.
     catalog: srelens_registry::SharedCatalog,
+    /// The extension policy every user's apps are held to (#578), read again by each
+    /// of their calls.
+    policy: srelens_registry::SharedPolicy,
     /// One app-inventory writer lock per user, kept across environment rebuilds:
     /// a request still running on an old environment and one on its replacement
     /// write the same row.
@@ -119,9 +122,15 @@ fn write_private_file(path: &Path, contents: &[u8]) -> Result<(), String> {
 }
 
 impl UserEnvs {
-    pub fn new(factory: RegistryFactory, data_dir: PathBuf, public_url: String) -> Self {
+    pub fn new(
+        factory: RegistryFactory,
+        data_dir: PathBuf,
+        public_url: String,
+        policy: srelens_registry::SharedPolicy,
+    ) -> Self {
         Self {
             factory,
+            policy,
             catalog: srelens_registry::SharedCatalog::new(shared_catalog_path(&data_dir)),
             inventory_locks: Mutex::new(HashMap::new()),
             data_dir,
@@ -131,9 +140,22 @@ impl UserEnvs {
         }
     }
 
+    /// These environments with the shared catalog, and every user's app signatures,
+    /// verified against `trust` rather than the root this build pins: a test's root.
+    pub fn with_catalog_trust(mut self, trust: srelens_registry::TrustRoot) -> Self {
+        self.catalog =
+            srelens_registry::SharedCatalog::with_trust(shared_catalog_path(&self.data_dir), trust);
+        self
+    }
+
     /// The app catalog every user reads, for the server to keep fresh.
     pub fn catalog(&self) -> &srelens_registry::SharedCatalog {
         &self.catalog
+    }
+
+    /// The extension policy every user's apps are held to (#578).
+    pub fn policy(&self) -> &srelens_registry::SharedPolicy {
+        &self.policy
     }
 
     /// Remove ALL materialized runtime files (startup hygiene: a crash may
@@ -223,7 +245,8 @@ impl UserEnvs {
             .await;
 
         // The user's own apps: their inventory row, and the catalog every user
-        // shares. Never a file under `dir`, which goes with the environment.
+        // shares, held to the server's extension policy on every call (#578).
+        // Never a file under `dir`, which goes with the environment.
         let inventory_lock = self
             .inventory_locks
             .lock()
@@ -239,7 +262,8 @@ impl UserEnvs {
                 inventory_lock,
             )),
             self.catalog.clone(),
-        );
+        )
+        .governed_by(self.policy.clone());
         let registry = Arc::new((self.factory)(cache.clone(), paths.clone(), apps));
         let streams = Arc::new(crate::streams::UserStreams::new(cache.clone()));
         let env = Arc::new(UserEnv {
@@ -362,7 +386,12 @@ mod tests {
             .await
             .unwrap();
 
-        let envs = UserEnvs::new(factory(), data_dir.clone(), "http://127.0.0.1:8080".into());
+        let envs = UserEnvs::new(
+            factory(),
+            data_dir.clone(),
+            "http://127.0.0.1:8080".into(),
+            Default::default(),
+        );
         let env = envs.env_for(&db, &k, user.id).await.unwrap();
         assert_eq!(env.paths.len(), 1);
         let on_disk = std::fs::read_to_string(&env.paths[0]).unwrap();
@@ -413,7 +442,12 @@ mod tests {
             .await
             .unwrap();
 
-        let envs = UserEnvs::new(factory(), data_dir.clone(), "http://127.0.0.1:8080".into());
+        let envs = UserEnvs::new(
+            factory(),
+            data_dir.clone(),
+            "http://127.0.0.1:8080".into(),
+            Default::default(),
+        );
         let a = envs.env_for(&db, &k, alice.id).await.unwrap();
         let b = envs.env_for(&db, &k, bob.id).await.unwrap();
         assert_eq!(a.paths.len(), 1);
@@ -441,7 +475,12 @@ mod tests {
         db.put_kubeconfig(user.id, "kc", &k, "contexts: []\n", 1)
             .await
             .unwrap();
-        let envs = Arc::new(UserEnvs::new(factory(), data_dir.clone(), "http://127.0.0.1:8080".into()));
+        let envs = Arc::new(UserEnvs::new(
+            factory(),
+            data_dir.clone(),
+            "http://127.0.0.1:8080".into(),
+            Default::default(),
+        ));
         // Fire many concurrent first-time env_for for the same user.
         let mut handles = vec![];
         for _ in 0..8 {
@@ -473,7 +512,12 @@ mod tests {
             .await
             .unwrap();
 
-        let envs = Arc::new(UserEnvs::new(factory(), data_dir.clone(), "http://127.0.0.1:8080".into()));
+        let envs = Arc::new(UserEnvs::new(
+            factory(),
+            data_dir.clone(),
+            "http://127.0.0.1:8080".into(),
+            Default::default(),
+        ));
         let hub = Arc::new(crate::ws::hub::WsHub::new());
 
         let env = envs.env_for(&db, &k, user.id).await.unwrap();
@@ -505,7 +549,12 @@ mod tests {
             .await
             .unwrap();
 
-        let envs = Arc::new(UserEnvs::new(factory(), data_dir.clone(), "http://127.0.0.1:8080".into()));
+        let envs = Arc::new(UserEnvs::new(
+            factory(),
+            data_dir.clone(),
+            "http://127.0.0.1:8080".into(),
+            Default::default(),
+        ));
         let hub = Arc::new(crate::ws::hub::WsHub::new());
 
         // Register a live WS connection for the user before building the env.
@@ -532,7 +581,12 @@ mod tests {
             .await
             .unwrap();
 
-        let envs = Arc::new(UserEnvs::new(factory(), data_dir.clone(), "http://127.0.0.1:8080".into()));
+        let envs = Arc::new(UserEnvs::new(
+            factory(),
+            data_dir.clone(),
+            "http://127.0.0.1:8080".into(),
+            Default::default(),
+        ));
         let hub = Arc::new(crate::ws::hub::WsHub::new());
 
         let env = envs.env_for(&db, &k, user.id).await.unwrap();
@@ -578,7 +632,12 @@ mod tests {
             .await
             .unwrap();
 
-        let envs = Arc::new(UserEnvs::new(factory(), data_dir.clone(), "http://127.0.0.1:8080".into()));
+        let envs = Arc::new(UserEnvs::new(
+            factory(),
+            data_dir.clone(),
+            "http://127.0.0.1:8080".into(),
+            Default::default(),
+        ));
         let hub = Arc::new(crate::ws::hub::WsHub::new());
 
         let env = envs.env_for(&db, &k, user.id).await.unwrap();
@@ -612,7 +671,12 @@ mod tests {
             .await
             .unwrap();
 
-        let envs = Arc::new(UserEnvs::new(factory(), data_dir.clone(), "http://127.0.0.1:8080".into()));
+        let envs = Arc::new(UserEnvs::new(
+            factory(),
+            data_dir.clone(),
+            "http://127.0.0.1:8080".into(),
+            Default::default(),
+        ));
         let hub = Arc::new(crate::ws::hub::WsHub::new());
 
         // Two tabs: register both, then only one drops.
@@ -651,7 +715,12 @@ mod tests {
             .await
             .unwrap();
 
-        let envs = Arc::new(UserEnvs::new(factory(), data_dir.clone(), "http://127.0.0.1:8080".into()));
+        let envs = Arc::new(UserEnvs::new(
+            factory(),
+            data_dir.clone(),
+            "http://127.0.0.1:8080".into(),
+            Default::default(),
+        ));
         let hub = Arc::new(crate::ws::hub::WsHub::new());
 
         // Bob is still connected; Alice is not.

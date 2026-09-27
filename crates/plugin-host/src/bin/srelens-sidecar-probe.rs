@@ -170,6 +170,50 @@ fn handle(method: &str, params: &Value) -> Result<Action, Fail> {
             std::fs::write(str_param(params, "path")?, str_param(params, "text")?)?;
             answer(json!({}))
         }
+        "write_bytes" => {
+            // `bytes` zeros, a MiB at a time, for the data directory's limit.
+            let len = params["bytes"].as_u64().ok_or("missing bytes".to_owned())?;
+            let mut file = std::fs::File::create(str_param(params, "path")?)?;
+            let chunk = vec![0u8; 1 << 20];
+            let mut left = len;
+            while left > 0 {
+                let n = left.min(chunk.len() as u64) as usize;
+                file.write_all(&chunk[..n])?;
+                left -= n as u64;
+            }
+            answer(json!({"bytes": len}))
+        }
+        "temp_dir" => answer(json!({"path": std::env::temp_dir()})),
+        "set_readonly" => {
+            // A metadata write: the mode on Linux and macOS, the read-only
+            // attribute on Windows. Nothing of the file's contents. By path
+            // (`chmod`), or with `by: "file"` through the open file (`fchmod`).
+            let path = str_param(params, "path")?;
+            let mut permissions = std::fs::metadata(path)?.permissions();
+            permissions.set_readonly(params["readonly"].as_bool().unwrap_or(true));
+            if params["by"] == "file" {
+                let file = std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(path)?;
+                file.set_permissions(permissions)?;
+            } else {
+                std::fs::set_permissions(path, permissions)?;
+            }
+            answer(json!({}))
+        }
+        "hard_link" => {
+            std::fs::hard_link(str_param(params, "from")?, str_param(params, "to")?)?;
+            answer(json!({}))
+        }
+        "symlink" => {
+            let (target, link) = (str_param(params, "target")?, str_param(params, "link")?);
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(target, link)?;
+            #[cfg(windows)]
+            std::os::windows::fs::symlink_file(target, link)?;
+            answer(json!({}))
+        }
         "tcp_connect" => {
             let addr: SocketAddr = str_param(params, "addr")?
                 .parse()

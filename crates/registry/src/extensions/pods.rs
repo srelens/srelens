@@ -19,6 +19,7 @@ use serde_json::Value;
 use srelens_capability::{Annotations, Capability, CapabilityError, Impact, Registry};
 use srelens_kube::app_pods::{Output, PodFacts, ReadError, ServiceFacts, Upstream};
 use srelens_kube::client_cache::ClientCache;
+use srelens_kube::logs::Line;
 use srelens_plugin_host::{Binding, Manifest, PodScope, POD_EXEC, POD_FORWARD, POD_LOGS};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -44,6 +45,9 @@ pub struct LogsAsk {
     pub tail_lines: i64,
     pub since_seconds: Option<i64>,
     pub timestamps: bool,
+    /// The most of one line the reader keeps (#747): the source's own cut, so
+    /// a long line is never held whole to be cut afterwards.
+    pub max_line_bytes: usize,
 }
 
 /// What a follow reports.
@@ -51,7 +55,7 @@ pub struct LogsAsk {
 pub enum LogEvent {
     /// The cluster opened the log stream.
     Connected,
-    Line(String),
+    Line(Line),
 }
 
 /// One run of an exec binding's command.
@@ -174,6 +178,7 @@ impl PodCluster for KubePods {
                 tail_lines: ask.tail_lines,
                 since_seconds: ask.since_seconds,
                 timestamps: ask.timestamps,
+                max_line_bytes: ask.max_line_bytes,
             },
             move |line| {
                 let _ = lines.send(LogEvent::Line(line));

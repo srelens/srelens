@@ -347,7 +347,7 @@ const rendered = (region?: HTMLElement) => {
 };
 
 /** Push lines into the buffer the screen is rendering. */
-function push(...lines: { source: string; text: string }[]) {
+function push(...lines: { source: string; text: string; truncated?: true }[]) {
   act(() => {
     h.state.lines = [...h.state.lines, ...lines];
     notify();
@@ -479,6 +479,22 @@ describe("Logs", () => {
       "14:07:43.900|api-8 · api|error|error pool timeout waited=30.0s in_use=5",
       "14:07:44.010|api-9 · api||GET /healthz 200 1ms",
     ]);
+  });
+
+  it("says beside a line the host cut that it was cut, and keeps the line as it came (#747)", async () => {
+    const region = await (draw(), body());
+    push({ ...line("api-7/api", "14:07:41.208000000", "info the start of it"), truncated: true }, LINES[1]);
+    // The note follows the text the container wrote, up to the cut. It is the
+    // screen's, drawn beside the line's text rather than in it, so the filter
+    // and an export never see it.
+    expect(rendered(region)).toEqual([
+      "14:07:41.208|api-7 · api|info|info the start of it [line cut: too long]",
+      "14:07:42.100|api-7 · otel-sidecar|warn|warn exporter queue is full",
+    ]);
+    const notes = Array.from(region.querySelectorAll(".logline")).map(
+      (row) => row.querySelector("[data-slot=message] .text-faint")?.textContent ?? null,
+    );
+    expect(notes).toEqual([" [line cut: too long]", null]);
   });
 
   it("leaves the level's colour to the kit rather than pairing one itself", async () => {

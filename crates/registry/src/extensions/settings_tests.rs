@@ -334,6 +334,7 @@ fn try_refresh_app(
         core.clone(),
         Configure::Install {
             signature: None,
+            key_id: None,
             manifest: value.to_string(),
             grants,
             reviewed_revision: None,
@@ -355,7 +356,7 @@ async fn refresh(
     let mut reg = Registry::new();
     resource::register(
         &mut reg,
-        Arc::new(path.to_path_buf()),
+        Store::file(path),
         core,
         srelens_kube::client_cache::ClientCache::new_many(vec![]),
     );

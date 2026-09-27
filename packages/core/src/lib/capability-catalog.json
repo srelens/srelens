@@ -45,6 +45,16 @@
     "confirm": "Allow this change[ to {resource}][ in cluster {cluster}]?"
   },
   {
+    "id": "extensions.inspect",
+    "readOnly": true,
+    "destructive": false,
+    "requiresConfirm": false,
+    "sensitive": false,
+    "impact": "low",
+    "confirm": null,
+    "uiOnly": true
+  },
+  {
     "id": "extensions.list",
     "readOnly": true,
     "destructive": false,
@@ -52,6 +62,16 @@
     "sensitive": false,
     "impact": "low",
     "confirm": null
+  },
+  {
+    "id": "extensions.logs",
+    "readOnly": true,
+    "destructive": false,
+    "requiresConfirm": false,
+    "sensitive": false,
+    "impact": "low",
+    "confirm": null,
+    "uiOnly": true
   },
   {
     "id": "extensions.packageManifest",

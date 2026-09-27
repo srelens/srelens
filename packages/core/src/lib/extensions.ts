@@ -391,12 +391,32 @@ export interface ExtensionManifest {
 /** Where a version came from: `catalog` is the exact bytes of a cached catalog release. */
 export type ExtensionSource = "local" | "catalog";
 /**
+ * Who signed an app, as the host verified it (#559): the publisher the catalog delegates the
+ * app's ID namespace to. Shown as "Signed by <name>".
+ */
+export interface ExtensionSigner {
+  id: string;
+  name: string;
+}
+/** A signed document (#559): a DSSE envelope over the document's exact bytes. */
+export interface ExtensionSignedDocument {
+  payloadType: string;
+  /** The document's exact bytes, in base64. */
+  payload: string;
+  signatures: Array<{ keyid?: string; sig: string }>;
+}
+/**
  * A publisher signature the host keeps and checks on every load. For a package (#562) it is
  * over `digests`, the package's digest list, which names `manifest`; otherwise over `manifest`.
  */
 export interface ExtensionSignatureProof {
   manifest: string;
   signature: number[];
+  /**
+   * The signed publisher delegation that vouched for the signature (#559), kept so the host
+   * can verify it with no catalog at hand. Absent when the host's own delegations vouch for it.
+   */
+  delegation?: ExtensionSignedDocument;
   digests?: string;
 }
 /** A version an update replaced, kept so it can be restored. */
@@ -417,6 +437,8 @@ export interface InstalledExtension {
   quarantined?: string;
   /** Host-computed unsigned-app policy denial; the affected app is disabled. */
   policyBlocked?: string;
+  /** Who signed the installed version, when its proof verified on this read (#559). */
+  signedBy?: ExtensionSigner;
   manifest: ExtensionManifest;
   enabled: boolean;
   revision: number;
@@ -462,6 +484,37 @@ export interface ExtensionInventory {
    * answer; read it from the list.
    */
   secretStore?: ExtensionSecretStoreState;
+  /**
+   * The administrator's policy the host holds these apps to (#578), reported by every
+   * read on a host that has one (the web server). Never stored, and never written over
+   * the API.
+   */
+  policy?: ExtensionPolicy;
+}
+/**
+ * What an administrator allows apps to be and do on a host (#578). A `null` list
+ * allows everything of its kind; the host refuses what the policy does not allow, at
+ * install and on every call.
+ */
+export interface ExtensionPolicy {
+  /** Only these app IDs may be installed and used; `null` allows any. */
+  allowedApps?: string[] | null;
+  /** These app IDs may not be installed or used. */
+  blockedApps: string[];
+  /** Signed apps only from these publishers; `null` allows every one the host trusts. */
+  allowedPublishers?: string[] | null;
+  /** Whether apps with no publisher signature may be installed and used at all. */
+  allowUnsignedApps: boolean;
+  /** The host capabilities an app may be granted; `null` allows every one. */
+  allowedCapabilities?: string[] | null;
+  /** Whether an app may declare write actions. Commands in pods are `k8s.exec`, in `allowedCapabilities`. */
+  allowWriteActions: boolean;
+  /** The most `network.http` may reach; empty reaches no host. */
+  networkCeiling: string[];
+  /** Always false until executable apps have a per-user sidecar identity (#521). */
+  allowExecutableApps: boolean;
+  /** Apps every user keeps: one that is installed cannot be removed or disabled. */
+  requiredApps: string[];
 }
 /** The host's secret store, as `extensions.list` reports it (#543). */
 export interface ExtensionSecretStoreState {
@@ -471,7 +524,8 @@ export interface ExtensionSecretStoreState {
 }
 export type ExtensionChange =
   | { action: "unsignedApps"; allowUnsignedApps: boolean }
-  | { action: "install"; manifest: string; grants: string[]; signature?: number[]; reviewedRevision?: number }
+  /** `keyId` is the key the signature names (#559), as the catalog review returned it. */
+  | { action: "install"; manifest: string; grants: string[]; signature?: number[]; keyId?: string; reviewedRevision?: number }
   /** Installs a package file (#562), sent as base64; the host verifies it again. */
   | { action: "installPackage"; package: string; grants: string[]; reviewedRevision?: number }
   /**
@@ -561,14 +615,16 @@ export interface ExtensionPermissionDiff {
 /**
  * Checks a manifest exactly as installing it with these grants would, without installing.
  * For a package's manifest, `digests` is its digest list as the review returned it, and
- * `signature` is over that list.
+ * `signature` is over that list. `keyId` is the key the signature names (#559), and
+ * `signedBy` in the answer names the publisher when the signature verified.
  */
-export const validateExtension = (manifest: string, grants: string[], signature?: number[], digests?: string) =>
-  invokeCapability<{ errors: ExtensionValidationError[]; permissionDiff?: ExtensionPermissionDiff }>("extensions.validate", {
+export const validateExtension = (manifest: string, grants: string[], signature?: number[], digests?: string, keyId?: string) =>
+  invokeCapability<{ errors: ExtensionValidationError[]; permissionDiff?: ExtensionPermissionDiff; signedBy?: ExtensionSigner }>("extensions.validate", {
     manifest,
     grants,
     ...(signature ? { signature } : {}),
     ...(digests !== undefined ? { digests } : {}),
+    ...(signature && keyId ? { keyId } : {}),
   });
 /** What a package holds beyond its manifest, as the host verified it (#562). */
 export interface ExtensionPackageReview {
@@ -584,6 +640,10 @@ export interface ExtensionPackageReview {
 export interface ExtensionReview {
   manifest: string;
   signature?: number[] | null;
+  /** The key the signature names (#559), passed back to the install. */
+  keyId?: string;
+  /** Who signed it: the publisher delegated its namespace (#559). */
+  signedBy?: ExtensionSigner;
   package?: ExtensionPackageReview;
 }
 /** The largest package file the host accepts (#562). */
@@ -887,8 +947,25 @@ export interface ExtensionCatalogEntry {
   };
   testedHost: { repository: string; revision: string };
 }
+/** A publisher the signed catalog delegates app ID namespaces to (#559). */
+export interface ExtensionCatalogPublisher {
+  id: string;
+  name: string;
+  namespaces: string[];
+}
 export interface ExtensionCatalogSnapshot {
-  catalog: { schemaVersion: number; extensions: ExtensionCatalogEntry[] };
+  /**
+   * The last catalog the host verified against its pinned root (#559): refused when unsigned,
+   * expired, or older than one it already verified.
+   */
+  catalog: {
+    schemaVersion: number;
+    version: number;
+    /** When hosts stop trusting it, as an RFC 3339 time. */
+    expires: string;
+    publishers: ExtensionCatalogPublisher[];
+    extensions: ExtensionCatalogEntry[];
+  };
   fetchedAt: number;
   stale: boolean;
   error: string | null;
@@ -902,7 +979,9 @@ export const listExtensionCatalog = (refresh = false) =>
   invokeCapability<ExtensionCatalogSnapshot>("extensions.catalog", { refresh });
 /**
  * Returns the exact checksum-verified bytes for explicit permission review; for a release
- * the host installs as a package (#562), with the package's review.
+ * the host installs as a package (#562), with the package's review. When the app's
+ * namespace is delegated (#559), with the publisher signature, the key it names, and who
+ * signed it.
  */
 export const reviewCatalogExtension = (id: string, sha256: string) =>
   invokeCapability<ExtensionReview>("extensions.catalogManifest", { id, sha256 });
@@ -946,3 +1025,107 @@ export function onExtensionResourceChanged(listener: (resource: ExtensionResourc
 export function extensionResourceRoute(context:string,id:string,page:string,namespace:string,name:string) {
   return `${extensionRoute(context,id,page,namespace)}/${encodeURIComponent(name)}`;
 }
+
+/*
+ * An app's log and runtime metrics (#575). Both reads are for Settings → Apps only and are
+ * deliberately not MCP tools: an agent's context goes to its model provider, and a sidecar's
+ * stderr is third-party text. The host keeps both in memory only, never on disk.
+ */
+export type ExtensionLogLevel = "trace" | "debug" | "info" | "warn" | "error";
+/** The levels, least severe first: a minimum level shows itself and every one after it. */
+export const EXTENSION_LOG_LEVELS: readonly ExtensionLogLevel[] = ["trace", "debug", "info", "warn", "error"];
+export interface ExtensionLogLine {
+  /** Counts from 1 over the life of the app's log. */
+  seq: number;
+  /** Milliseconds since the Unix epoch. */
+  at: number;
+  level: ExtensionLogLevel;
+  /** `sidecar`: the app's own process wrote it on stderr; `host`: srelens wrote it. */
+  source: "sidecar" | "host";
+  /** Already redacted by the host. */
+  text: string;
+}
+/** Declarative apps have no process of their own. */
+export type ExtensionRuntime = "declarative" | "sidecar";
+export interface ExtensionOpenStream {
+  stream: string;
+  view: string;
+  revision: number;
+  source: string;
+  messages: number;
+  bytes: number;
+}
+export type ExtensionProcessState = "starting" | "running" | "restarting" | "disabled" | "refused" | "stopping" | "stopped";
+export type ExtensionProcessAction = "restart" | "viewLogs" | "disable";
+export interface ExtensionProcess {
+  state: ExtensionProcessState;
+  /** Why, in a sentence (redacted); for restarting, disabled and refused. */
+  reason: string | null;
+  /** The headline, such as "Extension process exited unexpectedly"; only when disabled. */
+  message: string | null;
+  /** What the supervisor offers from this state. */
+  actions: ExtensionProcessAction[];
+  /** The sidecar API version negotiated at start, while running. */
+  apiVersion: string | null;
+  pid: number | null;
+  /** Milliseconds since the Unix epoch, when the running process came up. */
+  startedAt: number | null;
+  /** While restarting. */
+  restart: { attempt: number; of: number; delayMs: number } | null;
+  launches: number;
+  unexpectedExits: number;
+  /** `bytes` is null where this OS does not measure it. */
+  memory: { bytes: number | null; limitBytes: number; enforcement: "kernel" | "host" | "missing" };
+  cpus: number;
+  rpc: {
+    answered: number;
+    failed: number;
+    timedOut: number;
+    refused: number;
+    inFlight: number;
+    latency: { samples: number; p50Ms: number | null; p95Ms: number | null; maxMs: number | null };
+  };
+  /** The sidecar's own JSON-RPC streams. */
+  streams: { open: number; opened: number; limit: number };
+}
+export interface ExtensionInspection {
+  id: string;
+  runtime: ExtensionRuntime;
+  /** Always null for a declarative app. */
+  process: ExtensionProcess | null;
+  streams: {
+    /** The app streams its views opened, except watches. */
+    open: ExtensionOpenStream[];
+    /** The app streams whose source is `watch`. */
+    watches: ExtensionOpenStream[];
+    opened: number;
+    messages: number;
+    bytes: number;
+    /** Streams stopped for exceeding the message rate. */
+    rateLimited: number;
+    /** Opens refused because the app was at its cap. */
+    refused: number;
+    /** Streams ended because their window closed or reloaded. */
+    windowEnded: number;
+    /** The per-app cap on open streams. */
+    maxOpen: number;
+  };
+  /** The last 20 error lines, oldest first. */
+  recentErrors: ExtensionLogLine[];
+  log: { lines: number; capacity: number; dropped: number };
+}
+export interface ExtensionLogRead {
+  runtime: ExtensionRuntime;
+  /** The lines after `after` at `minLevel` or above, oldest first. */
+  lines: ExtensionLogLine[];
+  capacity: number;
+  dropped: number;
+}
+export const inspectExtension = (id: string) => invokeCapability<ExtensionInspection>("extensions.inspect", { id });
+/** A field left out is not sent at all: the host denies one it does not know, and `null` is not a level. */
+export const extensionLogs = (id: string, { after, minLevel }: { after?: number; minLevel?: ExtensionLogLevel } = {}) =>
+  invokeCapability<ExtensionLogRead>("extensions.logs", {
+    id,
+    ...(after === undefined ? {} : { after }),
+    ...(minLevel === undefined ? {} : { minLevel }),
+  });

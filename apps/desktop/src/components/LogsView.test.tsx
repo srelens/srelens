@@ -186,7 +186,7 @@ describe("LogsView", () => {
 
   it("starts a live-tail stream and appends streamed lines", async () => {
     podLogsMock.mockResolvedValue({ logs: "" });
-    let emit: ((source: string, line: string) => void) | undefined;
+    let emit: ((source: string, line: string, truncated: boolean) => void) | undefined;
     const stop = vi.fn();
     startLogStreamMock.mockImplementation(async (_c, _n, _t, onLine) => {
       emit = onLine;
@@ -198,8 +198,13 @@ describe("LogsView", () => {
     fireEvent.click(screen.getByLabelText("Live tail"));
     await waitFor(() => expect(startLogStreamMock).toHaveBeenCalled());
 
-    act(() => emit?.("", "streamed line"));
+    act(() => emit?.("", "streamed line", false));
     expect(await screen.findByText("streamed line")).toBeDefined();
+    // A line the host cut says so after it, and the line itself is as it came (#747).
+    act(() => emit?.("", "the start of a long one", true));
+    const cut = await screen.findByText("the start of a long one", { exact: false });
+    expect(cut.closest("[data-log-row]")?.textContent).toBe("the start of a long one [line cut: too long]");
+    expect(screen.getAllByText(/line cut/)).toHaveLength(1);
 
     // Toggling off stops the stream.
     fireEvent.click(screen.getByLabelText("Pause live tail"));

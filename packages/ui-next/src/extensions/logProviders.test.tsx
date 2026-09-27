@@ -103,7 +103,7 @@ describe("following a log provider (#569)", () => {
     });
     act(() => fake.opened[0].handlers.onData({ event: "lines", lines: [{ source: "web-1/app", line: "hello" }] }, 1));
     act(() => fake.opened[0].handlers.onData({ event: "status", source: "loki", status: "live" }, 2));
-    expect(onLine).toHaveBeenCalledWith("web-1/app", "hello");
+    expect(onLine).toHaveBeenCalledWith("web-1/app", "hello", false);
     expect(onStatus).toHaveBeenCalledWith("live", "loki");
   });
 

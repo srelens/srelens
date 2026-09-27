@@ -965,9 +965,12 @@ The answer is `{ "status", "contentType", "body" }`: the body parsed when the se
 it is JSON, as text otherwise. A status outside 2xx is an error that names it. No error
 repeats the URL, its host or a secret; a URL may be a setting's value.
 
-**Desktop only.** On the web host a request would leave from the shared server, so a web
-user's registry has no `network.http` and an app that binds it is refused there
-(`EXTENSION_UNSUPPORTED_TARGET`); see [capabilities.md](capabilities.md#web-host).
+**On the web, only under the operator's ceiling.** On the web host a request leaves from
+the shared server. So a web user's registry has `network.http` only when the server's
+extension policy lists hosts in `networkCeiling`, and each request must then go to a
+host both this list and the ceiling allow, over HTTPS. Otherwise an app that binds it
+is refused there (`EXTENSION_UNSUPPORTED_TARGET`); see
+[capabilities.md](capabilities.md#web-host) and [WEB.md](../WEB.md#extension-policy).
 
 `extensions.read` sends a request, with every check an app read makes: the app enabled,
 at the revision the view knows, on a cluster it is enabled for, with its grants. A read

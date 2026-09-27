@@ -12,6 +12,13 @@
 //!   variables, and the few Windows needs ([`FROM_HOST`]). The spike passed no
 //!   block, so its probe inherited the host's environment.
 //!
+//! And one for #573: **the data directory is the only path it may write.**
+//! Windows lets an AppContainer write its own profile folder
+//! (`%LOCALAPPDATA%\Packages\<profile>`), which is where it points the
+//! sidecar's `TEMP`, `TMP` and `LOCALAPPDATA`. That folder is outside the size
+//! limit and outlives the app's data, so it is made read-only to the
+//! container ([`read_only_profile_folder`]).
+//!
 //! Everything else is as the spike ran it: `CreateAppContainerProfile` (a SID
 //! only derived is refused by `CreateProcessW`), read and execute on the
 //! program and full control of the data directory granted to the container's
@@ -25,9 +32,9 @@ use sha2::{Digest, Sha256};
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io;
-use std::os::windows::ffi::OsStrExt;
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::ptr::{null, null_mut};
 use std::sync::Arc;
 use windows_sys::Win32::Foundation::{
@@ -35,9 +42,11 @@ use windows_sys::Win32::Foundation::{
 };
 use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
 use windows_sys::Win32::Security::Isolation::{
-    CreateAppContainerProfile, DeleteAppContainerProfile, DeriveAppContainerSidFromAppContainerName,
+    CreateAppContainerProfile, DeleteAppContainerProfile,
+    DeriveAppContainerSidFromAppContainerName, GetAppContainerFolderPath,
 };
 use windows_sys::Win32::Security::{FreeSid, PSID, SECURITY_ATTRIBUTES, SECURITY_CAPABILITIES};
+use windows_sys::Win32::System::Com::CoTaskMemFree;
 use windows_sys::Win32::System::JobObjects::{
     CreateJobObjectW, JobObjectCpuRateControlInformation, JobObjectExtendedLimitInformation,
     SetInformationJobObject, TerminateJobObject, JOBOBJECT_CPU_RATE_CONTROL_INFORMATION,
@@ -132,12 +141,23 @@ fn container_sid(app_id: &str) -> io::Result<Sid> {
     Ok(Sid(sid))
 }
 
-/// Remove the AppContainer profile of `app_id`, when the app is uninstalled.
-/// Where the profiles go when srelens itself is uninstalled with apps still
-/// installed is open (ADR, "Open questions").
+/// Remove the AppContainer profile of `app_id`, with its folder and its
+/// registry storage, when the app is uninstalled: the registry calls it for
+/// every app a change uninstalls (#573). A profile that was never made, as for
+/// an app that never ran a sidecar, is nothing to do. Where the profiles go
+/// when srelens itself is uninstalled with apps still installed is open (ADR,
+/// "Open questions").
 pub fn delete_profile(app_id: &str) -> io::Result<()> {
+    // `HRESULT_FROM_WIN32` of `ERROR_FILE_NOT_FOUND` and of `ERROR_NOT_FOUND`:
+    // what a profile that does not exist may be reported as. Which of the two
+    // `DeleteAppContainerProfile` returns is not documented, so both count.
+    const FILE_NOT_FOUND: i32 = 0x80070002_u32 as i32;
+    const NOT_FOUND: i32 = 0x80070490_u32 as i32;
     // SAFETY: valid wide string.
     let hr = unsafe { DeleteAppContainerProfile(wide(profile_name(app_id)).as_ptr()) };
+    if hr == FILE_NOT_FOUND || hr == NOT_FOUND {
+        return Ok(());
+    }
     if hr != 0 {
         return Err(io::Error::other(format!(
             "DeleteAppContainerProfile: {hr:#x}"
@@ -160,24 +180,81 @@ fn sid_string(sid: &Sid) -> io::Result<String> {
     }
 }
 
-/// Grant the container SID access to `path` with `icacls`, from System32 by
-/// its full path, not by a search of `PATH`.
-fn icacls(path: &Path, grant: &str) -> io::Result<()> {
+/// Change the ACL of `path` with `icacls` (`/grant` or `/deny` and its
+/// entry, and any options), from System32 by its full path, not by a search
+/// of `PATH`.
+fn icacls(path: &Path, args: &[&str]) -> io::Result<()> {
     let root = std::env::var_os("SystemRoot").unwrap_or_else(|| OsString::from(r"C:\Windows"));
     let icacls = Path::new(&root).join("System32").join("icacls.exe");
     let out = std::process::Command::new(icacls)
         .arg(path)
-        .arg("/grant")
-        .arg(grant)
+        .args(args)
         .output()?;
     if !out.status.success() {
         return Err(io::Error::other(format!(
-            "icacls {} /grant {grant}: {}",
+            "icacls {} {}: {}",
             path.display(),
+            args.join(" "),
             String::from_utf8_lossy(&out.stdout)
         )));
     }
     Ok(())
+}
+
+/// The AppContainer's own folders: its profile folder,
+/// `%LOCALAPPDATA%\Packages\<profile>`, and the `AC` folder in it that
+/// `GetAppContainerFolderPath` names, which the container is granted and where
+/// Windows points its `TEMP`.
+struct ProfileFolders {
+    profile: PathBuf,
+    ac: PathBuf,
+}
+
+fn profile_folders(sid_text: &str) -> io::Result<ProfileFolders> {
+    let sid = wide(sid_text);
+    let mut path: *mut u16 = null_mut();
+    // SAFETY: a valid wide string and out-pointer; the buffer it returns is
+    // freed once, with CoTaskMemFree, after it is copied.
+    let ac = unsafe {
+        let hr = GetAppContainerFolderPath(sid.as_ptr(), &mut path);
+        if hr != 0 || path.is_null() {
+            return Err(io::Error::other(format!(
+                "GetAppContainerFolderPath: {hr:#x}"
+            )));
+        }
+        let len = (0..).take_while(|&i| *path.add(i) != 0).count();
+        let text = OsString::from_wide(std::slice::from_raw_parts(path, len));
+        CoTaskMemFree(path as *const std::ffi::c_void);
+        PathBuf::from(text)
+    };
+    let profile = match (ac.file_name(), ac.parent()) {
+        (Some(name), Some(parent)) if name.eq_ignore_ascii_case("AC") => parent.to_path_buf(),
+        _ => ac.clone(),
+    };
+    Ok(ProfileFolders { profile, ac })
+}
+
+/// Make the container's own profile folder read-only to it, so the data
+/// directory is the only path it may write (#573).
+///
+/// A deny does not do it. In an AppContainer's access check, a deny entry for
+/// its own SID does not outweigh the full control Windows grants that SID on
+/// `AC`: the second CI run of this had explicit `(DENY)(WD,AD,…)` entries for
+/// the container on `AC\Temp`, and the write still went through. So the grant
+/// goes instead. Every entry for the container's SID is removed from the
+/// profile folder and from everything already in it (`<folder>\*` with `/T`,
+/// `icacls`'s own pattern match), the denies earlier versions added included,
+/// which a deny-only version added again on every launch. Then `AC` grants it
+/// read and execute, inherited below, so it can still read what Windows keeps
+/// for it there. `AC\Temp`, where Windows points its `TEMP`, is made first if
+/// it is missing, so it is among the entries changed.
+fn read_only_profile_folder(sid_text: &str) -> io::Result<()> {
+    let folders = profile_folders(sid_text)?;
+    std::fs::create_dir_all(folders.ac.join("Temp"))?;
+    let sid = format!("*{sid_text}");
+    icacls(&folders.profile, &["/remove", &sid])?;
+    icacls(&folders.profile.join("*"), &["/remove", &sid, "/T"])?;
+    icacls(&folders.ac, &["/grant", &format!("{sid}:(OI)(CI)(RX)")])
 }
 
 /// Owned kernel handles, closed on drop.
@@ -379,8 +456,13 @@ pub(super) fn launch(command: &SidecarCommand, limits: &Limits) -> Result<Launch
         |e: io::Error| LaunchError::Failed(format!("srelens could not start the app: {e}"));
     let sid = container_sid(&command.app_id).map_err(unavailable)?;
     let sid_text = sid_string(&sid).map_err(unavailable)?;
-    icacls(&command.program, &format!("*{sid_text}:(RX)")).map_err(failed)?;
-    icacls(&command.data_dir, &format!("*{sid_text}:(OI)(CI)(F)")).map_err(failed)?;
+    icacls(&command.program, &["/grant", &format!("*{sid_text}:(RX)")]).map_err(failed)?;
+    icacls(
+        &command.data_dir,
+        &["/grant", &format!("*{sid_text}:(OI)(CI)(F)")],
+    )
+    .map_err(failed)?;
+    read_only_profile_folder(&sid_text).map_err(unavailable)?;
     let job = job(limits).map_err(unavailable)?;
 
     let (stdin_parent, stdin_child) = pipe(true).map_err(failed)?;
@@ -529,6 +611,13 @@ pub(super) fn launch(command: &SidecarCommand, limits: &Limits) -> Result<Launch
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Uninstalling an app deletes its profile whether or not it ever ran a
+    /// sidecar, and most apps never do (#573).
+    #[test]
+    fn deleting_a_profile_that_was_never_made_is_nothing_to_do() {
+        delete_profile("org.srelens.never-installed-573").expect("nothing to delete");
+    }
 
     #[test]
     fn a_profile_name_fits_windows_whatever_the_app_id() {

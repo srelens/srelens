@@ -27,7 +27,7 @@ async fn resolve(
     selection: Selection,
 ) -> Result<(ResourceIn, Installed), CapabilityError> {
     let resolved = request_context(&cache, &selection.context).await;
-    let state = tokio::task::spawn_blocking(move || read(&path))
+    let state = tokio::task::spawn_blocking(move || path.read())
         .await
         .map_err(|e| CapabilityError::Handler(e.to_string()))?
         .map_err(CapabilityError::Handler)?;
@@ -167,7 +167,7 @@ mod tests {
         let mut payload = payload;
         payload["capability"] = json!(state.plugins[0].manifest.capabilities[0].name);
         let resolved = resolve(
-            Arc::new(path.clone()),
+            Store::file(path.clone()),
             core.clone(),
             srelens_kube::client_cache::ClientCache::new_many(vec![]),
             serde_json::from_value(payload.clone()).unwrap(),
@@ -190,7 +190,7 @@ mod tests {
         )
         .unwrap();
         assert!(resolve(
-            Arc::new(path),
+            Store::file(path),
             core,
             srelens_kube::client_cache::ClientCache::new_many(vec![]),
             serde_json::from_value(payload).unwrap()
@@ -210,7 +210,7 @@ mod tests {
             .clone();
         let selection = json!({"id":"org.example.argocd","revision":revision,"capability":binding,"context":"default","namespace":"team","name":"app"});
         let resolved = resolve(
-            Arc::new(path),
+            Store::file(path),
             core,
             srelens_kube::client_cache::ClientCache::new_many(vec![config.clone()]),
             serde_json::from_value(selection).unwrap(),
@@ -250,6 +250,7 @@ mod tests {
             core.clone(),
             Configure::Install {
                 signature: None,
+                key_id: None,
                 manifest: source.to_string(),
                 grants: vec!["k8s.listCustomResource".into()],
                 reviewed_revision: None,
@@ -261,7 +262,7 @@ mod tests {
         let mut reg = Registry::new();
         register(
             &mut reg,
-            Arc::new(path.clone()),
+            Store::file(path.clone()),
             core.clone(),
             srelens_kube::client_cache::ClientCache::new_many(vec![]),
         );
@@ -326,6 +327,7 @@ mod tests {
             core.clone(),
             Configure::Install {
                 signature: None,
+                key_id: None,
                 manifest: manifest.to_string(),
                 grants: vec![
                     "k8s.listCustomResource".into(),
@@ -343,7 +345,7 @@ mod tests {
         let mut reg = Registry::new();
         register(
             &mut reg,
-            Arc::new(path.clone()),
+            Store::file(path.clone()),
             core.clone(),
             srelens_kube::client_cache::ClientCache::new_many(vec![]),
         );
@@ -389,7 +391,7 @@ mod tests {
         )
         .unwrap();
         assert!(resolve(
-            Arc::new(path),
+            Store::file(path),
             core,
             srelens_kube::client_cache::ClientCache::new_many(vec![]),
             serde_json::from_value(selected).unwrap()
@@ -442,7 +444,7 @@ mod migration_tests {
         let mut reg = Registry::new();
         register(
             &mut reg,
-            Arc::new(path),
+            Store::file(path),
             core,
             srelens_kube::client_cache::ClientCache::new_many(vec![]),
         );

@@ -377,11 +377,19 @@ describe("startExtensionLogStream (#567)", () => {
     emit(channel, { type: "data", stream: "s-1", seq: 1, data: { event: "status", source: "web-1/app", status: "live" } });
     emit(channel, {
       type: "data", stream: "s-1", seq: 2,
-      data: { event: "lines", lines: [{ source: "web-1/app", line: "one" }, { source: "web-1/app", line: "two" }], dropped: 4 },
+      data: {
+        event: "lines",
+        lines: [
+          { source: "web-1/app", line: "one" },
+          { source: "web-1/app", line: "two", truncated: true },
+        ],
+        dropped: 4,
+      },
     });
     emit(channel, { type: "data", stream: "s-1", seq: 3, data: { event: "surprise" } });
     expect(onStatus).toHaveBeenCalledWith("live", "web-1/app");
-    expect(onLine.mock.calls).toEqual([["web-1/app", "one"], ["web-1/app", "two"]]);
+    // A line the host cut says so, as the cluster's own stream does (#747).
+    expect(onLine.mock.calls).toEqual([["web-1/app", "one", false], ["web-1/app", "two", true]]);
     expect(onDropped).toHaveBeenCalledWith(4);
     emit(channel, { type: "error", stream: "s-1", code: "source", message: "forbidden" });
     expect(onEnd).toHaveBeenCalledWith({ type: "error", code: "source", message: "forbidden" });
@@ -412,7 +420,7 @@ describe("startExtensionLogStream (#567)", () => {
     const [channel] = [...channels.keys()].slice(-1);
     emit(channel, { type: "data", stream: "s-1", seq: 1, data: { event: "lines", lines: [{ source: "web-1/app", line: "one" }] } });
     emit(channel, { type: "data", stream: "s-1", seq: 2, data: { event: "status", source: "loki", status: "live" } });
-    expect(onLine).toHaveBeenCalledWith("web-1/app", "one");
+    expect(onLine).toHaveBeenCalledWith("web-1/app", "one", false);
     expect(onStatus).toHaveBeenCalledWith("live", "loki");
   });
 

@@ -15,13 +15,15 @@ dashboards, resource details, navigation groups and actions with host components
 in both classic and new designs. No third-party JavaScript executes in the host.
 Native Flux and Argo CD manifests are the reference integrations.
 
-The application installs declarative manifests from the catalog, where official
-releases are signature-verified, or as local manifests after an explicit
-permission review. There is no developer mode. IDs under `org.srelens.` are
-reserved for signed srelens releases. See [Extensions](../EXTENSIONS.md) for
-installation, examples, supported fields and current limitations. The executable
-SDK, third-party publisher signing, key rotation and revocation described below
-are future work, not shipped capabilities.
+The application installs declarative manifests from the catalog, which is signed and
+verified against a root the host pins, or as local manifests after an explicit
+permission review. There is no developer mode. The catalog delegates app ID namespaces
+to publishers, and an ID in a delegated namespace installs only with that publisher's
+signature; `org.srelens.` is delegated to the srelens publisher (see
+[the signed catalog decision](#decision-a-tuf-style-signed-catalog-not-sigstore-keyless)).
+See [Extensions](../EXTENSIONS.md) for installation, examples, supported fields and
+current limitations. The executable SDK, key rotation and revocation described below are
+future work, not shipped capabilities.
 
 ## Data and lifecycle
 
@@ -66,12 +68,145 @@ per-user inventory and lifecycle isolation are implemented.
    [Sandbox backends for executable extensions](#sandbox-backends-for-executable-extensions).
 4. Extend signed distribution from official releases to third-party publishers,
    with key rotation, update verification, permission-diff consent and
-   revocation. Unsigned local manifests stay outside reserved namespaces.
+   revocation. Unsigned local manifests stay outside delegated namespaces. Publisher
+   delegation shipped with the signed catalog ([#559]); rotation ([#560]), revocation
+   ([#561]) and update verification ([#563]) build on it.
 
 There is no Lens API shim, Node compatibility host or third-party package runtime.
 Extensions must target the srelens contract. Retired archive inventory entries are
 excluded on read and removed on the next successful inventory save, preserving
 native installations and settings.
+
+## Decision: a TUF-style signed catalog, not Sigstore keyless
+
+Status: **Accepted, 2026-09-27**, by the maintainer, for [#559]. It settles the spike the
+issue opened with. The formats and the runbooks are in
+[Trust](../extensions/trust.md); what it changes in the threat model is in
+[the threat model](../extensions/threat-model.md#compromised-publisher-or-key).
+
+The host pins a root with a signature threshold. The root's catalog role signs a catalog
+that carries a version and an expiry, and delegates app ID namespaces to publishers,
+whose keys sign their releases. This is [The Update Framework](https://theupdateframework.io/)'s
+model, reduced to what one catalog file and per-publisher GitHub releases need.
+
+### Why not Sigstore keyless
+
+Keyless signing ties a signature to an identity, such as a CI workflow, through a
+short-lived certificate and a transparency log, and needs no long-lived publisher key.
+For this threat model it does not remove the hard part and adds another:
+
+- **The policy is still ours to sign.** A keyless signature says which identity signed.
+  Which identity may sign which app ID namespace still has to come from somewhere
+  srelens vouches for: the same delegation a signed catalog carries. Keyless would add a
+  second trust root, operated by a third party, beside the one srelens must pin anyway.
+- **Stored apps are verified again on every load, offline.** Every inventory load
+  re-verifies each app's stored proof ([Data and lifecycle](#data-and-lifecycle)). With a
+  key, the proof is a signature and the delegation that vouched for it. With keyless, it
+  would be a certificate chain and transparency log evidence, checked against a trust
+  root that rotates on its own schedule.
+- **Air-gapped and enterprise catalogs ([#564]).** A mirrored, signed file verifies with
+  nothing else reachable. Keyless verification depends on the transparency log's and the
+  certificate authority's keys, public or privately run.
+- **Rotation and revocation map directly.** TUF's root rotation is the basis for key
+  rotation ([#560]), and a catalog-carried revocation list for revocation ([#561]).
+- **A publisher does not need an identity provider.** A person signing a release on
+  their own machine holds a key.
+
+What keyless offers and this does not: no long-lived publisher key to steal, and a public
+log of every signature. A stolen publisher key is contained to that publisher's
+namespaces and is revoked through the catalog ([#561]).
+
+### How the design maps onto TUF
+
+| TUF | srelens |
+|---|---|
+| The client ships a root and trusts it | The build pins `trust/root.json`: the `root` and `catalog` roles' keys and thresholds, self-signed at the root role's threshold |
+| Top-level targets role | The `catalog` role, which signs the catalog |
+| Snapshot and timestamp roles | Folded into the catalog's `version` and `expires`: a version never goes back and one version is one set of bytes (rollback protection), and an expired catalog is refused and never installed from (freeze protection) |
+| Delegated targets roles, with `paths` | Publisher delegations with `namespaces`, each its own document signed by the catalog role. Namespaces may not overlap, so every delegation is terminating and at most one publisher can sign an ID |
+| A delegated role's targets metadata | The publisher's signature over a release's exact manifest bytes, naming the key that made it |
+| Root rotation (version N+1 signed by the thresholds of N and N+1) | The basis for [#560]; the root is versioned, and the host does not walk a chain yet |
+| Consistent snapshots | Not needed: the catalog is one file, fetched in one request |
+
+Where it departs from TUF, and why:
+
+- **Signatures cover exact bytes, not canonical JSON.** Every signed document is a
+  [DSSE](https://github.com/secure-systems-lab/dsse) envelope over its payload's type and
+  bytes. There is no canonicalizer to get wrong, what is parsed is exactly what was
+  verified, and a signature over one document type cannot pass as another.
+- **Key IDs are the SHA-256 of the raw public key**, not of a canonical JSON key object,
+  and the host always computes them.
+- **The pinned root carries no expiry.** It is as current as the build; the catalog's
+  expiry is what bounds freshness.
+- **One catalog document instead of timestamp, snapshot and targets files**, so there is
+  nothing to mix and match inside a catalog. A short-lived timestamp role can be split out
+  later as a role the root adds; released hosts ignore roles they do not know.
+- **Publishers sign the release, not targets metadata.** This keeps the release format
+  the Flux and Argo CD repositories already publish, so the signed releases already
+  installed keep verifying. The catalog pins each release's SHA-256 as well.
+- **An install keeps the delegation that vouched for it**, so an installed app is
+  verified on every load with no catalog at hand. The build also ships the srelens
+  delegation for apps installed before this change, whose proofs name none, and a later
+  shipped delegation for a publisher replaces the one an install kept.
+- **A build with no usable root installs nothing**, rather than guessing which IDs are
+  reserved.
+
+### Implementation: a maintained TUF library, or a subset built on ring
+
+Checked on 2026-09-26, from crates.io and each project's repository, and by building each
+with default features off and counting its dependency tree:
+
+| | [`tough`](https://github.com/awslabs/tough) | [`tuf`](https://github.com/theupdateframework/rust-tuf) (rust-tuf) |
+|---|---|---|
+| Latest release | 0.24.0, 2026-07-10 | 0.3.0-beta14, 2025-10-20; the latest stable release, 0.2.0, is from 2017 |
+| Activity | Commits in September 2026 | Commits in August 2026 |
+| License | MIT OR Apache-2.0 | MIT/Apache-2.0 |
+| Dependency tree | 121 crates; 8 not already in srelens's lockfile, among them `aws-lc-rs` and `aws-lc-sys`, which are not optional | 84 crates, all already in the lockfile |
+| API | Async | Async, pre-release |
+
+Both implement the full TUF client: a repository of separate root, timestamp, snapshot and
+targets files, target files fetched by path from that repository, and delegated roles that
+sign targets metadata. srelens's catalog is one file, its releases are signed manifests in
+each publisher's own GitHub releases, and it verifies stored proofs offline on every
+inventory load. Fitting either library would change the release format, so the published
+Flux and Argo CD releases would stop verifying. It would also add a second download path
+beside the one that enforces the catalog's host allowlist, redirect checks and size limits
+(`http_policy`). `tough` would also link a second native cryptography library beside `ring`,
+the combination behind the rustls provider panic recorded in `AGENTS.md`. `tuf` has had no
+stable release since 2017.
+
+So this is a subset built on what the host already uses: `ring` for Ed25519 (as the
+signature checks before it did), `sha2` for SHA-256, and `base64` and `chrono`, both already
+in the lockfile. No cryptographic primitive is written here. The subset is parsing, key ID
+computation, threshold counting and the rules above (`crates/registry/src/extensions/trust.rs`,
+`signing.rs`, `catalog.rs`), and a dependency-free signer for the key holders
+(`scripts/extensions/trust.mjs`), whose output the tests verify.
+
+### How far it goes toward #560, #561, #563 and #564
+
+- **[#560] Key rotation.** The root is versioned and self-signed at its threshold, which is
+  what a TUF rotation chain needs. A publisher rotates keys within its delegation, whose
+  `version` a catalog cannot take back below what the build shipped. Installed apps keep
+  the delegation that vouched for them, so retiring a key in the catalog alone does not
+  quarantine what it signed; a build that ships the later delegation does. An overlap
+  window and a key history are #560's.
+- **[#561] Revocation.** The catalog tolerates unknown fields, so a revocation list can be
+  added without breaking released hosts, and load-time verification takes the trust root
+  as a parameter, which is where the last verified revocations would join it.
+- **[#563] Downgrade protection.** A replayed older catalog is refused, so a network
+  attacker cannot re-offer old releases as current. Installing an older signed release
+  another way (a pasted manifest, a rollback) is still possible, and is #563's per-app
+  version floor.
+- **[#564] Other catalog sources.** `TrustRoot::from_signed_root` accepts any self-signed
+  root, and `SharedCatalog::with_trust` and `Apps::with_trust` verify against it.
+  Load-time verification uses one root per inventory today; a host that trusts an
+  imported root beside the pinned one will need both there.
+
+### Rollout
+
+The host refuses the unsigned catalog, so the order matters: the key ceremony, then the
+signed catalog in srelens/extensions, then the host release ([Rollout order](../extensions/trust.md#rollout-order)).
+Hosts released before this read the unsigned `catalog.json`, which stays in place, frozen.
 
 ## Sandbox backends for executable extensions
 
@@ -467,6 +602,7 @@ Where it departs from the spike:
 | The spike | The supervisor | Why |
 |---|---|---|
 | The seccomp filter allowed `AF_UNIX` sockets | It refuses every `socket` call | The sidecar's stdio is pipes, and an `AF_UNIX` socket reaches the D-Bus session bus (see [What the spike did not establish](#what-the-spike-did-not-establish)) |
+| The seccomp filter allowed changing a file's mode, owner and extended attributes by path, which Landlock has no right for | It refuses `chmod`, `chown`, `setxattr`, `removexattr` and their `*at` forms; the same on an open file stays allowed (#573) | A sidecar could `chmod` a kubeconfig outside its grant readable to every user. #571 and #572 did not check it; #573's conformance check found it |
 | Landlock ABI 5 | ABI 5, plus the ABI 6 scopes: abstract Unix sockets, and signals to processes outside the sandbox | Best effort, so kernels before 6.12 are unchanged; on newer ones a sidecar cannot signal srelens or the user's other processes |
 | A best-effort ruleset that a kernel without Landlock silently did not apply | The host refuses a kernel without Landlock, and the launcher refuses a ruleset the kernel enforces none of | A layer that is not there must refuse the app, not pass as applied |
 | The probe inherited the host's environment | The sidecar gets only the variables srelens names. On Windows it also gets `SystemRoot` and `LOCALAPPDATA`, `TEMP` and `TMP`, which Windows reroutes into the AppContainer's folder. A block without those three failed with error 203 on the first CI run | The environment may hold `KUBECONFIG`, cloud credentials or tokens |
@@ -474,6 +610,8 @@ Where it departs from the spike:
 | One AppContainer profile | One per app, named by a digest of its ID, with `delete_profile` for uninstall | The recommendation above; an app ID can be longer than a profile name |
 | On Windows, stderr joined stdout | Its own pipe | stdout is protocol only |
 | `icacls` found by `PATH` | Under `%SystemRoot%\System32` | A `PATH` entry must not choose it |
+| The AppContainer could write its own profile folder, where Windows points `TEMP` | The folder is read-only to it: each launch removes the container's own entries from it and grants read and execute on `AC`. A deny entry did not work, since a deny for an AppContainer's own SID does not outweigh the full control Windows grants it there (#573) | The app's data directory is the only path it may write, and the only one under its size limit |
+| One scratch directory the probe was given | A per-app data directory, owner-only, measured against a size limit before each start and every 2 s, each file capped by `RLIMIT_FSIZE` on Linux and macOS. Removing the app removes it after the inventory change, best effort; one that cannot be removed then is tried again on the next change (#573) | Real tools need scratch space; see [Data directory](../extensions/sidecar-protocol.md#data-directory) |
 | macOS launcher set `RLIMIT_DATA`, `RLIMIT_AS` and a 60-second `RLIMIT_CPU` | None | The first two were refused. The third would kill a long-lived sidecar after a minute of CPU, which is not a limit |
 
 `crates/plugin-host/tests/sandbox_conformance.rs` is the conformance suite: the seven
@@ -556,9 +694,10 @@ are not run on macOS.
   decided above; this one is not.
 - One AppContainer profile per extension, or one per install? Where is the profile
   deleted if srelens is uninstalled with extensions still installed?
-- Can the host-side broker callbacks (#573) stay on stdio, so that no backend has to
-  open even loopback networking? Loopback is denied under the recommended Windows and
-  Linux backends.
+- ~~Can the host-side broker callbacks (#573) stay on stdio, so that no backend has to
+  open even loopback networking?~~ Answered by #573: yes. A sidecar's calls back into the
+  host are JSON-RPC requests on the same pipes, and every backend keeps the network closed
+  ([Calls from the sidecar](../extensions/sidecar-protocol.md#calls-from-the-sidecar)).
 - What are the Landlock ABI floor and target? ABI 1 already covers checks 1 and 2 when
   seccomp covers the network. The spike targets ABI 5, which leaves two gaps that a
   newer target would close on newer kernels. Both tie to the Unix-socket item under
@@ -575,9 +714,10 @@ are not run on macOS.
 What the supervisor (#572) does until these are decided:
 
 - **A missing limit layer:** it refuses the app, and says which layer is missing.
-- **AppContainer profiles:** one per app, and `delete_profile` removes one on uninstall.
-  Nothing removes them when srelens itself is uninstalled.
-- **Broker callbacks:** the protocol carries them on stdio, and until #573 refuses them.
+- **AppContainer profiles:** one per app. Uninstalling an app tries to delete its profile,
+  with its folder and its registry storage (#573). A profile that cannot be deleted is
+  logged and stays. Nothing removes them when srelens itself is uninstalled.
+- **Broker callbacks:** on stdio, answered by the app facade the UI calls (#573).
 - **Landlock:** the target is ABI 5 plus the ABI 6 scopes, best effort. The floor is any
   kernel that enforces some of the ruleset.
 
@@ -610,3 +750,9 @@ claims, and 2 if the probe could not start under the profile.
 - **Linux:** `none`, `landlock`, `seccomp`, `cgroup`, `landlock+seccomp+cgroup` and
   `bwrap`;
 - **macOS:** `none` and `seatbelt`.
+
+[#559]: https://github.com/srelens/srelens/issues/559
+[#560]: https://github.com/srelens/srelens/issues/560
+[#561]: https://github.com/srelens/srelens/issues/561
+[#563]: https://github.com/srelens/srelens/issues/563
+[#564]: https://github.com/srelens/srelens/issues/564

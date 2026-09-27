@@ -17,3 +17,4 @@ crates/registry/tests/fixtures/flux-0.4.0-manifest.json -text
 # Package fixtures (#562): every file is named by its SHA-256 in its package's digest list,
 # and the signed one's list carries a signature, so no byte may change on checkout.
 crates/registry/tests/fixtures/packages/** -text
+crates/registry/tests/fixtures/trust/example-release.json -text

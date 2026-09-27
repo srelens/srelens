@@ -16,6 +16,15 @@ export function extensionLabel(plugin: InstalledExtension): string {
 }
 
 /**
+ * Who signed an installed app, as the host verified it on this read (#559). Only the
+ * host's `signedBy` names a publisher: a stored proof is not a signature anyone vouched
+ * for until it verifies, and a quarantined app's is the one that failed.
+ */
+export function extensionSigner(plugin: InstalledExtension): string {
+  return !plugin.quarantined && plugin.signedBy ? `Signed by ${plugin.signedBy.name}` : "Signature not verified";
+}
+
+/**
  * How the list learns of a change made elsewhere (#566): `live` when the host
  * announces every inventory write, `polling` when that channel could not be
  * listened to (with why) and the list is read every five seconds instead, and

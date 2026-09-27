@@ -20,9 +20,13 @@ import {
   providersFor,
   queryExtensionProvider,
   type ExtensionManifest,
+  inspectExtension,
+  extensionLogs,
 } from "./extensions";
 // What the Rust `QueryIn` test deserializes, byte for byte (#569).
 import queryProviderPayload from "./extension-query-provider.json";
+// What the Rust `extensions.logs` input test deserializes, byte for byte.
+import logsRequest from "./extension-logs-request.json";
 
 describe("itemStatus: one normalized status per listed resource (#541)", () => {
   const legacy = { ready: 0, suspended: 1, progressing: 2 };
@@ -434,5 +438,35 @@ describe("providers (#569)", () => {
     expect(providersFor(manifest, "traces", "/Pod")).toEqual([]);
     // A manifest from before providers, or one the host has not checked, has none.
     expect(providersFor({ contributions: {} } as unknown as ExtensionManifest, "logs", "/Pod")).toEqual([]);
+  });
+});
+
+describe("an app's inspection and log (#575): UI-only reads, in the wrapper's own spelling", () => {
+  // `toStrictEqual` on the call, not `toHaveBeenCalledWith`: the latter treats a key
+  // holding `undefined` as absent, and the host denies a field it does not know.
+  const lastCall = () => vi.mocked(invokeCapability).mock.lastCall;
+
+  it("inspects an app by its ID alone", async () => {
+    vi.mocked(invokeCapability).mockResolvedValueOnce({ id: "org.test.app", runtime: "declarative" });
+    await expect(inspectExtension("org.test.app")).resolves.toEqual({ id: "org.test.app", runtime: "declarative" });
+    expect(lastCall()).toStrictEqual(["extensions.inspect", { id: "org.test.app" }]);
+  });
+
+  it("reads the log with camelCase minLevel and after, leaving out what is not asked", async () => {
+    await extensionLogs("org.test.app");
+    expect(lastCall()).toStrictEqual(["extensions.logs", { id: "org.test.app" }]);
+    await extensionLogs("org.test.app", { minLevel: "warn" });
+    expect(lastCall()).toStrictEqual(["extensions.logs", { id: "org.test.app", minLevel: "warn" }]);
+    // `after: 0` is a value, not an absence: it asks for every line from the start.
+    await extensionLogs("org.test.app", { after: 0, minLevel: "trace" });
+    expect(lastCall()).toStrictEqual(["extensions.logs", { id: "org.test.app", after: 0, minLevel: "trace" }]);
+    await extensionLogs("org.test.app", { after: 41, minLevel: undefined });
+    expect(lastCall()).toStrictEqual(["extensions.logs", { id: "org.test.app", after: 41 }]);
+    expect(JSON.stringify(lastCall())).not.toMatch(/min_level|null/);
+  });
+
+  it("sends exactly the payload the host's input test deserializes", async () => {
+    await extensionLogs("org.example.argocd", { after: 41, minLevel: "warn" });
+    expect(lastCall()).toStrictEqual(["extensions.logs", logsRequest]);
   });
 });

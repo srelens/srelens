@@ -22,6 +22,7 @@ use serde_json::{json, Value};
 use srelens_capability::audit::{AppRef, AuditRecord, AuditSink, Source};
 use srelens_capability::audit::{OUTCOME_OK, OUTCOME_REJECTED};
 use srelens_kube::app_pods::{Output, PodFacts};
+use srelens_kube::logs::Line;
 use srelens_plugin_host::{Binding, Manifest, POD_EXEC, POD_FORWARD, POD_LOGS};
 use srelens_streams::app::{StreamEmitter, StreamOwner, StreamWindow};
 use srelens_streams::EventSink;
@@ -212,14 +213,23 @@ fn check_names(
     Ok(())
 }
 
-/// Cut one log line to [`MAX_LINE_BYTES`], on a character boundary, saying so.
-pub(super) fn line_frame(source: &str, mut line: String) -> Value {
+/// One log line as a frame entry, marked `truncated` when the reader cut it
+/// (#747) or when it is past [`MAX_LINE_BYTES`] still, and cut here, on a
+/// character boundary. A log provider's lines (#569) come through here too.
+pub(super) fn line_frame(source: &str, line: Line) -> Value {
+    let Line {
+        text: mut line,
+        mut truncated,
+    } = line;
     if line.len() > MAX_LINE_BYTES {
         let mut end = MAX_LINE_BYTES;
         while !line.is_char_boundary(end) {
             end -= 1;
         }
         line.truncate(end);
+        truncated = true;
+    }
+    if truncated {
         json!({"source": source, "line": line, "truncated": true})
     } else {
         json!({"source": source, "line": line})
@@ -336,6 +346,7 @@ impl ExtensionStreams {
                 tail_lines,
                 since_seconds: *since_seconds,
                 timestamps: *timestamps,
+                max_line_bytes: MAX_LINE_BYTES,
             },
             source: format!("{}/{container}", facts.name),
             object: name.clone(),
@@ -1118,7 +1129,7 @@ mod tests {
         let long = "x".repeat(MAX_LINE_BYTES);
         let fits = MAX_PENDING_BYTES / MAX_LINE_BYTES;
         for _ in 0..fits + 10 {
-            pending.push(line_frame("web-1/app", long.clone()));
+            pending.push(line_frame("web-1/app", Line::whole(long.clone())));
         }
         assert_eq!(pending.lines.len(), fits);
         assert_eq!(pending.dropped, 10);
@@ -1153,14 +1164,29 @@ mod tests {
     #[test]
     fn a_long_line_is_cut_on_a_character_boundary() {
         let line = "é".repeat(MAX_LINE_BYTES);
-        let frame = line_frame("s", line);
+        let frame = line_frame("s", Line::whole(line));
         let cut = frame["line"].as_str().unwrap();
         assert!(cut.len() <= MAX_LINE_BYTES && cut.len() > MAX_LINE_BYTES - 4);
         assert!(cut.chars().all(|c| c == 'é'));
         assert_eq!(frame["truncated"], true);
         assert_eq!(
-            line_frame("s", "short".into()),
+            line_frame("s", Line::whole("short".into())),
             json!({"source": "s", "line": "short"})
         );
+    }
+
+    /// A line the reader already cut to the limit is marked, though what is
+    /// left of it is no longer than the limit (#747).
+    #[test]
+    fn a_line_the_reader_cut_is_marked() {
+        let frame = line_frame(
+            "s",
+            Line {
+                text: "x".repeat(MAX_LINE_BYTES),
+                truncated: true,
+            },
+        );
+        assert_eq!(frame["truncated"], true);
+        assert_eq!(frame["line"].as_str().unwrap().len(), MAX_LINE_BYTES);
     }
 }

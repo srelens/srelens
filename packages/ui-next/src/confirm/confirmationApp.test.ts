@@ -27,13 +27,27 @@ function installed(over: Partial<InstalledExtension> & { id: string; name: strin
 }
 
 describe("who the host says asked", () => {
-  it("names a signed app by its manifest name and its publisher", () => {
+  it("names a signed app by its manifest name and the publisher the host verified", () => {
     const plugins = [
-      installed({ id: "flux", name: "Flux Tools", signatureProof: { manifest: "{}", signature: [1] } }),
+      installed({
+        id: "flux",
+        name: "Flux Tools",
+        signatureProof: { manifest: "{}", signature: [1] },
+        signedBy: { id: "example", name: "Example Labs" },
+      }),
     ];
     expect(appIdentity(plugins, { id: "flux", revision: 3 })).toEqual({
       name: "Flux Tools",
-      publisher: "srelens",
+      publisher: "Example Labs",
+    });
+  });
+
+  /** A stored proof names no publisher (#559); only the host's `signedBy` does. */
+  it("claims no publisher for a proof the host has not verified", () => {
+    const plugins = [installed({ id: "flux", name: "Flux Tools", signatureProof: { manifest: "{}", signature: [1] } })];
+    expect(appIdentity(plugins, { id: "flux", revision: 3 })).toEqual({
+      name: "Flux Tools",
+      publisher: null,
     });
   });
 
@@ -57,6 +71,7 @@ describe("who the host says asked", () => {
         name: "srelens Core",
         quarantined: "App publisher signature is invalid",
         signatureProof: { manifest: "{}", signature: [1] },
+        signedBy: { id: "srelens", name: "srelens" },
       }),
     ];
     expect(appIdentity(plugins, { id: "flux", revision: 3 })).toEqual({
@@ -81,6 +96,7 @@ describe("who the host says asked", () => {
         name: "Flux Tools",
         revision: 5,
         signatureProof: { manifest: "{}", signature: [1] },
+        signedBy: { id: "srelens", name: "srelens" },
       }),
     ];
     expect(appIdentity(plugins, { id: "flux", revision: 4 })).toBeNull();

@@ -137,6 +137,22 @@ impl std::fmt::Display for OpenError {
     }
 }
 
+/// A window asked to cancel a stream it did not open (#733).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ForeignStream {
+    pub stream: String,
+}
+
+impl std::fmt::Display for ForeignStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Stream {} was not opened by this window; only the window that opened it may end it",
+            self.stream
+        )
+    }
+}
+
 /// Why [`StreamEmitter::data`] refused a frame. The source should return.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Stopped {
@@ -384,6 +400,34 @@ impl AppStreams {
         self.end_where(|owner| (owner.view == view).then_some(CloseReason::ViewClosed))
     }
 
+    /// [`AppStreams::cancel`], for a host that names the calling window: a
+    /// stream another window opened, or no window did, is refused and keeps
+    /// running. Unknown or ended is still `Ok(false)`.
+    pub fn cancel_in_window(&self, stream: &str, window: &str) -> Result<bool, ForeignStream> {
+        let opened_here = {
+            let state = self.inner.state.lock().unwrap();
+            match state.streams.get(stream) {
+                None => return Ok(false),
+                Some(entry) => opened_in(&entry.owner, window),
+            }
+        };
+        if !opened_here {
+            return Err(ForeignStream {
+                stream: stream.to_owned(),
+            });
+        }
+        Ok(self.cancel(stream))
+    }
+
+    /// [`AppStreams::close_view`], for a host that names the calling window:
+    /// ends only the streams that window opened for `view`. Views are named by
+    /// the page, so another window may have one of the same name.
+    pub fn close_view_in_window(&self, view: &str, window: &str) -> usize {
+        self.end_where(|owner| {
+            (owner.view == view && opened_in(owner, window)).then_some(CloseReason::ViewClosed)
+        })
+    }
+
     /// `window`'s epoch now. A host reads it before an open does anything
     /// that awaits, and names it in the owner's [`StreamWindow`].
     pub fn window_epoch(&self, window: &str) -> u64 {
@@ -401,7 +445,7 @@ impl AppStreams {
             state
                 .streams
                 .iter()
-                .filter(|(_, e)| e.owner.window.as_ref().is_some_and(|w| w.label == window))
+                .filter(|(_, e)| opened_in(&e.owner, window))
                 .map(|(id, e)| (id.clone(), e.owner.app.clone()))
                 .collect()
         };
@@ -543,6 +587,11 @@ impl Shared {
         self.sink.emit(&self.channel, terminal);
         true
     }
+}
+
+/// Whether `owner` was opened through the window labelled `window`.
+fn opened_in(owner: &StreamOwner, window: &str) -> bool {
+    owner.window.as_ref().is_some_and(|w| w.label == window)
 }
 
 fn close_frame(stream: &str, reason: CloseReason) -> Value {
@@ -1091,6 +1140,96 @@ mod tests {
             0,
             "camelCase on the wire"
         );
+    }
+
+    /// A window cancels its own streams and no one else's (#733): another
+    /// window's stream, or one no window opened, is refused by name and keeps
+    /// running. An unknown or ended stream is still `false`, not an error.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_window_cancels_only_the_streams_it_opened() {
+        let streams = AppStreams::new(StreamLimits::default());
+        let sink = Arc::new(TestSink::default());
+        let mine = streams
+            .open(
+                in_window(&streams, "a", "page#1", "main"),
+                "test",
+                sink.clone(),
+                "extstream:mine".into(),
+                forever,
+            )
+            .unwrap();
+        let theirs = streams
+            .open(
+                in_window(&streams, "a", "page#1", "ctx-1"),
+                "test",
+                sink.clone(),
+                "extstream:theirs".into(),
+                forever,
+            )
+            .unwrap();
+        let unowned = streams
+            .open(
+                owner("a", 1, "page#1"),
+                "test",
+                sink.clone(),
+                "extstream:unowned".into(),
+                forever,
+            )
+            .unwrap();
+
+        for other in [&theirs, &unowned] {
+            let refused = streams.cancel_in_window(other, "main").unwrap_err();
+            assert_eq!(
+                refused,
+                ForeignStream {
+                    stream: other.clone()
+                }
+            );
+            assert_eq!(
+                refused.to_string(),
+                format!("Stream {other} was not opened by this window; only the window that opened it may end it")
+            );
+        }
+        assert_eq!(types(&sink, "extstream:theirs"), ["open"], "still running");
+        assert_eq!(types(&sink, "extstream:unowned"), ["open"]);
+
+        assert_eq!(streams.cancel_in_window(&mine, "main"), Ok(true));
+        assert_eq!(
+            streams.cancel_in_window(&mine, "main"),
+            Ok(false),
+            "idempotent"
+        );
+        assert_eq!(streams.cancel_in_window("s-unknown", "main"), Ok(false));
+        assert_eq!(types(&sink, "extstream:mine"), ["open", "close"]);
+        assert_eq!(streams.cancel_in_window(&theirs, "ctx-1"), Ok(true));
+    }
+
+    /// Views are named by the page, so two windows can each have a view
+    /// called `page#1`. Closing it in one window ends that window's streams
+    /// for the view, never the other window's or an unowned one's (#733).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn closing_a_view_in_a_window_leaves_the_same_view_in_other_windows() {
+        let streams = AppStreams::new(StreamLimits::default());
+        let sink = Arc::new(TestSink::default());
+        for (o, ch) in [
+            (in_window(&streams, "a", "page#1", "main"), "extstream:m1"),
+            (in_window(&streams, "b", "page#1", "main"), "extstream:m2"),
+            (in_window(&streams, "a", "page#2", "main"), "extstream:m3"),
+            (in_window(&streams, "a", "page#1", "ctx-1"), "extstream:c1"),
+            (owner("a", 1, "page#1"), "extstream:u1"),
+        ] {
+            streams
+                .open(o, "test", sink.clone(), ch.into(), forever)
+                .unwrap();
+        }
+        assert_eq!(streams.close_view_in_window("page#1", "main"), 2);
+        assert_eq!(streams.close_view_in_window("page#1", "main"), 0);
+        for ch in ["extstream:m1", "extstream:m2"] {
+            assert_eq!(sink.payloads_for(ch)[1]["reason"], "viewClosed");
+        }
+        for ch in ["extstream:m3", "extstream:c1", "extstream:u1"] {
+            assert_eq!(types(&sink, ch), ["open"], "{ch} is not main's page#1");
+        }
     }
 
     /// A window that closes ends every stream it opened, of every app and

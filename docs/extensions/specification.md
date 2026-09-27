@@ -256,6 +256,7 @@ list, and the [developer harness](testing.md#developer-harness) prints one per l
 | `EXTENSION_UNRESOLVED_CAPABILITY` | A contribution or dashboard names a capability the manifest does not declare. |
 | `EXTENSION_UNRESOLVED_PAGE` | A dashboard names a page the manifest does not declare. |
 | `EXTENSION_INVALID_KIND` | The manifest `kind` is not `declarative`, or a `forKinds` entry is not a qualified Kubernetes kind. |
+| `EXTENSION_POLICY_REFUSED` | The host's administrator policy does not allow the app: its ID, its publisher or lack of a signature, a capability it requests, or its write actions. Only a host with a policy reports it, such as a web server whose operator set one ([WEB.md](../WEB.md#extension-policy)). |
 
 ## Identifiers
 
@@ -263,11 +264,12 @@ list, and the [developer harness](testing.md#developer-harness) prints one per l
   characters from `A–Z`, `a–z`, `0–9` and `-`, and at most 128 characters in total.
   Catalog entries additionally require lowercase, so use lowercase everywhere. Use a
   domain you control, for example `io.example.cert-manager`.
-- **Reserved namespaces.** IDs under `org.srelens.` install only with the srelens
-  publisher signature. A local, unsigned manifest cannot use one, and cannot replace
-  a signed installation. See [distribution.md](distribution.md). Namespaces for other
-  verified publishers are planned in
-  [#559](https://github.com/srelens/srelens/issues/559).
+- **Reserved namespaces.** The signed catalog delegates namespaces to publishers, and
+  an ID in one installs only with that publisher's signature: IDs under `org.srelens.`
+  with the srelens signature, and a third party's with its own. A local, unsigned
+  manifest cannot use one, and cannot replace a signed installation. See
+  [distribution.md](distribution.md#signed-releases-and-publishers) and
+  [trust.md](trust.md).
 - **Collisions between apps.** One installed app per ID. Installing an ID that is
   already installed is an explicit replacement after permission review. It keeps the
   app's settings and assigns a new revision.
@@ -453,6 +455,13 @@ unknown field. A 0.4 manifest may use everything 0.3 has, with the same meaning.
   `extensions.resolveLinks` rechecks the installed app's revision, grants and
   cluster scope; the Inspector shows the result as a Related section. See the
   [manifest reference](manifest.md#resourcelinks).
+- The catalog is signed (#559). Hosts read `catalog.signed.json`, catalog
+  `schemaVersion` 2, verified against the root they pin, and refuse one that is unsigned,
+  expired or older than the last they verified. The catalog delegates app ID namespaces to
+  publishers, whose keys sign their releases; a release signature may name its key, and
+  `extensions.validate` and `extensions.configure` accept it as `keyId`. Installed apps
+  report who signed them as `signedBy`. Manifests are unchanged, and the signed 0.3
+  releases keep installing. See [trust.md](trust.md).
 - The host supports API 0.3 and 0.4, and `extensions.catalog` reports both in
   `hostApiVersions` (#709). The signed 0.3 releases keep installing; see
   [Compatibility rules](#compatibility-rules).
@@ -552,6 +561,7 @@ update.
   - A catalog entry's `repository` is matched against the trusted-publisher table case-insensitively, as GitHub resolves owner and repository names. An entry whose repository is `https://github.com/SRELENS/…` must carry the srelens signature, exactly as the lowercase form must.
   - A lookalike owner such as `srelensx` is a different repository, and its entries stay ordinary unsigned third-party apps.
   - The release asset URL must still equal the pinned repository's `v<version>/manifest.json`, so an official entry writes it in the pinned form.
+  - Superseded by #559, which removed the trusted-publisher table: a delegated namespace, not a repository, decides who signs a release (see 0.4.0).
 - **#601:** security fix.
   - A `k8s.listCustomResource` binding's `group` must be shaped like a CustomResourceDefinition group. A group without a dot (`apps`, `batch`, `policy`) or with an empty label is refused with `EXTENSION_INVALID_BINDING` at `capabilities[i].arguments.group`, by `extensions.validate`, install and rollback. Dotted groups under `k8s.io` are accepted here, since some, such as `gateway.networking.k8s.io`, are CRD groups.
   - An installed app whose binding breaks the rule fails re-verification and is quarantined.

@@ -9,6 +9,7 @@ use srelens_plugin_host::{secret_key, SECRET_STORE_PERMISSION};
 fn policy(rules: Vec<HostRule>, loopback_http: bool) -> Policy {
     Policy {
         allowlist: rules,
+        ceiling: None,
         loopback_http,
         limits: Limits::default(),
     }

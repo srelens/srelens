@@ -43,6 +43,9 @@ pub enum ValidationCode {
     UnresolvedPage,
     #[serde(rename = "EXTENSION_INVALID_KIND")]
     InvalidKind,
+    /// The host's administrator policy refuses the app (#578).
+    #[serde(rename = "EXTENSION_POLICY_REFUSED")]
+    PolicyRefused,
 }
 
 impl ValidationCode {
@@ -64,6 +67,7 @@ impl ValidationCode {
         Self::UnresolvedCapability,
         Self::UnresolvedPage,
         Self::InvalidKind,
+        Self::PolicyRefused,
     ];
 
     /// The wire name, as serialized.
@@ -86,6 +90,7 @@ impl ValidationCode {
             Self::UnresolvedCapability => "EXTENSION_UNRESOLVED_CAPABILITY",
             Self::UnresolvedPage => "EXTENSION_UNRESOLVED_PAGE",
             Self::InvalidKind => "EXTENSION_INVALID_KIND",
+            Self::PolicyRefused => "EXTENSION_POLICY_REFUSED",
         }
     }
 }

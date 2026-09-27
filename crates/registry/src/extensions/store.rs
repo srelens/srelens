@@ -11,6 +11,8 @@ use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use super::app_policy::AppPolicy;
+
 /// Names one inventory within this process. The registries that serve the same inventory
 /// share its app streams under this key, and a write is announced to them by it.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -50,6 +52,12 @@ pub trait InventoryStore: Send + Sync {
     fn save(&self, raw: &[u8]) -> Result<(), String>;
     /// Keep every other writer of this inventory out until the lock is dropped.
     fn lock(&self) -> Result<InventoryLock, String>;
+    /// The administrator's policy every read of this inventory is held to (#578): the
+    /// one in force now, since it may be replaced between calls. `None` on a host with
+    /// none, such as the desktop.
+    fn policy(&self) -> Option<Arc<AppPolicy>> {
+        None
+    }
 }
 
 /// The desktop's store: the inventory file, saved durably and locked across processes, so
@@ -103,6 +111,9 @@ impl<T: InventoryStore + ?Sized> InventoryStore for Arc<T> {
     }
     fn lock(&self) -> Result<InventoryLock, String> {
         (**self).lock()
+    }
+    fn policy(&self) -> Option<Arc<AppPolicy>> {
+        (**self).policy()
     }
 }
 

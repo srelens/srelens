@@ -558,7 +558,7 @@ pub(super) fn register(
             async move {
                 check_input(&input)?;
                 let resolved = request_context(&client_cache, &input.context).await;
-                let state = tokio::task::spawn_blocking(move || read(&path))
+                let state = tokio::task::spawn_blocking(move || path.read())
                     .await
                     .map_err(|error| CapabilityError::Handler(error.to_string()))?
                     .map_err(CapabilityError::Handler)?;
@@ -962,6 +962,7 @@ mod tests {
             core.clone(),
             Configure::Install {
                 signature: None,
+                key_id: None,
                 manifest: manifest.to_string(),
                 grants: vec!["k8s.listCustomResource".into()],
                 reviewed_revision: None,

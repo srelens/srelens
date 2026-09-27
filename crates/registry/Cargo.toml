@@ -46,10 +46,14 @@ ring = "0.17"
 semver = "1"
 # `.srelens-extension` packages (#562) are gzip-compressed tar archives, and a package file
 # chosen in the app reaches `extensions.configure` as base64. All three are already in the
-# workspace through srelens-kube, which uses each of them; no new crate is built.
+# workspace through srelens-kube, which uses each of them; no new crate is built. Signed
+# catalog documents (#559) are DSSE envelopes, whose payloads and signatures are base64 too.
 tar = "0.4"
 flate2 = "1"
 base64 = "0.22"
+# A signed catalog (#559) expires at an RFC 3339 time. Already in the lockfile, through
+# srelens-capability and srelens-kube.
+chrono = { version = "0.4", default-features = false, features = ["std"] }
 
 # Windows: `durable::replace` renames with `MoveFileExW` and `MOVEFILE_WRITE_THROUGH`.
 # Already in the lockfile through tempfile and others; no new crate is built.

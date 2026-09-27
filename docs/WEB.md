@@ -85,6 +85,7 @@ tracked as future work.
 | `SRELENS_OIDC_ALLOWED_DOMAINS` | Optional | Comma-separated list of email domains allowed to sign in (e.g. `example.com,corp.io`), case-insensitive. Leave unset to allow any authenticated email through. |
 | `SRELENS_MASTER_KEY` | **Required** | 64 hex characters (32 bytes) that seal every kubeconfig and OIDC token at rest (AES-256-GCM). **Server mode refuses to start without it** — the key is never written to the data volume, so a stolen volume yields only sealed ciphertext. Generate with `openssl rand -hex 32` and keep it stable (rotating it makes existing sealed data unreadable). |
 | `SRELENS_DATA` | Optional | Path to the data directory holding the SQLite database and per-user runtime files. Defaults to `/data` in the shipped image (`./srelens-data` if unset outside the container). |
+| `SRELENS_EXTENSION_POLICY` | Optional | Path to a JSON file with the extension policy every user's apps are held to; see [Extension policy](#extension-policy). Read once at startup, and the server refuses to start if it can't read the file or the policy in it is not valid. Unset: the default policy, which allows what the web host allowed before policies existed. |
 | `SRELENS_DEV_LOGIN` | Optional | An email address; when set, enables `POST /auth/dev-login`, a no-IdP login shortcut for local trials. **Never set this on a deployment reachable by anyone other than you** — see below. |
 
 At least one of OIDC (all three `SRELENS_OIDC_*` vars) or `SRELENS_DEV_LOGIN`
@@ -235,7 +236,8 @@ URI, pin a fixed port with `SRELENS_CLUSTER_LOGIN_PORT` and register
   row of the SQLite database, not under `runtime/`, so it survives restarts and
   environment rebuilds and is deleted with the account
   ([#515](https://github.com/srelens/srelens/issues/515)). No user can list,
-  read or change another's. The **app catalog** is one cache on the data volume
+  read or change another's. Every user's apps are held to the server's
+  [extension policy](#extension-policy). The **app catalog** is one cache on the data volume
   (`$SRELENS_DATA/cache/extensions.catalog.json`) that users read and only the
   server writes: it checks hourly and fetches
   `raw.githubusercontent.com/srelens/extensions` again once its copy is a day
@@ -247,6 +249,74 @@ URI, pin a fixed port with `SRELENS_CLUSTER_LOGIN_PORT` and register
   not live on the web: they read on Refresh. `k8s.getCustomResource` stays
   available: it is a read under your own kubeconfig and RBAC, like every other
   custom-resource read.
+
+## Extension policy
+
+An operator can limit which apps this server's users install and what those apps
+may do, with a JSON file named by `SRELENS_EXTENSION_POLICY`
+([#578](https://github.com/srelens/srelens/issues/578)). The server applies it to
+every user's apps on every call, not only at install. An app the policy does not
+allow is refused at install and update, and one already installed is shown disabled
+with the reason, and every read, action and resolver through it is refused from its
+next call. Nothing is saved on the policy's account, so when the policy allows the app
+again it comes back as its user left it.
+
+```json
+{
+  "allowedApps": ["org.srelens.argocd", "org.srelens.flux", "org.example.metrics"],
+  "allowedPublishers": ["srelens"],
+  "allowWriteActions": false,
+  "networkCeiling": ["prometheus.example.com", "*.grafana.example.com"],
+  "requiredApps": ["org.srelens.argocd"]
+}
+```
+
+Every field may be left out:
+
+| Field | Left out | Meaning |
+| --- | --- | --- |
+| `allowedApps` | Any app | Only these app IDs may be installed and used. |
+| `blockedApps` | None | These app IDs may never be installed or used, whatever else allows them. |
+| `allowedPublishers` | Every trusted publisher | Signed apps only from these publishers, each named by the ID of the delegation its signature verifies under ([trust.md](extensions/trust.md)). A policy can name the publishers the build ships a delegation for; today that is `srelens`. |
+| `allowUnsignedApps` | `true` | `false` refuses every app without a verified publisher signature. With `true`, each user's own **Allow unsigned apps to modify clusters** still decides whether an unsigned app may write. |
+| `allowedCapabilities` | Every one | The host capabilities an app may be granted: `k8s.listCustomResource`, `k8s.listEvents`, `k8s.listDeployments`, `k8s.listStatefulSets`, `k8s.listDaemonSets`, `k8s.listNodes`, `network.http`, `extension.secretStore`, the pod capabilities `k8s.streamLogs`, `k8s.exec` and `k8s.portForward`, and the action primitives `k8s.annotate`, `k8s.setFields`, `k8s.setStatusCondition`, `k8s.mergePatch`, `k8s.requestRolloutRestart` and `k8s.requestCordonNode`. |
+| `allowWriteActions` | `true` | `false` refuses every app that declares a write action, which includes the official Argo CD and Flux apps. It does not cover running commands in pods: to refuse that, leave `k8s.exec` out of `allowedCapabilities`. |
+| `networkCeiling` | No host | The hosts `network.http` may reach, written the way an app lists its hosts: `name`, `name:port`, `*.example.com` (one subdomain label) or an IP address. A request, and each redirect, goes out only when both the app and the ceiling allow its host, and only over HTTPS. Without a ceiling, apps on the web have no `network.http` at all. |
+| `allowExecutableApps` | `false` | Must be `false`: executable apps stay off until they run with a per-user sidecar identity ([#521](https://github.com/srelens/srelens/issues/521)). |
+| `requiredApps` | None | Apps users keep: an installed one can't be removed or disabled, and Settings → Apps tells a user who hasn't installed one to install it from the Catalog. The server does not install apps for anyone, and which clusters a required app is enabled for stays each user's choice. |
+
+An app that fails any rule is refused as a whole, not just the part the rule is about:
+with `allowWriteActions: false`, the Argo CD app can't be installed or used at all,
+views included. Requiring an app exempts it from nothing: a required app that another
+rule refuses stays disabled for everyone.
+
+What to know as an operator:
+
+- **The file is checked whole at startup.** An unknown field, an entry that is not an
+  app ID (wildcards such as `org.srelens.*` are not supported; use
+  `allowedPublishers`), an unknown publisher or capability, a host that is not one,
+  `allowExecutableApps: true`, or a required app that is blocked or missing from
+  `allowedApps` stops the server with every problem listed.
+- **A change takes effect when the server restarts.** Nothing writes the policy over
+  the API; an administrator role and policy administration in the web settings are
+  [#739](https://github.com/srelens/srelens/issues/739).
+- **Every signed-in user can read it**, at `GET /api/extension-policy`, and Settings →
+  Apps summarizes it, so a user can see why an app is refused.
+- **A ceiling host is reached from the server's network position.** List only hosts
+  every user's apps may reach from there. `*.example.com` covers every one-label
+  subdomain, including ones created later, and a name that resolves to an internal
+  address is reached like any other. Plain HTTP is never allowed under a policy,
+  because loopback would be this server, not the user's computer.
+- **Mount the file read-only**, readable by the container user (uid 10001):
+
+  ```yaml
+  services:
+    srelens:
+      environment:
+        SRELENS_EXTENSION_POLICY: /etc/srelens/extension-policy.json
+      volumes:
+        - ./extension-policy.json:/etc/srelens/extension-policy.json:ro
+  ```
 
 ## Extending the image with cloud CLIs
 

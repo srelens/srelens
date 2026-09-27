@@ -20,6 +20,15 @@ pub struct Limits {
     /// CPU time, as a number of CPUs, enforced like the memory. Default 1.
     /// #572 names no default; this one is the supervisor's.
     pub cpus: f64,
+    /// What the app's data directory, the one path it may write (#573), may
+    /// hold: files, directories and links, by the larger of each file's length
+    /// and what the filesystem allocated to it. Default 1 GiB, room for
+    /// Trivy's vulnerability database, which is what #573 names.
+    pub data_bytes: u64,
+    /// How many files, directories and links it may hold. Default 100,000.
+    /// It bounds what one measurement costs the host, and a directory of tiny
+    /// files uses disk its byte count does not show.
+    pub data_entries: u64,
 }
 
 impl Default for Limits {
@@ -30,6 +39,8 @@ impl Default for Limits {
             max_streams: 5,
             memory_bytes: 256 * 1024 * 1024,
             cpus: 1.0,
+            data_bytes: 1024 * 1024 * 1024,
+            data_entries: 100_000,
         }
     }
 }
@@ -54,6 +65,11 @@ pub struct Policy {
     /// On a stop: how long `deactivate` and `shutdown` each get, and then how
     /// long the process gets to exit before it is killed. Default 5 s.
     pub shutdown_grace: Duration,
+    /// How often a running sidecar's data directory is measured against
+    /// [`Limits::data_bytes`] and [`Limits::data_entries`]. Default 2 s. What it
+    /// writes between two measurements can overshoot the limit; see
+    /// `docs/extensions/sidecar-protocol.md`, "Data directory".
+    pub data_check_interval: Duration,
 }
 
 impl Default for Policy {
@@ -68,6 +84,7 @@ impl Default for Policy {
             health_interval: Duration::from_secs(30),
             health_timeout: Duration::from_secs(10),
             shutdown_grace: Duration::from_secs(5),
+            data_check_interval: Duration::from_secs(2),
         }
     }
 }
@@ -83,6 +100,13 @@ mod tests {
         assert_eq!(limits.max_concurrent_requests, 8);
         assert_eq!(limits.max_streams, 5);
         assert_eq!(limits.memory_bytes, 268_435_456);
+        // #573's.
+        assert_eq!(limits.data_bytes, 1 << 30);
+        assert_eq!(limits.data_entries, 100_000);
+        assert_eq!(
+            Policy::default().data_check_interval,
+            Duration::from_secs(2)
+        );
         let backoff: Vec<u64> = Policy::default()
             .backoff
             .iter()

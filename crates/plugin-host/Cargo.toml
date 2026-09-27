@@ -18,10 +18,16 @@ semver = "1"
 # credentials in it cannot hide behind unusual spelling. Already in the
 # workspace through srelens-capability.
 url = "2"
+# Redacting an app's log lines (#575): matching is linear in the line, so a
+# line a sidecar writes cannot make it slow. Already in the lockfile.
+regex = "1"
 # The sidecar supervisor (#572): child processes, their pipes, timers and the
 # channels between them. `fs` adapts the Windows backend's anonymous pipes,
 # which tokio has no async type for.
 tokio = { version = "1", features = ["rt", "sync", "time", "io-util", "process", "macros", "fs"] }
+# A sidecar's data directory (#573) is named by a digest of its app ID, as its
+# Windows AppContainer profile is. Already in the lockfile.
+sha2 = "0.10"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -42,13 +48,12 @@ windows-sys = { version = "0.59", features = [
   "Win32_Security",
   "Win32_Security_Authorization",
   "Win32_Security_Isolation",
+  # CoTaskMemFree, for the path GetAppContainerFolderPath returns (#573).
+  "Win32_System_Com",
   "Win32_System_JobObjects",
   "Win32_System_Pipes",
   "Win32_System_Threading",
 ] }
-# An AppContainer name is at most 64 characters and an app ID up to 128, so the
-# profile is named by a digest of the ID. Already in the lockfile.
-sha2 = "0.10"
 
 [features]
 # Exposes `srelens_plugin_host::fuzzing` to the fuzz targets in `fuzz/` and to

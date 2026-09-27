@@ -20,7 +20,7 @@
 //! (`streams/providers.rs`): its history, then a query every
 //! [`ProviderTiming::poll`] for what is new, for as long as the view is open.
 use super::network::{self, Limits, RequestError};
-use super::{resolve_app, Installed, Store};
+use super::{resolve_app, AppPolicy, Installed, Store};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -189,6 +189,9 @@ pub(super) struct Ask {
 /// query goes through, and the query with every variable in place.
 pub(super) struct Bound {
     pub plugin: Installed,
+    /// The administrator's policy the app was read under (#578), whose network
+    /// ceiling holds its requests on the web host.
+    pub policy: Option<AppPolicy>,
     pub kind: ProviderKind,
     pub id: String,
     pub title: String,
@@ -283,6 +286,7 @@ impl Ask {
         .await
         .map_err(|e| e.to_string())?;
         let plugin = app.state.plugins[app.index].clone();
+        let policy = app.state.policy.clone();
         let manifest = &plugin.manifest;
         let provider = manifest
             .provider(&self.provider)
@@ -335,6 +339,7 @@ impl Ask {
             unit: provider.unit,
             query,
             plugin,
+            policy,
         })
     }
 
@@ -357,6 +362,7 @@ impl Ask {
             &bound.plugin,
             &bound.capability,
             &extra,
+            bound.policy.as_ref(),
             Limits::default(),
         )
         .await?;
