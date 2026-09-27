@@ -131,7 +131,11 @@ function positiveInteger(options, name, fallback) {
 function role(options, name) {
   const keys = (options[name] ?? []).map(loadKey);
   if (keys.length === 0) fail(`name at least one --${name} key`);
-  return { keys, threshold: positiveInteger(options, `${name}-threshold`) };
+  const threshold = positiveInteger(options, `${name}-threshold`);
+  // The host counts each key once, so a threshold above the distinct keys is never met.
+  const distinct = new Set(keys.map(keyId)).size;
+  if (threshold > distinct) fail(`--${name}-threshold ${threshold} needs that many distinct --${name} keys; ${distinct} given`);
+  return { keys, threshold };
 }
 
 const commands = {
@@ -162,6 +166,13 @@ const commands = {
         catalog: { keyids: catalog.keys.map(keyId), threshold: catalog.threshold },
       },
     };
+    // A host trusts a root only once its own root role has signed it at its threshold, so
+    // one signed by fewer of its root keys would be refused wherever it is pinned.
+    const rootIds = new Set(root.keys.map(keyId));
+    const signedBy = new Set((options.sign ?? []).map((spec) => keyId(loadKey(spec))).filter((id) => rootIds.has(id)));
+    if (signedBy.size < root.threshold) {
+      fail(`the root needs signatures from ${root.threshold} of its --root keys; --sign names ${signedBy.size}`);
+    }
     print(envelope(TYPES.root, document, options.sign ?? []));
   },
   publisher({ options }) {
@@ -180,6 +191,9 @@ const commands = {
   },
   catalog({ options }) {
     const source = JSON.parse(readFileSync(one(options, 'in'), 'utf8'));
+    // A catalog with no entries is one hosts accept, so a missing list is refused here
+    // rather than signed as an empty catalog.
+    if (!Array.isArray(source?.extensions)) fail('--in must be a catalog with an "extensions" array');
     const expires = one(options, 'expires');
     if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(expires) || Number.isNaN(Date.parse(expires))) {
       fail('--expires must be an RFC 3339 UTC time such as 2026-10-31T00:00:00Z');
@@ -191,7 +205,7 @@ const commands = {
       expires,
       publishers: (options.publisher ?? []).map((file) => JSON.parse(readFileSync(file, 'utf8'))),
       // An unsigned catalog of schema version 1 gives its entries unchanged.
-      extensions: source.extensions ?? [],
+      extensions: source.extensions,
     };
     print(envelope(TYPES.catalog, document, options.sign ?? []));
   },
