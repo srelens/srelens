@@ -114,7 +114,22 @@ const tables: Record<string, Record<string, "required" | "optional">> = {
     badges: "optional",
     commands: "optional",
     resourceLinks: "optional",
+    metricProviders: "optional",
+    logProviders: "optional",
+    traceProviders: "optional",
   } satisfies Presence<Contributions>,
+  MetricProvider: {
+    id: "required", title: "required", capability: "required", language: "required", forKinds: "required",
+    query: "required", unit: "required",
+  } satisfies Presence<NonNullable<Contributions["metricProviders"]>[number]>,
+  LogProvider: {
+    id: "required", title: "required", capability: "required", language: "required", forKinds: "required",
+    query: "required",
+  } satisfies Presence<NonNullable<Contributions["logProviders"]>[number]>,
+  TraceProvider: {
+    id: "required", title: "required", capability: "required", language: "required", forKinds: "required",
+    query: "required",
+  } satisfies Presence<NonNullable<Contributions["traceProviders"]>[number]>,
   PaletteCommand: { id:"required", title:"required", target:"required", forKinds:"optional" } satisfies Presence<NonNullable<Contributions["commands"]>[number]>,
   ResourceLink: { id:"required", from:"required", to:"required", relation:"required", match:"required" } satisfies Presence<NonNullable<Contributions["resourceLinks"]>[number]>,
   LinkMatch: { label:"optional", namespaceLabel:"optional", ownerReference:"optional", annotation:"optional", parse:"optional", defaultNamespace:"optional", name:"optional", path:"optional" } satisfies Presence<NonNullable<Contributions["resourceLinks"]>[number]["match"]>,

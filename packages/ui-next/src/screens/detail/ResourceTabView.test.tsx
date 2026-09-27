@@ -43,6 +43,9 @@ vi.mock("../../extensions/ExtensionPanelSlot", () => ({
 vi.mock("../../extensions/ExtensionRelatedSlot", () => ({
   ExtensionRelatedSlot: ({context,resource}:{context:string;resource:K8sObject}) => <section className="section" data-testid="extension-related-slot">{resource.kind} related on {context}</section>,
 }));
+vi.mock("../../extensions/ExtensionProviderSlot", () => ({
+  ExtensionProviderSlot: ({context,resource}:{context:string;resource:K8sObject}) => <section className="section" data-testid="extension-provider-slot">{resource.kind} metrics and traces on {context}</section>,
+}));
 
 import { ConsoleProvider } from "../../console";
 import { loadSectionFolds, setSectionOpen } from "../../lib/sectionFolds";
@@ -306,6 +309,13 @@ describe("ResourceTabView — the full tab the design draws", () => {
       await openPod();
       const slot = screen.getByTestId("extension-panel-slot");
       expect(slot.textContent).toBe("Pod app panels");
+      const facts = document.querySelector("[data-slot='fact-grid']")!;
+      expect(facts.compareDocumentPosition(slot) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    });
+    it("places app metrics and traces after the host's Overview sections (#569)", async () => {
+      await openPod();
+      const slot = screen.getByTestId("extension-provider-slot");
+      expect(slot.textContent).toContain("Pod metrics and traces on");
       const facts = document.querySelector("[data-slot='fact-grid']")!;
       expect(facts.compareDocumentPosition(slot) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     });

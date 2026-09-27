@@ -920,3 +920,12 @@
   white-space: pre;
   overflow-x: auto;
 }
+
+/* Metric and trace providers (#569): one heading bar with the range, then a panel per
+   provider, each saying which app asked for it. Flush, like every region here. */
+.extension-providers-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 6px 12px; background: var(--surface, var(--fl-color-surface)); border-block: 1px solid var(--rule, var(--fl-color-border)); }
+.extension-providers-heading { flex: 1; min-width: 0; margin: 0; font-size: inherit; font-weight: 600; }
+.extension-provider { padding-block: 6px; border-bottom: 1px solid var(--rule, var(--fl-color-border)); }
+.extension-provider:last-child { border-bottom: 0; }
+.extension-provider-title { margin: 0; padding: 0 12px; font-size: inherit; font-weight: 600; }
+.extension-provider-origin { margin: 0; padding: 0 12px 4px; font-size: 0.75rem; color: var(--ink-muted, var(--fl-color-text-muted)); }

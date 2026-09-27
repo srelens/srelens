@@ -49,8 +49,17 @@ const h = vi.hoisted(() => {
       context: string;
       namespace: string;
       targets: { pod: string; container?: string; label?: string }[];
-      options: { sinceSeconds?: number; tailLines?: number; timestamps?: boolean };
+      options: {
+        sinceSeconds?: number;
+        tailLines?: number;
+        timestamps?: boolean;
+        source?: { key: string; open: (...a: never[]) => Promise<unknown> };
+      };
     }[],
+    /** The installed apps the log view may take a source from (#569). */
+    plugins: [] as unknown[],
+    /** Every app view a provider source opened, with its streams. */
+    views: [] as { app: string; label: string; close: ReturnType<typeof vi.fn>; opened: { request: unknown; handlers: { onEnd?: (end: unknown) => void } }[] }[],
     resolve: vi.fn(),
     subscribe(listener: () => void) {
       listeners.add(listener);
@@ -73,7 +82,7 @@ vi.mock("../lib/logStream", async () => {
       context: string,
       namespace: string,
       targets: { pod: string; container?: string; label?: string }[],
-      options: { sinceSeconds?: number; tailLines?: number; timestamps?: boolean } = {},
+      options: { sinceSeconds?: number; tailLines?: number; timestamps?: boolean; source?: never } = {},
     ) => {
       useSyncExternalStore(
         h.subscribe,
@@ -121,6 +130,27 @@ vi.mock("@srelens/core", async (orig) => ({
   // The bare route's only backend call: one list per kind and namespace, to
   // find out which remembered subjects the cluster still has.
   listResource: (...a: unknown[]) => h.listed(...a),
+  // A log provider's source (#569): the app view it opens its stream on, and the
+  // kubeconfig listing that says which cluster an app is enabled for.
+  listContexts: async () => ({ contexts: [{ name: "prod-eu", key: "prod" }] }),
+  openExtensionView: (app: string, label: string) => {
+    const opened: { request: unknown; handlers: { onEnd?: (end: unknown) => void } }[] = [];
+    const view = { app, label, close: vi.fn(async () => {}), opened };
+    h.views.push(view);
+    return {
+      view: `${app}/${label}`,
+      close: view.close,
+      open: async (request: unknown, handlers: { onEnd?: (end: unknown) => void }) => {
+        opened.push({ request, handlers });
+        return { stream: "s-1", cancel: vi.fn(async () => {}) };
+      },
+    };
+  },
+}));
+
+vi.mock("../extensions/inventoryStore", async (orig) => ({
+  ...(await orig<typeof import("../extensions/inventoryStore")>()),
+  useExtensions: () => ({ status: "ready", data: { schemaVersion: 1, nextRevision: 9, plugins: h.plugins }, reload: () => {} }),
 }));
 
 if (!("ResizeObserver" in globalThis)) {
@@ -231,6 +261,8 @@ beforeEach(() => {
   h.listeners.clear();
   h.version = 0;
   h.seen = [];
+  h.plugins = [];
+  h.views = [];
   h.state = {
     lines: [],
     dropped: 0,
@@ -1768,5 +1800,90 @@ describe("the previous instance", () => {
     } finally {
       restore();
     }
+  });
+});
+
+/** An observability app whose Loki provider is for workloads, and one for pods only. */
+function observability() {
+  return {
+    manifest: {
+      id: "org.example.observability", name: "Observability", version: "1.0.0", srelensApiVersion: "^0.5",
+      kind: "declarative", permissions: [], capabilities: [],
+      contributions: {
+        pages: [], detailTabs: [], detailLinks: [],
+        logProviders: [
+          { id: "loki", title: "Loki", capability: "loki", language: "logql", forKinds: ["apps/Deployment"], query: "{}" },
+          { id: "podLoki", title: "Pod Loki", capability: "loki", language: "logql", forKinds: ["/Pod"], query: "{}" },
+        ],
+      },
+    },
+    enabled: true, revision: 7, grants: [], settings: {}, source: "local", installedAt: 0, history: [],
+  };
+}
+
+describe("log sources (#569)", () => {
+  it("offers no source picker while no installed app provides logs", async () => {
+    draw();
+    await screen.findByRole("log");
+    expect(screen.queryByRole("combobox", { name: "source" })).toBeNull();
+  });
+
+  it("offers Kubernetes first, then each installed log provider for the subject's kind", async () => {
+    h.plugins = [observability()];
+    draw();
+    const picker = await screen.findByRole("combobox", { name: "source" });
+    expect(within(picker).getAllByRole("option").map((o) => o.textContent)).toEqual([
+      "Kubernetes",
+      "Loki · Observability",
+    ]);
+    expect((picker as HTMLSelectElement).value).toBe("kubernetes");
+  });
+
+  it("follows the chosen provider through the view's own stream, without the Kubernetes-only controls", async () => {
+    h.plugins = [observability()];
+    draw();
+    const picker = await screen.findByRole("combobox", { name: "source" });
+    expect(screen.getByRole("button", { name: /Previous instance/ })).toBeTruthy();
+    fireEvent.change(picker, { target: { value: "org.example.observability/loki" } });
+    await waitFor(() => expect(h.seen.at(-1)?.options.source?.key).toContain("org.example.observability/loki"));
+    const asked = h.seen.at(-1)!;
+    expect(asked.targets).toEqual([{ pod: "checkout-api", label: "loki" }]);
+    // "all" is the longest history a provider is asked for, rather than none.
+    expect(asked.options.sinceSeconds).toBe(7 * 24 * 3600);
+    expect(asked.options.tailLines).toBe(1000);
+    expect(h.views.map((v) => [v.app, v.label])).toEqual([["org.example.observability", "logs:loki"]]);
+    // A previous instance is the cluster's, not Loki's.
+    expect(screen.queryByRole("button", { name: /Previous instance/ })).toBeNull();
+    // What the hook would open: the provider's stream for this Deployment.
+    await asked.options.source!.open(...([[], () => {}, () => {}, { tailLines: 1000 }] as never[]));
+    expect(h.views[0].opened[0].request).toMatchObject({
+      id: "org.example.observability", revision: 7, context: "prod-eu", namespace: "checkout",
+      source: { kind: "logProvider", provider: "loki", resourceKind: "apps/Deployment", name: "checkout-api" },
+    });
+    // And back: Kubernetes follows the cluster's own targets again, and the view is closed.
+    fireEvent.change(picker, { target: { value: "kubernetes" } });
+    await waitFor(() => expect(h.seen.at(-1)?.options.source).toBeUndefined());
+    expect(h.seen.at(-1)!.targets).toEqual(TARGETS);
+    expect(h.views[0].close).toHaveBeenCalled();
+  });
+
+  it("says how a provider's stream ended, as a failure, and follows it again", async () => {
+    h.plugins = [observability()];
+    draw();
+    fireEvent.change(await screen.findByRole("combobox", { name: "source" }), {
+      target: { value: "org.example.observability/loki" },
+    });
+    await waitFor(() => expect(h.seen.at(-1)?.options.source).toBeDefined());
+    const first = h.seen.at(-1)!.options.source!;
+    await first.open(...([[], () => {}, () => {}, {}] as never[]));
+    act(() =>
+      h.views[0].opened[0].handlers.onEnd?.({ type: "error", code: "source", message: "The server answered HTTP 403 Forbidden" }),
+    );
+    expect((await screen.findByRole("alert")).textContent).toContain(
+      "The stream failed: The server answered HTTP 403 Forbidden",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Follow again" }));
+    await waitFor(() => expect(h.seen.at(-1)?.options.source?.key).not.toBe(first.key));
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 });

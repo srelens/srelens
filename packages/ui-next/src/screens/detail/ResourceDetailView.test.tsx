@@ -51,6 +51,10 @@ vi.mock("../../extensions/ExtensionRelatedSlot", () => ({
   ExtensionRelatedSlot: ({context,resource}:{context:string;resource:K8sObject}) =>
     <section className="section" data-testid="peek-related">{resource.kind} related on {context}</section>,
 }));
+vi.mock("../../extensions/ExtensionProviderSlot", () => ({
+  ExtensionProviderSlot: ({context,resource}:{context:string;resource:K8sObject}) =>
+    <section className="section" data-testid="peek-providers">{resource.kind} metrics and traces on {context}</section>,
+}));
 
 // The kit's `CodeEditor`, unchanged — wrapped only to record what the YAML
 // pane hands it. CodeMirror compiles its sizing into a generated stylesheet
@@ -252,6 +256,17 @@ describe("ResourceDetailView", () => {
     expect(facts!.compareDocumentPosition(panel) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     await userEvent.click(screen.getByRole("tab", { name: "YAML" }));
     expect(screen.queryByTestId("peek-extension-panel")).toBeNull();
+  });
+
+  it("places app metrics and traces after the peek's host facts only on Details (#569)", async () => {
+    getObject.mockResolvedValue({ object: POD });
+    render(<ResourceDetailView context="ctx" kind="Pod" namespace="default" name="web-1" />);
+    const providers = await screen.findByTestId("peek-providers");
+    expect(providers.textContent).toBe("Pod metrics and traces on ctx");
+    const facts = document.querySelector(".fact-list");
+    expect(facts!.compareDocumentPosition(providers) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    await userEvent.click(screen.getByRole("tab", { name: "YAML" }));
+    expect(screen.queryByTestId("peek-providers")).toBeNull();
   });
 
   it("places the Related section after the peek's host facts only on Details (#545)", async () => {

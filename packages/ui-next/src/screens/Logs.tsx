@@ -9,6 +9,7 @@ import {
 } from "react";
 import {
   absoluteTimestamp,
+  describeStreamEnd,
   logConnectionStatus,
   logLineHealth,
   listResource,
@@ -38,6 +39,7 @@ import {
   toneWash,
 } from "@srelens/ui-kit";
 import { useConsole } from "../console";
+import { useLogProviderSource, useLogProviders } from "../extensions/logProviders";
 import { useActiveContext } from "../lib/clusters";
 import { FailureAlert, FailureState } from "../lib/errorCopy";
 import { Icons } from "../lib/icons";
@@ -148,6 +150,28 @@ const TAIL_LINES = 1000;
 
 /** Stands for "every container", as a select value that cannot be a name. */
 const ALL_CONTAINERS = "";
+
+/** The source picker's value for the cluster's own logs; a provider's is `<app>/<provider>`, which has a dot. */
+const KUBERNETES_SOURCE = "kubernetes";
+
+/**
+ * How far back "all" reaches for a log provider (#569): the longest history the host
+ * asks one for. The cluster keeps what a container still has; a log backend keeps far
+ * more, so "all" of it is not a query anyone could wait for.
+ */
+const PROVIDER_ALL_SECONDS = 7 * 24 * 3600;
+
+/** The qualified kind a log provider is declared for (#569), from the route's kind. */
+function providerKind(kind: string): string | undefined {
+  return (
+    {
+      pod: "/Pod",
+      deployment: "apps/Deployment",
+      statefulset: "apps/StatefulSet",
+      daemonset: "apps/DaemonSet",
+    } as Record<string, string>
+  )[kind.toLowerCase()];
+}
 
 /** How near the bottom still counts as being at it, in pixels. Classic's 48. */
 const STICK_SLACK = 48;
@@ -692,6 +716,7 @@ function LogsSubject({
     <LogsStream
       context={context}
       clusterName={clusterName}
+      kind={kind}
       namespace={namespace}
       name={name}
       targets={resolution.targets}
@@ -710,6 +735,7 @@ function LogsSubject({
 function LogsStream({
   context,
   clusterName,
+  kind,
   namespace,
   name,
   targets,
@@ -718,6 +744,7 @@ function LogsStream({
 }: {
   context: string;
   clusterName: string;
+  kind: string;
   namespace: string;
   name: string;
   targets: LogTarget[];
@@ -762,13 +789,35 @@ function LogsStream({
    */
   const stickRef = useRef(true);
 
+  /**
+   * Where the lines come from (#569): the cluster, or one of the installed apps'
+   * log providers for this kind. The picker is drawn only when there is a choice.
+   * A provider's lines carry `pod/container` from its own labels, so the rail and
+   * the container filter read them as they read the cluster's.
+   */
+  const resourceKind = providerKind(kind);
+  const providers = useLogProviders(context, resourceKind);
+  const [picked, setPicked] = useState<{ key: string; label: string } | null>(null);
+  const chosen = picked ? providers.find((p) => p.key === picked.key) : undefined;
+  const provider = useLogProviderSource(chosen, { context, namespace, resourceKind: resourceKind ?? "", name });
+  const chooseSource = useCallback(
+    (key: string) => {
+      const next = providers.find((p) => p.key === key);
+      setPicked(next ? { key: next.key, label: next.label } : null);
+      // A previous instance is the cluster's to hand back, never a provider's.
+      if (next) setPrevious(false);
+    },
+    [providers],
+  );
+
   const sinceSeconds = SINCE.find((s) => s.value === since)?.seconds;
-  const stream = useLogStream(context, namespace, targets, {
+  const stream = useLogStream(context, namespace, provider.targets ?? targets, {
     // Always on: the design gives the time its own column, so the stamp is not
     // an option the reader turns on — it is where the first column comes from.
     timestamps: true,
-    sinceSeconds,
+    sinceSeconds: chosen ? (sinceSeconds ?? PROVIDER_ALL_SECONDS) : sinceSeconds,
     tailLines: TAIL_LINES,
+    source: provider.source,
   });
 
   const byLabel = useMemo(() => indexTargets(targets), [targets]);
@@ -1155,6 +1204,23 @@ function LogsStream({
           label="Filter lines"
           placeholder="Filter lines"
         >
+          {providers.length > 0 && (
+            <div className="flex items-center gap-1.5">
+              <Eyebrow>source</Eyebrow>
+              <Select
+                value={chosen ? chosen.key : KUBERNETES_SOURCE}
+                onValueChange={chooseSource}
+                options={[
+                  { value: KUBERNETES_SOURCE, label: "Kubernetes" },
+                  ...providers.map((p) => ({ value: p.key, label: p.label })),
+                ]}
+                // The snapshot of a terminated container is the cluster's; a
+                // provider is a source of the live tail.
+                disabled={previous}
+                aria-label="source"
+              />
+            </div>
+          )}
           <div className="flex items-center gap-1.5">
             <Eyebrow>since</Eyebrow>
             <Select
@@ -1186,25 +1252,29 @@ function LogsStream({
           )}
           {/* The design's rotate-ccw toggle. Warn-tinted while on, from the
               same tokens the banner under it uses — a pane showing something
-              other than the live stream must not look like one that is. */}
-          <Button
-            variant="secondary"
-            size="xs"
-            aria-pressed={previous}
-            onClick={() => setPrevious((p) => !p)}
-            style={
-              previous
-                ? {
-                    borderColor: toneColor("warn"),
-                    color: toneColor("warn"),
-                    background: toneWash("warn"),
-                  }
-                : undefined
-            }
-          >
-            <Icons.revert size={12} aria-hidden="true" />
-            Previous instance
-          </Button>
+              other than the live stream must not look like one that is. Not
+              drawn for a provider: a terminated container's buffer is the
+              cluster's, and a log backend has no "previous instance". */}
+          {!chosen && (
+            <Button
+              variant="secondary"
+              size="xs"
+              aria-pressed={previous}
+              onClick={() => setPrevious((p) => !p)}
+              style={
+                previous
+                  ? {
+                      borderColor: toneColor("warn"),
+                      color: toneColor("warn"),
+                      background: toneWash("warn"),
+                    }
+                  : undefined
+              }
+            >
+              <Icons.revert size={12} aria-hidden="true" />
+              Previous instance
+            </Button>
+          )}
           <Button
             variant="secondary"
             size="xs"
@@ -1242,6 +1312,31 @@ function LogsStream({
           )}
         </FilterBar>
 
+        {picked && !chosen && (
+          // The choice was made from a list that has since changed: say so
+          // rather than quietly draw the cluster's lines under the old name.
+          <Alert
+            tone="warn"
+            title={`${picked.label} is no longer offered for this ${kind}`}
+            className="mx-3 mt-3"
+          >
+            The app that provides it was disabled or removed, or is no longer
+            enabled for this cluster. Following Kubernetes instead.
+          </Alert>
+        )}
+        {chosen && provider.end && (
+          // A provider's stream ends only with a reason, and a failure is not
+          // an ending: `describeStreamEnd` words the two differently.
+          <Alert
+            tone={provider.end.type === "error" ? "sev" : "info"}
+            title={describeStreamEnd(provider.end)}
+            className="mx-3 mt-3"
+          >
+            <Button variant="secondary" size="xs" onClick={provider.retry}>
+              Follow again
+            </Button>
+          </Alert>
+        )}
         {previous && terminated.length > 0 && (
           // Directly under the filter bar, as the design places it: what is
           // being read, and why nothing is arriving.

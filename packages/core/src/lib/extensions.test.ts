@@ -17,7 +17,12 @@ import {
   parseExtensionRoute,
   itemStatus,
   itemStatuses,
+  providersFor,
+  queryExtensionProvider,
+  type ExtensionManifest,
 } from "./extensions";
+// What the Rust `QueryIn` test deserializes, byte for byte (#569).
+import queryProviderPayload from "./extension-query-provider.json";
 
 describe("itemStatus: one normalized status per listed resource (#541)", () => {
   const legacy = { ready: 0, suspended: 1, progressing: 2 };
@@ -389,5 +394,45 @@ describe("dashboard cards (#540)", () => {
     expect(parseExtensionRoute("/extension-clusters/c/org.test.app/page/team/name?card=x")).toBeNull();
     expect(parseExtensionRoute("/extension-clusters/c/org.test.app/page/team?card=")).toBeNull();
     expect(parseExtensionRoute("/extension-clusters/c/org.test.app/page/team?other=x")).toBeNull();
+  });
+});
+
+describe("providers (#569)", () => {
+  it("queries one exactly as the host's QueryIn accepts it", async () => {
+    vi.mocked(invokeCapability).mockClear();
+    await queryExtensionProvider({
+      id: "org.example.observability", revision: 3, provider: "cpu", context: "kind-dev",
+      namespace: "team", resourceKind: "apps/Deployment", name: "web", rangeSeconds: 3600,
+    });
+    expect(invokeCapability).toHaveBeenCalledWith("extensions.queryProvider", queryProviderPayload);
+    expect(JSON.stringify(vi.mocked(invokeCapability).mock.calls[0][1])).not.toMatch(/resource_kind|range_seconds/);
+  });
+
+  it("leaves the range out when the view names none, so the host's default holds", async () => {
+    vi.mocked(invokeCapability).mockClear();
+    await queryExtensionProvider({
+      id: "a.b", revision: 1, provider: "cpu", context: "c", namespace: "n", resourceKind: "/Pod", name: "p",
+    });
+    expect(vi.mocked(invokeCapability).mock.calls[0][1]).not.toHaveProperty("rangeSeconds");
+  });
+
+  const manifest = {
+    contributions: {
+      pages: [], detailTabs: [], detailLinks: [],
+      metricProviders: [
+        { id: "cpu", title: "CPU", capability: "prom", language: "promql", forKinds: ["apps/Deployment"], unit: "cores", query: "up" },
+        { id: "pods", title: "Pod CPU", capability: "prom", language: "promql", forKinds: ["/Pod"], unit: "cores", query: "up" },
+      ],
+      logProviders: [{ id: "loki", title: "Loki", capability: "loki", language: "logql", forKinds: ["/Pod"], query: "{}" }],
+    },
+  } as unknown as ExtensionManifest;
+
+  it("finds the providers of one list declared for a kind, in manifest order", () => {
+    expect(providersFor(manifest, "metrics", "apps/Deployment").map((p) => p.id)).toEqual(["cpu"]);
+    expect(providersFor(manifest, "metrics", "/Pod").map((p) => p.id)).toEqual(["pods"]);
+    expect(providersFor(manifest, "logs", "/Pod").map((p) => p.id)).toEqual(["loki"]);
+    expect(providersFor(manifest, "traces", "/Pod")).toEqual([]);
+    // A manifest from before providers, or one the host has not checked, has none.
+    expect(providersFor({ contributions: {} } as unknown as ExtensionManifest, "logs", "/Pod")).toEqual([]);
   });
 });

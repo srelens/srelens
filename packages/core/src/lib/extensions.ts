@@ -2,6 +2,7 @@ import { invokeCapability } from "../transport/transport";
 import { isTauri } from "../transport/platform";
 import type { ActionPredicate } from "./actionPredicates";
 import type { CapabilityImpact } from "./capabilities";
+import type { NativeTimeseriesData, NativeTimeseriesUnit } from "./nativeComponents";
 // These mirror crates/plugin-host/src/manifest.rs and crates/registry/src/extensions.rs;
 // extensionTypes.test.ts fails when a field name or its optionality differs.
 interface ExtensionContributionBase {
@@ -261,6 +262,53 @@ export function podNamespaces(manifest: unknown, capability: string): string[] {
     ? scoped.namespaces.filter((namespace): namespace is string => typeof namespace === "string")
     : [];
 }
+/** The fields every provider has: a query template sent through a `network.http` binding. */
+interface ExtensionProviderBase {
+  id: string;
+  title: string;
+  /** The `network.http` binding the query goes through. */
+  capability: string;
+  forKinds: string[];
+  /**
+   * The query, with `${cluster}`, `${namespace}`, `${workload}` or `${pod}` inside
+   * double-quoted strings, which the host escapes, and a metric provider's
+   * `${range}` and `${step}`. The host binds every one; the app sends nothing.
+   */
+  query: string;
+}
+/** A PromQL range query, drawn as a chart on each kind's overview. */
+export interface ExtensionMetricProvider extends ExtensionProviderBase {
+  language: "promql";
+  unit: NativeTimeseriesUnit;
+}
+/** A LogQL query the log view can follow as a source beside Kubernetes. */
+export interface ExtensionLogProvider extends ExtensionProviderBase {
+  language: "logql";
+}
+/** A TraceQL search, listed on each kind's overview. */
+export interface ExtensionTraceProvider extends ExtensionProviderBase {
+  language: "traceql";
+}
+/** The three provider lists, by what they answer. */
+export interface ExtensionProviderLists {
+  metrics: ExtensionMetricProvider;
+  logs: ExtensionLogProvider;
+  traces: ExtensionTraceProvider;
+}
+const PROVIDER_LISTS = {
+  metrics: "metricProviders",
+  logs: "logProviders",
+  traces: "traceProviders",
+} as const;
+/** The providers of one list that `manifest` declares for `kind`, in manifest order. */
+export function providersFor<K extends keyof ExtensionProviderLists>(
+  manifest: ExtensionManifest,
+  list: K,
+  kind: string,
+): ExtensionProviderLists[K][] {
+  const declared = manifest.contributions[PROVIDER_LISTS[list]] as ExtensionProviderLists[K][] | undefined;
+  return (declared ?? []).filter((provider) => provider.forKinds.includes(kind));
+}
 export interface ExtensionManifest {
   /** Editor metadata naming the manifest's JSON Schema; the host ignores it. */
   $schema?: string;
@@ -332,6 +380,12 @@ export interface ExtensionManifest {
     badges?: ExtensionBadge[];
     commands?: ExtensionCommand[];
     resourceLinks?: ExtensionResourceLink[];
+    /** PromQL range queries drawn as charts on workload and pod overviews (#569). */
+    metricProviders?: ExtensionMetricProvider[];
+    /** LogQL queries the log view can follow as a source (#569). */
+    logProviders?: ExtensionLogProvider[];
+    /** TraceQL searches listed on workload and pod overviews (#569). */
+    traceProviders?: ExtensionTraceProvider[];
   };
 }
 /** Where a version came from: `catalog` is the exact bytes of a cached catalog release. */
@@ -602,6 +656,46 @@ export const readExtension = <T = ExtensionResourceResult>(
     ...(useCrdColumns ? {useCrdColumns:true} : {}),
     ...(card ? { card } : {}),
     ...(card && namespaces?.length ? { namespaces } : {}),
+  });
+/** What `extensions.queryProvider` is asked: one provider, for the resource a view shows (#569). */
+export interface ExtensionProviderQuery {
+  id: string;
+  revision: number;
+  /** The provider's `id`. */
+  provider: string;
+  context: string;
+  namespace: string;
+  /** The qualified kind of the resource the view shows, e.g. `apps/Deployment`. */
+  resourceKind: string;
+  name: string;
+  /** How far back from now, 300–604800 seconds; the host's default is an hour. */
+  rangeSeconds?: number;
+}
+/** One trace a trace provider's search found. */
+export interface ExtensionTrace {
+  traceId: string;
+  rootService?: string;
+  rootName?: string;
+  /** When it started, in epoch milliseconds. */
+  start?: number;
+  durationMs?: number;
+}
+/** What a provider answered, as the host read it: never markup, only data it draws. */
+export type ExtensionProviderResult =
+  | { kind: "metrics"; chart: NativeTimeseriesData }
+  | { kind: "logs"; lines: Array<{ time: string; source: string; line: string; truncated?: boolean }>; truncated: boolean }
+  | { kind: "traces"; traces: ExtensionTrace[]; truncated: boolean };
+/** One provider query, through its `network.http` binding and every rule the host holds that to. */
+export const queryExtensionProvider = (query: ExtensionProviderQuery) =>
+  invokeCapability<ExtensionProviderResult>("extensions.queryProvider", {
+    id: query.id,
+    revision: query.revision,
+    provider: query.provider,
+    context: query.context,
+    namespace: query.namespace,
+    resourceKind: query.resourceKind,
+    name: query.name,
+    ...(query.rangeSeconds !== undefined ? { rangeSeconds: query.rangeSeconds } : {}),
   });
 /**
  * One dashboard card's answer. `error` is a read that failed or a figure that
