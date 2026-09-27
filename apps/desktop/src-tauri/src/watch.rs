@@ -7,16 +7,19 @@
 
 use std::sync::Arc;
 
+use serde_json::Value;
 use srelens_streams::watch::WatchManager;
-use tauri::{AppHandle, Runtime, State, Window};
+use tauri::ipc::Channel;
+use tauri::{Runtime, State, Window};
 
-use crate::sink::TauriSink;
+use crate::sink::ChannelSink;
 use crate::window_streams::WindowStreams;
 
 /// Start watching a watchable resource kind in a namespace, emitting each full
 /// sorted snapshot on the caller-provided `channel`. The WebView subscribes to
 /// `channel` first, then invokes this, so the initial snapshot can't race
-/// ahead of the listener.
+/// ahead of the listener. The snapshots travel on `on_event`, the page's own
+/// channel, so no other window receives them (#733).
 ///
 /// The watch belongs to the calling window and stops when it closes or
 /// reloads (#700). A watch whose window reloaded while it was starting is
@@ -29,15 +32,15 @@ pub async fn start_resource_watch<R: Runtime>(
     kind: String,
     channel: String,
     kubeconfig_paths: Vec<String>,
+    on_event: Channel<Value>,
     window: Window<R>,
-    app: AppHandle<R>,
     manager: State<'_, WatchManager>,
     owned: State<'_, WindowStreams>,
 ) -> Result<String, String> {
     let epoch = owned.epoch(window.label());
     let channel = manager
         .start(
-            Arc::new(TauriSink(app)),
+            Arc::new(ChannelSink(on_event)),
             context,
             namespace,
             kind,
@@ -51,7 +54,8 @@ pub async fn start_resource_watch<R: Runtime>(
     owned.keep_watch(&manager, window.label(), epoch, channel)
 }
 
-/// Stop a running watch by its channel.
+/// Stop a running watch by its channel. Only the window that started it may
+/// (#733); a watch no window holds has already ended, and this is a no-op.
 #[tauri::command]
 pub async fn stop_watch<R: Runtime>(
     channel: String,
@@ -59,8 +63,10 @@ pub async fn stop_watch<R: Runtime>(
     manager: State<'_, WatchManager>,
     owned: State<'_, WindowStreams>,
 ) -> Result<(), String> {
-    manager.stop(&channel);
-    owned.disown_watch(window.label(), &channel);
+    if owned.check_watch(window.label(), &channel)? {
+        manager.stop(&channel);
+        owned.disown_watch(window.label(), &channel);
+    }
     Ok(())
 }
 
@@ -87,8 +93,8 @@ mod tests {
             "pods".into(),
             "watch:test".into(),
             vec!["/nonexistent/kubeconfig".into()],
+            crate::sink::tests::recording().0,
             window.clone(),
-            app.handle().clone(),
             app.state(),
             app.state(),
         )

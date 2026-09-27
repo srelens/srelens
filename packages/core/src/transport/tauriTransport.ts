@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getVersion } from "@tauri-apps/api/app";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
@@ -56,10 +56,42 @@ export function resetWindowStreams(): Promise<void> {
   return windowReset;
 }
 
+/** One frame of a stream, as the host sends it on the opener's channel. */
+interface StreamFrame {
+  event: string;
+  payload: unknown;
+}
+
+/**
+ * This page's subscriptions, by event name. A stream's frames arrive on the
+ * channel passed with its open, not as events (#733), and are handed out here.
+ */
+const subscriptions = new Map<string, Set<(payload: unknown) => void>>();
+
+function hold(channel: string, handler: (payload: unknown) => void): () => void {
+  let handlers = subscriptions.get(channel);
+  if (!handlers) subscriptions.set(channel, (handlers = new Set()));
+  handlers.add(handler);
+  return () => {
+    handlers.delete(handler);
+    if (handlers.size === 0 && subscriptions.get(channel) === handlers) subscriptions.delete(channel);
+  };
+}
+
+function deliver({ event, payload }: StreamFrame): void {
+  for (const handler of [...(subscriptions.get(event) ?? [])]) handler(payload);
+}
+
 /**
  * Invoke a raw Tauri command (for streaming primitives like watches). A
  * command that opens a stream fails closed: until the old page's streams are
  * ended, it is not sent, so it can never be ended by a later reset either.
+ *
+ * A command that opens a stream is also passed `onEvent`, a channel of its
+ * own. The host sends the stream's frames on it, and Tauri answers a channel
+ * only in the page that made the call, so no other window receives them
+ * (#733). Each open needs its own: Tauri numbers a channel's messages from
+ * the host end and closes it when that stream ends.
  */
 export async function invokeCommand<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   if (OPENS_A_STREAM.has(command)) {
@@ -71,12 +103,17 @@ export async function invokeCommand<T>(command: string, args?: Record<string, un
         `Not opened: srelens could not end this window's streams from before the reload (${reason}). Try again.`,
       );
     }
+    return invoke<T>(command, { ...args, onEvent: new Channel<StreamFrame>(deliver) });
   }
   return invoke<T>(command, args);
 }
 
-/** Subscribe to a broadcast event (mirrors ipcRendererOn / broadcastMessage). */
+/**
+ * Subscribe to an event: a broadcast (mirrors ipcRendererOn /
+ * broadcastMessage), or the frames of a stream this page opens on `channel`.
+ */
 export function on(channel: string, handler: (payload: unknown) => void): () => void {
+  const release = hold(channel, handler);
   const unlistenPromise = listen(channel, (event) => handler(event.payload));
   let disposed = false;
   unlistenPromise.then((un) => {
@@ -84,6 +121,7 @@ export function on(channel: string, handler: (payload: unknown) => void): () => 
   });
   return () => {
     disposed = true;
+    release();
     unlistenPromise.then((un) => un());
   };
 }
@@ -97,7 +135,17 @@ export async function subscribe(
   channel: string,
   handler: (payload: unknown) => void,
 ): Promise<() => void> {
-  return listen(channel, (event) => handler(event.payload));
+  const release = hold(channel, handler);
+  try {
+    const unlisten = await listen(channel, (event) => handler(event.payload));
+    return () => {
+      release();
+      unlisten();
+    };
+  } catch (e) {
+    release();
+    throw e;
+  }
 }
 
 /** Restart the app (used after an update is installed). */

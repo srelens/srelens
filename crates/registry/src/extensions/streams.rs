@@ -462,6 +462,21 @@ impl ExtensionStreams {
         self.streams.close_view(view)
     }
 
+    /// Cancel one stream for the window labelled `window` (#733): refused,
+    /// and left running, when another window opened it or none did.
+    /// `Ok(false)` when it had already ended.
+    pub fn cancel_in_window(&self, stream: &str, window: &str) -> Result<bool, String> {
+        self.streams
+            .cancel_in_window(stream, window)
+            .map_err(|e| e.to_string())
+    }
+
+    /// End the streams the window labelled `window` opened for `view`, and
+    /// no other window's. Returns how many.
+    pub fn close_view_in_window(&self, view: &str, window: &str) -> usize {
+        self.streams.close_view_in_window(view, window)
+    }
+
     /// End every stream the window labelled `window` opened, with `reason`
     /// (`windowClosed` or `windowReloaded`), and refuse any open it began
     /// before this. Returns how many ended.
@@ -1392,6 +1407,46 @@ mod tests {
             (&json!(0), &json!(22), &json!(3)),
             "{out}"
         );
+    }
+
+    /// A window may end only what it opened (#733): cancelling another
+    /// window's stream is refused and leaves it running, and closing a view
+    /// ends only the calling window's streams under that view's name.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_window_ends_only_its_own_streams() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, _reg, streams) = setup(dir.path());
+        let revision = install(&path, fake_core());
+        let sink = Arc::new(TestSink::default());
+        let mut opened = vec![];
+        for (window, channel) in [("main", "extstream:main"), ("ctx-1", "extstream:ctx")] {
+            let out = streams
+                .open_in_window(
+                    sink.clone(),
+                    window,
+                    Arc::new(NoopAudit),
+                    request(APP, revision, "page#1", channel),
+                )
+                .await
+                .unwrap();
+            opened.push(out.stream);
+        }
+        let (mine, theirs) = (&opened[0], &opened[1]);
+
+        let refused = streams.cancel_in_window(theirs, "main").unwrap_err();
+        assert!(refused.contains("not opened by this window"), "{refused}");
+        assert_eq!(streams.close_view_in_window("page#1", "main"), 1);
+        assert!(!types(&sink, "extstream:ctx").contains(&"close".to_owned()));
+        assert_eq!(
+            sink.payloads_for("extstream:main").last().unwrap()["reason"],
+            "viewClosed"
+        );
+        assert_eq!(
+            streams.cancel_in_window(mine, "main"),
+            Ok(false),
+            "already ended"
+        );
+        assert_eq!(streams.cancel_in_window(theirs, "ctx-1"), Ok(true));
     }
 
     // ---- The `watch` source (#566) ----
