@@ -1,5 +1,5 @@
 //! Installing, updating, verifying and removing apps that come as packages (#562).
-use super::package::tests::{fixture, packed, shipped, Raw};
+use super::package::tests::{digests_for, files_of, fixture, packed, shipped, Raw};
 use super::tests::{configure, fake_core};
 use super::*;
 use base64::Engine as _;
@@ -416,6 +416,101 @@ fn an_unsigned_package_cannot_take_a_reserved_id() {
         .gz();
     let reason = install_package(&path, &unsigned).err().unwrap();
     assert!(reason.contains("reserved"), "{reason}");
+}
+
+/// What `extensions.packageManifest` and an `installPackage` answer for `archive`, on a
+/// host with these `apps`.
+async fn review_and_install(apps: Apps, archive: &[u8]) -> [Result<Value, String>; 2] {
+    let mut reg = Registry::new();
+    register(
+        &mut reg,
+        apps,
+        fake_core(),
+        srelens_kube::client_cache::ClientCache::new_many(vec![]),
+    );
+    let archive = encode(archive);
+    let review = reg
+        .invoke("extensions.packageManifest", json!({"package": archive}))
+        .await
+        .map_err(|e| e.to_string());
+    let install = reg
+        .invoke(
+            "extensions.configure",
+            json!({"action": "installPackage", "package": archive, "grants": GRANTS}),
+        )
+        .await
+        .map_err(|e| e.to_string());
+    [review, install]
+}
+
+/// A package the host cannot verify for want of a root, or of a current catalog, is
+/// refused for that cause at review and at install, as a single-file manifest is (#559
+/// review), and never as signed by a publisher the host does not trust.
+#[tokio::test]
+async fn a_package_refused_for_want_of_a_root_or_a_current_catalog_says_why() {
+    // Signed by Example Labs, whom only the catalog delegates `com.example-labs`.
+    let id = "com.example-labs.packaged";
+    let mut files = files_of("signed");
+    let manifest = String::from_utf8(files[package::MANIFEST].clone())
+        .unwrap()
+        .replace("test.signed.packaged", id);
+    files.insert(package::MANIFEST.into(), manifest.into_bytes());
+    let digests = digests_for(&files, id, "1.0.0");
+    let key = trust::testing::key(trust::testing::EXAMPLE_SEED);
+    files.insert(
+        package::SIGNATURE.into(),
+        key.sign(&digests).as_ref().to_vec(),
+    );
+    files.insert(package::DIGESTS.into(), digests);
+    let archive = Raw::new().files(&files).gz();
+    let delegating = [
+        trust::testing::srelens_publisher(),
+        trust::testing::example_publisher(),
+    ];
+
+    // Under a current catalog it is Example Labs'.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("extensions.json");
+    fs::write(
+        path.with_extension("catalog.json"),
+        catalog::test_cache(&delegating, json!([]), now()),
+    )
+    .unwrap();
+    let [review, install] = review_and_install(Apps::from(path), &archive).await;
+    assert_eq!(review.unwrap()["signedBy"]["name"], "Example Labs");
+    install.unwrap();
+
+    // Under an expired one, the expiry is why.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("extensions.json");
+    fs::write(
+        path.with_extension("catalog.json"),
+        catalog::test_cache_expiring(&delegating, json!([]), now(), "2020-01-01T00:00:00Z"),
+    )
+    .unwrap();
+    for refused in review_and_install(Apps::from(path.clone()), &archive).await {
+        let refused = refused.unwrap_err();
+        assert!(refused.contains("expired on 2020-01-01"), "{refused}");
+    }
+    // Unless the package would not have verified under it either.
+    let mut tampered = files.clone();
+    tampered.insert(package::SIGNATURE.into(), vec![0; 64]);
+    for refused in review_and_install(Apps::from(path), &Raw::new().files(&tampered).gz()).await {
+        let refused = refused.unwrap_err();
+        assert!(!refused.contains("expired"), "{refused}");
+    }
+
+    // With no root, nothing installs, and that is why.
+    let dir = tempfile::tempdir().unwrap();
+    let apps = Apps::with_trust(
+        dir.path().join("extensions.json"),
+        trust::testing::placeholder_root(),
+    );
+    for refused in review_and_install(apps, &archive).await {
+        let refused = refused.unwrap_err();
+        assert!(refused.contains("installs nothing"), "{refused}");
+        assert!(refused.contains("key ceremony"), "{refused}");
+    }
 }
 
 #[tokio::test]

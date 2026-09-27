@@ -25,7 +25,7 @@ pub(in crate::extensions) fn packed(name: &str) -> Vec<u8> {
 }
 
 /// Every file of a fixture package, `digests.json` and its signature included.
-fn files_of(name: &str) -> BTreeMap<String, Vec<u8>> {
+pub(in crate::extensions) fn files_of(name: &str) -> BTreeMap<String, Vec<u8>> {
     files_under(&fixture(name))
         .unwrap()
         .into_iter()
@@ -74,7 +74,7 @@ impl Raw {
         self.entry(tar::EntryType::Regular, path.as_bytes(), data)
     }
 
-    fn files(self, files: &BTreeMap<String, Vec<u8>>) -> Self {
+    pub(in crate::extensions) fn files(self, files: &BTreeMap<String, Vec<u8>>) -> Self {
         files
             .iter()
             .fold(self, |raw, (path, data)| raw.file(path, data))
@@ -90,7 +90,11 @@ impl Raw {
 }
 
 /// The digest list for `files` (which must not hold one), for `id` at `version`.
-fn digests_for(files: &BTreeMap<String, Vec<u8>>, id: &str, version: &str) -> Vec<u8> {
+pub(in crate::extensions) fn digests_for(
+    files: &BTreeMap<String, Vec<u8>>,
+    id: &str,
+    version: &str,
+) -> Vec<u8> {
     let files: Vec<Value> = files
         .iter()
         .filter(|(path, _)| path.as_str() != DIGESTS && path.as_str() != SIGNATURE)

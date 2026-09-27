@@ -1217,11 +1217,7 @@ fn check_install(
     let authority = match authority {
         Ok(authority) => authority,
         Err(reason) => {
-            problems.push(
-                Code::ReservedId,
-                "id",
-                format!("This host cannot tell which app IDs are reserved for signed publishers, so it installs nothing: {reason}"),
-            );
+            problems.push(Code::ReservedId, "id", format!("{NO_ROOT}: {reason}"));
             return Err(problems);
         }
     };
@@ -1429,6 +1425,32 @@ const NO_PACKAGES: &str = "This host keeps no files for its apps, so it cannot i
 /// Installs the package `archive` (#562): read and verified whole, checked as installing
 /// its manifest would be (with the signature over its digest list), then unpacked into
 /// its private directory. The inventory's save that follows is what installs it.
+/// Why nothing installs on a host with no usable root: which app IDs are reserved for
+/// signed publishers is unknown, so an unsigned app could take one.
+const NO_ROOT: &str =
+    "This host cannot tell which app IDs are reserved for signed publishers, so it installs nothing";
+/// The package `archive`, read under the publishers `authority` trusts, or refused for the
+/// cause its failure has: the missing root when there is none, as `check_install` says, and
+/// the expired catalog when only that catalog's delegations would have verified it. A
+/// failed trust lookup is not reported as a fact about the package.
+fn read_package(
+    archive: &[u8],
+    authority: &Result<catalog::Authority, String>,
+) -> Result<package::Package, String> {
+    let authority = authority
+        .as_ref()
+        .map_err(|reason| format!("{NO_ROOT}: {reason}"))?;
+    package::read(archive, &mut package::Discard, &authority.signers).map_err(|reason| {
+        match &authority.expired {
+            Some(expired)
+                if package::read(archive, &mut package::Discard, &authority.reserved).is_ok() =>
+            {
+                format!("{reason} ({expired})")
+            }
+            _ => reason,
+        }
+    })
+}
 fn install_package(
     apps: &Apps,
     state: &mut Inventory,
@@ -1440,11 +1462,7 @@ fn install_package(
 ) -> Result<(), String> {
     let root = apps.packages.as_deref().ok_or(NO_PACKAGES)?;
     let authority = apps.catalog.authority();
-    let signers = authority
-        .as_ref()
-        .map(|authority| authority.signers.clone())
-        .unwrap_or_default();
-    let verified = package::read(archive, &mut package::Discard, &signers)?;
+    let verified = read_package(archive, &authority)?;
     package::check_installable(&verified)?;
     let (manifest, signed) = check_install(
         &verified.manifest,
@@ -1487,8 +1505,10 @@ fn install_package(
         },
         policy,
     )?;
-    // Last, once nothing else can refuse the install.
-    package::unpack(root, archive, &verified, &signers)
+    // Last, once nothing else can refuse the install. `read_package` has refused every
+    // package already when there is no authority.
+    let signers = &authority.as_ref().map_err(Clone::clone)?.signers;
+    package::unpack(root, archive, &verified, signers)
 }
 /// Every package version each app keeps, current and for rollback, by app ID.
 fn kept_packages(
@@ -2279,8 +2299,7 @@ fn register_apps(
             tokio::task::spawn_blocking(move || {
                 // A package's signature is checked as an install checks it: by the publisher
                 // delegated its app ID's namespace (#559).
-                let signers = catalog.authority().map(|authority| authority.signers)?;
-                let verified = package::read(&input.package, &mut package::Discard, &signers)?;
+                let verified = read_package(&input.package, &catalog.authority())?;
                 package::check_installable(&verified)?;
                 Ok(catalog::Review::of_package(&verified))
             })
