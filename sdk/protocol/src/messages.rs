@@ -348,6 +348,20 @@ mod tests {
             "capability": "apps", "name": "web", "action": "sync", "uid": "u",
             "resource_version": "1"});
         assert!(serde_json::from_value::<HostActionParams>(action).is_err());
+
+        let mut wire = serde_json::to_value(initialize()).unwrap();
+        let api_versions = wire.as_object_mut().unwrap().remove("apiVersions").unwrap();
+        wire["api_versions"] = api_versions;
+        assert!(serde_json::from_value::<InitializeParams>(wire).is_err());
+
+        let mut limits = serde_json::to_value(limits()).unwrap();
+        let request_timeout_ms = limits
+            .as_object_mut()
+            .unwrap()
+            .remove("requestTimeoutMs")
+            .unwrap();
+        limits["request_timeout_ms"] = request_timeout_ms;
+        assert!(serde_json::from_value::<InitializeLimits>(limits).is_err());
     }
 
     #[test]
