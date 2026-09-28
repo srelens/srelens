@@ -2374,6 +2374,7 @@ async fn argo_streaming_chunks_and_disk_cache_load_instantly() {
     // 1. Switch to Argo view: loads disk cache via background task
     app.switch_view_to_kind(ResourceKind::ArgoApplications)
         .await;
+    let mut got = false;
     while let Ok(Some(event)) =
         tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv()).await
     {
@@ -2385,9 +2386,11 @@ async fn argo_streaming_chunks_and_disk_cache_load_instantly() {
         } = event
         {
             app.handle_argo_disk_snapshot(&context, result, written_at, hub_context);
+            got = true;
             break;
         }
     }
+    assert!(got, "no ArgoDiskSnapshot event received within 500ms");
     if let ActiveView::Argo(ref argo) = app.active_view {
         assert_eq!(argo.applications.len(), 1, "disk cache loaded on frame 1");
         assert_eq!(argo.applications[0].name, "cached-app-1");
