@@ -35,6 +35,21 @@ JSON-RPC 2.0, one message per line.
   number as the id of a call it makes to srelens.
 - **Params** are an object or an array, or absent.
 
+The same contract in machine-readable form is
+[`schemas/sidecar-protocol.v0.1.json`](../../schemas/sidecar-protocol.v0.1.json), one
+file per sidecar API line. It is generated from the `srelens-sidecar-protocol` crate
+(`sdk/protocol/`), whose types srelens itself builds its messages from, and which the SDKs
+share. It has:
+
+- a definition for every method's params and result;
+- `HostMessage` and `SidecarMessage`, every line each side writes;
+- in `x-srelens-methods`, every method with its direction, kind, params and result.
+
+A sidecar may validate what it writes against it. srelens takes exactly the `host/*` calls
+the schema allows; a test in `crates/plugin-host/src/sidecar/broker.rs` holds the two to
+each other. JSON Schema counts characters where srelens counts bytes, so for `clusterId`
+and a string call id, check the byte length too.
+
 ## Lifecycle
 
 ```text
@@ -66,7 +81,7 @@ that is how it learns srelens has gone.
 ### Version negotiation
 
 The sidecar API has its own versions, listed in `SIDECAR_API_VERSIONS`
-(`crates/plugin-host/src/sidecar/protocol.rs`). Today there is one, `0.1.0`. It is not
+(`sdk/protocol/src/lib.rs`). Today there is one, `0.1.0`. It is not
 the extension API version (`SUPPORTED_API_VERSIONS`), and the executable kind (#574) kept
 the two apart: a manifest names the extension API it is written for, and its sidecar
 negotiates this one at `initialize`, so each can move without the other.
@@ -549,6 +564,6 @@ uninstalled; locking it down while the app is installed is left for the escape r
 | An operation that answers with a stream: the protocol has streams, and nothing opens one on an app's behalf yet | — |
 | Shipping `srelens-sandbox-launch` in the desktop bundles, and finding a delegated cgroup on a systemd desktop; until then Linux names them with `SRELENS_SANDBOX_LAUNCHER` and `SRELENS_SANDBOX_CGROUP_ROOT` | — |
 | A "Clear data" action for an app refused for its data directory (`DataDir::clear` is there; the Inspector, #575, is where a person would find it) | not filed yet |
-| JSON Schema for these messages, and the Rust and Go SDKs | [#576](https://github.com/srelens/srelens/issues/576) |
+| The Rust and Go SDKs | [#576](https://github.com/srelens/srelens/issues/576) |
 | Memory and CPU limits on macOS | [#713](https://github.com/srelens/srelens/issues/713) |
 | The escape-hardening review of the supervisor and its backends, which the ADR assigned to #572 | [#744](https://github.com/srelens/srelens/issues/744) |
