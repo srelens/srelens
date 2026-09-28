@@ -1524,7 +1524,10 @@ mod tests {
             std::fs::write(path, &want).unwrap();
             return;
         }
-        let got = std::fs::read_to_string(path).unwrap_or_default();
+        // LF in the index but CRLF in a `core.autocrlf=true` checkout; `want` is LF.
+        let got = std::fs::read_to_string(path)
+            .unwrap_or_default()
+            .replace("\r\n", "\n");
         assert_eq!(got, want, "capability-catalog.json is stale — run UPDATE_CATALOG=1 cargo test -p srelens-registry");
     }
 
@@ -1539,7 +1542,10 @@ mod tests {
             std::fs::write(path, &want).unwrap();
             return;
         }
-        let got = std::fs::read_to_string(path).unwrap_or_default();
+        // LF in the index but CRLF in a `core.autocrlf=true` checkout; `want` is LF.
+        let got = std::fs::read_to_string(path)
+            .unwrap_or_default()
+            .replace("\r\n", "\n");
         assert_eq!(
             got, want,
             "docs/mcp-catalog.md is stale — run `UPDATE_CATALOG=1 cargo test -p srelens-registry`"
