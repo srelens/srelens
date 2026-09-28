@@ -762,10 +762,20 @@
             "method": {
               "not": {
                 "enum": [
+                  "initialize",
+                  "activate",
+                  "health",
+                  "deactivate",
+                  "shutdown",
+                  "stream/open",
                   "$/cancelRequest",
+                  "stream/cancel",
                   "stream/data",
                   "stream/close",
-                  "stream/error"
+                  "stream/error",
+                  "host/read",
+                  "host/resource",
+                  "host/action"
                 ]
               },
               "type": "string"

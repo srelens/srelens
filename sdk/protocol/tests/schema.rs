@@ -96,7 +96,8 @@ fn every_pattern_compiles_without_lookaround() {
     let schema = schema();
     let mut patterns = Vec::new();
     strings_under(&schema, "pattern", &mut patterns);
-    // Identifier, object name, token, namespace, cluster ID, and the reserved-method prefixes.
+    // The five shapes (identifier, object name, token, namespace, cluster ID) and the
+    // app-request method pattern, some of them appearing more than once.
     assert!(
         patterns.len() >= 7,
         "only {} patterns: {patterns:?}",

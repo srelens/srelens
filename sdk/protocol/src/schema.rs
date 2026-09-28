@@ -90,14 +90,13 @@ pub fn schema() -> Value {
     // srelens's answer to a sidecar's call, under the sidecar's own id.
     host.push(response(request_id, rpc_error.clone()));
 
-    // A notification from a newer SDK, which srelens ignores.
-    let sidecar_notifications: Vec<&str> = METHODS
-        .iter()
-        .filter(|spec| spec.kind == Kind::Notification && spec.direction.from_sidecar())
-        .map(|spec| spec.name)
-        .collect();
+    // A notification from a newer SDK, which srelens ignores. Forward
+    // compatibility only needs to allow methods srelens does not know, so
+    // this excludes every method in the table, not only the sidecar's own
+    // notifications: a known request such as `host/action` sent without an
+    // id would never run.
     sidecar.push(notification(
-        json!({"type": "string", "not": {"enum": sidecar_notifications}}),
+        json!({"type": "string", "not": {"enum": protocol_methods}}),
         json!({"type": ["object", "array"]}),
         false,
     ));

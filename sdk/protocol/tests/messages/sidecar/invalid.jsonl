@@ -22,3 +22,7 @@
 {"jsonrpc":"2.0","id":null,"method":"host/read","params":{"context":{"clusterId":"kind-dev","namespace":null},"capability":"applications"}}
 # A sidecar calls srelens only through host/*
 {"jsonrpc":"2.0","id":"c-9","method":"k8s.getSecret","params":{}}
+# A known method is never a notification from a newer SDK: a host/action without an id would never run
+{"jsonrpc":"2.0","method":"host/action","params":{"context":{"clusterId":"kind-dev","namespace":null},"capability":"applications","name":"web","action":"sync","uid":"u-1","resourceVersion":"1"}}
+# nor is a method srelens sends
+{"jsonrpc":"2.0","method":"initialize","params":{}}
