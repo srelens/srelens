@@ -28,10 +28,7 @@ pub const STREAM_BUFFER: usize = 64;
 /// its stdin could grow the host's memory without limit.
 pub const ANSWER_BUFFER: usize = 16;
 
-/// The longest `id` (as a string) and `method` a sidecar's call may carry.
-/// Both are echoed in the answer, so a longer one is refused as a protocol
-/// violation rather than copied.
-pub const MAX_CALL_FIELD_BYTES: usize = 256;
+pub use srelens_sidecar_protocol::MAX_CALL_FIELD_BYTES;
 
 /// Why a request did not get an answer.
 #[derive(Debug, Clone, PartialEq)]

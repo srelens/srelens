@@ -6,6 +6,8 @@ license.workspace = true
 
 [dependencies]
 srelens-capability = { path = "../capability" }
+# The sidecar wire's constants and message types, shared with the SDKs (#576).
+srelens-sidecar-protocol = { path = "../../sdk/protocol" }
 serde = { version = "1", features = ["derive"] }
 # float_roundtrip: without it serde_json reads about a third of doubles back one step
 # off, so a manifest argument changed each time a manifest was stored and read, and a

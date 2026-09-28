@@ -1,0 +1,23 @@
+[package]
+name = "srelens-sidecar-protocol"
+description = "The JSON-RPC protocol between srelens and an executable extension's sidecar"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+# Stays in this repository until the protocol is stable (#576).
+publish = false
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+# float_roundtrip, as srelens-plugin-host has it: `cpus` reads back exactly.
+serde_json = { version = "1", features = ["float_roundtrip"] }
+schemars = "0.8"
+
+[dev-dependencies]
+# Validates the message fixtures against the committed schema. No default
+# features: they bring an HTTP resolver and rustls with a second crypto
+# provider, which panics kube's client in the workspace build (AGENTS.md).
+jsonschema = { version = "0.58", default-features = false }
+# Compiles every pattern the schema carries. Like Go's RE2 it has no
+# lookaround or backreferences, so a pattern it takes, the Go SDK can use.
+regex = "1"
