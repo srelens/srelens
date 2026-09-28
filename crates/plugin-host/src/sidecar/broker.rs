@@ -33,7 +33,6 @@
 //! `sensitive` is refused outright. The methods and their parameters are in
 //! `docs/extensions/sidecar-protocol.md`, "Calls from the sidecar".
 
-use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use srelens_capability::audit::{self, AuditSink, Source};
 use srelens_capability::{CapabilityError, Impact, Registry};
@@ -43,6 +42,10 @@ use std::sync::Arc;
 
 use super::connection::Broker;
 use super::protocol::{code, method, RpcError};
+pub use srelens_sidecar_protocol::CallContext;
+use srelens_sidecar_protocol::{
+    MAX_CLUSTER_ID_BYTES, MAX_IDENTIFIER_LEN, MAX_NAMESPACE_LEN, MAX_OBJECT_NAME_LEN, MAX_TOKEN_LEN,
+};
 
 /// Who the sidecar is: the installed app its supervisor started it for.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,17 +59,6 @@ pub struct AppIdentity {
     /// Who signed it, or `None` for an unsigned app, for the confirmation's
     /// "Requested by app `<name>` (`<publisher>` / unsigned)" (#552).
     pub publisher: Option<String>,
-}
-
-/// The cluster and namespace one call names.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CallContext {
-    /// A cluster as srelens names it: the `context` a host request passes, a
-    /// kubeconfig context's stable ID, pinned ID or name. The facade resolves
-    /// it as it resolves the UI's.
-    pub cluster_id: String,
-    /// A namespace, or `None` for every namespace or a cluster-scoped kind.
-    pub namespace: Option<String>,
 }
 
 /// One call a person must confirm before it runs.
@@ -286,60 +278,11 @@ impl CapabilityBroker {
         name: &str,
         params: Value,
     ) -> Result<(&'static str, CallContext, Value), RpcError> {
-        let (tool, fields): (&'static str, &[&str]) = match name {
-            method::HOST_READ => ("extensions.read", &["capability"]),
-            method::HOST_RESOURCE => ("extensions.resource", &["capability", "name"]),
-            method::HOST_ACTION => (
-                "extensions.action",
-                &["capability", "name", "action", "uid", "resourceVersion"],
-            ),
-            _ => {
-                return Err(RpcError::new(
-                    code::METHOD_NOT_FOUND,
-                    format!(
-                        "srelens takes no `{name}` call from a sidecar; it takes {}, {} and {}",
-                        method::HOST_READ,
-                        method::HOST_RESOURCE,
-                        method::HOST_ACTION
-                    ),
-                ))
-            }
-        };
-        let Value::Object(mut params) = params else {
-            return Err(invalid(format!("`{name}` takes an object")));
-        };
-        let context = call_context(params.remove("context"))?;
-        let mut given = Map::new();
-        for (key, value) in params {
-            if !fields.contains(&key.as_str()) {
-                return Err(invalid(format!(
-                    "`{name}` takes {}, and not `{key}`",
-                    std::iter::once("context")
-                        .chain(fields.iter().copied())
-                        .map(|f| format!("`{f}`"))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )));
-            }
-            let Value::String(_) = value else {
-                return Err(invalid(format!("`{name}`: `{key}` must be a string")));
-            };
-            given.insert(key, value);
-        }
-        if let Some(missing) = fields.iter().find(|f| !given.contains_key(**f)) {
-            return Err(invalid(format!("`{name}` needs `{missing}`")));
-        }
-        for (field, value) in &given {
-            let value = value.as_str().unwrap_or_default();
-            let (fits, shape) = match field.as_str() {
-                "capability" | "action" => (is_identifier(value), IDENTIFIER),
-                "name" => (is_object_name(value), OBJECT_NAME),
-                _ => (is_token(value), TOKEN),
-            };
-            if !fits {
-                return Err(invalid(format!("`{name}`: `{field}` must be {shape}")));
-            }
-        }
+        let HostCall {
+            tool,
+            context,
+            fields: given,
+        } = host_call(name, params)?;
         let namespace = context.namespace.clone().unwrap_or_default();
         let selection = || {
             json!({
@@ -372,6 +315,81 @@ impl CapabilityBroker {
     }
 }
 
+/// A `host/*` call held to the protocol's shapes: the facade capability that
+/// answers it, the cluster it names, and its fields. Knows nothing of the
+/// app; the broker adds who is asking.
+#[derive(Debug)]
+pub(crate) struct HostCall {
+    pub tool: &'static str,
+    pub context: CallContext,
+    pub fields: Map<String, Value>,
+}
+
+/// Read one call a sidecar made to the host, or say why it is refused, with
+/// the same codes and sentences as always. The committed protocol schema
+/// takes exactly what this takes (see the conformance test).
+pub(crate) fn host_call(name: &str, params: Value) -> Result<HostCall, RpcError> {
+    let (tool, fields): (&'static str, &[&str]) = match name {
+        method::HOST_READ => ("extensions.read", &["capability"]),
+        method::HOST_RESOURCE => ("extensions.resource", &["capability", "name"]),
+        method::HOST_ACTION => (
+            "extensions.action",
+            &["capability", "name", "action", "uid", "resourceVersion"],
+        ),
+        _ => {
+            return Err(RpcError::new(
+                code::METHOD_NOT_FOUND,
+                format!(
+                    "srelens takes no `{name}` call from a sidecar; it takes {}, {} and {}",
+                    method::HOST_READ,
+                    method::HOST_RESOURCE,
+                    method::HOST_ACTION
+                ),
+            ))
+        }
+    };
+    let Value::Object(mut params) = params else {
+        return Err(invalid(format!("`{name}` takes an object")));
+    };
+    let context = call_context(params.remove("context"))?;
+    let mut given = Map::new();
+    for (key, value) in params {
+        if !fields.contains(&key.as_str()) {
+            return Err(invalid(format!(
+                "`{name}` takes {}, and not `{key}`",
+                std::iter::once("context")
+                    .chain(fields.iter().copied())
+                    .map(|f| format!("`{f}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )));
+        }
+        let Value::String(_) = value else {
+            return Err(invalid(format!("`{name}`: `{key}` must be a string")));
+        };
+        given.insert(key, value);
+    }
+    if let Some(missing) = fields.iter().find(|f| !given.contains_key(**f)) {
+        return Err(invalid(format!("`{name}` needs `{missing}`")));
+    }
+    for (field, value) in &given {
+        let value = value.as_str().unwrap_or_default();
+        let (fits, shape) = match field.as_str() {
+            "capability" | "action" => (is_identifier(value), IDENTIFIER),
+            "name" => (is_object_name(value), OBJECT_NAME),
+            _ => (is_token(value), TOKEN),
+        };
+        if !fits {
+            return Err(invalid(format!("`{name}`: `{field}` must be {shape}")));
+        }
+    }
+    Ok(HostCall {
+        tool,
+        context,
+        fields: given,
+    })
+}
+
 impl Broker for CapabilityBroker {
     fn call<'a>(
         &'a self,
@@ -386,26 +404,8 @@ fn invalid(message: String) -> RpcError {
     RpcError::new(code::INVALID_PARAMS, message)
 }
 
-/// The longest `clusterId` a call may carry: a pinned ID is a kubeconfig's
-/// absolute path and a context name, encoded.
-const MAX_CLUSTER_ID_BYTES: usize = 4096;
-
 const CONTEXT_SHAPE: &str =
     "`context` must be {\"clusterId\": \"<cluster>\", \"namespace\": \"<namespace>\" or null}";
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ContextIn {
-    #[serde(rename = "clusterId")]
-    cluster_id: String,
-    // Required, though it may be null: "no namespace" is said, not assumed.
-    #[serde(deserialize_with = "explicit")]
-    namespace: Option<String>,
-}
-
-fn explicit<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
-    Option::<String>::deserialize(d)
-}
 
 /// The explicit context of one call, or why it is not one.
 fn call_context(context: Option<Value>) -> Result<CallContext, RpcError> {
@@ -414,7 +414,7 @@ fn call_context(context: Option<Value>) -> Result<CallContext, RpcError> {
             "Every call names its cluster: {CONTEXT_SHAPE}. srelens has no current cluster to assume"
         )));
     };
-    let parsed: ContextIn =
+    let parsed: CallContext =
         serde_json::from_value(context).map_err(|e| invalid(format!("{CONTEXT_SHAPE} ({e})")))?;
     if parsed.cluster_id.trim().is_empty() || parsed.cluster_id.len() > MAX_CLUSTER_ID_BYTES {
         return Err(invalid(format!(
@@ -429,10 +429,7 @@ fn call_context(context: Option<Value>) -> Result<CallContext, RpcError> {
             )));
         }
     }
-    Ok(CallContext {
-        cluster_id: parsed.cluster_id,
-        namespace: parsed.namespace,
-    })
+    Ok(parsed)
 }
 
 const IDENTIFIER: &str = "1 to 64 ASCII letters, digits and hyphens, as the manifest names it";
@@ -444,7 +441,7 @@ const TOKEN: &str = "1 to 128 printable ASCII characters, as the object carries 
 /// `manifest.rs`).
 fn is_identifier(value: &str) -> bool {
     !value.is_empty()
-        && value.len() <= 64
+        && value.len() <= MAX_IDENTIFIER_LEN
         && value
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'-')
@@ -454,7 +451,7 @@ fn is_identifier(value: &str) -> bool {
 /// holds one to.
 fn is_object_name(value: &str) -> bool {
     !value.is_empty()
-        && value.len() <= 253
+        && value.len() <= MAX_OBJECT_NAME_LEN
         && value != "."
         && value != ".."
         && value
@@ -465,14 +462,14 @@ fn is_object_name(value: &str) -> bool {
 /// A `uid` or `resourceVersion`: short, and nothing that is not a visible
 /// character.
 fn is_token(value: &str) -> bool {
-    !value.is_empty() && value.len() <= 128 && value.bytes().all(|b| b.is_ascii_graphic())
+    !value.is_empty() && value.len() <= MAX_TOKEN_LEN && value.bytes().all(|b| b.is_ascii_graphic())
 }
 
 /// A Kubernetes namespace name: an RFC 1123 label. The rule `extensions.read`
 /// holds a namespace to.
 fn is_namespace(name: &str) -> bool {
     !name.is_empty()
-        && name.len() <= 63
+        && name.len() <= MAX_NAMESPACE_LEN
         && name
             .bytes()
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
@@ -1096,5 +1093,151 @@ mod tests {
         .expect("the action was recorded");
         assert_eq!(recorded.outcome, audit::OUTCOME_OK);
         assert_eq!(recorded.decision, "approved");
+    }
+
+    /// Calls to `method`: a valid one, then that one with each field and the
+    /// context changed to a value at, inside or past its bounds, removed, or
+    /// joined by one it does not take. ASCII only: the schema counts
+    /// characters where the broker counts bytes, which differ only past ASCII.
+    fn conformance_cases(method: &str) -> Vec<Value> {
+        let fields: &[&str] = match method {
+            "host/read" => &["capability"],
+            "host/resource" => &["capability", "name"],
+            _ => &["capability", "name", "action", "uid", "resourceVersion"],
+        };
+        let mut base = json!({"context": {"clusterId": "prod", "namespace": "team"}});
+        for field in fields {
+            base[*field] = json!(match *field {
+                "capability" => "applications",
+                "name" => "web",
+                "action" => "sync",
+                "uid" => "u-1",
+                _ => "42",
+            });
+        }
+        let mut cases = vec![base.clone()];
+        for field in fields {
+            let values = match *field {
+                "capability" | "action" => vec![
+                    json!("a"),
+                    json!("a".repeat(64)),
+                    json!("a".repeat(65)),
+                    json!("Two-Words"),
+                    json!("two words"),
+                    json!("under_score"),
+                    json!("dot.ted"),
+                    json!(""),
+                    json!(7),
+                ],
+                "name" => vec![
+                    json!("a"),
+                    json!("a".repeat(253)),
+                    json!("a".repeat(254)),
+                    json!("web.v1-2"),
+                    json!("."),
+                    json!(".."),
+                    json!("..."),
+                    json!("web server"),
+                    json!("web/1"),
+                    json!(""),
+                    Value::Null,
+                ],
+                _ => vec![
+                    json!("!"),
+                    json!("~".repeat(128)),
+                    json!("x".repeat(129)),
+                    json!("u 1"),
+                    json!("u\n1"),
+                    json!("u\u{7f}"),
+                    json!(""),
+                    json!(1),
+                ],
+            };
+            for value in values {
+                let mut case = base.clone();
+                case[*field] = value;
+                cases.push(case);
+            }
+            let mut missing = base.clone();
+            missing.as_object_mut().unwrap().remove(*field);
+            cases.push(missing);
+        }
+        for context in [
+            json!({"clusterId": "prod", "namespace": null}),
+            json!({"clusterId": "  prod", "namespace": "team"}),
+            json!({"clusterId": "x".repeat(4096), "namespace": "a"}),
+            json!({"clusterId": "x".repeat(4097), "namespace": "a"}),
+            json!({"clusterId": "", "namespace": "team"}),
+            json!({"clusterId": "   ", "namespace": "team"}),
+            json!({"clusterId": 7, "namespace": "team"}),
+            json!({"clusterId": "prod"}),
+            json!({"namespace": "team"}),
+            json!({"clusterId": "prod", "namespace": ""}),
+            json!({"clusterId": "prod", "namespace": "a".repeat(63)}),
+            json!({"clusterId": "prod", "namespace": "a".repeat(64)}),
+            json!({"clusterId": "prod", "namespace": "team-1"}),
+            json!({"clusterId": "prod", "namespace": "-team"}),
+            json!({"clusterId": "prod", "namespace": "team-"}),
+            json!({"clusterId": "prod", "namespace": "Team"}),
+            json!({"clusterId": "prod", "namespace": "te.am"}),
+            json!({"clusterId": "prod", "namespace": 3}),
+            json!({"cluster_id": "prod", "namespace": "team"}),
+            json!({"clusterId": "prod", "namespace": null, "current": true}),
+            json!("prod"),
+            Value::Null,
+        ] {
+            let mut case = base.clone();
+            case["context"] = context;
+            cases.push(case);
+        }
+        let mut no_context = base.clone();
+        no_context.as_object_mut().unwrap().remove("context");
+        cases.push(no_context);
+        for extra in ["id", "revision", "cluster", "namespace", "resource_version"] {
+            let mut case = base.clone();
+            case[extra] = json!("x");
+            cases.push(case);
+        }
+        cases.extend([json!([]), json!("host/read"), Value::Null, json!({})]);
+        cases
+    }
+
+    /// The committed schema and the broker agree on every `host/*` call: what
+    /// the broker takes, the schema allows, and what it refuses, the schema
+    /// refuses. Otherwise the schema's patterns could drift from
+    /// `is_identifier` and the rest, and an SDK that checks its calls against
+    /// the schema would send ones srelens refuses.
+    #[test]
+    fn the_protocol_schema_takes_exactly_the_calls_the_broker_takes() {
+        let root = srelens_sidecar_protocol::schema();
+        let (mut accepted, mut refused) = (0, 0);
+        for (method, definition) in [
+            (method::HOST_READ, "HostReadParams"),
+            (method::HOST_RESOURCE, "HostResourceParams"),
+            (method::HOST_ACTION, "HostActionParams"),
+        ] {
+            let validator = jsonschema::draft7::new(&json!({
+                "definitions": root["definitions"],
+                "allOf": [{"$ref": format!("#/definitions/{definition}")}],
+            }))
+            .expect("the schema compiles");
+            for params in conformance_cases(method) {
+                let broker = host_call(method, params.clone());
+                let schema = validator.is_valid(&params);
+                assert_eq!(
+                    broker.is_ok(),
+                    schema,
+                    "{method} {params}: the broker says {broker:?}, the schema says {schema}"
+                );
+                if schema {
+                    accepted += 1;
+                } else {
+                    refused += 1;
+                }
+            }
+        }
+        // Guards the guard: both verdicts are exercised.
+        assert!(accepted >= 30, "{accepted} accepted");
+        assert!(refused >= 100, "{refused} refused");
     }
 }
