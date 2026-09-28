@@ -4999,6 +4999,10 @@ mod tests {
 
     #[tokio::test]
     async fn lookup_snapshot_preserves_cached_fetched_at() {
+        let _lock = crate::argo::CACHE_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::argo::invalidate_argo_applications_cache();
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("SRELENS_CACHE_DIR", dir.path());
         let ctx = "test-lookup-fetched-at";

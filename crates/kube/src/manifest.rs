@@ -338,7 +338,7 @@ pub fn gvk_for(kind: &str) -> Option<(GroupVersionKind, bool)> {
         "priorityclass" | "priorityclasses" | "pc" => {
             ("scheduling.k8s.io", "v1", "PriorityClass", false)
         }
-        "runtimeclass" | "runtimeclasses" | "rc" => ("node.k8s.io", "v1", "RuntimeClass", false),
+        "runtimeclass" | "runtimeclasses" => ("node.k8s.io", "v1", "RuntimeClass", false),
         "lease" | "leases" => ("coordination.k8s.io", "v1", "Lease", true),
         "mutatingwebhookconfiguration" | "mutatingwebhookconfigurations" | "mwc" => (
             "admissionregistration.k8s.io",
@@ -2499,7 +2499,6 @@ metadata:
         assert_eq!(gvk_for("priorityclasses").unwrap().0.kind, "PriorityClass");
         assert_eq!(gvk_for("pc").unwrap().0.kind, "PriorityClass");
         assert_eq!(gvk_for("runtimeclasses").unwrap().0.kind, "RuntimeClass");
-        assert_eq!(gvk_for("rc").unwrap().0.kind, "RuntimeClass");
         assert_eq!(
             gvk_for("mutatingwebhookconfigurations").unwrap().0.kind,
             "MutatingWebhookConfiguration"

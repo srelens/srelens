@@ -1432,7 +1432,7 @@ pub async fn fetch_argo_applications_cached_stream(
             };
 
             // Spoke cluster: check if hub cache is fresh before querying hub over network.
-            if !force_refresh {
+            if !force_refresh && !is_known_spoke {
                 if let Some(res) = resolve_from_hub_cache(
                     hub,
                     current_context,
@@ -1741,7 +1741,12 @@ pub async fn trigger_argo_hard_refresh(
 }
 
 #[cfg(test)]
+pub(crate) static CACHE_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
 mod tests {
+    use super::CACHE_TEST_MUTEX;
+
     /// Serialises the tests that move the process-wide ArgoCD timeout.
     static ARGO_TIMEOUT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -2459,8 +2464,6 @@ mod tests {
             assert!(toggles.lock().unwrap().is_empty());
         }
     }
-
-    static CACHE_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn test_argo_application_resource() {
