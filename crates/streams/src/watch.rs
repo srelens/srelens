@@ -319,4 +319,37 @@ mod tests {
         }
         panic!("error event never arrived on the sink for custom resource watch");
     }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn start_recognized_omitted_kind_uses_custom_watch() {
+        let manager = WatchManager::new(ClientCache::new_many(vec![]));
+        let sink = Arc::new(TestSink::default());
+        let channel = manager
+            .start(
+                sink.clone(),
+                "ctx".into(),
+                "default".into(),
+                "horizontalpodautoscalers".into(),
+                "watch:hpa:1".into(),
+                vec![],
+            )
+            .await
+            .expect("recognized omitted kind routes to custom watch");
+        assert_eq!(channel, "watch:hpa:1");
+
+        for _ in 0..50 {
+            if sink
+                .payloads_for("watch:hpa:1")
+                .iter()
+                .any(|v| v.get("error").is_some())
+            {
+                manager.stop("watch:hpa:1");
+                assert!(!manager.has_channel("watch:hpa:1"));
+                manager.shutdown_all();
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("error event never arrived on the sink for recognized omitted kind watch");
+    }
 }

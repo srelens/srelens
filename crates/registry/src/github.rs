@@ -260,20 +260,26 @@ impl GitHub {
             .bytes()
             .await
             .map_err(|e| GitHubError::Network(e.to_string()))?;
-        let json: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
-        let message = || json["message"].as_str().unwrap_or("no message").to_string();
         let has_token = self.token.is_some();
         match status {
-            200..=299 => Ok(json),
+            200..=299 => serde_json::from_slice(&body).map_err(|e| GitHubError::Unexpected {
+                status,
+                message: format!("invalid JSON from GitHub: {e}"),
+            }),
             401 => Err(GitHubError::AuthRejected),
             404 => Err(GitHubError::NotFoundOrNoAccess { has_token }),
             429 => Err(GitHubError::RateLimited { has_token }),
             403 if exhausted => Err(GitHubError::RateLimited { has_token }),
-            403 => Err(GitHubError::Forbidden(message())),
-            _ => Err(GitHubError::Unexpected {
-                status,
-                message: message(),
-            }),
+            403 => {
+                let json: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+                let message = json["message"].as_str().unwrap_or("no message").to_string();
+                Err(GitHubError::Forbidden(message))
+            }
+            _ => {
+                let json: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+                let message = json["message"].as_str().unwrap_or("no message").to_string();
+                Err(GitHubError::Unexpected { status, message })
+            }
         }
     }
 
@@ -308,12 +314,26 @@ impl GitHub {
                         &[("sha", revision), ("path", path), ("per_page", "1")],
                     )
                     .await?;
-                latest.as_array().cloned().unwrap_or_default()
+                latest
+                    .as_array()
+                    .cloned()
+                    .ok_or_else(|| GitHubError::Unexpected {
+                        status: 200,
+                        message: "expected array of commits from GitHub".into(),
+                    })?
             }
-            None => vec![
-                self.get(&format!("/repos/{slug}/commits/{revision}"), &[])
-                    .await?,
-            ],
+            None => {
+                let commit = self
+                    .get(&format!("/repos/{slug}/commits/{revision}"), &[])
+                    .await?;
+                if !commit.is_object() {
+                    return Err(GitHubError::Unexpected {
+                        status: 200,
+                        message: "expected commit object from GitHub".into(),
+                    });
+                }
+                vec![commit]
+            }
             Some(prev) => {
                 let mut cmp = self
                     .get(&format!("/repos/{slug}/compare/{prev}...{revision}"), &[])
@@ -328,7 +348,14 @@ impl GitHub {
                 }
                 cause.compare_url = cmp["html_url"].as_str().map(str::to_string);
                 let mut in_range: Vec<Value> =
-                    cmp["commits"].as_array().cloned().unwrap_or_default();
+                    cmp["commits"]
+                        .as_array()
+                        .cloned()
+                        .ok_or_else(|| GitHubError::Unexpected {
+                            status: 200,
+                            message: "expected 'commits' array in compare response from GitHub"
+                                .into(),
+                        })?;
                 let total = cmp["total_commits"]
                     .as_u64()
                     .unwrap_or(in_range.len() as u64);
@@ -345,7 +372,14 @@ impl GitHub {
                             &[("sha", head), ("path", path), ("per_page", &per_page)],
                         )
                         .await?;
-                    let touched = touched.as_array().cloned().unwrap_or_default();
+                    let touched =
+                        touched
+                            .as_array()
+                            .cloned()
+                            .ok_or_else(|| GitHubError::Unexpected {
+                                status: 200,
+                                message: "expected array of touched commits from GitHub".into(),
+                            })?;
                     let shas: HashSet<&str> =
                         touched.iter().filter_map(|c| c["sha"].as_str()).collect();
                     // A full page whose oldest entry is still in the range
@@ -1036,6 +1070,42 @@ mod tests {
         assert_eq!(
             err,
             GitHubError::NotGitHub("https://gitlab.com/acme/deploy.git".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn structurally_invalid_json_response_returns_unexpected_error() {
+        // Commits endpoint returns a boolean instead of an array
+        let srv = server(|_| ok(serde_json::Value::Bool(true))).await;
+        let gh = GitHub::new(&srv.base, None).unwrap();
+        let err = gh
+            .rollout_cause(&repo(), HEAD, None, "apps/shop")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, GitHubError::Unexpected { status: 200, ref message } if message.contains("expected array of commits")),
+            "{err:?}"
+        );
+
+        // Single commit endpoint returns an array instead of a commit object
+        let srv = server(|_| ok(serde_json::Value::Array(vec![]))).await;
+        let gh = GitHub::new(&srv.base, None).unwrap();
+        let err = gh.rollout_cause(&repo(), HEAD, None, "").await.unwrap_err();
+        assert!(
+            matches!(err, GitHubError::Unexpected { status: 200, ref message } if message.contains("expected commit object")),
+            "{err:?}"
+        );
+
+        // Compare endpoint returns commits as boolean instead of array
+        let srv = server(|_| ok(serde_json::json!({ "commits": false }))).await;
+        let gh = GitHub::new(&srv.base, None).unwrap();
+        let err = gh
+            .rollout_cause(&repo(), HEAD, Some(PREV), "")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, GitHubError::Unexpected { status: 200, ref message } if message.contains("expected 'commits' array")),
+            "{err:?}"
         );
     }
 }
