@@ -1101,7 +1101,22 @@ async fn everything_srelens_writes_is_a_host_message_in_the_protocol_schema() {
         "allOf": [{"$ref": "#/definitions/HostMessage"}],
     }))
     .expect("the schema compiles");
-    let launcher = FakeLauncher::new(|call| (call.method == "slow").then_some(Reply::Silent));
+    let launcher = FakeLauncher::new(|call| match call.method {
+        "slow" => Some(Reply::Silent),
+        "echo" => {
+            // The sidecar calls the host too; the supervisor runs with
+            // NoBroker, so srelens answers both with an error, which is
+            // still a HostMessage.
+            call.call_host(
+                "c-1",
+                "host/read",
+                json!({"context": {"clusterId": "kind-dev", "namespace": null}, "capability": "applications"}),
+            );
+            call.call_host("c-2", "k8s.getSecret", json!({}));
+            None
+        }
+        _ => None,
+    });
     let supervisor = start(&launcher);
     running(&supervisor).await;
     supervisor
@@ -1143,6 +1158,10 @@ async fn everything_srelens_writes_is_a_host_message_in_the_protocol_schema() {
             .collect();
         assert!(errors.is_empty(), "{message}: {errors:?}");
     }
+    assert!(
+        received.iter().any(|(_, m)| m.get("method").is_none()),
+        "srelens wrote no answer to a sidecar call"
+    );
     // Guards the guard: the validator refuses what the schema does not allow.
     let mut broken = received[0].1.clone();
     broken["params"]
