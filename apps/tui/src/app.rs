@@ -11241,22 +11241,26 @@ impl App {
         let hub = self.tui_config.resolved_argo_hub_context();
         tokio::task::spawn_blocking(move || {
             let loaded = if let Some(ref hub_name) = hub {
-                if let Some((hub_res, written_at)) =
-                    srelens_kube::argo::load_argo_hub_disk_cache_with_age(hub_name)
-                {
-                    let filtered = srelens_kube::argo::filter_hub_apps_for_spoke_context(
-                        &hub_res.all_apps,
-                        &disk_ctx,
-                        Some(hub_name),
-                    );
-                    let res = srelens_kube::argo::ArgoApplicationsFetchResult {
-                        all_apps: hub_res.all_apps,
-                        filtered_apps: filtered,
-                        is_remote_hub: true,
-                        truncated: hub_res.truncated,
-                        fetched_at: Some(written_at),
-                    };
-                    Some((res, written_at))
+                if hub_name != &disk_ctx {
+                    if let Some((hub_res, written_at)) =
+                        srelens_kube::argo::load_argo_hub_disk_cache_with_age(hub_name)
+                    {
+                        let filtered = srelens_kube::argo::filter_hub_apps_for_spoke_context(
+                            &hub_res.all_apps,
+                            &disk_ctx,
+                            Some(hub_name),
+                        );
+                        let res = srelens_kube::argo::ArgoApplicationsFetchResult {
+                            all_apps: hub_res.all_apps,
+                            filtered_apps: filtered,
+                            is_remote_hub: true,
+                            truncated: hub_res.truncated,
+                            fetched_at: Some(written_at),
+                        };
+                        Some((res, written_at))
+                    } else {
+                        srelens_kube::argo::load_argo_apps_disk_cache_with_age(&disk_ctx)
+                    }
                 } else {
                     srelens_kube::argo::load_argo_apps_disk_cache_with_age(&disk_ctx)
                 }
@@ -11290,7 +11294,7 @@ impl App {
             (snap.complete, snap.disk_checked, due)
         };
         if !complete && !disk_checked {
-            if let Some(ref h) = hub {
+            if let Some(ref h) = hub.filter(|h| h != &ctx) {
                 let hub_data = self.argo_snapshots.get(h).and_then(|hub_snap| {
                     if hub_snap.complete {
                         Some((

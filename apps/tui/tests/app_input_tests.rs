@@ -2540,6 +2540,98 @@ async fn reopening_argo_view_with_recent_disk_cache_preserves_disk_age() {
 }
 
 #[tokio::test]
+async fn argo_disk_snapshot_on_hub_context_is_not_remote_hub_and_keeps_all_apps() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, mut rx) = common::app().await;
+    let hub = "hub-cluster-test";
+    app.active_context = hub.to_string();
+    app.tui_config.argo_hub_context = Some(hub.to_string());
+
+    let make_app = |name: &str, dest: &str| srelens_kube::argo::ArgoApplication {
+        name: name.to_string(),
+        namespace: "argocd".to_string(),
+        uid: "uid-1".to_string(),
+        resource_version: "1".to_string(),
+        project: "default".to_string(),
+        destination_server: "".to_string(),
+        destination_name: dest.to_string(),
+        destination_namespace: "default".to_string(),
+        repo_url: "https://github.com/example/repo".to_string(),
+        target_revision: "HEAD".to_string(),
+        path: "apps".to_string(),
+        sync_status: "Synced".to_string(),
+        health_status: "Healthy".to_string(),
+        health_message: "".to_string(),
+        sync_revision: "123".to_string(),
+        operation_phase: "".to_string(),
+        operation_message: "".to_string(),
+        auto_sync_enabled: true,
+        self_heal_enabled: false,
+        prune_enabled: false,
+        last_sync_time: "".to_string(),
+        created_at: "".to_string(),
+        resources: vec![],
+        sync_history: vec![],
+    };
+
+    let all_apps = vec![
+        make_app("hub-own-app", hub),
+        make_app("spoke-app", "spoke-cluster"),
+    ];
+
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let written_at = now_secs.saturating_sub(45);
+
+    let hub_res = srelens_kube::argo::ArgoApplicationsFetchResult {
+        all_apps: all_apps.clone(),
+        filtered_apps: all_apps.clone(),
+        is_remote_hub: false,
+        truncated: false,
+        fetched_at: Some(written_at),
+    };
+    srelens_kube::argo::save_argo_hub_disk_cache(hub, &hub_res);
+    srelens_kube::argo::save_argo_apps_disk_cache(hub, &hub_res);
+
+    app.switch_view_to_kind(ResourceKind::ArgoApplications)
+        .await;
+    while let Ok(Some(event)) =
+        tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv()).await
+    {
+        if let srelens_tui::event::AppEvent::ArgoDiskSnapshot {
+            context,
+            result,
+            written_at,
+            hub_context,
+        } = event
+        {
+            app.handle_argo_disk_snapshot(&context, result, written_at, hub_context);
+            break;
+        }
+    }
+
+    if let ActiveView::Argo(ref argo) = app.active_view {
+        assert!(
+            !argo.is_remote_hub,
+            "on hub cluster, is_remote_hub must be false"
+        );
+        assert_eq!(argo.hub_context_name, None);
+        assert_eq!(
+            argo.displayed_applications().len(),
+            2,
+            "hub cluster must display all apps, not filter for spoke"
+        );
+    } else {
+        panic!("expected ActiveView::Argo");
+    }
+
+    srelens_kube::argo::invalidate_argo_disk_cache(hub);
+    srelens_kube::argo::invalidate_argo_disk_cache(&format!("hub-{}", hub));
+}
+
+#[tokio::test]
 async fn switching_context_during_hub_listing_starts_no_duplicate_and_fills_spoke_view() {
     let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
@@ -6403,6 +6495,52 @@ async fn argo_view_column_prioritization_and_no_clipping() {
         text.contains("super-long-mission-critical-application-gateway"),
         "APPLICATION name must be shown in full without cut, got:\n{}",
         text
+    );
+}
+
+#[tokio::test]
+async fn argo_view_renders_header_with_age_tag_and_hub_spoke_filtering() {
+    let mut argo_state = srelens_tui::views::argo_view::ArgoViewState::new();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    argo_state.fetched_at = Some(now - 30); // 30s ago
+
+    // 1. Remote hub with spoke filter
+    argo_state.set_applications(vec![], vec![], true, Some("tools".to_string()));
+    let text = common::render_text(160, 25, |f| {
+        srelens_tui::views::argo_view::render_argo_view(f, f.area(), &argo_state);
+    });
+    assert!(
+        text.contains("[Hub: tools · Spoke Filtered, as of 30s ago]"),
+        "must render spoke filtered age tag in header, got:\n{}",
+        text
+    );
+    assert!(!text.contains("View All Hub Apps"));
+    assert!(!text.contains("Hard refresh"));
+
+    // 2. Remote hub with all hub apps
+    argo_state.show_all_hub_apps = true;
+    let text_all = common::render_text(160, 25, |f| {
+        srelens_tui::views::argo_view::render_argo_view(f, f.area(), &argo_state);
+    });
+    assert!(
+        text_all.contains("[Hub: tools · All Hub Apps, as of 30s ago]"),
+        "must render all hub apps age tag in header, got:\n{}",
+        text_all
+    );
+
+    // 3. Local argo cluster (not remote hub)
+    argo_state.is_remote_hub = false;
+    argo_state.hub_context_name = None;
+    let text_local = common::render_text(160, 25, |f| {
+        srelens_tui::views::argo_view::render_argo_view(f, f.area(), &argo_state);
+    });
+    assert!(
+        text_local.contains("[as of 30s ago]"),
+        "must render local age tag without Hub: prefix, got:\n{}",
+        text_local
     );
 }
 

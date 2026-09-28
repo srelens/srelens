@@ -1257,8 +1257,48 @@ pub async fn fetch_argo_applications_cached_stream(
         if let Some((mut disk_res, written_at)) =
             load_argo_apps_disk_cache_with_age(current_context)
         {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let age = now.saturating_sub(written_at);
             disk_res.fetched_at = Some(written_at);
-            if let Some(ref tx) = chunk_sender {
+            if age < ARGO_FRESH_FOR.as_secs() {
+                if let Ok(mut guard) = ARGO_APPS_CACHE.write() {
+                    let map = guard.get_or_insert_with(HashMap::new);
+                    map.insert(
+                        cache_key.clone(),
+                        (
+                            Instant::now()
+                                .checked_sub(Duration::from_secs(age))
+                                .unwrap_or_else(Instant::now),
+                            disk_res.clone(),
+                        ),
+                    );
+                }
+                if let Some(hub) = hub_context {
+                    if current_context == hub {
+                        if let Ok(mut guard) = ARGO_HUB_CACHE.write() {
+                            let map = guard.get_or_insert_with(HashMap::new);
+                            map.insert(
+                                hub.to_string(),
+                                ArgoHubCacheEntry {
+                                    fetched_at: Instant::now()
+                                        .checked_sub(Duration::from_secs(age))
+                                        .unwrap_or_else(Instant::now),
+                                    fetched_at_unix: written_at,
+                                    all_apps: disk_res.all_apps.clone(),
+                                    truncated: disk_res.truncated,
+                                },
+                            );
+                        }
+                    }
+                }
+                if let Some(ref tx) = chunk_sender {
+                    let _ = tx.send(disk_res.clone());
+                }
+                return Ok(disk_res);
+            } else if let Some(ref tx) = chunk_sender {
                 let _ = tx.send(disk_res);
             }
         }
@@ -2871,6 +2911,54 @@ mod tests {
         std::env::remove_var("SRELENS_CACHE_DIR");
     }
 
+    #[test]
+    fn argo_disk_cache_rejects_corrupted_and_expired_content() {
+        let _lock = CACHE_TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("SRELENS_CACHE_DIR", dir.path());
+        let ctx = "bad-cache-ctx";
+
+        let path = argo_disk_cache_path(ctx).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+
+        // 1. Corrupted content
+        std::fs::write(&path, b"not valid json").unwrap();
+        assert_eq!(load_argo_apps_disk_cache(ctx), None);
+        assert_eq!(load_argo_apps_disk_cache_with_age(ctx), None);
+
+        // 2. Expired content (> 7 days)
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let eight_days_ago = now - (8 * 86400);
+        let expired_envelope = serde_json::json!({
+            "timestamp": eight_days_ago,
+            "data": ArgoApplicationsFetchResult::default(),
+        });
+        std::fs::write(&path, serde_json::to_string(&expired_envelope).unwrap()).unwrap();
+        assert_eq!(load_argo_apps_disk_cache(ctx), None);
+        assert_eq!(load_argo_apps_disk_cache_with_age(ctx), None);
+
+        // 3. Valid recent content
+        let one_hour_ago = now - 3600;
+        let valid_envelope = serde_json::json!({
+            "timestamp": one_hour_ago,
+            "data": ArgoApplicationsFetchResult {
+                all_apps: vec![],
+                filtered_apps: vec![],
+                is_remote_hub: false,
+                truncated: false,
+                fetched_at: Some(one_hour_ago),
+            },
+        });
+        std::fs::write(&path, serde_json::to_string(&valid_envelope).unwrap()).unwrap();
+        assert!(load_argo_apps_disk_cache_with_age(ctx).is_some());
+
+        invalidate_argo_disk_cache(ctx);
+        std::env::remove_var("SRELENS_CACHE_DIR");
+    }
+
     /// An Application list served one app per page, following continue
     /// tokens `p1`, `p2`, ...; the page numbered `stall` never answers.
     fn paged_client(pages: usize, stall: Option<usize>) -> kube::Client {
@@ -3177,6 +3265,65 @@ mod tests {
 
         invalidate_argo_applications_cache();
         invalidate_argo_disk_cache(&format!("hub-{}", hub));
+        std::env::remove_var("SRELENS_CACHE_DIR");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn fresh_local_disk_cache_skips_request_and_force_refresh_fetches() {
+        let _lock = CACHE_TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("SRELENS_CACHE_DIR", dir.path());
+        invalidate_argo_applications_cache();
+
+        let ctx = "local-cluster";
+        let (client, calls) = hub_client_with_apps(&[("local-app", "local-cluster")]);
+
+        let cache = ClientCache::new_many(vec![]);
+        cache.preload(ctx, client).await;
+
+        let fresh_result = ArgoApplicationsFetchResult {
+            all_apps: vec![ArgoApplication::from_json(&serde_json::json!({
+                "metadata": {"name": "local-app", "namespace": "argocd"},
+                "spec": {"destination": {"name": "local-cluster"}}
+            }))],
+            filtered_apps: vec![ArgoApplication::from_json(&serde_json::json!({
+                "metadata": {"name": "local-app", "namespace": "argocd"},
+                "spec": {"destination": {"name": "local-cluster"}}
+            }))],
+            is_remote_hub: false,
+            truncated: false,
+            fetched_at: None,
+        };
+        save_argo_apps_disk_cache(ctx, &fresh_result);
+
+        // First call with fresh disk cache and force_refresh=false
+        let res =
+            fetch_argo_applications_cached(&cache, ctx, Some(ctx), None, None, None, true, false)
+                .await
+                .unwrap();
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "fresh local disk cache must skip network request"
+        );
+        assert_eq!(res.all_apps.len(), 1);
+        assert_eq!(res.all_apps[0].name, "local-app");
+
+        // Force refresh must bypass disk cache and hit network
+        let res2 =
+            fetch_argo_applications_cached(&cache, ctx, Some(ctx), None, None, None, true, true)
+                .await
+                .unwrap();
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "force refresh must hit the network"
+        );
+        assert_eq!(res2.all_apps.len(), 1);
+
+        invalidate_argo_applications_cache();
+        invalidate_argo_disk_cache(ctx);
         std::env::remove_var("SRELENS_CACHE_DIR");
     }
 }
