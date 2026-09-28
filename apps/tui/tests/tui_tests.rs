@@ -8683,7 +8683,6 @@ mod tests {
         }
         let content = render_to_string(&mut app, 160, 30);
         assert!(content.contains("Hub: hub-ctx"));
-        assert!(content.contains("View All Hub Apps"));
         assert!(content.contains("Press <a> to view all Hub applications"));
 
         // Standard populated table with a filter query narrowing the rows

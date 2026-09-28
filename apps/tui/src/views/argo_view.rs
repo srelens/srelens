@@ -20,6 +20,7 @@ pub struct ArgoViewState {
     pub hub_context_name: Option<String>,
     pub show_all_hub_apps: bool,
     pub is_streaming: bool,
+    pub fetched_at: Option<u64>,
 }
 
 impl ArgoViewState {
@@ -35,6 +36,7 @@ impl ArgoViewState {
             hub_context_name: None,
             show_all_hub_apps: false,
             is_streaming: false,
+            fetched_at: None,
         }
     }
 
@@ -204,30 +206,34 @@ pub fn render_argo_view(f: &mut Frame, area: Rect, state: &ArgoViewState) {
         format!("{}/{}", filtered.len(), displayed.len())
     };
 
+    let age_tag = state
+        .fetched_at
+        .map(|ts| {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let secs = now.saturating_sub(ts) as i64;
+            format!(", as of {} ago", srelens_kube::format_age(secs.max(0)))
+        })
+        .unwrap_or_default();
+
     let hub_tag = if state.is_remote_hub {
         let name = state.hub_context_name.as_deref().unwrap_or("Hub");
         if state.show_all_hub_apps {
-            format!(" [Hub: {} · All Hub Apps] ", name)
+            format!(" [Hub: {} · All Hub Apps{}] ", name, age_tag)
         } else {
-            format!(" [Hub: {} · Spoke Filtered] ", name)
+            format!(" [Hub: {} · Spoke Filtered{}] ", name, age_tag)
         }
+    } else if !age_tag.is_empty() {
+        format!(" [{}] ", age_tag.trim_start_matches(", "))
     } else {
         String::new()
     };
 
-    let toggle_hint = if state.is_remote_hub {
-        if state.show_all_hub_apps {
-            " <a> Current Spoke "
-        } else {
-            " <a> View All Hub Apps "
-        }
-    } else {
-        ""
-    };
-
     let title = format!(
-        " 🐙 ArgoCD Applications [{}] {}(<Enter> Details  <x> Actions / AI{} <s> Sync  <p> Toggle Auto-Sync  <R> Hard Refresh  <g> Git  <c> Config Hub  <r> Reload  <Esc> Back) ",
-        count_text, hub_tag, toggle_hint
+        " 🐙 ArgoCD Applications [{}] {}(<Enter> Details  <x> Actions / AI  <g> Git  <c> Config Hub  <r> Reload  <Esc> Back) ",
+        count_text, hub_tag
     );
 
     let block = Block::default()

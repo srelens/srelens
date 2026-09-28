@@ -2327,7 +2327,7 @@ async fn switch_context_while_in_argo_view_handles_stale_results_and_refreshes()
 #[tokio::test]
 async fn argo_streaming_chunks_and_disk_cache_load_instantly() {
     let _settings = common::env::isolate_settings();
-    let (mut app, _rx) = common::app().await;
+    let (mut app, mut rx) = common::app().await;
     let ctx = "test-cluster-disk-cache";
     app.active_context = ctx.to_string();
 
@@ -2367,12 +2367,30 @@ async fn argo_streaming_chunks_and_disk_cache_load_instantly() {
     };
     srelens_kube::argo::save_argo_apps_disk_cache(ctx, &fetch_result);
 
-    // 1. Switch to Argo view: should load disk cache on frame 1
-    app.switch_view_to_kind(ResourceKind::ArgoApplications).await;
+    // 1. Switch to Argo view: loads disk cache via background task
+    app.switch_view_to_kind(ResourceKind::ArgoApplications)
+        .await;
+    while let Ok(Some(event)) =
+        tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv()).await
+    {
+        if let srelens_tui::event::AppEvent::ArgoDiskSnapshot {
+            context,
+            result,
+            written_at,
+            hub_context,
+        } = event
+        {
+            app.handle_argo_disk_snapshot(&context, result, written_at, hub_context);
+            break;
+        }
+    }
     if let ActiveView::Argo(ref argo) = app.active_view {
         assert_eq!(argo.applications.len(), 1, "disk cache loaded on frame 1");
         assert_eq!(argo.applications[0].name, "cached-app-1");
-        assert!(!argo.displayed_applications().is_empty(), "cache items displayed immediately");
+        assert!(
+            !argo.displayed_applications().is_empty(),
+            "cache items displayed immediately"
+        );
     } else {
         panic!("expected ActiveView::Argo");
     }
@@ -2393,7 +2411,11 @@ async fn argo_streaming_chunks_and_disk_cache_load_instantly() {
 
     if let ActiveView::Argo(ref argo) = app.active_view {
         assert!(argo.is_streaming, "streaming flag set on chunk arrival");
-        assert_eq!(argo.displayed_applications().len(), 2, "chunk apps rendered immediately");
+        assert_eq!(
+            argo.displayed_applications().len(),
+            2,
+            "chunk apps rendered immediately"
+        );
     } else {
         panic!("expected ActiveView::Argo");
     }
@@ -2420,16 +2442,18 @@ async fn argo_streaming_chunks_and_disk_cache_load_instantly() {
     }
 
     // 4. Background refresh error when applications already exist does not wipe view
-    app.handle_argo_applications_result(
-        ctx,
-        false,
-        None,
-        Err("temporary timeout".to_string()),
-    );
+    app.handle_argo_applications_result(ctx, false, None, Err("temporary timeout".to_string()));
 
     if let ActiveView::Argo(ref argo) = app.active_view {
-        assert_eq!(argo.applications.len(), 2, "applications preserved despite refresh error");
-        assert!(argo.error.is_none(), "error screen suppressed when apps are present");
+        assert_eq!(
+            argo.applications.len(),
+            2,
+            "applications preserved despite refresh error"
+        );
+        assert!(
+            argo.error.is_none(),
+            "error screen suppressed when apps are present"
+        );
         assert!(!argo.is_loading);
     } else {
         panic!("expected ActiveView::Argo");
@@ -2437,6 +2461,189 @@ async fn argo_streaming_chunks_and_disk_cache_load_instantly() {
 
     // Cleanup disk cache
     srelens_kube::argo::invalidate_argo_disk_cache(ctx);
+}
+
+#[tokio::test]
+async fn switching_context_during_hub_listing_starts_no_duplicate_and_fills_spoke_view() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.tui_config.argo_hub_context = Some("tools".to_string());
+    app.active_context = "spoke1".to_string();
+    app.active_view = ActiveView::Argo(srelens_tui::views::argo_view::ArgoViewState::new());
+
+    // 1. Refresh is in flight for spoke1
+    app.argo_refreshing = true;
+
+    // 2. User switches context to spoke2 and then spoke3 while in flight
+    app.switch_context("spoke2".to_string()).await;
+    assert!(
+        app.argo_refreshing,
+        "switch to spoke2 preserves in-flight flag"
+    );
+    assert_eq!(app.active_context, "spoke2");
+
+    app.switch_context("spoke3".to_string()).await;
+    assert!(
+        app.argo_refreshing,
+        "switch to spoke3 preserves in-flight flag"
+    );
+    assert_eq!(app.active_context, "spoke3");
+
+    // 3. Hub result arrives for the initial request (triggered on spoke1)
+    let make_app = |name: &str, dest: &str| srelens_kube::argo::ArgoApplication {
+        name: name.to_string(),
+        namespace: "argocd".to_string(),
+        uid: "uid-1".to_string(),
+        resource_version: "1".to_string(),
+        project: "default".to_string(),
+        destination_server: "".to_string(),
+        destination_name: dest.to_string(),
+        destination_namespace: "default".to_string(),
+        repo_url: "https://github.com/example/repo".to_string(),
+        target_revision: "HEAD".to_string(),
+        path: "apps".to_string(),
+        sync_status: "Synced".to_string(),
+        health_status: "Healthy".to_string(),
+        health_message: "".to_string(),
+        sync_revision: "123".to_string(),
+        operation_phase: "".to_string(),
+        operation_message: "".to_string(),
+        auto_sync_enabled: true,
+        self_heal_enabled: false,
+        prune_enabled: false,
+        last_sync_time: "".to_string(),
+        created_at: "".to_string(),
+        resources: vec![],
+        sync_history: vec![],
+    };
+
+    let app_spoke1 = make_app("app-spoke1", "spoke1");
+    let app_spoke2 = make_app("app-spoke2", "spoke2");
+    let app_spoke3 = make_app("app-spoke3", "spoke3");
+    let all_hub_apps = vec![app_spoke1.clone(), app_spoke2.clone(), app_spoke3.clone()];
+
+    app.handle_argo_applications_result(
+        "spoke1",
+        true,
+        Some("tools".to_string()),
+        Ok(srelens_kube::argo::ArgoApplicationsFetchResult {
+            all_apps: all_hub_apps.clone(),
+            filtered_apps: vec![app_spoke1.clone()],
+            is_remote_hub: true,
+            truncated: false,
+        }),
+    );
+
+    assert!(!app.argo_refreshing, "refresh flag cleared on completion");
+
+    // spoke3 view is now active and populated from the shared hub apps!
+    if let ActiveView::Argo(ref argo) = app.active_view {
+        assert_eq!(argo.applications.len(), 1);
+        assert_eq!(argo.applications[0].name, "app-spoke3");
+        assert_eq!(argo.all_applications.len(), 3);
+        assert!(!argo.is_loading);
+        assert!(argo.fetched_at.is_some());
+    } else {
+        panic!("expected ActiveView::Argo");
+    }
+
+    // Snapshots for hub and active spoke are both present and complete
+    assert!(app
+        .argo_snapshots
+        .get("tools")
+        .map(|s| s.complete)
+        .unwrap_or(false));
+    assert!(app
+        .argo_snapshots
+        .get("spoke3")
+        .map(|s| s.complete)
+        .unwrap_or(false));
+}
+
+#[tokio::test]
+async fn argo_view_timer_spaces_out_by_fresh_for_instead_of_frequent_polling() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.active_context = "ctx-timer".to_string();
+    app.active_view = ActiveView::Argo(srelens_tui::views::argo_view::ArgoViewState::new());
+
+    // Fresh snapshot marks attempted_at = now
+    let snap = app
+        .argo_snapshots
+        .entry("ctx-timer".to_string())
+        .or_default();
+    snap.attempted_at = Some(std::time::Instant::now());
+
+    // Run 50 ticks (would previously trigger every 40 ticks = 4s)
+    for _ in 0..50 {
+        app.handle_tick();
+    }
+
+    // No background refresh was started because attempted_at < ARGO_FRESH_FOR (10 min)
+    assert!(
+        !app.argo_refreshing,
+        "tick did not start refresh during fresh window"
+    );
+}
+
+#[tokio::test]
+async fn changed_view_shares_argo_snapshot_from_hub() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.tui_config.argo_hub_context = Some("tools-hub".to_string());
+    app.active_context = "spoke-changed".to_string();
+
+    let make_app = |name: &str, dest: &str| srelens_kube::argo::ArgoApplication {
+        name: name.to_string(),
+        namespace: "argocd".to_string(),
+        uid: "uid-1".to_string(),
+        resource_version: "1".to_string(),
+        project: "default".to_string(),
+        destination_server: "".to_string(),
+        destination_name: dest.to_string(),
+        destination_namespace: "default".to_string(),
+        repo_url: "https://github.com/example/repo".to_string(),
+        target_revision: "HEAD".to_string(),
+        path: "apps".to_string(),
+        sync_status: "Synced".to_string(),
+        health_status: "Healthy".to_string(),
+        health_message: "".to_string(),
+        sync_revision: "123".to_string(),
+        operation_phase: "".to_string(),
+        operation_message: "".to_string(),
+        auto_sync_enabled: true,
+        self_heal_enabled: false,
+        prune_enabled: false,
+        last_sync_time: "".to_string(),
+        created_at: "".to_string(),
+        resources: vec![],
+        sync_history: vec![],
+    };
+
+    let app_changed = make_app("spoke-app", "spoke-changed");
+    let hub_snap = app
+        .argo_snapshots
+        .entry("tools-hub".to_string())
+        .or_default();
+    hub_snap.complete = true;
+    hub_snap.result = srelens_kube::argo::ArgoApplicationsFetchResult {
+        all_apps: vec![app_changed.clone()],
+        filtered_apps: vec![app_changed.clone()],
+        is_remote_hub: true,
+        truncated: false,
+    };
+    hub_snap.fetched_at = Some(srelens_kube::k8s_openapi::jiff::Timestamp::now());
+
+    // ensure_argo_snapshot on spoke-changed populates from tools-hub snapshot immediately
+    app.ensure_argo_snapshot();
+    let spoke_snap = app
+        .argo_snapshots
+        .get("spoke-changed")
+        .expect("spoke snapshot populated");
+    assert!(spoke_snap.complete);
+    assert_eq!(spoke_snap.result.filtered_apps.len(), 1);
+    assert_eq!(spoke_snap.result.filtered_apps[0].name, "spoke-app");
+    assert_eq!(spoke_snap.hub.as_deref(), Some("tools-hub"));
 }
 
 #[tokio::test]

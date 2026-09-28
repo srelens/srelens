@@ -701,10 +701,14 @@ impl App {
             self.helm_tick_counter = 0;
         }
 
-        // Periodically refresh ArgoCD applications or ArgoCD Application detail every ~4 seconds (40 ticks at 100ms)
+        // Periodically refresh ArgoCD applications or ArgoCD Application detail
         if let ActiveView::Argo(argo) = &self.active_view {
             self.argo_tick_counter = self.argo_tick_counter.saturating_add(1);
-            if self.argo_tick_counter % 40 == 1 && !self.argo_refreshing && argo.error.is_none() {
+            let snap = self.argo_snapshots.get(&self.active_context);
+            let due = snap
+                .and_then(|s| s.attempted_at)
+                .is_none_or(|t| t.elapsed() >= srelens_kube::argo::ARGO_FRESH_FOR);
+            if due && !self.argo_refreshing && argo.error.is_none() {
                 self.refresh_argo_applications();
             }
         } else if let ActiveView::ArgoDetail(detail) = &self.active_view {
@@ -2112,26 +2116,13 @@ impl App {
             helm.releases.clear();
             helm.is_loading = true;
         }
-        if let ActiveView::Argo(argo) = &mut self.active_view {
-            self.argo_refreshing = false;
-            argo.applications.clear();
-            argo.all_applications.clear();
-            argo.error = None;
-            argo.is_loading = true;
-            if let Some(cached) = srelens_kube::argo::load_argo_apps_disk_cache(&self.active_context) {
-                let effective_hub = if cached.is_remote_hub {
-                    self.tui_config.resolved_argo_hub_context()
-                } else {
-                    None
-                };
-                argo.set_applications(
-                    cached.filtered_apps,
-                    cached.all_apps,
-                    cached.is_remote_hub,
-                    effective_hub,
-                );
-            }
+        if matches!(self.active_view, ActiveView::Argo(_)) {
+            // Keep self.argo_refreshing intact across context switches so an in-flight
+            // hub fetch continues and populates the active context upon completion.
+            let argo = argo_view::ArgoViewState::new();
+            self.load_argo_disk_snapshot_async(&self.active_context);
             self.refresh_argo_applications();
+            self.active_view = ActiveView::Argo(argo);
         }
         if let ActiveView::Changed(changed) = &mut self.active_view {
             self.changed_refreshing = false;
@@ -9576,20 +9567,8 @@ impl App {
                 ActiveView::Helm(HelmViewState::new())
             }
             ResourceKind::ArgoApplications => {
-                let mut argo = argo_view::ArgoViewState::new();
-                if let Some(cached) = srelens_kube::argo::load_argo_apps_disk_cache(&self.active_context) {
-                    let effective_hub = if cached.is_remote_hub {
-                        self.tui_config.resolved_argo_hub_context()
-                    } else {
-                        None
-                    };
-                    argo.set_applications(
-                        cached.filtered_apps,
-                        cached.all_apps,
-                        cached.is_remote_hub,
-                        effective_hub,
-                    );
-                }
+                let argo = argo_view::ArgoViewState::new();
+                self.load_argo_disk_snapshot_async(&self.active_context);
                 self.refresh_argo_applications();
                 ActiveView::Argo(argo)
             }
@@ -11182,8 +11161,66 @@ impl App {
             self.argo_snapshots
                 .get(&self.active_context)
                 .map(ArgoSnapshotState::to_triage_snapshot)
-                .unwrap_or_default(),
+                .unwrap_or_else(|| {
+                    if let Some(hub) = self.tui_config.resolved_argo_hub_context() {
+                        if let Some(hub_snap) = self.argo_snapshots.get(&hub) {
+                            let filtered = srelens_kube::argo::filter_hub_apps_for_spoke_context(
+                                &hub_snap.result.all_apps,
+                                &self.active_context,
+                                Some(&hub),
+                            );
+                            return srelens_kube::changed::ArgoSnapshot {
+                                apps: filtered,
+                                fetched_at: hub_snap.fetched_at,
+                                complete: hub_snap.complete,
+                                error: hub_snap.error.clone(),
+                                hub: Some(hub),
+                            };
+                        }
+                    }
+                    srelens_kube::changed::ArgoSnapshot::default()
+                }),
         )
+    }
+
+    pub fn load_argo_disk_snapshot_async(&self, context: &str) {
+        let event_tx = self.event_tx.clone();
+        let disk_ctx = context.to_string();
+        let hub = self.tui_config.resolved_argo_hub_context();
+        tokio::task::spawn_blocking(move || {
+            let loaded = if let Some(ref hub_name) = hub {
+                if let Some((hub_res, written_at)) =
+                    srelens_kube::argo::load_argo_hub_disk_cache_with_age(hub_name)
+                {
+                    let filtered = srelens_kube::argo::filter_hub_apps_for_spoke_context(
+                        &hub_res.all_apps,
+                        &disk_ctx,
+                        Some(hub_name),
+                    );
+                    let res = srelens_kube::argo::ArgoApplicationsFetchResult {
+                        all_apps: hub_res.all_apps,
+                        filtered_apps: filtered,
+                        is_remote_hub: true,
+                        truncated: hub_res.truncated,
+                    };
+                    Some((res, written_at))
+                } else {
+                    srelens_kube::argo::load_argo_apps_disk_cache_with_age(&disk_ctx)
+                }
+            } else {
+                srelens_kube::argo::load_argo_apps_disk_cache_with_age(&disk_ctx)
+            };
+
+            if let Some((result, written_at)) = loaded {
+                let hub_out = if result.is_remote_hub { hub } else { None };
+                let _ = event_tx.send(crate::event::AppEvent::ArgoDiskSnapshot {
+                    context: disk_ctx,
+                    result,
+                    written_at,
+                    hub_context: hub_out,
+                });
+            }
+        });
     }
 
     /// Fill the active context's Argo snapshot: the disk cache once, off the
@@ -11192,30 +11229,55 @@ impl App {
     pub fn ensure_argo_snapshot(&mut self) {
         let ctx = self.active_context.clone();
         let hub = self.tui_config.resolved_argo_hub_context();
-        let snap = self.argo_snapshots.entry(ctx.clone()).or_default();
-        if !snap.disk_checked {
-            snap.disk_checked = true;
-            let event_tx = self.event_tx.clone();
-            let disk_ctx = ctx.clone();
-            tokio::task::spawn_blocking(move || {
-                if let Some((result, written_at)) =
-                    srelens_kube::argo::load_argo_apps_disk_cache_with_age(&disk_ctx)
-                {
-                    let hub = if result.is_remote_hub { hub } else { None };
-                    let _ = event_tx.send(crate::event::AppEvent::ArgoDiskSnapshot {
-                        context: disk_ctx,
-                        result,
-                        written_at,
-                        hub_context: hub,
-                    });
+        let (complete, disk_checked, due) = {
+            let snap = self.argo_snapshots.entry(ctx.clone()).or_default();
+            let due = snap
+                .attempted_at
+                .is_none_or(|t| t.elapsed() >= ARGO_REFRESH_EVERY);
+            (snap.complete, snap.disk_checked, due)
+        };
+        if !complete && !disk_checked {
+            if let Some(ref h) = hub {
+                let hub_data = self.argo_snapshots.get(h).and_then(|hub_snap| {
+                    if hub_snap.complete {
+                        Some((
+                            hub_snap.result.all_apps.clone(),
+                            hub_snap.result.truncated,
+                            hub_snap.fetched_at,
+                        ))
+                    } else {
+                        None
+                    }
+                });
+                if let Some((all_apps, truncated, fetched_at)) = hub_data {
+                    let filtered = srelens_kube::argo::filter_hub_apps_for_spoke_context(
+                        &all_apps,
+                        &ctx,
+                        Some(h),
+                    );
+                    let snap = self.argo_snapshots.entry(ctx.clone()).or_default();
+                    snap.complete = true;
+                    snap.result = srelens_kube::argo::ArgoApplicationsFetchResult {
+                        all_apps,
+                        filtered_apps: filtered,
+                        is_remote_hub: true,
+                        truncated,
+                    };
+                    snap.hub = Some(h.clone());
+                    snap.fetched_at = fetched_at;
+                    snap.disk_checked = true;
+                    return;
                 }
-            });
+            }
+            if let Some(snap) = self.argo_snapshots.get_mut(&ctx) {
+                snap.disk_checked = true;
+            }
+            self.load_argo_disk_snapshot_async(&ctx);
         }
-        let due = snap
-            .attempted_at
-            .is_none_or(|t| t.elapsed() >= ARGO_REFRESH_EVERY);
         if due && !self.argo_refreshing {
-            snap.attempted_at = Some(Instant::now());
+            if let Some(snap) = self.argo_snapshots.get_mut(&ctx) {
+                snap.attempted_at = Some(Instant::now());
+            }
             self.refresh_argo_applications();
         }
     }
@@ -11230,9 +11292,25 @@ impl App {
     ) {
         let snap = self.argo_snapshots.entry(context.to_string()).or_default();
         let was_complete = snap.complete;
-        snap.apply_disk(result, written_at, hub_context);
+        snap.apply_disk(result.clone(), written_at, hub_context.clone());
         if !was_complete && snap.complete {
             self.rematch_changed(context);
+        }
+        if let ActiveView::Argo(argo) = &mut self.active_view {
+            if self.active_context == context {
+                let effective_hub = if result.is_remote_hub {
+                    hub_context
+                } else {
+                    None
+                };
+                argo.set_applications(
+                    result.filtered_apps,
+                    result.all_apps,
+                    result.is_remote_hub,
+                    effective_hub,
+                );
+                argo.fetched_at = Some(written_at);
+            }
         }
     }
 
@@ -11702,7 +11780,15 @@ impl App {
             srelens_kube::argo::invalidate_argo_disk_cache(&self.active_context);
             if let Some(hub) = self.tui_config.resolved_argo_hub_context() {
                 srelens_kube::argo::invalidate_argo_disk_cache(&hub);
+                srelens_kube::argo::invalidate_argo_disk_cache(&format!("hub-{}", hub));
             }
+        }
+        self.argo_snapshots
+            .entry(self.active_context.clone())
+            .or_default()
+            .attempted_at = Some(Instant::now());
+        if let Some(hub) = self.tui_config.resolved_argo_hub_context() {
+            self.argo_snapshots.entry(hub).or_default().attempted_at = Some(Instant::now());
         }
         if let ActiveView::Argo(argo) = &mut self.active_view {
             if argo.applications.is_empty() {
@@ -11730,8 +11816,9 @@ impl App {
         let event_tx = self.event_tx.clone();
         let hub_ctx_clone = hub_context.clone();
 
-        let (chunk_tx, mut chunk_rx) =
-            tokio::sync::mpsc::unbounded_channel::<srelens_kube::argo::ArgoApplicationsFetchResult>();
+        let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::unbounded_channel::<
+            srelens_kube::argo::ArgoApplicationsFetchResult,
+        >();
         let event_tx_stream = event_tx.clone();
         let stream_context = current_context.clone();
         let stream_hub = hub_context.clone();
@@ -11818,6 +11905,16 @@ impl App {
                     chunk.is_remote_hub,
                     effective_hub,
                 );
+            } else if chunk.is_remote_hub
+                && self.tui_config.resolved_argo_hub_context().as_deref() == hub_context.as_deref()
+            {
+                let filtered = srelens_kube::argo::filter_hub_apps_for_spoke_context(
+                    &chunk.all_apps,
+                    &self.active_context,
+                    hub_context.as_deref(),
+                );
+                argo.is_streaming = true;
+                argo.set_applications(filtered, chunk.all_apps, chunk.is_remote_hub, hub_context);
             }
         }
     }
@@ -11840,8 +11937,31 @@ impl App {
         if (snap.complete, snap.fetched_at) != before {
             self.rematch_changed(context);
         }
+
+        if let Ok(fetch_res) = &result {
+            if fetch_res.is_remote_hub {
+                if let Some(ref hub) = hub_context {
+                    let hub_snap = self.argo_snapshots.entry(hub.clone()).or_default();
+                    hub_snap.apply_result(
+                        Ok(srelens_kube::argo::ArgoApplicationsFetchResult {
+                            all_apps: fetch_res.all_apps.clone(),
+                            filtered_apps: fetch_res.all_apps.clone(),
+                            is_remote_hub: false,
+                            truncated: fetch_res.truncated,
+                        }),
+                        None,
+                    );
+                }
+            }
+        }
+
         if let ActiveView::Argo(argo) = &mut self.active_view {
             argo.is_streaming = false;
+            let now_secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+
             if self.active_context == context {
                 match result {
                     Ok(fetch_res) => {
@@ -11856,6 +11976,7 @@ impl App {
                             fetch_res.is_remote_hub,
                             effective_hub,
                         );
+                        argo.fetched_at = Some(now_secs);
                     }
                     Err(err) => {
                         if argo.applications.is_empty() {
@@ -11869,9 +11990,34 @@ impl App {
                         }
                     }
                 }
+            } else if let Ok(fetch_res) = result {
+                let same_hub = fetch_res.is_remote_hub
+                    && self.tui_config.resolved_argo_hub_context().as_deref()
+                        == hub_context.as_deref();
+                if same_hub {
+                    let filtered = srelens_kube::argo::filter_hub_apps_for_spoke_context(
+                        &fetch_res.all_apps,
+                        &self.active_context,
+                        hub_context.as_deref(),
+                    );
+                    let active_snap = self
+                        .argo_snapshots
+                        .entry(self.active_context.clone())
+                        .or_default();
+                    let active_result = srelens_kube::argo::ArgoApplicationsFetchResult {
+                        all_apps: fetch_res.all_apps.clone(),
+                        filtered_apps: filtered.clone(),
+                        is_remote_hub: true,
+                        truncated: fetch_res.truncated,
+                    };
+                    active_snap.apply_result(Ok(active_result), hub_context.clone());
+
+                    argo.set_applications(filtered, fetch_res.all_apps, true, hub_context);
+                    argo.fetched_at = Some(now_secs);
+                } else {
+                    self.refresh_argo_applications();
+                }
             } else {
-                // Received result for an older context from before context switch;
-                // trigger a fresh query for the now-active context.
                 self.refresh_argo_applications();
             }
         }
@@ -14826,9 +14972,6 @@ impl App {
                     ("</>", "Filter"),
                     ("<Enter>", "Details"),
                     ("<x>", "Actions / AI"),
-                    ("<s>", "Sync"),
-                    ("<p>", "Auto-Sync"),
-                    ("<R>", "Hard Refresh"),
                     ("<g>", "Git"),
                     ("<r>", "Reload"),
                     ("<Esc>", "Back"),
