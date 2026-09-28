@@ -48,6 +48,9 @@ impl GitHubRepo {
 /// is ever requested from one.
 pub fn parse_github_repo(url: &str) -> Option<GitHubRepo> {
     let url = url.trim();
+    if url.len() > 2048 {
+        return None;
+    }
     let path = if let Some(rest) = url.strip_prefix("git@github.com:") {
         rest
     } else {
@@ -68,6 +71,8 @@ pub fn parse_github_repo(url: &str) -> Option<GitHubRepo> {
     let (owner, name) = (parts.next()?, parts.next()?);
     let valid = |s: &str| {
         !s.is_empty()
+            && s != "."
+            && s != ".."
             && s.chars()
                 .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
     };
@@ -149,6 +154,7 @@ pub struct RolloutCause {
 pub enum GitHubError {
     NotGitHub(String),
     NotACommit(String),
+    InvalidInput(String),
     AuthRejected,
     NotFoundOrNoAccess { has_token: bool },
     RateLimited { has_token: bool },
@@ -162,6 +168,7 @@ impl std::fmt::Display for GitHubError {
         match self {
             Self::NotGitHub(url) => write!(f, "not a github.com repository: {url}"),
             Self::NotACommit(rev) => write!(f, "{rev} is not a git commit SHA"),
+            Self::InvalidInput(msg) => write!(f, "invalid input: {msg}"),
             Self::AuthRejected => write!(f, "GitHub rejected the token in GITHUB_TOKEN/GH_TOKEN"),
             Self::NotFoundOrNoAccess { has_token: false } => write!(
                 f,
@@ -454,6 +461,11 @@ pub async fn rollout_cause(
     previous: Option<&str>,
     path: &str,
 ) -> Result<RolloutCause, GitHubError> {
+    if path.len() > 1024 {
+        return Err(GitHubError::InvalidInput(
+            "path exceeds 1024 bytes".to_string(),
+        ));
+    }
     let repo =
         parse_github_repo(repo_url).ok_or_else(|| GitHubError::NotGitHub(repo_url.to_string()))?;
     let key = (
@@ -542,10 +554,17 @@ mod tests {
             "https://charts.acme.io",
             "https://github.com/acme",
             "https://github.com/acme/deploy/tree/main",
+            "https://github.com/../deploy",
+            "https://github.com/acme/..",
+            "https://github.com/./deploy",
+            "https://github.com/acme/.",
             "",
         ] {
             assert_eq!(parse_github_repo(url), None, "{url}");
         }
+
+        let giant_url = format!("https://github.com/acme/{}", "a".repeat(2050));
+        assert_eq!(parse_github_repo(&giant_url), None, "overlong URL rejected");
     }
 
     #[test]
@@ -563,6 +582,20 @@ mod tests {
             "revision": HEAD
         }));
         assert!(wrong.is_err(), "repo_url is not the wire name");
+    }
+
+    #[tokio::test]
+    async fn rollout_cause_rejects_overlong_path() {
+        let giant_path = "a".repeat(1025);
+        let err = rollout_cause(
+            "https://github.com/acme/deploy",
+            HEAD,
+            Some(PREV),
+            &giant_path,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, GitHubError::InvalidInput(_)));
     }
 
     #[derive(Clone)]

@@ -134,9 +134,9 @@ impl ArgoSnapshotState {
         result: srelens_kube::argo::ArgoApplicationsFetchResult,
         written_at: u64,
         hub: Option<String>,
-    ) {
+    ) -> bool {
         if self.complete {
-            return;
+            return false;
         }
         self.complete = !result.truncated;
         self.result = result;
@@ -152,6 +152,7 @@ impl ArgoSnapshotState {
                 .checked_sub(std::time::Duration::from_secs(age))
                 .unwrap_or_else(std::time::Instant::now),
         );
+        true
     }
 
     /// What `:changed` matches against.
@@ -11350,24 +11351,26 @@ impl App {
     ) {
         let snap = self.argo_snapshots.entry(context.to_string()).or_default();
         let was_complete = snap.complete;
-        snap.apply_disk(result.clone(), written_at, hub_context.clone());
+        let applied = snap.apply_disk(result.clone(), written_at, hub_context.clone());
         if !was_complete && snap.complete {
             self.rematch_changed(context);
         }
-        if let ActiveView::Argo(argo) = &mut self.active_view {
-            if self.active_context == context {
-                let effective_hub = if result.is_remote_hub {
-                    hub_context
-                } else {
-                    None
-                };
-                argo.set_applications(
-                    result.filtered_apps,
-                    result.all_apps,
-                    result.is_remote_hub,
-                    effective_hub,
-                );
-                argo.fetched_at = Some(written_at);
+        if applied {
+            if let ActiveView::Argo(argo) = &mut self.active_view {
+                if self.active_context == context {
+                    let effective_hub = if result.is_remote_hub {
+                        hub_context
+                    } else {
+                        None
+                    };
+                    argo.set_applications(
+                        result.filtered_apps,
+                        result.all_apps,
+                        result.is_remote_hub,
+                        effective_hub,
+                    );
+                    argo.fetched_at = Some(written_at);
+                }
             }
         }
     }
@@ -11949,6 +11952,9 @@ impl App {
             .entry(context.to_string())
             .or_default()
             .apply_chunk(chunk.clone(), snap_hub);
+        if !self.argo_refreshing {
+            return;
+        }
         if let ActiveView::Argo(argo) = &mut self.active_view {
             if self.active_context == context {
                 let effective_hub = if chunk.is_remote_hub {

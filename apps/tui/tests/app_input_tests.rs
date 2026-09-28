@@ -2540,6 +2540,93 @@ async fn reopening_argo_view_with_recent_disk_cache_preserves_disk_age() {
 }
 
 #[tokio::test]
+async fn argo_late_disk_snapshot_does_not_overwrite_completed_live_snapshot() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    let ctx = "test-cluster";
+    app.active_context = ctx.to_string();
+
+    let make_app = |name: &str| srelens_kube::argo::ArgoApplication {
+        name: name.to_string(),
+        namespace: "argocd".to_string(),
+        uid: "uid-1".to_string(),
+        resource_version: "1".to_string(),
+        project: "default".to_string(),
+        destination_server: "".to_string(),
+        destination_name: "".to_string(),
+        destination_namespace: "default".to_string(),
+        repo_url: "https://github.com/example/repo".to_string(),
+        target_revision: "HEAD".to_string(),
+        path: "apps".to_string(),
+        sync_status: "Synced".to_string(),
+        health_status: "Healthy".to_string(),
+        health_message: "".to_string(),
+        sync_revision: "123".to_string(),
+        operation_phase: "".to_string(),
+        operation_message: "".to_string(),
+        auto_sync_enabled: true,
+        self_heal_enabled: false,
+        prune_enabled: false,
+        last_sync_time: "".to_string(),
+        created_at: "".to_string(),
+        resources: vec![],
+        sync_history: vec![],
+    };
+
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let disk_secs = now_secs.saturating_sub(60);
+
+    let fresh_result = srelens_kube::argo::ArgoApplicationsFetchResult {
+        all_apps: vec![make_app("fresh-app")],
+        filtered_apps: vec![make_app("fresh-app")],
+        is_remote_hub: false,
+        truncated: false,
+        fetched_at: Some(now_secs),
+    };
+    let stale_result = srelens_kube::argo::ArgoApplicationsFetchResult {
+        all_apps: vec![make_app("stale-app")],
+        filtered_apps: vec![make_app("stale-app")],
+        is_remote_hub: false,
+        truncated: false,
+        fetched_at: Some(disk_secs),
+    };
+
+    app.active_view = ActiveView::Argo(srelens_tui::views::argo_view::ArgoViewState::new());
+    // Live result finishes first
+    app.handle_argo_applications_result(ctx, false, None, Ok(fresh_result));
+
+    // Stale disk snapshot arrives late
+    app.handle_argo_disk_snapshot(ctx, stale_result.clone(), disk_secs, None);
+
+    if let ActiveView::Argo(ref argo) = app.active_view {
+        assert_eq!(
+            argo.fetched_at,
+            Some(now_secs),
+            "stale disk snapshot must not overwrite fetched_at"
+        );
+        assert_eq!(argo.applications.len(), 1);
+        assert_eq!(
+            argo.applications[0].name, "fresh-app",
+            "stale disk snapshot must not overwrite fresh applications"
+        );
+    } else {
+        panic!("expected ActiveView::Argo");
+    }
+
+    // Late chunk arrives after completion
+    app.handle_argo_applications_chunk(ctx, false, None, stale_result);
+    if let ActiveView::Argo(ref argo) = app.active_view {
+        assert_eq!(
+            argo.applications[0].name, "fresh-app",
+            "late chunk must not overwrite fresh applications"
+        );
+    }
+}
+
+#[tokio::test]
 async fn argo_disk_snapshot_on_hub_context_is_not_remote_hub_and_keeps_all_apps() {
     let _settings = common::env::isolate_settings();
     let (mut app, mut rx) = common::app().await;

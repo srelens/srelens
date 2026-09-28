@@ -421,6 +421,10 @@ impl ChangedViewState {
         let d = self
             .selected_deployment()
             .ok_or_else(|| "Select a workload first".to_string())?;
+        self.cause_link_for(d)
+    }
+
+    pub fn cause_link_for(&self, d: &AppDeploymentChange) -> Result<(String, String), String> {
         let ask = match cause_ask(d) {
             Some(Ok(ask)) => ask,
             Some(Err(reason)) => return Err(reason),
@@ -1408,7 +1412,7 @@ fn render_deployment_diagnostic_card(f: &mut Frame, area: Rect, state: &ChangedV
     let mut actions = String::from(
         "[Enter/d] Describe   [l] Logs   [y] YAML   [s] Quick AI RCA   [a] Assistant   [r] Refresh",
     );
-    if state.cause_link().is_ok() {
+    if state.cause_link_for(d).is_ok() {
         actions.push_str("   [g] Open PR");
     }
     lines.push(Line::from(vec![

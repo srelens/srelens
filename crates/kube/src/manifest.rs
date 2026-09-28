@@ -329,18 +329,24 @@ pub fn gvk_for(kind: &str) -> Option<(GroupVersionKind, bool)> {
         ),
         "resourcequota" | "resourcequotas" | "quota" => ("", "v1", "ResourceQuota", true),
         "limitrange" | "limitranges" | "limits" => ("", "v1", "LimitRange", true),
-        "horizontalpodautoscaler" | "hpa" => ("autoscaling", "v2", "HorizontalPodAutoscaler", true),
-        "poddisruptionbudget" | "pdb" => ("policy", "v1", "PodDisruptionBudget", true),
-        "priorityclass" => ("scheduling.k8s.io", "v1", "PriorityClass", false),
-        "runtimeclass" => ("node.k8s.io", "v1", "RuntimeClass", false),
+        "horizontalpodautoscaler" | "horizontalpodautoscalers" | "hpa" => {
+            ("autoscaling", "v2", "HorizontalPodAutoscaler", true)
+        }
+        "poddisruptionbudget" | "poddisruptionbudgets" | "pdb" => {
+            ("policy", "v1", "PodDisruptionBudget", true)
+        }
+        "priorityclass" | "priorityclasses" | "pc" => {
+            ("scheduling.k8s.io", "v1", "PriorityClass", false)
+        }
+        "runtimeclass" | "runtimeclasses" | "rc" => ("node.k8s.io", "v1", "RuntimeClass", false),
         "lease" | "leases" => ("coordination.k8s.io", "v1", "Lease", true),
-        "mutatingwebhookconfiguration" => (
+        "mutatingwebhookconfiguration" | "mutatingwebhookconfigurations" | "mwc" => (
             "admissionregistration.k8s.io",
             "v1",
             "MutatingWebhookConfiguration",
             false,
         ),
-        "validatingwebhookconfiguration" => (
+        "validatingwebhookconfiguration" | "validatingwebhookconfigurations" | "vwc" => (
             "admissionregistration.k8s.io",
             "v1",
             "ValidatingWebhookConfiguration",
@@ -2481,6 +2487,35 @@ metadata:
         let (gvk, ns) = gvk_for("MutatingWebhookConfiguration").unwrap();
         assert_eq!(gvk.group, "admissionregistration.k8s.io");
         assert!(!ns);
+
+        assert_eq!(
+            gvk_for("horizontalpodautoscalers").unwrap().0.kind,
+            "HorizontalPodAutoscaler"
+        );
+        assert_eq!(
+            gvk_for("poddisruptionbudgets").unwrap().0.kind,
+            "PodDisruptionBudget"
+        );
+        assert_eq!(gvk_for("priorityclasses").unwrap().0.kind, "PriorityClass");
+        assert_eq!(gvk_for("pc").unwrap().0.kind, "PriorityClass");
+        assert_eq!(gvk_for("runtimeclasses").unwrap().0.kind, "RuntimeClass");
+        assert_eq!(gvk_for("rc").unwrap().0.kind, "RuntimeClass");
+        assert_eq!(
+            gvk_for("mutatingwebhookconfigurations").unwrap().0.kind,
+            "MutatingWebhookConfiguration"
+        );
+        assert_eq!(
+            gvk_for("mwc").unwrap().0.kind,
+            "MutatingWebhookConfiguration"
+        );
+        assert_eq!(
+            gvk_for("validatingwebhookconfigurations").unwrap().0.kind,
+            "ValidatingWebhookConfiguration"
+        );
+        assert_eq!(
+            gvk_for("vwc").unwrap().0.kind,
+            "ValidatingWebhookConfiguration"
+        );
     }
 
     // -- resolve_api_resource --------------------------------------------------

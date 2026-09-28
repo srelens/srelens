@@ -2644,7 +2644,10 @@ async fn lookup_snapshot(
                 None
             },
             apps: r.filtered_apps,
-            fetched_at: Some(Timestamp::now()),
+            fetched_at: r
+                .fetched_at
+                .and_then(|ts| Timestamp::from_second(ts as i64).ok())
+                .or_else(|| Some(Timestamp::now())),
             error: None,
         },
         Ok(Err(e)) => ArgoSnapshot {
@@ -4992,5 +4995,40 @@ mod tests {
             report.argo.error.as_deref(),
             Some("Argo lookup timed out after 5s")
         );
+    }
+
+    #[tokio::test]
+    async fn lookup_snapshot_preserves_cached_fetched_at() {
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("SRELENS_CACHE_DIR", dir.path());
+        let ctx = "test-lookup-fetched-at";
+        let cache = ClientCache::new_many(vec![]);
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let target_ts = now - 500;
+        let fresh_result = crate::argo::ArgoApplicationsFetchResult {
+            all_apps: vec![],
+            filtered_apps: vec![],
+            is_remote_hub: false,
+            truncated: false,
+            fetched_at: Some(target_ts),
+        };
+        crate::argo::save_argo_apps_disk_cache(ctx, &fresh_result);
+
+        let snap =
+            lookup_snapshot(&cache, ctx, &ArgoLookup::default(), Duration::from_secs(5)).await;
+
+        let expected_ts = Timestamp::from_second(target_ts as i64).unwrap();
+        assert_eq!(
+            snap.fetched_at,
+            Some(expected_ts),
+            "lookup_snapshot must preserve cached fetched_at instead of stamping now"
+        );
+
+        crate::argo::invalidate_argo_disk_cache(ctx);
+        std::env::remove_var("SRELENS_CACHE_DIR");
     }
 }
