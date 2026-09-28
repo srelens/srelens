@@ -6,7 +6,7 @@
 //! that stops waiting (drops the future) cancels its request, and when the
 //! process ends every caller still waiting is told why at once.
 
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::collections::HashMap;
 use std::fmt;
 use std::future::Future;
@@ -17,6 +17,7 @@ use tokio::sync::{mpsc, oneshot, OwnedSemaphorePermit, Semaphore};
 
 use super::protocol::{self, code, method, Incoming, RpcError, Violation};
 use super::Limits;
+use srelens_sidecar_protocol::{CancelParams, RequestId, StreamCancelParams, StreamOpenParams};
 
 /// Frames a stream may have waiting for its reader. A sidecar that gets this
 /// far ahead of the host has its stream stopped rather than buffered.
@@ -348,7 +349,11 @@ impl Connection {
             connection: self.clone(),
             stream,
         };
-        let params = json!({"stream": stream, "method": name, "params": params});
+        let params = protocol::params(&StreamOpenParams {
+            stream,
+            method: name.to_owned(),
+            params,
+        });
         match self
             .call(
                 method::STREAM_OPEN,
@@ -495,7 +500,7 @@ impl Connection {
         drop(state);
         self.send(protocol::notification(
             method::STREAM_CANCEL,
-            &json!({"stream": stream}),
+            &protocol::params(&StreamCancelParams { stream }),
         ));
     }
 
@@ -707,7 +712,9 @@ impl Drop for PendingGuard<'_> {
         if still_pending {
             self.connection.send(protocol::notification(
                 method::CANCEL,
-                &json!({"id": self.id}),
+                &protocol::params(&CancelParams {
+                    id: RequestId::from(self.id),
+                }),
             ));
         }
     }
@@ -728,7 +735,9 @@ impl Drop for StreamGuard {
         if was_open {
             self.connection.send(protocol::notification(
                 method::STREAM_CANCEL,
-                &json!({"stream": self.stream}),
+                &protocol::params(&StreamCancelParams {
+                    stream: self.stream,
+                }),
             ));
         }
     }
@@ -765,6 +774,7 @@ impl fmt::Debug for SidecarStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use tokio::time::Instant;
 
     fn limits() -> Limits {

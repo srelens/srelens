@@ -656,7 +656,10 @@ async fn a_sidecar_that_fills_its_data_directory_past_the_limit_is_stopped_and_n
     let started = Instant::now();
     supervisor.request("fill", json!({})).await.unwrap();
     let reason = refused(&supervisor).await;
-    assert!(reason.contains("holds 3 MiB, over its 2 MiB limit"), "{reason}");
+    assert!(
+        reason.contains("holds 3 MiB, over its 2 MiB limit"),
+        "{reason}"
+    );
     assert!(reason.contains("so srelens stopped it"), "{reason}");
     assert!(
         started.elapsed() <= Policy::default().data_check_interval,
@@ -1084,4 +1087,70 @@ async fn the_hosts_log_outlives_the_supervisor_that_wrote_to_it() {
         .filter(|l| l.text == "The extension is running")
         .count();
     assert_eq!(running_lines, 2);
+}
+
+/// Everything srelens writes to a sidecar is a message the protocol schema
+/// (`schemas/sidecar-protocol.v0.1.json`) allows: the handshake, an app
+/// request, a stream opened and cancelled, a request cancelled, the stop. So
+/// an SDK that validates what it reads against the schema accepts all of it.
+#[tokio::test(start_paused = true)]
+async fn everything_srelens_writes_is_a_host_message_in_the_protocol_schema() {
+    let root = srelens_sidecar_protocol::schema();
+    let host_message = jsonschema::draft7::new(&json!({
+        "definitions": root["definitions"],
+        "allOf": [{"$ref": "#/definitions/HostMessage"}],
+    }))
+    .expect("the schema compiles");
+    let launcher = FakeLauncher::new(|call| (call.method == "slow").then_some(Reply::Silent));
+    let supervisor = start(&launcher);
+    running(&supervisor).await;
+    supervisor
+        .request("echo", json!({"n": 1}))
+        .await
+        .expect("answered");
+    let stream = supervisor
+        .open_stream("watch", json!({}))
+        .await
+        .expect("opens");
+    drop(stream);
+    // Times out, and is cancelled at the sidecar.
+    let _ = supervisor.request("slow", json!({})).await;
+    supervisor.stop().await;
+    sleep(Duration::from_millis(1)).await;
+
+    let methods = launcher.methods();
+    for expected in [
+        "initialize",
+        "activate",
+        "echo",
+        "stream/open",
+        "stream/cancel",
+        "slow",
+        "$/cancelRequest",
+        "deactivate",
+        "shutdown",
+    ] {
+        assert!(
+            methods.iter().any(|m| m == expected),
+            "srelens never wrote {expected}: {methods:?}"
+        );
+    }
+    let received = launcher.received();
+    for (_, message) in &received {
+        let errors: Vec<String> = host_message
+            .iter_errors(message)
+            .map(|e| e.to_string())
+            .collect();
+        assert!(errors.is_empty(), "{message}: {errors:?}");
+    }
+    // Guards the guard: the validator refuses what the schema does not allow.
+    let mut broken = received[0].1.clone();
+    broken["params"]
+        .as_object_mut()
+        .unwrap()
+        .remove("apiVersions");
+    assert!(
+        !host_message.is_valid(&broken),
+        "the validator took an initialize without apiVersions"
+    );
 }

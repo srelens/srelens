@@ -6699,6 +6699,7 @@ dependencies = [
 name = "srelens-plugin-host"
 version = "0.15.0"
 dependencies = [
+ "jsonschema",
  "landlock",
  "libc",
  "proptest",

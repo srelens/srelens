@@ -23,6 +23,7 @@ use super::Limits;
 pub use srelens_sidecar_protocol::{
     code, is_reserved, method, RpcError, MAX_MESSAGE_BYTES, SIDECAR_API_VERSIONS,
 };
+use srelens_sidecar_protocol::{InitializeLimits, InitializeParams, Peer};
 
 /// One message a sidecar wrote.
 #[derive(Debug, Clone, PartialEq)]
@@ -76,7 +77,7 @@ pub fn parse(line: &[u8]) -> Result<Incoming, Violation> {
             .as_str()
             .ok_or_else(|| violation("wrote a message whose method is not a string"))?
             .to_owned();
-        let params = params(&message)?;
+        let params = incoming_params(&message)?;
         return match message.get("id") {
             None => Ok(Incoming::Notification { method, params }),
             Some(id @ (Value::String(_) | Value::Number(_))) => Ok(Incoming::Request {
@@ -106,7 +107,9 @@ pub fn parse(line: &[u8]) -> Result<Incoming, Violation> {
     Ok(Incoming::Response { id, outcome })
 }
 
-fn params(message: &Map<String, Value>) -> Result<Value, Violation> {
+/// The `params` a sidecar sent with one message: absent is `Null`, an object
+/// or array is kept, anything else is a violation.
+fn incoming_params(message: &Map<String, Value>) -> Result<Value, Violation> {
     match message.get("params") {
         None => Ok(Value::Null),
         Some(params @ (Value::Object(_) | Value::Array(_))) => Ok(params.clone()),
@@ -134,23 +137,31 @@ pub fn response(id: &Value, outcome: &Result<Value, RpcError>) -> String {
     .to_string()
 }
 
+/// A message's params as the value a line carries.
+pub(crate) fn params<T: serde::Serialize>(params: &T) -> Value {
+    serde_json::to_value(params).expect("protocol params are plain JSON")
+}
+
 /// `initialize`'s params: every version the host speaks, the limits the
 /// sidecar runs under, so an SDK can hold itself to them, and its data
 /// directory (#573), the one path it may write.
 pub fn initialize_params(offered: &[&str], limits: &Limits, data_dir: &Path) -> Value {
-    json!({
-        "apiVersions": offered,
-        "host": {"name": "srelens", "version": env!("CARGO_PKG_VERSION")},
-        "limits": {
-            "requestTimeoutMs": limits.request_timeout.as_millis() as u64,
-            "maxConcurrentRequests": limits.max_concurrent_requests,
-            "maxStreams": limits.max_streams,
-            "memoryBytes": limits.memory_bytes,
-            "cpus": limits.cpus,
-            "dataBytes": limits.data_bytes,
-            "dataEntries": limits.data_entries,
+    params(&InitializeParams {
+        api_versions: offered.iter().map(|v| (*v).to_owned()).collect(),
+        host: Peer {
+            name: "srelens".to_owned(),
+            version: env!("CARGO_PKG_VERSION").to_owned(),
         },
-        "dataDirectory": data_dir.to_string_lossy(),
+        limits: InitializeLimits {
+            request_timeout_ms: limits.request_timeout.as_millis() as u64,
+            max_concurrent_requests: limits.max_concurrent_requests as u64,
+            max_streams: limits.max_streams as u64,
+            memory_bytes: limits.memory_bytes,
+            cpus: limits.cpus,
+            data_bytes: limits.data_bytes,
+            data_entries: limits.data_entries,
+        },
+        data_directory: data_dir.to_string_lossy().into_owned(),
     })
 }
 

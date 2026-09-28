@@ -68,3 +68,6 @@ srelens-mcp = { path = "../mcp" }
 tokio = { version = "1", features = ["macros", "rt", "io-std", "test-util"] }
 tempfile = "3"
 proptest = { version = "1", default-features = false, features = ["std"] }
+# Holds what srelens writes, and the broker's `host/*` checks, to the committed
+# sidecar protocol schema (#576). No default features: see sdk/protocol/Cargo.toml.
+jsonschema = { version = "0.58", default-features = false }
