@@ -583,6 +583,14 @@ struct ArgoDiskCacheEnvelope {
 }
 
 pub fn load_argo_apps_disk_cache(context: &str) -> Option<ArgoApplicationsFetchResult> {
+    load_argo_apps_disk_cache_with_age(context).map(|(data, _)| data)
+}
+
+/// [`load_argo_apps_disk_cache`], with when the snapshot was written, in Unix
+/// seconds, so a reader can say how old it is.
+pub fn load_argo_apps_disk_cache_with_age(
+    context: &str,
+) -> Option<(ArgoApplicationsFetchResult, u64)> {
     let path = argo_disk_cache_path(context)?;
     let content = std::fs::read_to_string(path).ok()?;
     let envelope: ArgoDiskCacheEnvelope = serde_json::from_str(&content).ok()?;
@@ -591,7 +599,7 @@ pub fn load_argo_apps_disk_cache(context: &str) -> Option<ArgoApplicationsFetchR
         .ok()?
         .as_secs();
     if now.saturating_sub(envelope.timestamp) < 7 * 86400 {
-        Some(envelope.data)
+        Some((envelope.data, envelope.timestamp))
     } else {
         None
     }
@@ -813,6 +821,12 @@ pub struct ArgoApplicationsFetchResult {
     pub filtered_apps: Vec<ArgoApplication>,
     /// Whether the result was fetched from a remote Hub cluster.
     pub is_remote_hub: bool,
+    /// A page stopped arriving after others had: the lists hold what came
+    /// back, not every Application. A caller must not read an app's absence
+    /// from them as "not managed by Argo". Absent in older disk caches,
+    /// which were only ever written complete.
+    #[serde(default)]
+    pub truncated: bool,
 }
 
 /// Fetch applications for the given context.
@@ -857,17 +871,21 @@ enum ArgoListError {
 
 const ARGO_PAGE_LIMIT: u32 = 250;
 
+/// Every Application `api` lists, a page at a time, and whether the listing
+/// stopped early: a later page timed out, or the server repeated a continue
+/// token. The first page timing out is an error, since nothing arrived.
 async fn list_argo_applications_paginated<F>(
     api: &Api<DynamicObject>,
     per_page_timeout: Duration,
     mut on_chunk: F,
-) -> Result<Vec<DynamicObject>, ArgoListError>
+) -> Result<(Vec<DynamicObject>, bool), ArgoListError>
 where
     F: FnMut(&[DynamicObject]),
 {
     let mut all_items = Vec::new();
     let mut token: Option<String> = None;
     let mut followed = std::collections::HashSet::new();
+    let mut truncated = false;
 
     loop {
         let mut lp = ListParams::default().limit(ARGO_PAGE_LIMIT);
@@ -901,6 +919,7 @@ where
                         per_page_timeout.as_secs()
                     )));
                 } else {
+                    truncated = true;
                     break;
                 }
             }
@@ -915,6 +934,7 @@ where
         let next = page_res.metadata.continue_.filter(|t| !t.is_empty());
         if let Some(ref repeat) = next {
             if !followed.insert(repeat.clone()) {
+                truncated = true;
                 break;
             }
         }
@@ -924,7 +944,20 @@ where
         }
     }
 
-    Ok(all_items)
+    Ok((all_items, truncated))
+}
+
+/// Keep a finished listing: in memory for [`ARGO_APPS_CACHE_TTL`] either way,
+/// on disk only when complete, so a truncated list is never shown on a later
+/// start as though it were the whole set.
+fn store_argo_apps(key: ArgoAppsCacheKey, context: &str, result: &ArgoApplicationsFetchResult) {
+    if let Ok(mut guard) = ARGO_APPS_CACHE.write() {
+        let map = guard.get_or_insert_with(HashMap::new);
+        map.insert(key, (Instant::now(), result.clone()));
+    }
+    if !result.truncated {
+        save_argo_apps_disk_cache(context, result);
+    }
 }
 
 pub async fn fetch_argo_applications_cached(
@@ -1021,26 +1054,22 @@ pub async fn fetch_argo_applications_cached_stream(
                 all_apps: local_all_apps.clone(),
                 filtered_apps: local_filtered_apps.clone(),
                 is_remote_hub: false,
+                truncated: false,
             });
         }
     })
     .await;
 
     match local_res {
-        Ok(_) => {
+        Ok((_, truncated)) => {
             // ArgoCD is installed in the selected cluster! Priority is given to local cluster.
             let result = ArgoApplicationsFetchResult {
                 all_apps: local_all_apps.clone(),
                 filtered_apps: local_filtered_apps,
                 is_remote_hub: false,
+                truncated,
             };
-
-            if let Ok(mut guard) = ARGO_APPS_CACHE.write() {
-                let map = guard.get_or_insert_with(HashMap::new);
-                map.insert(cache_key, (Instant::now(), result.clone()));
-            }
-            save_argo_apps_disk_cache(current_context, &result);
-
+            store_argo_apps(cache_key, current_context, &result);
             Ok(result)
         }
         Err(ArgoListError::Other(e)) => {
@@ -1115,25 +1144,21 @@ pub async fn fetch_argo_applications_cached_stream(
                         all_apps: hub_all_apps.clone(),
                         filtered_apps: hub_filtered_apps.clone(),
                         is_remote_hub: true,
+                        truncated: false,
                     });
                 }
             })
             .await;
 
             match hub_res {
-                Ok(_) => {
+                Ok((_, truncated)) => {
                     let result = ArgoApplicationsFetchResult {
                         all_apps: hub_all_apps,
                         filtered_apps: hub_filtered_apps,
                         is_remote_hub: true,
+                        truncated,
                     };
-
-                    if let Ok(mut guard) = ARGO_APPS_CACHE.write() {
-                        let map = guard.get_or_insert_with(HashMap::new);
-                        map.insert(cache_key, (Instant::now(), result.clone()));
-                    }
-                    save_argo_apps_disk_cache(current_context, &result);
-
+                    store_argo_apps(cache_key, current_context, &result);
                     Ok(result)
                 }
                 Err(ArgoListError::NotFound) => {
@@ -2292,6 +2317,7 @@ mod tests {
             all_apps: vec![],
             filtered_apps: vec![],
             is_remote_hub: true,
+            truncated: false,
         };
 
         // Cache insert
@@ -2410,6 +2436,7 @@ mod tests {
             all_apps: vec![],
             filtered_apps: vec![],
             is_remote_hub: false,
+            truncated: false,
         };
         if let Ok(mut guard) = ARGO_APPS_CACHE.write() {
             let map = guard.get_or_insert_with(HashMap::new);
@@ -2559,6 +2586,7 @@ mod tests {
 
     #[test]
     fn argo_disk_cache_round_trip() {
+        let _lock = CACHE_TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let temp_dir = tempfile::tempdir().unwrap();
         std::env::set_var("SRELENS_CACHE_DIR", temp_dir.path());
 
@@ -2569,6 +2597,7 @@ mod tests {
             }))],
             filtered_apps: vec![],
             is_remote_hub: true,
+            truncated: false,
         };
 
         assert_eq!(load_argo_apps_disk_cache(ctx), None);
@@ -2582,6 +2611,112 @@ mod tests {
         invalidate_argo_disk_cache(ctx);
         assert_eq!(load_argo_apps_disk_cache(ctx), None);
 
+        std::env::remove_var("SRELENS_CACHE_DIR");
+    }
+
+    /// An Application list served one app per page, following continue
+    /// tokens `p1`, `p2`, ...; the page numbered `stall` never answers.
+    fn paged_client(pages: usize, stall: Option<usize>) -> kube::Client {
+        let service = tower::service_fn(
+            move |request: http::Request<kube::client::Body>| async move {
+                let query = request.uri().query().unwrap_or_default().to_string();
+                let page = query
+                    .split('&')
+                    .find_map(|kv| kv.strip_prefix("continue="))
+                    .and_then(|t| t.trim_start_matches('p').parse::<usize>().ok())
+                    .unwrap_or(0);
+                if Some(page) == stall {
+                    tokio::time::sleep(Duration::from_secs(3600)).await;
+                }
+                let next = if page + 1 < pages {
+                    format!("p{}", page + 1)
+                } else {
+                    String::new()
+                };
+                let body = serde_json::json!({
+                    "apiVersion": "argoproj.io/v1alpha1",
+                    "kind": "ApplicationList",
+                    "metadata": {"continue": next, "resourceVersion": "1"},
+                    "items": [{
+                        "apiVersion": "argoproj.io/v1alpha1",
+                        "kind": "Application",
+                        "metadata": {"name": format!("app-{page}"), "namespace": "argocd"}
+                    }]
+                });
+                Ok::<_, std::convert::Infallible>(
+                    http::Response::builder()
+                        .status(200)
+                        .header("content-type", "application/json")
+                        .body(kube::client::Body::from(body.to_string().into_bytes()))
+                        .unwrap(),
+                )
+            },
+        );
+        kube::Client::new(service, "default")
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_page_that_stops_arriving_after_others_marks_the_listing_truncated() {
+        let ar = argo_application_resource();
+        let api = |client| Api::<DynamicObject>::all_with(client, &ar);
+        let per_page = Duration::from_secs(15);
+
+        let (items, truncated) =
+            list_argo_applications_paginated(&api(paged_client(3, None)), per_page, |_| {})
+                .await
+                .unwrap();
+        assert_eq!((items.len(), truncated), (3, false));
+
+        let mut chunks = 0;
+        let (items, truncated) =
+            list_argo_applications_paginated(&api(paged_client(3, Some(2))), per_page, |_| {
+                chunks += 1
+            })
+            .await
+            .unwrap();
+        assert_eq!((items.len(), truncated, chunks), (2, true, 2));
+
+        let first =
+            list_argo_applications_paginated(&api(paged_client(3, Some(0))), per_page, |_| {})
+                .await;
+        assert!(
+            matches!(first, Err(ArgoListError::Other(_))),
+            "nothing arrived: an error, not an empty list"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_truncated_listing_is_kept_in_memory_but_never_written_to_disk() {
+        let _lock = CACHE_TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("SRELENS_CACHE_DIR", dir.path());
+        let ctx = "truncated-listing-ctx";
+        let cache = ClientCache::new_many(vec![]);
+
+        cache.preload(ctx, paged_client(3, Some(2))).await;
+        let partial =
+            fetch_argo_applications_cached(&cache, ctx, None, None, None, None, true, true)
+                .await
+                .unwrap();
+        assert!(partial.truncated);
+        assert_eq!(partial.all_apps.len(), 2);
+        assert_eq!(
+            load_argo_apps_disk_cache(ctx),
+            None,
+            "a partial list is not kept for the next start"
+        );
+
+        cache.preload(ctx, paged_client(3, None)).await;
+        let whole = fetch_argo_applications_cached(&cache, ctx, None, None, None, None, true, true)
+            .await
+            .unwrap();
+        assert!(!whole.truncated);
+        assert_eq!(
+            load_argo_apps_disk_cache(ctx).map(|r| r.all_apps.len()),
+            Some(3)
+        );
+
+        invalidate_argo_disk_cache(ctx);
         std::env::remove_var("SRELENS_CACHE_DIR");
     }
 }

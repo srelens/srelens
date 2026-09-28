@@ -6,8 +6,8 @@ use ratatui::{
     Frame,
 };
 use srelens_kube::changed::{
-    AppDeploymentChange, ChangeKind, ChangedTriageReport, FailureCategory, IncidentStatus,
-    InfraChangeItem, PodIncidentDetail, RolloutStatus,
+    AppDeploymentChange, ArgoCoverage, ArgoCoverageState, ChangeKind, ChangedTriageReport,
+    FailureCategory, IncidentStatus, InfraChangeItem, PodIncidentDetail, RolloutStatus,
 };
 use srelens_registry::github::RolloutCause;
 use std::collections::HashMap;
@@ -1198,6 +1198,15 @@ fn render_deployment_diagnostic_card(f: &mut Frame, area: Rect, state: &ChangedV
         ]));
     }
 
+    // How much of Argo the GitOps fields below were matched against.
+    if let Some(line) = state
+        .report
+        .as_ref()
+        .and_then(|r| argo_coverage_line(&r.argo))
+    {
+        lines.push(line);
+    }
+
     // Line 2: GitOps / ArgoCD Panel (if available)
     if let Some(ref g) = d.gitops {
         let sync_style = if g.sync_status == "Synced" && g.health_status == "Healthy" {
@@ -1416,6 +1425,59 @@ fn render_deployment_diagnostic_card(f: &mut Frame, area: Rect, state: &ChangedV
     f.render_widget(p, area);
 }
 
+/// "Argo: …" on the card: how many Applications the GitOps fields were
+/// matched against, from where, and how old they are. `None` when no Argo
+/// manages the cluster, since there is nothing to qualify.
+pub fn argo_coverage_line(c: &ArgoCoverage) -> Option<Line<'static>> {
+    let from = match &c.hub {
+        Some(hub) => format!("from hub {hub}"),
+        None => "on this cluster".to_string(),
+    };
+    let age = c
+        .fetched_at
+        .as_deref()
+        .and_then(|t| t.parse::<srelens_kube::k8s_openapi::jiff::Timestamp>().ok())
+        .map(|t| {
+            let secs = srelens_kube::k8s_openapi::jiff::Timestamp::now()
+                .duration_since(t)
+                .as_secs();
+            format!(", as of {} ago", srelens_kube::format_age(secs.max(0)))
+        })
+        .unwrap_or_default();
+    let n = c.apps_loaded;
+    let dim = Style::default().fg(Theme::dim());
+    let warn = Style::default().fg(Theme::yellow());
+    let (text, style) = match c.state {
+        ArgoCoverageState::NoArgo => return None,
+        ArgoCoverageState::Complete => (format!("{n} apps {from}{age}"), dim),
+        ArgoCoverageState::Stale => {
+            let failed = c
+                .error
+                .as_deref()
+                .map(|e| format!("; last refresh: {e}"))
+                .unwrap_or_else(|| "; refreshing".to_string());
+            (format!("{n} apps {from}{age}{failed}"), warn)
+        }
+        ArgoCoverageState::Partial => (
+            format!("loading {from} ({n} apps for this cluster so far)"),
+            warn,
+        ),
+        ArgoCoverageState::Unavailable => (
+            format!(
+                "unavailable: {}",
+                c.error.as_deref().unwrap_or("unknown error")
+            ),
+            Style::default()
+                .fg(Theme::yellow())
+                .add_modifier(Modifier::BOLD),
+        ),
+    };
+    Some(Line::from(vec![
+        Span::styled("Argo: ", Theme::header_label()),
+        Span::styled(sanitize_span_text(&text), style),
+    ]))
+}
+
 /// Pull requests and commits the Why block lists before counting the rest.
 const MAX_CAUSE_LINES: usize = 5;
 
@@ -1456,10 +1518,7 @@ pub fn why_lines(d: &AppDeploymentChange, state: &ChangedViewState) -> Vec<Line<
         return said(msg, warn);
     }
     let Some(g) = &d.gitops else {
-        return match state.report.as_ref().and_then(|r| r.argo_error.as_deref()) {
-            Some(err) => said(&format!("unknown, Argo unavailable: {err}"), warn),
-            None => Vec::new(),
-        };
+        return Vec::new();
     };
     let Some(r) = &g.rollout else {
         return match &g.rollout_unmatched {

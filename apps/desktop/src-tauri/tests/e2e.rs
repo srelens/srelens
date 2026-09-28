@@ -1082,6 +1082,10 @@ async fn run_suite() {
         )
         .await;
     assert!(out["deployments"].is_array());
+    assert!(
+        out["argo"]["state"].is_string(),
+        "the report says how much of Argo it saw: {out}"
+    );
 
     let out = h
         .ok("k8s.listJobs", json!({ "context": ctx, "namespace": NS }))

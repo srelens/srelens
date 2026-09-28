@@ -55,6 +55,104 @@ pub enum ActiveView {
     Changed(changed_view::ChangedViewState),
 }
 
+/// The Argo Applications last seen for one context, shared by `:argo` and
+/// `:changed`, so `:changed` matches workloads against what is already known
+/// instead of waiting on a hub that lists thousands of apps.
+#[derive(Debug, Clone, Default)]
+pub struct ArgoSnapshotState {
+    pub result: srelens_kube::argo::ArgoApplicationsFetchResult,
+    pub fetched_at: Option<k8s_openapi::jiff::Timestamp>,
+    /// `result` holds every Application: a finished, untruncated listing.
+    pub complete: bool,
+    pub error: Option<String>,
+    pub hub: Option<String>,
+    /// When `:changed` last started an Argo refresh; it waits
+    /// [`ARGO_REFRESH_EVERY`] before starting another, failed or not.
+    pub attempted_at: Option<Instant>,
+    pub disk_checked: bool,
+}
+
+/// How often `:changed` asks Argo again for a context it already has.
+pub const ARGO_REFRESH_EVERY: Duration = Duration::from_secs(120);
+
+impl ArgoSnapshotState {
+    /// A page of a refresh in flight. It replaces the apps only while no
+    /// complete list is held: matching against a complete older list beats
+    /// matching against the first 250 apps of a newer one.
+    pub fn apply_chunk(
+        &mut self,
+        chunk: srelens_kube::argo::ArgoApplicationsFetchResult,
+        hub: Option<String>,
+    ) {
+        if !self.complete {
+            self.result = chunk;
+            self.hub = hub;
+        }
+    }
+
+    /// A finished refresh. A truncated one does not replace a complete list.
+    pub fn apply_result(
+        &mut self,
+        result: Result<srelens_kube::argo::ArgoApplicationsFetchResult, String>,
+        hub: Option<String>,
+    ) {
+        match result {
+            Ok(r) if r.truncated && self.complete => {
+                self.error = Some(format!(
+                    "the latest Argo refresh stopped early ({} apps)",
+                    r.all_apps.len()
+                ));
+            }
+            Ok(r) => {
+                self.complete = !r.truncated;
+                self.result = r;
+                self.hub = hub;
+                self.fetched_at = Some(k8s_openapi::jiff::Timestamp::now());
+                self.error = None;
+            }
+            Err(e) if e == srelens_kube::argo::NO_ARGO => {
+                *self = Self {
+                    error: Some(e),
+                    complete: true,
+                    fetched_at: Some(k8s_openapi::jiff::Timestamp::now()),
+                    attempted_at: self.attempted_at,
+                    disk_checked: self.disk_checked,
+                    ..Default::default()
+                };
+            }
+            Err(e) => self.error = Some(e),
+        }
+    }
+
+    /// The disk cache, written `written_at` (Unix seconds). Only fills a
+    /// context with no complete list yet.
+    pub fn apply_disk(
+        &mut self,
+        result: srelens_kube::argo::ArgoApplicationsFetchResult,
+        written_at: u64,
+        hub: Option<String>,
+    ) {
+        if self.complete {
+            return;
+        }
+        self.complete = !result.truncated;
+        self.result = result;
+        self.hub = hub;
+        self.fetched_at = k8s_openapi::jiff::Timestamp::from_second(written_at as i64).ok();
+    }
+
+    /// What `:changed` matches against.
+    pub fn to_triage_snapshot(&self) -> srelens_kube::changed::ArgoSnapshot {
+        srelens_kube::changed::ArgoSnapshot {
+            apps: self.result.filtered_apps.clone(),
+            fetched_at: self.fetched_at,
+            complete: self.complete,
+            error: self.error.clone(),
+            hub: self.hub.clone(),
+        }
+    }
+}
+
 pub struct App {
     pub active_context: String,
     pub active_namespace: String,
@@ -105,6 +203,8 @@ pub struct App {
     pub helm_refreshing: bool,
     pub argo_tick_counter: usize,
     pub argo_refreshing: bool,
+    /// Argo Applications by context, fed by every Argo refresh.
+    pub argo_snapshots: HashMap<String, ArgoSnapshotState>,
     pub changed_tick_counter: usize,
     pub changed_refreshing: bool,
     pub node_metrics_history:
@@ -467,6 +567,7 @@ impl App {
             helm_refreshing: false,
             argo_tick_counter: 0,
             argo_refreshing: false,
+            argo_snapshots: HashMap::new(),
             changed_tick_counter: 0,
             changed_refreshing: false,
             node_metrics_history: HashMap::new(),
@@ -9618,20 +9719,18 @@ impl App {
                 };
                 let cache = self.client_cache.clone();
                 let event_tx = self.event_tx.clone();
-                let (argo_lookup, hub_kubeconfig) = self.changed_argo_lookup();
+                self.ensure_argo_snapshot();
+                let argo = self.changed_argo_source();
                 self.changed_refreshing = true;
 
                 tokio::spawn(async move {
-                    if let Some(path) = hub_kubeconfig {
-                        cache.ensure_paths(vec![path]).await;
-                    }
                     let res = srelens_kube::changed::fetch_changed_triage(
                         &cache,
                         &ctx,
                         ns.as_deref(),
                         window,
                         opts,
-                        &argo_lookup,
+                        argo,
                     )
                     .await;
                     let _ = event_tx.send(crate::event::AppEvent::ChangedTriageResult {
@@ -11051,23 +11150,21 @@ impl App {
             return;
         };
 
+        self.ensure_argo_snapshot();
         self.changed_refreshing = true;
         let ctx = self.active_context.clone();
         let cache = self.client_cache.clone();
         let event_tx = self.event_tx.clone();
-        let (argo_lookup, hub_kubeconfig) = self.changed_argo_lookup();
+        let argo = self.changed_argo_source();
 
         tokio::spawn(async move {
-            if let Some(path) = hub_kubeconfig {
-                cache.ensure_paths(vec![path]).await;
-            }
             let res = srelens_kube::changed::fetch_changed_triage(
                 &cache,
                 &ctx,
                 ns.as_deref(),
                 window,
                 opts,
-                &argo_lookup,
+                argo,
             )
             .await;
             let _ = event_tx.send(crate::event::AppEvent::ChangedTriageResult {
@@ -11078,25 +11175,73 @@ impl App {
         });
     }
 
-    /// Where `:changed` looks for the Argo apps that manage the active
-    /// cluster, the same way the Argo view does, and the hub kubeconfig to
-    /// load before the lookup.
-    fn changed_argo_lookup(
-        &self,
-    ) -> (
-        srelens_kube::changed::ArgoLookup,
-        Option<std::path::PathBuf>,
+    /// The Argo data `:changed` matches against for the active context: the
+    /// shared snapshot as it stands, never a fresh hub listing.
+    fn changed_argo_source(&self) -> srelens_kube::changed::ArgoSource {
+        srelens_kube::changed::ArgoSource::Snapshot(
+            self.argo_snapshots
+                .get(&self.active_context)
+                .map(ArgoSnapshotState::to_triage_snapshot)
+                .unwrap_or_default(),
+        )
+    }
+
+    /// Fill the active context's Argo snapshot: the disk cache once, off the
+    /// UI thread, and a shared refresh at most every [`ARGO_REFRESH_EVERY`],
+    /// so a failing hub is not asked again on every `:changed` tick.
+    pub fn ensure_argo_snapshot(&mut self) {
+        let ctx = self.active_context.clone();
+        let hub = self.tui_config.resolved_argo_hub_context();
+        let snap = self.argo_snapshots.entry(ctx.clone()).or_default();
+        if !snap.disk_checked {
+            snap.disk_checked = true;
+            let event_tx = self.event_tx.clone();
+            let disk_ctx = ctx.clone();
+            tokio::task::spawn_blocking(move || {
+                if let Some((result, written_at)) =
+                    srelens_kube::argo::load_argo_apps_disk_cache_with_age(&disk_ctx)
+                {
+                    let hub = if result.is_remote_hub { hub } else { None };
+                    let _ = event_tx.send(crate::event::AppEvent::ArgoDiskSnapshot {
+                        context: disk_ctx,
+                        result,
+                        written_at,
+                        hub_context: hub,
+                    });
+                }
+            });
+        }
+        let due = snap
+            .attempted_at
+            .is_none_or(|t| t.elapsed() >= ARGO_REFRESH_EVERY);
+        if due && !self.argo_refreshing {
+            snap.attempted_at = Some(Instant::now());
+            self.refresh_argo_applications();
+        }
+    }
+
+    /// The disk cache `ensure_argo_snapshot` read for `context`.
+    pub fn handle_argo_disk_snapshot(
+        &mut self,
+        context: &str,
+        result: srelens_kube::argo::ArgoApplicationsFetchResult,
+        written_at: u64,
+        hub_context: Option<String>,
     ) {
-        let lookup = srelens_kube::changed::ArgoLookup {
-            hub_context: self.tui_config.resolved_argo_hub_context(),
-            cluster_name: Some(self.cluster_name.clone()),
-            server_url: self
-                .contexts
-                .iter()
-                .find(|c| c.name == self.active_context)
-                .map(|c| c.server.clone()),
-        };
-        (lookup, self.tui_config.resolved_argo_hub_kubeconfig())
+        let snap = self.argo_snapshots.entry(context.to_string()).or_default();
+        let was_complete = snap.complete;
+        snap.apply_disk(result, written_at, hub_context);
+        if !was_complete && snap.complete {
+            self.rematch_changed(context);
+        }
+    }
+
+    /// New Argo data for `context`: re-run `:changed` if it is on screen for
+    /// it, so its rows match against the data now, not on the next tick.
+    fn rematch_changed(&mut self, context: &str) {
+        if matches!(self.active_view, ActiveView::Changed(_)) && self.active_context == context {
+            self.refresh_changed_triage();
+        }
     }
 
     /// `s` on the `:changed` Deployments tab: one tool-less completion over
@@ -11650,6 +11795,15 @@ impl App {
         hub_context: Option<String>,
         chunk: srelens_kube::argo::ArgoApplicationsFetchResult,
     ) {
+        let snap_hub = if chunk.is_remote_hub {
+            hub_context.clone()
+        } else {
+            None
+        };
+        self.argo_snapshots
+            .entry(context.to_string())
+            .or_default()
+            .apply_chunk(chunk.clone(), snap_hub);
         if let ActiveView::Argo(argo) = &mut self.active_view {
             if self.active_context == context {
                 let effective_hub = if chunk.is_remote_hub {
@@ -11676,6 +11830,16 @@ impl App {
         result: Result<srelens_kube::argo::ArgoApplicationsFetchResult, String>,
     ) {
         self.argo_refreshing = false;
+        let snap_hub = match &result {
+            Ok(r) if r.is_remote_hub => hub_context.clone(),
+            _ => None,
+        };
+        let snap = self.argo_snapshots.entry(context.to_string()).or_default();
+        let before = (snap.complete, snap.fetched_at);
+        snap.apply_result(result.clone(), snap_hub);
+        if (snap.complete, snap.fetched_at) != before {
+            self.rematch_changed(context);
+        }
         if let ActiveView::Argo(argo) = &mut self.active_view {
             argo.is_streaming = false;
             if self.active_context == context {

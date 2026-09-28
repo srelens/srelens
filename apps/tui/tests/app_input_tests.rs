@@ -2248,6 +2248,7 @@ async fn switch_context_while_in_argo_view_handles_stale_results_and_refreshes()
             all_apps: vec![app1.clone()],
             filtered_apps: vec![app1.clone()],
             is_remote_hub: false,
+            truncated: false,
         }),
     );
 
@@ -2269,6 +2270,7 @@ async fn switch_context_while_in_argo_view_handles_stale_results_and_refreshes()
             all_apps: vec![app1.clone(), app2.clone()],
             filtered_apps: vec![app2.clone()],
             is_remote_hub: true,
+            truncated: false,
         }),
     );
 
@@ -2312,6 +2314,7 @@ async fn switch_context_while_in_argo_view_handles_stale_results_and_refreshes()
             all_apps: vec![app1.clone(), app2.clone()],
             filtered_apps: vec![app1.clone()],
             is_remote_hub: true,
+            truncated: false,
         }),
     );
     if let ActiveView::Argo(ref argo) = app.active_view {
@@ -2360,6 +2363,7 @@ async fn argo_streaming_chunks_and_disk_cache_load_instantly() {
         all_apps: vec![cached_app.clone()],
         filtered_apps: vec![cached_app.clone()],
         is_remote_hub: false,
+        truncated: false,
     };
     srelens_kube::argo::save_argo_apps_disk_cache(ctx, &fetch_result);
 
@@ -2383,6 +2387,7 @@ async fn argo_streaming_chunks_and_disk_cache_load_instantly() {
             all_apps: vec![cached_app.clone(), chunk_app.clone()],
             filtered_apps: vec![cached_app.clone(), chunk_app.clone()],
             is_remote_hub: false,
+            truncated: false,
         },
     );
 
@@ -2402,6 +2407,7 @@ async fn argo_streaming_chunks_and_disk_cache_load_instantly() {
             all_apps: vec![cached_app.clone(), chunk_app.clone()],
             filtered_apps: vec![cached_app.clone(), chunk_app.clone()],
             is_remote_hub: false,
+            truncated: false,
         }),
     );
 
@@ -2479,6 +2485,7 @@ async fn argo_view_prioritizes_local_argocd_when_installed_even_if_hub_context_i
             all_apps: vec![local_app.clone()],
             filtered_apps: vec![local_app.clone()],
             is_remote_hub: false,
+            truncated: false,
         }),
     );
 
@@ -2552,6 +2559,7 @@ async fn argo_view_prioritizes_local_argocd_when_installed_even_if_hub_context_i
             all_apps: vec![hub_app.clone()],
             filtered_apps: vec![hub_app.clone()],
             is_remote_hub: true,
+            truncated: false,
         }),
     );
 
@@ -2646,6 +2654,7 @@ async fn test_argo_app_handlers_and_interactions() {
             all_apps: vec![test_app.clone()],
             filtered_apps: vec![test_app.clone()],
             is_remote_hub: false,
+            truncated: false,
         }),
     );
 
@@ -5189,7 +5198,7 @@ async fn changed_view_drops_a_result_for_a_window_it_no_longer_shows() {
         infra_changes: vec![],
         includes_failing: false,
         includes_scaled: false,
-        argo_error: None,
+        argo: Default::default(),
     };
 
     // The view shows 1h; a 15m answer from before a window change is stale.
@@ -6959,7 +6968,7 @@ async fn switch_context_while_in_changed_view_clears_report_and_handles_stale_re
         infra_changes: vec![],
         includes_failing: true,
         includes_scaled: false,
-        argo_error: None,
+        argo: Default::default(),
     });
     app.active_view = ActiveView::Changed(changed_state);
     app.active_context = "cluster-1".to_string();
@@ -6997,7 +7006,7 @@ async fn switch_context_while_in_changed_view_clears_report_and_handles_stale_re
         infra_changes: vec![],
         includes_failing: true,
         includes_scaled: false,
-        argo_error: None,
+        argo: Default::default(),
     };
     app.handle_changed_triage_result("cluster-1", None, Ok(stale_report));
 
@@ -7028,7 +7037,7 @@ async fn switch_context_while_in_changed_view_clears_report_and_handles_stale_re
         infra_changes: vec![],
         includes_failing: false,
         includes_scaled: false,
-        argo_error: None,
+        argo: Default::default(),
     };
     app.handle_changed_triage_result("cluster-2", None, Ok(cluster2_report));
 
@@ -7067,7 +7076,7 @@ async fn switch_namespace_while_in_changed_view_clears_stale_report() {
         infra_changes: vec![],
         includes_failing: true,
         includes_scaled: false,
-        argo_error: None,
+        argo: Default::default(),
     });
     app.active_view = ActiveView::Changed(changed_state);
     app.active_context = "cluster-1".to_string();
@@ -7085,6 +7094,126 @@ async fn switch_namespace_while_in_changed_view_clears_stale_report() {
     } else {
         panic!("expected ActiveView::Changed");
     }
+}
+
+fn argo_list(names: &[&str], truncated: bool) -> srelens_kube::argo::ArgoApplicationsFetchResult {
+    let apps: Vec<_> = names
+        .iter()
+        .map(|n| {
+            srelens_kube::argo::ArgoApplication::from_json(&serde_json::json!({
+                "metadata": {"name": n, "namespace": "argocd"}
+            }))
+        })
+        .collect();
+    srelens_kube::argo::ArgoApplicationsFetchResult {
+        all_apps: apps.clone(),
+        filtered_apps: apps,
+        is_remote_hub: true,
+        truncated,
+    }
+}
+
+#[test]
+fn an_argo_snapshot_keeps_a_complete_list_over_a_partial_newer_one() {
+    use srelens_tui::app::ArgoSnapshotState;
+    let hub = || Some("tools".to_string());
+    let mut snap = ArgoSnapshotState::default();
+
+    // Pages fill an empty snapshot, incomplete.
+    snap.apply_chunk(argo_list(&["a"], false), hub());
+    assert_eq!(snap.result.filtered_apps.len(), 1);
+    assert!(!snap.complete);
+
+    // A finished listing makes it complete.
+    snap.apply_result(Ok(argo_list(&["a", "b", "c"], false)), hub());
+    assert!(snap.complete);
+    assert_eq!(snap.hub.as_deref(), Some("tools"));
+
+    // The next refresh's first page does not replace the complete list...
+    snap.apply_chunk(argo_list(&["a"], false), hub());
+    assert_eq!(snap.result.filtered_apps.len(), 3);
+    // ...nor does a refresh that stopped early; it is noted instead.
+    snap.apply_result(Ok(argo_list(&["a"], true)), hub());
+    assert_eq!(snap.result.filtered_apps.len(), 3);
+    assert!(snap
+        .error
+        .as_deref()
+        .is_some_and(|e| e.contains("stopped early")));
+
+    // A failed refresh keeps the apps and says why.
+    snap.apply_result(Err("hub unreachable".to_string()), hub());
+    assert_eq!(snap.result.filtered_apps.len(), 3);
+    assert_eq!(snap.error.as_deref(), Some("hub unreachable"));
+
+    // No Argo at all is an answer: complete, nothing in it.
+    snap.apply_result(Err(srelens_kube::argo::NO_ARGO.to_string()), None);
+    assert!(snap.complete && snap.result.filtered_apps.is_empty());
+    assert_eq!(
+        snap.to_triage_snapshot().error.as_deref(),
+        Some(srelens_kube::argo::NO_ARGO)
+    );
+}
+
+#[test]
+fn the_argo_disk_cache_fills_only_a_context_with_no_complete_list() {
+    use srelens_tui::app::ArgoSnapshotState;
+    let mut snap = ArgoSnapshotState::default();
+    snap.apply_chunk(argo_list(&["a"], false), None);
+    snap.apply_disk(
+        argo_list(&["a", "b"], false),
+        1_700_000_000,
+        Some("tools".into()),
+    );
+    assert!(snap.complete);
+    assert_eq!(snap.result.filtered_apps.len(), 2);
+    assert_eq!(
+        snap.fetched_at.map(|t| t.as_second()),
+        Some(1_700_000_000),
+        "the snapshot's age is the file's"
+    );
+
+    snap.apply_disk(argo_list(&["x"], false), 1_600_000_000, None);
+    assert_eq!(
+        snap.result.filtered_apps.len(),
+        2,
+        "an older file does not replace it"
+    );
+}
+
+#[tokio::test]
+async fn a_complete_argo_result_rematches_changed_and_refreshes_are_spaced() {
+    let settings = common::env::isolate_settings();
+    let (mut app, _rx) = changed_app_with_report(&settings).await;
+    assert!(
+        app.argo_snapshots.contains_key("fake-cluster"),
+        "opening :changed asks Argo"
+    );
+    app.changed_refreshing = false;
+
+    app.handle_argo_applications_result(
+        "fake-cluster",
+        true,
+        Some("tools".to_string()),
+        Ok(argo_list(&["payment-prod"], false)),
+    );
+    let snap = &app.argo_snapshots["fake-cluster"];
+    assert!(snap.complete);
+    assert_eq!(snap.result.filtered_apps.len(), 1);
+    assert!(
+        app.changed_refreshing,
+        "the rows re-match against the new apps"
+    );
+
+    // A refresh was attempted when :changed opened; another waits its turn.
+    app.argo_refreshing = false;
+    let attempted = app.argo_snapshots["fake-cluster"].attempted_at;
+    assert!(attempted.is_some());
+    app.ensure_argo_snapshot();
+    assert_eq!(app.argo_snapshots["fake-cluster"].attempted_at, attempted);
+    assert!(
+        !app.argo_refreshing,
+        "no second Argo refresh within two minutes"
+    );
 }
 
 #[tokio::test]

@@ -5,8 +5,9 @@ mod common;
 use ratatui::backend::TestBackend;
 use ratatui::{Frame, Terminal};
 use srelens_kube::changed::{
-    AppDeploymentChange, ArgoRollout, ChangedTriageReport, FailureCategory, GitOpsReleaseInfo,
-    IncidentStatus, InfraChangeItem, PodIncidentDetail, RolloutStatus, TriageSummary,
+    AppDeploymentChange, ArgoCoverage, ArgoCoverageState, ArgoRollout, ChangedTriageReport,
+    FailureCategory, GitOpsReleaseInfo, IncidentStatus, InfraChangeItem, PodIncidentDetail,
+    RolloutStatus, TriageSummary,
 };
 use srelens_kube::events::EventSummary;
 use srelens_registry::github::{CausePull, RolloutCause};
@@ -240,7 +241,7 @@ fn sample_report() -> ChangedTriageReport {
         ],
         includes_failing: false,
         includes_scaled: false,
-        argo_error: None,
+        argo: Default::default(),
     }
 }
 
@@ -1135,13 +1136,16 @@ fn what_could_not_be_found_out_is_said_as_such() {
     assert!(render_card(&unresolved)
         .contains("Why: tracking id names Argo app checkout-prod; Argo unavailable"));
 
-    let mut report = sample_report();
-    report.deployments[0].gitops = None;
-    report.argo_error = Some("Failed to list ArgoCD Applications: 403".to_string());
-    let mut argo_down = ChangedViewState::new();
-    argo_down.set_report(report);
+    // What the report puts on a row with no app while Argo cannot be read.
+    let argo_down = why_state(|d| {
+        d.gitops = None;
+        d.gitops_unresolved = Some(
+            "Argo unavailable: Failed to list ArgoCD Applications: 403; ownership not known"
+                .to_string(),
+        );
+    });
     assert!(render_card(&argo_down)
-        .contains("Why: unknown, Argo unavailable: Failed to list ArgoCD Applications: 403"));
+        .contains("Why: Argo unavailable: Failed to list ArgoCD Applications: 403"));
 
     let restarted = why_state(|d| {
         with_sync(d);
@@ -1245,6 +1249,72 @@ fn g_opens_a_persons_pr_before_a_bots_else_a_commit_else_the_compare_view() {
     });
     assert!(chart.cause_link().unwrap_err().starts_with("chart source"));
     assert!(!render_card(&chart).contains("[g] Open PR"));
+}
+
+fn card_with_argo(argo: ArgoCoverage) -> String {
+    let mut report = sample_report();
+    report.argo = argo;
+    let mut state = ChangedViewState::new();
+    state.set_report(report);
+    render_card(&state)
+}
+
+#[test]
+fn the_card_says_how_much_of_argo_its_gitops_fields_were_matched_against() {
+    let _settings = common::env::isolate_settings();
+    let hub = || Some("tools".to_string());
+
+    let none = card_with_argo(ArgoCoverage::default());
+    assert!(
+        !none.contains("Argo: "),
+        "no Argo, nothing to qualify: {none}"
+    );
+
+    let complete = card_with_argo(ArgoCoverage {
+        state: ArgoCoverageState::Complete,
+        apps_loaded: 171,
+        hub: hub(),
+        fetched_at: Some(srelens_kube::k8s_openapi::jiff::Timestamp::now().to_string()),
+        error: None,
+    });
+    assert!(
+        complete.contains("Argo: 171 apps from hub tools, as of 0s ago"),
+        "{complete}"
+    );
+
+    let loading = card_with_argo(ArgoCoverage {
+        state: ArgoCoverageState::Partial,
+        apps_loaded: 12,
+        hub: hub(),
+        ..Default::default()
+    });
+    assert!(
+        loading.contains("Argo: loading from hub tools (12 apps for this cluster so far)"),
+        "{loading}"
+    );
+
+    let stale = card_with_argo(ArgoCoverage {
+        state: ArgoCoverageState::Stale,
+        apps_loaded: 171,
+        hub: hub(),
+        fetched_at: Some("2026-09-01T10:00:00Z".to_string()),
+        error: Some("hub unreachable".to_string()),
+    });
+    assert!(
+        stale.contains("Argo: 171 apps from hub tools, as of"),
+        "{stale}"
+    );
+    assert!(stale.contains("last refresh: hub unreachable"), "{stale}");
+
+    let down = card_with_argo(ArgoCoverage {
+        state: ArgoCoverageState::Unavailable,
+        error: Some("Argo lookup timed out after 20s".to_string()),
+        ..Default::default()
+    });
+    assert!(
+        down.contains("Argo: unavailable: Argo lookup timed out after 20s"),
+        "{down}"
+    );
 }
 
 #[test]

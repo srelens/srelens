@@ -500,6 +500,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 AppEvent::ArgoApplicationsChunk { context, is_remote_hub, hub_context, chunk } => {
                     app.handle_argo_applications_chunk(&context, is_remote_hub, hub_context, chunk);
                 }
+                AppEvent::ArgoDiskSnapshot { context, result, written_at, hub_context } => {
+                    app.handle_argo_disk_snapshot(&context, result, written_at, hub_context);
+                }
                 AppEvent::ArgoApplicationsResult { context, is_remote_hub, hub_context, result } => {
                     app.handle_argo_applications_result(&context, is_remote_hub, hub_context, result);
                 }

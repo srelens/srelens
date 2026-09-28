@@ -384,10 +384,46 @@ pub struct ChangedTriageReport {
     pub includes_failing: bool,
     #[serde(default, rename = "includesScaled")]
     pub includes_scaled: bool,
-    /// Argo Applications could not be listed, so no row can be said to be
-    /// unmanaged by Argo.
-    #[serde(default, rename = "argoError")]
-    pub argo_error: Option<String>,
+    /// How complete the Argo data behind the GitOps fields is, so a reader
+    /// can tell "not managed by Argo" from "Argo data not all in yet".
+    #[serde(default)]
+    pub argo: ArgoCoverage,
+}
+
+/// How much of the Argo picture a report was matched against.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum ArgoCoverageState {
+    /// Every Application Argo lists for this cluster, fetched recently.
+    #[serde(rename = "complete")]
+    Complete,
+    /// Some Applications are still loading, or the listing stopped early.
+    #[serde(rename = "partial")]
+    Partial,
+    /// A complete list, but older than [`ARGO_STALE_AFTER`], or kept after a
+    /// refresh failed.
+    #[serde(rename = "stale")]
+    Stale,
+    /// Argo could not be read, and nothing is known.
+    #[serde(rename = "unavailable")]
+    Unavailable,
+    /// No Argo CD manages this cluster.
+    #[default]
+    #[serde(rename = "none")]
+    NoArgo,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ArgoCoverage {
+    pub state: ArgoCoverageState,
+    #[serde(default, rename = "fetchedAt")]
+    pub fetched_at: Option<String>,
+    #[serde(default, rename = "appsLoaded")]
+    pub apps_loaded: usize,
+    /// The hub cluster the Applications were read from, when not this one.
+    #[serde(default)]
+    pub hub: Option<String>,
+    #[serde(default)]
+    pub error: Option<String>,
 }
 
 /// Maximum window for triage query (30 days).
@@ -823,20 +859,85 @@ const SYNC_SKEW: SignedDuration = SignedDuration::from_secs(15 * 60);
 const CLOCK_SLACK: SignedDuration = SignedDuration::from_secs(60);
 
 /// How a row's `gitops_unresolved` ends when Argo answered without the app;
-/// [`mark_argo_unavailable`] replaces it when Argo did not answer at all.
+/// [`apply_argo_coverage`] replaces it when the answer was not all of Argo.
 const NOT_LISTED: &str = ", which Argo did not list";
 
-/// Record that Argo could not be read, on the report and on every row whose
-/// tracking id names an app: for those, "not listed" would blame the app.
-fn mark_argo_unavailable(report: &mut ChangedTriageReport, err: String) {
+/// A complete Argo list older than this is reported as stale.
+const ARGO_STALE_AFTER: SignedDuration = SignedDuration::from_secs(5 * 60);
+
+/// What a rollout newer than the Argo data says instead of "no Argo sync
+/// around this rollout": its sync cannot be in that history yet.
+const ARGO_OLDER_THAN_ROLLOUT: &str = "Argo data is older than this rollout; refreshing";
+
+/// How complete `snapshot` is, as the report states it.
+pub fn argo_coverage(snapshot: &ArgoSnapshot, now: Timestamp) -> ArgoCoverage {
+    let old = snapshot
+        .fetched_at
+        .is_some_and(|t| now.duration_since(t) > ARGO_STALE_AFTER);
+    let state = match (&snapshot.error, snapshot.apps.is_empty()) {
+        (Some(e), _) if e == crate::argo::NO_ARGO => ArgoCoverageState::NoArgo,
+        (Some(_), true) => ArgoCoverageState::Unavailable,
+        _ if !snapshot.complete => ArgoCoverageState::Partial,
+        (Some(_), false) => ArgoCoverageState::Stale,
+        _ if old => ArgoCoverageState::Stale,
+        _ => ArgoCoverageState::Complete,
+    };
+    ArgoCoverage {
+        state,
+        fetched_at: snapshot.fetched_at.map(|t| t.to_string()),
+        apps_loaded: snapshot.apps.len(),
+        hub: snapshot.hub.clone(),
+        error: snapshot.error.clone(),
+    }
+}
+
+/// Put `coverage` on the report and keep every row honest about it: with
+/// part of Argo, or none, a row without an app has an unknown owner, not no
+/// owner; and a rollout newer than the data has a sync the data cannot hold.
+fn apply_argo_coverage(report: &mut ChangedTriageReport, coverage: ArgoCoverage) {
+    let fetched_at = coverage
+        .fetched_at
+        .as_deref()
+        .and_then(|t| t.parse::<Timestamp>().ok());
+    let n = coverage.apps_loaded;
+    let err = coverage.error.as_deref().unwrap_or("unknown error");
+    // (after a tracking id's app name, for a row with no app at all)
+    let pending = match coverage.state {
+        ArgoCoverageState::Partial => Some((
+            format!("the Argo list is still loading ({n} apps so far)"),
+            format!("Argo list incomplete ({n} apps loaded); ownership not known yet"),
+        )),
+        ArgoCoverageState::Unavailable => Some((
+            format!("Argo unavailable: {err}"),
+            format!("Argo unavailable: {err}; ownership not known"),
+        )),
+        _ => None,
+    };
     for d in &mut report.deployments {
-        if let Some(msg) = d.gitops_unresolved.as_mut() {
-            if let Some(head) = msg.strip_suffix(NOT_LISTED) {
-                *msg = format!("{head}; Argo unavailable: {err}");
+        if let Some((after_app, unowned)) = &pending {
+            match d.gitops_unresolved.as_mut() {
+                Some(msg) => {
+                    if let Some(head) = msg.strip_suffix(NOT_LISTED) {
+                        *msg = format!("{head}; {after_app}");
+                    }
+                }
+                None if d.gitops.is_none() => d.gitops_unresolved = Some(unowned.clone()),
+                None => {}
+            }
+        }
+        let created = d
+            .deployed_at
+            .as_deref()
+            .and_then(|t| t.parse::<Timestamp>().ok());
+        if let (Some(g), Some(at), Some(created), "Deployment") =
+            (d.gitops.as_mut(), fetched_at, created, d.kind.as_str())
+        {
+            if g.rollout.is_none() && created > at {
+                g.rollout_unmatched = Some(ARGO_OLDER_THAN_ROLLOUT.to_string());
             }
         }
     }
-    report.argo_error = Some(err);
+    report.argo = coverage;
 }
 
 /// The workload a [`gitops_release_for`] lookup is about.
@@ -2456,7 +2557,7 @@ pub fn evaluate_changed_triage(
         infra_changes,
         includes_failing: opts.include_failing,
         includes_scaled: opts.include_scaled,
-        argo_error: None,
+        argo: ArgoCoverage::default(),
     }
 }
 
@@ -2489,6 +2590,75 @@ pub struct ArgoLookup {
     pub server_url: Option<String>,
 }
 
+/// The Argo Applications a triage run matches workloads against, and how
+/// much of Argo they are.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ArgoSnapshot {
+    /// The Applications whose destination is this cluster.
+    pub apps: Vec<ArgoApplication>,
+    pub fetched_at: Option<Timestamp>,
+    /// Every page arrived: not still streaming, not truncated.
+    pub complete: bool,
+    /// Why the latest read failed; `NO_ARGO` means there is no Argo at all.
+    pub error: Option<String>,
+    /// The hub the apps came from, when not this cluster.
+    pub hub: Option<String>,
+}
+
+/// Where a triage run gets its Argo data.
+#[derive(Debug, Clone)]
+pub enum ArgoSource {
+    /// Apps the caller already holds (the TUI's shared snapshot): no Argo
+    /// call, so the report never waits on a hub listing thousands of apps.
+    Snapshot(ArgoSnapshot),
+    /// Look them up now, within `budget` overall (MCP `k8s.listChanges`).
+    Lookup {
+        lookup: ArgoLookup,
+        budget: Duration,
+    },
+}
+
+/// The Argo lookup behind [`ArgoSource::Lookup`], never longer than `budget`.
+async fn lookup_snapshot(
+    cache: &Arc<ClientCache>,
+    context: &str,
+    lookup: &ArgoLookup,
+    budget: Duration,
+) -> ArgoSnapshot {
+    let fetch = crate::argo::fetch_argo_applications_cached(
+        cache,
+        context,
+        lookup.cluster_name.as_deref(),
+        lookup.server_url.as_deref(),
+        lookup.hub_context.as_deref(),
+        None,
+        true,
+        false,
+    );
+    match tokio::time::timeout(budget, fetch).await {
+        Ok(Ok(r)) => ArgoSnapshot {
+            complete: !r.truncated,
+            hub: if r.is_remote_hub {
+                lookup.hub_context.clone()
+            } else {
+                None
+            },
+            apps: r.filtered_apps,
+            fetched_at: Some(Timestamp::now()),
+            error: None,
+        },
+        Ok(Err(e)) => ArgoSnapshot {
+            error: Some(e),
+            ..Default::default()
+        },
+        Err(_) => ArgoSnapshot {
+            error: Some(format!("Argo lookup timed out after {}s", budget.as_secs())),
+            hub: lookup.hub_context.clone(),
+            ..Default::default()
+        },
+    }
+}
+
 /// Fetches and evaluates the holistic triage report for recent changes across a cluster context.
 pub async fn fetch_changed_triage(
     cache: &Arc<ClientCache>,
@@ -2496,7 +2666,7 @@ pub async fn fetch_changed_triage(
     namespace: Option<&str>,
     window: Duration,
     opts: TriageOptions,
-    argo_lookup: &ArgoLookup,
+    argo: ArgoSource,
 ) -> Result<ChangedTriageReport, String> {
     let client = cache.get(context).await.map_err(|e| e.to_string())?;
     let ns_str = namespace.unwrap_or("");
@@ -2514,6 +2684,16 @@ pub async fn fetch_changed_triage(
     let lp = ListParams::default();
     let ns_opt = namespace.filter(|s| !s.is_empty()).map(|s| s.to_string());
 
+    // A snapshot is ready now; a lookup runs beside the lists, bounded.
+    let argo_fut = async {
+        match argo {
+            ArgoSource::Snapshot(snapshot) => snapshot,
+            ArgoSource::Lookup { lookup, budget } => {
+                lookup_snapshot(cache, context, &lookup, budget).await
+            }
+        }
+    };
+
     // One round trip of wall time, not seven. Deployments, ReplicaSets, Pods
     // and Events are the core and fail the report; StatefulSets, CronJobs,
     // Jobs and Argo are optional and degrade to empty (RBAC may refuse them,
@@ -2526,16 +2706,7 @@ pub async fn fetch_changed_triage(
         tokio::time::timeout(timeout, rs_api.list(&lp)),
         tokio::time::timeout(timeout, pod_api.list(&lp)),
         tokio::time::timeout(timeout, ev_api.list(&lp)),
-        crate::argo::fetch_argo_applications_cached(
-            cache,
-            context,
-            argo_lookup.cluster_name.as_deref(),
-            argo_lookup.server_url.as_deref(),
-            argo_lookup.hub_context.as_deref(),
-            None,
-            true,
-            false,
-        ),
+        argo_fut,
     );
 
     fn required<T>(
@@ -2568,18 +2739,11 @@ pub async fn fetch_changed_triage(
     let sts = optional(sts);
     let cjs = optional(cjs);
     let jobs = optional(jobs);
-    let (argo_apps, argo_error) = match argo {
-        Ok(r) => (r.filtered_apps, None),
-        Err(e) if e == crate::argo::NO_ARGO => (Vec::new(), None),
-        Err(e) => (Vec::new(), Some(e)),
-    };
-
+    let coverage = argo_coverage(&argo, now);
     let mut report = evaluate_changed_triage(
-        &deps, &sts, &cjs, &jobs, &rs, &pods, &events, &argo_apps, window, now, ns_opt, opts,
+        &deps, &sts, &cjs, &jobs, &rs, &pods, &events, &argo.apps, window, now, ns_opt, opts,
     );
-    if let Some(err) = argo_error {
-        mark_argo_unavailable(&mut report, err);
-    }
+    apply_argo_coverage(&mut report, coverage);
     if !opts.log_snippets {
         return Ok(report);
     }
@@ -2695,6 +2859,10 @@ fn log_snippet_lines(text: &str) -> Option<Vec<String>> {
     (!lines.is_empty() && !kubelet_refusal).then_some(lines)
 }
 
+/// How long `k8s.listChanges` waits for Argo before reporting its coverage
+/// as incomplete, rather than holding the whole report.
+const MCP_ARGO_BUDGET: Duration = Duration::from_secs(20);
+
 /// `k8s.listChanges` — provides holistic deployment & change incident triage for MCP and agents.
 pub fn list_changes_capability(cache: Arc<ClientCache>) -> Capability {
     Capability::typed::<ListChangesIn, ChangedTriageReport, _, _>(
@@ -2721,7 +2889,10 @@ pub fn list_changes_capability(cache: Arc<ClientCache>) -> Capability {
                     ns_opt,
                     window,
                     opts,
-                    &ArgoLookup::default(),
+                    ArgoSource::Lookup {
+                        lookup: ArgoLookup::default(),
+                        budget: MCP_ARGO_BUDGET,
+                    },
                 )
                 .await
                 .map_err(CapabilityError::Handler)
@@ -4350,8 +4521,13 @@ mod tests {
             Some("tracking id names Argo app shop, which Argo did not list")
         );
 
-        mark_argo_unavailable(&mut report, "list timed out".to_string());
-        assert_eq!(report.argo_error.as_deref(), Some("list timed out"));
+        let unavailable = ArgoSnapshot {
+            error: Some("list timed out".into()),
+            ..Default::default()
+        };
+        apply_argo_coverage(&mut report, argo_coverage(&unavailable, now()));
+        assert_eq!(report.argo.state, ArgoCoverageState::Unavailable);
+        assert_eq!(report.argo.error.as_deref(), Some("list timed out"));
         assert_eq!(
             report.deployments[0].gitops_unresolved.as_deref(),
             Some("tracking id names Argo app shop; Argo unavailable: list timed out")
@@ -4539,7 +4715,13 @@ mod tests {
             &[],
             &apps,
         );
-        report.argo_error = Some("x".into());
+        report.argo = ArgoCoverage {
+            state: ArgoCoverageState::Partial,
+            fetched_at: Some("2023-11-14T22:10:00Z".into()),
+            apps_loaded: 1,
+            hub: Some("tools".into()),
+            error: None,
+        };
         let raw = serde_json::to_value(&report).unwrap();
         let d = &raw["deployments"][0];
         assert_eq!(d["gitops"]["matchedBy"], "trackingId");
@@ -4547,11 +4729,14 @@ mod tests {
         assert_eq!(d["gitops"]["rollout"]["historyId"], 7);
         assert!(d.get("gitopsUnresolved").is_some());
         assert!(d.get("localCause").is_some());
-        assert_eq!(raw["argoError"], "x");
+        assert_eq!(raw["argo"]["state"], "partial");
+        assert_eq!(raw["argo"]["fetchedAt"], "2023-11-14T22:10:00Z");
+        assert_eq!(raw["argo"]["appsLoaded"], 1);
+        assert_eq!(raw["argo"]["hub"], "tools");
 
         // An older host's report, with none of the new keys, still reads.
         let mut old = raw.clone();
-        old.as_object_mut().unwrap().remove("argoError");
+        old.as_object_mut().unwrap().remove("argo");
         let od = old["deployments"][0].as_object_mut().unwrap();
         od.remove("gitopsUnresolved");
         od.remove("localCause");
@@ -4561,5 +4746,251 @@ mod tests {
         og.remove("rolloutUnmatched");
         let back: ChangedTriageReport = serde_json::from_value(old).unwrap();
         assert_eq!(back.deployments[0].gitops.as_ref().unwrap().rollout, None);
+    }
+
+    fn now() -> Timestamp {
+        Timestamp::from_second(NOW).unwrap()
+    }
+
+    fn ago(secs: i64) -> Timestamp {
+        Timestamp::from_second(NOW - secs).unwrap()
+    }
+
+    #[test]
+    fn argo_coverage_names_how_much_of_argo_a_report_saw() {
+        let state = |s: ArgoSnapshot| argo_coverage(&s, now()).state;
+        let app = || vec![argo_app("shop", "argocd", vec![])];
+        assert_eq!(
+            state(ArgoSnapshot {
+                error: Some(crate::argo::NO_ARGO.into()),
+                ..Default::default()
+            }),
+            ArgoCoverageState::NoArgo
+        );
+        assert_eq!(
+            state(ArgoSnapshot {
+                error: Some("boom".into()),
+                ..Default::default()
+            }),
+            ArgoCoverageState::Unavailable
+        );
+        assert_eq!(
+            state(ArgoSnapshot {
+                apps: app(),
+                complete: false,
+                ..Default::default()
+            }),
+            ArgoCoverageState::Partial
+        );
+        assert_eq!(
+            state(ArgoSnapshot {
+                apps: app(),
+                complete: true,
+                fetched_at: Some(ago(3600)),
+                ..Default::default()
+            }),
+            ArgoCoverageState::Stale
+        );
+        assert_eq!(
+            state(ArgoSnapshot {
+                apps: app(),
+                complete: true,
+                error: Some("refresh failed".into()),
+                fetched_at: Some(ago(10)),
+                ..Default::default()
+            }),
+            ArgoCoverageState::Stale,
+            "kept after a failed refresh"
+        );
+        assert_eq!(
+            state(ArgoSnapshot {
+                apps: app(),
+                complete: true,
+                fetched_at: Some(ago(10)),
+                ..Default::default()
+            }),
+            ArgoCoverageState::Complete
+        );
+    }
+
+    #[test]
+    fn with_part_of_argo_a_row_without_an_app_has_an_unknown_owner() {
+        let partial = ArgoSnapshot {
+            apps: vec![argo_app("other", "argocd", vec![])],
+            complete: false,
+            ..Default::default()
+        };
+        let rs = [replicaset("api-new", "api", 300)];
+
+        let mut plain = triage(&[deployment("api", 1, 1)], &rs, &[], &[], &partial.apps);
+        apply_argo_coverage(&mut plain, argo_coverage(&partial, now()));
+        let d = &plain.deployments[0];
+        assert_eq!(d.gitops, None);
+        assert_eq!(
+            d.gitops_unresolved.as_deref(),
+            Some("Argo list incomplete (1 apps loaded); ownership not known yet")
+        );
+
+        let tracked = tracked_deployment(Some("shop:apps/Deployment:default/api"), None);
+        let mut report = triage(&[tracked], &rs, &[], &[], &partial.apps);
+        apply_argo_coverage(&mut report, argo_coverage(&partial, now()));
+        assert_eq!(
+            report.deployments[0].gitops_unresolved.as_deref(),
+            Some("tracking id names Argo app shop; the Argo list is still loading (1 apps so far)")
+        );
+
+        // With all of Argo, no app means no Argo owner.
+        let complete = ArgoSnapshot {
+            complete: true,
+            fetched_at: Some(ago(10)),
+            ..partial
+        };
+        let mut unmanaged = triage(&[deployment("api", 1, 1)], &rs, &[], &[], &complete.apps);
+        apply_argo_coverage(&mut unmanaged, argo_coverage(&complete, now()));
+        assert_eq!(unmanaged.deployments[0].gitops_unresolved, None);
+        assert_eq!(unmanaged.argo.state, ArgoCoverageState::Complete);
+    }
+
+    #[test]
+    fn a_rollout_newer_than_the_argo_data_says_the_data_is_older() {
+        let dep = tracked_deployment(Some("shop:apps/Deployment:default/api"), None);
+        let apps = vec![argo_app(
+            "shop",
+            "argocd",
+            vec![hist(
+                6,
+                SHA_PREV,
+                "2023-11-14T19:00:00Z",
+                "2023-11-14T19:01:00Z",
+            )],
+        )];
+        // The ReplicaSet was created 300s ago; the snapshot is an hour old.
+        let old = ArgoSnapshot {
+            apps: apps.clone(),
+            complete: true,
+            fetched_at: Some(ago(3600)),
+            ..Default::default()
+        };
+        let mut report = triage(
+            &[dep.clone()],
+            &[replicaset("api-new", "api", 300)],
+            &[],
+            &[],
+            &apps,
+        );
+        apply_argo_coverage(&mut report, argo_coverage(&old, now()));
+        let g = report.deployments[0].gitops.as_ref().unwrap();
+        assert_eq!(
+            g.rollout_unmatched.as_deref(),
+            Some(ARGO_OLDER_THAN_ROLLOUT)
+        );
+
+        // Fetched after the rollout: its sync is genuinely not in the history.
+        let fresh = ArgoSnapshot {
+            fetched_at: Some(ago(10)),
+            ..old
+        };
+        let mut report = triage(
+            &[dep],
+            &[replicaset("api-new", "api", 300)],
+            &[],
+            &[],
+            &apps,
+        );
+        apply_argo_coverage(&mut report, argo_coverage(&fresh, now()));
+        let g = report.deployments[0].gitops.as_ref().unwrap();
+        assert!(g
+            .rollout_unmatched
+            .as_deref()
+            .is_some_and(|s| s.starts_with("no Argo sync around this rollout")));
+    }
+
+    /// A cluster answering every list with nothing and recording each path;
+    /// with `argo_hangs`, Argo Application lists never answer.
+    fn cluster_client(argo_hangs: bool) -> (kube::Client, Arc<std::sync::Mutex<Vec<String>>>) {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = seen.clone();
+        let service = tower::service_fn(move |request: http::Request<kube::client::Body>| {
+            let log = log.clone();
+            async move {
+                let path = request.uri().path().to_string();
+                log.lock().unwrap().push(path.clone());
+                if argo_hangs && path.contains("argoproj.io") {
+                    tokio::time::sleep(Duration::from_secs(3600)).await;
+                }
+                let body = serde_json::json!({
+                    "apiVersion": "v1", "kind": "List",
+                    "metadata": {"resourceVersion": "1"}, "items": []
+                });
+                Ok::<_, std::convert::Infallible>(
+                    http::Response::builder()
+                        .status(200)
+                        .header("content-type", "application/json")
+                        .body(kube::client::Body::from(body.to_string().into_bytes()))
+                        .unwrap(),
+                )
+            }
+        });
+        (kube::Client::new(service, "default"), seen)
+    }
+
+    #[tokio::test]
+    async fn a_snapshot_triage_asks_argo_nothing() {
+        let (client, seen) = cluster_client(false);
+        let cache = ClientCache::new_many(vec![]);
+        cache.preload("snapshot-ctx", client).await;
+        let snapshot = ArgoSnapshot {
+            apps: vec![argo_app("shop", "argocd", shop_history())],
+            fetched_at: Some(Timestamp::now()),
+            complete: true,
+            error: None,
+            hub: Some("tools".into()),
+        };
+        let report = fetch_changed_triage(
+            &cache,
+            "snapshot-ctx",
+            Some("default"),
+            Duration::from_secs(1800),
+            TriageOptions::default(),
+            ArgoSource::Snapshot(snapshot),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(report.argo.state, ArgoCoverageState::Complete);
+        assert_eq!(report.argo.apps_loaded, 1);
+        assert_eq!(report.argo.hub.as_deref(), Some("tools"));
+        let seen = seen.lock().unwrap();
+        assert!(seen.iter().any(|p| p.contains("deployments")), "{seen:?}");
+        assert!(
+            !seen.iter().any(|p| p.contains("argoproj.io")),
+            "no Argo call with a snapshot: {seen:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_lookup_past_its_budget_still_returns_the_report() {
+        let (client, _seen) = cluster_client(true);
+        let cache = ClientCache::new_many(vec![]);
+        cache.preload("budget-ctx", client).await;
+        let report = fetch_changed_triage(
+            &cache,
+            "budget-ctx",
+            Some("default"),
+            Duration::from_secs(1800),
+            TriageOptions::default(),
+            ArgoSource::Lookup {
+                lookup: ArgoLookup::default(),
+                budget: Duration::from_secs(5),
+            },
+        )
+        .await
+        .expect("the report does not wait on Argo past the budget");
+
+        assert_eq!(report.argo.state, ArgoCoverageState::Unavailable);
+        assert_eq!(
+            report.argo.error.as_deref(),
+            Some("Argo lookup timed out after 5s")
+        );
     }
 }

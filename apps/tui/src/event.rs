@@ -58,6 +58,14 @@ pub enum AppEvent {
         hub_context: Option<String>,
         chunk: srelens_kube::argo::ArgoApplicationsFetchResult,
     },
+    /// The Argo disk cache for `context`, read off the UI thread, written
+    /// `written_at` (Unix seconds).
+    ArgoDiskSnapshot {
+        context: String,
+        result: srelens_kube::argo::ArgoApplicationsFetchResult,
+        written_at: u64,
+        hub_context: Option<String>,
+    },
     ArgoApplicationsResult {
         context: String,
         is_remote_hub: bool,
