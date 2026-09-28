@@ -13,10 +13,18 @@ use serde_json::Value;
 use std::fmt;
 
 mod bounds;
+mod messages;
 
 pub use bounds::{
     MAX_CALL_FIELD_BYTES, MAX_CLUSTER_ID_BYTES, MAX_IDENTIFIER_LEN, MAX_NAMESPACE_LEN,
     MAX_OBJECT_NAME_LEN, MAX_TOKEN_LEN,
+};
+
+pub use messages::{
+    CallContext, CancelParams, Empty, HostActionParams, HostReadParams, HostResourceParams,
+    InitializeLimits, InitializeParams, InitializeResult, Peer, RequestId, StreamCancelParams,
+    StreamCloseParams, StreamDataParams, StreamErrorParams, StreamOpenParams,
+    UnsupportedApiVersion,
 };
 
 /// Sidecar API versions this host speaks, oldest first. `initialize` offers
