@@ -45,10 +45,17 @@ share. It has:
 - `HostMessage` and `SidecarMessage`, every line each side writes;
 - in `x-srelens-methods`, every method with its direction, kind, params and result.
 
-A sidecar may validate what it writes against it. srelens takes exactly the `host/*` calls
-the schema allows; a test in `crates/plugin-host/src/sidecar/broker.rs` holds the two to
-each other. JSON Schema counts characters where srelens counts bytes, so for `clusterId`
-and a string call id, check the byte length too.
+A sidecar may validate what it writes against it. srelens holds the `host/*` calls to
+exactly the shapes the schema states; a test in `crates/plugin-host/src/sidecar/broker.rs`
+holds the two to each other. A call of the right shape can still be refused by the
+capability, the cluster or the person asked. JSON Schema counts characters where srelens
+counts bytes, and regex engines disagree about which characters are white space. So for
+`clusterId` and a string call id, check the byte length yourself, and do not rely on the
+schema alone to tell that a `clusterId` is blank.
+
+The file uses `x-srelens-*` keywords, which draft-07 allows. A validator in strict mode,
+such as Ajv 8 by default, needs `strict: false`, or the keywords registered
+(`ajv.addVocabulary([...])`).
 
 ## Lifecycle
 
@@ -204,6 +211,10 @@ Every call carries `context`, and there is no current cluster to fall back on:
 A call without `context`, or with one that is not exactly that shape, is refused with
 `-32602` before anything runs: "Every call names its cluster: … srelens has no current
 cluster to assume".
+
+A `context` that is not an object is refused as "`context` must be {…}, not a string" (or
+a number, an array, …). One of the right type with a wrong field names that field, in
+serde's words.
 
 ### What srelens checks
 
