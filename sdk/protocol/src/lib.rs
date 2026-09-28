@@ -14,11 +14,13 @@ use std::fmt;
 
 mod bounds;
 mod messages;
+mod methods;
 
 pub use bounds::{
     MAX_CALL_FIELD_BYTES, MAX_CLUSTER_ID_BYTES, MAX_IDENTIFIER_LEN, MAX_NAMESPACE_LEN,
     MAX_OBJECT_NAME_LEN, MAX_TOKEN_LEN,
 };
+pub use methods::{is_reserved, Direction, Kind, MethodSpec, METHODS};
 
 pub use messages::{
     CallContext, CancelParams, Empty, HostActionParams, HostReadParams, HostResourceParams,
@@ -73,16 +75,6 @@ pub mod method {
     /// Sidecar → host request (#573): run one of the app's declared actions,
     /// through `extensions.action`, once a person has confirmed it.
     pub const HOST_ACTION: &str = "host/action";
-}
-
-/// Whether `name` is one of the host's own methods, which an app request may
-/// not name: an app-facing path that forwarded `shutdown` would let a caller
-/// stop the sidecar, and one that forwarded `stream/data` would forge frames.
-pub fn is_reserved(name: &str) -> bool {
-    use method::*;
-    [INITIALIZE, ACTIVATE, DEACTIVATE, HEALTH, SHUTDOWN].contains(&name)
-        || name.starts_with("$/")
-        || name.starts_with("stream/")
 }
 
 /// Error codes. The first five are JSON-RPC 2.0's own.
@@ -151,26 +143,6 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::collections::HashSet;
-
-    #[test]
-    fn the_host_methods_are_reserved() {
-        for name in [
-            "initialize",
-            "activate",
-            "deactivate",
-            "health",
-            "shutdown",
-            "$/cancelRequest",
-            "$/anything",
-            "stream/open",
-            "stream/data",
-        ] {
-            assert!(is_reserved(name), "{name}");
-        }
-        for name in ["scan", "streams", "health-report", "k8s.list", "host/read"] {
-            assert!(!is_reserved(name), "{name}");
-        }
-    }
 
     #[test]
     fn every_error_code_has_one_name_and_one_value() {
