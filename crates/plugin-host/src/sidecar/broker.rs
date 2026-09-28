@@ -414,6 +414,9 @@ fn call_context(context: Option<Value>) -> Result<CallContext, RpcError> {
             "Every call names its cluster: {CONTEXT_SHAPE}. srelens has no current cluster to assume"
         )));
     };
+    if !context.is_object() {
+        return Err(invalid(format!("{CONTEXT_SHAPE}, not {}", kind(&context))));
+    }
     let parsed: CallContext =
         serde_json::from_value(context).map_err(|e| invalid(format!("{CONTEXT_SHAPE} ({e})")))?;
     if parsed.cluster_id.trim().is_empty() || parsed.cluster_id.len() > MAX_CLUSTER_ID_BYTES {
@@ -430,6 +433,18 @@ fn call_context(context: Option<Value>) -> Result<CallContext, RpcError> {
         }
     }
     Ok(parsed)
+}
+
+/// What a JSON value is, for a refusal: "a string", "an array", …
+fn kind(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "true or false",
+        Value::Number(_) => "a number",
+        Value::String(_) => "a string",
+        Value::Array(_) => "an array",
+        Value::Object(_) => "an object",
+    }
 }
 
 const IDENTIFIER: &str = "1 to 64 ASCII letters, digits and hyphens, as the manifest names it";
@@ -714,6 +729,35 @@ mod tests {
         }
         assert!(h.seen().is_empty(), "something ran: {:?}", h.seen());
         assert!(h.audit.records().is_empty());
+    }
+
+    /// A context that is not an object is refused in the protocol's words,
+    /// naming what it was: never a Rust type name, and never read as a list.
+    #[tokio::test]
+    async fn a_context_that_is_not_an_object_is_refused_in_the_protocols_words() {
+        let h = harness(Arc::new(NoConsent));
+        for (context, what) in [
+            (json!("prod"), "a string"),
+            (json!(7), "a number"),
+            (json!(true), "true or false"),
+            (json!(["prod", "team"]), "an array"),
+            (json!([]), "an array"),
+        ] {
+            let error = h
+                .call(
+                    "host/read",
+                    json!({"context": context, "capability": "applications"}),
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(error.code, code::INVALID_PARAMS, "{context}");
+            assert_eq!(
+                error.message,
+                format!("{CONTEXT_SHAPE}, not {what}"),
+                "{context}"
+            );
+        }
+        assert!(h.seen().is_empty(), "something ran: {:?}", h.seen());
     }
 
     #[tokio::test]
@@ -1184,6 +1228,8 @@ mod tests {
             json!({"cluster_id": "prod", "namespace": "team"}),
             json!({"clusterId": "prod", "namespace": null, "current": true}),
             json!("prod"),
+            json!(["prod", "team"]),
+            json!(["prod", null]),
             Value::Null,
         ] {
             let mut case = base.clone();
