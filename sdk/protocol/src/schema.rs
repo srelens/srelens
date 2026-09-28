@@ -4,10 +4,11 @@
 //! - `definitions`: every params and result type, and `HostMessage` and
 //!   `SidecarMessage`, a `oneOf` over every line each side writes.
 //! - The root is `anyOf` the two: a line of either kind validates. They
-//!   overlap on responses, which is why it is not `oneOf`.
-//! - `x-srelens-methods`, `x-srelens-errorCodes`, `x-srelens-apiVersion` and
-//!   `x-srelens-maxMessageBytes`: what an SDK in another language generates
-//!   its constants from, so it needs nothing but this file.
+//!   overlap (responses, `$/cancelRequest`), which is why it is not `oneOf`.
+//! - `x-srelens-methods`, `x-srelens-errorCodes`, `x-srelens-errorData`,
+//!   `x-srelens-apiVersion` and `x-srelens-maxMessageBytes`: what an SDK in
+//!   another language generates its constants from, so it needs nothing but
+//!   this file.
 //!
 //! A response's result cannot be tied to its request inside one line, which
 //! does not carry the method: the method table is where result types live.
@@ -17,7 +18,8 @@ use serde_json::{json, Map, Value};
 
 use crate::methods::{Kind, METHODS};
 use crate::{
-    code, RequestId, RpcError, MAX_IDENTIFIER_LEN, MAX_MESSAGE_BYTES, SIDECAR_API_VERSIONS,
+    code, RequestId, RpcError, UnsupportedApiVersion, MAX_IDENTIFIER_LEN, MAX_MESSAGE_BYTES,
+    SIDECAR_API_VERSIONS,
 };
 
 /// The newest sidecar API line, `0.1` for 0.1.0.
@@ -36,6 +38,9 @@ pub fn schema() -> Value {
     let mut generator = SchemaSettings::draft07().into_generator();
     let request_id = to_value(generator.subschema_for::<RequestId>());
     let rpc_error = to_value(generator.subschema_for::<RpcError>());
+    // Not the `data` of any params or result in METHODS: it is the `data` of
+    // error -32001, so nothing but `x-srelens-errorData` reaches it below.
+    let unsupported_api_version = to_value(generator.subschema_for::<UnsupportedApiVersion>());
     // srelens numbers its own requests from 1.
     let host_id = json!({"type": "integer", "minimum": 1});
 
@@ -112,6 +117,9 @@ pub fn schema() -> Value {
         .iter()
         .map(|(name, value)| ((*name).to_owned(), json!(value)))
         .collect();
+    // The `data` of an error, keyed by its name in `x-srelens-errorCodes`.
+    // Only `unsupportedApiVersion` (-32001) carries a typed `data` today.
+    let error_data = json!({"unsupportedApiVersion": unsupported_api_version});
 
     let mut document = json!({
         "$schema": "http://json-schema.org/draft-07/schema#",
@@ -129,6 +137,7 @@ pub fn schema() -> Value {
         "x-srelens-apiVersion": SIDECAR_API_VERSIONS.last().expect("at least one version"),
         "x-srelens-maxMessageBytes": MAX_MESSAGE_BYTES,
         "x-srelens-errorCodes": errors,
+        "x-srelens-errorData": error_data,
         "x-srelens-methods": table,
     });
     strip_nonstandard_formats(&mut document);

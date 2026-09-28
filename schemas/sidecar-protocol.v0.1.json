@@ -898,6 +898,22 @@
         "stream"
       ],
       "type": "object"
+    },
+    "UnsupportedApiVersion": {
+      "description": "The `data` of error -32001, the answer to `initialize` from a sidecar that speaks none of the offered versions.",
+      "properties": {
+        "supported": {
+          "description": "The versions it does speak.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "supported"
+      ],
+      "type": "object"
     }
   },
   "description": "JSON-RPC 2.0 between srelens and an executable extension's sidecar, one message per line on its stdin and stdout. The prose is docs/extensions/sidecar-protocol.md.",
@@ -913,6 +929,11 @@
     "parseError": -32700,
     "requestCancelled": -32800,
     "unsupportedApiVersion": -32001
+  },
+  "x-srelens-errorData": {
+    "unsupportedApiVersion": {
+      "$ref": "#/definitions/UnsupportedApiVersion"
+    }
   },
   "x-srelens-maxMessageBytes": 4194304,
   "x-srelens-methods": {

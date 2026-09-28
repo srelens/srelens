@@ -171,6 +171,45 @@ fn the_schema_carries_what_an_sdk_needs_beside_the_types() {
     assert_eq!(schema_file(), "sidecar-protocol.v0.1.json");
 }
 
+/// Every type the crate exports has a definition, including one no
+/// `subschema_for` call in `METHODS` reaches: `UnsupportedApiVersion`, the
+/// `data` of error -32001, which the Go SDK can only see through the schema.
+#[test]
+fn every_type_the_crate_exports_has_a_definition() {
+    let schema = schema();
+    for definition in [
+        "RequestId",
+        "Peer",
+        "InitializeLimits",
+        "InitializeParams",
+        "InitializeResult",
+        "UnsupportedApiVersion",
+        "Empty",
+        "CancelParams",
+        "StreamOpenParams",
+        "StreamDataParams",
+        "StreamCloseParams",
+        "StreamErrorParams",
+        "StreamCancelParams",
+        "CallContext",
+        "HostReadParams",
+        "HostResourceParams",
+        "HostActionParams",
+        "RpcError",
+        "HostMessage",
+        "SidecarMessage",
+    ] {
+        assert!(
+            schema["definitions"].get(definition).is_some(),
+            "no definition {definition}"
+        );
+    }
+    assert_eq!(
+        schema["x-srelens-errorData"]["unsupportedApiVersion"]["$ref"],
+        "#/definitions/UnsupportedApiVersion"
+    );
+}
+
 /// An app operation is a request from srelens under a name the manifest could
 /// declare (`manifest.rs`'s `identifier`), with object params. It is not any
 /// string the host happens not to reserve: `host/read` is a real method, just
