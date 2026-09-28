@@ -2249,6 +2249,7 @@ async fn switch_context_while_in_argo_view_handles_stale_results_and_refreshes()
             filtered_apps: vec![app1.clone()],
             is_remote_hub: false,
             truncated: false,
+            fetched_at: None,
         }),
     );
 
@@ -2271,6 +2272,7 @@ async fn switch_context_while_in_argo_view_handles_stale_results_and_refreshes()
             filtered_apps: vec![app2.clone()],
             is_remote_hub: true,
             truncated: false,
+            fetched_at: None,
         }),
     );
 
@@ -2315,6 +2317,7 @@ async fn switch_context_while_in_argo_view_handles_stale_results_and_refreshes()
             filtered_apps: vec![app1.clone()],
             is_remote_hub: true,
             truncated: false,
+            fetched_at: None,
         }),
     );
     if let ActiveView::Argo(ref argo) = app.active_view {
@@ -2364,6 +2367,7 @@ async fn argo_streaming_chunks_and_disk_cache_load_instantly() {
         filtered_apps: vec![cached_app.clone()],
         is_remote_hub: false,
         truncated: false,
+        fetched_at: None,
     };
     srelens_kube::argo::save_argo_apps_disk_cache(ctx, &fetch_result);
 
@@ -2406,6 +2410,7 @@ async fn argo_streaming_chunks_and_disk_cache_load_instantly() {
             filtered_apps: vec![cached_app.clone(), chunk_app.clone()],
             is_remote_hub: false,
             truncated: false,
+            fetched_at: None,
         },
     );
 
@@ -2430,6 +2435,7 @@ async fn argo_streaming_chunks_and_disk_cache_load_instantly() {
             filtered_apps: vec![cached_app.clone(), chunk_app.clone()],
             is_remote_hub: false,
             truncated: false,
+            fetched_at: None,
         }),
     );
 
@@ -2460,6 +2466,76 @@ async fn argo_streaming_chunks_and_disk_cache_load_instantly() {
     }
 
     // Cleanup disk cache
+    srelens_kube::argo::invalidate_argo_disk_cache(ctx);
+}
+
+#[tokio::test]
+async fn reopening_argo_view_with_recent_disk_cache_preserves_disk_age() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    let ctx = "test-cluster-disk-age";
+    app.active_context = ctx.to_string();
+
+    let make_app = |name: &str| srelens_kube::argo::ArgoApplication {
+        name: name.to_string(),
+        namespace: "argocd".to_string(),
+        uid: "uid-1".to_string(),
+        resource_version: "1".to_string(),
+        project: "default".to_string(),
+        destination_server: "".to_string(),
+        destination_name: ctx.to_string(),
+        destination_namespace: "default".to_string(),
+        repo_url: "https://github.com/example/repo".to_string(),
+        target_revision: "HEAD".to_string(),
+        path: "apps".to_string(),
+        sync_status: "Synced".to_string(),
+        health_status: "Healthy".to_string(),
+        health_message: "".to_string(),
+        sync_revision: "123".to_string(),
+        operation_phase: "".to_string(),
+        operation_message: "".to_string(),
+        auto_sync_enabled: true,
+        self_heal_enabled: false,
+        prune_enabled: false,
+        last_sync_time: "".to_string(),
+        created_at: "".to_string(),
+        resources: vec![],
+        sync_history: vec![],
+    };
+
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let written_at = now_secs.saturating_sub(45); // 45 seconds ago
+
+    let fetch_result = srelens_kube::argo::ArgoApplicationsFetchResult {
+        all_apps: vec![make_app("cached-app")],
+        filtered_apps: vec![make_app("cached-app")],
+        is_remote_hub: false,
+        truncated: false,
+        fetched_at: Some(written_at),
+    };
+    srelens_kube::argo::save_argo_apps_disk_cache(ctx, &fetch_result);
+
+    app.active_view = ActiveView::Argo(srelens_tui::views::argo_view::ArgoViewState::new());
+    app.handle_argo_disk_snapshot(ctx, fetch_result.clone(), written_at, None);
+
+    if let ActiveView::Argo(ref argo) = app.active_view {
+        assert_eq!(argo.fetched_at, Some(written_at));
+    }
+
+    // Now simulate background task returning the cached result (which also carries fetched_at = written_at)
+    app.handle_argo_applications_result(ctx, false, None, Ok(fetch_result));
+
+    if let ActiveView::Argo(ref argo) = app.active_view {
+        assert_eq!(
+            argo.fetched_at,
+            Some(written_at),
+            "cached result must NOT overwrite argo.fetched_at to now"
+        );
+    }
+
     srelens_kube::argo::invalidate_argo_disk_cache(ctx);
 }
 
@@ -2531,6 +2607,7 @@ async fn switching_context_during_hub_listing_starts_no_duplicate_and_fills_spok
             filtered_apps: vec![app_spoke1.clone()],
             is_remote_hub: true,
             truncated: false,
+            fetched_at: None,
         }),
     );
 
@@ -2631,6 +2708,7 @@ async fn changed_view_shares_argo_snapshot_from_hub() {
         filtered_apps: vec![app_changed.clone()],
         is_remote_hub: true,
         truncated: false,
+        fetched_at: None,
     };
     hub_snap.fetched_at = Some(srelens_kube::k8s_openapi::jiff::Timestamp::now());
 
@@ -2693,6 +2771,7 @@ async fn argo_view_prioritizes_local_argocd_when_installed_even_if_hub_context_i
             filtered_apps: vec![local_app.clone()],
             is_remote_hub: false,
             truncated: false,
+            fetched_at: None,
         }),
     );
 
@@ -2767,6 +2846,7 @@ async fn argo_view_prioritizes_local_argocd_when_installed_even_if_hub_context_i
             filtered_apps: vec![hub_app.clone()],
             is_remote_hub: true,
             truncated: false,
+            fetched_at: None,
         }),
     );
 
@@ -2862,6 +2942,7 @@ async fn test_argo_app_handlers_and_interactions() {
             filtered_apps: vec![test_app.clone()],
             is_remote_hub: false,
             truncated: false,
+            fetched_at: None,
         }),
     );
 
@@ -7317,6 +7398,7 @@ fn argo_list(names: &[&str], truncated: bool) -> srelens_kube::argo::ArgoApplica
         filtered_apps: apps,
         is_remote_hub: true,
         truncated,
+        fetched_at: None,
     }
 }
 

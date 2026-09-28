@@ -549,6 +549,7 @@ pub const ARGO_APPS_CACHE_TTL: Duration = ARGO_FRESH_FOR;
 #[derive(Debug, Clone)]
 pub struct ArgoHubCacheEntry {
     pub fetched_at: Instant,
+    pub fetched_at_unix: u64,
     pub all_apps: Vec<ArgoApplication>,
     pub truncated: bool,
 }
@@ -638,7 +639,7 @@ pub fn save_argo_apps_disk_cache(context: &str, data: &ArgoApplicationsFetchResu
             .map(|d| d.as_secs())
             .unwrap_or(0);
         let envelope = ArgoDiskCacheEnvelope {
-            timestamp: now,
+            timestamp: data.fetched_at.unwrap_or(now),
             data: data.clone(),
         };
         if let Ok(json) = serde_json::to_string(&envelope) {
@@ -912,6 +913,9 @@ pub struct ArgoApplicationsFetchResult {
     /// which were only ever written complete.
     #[serde(default)]
     pub truncated: bool,
+    /// Timestamp (Unix seconds) when this data was fetched from the cluster or saved to disk.
+    #[serde(default)]
+    pub fetched_at: Option<u64>,
 }
 
 /// Fetch applications for the given context.
@@ -1038,9 +1042,18 @@ where
 fn store_argo_apps(
     key: ArgoAppsCacheKey,
     context: &str,
-    result: &ArgoApplicationsFetchResult,
+    result: &mut ArgoApplicationsFetchResult,
     hub_context: Option<&str>,
 ) {
+    let now_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    if result.fetched_at.is_none() {
+        result.fetched_at = Some(now_unix);
+    }
+    let entry_unix = result.fetched_at.unwrap_or(now_unix);
+
     if let Ok(mut guard) = ARGO_APPS_CACHE.write() {
         let map = guard.get_or_insert_with(HashMap::new);
         map.insert(key, (Instant::now(), result.clone()));
@@ -1053,6 +1066,7 @@ fn store_argo_apps(
                     hub.to_string(),
                     ArgoHubCacheEntry {
                         fetched_at: Instant::now(),
+                        fetched_at_unix: entry_unix,
                         all_apps: result.all_apps.clone(),
                         truncated: result.truncated,
                     },
@@ -1071,6 +1085,7 @@ fn store_argo_apps(
                         hub.to_string(),
                         ArgoHubCacheEntry {
                             fetched_at: Instant::now(),
+                            fetched_at_unix: entry_unix,
                             all_apps: result.all_apps.clone(),
                             truncated: result.truncated,
                         },
@@ -1172,6 +1187,7 @@ pub async fn fetch_argo_applications_cached_stream(
                                     filtered_apps: filtered,
                                     is_remote_hub: true,
                                     truncated: entry.truncated,
+                                    fetched_at: Some(entry.fetched_at_unix),
                                 };
                                 if let Some(ref tx) = chunk_sender {
                                     let _ = tx.send(res.clone());
@@ -1210,6 +1226,7 @@ pub async fn fetch_argo_applications_cached_stream(
                         filtered_apps: filtered,
                         is_remote_hub: true,
                         truncated: hub_disk_res.truncated,
+                        fetched_at: Some(written_at),
                     };
                     if age < ARGO_FRESH_FOR.as_secs() {
                         if let Ok(mut guard) = ARGO_HUB_CACHE.write() {
@@ -1220,6 +1237,7 @@ pub async fn fetch_argo_applications_cached_stream(
                                     fetched_at: Instant::now()
                                         .checked_sub(Duration::from_secs(age))
                                         .unwrap_or_else(Instant::now),
+                                    fetched_at_unix: written_at,
                                     all_apps: hub_disk_res.all_apps,
                                     truncated: hub_disk_res.truncated,
                                 },
@@ -1236,7 +1254,10 @@ pub async fn fetch_argo_applications_cached_stream(
             }
         }
 
-        if let Some(disk_res) = load_argo_apps_disk_cache(current_context) {
+        if let Some((mut disk_res, written_at)) =
+            load_argo_apps_disk_cache_with_age(current_context)
+        {
+            disk_res.fetched_at = Some(written_at);
             if let Some(ref tx) = chunk_sender {
                 let _ = tx.send(disk_res);
             }
@@ -1291,6 +1312,7 @@ pub async fn fetch_argo_applications_cached_stream(
                         filtered_apps: local_filtered_apps.clone(),
                         is_remote_hub: false,
                         truncated: false,
+                        fetched_at: None,
                     });
                 }
             })
@@ -1298,13 +1320,14 @@ pub async fn fetch_argo_applications_cached_stream(
 
             match l_res {
                 Ok((_, truncated)) => {
-                    let result = ArgoApplicationsFetchResult {
+                    let mut result = ArgoApplicationsFetchResult {
                         all_apps: local_all_apps.clone(),
                         filtered_apps: local_filtered_apps,
                         is_remote_hub: false,
                         truncated,
+                        fetched_at: None,
                     };
-                    store_argo_apps(cache_key, current_context, &result, hub_context);
+                    store_argo_apps(cache_key, current_context, &mut result, hub_context);
                     return Ok(result);
                 }
                 Err(e) => Err(e),
@@ -1374,6 +1397,7 @@ pub async fn fetch_argo_applications_cached_stream(
                         filtered_apps: hub_filtered_apps.clone(),
                         is_remote_hub: true,
                         truncated: false,
+                        fetched_at: None,
                     });
                 }
             })
@@ -1381,13 +1405,14 @@ pub async fn fetch_argo_applications_cached_stream(
 
             match hub_res {
                 Ok((_, truncated)) => {
-                    let result = ArgoApplicationsFetchResult {
+                    let mut result = ArgoApplicationsFetchResult {
                         all_apps: hub_all_apps,
                         filtered_apps: hub_filtered_apps,
                         is_remote_hub: true,
                         truncated,
+                        fetched_at: None,
                     };
-                    store_argo_apps(cache_key, current_context, &result, Some(hub));
+                    store_argo_apps(cache_key, current_context, &mut result, Some(hub));
                     Ok(result)
                 }
                 Err(ArgoListError::NotFound) => {
@@ -2547,6 +2572,7 @@ mod tests {
             filtered_apps: vec![],
             is_remote_hub: true,
             truncated: false,
+            fetched_at: None,
         };
 
         // Cache insert
@@ -2666,6 +2692,7 @@ mod tests {
             filtered_apps: vec![],
             is_remote_hub: false,
             truncated: false,
+            fetched_at: None,
         };
         if let Ok(mut guard) = ARGO_APPS_CACHE.write() {
             let map = guard.get_or_insert_with(HashMap::new);
@@ -2827,6 +2854,7 @@ mod tests {
             filtered_apps: vec![],
             is_remote_hub: true,
             truncated: false,
+            fetched_at: None,
         };
 
         assert_eq!(load_argo_apps_disk_cache(ctx), None);
@@ -3106,6 +3134,7 @@ mod tests {
             filtered_apps: vec![],
             is_remote_hub: true,
             truncated: false,
+            fetched_at: None,
         };
         save_argo_hub_disk_cache(hub, &fresh_result);
 

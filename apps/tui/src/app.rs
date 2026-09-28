@@ -105,9 +105,12 @@ impl ArgoSnapshotState {
             }
             Ok(r) => {
                 self.complete = !r.truncated;
+                let ts_opt = r.fetched_at;
                 self.result = r;
                 self.hub = hub;
-                self.fetched_at = Some(k8s_openapi::jiff::Timestamp::now());
+                self.fetched_at = ts_opt
+                    .and_then(|ts| k8s_openapi::jiff::Timestamp::from_second(ts as i64).ok())
+                    .or_else(|| Some(k8s_openapi::jiff::Timestamp::now()));
                 self.error = None;
             }
             Err(e) if e == srelens_kube::argo::NO_ARGO => {
@@ -139,6 +142,16 @@ impl ArgoSnapshotState {
         self.result = result;
         self.hub = hub;
         self.fetched_at = k8s_openapi::jiff::Timestamp::from_second(written_at as i64).ok();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let age = now.saturating_sub(written_at);
+        self.attempted_at = Some(
+            std::time::Instant::now()
+                .checked_sub(std::time::Duration::from_secs(age))
+                .unwrap_or_else(std::time::Instant::now),
+        );
     }
 
     /// What `:changed` matches against.
@@ -9567,9 +9580,48 @@ impl App {
                 ActiveView::Helm(HelmViewState::new())
             }
             ResourceKind::ArgoApplications => {
-                let argo = argo_view::ArgoViewState::new();
-                self.load_argo_disk_snapshot_async(&self.active_context);
-                self.refresh_argo_applications();
+                let mut argo = argo_view::ArgoViewState::new();
+                if let Some(snap) = self.argo_snapshots.get(&self.active_context) {
+                    if snap.complete {
+                        argo.set_applications(
+                            snap.result.filtered_apps.clone(),
+                            snap.result.all_apps.clone(),
+                            snap.result.is_remote_hub,
+                            snap.hub.clone(),
+                        );
+                        argo.fetched_at = snap.fetched_at.map(|ts| ts.as_second() as u64);
+                    }
+                } else if let Some(hub) = self.tui_config.resolved_argo_hub_context() {
+                    if let Some(hub_snap) = self.argo_snapshots.get(&hub) {
+                        if hub_snap.complete {
+                            let filtered = srelens_kube::argo::filter_hub_apps_for_spoke_context(
+                                &hub_snap.result.all_apps,
+                                &self.active_context,
+                                Some(&hub),
+                            );
+                            let now_ts = hub_snap.fetched_at.map(|ts| ts.as_second() as u64);
+                            argo.set_applications(
+                                filtered,
+                                hub_snap.result.all_apps.clone(),
+                                true,
+                                Some(hub),
+                            );
+                            argo.fetched_at = now_ts;
+                        }
+                    }
+                }
+                let is_fresh = self
+                    .argo_snapshots
+                    .get(&self.active_context)
+                    .is_some_and(|s| {
+                        s.complete
+                            && s.attempted_at
+                                .is_some_and(|t| t.elapsed() < srelens_kube::argo::ARGO_FRESH_FOR)
+                    });
+                if !is_fresh {
+                    self.load_argo_disk_snapshot_async(&self.active_context);
+                    self.refresh_argo_applications();
+                }
                 ActiveView::Argo(argo)
             }
             ResourceKind::Overview => {
@@ -11202,6 +11254,7 @@ impl App {
                         filtered_apps: filtered,
                         is_remote_hub: true,
                         truncated: hub_res.truncated,
+                        fetched_at: Some(written_at),
                     };
                     Some((res, written_at))
                 } else {
@@ -11262,6 +11315,7 @@ impl App {
                         filtered_apps: filtered,
                         is_remote_hub: true,
                         truncated,
+                        fetched_at: fetched_at.map(|ts| ts.as_second() as u64),
                     };
                     snap.hub = Some(h.clone());
                     snap.fetched_at = fetched_at;
@@ -11948,6 +12002,7 @@ impl App {
                             filtered_apps: fetch_res.all_apps.clone(),
                             is_remote_hub: false,
                             truncated: fetch_res.truncated,
+                            fetched_at: fetch_res.fetched_at,
                         }),
                         None,
                     );
@@ -11976,7 +12031,7 @@ impl App {
                             fetch_res.is_remote_hub,
                             effective_hub,
                         );
-                        argo.fetched_at = Some(now_secs);
+                        argo.fetched_at = fetch_res.fetched_at.or(Some(now_secs));
                     }
                     Err(err) => {
                         if argo.applications.is_empty() {
@@ -12009,11 +12064,12 @@ impl App {
                         filtered_apps: filtered.clone(),
                         is_remote_hub: true,
                         truncated: fetch_res.truncated,
+                        fetched_at: fetch_res.fetched_at,
                     };
                     active_snap.apply_result(Ok(active_result), hub_context.clone());
 
                     argo.set_applications(filtered, fetch_res.all_apps, true, hub_context);
-                    argo.fetched_at = Some(now_secs);
+                    argo.fetched_at = fetch_res.fetched_at.or(Some(now_secs));
                 } else {
                     self.refresh_argo_applications();
                 }
