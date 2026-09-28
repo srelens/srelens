@@ -497,6 +497,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 AppEvent::HelmDetailResult { context, namespace, name, revision, result } => {
                     app.handle_helm_detail_result(&context, &namespace, &name, revision, result);
                 }
+                AppEvent::ArgoApplicationsChunk { context, is_remote_hub, hub_context, chunk } => {
+                    app.handle_argo_applications_chunk(&context, is_remote_hub, hub_context, chunk);
+                }
                 AppEvent::ArgoApplicationsResult { context, is_remote_hub, hub_context, result } => {
                     app.handle_argo_applications_result(&context, is_remote_hub, hub_context, result);
                 }

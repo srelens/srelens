@@ -2322,6 +2322,118 @@ async fn switch_context_while_in_argo_view_handles_stale_results_and_refreshes()
 }
 
 #[tokio::test]
+async fn argo_streaming_chunks_and_disk_cache_load_instantly() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    let ctx = "test-cluster-disk-cache";
+    app.active_context = ctx.to_string();
+
+    let make_app = |name: &str| srelens_kube::argo::ArgoApplication {
+        name: name.to_string(),
+        namespace: "argocd".to_string(),
+        uid: "uid-1".to_string(),
+        resource_version: "1".to_string(),
+        project: "default".to_string(),
+        destination_server: "".to_string(),
+        destination_name: ctx.to_string(),
+        destination_namespace: "default".to_string(),
+        repo_url: "https://github.com/example/repo".to_string(),
+        target_revision: "HEAD".to_string(),
+        path: "apps".to_string(),
+        sync_status: "Synced".to_string(),
+        health_status: "Healthy".to_string(),
+        health_message: "".to_string(),
+        sync_revision: "123".to_string(),
+        operation_phase: "".to_string(),
+        operation_message: "".to_string(),
+        auto_sync_enabled: true,
+        self_heal_enabled: false,
+        prune_enabled: false,
+        last_sync_time: "".to_string(),
+        created_at: "".to_string(),
+        resources: vec![],
+        sync_history: vec![],
+    };
+
+    let cached_app = make_app("cached-app-1");
+    let fetch_result = srelens_kube::argo::ArgoApplicationsFetchResult {
+        all_apps: vec![cached_app.clone()],
+        filtered_apps: vec![cached_app.clone()],
+        is_remote_hub: false,
+    };
+    srelens_kube::argo::save_argo_apps_disk_cache(ctx, &fetch_result);
+
+    // 1. Switch to Argo view: should load disk cache on frame 1
+    app.switch_view_to_kind(ResourceKind::ArgoApplications).await;
+    if let ActiveView::Argo(ref argo) = app.active_view {
+        assert_eq!(argo.applications.len(), 1, "disk cache loaded on frame 1");
+        assert_eq!(argo.applications[0].name, "cached-app-1");
+        assert!(!argo.displayed_applications().is_empty(), "cache items displayed immediately");
+    } else {
+        panic!("expected ActiveView::Argo");
+    }
+
+    // 2. Progressive streaming chunk arrives
+    let chunk_app = make_app("chunk-app-2");
+    app.handle_argo_applications_chunk(
+        ctx,
+        false,
+        None,
+        srelens_kube::argo::ArgoApplicationsFetchResult {
+            all_apps: vec![cached_app.clone(), chunk_app.clone()],
+            filtered_apps: vec![cached_app.clone(), chunk_app.clone()],
+            is_remote_hub: false,
+        },
+    );
+
+    if let ActiveView::Argo(ref argo) = app.active_view {
+        assert!(argo.is_streaming, "streaming flag set on chunk arrival");
+        assert_eq!(argo.displayed_applications().len(), 2, "chunk apps rendered immediately");
+    } else {
+        panic!("expected ActiveView::Argo");
+    }
+
+    // 3. Final result arrives
+    app.handle_argo_applications_result(
+        ctx,
+        false,
+        None,
+        Ok(srelens_kube::argo::ArgoApplicationsFetchResult {
+            all_apps: vec![cached_app.clone(), chunk_app.clone()],
+            filtered_apps: vec![cached_app.clone(), chunk_app.clone()],
+            is_remote_hub: false,
+        }),
+    );
+
+    if let ActiveView::Argo(ref argo) = app.active_view {
+        assert!(!argo.is_streaming, "streaming stopped on completion");
+        assert!(!argo.is_loading, "loading stopped on completion");
+        assert_eq!(argo.applications.len(), 2);
+    } else {
+        panic!("expected ActiveView::Argo");
+    }
+
+    // 4. Background refresh error when applications already exist does not wipe view
+    app.handle_argo_applications_result(
+        ctx,
+        false,
+        None,
+        Err("temporary timeout".to_string()),
+    );
+
+    if let ActiveView::Argo(ref argo) = app.active_view {
+        assert_eq!(argo.applications.len(), 2, "applications preserved despite refresh error");
+        assert!(argo.error.is_none(), "error screen suppressed when apps are present");
+        assert!(!argo.is_loading);
+    } else {
+        panic!("expected ActiveView::Argo");
+    }
+
+    // Cleanup disk cache
+    srelens_kube::argo::invalidate_argo_disk_cache(ctx);
+}
+
+#[tokio::test]
 async fn argo_view_prioritizes_local_argocd_when_installed_even_if_hub_context_is_set() {
     let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;

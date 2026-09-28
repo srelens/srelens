@@ -52,6 +52,12 @@ pub enum AppEvent {
         revision: Option<i64>,
         result: Result<srelens_kube::helm::HelmReleaseDetail, String>,
     },
+    ArgoApplicationsChunk {
+        context: String,
+        is_remote_hub: bool,
+        hub_context: Option<String>,
+        chunk: srelens_kube::argo::ArgoApplicationsFetchResult,
+    },
     ArgoApplicationsResult {
         context: String,
         is_remote_hub: bool,

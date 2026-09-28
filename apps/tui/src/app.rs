@@ -601,9 +601,9 @@ impl App {
         }
 
         // Periodically refresh ArgoCD applications or ArgoCD Application detail every ~4 seconds (40 ticks at 100ms)
-        if matches!(self.active_view, ActiveView::Argo(_)) {
+        if let ActiveView::Argo(argo) = &self.active_view {
             self.argo_tick_counter = self.argo_tick_counter.saturating_add(1);
-            if self.argo_tick_counter % 40 == 1 && !self.argo_refreshing {
+            if self.argo_tick_counter % 40 == 1 && !self.argo_refreshing && argo.error.is_none() {
                 self.refresh_argo_applications();
             }
         } else if let ActiveView::ArgoDetail(detail) = &self.active_view {
@@ -2015,7 +2015,21 @@ impl App {
             self.argo_refreshing = false;
             argo.applications.clear();
             argo.all_applications.clear();
+            argo.error = None;
             argo.is_loading = true;
+            if let Some(cached) = srelens_kube::argo::load_argo_apps_disk_cache(&self.active_context) {
+                let effective_hub = if cached.is_remote_hub {
+                    self.tui_config.resolved_argo_hub_context()
+                } else {
+                    None
+                };
+                argo.set_applications(
+                    cached.filtered_apps,
+                    cached.all_apps,
+                    cached.is_remote_hub,
+                    effective_hub,
+                );
+            }
             self.refresh_argo_applications();
         }
         if let ActiveView::Changed(changed) = &mut self.active_view {
@@ -9461,8 +9475,22 @@ impl App {
                 ActiveView::Helm(HelmViewState::new())
             }
             ResourceKind::ArgoApplications => {
+                let mut argo = argo_view::ArgoViewState::new();
+                if let Some(cached) = srelens_kube::argo::load_argo_apps_disk_cache(&self.active_context) {
+                    let effective_hub = if cached.is_remote_hub {
+                        self.tui_config.resolved_argo_hub_context()
+                    } else {
+                        None
+                    };
+                    argo.set_applications(
+                        cached.filtered_apps,
+                        cached.all_apps,
+                        cached.is_remote_hub,
+                        effective_hub,
+                    );
+                }
                 self.refresh_argo_applications();
-                ActiveView::Argo(argo_view::ArgoViewState::new())
+                ActiveView::Argo(argo)
             }
             ResourceKind::Overview => {
                 let mut initial_data = self.cluster_overview_data.clone().unwrap_or_default();
@@ -11526,6 +11554,10 @@ impl App {
         if force_refresh {
             srelens_kube::argo::invalidate_argo_applications_cache();
             srelens_kube::argo::invalidate_argo_cluster_mapping_cache();
+            srelens_kube::argo::invalidate_argo_disk_cache(&self.active_context);
+            if let Some(hub) = self.tui_config.resolved_argo_hub_context() {
+                srelens_kube::argo::invalidate_argo_disk_cache(&hub);
+            }
         }
         if let ActiveView::Argo(argo) = &mut self.active_view {
             if argo.applications.is_empty() {
@@ -11553,12 +11585,30 @@ impl App {
         let event_tx = self.event_tx.clone();
         let hub_ctx_clone = hub_context.clone();
 
+        let (chunk_tx, mut chunk_rx) =
+            tokio::sync::mpsc::unbounded_channel::<srelens_kube::argo::ArgoApplicationsFetchResult>();
+        let event_tx_stream = event_tx.clone();
+        let stream_context = current_context.clone();
+        let stream_hub = hub_context.clone();
+
+        tokio::spawn(async move {
+            while let Some(chunk) = chunk_rx.recv().await {
+                let is_remote = chunk.is_remote_hub;
+                let _ = event_tx_stream.send(crate::event::AppEvent::ArgoApplicationsChunk {
+                    context: stream_context.clone(),
+                    is_remote_hub: is_remote,
+                    hub_context: if is_remote { stream_hub.clone() } else { None },
+                    chunk,
+                });
+            }
+        });
+
         tokio::spawn(async move {
             if let Some(ref path) = hub_kubeconfig {
                 cache.ensure_paths(vec![path.clone()]).await;
             }
 
-            let res = srelens_kube::argo::fetch_argo_applications_cached(
+            let res = srelens_kube::argo::fetch_argo_applications_cached_stream(
                 &cache,
                 &current_context,
                 Some(&current_cluster_name),
@@ -11567,6 +11617,7 @@ impl App {
                 target_ns.as_deref(),
                 true,
                 force_refresh,
+                Some(chunk_tx),
             )
             .await;
 
@@ -11592,6 +11643,31 @@ impl App {
         });
     }
 
+    pub fn handle_argo_applications_chunk(
+        &mut self,
+        context: &str,
+        _is_remote_hub: bool,
+        hub_context: Option<String>,
+        chunk: srelens_kube::argo::ArgoApplicationsFetchResult,
+    ) {
+        if let ActiveView::Argo(argo) = &mut self.active_view {
+            if self.active_context == context {
+                let effective_hub = if chunk.is_remote_hub {
+                    hub_context
+                } else {
+                    None
+                };
+                argo.is_streaming = true;
+                argo.set_applications(
+                    chunk.filtered_apps,
+                    chunk.all_apps,
+                    chunk.is_remote_hub,
+                    effective_hub,
+                );
+            }
+        }
+    }
+
     pub fn handle_argo_applications_result(
         &mut self,
         context: &str,
@@ -11601,6 +11677,7 @@ impl App {
     ) {
         self.argo_refreshing = false;
         if let ActiveView::Argo(argo) = &mut self.active_view {
+            argo.is_streaming = false;
             if self.active_context == context {
                 match result {
                     Ok(fetch_res) => {
@@ -11616,7 +11693,17 @@ impl App {
                             effective_hub,
                         );
                     }
-                    Err(err) => argo.set_error(err),
+                    Err(err) => {
+                        if argo.applications.is_empty() {
+                            argo.set_error(err);
+                        } else {
+                            argo.is_loading = false;
+                            self.set_toast(
+                                format!("ArgoCD refresh failed: {}", err),
+                                Theme::status_error(),
+                            );
+                        }
+                    }
                 }
             } else {
                 // Received result for an older context from before context switch;
