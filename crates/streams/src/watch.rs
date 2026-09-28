@@ -45,7 +45,34 @@ macro_rules! dispatch_watch {
                     .await
                 }
             )+
-            other => Err(format!("kind not watchable: {other}")),
+            other => {
+                if let Some((gvk, namespaced)) = srelens_kube::manifest::gvk_for(other) {
+                    let target = srelens_kube::watch::CustomWatchTarget {
+                        group: gvk.group,
+                        version: gvk.version,
+                        kind: gvk.kind,
+                        plural: other.to_string(),
+                        namespaced,
+                    };
+                    let (rows_sink, rows_ch) = ($sink.clone(), $channel.clone());
+                    let (st_sink, st_ch) = ($sink.clone(), $channel.clone());
+                    srelens_kube::watch::watch_custom_resource(
+                        $cache,
+                        $context,
+                        $namespace,
+                        target,
+                        move |rows| {
+                            rows_sink.emit(&rows_ch, serde_json::Value::Array(rows));
+                        },
+                        move |st: srelens_kube::watch::WatchStatus| {
+                            st_sink.emit(&st_ch, serde_json::json!({ "status": st.as_str() }));
+                        },
+                    )
+                    .await
+                } else {
+                    Err(format!("kind not watchable: {other}"))
+                }
+            }
         }
     };
 }
