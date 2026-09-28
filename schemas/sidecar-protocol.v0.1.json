@@ -313,37 +313,28 @@
             },
             "method": {
               "not": {
-                "anyOf": [
-                  {
-                    "enum": [
-                      "initialize",
-                      "activate",
-                      "health",
-                      "deactivate",
-                      "shutdown",
-                      "stream/open",
-                      "$/cancelRequest",
-                      "stream/cancel",
-                      "stream/data",
-                      "stream/close",
-                      "stream/error"
-                    ]
-                  },
-                  {
-                    "pattern": "^\\$/"
-                  },
-                  {
-                    "pattern": "^stream/"
-                  }
+                "enum": [
+                  "initialize",
+                  "activate",
+                  "health",
+                  "deactivate",
+                  "shutdown",
+                  "stream/open",
+                  "$/cancelRequest",
+                  "stream/cancel",
+                  "stream/data",
+                  "stream/close",
+                  "stream/error",
+                  "host/read",
+                  "host/resource",
+                  "host/action"
                 ]
               },
+              "pattern": "^[A-Za-z0-9-]{1,64}$",
               "type": "string"
             },
             "params": {
-              "type": [
-                "object",
-                "array"
-              ]
+              "type": "object"
             }
           },
           "required": [

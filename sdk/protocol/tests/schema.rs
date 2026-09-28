@@ -1,7 +1,7 @@
 //! The committed schema is what an SDK generates its types from and a sidecar
 //! validates against. It must equal what this crate's types generate.
 
-use serde_json::Value;
+use serde_json::{json, Value};
 use srelens_sidecar_protocol::{
     code, schema, schema_file, Kind, MAX_MESSAGE_BYTES, METHODS, SIDECAR_API_VERSIONS,
 };
@@ -169,4 +169,38 @@ fn the_schema_carries_what_an_sdk_needs_beside_the_types() {
         );
     }
     assert_eq!(schema_file(), "sidecar-protocol.v0.1.json");
+}
+
+/// An app operation is a request from srelens under a name the manifest could
+/// declare (`manifest.rs`'s `identifier`), with object params. It is not any
+/// string the host happens not to reserve: `host/read` is a real method, just
+/// not one srelens ever writes, so a line naming it must still be refused.
+#[test]
+fn an_app_request_is_an_operation_the_manifest_could_declare() {
+    let root = schema();
+    let validator = jsonschema::draft7::new(&json!({
+        "definitions": root["definitions"],
+        "allOf": [{"$ref": "#/definitions/HostMessage"}],
+    }))
+    .unwrap();
+
+    assert!(validator.is_valid(&json!({
+        "jsonrpc": "2.0", "id": 3, "method": "scan", "params": {"image": "x"}
+    })));
+
+    let context = json!({"clusterId": "prod", "namespace": null});
+    let invalid = [
+        // A real method, but sidecar-to-host, never one srelens writes.
+        json!({"jsonrpc": "2.0", "id": 3, "method": "host/read",
+            "params": {"context": context, "capability": "apps"}}),
+        json!({"jsonrpc": "2.0", "id": 3, "method": "", "params": {}}),
+        json!({"jsonrpc": "2.0", "id": 3, "method": "list pods", "params": {}}),
+        json!({"jsonrpc": "2.0", "id": 3, "method": "rpc.discover", "params": {}}),
+        // `health` is a real, reserved method: srelens numbers its own requests from 1.
+        json!({"jsonrpc": "2.0", "id": 0, "method": "health", "params": {}}),
+        json!({"jsonrpc": "2.0", "id": 3, "method": "scan", "params": [1]}),
+    ];
+    for instance in invalid {
+        assert!(!validator.is_valid(&instance), "{instance}");
+    }
 }

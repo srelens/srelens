@@ -16,7 +16,9 @@ use schemars::gen::SchemaSettings;
 use serde_json::{json, Map, Value};
 
 use crate::methods::{Kind, METHODS};
-use crate::{code, is_reserved, RequestId, RpcError, MAX_MESSAGE_BYTES, SIDECAR_API_VERSIONS};
+use crate::{
+    code, RequestId, RpcError, MAX_IDENTIFIER_LEN, MAX_MESSAGE_BYTES, SIDECAR_API_VERSIONS,
+};
 
 /// The newest sidecar API line, `0.1` for 0.1.0.
 fn line() -> String {
@@ -67,22 +69,17 @@ pub fn schema() -> Value {
         }
     }
 
-    // An app operation: a request from srelens under any name it does not reserve.
-    let reserved: Vec<&str> = METHODS
-        .iter()
-        .map(|spec| spec.name)
-        .filter(|name| is_reserved(name))
-        .collect();
+    // An app operation: a request naming one of the app's own manifest-declared
+    // operations, as the manifest requires (`manifest.rs`'s `identifier`), with
+    // object params (the operation's inputs).
+    let protocol_methods: Vec<&str> = METHODS.iter().map(|spec| spec.name).collect();
     host.push(request(
         json!({
             "type": "string",
-            "not": {"anyOf": [
-                {"enum": reserved},
-                {"pattern": "^\\$/"},
-                {"pattern": "^stream/"},
-            ]},
+            "pattern": format!("^[A-Za-z0-9-]{{1,{MAX_IDENTIFIER_LEN}}}$"),
+            "not": {"enum": protocol_methods},
         }),
-        json!({"type": ["object", "array"]}),
+        json!({"type": "object"}),
         host_id.clone(),
     ));
     // srelens's answer to a sidecar's call, under the sidecar's own id.
