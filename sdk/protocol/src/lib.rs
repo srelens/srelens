@@ -15,12 +15,14 @@ use std::fmt;
 mod bounds;
 mod messages;
 mod methods;
+mod schema;
 
 pub use bounds::{
     MAX_CALL_FIELD_BYTES, MAX_CLUSTER_ID_BYTES, MAX_IDENTIFIER_LEN, MAX_NAMESPACE_LEN,
     MAX_OBJECT_NAME_LEN, MAX_TOKEN_LEN,
 };
 pub use methods::{is_reserved, Direction, Kind, MethodSpec, METHODS};
+pub use schema::{schema, schema_file};
 
 pub use messages::{
     CallContext, CancelParams, Empty, HostActionParams, HostReadParams, HostResourceParams,
