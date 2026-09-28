@@ -1,0 +1,24 @@
+# stdout is protocol only
+{"level":"info","msg":"starting"}
+# An answer to srelens carries srelens's own numeric id
+{"jsonrpc":"2.0","id":"1","result":{}}
+# A call names its cluster, and its namespace even when there is none
+{"jsonrpc":"2.0","id":"c-1","method":"host/read","params":{"capability":"applications"}}
+{"jsonrpc":"2.0","id":"c-1","method":"host/read","params":{"context":{"clusterId":"kind-dev"},"capability":"applications"}}
+{"jsonrpc":"2.0","id":"c-1","method":"host/read","params":{"context":{"clusterId":"kind-dev","namespace":""},"capability":"applications"}}
+{"jsonrpc":"2.0","id":"c-1","method":"host/read","params":{"context":{"clusterId":"   ","namespace":null},"capability":"applications"}}
+# It names no other app, revision or cluster
+{"jsonrpc":"2.0","id":"c-1","method":"host/read","params":{"context":{"clusterId":"kind-dev","namespace":null},"capability":"applications","id":"org.example.other"}}
+# Each field is held to its shape
+{"jsonrpc":"2.0","id":"c-1","method":"host/read","params":{"context":{"clusterId":"kind-dev","namespace":null},"capability":"two words"}}
+{"jsonrpc":"2.0","id":"c-2","method":"host/resource","params":{"context":{"clusterId":"kind-dev","namespace":null},"capability":"applications","name":".."}}
+{"jsonrpc":"2.0","id":"c-3","method":"host/action","params":{"context":{"clusterId":"kind-dev","namespace":null},"capability":"applications","name":"web","action":"sync","uid":"u 1","resourceVersion":"1"}}
+{"jsonrpc":"2.0","id":"c-3","method":"host/action","params":{"context":{"clusterId":"kind-dev","namespace":null},"capability":"applications","name":"web","action":"sync","uid":"u-1","resource_version":"1"}}
+# A stream frame names its stream; a data frame its data; an error frame its message
+{"jsonrpc":"2.0","method":"stream/data","params":{"data":1}}
+{"jsonrpc":"2.0","method":"stream/data","params":{"stream":1}}
+{"jsonrpc":"2.0","method":"stream/error","params":{"stream":1}}
+# A request id is a string or a number
+{"jsonrpc":"2.0","id":null,"method":"host/read","params":{"context":{"clusterId":"kind-dev","namespace":null},"capability":"applications"}}
+# A sidecar calls srelens only through host/*
+{"jsonrpc":"2.0","id":"c-9","method":"k8s.getSecret","params":{}}
