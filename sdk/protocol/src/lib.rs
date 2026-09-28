@@ -16,6 +16,7 @@ mod bounds;
 mod messages;
 mod methods;
 mod schema;
+mod wire;
 
 pub use bounds::{
     MAX_CALL_FIELD_BYTES, MAX_CLUSTER_ID_BYTES, MAX_IDENTIFIER_LEN, MAX_NAMESPACE_LEN,
@@ -30,6 +31,8 @@ pub use messages::{
     StreamCloseParams, StreamDataParams, StreamErrorParams, StreamOpenParams,
     UnsupportedApiVersion,
 };
+
+pub use wire::{JsonRpc, Message, Notification, Request, Response};
 
 /// Sidecar API versions this host speaks, oldest first. `initialize` offers
 /// all of them and the sidecar answers with the one it chose.
