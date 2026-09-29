@@ -62,6 +62,7 @@ impl From<ContextError> for Error {
 
 /// Why a session with srelens ended other than as it should.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum SidecarError {
     /// Reading stdin or writing stdout failed.
     Io(std::io::Error),
@@ -83,7 +84,27 @@ impl fmt::Display for SidecarError {
 impl std::error::Error for SidecarError {}
 
 /// Why a call to srelens failed.
+///
+/// `#[non_exhaustive]`: a new variant here should not break every match an
+/// author wrote against this enum, so matching it from outside this crate
+/// needs a wildcard arm.
+///
+/// ```compile_fail
+/// use srelens_sidecar::HostError;
+///
+/// fn describe(error: HostError) -> &'static str {
+///     match error {
+///         HostError::ConsentDenied(_) => "denied",
+///         HostError::CapabilityFailed(_) => "failed",
+///         HostError::InvalidParams(_) => "invalid",
+///         HostError::Cancelled => "cancelled",
+///         HostError::Rpc(_) => "rpc",
+///         HostError::Disconnected => "disconnected",
+///     }
+/// }
+/// ```
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum HostError {
     /// A person declined, or no one could be asked (`-32002`). Nothing ran.
     ConsentDenied(String),
@@ -136,6 +157,7 @@ impl From<HostError> for Error {
 
 /// Why [`crate::Frames::send`] did not send.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum StreamClosed {
     /// srelens cancelled the stream.
     Cancelled,

@@ -48,8 +48,8 @@ impl Sidecar {
     pub(crate) fn check_name(&self, name: &str) {
         assert!(
             shape::is_identifier(name) && !is_reserved(name),
-            "`{name}` cannot name an operation: use 1 to 64 ASCII letters, digits and hyphens, \
-             as the manifest does, and none of srelens's own methods"
+            "`{name}` cannot name an operation or a stream: use 1 to 64 ASCII letters, digits and \
+             hyphens, as the manifest does, and none of srelens's own methods"
         );
         assert!(
             !self.registry.operations.contains_key(name)
@@ -71,6 +71,8 @@ impl Sidecar {
     /// Serve `name`: srelens's request `name` runs `handler` with its params
     /// read as `I`. Params that do not read as `I` are answered `-32602`
     /// without running it; its `O` is the result, and its `Error` the error.
+    /// Never block `handler`'s thread: run blocking work with
+    /// `tokio::task::spawn_blocking`, or srelens's `health` check can starve.
     pub fn operation<I, O, F, Fut>(mut self, name: &str, handler: F) -> Sidecar
     where
         I: DeserializeOwned + Send + 'static,

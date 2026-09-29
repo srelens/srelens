@@ -267,6 +267,18 @@ impl CallContext {
 /// with `#[serde(remote = "Self")]`, which makes the derived code inherent
 /// functions, and implement the traits here: writing is unchanged, and
 /// reading takes an object only, then runs the derived reader on it.
+///
+/// Reading through a `serde_json::Map` first changes what the text readers
+/// (`serde_json::from_str`, `from_slice`, `from_reader`) do: duplicate keys
+/// resolve last-wins instead of erroring, a parse error's line and column are
+/// dropped, and a value that is not an object says "expected a map" rather
+/// than naming the type. The host is unaffected, because it reads these
+/// types from an already-parsed `Value`.
+///
+/// The derive also generates an inherent `T::deserialize(..)` function (from
+/// `remote = "Self"`), which is `pub` and still reads the array form: call
+/// `<T as Deserialize>::deserialize` or one of the `serde_json` functions
+/// instead, never the inherent one.
 macro_rules! object_only {
     ($($ty:ident),*) => {$(
         impl Serialize for $ty {

@@ -27,8 +27,10 @@ pub(crate) enum Key {
     Stream(u64),
 }
 
-/// Running handlers' cancellation tokens. Whoever removes an entry answers
-/// for it: the handler when it finishes, or a cancellation.
+/// Running handlers' cancellation tokens. A handler finishing, or srelens's
+/// cancel (`$/cancelRequest` or `stream/cancel`), removes the entry and
+/// answers. At session end every remaining entry is removed by `cancel_all`
+/// and nothing more is written for it.
 pub(crate) type Running = Arc<Mutex<HashMap<Key, CancellationToken>>>;
 
 enum Flow {
@@ -404,7 +406,7 @@ pub(crate) async fn answer(outbox: &Outbox, id: RequestId, outcome: Result<Value
         let why = RpcError::new(
             code::INTERNAL_ERROR,
             format!(
-                "the result is {bytes} bytes, over the {} a message may be",
+                "the answer is {bytes} bytes, over the {} a message may be",
                 limit_text()
             ),
         );
