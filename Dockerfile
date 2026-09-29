@@ -53,6 +53,7 @@ COPY apps/tui apps/tui
 # srelens-plugin-host, so the build needs it as well as the whole workspace.
 COPY sdk/protocol sdk/protocol
 COPY sdk/rust sdk/rust
+COPY sdk/examples/hello-world/rust sdk/examples/hello-world/rust
 # rust-embed reads apps/desktop/dist at compile time; copy the built bundle in.
 COPY --from=frontend /src/apps/desktop/dist apps/desktop/dist
 RUN cargo build --release -p srelens-server --bin srelens-server

@@ -6799,6 +6799,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "srelens-sidecar-hello-world"
+version = "0.15.0"
+dependencies = [
+ "log",
+ "serde",
+ "serde_json",
+ "srelens-plugin-host",
+ "srelens-sidecar",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "srelens-sidecar-protocol"
 version = "0.15.0"
 dependencies = [

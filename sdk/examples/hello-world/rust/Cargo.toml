@@ -1,0 +1,23 @@
+[package]
+name = "srelens-sidecar-hello-world"
+description = "The smallest srelens sidecar in Rust: an operation, a call to the host, and a stream"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "hello-world"
+path = "src/main.rs"
+
+[dependencies]
+srelens-sidecar = { path = "../../../rust" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+log = "0.4"
+
+[dev-dependencies]
+srelens-plugin-host = { path = "../../../../crates/plugin-host" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "time"] }
+tempfile = "3"
