@@ -43,13 +43,7 @@ where
 {
     let (outbox, lines) = Outbox::new();
     let mut writer = tokio::spawn(lines.run(writer));
-    let mut session = Session {
-        sidecar: Arc::new(sidecar),
-        outbox: outbox.clone(),
-        shared: None,
-        running: Running::default(),
-        tasks: JoinSet::new(),
-    };
+    let mut session = Session::new(sidecar, outbox.clone());
     let mut input = BufReader::new(reader).lines();
     // Whether the loop below already consumed (awaited) the writer's
     // JoinHandle: that happens only when the writer itself ends the
@@ -121,7 +115,21 @@ struct Session {
 }
 
 impl Session {
+    fn new(sidecar: Sidecar, outbox: Outbox) -> Session {
+        Session {
+            sidecar: Arc::new(sidecar),
+            outbox,
+            shared: None,
+            running: Running::default(),
+            tasks: JoinSet::new(),
+        }
+    }
+
     async fn handle(&mut self, message: Message) -> Flow {
+        // Collect finished handler tasks as each message arrives, so a
+        // long-lived sidecar's `tasks` does not grow without bound: a
+        // `JoinSet` never reaps on its own unless something joins it.
+        while self.tasks.try_join_next().is_some() {}
         match message {
             Message::Request(request) => return self.request(request).await,
             Message::Notification(note) => self.notify(note).await,
@@ -302,5 +310,66 @@ pub(crate) async fn answer(outbox: &Outbox, id: RequestId, outcome: Result<Value
             ),
         );
         let _ = outbox.send(&Response::err(id, why)).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Context, Error};
+    use serde_json::json;
+
+    fn init_line() -> String {
+        json!({
+            "jsonrpc": "2.0",
+            "id": 0,
+            "method": "initialize",
+            "params": {
+                "apiVersions": ["0.1.0"],
+                "host": {"name": "srelens", "version": "0.15.0"},
+                "limits": {
+                    "requestTimeoutMs": 30000,
+                    "maxConcurrentRequests": 8,
+                    "maxStreams": 5,
+                    "memoryBytes": 268435456u64,
+                    "cpus": 1.0,
+                    "dataBytes": 1073741824u64,
+                    "dataEntries": 100000
+                },
+                "dataDirectory": "/tmp"
+            }
+        })
+        .to_string()
+    }
+
+    #[tokio::test]
+    async fn finished_handlers_are_reaped_as_messages_arrive() {
+        let sidecar = Sidecar::new("t", "1")
+            .operation("echo", |_ctx: Context, v: Value| async move {
+                Ok::<_, Error>(v)
+            });
+        let (outbox, writer) = Outbox::new();
+        tokio::spawn(writer.run(tokio::io::sink()));
+        let mut session = Session::new(sidecar, outbox);
+
+        session.handle(Message::parse(&init_line()).unwrap()).await;
+
+        for i in 1..=1000u64 {
+            let request = json!({
+                "jsonrpc": "2.0",
+                "id": i,
+                "method": "echo",
+                "params": {"n": i}
+            })
+            .to_string();
+            session.handle(Message::parse(&request).unwrap()).await;
+            tokio::task::yield_now().await;
+        }
+
+        assert!(
+            session.tasks.len() <= 16,
+            "expected finished handler tasks to be reaped, found {} still tracked",
+            session.tasks.len()
+        );
     }
 }
