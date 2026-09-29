@@ -1353,3 +1353,18 @@ fn a_range_with_nothing_under_the_app_path_says_so() {
         "{rendered}"
     );
 }
+
+#[test]
+fn card_does_not_render_successful_sync_as_sync_error() {
+    let _settings = common::env::isolate_settings();
+    let mut report = sample_report();
+    report.deployments[0].gitops.as_mut().unwrap().sync_message =
+        Some("successfully synced (all tasks run)".into());
+    let mut state = ChangedViewState::new();
+    state.set_report(report);
+    let card = render_card(&state);
+    assert!(
+        !card.contains("Sync Error:"),
+        "must not render Sync Error for successful sync: {card}"
+    );
+}

@@ -1174,9 +1174,14 @@ fn gitops_release_for(
         target_revision: app.target_revision.clone(),
         sync_revision: short_rev,
         sync_age,
-        sync_message: if !app.operation_message.is_empty() {
+        sync_message: if !app.operation_message.is_empty()
+            && !app.operation_message.starts_with("successfully synced")
+            && (app.operation_phase == "Failed"
+                || app.operation_phase == "Error"
+                || app.sync_status != "Synced")
+        {
             Some(app.operation_message.clone())
-        } else if !app.health_message.is_empty() {
+        } else if !app.health_message.is_empty() && app.health_status != "Healthy" {
             Some(app.health_message.clone())
         } else {
             None
@@ -5045,5 +5050,55 @@ mod tests {
 
         crate::argo::invalidate_argo_disk_cache(ctx);
         std::env::remove_var("SRELENS_CACHE_DIR");
+    }
+
+    #[test]
+    fn successful_sync_message_is_not_treated_as_sync_error() {
+        let app = ArgoApplication::from_json(&serde_json::json!({
+            "metadata": { "name": "shop", "namespace": "argocd" },
+            "spec": { "source": { "repoURL": "https://github.com/acme/deploy.git", "path": "apps/shop" } },
+            "status": {
+                "sync": { "status": "Synced", "revision": SHA_NOW },
+                "health": { "status": "Healthy" },
+                "operationState": {
+                    "phase": "Succeeded",
+                    "message": "successfully synced (all tasks run)"
+                },
+                "history": shop_history()
+            }
+        }));
+        let dep = tracked_deployment(Some("shop:apps/Deployment:default/api"), None);
+        let rs = [replicaset("api-new", "api", 300)];
+        let report = triage(&[dep], &rs, &[], &[], &[app]);
+        let gitops = report.deployments[0].gitops.as_ref().unwrap();
+        assert_eq!(
+            gitops.sync_message, None,
+            "a successful sync message must not be recorded as sync_message"
+        );
+    }
+
+    #[test]
+    fn failed_sync_message_is_recorded_as_sync_error() {
+        let app = ArgoApplication::from_json(&serde_json::json!({
+            "metadata": { "name": "shop", "namespace": "argocd" },
+            "spec": { "source": { "repoURL": "https://github.com/acme/deploy.git", "path": "apps/shop" } },
+            "status": {
+                "sync": { "status": "Failed", "revision": SHA_NOW },
+                "health": { "status": "Degraded" },
+                "operationState": {
+                    "phase": "Failed",
+                    "message": "one or more synchronization tasks are not valid"
+                },
+                "history": shop_history()
+            }
+        }));
+        let dep = tracked_deployment(Some("shop:apps/Deployment:default/api"), None);
+        let rs = [replicaset("api-new", "api", 300)];
+        let report = triage(&[dep], &rs, &[], &[], &[app]);
+        let gitops = report.deployments[0].gitops.as_ref().unwrap();
+        assert_eq!(
+            gitops.sync_message.as_deref(),
+            Some("one or more synchronization tasks are not valid")
+        );
     }
 }

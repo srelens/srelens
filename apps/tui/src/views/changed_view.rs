@@ -1242,14 +1242,22 @@ fn render_deployment_diagnostic_card(f: &mut Frame, area: Rect, state: &ChangedV
                 Style::default().fg(Theme::dim()),
             ),
         ]));
-        if let Some(ref msg) = g.sync_message {
+        if let Some(ref msg) = g
+            .sync_message
+            .as_deref()
+            .filter(|m| !m.starts_with("successfully synced"))
+        {
+            let is_health = g.health_status != "Healthy" && g.sync_status == "Synced";
+            let (label, color) = if is_health {
+                ("   Health: ", Theme::yellow())
+            } else {
+                ("   Sync Error: ", Theme::red())
+            };
             lines.push(Line::from(vec![
-                Span::styled("   Sync Error: ", Theme::header_label()),
+                Span::styled(label, Theme::header_label()),
                 Span::styled(
                     sanitize_span_text(msg),
-                    Style::default()
-                        .fg(Theme::red())
-                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
                 ),
             ]));
         }
