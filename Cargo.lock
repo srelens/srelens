@@ -6786,6 +6786,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "srelens-sidecar"
+version = "0.15.0"
+dependencies = [
+ "jsonschema",
+ "log",
+ "serde",
+ "serde_json",
+ "srelens-sidecar-protocol",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "srelens-sidecar-protocol"
 version = "0.15.0"
 dependencies = [
@@ -7820,6 +7833,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "futures-util",
  "pin-project-lite",
  "slab",
  "tokio",
