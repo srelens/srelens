@@ -33,7 +33,7 @@ impl Frames {
         if self.cancel.is_cancelled() {
             return Err(StreamClosed::Cancelled);
         }
-        let data = serde_json::to_value(data).map_err(|_| StreamClosed::Ended)?;
+        let data = serde_json::to_value(data).map_err(|e| StreamClosed::Invalid(e.to_string()))?;
         let frame = Notification::new(
             method::STREAM_DATA,
             serde_json::to_value(StreamDataParams {

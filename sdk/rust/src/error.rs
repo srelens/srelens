@@ -143,6 +143,8 @@ pub enum StreamClosed {
     TooLarge(usize),
     /// The session ended.
     Ended,
+    /// The frame could not be serialized; the serializer's message.
+    Invalid(String),
 }
 
 impl fmt::Display for StreamClosed {
@@ -155,6 +157,7 @@ impl fmt::Display for StreamClosed {
                 crate::outbox::limit_text()
             ),
             StreamClosed::Ended => f.write_str("the session with srelens ended"),
+            StreamClosed::Invalid(why) => write!(f, "the frame could not be serialized: {why}"),
         }
     }
 }

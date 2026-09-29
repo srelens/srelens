@@ -270,7 +270,23 @@ impl Session {
                         .expect("plain JSON"),
                 ),
             };
-            let _ = outbox.send(&terminal).await;
+            // A `stream/close` can never be too large; a `stream/error` whose
+            // handler-given message alone is over the limit still must end
+            // the stream, so it is replaced with one that says why.
+            if let Err(Unsent::TooLarge(bytes)) = outbox.send(&terminal).await {
+                let short = Notification::new(
+                    method::STREAM_ERROR,
+                    serde_json::to_value(StreamErrorParams {
+                        stream,
+                        message: format!(
+                            "the stream's error is {bytes} bytes, over the {} a message may be",
+                            limit_text()
+                        ),
+                    })
+                    .expect("plain JSON"),
+                );
+                let _ = outbox.send(&short).await;
+            }
         });
     }
 

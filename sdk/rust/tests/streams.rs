@@ -3,7 +3,9 @@ mod common;
 use common::FakeHost;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use srelens_sidecar::{Context, Error, Frames, Sidecar};
+use srelens_sidecar::{Context, Error, Frames, Sidecar, StreamClosed};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 #[derive(Deserialize)]
 struct Count {
@@ -155,6 +157,78 @@ async fn a_cancelled_stream_stops_and_sends_no_terminal_frame() {
         stragglers += 1;
         assert!(stragglers <= 1, "the stream kept sending after its cancel");
     }
+    host.finish().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_stream_whose_error_is_too_large_still_ends_with_an_error_frame() {
+    let sidecar = Sidecar::new("t", "1").stream(
+        "too-large-error",
+        |_ctx: Context, _: Value, _frames: Frames| async move {
+            Err(Error::internal("x".repeat(5 * 1024 * 1024)))
+        },
+    );
+    let mut host = FakeHost::start(sidecar);
+    host.initialize().await;
+    let id = host
+        .request(
+            "stream/open",
+            json!({"stream": 7, "method": "too-large-error", "params": {}}),
+        )
+        .await;
+    host.answer(id).await;
+    let end = host.recv().await;
+    assert_eq!(end["method"], "stream/error");
+    assert_eq!(end["params"]["stream"], 7);
+    assert!(
+        end["params"]["message"].as_str().unwrap().contains("4 MiB"),
+        "{end}"
+    );
+    host.finish().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_frame_that_cannot_be_serialized_says_so() {
+    let captured: Arc<Mutex<Option<StreamClosed>>> = Arc::new(Mutex::new(None));
+    let captured_in_handler = captured.clone();
+    let sidecar = Sidecar::new("t", "1").stream(
+        "unserializable",
+        move |_ctx: Context, _: Value, frames: Frames| {
+            let captured = captured_in_handler.clone();
+            async move {
+                let mut m: HashMap<(u8, u8), u8> = HashMap::new();
+                m.insert((1, 2), 3);
+                let error = frames.send(&m).await.unwrap_err();
+                *captured.lock().unwrap() = Some(error.clone());
+                Err(error.into())
+            }
+        },
+    );
+    let mut host = FakeHost::start(sidecar);
+    host.initialize().await;
+    let id = host
+        .request(
+            "stream/open",
+            json!({"stream": 8, "method": "unserializable", "params": {}}),
+        )
+        .await;
+    host.answer(id).await;
+    let end = host.recv().await;
+    assert_eq!(end["method"], "stream/error");
+    assert!(
+        end["params"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("could not be serialized"),
+        "{end}"
+    );
+    assert!(
+        matches!(
+            captured.lock().unwrap().take(),
+            Some(StreamClosed::Invalid(_))
+        ),
+        "expected StreamClosed::Invalid"
+    );
     host.finish().await.unwrap();
 }
 
