@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{oneshot, OwnedSemaphorePermit, Semaphore};
 
-use crate::outbox::Outbox;
+use crate::outbox::{Outbox, Unsent};
 use crate::HostError;
 
 pub(crate) const HOST_CALLS_IN_FLIGHT: usize = 8;
@@ -152,12 +152,15 @@ impl Host {
         let request = Request::new(RequestId::String(id.clone()), method, params);
         // Cancel-safe: a `send` dropped before it resolves queues nothing,
         // which is exactly why `guard.queued` is only set after it returns.
-        if self.inner.outbox.send(&request).await.is_err() {
+        if let Err(unsent) = self.inner.outbox.send(&request).await {
             guard.id = None;
             if let Some(waiting) = self.inner.waiting.lock().expect("not poisoned").as_mut() {
                 waiting.remove(&id);
             }
-            return Err(HostError::Disconnected);
+            return Err(match unsent {
+                Unsent::TooLarge(bytes) => HostError::TooLarge(bytes),
+                Unsent::Closed => HostError::Disconnected,
+            });
         }
         guard.queued = true;
         let outcome = answered.await;

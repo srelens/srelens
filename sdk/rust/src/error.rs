@@ -99,6 +99,7 @@ impl std::error::Error for SidecarError {}
 ///         HostError::InvalidParams(_) => "invalid",
 ///         HostError::Cancelled => "cancelled",
 ///         HostError::Rpc(_) => "rpc",
+///         HostError::TooLarge(_) => "too large",
 ///         HostError::Disconnected => "disconnected",
 ///     }
 /// }
@@ -117,6 +118,9 @@ pub enum HostError {
     Cancelled,
     /// Any other error srelens answered with.
     Rpc(RpcError),
+    /// The call serialized to this many bytes, over the message limit, so it
+    /// was never sent. srelens did not see it, and the session goes on.
+    TooLarge(usize),
     /// The session with srelens ended before it answered.
     Disconnected,
 }
@@ -141,6 +145,11 @@ impl fmt::Display for HostError {
             HostError::InvalidParams(why) => write!(f, "srelens refused the call's params: {why}"),
             HostError::Cancelled => f.write_str("the call to srelens was cancelled"),
             HostError::Rpc(error) => write!(f, "srelens answered with an error: {error}"),
+            HostError::TooLarge(bytes) => write!(
+                f,
+                "the call is {bytes} bytes, over the {} a message may be, so it was not sent",
+                crate::outbox::limit_text()
+            ),
             HostError::Disconnected => f.write_str("the session with srelens ended"),
         }
     }
@@ -163,6 +172,9 @@ pub enum StreamClosed {
     Cancelled,
     /// The frame is this many bytes, over the message limit.
     TooLarge(usize),
+    /// The stream's handler already returned, and its terminal frame was
+    /// sent: a clone of [`crate::Frames`] kept past the handler sends nothing.
+    Finished,
     /// The session ended.
     Ended,
     /// The frame could not be serialized; the serializer's message.
@@ -178,6 +190,7 @@ impl fmt::Display for StreamClosed {
                 "the frame is {bytes} bytes, over the {} a message may be",
                 crate::outbox::limit_text()
             ),
+            StreamClosed::Finished => f.write_str("the stream already ended: its handler returned"),
             StreamClosed::Ended => f.write_str("the session with srelens ended"),
             StreamClosed::Invalid(why) => write!(f, "the frame could not be serialized: {why}"),
         }

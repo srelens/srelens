@@ -230,6 +230,7 @@ impl Session {
         let shared = self.shared.clone().expect("initialized");
         let cancel = CancellationToken::new();
         let frames = Frames::new(open.stream, self.outbox.clone(), cancel.clone());
+        let closer = frames.clone();
         let work = match handler(Context::new(shared, cancel.clone()), open.params, frames) {
             Ok(work) => work,
             Err(refused) => return answer(&self.outbox, id, Err(refused.into_rpc())).await,
@@ -261,6 +262,9 @@ impl Session {
             if running.lock().expect("not poisoned").remove(&key).is_none() {
                 return;
             }
+            // A `Frames` clone kept past the handler must not follow the
+            // terminal frame with data.
+            closer.finish().await;
             let terminal = match ended {
                 Ok(()) => Notification::new(
                     method::STREAM_CLOSE,

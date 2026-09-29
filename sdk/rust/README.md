@@ -37,7 +37,7 @@ Declare the operations in the app's manifest
 - **Handlers.**
   - Each request runs on its own task, with its input read into your type. Input that does not fit is answered `-32602` without running the handler.
   - A handler's `Error` is the answer. A panic is answered `-32603`, and the sidecar keeps running.
-  - A stream ends in exactly one closing frame, even when its own error message is too large to send whole: that frame is replaced with one that says so instead.
+  - A stream ends in exactly one closing frame, even when its own error message is too large to send whole: that frame is replaced with one that says so instead. Nothing follows it: a `Frames` clone kept past the handler is refused (`StreamClosed::Finished`).
 - **Cancellation.**
   - When srelens cancels a request or a stream, `ctx.cancelled()` resolves and `ctx.is_cancelled()` turns true.
   - A cancelled request is answered `-32800` for you. A cancelled stream's `send` fails.
@@ -47,7 +47,7 @@ Declare the operations in the app's manifest
   - srelens adds no cluster to an operation's input: declare one, and pass it on.
   - At most 8 calls are in flight, which is srelens's limit; the rest wait.
   - Dropping a call's future cancels it at srelens once srelens has seen the request; dropped while still waiting for a slot, its place is freed at once instead, since srelens never saw it.
-  - Refusals come back as `HostError`: `ConsentDenied`, `CapabilityFailed`, `InvalidParams`, `Cancelled`, `Rpc` or `Disconnected`.
+  - Refusals come back as `HostError`: `ConsentDenied`, `CapabilityFailed`, `InvalidParams`, `Cancelled`, `Rpc` or `Disconnected`. A call too large to send is refused before it is sent (`HostError::TooLarge`), and the session goes on.
 - **Limits.** No line goes over the protocol's 4 MiB. A result that would be larger is answered with an error instead, and a frame that would be larger is refused to your handler, as is one that cannot be serialized (`StreamClosed::Invalid`).
 - **Logging.**
   - Use the `log` crate. Records go to stderr as `LEVEL target: message`, which srelens keeps in the app's log at that level.

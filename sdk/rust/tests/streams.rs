@@ -258,3 +258,42 @@ async fn a_frame_over_the_message_limit_is_refused_to_the_handler() {
     );
     host.finish().await.unwrap();
 }
+
+#[tokio::test]
+async fn a_frames_clone_kept_past_its_handler_sends_nothing_after_the_closing_frame() {
+    let kept: Arc<Mutex<Option<Frames>>> = Arc::new(Mutex::new(None));
+    let keep = kept.clone();
+    let sidecar =
+        Sidecar::new("t", "1").stream("leak", move |_ctx: Context, _: Value, frames: Frames| {
+            let keep = keep.clone();
+            async move {
+                *keep.lock().unwrap() = Some(frames.clone());
+                Ok::<_, Error>(())
+            }
+        });
+    let mut host = FakeHost::start(sidecar);
+    host.initialize().await;
+    let id = host
+        .request(
+            "stream/open",
+            json!({"stream": 9, "method": "leak", "params": {}}),
+        )
+        .await;
+    host.answer(id).await;
+    assert_eq!(
+        host.recv().await,
+        json!({"jsonrpc": "2.0", "method": "stream/close", "params": {"stream": 9}})
+    );
+    let frames = kept
+        .lock()
+        .unwrap()
+        .take()
+        .expect("the handler kept a clone");
+    assert_eq!(
+        frames.send(&"late").await,
+        Err(StreamClosed::Finished),
+        "a frame was queued after the stream's closing frame"
+    );
+    // `finish` also fails on any line not read, such as a late stream/data.
+    host.finish().await.unwrap();
+}

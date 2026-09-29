@@ -284,3 +284,37 @@ async fn a_cancelled_call_keeps_its_slot_until_srelens_answers() {
     }
     host.finish().await.unwrap();
 }
+
+#[tokio::test]
+async fn a_call_over_the_message_limit_is_refused_as_too_large_and_the_session_goes_on() {
+    let seen = Arc::new(Mutex::new(None));
+    let log = seen.clone();
+    let sidecar = Sidecar::new("t", "1").operation("big", move |ctx: Context, _: Value| {
+        let log = log.clone();
+        async move {
+            let name = "x".repeat(5 * 1024 * 1024);
+            let outcome = ctx.host().resource(&prod(), "apps", &name).await;
+            *log.lock().unwrap() = Some(outcome);
+            Ok::<_, Error>(())
+        }
+    });
+    let mut host = FakeHost::start(sidecar);
+    host.initialize().await;
+    let id = host.request("big", json!({})).await;
+    // The operation's own answer is the next line: no call reached the wire.
+    assert_eq!(host.answer(id).await["result"], Value::Null);
+    let error = seen
+        .lock()
+        .unwrap()
+        .take()
+        .expect("the handler ran")
+        .expect_err("a call over the limit cannot be sent");
+    assert!(
+        matches!(error, HostError::TooLarge(bytes) if bytes > 5 * 1024 * 1024),
+        "the session with srelens is still live; the call alone was too large: {error:?}"
+    );
+    assert!(error.to_string().contains("4 MiB"), "{error}");
+    let health = host.request("health", json!({})).await;
+    assert_eq!(host.answer(health).await["result"], json!({}));
+    host.finish().await.unwrap();
+}
