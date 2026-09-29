@@ -2,7 +2,7 @@
 //! starts in the OS sandbox and talks to over stdin and stdout
 //! (`docs/extensions/sidecar-protocol.md`).
 //!
-//! ```ignore
+//! ```no_run
 //! # use srelens_sidecar::{Context, Error, Sidecar};
 //! # #[derive(serde::Deserialize)] struct In { name: String }
 //! #[tokio::main]
@@ -23,6 +23,7 @@
 mod context;
 mod error;
 mod host;
+mod logging;
 mod outbox;
 mod session;
 mod sidecar;

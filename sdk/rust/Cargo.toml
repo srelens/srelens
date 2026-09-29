@@ -13,7 +13,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "io-
 tokio-util = { version = "0.7", features = ["rt"] }  # CancellationToken; AbortOnDropHandle needs "rt"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
-log = "0.4"
+log = { version = "0.4", features = ["std"] }
 
 [dev-dependencies]
 # Holds every line the SDK writes to the committed schema. No default

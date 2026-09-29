@@ -113,4 +113,22 @@ impl Sidecar {
         self.registry.streams.insert(name.to_owned(), open);
         self
     }
+
+    /// Serve srelens over stdin and stdout, then exit: 0 after `shutdown` or
+    /// when stdin closes, 1 when srelens wrote something that is not
+    /// JSON-RPC. Installs the stderr logger and the panic hook first. Exits
+    /// the process rather than returning: tokio's stdin reader cannot be
+    /// cancelled, and would keep the runtime from shutting down.
+    pub async fn run_stdio(self) -> std::process::ExitCode {
+        crate::logging::install();
+        let code = match self.run(tokio::io::stdin(), tokio::io::stdout()).await {
+            Ok(()) => 0,
+            Err(e) => {
+                log::error!("{e}");
+                1
+            }
+        };
+        log::logger().flush();
+        std::process::exit(code)
+    }
 }
