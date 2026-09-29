@@ -520,8 +520,13 @@ fn node_header_lines(d: &NodeInspectorDetails) -> Vec<Line<'_>> {
 
     if d.has_gpu {
         let model = d.gpu_model.as_deref().unwrap_or("GPU Accelerator");
+        let badge_text = if d.is_virtual_gpu && d.gpu_allocatable_count > 1 {
+            format!("[⚡ {} ({} vGPUs)] ", model, d.gpu_allocatable_count)
+        } else {
+            format!("[⚡ {}] ", model)
+        };
         row1_spans.push(Span::styled(
-            format!("[⚡ {}] ", model),
+            badge_text,
             Style::default()
                 .fg(Theme::YELLOW)
                 .add_modifier(Modifier::BOLD),
@@ -1284,6 +1289,7 @@ mod tests {
             gpu_requests_count: 0,
             gpu_memory_total_mib: None,
             gpu_memory_requests_mib: 0,
+            is_virtual_gpu: false,
             conditions: vec![],
             taints: vec![],
             pods: vec![

@@ -1,7 +1,7 @@
-use std::time::Duration;
 use k8s_openapi::api::core::v1::{Node, Pod};
 use kube::{api::ListParams, Api, Client};
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 
 /// Comprehensive inspection details for a single Kubernetes Node.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -46,6 +46,8 @@ pub struct NodeInspectorDetails {
     pub gpu_requests_count: i64,
     pub gpu_memory_total_mib: Option<i64>,
     pub gpu_memory_requests_mib: i64,
+    #[serde(default)]
+    pub is_virtual_gpu: bool,
 
     pub conditions: Vec<NodeConditionInfo>,
     pub taints: Vec<NodeTaintInfo>,
@@ -110,11 +112,21 @@ pub fn parse_node_details(node: &Node, pods: &[Pod]) -> NodeInspectorDetails {
         .as_ref()
         .and_then(|s| s.conditions.as_ref())
         .and_then(|conds| conds.iter().find(|c| c.type_ == "Ready"))
-        .map(|c| if c.status == "True" { "Ready" } else { "NotReady" })
+        .map(|c| {
+            if c.status == "True" {
+                "Ready"
+            } else {
+                "NotReady"
+            }
+        })
         .unwrap_or("Unknown")
         .to_string();
 
-    let unschedulable = node.spec.as_ref().and_then(|s| s.unschedulable).unwrap_or(false);
+    let unschedulable = node
+        .spec
+        .as_ref()
+        .and_then(|s| s.unschedulable)
+        .unwrap_or(false);
 
     // 2. Roles
     let roles = node
@@ -172,19 +184,35 @@ pub fn parse_node_details(node: &Node, pods: &[Pod]) -> NodeInspectorDetails {
     // 4. Addresses
     let addresses = node.status.as_ref().and_then(|s| s.addresses.as_ref());
     let internal_ip = addresses.and_then(|addrs| {
-        addrs.iter().find(|a| a.type_ == "InternalIP").map(|a| a.address.clone())
+        addrs
+            .iter()
+            .find(|a| a.type_ == "InternalIP")
+            .map(|a| a.address.clone())
     });
     let external_ip = addresses.and_then(|addrs| {
-        addrs.iter().find(|a| a.type_ == "ExternalIP").map(|a| a.address.clone())
+        addrs
+            .iter()
+            .find(|a| a.type_ == "ExternalIP")
+            .map(|a| a.address.clone())
     });
 
     // 5. System Info
     let node_info = node.status.as_ref().and_then(|s| s.node_info.as_ref());
-    let os_image = node_info.map(|i| i.os_image.clone()).unwrap_or_else(|| "-".to_string());
-    let kernel_version = node_info.map(|i| i.kernel_version.clone()).unwrap_or_else(|| "-".to_string());
-    let container_runtime = node_info.map(|i| i.container_runtime_version.clone()).unwrap_or_else(|| "-".to_string());
-    let kubelet_version = node_info.map(|i| i.kubelet_version.clone()).unwrap_or_else(|| "-".to_string());
-    let architecture = node_info.map(|i| i.architecture.clone()).unwrap_or_else(|| "-".to_string());
+    let os_image = node_info
+        .map(|i| i.os_image.clone())
+        .unwrap_or_else(|| "-".to_string());
+    let kernel_version = node_info
+        .map(|i| i.kernel_version.clone())
+        .unwrap_or_else(|| "-".to_string());
+    let container_runtime = node_info
+        .map(|i| i.container_runtime_version.clone())
+        .unwrap_or_else(|| "-".to_string());
+    let kubelet_version = node_info
+        .map(|i| i.kubelet_version.clone())
+        .unwrap_or_else(|| "-".to_string());
+    let architecture = node_info
+        .map(|i| i.architecture.clone())
+        .unwrap_or_else(|| "-".to_string());
     let created_at = crate::creation_timestamp_iso(node.metadata.creation_timestamp.as_ref());
 
     // 6. CPU, Memory, Pods Capacity & Allocatable
@@ -223,13 +251,33 @@ pub fn parse_node_details(node: &Node, pods: &[Pod]) -> NodeInspectorDetails {
     // 7. GPU & Accelerator Detection
     let mut gpu_capacity_count: i64 = 0;
     let mut gpu_allocatable_count: i64 = 0;
+    let mut is_virtual_gpu = false;
+
+    // Check HAMi virtual GPU annotation first
+    let hami_info = node
+        .metadata
+        .annotations
+        .as_ref()
+        .and_then(|a| a.get("hami.io/node-nvidia-register"))
+        .and_then(|ann| crate::gpu_info::parse_hami_register_annotation(ann));
+
+    let mut hami_vram_total_mib: Option<i64> = None;
+    let mut hami_model_name: Option<String> = None;
+
+    if let Some((v_gpus, v_vram, model)) = &hami_info {
+        if *v_gpus > 0 {
+            is_virtual_gpu = true;
+            gpu_capacity_count = gpu_capacity_count.max(*v_gpus);
+            gpu_allocatable_count = gpu_allocatable_count.max(*v_gpus);
+            if *v_vram > 0 {
+                hami_vram_total_mib = Some(*v_vram);
+            }
+            hami_model_name = model.clone();
+        }
+    }
 
     // Discrete GPU keys
-    let discrete_gpu_keys = [
-        "nvidia.com/gpu",
-        "amd.com/gpu",
-        "google.com/tpu",
-    ];
+    let discrete_gpu_keys = ["nvidia.com/gpu", "amd.com/gpu", "google.com/tpu"];
 
     for key in &discrete_gpu_keys {
         if let Some(cap) = capacity.and_then(|c| c.get(*key)) {
@@ -266,15 +314,31 @@ pub fn parse_node_details(node: &Node, pods: &[Pod]) -> NodeInspectorDetails {
         }
     }
 
+    // Check nvidia.com/vgpu capacity if present
+    if let Some(cap) = capacity.and_then(|c| c.get("nvidia.com/vgpu")) {
+        if let Ok(count) = cap.0.trim().parse::<i64>() {
+            gpu_capacity_count = gpu_capacity_count.max(count);
+            is_virtual_gpu = true;
+        }
+    }
+    if let Some(alloc) = allocatable.and_then(|a| a.get("nvidia.com/vgpu")) {
+        if let Ok(count) = alloc.0.trim().parse::<i64>() {
+            gpu_allocatable_count = gpu_allocatable_count.max(count);
+            is_virtual_gpu = true;
+        }
+    }
+
     // GPU Model & Driver Info
-    let gpu_model = labels.and_then(|l| {
-        l.get("nvidia.com/gpu.product")
-            .or_else(|| l.get("gpu.trivago.com/model"))
-            .or_else(|| l.get("nvidia.com/gpu.machine"))
-            .or_else(|| l.get("nvidia.com/gpu.family"))
-            .cloned()
-            .map(|m| m.replace('-', " "))
-    });
+    let gpu_model = labels
+        .and_then(|l| {
+            l.get("nvidia.com/gpu.product")
+                .or_else(|| l.get("gpu.trivago.com/model"))
+                .or_else(|| l.get("nvidia.com/gpu.machine"))
+                .or_else(|| l.get("nvidia.com/gpu.family"))
+                .cloned()
+                .map(|m| m.replace('-', " "))
+        })
+        .or(hami_model_name);
 
     let gpu_driver_version = labels.and_then(|l| {
         l.get("nvidia.com/cuda.driver-version")
@@ -288,41 +352,83 @@ pub fn parse_node_details(node: &Node, pods: &[Pod]) -> NodeInspectorDetails {
             .cloned()
     });
 
-    let mut gpu_memory_total_mib = labels.and_then(|l| {
+    let mut vram_per_gpu_mib: Option<i64> = labels.and_then(|l| {
         l.get("nvidia.com/gpu.memory")
             .and_then(|m| m.parse::<i64>().ok())
     });
 
     // Check capacity / allocatable for "nvidia.com/gpumem" (HAMi virtual memory)
-    if gpu_memory_total_mib.is_none() {
+    if vram_per_gpu_mib.is_none() {
         if let Some(mem_cap) = capacity.and_then(|c| c.get("nvidia.com/gpumem")) {
             if let Ok(val) = mem_cap.0.trim().parse::<i64>() {
-                gpu_memory_total_mib = Some(val);
+                let total_gpus = gpu_capacity_count.max(1);
+                vram_per_gpu_mib = Some(val / total_gpus);
             }
         }
     }
 
-    // If still none, fallback based on well-known GPU models
-    if gpu_memory_total_mib.is_none() {
+    if vram_per_gpu_mib.is_none() {
+        if let Some((v_gpus, v_vram, _)) = &hami_info {
+            if *v_gpus > 0 && *v_vram > 0 {
+                vram_per_gpu_mib = Some(*v_vram / *v_gpus);
+            }
+        }
+    }
+
+    // Fallback based on well-known GPU models
+    if vram_per_gpu_mib.is_none() {
         if let Some(model) = &gpu_model {
             let m_lower = model.to_lowercase();
             if m_lower.contains("t4") {
-                gpu_memory_total_mib = Some(15360); // 15 GiB
+                vram_per_gpu_mib = Some(15360); // 15 GiB
             } else if m_lower.contains("a100") {
-                gpu_memory_total_mib = Some(81920); // 80 GiB
+                if m_lower.contains("40gb") || m_lower.contains("40g") {
+                    vram_per_gpu_mib = Some(40960); // 40 GiB
+                } else {
+                    vram_per_gpu_mib = Some(81920); // 80 GiB
+                }
             } else if m_lower.contains("h100") {
-                gpu_memory_total_mib = Some(81920); // 80 GiB
-            } else if m_lower.contains("a10") || m_lower.contains("l40") {
-                gpu_memory_total_mib = Some(24576); // 24 GiB
+                vram_per_gpu_mib = Some(81920); // 80 GiB
+            } else if m_lower.contains("h200") {
+                vram_per_gpu_mib = Some(144384); // 141 GiB
+            } else if m_lower.contains("b200") {
+                vram_per_gpu_mib = Some(196608); // 192 GiB
+            } else if m_lower.contains("l40") {
+                vram_per_gpu_mib = Some(49152); // 48 GiB
+            } else if m_lower.contains("l4") {
+                vram_per_gpu_mib = Some(24576); // 24 GiB
+            } else if m_lower.contains("a10") || m_lower.contains("a30") {
+                vram_per_gpu_mib = Some(24576); // 24 GiB
             } else if m_lower.contains("v100") {
-                gpu_memory_total_mib = Some(16384); // 16 GiB
+                if m_lower.contains("32gb") || m_lower.contains("32g") {
+                    vram_per_gpu_mib = Some(32768);
+                } else {
+                    vram_per_gpu_mib = Some(16384); // 16 GiB
+                }
+            } else if m_lower.contains("rtx 4090") || m_lower.contains("rtx 3090") {
+                vram_per_gpu_mib = Some(24576); // 24 GiB
+            } else if m_lower.contains("a40") || m_lower.contains("a6000") {
+                vram_per_gpu_mib = Some(49152); // 48 GiB
             }
         }
     }
 
+    // Total node VRAM:
+    // If HAMi annotation provided explicit total virtual VRAM, use it!
+    // Otherwise multiply per-GPU VRAM by total GPU capacity count.
+    let gpu_memory_total_mib = hami_vram_total_mib
+        .or_else(|| vram_per_gpu_mib.map(|per_gpu| per_gpu * gpu_capacity_count.max(1)));
+
     let has_gpu = gpu_capacity_count > 0
+        || is_virtual_gpu
         || gpu_model.is_some()
-        || labels.map(|l| l.contains_key("nvidia.com/gpu.present") || l.contains_key("trivago.com/gpu") || l.contains_key("gpu.trivago.com/model")).unwrap_or(false);
+        || labels
+            .map(|l| {
+                l.contains_key("nvidia.com/gpu.present")
+                    || l.contains_key("trivago.com/gpu")
+                    || l.contains_key("gpu.trivago.com/model")
+            })
+            .unwrap_or(false);
 
     // 8. Conditions
     let conditions = node
@@ -367,7 +473,11 @@ pub fn parse_node_details(node: &Node, pods: &[Pod]) -> NodeInspectorDetails {
 
     for pod in pods {
         let p_name = pod.metadata.name.clone().unwrap_or_default();
-        let p_ns = pod.metadata.namespace.clone().unwrap_or_else(|| "default".to_string());
+        let p_ns = pod
+            .metadata
+            .namespace
+            .clone()
+            .unwrap_or_else(|| "default".to_string());
         let p_phase = pod
             .status
             .as_ref()
@@ -377,15 +487,14 @@ pub fn parse_node_details(node: &Node, pods: &[Pod]) -> NodeInspectorDetails {
         let age = crate::humanize_age(pod.metadata.creation_timestamp.as_ref());
 
         // Container ready count
-        let container_statuses = pod.status.as_ref().and_then(|s| s.container_statuses.as_ref());
+        let container_statuses = pod
+            .status
+            .as_ref()
+            .and_then(|s| s.container_statuses.as_ref());
         let ready_count = container_statuses
             .map(|cs| cs.iter().filter(|c| c.ready).count())
             .unwrap_or(0);
-        let total_containers = pod
-            .spec
-            .as_ref()
-            .map(|s| s.containers.len())
-            .unwrap_or(0);
+        let total_containers = pod.spec.as_ref().map(|s| s.containers.len()).unwrap_or(0);
         let ready_containers = format!("{}/{}", ready_count, total_containers);
 
         let restarts: i64 = container_statuses
@@ -408,49 +517,51 @@ pub fn parse_node_details(node: &Node, pods: &[Pod]) -> NodeInspectorDetails {
                         if let Some(mem) = reqs.get("memory") {
                             pod_mem_req += crate::metrics::mem_mib(&mem.0);
                         }
+                    }
+
+                    let mut c_gpu = 0;
+                    let mut c_vram = 0;
+
+                    let reqs_or_limits = res.requests.as_ref().or(res.limits.as_ref());
+                    if let Some(res_map) = reqs_or_limits {
                         for key in &discrete_gpu_keys {
-                            if let Some(gpu) = reqs.get(*key) {
+                            if let Some(gpu) = res_map.get(*key) {
                                 if let Ok(val) = gpu.0.trim().parse::<i64>() {
-                                    pod_gpu_req += val;
+                                    c_gpu += val;
                                 }
                             }
                         }
-                        if let Some(gpumem) = reqs.get("nvidia.com/gpumem") {
-                            if let Ok(val) = gpumem.0.trim().parse::<i64>() {
-                                pod_gpu_mem_req += val;
+                        if let Some(vgpu) = res_map.get("nvidia.com/vgpu") {
+                            if let Ok(val) = vgpu.0.trim().parse::<i64>() {
+                                c_gpu += val;
                             }
                         }
-                        for (k, v) in reqs {
+                        if let Some(q) = res_map
+                            .get("nvidia.com/gpumem")
+                            .or_else(|| res_map.get("nvidia.com/gpu-mem"))
+                            .or_else(|| res_map.get("nvidia.com/gpu.memory"))
+                            .or_else(|| res_map.get("nvidia.com/vcuda-memory"))
+                        {
+                            c_vram += crate::gpu_info::parse_vram_quantity(&q.0);
+                        }
+                        for (k, v) in res_map {
                             if k.starts_with("nvidia.com/mig-") {
                                 if let Ok(val) = v.0.trim().parse::<i64>() {
-                                    pod_gpu_req += val;
+                                    c_gpu += val;
+                                    c_vram += crate::gpu_info::parse_mig_slice_vram_mib(k) * val;
                                 }
                             }
                         }
                     }
-                    // Fallback to limits if requests not specified
-                    if pod_gpu_req == 0 && pod_gpu_mem_req == 0 {
-                        if let Some(limits) = &res.limits {
-                            for key in &discrete_gpu_keys {
-                                if let Some(gpu) = limits.get(*key) {
-                                    if let Ok(val) = gpu.0.trim().parse::<i64>() {
-                                        pod_gpu_req += val;
-                                    }
-                                }
-                            }
-                            if let Some(gpumem) = limits.get("nvidia.com/gpumem") {
-                                if let Ok(val) = gpumem.0.trim().parse::<i64>() {
-                                    pod_gpu_mem_req += val;
-                                }
-                            }
-                            for (k, v) in limits {
-                                if k.starts_with("nvidia.com/mig-") {
-                                    if let Ok(val) = v.0.trim().parse::<i64>() {
-                                        pod_gpu_req += val;
-                                    }
-                                }
+
+                    if c_gpu > 0 || c_vram > 0 {
+                        if c_vram == 0 && c_gpu > 0 {
+                            if let Some(vram_per_gpu) = vram_per_gpu_mib {
+                                c_vram = c_gpu * vram_per_gpu;
                             }
                         }
+                        pod_gpu_req += c_gpu;
+                        pod_gpu_mem_req += c_vram;
                     }
                 }
             }
@@ -536,6 +647,7 @@ pub fn parse_node_details(node: &Node, pods: &[Pod]) -> NodeInspectorDetails {
         gpu_requests_count,
         gpu_memory_total_mib,
         gpu_memory_requests_mib,
+        is_virtual_gpu,
         conditions,
         taints,
         pods: pod_items,
@@ -551,11 +663,23 @@ mod tests {
     #[test]
     fn test_parse_node_details_with_gpu_and_pods() {
         let mut labels = BTreeMap::new();
-        labels.insert("node.kubernetes.io/instance-type".to_string(), "g4dn.xlarge".to_string());
-        labels.insert("topology.kubernetes.io/zone".to_string(), "eu-west-1a".to_string());
+        labels.insert(
+            "node.kubernetes.io/instance-type".to_string(),
+            "g4dn.xlarge".to_string(),
+        );
+        labels.insert(
+            "topology.kubernetes.io/zone".to_string(),
+            "eu-west-1a".to_string(),
+        );
         labels.insert("nvidia.com/gpu.product".to_string(), "Tesla-T4".to_string());
-        labels.insert("nvidia.com/cuda.driver-version".to_string(), "535.129".to_string());
-        labels.insert("nvidia.com/cuda.runtime.version".to_string(), "12.2".to_string());
+        labels.insert(
+            "nvidia.com/cuda.driver-version".to_string(),
+            "535.129".to_string(),
+        );
+        labels.insert(
+            "nvidia.com/cuda.runtime.version".to_string(),
+            "12.2".to_string(),
+        );
 
         let mut allocatable = BTreeMap::new();
         allocatable.insert("cpu".to_string(), Quantity("4".to_string()));
@@ -657,5 +781,97 @@ mod tests {
         assert_eq!(details.pods[0].gpu_requests, 1);
         assert_eq!(details.taints.len(), 1);
         assert_eq!(details.taints[0].key, "nvidia.com/gpu");
+        assert!(!details.is_virtual_gpu);
+        assert_eq!(details.gpu_memory_total_mib, Some(15360));
+        assert_eq!(details.gpu_memory_requests_mib, 15360);
+    }
+
+    #[test]
+    fn test_parse_node_details_with_hami_annotation() {
+        let mut annotations = BTreeMap::new();
+        annotations.insert(
+            "hami.io/node-nvidia-register".to_string(),
+            r#"[{"id":"GPU-9d7a7548-daa1-a209-8b79-6d787abe9987","count":10,"devmem":15360,"devcore":100,"type":"NVIDIA-Tesla T4","mode":"hami-core","health":true,"devicepairscore":{}}]"#.to_string(),
+        );
+
+        let mut labels = BTreeMap::new();
+        labels.insert(
+            "node.kubernetes.io/instance-type".to_string(),
+            "virtual".to_string(),
+        );
+        labels.insert("nvidia.com/gpu.product".to_string(), "Tesla-T4".to_string());
+        labels.insert("nvidia.com/gpu.count".to_string(), "1".to_string());
+        labels.insert("nvidia.com/gpu.memory".to_string(), "15360".to_string());
+
+        let mut capacity = BTreeMap::new();
+        capacity.insert("cpu".to_string(), Quantity("16".to_string()));
+        capacity.insert("memory".to_string(), Quantity("64Gi".to_string()));
+        capacity.insert("nvidia.com/gpu".to_string(), Quantity("10".to_string()));
+
+        let node = Node {
+            metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
+                name: Some("data-processing-stage-gpu-flink-t4x1-l7hhl".to_string()),
+                annotations: Some(annotations),
+                labels: Some(labels),
+                ..Default::default()
+            },
+            status: Some(k8s_openapi::api::core::v1::NodeStatus {
+                allocatable: Some(capacity.clone()),
+                capacity: Some(capacity),
+                ..Default::default()
+            }),
+            spec: Some(k8s_openapi::api::core::v1::NodeSpec {
+                unschedulable: Some(false),
+                ..Default::default()
+            }),
+        };
+
+        // Pod with HAMi requests: 1 vGPU and 5 GiB VRAM
+        let mut pod_requests = BTreeMap::new();
+        pod_requests.insert("cpu".to_string(), Quantity("1".to_string()));
+        pod_requests.insert("memory".to_string(), Quantity("5Gi".to_string()));
+        pod_requests.insert("nvidia.com/gpu".to_string(), Quantity("1".to_string()));
+        pod_requests.insert(
+            "nvidia.com/gpumem".to_string(),
+            Quantity("5120".to_string()),
+        );
+
+        let pod = Pod {
+            metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
+                name: Some("flink-vision-taskmanager-1-10".to_string()),
+                namespace: Some("flink-image-tagging-processor".to_string()),
+                ..Default::default()
+            },
+            spec: Some(k8s_openapi::api::core::v1::PodSpec {
+                containers: vec![k8s_openapi::api::core::v1::Container {
+                    name: "python-worker-harness".to_string(),
+                    resources: Some(k8s_openapi::api::core::v1::ResourceRequirements {
+                        requests: Some(pod_requests),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            status: Some(k8s_openapi::api::core::v1::PodStatus {
+                phase: Some("Running".to_string()),
+                ..Default::default()
+            }),
+        };
+
+        let details = parse_node_details(&node, &[pod]);
+
+        assert!(details.has_gpu);
+        assert!(details.is_virtual_gpu);
+        assert_eq!(details.gpu_capacity_count, 10);
+        assert_eq!(details.gpu_allocatable_count, 10);
+        assert_eq!(details.gpu_requests_count, 1);
+        // 10 vGPUs * 15360 MiB = 153600 MiB = 150 GiB
+        assert_eq!(details.gpu_memory_total_mib, Some(153600));
+        assert_eq!(details.gpu_memory_requests_mib, 5120);
+        assert_eq!(details.gpu_model.as_deref(), Some("Tesla T4"));
+        assert_eq!(details.pods.len(), 1);
+        assert_eq!(details.pods[0].gpu_requests, 1);
+        assert_eq!(details.pods[0].gpu_mem_requests_mib, 5120);
     }
 }

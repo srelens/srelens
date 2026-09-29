@@ -4024,6 +4024,7 @@ mod tests {
             gpu_requests_count: 1,
             gpu_memory_total_mib: Some(15360),
             gpu_memory_requests_mib: 7168,
+            is_virtual_gpu: false,
             conditions: vec![NodeConditionInfo {
                 type_: "Ready".to_string(),
                 status: "True".to_string(),
@@ -4292,6 +4293,7 @@ mod tests {
             gpu_requests_count: 0,
             gpu_memory_total_mib: None,
             gpu_memory_requests_mib: 0,
+            is_virtual_gpu: false,
             conditions: vec![],
             taints: vec![],
             pods: mock_pods,
@@ -5331,6 +5333,7 @@ mod tests {
             gpu_requests_count: 0,
             gpu_memory_total_mib: None,
             gpu_memory_requests_mib: 0,
+            is_virtual_gpu: false,
             conditions: vec![],
             taints: vec![],
             pods: vec![NodePodItem {
@@ -5554,6 +5557,7 @@ mod tests {
             gpu_requests_count: 0,
             gpu_memory_total_mib: None,
             gpu_memory_requests_mib: 0,
+            is_virtual_gpu: false,
             conditions: vec![],
             taints: vec![],
             pods: vec![NodePodItem {

@@ -288,6 +288,7 @@ fn node_details(name: &str, unschedulable: bool) -> NodeInspectorDetails {
         gpu_requests_count: 0,
         gpu_memory_total_mib: Some(24_576),
         gpu_memory_requests_mib: 0,
+        is_virtual_gpu: false,
         conditions: vec![NodeConditionInfo {
             type_: "Ready".into(),
             status: "True".into(),

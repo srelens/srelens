@@ -112,6 +112,7 @@ fn node_details(name: &str) -> NodeInspectorDetails {
         gpu_requests_count: 0,
         gpu_memory_total_mib: None,
         gpu_memory_requests_mib: 0,
+        is_virtual_gpu: false,
         conditions: vec![NodeConditionInfo {
             type_: "Ready".to_string(),
             status: "True".to_string(),
@@ -471,6 +472,29 @@ fn node_inspector_gpu_gauge_prefers_vram_when_memory_requests_are_known() {
     let state = node_state(details);
     let text = render_node(200, 40, &state);
     assert!(text.contains("Tesla T4: 7.0/15.0 GiB VRAM (47%)"), "{text}");
+}
+
+#[test]
+fn node_inspector_gpu_gauge_shows_virtual_gpus_and_total_virtual_vram_for_hami() {
+    let mut details = node_details("gpu-node-hami");
+    details.has_gpu = true;
+    details.is_virtual_gpu = true;
+    details.gpu_model = Some("Tesla T4".to_string());
+    details.gpu_capacity_count = 10;
+    details.gpu_allocatable_count = 10;
+    details.gpu_requests_count = 3;
+    // 10 vGPUs * 15 GiB = 150 GiB total virtual VRAM
+    details.gpu_memory_total_mib = Some(153600);
+    details.gpu_memory_requests_mib = 15360; // 15 GiB requested
+    let state = node_state(details);
+    let text = render_node(200, 40, &state);
+    // Header card badge with Option A:
+    assert!(text.contains("Tesla T4 (10 vGPUs)"), "{text}");
+    // GPU gauge VRAM allocation:
+    assert!(
+        text.contains("Tesla T4: 15.0/150.0 GiB VRAM (10%)"),
+        "{text}"
+    );
 }
 
 #[test]
@@ -1234,7 +1258,11 @@ fn settings_view_highlights_the_focused_field_on_the_selected_card() {
     let b = render_buffer(120, 40, |f| render_settings_view(f, f.area(), &s));
     let l = common::render_lines(120, 40, |f| render_settings_view(f, f.area(), &s));
     let r = row_of(&l, "4. OpenAI-Compatible / Ollama (Local)") + 3;
-    assert!(l[r].contains("Base URL: http://localhost:11434/v1"), "{}", l[r]);
+    assert!(
+        l[r].contains("Base URL: http://localhost:11434/v1"),
+        "{}",
+        l[r]
+    );
     let bx = col(&l[r], "Base URL:");
     assert_eq!(b[(bx, r as u16)].fg, Theme::YELLOW);
     let vx = col(&l[r], "http://localhost:11434/v1");
@@ -2458,7 +2486,10 @@ fn tui_config_view_renders_cards_and_live_preview_at_wide_and_narrow() {
 }
 
 fn config_render(state: &TuiConfigViewState, config: &TuiConfig) -> String {
-    common::render_lines(140, 40, |f| render_tui_config_view(f, f.area(), state, config)).join("\n")
+    common::render_lines(140, 40, |f| {
+        render_tui_config_view(f, f.area(), state, config)
+    })
+    .join("\n")
 }
 
 #[test]
@@ -2474,7 +2505,10 @@ fn tui_config_argo_box_shows_each_setting_and_marks_the_selected_one() {
     let mut state = TuiConfigViewState::new();
 
     let unselected = config_render(&state, &config);
-    assert!(unselected.contains("Hub Context    hub-prod"), "{unselected}");
+    assert!(
+        unselected.contains("Hub Context    hub-prod"),
+        "{unselected}"
+    );
     assert!(unselected.contains("UI URL         https://argocd.example.com"));
     assert!(unselected.contains("Fetch Timeout  30s"));
     assert!(unselected.contains("j/k to select an ArgoCD setting"));
@@ -2484,10 +2518,19 @@ fn tui_config_argo_box_shows_each_setting_and_marks_the_selected_one() {
     assert!(url.contains("▶ UI URL"), "{url}");
     assert!(url.contains("e/Enter Edit · c Clear"));
     // The preview names the link `a` will open and what the timeout covers.
-    assert!(url.contains("UI Link:       https://argocd.example.com/applications/<application>"), "{url}");
+    assert!(
+        url.contains("UI Link:       https://argocd.example.com/applications/<application>"),
+        "{url}"
+    );
     assert!(url.contains("Fetch Timeout: 30s"));
-    assert!(url.contains("Opened by a in an :argo app's details."), "{url}");
-    assert!(url.contains("Bounds list and detail reads; never cuts off a sync."), "{url}");
+    assert!(
+        url.contains("Opened by a in an :argo app's details."),
+        "{url}"
+    );
+    assert!(
+        url.contains("Bounds list and detail reads; never cuts off a sync."),
+        "{url}"
+    );
 
     state.selected_field = FIELD_ARGO_TIMEOUT;
     let timeout = config_render(&state, &config);
@@ -2496,7 +2539,10 @@ fn tui_config_argo_box_shows_each_setting_and_marks_the_selected_one() {
 
     // Unset values say what being unset means.
     let empty = config_render(&state, &TuiConfig::default());
-    assert!(empty.contains("not set (a in app details is off)"), "{empty}");
+    assert!(
+        empty.contains("not set (a in app details is off)"),
+        "{empty}"
+    );
     assert!(empty.contains("inherit (8s request timeout)"));
 }
 
@@ -2526,9 +2572,15 @@ fn tui_config_argo_ui_url_is_validated_before_it_is_saved() {
     state.insert_str("https://argocd.example.com/");
     state.finish_editing(&mut config).unwrap();
     assert!(!state.is_editing);
-    assert_eq!(config.argo_ui_url.as_deref(), Some("https://argocd.example.com"));
+    assert_eq!(
+        config.argo_ui_url.as_deref(),
+        Some("https://argocd.example.com")
+    );
     let saved = std::fs::read_to_string(TuiConfig::config_file_path()).unwrap();
-    assert!(saved.contains(r#""argoUiUrl": "https://argocd.example.com""#), "{saved}");
+    assert!(
+        saved.contains(r#""argoUiUrl": "https://argocd.example.com""#),
+        "{saved}"
+    );
 
     // `c` clears it.
     assert!(state.is_clearable_field());
@@ -2548,11 +2600,17 @@ fn tui_config_argo_timeout_steps_and_applies_to_argo_reads() {
 
     state.adjust_current(1, &mut config).unwrap();
     assert_eq!(config.argo_timeout_secs, Some(5));
-    assert_eq!(srelens_kube::argo::argo_timeout(), std::time::Duration::from_secs(5));
+    assert_eq!(
+        srelens_kube::argo::argo_timeout(),
+        std::time::Duration::from_secs(5)
+    );
 
     state.adjust_current(1, &mut config).unwrap();
     assert_eq!(config.argo_timeout_secs, Some(10));
-    assert_eq!(srelens_kube::argo::argo_timeout(), std::time::Duration::from_secs(10));
+    assert_eq!(
+        srelens_kube::argo::argo_timeout(),
+        std::time::Duration::from_secs(10)
+    );
 
     // Space/Enter walk forward too, wrapping from the maximum to inherit.
     config.argo_timeout_secs = Some(120);
