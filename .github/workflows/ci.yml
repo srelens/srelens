@@ -276,7 +276,7 @@ jobs:
           toolchain: stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Build the suites
-        run: cargo test -p srelens-plugin-host --no-run
+        run: cargo test -p srelens-plugin-host -p srelens-sidecar-hello-world --no-run
       # A cgroup v2 subtree the runner's user owns, with the memory and cpu
       # controllers enabled for its children: what a systemd desktop would
       # delegate to srelens (a user scope with Delegate=yes). cgroup v2 lets a
@@ -301,11 +301,16 @@ jobs:
           echo $$ | sudo tee /sys/fs/cgroup/srelens-ci/host/cgroup.procs
           echo "+memory +cpu" > /sys/fs/cgroup/srelens-ci/cgroup.subtree_control
           cargo test -p srelens-plugin-host --test sandbox_conformance -- --ignored --test-threads=1 --nocapture
+          SRELENS_SANDBOX_LAUNCHER="$PWD/target/debug/srelens-sandbox-launch" \
+            cargo test -p srelens-sidecar-hello-world --test sandboxed -- --ignored --test-threads=1 --nocapture
       # One thread, and the AppContainer profile's cleanup is the test that
       # sorts last.
       - name: Conformance
         if: runner.os == 'Windows'
         run: cargo test -p srelens-plugin-host --test sandbox_conformance -- --ignored --test-threads=1 --nocapture
+      - name: The Rust SDK example in the sandbox
+        if: runner.os == 'Windows'
+        run: cargo test -p srelens-sidecar-hello-world --test sandboxed -- --ignored --test-threads=1 --nocapture
       # bash, not the default PowerShell, which fails a step only on its last
       # command's exit status.
       - name: The other sidecar suites
@@ -314,6 +319,7 @@ jobs:
         run: |
           cargo test -p srelens-plugin-host --lib sidecar
           cargo test -p srelens-plugin-host --test sidecar --test sidecar_process
+          cargo test -p srelens-sidecar -p srelens-sidecar-hello-world
 
   # The WebDriver smoke suite (issue #30): the REAL built app — WebView and
   # all — driven through tauri-driver against a kind cluster. This is the
