@@ -1,6 +1,8 @@
 //! A fake srelens: drives `Sidecar::run` over in-memory pipes, as the
 //! supervisor would, and holds every line the sidecar writes to the committed
-//! schema's `SidecarMessage`.
+//! schema's `SidecarMessage` -- including anything written after the test's
+//! last explicit read, which `finish` and `ended` drain and check before
+//! they return.
 
 #![allow(dead_code)]
 
@@ -135,22 +137,57 @@ impl FakeHost {
         initialized["result"].clone()
     }
 
-    /// Close the sidecar's stdin and wait for the session to end.
+    /// Close the sidecar's stdin and wait for the session to end. Then check
+    /// that nothing was left on its stdout unread (see [`drain`]).
     pub async fn finish(mut self) -> Result<(), SidecarError> {
         self.to_sidecar.shutdown().await.unwrap();
         drop(self.to_sidecar);
-        tokio::time::timeout(WAIT, self.session)
+        let ended = tokio::time::timeout(WAIT, self.session)
             .await
             .expect("the session ended in time")
-            .expect("the session did not panic")
+            .expect("the session did not panic");
+        drain(&mut self.from_sidecar).await;
+        ended
     }
 
     /// Wait for the session to end without closing stdin (after `shutdown`).
-    pub async fn ended(self) -> Result<(), SidecarError> {
-        tokio::time::timeout(WAIT, self.session)
+    /// Then check that nothing was left on its stdout unread (see [`drain`]).
+    pub async fn ended(mut self) -> Result<(), SidecarError> {
+        let ended = tokio::time::timeout(WAIT, self.session)
             .await
             .expect("the session ended in time")
-            .expect("the session did not panic")
+            .expect("the session did not panic");
+        drain(&mut self.from_sidecar).await;
+        ended
+    }
+}
+
+/// Read `from_sidecar` to EOF (bounded by [`WAIT`]), validating every
+/// remaining line exactly as [`FakeHost::recv`] does. Called once the
+/// session has ended, when EOF should follow quickly: the writer task
+/// returns and shuts its write half down. Any line still here is one no
+/// test assertion consumed -- invalid JSON, a schema-refused line, a
+/// duplicate answer, anything -- and that is itself the failure this
+/// harness exists to catch.
+async fn drain(from_sidecar: &mut Lines<BufReader<ReadHalf<DuplexStream>>>) {
+    loop {
+        let line = tokio::time::timeout(WAIT, from_sidecar.next_line())
+            .await
+            .expect("the sidecar's stdout did not close in time")
+            .expect("its stdout reads");
+        let Some(line) = line else {
+            return; // EOF: nothing left unread.
+        };
+        let message: Value = serde_json::from_str(&line).expect("one JSON object per line");
+        let errors: Vec<String> = sidecar_message()
+            .iter_errors(&message)
+            .map(|e| e.to_string())
+            .collect();
+        assert!(
+            errors.is_empty(),
+            "the sidecar wrote {message}, which the schema refuses: {errors:?}"
+        );
+        panic!("the sidecar wrote {message}, which the test never read");
     }
 }
 

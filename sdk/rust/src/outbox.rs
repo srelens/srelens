@@ -22,7 +22,9 @@ pub(crate) enum Unsent {
 
 enum Line {
     Text(String),
-    Flush(oneshot::Sender<()>),
+    /// There is nothing more to write: flush, shut the writer down (so the
+    /// reader on the other end sees the sidecar's output end), then ack.
+    Close(oneshot::Sender<()>),
 }
 
 #[derive(Clone)]
@@ -46,11 +48,14 @@ impl Outbox {
             .map_err(|_| Unsent::Closed)
     }
 
-    /// Wait until every line queued before this call is written and flushed.
-    pub(crate) async fn flush(&self) {
-        let (done, flushed) = oneshot::channel();
-        if self.0.send(Line::Flush(done)).await.is_ok() {
-            let _ = flushed.await;
+    /// Tell the writer there is nothing more to write, and wait for it to
+    /// flush, shut down and stop; a line queued after this call is never
+    /// written. If the writer is already gone (it failed, or was already
+    /// closed), there is nothing to wait for.
+    pub(crate) async fn close(&self) {
+        let (done, closed) = oneshot::channel();
+        if self.0.send(Line::Close(done)).await.is_ok() {
+            let _ = closed.await;
         }
     }
 }
@@ -66,13 +71,15 @@ impl Writer {
                     out.write_all(text.as_bytes()).await?;
                     out.flush().await?;
                 }
-                Line::Flush(done) => {
+                Line::Close(done) => {
                     out.flush().await?;
+                    out.shutdown().await?;
                     let _ = done.send(());
+                    return Ok(());
                 }
             }
         }
-        out.flush().await
+        out.shutdown().await
     }
 }
 

@@ -42,7 +42,7 @@ where
     W: AsyncWrite + Unpin + Send + 'static,
 {
     let (outbox, lines) = Outbox::new();
-    let writer = tokio::spawn(lines.run(writer));
+    let mut writer = tokio::spawn(lines.run(writer));
     let mut session = Session {
         sidecar: Arc::new(sidecar),
         outbox: outbox.clone(),
@@ -51,31 +51,65 @@ where
         tasks: JoinSet::new(),
     };
     let mut input = BufReader::new(reader).lines();
+    // Whether the loop below already consumed (awaited) the writer's
+    // JoinHandle: that happens only when the writer itself ends the
+    // session, in which case awaiting it again is neither needed nor safe.
+    let mut writer_consumed = false;
     let ended = loop {
-        let line = match input.next_line().await {
-            Ok(Some(line)) => line,
-            Ok(None) => break Ok(()),
-            Err(e) => break Err(SidecarError::Io(e)),
-        };
-        if line.trim().is_empty() {
-            continue;
-        }
-        let message = match Message::parse(&line) {
-            Ok(message) => message,
-            Err(why) => {
-                log::error!("srelens wrote a line that is not JSON-RPC: {why}");
-                break Err(SidecarError::Protocol(why));
+        tokio::select! {
+            line = input.next_line() => {
+                let line = match line {
+                    Ok(Some(line)) => line,
+                    Ok(None) => break Ok(()),
+                    Err(e) => break Err(SidecarError::Io(e)),
+                };
+                if line.trim().is_empty() {
+                    continue;
+                }
+                let message = match Message::parse(&line) {
+                    Ok(message) => message,
+                    Err(why) => {
+                        log::error!("srelens wrote a line that is not JSON-RPC: {why}");
+                        break Err(SidecarError::Protocol(why));
+                    }
+                };
+                match session.handle(message).await {
+                    Flow::Continue => {}
+                    Flow::Shutdown => break Ok(()),
+                }
             }
-        };
-        match session.handle(message).await {
-            Flow::Continue => {}
-            Flow::Shutdown => break Ok(()),
+            // The writer stopped on its own -- a write to srelens failed, or
+            // it panicked -- before the session otherwise decided to end.
+            result = &mut writer => {
+                writer_consumed = true;
+                break Err(writer_stopped(result));
+            }
         }
     };
     session.end();
-    outbox.flush().await;
-    writer.abort();
+    outbox.close().await;
+    let ended = if writer_consumed {
+        ended
+    } else {
+        // The session ended for its own reason (srelens's input ended, or it
+        // shut the sidecar down); a write failure on the way out still
+        // matters more than a clean `Ok(())`.
+        match (ended, writer.await) {
+            (Ok(()), Ok(Err(e))) => Err(SidecarError::Io(e)),
+            (ended, _) => ended,
+        }
+    };
     ended
+}
+
+/// Why the session ends when the writer stops on its own, before the
+/// session otherwise decided to: the writer's own error if it had one, or a
+/// stand-in if it returned `Ok` unasked or panicked.
+fn writer_stopped(result: Result<std::io::Result<()>, tokio::task::JoinError>) -> SidecarError {
+    match result {
+        Ok(Err(e)) => SidecarError::Io(e),
+        _ => SidecarError::Io(std::io::Error::other("the writer stopped")),
+    }
 }
 
 struct Session {

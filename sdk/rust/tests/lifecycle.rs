@@ -1,11 +1,36 @@
 mod common;
 
-use common::{initialize_params, is_sidecar_message, FakeHost};
+use common::{initialize_params, is_sidecar_message, FakeHost, WAIT};
 use serde_json::json;
-use srelens_sidecar::Sidecar;
+use srelens_sidecar::{Sidecar, SidecarError};
+use std::io;
+use std::pin::Pin;
+use std::task::{Context, Poll};
+use tokio::io::AsyncWrite;
 
 fn sidecar() -> Sidecar {
     Sidecar::new("test-sidecar", "1.2.3")
+}
+
+/// A writer whose every write fails, as a broken pipe would.
+struct FailingWriter;
+
+impl AsyncWrite for FailingWriter {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        _buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Poll::Ready(Err(io::Error::other("broken pipe")))
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
 }
 
 #[tokio::test]
@@ -70,7 +95,21 @@ async fn the_session_ends_when_its_input_does() {
 async fn a_line_from_srelens_that_is_not_json_rpc_ends_the_session_with_an_error() {
     let mut host = FakeHost::start(sidecar());
     host.send_raw("this is not json").await;
-    assert!(host.ended().await.is_err());
+    assert!(matches!(host.ended().await, Err(SidecarError::Protocol(_))));
+}
+
+#[tokio::test]
+async fn a_sidecar_whose_output_fails_ends_with_an_io_error() {
+    let line = format!(
+        "{}\n",
+        json!({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+               "params": initialize_params(&["0.1.0"], "/d")})
+    );
+    let reader = io::Cursor::new(line.into_bytes());
+    let result = tokio::time::timeout(WAIT, sidecar().run(reader, FailingWriter))
+        .await
+        .expect("the session ended in time");
+    assert!(matches!(result, Err(SidecarError::Io(_))), "{result:?}");
 }
 
 #[test]
