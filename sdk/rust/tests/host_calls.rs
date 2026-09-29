@@ -89,13 +89,12 @@ async fn the_hosts_refusals_become_host_errors_by_code() {
             .await;
         host.answer(id).await;
     }
-    let seen = seen.lock().unwrap();
+    let seen = seen.lock().unwrap().clone();
     assert_eq!(seen[0], Err(HostError::ConsentDenied("declined".into())));
     assert_eq!(seen[1], Err(HostError::CapabilityFailed("no grant".into())));
     assert_eq!(seen[2], Err(HostError::InvalidParams("bad".into())));
     assert_eq!(seen[3], Err(HostError::Cancelled));
     assert!(matches!(&seen[4], Err(HostError::Rpc(e)) if e.code == -32601));
-    drop(seen);
     host.finish().await.unwrap();
 }
 
@@ -115,7 +114,7 @@ async fn a_call_the_sidecar_stops_waiting_for_is_cancelled_at_the_host() {
     let call = host.call().await;
     host.notify("$/cancelRequest", json!({"id": id})).await;
     // srelens's cancel answer and the sidecar's cancel of its own call, in either order.
-    let mut lines = vec![host.recv().await, host.recv().await];
+    let mut lines = [host.recv().await, host.recv().await];
     lines.sort_by_key(|m| m.get("method").is_some());
     assert_eq!(lines[0]["error"]["code"], -32800);
     assert_eq!(
@@ -186,7 +185,7 @@ async fn calls_waiting_when_the_session_ends_are_disconnected() {
     host.initialize().await;
     let id = host.request("read", json!({})).await;
     // The op's own answer and the detached task's host/read call, in either order.
-    let mut lines = vec![host.recv().await, host.recv().await];
+    let mut lines = [host.recv().await, host.recv().await];
     lines.sort_by_key(|m| m.get("method").is_some());
     assert_eq!(lines[0]["id"], json!(id));
     assert_eq!(lines[1]["method"], "host/read");

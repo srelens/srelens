@@ -192,25 +192,23 @@ impl FakeHost {
 /// duplicate answer, anything -- and that is itself the failure this
 /// harness exists to catch.
 async fn drain(from_sidecar: &mut Lines<BufReader<ReadHalf<DuplexStream>>>) {
-    loop {
-        let line = tokio::time::timeout(WAIT, from_sidecar.next_line())
-            .await
-            .expect("the sidecar's stdout did not close in time")
-            .expect("its stdout reads");
-        let Some(line) = line else {
-            return; // EOF: nothing left unread.
-        };
-        let message: Value = serde_json::from_str(&line).expect("one JSON object per line");
-        let errors: Vec<String> = sidecar_message()
-            .iter_errors(&message)
-            .map(|e| e.to_string())
-            .collect();
-        assert!(
-            errors.is_empty(),
-            "the sidecar wrote {message}, which the schema refuses: {errors:?}"
-        );
-        panic!("the sidecar wrote {message}, which the test never read");
-    }
+    let line = tokio::time::timeout(WAIT, from_sidecar.next_line())
+        .await
+        .expect("the sidecar's stdout did not close in time")
+        .expect("its stdout reads");
+    let Some(line) = line else {
+        return; // EOF: nothing left unread.
+    };
+    let message: Value = serde_json::from_str(&line).expect("one JSON object per line");
+    let errors: Vec<String> = sidecar_message()
+        .iter_errors(&message)
+        .map(|e| e.to_string())
+        .collect();
+    assert!(
+        errors.is_empty(),
+        "the sidecar wrote {message}, which the schema refuses: {errors:?}"
+    );
+    panic!("the sidecar wrote {message}, which the test never read");
 }
 
 pub fn initialize_params(offered: &[&str], data_dir: &str) -> Value {
