@@ -155,7 +155,8 @@ pub struct StreamCancelParams {
 /// The cluster and namespace one call names. Every call from a sidecar
 /// carries one: srelens has no current cluster to assume.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields, remote = "Self")]
+#[schemars(rename = "CallContext")]
 pub struct CallContext {
     /// A cluster as srelens names it: the `context` of the request the
     /// sidecar is serving, a kubeconfig context's stable ID, pinned ID or
@@ -172,7 +173,8 @@ pub struct CallContext {
 /// `host/read`'s params: read one of the app's declared readers, or one of
 /// its `network.http` requests.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields, remote = "Self")]
+#[schemars(rename = "HostReadParams")]
 pub struct HostReadParams {
     pub context: CallContext,
     #[schemars(schema_with = "identifier")]
@@ -182,7 +184,8 @@ pub struct HostReadParams {
 /// `host/resource`'s params: inspect object `name` of a declared
 /// custom-resource reader.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields, remote = "Self")]
+#[schemars(rename = "HostResourceParams")]
 pub struct HostResourceParams {
     pub context: CallContext,
     #[schemars(schema_with = "identifier")]
@@ -194,7 +197,8 @@ pub struct HostResourceParams {
 /// `host/action`'s params: run one of the app's declared actions on object
 /// `name`, as read (`uid`, `resourceVersion`), once a person has confirmed it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields, remote = "Self")]
+#[schemars(rename = "HostActionParams")]
 pub struct HostActionParams {
     pub context: CallContext,
     #[schemars(schema_with = "identifier")]
@@ -208,6 +212,83 @@ pub struct HostActionParams {
     #[schemars(schema_with = "token")]
     pub resource_version: String,
 }
+
+/// Why [`CallContext::new`] refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContextError {
+    ClusterId,
+    Namespace(String),
+}
+
+impl std::fmt::Display for ContextError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ContextError::ClusterId => write!(
+                f,
+                "`clusterId` must name a cluster, in at most {MAX_CLUSTER_ID_BYTES} bytes"
+            ),
+            ContextError::Namespace(namespace) => write!(
+                f,
+                "`namespace` must be a Kubernetes namespace name, or none; not {:?}",
+                namespace.chars().take(64).collect::<String>()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ContextError {}
+
+impl CallContext {
+    /// The cluster and namespace a call names, held to the shapes srelens
+    /// checks: a cluster that is not blank and at most 4096 bytes, and a
+    /// Kubernetes namespace name or none.
+    pub fn new(
+        cluster: impl Into<String>,
+        namespace: Option<&str>,
+    ) -> Result<CallContext, ContextError> {
+        let cluster_id = cluster.into();
+        if !crate::shape::is_cluster_id(&cluster_id) {
+            return Err(ContextError::ClusterId);
+        }
+        if let Some(namespace) = namespace {
+            if !crate::shape::is_namespace(namespace) {
+                return Err(ContextError::Namespace(namespace.to_owned()));
+            }
+        }
+        Ok(CallContext {
+            cluster_id,
+            namespace: namespace.map(str::to_owned),
+        })
+    }
+}
+
+/// serde's derive also reads a struct from a JSON array (`["prod", "team"]`),
+/// which the protocol never allows and srelens refuses. These types derive
+/// with `#[serde(remote = "Self")]`, which makes the derived code inherent
+/// functions, and implement the traits here: writing is unchanged, and
+/// reading takes an object only, then runs the derived reader on it.
+macro_rules! object_only {
+    ($($ty:ident),*) => {$(
+        impl Serialize for $ty {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                $ty::serialize(self, serializer)
+            }
+        }
+        impl<'de> Deserialize<'de> for $ty {
+            fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+                let fields = serde_json::Map::<String, Value>::deserialize(deserializer)?;
+                $ty::deserialize(Value::Object(fields)).map_err(serde::de::Error::custom)
+            }
+        }
+    )*};
+}
+
+object_only!(
+    CallContext,
+    HostReadParams,
+    HostResourceParams,
+    HostActionParams
+);
 
 /// A required field that may be null: absent is refused, null is `None`.
 fn explicit<'de, D: Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
@@ -454,5 +535,68 @@ mod tests {
         let data: UnsupportedApiVersion =
             serde_json::from_value(json!({"supported": ["1.0.0"]})).unwrap();
         assert_eq!(data.supported, ["1.0.0"]);
+    }
+
+    #[test]
+    fn a_call_to_the_host_is_an_object_never_a_list() {
+        assert!(serde_json::from_value::<CallContext>(json!(["prod", "team"])).is_err());
+        assert!(serde_json::from_value::<CallContext>(json!(["prod", null])).is_err());
+        assert!(serde_json::from_value::<HostReadParams>(json!([["prod", null], "apps"])).is_err());
+        assert!(serde_json::from_value::<HostReadParams>(
+            json!({"context": ["prod", null], "capability": "apps"})
+        )
+        .is_err());
+        assert!(
+            serde_json::from_value::<HostResourceParams>(json!([["p", null], "apps", "web"]))
+                .is_err()
+        );
+        assert!(serde_json::from_value::<HostActionParams>(json!([
+            ["p", null],
+            "apps",
+            "web",
+            "sync",
+            "u",
+            "1"
+        ]))
+        .is_err());
+        // The object form still reads, and the old messages stay.
+        let context: CallContext =
+            serde_json::from_value(json!({"clusterId": "prod", "namespace": null})).unwrap();
+        assert_eq!(context.cluster_id, "prod");
+        let missing =
+            serde_json::from_value::<CallContext>(json!({"clusterId": "prod"})).unwrap_err();
+        assert!(
+            missing.to_string().contains("missing field `namespace`"),
+            "{missing}"
+        );
+    }
+
+    #[test]
+    fn a_context_built_in_a_sidecar_is_held_to_the_shapes_srelens_checks() {
+        let ok = CallContext::new("kind-dev", Some("team")).unwrap();
+        assert_eq!(ok.cluster_id, "kind-dev");
+        assert_eq!(ok.namespace.as_deref(), Some("team"));
+        assert_eq!(CallContext::new("kind-dev", None).unwrap().namespace, None);
+        assert_eq!(
+            CallContext::new("x".repeat(4096), None).map(|c| c.cluster_id.len()),
+            Ok(4096)
+        );
+        for cluster in ["", "   ", &"x".repeat(4097)] {
+            assert_eq!(
+                CallContext::new(cluster, None),
+                Err(ContextError::ClusterId),
+                "{cluster:?}"
+            );
+        }
+        // 3000 two-byte characters: 6000 bytes, over the byte limit.
+        assert_eq!(
+            CallContext::new("é".repeat(3000), None),
+            Err(ContextError::ClusterId)
+        );
+        for namespace in ["", "Team", "-team", "team-", "te.am", &"a".repeat(64)] {
+            let refused = CallContext::new("kind-dev", Some(namespace)).unwrap_err();
+            assert_eq!(refused, ContextError::Namespace(namespace.to_owned()));
+            assert!(refused.to_string().contains("namespace"), "{refused}");
+        }
     }
 }

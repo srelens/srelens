@@ -16,6 +16,7 @@ mod bounds;
 mod messages;
 mod methods;
 mod schema;
+pub mod shape;
 mod wire;
 
 pub use bounds::{
@@ -26,9 +27,9 @@ pub use methods::{is_reserved, Direction, Kind, MethodSpec, METHODS};
 pub use schema::{schema, schema_file};
 
 pub use messages::{
-    CallContext, CancelParams, Empty, HostActionParams, HostReadParams, HostResourceParams,
-    InitializeLimits, InitializeParams, InitializeResult, Peer, RequestId, StreamCancelParams,
-    StreamCloseParams, StreamDataParams, StreamErrorParams, StreamOpenParams,
+    CallContext, CancelParams, ContextError, Empty, HostActionParams, HostReadParams,
+    HostResourceParams, InitializeLimits, InitializeParams, InitializeResult, Peer, RequestId,
+    StreamCancelParams, StreamCloseParams, StreamDataParams, StreamErrorParams, StreamOpenParams,
     UnsupportedApiVersion,
 };
 
