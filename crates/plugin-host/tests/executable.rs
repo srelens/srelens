@@ -294,7 +294,8 @@ fn an_operation_runs_under_the_hosts_row_not_the_apps() {
 /// is not a caller, so the example is parsed like one.
 #[test]
 fn the_reference_example_is_a_manifest_this_host_accepts() {
-    let reference = include_str!("../../../docs/extensions/manifest.md");
+    // LF in the index but CRLF in a `core.autocrlf=true` checkout; the splits below want LF.
+    let reference = include_str!("../../../docs/extensions/manifest.md").replace("\r\n", "\n");
     let section = reference
         .split("\n## Executable apps\n")
         .nth(1)
