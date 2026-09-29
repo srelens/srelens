@@ -7634,6 +7634,7 @@ impl App {
                     } else {
                         "Refreshing triage report..."
                     };
+                    self.refresh_argo_applications_ext(true);
                     self.refresh_changed_triage();
                     self.set_toast(msg.to_string(), Theme::status_ok());
                 }

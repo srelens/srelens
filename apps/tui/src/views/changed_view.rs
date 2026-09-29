@@ -1459,7 +1459,7 @@ pub fn argo_coverage_line(c: &ArgoCoverage) -> Option<Line<'static>> {
                 .error
                 .as_deref()
                 .map(|e| format!("; last refresh: {e}"))
-                .unwrap_or_else(|| "; refreshing".to_string());
+                .unwrap_or_default();
             (format!("{n} apps {from}{age}{failed}"), warn)
         }
         ArgoCoverageState::Partial => (

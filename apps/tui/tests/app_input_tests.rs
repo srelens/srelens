@@ -5634,6 +5634,13 @@ async fn changed_view_command_and_interaction_flow() {
         assert_eq!(changed.current_window_label(), "15m");
     }
 
+    // Press 'r' to refresh triage and force-refresh argo
+    press(&mut app, ch('r')).await;
+    assert!(
+        app.argo_refreshing,
+        "pressing 'r' in :changed must trigger argo refresh"
+    );
+
     // Press Esc to exit back to previous view (pops both :changed invocations)
     press(&mut app, key(KeyCode::Esc)).await;
     press(&mut app, key(KeyCode::Esc)).await;

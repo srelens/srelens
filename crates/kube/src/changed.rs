@@ -863,7 +863,8 @@ const CLOCK_SLACK: SignedDuration = SignedDuration::from_secs(60);
 const NOT_LISTED: &str = ", which Argo did not list";
 
 /// A complete Argo list older than this is reported as stale.
-const ARGO_STALE_AFTER: SignedDuration = SignedDuration::from_secs(5 * 60);
+const ARGO_STALE_AFTER: SignedDuration =
+    SignedDuration::from_secs(crate::argo::ARGO_FRESH_FOR.as_secs() as i64);
 
 /// What a rollout newer than the Argo data says instead of "no Argo sync
 /// around this rollout": its sync cannot be in that history yet.
@@ -4804,6 +4805,16 @@ mod tests {
             }),
             ArgoCoverageState::Stale,
             "kept after a failed refresh"
+        );
+        assert_eq!(
+            state(ArgoSnapshot {
+                apps: app(),
+                complete: true,
+                fetched_at: Some(ago(8 * 60)),
+                ..Default::default()
+            }),
+            ArgoCoverageState::Complete,
+            "8 minutes old is within 10m TTL, not stale"
         );
         assert_eq!(
             state(ArgoSnapshot {

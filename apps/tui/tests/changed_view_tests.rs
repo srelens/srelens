@@ -1306,6 +1306,22 @@ fn the_card_says_how_much_of_argo_its_gitops_fields_were_matched_against() {
     );
     assert!(stale.contains("last refresh: hub unreachable"), "{stale}");
 
+    let stale_no_err = card_with_argo(ArgoCoverage {
+        state: ArgoCoverageState::Stale,
+        apps_loaded: 171,
+        hub: hub(),
+        fetched_at: Some("2026-09-01T10:00:00Z".to_string()),
+        error: None,
+    });
+    assert!(
+        stale_no_err.contains("Argo: 171 apps from hub tools, as of"),
+        "{stale_no_err}"
+    );
+    assert!(
+        !stale_no_err.contains("refreshing"),
+        "stale with no active refresh must not say refreshing: {stale_no_err}"
+    );
+
     let down = card_with_argo(ArgoCoverage {
         state: ArgoCoverageState::Unavailable,
         error: Some("Argo lookup timed out after 20s".to_string()),
