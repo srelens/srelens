@@ -47,12 +47,12 @@ Declare the operations in the app's manifest
   - At most 8 calls are in flight, which is srelens's limit; the rest wait.
   - Dropping a call's future cancels it at srelens once srelens has seen the request; dropped while still waiting for a slot, its place is freed at once instead, since srelens never saw it.
   - Refusals come back as `HostError`: `ConsentDenied`, `CapabilityFailed`, `InvalidParams`, `Cancelled`, `Rpc` or `Disconnected`.
-- **Limits.** No line goes over the protocol's 4 MiB. A result that would be larger is answered with an error instead, and a frame that would be larger is refused to your handler.
+- **Limits.** No line goes over the protocol's 4 MiB. A result that would be larger is answered with an error instead, and a frame that would be larger is refused to your handler, as is one that cannot be serialized (`StreamClosed::Invalid`).
 - **Logging.**
   - Use the `log` crate. Records go to stderr as `LEVEL target: message`, which srelens keeps in the app's log at that level.
   - Each line is cut to the 4 KiB srelens keeps.
   - A panic is logged as an error.
-- **Exit.** The process exits after `shutdown`, or when srelens goes away, having flushed everything queued first — the session never cuts off its own last line. It exits 0 once that is done, and 1 if a write failed or srelens broke the protocol.
+- **Exit.** The process exits after `shutdown`, or when srelens goes away, having flushed everything queued first — the session never cuts off its own last line. It exits 0 once that is done, and 1 if reading or writing the pipe to srelens failed, or srelens broke the protocol.
 
 ## The sandbox, for authors
 
