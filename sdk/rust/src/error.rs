@@ -133,3 +133,36 @@ impl From<HostError> for Error {
         Error::internal(error.to_string())
     }
 }
+
+/// Why [`crate::Frames::send`] did not send.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StreamClosed {
+    /// srelens cancelled the stream.
+    Cancelled,
+    /// The frame is this many bytes, over the message limit.
+    TooLarge(usize),
+    /// The session ended.
+    Ended,
+}
+
+impl fmt::Display for StreamClosed {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            StreamClosed::Cancelled => f.write_str("srelens cancelled the stream"),
+            StreamClosed::TooLarge(bytes) => write!(
+                f,
+                "the frame is {bytes} bytes, over the {} a message may be",
+                crate::outbox::limit_text()
+            ),
+            StreamClosed::Ended => f.write_str("the session with srelens ended"),
+        }
+    }
+}
+
+impl std::error::Error for StreamClosed {}
+
+impl From<StreamClosed> for Error {
+    fn from(closed: StreamClosed) -> Error {
+        Error::internal(closed.to_string())
+    }
+}

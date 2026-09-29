@@ -26,9 +26,11 @@ mod host;
 mod outbox;
 mod session;
 mod sidecar;
+mod stream;
 
 pub use context::Context;
-pub use error::{Error, HostError, SidecarError};
+pub use error::{Error, HostError, SidecarError, StreamClosed};
 pub use host::Host;
 pub use sidecar::Sidecar;
 pub use srelens_sidecar_protocol::{code, CallContext, ContextError, InitializeLimits, RpcError};
+pub use stream::Frames;

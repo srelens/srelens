@@ -5,7 +5,8 @@
 use serde_json::{json, Value};
 use srelens_sidecar_protocol::{
     code, method, CancelParams, InitializeParams, InitializeResult, Message, Notification, Request,
-    RequestId, Response, RpcError, UnsupportedApiVersion, SIDECAR_API_VERSIONS,
+    RequestId, Response, RpcError, StreamCancelParams, StreamCloseParams, StreamErrorParams,
+    StreamOpenParams, UnsupportedApiVersion, SIDECAR_API_VERSIONS,
 };
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -17,13 +18,12 @@ use tokio_util::task::AbortOnDropHandle;
 use crate::context::Shared;
 use crate::outbox::{limit_text, Outbox, Unsent};
 use crate::sidecar::Sidecar;
-use crate::{Context, Error, Host, SidecarError};
+use crate::{Context, Error, Frames, Host, SidecarError};
 
 /// A running handler: an app request by its id's JSON text, or a stream.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum Key {
     Request(String),
-    #[allow(dead_code)] // used from Task 6
     Stream(u64),
 }
 
@@ -165,6 +165,7 @@ impl Session {
                 answer(&self.outbox, id, Ok(json!({}))).await;
                 return Flow::Shutdown;
             }
+            method::STREAM_OPEN => self.open_stream(id, params).await,
             name => self.operation(id, name, params).await,
         }
         Flow::Continue
@@ -206,6 +207,70 @@ impl Session {
                 return;
             }
             answer(&outbox, id, outcome).await;
+        });
+    }
+
+    async fn open_stream(&mut self, id: RequestId, params: Value) {
+        let open: StreamOpenParams = match serde_json::from_value(params) {
+            Ok(open) => open,
+            Err(e) => {
+                let why = RpcError::new(code::INVALID_PARAMS, format!("stream/open: {e}"));
+                return answer(&self.outbox, id, Err(why)).await;
+            }
+        };
+        let Some(handler) = self.sidecar.registry.streams.get(&open.method).cloned() else {
+            let why = RpcError::new(
+                code::METHOD_NOT_FOUND,
+                format!("this sidecar has no stream `{}`", open.method),
+            );
+            return answer(&self.outbox, id, Err(why)).await;
+        };
+        let shared = self.shared.clone().expect("initialized");
+        let cancel = CancellationToken::new();
+        let frames = Frames::new(open.stream, self.outbox.clone(), cancel.clone());
+        let work = match handler(Context::new(shared, cancel.clone()), open.params, frames) {
+            Ok(work) => work,
+            Err(refused) => return answer(&self.outbox, id, Err(refused.into_rpc())).await,
+        };
+        let key = Key::Stream(open.stream);
+        self.running
+            .lock()
+            .expect("not poisoned")
+            .insert(key.clone(), cancel);
+        // The ack is queued before the handler starts, so it precedes every frame.
+        answer(&self.outbox, id, Ok(json!({}))).await;
+        let (outbox, running, stream, name) = (
+            self.outbox.clone(),
+            self.running.clone(),
+            open.stream,
+            open.method,
+        );
+        self.tasks.spawn(async move {
+            let handler = AbortOnDropHandle::new(tokio::spawn(work));
+            let ended = match handler.await {
+                Ok(result) => result.map_err(|e| e.message().to_owned()),
+                Err(e) if e.is_panic() => {
+                    log::error!("the stream `{name}` panicked");
+                    Err(format!("the stream `{name}` panicked"))
+                }
+                Err(_) => return,
+            };
+            // Cancelled: srelens asked for nothing more, a terminal frame included.
+            if running.lock().expect("not poisoned").remove(&key).is_none() {
+                return;
+            }
+            let terminal = match ended {
+                Ok(()) => Notification::new(
+                    method::STREAM_CLOSE,
+                    serde_json::to_value(StreamCloseParams { stream }).expect("plain JSON"),
+                ),
+                Err(message) => Notification::new(
+                    method::STREAM_ERROR,
+                    serde_json::to_value(StreamErrorParams { stream, message })
+                        .expect("plain JSON"),
+                ),
+            };
+            let _ = outbox.send(&terminal).await;
         });
     }
 
@@ -278,6 +343,17 @@ impl Session {
                 token.cancel();
                 let why = RpcError::new(code::REQUEST_CANCELLED, "srelens cancelled the request");
                 answer(&self.outbox, id, Err(why)).await;
+            }
+        } else if note.method == method::STREAM_CANCEL {
+            if let Ok(StreamCancelParams { stream }) = serde_json::from_value(note.params) {
+                if let Some(token) = self
+                    .running
+                    .lock()
+                    .expect("not poisoned")
+                    .remove(&Key::Stream(stream))
+                {
+                    token.cancel();
+                }
             }
         }
     }

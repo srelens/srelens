@@ -13,11 +13,17 @@ use crate::{Context, Error, SidecarError};
 pub(crate) type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 pub(crate) type OperationFn =
     Arc<dyn Fn(Context, Value) -> BoxFuture<Result<Value, Error>> + Send + Sync>;
+pub(crate) type StreamFn = Arc<
+    dyn Fn(Context, Value, crate::Frames) -> Result<BoxFuture<Result<(), Error>>, Error>
+        + Send
+        + Sync,
+>;
 
 /// The handlers a sidecar serves, by method name.
 #[derive(Default)]
 pub(crate) struct Registry {
     pub(crate) operations: HashMap<String, OperationFn>,
+    pub(crate) streams: HashMap<String, StreamFn>,
 }
 
 /// A sidecar: its name, its version, and the handlers it serves.
@@ -46,7 +52,8 @@ impl Sidecar {
              as the manifest does, and none of srelens's own methods"
         );
         assert!(
-            !self.registry.operations.contains_key(name),
+            !self.registry.operations.contains_key(name)
+                && !self.registry.streams.contains_key(name),
             "`{name}` is registered twice"
         );
     }
@@ -83,6 +90,27 @@ impl Sidecar {
             })
         });
         self.registry.operations.insert(name.to_owned(), run);
+        self
+    }
+
+    /// Serve the stream `name`: srelens's `stream/open` for `name` runs
+    /// `handler` with its params read as `I` (refused `-32602` otherwise).
+    /// Returning `Ok` closes the stream; `Err` fails it with the message.
+    pub fn stream<I, F, Fut>(mut self, name: &str, handler: F) -> Sidecar
+    where
+        I: DeserializeOwned + Send + 'static,
+        F: Fn(Context, I, crate::Frames) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<(), Error>> + Send + 'static,
+    {
+        self.check_name(name);
+        let handler = Arc::new(handler);
+        let open: StreamFn = Arc::new(move |ctx, params, frames| {
+            let input: I =
+                serde_json::from_value(params).map_err(|e| Error::invalid_params(e.to_string()))?;
+            let handler = handler.clone();
+            Ok(Box::pin(async move { handler(ctx, input, frames).await }))
+        });
+        self.registry.streams.insert(name.to_owned(), open);
         self
     }
 }
