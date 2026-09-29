@@ -8,6 +8,7 @@ pub(crate) struct Shared {
     pub(crate) data_dir: PathBuf,
     pub(crate) limits: InitializeLimits,
     pub(crate) api_version: String,
+    pub(crate) host: crate::Host,
 }
 
 /// What a handler is given about its call and its sidecar.
@@ -47,5 +48,10 @@ impl Context {
     /// Resolves when srelens cancels this call, or the session ends.
     pub async fn cancelled(&self) {
         self.cancel.cancelled().await
+    }
+
+    /// Calls to srelens.
+    pub fn host(&self) -> &crate::Host {
+        &self.shared.host
     }
 }

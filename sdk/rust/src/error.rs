@@ -81,3 +81,55 @@ impl fmt::Display for SidecarError {
 }
 
 impl std::error::Error for SidecarError {}
+
+/// Why a call to srelens failed.
+#[derive(Debug, Clone, PartialEq)]
+pub enum HostError {
+    /// A person declined, or no one could be asked (`-32002`). Nothing ran.
+    ConsentDenied(String),
+    /// srelens or the cluster refused the call or failed it (`-32003`). The
+    /// message is theirs.
+    CapabilityFailed(String),
+    /// srelens refused the call's params (`-32602`).
+    InvalidParams(String),
+    /// The call was cancelled (`-32800`).
+    Cancelled,
+    /// Any other error srelens answered with.
+    Rpc(RpcError),
+    /// The session with srelens ended before it answered.
+    Disconnected,
+}
+
+impl HostError {
+    pub(crate) fn from_rpc(error: RpcError) -> HostError {
+        match error.code {
+            code::CONSENT_DENIED => HostError::ConsentDenied(error.message),
+            code::CAPABILITY_FAILED => HostError::CapabilityFailed(error.message),
+            code::INVALID_PARAMS => HostError::InvalidParams(error.message),
+            code::REQUEST_CANCELLED => HostError::Cancelled,
+            _ => HostError::Rpc(error),
+        }
+    }
+}
+
+impl fmt::Display for HostError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            HostError::ConsentDenied(why) => write!(f, "srelens was not given consent: {why}"),
+            HostError::CapabilityFailed(why) => write!(f, "srelens refused the call: {why}"),
+            HostError::InvalidParams(why) => write!(f, "srelens refused the call's params: {why}"),
+            HostError::Cancelled => f.write_str("the call to srelens was cancelled"),
+            HostError::Rpc(error) => write!(f, "srelens answered with an error: {error}"),
+            HostError::Disconnected => f.write_str("the session with srelens ended"),
+        }
+    }
+}
+
+impl std::error::Error for HostError {}
+
+/// A handler's host call failed: the handler fails with srelens's words.
+impl From<HostError> for Error {
+    fn from(error: HostError) -> Error {
+        Error::internal(error.to_string())
+    }
+}

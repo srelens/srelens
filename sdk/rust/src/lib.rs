@@ -22,11 +22,13 @@
 
 mod context;
 mod error;
+mod host;
 mod outbox;
 mod session;
 mod sidecar;
 
 pub use context::Context;
-pub use error::{Error, SidecarError};
+pub use error::{Error, HostError, SidecarError};
+pub use host::Host;
 pub use sidecar::Sidecar;
 pub use srelens_sidecar_protocol::{code, CallContext, ContextError, InitializeLimits, RpcError};

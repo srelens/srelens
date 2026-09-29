@@ -17,7 +17,7 @@ use tokio_util::task::AbortOnDropHandle;
 use crate::context::Shared;
 use crate::outbox::{limit_text, Outbox, Unsent};
 use crate::sidecar::Sidecar;
-use crate::{Context, Error, SidecarError};
+use crate::{Context, Error, Host, SidecarError};
 
 /// A running handler: an app request by its id's JSON text, or a stream.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -112,12 +112,14 @@ struct Session {
     shared: Option<Arc<Shared>>,
     running: Running,
     tasks: JoinSet<()>,
+    host: Host,
 }
 
 impl Session {
     fn new(sidecar: Sidecar, outbox: Outbox) -> Session {
         Session {
             sidecar: Arc::new(sidecar),
+            host: Host::new(outbox.clone()),
             outbox,
             shared: None,
             running: Running::default(),
@@ -133,8 +135,7 @@ impl Session {
         match message {
             Message::Request(request) => return self.request(request).await,
             Message::Notification(note) => self.notify(note).await,
-            // Answers to the sidecar's own calls: routed in Task 5.
-            Message::Response(_) => {}
+            Message::Response(response) => self.host.answered(response),
         }
         Flow::Continue
     }
@@ -252,6 +253,7 @@ impl Session {
             data_dir: params.data_directory.into(),
             limits: params.limits,
             api_version: (*chosen).to_owned(),
+            host: self.host.clone(),
         }));
         let result = InitializeResult {
             api_version: (*chosen).to_owned(),
@@ -286,8 +288,13 @@ impl Session {
         }
     }
 
-    /// The session is over: stop every handler.
+    /// The session is over: stop every handler. The host is disconnected
+    /// first, before handlers are aborted: aborting a handler drops its
+    /// pending host-call futures, and each drop would otherwise race the
+    /// session's own shutdown by sending a `$/cancelRequest` of its own (see
+    /// `CancelOnDrop` in `host.rs`).
     fn end(&mut self) {
+        self.host.disconnect();
         self.cancel_all();
         self.tasks.abort_all();
     }

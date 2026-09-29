@@ -123,6 +123,28 @@ impl FakeHost {
         message
     }
 
+    /// The next line, which must be a call from the sidecar to the host.
+    pub async fn call(&mut self) -> Value {
+        let message = self.recv().await;
+        assert!(
+            message["method"]
+                .as_str()
+                .is_some_and(|m| m.starts_with("host/"))
+                && message.get("id").is_some(),
+            "expected a host/* call, got {message}"
+        );
+        message
+    }
+
+    /// Answer the sidecar's call `id` (its own id, as it sent it).
+    pub async fn reply(&mut self, id: &Value, outcome: Result<Value, Value>) {
+        let line = match outcome {
+            Ok(result) => json!({"jsonrpc": "2.0", "id": id, "result": result}),
+            Err(error) => json!({"jsonrpc": "2.0", "id": id, "error": error}),
+        };
+        self.send_raw(&line.to_string()).await;
+    }
+
     /// Initialize and activate, as the supervisor does; `initialize`'s result.
     pub async fn initialize(&mut self) -> Value {
         let id = self
