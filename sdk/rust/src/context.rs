@@ -18,7 +18,6 @@ pub struct Context {
 }
 
 impl Context {
-    #[allow(dead_code)] // used from Task 4
     pub(crate) fn new(shared: Arc<Shared>, cancel: CancellationToken) -> Context {
         Context { shared, cancel }
     }

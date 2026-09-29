@@ -34,7 +34,6 @@ impl Error {
         &self.0.message
     }
 
-    #[allow(dead_code)] // used from Task 4
     pub(crate) fn into_rpc(self) -> RpcError {
         self.0
     }

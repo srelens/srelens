@@ -1,6 +1,4 @@
-#[allow(unused_imports)] // used from Task 4
 use serde::de::DeserializeOwned;
-#[allow(unused_imports)] // used from Task 4
 use serde::Serialize;
 use serde_json::Value;
 use srelens_sidecar_protocol::{is_reserved, shape, Peer};
@@ -19,14 +17,12 @@ pub(crate) type OperationFn =
 /// The handlers a sidecar serves, by method name.
 #[derive(Default)]
 pub(crate) struct Registry {
-    #[allow(dead_code)] // used from Task 4
     pub(crate) operations: HashMap<String, OperationFn>,
 }
 
 /// A sidecar: its name, its version, and the handlers it serves.
 pub struct Sidecar {
     pub(crate) identity: Peer,
-    #[allow(dead_code)] // used from Task 4
     pub(crate) registry: Registry,
 }
 
@@ -43,7 +39,6 @@ impl Sidecar {
 
     /// Panics when `name` cannot name an operation, or is taken: a
     /// programming error, found the first time the sidecar starts.
-    #[allow(dead_code)] // used from Task 4
     pub(crate) fn check_name(&self, name: &str) {
         assert!(
             shape::is_identifier(name) && !is_reserved(name),
@@ -64,5 +59,30 @@ impl Sidecar {
         W: AsyncWrite + Unpin + Send + 'static,
     {
         crate::session::serve(self, reader, writer).await
+    }
+
+    /// Serve `name`: srelens's request `name` runs `handler` with its params
+    /// read as `I`. Params that do not read as `I` are answered `-32602`
+    /// without running it; its `O` is the result, and its `Error` the error.
+    pub fn operation<I, O, F, Fut>(mut self, name: &str, handler: F) -> Sidecar
+    where
+        I: DeserializeOwned + Send + 'static,
+        O: Serialize + Send + 'static,
+        F: Fn(Context, I) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<O, Error>> + Send + 'static,
+    {
+        self.check_name(name);
+        let handler = Arc::new(handler);
+        let run: OperationFn = Arc::new(move |ctx, params| {
+            let handler = handler.clone();
+            Box::pin(async move {
+                let input: I = serde_json::from_value(params)
+                    .map_err(|e| Error::invalid_params(e.to_string()))?;
+                let output = handler(ctx, input).await?;
+                Ok(serde_json::to_value(output)?)
+            })
+        });
+        self.registry.operations.insert(name.to_owned(), run);
+        self
     }
 }

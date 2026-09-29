@@ -4,26 +4,26 @@
 
 use serde_json::{json, Value};
 use srelens_sidecar_protocol::{
-    code, method, InitializeParams, InitializeResult, Message, Notification, Request, RequestId,
-    Response, RpcError, UnsupportedApiVersion, SIDECAR_API_VERSIONS,
+    code, method, CancelParams, InitializeParams, InitializeResult, Message, Notification, Request,
+    RequestId, Response, RpcError, UnsupportedApiVersion, SIDECAR_API_VERSIONS,
 };
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, BufReader};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::AbortOnDropHandle;
 
 use crate::context::Shared;
 use crate::outbox::{limit_text, Outbox, Unsent};
 use crate::sidecar::Sidecar;
-use crate::SidecarError;
+use crate::{Context, Error, SidecarError};
 
 /// A running handler: an app request by its id's JSON text, or a stream.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum Key {
-    #[allow(dead_code)] // used from Task 4
     Request(String),
-    #[allow(dead_code)] // used from Task 4
+    #[allow(dead_code)] // used from Task 6
     Stream(u64),
 }
 
@@ -156,15 +156,48 @@ impl Session {
                 answer(&self.outbox, id, Ok(json!({}))).await;
                 return Flow::Shutdown;
             }
-            _ => {
-                let why = RpcError::new(
-                    code::METHOD_NOT_FOUND,
-                    format!("this sidecar has no operation `{method}`"),
-                );
-                answer(&self.outbox, id, Err(why)).await;
-            }
+            name => self.operation(id, name, params).await,
         }
         Flow::Continue
+    }
+
+    async fn operation(&mut self, id: RequestId, name: &str, params: Value) {
+        let Some(handler) = self.sidecar.registry.operations.get(name).cloned() else {
+            let why = RpcError::new(
+                code::METHOD_NOT_FOUND,
+                format!("this sidecar has no operation `{name}`"),
+            );
+            return answer(&self.outbox, id, Err(why)).await;
+        };
+        let shared = self.shared.clone().expect("initialized");
+        let key = Key::Request(serde_json::to_string(&id).expect("plain JSON"));
+        let cancel = CancellationToken::new();
+        self.running
+            .lock()
+            .expect("not poisoned")
+            .insert(key.clone(), cancel.clone());
+        let (outbox, running, name) = (self.outbox.clone(), self.running.clone(), name.to_owned());
+        let work = handler(Context::new(shared, cancel), params);
+        self.tasks.spawn(async move {
+            // Its own task, so a panic is caught here; aborted with this one.
+            let handler = AbortOnDropHandle::new(tokio::spawn(work));
+            let outcome = match handler.await {
+                Ok(result) => result.map_err(Error::into_rpc),
+                Err(e) if e.is_panic() => {
+                    log::error!("the handler for `{name}` panicked");
+                    Err(RpcError::new(
+                        code::INTERNAL_ERROR,
+                        format!("the handler for `{name}` panicked"),
+                    ))
+                }
+                Err(_) => return,
+            };
+            // Cancelled: `-32800` was the answer, and this one is dropped.
+            if running.lock().expect("not poisoned").remove(&key).is_none() {
+                return;
+            }
+            answer(&outbox, id, outcome).await;
+        });
     }
 
     async fn initialize(&mut self, id: RequestId, params: Value) {
@@ -224,8 +257,19 @@ impl Session {
         .await;
     }
 
-    async fn notify(&mut self, _note: Notification) {
-        // `$/cancelRequest` and `stream/cancel`: Tasks 4 and 6.
+    async fn notify(&mut self, note: Notification) {
+        if note.method == method::CANCEL {
+            let Ok(CancelParams { id }) = serde_json::from_value(note.params) else {
+                return;
+            };
+            let key = Key::Request(serde_json::to_string(&id).expect("plain JSON"));
+            let token = self.running.lock().expect("not poisoned").remove(&key);
+            if let Some(token) = token {
+                token.cancel();
+                let why = RpcError::new(code::REQUEST_CANCELLED, "srelens cancelled the request");
+                answer(&self.outbox, id, Err(why)).await;
+            }
+        }
     }
 
     fn cancel_all(&self) {
