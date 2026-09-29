@@ -338,11 +338,19 @@ mod tests {
         assert_eq!(channel, "watch:hpa:1");
 
         for _ in 0..50 {
-            if sink
+            if let Some(err_val) = sink
                 .payloads_for("watch:hpa:1")
                 .iter()
-                .any(|v| v.get("error").is_some())
+                .find_map(|v| v.get("error").and_then(|e| e.as_str()))
             {
+                assert!(
+                    !err_val.contains("kind not watchable"),
+                    "should have routed to custom watch, but got unwatchable error: {err_val}"
+                );
+                assert!(
+                    err_val.contains("ctx") || err_val.contains("context"),
+                    "expected custom watch client failure for context 'ctx', got: {err_val}"
+                );
                 manager.stop("watch:hpa:1");
                 assert!(!manager.has_channel("watch:hpa:1"));
                 manager.shutdown_all();
@@ -351,5 +359,42 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
         panic!("error event never arrived on the sink for recognized omitted kind watch");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn start_unrecognized_kind_fails_with_kind_not_watchable() {
+        let manager = WatchManager::new(ClientCache::new_many(vec![]));
+        let sink = Arc::new(TestSink::default());
+        let channel = manager
+            .start(
+                sink.clone(),
+                "ctx".into(),
+                "default".into(),
+                "completely_unknown_kind".into(),
+                "watch:unknown:1".into(),
+                vec![],
+            )
+            .await
+            .expect("start returns channel even for unknown kind");
+        assert_eq!(channel, "watch:unknown:1");
+
+        for _ in 0..50 {
+            if let Some(err_val) = sink
+                .payloads_for("watch:unknown:1")
+                .iter()
+                .find_map(|v| v.get("error").and_then(|e| e.as_str()))
+            {
+                assert_eq!(
+                    err_val, "kind not watchable: completely_unknown_kind",
+                    "unrecognized kinds must fail with kind not watchable"
+                );
+                manager.stop("watch:unknown:1");
+                assert!(!manager.has_channel("watch:unknown:1"));
+                manager.shutdown_all();
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("error event never arrived on the sink for unknown kind watch");
     }
 }
