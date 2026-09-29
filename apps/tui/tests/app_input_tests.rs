@@ -5641,6 +5641,10 @@ async fn changed_view_command_and_interaction_flow() {
         "pressing 'r' in :changed must trigger argo refresh"
     );
 
+    // When argo_refreshing is already true, pressing 'r' reports refresh in progress
+    press(&mut app, ch('r')).await;
+    assert_eq!(toast(&app), "Refresh already in progress");
+
     // Press Esc to exit back to previous view (pops both :changed invocations)
     press(&mut app, key(KeyCode::Esc)).await;
     press(&mut app, key(KeyCode::Esc)).await;

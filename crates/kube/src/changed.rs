@@ -129,6 +129,10 @@ pub struct GitOpsReleaseInfo {
     pub sync_age: String,
     #[serde(rename = "syncMessage")]
     pub sync_message: Option<String>,
+    /// Whether `sync_message` holds a degraded health message rather than an
+    /// operation/sync error.
+    #[serde(default, rename = "isHealthMessage")]
+    pub is_health_message: bool,
     /// How the workload was matched to the app: `trackingId` (Argo's
     /// `argocd.argoproj.io/tracking-id` annotation), `resources` (the app's
     /// resource list) or `label` (the instance label).
@@ -1163,6 +1167,19 @@ fn gitops_release_for(
         None => None,
     };
 
+    let (sync_message, is_health_message) = if !app.operation_message.is_empty()
+        && !app.operation_message.starts_with("successfully synced")
+        && (app.operation_phase == "Failed"
+            || app.operation_phase == "Error"
+            || app.sync_status != "Synced")
+    {
+        (Some(app.operation_message.clone()), false)
+    } else if !app.health_message.is_empty() && app.health_status != "Healthy" {
+        (Some(app.health_message.clone()), true)
+    } else {
+        (None, false)
+    };
+
     let info = GitOpsReleaseInfo {
         matched_by: matched_by.to_string(),
         rollout,
@@ -1174,18 +1191,8 @@ fn gitops_release_for(
         target_revision: app.target_revision.clone(),
         sync_revision: short_rev,
         sync_age,
-        sync_message: if !app.operation_message.is_empty()
-            && !app.operation_message.starts_with("successfully synced")
-            && (app.operation_phase == "Failed"
-                || app.operation_phase == "Error"
-                || app.sync_status != "Synced")
-        {
-            Some(app.operation_message.clone())
-        } else if !app.health_message.is_empty() && app.health_status != "Healthy" {
-            Some(app.health_message.clone())
-        } else {
-            None
-        },
+        sync_message,
+        is_health_message,
     };
     GitOpsMatch {
         info: Some(info),
@@ -5099,6 +5106,35 @@ mod tests {
         assert_eq!(
             gitops.sync_message.as_deref(),
             Some("one or more synchronization tasks are not valid")
+        );
+        assert!(
+            !gitops.is_health_message,
+            "operation error must not be marked as health message"
+        );
+    }
+
+    #[test]
+    fn degraded_health_message_sets_is_health_message_flag() {
+        let app = ArgoApplication::from_json(&serde_json::json!({
+            "metadata": { "name": "shop", "namespace": "argocd" },
+            "spec": { "source": { "repoURL": "https://github.com/acme/deploy.git", "path": "apps/shop" } },
+            "status": {
+                "sync": { "status": "OutOfSync", "revision": SHA_NOW },
+                "health": { "status": "Degraded", "message": "Deployment has 0/2 ready pods" },
+                "history": shop_history()
+            }
+        }));
+        let dep = tracked_deployment(Some("shop:apps/Deployment:default/api"), None);
+        let rs = [replicaset("api-new", "api", 300)];
+        let report = triage(&[dep], &rs, &[], &[], &[app]);
+        let gitops = report.deployments[0].gitops.as_ref().unwrap();
+        assert_eq!(
+            gitops.sync_message.as_deref(),
+            Some("Deployment has 0/2 ready pods")
+        );
+        assert!(
+            gitops.is_health_message,
+            "health message must be marked as is_health_message"
         );
     }
 }

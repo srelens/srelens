@@ -1247,8 +1247,7 @@ fn render_deployment_diagnostic_card(f: &mut Frame, area: Rect, state: &ChangedV
             .as_deref()
             .filter(|m| !m.starts_with("successfully synced"))
         {
-            let is_health = g.health_status != "Healthy" && g.sync_status == "Synced";
-            let (label, color) = if is_health {
+            let (label, color) = if g.is_health_message {
                 ("   Health: ", Theme::yellow())
             } else {
                 ("   Sync Error: ", Theme::red())

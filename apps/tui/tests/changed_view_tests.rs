@@ -1368,3 +1368,27 @@ fn card_does_not_render_successful_sync_as_sync_error() {
         "must not render Sync Error for successful sync: {card}"
     );
 }
+
+#[test]
+fn card_labels_health_message_as_health_not_sync_error_even_when_out_of_sync() {
+    let _settings = common::env::isolate_settings();
+    let mut report = sample_report();
+    let mut gitops = report.deployments[0].gitops.clone().unwrap();
+    gitops.sync_status = "OutOfSync".into();
+    gitops.health_status = "Degraded".into();
+    gitops.sync_message = Some("Deployment has 0/2 ready pods".into());
+    gitops.is_health_message = true;
+    report.deployments[0].gitops = Some(gitops);
+
+    let mut state = ChangedViewState::new();
+    state.set_report(report);
+    let card = render_card(&state);
+    assert!(
+        card.contains("Health: Deployment has 0/2 ready pods"),
+        "{card}"
+    );
+    assert!(
+        !card.contains("Sync Error:"),
+        "must not say Sync Error for health message: {card}"
+    );
+}

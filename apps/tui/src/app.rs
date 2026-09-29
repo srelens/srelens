@@ -7629,8 +7629,8 @@ impl App {
                     self.filter_buffer = changed.filter_query.clone();
                 }
                 KeyCode::Char('r') => {
-                    let msg = if self.changed_refreshing {
-                        "Triage report is already refreshing"
+                    let msg = if self.changed_refreshing || self.argo_refreshing {
+                        "Refresh already in progress"
                     } else {
                         "Refreshing triage report..."
                     };
