@@ -33,7 +33,7 @@ Declare the operations in the app's manifest
 
 ## What the SDK does for you
 
-- **Lifecycle.** It answers `initialize` (and picks the API version), `activate`, `deactivate`, `health` and `shutdown`. `health` gets through even while every handler is busy.
+- **Lifecycle.** It answers `initialize` (and picks the API version), `activate`, `deactivate`, `health` and `shutdown`. `health` is answered from the reader loop, so it gets through alongside handlers that are merely awaiting — not ones that are blocking their thread; see below.
 - **Handlers.**
   - Each request runs on its own task, with its input read into your type. Input that does not fit is answered `-32602` without running the handler.
   - A handler's `Error` is the answer. A panic is answered `-32603`, and the sidecar keeps running.
@@ -41,6 +41,7 @@ Declare the operations in the app's manifest
 - **Cancellation.**
   - When srelens cancels a request or a stream, `ctx.cancelled()` resolves and `ctx.is_cancelled()` turns true.
   - A cancelled request is answered `-32800` for you. A cancelled stream's `send` fails.
+  - The SDK does not stop the handler for you: check `ctx.is_cancelled()` or select on `ctx.cancelled()` and return.
 - **Calls to srelens.**
   - The calls are `ctx.host().read`, `.resource` and `.action`. Each names its cluster with a `CallContext`.
   - srelens adds no cluster to an operation's input: declare one, and pass it on.
@@ -56,6 +57,8 @@ Declare the operations in the app's manifest
 
 ## The sandbox, for authors
 
+- **Never block a handler's thread.** Run CPU-bound or blocking work with `tokio::task::spawn_blocking`, or srelens's health check can starve and srelens will restart the sidecar.
+- **Stdout is the protocol.** Never write to it (`println!`, `print!`, or a dependency that does). Log with the `log` crate, which goes to stderr.
 - **No network and no subprocesses.** To reach a cluster or the outside, go through `ctx.host()` and the capabilities your manifest declares.
 - **Scratch files.** Write only under `ctx.data_dir()`, which is also the working directory. `std::env::temp_dir()` is not writable on Windows.
 - **File modes (Linux).** Set a file's mode through an open file (`File::set_permissions`), never by path (`std::fs::set_permissions`): the seccomp filter refuses the path form.

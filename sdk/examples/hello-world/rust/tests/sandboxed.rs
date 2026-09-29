@@ -2,12 +2,15 @@
 //! tokio runtime (threads, the reactor, the blocking stdin reader) works
 //! under Linux's Landlock and seccomp layers and in a Windows AppContainer.
 //! `#[ignore]`: it needs the sandbox, and on Linux the trusted launcher and a
-//! delegated cgroup. The `sandbox-conformance` CI job runs it:
+//! delegated cgroup. The `sandbox-conformance` CI job runs it, from the
+//! workspace root:
 //! ```text
-//! SRELENS_SANDBOX_LAUNCHER=target/debug/srelens-sandbox-launch \
+//! cargo build -p srelens-plugin-host --bin srelens-sandbox-launch
+//! SRELENS_SANDBOX_LAUNCHER="$PWD/target/debug/srelens-sandbox-launch" \
 //! SRELENS_SANDBOX_CGROUP_ROOT=/sys/fs/cgroup/<delegated> \
 //!   cargo test -p srelens-sidecar-hello-world --test sandboxed -- --ignored --test-threads=1
 //! ```
+//! On Windows, neither variable is needed.
 
 mod common;
 

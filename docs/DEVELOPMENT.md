@@ -38,7 +38,7 @@ The first `pnpm dev` compiles the full Rust dependency tree and takes a few minu
 | `UPDATE_CATALOG=1 cargo test -p srelens-plugin-host --test schema` | Regenerate the committed extension manifest schema after changing a manifest field |
 | `UPDATE_CATALOG=1 cargo test -p srelens-sidecar-protocol --test schema` | Regenerate the committed sidecar protocol schema after changing a protocol type |
 | `cargo test -p srelens-sidecar -p srelens-sidecar-hello-world` | The Rust sidecar SDK and its example, which runs the real binary under the supervisor |
-| `SRELENS_SANDBOX_LAUNCHER=target/debug/srelens-sandbox-launch cargo test -p srelens-sidecar-hello-world --test sandboxed -- --ignored --test-threads=1` | The example inside the OS sandbox (Linux also needs `SRELENS_SANDBOX_CGROUP_ROOT`; Windows needs neither) |
+| `cargo build -p srelens-plugin-host --bin srelens-sandbox-launch`, then `SRELENS_SANDBOX_LAUNCHER="$PWD/target/debug/srelens-sandbox-launch" SRELENS_SANDBOX_CGROUP_ROOT=/sys/fs/cgroup/<delegated> cargo test -p srelens-sidecar-hello-world --test sandboxed -- --ignored --test-threads=1` | The example inside the OS sandbox, run from the workspace root (Linux needs the launcher built first and passed as an absolute path, plus `SRELENS_SANDBOX_CGROUP_ROOT`; on Windows neither variable is needed) |
 | `PROPTEST_RNG_SEED=7 PROPTEST_CASES=10000 cargo test -p srelens-registry --lib fuzzing` | Run the extension parser property tests past their fixed cases |
 | `cargo +nightly fuzz run manifest` | Fuzz an extension parser (Linux or macOS, nightly); setup in [docs/extensions/testing.md](extensions/testing.md#fuzzing) |
 

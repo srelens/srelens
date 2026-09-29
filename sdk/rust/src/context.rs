@@ -45,7 +45,9 @@ impl Context {
         self.cancel.is_cancelled()
     }
 
-    /// Resolves when srelens cancels this call, or the session ends.
+    /// Resolves when srelens cancels this call, or the session ends. The SDK
+    /// does not stop the handler for you: select on this and return, or
+    /// check [`Context::is_cancelled`].
     pub async fn cancelled(&self) {
         self.cancel.cancelled().await
     }
