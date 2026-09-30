@@ -158,9 +158,70 @@ func (se *session) request(req protocol.Request) flow {
 	return proceed
 }
 
-// dispatch serves an app request.
+// dispatch serves an app request: a stream's opening, or an operation.
 func (se *session) dispatch(req protocol.Request) {
+	if req.Method == protocol.MethodStreamOpen {
+		se.openStream(req.ID, req.Params)
+		return
+	}
 	se.operation(req)
+}
+
+func (se *session) openStream(id protocol.RequestID, raw json.RawMessage) {
+	var open protocol.StreamOpenParams
+	if err := json.Unmarshal(raw, &open); err != nil {
+		se.answerError(id, protocol.CodeInvalidParams, "stream/open: "+err.Error(), nil)
+		return
+	}
+	start, ok := se.sc.streams[open.Method]
+	if !ok {
+		se.answerError(id, protocol.CodeMethodNotFound, fmt.Sprintf("this sidecar has no stream `%s`", open.Method), nil)
+		return
+	}
+	ctx, cancel := context.WithCancelCause(se.base)
+	frames := &Frames{stream: open.Stream, out: se.out, ctx: ctx, cancel: cancel}
+	what := fmt.Sprintf("the stream `%s`", open.Method)
+	run, err := start(ctx, open.Params, frames)
+	if err != nil {
+		cancel(err)
+		se.send(se.out.general, protocol.Response{ID: id, Error: asRPCError(err, what)})
+		return
+	}
+	key := streamKey(open.Stream)
+	se.track(key, cancel)
+	// The ack is queued before the handler starts, so it precedes every frame.
+	se.answer(id, json.RawMessage("{}"))
+	go func() {
+		_, err := guarded(what, func() (struct{}, error) { return struct{}{}, run() })
+		frames.finish()
+		// Cancelled, or the session ended: srelens asked for nothing more, a
+		// terminal frame included.
+		if !se.untrack(key) {
+			return
+		}
+		se.endStream(open.Stream, err, what)
+	}()
+}
+
+func streamKey(stream uint64) string { return fmt.Sprintf("stream %d", stream) }
+
+// endStream queues the stream's one terminal frame: stream/close, or
+// stream/error with why. An error message too large to send is replaced with
+// one that says so, since the stream must still end.
+func (se *session) endStream(stream uint64, err error, what string) {
+	if err == nil {
+		params, _ := json.Marshal(protocol.StreamCloseParams{Stream: stream})
+		_ = se.out.send(se.out.general, protocol.Notification{Method: protocol.MethodStreamClose, Params: params}, nil)
+		return
+	}
+	params, _ := json.Marshal(protocol.StreamErrorParams{Stream: stream, Message: asRPCError(err, what).Message})
+	sendErr := se.out.send(se.out.general, protocol.Notification{Method: protocol.MethodStreamError, Params: params}, nil)
+	var over *errOverLimit
+	if errors.As(sendErr, &over) {
+		params, _ := json.Marshal(protocol.StreamErrorParams{Stream: stream, Message: fmt.Sprintf(
+			"the stream's error is %d bytes, over the %s a message may be", over.bytes, limitText())})
+		_ = se.out.send(se.out.general, protocol.Notification{Method: protocol.MethodStreamError, Params: params}, nil)
+	}
 }
 
 func (se *session) operation(req protocol.Request) {
@@ -229,6 +290,11 @@ func (se *session) notify(note protocol.Notification) {
 		}
 		if se.cancelRunning(requestKey(p.ID), ErrCancelled) {
 			se.answerError(p.ID, protocol.CodeRequestCancelled, "srelens cancelled the request", nil)
+		}
+	case protocol.MethodStreamCancel:
+		var p protocol.StreamCancelParams
+		if err := json.Unmarshal(note.Params, &p); err == nil {
+			se.cancelRunning(streamKey(p.Stream), ErrCancelled)
 		}
 	}
 }

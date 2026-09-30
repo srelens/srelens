@@ -26,6 +26,13 @@ var (
 	// returned, as net/http cancels a request's context: a goroutine the
 	// handler left running sees its context done.
 	ErrHandlerReturned = errors.New("the handler returned")
+	// ErrStreamCancelled is Frames.Send's error once srelens has cancelled the stream.
+	ErrStreamCancelled = errors.New("srelens cancelled the stream")
+	// ErrStreamFinished is Frames.Send's error once the stream's handler has
+	// returned: a Frames kept past its handler sends nothing.
+	ErrStreamFinished = errors.New("the stream already ended: its handler returned")
+	// ErrFrameTooLarge matches a *FrameTooLargeError.
+	ErrFrameTooLarge = errors.New("the frame is over the message limit")
 )
 
 // Error is a handler's failure as srelens is to be told it: a JSON-RPC
@@ -116,3 +123,12 @@ func asRPCError(err error, what string) (rpcErr *protocol.RPCError) {
 	}
 	return &protocol.RPCError{Code: protocol.CodeInternalError, Message: err.Error()}
 }
+
+// FrameTooLargeError is a frame over the message limit, which was not sent.
+type FrameTooLargeError struct{ Bytes int }
+
+func (e *FrameTooLargeError) Error() string {
+	return fmt.Sprintf("the frame is %d bytes, over the %s a message may be", e.Bytes, limitText())
+}
+
+func (e *FrameTooLargeError) Is(target error) bool { return target == ErrFrameTooLarge }

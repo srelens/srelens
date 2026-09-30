@@ -16,11 +16,12 @@ import (
 type Sidecar struct {
 	name, version string
 	operations    map[string]operationFunc
+	streams       map[string]streamFunc
 }
 
 // New is a sidecar called name, at version, serving nothing yet.
 func New(name, version string) *Sidecar {
-	return &Sidecar{name: name, version: version, operations: map[string]operationFunc{}}
+	return &Sidecar{name: name, version: version, operations: map[string]operationFunc{}, streams: map[string]streamFunc{}}
 }
 
 // Run serves srelens over r and w until srelens shuts the sidecar down, r
@@ -44,6 +45,9 @@ func (s *Sidecar) register(name string) {
 			"digits and hyphens, as the manifest does, and none of srelens's own methods", name))
 	}
 	if _, taken := s.operations[name]; taken {
+		panic(fmt.Sprintf("sidecar: `%s` is registered twice", name))
+	}
+	if _, taken := s.streams[name]; taken {
 		panic(fmt.Sprintf("sidecar: `%s` is registered twice", name))
 	}
 }
