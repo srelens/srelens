@@ -190,9 +190,15 @@ func TestAHandlersContextIsDoneOnceItReturns(t *testing.T) {
 // Go's scheduler preempts a spinning goroutine, and a goroutine blocked in a
 // sleep or a system call gives up its thread: health is answered on the
 // reader, which no handler can starve.
+//
+// The spin is plain Go that looks at release only once in 2^20 turns. Under
+// -race, sync/atomic is not inlined: a loop of release.Load() calls runs
+// almost wholly in the race runtime, where a goroutine can rarely be
+// preempted, and four such loops could hold every P of a small CI runner.
 func TestHealthIsAnsweredWhileEveryHandlerBlocksOrSpins(t *testing.T) {
 	s := sidecar.New("t", "1")
 	var release atomic.Bool
+	t.Cleanup(func() { release.Store(true) }) // a failed test leaves nothing spinning
 	started := make(chan struct{}, 8)
 	sidecar.Operation(s, "sleep", func(context.Context, struct{}) (struct{}, error) {
 		started <- struct{}{}
@@ -203,7 +209,10 @@ func TestHealthIsAnsweredWhileEveryHandlerBlocksOrSpins(t *testing.T) {
 	})
 	sidecar.Operation(s, "spin", func(context.Context, struct{}) (struct{}, error) {
 		started <- struct{}{}
-		for !release.Load() {
+		for n := uint64(1); ; n++ {
+			if n%(1<<20) == 0 && release.Load() {
+				break
+			}
 		}
 		return struct{}{}, nil
 	})
@@ -215,7 +224,11 @@ func TestHealthIsAnsweredWhileEveryHandlerBlocksOrSpins(t *testing.T) {
 		ids[float64(h.request("spin", map[string]any{}))] = true
 	}
 	for i := 0; i < 8; i++ {
-		<-started
+		select {
+		case <-started:
+		case <-time.After(wait):
+			t.Fatalf("%d of the 8 handlers started", i)
+		}
 	}
 	asked := time.Now()
 	health := h.answer(h.request("health", map[string]any{}))
