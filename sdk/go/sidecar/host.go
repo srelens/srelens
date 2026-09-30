@@ -29,6 +29,7 @@ type Host struct {
 	next    atomic.Uint64
 	slots   chan struct{}
 	gone    chan struct{} // closed by disconnect
+	goneOne sync.Once     // disconnect runs once, however often it is called
 	mu      sync.Mutex
 	waiting map[string]chan protocol.Response // by id key; nil once disconnected
 	absent  bool                              // no session: every call fails with ErrNoSession
@@ -251,11 +252,13 @@ func (h *Host) answered(resp protocol.Response) {
 }
 
 // disconnect answers every waiting call ErrSessionEnded, and refuses later
-// ones at once. The session calls it once, before it stops its handlers, so a
-// call a handler abandons as it stops sends nothing.
+// ones at once. The session calls it before it stops its handlers, so a call
+// a handler abandons as it stops sends nothing; a second call does nothing.
 func (h *Host) disconnect() {
-	h.mu.Lock()
-	h.waiting = nil
-	h.mu.Unlock()
-	close(h.gone)
+	h.goneOne.Do(func() {
+		h.mu.Lock()
+		h.waiting = nil
+		h.mu.Unlock()
+		close(h.gone)
+	})
 }

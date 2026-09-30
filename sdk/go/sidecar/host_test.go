@@ -358,3 +358,26 @@ func TestEndDisconnectsTheHostBeforeCancellingHandlers(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// shutdown ends the session as the end of input does: a handler blocked in
+// a host call on its own ctx sends no $/cancelRequest, before or after the
+// answer {}. ended fails on any line the sidecar wrote that this test never
+// read. host_internal_test.go holds the deterministic check of the order.
+func TestShutdownWhileAHandlerWaitsOnTheHostSendsOnlyItsAnswer(t *testing.T) {
+	s := sidecar.New("t", "1")
+	sidecar.Operation(s, "read", func(ctx context.Context, _ struct{}) (struct{}, error) {
+		_, err := sidecar.HostFrom(ctx).Read(ctx, prod(t), "apps")
+		return struct{}{}, err
+	})
+	h := start(t, s)
+	h.initialize()
+	h.request("read", map[string]any{})
+	h.call() // the host/read request; never answered
+	id := h.request("shutdown", map[string]any{})
+	if r := h.answer(id)["result"]; !reflect.DeepEqual(r, map[string]any{}) {
+		t.Fatalf("shutdown answered %v", r)
+	}
+	if err := h.ended(); err != nil {
+		t.Fatalf("the session ended with %v", err)
+	}
+}

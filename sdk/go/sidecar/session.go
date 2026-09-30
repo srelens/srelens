@@ -150,7 +150,9 @@ func (se *session) request(req protocol.Request) flow {
 	case protocol.MethodActivate, protocol.MethodHealth, protocol.MethodDeactivate:
 		se.answerOn(se.out.lifecycle, req.ID, json.RawMessage("{}"))
 	case protocol.MethodShutdown:
-		se.cancelAll(ErrSessionEnded)
+		// Ended before the answer, as end orders it: a handler blocked in a
+		// host call sends nothing that could follow the answer.
+		se.end()
 		se.answer(req.ID, json.RawMessage("{}"))
 		return shutdown
 	default:
@@ -392,7 +394,9 @@ func (se *session) cancelAll(cause error) {
 }
 
 // end stops every handler: the session is over. The host is disconnected
-// first, so a call a handler abandons as it stops sends nothing.
+// first, so a call a handler abandons as it stops sends nothing. shutdown
+// ends the session before its answer, and serve after its loop: a second
+// end does nothing more.
 func (se *session) end() {
 	if se.shared != nil {
 		se.shared.host.disconnect()

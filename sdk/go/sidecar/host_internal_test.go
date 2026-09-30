@@ -168,6 +168,43 @@ func TestEndDisconnectsTheHostBeforeItCancelsHandlers(t *testing.T) {
 	}
 }
 
+// shutdown must end the session as end does: the host disconnected first,
+// then the handlers cancelled, so a handler blocked in a host call sends no
+// $/cancelRequest that could land after the shutdown answer. The answer {}
+// is then the one line queued, and serve's own end after its loop must be
+// harmless. Deterministic for the same reason as the test above.
+func TestShutdownDisconnectsTheHostBeforeItCancelsHandlers(t *testing.T) {
+	out := newOutbox() // its writer never runs
+	h := newHost(out, protocol.InitializeLimits{MaxConcurrentRequests: 8})
+	se := &session{out: out, running: map[string]context.CancelCauseFunc{}, shared: &shared{host: h}}
+
+	var called, sawDisconnected bool
+	se.track("request x", func(cause error) {
+		called = true
+		h.mu.Lock()
+		sawDisconnected = h.waiting == nil
+		h.mu.Unlock()
+	})
+
+	if se.request(protocol.Request{ID: protocol.StringID("s"), Method: protocol.MethodShutdown}) != shutdown {
+		t.Fatal("shutdown did not end the session")
+	}
+	if !called {
+		t.Fatal("shutdown did not cancel the running handler")
+	}
+	if !sawDisconnected {
+		t.Fatal("shutdown cancelled the handler before the host disconnected")
+	}
+	if len(out.general) != 1 {
+		t.Fatalf("queued %d lines, want only the answer", len(out.general))
+	}
+	msg, err := protocol.ParseMessage(<-out.general)
+	if err != nil || msg.Response == nil || msg.Response.ID != protocol.StringID("s") || string(msg.Response.Result) != "{}" {
+		t.Fatalf("the queued line is not shutdown's answer {}: %+v, %v", msg, err)
+	}
+	se.end() // as serve does after its loop
+}
+
 // check's namespace refusal must cut the value to 64 runes, as
 // protocol.ContextError.Error does, not quote the whole thing.
 func TestCheckTruncatesALongNamespaceInItsRefusal(t *testing.T) {
