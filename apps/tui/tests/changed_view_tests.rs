@@ -369,7 +369,7 @@ fn renders_changed_view_wide_with_diagnostic_card() {
     let rendered = lines.join("\n");
 
     // Banner checks
-    assert!(rendered.contains("POST-PAGE INCIDENT INVESTIGATOR"));
+    assert!(rendered.contains("SRE INCIDENT INVESTIGATOR & CHANGE TRIAGE"));
     assert!(rendered.contains("CRASH: 1"));
     assert!(rendered.contains("OOM: 0"));
     assert!(rendered.contains("ERROR: 0"));
@@ -759,6 +759,8 @@ fn an_empty_list_says_why_it_is_empty() {
     let mut report = sample_report();
     report.deployments.clear();
     let mut state = ChangedViewState::new();
+    state.include_failing = false;
+    state.include_scaled = false;
     state.set_report(report.clone());
     let strict = render_card(&state);
     // The message wraps; judge it on one line.
@@ -786,6 +788,12 @@ fn an_empty_list_says_why_it_is_empty() {
     state.include_scaled = true;
     let scaled_only = render_card(&state);
     assert!(scaled_only.contains("No workloads changed or scaled within the last 1h."));
+
+    // Default state: inclusive (both true)
+    let mut default_state = ChangedViewState::new();
+    default_state.set_report(report.clone());
+    let default_card = render_card(&default_state);
+    assert!(default_card.contains("No workloads changed, scaled or failing within the last 1h."));
 
     // Rows exist, but the incident filter hides them: say so, not "none".
     let mut state = ChangedViewState::new();
@@ -820,27 +828,27 @@ fn a_scaled_row_shows_when_it_scaled_and_says_so() {
         .lines()
         .find(|l| l.contains("checkout-api (scaled)"))
         .unwrap();
+    assert!(row.contains("66d"), "DEPLOYED is rollout time: {row}");
     assert!(
-        row.trim_end()
-            .trim_end_matches('│')
-            .trim_end()
-            .ends_with("5m"),
-        "CHANGED is the scale time: {row}"
+        row.contains("Scaled 3→4"),
+        "RECENT CHANGE is scale event: {row}"
     );
-    assert!(rendered.contains("CHANGED"), "column header");
+    assert!(row.contains("5m"), "RECENT CHANGE age: {row}");
+    assert!(rendered.contains("DEPLOYED"), "column header");
+    assert!(rendered.contains("RECENT CHANGE"), "column header");
     assert!(rendered.contains("Scaled 3→4 5m ago; last rollout 66d ago (S to hide)."));
 }
 
 #[test]
 fn scope_label_names_every_combination() {
     let mut state = ChangedViewState::new();
-    assert_eq!(state.scope_label(), "[CHANGED]");
-    state.include_scaled = true;
-    assert_eq!(state.scope_label(), "[CHANGED + SCALED]");
-    state.include_failing = true;
     assert_eq!(state.scope_label(), "[CHANGED + SCALED + FAILING]");
     state.include_scaled = false;
     assert_eq!(state.scope_label(), "[CHANGED + FAILING]");
+    state.include_failing = false;
+    assert_eq!(state.scope_label(), "[CHANGED]");
+    state.include_scaled = true;
+    assert_eq!(state.scope_label(), "[CHANGED + SCALED]");
 }
 
 /// The card's rows, from its "Workload:" line to "Actions:", border-trimmed.

@@ -5681,8 +5681,8 @@ async fn changed_view_drops_a_result_for_a_window_it_no_longer_shows() {
         },
         deployments: vec![],
         infra_changes: vec![],
-        includes_failing: false,
-        includes_scaled: false,
+        includes_failing: true,
+        includes_scaled: true,
         argo: Default::default(),
     };
 
@@ -5725,7 +5725,9 @@ fn changed_report_with_one_workload() -> srelens_kube::changed::ChangedTriageRep
             "primarySymptoms": [], "failingPodNames": ["payment-api-1"], "topEvents": [],
             "errorLogPod": "payment-api-1", "errorLogContainer": "payment"
         }],
-        "infraChanges": []
+        "infraChanges": [],
+        "includesFailing": true,
+        "includesScaled": true
     }))
     .expect("report JSON matches the wire shape")
 }
@@ -5877,6 +5879,7 @@ fn changed_report_with_two_workloads(
     second.app_name = "payment-worker".to_string();
     report.deployments.push(second);
     report.includes_failing = includes_failing;
+    report.includes_scaled = true;
     report
 }
 
@@ -5894,7 +5897,7 @@ async fn changed_view_moves_with_arrows_and_ignores_j_and_k() {
     app.handle_changed_triage_result(
         "fake-cluster",
         Some("default"),
-        Ok(changed_report_with_two_workloads(false)),
+        Ok(changed_report_with_two_workloads(true)),
     );
     assert_eq!(changed_state(&app).selected_idx, 0);
 
@@ -5923,20 +5926,20 @@ async fn changed_view_moves_with_arrows_and_ignores_j_and_k() {
 async fn changed_view_u_widens_the_scope_and_drops_the_narrow_answer() {
     let settings = common::env::isolate_settings();
     let (mut app, _rx) = changed_app_with_report(&settings).await;
-    assert!(!changed_state(&app).include_failing, "strict by default");
+    assert!(changed_state(&app).include_failing, "inclusive by default");
     app.changed_refreshing = false;
 
     press(&mut app, ch('u')).await;
     let c = changed_state(&app);
-    assert!(c.include_failing);
+    assert!(!c.include_failing);
     assert!(c.is_loading);
-    assert!(app.changed_refreshing, "the wider scope is fetched");
+    assert!(app.changed_refreshing, "the narrower scope is fetched");
 
-    // The strict answer from before the toggle lands late: dropped, refetched.
+    // The wide answer from before the toggle lands late: dropped, refetched.
     app.handle_changed_triage_result(
         "fake-cluster",
         Some("default"),
-        Ok(changed_report_with_two_workloads(false)),
+        Ok(changed_report_with_two_workloads(true)),
     );
     let c = changed_state(&app);
     assert!(
@@ -5948,7 +5951,7 @@ async fn changed_view_u_widens_the_scope_and_drops_the_narrow_answer() {
     app.handle_changed_triage_result(
         "fake-cluster",
         Some("default"),
-        Ok(changed_report_with_two_workloads(true)),
+        Ok(changed_report_with_two_workloads(false)),
     );
     let c = changed_state(&app);
     assert_eq!(c.report.as_ref().unwrap().deployments.len(), 2);
@@ -5960,28 +5963,26 @@ async fn changed_view_capital_s_includes_scaled_and_drops_the_narrow_answer() {
     let settings = common::env::isolate_settings();
     let (mut app, _rx) = changed_app_with_report(&settings).await;
     assert!(
-        !changed_state(&app).include_scaled,
-        "scale-only rows hidden by default"
+        changed_state(&app).include_scaled,
+        "scale-only rows included by default"
     );
     app.changed_refreshing = false;
 
     press(&mut app, ch('S')).await;
     let c = changed_state(&app);
-    assert!(c.include_scaled);
-    assert!(!c.include_failing, "S is not u");
-    assert!(app.changed_refreshing, "the wider scope is fetched");
+    assert!(!c.include_scaled);
+    assert!(c.include_failing, "S is not u");
+    assert!(app.changed_refreshing, "the narrower scope is fetched");
 
     // The answer from before the toggle is dropped and refetched.
-    app.handle_changed_triage_result(
-        "fake-cluster",
-        Some("default"),
-        Ok(changed_report_with_two_workloads(false)),
-    );
-    assert!(changed_state(&app).is_loading);
-
-    let mut wide = changed_report_with_two_workloads(false);
+    let mut wide = changed_report_with_two_workloads(true);
     wide.includes_scaled = true;
     app.handle_changed_triage_result("fake-cluster", Some("default"), Ok(wide));
+    assert!(changed_state(&app).is_loading);
+
+    let mut narrow = changed_report_with_two_workloads(true);
+    narrow.includes_scaled = false;
+    app.handle_changed_triage_result("fake-cluster", Some("default"), Ok(narrow));
     let c = changed_state(&app);
     assert!(!c.is_loading);
     assert_eq!(c.report.as_ref().unwrap().deployments.len(), 2);
@@ -7508,7 +7509,7 @@ async fn switch_context_while_in_changed_view_clears_report_and_handles_stale_re
         deployments: vec![],
         infra_changes: vec![],
         includes_failing: true,
-        includes_scaled: false,
+        includes_scaled: true,
         argo: Default::default(),
     });
     app.active_view = ActiveView::Changed(changed_state);
@@ -7546,7 +7547,7 @@ async fn switch_context_while_in_changed_view_clears_report_and_handles_stale_re
         deployments: vec![],
         infra_changes: vec![],
         includes_failing: true,
-        includes_scaled: false,
+        includes_scaled: true,
         argo: Default::default(),
     };
     app.handle_changed_triage_result("cluster-1", None, Ok(stale_report));
@@ -7576,8 +7577,8 @@ async fn switch_context_while_in_changed_view_clears_report_and_handles_stale_re
         },
         deployments: vec![],
         infra_changes: vec![],
-        includes_failing: false,
-        includes_scaled: false,
+        includes_failing: true,
+        includes_scaled: true,
         argo: Default::default(),
     };
     app.handle_changed_triage_result("cluster-2", None, Ok(cluster2_report));
@@ -7616,7 +7617,7 @@ async fn switch_namespace_while_in_changed_view_clears_stale_report() {
         deployments: vec![],
         infra_changes: vec![],
         includes_failing: true,
-        includes_scaled: false,
+        includes_scaled: true,
         argo: Default::default(),
     });
     app.active_view = ActiveView::Changed(changed_state);

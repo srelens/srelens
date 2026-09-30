@@ -109,6 +109,47 @@ fn row_age(d: &AppDeploymentChange) -> &str {
     }
 }
 
+/// The formatted description of the most recent change event in the window,
+/// e.g. "📦 Rollout (12m)", "📈 Scaled 14→18 (47s)", "⚠️ Failing (2m)".
+pub fn recent_change_str(d: &AppDeploymentChange) -> String {
+    let age = if d.changed_age.is_empty() {
+        &d.deployed_age
+    } else {
+        &d.changed_age
+    };
+    match d.change_kind {
+        ChangeKind::Rollout => {
+            if age.is_empty() || age == "-" {
+                "📦 Rollout".to_string()
+            } else {
+                format!("📦 Rollout ({age})")
+            }
+        }
+        ChangeKind::Scaled => {
+            if let Some(ref detail) = d.change_detail {
+                if age.is_empty() || age == "-" {
+                    format!("📈 {detail}")
+                } else {
+                    format!("📈 {detail} ({age})")
+                }
+            } else if age.is_empty() || age == "-" {
+                "📈 Scaled".to_string()
+            } else {
+                format!("📈 Scaled ({age})")
+            }
+        }
+        ChangeKind::FailingOnly => {
+            if d.incident_status == IncidentStatus::Healthy {
+                "-".to_string()
+            } else if age.is_empty() || age == "-" {
+                "⚠️ Failing".to_string()
+            } else {
+                format!("⚠️ Failing ({age})")
+            }
+        }
+    }
+}
+
 /// A column exactly as wide as its longest value, and never narrower than
 /// its header, so no value is cut ("external-secrets" in a 14-wide column
 /// read "external-secre"). The flexible ROOT CAUSE / MESSAGE column takes
@@ -276,10 +317,10 @@ pub struct ChangedViewState {
     pub window_idx: usize,
     pub incident_filter: IncidentFilter,
     /// Also list workloads that did not change in the window but are failing
-    /// in it (`u`). Off by default: the window means "changed".
+    /// in it (`u`). On by default: active failures are never hidden.
     pub include_failing: bool,
     /// Also list Deployments whose only change is a replica count (`S`).
-    /// Off by default: an autoscaled cluster scales something every hour.
+    /// On by default: scaling surges are included in triage.
     pub include_scaled: bool,
     /// Whether to display the SRE scope and triage guide banner (`b` / `?`).
     pub show_guide_banner: bool,
@@ -300,8 +341,8 @@ impl ChangedViewState {
             filter_query: String::new(),
             window_idx: 2, // Default to 1h
             incident_filter: IncidentFilter::All,
-            include_failing: false,
-            include_scaled: false,
+            include_failing: true,
+            include_scaled: true,
             show_guide_banner: true,
         }
     }
@@ -630,10 +671,7 @@ pub fn render_guide_banner(f: &mut Frame, area: Rect, state: &ChangedViewState) 
                 .fg(Theme::cyan())
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(
-            "Rollouts & image/config diffs in window  │  ",
-            Style::default().fg(Theme::fg()),
-        ),
+        Span::styled("Rollouts in window  │  ", Style::default().fg(Theme::fg())),
         Span::styled(
             "[S] Scaled: ",
             Style::default()
@@ -641,11 +679,7 @@ pub fn render_guide_banner(f: &mut Frame, area: Rect, state: &ChangedViewState) 
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            if state.include_scaled {
-                "ON (HPA & surges shown)"
-            } else {
-                "OFF (hides autoscaling noise)"
-            },
+            if state.include_scaled { "ON" } else { "OFF" },
             Style::default().fg(if state.include_scaled {
                 Theme::yellow()
             } else {
@@ -660,11 +694,7 @@ pub fn render_guide_banner(f: &mut Frame, area: Rect, state: &ChangedViewState) 
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            if state.include_failing {
-                "ON (unchanged warned/failing shown)"
-            } else {
-                "OFF (rollouts only)"
-            },
+            if state.include_failing { "ON" } else { "OFF" },
             Style::default().fg(if state.include_failing {
                 Theme::red()
             } else {
@@ -922,9 +952,9 @@ fn summary_banner(state: &ChangedViewState) -> (Block<'static>, Line<'static>, L
 
     let title_badge = match state.active_tab {
         ChangedTab::Deployments => {
-            " 🚨 CHANGED & TRIAGE — POST-PAGE INCIDENT INVESTIGATOR [Tab: Deployments] "
+            " 🚨 SRE INCIDENT INVESTIGATOR & CHANGE TRIAGE [Tab: Workloads] "
         }
-        ChangedTab::Infra => " 📦 CHANGED & TRIAGE — INFRASTRUCTURE CHANGES [Tab: Infra] ",
+        ChangedTab::Infra => " 📦 SRE INCIDENT INVESTIGATOR — INFRASTRUCTURE CHANGES [Tab: Infra] ",
     };
 
     let block = Block::default()
@@ -1149,8 +1179,12 @@ fn render_deployments_table(f: &mut Frame, area: Rect, state: &ChangedViewState)
         Cell::from(Span::styled("NAMESPACE", Theme::table_header())),
         Cell::from(Span::styled("REVISION / GITOPS", Theme::table_header())),
         Cell::from(Span::styled("READY", Theme::table_header())),
-        Cell::from(Span::styled("ROOT CAUSE / DETAIL", Theme::table_header())),
-        Cell::from(Span::styled("CHANGED", Theme::table_header())),
+        Cell::from(Span::styled(
+            "ROOT CAUSE / SRE DIAGNOSTIC",
+            Theme::table_header(),
+        )),
+        Cell::from(Span::styled("DEPLOYED", Theme::table_header())),
+        Cell::from(Span::styled("RECENT CHANGE", Theme::table_header())),
     ];
     let header = Row::new(header_cells).height(1).bottom_margin(0);
 
@@ -1278,7 +1312,27 @@ fn render_deployments_table(f: &mut Frame, area: Rect, state: &ChangedViewState)
             let detail_cell =
                 Cell::from(Span::styled(sanitize_span_text(&detail_text), detail_style));
 
-            let age_cell = Cell::from(Span::styled(row_age(d), Style::default().fg(Theme::dim())));
+            let deployed_cell = Cell::from(Span::styled(
+                &d.deployed_age,
+                Style::default().fg(Theme::dim()),
+            ));
+
+            let recent_change_text = recent_change_str(d);
+            let recent_change_style = match d.change_kind {
+                ChangeKind::Rollout => Style::default().fg(Theme::cyan()),
+                ChangeKind::Scaled => Style::default().fg(Theme::yellow()),
+                ChangeKind::FailingOnly => {
+                    if d.incident_status != IncidentStatus::Healthy {
+                        Style::default().fg(Theme::red())
+                    } else {
+                        Style::default().fg(Theme::dim())
+                    }
+                }
+            };
+            let recent_change_cell = Cell::from(Span::styled(
+                sanitize_span_text(&recent_change_text),
+                recent_change_style,
+            ));
 
             let row = Row::new(vec![
                 status_cell,
@@ -1287,7 +1341,8 @@ fn render_deployments_table(f: &mut Frame, area: Rect, state: &ChangedViewState)
                 rev_cell,
                 ready_cell,
                 detail_cell,
-                age_cell,
+                deployed_cell,
+                recent_change_cell,
             ]);
 
             if is_selected {
@@ -1309,6 +1364,7 @@ fn render_deployments_table(f: &mut Frame, area: Rect, state: &ChangedViewState)
         let change = change_tag(d.change_kind).map_or(0, |t| t.chars().count());
         d.app_name.chars().count() + kind_tag + change
     });
+    let recent_change_widths = deps.iter().map(|d| recent_change_str(d).chars().count());
     let widths = [
         Constraint::Length(12),
         Constraint::Length(column_width("WORKLOAD", workload_width)),
@@ -1320,6 +1376,7 @@ fn render_deployments_table(f: &mut Frame, area: Rect, state: &ChangedViewState)
         Constraint::Length(9),
         Constraint::Min(30),
         Constraint::Length(8),
+        Constraint::Length(column_width("RECENT CHANGE", recent_change_widths).max(16)),
     ];
 
     let table = Table::new(rows, widths)

@@ -356,19 +356,28 @@ pub struct TriageSummary {
 }
 
 /// What a triage run includes and fetches.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TriageOptions {
     /// Also report workloads that did not change in the window but are
     /// failing in it (a Warning on a pod or the current ReplicaSet). They
-    /// are marked [`ChangeKind::FailingOnly`].
+    /// are marked [`ChangeKind::FailingOnly`]. Enabled by default.
     pub include_failing: bool,
     /// Also report Deployments whose only change in the window is a replica
-    /// count (HPA or `kubectl scale`), marked [`ChangeKind::Scaled`]. Off by
-    /// default: on an autoscaled cluster nearly everything scales hourly.
+    /// count (HPA or `kubectl scale`), marked [`ChangeKind::Scaled`]. Enabled by default.
     pub include_scaled: bool,
     /// Tail a five-line log snippet per failing workload. The TUI leaves
     /// this off (its card links to the full logs); MCP callers get it.
     pub log_snippets: bool,
+}
+
+impl Default for TriageOptions {
+    fn default() -> Self {
+        Self {
+            include_failing: true,
+            include_scaled: true,
+            log_snippets: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -1579,6 +1588,48 @@ pub fn evaluate_changed_triage(
             .cloned()
             .unwrap_or_default();
 
+        let desired_replicas = dep.spec.as_ref().and_then(|s| s.replicas).unwrap_or(1);
+        let status = dep.status.as_ref();
+        let updated_replicas = status.and_then(|s| s.updated_replicas).unwrap_or(0);
+        let ready_replicas = status.and_then(|s| s.ready_replicas).unwrap_or(0);
+        let available_replicas = status.and_then(|s| s.available_replicas).unwrap_or(0);
+
+        let mut progress_deadline_exceeded = false;
+        if let Some(st) = status {
+            if let Some(ref conds) = st.conditions {
+                for c in conds {
+                    if c.type_ == "Progressing"
+                        && c.status == "False"
+                        && c.reason.as_deref() == Some("ProgressDeadlineExceeded")
+                    {
+                        progress_deadline_exceeded = true;
+                    }
+                }
+            }
+        }
+
+        let (
+            failing_pod_names,
+            crash_loop_count,
+            oom_killed_count,
+            config_error_count,
+            image_error_count,
+            pending_pod_count,
+            restart_count,
+            primary_symptoms,
+            pod_symptoms,
+            detected_failure_category,
+            detected_failure_detail,
+        ) = evaluate_pod_failures(&current_pods, &events_by_object, &dep_ns);
+
+        let is_actively_failing = crash_loop_count > 0
+            || oom_killed_count > 0
+            || config_error_count > 0
+            || image_error_count > 0
+            || pending_pod_count > 0
+            || progress_deadline_exceeded
+            || (desired_replicas > 0 && ready_replicas < desired_replicas);
+
         let mut change_detail = None;
         let change = if rolled_out {
             Some((ChangeKind::Rollout, deployed_age.clone()))
@@ -1588,10 +1639,9 @@ pub fn evaluate_changed_triage(
             change_detail = Some(parse_scale_event(ev.message.as_deref().unwrap_or("")));
             Some((ChangeKind::Scaled, age_of(t)))
         } else if opts.include_failing {
-            // Not changed in the window, but failing in it: a Warning on the
-            // current ReplicaSet (FailedCreate on a quota) or on a pod.
-            cutoff_ts.as_ref().and_then(|cutoff| {
-                let failing =
+            // Actively failing or warned in the window
+            let failing = is_actively_failing
+                || cutoff_ts.as_ref().is_some_and(|cutoff| {
                     warning_in_window(
                         events_by_object.get(&(
                             "ReplicaSet".to_string(),
@@ -1599,9 +1649,9 @@ pub fn evaluate_changed_triage(
                             current_rs_name.to_string(),
                         )),
                         cutoff,
-                    ) || pods_warned_in_window(&current_pods, &events_by_object, &dep_ns, cutoff);
-                failing.then(|| (ChangeKind::FailingOnly, deployed_age.clone()))
-            })
+                    ) || pods_warned_in_window(&current_pods, &events_by_object, &dep_ns, cutoff)
+                });
+            failing.then(|| (ChangeKind::FailingOnly, deployed_age.clone()))
         } else {
             None
         };
@@ -1644,40 +1694,6 @@ pub fn evaluate_changed_triage(
                 .and_then(|a| a.get("deployment.kubernetes.io/revision"))
                 .cloned()
         });
-
-        let desired_replicas = dep.spec.as_ref().and_then(|s| s.replicas).unwrap_or(1);
-        let status = dep.status.as_ref();
-        let updated_replicas = status.and_then(|s| s.updated_replicas).unwrap_or(0);
-        let ready_replicas = status.and_then(|s| s.ready_replicas).unwrap_or(0);
-        let available_replicas = status.and_then(|s| s.available_replicas).unwrap_or(0);
-
-        let mut progress_deadline_exceeded = false;
-        if let Some(st) = status {
-            if let Some(ref conds) = st.conditions {
-                for c in conds {
-                    if c.type_ == "Progressing"
-                        && c.status == "False"
-                        && c.reason.as_deref() == Some("ProgressDeadlineExceeded")
-                    {
-                        progress_deadline_exceeded = true;
-                    }
-                }
-            }
-        }
-
-        let (
-            failing_pod_names,
-            crash_loop_count,
-            oom_killed_count,
-            config_error_count,
-            image_error_count,
-            pending_pod_count,
-            restart_count,
-            primary_symptoms,
-            pod_symptoms,
-            detected_failure_category,
-            detected_failure_detail,
-        ) = evaluate_pod_failures(&current_pods, &events_by_object, &dep_ns);
 
         let mut correlated_events: Vec<EventSummary> = Vec::new();
         let mut probe_failure_count = 0;
@@ -1867,79 +1883,10 @@ pub fn evaluate_changed_triage(
         }
         let sts_name = sts.metadata.name.clone().unwrap_or_default();
 
-        let mut in_window = false;
-        let mut deployed_at = None;
-        let mut deployed_age = "-".to_string();
-
-        if let Some(ref ct) = sts.metadata.creation_timestamp {
-            deployed_at = Some(ct.0.to_string());
-            deployed_age = crate::format_age(now.duration_since(ct.0).as_secs().max(0));
-            if let Some(ref cutoff) = cutoff_ts {
-                if ct.0 >= *cutoff {
-                    in_window = true;
-                }
-            }
-        }
-
-        let sts_events = events_by_object
-            .get(&("StatefulSet".to_string(), sts_ns.clone(), sts_name.clone()))
-            .cloned()
-            .unwrap_or_default();
-        for ev in &sts_events {
-            if let Some(last_ts) = event_last_timestamp(ev) {
-                if let Some(ref cutoff) = cutoff_ts {
-                    if last_ts >= *cutoff {
-                        in_window = true;
-                        break;
-                    }
-                }
-            }
-        }
-
         let current_pods = pods_by_sts
             .get(&(sts_ns.clone(), sts_name.clone()))
             .cloned()
             .unwrap_or_default();
-
-        for p in &current_pods {
-            if let Some(ref ct) = p.metadata.creation_timestamp {
-                if let Some(ref cutoff) = cutoff_ts {
-                    if ct.0 >= *cutoff {
-                        in_window = true;
-                        break;
-                    }
-                }
-            }
-        }
-        let mut change_kind = ChangeKind::Rollout;
-        if !in_window && opts.include_failing {
-            if let Some(ref cutoff) = cutoff_ts {
-                in_window =
-                    pods_warned_in_window(&current_pods, &events_by_object, &sts_ns, cutoff);
-                if in_window {
-                    change_kind = ChangeKind::FailingOnly;
-                }
-            }
-        }
-
-        if !in_window {
-            continue;
-        }
-
-        tracked_objects.insert(("StatefulSet".to_string(), sts_ns.clone(), sts_name.clone()));
-        for p in &current_pods {
-            let pod_name = p.metadata.name.clone().unwrap_or_default();
-            tracked_objects.insert(("Pod".to_string(), sts_ns.clone(), pod_name));
-        }
-
-        let current_images = extract_sts_container_images(sts);
-        let image_diff = current_images.join(", ");
-        let current_revision = sts
-            .status
-            .as_ref()
-            .and_then(|s| s.current_revision.clone())
-            .or_else(|| sts.status.as_ref().and_then(|s| s.update_revision.clone()))
-            .unwrap_or_else(|| "1".to_string());
 
         let desired_replicas = sts.spec.as_ref().and_then(|s| s.replicas).unwrap_or(1);
         let st = sts.status.as_ref();
@@ -1962,6 +1909,93 @@ pub fn evaluate_changed_triage(
             detected_failure_category,
             detected_failure_detail,
         ) = evaluate_pod_failures(&current_pods, &events_by_object, &sts_ns);
+
+        let is_actively_failing = crash_loop_count > 0
+            || oom_killed_count > 0
+            || config_error_count > 0
+            || image_error_count > 0
+            || pending_pod_count > 0
+            || (desired_replicas > 0 && ready_replicas < desired_replicas);
+
+        let sts_events = events_by_object
+            .get(&("StatefulSet".to_string(), sts_ns.clone(), sts_name.clone()))
+            .cloned()
+            .unwrap_or_default();
+
+        let latest_pod_created = current_pods
+            .iter()
+            .filter_map(|p| p.metadata.creation_timestamp.as_ref().map(|t| t.0))
+            .max();
+        let latest_event_ts = sts_events
+            .iter()
+            .filter_map(|ev| event_last_timestamp(ev))
+            .max();
+
+        let deployed_at_ts =
+            latest_pod_created.or_else(|| sts.metadata.creation_timestamp.as_ref().map(|t| t.0));
+        let deployed_at = deployed_at_ts.map(|t| t.to_string());
+        let deployed_age = deployed_at_ts
+            .map(|t| crate::format_age(now.duration_since(t).as_secs().max(0)))
+            .unwrap_or_else(|| "-".to_string());
+
+        let mut in_window = false;
+        let mut change_kind = ChangeKind::Rollout;
+        let mut changed_age = deployed_age.clone();
+
+        if let Some(pod_ts) = latest_pod_created {
+            if cutoff_ts.as_ref().is_some_and(|c| &pod_ts >= c) {
+                in_window = true;
+                change_kind = ChangeKind::Rollout;
+                changed_age = crate::format_age(now.duration_since(pod_ts).as_secs().max(0));
+            }
+        }
+        if !in_window {
+            if let Some(ev_t) = latest_event_ts {
+                if cutoff_ts.as_ref().is_some_and(|c| &ev_t >= c) {
+                    in_window = true;
+                    change_kind = ChangeKind::Scaled;
+                    changed_age = crate::format_age(now.duration_since(ev_t).as_secs().max(0));
+                }
+            }
+        }
+        if !in_window && (opts.include_failing || is_actively_failing) {
+            let failing = is_actively_failing
+                || cutoff_ts.as_ref().is_some_and(|cutoff| {
+                    pods_warned_in_window(&current_pods, &events_by_object, &sts_ns, cutoff)
+                });
+            if failing {
+                in_window = true;
+                change_kind = ChangeKind::FailingOnly;
+                changed_age = deployed_age.clone();
+            }
+        }
+        if !in_window && opts.include_scaled {
+            if let Some(ref ct) = sts.metadata.creation_timestamp {
+                if cutoff_ts.as_ref().is_some_and(|c| &ct.0 >= c) {
+                    in_window = true;
+                    change_kind = ChangeKind::Rollout;
+                }
+            }
+        }
+
+        if !in_window {
+            continue;
+        }
+
+        tracked_objects.insert(("StatefulSet".to_string(), sts_ns.clone(), sts_name.clone()));
+        for p in &current_pods {
+            let pod_name = p.metadata.name.clone().unwrap_or_default();
+            tracked_objects.insert(("Pod".to_string(), sts_ns.clone(), pod_name));
+        }
+
+        let current_images = extract_sts_container_images(sts);
+        let image_diff = current_images.join(", ");
+        let current_revision = sts
+            .status
+            .as_ref()
+            .and_then(|s| s.current_revision.clone())
+            .or_else(|| sts.status.as_ref().and_then(|s| s.update_revision.clone()))
+            .unwrap_or_else(|| "1".to_string());
 
         let mut correlated_events: Vec<EventSummary> = Vec::new();
         let mut probe_failure_count = 0;
@@ -2086,7 +2120,7 @@ pub fn evaluate_changed_triage(
             error_log_pod,
             error_log_container,
             change_kind,
-            changed_age: deployed_age.clone(),
+            changed_age,
             change_detail: None,
             deployed_at,
             deployed_age,
@@ -2122,47 +2156,6 @@ pub fn evaluate_changed_triage(
         }
         let cj_name = cj.metadata.name.clone().unwrap_or_default();
 
-        let mut in_window = false;
-        let mut deployed_at = None;
-        let mut deployed_age = "-".to_string();
-
-        if let Some(ref ct) = cj.metadata.creation_timestamp {
-            deployed_at = Some(ct.0.to_string());
-            deployed_age = crate::format_age(now.duration_since(ct.0).as_secs().max(0));
-            if let Some(ref cutoff) = cutoff_ts {
-                if ct.0 >= *cutoff {
-                    in_window = true;
-                }
-            }
-        }
-
-        if let Some(ref st) = cj.status {
-            if let Some(ref sched) = st.last_schedule_time {
-                deployed_at = Some(sched.0.to_string());
-                deployed_age = crate::format_age(now.duration_since(sched.0).as_secs().max(0));
-                if let Some(ref cutoff) = cutoff_ts {
-                    if sched.0 >= *cutoff {
-                        in_window = true;
-                    }
-                }
-            }
-        }
-
-        let cj_events = events_by_object
-            .get(&("CronJob".to_string(), cj_ns.clone(), cj_name.clone()))
-            .cloned()
-            .unwrap_or_default();
-        for ev in &cj_events {
-            if let Some(last_ts) = event_last_timestamp(ev) {
-                if let Some(ref cutoff) = cutoff_ts {
-                    if last_ts >= *cutoff {
-                        in_window = true;
-                        break;
-                    }
-                }
-            }
-        }
-
         let mut current_pods: Vec<&Pod> = Vec::new();
         if let Some(owned_jobs) = jobs_by_cj.get(&(cj_ns.clone(), cj_name.clone())) {
             for job in owned_jobs {
@@ -2175,22 +2168,100 @@ pub fn evaluate_changed_triage(
             }
         }
 
-        for p in &current_pods {
-            if let Some(ref ct) = p.metadata.creation_timestamp {
-                if let Some(ref cutoff) = cutoff_ts {
-                    if ct.0 >= *cutoff {
-                        in_window = true;
-                        break;
-                    }
+        let is_suspended = cj.spec.as_ref().and_then(|s| s.suspend).unwrap_or(false);
+        let desired_replicas = if is_suspended { 0 } else { 1 };
+        let ready_replicas = current_pods
+            .iter()
+            .filter(|p| {
+                p.status.as_ref().and_then(|s| s.phase.as_deref()) == Some("Running")
+                    || p.status.as_ref().and_then(|s| s.phase.as_deref()) == Some("Succeeded")
+            })
+            .count() as i32;
+        let updated_replicas = ready_replicas;
+        let available_replicas = ready_replicas;
+
+        let (
+            failing_pod_names,
+            crash_loop_count,
+            oom_killed_count,
+            config_error_count,
+            image_error_count,
+            pending_pod_count,
+            restart_count,
+            primary_symptoms,
+            pod_symptoms,
+            detected_failure_category,
+            detected_failure_detail,
+        ) = evaluate_pod_failures(&current_pods, &events_by_object, &cj_ns);
+
+        let is_actively_failing = crash_loop_count > 0
+            || oom_killed_count > 0
+            || config_error_count > 0
+            || image_error_count > 0
+            || pending_pod_count > 0;
+
+        let cj_events = events_by_object
+            .get(&("CronJob".to_string(), cj_ns.clone(), cj_name.clone()))
+            .cloned()
+            .unwrap_or_default();
+
+        let latest_pod_created = current_pods
+            .iter()
+            .filter_map(|p| p.metadata.creation_timestamp.as_ref().map(|t| t.0))
+            .max();
+        let latest_sched = cj
+            .status
+            .as_ref()
+            .and_then(|s| s.last_schedule_time.as_ref().map(|t| t.0));
+        let latest_event_ts = cj_events
+            .iter()
+            .filter_map(|ev| event_last_timestamp(ev))
+            .max();
+
+        let deployed_at_ts = latest_sched
+            .or(latest_pod_created)
+            .or_else(|| cj.metadata.creation_timestamp.as_ref().map(|t| t.0));
+        let deployed_at = deployed_at_ts.map(|t| t.to_string());
+        let deployed_age = deployed_at_ts
+            .map(|t| crate::format_age(now.duration_since(t).as_secs().max(0)))
+            .unwrap_or_else(|| "-".to_string());
+
+        let mut in_window = false;
+        let mut change_kind = ChangeKind::Rollout;
+        let mut changed_age = deployed_age.clone();
+
+        if let Some(ts) = latest_sched.or(latest_pod_created) {
+            if cutoff_ts.as_ref().is_some_and(|c| &ts >= c) {
+                in_window = true;
+                change_kind = ChangeKind::Rollout;
+                changed_age = crate::format_age(now.duration_since(ts).as_secs().max(0));
+            }
+        }
+        if !in_window {
+            if let Some(ev_t) = latest_event_ts {
+                if cutoff_ts.as_ref().is_some_and(|c| &ev_t >= c) {
+                    in_window = true;
+                    change_kind = ChangeKind::Scaled;
+                    changed_age = crate::format_age(now.duration_since(ev_t).as_secs().max(0));
                 }
             }
         }
-        let mut change_kind = ChangeKind::Rollout;
-        if !in_window && opts.include_failing {
-            if let Some(ref cutoff) = cutoff_ts {
-                in_window = pods_warned_in_window(&current_pods, &events_by_object, &cj_ns, cutoff);
-                if in_window {
-                    change_kind = ChangeKind::FailingOnly;
+        if !in_window && (opts.include_failing || is_actively_failing) {
+            let failing = is_actively_failing
+                || cutoff_ts.as_ref().is_some_and(|cutoff| {
+                    pods_warned_in_window(&current_pods, &events_by_object, &cj_ns, cutoff)
+                });
+            if failing {
+                in_window = true;
+                change_kind = ChangeKind::FailingOnly;
+                changed_age = deployed_age.clone();
+            }
+        }
+        if !in_window && opts.include_scaled {
+            if let Some(ref ct) = cj.metadata.creation_timestamp {
+                if cutoff_ts.as_ref().is_some_and(|c| &ct.0 >= c) {
+                    in_window = true;
+                    change_kind = ChangeKind::Rollout;
                 }
             }
         }
@@ -2220,32 +2291,6 @@ pub fn evaluate_changed_triage(
             .as_ref()
             .map(|s| s.schedule.clone())
             .unwrap_or_else(|| "-".to_string());
-
-        let is_suspended = cj.spec.as_ref().and_then(|s| s.suspend).unwrap_or(false);
-        let desired_replicas = if is_suspended { 0 } else { 1 };
-        let ready_replicas = current_pods
-            .iter()
-            .filter(|p| {
-                p.status.as_ref().and_then(|s| s.phase.as_deref()) == Some("Running")
-                    || p.status.as_ref().and_then(|s| s.phase.as_deref()) == Some("Succeeded")
-            })
-            .count() as i32;
-        let updated_replicas = ready_replicas;
-        let available_replicas = ready_replicas;
-
-        let (
-            failing_pod_names,
-            crash_loop_count,
-            oom_killed_count,
-            config_error_count,
-            image_error_count,
-            pending_pod_count,
-            restart_count,
-            primary_symptoms,
-            pod_symptoms,
-            detected_failure_category,
-            detected_failure_detail,
-        ) = evaluate_pod_failures(&current_pods, &events_by_object, &cj_ns);
 
         let mut correlated_events: Vec<EventSummary> = Vec::new();
         let probe_failure_count = 0;
@@ -2354,7 +2399,7 @@ pub fn evaluate_changed_triage(
             error_log_pod,
             error_log_container,
             change_kind,
-            changed_age: deployed_age.clone(),
+            changed_age,
             change_detail: None,
             deployed_at,
             deployed_age,
@@ -2396,6 +2441,11 @@ pub fn evaluate_changed_triage(
         };
         rank(a.incident_status)
             .cmp(&rank(b.incident_status))
+            .then_with(|| {
+                let a_deficit = a.ready_replicas < a.desired_replicas;
+                let b_deficit = b.ready_replicas < b.desired_replicas;
+                b_deficit.cmp(&a_deficit)
+            })
             .then((a.change_kind as u8).cmp(&(b.change_kind as u8)))
     });
 
@@ -3849,7 +3899,7 @@ mod tests {
     }
 
     #[test]
-    fn an_old_rollout_failing_in_the_window_is_reported_only_when_asked() {
+    fn an_old_rollout_failing_is_reported_by_default_and_suppressed_when_failing_disabled() {
         // Rolled out three days ago; crash-looping now, BackOff 2m ago.
         let crashing = [deployment("api", 1, 0), deployment("quiet", 1, 1)];
         let rs = [
@@ -3862,23 +3912,9 @@ mod tests {
         ];
         let events = [event("Pod", "api-6f7-x1", "Warning", "BackOff", 120)];
 
-        // By default the window means "changed": nothing here changed.
-        let strict = triage(&crashing, &rs, &pods, &events, &[]);
-        assert!(strict.deployments.is_empty(), "{:?}", strict.deployments);
-        assert!(!strict.includes_failing);
-
-        let wide = triage_with(
-            &crashing,
-            &rs,
-            &pods,
-            &events,
-            &[],
-            TriageOptions {
-                include_failing: true,
-                ..TriageOptions::default()
-            },
-        );
-        let names: Vec<&str> = wide
+        // By default active failures are ALWAYS reported: api is in, quiet stays out.
+        let default_rep = triage(&crashing, &rs, &pods, &events, &[]);
+        let names: Vec<&str> = default_rep
             .deployments
             .iter()
             .map(|d| d.app_name.as_str())
@@ -3886,19 +3922,35 @@ mod tests {
         assert_eq!(
             names,
             ["api"],
-            "the quiet, old, healthy deployment stays out"
+            "active failure is reported; the quiet, old, healthy deployment stays out"
         );
-        assert!(wide.includes_failing);
-        let api = &wide.deployments[0];
+        assert!(default_rep.includes_failing);
+        let api = &default_rep.deployments[0];
         assert_eq!(api.incident_status, IncidentStatus::CrashLoop);
         assert!(
             api.change_kind == ChangeKind::FailingOnly,
             "marked as included for failing, not for changing"
         );
+
+        // When include_failing is explicitly disabled, unchanged failing workloads stay out.
+        let strict = triage_with(
+            &crashing,
+            &rs,
+            &pods,
+            &events,
+            &[],
+            TriageOptions {
+                include_failing: false,
+                include_scaled: false,
+                log_snippets: false,
+            },
+        );
+        assert!(strict.deployments.is_empty(), "{:?}", strict.deployments);
+        assert!(!strict.includes_failing);
     }
 
     #[test]
-    fn a_replicaset_that_cannot_create_pods_is_reported_only_when_asked() {
+    fn a_replicaset_that_cannot_create_pods_is_reported_by_default() {
         let deps = [deployment("batch", 2, 0)];
         let rs = [replicaset("batch-9c", "batch", 3 * 86_400)];
         let events = [event(
@@ -3909,22 +3961,27 @@ mod tests {
             60,
         )];
 
-        assert!(triage(&deps, &rs, &[], &events, &[]).deployments.is_empty());
+        let default_rep = triage(&deps, &rs, &[], &events, &[]);
+        assert_eq!(default_rep.deployments.len(), 1);
+        assert_eq!(default_rep.deployments[0].app_name, "batch");
+        assert_eq!(
+            default_rep.deployments[0].change_kind,
+            ChangeKind::FailingOnly
+        );
 
-        let wide = triage_with(
+        let strict = triage_with(
             &deps,
             &rs,
             &[],
             &events,
             &[],
             TriageOptions {
-                include_failing: true,
-                ..TriageOptions::default()
+                include_failing: false,
+                include_scaled: false,
+                log_snippets: false,
             },
         );
-        assert_eq!(wide.deployments.len(), 1);
-        assert_eq!(wide.deployments[0].app_name, "batch");
-        assert_eq!(wide.deployments[0].change_kind, ChangeKind::FailingOnly);
+        assert!(strict.deployments.is_empty());
     }
 
     #[test]
@@ -4049,26 +4106,10 @@ mod tests {
             300,
         )];
 
-        let strict = triage(&deps, &rs, &pods, &events, &[]);
-        assert!(
-            strict.deployments.is_empty(),
-            "a scale alone is not a change"
-        );
-        assert!(!strict.includes_scaled);
-
-        let wide = triage_with(
-            &deps,
-            &rs,
-            &pods,
-            &events,
-            &[],
-            TriageOptions {
-                include_scaled: true,
-                ..TriageOptions::default()
-            },
-        );
-        assert!(wide.includes_scaled);
-        let d = &wide.deployments[0];
+        let default_rep = triage(&deps, &rs, &pods, &events, &[]);
+        assert_eq!(default_rep.deployments.len(), 1);
+        assert!(default_rep.includes_scaled);
+        let d = &default_rep.deployments[0];
         assert_eq!(d.change_kind, ChangeKind::Scaled);
         assert_eq!(
             d.changed_age, "5m",
@@ -4080,6 +4121,24 @@ mod tests {
             d.failure_detail, "Scaled 3→4",
             "the scale is the news on a healthy row"
         );
+
+        let strict = triage_with(
+            &deps,
+            &rs,
+            &pods,
+            &events,
+            &[],
+            TriageOptions {
+                include_failing: false,
+                include_scaled: false,
+                log_snippets: false,
+            },
+        );
+        assert!(
+            strict.deployments.is_empty(),
+            "a scale alone is not a rollout when scaled is excluded"
+        );
+        assert!(!strict.includes_scaled);
     }
 
     #[test]
