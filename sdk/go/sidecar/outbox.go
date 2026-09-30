@@ -23,7 +23,7 @@ type outbox struct {
 	lifecycle chan []byte
 	general   chan []byte
 	done      chan struct{} // closed once the writer has stopped
-	err       error         // the write that failed, if one did; read after done
+	err       error         // the failed write's error, or else the error from closing w; read after done
 }
 
 func newOutbox() *outbox {
@@ -71,11 +71,22 @@ func (o *outbox) send(lane chan []byte, msg any, stop <-chan struct{}) error {
 	}
 }
 
-// run writes queued lines to w until the close marker (a nil line), then
-// closes w if it can, so the reader on the other end reads to its end. It
-// stops early if a write fails.
+// run writes queued lines to w until the close marker (a nil line) or a
+// failed write, and closes w on either exit if it can, so the reader on the
+// other end reads to its end even after a failed write.
 func (o *outbox) run(w io.Writer) {
 	defer close(o.done)
+	wroteErr := false
+	defer func() {
+		c, ok := w.(io.Closer)
+		if !ok {
+			return
+		}
+		closeErr := c.Close()
+		if !wroteErr {
+			o.err = closeErr
+		}
+	}()
 	for {
 		var line []byte
 		select {
@@ -87,13 +98,11 @@ func (o *outbox) run(w io.Writer) {
 			}
 		}
 		if line == nil {
-			if c, ok := w.(io.Closer); ok {
-				o.err = c.Close()
-			}
 			return
 		}
 		if _, err := w.Write(append(line, '\n')); err != nil {
 			o.err = err
+			wroteErr = true
 			return
 		}
 	}

@@ -6,6 +6,7 @@ import (
 	"io"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -129,15 +130,25 @@ func TestALineThatIsNotJSONRPCEndsTheSessionWithAnError(t *testing.T) {
 	}
 }
 
-type failingWriter struct{}
+// failingWriter fails every Write, and records whether it was Closed, so
+// tests can tell Run closed it even though the write failed.
+type failingWriter struct {
+	closed atomic.Bool
+}
 
-func (failingWriter) Write([]byte) (int, error) { return 0, errors.New("the pipe broke") }
+func (*failingWriter) Write([]byte) (int, error) { return 0, errors.New("the pipe broke") }
+
+func (fw *failingWriter) Close() error {
+	fw.closed.Store(true)
+	return nil
+}
 
 func TestASidecarWhoseOutputFailsEndsWithAnIOError(t *testing.T) {
 	inR, inW := io.Pipe()
 	defer inW.Close()
+	fw := &failingWriter{}
 	done := make(chan error, 1)
-	go func() { done <- sidecar.New("t", "1").Run(context.Background(), inR, failingWriter{}) }()
+	go func() { done <- sidecar.New("t", "1").Run(context.Background(), inR, fw) }()
 	line := mustJSON(t, map[string]any{"jsonrpc": "2.0", "id": 1, "method": "initialize",
 		"params": initializeParams([]string{"0.1.0"}, t.TempDir(), defaultLimits())})
 	go io.WriteString(inW, line+"\n")
@@ -148,6 +159,9 @@ func TestASidecarWhoseOutputFailsEndsWithAnIOError(t *testing.T) {
 		}
 	case <-time.After(wait):
 		t.Fatal("the session did not end")
+	}
+	if !fw.closed.Load() {
+		t.Fatal("Run did not close w after the write to it failed")
 	}
 }
 
