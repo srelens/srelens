@@ -156,8 +156,10 @@ func TestAStreamWhoseErrorIsTooLargeStillEndsWithAnErrorFrame(t *testing.T) {
 	h.initialize()
 	h.answer(h.request("stream/open", map[string]any{"stream": 7, "method": "loud", "params": map[string]any{}}))
 	m := h.recv()
-	params := m["params"].(map[string]any)
-	if m["method"] != "stream/error" || params["stream"] != float64(7) || !strings.Contains(params["message"].(string), "4 MiB") {
+	// Checked assertions: a wrong frame fails with the frame, not a panic.
+	params, _ := m["params"].(map[string]any)
+	message, _ := params["message"].(string)
+	if m["method"] != "stream/error" || params["stream"] != float64(7) || !strings.Contains(message, "4 MiB") {
 		t.Fatalf("%v", m)
 	}
 	if err := h.finish(); err != nil {
@@ -265,5 +267,28 @@ func TestStreamsAndOperationsShareOneNameSpace(t *testing.T) {
 		mustPanic(t, "registering a stream named "+name, func() {
 			sidecar.Stream(sidecar.New("t", "1"), name, noopStream)
 		})
+	}
+}
+
+// explodingInput's decoder panics, as a buggy UnmarshalJSON in an author's
+// type might.
+type explodingInput struct{}
+
+func (*explodingInput) UnmarshalJSON([]byte) error { panic("the decoder broke") }
+
+// A panic while decoding a stream's params is answered as a panic, as it is
+// for an operation, and does not take the sidecar down.
+func TestAStreamWhoseInputPanicsWhileDecodingIsRefusedAndTheSidecarGoesOn(t *testing.T) {
+	s := sidecar.New("t", "1")
+	sidecar.Stream(s, "explode", func(context.Context, explodingInput, *sidecar.Frames) error { return nil })
+	h := start(t, s)
+	h.initialize()
+	id := h.request("stream/open", map[string]any{"stream": 11, "method": "explode", "params": map[string]any{}})
+	if e := errorOf(t, h.answer(id)); e.code != -32603 || e.message != "the stream `explode` panicked" {
+		t.Fatalf("%+v", e)
+	}
+	h.answer(h.request("health", map[string]any{}))
+	if err := h.finish(); err != nil {
+		t.Fatal(err)
 	}
 }

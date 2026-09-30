@@ -184,7 +184,10 @@ func (se *session) openStream(id protocol.RequestID, raw json.RawMessage) {
 	ctx, cancel := context.WithCancelCause(se.base)
 	frames := &Frames{stream: open.Stream, out: se.out, ctx: ctx, cancel: cancel}
 	what := fmt.Sprintf("the stream `%s`", open.Method)
-	run, err := start(ctx, open.Params, frames)
+	// Decoding runs the author's types' UnmarshalJSON on the reader
+	// goroutine: guarded, so a panic there refuses the stream instead of
+	// taking the sidecar down, as it would for an operation.
+	run, err := guarded(what, func() (func() error, error) { return start(ctx, open.Params, frames) })
 	if err != nil {
 		cancel(err)
 		se.send(se.out.general, protocol.Response{ID: id, Error: asRPCError(err, what)})
