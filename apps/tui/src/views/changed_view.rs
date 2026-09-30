@@ -190,7 +190,6 @@ pub enum IncidentFilter {
     PendingOnly,
     FlappingOnly,
     RollingOnly,
-    HealthyOnly,
 }
 
 impl IncidentFilter {
@@ -203,7 +202,6 @@ impl IncidentFilter {
             Self::PendingOnly => "PENDING (INFRA)",
             Self::FlappingOnly => "FLAPPING",
             Self::RollingOnly => "ROLLING",
-            Self::HealthyOnly => "HEALTHY",
         }
     }
 
@@ -215,8 +213,7 @@ impl IncidentFilter {
             Self::ErrorOnly => Self::PendingOnly,
             Self::PendingOnly => Self::FlappingOnly,
             Self::FlappingOnly => Self::RollingOnly,
-            Self::RollingOnly => Self::HealthyOnly,
-            Self::HealthyOnly => Self::All,
+            Self::RollingOnly => Self::All,
         }
     }
 }
@@ -604,7 +601,6 @@ impl ChangedViewState {
                     d.incident_status == IncidentStatus::Rolling
                         || d.incident_status == IncidentStatus::Stalled
                 }
-                IncidentFilter::HealthyOnly => false,
             })
             .filter(|d| self.matches_query(d, &q))
             .collect()
@@ -633,7 +629,6 @@ impl ChangedViewState {
                     d.incident_status == IncidentStatus::Rolling
                         || d.incident_status == IncidentStatus::Stalled
                 }
-                IncidentFilter::HealthyOnly => d.incident_status == IncidentStatus::Healthy,
             })
             .filter(|d| self.matches_query(d, &q))
             .collect()
@@ -684,7 +679,6 @@ impl ChangedViewState {
                     d.incident_status == IncidentStatus::Rolling
                         || d.incident_status == IncidentStatus::Stalled
                 }
-                IncidentFilter::HealthyOnly => d.incident_status == IncidentStatus::Healthy,
             })
             .filter(|d| self.matches_query(d, &q))
             .collect()

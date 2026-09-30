@@ -658,21 +658,25 @@ pub fn analyze_pod_failure(pod: &Pod, pod_events: &[&Event]) -> (FailureCategory
         // 1. Container Waiting / Terminated state
         if let Some(ref c_statuses) = st.container_statuses {
             for cs in c_statuses {
-                if let Some(ref term) = cs.last_state.as_ref().and_then(|s| s.terminated.as_ref()) {
-                    if term.exit_code == 137 || term.reason.as_deref() == Some("OOMKilled") {
-                        return (
-                            FailureCategory::App,
-                            Some(format!("{} OOMKilled (Exit Code 137)", cs.name)),
-                        );
-                    }
-                    if term.exit_code != 0 {
-                        return (
-                            FailureCategory::App,
-                            Some(format!(
-                                "{} terminated with Exit Code {}",
-                                cs.name, term.exit_code
-                            )),
-                        );
+                if !cs.ready {
+                    if let Some(ref term) =
+                        cs.last_state.as_ref().and_then(|s| s.terminated.as_ref())
+                    {
+                        if term.exit_code == 137 || term.reason.as_deref() == Some("OOMKilled") {
+                            return (
+                                FailureCategory::App,
+                                Some(format!("{} OOMKilled (Exit Code 137)", cs.name)),
+                            );
+                        }
+                        if term.exit_code != 0 {
+                            return (
+                                FailureCategory::App,
+                                Some(format!(
+                                    "{} terminated with Exit Code {}",
+                                    cs.name, term.exit_code
+                                )),
+                            );
+                        }
                     }
                 }
                 if let Some(ref term) = cs.state.as_ref().and_then(|s| s.terminated.as_ref()) {
@@ -851,9 +855,9 @@ pub fn failing_container_name(pod: &Pod) -> Option<String> {
                     .is_some_and(|r| r != "ContainerCreating" && r != "PodInitializing");
                 waiting_on_error
                     || exited_non_zero(cs.state.as_ref())
-                    || exited_non_zero(cs.last_state.as_ref())
+                    || (!cs.ready && exited_non_zero(cs.last_state.as_ref()))
             })
-            .or_else(|| list.iter().find(|cs| cs.restart_count > 0));
+            .or_else(|| list.iter().find(|cs| !cs.ready && cs.restart_count > 0));
         if let Some(cs) = failing {
             return Some(cs.name.clone());
         }
@@ -1312,25 +1316,28 @@ fn evaluate_pod_failures(
                                 .unwrap_or_else(|| reason.to_string());
                         }
                     }
-                    if let Some(ref term) =
-                        cs.last_state.as_ref().and_then(|s| s.terminated.as_ref())
-                    {
-                        if term.exit_code == 137 || term.reason.as_deref() == Some("OOMKilled") {
-                            is_pod_failing = true;
-                            oom_killed_count += 1;
-                            pod_status_label = "OOMKilled".to_string();
-                            pod_error_msg = "exit code 137".to_string();
-                        } else if term.exit_code != 0 {
-                            is_pod_failing = true;
-                            exited_non_zero = true;
-                            if pod_status_label.is_empty() {
-                                pod_status_label = "Error".to_string();
-                            }
-                            if pod_status_label == "CrashLoopBackOff"
-                                || pod_error_msg.is_empty()
-                                || pod_error_msg.starts_with("back-off")
+                    if !cs.ready {
+                        if let Some(ref term) =
+                            cs.last_state.as_ref().and_then(|s| s.terminated.as_ref())
+                        {
+                            if term.exit_code == 137 || term.reason.as_deref() == Some("OOMKilled")
                             {
-                                pod_error_msg = format!("exited with code {}", term.exit_code);
+                                is_pod_failing = true;
+                                oom_killed_count += 1;
+                                pod_status_label = "OOMKilled".to_string();
+                                pod_error_msg = "exit code 137".to_string();
+                            } else if term.exit_code != 0 {
+                                is_pod_failing = true;
+                                exited_non_zero = true;
+                                if pod_status_label.is_empty() {
+                                    pod_status_label = "Error".to_string();
+                                }
+                                if pod_status_label == "CrashLoopBackOff"
+                                    || pod_error_msg.is_empty()
+                                    || pod_error_msg.starts_with("back-off")
+                                {
+                                    pod_error_msg = format!("exited with code {}", term.exit_code);
+                                }
                             }
                         }
                     }
@@ -3438,6 +3445,130 @@ mod tests {
         assert_eq!(change.oom_killed_count, 1);
         assert_eq!(change.crash_loop_count, 1);
         assert!(change.failure_detail.contains("OOMKilled"));
+    }
+
+    #[test]
+    fn triage_ignores_historical_oom_when_pod_is_currently_ready() {
+        let now = Timestamp::from_second(1_700_000_000).unwrap();
+        let dep_time = Timestamp::from_second(1_700_000_000 - 300).unwrap();
+
+        let dep = Deployment {
+            metadata: ObjectMeta {
+                name: Some("bookwize".to_string()),
+                namespace: Some("connector".to_string()),
+                creation_timestamp: Some(Time(dep_time)),
+                ..Default::default()
+            },
+            spec: Some(DeploymentSpec {
+                replicas: Some(2),
+                ..Default::default()
+            }),
+            status: Some(DeploymentStatus {
+                replicas: Some(2),
+                ready_replicas: Some(2),
+                updated_replicas: Some(2),
+                available_replicas: Some(2),
+                ..Default::default()
+            }),
+        };
+
+        let mut ann = BTreeMap::new();
+        ann.insert(
+            "deployment.kubernetes.io/revision".to_string(),
+            "1".to_string(),
+        );
+
+        let rs = ReplicaSet {
+            metadata: ObjectMeta {
+                name: Some("bookwize-7cb7".to_string()),
+                namespace: Some("connector".to_string()),
+                owner_references: Some(vec![make_owner_ref("Deployment", "bookwize")]),
+                annotations: Some(ann),
+                creation_timestamp: Some(Time(dep_time)),
+                ..Default::default()
+            },
+            spec: Some(ReplicaSetSpec {
+                replicas: Some(2),
+                template: Some(PodTemplateSpec {
+                    spec: Some(PodSpec {
+                        containers: vec![Container {
+                            name: "bookwize".to_string(),
+                            image: Some("acme/bookwize:v1".to_string()),
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            status: Some(ReplicaSetStatus {
+                replicas: 2,
+                ready_replicas: Some(2),
+                ..Default::default()
+            }),
+        };
+
+        // Pod has 1 restart with historical OOM in last_state, but is currently Running and Ready (ready: true)
+        let pod = Pod {
+            metadata: ObjectMeta {
+                name: Some("bookwize-7cb7-x7fsf".to_string()),
+                namespace: Some("connector".to_string()),
+                owner_references: Some(vec![make_owner_ref("ReplicaSet", "bookwize-7cb7")]),
+                ..Default::default()
+            },
+            spec: Some(PodSpec::default()),
+            status: Some(PodStatus {
+                container_statuses: Some(vec![ContainerStatus {
+                    name: "bookwize".to_string(),
+                    ready: true,
+                    restart_count: 1,
+                    state: Some(ContainerState {
+                        running: Some(Default::default()),
+                        ..Default::default()
+                    }),
+                    last_state: Some(ContainerState {
+                        terminated: Some(ContainerStateTerminated {
+                            exit_code: 137,
+                            reason: Some("OOMKilled".to_string()),
+                            finished_at: Some(Time(
+                                Timestamp::from_second(1_700_000_000 - 18000).unwrap(),
+                            )),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+        };
+
+        let report = evaluate_changed_triage(
+            &[dep],
+            &[],
+            &[],
+            &[],
+            &[rs],
+            &[pod],
+            &[],
+            &[],
+            Duration::from_secs(1800), // 30m
+            now,
+            Some("connector".to_string()),
+            TriageOptions::default(),
+        );
+
+        assert_eq!(report.summary.total_deployments, 1);
+        assert_eq!(report.summary.oom_count, 0);
+
+        let change = &report.deployments[0];
+        assert_eq!(change.app_name, "bookwize");
+        assert_eq!(change.incident_status, IncidentStatus::Healthy);
+        assert_eq!(change.oom_killed_count, 0);
+        assert_eq!(change.crash_loop_count, 0);
+        assert_eq!(change.ready_replicas, 2);
+        assert_eq!(change.desired_replicas, 2);
     }
 
     #[test]

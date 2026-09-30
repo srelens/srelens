@@ -337,11 +337,6 @@ fn changed_view_state_navigation_and_filters() {
     assert_eq!(state.filtered_deployments().len(), 0);
 
     state.cycle_filter();
-    assert_eq!(state.incident_filter, IncidentFilter::HealthyOnly);
-    assert_eq!(state.filtered_deployments().len(), 1);
-    assert_eq!(state.filtered_deployments()[0].app_name, "frontend");
-
-    state.cycle_filter();
     assert_eq!(state.incident_filter, IncidentFilter::All);
     assert_eq!(state.filtered_deployments().len(), 3);
 
