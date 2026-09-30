@@ -1,7 +1,7 @@
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
-    text::{Line, Span},
+    text::{Line, Span, Text},
     widgets::{Block, BorderType, Borders, Cell, Paragraph, Row, Table, TableState, Wrap},
     Frame,
 };
@@ -1693,6 +1693,88 @@ fn cause_lines(
     out
 }
 
+/// Wrap message text into multiple lines bounded by `max_width`.
+/// Breaks on word boundaries where possible; breaks words that exceed `max_width`.
+pub fn wrap_message_text(text: &str, max_width: usize) -> Vec<String> {
+    let sanitized = sanitize_span_text(text);
+    if sanitized.is_empty() {
+        return vec![String::new()];
+    }
+    let max_w = max_width.max(15);
+    let mut lines = Vec::new();
+    let mut current_line = String::new();
+    let mut current_w = 0;
+
+    for word in sanitized.split_whitespace() {
+        let word_w = unicode_width::UnicodeWidthStr::width(word);
+        if current_line.is_empty() {
+            if word_w <= max_w {
+                current_line.push_str(word);
+                current_w = word_w;
+            } else {
+                // Word itself exceeds max_w; split by chars
+                let mut chunk = String::new();
+                let mut chunk_w = 0;
+                for ch in word.chars() {
+                    let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1);
+                    if chunk_w + cw > max_w && !chunk.is_empty() {
+                        lines.push(chunk);
+                        chunk = String::new();
+                        chunk_w = 0;
+                    }
+                    chunk.push(ch);
+                    chunk_w += cw;
+                }
+                if !chunk.is_empty() {
+                    current_line = chunk;
+                    current_w = chunk_w;
+                }
+            }
+        } else if current_w + 1 + word_w <= max_w {
+            current_line.push(' ');
+            current_line.push_str(word);
+            current_w += 1 + word_w;
+        } else {
+            lines.push(current_line);
+            current_line = String::new();
+            current_w = 0;
+
+            if word_w <= max_w {
+                current_line.push_str(word);
+                current_w = word_w;
+            } else {
+                let mut chunk = String::new();
+                let mut chunk_w = 0;
+                for ch in word.chars() {
+                    let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1);
+                    if chunk_w + cw > max_w && !chunk.is_empty() {
+                        lines.push(chunk);
+                        chunk = String::new();
+                        chunk_w = 0;
+                    }
+                    chunk.push(ch);
+                    chunk_w += cw;
+                }
+                if !chunk.is_empty() {
+                    current_line = chunk;
+                    current_w = chunk_w;
+                }
+            }
+        }
+    }
+
+    if !current_line.is_empty() {
+        lines.push(current_line);
+    }
+
+    if lines.is_empty() {
+        vec![String::new()]
+    } else {
+        lines
+    }
+}
+
+
 fn render_infra_tab(f: &mut Frame, area: Rect, state: &ChangedViewState) {
     let block = Block::default()
         .borders(Borders::ALL)
@@ -1735,6 +1817,14 @@ fn render_infra_tab(f: &mut Frame, area: Rect, state: &ChangedViewState) {
     ];
     let header = Row::new(header_cells).height(1).bottom_margin(0);
 
+    let ns_col_width = column_width(
+        "NAMESPACE",
+        infra.iter().map(|i| i.namespace.chars().count()),
+    );
+    // Fixed columns: 8 (AGE) + 14 (KIND) + ns_col_width + 22 (NAME) + 16 (REASON) + 6 (COUNT) + 6 (spacing) + 2 (borders)
+    let fixed_width = 8 + 14 + ns_col_width + 22 + 16 + 6 + 6 + 2;
+    let msg_col_width = (area.width.saturating_sub(fixed_width as u16) as usize).max(30);
+
     let rows: Vec<Row> = infra
         .iter()
         .enumerate()
@@ -1768,10 +1858,14 @@ fn render_infra_tab(f: &mut Frame, area: Rect, state: &ChangedViewState) {
                 format!("{}", item.count),
                 Style::default().fg(Theme::dim()),
             ));
-            let msg_cell = Cell::from(Span::styled(
-                sanitize_span_text(&item.message),
-                Style::default().fg(Theme::fg()),
-            ));
+
+            let wrapped_lines = wrap_message_text(&item.message, msg_col_width);
+            let row_height = wrapped_lines.len().max(1) as u16;
+            let text_lines: Vec<Line> = wrapped_lines
+                .into_iter()
+                .map(|line| Line::from(Span::styled(line, Style::default().fg(Theme::fg()))))
+                .collect();
+            let msg_cell = Cell::from(Text::from(text_lines));
 
             let row = Row::new(vec![
                 age_cell,
@@ -1781,7 +1875,8 @@ fn render_infra_tab(f: &mut Frame, area: Rect, state: &ChangedViewState) {
                 reason_cell,
                 count_cell,
                 msg_cell,
-            ]);
+            ])
+            .height(row_height);
 
             if is_selected {
                 row.style(Theme::selected_row())
@@ -1794,10 +1889,7 @@ fn render_infra_tab(f: &mut Frame, area: Rect, state: &ChangedViewState) {
     let widths = [
         Constraint::Length(8),
         Constraint::Length(14),
-        Constraint::Length(column_width(
-            "NAMESPACE",
-            infra.iter().map(|i| i.namespace.chars().count()),
-        )),
+        Constraint::Length(ns_col_width),
         Constraint::Length(22),
         Constraint::Length(16),
         Constraint::Length(6),

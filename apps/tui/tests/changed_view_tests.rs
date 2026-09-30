@@ -13,8 +13,8 @@ use srelens_kube::events::EventSummary;
 use srelens_registry::github::{CausePull, RolloutCause};
 use srelens_tui::commands::{resolve_command, CommandTarget, ResourceKind};
 use srelens_tui::views::changed_view::{
-    render_changed_view, CauseLookup, ChangedTab, ChangedViewState, IncidentFilter, QuickRca,
-    QuickRcaStatus,
+    render_changed_view, wrap_message_text, CauseLookup, ChangedTab, ChangedViewState,
+    IncidentFilter, QuickRca, QuickRcaStatus,
 };
 
 fn render_lines<F>(width: u16, height: u16, draw: F) -> Vec<String>
@@ -415,11 +415,43 @@ fn renders_changed_view_wide_with_diagnostic_card() {
 }
 
 #[test]
+fn wrap_message_text_splits_on_words_and_long_tokens() {
+    // Normal sentence wrapping
+    let text = "Error updating load balancer with new hosts in target pool";
+    let wrapped = wrap_message_text(text, 25);
+    assert!(wrapped.len() >= 2);
+    assert_eq!(wrapped.join(" "), text);
+
+    // Huge token that exceeds column width
+    let huge_token = "gke-search-backend-p-amd64spot-cc-0-d-141c084a-gl6z";
+    let wrapped_token = wrap_message_text(huge_token, 20);
+    assert!(wrapped_token.len() >= 2);
+    assert_eq!(wrapped_token.concat(), huge_token);
+
+    // Empty and single words
+    assert_eq!(wrap_message_text("", 30), vec![""]);
+    assert_eq!(wrap_message_text("Ready", 30), vec!["Ready"]);
+}
+
+#[test]
 fn renders_changed_view_infra_tab() {
     let _settings = common::env::isolate_settings();
 
+    let mut report = sample_report();
+    report.infra_changes.push(InfraChangeItem {
+        age: "22s".to_string(),
+        last_ts: None,
+        kind: "Service".to_string(),
+        name: "thanos-query-cluster-ingress".to_string(),
+        namespace: "monitoring".to_string(),
+        reason: "UpdateLoadBalancer".to_string(),
+        message: "Error updating load balancer with new hosts [gke-search-backend-p-amd64spot-cc-0-d-141c084a-gl6z gke-search-backend-p-amd64spot-cc-0-d-141c084a-gl6z]".to_string(),
+        count: 1,
+        is_warning: true,
+    });
+
     let mut state = ChangedViewState::new();
-    state.set_report(sample_report());
+    state.set_report(report);
     state.active_tab = ChangedTab::Infra;
 
     let lines = render_lines(120, 28, |f| {
@@ -432,6 +464,9 @@ fn renders_changed_view_infra_tab() {
     assert!(rendered.contains("app-config"));
     assert!(rendered.contains("api-ingress"));
     assert!(rendered.contains("Backend TLS certificate expired"));
+    // Multi-line wrapped parts both rendered
+    assert!(rendered.contains("Error updating load balancer"));
+    assert!(rendered.contains("gke-search-backend-p-amd64spot"));
 
     // When filter matches nothing, it tells the user the filter hid them
     state.filter_query = "nonexistent".to_string();
