@@ -160,11 +160,78 @@ func (se *session) request(req protocol.Request) flow {
 
 // dispatch serves an app request.
 func (se *session) dispatch(req protocol.Request) {
-	se.answerError(req.ID, protocol.CodeMethodNotFound, fmt.Sprintf("this sidecar has no operation `%s`", req.Method), nil)
+	se.operation(req)
+}
+
+func (se *session) operation(req protocol.Request) {
+	run, ok := se.sc.operations[req.Method]
+	if !ok {
+		se.answerError(req.ID, protocol.CodeMethodNotFound, fmt.Sprintf("this sidecar has no operation `%s`", req.Method), nil)
+		return
+	}
+	key := requestKey(req.ID)
+	ctx, cancel := context.WithCancelCause(se.base)
+	se.track(key, cancel)
+	what := fmt.Sprintf("the handler for `%s`", req.Method)
+	go func() {
+		result, err := guarded(what, func() (json.RawMessage, error) { return run(ctx, req.Params) })
+		cancel(ErrHandlerReturned)
+		// Cancelled, or the session ended: -32800 was the answer, or none is
+		// due, and this one is dropped.
+		if !se.untrack(key) {
+			return
+		}
+		if err != nil {
+			se.send(se.out.general, protocol.Response{ID: req.ID, Error: asRPCError(err, what)})
+			return
+		}
+		se.answer(req.ID, result)
+	}()
+}
+
+func requestKey(id protocol.RequestID) string { return "request " + id.Key() }
+
+func (se *session) track(key string, cancel context.CancelCauseFunc) {
+	se.mu.Lock()
+	se.running[key] = cancel
+	se.mu.Unlock()
+}
+
+// untrack forgets key; whether it was still running, which it is not once
+// srelens cancelled it or the session ended.
+func (se *session) untrack(key string) bool {
+	se.mu.Lock()
+	defer se.mu.Unlock()
+	_, ok := se.running[key]
+	delete(se.running, key)
+	return ok
+}
+
+// cancelRunning stops key with cause, if it is still running; whether it was.
+func (se *session) cancelRunning(key string, cause error) bool {
+	se.mu.Lock()
+	cancel, ok := se.running[key]
+	delete(se.running, key)
+	se.mu.Unlock()
+	if ok {
+		cancel(cause)
+	}
+	return ok
 }
 
 // notify handles srelens's notifications; one this SDK does not know is ignored.
-func (se *session) notify(protocol.Notification) {}
+func (se *session) notify(note protocol.Notification) {
+	switch note.Method {
+	case protocol.MethodCancelRequest:
+		var p protocol.CancelParams
+		if err := json.Unmarshal(note.Params, &p); err != nil || p.ID.IsZero() {
+			return
+		}
+		if se.cancelRunning(requestKey(p.ID), ErrCancelled) {
+			se.answerError(p.ID, protocol.CodeRequestCancelled, "srelens cancelled the request", nil)
+		}
+	}
+}
 
 // answered routes srelens's answer to one of the sidecar's calls.
 func (se *session) answered(protocol.Response) {}
