@@ -33,6 +33,7 @@ var initialisms = map[string]string{"id": "ID", "api": "API", "uid": "UID", "rpc
 var (
 	definitionKeywords = set("type", "properties", "required", "additionalProperties", "description")
 	propertyKeywords   = set("type", "$ref", "anyOf", "items", "pattern", "minLength", "maxLength", "minimum", "not", "description")
+	methodKeywords     = set("direction", "kind", "params", "result")
 )
 
 func set(words ...string) map[string]bool {
@@ -202,11 +203,20 @@ func (g *generator) constants() error {
 		if !ok {
 			return fmt.Errorf("x-srelens-methods.%s is not an object", name)
 		}
+		if err := only(spec, methodKeywords, "x-srelens-methods."+name); err != nil {
+			return err
+		}
 		direction, _ := spec["direction"].(string)
 		switch direction {
 		case "hostToSidecar", "sidecarToHost", "both":
 		default:
 			return fmt.Errorf("x-srelens-methods.%s: unknown direction %q", name, direction)
+		}
+		kind, _ := spec["kind"].(string)
+		switch kind {
+		case "request", "notification":
+		default:
+			return fmt.Errorf("x-srelens-methods.%s: unknown kind %q", name, kind)
 		}
 		for _, key := range []string{"params", "result"} {
 			if ref, ok := spec[key]; ok {
@@ -261,6 +271,9 @@ func (g *generator) definition(name string, v any) error {
 	}
 	if err := only(def, definitionKeywords, path); err != nil {
 		return err
+	}
+	if ap, ok := def["additionalProperties"]; ok && ap != false {
+		return fmt.Errorf("%s: additionalProperties is supported only as false", path)
 	}
 	if def["type"] != "object" {
 		return fmt.Errorf(`%s: type must be "object"`, path)

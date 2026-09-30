@@ -48,6 +48,42 @@ func TestAKeywordTheGeneratorDoesNotKnowIsRefusedNamingItsPath(t *testing.T) {
 	}
 }
 
+func TestAdditionalPropertiesOtherThanFalseIsRefused(t *testing.T) {
+	for _, ap := range []string{"true", "{}"} {
+		_, err := generate(minimal(`"Thing": {"type": "object", "properties": {"n": {"type": "string"}}, "additionalProperties": ` + ap + `}`))
+		if err == nil || !strings.Contains(err.Error(), "definitions.Thing") || !strings.Contains(err.Error(), "additionalProperties") {
+			t.Errorf("additionalProperties: %s: expected a refusal naming definitions.Thing and additionalProperties, got %v", ap, err)
+		}
+	}
+}
+
+// methodSchema is a schema whose x-srelens-methods table holds exactly the
+// given "health" method spec (a JSON fragment of its object body), for tests
+// that exercise the method-table rules minimal's fixed table cannot reach.
+func methodSchema(healthSpec string) []byte {
+	return []byte(`{
+		"definitions": {"HostMessage": {}, "SidecarMessage": {}, "RequestId": {}},
+		"x-srelens-apiVersion": "0.1.0",
+		"x-srelens-maxMessageBytes": 4194304,
+		"x-srelens-errorCodes": {"parseError": -32700},
+		"x-srelens-methods": {"health": {` + healthSpec + `}}
+	}`)
+}
+
+func TestAMethodSpecKeyTheGeneratorDoesNotKnowIsRefusedNamingItAndItsPath(t *testing.T) {
+	_, err := generate(methodSchema(`"direction": "hostToSidecar", "kind": "request", "params": true, "result": true, "since": "0.2.0"`))
+	if err == nil || !strings.Contains(err.Error(), `"since"`) || !strings.Contains(err.Error(), "x-srelens-methods.health") {
+		t.Fatalf("expected a refusal naming \"since\" and its path, got %v", err)
+	}
+}
+
+func TestAMethodSpecWithAnUnknownKindIsRefused(t *testing.T) {
+	_, err := generate(methodSchema(`"direction": "hostToSidecar", "kind": "stream", "params": true, "result": true`))
+	if err == nil || !strings.Contains(err.Error(), "x-srelens-methods.health") || !strings.Contains(err.Error(), `"stream"`) {
+		t.Fatalf("expected a refusal naming the unknown kind, got %v", err)
+	}
+}
+
 func TestNullableIsAPointerWrittenAsNullAndOptionalIsAPointerLeftOut(t *testing.T) {
 	src, err := generate(minimal(`
 		"Peer": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]},
