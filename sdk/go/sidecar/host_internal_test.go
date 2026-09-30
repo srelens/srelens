@@ -446,3 +446,29 @@ func TestCheckTruncatesALongNamespaceInItsRefusal(t *testing.T) {
 		t.Fatalf("the refusal dropped the namespace: %s", msg)
 	}
 }
+
+// An answer srelens already gave wins over the caller's ctx or the session
+// ending at the same moment: select picks at random among ready cases, and a
+// host/action srelens ran must not be reported as cancelled. Each round
+// delivers the answer and ends the ctx or the session before await looks.
+func TestAnAnswerAlreadyDeliveredWinsOverTheContextOrSessionEnding(t *testing.T) {
+	for _, ending := range []string{"ctx", "session"} {
+		for round := 0; round < 200; round++ {
+			h, _ := testHost(t)
+			id := protocol.StringID("c-1")
+			p := &pending{answer: make(chan protocol.Response, 1)}
+			p.answer <- protocol.Response{ID: id, Result: json.RawMessage(`{"ran":true}`)}
+			ctx, cancel := context.WithCancel(context.Background())
+			if ending == "ctx" {
+				cancel()
+			} else {
+				h.disconnect()
+			}
+			got, err := h.await(ctx, id, p)
+			cancel()
+			if err != nil || string(got) != `{"ran":true}` {
+				t.Fatalf("%s ended as the answer arrived (round %d): got %s, %v; want the answer", ending, round, got, err)
+			}
+		}
+	}
+}

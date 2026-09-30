@@ -208,18 +208,47 @@ func (h *Host) call(ctx context.Context, method string, params any) (json.RawMes
 			return nil, ErrSessionEnded
 		}
 	}
+	return h.await(ctx, id, p)
+}
+
+// await waits for srelens's answer to call id, the caller's ctx to end, or
+// the session to end. An answer that has already arrived wins: select picks
+// at random among ready cases, and a call srelens answered, perhaps an
+// action it ran, must not be reported as cancelled or cut off.
+func (h *Host) await(ctx context.Context, id protocol.RequestID, p *pending) (json.RawMessage, error) {
 	select {
 	case resp := <-p.answer:
-		if resp.Error != nil {
-			return nil, &HostError{Code: resp.Error.Code, Message: resp.Error.Message, Data: resp.Error.Data}
-		}
-		return resp.Result, nil
+		return result(resp)
 	case <-h.ended.Done():
+		if resp, ok := arrived(p); ok {
+			return result(resp)
+		}
 		return nil, ErrSessionEnded
 	case <-ctx.Done():
+		if resp, ok := arrived(p); ok {
+			return result(resp)
+		}
 		h.cancelCall(id)
 		return nil, h.stopped(ctx)
 	}
+}
+
+// arrived is p's answer if srelens has already given it.
+func arrived(p *pending) (protocol.Response, bool) {
+	select {
+	case resp := <-p.answer:
+		return resp, true
+	default:
+		return protocol.Response{}, false
+	}
+}
+
+// result is a call's outcome from srelens's answer.
+func result(resp protocol.Response) (json.RawMessage, error) {
+	if resp.Error != nil {
+		return nil, &HostError{Code: resp.Error.Code, Message: resp.Error.Message, Data: resp.Error.Data}
+	}
+	return resp.Result, nil
 }
 
 // queue queues a call's request, waiting for room until the caller's ctx is
