@@ -1234,7 +1234,11 @@ fn settings_view_highlights_the_focused_field_on_the_selected_card() {
     let b = render_buffer(120, 40, |f| render_settings_view(f, f.area(), &s));
     let l = common::render_lines(120, 40, |f| render_settings_view(f, f.area(), &s));
     let r = row_of(&l, "4. OpenAI-Compatible / Ollama (Local)") + 3;
-    assert!(l[r].contains("Base URL: http://localhost:11434/v1"), "{}", l[r]);
+    assert!(
+        l[r].contains("Base URL: http://localhost:11434/v1"),
+        "{}",
+        l[r]
+    );
     let bx = col(&l[r], "Base URL:");
     assert_eq!(b[(bx, r as u16)].fg, Theme::YELLOW);
     let vx = col(&l[r], "http://localhost:11434/v1");
@@ -2139,27 +2143,30 @@ fn tui_config_view_state_field_navigation_and_adjustments() {
     assert_eq!(state.selected_field, 4);
 
     state.select_next_field();
-    assert_eq!(state.selected_field, 5);
+    assert_eq!(state.selected_field, 5, "Changed SRE Guide Banner");
 
     state.select_next_field();
-    assert_eq!(state.selected_field, 6);
+    assert_eq!(state.selected_field, 6, "ArgoCD Hub Context");
 
     state.select_next_field();
-    assert_eq!(state.selected_field, 7, "ArgoCD UI URL");
+    assert_eq!(state.selected_field, 7, "ArgoCD Hub Kubeconfig");
 
     state.select_next_field();
-    assert_eq!(state.selected_field, 8, "ArgoCD fetch timeout");
+    assert_eq!(state.selected_field, 8, "ArgoCD UI URL");
+
+    state.select_next_field();
+    assert_eq!(state.selected_field, 9, "ArgoCD fetch timeout");
 
     state.select_next_field();
     assert_eq!(state.selected_field, 0, "wraps after the last field");
 
     state.select_prev_field();
-    assert_eq!(state.selected_field, 8, "wraps back to the last field");
+    assert_eq!(state.selected_field, 9, "wraps back to the last field");
 
     state.select_prev_field();
     state.select_prev_field();
     state.select_prev_field();
-    assert_eq!(state.selected_field, 5);
+    assert_eq!(state.selected_field, 6);
 
     let mut config = TuiConfig::default();
     assert_eq!(config.command_popup_max_width, 65);
@@ -2167,10 +2174,11 @@ fn tui_config_view_state_field_navigation_and_adjustments() {
     assert_eq!(config.command_popup_density, CommandPopupDensity::Compact);
     assert!(config.show_feature_banner);
     assert!(config.check_updates);
+    assert!(config.show_changed_guide);
     assert_eq!(config.argo_hub_context, None);
     assert_eq!(config.argo_hub_kubeconfig, None);
 
-    // Selected field 5: ArgoCD Hub Context cycling and editing
+    // Selected field 6: ArgoCD Hub Context cycling and editing
     state.available_contexts = vec!["ctx-mgmt".to_string(), "ctx-prod".to_string()];
     let _ = state.adjust_current(1, &mut config);
     assert_eq!(config.argo_hub_context.as_deref(), Some("ctx-mgmt"));
@@ -2179,7 +2187,7 @@ fn tui_config_view_state_field_navigation_and_adjustments() {
     let _ = state.adjust_current(1, &mut config);
     assert_eq!(config.argo_hub_context, None); // cycled back to None
 
-    // Direct editing of field 5 with cursor movement and insertion
+    // Direct editing of field 6 with cursor movement and insertion
     state.start_editing(&config);
     assert!(state.is_editing);
     assert_eq!(state.cursor_pos(), 0);
@@ -2221,9 +2229,9 @@ fn tui_config_view_state_field_navigation_and_adjustments() {
     let _ = state.clear_current(&mut config);
     assert_eq!(config.argo_hub_context, None);
 
-    // Selected field 6: ArgoCD Hub Kubeconfig Path editing and clearing
+    // Selected field 7: ArgoCD Hub Kubeconfig Path editing and clearing
     state.select_next_field();
-    assert_eq!(state.selected_field, 6);
+    assert_eq!(state.selected_field, 7);
     state.start_editing(&config);
     assert!(state.is_editing);
     state.edit_buffer = "/path/to/custom/kubeconfig".to_string();
@@ -2239,8 +2247,17 @@ fn tui_config_view_state_field_navigation_and_adjustments() {
     let _ = state.clear_current(&mut config);
     assert_eq!(config.argo_hub_kubeconfig, None);
 
-    // Selected field 4: Startup Update Check toggle
+    // Selected field 5: Changed SRE Guide Banner toggle
     state.select_prev_field();
+    state.select_prev_field();
+    assert_eq!(state.selected_field, 5);
+    assert!(config.show_changed_guide);
+    let _ = state.adjust_current(1, &mut config);
+    assert!(!config.show_changed_guide);
+    let _ = state.cycle_current(&mut config);
+    assert!(config.show_changed_guide);
+
+    // Selected field 4: Startup Update Check toggle
     state.select_prev_field();
     assert_eq!(state.selected_field, 4);
     assert!(config.check_updates);
@@ -2252,6 +2269,7 @@ fn tui_config_view_state_field_navigation_and_adjustments() {
     // Selected field 3: Startup Feature Banner toggle
     state.select_prev_field();
     assert_eq!(state.selected_field, 3);
+    assert!(config.show_feature_banner);
     let _ = state.adjust_current(1, &mut config);
     assert!(!config.show_feature_banner);
     let _ = state.cycle_current(&mut config);
@@ -2329,6 +2347,7 @@ fn tui_config_view_renders_cards_and_live_preview_at_wide_and_narrow() {
         command_popup_density: CommandPopupDensity::Compact,
         show_feature_banner: true,
         check_updates: true,
+        show_changed_guide: true,
         argo_hub_context: None,
         argo_hub_kubeconfig: None,
         argo_ui_url: None,
@@ -2395,7 +2414,7 @@ fn tui_config_view_renders_cards_and_live_preview_at_wide_and_narrow() {
 
     // Startup update check preview when selected_field == 4
     let mut update_state = TuiConfigViewState::new();
-    update_state.selected_field = 4;
+    update_state.selected_field = srelens_tui::views::tui_config_view::FIELD_STARTUP_UPDATES;
     let update_lines = common::render_lines(120, 30, |f| {
         render_tui_config_view(f, f.area(), &update_state, &config)
     });
@@ -2409,9 +2428,25 @@ fn tui_config_view_renders_cards_and_live_preview_at_wide_and_narrow() {
         "shows header indicator preview"
     );
 
-    // ArgoCD GitOps Live Preview when selected_field == 5
+    // Changed Guide preview when selected_field == FIELD_CHANGED_GUIDE
+    let mut guide_state = TuiConfigViewState::new();
+    guide_state.selected_field = srelens_tui::views::tui_config_view::FIELD_CHANGED_GUIDE;
+    let guide_lines = common::render_lines(120, 30, |f| {
+        render_tui_config_view(f, f.area(), &guide_state, &config)
+    });
+    let guide_full = guide_lines.join("\n");
+    assert!(
+        guide_full.contains("Live Preview: Changed SRE Triage Guide"),
+        "shows guide preview title: {guide_full}"
+    );
+    assert!(
+        guide_full.contains("SRE Scope & Triage Guide"),
+        "shows guide banner content: {guide_full}"
+    );
+
+    // ArgoCD GitOps Live Preview when selected_field == FIELD_ARGO_HUB_CONTEXT
     let mut argo_state = TuiConfigViewState::new();
-    argo_state.selected_field = 5;
+    argo_state.selected_field = srelens_tui::views::tui_config_view::FIELD_ARGO_HUB_CONTEXT;
     argo_state.available_contexts = vec!["ctx-mgmt".to_string(), "ctx-worker".to_string()];
     let argo_lines = common::render_lines(120, 30, |f| {
         render_tui_config_view(f, f.area(), &argo_state, &config)
@@ -2429,7 +2464,7 @@ fn tui_config_view_renders_cards_and_live_preview_at_wide_and_narrow() {
 
     // Edit modal dialog when is_editing == true
     let mut edit_state = TuiConfigViewState::new();
-    edit_state.selected_field = 5;
+    edit_state.selected_field = srelens_tui::views::tui_config_view::FIELD_ARGO_HUB_CONTEXT;
     edit_state.is_editing = true;
     edit_state.edit_buffer = "my-argo-hub".to_string();
     edit_state.edit_cursor = "my-argo-hub".chars().count();
@@ -2458,7 +2493,10 @@ fn tui_config_view_renders_cards_and_live_preview_at_wide_and_narrow() {
 }
 
 fn config_render(state: &TuiConfigViewState, config: &TuiConfig) -> String {
-    common::render_lines(140, 40, |f| render_tui_config_view(f, f.area(), state, config)).join("\n")
+    common::render_lines(140, 40, |f| {
+        render_tui_config_view(f, f.area(), state, config)
+    })
+    .join("\n")
 }
 
 #[test]
@@ -2474,7 +2512,10 @@ fn tui_config_argo_box_shows_each_setting_and_marks_the_selected_one() {
     let mut state = TuiConfigViewState::new();
 
     let unselected = config_render(&state, &config);
-    assert!(unselected.contains("Hub Context    hub-prod"), "{unselected}");
+    assert!(
+        unselected.contains("Hub Context    hub-prod"),
+        "{unselected}"
+    );
     assert!(unselected.contains("UI URL         https://argocd.example.com"));
     assert!(unselected.contains("Fetch Timeout  30s"));
     assert!(unselected.contains("j/k to select an ArgoCD setting"));
@@ -2484,10 +2525,19 @@ fn tui_config_argo_box_shows_each_setting_and_marks_the_selected_one() {
     assert!(url.contains("▶ UI URL"), "{url}");
     assert!(url.contains("e/Enter Edit · c Clear"));
     // The preview names the link `a` will open and what the timeout covers.
-    assert!(url.contains("UI Link:       https://argocd.example.com/applications/<application>"), "{url}");
+    assert!(
+        url.contains("UI Link:       https://argocd.example.com/applications/<application>"),
+        "{url}"
+    );
     assert!(url.contains("Fetch Timeout: 30s"));
-    assert!(url.contains("Opened by a in an :argo app's details."), "{url}");
-    assert!(url.contains("Bounds list and detail reads; never cuts off a sync."), "{url}");
+    assert!(
+        url.contains("Opened by a in an :argo app's details."),
+        "{url}"
+    );
+    assert!(
+        url.contains("Bounds list and detail reads; never cuts off a sync."),
+        "{url}"
+    );
 
     state.selected_field = FIELD_ARGO_TIMEOUT;
     let timeout = config_render(&state, &config);
@@ -2496,7 +2546,10 @@ fn tui_config_argo_box_shows_each_setting_and_marks_the_selected_one() {
 
     // Unset values say what being unset means.
     let empty = config_render(&state, &TuiConfig::default());
-    assert!(empty.contains("not set (a in app details is off)"), "{empty}");
+    assert!(
+        empty.contains("not set (a in app details is off)"),
+        "{empty}"
+    );
     assert!(empty.contains("inherit (8s request timeout)"));
 }
 
@@ -2526,9 +2579,15 @@ fn tui_config_argo_ui_url_is_validated_before_it_is_saved() {
     state.insert_str("https://argocd.example.com/");
     state.finish_editing(&mut config).unwrap();
     assert!(!state.is_editing);
-    assert_eq!(config.argo_ui_url.as_deref(), Some("https://argocd.example.com"));
+    assert_eq!(
+        config.argo_ui_url.as_deref(),
+        Some("https://argocd.example.com")
+    );
     let saved = std::fs::read_to_string(TuiConfig::config_file_path()).unwrap();
-    assert!(saved.contains(r#""argoUiUrl": "https://argocd.example.com""#), "{saved}");
+    assert!(
+        saved.contains(r#""argoUiUrl": "https://argocd.example.com""#),
+        "{saved}"
+    );
 
     // `c` clears it.
     assert!(state.is_clearable_field());
@@ -2548,11 +2607,17 @@ fn tui_config_argo_timeout_steps_and_applies_to_argo_reads() {
 
     state.adjust_current(1, &mut config).unwrap();
     assert_eq!(config.argo_timeout_secs, Some(5));
-    assert_eq!(srelens_kube::argo::argo_timeout(), std::time::Duration::from_secs(5));
+    assert_eq!(
+        srelens_kube::argo::argo_timeout(),
+        std::time::Duration::from_secs(5)
+    );
 
     state.adjust_current(1, &mut config).unwrap();
     assert_eq!(config.argo_timeout_secs, Some(10));
-    assert_eq!(srelens_kube::argo::argo_timeout(), std::time::Duration::from_secs(10));
+    assert_eq!(
+        srelens_kube::argo::argo_timeout(),
+        std::time::Duration::from_secs(10)
+    );
 
     // Space/Enter walk forward too, wrapping from the maximum to inherit.
     config.argo_timeout_secs = Some(120);

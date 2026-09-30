@@ -216,7 +216,7 @@ pub const SAMPLE_SUGGESTIONS: &[(&str, &[&str], &str, &str, &str)] = &[
     ),
 ];
 
-// Field indices. General settings are 0-4; the ArgoCD group is 5-8. Name a
+// Field indices. General settings are 0-5; the ArgoCD group is 6-9. Name a
 // field by its constant, never by a literal: the edit/clear gate in `app.rs`
 // once hard-coded "4 or 5", and when the update-check field was inserted at 4
 // it silently stopped the hub kubeconfig from being editable.
@@ -225,11 +225,12 @@ pub const FIELD_VISIBLE_ROWS: usize = 1;
 pub const FIELD_DENSITY: usize = 2;
 pub const FIELD_STARTUP_BANNER: usize = 3;
 pub const FIELD_STARTUP_UPDATES: usize = 4;
-pub const FIELD_ARGO_HUB_CONTEXT: usize = 5;
-pub const FIELD_ARGO_HUB_KUBECONFIG: usize = 6;
-pub const FIELD_ARGO_UI_URL: usize = 7;
-pub const FIELD_ARGO_TIMEOUT: usize = 8;
-pub const FIELD_COUNT: usize = 9;
+pub const FIELD_CHANGED_GUIDE: usize = 5;
+pub const FIELD_ARGO_HUB_CONTEXT: usize = 6;
+pub const FIELD_ARGO_HUB_KUBECONFIG: usize = 7;
+pub const FIELD_ARGO_UI_URL: usize = 8;
+pub const FIELD_ARGO_TIMEOUT: usize = 9;
+pub const FIELD_COUNT: usize = 10;
 
 /// The ArgoCD group's fields, in display order.
 pub const ARGO_FIELDS: std::ops::RangeInclusive<usize> =
@@ -301,6 +302,7 @@ impl TuiConfigViewState {
             FIELD_DENSITY => "command popup density",
             FIELD_STARTUP_BANNER => "startup banner",
             FIELD_STARTUP_UPDATES => "startup update check",
+            FIELD_CHANGED_GUIDE => "changed triage guide banner",
             FIELD_ARGO_HUB_CONTEXT => "ArgoCD hub context",
             FIELD_ARGO_HUB_KUBECONFIG => "ArgoCD hub kubeconfig",
             FIELD_ARGO_UI_URL => "ArgoCD UI URL",
@@ -311,12 +313,12 @@ impl TuiConfigViewState {
 
     pub fn start_editing(&mut self, config: &TuiConfig) {
         match self.selected_field {
-            5 => {
+            FIELD_ARGO_HUB_CONTEXT => {
                 self.edit_buffer = config.argo_hub_context.clone().unwrap_or_default();
                 self.edit_cursor = self.edit_buffer.chars().count();
                 self.is_editing = true;
             }
-            6 => {
+            FIELD_ARGO_HUB_KUBECONFIG => {
                 self.edit_buffer = config
                     .argo_hub_kubeconfig
                     .as_ref()
@@ -350,10 +352,10 @@ impl TuiConfigViewState {
             FIELD_ARGO_UI_URL => {
                 config.argo_ui_url = crate::tui_config::normalize_argo_ui_url(&val)?;
             }
-            5 => {
+            FIELD_ARGO_HUB_CONTEXT => {
                 config.argo_hub_context = if val.is_empty() { None } else { Some(val) };
             }
-            6 => {
+            FIELD_ARGO_HUB_KUBECONFIG => {
                 config.argo_hub_kubeconfig = if val.is_empty() {
                     None
                 } else {
@@ -469,8 +471,8 @@ impl TuiConfigViewState {
             return Ok(());
         }
         match self.selected_field {
-            5 => config.argo_hub_context = None,
-            6 => config.argo_hub_kubeconfig = None,
+            FIELD_ARGO_HUB_CONTEXT => config.argo_hub_context = None,
+            FIELD_ARGO_HUB_KUBECONFIG => config.argo_hub_kubeconfig = None,
             FIELD_ARGO_UI_URL => config.argo_ui_url = None,
             FIELD_ARGO_TIMEOUT => {
                 config.argo_timeout_secs = None;
@@ -486,28 +488,31 @@ impl TuiConfigViewState {
             return Ok(());
         }
         match self.selected_field {
-            0 => {
+            FIELD_POPUP_WIDTH => {
                 let current = config.command_popup_max_width as i32;
                 let next = (current + delta * 5).clamp(40, 200) as u16;
                 config.command_popup_max_width = next;
             }
-            1 => {
+            FIELD_VISIBLE_ROWS => {
                 let current = config.command_popup_max_visible as i32;
                 let next = (current + delta).clamp(3, 20) as usize;
                 config.command_popup_max_visible = next;
             }
-            2 => {
+            FIELD_DENSITY => {
                 let current = config.command_popup_density.scale() as i32;
                 let next = (current + delta).clamp(1, 4) as u8;
                 config.command_popup_density = CommandPopupDensity::from_scale(next);
             }
-            3 => {
+            FIELD_STARTUP_BANNER => {
                 config.show_feature_banner = !config.show_feature_banner;
             }
-            4 => {
+            FIELD_STARTUP_UPDATES => {
                 config.check_updates = !config.check_updates;
             }
-            5 => {
+            FIELD_CHANGED_GUIDE => {
+                config.show_changed_guide = !config.show_changed_guide;
+            }
+            FIELD_ARGO_HUB_CONTEXT => {
                 let mut options: Vec<Option<String>> = vec![None];
                 for ctx in &self.available_contexts {
                     options.push(Some(ctx.clone()));
@@ -525,7 +530,7 @@ impl TuiConfigViewState {
                 };
                 config.argo_hub_context = options[next_idx].clone();
             }
-            6 => {
+            FIELD_ARGO_HUB_KUBECONFIG => {
                 if delta < 0 {
                     config.argo_hub_kubeconfig = None;
                 }
@@ -545,7 +550,7 @@ impl TuiConfigViewState {
             return Ok(());
         }
         match self.selected_field {
-            0 => {
+            FIELD_POPUP_WIDTH => {
                 let current = config.command_popup_max_width;
                 config.command_popup_max_width = if current >= 200 {
                     40
@@ -553,7 +558,7 @@ impl TuiConfigViewState {
                     (current + 20).min(200)
                 };
             }
-            1 => {
+            FIELD_VISIBLE_ROWS => {
                 let current = config.command_popup_max_visible;
                 config.command_popup_max_visible = if current >= 20 {
                     3
@@ -561,19 +566,19 @@ impl TuiConfigViewState {
                     (current + 3).min(20)
                 };
             }
-            2 => {
+            FIELD_DENSITY => {
                 config.command_popup_density = config.command_popup_density.toggle();
             }
-            3 => {
+            FIELD_STARTUP_BANNER => {
                 config.show_feature_banner = !config.show_feature_banner;
             }
-            4 => {
+            FIELD_STARTUP_UPDATES => {
                 config.check_updates = !config.check_updates;
             }
-            5 => {
-                self.start_editing(config);
+            FIELD_CHANGED_GUIDE => {
+                config.show_changed_guide = !config.show_changed_guide;
             }
-            6 | FIELD_ARGO_UI_URL => {
+            FIELD_ARGO_HUB_CONTEXT | FIELD_ARGO_HUB_KUBECONFIG | FIELD_ARGO_UI_URL => {
                 self.start_editing(config);
             }
             FIELD_ARGO_TIMEOUT => {
@@ -809,10 +814,10 @@ pub fn render_tui_config_view(
         (v_chunks[0], v_chunks[1])
     };
 
-    // Five general setting cards, then one ArgoCD box holding fields 5-8:
+    // Six general setting cards, then one ArgoCD box holding fields 6-9:
     // two borders, one row per field, and one line of the selected row's keys.
     let argo_box_height = 2 + ARGO_FIELDS.count() as u16 + 1;
-    let card_height = if controls_area.height >= 5 * 4 + argo_box_height {
+    let card_height = if controls_area.height >= 6 * 4 + argo_box_height {
         4
     } else {
         3
@@ -825,7 +830,8 @@ pub fn render_tui_config_view(
             Constraint::Length(card_height),     // 2: Text Size / Density
             Constraint::Length(card_height),     // 3: Startup Feature Banner
             Constraint::Length(card_height),     // 4: Startup Update Check
-            Constraint::Length(argo_box_height), // 5-8: ArgoCD group
+            Constraint::Length(card_height),     // 5: Changed SRE Guide Banner
+            Constraint::Length(argo_box_height), // 6-9: ArgoCD group
             Constraint::Min(0),
         ])
         .split(controls_area);
@@ -1198,10 +1204,95 @@ pub fn render_tui_config_view(
         update_inner,
     );
 
-    // Settings 5-8: the ArgoCD group, one box.
-    render_argo_settings_box(f, control_chunks[5], state, config);
+    // Setting 5: Changed SRE Guide Banner
+    let is_guide_selected = state.selected_field == FIELD_CHANGED_GUIDE;
+    let guide_border_color = if is_guide_selected {
+        Theme::cyan()
+    } else {
+        Theme::border()
+    };
+    let guide_title = if is_guide_selected {
+        " ▶ Changed SRE Guide Banner "
+    } else {
+        "   Changed SRE Guide Banner "
+    };
+    let guide_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(Theme::border_type())
+        .border_style(Style::default().fg(guide_border_color))
+        .title(Span::styled(
+            guide_title,
+            if is_guide_selected {
+                Style::default()
+                    .fg(Theme::cyan())
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Theme::fg())
+            },
+        ));
+    let guide_inner = guide_block.inner(control_chunks[5]);
+    f.render_widget(guide_block, control_chunks[5]);
 
-    // 3. Live Preview (Feature Banner, ArgoCD GitOps, or Command Popup)
+    let (guide_checkbox_str, guide_status_str, guide_status_style) = if config.show_changed_guide {
+        (
+            "[● Show guide]",
+            "Enabled",
+            Style::default()
+                .fg(Theme::cyan())
+                .add_modifier(Modifier::BOLD),
+        )
+    } else {
+        (
+            "[○ Don't show]",
+            "Disabled",
+            Style::default().fg(Theme::dim()),
+        )
+    };
+
+    let guide_lines = vec![
+        Line::from(vec![
+            Span::styled("Guide: ", Style::default().fg(Theme::dim())),
+            Span::styled(
+                guide_checkbox_str,
+                if config.show_changed_guide {
+                    Style::default()
+                        .fg(Theme::cyan())
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Theme::dim())
+                },
+            ),
+            Span::styled("  Status: ", Style::default().fg(Theme::dim())),
+            Span::styled(guide_status_str, guide_status_style),
+            Span::styled("  View: ", Style::default().fg(Theme::dim())),
+            Span::styled(
+                ":changed",
+                Style::default()
+                    .fg(Theme::cyan())
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("Action: Toggle  |  Use ", Style::default().fg(Theme::dim())),
+            Span::styled("Space", Style::default().fg(Theme::yellow())),
+            Span::styled(" or ", Style::default().fg(Theme::dim())),
+            Span::styled("Enter", Style::default().fg(Theme::yellow())),
+            Span::styled(" or ", Style::default().fg(Theme::dim())),
+            Span::styled("←/→", Style::default().fg(Theme::yellow())),
+            Span::styled(" to toggle (or press ", Style::default().fg(Theme::dim())),
+            Span::styled("b", Style::default().fg(Theme::yellow())),
+            Span::styled(" in :changed)", Style::default().fg(Theme::dim())),
+        ]),
+    ];
+    f.render_widget(
+        Paragraph::new(guide_lines).wrap(Wrap { trim: true }),
+        guide_inner,
+    );
+
+    // Settings 6-9: the ArgoCD group, one box.
+    render_argo_settings_box(f, control_chunks[6], state, config);
+
+    // 3. Live Preview (Feature Banner, Update Check, Changed Guide, ArgoCD GitOps, or Command Popup)
     if state.selected_field == 3 {
         let preview_block = Block::default()
             .borders(Borders::ALL)
@@ -1364,6 +1455,25 @@ pub fn render_tui_config_view(
 
         let p = Paragraph::new(lines).wrap(Wrap { trim: true });
         f.render_widget(p, preview_inner);
+    } else if state.selected_field == FIELD_CHANGED_GUIDE {
+        let preview_block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(Theme::border_type())
+            .border_style(Style::default().fg(Theme::border()))
+            .title(Span::styled(
+                " Live Preview: Changed SRE Triage Guide (:changed) ",
+                Style::default()
+                    .fg(Theme::accent())
+                    .add_modifier(Modifier::BOLD),
+            ));
+        let preview_inner = preview_block.inner(preview_area);
+        f.render_widget(preview_block, preview_area);
+
+        crate::views::changed_view::render_guide_banner_preview(
+            f,
+            preview_inner,
+            config.show_changed_guide,
+        );
     } else if ARGO_FIELDS.contains(&state.selected_field) {
         let preview_block = Block::default()
             .borders(Borders::ALL)
@@ -2005,8 +2115,8 @@ pub fn render_tui_config_view(
         f.render_widget(Clear, modal_area);
 
         let title = match state.selected_field {
-            5 => " Edit ArgoCD Hub Context ",
-            6 => " Edit ArgoCD Hub Kubeconfig Path ",
+            FIELD_ARGO_HUB_CONTEXT => " Edit ArgoCD Hub Context ",
+            FIELD_ARGO_HUB_KUBECONFIG => " Edit ArgoCD Hub Kubeconfig Path ",
             FIELD_ARGO_UI_URL => " Edit ArgoCD UI URL ",
             _ => " Edit Setting ",
         };
@@ -2035,8 +2145,12 @@ pub fn render_tui_config_view(
             .split(inner);
 
         let prompt_text = match state.selected_field {
-            5 => "Enter context name pointing to the ArgoCD cluster (leave empty to clear):",
-            6 => "Enter absolute path to the kubeconfig for ArgoCD (leave empty to clear):",
+            FIELD_ARGO_HUB_CONTEXT => {
+                "Enter context name pointing to the ArgoCD cluster (leave empty to clear):"
+            }
+            FIELD_ARGO_HUB_KUBECONFIG => {
+                "Enter absolute path to the kubeconfig for ArgoCD (leave empty to clear):"
+            }
             FIELD_ARGO_UI_URL => "Base URL of the ArgoCD web UI, e.g. https://argocd.example.com (leave empty to clear):",
             _ => "Enter new value:",
         };

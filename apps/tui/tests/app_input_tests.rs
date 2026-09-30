@@ -607,14 +607,18 @@ async fn config_edit_keys_reach_every_text_field() {
     // The gate once named fields "4 or 5"; after a field was inserted at 4,
     // the hub kubeconfig (6) could not be edited or cleared from the keys.
     use srelens_tui::views::tui_config_view::{
-        FIELD_ARGO_HUB_KUBECONFIG, FIELD_ARGO_UI_URL, FIELD_STARTUP_UPDATES,
+        FIELD_ARGO_HUB_CONTEXT, FIELD_ARGO_HUB_KUBECONFIG, FIELD_ARGO_UI_URL, FIELD_STARTUP_UPDATES,
     };
     let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app_with("fake-cluster", "default").await;
     common::type_str(&mut app, ":config").await;
     press(&mut app, key(KeyCode::Enter)).await;
 
-    for field in [FIELD_ARGO_HUB_KUBECONFIG, FIELD_ARGO_UI_URL] {
+    for field in [
+        FIELD_ARGO_HUB_CONTEXT,
+        FIELD_ARGO_HUB_KUBECONFIG,
+        FIELD_ARGO_UI_URL,
+    ] {
         if let ActiveView::TuiConfig(ref mut c) = app.active_view {
             c.selected_field = field;
         }
@@ -6034,9 +6038,9 @@ async fn tui_config_hub_dialog_left_right_cursor_and_paste() {
     press(&mut app, key(KeyCode::Enter)).await;
     assert!(matches!(app.active_view, ActiveView::TuiConfig(_)));
 
-    // Select field 5 (Hub Context)
+    // Select Hub Context field
     if let ActiveView::TuiConfig(ref mut cfg) = app.active_view {
-        cfg.selected_field = 5;
+        cfg.selected_field = srelens_tui::views::tui_config_view::FIELD_ARGO_HUB_CONTEXT;
     }
 
     // Press 'e' to start editing
@@ -7268,7 +7272,7 @@ async fn tui_config_view_key_interactions() {
 
     // 2b. Field 4 toggle (Startup update check)
     if let ActiveView::TuiConfig(ref mut c) = app.active_view {
-        c.selected_field = 4;
+        c.selected_field = srelens_tui::views::tui_config_view::FIELD_STARTUP_UPDATES;
     }
     assert!(app.tui_config.check_updates);
     press(&mut app, ch(' ')).await;
@@ -7276,9 +7280,19 @@ async fn tui_config_view_key_interactions() {
     press(&mut app, ch(' ')).await;
     assert!(app.tui_config.check_updates);
 
-    // 3. Edit field 5 (Argo hub context)
+    // 2c. Field 5 toggle (Changed SRE Guide banner)
     if let ActiveView::TuiConfig(ref mut c) = app.active_view {
-        c.selected_field = 5;
+        c.selected_field = srelens_tui::views::tui_config_view::FIELD_CHANGED_GUIDE;
+    }
+    assert!(app.tui_config.show_changed_guide);
+    press(&mut app, ch(' ')).await;
+    assert!(!app.tui_config.show_changed_guide);
+    press(&mut app, ch(' ')).await;
+    assert!(app.tui_config.show_changed_guide);
+
+    // 3. Edit Argo hub context field
+    if let ActiveView::TuiConfig(ref mut c) = app.active_view {
+        c.selected_field = srelens_tui::views::tui_config_view::FIELD_ARGO_HUB_CONTEXT;
     }
     // Enter editing mode
     press(&mut app, key(KeyCode::Enter)).await;

@@ -7577,6 +7577,21 @@ impl App {
                     changed.toggle_include_scaled();
                     self.refresh_changed_triage();
                 }
+                KeyCode::Char('b') | KeyCode::Char('?') => {
+                    changed.show_guide_banner = !changed.show_guide_banner;
+                    let banner_on = changed.show_guide_banner;
+                    self.tui_config.show_changed_guide = banner_on;
+                    let _ = self.tui_config.save();
+                    self.set_toast(
+                        if banner_on {
+                            "Changed triage guide banner enabled"
+                        } else {
+                            "Changed triage guide banner hidden (press b to show)"
+                        }
+                        .to_string(),
+                        Theme::status_ok(),
+                    );
+                }
                 KeyCode::Home => {
                     changed.select_first();
                 }
@@ -9737,7 +9752,8 @@ impl App {
                 ActiveView::Top(top_state)
             }
             ResourceKind::Changed => {
-                let changed_state = changed_view::ChangedViewState::new();
+                let mut changed_state = changed_view::ChangedViewState::new();
+                changed_state.show_guide_banner = self.tui_config.show_changed_guide;
                 let window = changed_state.current_window();
                 let opts = srelens_kube::changed::TriageOptions {
                     include_failing: changed_state.include_failing,

@@ -281,6 +281,8 @@ pub struct ChangedViewState {
     /// Also list Deployments whose only change is a replica count (`S`).
     /// Off by default: an autoscaled cluster scales something every hour.
     pub include_scaled: bool,
+    /// Whether to display the SRE scope and triage guide banner (`b` / `?`).
+    pub show_guide_banner: bool,
 }
 
 impl ChangedViewState {
@@ -300,6 +302,7 @@ impl ChangedViewState {
             incident_filter: IncidentFilter::All,
             include_failing: false,
             include_scaled: false,
+            show_guide_banner: true,
         }
     }
 
@@ -604,26 +607,240 @@ impl ChangedViewState {
     }
 }
 
+/// SRE Scope & Triage Guide banner explaining [CHANGED], [S] Scaled, [u] Failing, and [Tab] Infra.
+pub fn render_guide_banner(f: &mut Frame, area: Rect, state: &ChangedViewState) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(Theme::border_type())
+        .border_style(Style::default().fg(Theme::border()))
+        .title(Span::styled(
+            " 💡 SRE Scope & Triage Guide [b/? to hide] ",
+            Style::default()
+                .fg(Theme::accent())
+                .add_modifier(Modifier::BOLD),
+        ));
+
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let line1 = Line::from(vec![
+        Span::styled(
+            " [CHANGED] ",
+            Style::default()
+                .fg(Theme::cyan())
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            "Rollouts & image/config diffs in window  │  ",
+            Style::default().fg(Theme::fg()),
+        ),
+        Span::styled(
+            "[S] Scaled: ",
+            Style::default()
+                .fg(Theme::yellow())
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            if state.include_scaled {
+                "ON (HPA & surges shown)"
+            } else {
+                "OFF (hides autoscaling noise)"
+            },
+            Style::default().fg(if state.include_scaled {
+                Theme::yellow()
+            } else {
+                Theme::dim()
+            }),
+        ),
+        Span::styled("  │  ", Style::default().fg(Theme::dim())),
+        Span::styled(
+            "[u] Failing: ",
+            Style::default()
+                .fg(Theme::red())
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            if state.include_failing {
+                "ON (unchanged warned/failing shown)"
+            } else {
+                "OFF (rollouts only)"
+            },
+            Style::default().fg(if state.include_failing {
+                Theme::red()
+            } else {
+                Theme::dim()
+            }),
+        ),
+    ]);
+
+    let line2 = Line::from(vec![
+        Span::styled(
+            " [Tab] Infra: ",
+            Style::default()
+                .fg(Theme::accent())
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            "Non-deployment warnings (CNI, Ingress/NEG sync, Istio webhooks, Node conditions)  │  ",
+            Style::default().fg(Theme::fg()),
+        ),
+        Span::styled(
+            "[s] Quick RCA  [a] Assistant  [f] Filter  [/] Search",
+            Style::default().fg(Theme::dim()),
+        ),
+    ]);
+
+    let lines = if inner.height >= 2 {
+        vec![line1, line2]
+    } else {
+        vec![line1]
+    };
+
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
+}
+
+pub fn render_guide_banner_preview(f: &mut Frame, area: Rect, enabled: bool) {
+    if enabled {
+        let dummy_state = ChangedViewState {
+            show_guide_banner: true,
+            ..ChangedViewState::new()
+        };
+        render_guide_banner(f, area, &dummy_state);
+    } else {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(Theme::border_type())
+            .border_style(Style::default().fg(Theme::border()))
+            .title(Span::styled(
+                " 💡 SRE Scope & Triage Guide (Disabled) ",
+                Style::default().fg(Theme::dim()),
+            ));
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+
+        let lines = vec![
+            Line::from(vec![
+                Span::styled("Banner is currently ", Style::default().fg(Theme::dim())),
+                Span::styled(
+                    "Disabled",
+                    Style::default()
+                        .fg(Theme::yellow())
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    ". Press Space/Enter to enable it on startup.",
+                    Style::default().fg(Theme::dim()),
+                ),
+            ]),
+            Line::from(""),
+            Line::from(vec![Span::styled(
+                "When enabled, the triage guide sits directly above the :changed table to explain:",
+                Style::default().fg(Theme::fg()),
+            )]),
+            Line::from(vec![
+                Span::styled("• ", Style::default().fg(Theme::cyan())),
+                Span::styled(
+                    "[CHANGED]: ",
+                    Style::default()
+                        .fg(Theme::cyan())
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    "Workloads with actual rollouts, image upgrades, and config diffs.",
+                    Style::default().fg(Theme::dim()),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled("• ", Style::default().fg(Theme::yellow())),
+                Span::styled(
+                    "[S] Scaled: ",
+                    Style::default()
+                        .fg(Theme::yellow())
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    "HPA horizontal autoscaling events, replica count edits, and scale-to-zero.",
+                    Style::default().fg(Theme::dim()),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled("• ", Style::default().fg(Theme::red())),
+                Span::styled(
+                    "[u] Failing: ",
+                    Style::default()
+                        .fg(Theme::red())
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    "Older unchanged workloads that are failing or producing warning events.",
+                    Style::default().fg(Theme::dim()),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled("• ", Style::default().fg(Theme::accent())),
+                Span::styled(
+                    "[Tab] Infra: ",
+                    Style::default()
+                        .fg(Theme::accent())
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    "Cluster-wide non-deployment infrastructure alerts (CNI, Ingress, Istio, Nodes).",
+                    Style::default().fg(Theme::dim()),
+                ),
+            ]),
+        ];
+        f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
+    }
+}
+
 pub fn render_changed_view(f: &mut Frame, area: Rect, state: &ChangedViewState) {
     let (banner_block, health, controls) = summary_banner(state);
     let b_height = banner_height(&health, &controls, area.width);
+    let guide_h = if state.show_guide_banner && area.height >= 28 {
+        if area.height >= 34 {
+            4
+        } else {
+            3
+        }
+    } else {
+        0
+    };
     let card_visible = state.active_tab == ChangedTab::Deployments
         && state
             .report
             .as_ref()
             .map_or(false, |r| !r.deployments.is_empty())
-        && area.height.saturating_sub(b_height + 1) >= CARD_MIN_HEIGHT;
+        && area.height.saturating_sub(b_height + guide_h + 1) >= CARD_MIN_HEIGHT;
     let footer_h = footer_height(area.width, state, card_visible);
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
+
+    let constraints = if guide_h > 0 {
+        vec![
+            Constraint::Length(b_height),
+            Constraint::Length(guide_h),
+            Constraint::Min(8),           // Main workspace
+            Constraint::Length(footer_h), // Footer shortcuts
+        ]
+    } else {
+        vec![
             Constraint::Length(b_height),
             Constraint::Min(8),           // Main workspace
             Constraint::Length(footer_h), // Footer shortcuts
-        ])
+        ]
+    };
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(constraints)
         .split(area);
 
     render_summary_banner(f, chunks[0], banner_block, health, controls);
+
+    let (main_chunk, footer_chunk) = if guide_h > 0 {
+        render_guide_banner(f, chunks[1], state);
+        (chunks[2], chunks[3])
+    } else {
+        (chunks[1], chunks[2])
+    };
 
     if state.is_loading && state.report.is_none() {
         let loading_block = Block::default()
@@ -645,8 +862,8 @@ pub fn render_changed_view(f: &mut Frame, area: Rect, state: &ChangedViewState) 
             .alignment(Alignment::Center)
             .block(loading_block)
             .wrap(Wrap { trim: true });
-        f.render_widget(loading_p, chunks[1]);
-        render_footer(f, chunks[2], state, false);
+        f.render_widget(loading_p, main_chunk);
+        render_footer(f, footer_chunk, state, false);
         return;
     }
 
@@ -660,19 +877,19 @@ pub fn render_changed_view(f: &mut Frame, area: Rect, state: &ChangedViewState) 
             .style(Theme::status_error())
             .block(err_block)
             .wrap(Wrap { trim: true });
-        f.render_widget(err_p, chunks[1]);
-        render_footer(f, chunks[2], state, false);
+        f.render_widget(err_p, main_chunk);
+        render_footer(f, footer_chunk, state, false);
         return;
     }
 
     match state.active_tab {
-        ChangedTab::Deployments => render_deployments_tab(f, chunks[1], state),
-        ChangedTab::Infra => render_infra_tab(f, chunks[1], state),
+        ChangedTab::Deployments => render_deployments_tab(f, main_chunk, state),
+        ChangedTab::Infra => render_infra_tab(f, main_chunk, state),
     }
 
     let card_visible =
-        state.active_tab == ChangedTab::Deployments && chunks[1].height >= CARD_MIN_HEIGHT;
-    render_footer(f, chunks[2], state, card_visible);
+        state.active_tab == ChangedTab::Deployments && main_chunk.height >= CARD_MIN_HEIGHT;
+    render_footer(f, footer_chunk, state, card_visible);
 }
 
 /// The banner's block, its health badges, and its controls (window, filter,
@@ -1954,6 +2171,14 @@ fn footer_line(state: &ChangedViewState, card_visible: bool) -> Line<'static> {
         },
     ));
     keys.push(("[Tab]".into(), "Toggle Infra".into()));
+    keys.push((
+        "[b]".into(),
+        if state.show_guide_banner {
+            "Hide guide".into()
+        } else {
+            "Show guide".into()
+        },
+    ));
     keys.push(("[/]".into(), "Search".into()));
 
     let mut spans = Vec::new();

@@ -710,7 +710,12 @@ fn an_unchanged_row_says_why_it_is_shown() {
 
 fn footer_line(width: u16, height: u16, state: &ChangedViewState) -> String {
     let lines = render_lines(width, height, |f| render_changed_view(f, f.area(), state));
-    lines.last().unwrap().trim_end().to_string()
+    lines
+        .into_iter()
+        .rev()
+        .map(|l| l.trim_end().to_string())
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or_default()
 }
 
 #[test]
@@ -723,8 +728,14 @@ fn footer_leaves_the_cards_keys_to_the_card() {
     let footer = footer_line(200, 44, &state);
     assert_eq!(
         footer,
-        "[[/]] Window (1h)  [f] Filter  [u] Include failing  [S] Include scaled  [Tab] Toggle Infra  [/] Search"
+        "[[/]] Window (1h)  [f] Filter  [u] Include failing  [S] Include scaled  [Tab] Toggle Infra  [b] Hide guide  [/] Search"
     );
+
+    // When guide banner is hidden, footer reflects "Show guide"
+    state.show_guide_banner = false;
+    let footer_hidden = footer_line(200, 44, &state);
+    assert!(footer_hidden.contains("[b] Show guide"), "{footer_hidden}");
+    state.show_guide_banner = true;
 
     // Too short for a card: its keys move to the footer.
     let short = footer_line(200, 24, &state);
@@ -1436,3 +1447,35 @@ fn card_labels_health_message_as_health_not_sync_error_even_when_out_of_sync() {
         "must not say Sync Error for health message: {card}"
     );
 }
+
+#[test]
+fn changed_view_renders_sre_guide_banner_and_respects_toggle_and_height() {
+    let _settings = common::env::isolate_settings();
+    let mut state = ChangedViewState::new();
+    state.set_report(sample_report());
+
+    // 1. Tall screen (height >= 28) with guide banner enabled
+    let lines = render_lines(140, 35, |f| render_changed_view(f, f.area(), &state));
+    let full = lines.join("\n");
+    assert!(full.contains("SRE Scope & Triage Guide"), "{full}");
+    assert!(full.contains("[CHANGED]"), "{full}");
+    assert!(full.contains("[S] Scaled:"), "{full}");
+    assert!(full.contains("[u] Failing:"), "{full}");
+    assert!(full.contains("[Tab] Infra:"), "{full}");
+
+    // 2. Guide banner toggled off
+    state.show_guide_banner = false;
+    let lines_off = render_lines(140, 35, |f| render_changed_view(f, f.area(), &state));
+    let full_off = lines_off.join("\n");
+    assert!(!full_off.contains("SRE Scope & Triage Guide"), "{full_off}");
+
+    // 3. Short screen (height < 28) suppresses guide banner even when enabled
+    state.show_guide_banner = true;
+    let lines_short = render_lines(140, 25, |f| render_changed_view(f, f.area(), &state));
+    let full_short = lines_short.join("\n");
+    assert!(
+        !full_short.contains("SRE Scope & Triage Guide"),
+        "{full_short}"
+    );
+}
+
