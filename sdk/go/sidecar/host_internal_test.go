@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -72,21 +73,26 @@ func TestACallWhoseContextEndsBeforeItIsQueuedFreesItsSlot(t *testing.T) {
 	}
 }
 
+// register takes a slot and registers call id as waiting, exactly as call
+// does before it queues the request.
+func register(h *Host, id protocol.RequestID) *pending {
+	h.slots <- struct{}{}
+	p := &pending{answer: make(chan protocol.Response, 1), holdsSlot: true}
+	h.mu.Lock()
+	h.waiting[id.Key()] = p
+	h.mu.Unlock()
+	return p
+}
+
 // forget must not free a slot that answered has already freed: a host that
 // answers an id it never actually received (a race, or a misbehaving host)
 // while the caller's own send is still in flight removes the waiting entry
-// and frees the slot itself. forget must see the entry is already gone and
+// and frees the slot itself. forget must see the slot is already freed and
 // do nothing, not free the same slot a second time.
 func TestForgetDoesNotFreeASlotAnsweredAlreadyFreed(t *testing.T) {
 	h, _ := testHost(t)
-	// Acquire one slot and register a waiting entry, exactly as call does
-	// before it queues the request.
-	h.slots <- struct{}{}
 	id := protocol.StringID("c-1")
-	answer := make(chan protocol.Response, 1)
-	h.mu.Lock()
-	h.waiting[id.Key()] = answer
-	h.mu.Unlock()
+	p := register(h, id)
 
 	// srelens answers first: this removes the entry and frees the slot.
 	h.answered(protocol.Response{ID: id, Result: json.RawMessage("null")})
@@ -95,10 +101,10 @@ func TestForgetDoesNotFreeASlotAnsweredAlreadyFreed(t *testing.T) {
 	}
 
 	// The caller's own send now fails (as it would once its ctx ends): forget
-	// must find nothing left to remove, and must not touch h.slots again.
+	// must find nothing left to free, and must not touch h.slots again.
 	done := make(chan struct{})
 	go func() {
-		h.forget(id)
+		h.forget(id, p)
 		close(done)
 	}()
 	select {
@@ -111,31 +117,231 @@ func TestForgetDoesNotFreeASlotAnsweredAlreadyFreed(t *testing.T) {
 	}
 }
 
-// forget must still free the slot when the host has disconnected: answered
-// can no longer have removed the entry (its waiting map is nil), so this
-// call is definitely still holding its own slot.
-func TestForgetFreesTheSlotWhenTheHostHasDisconnected(t *testing.T) {
+// The slot of a call whose request never reached the queue is freed once
+// when the host disconnects: disconnect frees it, and forget, as the call
+// gives up afterwards, finds it freed and neither blocks nor frees again.
+func TestTheSlotOfACallNotYetQueuedIsFreedOnceWhenTheHostDisconnects(t *testing.T) {
 	h, _ := testHost(t)
-	h.slots <- struct{}{}
 	id := protocol.StringID("c-1")
-	h.mu.Lock()
-	h.waiting[id.Key()] = make(chan protocol.Response, 1)
-	h.mu.Unlock()
+	p := register(h, id)
 
 	h.disconnect()
 
 	done := make(chan struct{})
 	go func() {
-		h.forget(id)
+		h.forget(id, p)
 		close(done)
 	}()
 	select {
 	case <-done:
 	case <-time.After(200 * time.Millisecond):
-		t.Fatal("forget did not free the slot after disconnect")
+		t.Fatal("forget blocked after disconnect")
 	}
 	if len(h.slots) != 0 {
 		t.Fatalf("slots %d", len(h.slots))
+	}
+}
+
+// fillQueue fills out's general lane, whose writer never runs, so the next
+// request waits for room.
+func fillQueue(t *testing.T, out *outbox) {
+	t.Helper()
+	for i := 0; i < queueLines; i++ {
+		if err := out.send(out.general, i, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// waitForCalls waits until n calls are waiting on h: each holds its slot and
+// has its id, and is about to queue its request or is waiting for room.
+func waitForCalls(t *testing.T, h *Host, n int) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for {
+		h.mu.Lock()
+		got := len(h.waiting)
+		h.mu.Unlock()
+		if got == n {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%d calls waiting, want %d", got, n)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// srelens may answer a call whose request is still waiting for room in the
+// queue (a race, or a misbehaving host): answered frees that call's slot.
+// When the session then ends, the call must not free its slot a second
+// time: that blocks it for good when no other slot is held, and otherwise
+// takes another call's. others is how many other slots are held meanwhile.
+func TestACallAnsweredWhileItWaitsForRoomFreesItsSlotOnceWhenTheSessionEnds(t *testing.T) {
+	for _, others := range []int{0, 1} {
+		h, out := testHost(t)
+		fillQueue(t, out)
+		for range others {
+			h.slots <- struct{}{} // a call between taking its slot and taking its id
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		result := make(chan error, 1)
+		go func() {
+			_, err := h.call(ctx, protocol.MethodHostRead, protocol.HostReadParams{})
+			result <- err
+		}()
+		waitForCalls(t, h, 1)
+		h.answered(protocol.Response{ID: protocol.StringID("c-1"), Result: json.RawMessage("null")})
+		h.disconnect()
+		cancel() // as end does, after disconnecting
+		select {
+		case <-result:
+		case <-time.After(time.Second):
+			t.Fatalf("others %d: the call blocked freeing a slot answered had already freed", others)
+		}
+		if len(h.slots) != others {
+			t.Fatalf("others %d: %d slots held after the call returned", others, len(h.slots))
+		}
+	}
+}
+
+// A call waiting for room in the queue when the session ends gets
+// ErrSessionEnded and queues nothing, whether the end cancels its ctx (a
+// handler's, which end cancels after disconnecting) or not (a detached one).
+func TestACallWaitingForRoomWhenTheSessionEndsGetsErrSessionEnded(t *testing.T) {
+	for _, detached := range []bool{false, true} {
+		h, out := testHost(t)
+		fillQueue(t, out)
+		ctx, cancel := context.WithCancel(context.Background())
+		callCtx := ctx
+		if detached {
+			callCtx = context.WithoutCancel(ctx)
+		}
+		result := make(chan error, 1)
+		go func() {
+			_, err := h.call(callCtx, protocol.MethodHostRead, protocol.HostReadParams{})
+			result <- err
+		}()
+		waitForCalls(t, h, 1)
+		h.disconnect()
+		cancel()
+		select {
+		case err := <-result:
+			if !errors.Is(err, ErrSessionEnded) {
+				t.Fatalf("detached %v: %v", detached, err)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("detached %v: the call kept waiting for room after the session ended", detached)
+		}
+		if len(out.general) != queueLines || len(h.slots) != 0 {
+			t.Fatalf("detached %v: queued %d lines, slots %d", detached, len(out.general)-queueLines, len(h.slots))
+		}
+	}
+}
+
+// A call whose request was just queued as the session ends gets
+// ErrSessionEnded, though its ctx, which end cancels, is done too by the
+// time the call waits for its answer. The call waits in an unbuffered lane
+// until the test takes its request, which readies the call, and the
+// session ends before the call runs on: it then finds both the end and its
+// ctx done. With one P, the call can wait only in the lane once it is
+// registered, and nothing else runs it before the end; select's choice
+// between the two is random, so it is run many times.
+func TestACallJustQueuedWhenTheSessionEndsGetsErrSessionEnded(t *testing.T) {
+	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(1))
+	for i := 0; i < 200; i++ {
+		out := &outbox{lifecycle: make(chan []byte, 8), general: make(chan []byte), done: make(chan struct{})}
+		h := newHost(out, protocol.InitializeLimits{MaxConcurrentRequests: 8})
+		ctx, cancel := context.WithCancel(context.Background())
+		result := make(chan error, 1)
+		go func() {
+			_, err := h.call(ctx, protocol.MethodHostRead, protocol.HostReadParams{})
+			result <- err
+		}()
+		waitForCalls(t, h, 1)
+		select {
+		case <-out.general:
+		case <-time.After(time.Second):
+			t.Fatalf("call %d: nothing was queued", i)
+		}
+		h.disconnect()
+		cancel()
+		select {
+		case err := <-result:
+			if !errors.Is(err, ErrSessionEnded) {
+				t.Fatalf("call %d: %v", i, err)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("call %d: the call did not return", i)
+		}
+	}
+}
+
+// A call waiting for a slot that is handed one as the session ends gets
+// ErrSessionEnded, though its ctx, which end cancels, is done too when it
+// runs on, and frees the slot. With one P, the call runs until it waits for
+// the slot, and the freed slot readies it; the session ends before it runs.
+func TestACallGivenASlotAsTheSessionEndsGetsErrSessionEnded(t *testing.T) {
+	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(1))
+	h := newHost(newOutbox(), protocol.InitializeLimits{MaxConcurrentRequests: 1})
+	h.slots <- struct{}{} // another call's
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		_, err := h.call(ctx, protocol.MethodHostRead, protocol.HostReadParams{})
+		result <- err
+	}()
+	time.Sleep(10 * time.Millisecond) // the call runs, and waits for the slot
+	<-h.slots                         // the other call's slot is freed, and handed to this one
+	h.disconnect()
+	cancel()
+	select {
+	case err := <-result:
+		if !errors.Is(err, ErrSessionEnded) {
+			t.Fatalf("%v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("the call did not return")
+	}
+	if len(h.slots) != 0 {
+		t.Fatalf("slots %d", len(h.slots))
+	}
+}
+
+// The session's end frees the slot of every call srelens has not answered:
+// one waiting for its answer, which gets ErrSessionEnded, and one whose
+// caller stopped waiting after its request was queued, which kept its slot
+// for srelens's answer.
+func TestTheSessionsEndFreesTheSlotOfEveryUnansweredCall(t *testing.T) {
+	h, out := testHost(t)
+	waiting := make(chan error, 1)
+	go func() {
+		_, err := h.call(context.Background(), protocol.MethodHostRead, protocol.HostReadParams{})
+		waiting <- err
+	}()
+	ctx, cancel := context.WithCancel(context.Background())
+	abandoned := make(chan error, 1)
+	go func() {
+		_, err := h.call(ctx, protocol.MethodHostRead, protocol.HostReadParams{})
+		abandoned <- err
+	}()
+	waitForCalls(t, h, 2)
+	for len(out.general) < 2 {
+		time.Sleep(time.Millisecond) // both requests queued
+	}
+	cancel()
+	if err := <-abandoned; !errors.Is(err, context.Canceled) {
+		t.Fatalf("the abandoned call got %v", err)
+	}
+	if len(h.slots) != 2 {
+		t.Fatalf("slots %d before the end, want 2", len(h.slots))
+	}
+	h.disconnect()
+	if err := <-waiting; !errors.Is(err, ErrSessionEnded) {
+		t.Fatalf("the waiting call got %v", err)
+	}
+	if len(h.slots) != 0 {
+		t.Fatalf("slots %d after the end", len(h.slots))
 	}
 }
 

@@ -21,18 +21,37 @@ const maxHostCalls = 8
 // id: the slot is freed at once, and nothing is sent. If it did, srelens is
 // working on the call and will answer it, -32800 for a cancelled one: the
 // slot stays taken until then, and a $/cancelRequest asks for that answer
-// sooner.
+// sooner. The session's end frees every slot still taken.
+//
+// Each slot is freed exactly once. Once a call has its id, the one of
+// answered, forget and disconnect that finds it still holding its slot
+// frees it; the others find it already freed.
 
 // Host is the way to srelens from a handler: HostFrom(ctx).
 type Host struct {
 	out     *outbox
 	next    atomic.Uint64
 	slots   chan struct{}
-	gone    chan struct{} // closed by disconnect
-	goneOne sync.Once     // disconnect runs once, however often it is called
+	ended   context.Context    // done once disconnected
+	end     context.CancelFunc // ends ended
 	mu      sync.Mutex
-	waiting map[string]chan protocol.Response // by id key; nil once disconnected
-	absent  bool                              // no session: every call fails with ErrNoSession
+	waiting map[string]*pending // by id key; nil once disconnected
+	absent  bool                // no session: every call fails with ErrNoSession
+}
+
+// pending is a call srelens has not answered: where its answer goes, and
+// whether it still holds its slot, which is read and cleared under Host.mu.
+type pending struct {
+	answer    chan protocol.Response
+	holdsSlot bool
+}
+
+// letGo clears p's hold on its slot; whether it held it, and so whether the
+// caller must free it. Host.mu is held.
+func (p *pending) letGo() bool {
+	held := p.holdsSlot
+	p.holdsSlot = false
+	return held
 }
 
 func newHost(out *outbox, limits protocol.InitializeLimits) *Host {
@@ -40,11 +59,13 @@ func newHost(out *outbox, limits protocol.InitializeLimits) *Host {
 	if m := limits.MaxConcurrentRequests; m >= 1 && m < uint64(n) {
 		n = int(m)
 	}
+	ended, end := context.WithCancel(context.Background())
 	return &Host{
 		out:     out,
 		slots:   make(chan struct{}, n),
-		gone:    make(chan struct{}),
-		waiting: map[string]chan protocol.Response{},
+		ended:   ended,
+		end:     end,
+		waiting: map[string]*pending{},
 	}
 }
 
@@ -140,7 +161,7 @@ func (h *Host) call(ctx context.Context, method string, params any) (json.RawMes
 		return nil, err
 	}
 	select {
-	case <-h.gone:
+	case <-h.ended.Done():
 		return nil, ErrSessionEnded
 	default:
 	}
@@ -151,7 +172,7 @@ func (h *Host) call(ctx context.Context, method string, params any) (json.RawMes
 	}
 	select {
 	case h.slots <- struct{}{}:
-	case <-h.gone:
+	case <-h.ended.Done():
 		return nil, ErrSessionEnded
 	case <-ctx.Done():
 		return nil, ctx.Err()
@@ -160,64 +181,75 @@ func (h *Host) call(ctx context.Context, method string, params any) (json.RawMes
 	// same instant a slot was free. Checked again now that a slot is held, so
 	// a ctx that was already done before the queue is reached still sends
 	// nothing and frees its slot at once, rather than reaching the queue.
-	if err := ctx.Err(); err != nil {
+	if ctx.Err() != nil {
 		<-h.slots
-		return nil, err
+		return nil, h.stopped(ctx)
 	}
 	id := protocol.StringID(fmt.Sprintf("c-%d", h.next.Add(1)))
-	answer := make(chan protocol.Response, 1)
+	p := &pending{answer: make(chan protocol.Response, 1), holdsSlot: true}
 	h.mu.Lock()
 	if h.waiting == nil {
 		h.mu.Unlock()
 		<-h.slots
 		return nil, ErrSessionEnded
 	}
-	h.waiting[id.Key()] = answer
+	h.waiting[id.Key()] = p
 	h.mu.Unlock()
-	err = h.out.send(h.out.general, protocol.Request{ID: id, Method: method, Params: raw}, ctx.Done())
+	err = h.queue(ctx, protocol.Request{ID: id, Method: method, Params: raw})
 	if err != nil {
-		h.forget(id)
+		h.forget(id, p)
 		var over *errOverLimit
 		switch {
 		case errors.As(err, &over):
 			return nil, &CallTooLargeError{Bytes: over.bytes}
 		case errors.Is(err, errStopped):
-			return nil, ctx.Err()
+			return nil, h.stopped(ctx)
 		default:
 			return nil, ErrSessionEnded
 		}
 	}
 	select {
-	case resp := <-answer:
+	case resp := <-p.answer:
 		if resp.Error != nil {
 			return nil, &HostError{Code: resp.Error.Code, Message: resp.Error.Message, Data: resp.Error.Data}
 		}
 		return resp.Result, nil
-	case <-h.gone:
+	case <-h.ended.Done():
 		return nil, ErrSessionEnded
 	case <-ctx.Done():
 		h.cancelCall(id)
-		return nil, ctx.Err()
+		return nil, h.stopped(ctx)
 	}
 }
 
-// forget drops a call whose request never reached the queue, freeing its
-// slot -- but only if this goroutine is the one still holding it. srelens
-// may already have answered this id (a race, or a misbehaving host) while
-// this call was still blocked in send: answered then already removed the
-// waiting entry and freed the slot itself, and forget must not free it
-// again. If the host has disconnected, waiting is nil and answered can no
-// longer have touched this id, so this goroutine is definitely still
-// holding its own slot.
-func (h *Host) forget(id protocol.RequestID) {
-	h.mu.Lock()
-	_, found := h.waiting[id.Key()]
-	if found {
-		delete(h.waiting, id.Key())
+// queue queues a call's request, waiting for room until the caller's ctx is
+// done or the session ends (errStopped).
+func (h *Host) queue(ctx context.Context, req protocol.Request) error {
+	sending, stop := context.WithCancel(ctx)
+	defer stop()
+	defer context.AfterFunc(h.ended, stop)()
+	return h.out.send(h.out.general, req, sending.Done())
+}
+
+// stopped is why a call stopped waiting: ErrSessionEnded once the session
+// has ended, which also cancels a handler's ctx, and otherwise ctx's error.
+func (h *Host) stopped(ctx context.Context) error {
+	if h.ended.Err() != nil {
+		return ErrSessionEnded
 	}
-	disconnected := h.waiting == nil
+	return ctx.Err()
+}
+
+// forget drops a call whose request never reached the queue, and frees its
+// slot if it still holds it. It may not: srelens may already have answered
+// the id (a race, or a misbehaving host) while the request waited for room,
+// or the session ended, and either freed the slot.
+func (h *Host) forget(id protocol.RequestID, p *pending) {
+	h.mu.Lock()
+	delete(h.waiting, id.Key())
+	held := p.letGo()
 	h.mu.Unlock()
-	if found || disconnected {
+	if held {
 		<-h.slots
 	}
 }
@@ -232,33 +264,45 @@ func (h *Host) cancelCall(id protocol.RequestID) {
 		return
 	}
 	params, _ := json.Marshal(protocol.CancelParams{ID: id})
-	_ = h.out.send(h.out.general, protocol.Notification{Method: protocol.MethodCancelRequest, Params: params}, h.gone)
+	_ = h.out.send(h.out.general, protocol.Notification{Method: protocol.MethodCancelRequest, Params: params}, h.ended.Done())
 }
 
 // answered routes srelens's answer to the call waiting for it, and frees that
 // call's slot. An answer to no waiting call is dropped.
 func (h *Host) answered(resp protocol.Response) {
 	h.mu.Lock()
-	answer, ok := h.waiting[resp.ID.Key()]
+	p, ok := h.waiting[resp.ID.Key()]
+	held := false
 	if ok {
 		delete(h.waiting, resp.ID.Key())
+		held = p.letGo()
 	}
 	h.mu.Unlock()
 	if !ok {
 		return
 	}
-	<-h.slots
-	answer <- resp
+	if held {
+		<-h.slots
+	}
+	p.answer <- resp
 }
 
-// disconnect answers every waiting call ErrSessionEnded, and refuses later
-// ones at once. The session calls it before it stops its handlers, so a call
-// a handler abandons as it stops sends nothing; a second call does nothing.
+// disconnect answers every waiting call ErrSessionEnded, refuses later ones
+// at once, and frees every slot still taken. The session calls it before it
+// stops its handlers, so a call a handler abandons as it stops sends
+// nothing; a second call does nothing.
 func (h *Host) disconnect() {
-	h.goneOne.Do(func() {
-		h.mu.Lock()
-		h.waiting = nil
-		h.mu.Unlock()
-		close(h.gone)
-	})
+	h.mu.Lock()
+	held := 0
+	for _, p := range h.waiting {
+		if p.letGo() {
+			held++
+		}
+	}
+	h.waiting = nil
+	h.mu.Unlock()
+	h.end()
+	for range held {
+		<-h.slots
+	}
 }

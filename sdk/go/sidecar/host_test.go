@@ -331,7 +331,7 @@ func TestHostFromAContextTheSDKDidNotMakeFailsWithErrNoSession(t *testing.T) {
 
 // end must disconnect the host before it cancels handlers: a handler blocked
 // in a host call it never detached from must unblock via the host's own
-// disconnect (case <-h.gone), not via its ctx ending, so it never sends a
+// disconnect (case <-h.ended.Done()), not via its ctx ending, so it never sends a
 // stray $/cancelRequest after the session has ended. finish fails on any
 // line the sidecar wrote that this test never read.
 //
