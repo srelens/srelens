@@ -51,9 +51,10 @@ A sidecar may validate what it writes against it. srelens holds the `host/*` cal
 exactly the shapes the schema states; a test in `crates/plugin-host/src/sidecar/broker.rs`
 holds the two to each other. A call of the right shape can still be refused by the
 capability, the cluster or the person asked. JSON Schema counts characters where srelens
-counts bytes, and regex engines disagree about which characters are white space. So for
-`clusterId` and a string call id, check the byte length yourself, and do not rely on the
-schema alone to tell that a `clusterId` is blank.
+counts bytes, so for `clusterId` and a string call id, check the byte length yourself.
+`clusterId`'s pattern lists every Unicode white-space character rather than using `\S`,
+which regex engines read differently, so any validator tells a blank `clusterId` as
+srelens does.
 
 The file uses `x-srelens-*` keywords, which draft-07 allows. A validator in strict mode,
 such as Ajv 8 by default, needs `strict: false`, or the keywords registered
