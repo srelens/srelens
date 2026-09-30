@@ -35,3 +35,18 @@ func TestASendWaitingOnAFullQueueReturnsOnceTheStreamIsCancelled(t *testing.T) {
 		t.Fatal("Send kept waiting after the cancel")
 	}
 }
+
+// A stream whose ctx is already done when Send is called queues nothing:
+// Send's own stopped check refuses it before out.send is ever reached.
+func TestSendWithAnAlreadyCancelledStreamQueuesNothing(t *testing.T) {
+	out := newOutbox() // its writer never runs, but the lane has plenty of room
+	ctx, cancel := context.WithCancelCause(context.Background())
+	cancel(ErrCancelled)
+	frames := &Frames{stream: 1, out: out, ctx: ctx, cancel: cancel}
+	if err := frames.Send("frame"); !errors.Is(err, ErrStreamCancelled) {
+		t.Fatalf("%v", err)
+	}
+	if len(out.general) != 0 {
+		t.Fatalf("queued %d lines", len(out.general))
+	}
+}

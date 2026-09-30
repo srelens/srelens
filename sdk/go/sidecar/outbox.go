@@ -62,6 +62,11 @@ func (o *outbox) send(lane chan []byte, msg any, stop <-chan struct{}) error {
 	default:
 	}
 	select {
+	case <-stop:
+		return errStopped
+	default:
+	}
+	select {
 	case lane <- line:
 		return nil
 	case <-o.done:

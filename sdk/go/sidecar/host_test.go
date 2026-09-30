@@ -328,3 +328,33 @@ func TestHostFromAContextTheSDKDidNotMakeFailsWithErrNoSession(t *testing.T) {
 		t.Fatalf("%v", err)
 	}
 }
+
+// end must disconnect the host before it cancels handlers: a handler blocked
+// in a host call it never detached from must unblock via the host's own
+// disconnect (case <-h.gone), not via its ctx ending, so it never sends a
+// stray $/cancelRequest after the session has ended. finish fails on any
+// line the sidecar wrote that this test never read.
+//
+// See the fix report for the swap-and-count evidence this depends on:
+// with the two lines in end() swapped, this test did not fail in 500 runs
+// (including with GOMAXPROCS=1), because disconnect and cancelAll are two
+// back-to-back, lock-only calls with nothing to give the blocked goroutine's
+// select a reliable window either way in this harness. A separate, wider
+// probe (many concurrently-blocked handlers, not committed here because it
+// is measurably flaky even on the correct order) did reproduce the swap's
+// bug at a high rate and is recorded in the report as corroborating
+// evidence that the order genuinely matters, matching the reviewer's ruling.
+func TestEndDisconnectsTheHostBeforeCancellingHandlers(t *testing.T) {
+	s := sidecar.New("t", "1")
+	sidecar.Operation(s, "read", func(ctx context.Context, _ struct{}) (struct{}, error) {
+		_, err := sidecar.HostFrom(ctx).Read(ctx, prod(t), "apps")
+		return struct{}{}, err
+	})
+	h := start(t, s)
+	h.initialize()
+	h.request("read", map[string]any{})
+	h.call() // the host/read request; never answered
+	if err := h.finish(); err != nil {
+		t.Fatal(err)
+	}
+}

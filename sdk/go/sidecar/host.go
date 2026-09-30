@@ -78,8 +78,12 @@ func check(cc CallContext, fields ...field) error {
 		return fmt.Errorf("%w: `context.clusterId` must name a cluster, in at most %d bytes", ErrInvalidCall, protocol.MaxClusterIDBytes)
 	}
 	if cc.Namespace != nil && !protocol.IsNamespace(*cc.Namespace) {
+		value := []rune(*cc.Namespace)
+		if len(value) > 64 {
+			value = value[:64]
+		}
 		return fmt.Errorf("%w: `context.namespace` must be a Kubernetes namespace name, or null for none; not %q",
-			ErrInvalidCall, *cc.Namespace)
+			ErrInvalidCall, string(value))
 	}
 	for _, f := range fields {
 		if !f.fits(f.value) {
@@ -140,11 +144,24 @@ func (h *Host) call(ctx context.Context, method string, params any) (json.RawMes
 	default:
 	}
 	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+	select {
 	case h.slots <- struct{}{}:
 	case <-h.gone:
 		return nil, ErrSessionEnded
 	case <-ctx.Done():
 		return nil, ctx.Err()
+	}
+	// select picks at random among ready cases: ctx may have ended at the
+	// same instant a slot was free. Checked again now that a slot is held, so
+	// a ctx that was already done before the queue is reached still sends
+	// nothing and frees its slot at once, rather than reaching the queue.
+	if err := ctx.Err(); err != nil {
+		<-h.slots
+		return nil, err
 	}
 	id := protocol.StringID(fmt.Sprintf("c-%d", h.next.Add(1)))
 	answer := make(chan protocol.Response, 1)
@@ -183,14 +200,25 @@ func (h *Host) call(ctx context.Context, method string, params any) (json.RawMes
 	}
 }
 
-// forget drops a call whose request never reached the queue, freeing its slot.
+// forget drops a call whose request never reached the queue, freeing its
+// slot -- but only if this goroutine is the one still holding it. srelens
+// may already have answered this id (a race, or a misbehaving host) while
+// this call was still blocked in send: answered then already removed the
+// waiting entry and freed the slot itself, and forget must not free it
+// again. If the host has disconnected, waiting is nil and answered can no
+// longer have touched this id, so this goroutine is definitely still
+// holding its own slot.
 func (h *Host) forget(id protocol.RequestID) {
 	h.mu.Lock()
-	if h.waiting != nil {
+	_, found := h.waiting[id.Key()]
+	if found {
 		delete(h.waiting, id.Key())
 	}
+	disconnected := h.waiting == nil
 	h.mu.Unlock()
-	<-h.slots
+	if found || disconnected {
+		<-h.slots
+	}
 }
 
 // cancelCall asks srelens to stop call id, if it has not answered it and the
