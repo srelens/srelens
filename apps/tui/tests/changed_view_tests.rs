@@ -45,6 +45,7 @@ fn sample_report() -> ChangedTriageReport {
             oom_count: 0,
             error_count: 0,
             pending_count: 1,
+            flapping_count: 0,
             rolling_count: 0,
             healthy_count: 1,
             headline_message: "CRITICAL: checkout-api: 1 pod(s) in CrashLoopBackOff".to_string(),
@@ -326,6 +327,10 @@ fn changed_view_state_navigation_and_filters() {
     assert_eq!(state.incident_filter, IncidentFilter::PendingOnly);
     assert_eq!(state.filtered_deployments().len(), 1);
     assert_eq!(state.filtered_deployments()[0].app_name, "payment-worker");
+
+    state.cycle_filter();
+    assert_eq!(state.incident_filter, IncidentFilter::FlappingOnly);
+    assert_eq!(state.filtered_deployments().len(), 0);
 
     state.cycle_filter();
     assert_eq!(state.incident_filter, IncidentFilter::RollingOnly);

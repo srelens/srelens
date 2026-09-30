@@ -38,6 +38,8 @@ pub enum IncidentStatus {
     ImageError,
     #[serde(rename = "pending")]
     Pending,
+    #[serde(rename = "flapping")]
+    Flapping,
     #[serde(rename = "stalled")]
     Stalled,
     #[serde(rename = "rolling")]
@@ -58,6 +60,7 @@ impl IncidentStatus {
             Self::ConfigError => "ConfigError",
             Self::ImageError => "ImageError",
             Self::Pending => "Pending",
+            Self::Flapping => "Flapping",
             Self::Stalled => "Stalled",
             Self::Rolling => "Rolling",
             Self::Healthy => "Healthy",
@@ -73,12 +76,26 @@ impl IncidentStatus {
             Self::ConfigError => "⚠️",
             Self::ImageError => "🚫",
             Self::Pending => "⏳",
+            Self::Flapping => "⚡",
             Self::Stalled => "🚫",
             Self::Rolling => "🔄",
             Self::Healthy => "🟢",
             Self::ScaledDown => "⚪",
             Self::Unknown => "❓",
         }
+    }
+
+    pub fn is_incident(&self) -> bool {
+        matches!(
+            self,
+            Self::CrashLoop
+                | Self::OomKilled
+                | Self::ConfigError
+                | Self::ImageError
+                | Self::Pending
+                | Self::Stalled
+                | Self::Flapping
+        )
     }
 }
 
@@ -320,6 +337,12 @@ pub struct AppDeploymentChange {
     pub top_events: Vec<EventSummary>,
 }
 
+impl AppDeploymentChange {
+    pub fn is_incident(&self) -> bool {
+        self.incident_status.is_incident()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct InfraChangeItem {
     pub age: String,
@@ -347,6 +370,8 @@ pub struct TriageSummary {
     pub error_count: usize,
     #[serde(rename = "pendingCount")]
     pub pending_count: usize,
+    #[serde(default, rename = "flappingCount")]
+    pub flapping_count: usize,
     #[serde(rename = "rollingCount")]
     pub rolling_count: usize,
     #[serde(rename = "healthyCount")]
@@ -1622,13 +1647,69 @@ pub fn evaluate_changed_triage(
             detected_failure_detail,
         ) = evaluate_pod_failures(&current_pods, &events_by_object, &dep_ns);
 
+        let restart_in_window = current_pods.iter().any(|p| {
+            let pod_created_in_window = p
+                .metadata
+                .creation_timestamp
+                .as_ref()
+                .and_then(|t| cutoff_ts.as_ref().map(|c| t.0 >= *c))
+                .unwrap_or(false);
+            if pod_created_in_window
+                && p.status
+                    .as_ref()
+                    .and_then(|s| s.container_statuses.as_ref())
+                    .map_or(false, |cs| cs.iter().any(|c| c.restart_count > 0))
+            {
+                return true;
+            }
+            if let Some(ref st) = p.status {
+                if let Some(ref cs_list) = st.container_statuses {
+                    for cs in cs_list {
+                        if cs.restart_count > 0 {
+                            if let Some(ref term) =
+                                cs.last_state.as_ref().and_then(|s| s.terminated.as_ref())
+                            {
+                                if let Some(ref finished) = term.finished_at {
+                                    if cutoff_ts.as_ref().map_or(true, |c| finished.0 >= *c) {
+                                        return true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            false
+        });
+
+        let mut probe_failure_count = 0;
+        for p in &current_pods {
+            let p_name = p.metadata.name.clone().unwrap_or_default();
+            if let Some(p_events) =
+                events_by_object.get(&("Pod".to_string(), dep_ns.clone(), p_name))
+            {
+                for ev in p_events {
+                    if ev.reason.as_deref() == Some("Unhealthy") {
+                        if cutoff_ts
+                            .as_ref()
+                            .map_or(true, |c| event_last_timestamp(ev).is_some_and(|t| t >= *c))
+                        {
+                            probe_failure_count += ev.count.unwrap_or(1) as usize;
+                        }
+                    }
+                }
+            }
+        }
+        let is_flapping = (restart_in_window && restart_count >= 2) || probe_failure_count > 0;
+
         let is_actively_failing = crash_loop_count > 0
             || oom_killed_count > 0
             || config_error_count > 0
             || image_error_count > 0
             || pending_pod_count > 0
             || progress_deadline_exceeded
-            || (desired_replicas > 0 && ready_replicas < desired_replicas);
+            || (desired_replicas > 0 && ready_replicas < desired_replicas)
+            || is_flapping;
 
         let mut change_detail = None;
         let change = if rolled_out {
@@ -1696,7 +1777,6 @@ pub fn evaluate_changed_triage(
         });
 
         let mut correlated_events: Vec<EventSummary> = Vec::new();
-        let mut probe_failure_count = 0;
 
         for ev in &dep_events {
             if !is_noisy_normal_event(ev.reason.as_deref().unwrap_or(""), ev.type_.as_deref()) {
@@ -1725,9 +1805,6 @@ pub fn evaluate_changed_triage(
                 events_by_object.get(&("Pod".to_string(), dep_ns.clone(), p_name))
             {
                 for ev in p_events {
-                    if ev.reason.as_deref() == Some("Unhealthy") {
-                        probe_failure_count += ev.count.unwrap_or(1) as usize;
-                    }
                     if !is_noisy_normal_event(
                         ev.reason.as_deref().unwrap_or(""),
                         ev.type_.as_deref(),
@@ -1766,6 +1843,7 @@ pub fn evaluate_changed_triage(
             && config_error_count == 0
             && image_error_count == 0
             && pending_pod_count == 0
+            && !is_flapping
         {
             RolloutStatus::Complete
         } else if !failing_pod_names.is_empty() {
@@ -1786,6 +1864,8 @@ pub fn evaluate_changed_triage(
             IncidentStatus::Pending
         } else if progress_deadline_exceeded {
             IncidentStatus::Stalled
+        } else if is_flapping {
+            IncidentStatus::Flapping
         } else if rollout_status == RolloutStatus::Progressing {
             IncidentStatus::Rolling
         } else if rollout_status == RolloutStatus::Complete {
@@ -1804,6 +1884,12 @@ pub fn evaluate_changed_triage(
             FailureCategory::Image
         } else if pending_pod_count > 0 {
             FailureCategory::Compute
+        } else if is_flapping {
+            if probe_failure_count > 0 && !restart_in_window {
+                FailureCategory::Network
+            } else {
+                FailureCategory::App
+            }
         } else {
             FailureCategory::None
         };
@@ -1820,6 +1906,14 @@ pub fn evaluate_changed_triage(
             format!("{image_error_count} pod(s) image pull failure")
         } else if progress_deadline_exceeded {
             "Rollout stalled: ProgressDeadlineExceeded".to_string()
+        } else if is_flapping {
+            if probe_failure_count > 0 && restart_in_window && restart_count >= 2 {
+                format!("{restart_count} restart(s), {probe_failure_count} probe failure(s)")
+            } else if probe_failure_count > 0 {
+                format!("{probe_failure_count} probe failure(s) in window")
+            } else {
+                format!("{restart_count} container restart(s) in window")
+            }
         } else if ready_replicas < desired_replicas {
             format!("{ready_replicas}/{desired_replicas} Ready")
         } else {
@@ -1830,6 +1924,10 @@ pub fn evaluate_changed_triage(
             (Some(scale), FailureCategory::None) => scale.clone(),
             _ => failure_detail,
         };
+
+        if change_kind == ChangeKind::FailingOnly && incident_status == IncidentStatus::Healthy {
+            continue;
+        }
 
         let (error_log_pod, error_log_container) = log_target(&pod_symptoms, &current_pods);
         deployment_changes.push(AppDeploymentChange {
@@ -1910,12 +2008,68 @@ pub fn evaluate_changed_triage(
             detected_failure_detail,
         ) = evaluate_pod_failures(&current_pods, &events_by_object, &sts_ns);
 
+        let restart_in_window = current_pods.iter().any(|p| {
+            let pod_created_in_window = p
+                .metadata
+                .creation_timestamp
+                .as_ref()
+                .and_then(|t| cutoff_ts.as_ref().map(|c| t.0 >= *c))
+                .unwrap_or(false);
+            if pod_created_in_window
+                && p.status
+                    .as_ref()
+                    .and_then(|s| s.container_statuses.as_ref())
+                    .map_or(false, |cs| cs.iter().any(|c| c.restart_count > 0))
+            {
+                return true;
+            }
+            if let Some(ref st) = p.status {
+                if let Some(ref cs_list) = st.container_statuses {
+                    for cs in cs_list {
+                        if cs.restart_count > 0 {
+                            if let Some(ref term) =
+                                cs.last_state.as_ref().and_then(|s| s.terminated.as_ref())
+                            {
+                                if let Some(ref finished) = term.finished_at {
+                                    if cutoff_ts.as_ref().map_or(true, |c| finished.0 >= *c) {
+                                        return true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            false
+        });
+
+        let mut probe_failure_count = 0;
+        for p in &current_pods {
+            let p_name = p.metadata.name.clone().unwrap_or_default();
+            if let Some(p_events) =
+                events_by_object.get(&("Pod".to_string(), sts_ns.clone(), p_name))
+            {
+                for ev in p_events {
+                    if ev.reason.as_deref() == Some("Unhealthy") {
+                        if cutoff_ts
+                            .as_ref()
+                            .map_or(true, |c| event_last_timestamp(ev).is_some_and(|t| t >= *c))
+                        {
+                            probe_failure_count += ev.count.unwrap_or(1) as usize;
+                        }
+                    }
+                }
+            }
+        }
+        let is_flapping = (restart_in_window && restart_count >= 2) || probe_failure_count > 0;
+
         let is_actively_failing = crash_loop_count > 0
             || oom_killed_count > 0
             || config_error_count > 0
             || image_error_count > 0
             || pending_pod_count > 0
-            || (desired_replicas > 0 && ready_replicas < desired_replicas);
+            || (desired_replicas > 0 && ready_replicas < desired_replicas)
+            || is_flapping;
 
         let sts_events = events_by_object
             .get(&("StatefulSet".to_string(), sts_ns.clone(), sts_name.clone()))
@@ -1998,7 +2152,6 @@ pub fn evaluate_changed_triage(
             .unwrap_or_else(|| "1".to_string());
 
         let mut correlated_events: Vec<EventSummary> = Vec::new();
-        let mut probe_failure_count = 0;
 
         for ev in &sts_events {
             if !is_noisy_normal_event(ev.reason.as_deref().unwrap_or(""), ev.type_.as_deref()) {
@@ -2011,9 +2164,6 @@ pub fn evaluate_changed_triage(
                 events_by_object.get(&("Pod".to_string(), sts_ns.clone(), p_name))
             {
                 for ev in p_events {
-                    if ev.reason.as_deref() == Some("Unhealthy") {
-                        probe_failure_count += ev.count.unwrap_or(1) as usize;
-                    }
                     if !is_noisy_normal_event(
                         ev.reason.as_deref().unwrap_or(""),
                         ev.type_.as_deref(),
@@ -2048,6 +2198,7 @@ pub fn evaluate_changed_triage(
             && config_error_count == 0
             && image_error_count == 0
             && pending_pod_count == 0
+            && !is_flapping
         {
             RolloutStatus::Complete
         } else if !failing_pod_names.is_empty() {
@@ -2066,6 +2217,8 @@ pub fn evaluate_changed_triage(
             IncidentStatus::ImageError
         } else if pending_pod_count > 0 {
             IncidentStatus::Pending
+        } else if is_flapping {
+            IncidentStatus::Flapping
         } else if rollout_status == RolloutStatus::Progressing {
             IncidentStatus::Rolling
         } else if rollout_status == RolloutStatus::Complete {
@@ -2084,6 +2237,12 @@ pub fn evaluate_changed_triage(
             FailureCategory::Image
         } else if pending_pod_count > 0 {
             FailureCategory::Compute
+        } else if is_flapping {
+            if probe_failure_count > 0 && !restart_in_window {
+                FailureCategory::Network
+            } else {
+                FailureCategory::App
+            }
         } else {
             FailureCategory::None
         };
@@ -2098,11 +2257,23 @@ pub fn evaluate_changed_triage(
             format!("{config_error_count} pod(s) configuration error")
         } else if image_error_count > 0 {
             format!("{image_error_count} pod(s) image pull failure")
+        } else if is_flapping {
+            if probe_failure_count > 0 && restart_in_window && restart_count >= 2 {
+                format!("{restart_count} restart(s), {probe_failure_count} probe failure(s)")
+            } else if probe_failure_count > 0 {
+                format!("{probe_failure_count} probe failure(s) in window")
+            } else {
+                format!("{restart_count} container restart(s) in window")
+            }
         } else if ready_replicas < desired_replicas {
             format!("{ready_replicas}/{desired_replicas} Ready")
         } else {
             "Healthy".to_string()
         };
+
+        if change_kind == ChangeKind::FailingOnly && incident_status == IncidentStatus::Healthy {
+            continue;
+        }
 
         let (error_log_pod, error_log_container) = log_target(&pod_symptoms, &current_pods);
         deployment_changes.push(AppDeploymentChange {
@@ -2194,11 +2365,67 @@ pub fn evaluate_changed_triage(
             detected_failure_detail,
         ) = evaluate_pod_failures(&current_pods, &events_by_object, &cj_ns);
 
+        let restart_in_window = current_pods.iter().any(|p| {
+            let pod_created_in_window = p
+                .metadata
+                .creation_timestamp
+                .as_ref()
+                .and_then(|t| cutoff_ts.as_ref().map(|c| t.0 >= *c))
+                .unwrap_or(false);
+            if pod_created_in_window
+                && p.status
+                    .as_ref()
+                    .and_then(|s| s.container_statuses.as_ref())
+                    .map_or(false, |cs| cs.iter().any(|c| c.restart_count > 0))
+            {
+                return true;
+            }
+            if let Some(ref st) = p.status {
+                if let Some(ref cs_list) = st.container_statuses {
+                    for cs in cs_list {
+                        if cs.restart_count > 0 {
+                            if let Some(ref term) =
+                                cs.last_state.as_ref().and_then(|s| s.terminated.as_ref())
+                            {
+                                if let Some(ref finished) = term.finished_at {
+                                    if cutoff_ts.as_ref().map_or(true, |c| finished.0 >= *c) {
+                                        return true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            false
+        });
+
+        let mut probe_failure_count = 0;
+        for p in &current_pods {
+            let p_name = p.metadata.name.clone().unwrap_or_default();
+            if let Some(p_events) =
+                events_by_object.get(&("Pod".to_string(), cj_ns.clone(), p_name))
+            {
+                for ev in p_events {
+                    if ev.reason.as_deref() == Some("Unhealthy") {
+                        if cutoff_ts
+                            .as_ref()
+                            .map_or(true, |c| event_last_timestamp(ev).is_some_and(|t| t >= *c))
+                        {
+                            probe_failure_count += ev.count.unwrap_or(1) as usize;
+                        }
+                    }
+                }
+            }
+        }
+        let is_flapping = (restart_in_window && restart_count >= 2) || probe_failure_count > 0;
+
         let is_actively_failing = crash_loop_count > 0
             || oom_killed_count > 0
             || config_error_count > 0
             || image_error_count > 0
-            || pending_pod_count > 0;
+            || pending_pod_count > 0
+            || is_flapping;
 
         let cj_events = events_by_object
             .get(&("CronJob".to_string(), cj_ns.clone(), cj_name.clone()))
@@ -2218,9 +2445,8 @@ pub fn evaluate_changed_triage(
             .filter_map(|ev| event_last_timestamp(ev))
             .max();
 
-        let deployed_at_ts = latest_sched
-            .or(latest_pod_created)
-            .or_else(|| cj.metadata.creation_timestamp.as_ref().map(|t| t.0));
+        let cj_created = cj.metadata.creation_timestamp.as_ref().map(|t| t.0);
+        let deployed_at_ts = cj_created.or(latest_sched).or(latest_pod_created);
         let deployed_at = deployed_at_ts.map(|t| t.to_string());
         let deployed_age = deployed_at_ts
             .map(|t| crate::format_age(now.duration_since(t).as_secs().max(0)))
@@ -2230,7 +2456,7 @@ pub fn evaluate_changed_triage(
         let mut change_kind = ChangeKind::Rollout;
         let mut changed_age = deployed_age.clone();
 
-        if let Some(ts) = latest_sched.or(latest_pod_created) {
+        if let Some(ts) = cj_created {
             if cutoff_ts.as_ref().is_some_and(|c| &ts >= c) {
                 in_window = true;
                 change_kind = ChangeKind::Rollout;
@@ -2293,7 +2519,6 @@ pub fn evaluate_changed_triage(
             .unwrap_or_else(|| "-".to_string());
 
         let mut correlated_events: Vec<EventSummary> = Vec::new();
-        let probe_failure_count = 0;
 
         for ev in &cj_events {
             if !is_noisy_normal_event(ev.reason.as_deref().unwrap_or(""), ev.type_.as_deref()) {
@@ -2349,6 +2574,8 @@ pub fn evaluate_changed_triage(
             IncidentStatus::ImageError
         } else if pending_pod_count > 0 {
             IncidentStatus::Pending
+        } else if is_flapping {
+            IncidentStatus::Flapping
         } else if is_suspended {
             IncidentStatus::ScaledDown
         } else {
@@ -2363,6 +2590,12 @@ pub fn evaluate_changed_triage(
             FailureCategory::Image
         } else if pending_pod_count > 0 {
             FailureCategory::Compute
+        } else if is_flapping {
+            if probe_failure_count > 0 && !restart_in_window {
+                FailureCategory::Network
+            } else {
+                FailureCategory::App
+            }
         } else {
             FailureCategory::None
         };
@@ -2377,11 +2610,23 @@ pub fn evaluate_changed_triage(
             format!("{config_error_count} pod(s) configuration error")
         } else if image_error_count > 0 {
             format!("{image_error_count} pod(s) image pull failure")
+        } else if is_flapping {
+            if probe_failure_count > 0 && restart_in_window && restart_count >= 2 {
+                format!("{restart_count} restart(s), {probe_failure_count} probe failure(s)")
+            } else if probe_failure_count > 0 {
+                format!("{probe_failure_count} probe failure(s) in window")
+            } else {
+                format!("{restart_count} container restart(s) in window")
+            }
         } else if is_suspended {
             format!("CronJob suspended ({schedule_str})")
         } else {
             format!("Scheduled ({schedule_str})")
         };
+
+        if change_kind == ChangeKind::FailingOnly && incident_status == IncidentStatus::Healthy {
+            continue;
+        }
 
         let (error_log_pod, error_log_container) = log_target(&pod_symptoms, &current_pods);
         deployment_changes.push(AppDeploymentChange {
@@ -2433,11 +2678,12 @@ pub fn evaluate_changed_triage(
             IncidentStatus::ConfigError => 2,
             IncidentStatus::ImageError => 3,
             IncidentStatus::Pending => 4,
-            IncidentStatus::Stalled => 5,
-            IncidentStatus::Rolling => 6,
-            IncidentStatus::Healthy => 7,
-            IncidentStatus::ScaledDown => 8,
-            IncidentStatus::Unknown => 9,
+            IncidentStatus::Flapping => 5,
+            IncidentStatus::Stalled => 6,
+            IncidentStatus::Rolling => 7,
+            IncidentStatus::Healthy => 8,
+            IncidentStatus::ScaledDown => 9,
+            IncidentStatus::Unknown => 10,
         };
         rank(a.incident_status)
             .cmp(&rank(b.incident_status))
@@ -2554,6 +2800,10 @@ pub fn evaluate_changed_triage(
         .iter()
         .filter(|d| d.incident_status == IncidentStatus::Pending)
         .count();
+    let flapping_count = deployment_changes
+        .iter()
+        .filter(|d| d.incident_status == IncidentStatus::Flapping)
+        .count();
     let rolling_count = deployment_changes
         .iter()
         .filter(|d| d.incident_status == IncidentStatus::Rolling)
@@ -2594,6 +2844,13 @@ pub fn evaluate_changed_triage(
             .map(|d| format!("{}: {}", d.app_name, d.failure_detail))
             .unwrap_or_default();
         format!("BLOCKED (INFRA): {first}")
+    } else if flapping_count > 0 {
+        let first = deployment_changes
+            .iter()
+            .find(|d| d.incident_status == IncidentStatus::Flapping)
+            .map(|d| format!("{}: {}", d.app_name, d.failure_detail))
+            .unwrap_or_default();
+        format!("DEGRADED (FLAPPING): {first}")
     } else if rolling_count > 0 {
         format!("{rolling_count} workload(s) currently rolling update")
     } else if healthy_count > 0 {
@@ -2612,6 +2869,7 @@ pub fn evaluate_changed_triage(
             oom_count,
             error_count,
             pending_count,
+            flapping_count,
             rolling_count,
             healthy_count,
             headline_message,
@@ -5195,5 +5453,137 @@ mod tests {
             gitops.is_health_message,
             "health message must be marked as is_health_message"
         );
+    }
+
+    #[test]
+    fn routine_cronjob_schedule_ticks_are_not_reported_as_rollouts() {
+        use k8s_openapi::api::batch::v1::{CronJobSpec, CronJobStatus, JobSpec, JobTemplateSpec};
+        let now = Timestamp::from_second(1_700_000_000).unwrap();
+        let old_creation = Timestamp::from_second(1_700_000_000 - 86400 * 10).unwrap();
+        let sched_time = Timestamp::from_second(1_700_000_000 - 300).unwrap();
+
+        let cj = CronJob {
+            metadata: ObjectMeta {
+                name: Some("routine-sync".to_string()),
+                namespace: Some("default".to_string()),
+                creation_timestamp: Some(Time(old_creation)),
+                ..Default::default()
+            },
+            spec: Some(CronJobSpec {
+                schedule: "*/5 * * * *".to_string(),
+                job_template: JobTemplateSpec {
+                    spec: Some(JobSpec::default()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            status: Some(CronJobStatus {
+                last_schedule_time: Some(Time(sched_time)),
+                ..Default::default()
+            }),
+        };
+
+        let report = evaluate_changed_triage(
+            &[],
+            &[],
+            &[cj],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            Duration::from_secs(3600),
+            now,
+            None,
+            TriageOptions::default(),
+        );
+
+        assert!(
+            report.deployments.is_empty(),
+            "Routine schedule ticks must not appear as rollouts in changed report"
+        );
+    }
+
+    #[test]
+    fn an_unchanged_workload_with_stale_warning_that_is_healthy_is_not_reported_as_failing() {
+        let deps = [deployment("advertiser-hub", 2, 2)];
+        let rs = [replicaset(
+            "advertiser-hub-old",
+            "advertiser-hub",
+            86400 * 5,
+        )];
+        let events = [event(
+            "ReplicaSet",
+            "advertiser-hub-old",
+            "Warning",
+            "FailedCreate",
+            300,
+        )];
+
+        let report = triage(&deps, &rs, &[], &events, &[]);
+        assert!(
+            report.deployments.is_empty(),
+            "A healthy 2/2 workload with an old warning must not appear as FailingOnly"
+        );
+    }
+
+    #[test]
+    fn a_workload_with_restart_surge_or_probe_failures_is_reported_as_flapping() {
+        use k8s_openapi::api::core::v1::ContainerStateRunning;
+        let now = Timestamp::from_second(1_700_000_000).unwrap();
+        let dep = deployment("api", 1, 1);
+        let rs = [replicaset("api-rs", "api", 86400 * 3)];
+        let pod = Pod {
+            metadata: ObjectMeta {
+                name: Some("api-rs-pod".to_string()),
+                namespace: Some("default".to_string()),
+                creation_timestamp: Some(Time(
+                    Timestamp::from_second(1_700_000_000 - 300).unwrap(),
+                )),
+                owner_references: Some(vec![make_owner_ref("ReplicaSet", "api-rs")]),
+                ..Default::default()
+            },
+            spec: Some(PodSpec::default()),
+            status: Some(PodStatus {
+                phase: Some("Running".to_string()),
+                container_statuses: Some(vec![ContainerStatus {
+                    name: "api".to_string(),
+                    ready: true,
+                    restart_count: 3,
+                    state: Some(ContainerState {
+                        running: Some(ContainerStateRunning {
+                            started_at: Some(Time(
+                                Timestamp::from_second(1_700_000_000 - 100).unwrap(),
+                            )),
+                        }),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+        };
+
+        let report = evaluate_changed_triage(
+            &[dep],
+            &[],
+            &[],
+            &[],
+            &rs,
+            &[pod],
+            &[],
+            &[],
+            Duration::from_secs(3600),
+            now,
+            None,
+            TriageOptions::default(),
+        );
+
+        assert_eq!(report.deployments.len(), 1);
+        assert_eq!(
+            report.deployments[0].incident_status,
+            IncidentStatus::Flapping
+        );
+        assert_eq!(report.summary.flapping_count, 1);
     }
 }

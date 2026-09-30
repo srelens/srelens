@@ -508,8 +508,16 @@ pub const COMMAND_REGISTRY: &[CommandDef] = &[
     },
     CommandDef {
         name: "changed",
-        aliases: &["change", "chg", "recent", "triage"],
-        description: "Holistic deployment & change incident triage (:changed [duration], :chg, :recent)",
+        aliases: &[
+            "change",
+            "chg",
+            "recent",
+            "triage",
+            "page",
+            "incident",
+            "incidents",
+        ],
+        description: "SRE incident investigation & change triage (:changed [duration], :page, :incident)",
         target: CommandTarget::Resource(ResourceKind::Changed),
     },
     CommandDef {

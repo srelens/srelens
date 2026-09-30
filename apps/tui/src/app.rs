@@ -7569,6 +7569,23 @@ impl App {
                 KeyCode::Down => {
                     changed.select_next();
                 }
+                KeyCode::Char('t') => {
+                    changed.toggle_band_focus();
+                }
+                KeyCode::Char('h') => {
+                    changed.show_healthy_in_timeline = !changed.show_healthy_in_timeline;
+                    let show = changed.show_healthy_in_timeline;
+                    changed.clamp_selection();
+                    self.set_toast(
+                        if show {
+                            "Timeline: showing all rollouts (including healthy)"
+                        } else {
+                            "Timeline: hiding healthy rollouts"
+                        }
+                        .to_string(),
+                        Theme::status_ok(),
+                    );
+                }
                 KeyCode::Char('u') => {
                     changed.toggle_include_failing();
                     self.refresh_changed_triage();
