@@ -155,10 +155,11 @@ pub fn recent_change_str(d: &AppDeploymentChange) -> String {
 /// read "external-secre"). The flexible ROOT CAUSE / MESSAGE column takes
 /// what is left.
 fn column_width(header: &str, values: impl Iterator<Item = usize>) -> u16 {
+    let header_width = unicode_width::UnicodeWidthStr::width(header);
     values
         .max()
         .unwrap_or(0)
-        .max(header.chars().count())
+        .max(header_width)
         .min(u16::MAX as usize) as u16
 }
 
@@ -1179,12 +1180,12 @@ fn render_deployments_table(f: &mut Frame, area: Rect, state: &ChangedViewState)
         Cell::from(Span::styled("NAMESPACE", Theme::table_header())),
         Cell::from(Span::styled("REVISION / GITOPS", Theme::table_header())),
         Cell::from(Span::styled("READY", Theme::table_header())),
+        Cell::from(Span::styled("RECENT CHANGE", Theme::table_header())),
+        Cell::from(Span::styled("DEPLOYED", Theme::table_header())),
         Cell::from(Span::styled(
             "ROOT CAUSE / SRE DIAGNOSTIC",
             Theme::table_header(),
         )),
-        Cell::from(Span::styled("DEPLOYED", Theme::table_header())),
-        Cell::from(Span::styled("RECENT CHANGE", Theme::table_header())),
     ];
     let header = Row::new(header_cells).height(1).bottom_margin(0);
 
@@ -1340,9 +1341,9 @@ fn render_deployments_table(f: &mut Frame, area: Rect, state: &ChangedViewState)
                 ns_cell,
                 rev_cell,
                 ready_cell,
-                detail_cell,
-                deployed_cell,
                 recent_change_cell,
+                deployed_cell,
+                detail_cell,
             ]);
 
             if is_selected {
@@ -1353,30 +1354,39 @@ fn render_deployments_table(f: &mut Frame, area: Rect, state: &ChangedViewState)
         })
         .collect();
 
-    // Wide enough for the longest name and its "(sts)"/"(unchanged)"
-    // markers, within reason; the ROOT CAUSE column takes the rest.
-    let workload_width = deps.iter().map(|d| {
+    let workload_widths = deps.iter().map(|d| {
         let kind_tag = match d.kind.as_str() {
             "CronJob" => 5,
             "StatefulSet" | "Job" => 6,
             _ => 0,
         };
-        let change = change_tag(d.change_kind).map_or(0, |t| t.chars().count());
-        d.app_name.chars().count() + kind_tag + change
+        let change =
+            change_tag(d.change_kind).map_or(0, |t| unicode_width::UnicodeWidthStr::width(t));
+        unicode_width::UnicodeWidthStr::width(d.app_name.as_str()) + kind_tag + change
     });
-    let recent_change_widths = deps.iter().map(|d| recent_change_str(d).chars().count());
+    let ns_widths = deps
+        .iter()
+        .map(|d| unicode_width::UnicodeWidthStr::width(d.namespace.as_str()));
+    let rev_widths = deps.iter().map(|d| {
+        if let Some(ref g) = d.gitops {
+            format!("r{} ({})", d.current_revision, g.sync_revision).len()
+        } else {
+            format!("r{}", d.current_revision).len()
+        }
+    });
+    let recent_change_widths = deps
+        .iter()
+        .map(|d| unicode_width::UnicodeWidthStr::width(recent_change_str(d).as_str()));
+
     let widths = [
         Constraint::Length(12),
-        Constraint::Length(column_width("WORKLOAD", workload_width)),
-        Constraint::Length(column_width(
-            "NAMESPACE",
-            deps.iter().map(|d| d.namespace.chars().count()),
-        )),
-        Constraint::Length(16),
-        Constraint::Length(9),
-        Constraint::Min(30),
+        Constraint::Length(column_width("WORKLOAD", workload_widths)),
+        Constraint::Length(column_width("NAMESPACE", ns_widths)),
+        Constraint::Length(column_width("REVISION / GITOPS", rev_widths)),
+        Constraint::Length(7),
+        Constraint::Length(column_width("RECENT CHANGE", recent_change_widths)),
         Constraint::Length(8),
-        Constraint::Length(column_width("RECENT CHANGE", recent_change_widths).max(16)),
+        Constraint::Min(28),
     ];
 
     let table = Table::new(rows, widths)

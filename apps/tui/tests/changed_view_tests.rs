@@ -955,6 +955,29 @@ fn table_columns_fit_their_longest_namespace_and_workload() {
 }
 
 #[test]
+fn recent_change_and_diagnostic_columns_render_without_truncation() {
+    let _settings = common::env::isolate_settings();
+    let mut state = ChangedViewState::new();
+    let mut report = sample_report();
+    report.deployments[0].change_kind = srelens_kube::changed::ChangeKind::Scaled;
+    report.deployments[0].change_detail = Some("Scaled 16→14".to_string());
+    report.deployments[0].changed_age = "25m".to_string();
+    state.set_report(report);
+
+    let rendered = render_lines(160, 36, |f| render_changed_view(f, f.area(), &state)).join("\n");
+
+    // Ensure REVISION / GITOPS header is fully visible without truncated 'S'
+    assert!(rendered.contains("REVISION / GITOPS"), "{rendered}");
+    // Ensure full recent change string and age are present
+    assert!(rendered.contains("Scaled 16→14 (25m)"), "{rendered}");
+    // Ensure root cause diagnostic is present
+    assert!(
+        rendered.contains("[APP] checkout-api-7b89-abcd"),
+        "{rendered}"
+    );
+}
+
+#[test]
 fn clamp_selection_clamps_both_deployments_and_infra() {
     let _settings = common::env::isolate_settings();
     let mut state = ChangedViewState::new();
