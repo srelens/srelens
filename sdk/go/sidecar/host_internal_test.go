@@ -139,6 +139,35 @@ func TestForgetFreesTheSlotWhenTheHostHasDisconnected(t *testing.T) {
 	}
 }
 
+// session.end must disconnect the host before it cancels handlers. This is
+// deterministic, unlike the end-to-end test in host_test.go: disconnect and
+// cancelAll both run synchronously in the same goroutine that calls end, so
+// there is no scheduling race to observe -- the fake handler's cancel runs
+// from inside cancelAll, and by then disconnect either has or has not
+// already nilled h.waiting, with nothing racy about which.
+func TestEndDisconnectsTheHostBeforeItCancelsHandlers(t *testing.T) {
+	out := newOutbox() // its writer never runs
+	h := newHost(out, protocol.InitializeLimits{MaxConcurrentRequests: 8})
+	se := &session{out: out, running: map[string]context.CancelCauseFunc{}, shared: &shared{host: h}}
+
+	var called, sawDisconnected bool
+	se.track("request x", func(cause error) {
+		called = true
+		h.mu.Lock()
+		sawDisconnected = h.waiting == nil
+		h.mu.Unlock()
+	})
+
+	se.end()
+
+	if !called {
+		t.Fatal("end did not cancel the running handler")
+	}
+	if !sawDisconnected {
+		t.Fatal("the handler was cancelled before the host disconnected")
+	}
+}
+
 // check's namespace refusal must cut the value to 64 runes, as
 // protocol.ContextError.Error does, not quote the whole thing.
 func TestCheckTruncatesALongNamespaceInItsRefusal(t *testing.T) {
