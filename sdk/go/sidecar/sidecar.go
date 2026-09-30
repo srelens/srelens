@@ -23,7 +23,9 @@ type Sidecar struct {
 	sizeRuntime   bool
 }
 
-// New is a sidecar called name, at version, serving nothing yet.
+// New is a sidecar called name, at version, serving nothing yet. Register
+// every Operation and Stream it serves before Run or RunStdio: registering
+// one while the sidecar runs is a data race.
 func New(name, version string) *Sidecar {
 	return &Sidecar{name: name, version: version, operations: map[string]operationFunc{}, streams: map[string]streamFunc{}, logLevel: slog.LevelInfo}
 }
@@ -33,7 +35,8 @@ func New(name, version string) *Sidecar {
 // the other end reads to its end. The error is nil after shutdown or the end
 // of r; otherwise it is a failed read or write, ErrProtocol for a line that
 // is not JSON-RPC, or ctx's error. Tests use Run; a sidecar's main uses
-// RunStdio.
+// RunStdio. Every Operation and Stream must be registered before Run or
+// RunStdio is called: registering one while the sidecar runs is a data race.
 func (s *Sidecar) Run(ctx context.Context, r io.Reader, w io.Writer) error {
 	return serve(ctx, s, r, w)
 }
@@ -84,7 +87,8 @@ func (s *Sidecar) register(name string) {
 // so check the fields the operation needs and return InvalidParams when one
 // is missing. The handler's ctx is done when srelens cancels the request
 // (cause ErrCancelled), the session ends (ErrSessionEnded), or the handler
-// returns (ErrHandlerReturned).
+// returns (ErrHandlerReturned). Call Operation before Run or RunStdio:
+// registering while the sidecar runs is a data race.
 func Operation[In, Out any](s *Sidecar, name string, handler func(context.Context, In) (Out, error)) {
 	s.register(name)
 	s.operations[name] = func(ctx context.Context, params json.RawMessage) (json.RawMessage, error) {

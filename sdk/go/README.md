@@ -52,7 +52,9 @@ The module is `github.com/srelens/srelens/sdk/go`, with Go 1.25 or later. It use
   - It answers `initialize`, picking the newest API version both sides speak (or `-32001`), and `activate`, `health`, `deactivate` and `shutdown`.
   - `health` is answered on the reader goroutine, through a lane the writer takes ahead of queued frames. A handler that blocks or spins cannot starve it: Go preempts goroutines, and a goroutine blocked in a system call gives up its thread.
 - **Handlers.**
+  - Register every `Operation` and `Stream` before `Run` or `RunStdio`. Registering one while the sidecar runs is a data race.
   - Each request and each stream runs in its own goroutine, with its params decoded into your type.
+  - A handler's `ctx` carries what `initialize` said. `sidecar.DataDir(ctx)` is the directory the sidecar may write. `sidecar.APIVersion(ctx)` is the API version both sides agreed on. `sidecar.Limits(ctx)` holds srelens's limits, such as `MaxConcurrentRequests`, `RequestTimeoutMs` and `MemoryBytes`.
   - Params that do not decode are answered `-32602`, and an unknown method `-32601`.
   - `encoding/json` leaves a missing field at its zero value, so check the fields you need and return `sidecar.InvalidParams`.
 - **What a handler returns** is the answer:

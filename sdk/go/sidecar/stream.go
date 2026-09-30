@@ -94,7 +94,9 @@ type streamFunc func(ctx context.Context, params json.RawMessage, frames *Frames
 // an error fails it with the error's message. After srelens cancels the
 // stream nothing more is sent, a terminal frame included. The handler's ctx
 // is done when srelens cancels the stream (cause ErrCancelled), the session
-// ends (ErrSessionEnded), or the handler returns (ErrHandlerReturned).
+// ends (ErrSessionEnded), or the handler returns (ErrHandlerReturned). Call
+// Stream before Run or RunStdio: registering while the sidecar runs is a
+// data race.
 func Stream[In any](s *Sidecar, name string, handler func(context.Context, In, *Frames) error) {
 	s.register(name)
 	s.streams[name] = func(ctx context.Context, params json.RawMessage, frames *Frames) (func() error, error) {
