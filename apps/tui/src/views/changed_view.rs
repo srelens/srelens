@@ -680,14 +680,7 @@ pub fn render_guide_banner(f: &mut Frame, area: Rect, state: &ChangedViewState) 
                 .fg(Theme::accent())
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(
-            "Non-deployment warnings (CNI, Ingress/NEG sync, Istio webhooks, Node conditions)  │  ",
-            Style::default().fg(Theme::fg()),
-        ),
-        Span::styled(
-            "[s] Quick RCA  [a] Assistant  [f] Filter  [/] Search",
-            Style::default().fg(Theme::dim()),
-        ),
+        Span::styled("Non-deployment warnings", Style::default().fg(Theme::fg())),
     ]);
 
     let lines = if inner.height >= 2 {
@@ -1029,14 +1022,6 @@ fn summary_banner(state: &ChangedViewState) -> (Block<'static>, Line<'static>, L
             format!("[{}]", state.incident_filter.label()),
             Style::default()
                 .fg(Theme::cyan())
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("  │  "),
-        Span::styled("Scope: ", Theme::header_label()),
-        Span::styled(
-            state.scope_label(),
-            Style::default()
-                .fg(Theme::accent())
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw("  │  "),
@@ -2001,7 +1986,6 @@ pub fn wrap_message_text(text: &str, max_width: usize) -> Vec<String> {
     }
 }
 
-
 fn render_infra_tab(f: &mut Frame, area: Rect, state: &ChangedViewState) {
     let block = Block::default()
         .borders(Borders::ALL)
@@ -2154,22 +2138,6 @@ fn footer_line(state: &ChangedViewState, card_visible: bool) -> Line<'static> {
         format!("Window ({})", state.current_window_label()),
     ));
     keys.push(("[f]".into(), "Filter".into()));
-    keys.push((
-        "[u]".into(),
-        if state.include_failing {
-            "Hide unchanged".into()
-        } else {
-            "Include failing".into()
-        },
-    ));
-    keys.push((
-        "[S]".into(),
-        if state.include_scaled {
-            "Hide scaled".into()
-        } else {
-            "Include scaled".into()
-        },
-    ));
     keys.push(("[Tab]".into(), "Toggle Infra".into()));
     keys.push((
         "[b]".into(),

@@ -404,7 +404,6 @@ fn renders_changed_view_wide_with_diagnostic_card() {
     assert!(rendered.contains(
         "[Enter/d] Describe   [l] Logs   [y] YAML   [s] Quick AI RCA   [a] Assistant   [r] Refresh"
     ));
-    assert!(rendered.contains("Scope: [CHANGED]"));
     assert!(!rendered.contains("[j/k] Navigate"));
     assert!(!rendered.contains("[r] Rollout Restart"));
     assert!(rendered.contains("[y] YAML"));
@@ -693,8 +692,6 @@ fn an_unchanged_row_says_why_it_is_shown() {
     );
     assert!(rendered
         .contains("Not changed in the last 1h; shown because it is failing now (u to hide)."));
-    assert!(rendered.contains("Scope: [CHANGED + FAILING]"));
-    assert!(rendered.contains("[u] Hide unchanged"));
     // Rows that did change carry no marker.
     assert!(!rendered.contains("payment-worker (unchanged)"));
 
@@ -728,7 +725,7 @@ fn footer_leaves_the_cards_keys_to_the_card() {
     let footer = footer_line(200, 44, &state);
     assert_eq!(
         footer,
-        "[[/]] Window (1h)  [f] Filter  [u] Include failing  [S] Include scaled  [Tab] Toggle Infra  [b] Hide guide  [/] Search"
+        "[[/]] Window (1h)  [f] Filter  [Tab] Toggle Infra  [b] Hide guide  [/] Search"
     );
 
     // When guide banner is hidden, footer reflects "Show guide"
@@ -832,8 +829,6 @@ fn a_scaled_row_shows_when_it_scaled_and_says_so() {
     );
     assert!(rendered.contains("CHANGED"), "column header");
     assert!(rendered.contains("Scaled 3→4 5m ago; last rollout 66d ago (S to hide)."));
-    assert!(rendered.contains("Scope: [CHANGED + SCALED]"));
-    assert!(rendered.contains("[S] Hide scaled"));
 }
 
 #[test]
@@ -1462,6 +1457,9 @@ fn changed_view_renders_sre_guide_banner_and_respects_toggle_and_height() {
     assert!(full.contains("[S] Scaled:"), "{full}");
     assert!(full.contains("[u] Failing:"), "{full}");
     assert!(full.contains("[Tab] Infra:"), "{full}");
+    assert!(full.contains("Non-deployment warnings"), "{full}");
+    assert!(!full.contains("CNI, Ingress"), "{full}");
+    assert!(!full.contains("Quick RCA  [a] Assistant"), "{full}");
 
     // 2. Guide banner toggled off
     state.show_guide_banner = false;
@@ -1478,4 +1476,3 @@ fn changed_view_renders_sre_guide_banner_and_respects_toggle_and_height() {
         "{full_short}"
     );
 }
-
