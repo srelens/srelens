@@ -29,7 +29,10 @@ func (f *Frames) ID() uint64 { return f.stream }
 // (ErrStreamFinished), or once the session has ended (ErrSessionEnded). It
 // also fails when the frame is over the message limit (*FrameTooLargeError,
 // which matches ErrFrameTooLarge), or when v cannot be serialized. A Send
-// waiting for room in the queue returns as soon as the stream stops.
+// waiting for room in the queue returns as soon as srelens cancels the
+// stream or the session ends. One from a Frames kept past its handler's
+// return does not: it keeps waiting for that room, since finish waits for
+// it too, which delays the stream's terminal frame until it is sent.
 func (f *Frames) Send(v any) error {
 	f.mu.RLock()
 	defer f.mu.RUnlock()

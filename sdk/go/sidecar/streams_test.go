@@ -109,23 +109,26 @@ func TestACancelledStreamStopsAndSendsNoTerminalFrame(t *testing.T) {
 	h.answer(h.request("stream/open", map[string]any{"stream": 5, "method": "forever", "params": map[string]any{}}))
 	h.recv()
 	h.notify("stream/cancel", map[string]any{"stream": 5})
-	// Frames already queued may still arrive before the answer to this.
-	health := h.request("health", map[string]any{})
+	// Fenced by a request answered on the general lane, which is FIFO:
+	// unlike health (on the lifecycle lane, which always jumps the general
+	// queue), this answer can only arrive once every frame queued ahead of
+	// it -- everything queued before the cancel took effect -- has already
+	// been delivered.
+	fence := h.request("stream/open", map[string]any{"stream": 6, "method": "nope", "params": map[string]any{}})
 	for {
 		m := h.recv()
-		if m["id"] == float64(health) {
+		if m["id"] == float64(fence) {
+			if e := errorOf(t, m); e.code != -32601 {
+				t.Fatalf("the fence: %+v", e)
+			}
 			break
 		}
 		if m["method"] != "stream/data" {
 			t.Fatalf("only frames queued before the cancel: %v", m)
 		}
 	}
-	// A frame already queued on the shared general lane before the cancel
-	// landed can still arrive after health's answer: the lifecycle lane
-	// always lets health jump that queue (see outbox.go's run), so a
-	// backlog built up before the cancel is delivered out of order relative
-	// to health, not after it. What must never appear is a terminal frame,
-	// and the stream must actually stop once that backlog drains.
+	// After the fence, at most the one frame that was mid-send when the
+	// cancel landed, and never a close or an error.
 	stragglers := 0
 	for {
 		m, ok := h.nextWithin(300 * time.Millisecond)
@@ -135,8 +138,8 @@ func TestACancelledStreamStopsAndSendsNoTerminalFrame(t *testing.T) {
 		if m["method"] != "stream/data" {
 			t.Fatalf("no terminal frame after a cancel: %v", m)
 		}
-		if stragglers++; stragglers > 200 {
-			t.Fatal("the stream kept sending long after its cancel")
+		if stragglers++; stragglers > 1 {
+			t.Fatal("the stream kept sending after its cancel")
 		}
 	}
 	if err := h.finish(); err != nil {
@@ -234,5 +237,33 @@ func TestAFramesKeptPastItsHandlerSendsNothingAfterTheClosingFrame(t *testing.T)
 	// finish also fails on any line not read, such as a late stream/data.
 	if err := h.finish(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestStreamsAndOperationsShareOneNameSpace reproduces the bug where
+// deleting sidecar.go's `streams` taken-twice check left the suite green:
+// nothing exercised a stream registered over another stream, or an operation
+// registered over a stream (the ordering only that check catches, since a
+// name taken only by a stream is absent from `operations`).
+func TestStreamsAndOperationsShareOneNameSpace(t *testing.T) {
+	noopOp := func(context.Context, struct{}) (struct{}, error) { return struct{}{}, nil }
+	noopStream := func(context.Context, struct{}, *sidecar.Frames) error { return nil }
+
+	s := sidecar.New("t", "1")
+	sidecar.Stream(s, "dup", noopStream)
+	mustPanic(t, "registering a stream twice", func() { sidecar.Stream(s, "dup", noopStream) })
+
+	s = sidecar.New("t", "1")
+	sidecar.Stream(s, "taken", noopStream)
+	mustPanic(t, "registering an operation over a stream", func() { sidecar.Operation(s, "taken", noopOp) })
+
+	s = sidecar.New("t", "1")
+	sidecar.Operation(s, "taken", noopOp)
+	mustPanic(t, "registering a stream over an operation", func() { sidecar.Stream(s, "taken", noopStream) })
+
+	for _, name := range []string{"health", "a_b"} {
+		mustPanic(t, "registering a stream named "+name, func() {
+			sidecar.Stream(sidecar.New("t", "1"), name, noopStream)
+		})
 	}
 }
