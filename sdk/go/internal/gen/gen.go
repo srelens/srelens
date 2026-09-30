@@ -31,6 +31,8 @@ var handWritten = map[string]string{
 var initialisms = map[string]string{"id": "ID", "api": "API", "uid": "UID", "rpc": "RPC", "cpus": "CPUs"}
 
 var (
+	rootKeywords = set("$id", "$schema", "anyOf", "definitions", "description", "title",
+		"x-srelens-apiVersion", "x-srelens-errorCodes", "x-srelens-errorData", "x-srelens-maxMessageBytes", "x-srelens-methods")
 	definitionKeywords = set("type", "properties", "required", "additionalProperties", "description")
 	propertyKeywords   = set("type", "$ref", "anyOf", "items", "pattern", "minLength", "maxLength", "minimum", "not", "description")
 	methodKeywords     = set("direction", "kind", "params", "result")
@@ -97,6 +99,19 @@ func only(o object, allowed map[string]bool, path string) error {
 	return nil
 }
 
+// nested accepts a schema inside a property's anyOf or items: the keywords
+// of a property, but not a pattern, which shapes reads only at a property's
+// top level.
+func nested(o object, path string) error {
+	if err := only(o, propertyKeywords, path); err != nil {
+		return err
+	}
+	if _, ok := o["pattern"]; ok {
+		return fmt.Errorf("%s: a pattern is supported only at a property's top level", path)
+	}
+	return nil
+}
+
 func oneLine(s string) string { return strings.Join(strings.Fields(s), " ") }
 
 // generate is protocol_gen.go for schema, gofmt'd.
@@ -127,6 +142,9 @@ type generator struct {
 func (g *generator) printf(format string, args ...any) { fmt.Fprintf(&g.out, format, args...) }
 
 func (g *generator) run() error {
+	if err := only(g.root, rootKeywords, "the schema's root"); err != nil {
+		return err
+	}
 	defs, ok := g.root["definitions"].(object)
 	if !ok {
 		return fmt.Errorf("the schema has no definitions")
@@ -389,7 +407,7 @@ func (g *generator) baseType(p object, path string) (string, bool, error) {
 		if len(anyOf) != 2 || nulls != 1 || inner == nil {
 			return "", false, fmt.Errorf("%s: anyOf is supported only as a nullable type", path)
 		}
-		if err := only(inner, propertyKeywords, path+".anyOf"); err != nil {
+		if err := nested(inner, path+".anyOf"); err != nil {
 			return "", false, err
 		}
 		base, _, err := g.baseType(inner, path+".anyOf")
@@ -433,7 +451,7 @@ func (g *generator) scalar(t string, p object, path string) (string, error) {
 		if !ok {
 			return "", fmt.Errorf("%s: an array needs an items schema", path)
 		}
-		if err := only(items, propertyKeywords, path+".items"); err != nil {
+		if err := nested(items, path+".items"); err != nil {
 			return "", err
 		}
 		base, nullable, err := g.baseType(items, path+".items")

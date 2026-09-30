@@ -48,6 +48,31 @@ func TestAKeywordTheGeneratorDoesNotKnowIsRefusedNamingItsPath(t *testing.T) {
 	}
 }
 
+// A top-level key the committed schema does not have, such as a new
+// x-srelens-* table, would otherwise be ignored without a word.
+func TestARootKeyTheGeneratorDoesNotKnowIsRefusedNamingIt(t *testing.T) {
+	schema := bytes.Replace(minimal(""), []byte(`"x-srelens-apiVersion"`), []byte(`"x-srelens-streams": {}, "x-srelens-apiVersion"`), 1)
+	_, err := generate(schema)
+	if err == nil || !strings.Contains(err.Error(), `"x-srelens-streams"`) {
+		t.Fatalf("expected a refusal naming \"x-srelens-streams\", got %v", err)
+	}
+}
+
+// Only a property's own pattern is written to fieldShapes; one nested in its
+// anyOf or items would be accepted and never checked.
+func TestAPatternAnywhereButAPropertysTopLevelIsRefusedNamingItsPath(t *testing.T) {
+	for _, c := range []struct{ prop, path string }{
+		{`{"anyOf": [{"type": "string", "pattern": "^a$", "maxLength": 1}, {"type": "null"}]}`, "definitions.Thing.properties.n.anyOf"},
+		{`{"type": "array", "items": {"type": "string", "pattern": "^a$", "maxLength": 1}}`, "definitions.Thing.properties.n.items"},
+		{`{"type": "array", "items": {"anyOf": [{"type": "null"}, {"type": "string", "pattern": "^a$", "maxLength": 1}]}}`, "definitions.Thing.properties.n.items.anyOf"},
+	} {
+		_, err := generate(minimal(`"Thing": {"type": "object", "properties": {"n": ` + c.prop + `}}`))
+		if err == nil || !strings.Contains(err.Error(), c.path+":") || !strings.Contains(err.Error(), "pattern") {
+			t.Errorf("%s: expected a refusal naming the pattern and %s, got %v", c.prop, c.path, err)
+		}
+	}
+}
+
 func TestAdditionalPropertiesOtherThanFalseIsRefused(t *testing.T) {
 	for _, ap := range []string{"true", "{}"} {
 		_, err := generate(minimal(`"Thing": {"type": "object", "properties": {"n": {"type": "string"}}, "additionalProperties": ` + ap + `}`))
