@@ -48,6 +48,14 @@ pub struct NodeInspectorDetails {
     pub gpu_memory_requests_mib: i64,
     #[serde(default)]
     pub is_virtual_gpu: bool,
+    #[serde(default)]
+    pub physical_gpu_count: i64,
+    #[serde(default)]
+    pub physical_gpu_memory_total_mib: Option<i64>,
+    #[serde(default)]
+    pub virtual_gpu_count: Option<i64>,
+    #[serde(default)]
+    pub virtual_gpu_memory_total_mib: Option<i64>,
 
     pub conditions: Vec<NodeConditionInfo>,
     pub taints: Vec<NodeTaintInfo>,
@@ -252,6 +260,10 @@ pub fn parse_node_details(node: &Node, pods: &[Pod]) -> NodeInspectorDetails {
     let mut gpu_capacity_count: i64 = 0;
     let mut gpu_allocatable_count: i64 = 0;
     let mut is_virtual_gpu = false;
+    let mut physical_gpu_count = 0;
+    let mut physical_gpu_memory_total_mib = None;
+    let mut virtual_gpu_count = None;
+    let mut virtual_gpu_memory_total_mib = None;
 
     // Check HAMi virtual GPU annotation first
     let hami_info = node
@@ -264,15 +276,21 @@ pub fn parse_node_details(node: &Node, pods: &[Pod]) -> NodeInspectorDetails {
     let mut hami_vram_total_mib: Option<i64> = None;
     let mut hami_model_name: Option<String> = None;
 
-    if let Some((v_gpus, v_vram, model)) = &hami_info {
-        if *v_gpus > 0 {
+    if let Some(h) = &hami_info {
+        if h.virtual_gpu_count > 0 {
             is_virtual_gpu = true;
-            gpu_capacity_count = gpu_capacity_count.max(*v_gpus);
-            gpu_allocatable_count = gpu_allocatable_count.max(*v_gpus);
-            if *v_vram > 0 {
-                hami_vram_total_mib = Some(*v_vram);
+            physical_gpu_count = h.physical_gpu_count;
+            if h.physical_vram_total_mib > 0 {
+                physical_gpu_memory_total_mib = Some(h.physical_vram_total_mib);
             }
-            hami_model_name = model.clone();
+            virtual_gpu_count = Some(h.virtual_gpu_count);
+            gpu_capacity_count = gpu_capacity_count.max(h.virtual_gpu_count);
+            gpu_allocatable_count = gpu_allocatable_count.max(h.virtual_gpu_count);
+            if h.virtual_vram_total_mib > 0 {
+                virtual_gpu_memory_total_mib = Some(h.virtual_vram_total_mib);
+                hami_vram_total_mib = Some(h.virtual_vram_total_mib);
+            }
+            hami_model_name = h.model.clone();
         }
     }
 
@@ -368,9 +386,9 @@ pub fn parse_node_details(node: &Node, pods: &[Pod]) -> NodeInspectorDetails {
     }
 
     if vram_per_gpu_mib.is_none() {
-        if let Some((v_gpus, v_vram, _)) = &hami_info {
-            if *v_gpus > 0 && *v_vram > 0 {
-                vram_per_gpu_mib = Some(*v_vram / *v_gpus);
+        if let Some(h) = &hami_info {
+            if h.virtual_gpu_count > 0 && h.virtual_vram_total_mib > 0 {
+                vram_per_gpu_mib = Some(h.virtual_vram_total_mib / h.virtual_gpu_count);
             }
         }
     }
@@ -418,6 +436,11 @@ pub fn parse_node_details(node: &Node, pods: &[Pod]) -> NodeInspectorDetails {
     // Otherwise multiply per-GPU VRAM by total GPU capacity count.
     let gpu_memory_total_mib = hami_vram_total_mib
         .or_else(|| vram_per_gpu_mib.map(|per_gpu| per_gpu * gpu_capacity_count.max(1)));
+
+    if !is_virtual_gpu {
+        physical_gpu_count = gpu_capacity_count;
+        physical_gpu_memory_total_mib = gpu_memory_total_mib;
+    }
 
     let has_gpu = gpu_capacity_count > 0
         || is_virtual_gpu
@@ -648,6 +671,10 @@ pub fn parse_node_details(node: &Node, pods: &[Pod]) -> NodeInspectorDetails {
         gpu_memory_total_mib,
         gpu_memory_requests_mib,
         is_virtual_gpu,
+        physical_gpu_count,
+        physical_gpu_memory_total_mib,
+        virtual_gpu_count,
+        virtual_gpu_memory_total_mib,
         conditions,
         taints,
         pods: pod_items,
@@ -863,6 +890,10 @@ mod tests {
 
         assert!(details.has_gpu);
         assert!(details.is_virtual_gpu);
+        assert_eq!(details.physical_gpu_count, 1);
+        assert_eq!(details.physical_gpu_memory_total_mib, Some(15360));
+        assert_eq!(details.virtual_gpu_count, Some(10));
+        assert_eq!(details.virtual_gpu_memory_total_mib, Some(153600));
         assert_eq!(details.gpu_capacity_count, 10);
         assert_eq!(details.gpu_allocatable_count, 10);
         assert_eq!(details.gpu_requests_count, 1);

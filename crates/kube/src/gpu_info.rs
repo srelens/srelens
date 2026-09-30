@@ -18,7 +18,7 @@ pub struct GpuPodItem {
     pub containers: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct GpuNodeInfo {
     pub name: String,
     pub status: String,
@@ -35,6 +35,12 @@ pub struct GpuNodeInfo {
     pub vram_capacity_total_mib: Option<i64>,
     pub vram_requests_total_mib: i64,
     pub pods: Vec<GpuPodItem>,
+    #[serde(default)]
+    pub is_virtual_gpu: bool,
+    #[serde(default)]
+    pub physical_gpu_count: i64,
+    #[serde(default)]
+    pub physical_vram_total_mib: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -106,10 +112,20 @@ pub fn parse_gpu_cluster_info(nodes: &[Node], pods: &[Pod]) -> GpuClusterInfo {
         // Detect GPU capacity & allocatable
         let mut gpu_capacity: i64 = 0;
         let mut gpu_allocatable: i64 = 0;
+        let mut is_virtual_gpu = false;
+        let mut physical_gpu_count = 0;
+        let mut physical_vram_total_mib = None;
 
-        if let Some((v_gpus, _, _)) = &hami_info {
-            gpu_capacity = gpu_capacity.max(*v_gpus);
-            gpu_allocatable = gpu_allocatable.max(*v_gpus);
+        if let Some(h) = &hami_info {
+            if h.virtual_gpu_count > 0 {
+                is_virtual_gpu = true;
+                physical_gpu_count = h.physical_gpu_count;
+                if h.physical_vram_total_mib > 0 {
+                    physical_vram_total_mib = Some(h.physical_vram_total_mib);
+                }
+                gpu_capacity = gpu_capacity.max(h.virtual_gpu_count);
+                gpu_allocatable = gpu_allocatable.max(h.virtual_gpu_count);
+            }
         }
 
         for key in &discrete_gpu_keys {
@@ -171,7 +187,7 @@ pub fn parse_gpu_cluster_info(nodes: &[Node], pods: &[Pod]) -> GpuClusterInfo {
                     .cloned()
                     .map(|m| m.replace('-', " "))
             })
-            .or_else(|| hami_info.as_ref().and_then(|(_, _, m)| m.clone()));
+            .or_else(|| hami_info.as_ref().and_then(|h| h.model.clone()));
 
         let has_gpu = gpu_capacity > 0
             || gpu_model.is_some()
@@ -216,9 +232,9 @@ pub fn parse_gpu_cluster_info(nodes: &[Node], pods: &[Pod]) -> GpuClusterInfo {
         }
 
         if vram_per_gpu_mib.is_none() {
-            if let Some((v_gpus, v_vram, _)) = &hami_info {
-                if *v_gpus > 0 && *v_vram > 0 {
-                    vram_per_gpu_mib = Some(*v_vram / *v_gpus);
+            if let Some(h) = &hami_info {
+                if h.virtual_gpu_count > 0 && h.virtual_vram_total_mib > 0 {
+                    vram_per_gpu_mib = Some(h.virtual_vram_total_mib / h.virtual_gpu_count);
                 }
             }
         }
@@ -426,8 +442,13 @@ pub fn parse_gpu_cluster_info(nodes: &[Node], pods: &[Pod]) -> GpuClusterInfo {
 
         let total_node_vram_mib = hami_info
             .as_ref()
-            .map(|(_, v_vram, _)| *v_vram)
+            .map(|h| h.virtual_vram_total_mib)
             .or_else(|| vram_per_gpu_mib.map(|per_gpu| per_gpu * gpu_capacity.max(1)));
+
+        if !is_virtual_gpu {
+            physical_gpu_count = gpu_capacity;
+            physical_vram_total_mib = total_node_vram_mib;
+        }
 
         cluster_total_gpus += gpu_capacity;
         cluster_allocated_gpus += node_gpu_reqs;
@@ -453,6 +474,9 @@ pub fn parse_gpu_cluster_info(nodes: &[Node], pods: &[Pod]) -> GpuClusterInfo {
             vram_capacity_total_mib: total_node_vram_mib,
             vram_requests_total_mib: node_vram_reqs_mib,
             pods: gpu_pod_items,
+            is_virtual_gpu,
+            physical_gpu_count,
+            physical_vram_total_mib,
         });
     }
 
@@ -528,14 +552,25 @@ pub struct HamiDeviceRegister {
     pub health: Option<bool>,
 }
 
-/// Helper to parse `hami.io/node-nvidia-register` annotation into (total_virtual_gpus, total_virtual_vram_mib, Option<clean_model_name>).
-pub fn parse_hami_register_annotation(ann: &str) -> Option<(i64, i64, Option<String>)> {
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HamiRegisterInfo {
+    pub physical_gpu_count: i64,
+    pub physical_vram_total_mib: i64,
+    pub virtual_gpu_count: i64,
+    pub virtual_vram_total_mib: i64,
+    pub model: Option<String>,
+}
+
+/// Helper to parse `hami.io/node-nvidia-register` annotation into structured HamiRegisterInfo.
+pub fn parse_hami_register_annotation(ann: &str) -> Option<HamiRegisterInfo> {
     let devices: Vec<HamiDeviceRegister> = serde_json::from_str(ann).ok()?;
     if devices.is_empty() {
         return None;
     }
-    let total_v_gpus: i64 = devices.iter().filter_map(|d| d.count).sum();
-    let total_v_vram_mib: i64 = devices
+    let physical_gpu_count = devices.len() as i64;
+    let physical_vram_total_mib: i64 = devices.iter().filter_map(|d| d.devmem).sum();
+    let virtual_gpu_count: i64 = devices.iter().filter_map(|d| d.count).sum();
+    let virtual_vram_total_mib: i64 = devices
         .iter()
         .map(|d| d.count.unwrap_or(1) * d.devmem.unwrap_or(0))
         .sum();
@@ -546,7 +581,13 @@ pub fn parse_hami_register_annotation(ann: &str) -> Option<(i64, i64, Option<Str
                 .replace('-', " ")
         })
     });
-    Some((total_v_gpus, total_v_vram_mib, model))
+    Some(HamiRegisterInfo {
+        physical_gpu_count,
+        physical_vram_total_mib,
+        virtual_gpu_count,
+        virtual_vram_total_mib,
+        model,
+    })
 }
 
 /// Format MiB into a human-readable VRAM string (e.g. "80.0 GiB" or "512 MiB").
@@ -793,6 +834,9 @@ mod tests {
         assert_eq!(cluster.total_allocated_vram_mib, 5120);
 
         let n = &cluster.nodes[0];
+        assert!(n.is_virtual_gpu);
+        assert_eq!(n.physical_gpu_count, 1);
+        assert_eq!(n.physical_vram_total_mib, Some(15360));
         assert_eq!(n.gpu_model.as_deref(), Some("Tesla T4"));
         assert_eq!(n.vram_capacity_total_mib, Some(153600));
         assert_eq!(n.vram_requests_total_mib, 5120);

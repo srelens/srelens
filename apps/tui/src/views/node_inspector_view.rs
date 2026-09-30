@@ -521,7 +521,11 @@ fn node_header_lines(d: &NodeInspectorDetails) -> Vec<Line<'_>> {
     if d.has_gpu {
         let model = d.gpu_model.as_deref().unwrap_or("GPU Accelerator");
         let badge_text = if d.is_virtual_gpu && d.gpu_allocatable_count > 1 {
-            format!("[⚡ {} ({} vGPUs)] ", model, d.gpu_allocatable_count)
+            let phys_count = d.physical_gpu_count.max(1);
+            format!(
+                "[⚡ {}x {} (HAMi {} vGPUs)] ",
+                phys_count, model, d.gpu_allocatable_count
+            )
         } else {
             format!("[⚡ {}] ", model)
         };
@@ -631,10 +635,19 @@ fn render_gauges_card(f: &mut Frame, area: Rect, d: &NodeInspectorDetails) {
         Theme::CYAN
     };
 
-    let cpu_title = format!(
-        " CPU: {:.1}/{:.1} Cores ({}%) ",
-        cpu_req, cpu_alloc, cpu_pct
-    );
+    let cpu_title = Line::from(vec![
+        Span::styled(" CPU ", Style::default().fg(Theme::fg())),
+        Span::styled(
+            "(Alloc)",
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!(": {:.1}/{:.1} Cores ({}%) ", cpu_req, cpu_alloc, cpu_pct),
+            Style::default().fg(Theme::fg()),
+        ),
+    ]);
     let cpu_gauge = Gauge::default()
         .block(
             Block::default()
@@ -662,10 +675,22 @@ fn render_gauges_card(f: &mut Frame, area: Rect, d: &NodeInspectorDetails) {
         Theme::ACCENT
     };
 
-    let mem_title = format!(
-        " Memory: {:.1}/{:.1} GiB ({}%) ",
-        mem_req_gib, mem_alloc_gib, mem_pct
-    );
+    let mem_title = Line::from(vec![
+        Span::styled(" Memory ", Style::default().fg(Theme::fg())),
+        Span::styled(
+            "(Alloc)",
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!(
+                ": {:.1}/{:.1} GiB ({}%) ",
+                mem_req_gib, mem_alloc_gib, mem_pct
+            ),
+            Style::default().fg(Theme::fg()),
+        ),
+    ]);
     let mem_gauge = Gauge::default()
         .block(
             Block::default()
@@ -688,10 +713,13 @@ fn render_gauges_card(f: &mut Frame, area: Rect, d: &NodeInspectorDetails) {
         Theme::GREEN
     };
 
-    let pods_title = format!(
-        " Pods: {}/{} ({}%) ",
-        d.pods_count, d.pods_allocatable, pods_pct
-    );
+    let pods_title = Line::from(Span::styled(
+        format!(
+            " Pods: {}/{} ({}%) ",
+            d.pods_count, d.pods_allocatable, pods_pct
+        ),
+        Style::default().fg(Theme::fg()),
+    ));
     let pods_gauge = Gauge::default()
         .block(
             Block::default()
@@ -707,39 +735,86 @@ fn render_gauges_card(f: &mut Frame, area: Rect, d: &NodeInspectorDetails) {
     if has_gpu {
         let model_label = d.gpu_model.as_deref().unwrap_or("GPU");
 
-        let (gpu_title, gpu_pct) = if d.gpu_memory_requests_mib > 0
-            && d.gpu_memory_total_mib.unwrap_or(0) > 0
-        {
+        let (gpu_suffix, gpu_pct) = if d.is_virtual_gpu {
+            let req_vram_gib = d.gpu_memory_requests_mib as f64 / 1024.0;
+            let phys_vram_mib = d.physical_gpu_memory_total_mib.unwrap_or(15360);
+            let phys_vram_gib = phys_vram_mib as f64 / 1024.0;
+            let virt_vram_mib = d
+                .virtual_gpu_memory_total_mib
+                .or(d.gpu_memory_total_mib)
+                .unwrap_or(phys_vram_mib * 10);
+            let virt_vram_gib = virt_vram_mib as f64 / 1024.0;
+            let phys_pct = (((d.gpu_memory_requests_mib as f64 / phys_vram_mib.max(1) as f64)
+                * 100.0)
+                .round() as u64)
+                .min(999) as u16;
+            let virt_pct = (((d.gpu_memory_requests_mib as f64 / virt_vram_mib.max(1) as f64)
+                * 100.0)
+                .round() as u64)
+                .min(999) as u16;
+            let suffix = if gauge_chunks[3].width >= 64 {
+                format!(
+                    ": {:.1}/{:.1} GiB Phys ({}% of {:.0}G vVRAM) ",
+                    req_vram_gib, phys_vram_gib, virt_pct, virt_vram_gib
+                )
+            } else if gauge_chunks[3].width >= 46 {
+                format!(
+                    ": {:.1}/{:.1}G ({}% virt) ",
+                    req_vram_gib, phys_vram_gib, virt_pct
+                )
+            } else if gauge_chunks[3].width >= 38 {
+                format!(
+                    ": {:.1}/{:.1}G ({}% v) ",
+                    req_vram_gib, phys_vram_gib, virt_pct
+                )
+            } else {
+                format!(": {:.0}/{:.0}G ", req_vram_gib, phys_vram_gib)
+            };
+            (suffix, phys_pct)
+        } else if d.gpu_memory_requests_mib > 0 && d.gpu_memory_total_mib.unwrap_or(0) > 0 {
             let total_vram_mib = d.gpu_memory_total_mib.unwrap_or(15360);
             let req_vram_gib = d.gpu_memory_requests_mib as f64 / 1024.0;
             let total_vram_gib = total_vram_mib as f64 / 1024.0;
             let pct = (((d.gpu_memory_requests_mib as f64 / total_vram_mib as f64) * 100.0).round()
                 as u64)
                 .min(999) as u16;
-            (
+            let suffix = if gauge_chunks[3].width >= 48 {
                 format!(
-                    " ⚡ {}: {:.1}/{:.1} GiB VRAM ({}%) ",
-                    model_label, req_vram_gib, total_vram_gib, pct
-                ),
-                pct,
-            )
+                    ": {:.1}/{:.1} GiB VRAM ({}%) ",
+                    req_vram_gib, total_vram_gib, pct
+                )
+            } else {
+                format!(": {:.1}/{:.1}G ({}%) ", req_vram_gib, total_vram_gib, pct)
+            };
+            (suffix, pct)
         } else {
             let gpu_alloc = d.gpu_allocatable_count.max(d.gpu_capacity_count).max(1);
             let pct = (((d.gpu_requests_count as f64 / gpu_alloc as f64) * 100.0).round() as u64)
                 .min(999) as u16;
-            let title = if d.gpu_allocatable_count > 1 {
+            let suffix = if d.gpu_allocatable_count > 1 {
                 format!(
-                    " ⚡ {}: {}/{} Slices ({}%) ",
-                    model_label, d.gpu_requests_count, gpu_alloc, pct
+                    ": {}/{} Slices ({}%) ",
+                    d.gpu_requests_count, gpu_alloc, pct
                 )
             } else {
-                format!(
-                    " ⚡ {}: {}/{} ({}%) ",
-                    model_label, d.gpu_requests_count, gpu_alloc, pct
-                )
+                format!(": {}/{} ({}%) ", d.gpu_requests_count, gpu_alloc, pct)
             };
-            (title, pct)
+            (suffix, pct)
         };
+
+        let gpu_title = Line::from(vec![
+            Span::styled(
+                format!(" ⚡ {} ", model_label),
+                Style::default().fg(Theme::YELLOW),
+            ),
+            Span::styled(
+                "(Alloc)",
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(gpu_suffix, Style::default().fg(Theme::YELLOW)),
+        ]);
 
         let gpu_color = if gpu_pct > 90 {
             Theme::RED

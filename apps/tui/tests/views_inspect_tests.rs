@@ -113,6 +113,10 @@ fn node_details(name: &str) -> NodeInspectorDetails {
         gpu_memory_total_mib: None,
         gpu_memory_requests_mib: 0,
         is_virtual_gpu: false,
+        physical_gpu_count: 0,
+        physical_gpu_memory_total_mib: None,
+        virtual_gpu_count: None,
+        virtual_gpu_memory_total_mib: None,
         conditions: vec![NodeConditionInfo {
             type_: "Ready".to_string(),
             status: "True".to_string(),
@@ -385,7 +389,7 @@ fn node_inspector_gpu_model_falls_back_to_a_generic_label() {
     let state = node_state(details);
     let text = render_node(160, 40, &state);
     assert!(text.contains("GPU Accelerator]"), "{text}");
-    assert!(text.contains("GPU: 0/1 (0%)"), "{text}");
+    assert!(text.contains("GPU (Alloc): 0/1 (0%)"), "{text}");
 }
 
 #[test]
@@ -416,8 +420,11 @@ fn node_inspector_footer_lists_every_shortcut_with_the_cordon_hint() {
 fn node_inspector_gauges_show_cpu_memory_and_pod_percentages_without_a_gpu() {
     let state = node_state(node_details("node-1"));
     let text = render_node(120, 40, &state);
-    assert!(text.contains("CPU: 2.5/7.8 Cores (32%)"), "{text}");
-    assert!(text.contains("Memory: 13.7/30.3 GiB (45%)"), "{text}");
+    assert!(text.contains("CPU (Alloc): 2.5/7.8 Cores (32%)"), "{text}");
+    assert!(
+        text.contains("Memory (Alloc): 13.7/30.3 GiB (45%)"),
+        "{text}"
+    );
     assert!(text.contains("Pods: 2/110 (2%)"), "{text}");
     assert!(!text.contains("VRAM"), "{text}");
     assert!(!text.contains("Slices"), "{text}");
@@ -432,8 +439,8 @@ fn node_inspector_gauges_report_zero_when_allocatable_is_zero() {
     details.pods_count = 3;
     let state = node_state(details);
     let text = render_node(120, 40, &state);
-    assert!(text.contains("CPU: 2.5/0.0 Cores (0%)"), "{text}");
-    assert!(text.contains("Memory: 13.7/0.0 GiB (0%)"), "{text}");
+    assert!(text.contains("CPU (Alloc): 2.5/0.0 Cores (0%)"), "{text}");
+    assert!(text.contains("Memory (Alloc): 13.7/0.0 GiB (0%)"), "{text}");
     // pods_allocatable is floored to 1 so the ratio does not divide by zero.
     assert!(text.contains("Pods: 3/0 (300%)"), "{text}");
 }
@@ -448,9 +455,9 @@ fn node_inspector_gauges_go_yellow_then_red_as_pressure_rises() {
     let state = node_state(details);
     let lines = common::render_lines(160, 40, |f| render_node_inspector_view(f, f.area(), &state));
     let buf = render_buffer(160, 40, |f| render_node_inspector_view(f, f.area(), &state));
-    let title_row = row_of(&lines, "CPU: 6.0/7.8 Cores (77%)");
-    let cpu_x = col(&lines[title_row], "CPU: 6.0");
-    let mem_x = col(&lines[title_row], "Memory: 29.3/30.3 GiB (97%)");
+    let title_row = row_of(&lines, "CPU (Alloc): 6.0/7.8 Cores (77%)");
+    let cpu_x = col(&lines[title_row], "CPU (Alloc): 6.0");
+    let mem_x = col(&lines[title_row], "Memory (Alloc): 29.3/30.3 GiB (97%)");
     let pods_x = col(&lines[title_row], "Pods: 80/110 (73%)");
     // The gauge body sits one row under its title; the filled part carries the fg colour.
     let body = title_row as u16 + 1;
@@ -471,7 +478,10 @@ fn node_inspector_gpu_gauge_prefers_vram_when_memory_requests_are_known() {
     details.gpu_memory_requests_mib = 7168;
     let state = node_state(details);
     let text = render_node(200, 40, &state);
-    assert!(text.contains("Tesla T4: 7.0/15.0 GiB VRAM (47%)"), "{text}");
+    assert!(
+        text.contains("Tesla T4 (Alloc): 7.0/15.0 GiB VRAM (47%)"),
+        "{text}"
+    );
 }
 
 #[test]
@@ -480,20 +490,34 @@ fn node_inspector_gpu_gauge_shows_virtual_gpus_and_total_virtual_vram_for_hami()
     details.has_gpu = true;
     details.is_virtual_gpu = true;
     details.gpu_model = Some("Tesla T4".to_string());
+    details.physical_gpu_count = 1;
+    details.physical_gpu_memory_total_mib = Some(15360);
     details.gpu_capacity_count = 10;
     details.gpu_allocatable_count = 10;
+    details.virtual_gpu_count = Some(10);
+    details.virtual_gpu_memory_total_mib = Some(153600);
     details.gpu_requests_count = 3;
     // 10 vGPUs * 15 GiB = 150 GiB total virtual VRAM
     details.gpu_memory_total_mib = Some(153600);
     details.gpu_memory_requests_mib = 15360; // 15 GiB requested
     let state = node_state(details);
-    let text = render_node(200, 40, &state);
-    // Header card badge with Option A:
-    assert!(text.contains("Tesla T4 (10 vGPUs)"), "{text}");
-    // GPU gauge VRAM allocation:
+    let text_wide = render_node(260, 40, &state);
+    // Header card badge with Option 1:
     assert!(
-        text.contains("Tesla T4: 15.0/150.0 GiB VRAM (10%)"),
-        "{text}"
+        text_wide.contains("1x Tesla T4 (HAMi 10 vGPUs)"),
+        "{text_wide}"
+    );
+    // GPU gauge VRAM allocation showing physical capacity and virtual percentage on wide screen:
+    assert!(
+        text_wide.contains("Tesla T4 (Alloc): 15.0/15.0 GiB Phys (10% of 150G vVRAM)"),
+        "{text_wide}"
+    );
+
+    // Compact GPU gauge on narrower screens:
+    let text_compact = render_node(200, 40, &state);
+    assert!(
+        text_compact.contains("Tesla T4 (Alloc): 15.0/15.0G (10% virt)"),
+        "{text_compact}"
     );
 }
 
@@ -508,7 +532,7 @@ fn node_inspector_gpu_gauge_counts_slices_when_more_than_one_gpu_is_allocatable(
     details.gpu_requests_count = 3;
     let state = node_state(details);
     let text = render_node(160, 40, &state);
-    assert!(text.contains("A100: 3/8 Slices (38%)"), "{text}");
+    assert!(text.contains("A100 (Alloc): 3/8 Slices (38%)"), "{text}");
 
     // Over-commit beyond 90% turns the gauge red.
     let mut hot = node_details("gpu-node");
@@ -524,8 +548,8 @@ fn node_inspector_gpu_gauge_counts_slices_when_more_than_one_gpu_is_allocatable(
     let buf = render_buffer(160, 40, |f| {
         render_node_inspector_view(f, f.area(), &hot_state)
     });
-    let row = row_of(&lines, "A100: 4/4 Slices (100%)");
-    let x = col(&lines[row], "A100: 4/4");
+    let row = row_of(&lines, "A100 (Alloc): 4/4 Slices (100%)");
+    let x = col(&lines[row], "A100 (Alloc): 4/4");
     assert_eq!(buf[(x, row as u16 + 1)].fg, Theme::RED);
 }
 
@@ -2622,4 +2646,76 @@ fn tui_config_argo_timeout_steps_and_applies_to_argo_reads() {
     state.clear_current(&mut config).unwrap();
     assert_eq!(config.argo_timeout_secs, None, "c resets to inherit");
     assert_eq!(srelens_kube::argo::argo_timeout(), request);
+}
+
+fn render_gpu(
+    width: u16,
+    height: u16,
+    state: &srelens_tui::views::gpu_view::GpuViewState,
+) -> String {
+    common::render_text(width, height, |f| {
+        srelens_tui::views::gpu_view::render(f, f.area(), state)
+    })
+}
+
+#[test]
+fn gpu_view_renders_hami_virtual_gpus_with_dual_reality() {
+    let _theme = common::theme::lock();
+    let node = srelens_kube::gpu_info::GpuNodeInfo {
+        name: "gpu-node-hami".to_string(),
+        status: "Ready".to_string(),
+        unschedulable: false,
+        roles: "worker".to_string(),
+        instance_type: "g4dn.xlarge".to_string(),
+        gpu_model: Some("Tesla T4".to_string()),
+        gpu_driver_version: Some("535.129.03".to_string()),
+        gpu_cuda_version: Some("12.2".to_string()),
+        gpu_capacity: 10,
+        gpu_allocatable: 10,
+        gpu_requests: 3,
+        vram_per_gpu_mib: Some(15360),
+        vram_capacity_total_mib: Some(153600),
+        vram_requests_total_mib: 15360,
+        pods: vec![],
+        is_virtual_gpu: true,
+        physical_gpu_count: 1,
+        physical_vram_total_mib: Some(15360),
+    };
+
+    let info = srelens_kube::gpu_info::GpuClusterInfo {
+        nodes: vec![node],
+        total_gpu_nodes: 1,
+        total_gpus: 10,
+        total_allocated_gpus: 3,
+        total_vram_mib: 153600,
+        total_allocated_vram_mib: 15360,
+        total_gpu_pods: 0,
+    };
+
+    let mut state = srelens_tui::views::gpu_view::GpuViewState::new();
+    state.set_info(info);
+
+    let text = render_gpu(160, 40, &state);
+
+    // Left table:
+    assert!(text.contains("3/10v"), "{text}");
+    assert!(text.contains("15/150G(v)"), "{text}");
+
+    // Right details header:
+    assert!(text.contains("1x Tesla T4 (HAMi 10 vGPUs)"), "{text}");
+
+    // Gauges:
+    assert!(text.contains("vGPUs (Alloc): 3 / 10 (30%)"), "{text}");
+    assert!(
+        text.contains("Physical VRAM (Alloc): 15 GiB / 15 GiB (100.0%)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("Virtual Pool: 15 GiB / 150 GiB vVRAM"),
+        "{text}"
+    );
+
+    // Summary footer:
+    assert!(text.contains("Available vGPUs: "), "{text}");
+    assert!(text.contains("Available vVRAM: "), "{text}");
 }
