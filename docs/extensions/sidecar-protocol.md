@@ -45,7 +45,7 @@ share. It has:
 - `HostMessage` and `SidecarMessage`, every line each side writes;
 - in `x-srelens-methods`, every method with its direction, kind, params and result.
 
-The Rust SDK is [`sdk/rust`](../../sdk/rust).
+The SDKs are [`sdk/rust`](../../sdk/rust) and [`sdk/go`](../../sdk/go).
 
 A sidecar may validate what it writes against it. srelens holds the `host/*` calls to
 exactly the shapes the schema states; a test in `crates/plugin-host/src/sidecar/broker.rs`
@@ -578,6 +578,5 @@ uninstalled; locking it down while the app is installed is left for the escape r
 | An operation that answers with a stream: the protocol has streams, and nothing opens one on an app's behalf yet | — |
 | Shipping `srelens-sandbox-launch` in the desktop bundles, and finding a delegated cgroup on a systemd desktop; until then Linux names them with `SRELENS_SANDBOX_LAUNCHER` and `SRELENS_SANDBOX_CGROUP_ROOT` | — |
 | A "Clear data" action for an app refused for its data directory (`DataDir::clear` is there; the Inspector, #575, is where a person would find it) | not filed yet |
-| The Go SDK | [#576](https://github.com/srelens/srelens/issues/576) |
 | Memory and CPU limits on macOS | [#713](https://github.com/srelens/srelens/issues/713) |
 | The escape-hardening review of the supervisor and its backends, which the ADR assigned to #572 | [#744](https://github.com/srelens/srelens/issues/744) |
