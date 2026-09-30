@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
+	"os"
 
 	"github.com/srelens/srelens/sdk/go/protocol"
 )
@@ -17,11 +19,13 @@ type Sidecar struct {
 	name, version string
 	operations    map[string]operationFunc
 	streams       map[string]streamFunc
+	logLevel      slog.Level
+	sizeRuntime   bool
 }
 
 // New is a sidecar called name, at version, serving nothing yet.
 func New(name, version string) *Sidecar {
-	return &Sidecar{name: name, version: version, operations: map[string]operationFunc{}, streams: map[string]streamFunc{}}
+	return &Sidecar{name: name, version: version, operations: map[string]operationFunc{}, streams: map[string]streamFunc{}, logLevel: slog.LevelInfo}
 }
 
 // Run serves srelens over r and w until srelens shuts the sidecar down, r
@@ -32,6 +36,27 @@ func New(name, version string) *Sidecar {
 // RunStdio.
 func (s *Sidecar) Run(ctx context.Context, r io.Reader, w io.Writer) error {
 	return serve(ctx, s, r, w)
+}
+
+// SetLogLevel sets the least severe level RunStdio writes to srelens's log;
+// Info unless set.
+func (s *Sidecar) SetLogLevel(level slog.Level) { s.logLevel = level }
+
+// RunStdio serves srelens over stdin and stdout; its result is main's exit
+// code: 0 after shutdown or when stdin ends, and 1 when reading or writing
+// failed or srelens wrote a line that is not JSON-RPC. It first makes slog's
+// default logger write to stderr as srelens reads it, and once srelens says
+// its limits it sizes the Go runtime to them.
+//
+//	func main() { os.Exit(s.RunStdio()) }
+func (s *Sidecar) RunStdio() int {
+	slog.SetDefault(slog.New(newLogHandler(os.Stderr, s.logLevel, s.name)))
+	s.sizeRuntime = true
+	if err := s.Run(context.Background(), os.Stdin, os.Stdout); err != nil {
+		slog.Error(err.Error())
+		return 1
+	}
+	return 0
 }
 
 // operationFunc runs one operation on its raw params; its raw result.

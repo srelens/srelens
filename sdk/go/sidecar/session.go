@@ -332,6 +332,9 @@ func (se *session) initialize(id protocol.RequestID, raw json.RawMessage) {
 		return
 	}
 	se.shared = &shared{dataDir: params.DataDirectory, limits: params.Limits, apiVersion: chosen, host: newHost(se.out, params.Limits)}
+	if se.sc.sizeRuntime {
+		sizeRuntime(params.Limits, processKnobs)
+	}
 	se.base = context.WithValue(context.Background(), sessionKey{}, se.shared)
 	result, _ := json.Marshal(protocol.InitializeResult{
 		APIVersion: chosen,
