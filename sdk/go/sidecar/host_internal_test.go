@@ -142,6 +142,23 @@ func TestTheSlotOfACallNotYetQueuedIsFreedOnceWhenTheHostDisconnects(t *testing.
 	}
 }
 
+// failAfter is how long a test here waits for a call: far above what the
+// SDK should need, so a wait this long is a failure.
+const failAfter = 5 * time.Second
+
+// within is what a call sends on result, failing t if it sends nothing in
+// failAfter.
+func within(t *testing.T, result <-chan error) error {
+	t.Helper()
+	select {
+	case err := <-result:
+		return err
+	case <-time.After(failAfter):
+		t.Fatal("the call did not return")
+	}
+	return nil
+}
+
 // fillQueue fills out's general lane, whose writer never runs, so the next
 // request waits for room.
 func fillQueue(t *testing.T, out *outbox) {
@@ -157,7 +174,7 @@ func fillQueue(t *testing.T, out *outbox) {
 // has its id, and is about to queue its request or is waiting for room.
 func waitForCalls(t *testing.T, h *Host, n int) {
 	t.Helper()
-	deadline := time.Now().Add(time.Second)
+	deadline := time.Now().Add(failAfter)
 	for {
 		h.mu.Lock()
 		got := len(h.waiting)
@@ -196,7 +213,7 @@ func TestACallAnsweredWhileItWaitsForRoomFreesItsSlotOnceWhenTheSessionEnds(t *t
 		cancel() // as end does, after disconnecting
 		select {
 		case <-result:
-		case <-time.After(time.Second):
+		case <-time.After(failAfter):
 			t.Fatalf("others %d: the call blocked freeing a slot answered had already freed", others)
 		}
 		if len(h.slots) != others {
@@ -230,7 +247,7 @@ func TestACallWaitingForRoomWhenTheSessionEndsGetsErrSessionEnded(t *testing.T) 
 			if !errors.Is(err, ErrSessionEnded) {
 				t.Fatalf("detached %v: %v", detached, err)
 			}
-		case <-time.After(time.Second):
+		case <-time.After(failAfter):
 			t.Fatalf("detached %v: the call kept waiting for room after the session ended", detached)
 		}
 		if len(out.general) != queueLines || len(h.slots) != 0 {
@@ -261,7 +278,7 @@ func TestACallJustQueuedWhenTheSessionEndsGetsErrSessionEnded(t *testing.T) {
 		waitForCalls(t, h, 1)
 		select {
 		case <-out.general:
-		case <-time.After(time.Second):
+		case <-time.After(failAfter):
 			t.Fatalf("call %d: nothing was queued", i)
 		}
 		h.disconnect()
@@ -271,7 +288,7 @@ func TestACallJustQueuedWhenTheSessionEndsGetsErrSessionEnded(t *testing.T) {
 			if !errors.Is(err, ErrSessionEnded) {
 				t.Fatalf("call %d: %v", i, err)
 			}
-		case <-time.After(time.Second):
+		case <-time.After(failAfter):
 			t.Fatalf("call %d: the call did not return", i)
 		}
 	}
@@ -300,7 +317,7 @@ func TestACallGivenASlotAsTheSessionEndsGetsErrSessionEnded(t *testing.T) {
 		if !errors.Is(err, ErrSessionEnded) {
 			t.Fatalf("%v", err)
 		}
-	case <-time.After(time.Second):
+	case <-time.After(failAfter):
 		t.Fatal("the call did not return")
 	}
 	if len(h.slots) != 0 {
@@ -326,18 +343,20 @@ func TestTheSessionsEndFreesTheSlotOfEveryUnansweredCall(t *testing.T) {
 		abandoned <- err
 	}()
 	waitForCalls(t, h, 2)
-	for len(out.general) < 2 {
-		time.Sleep(time.Millisecond) // both requests queued
+	for deadline := time.Now().Add(failAfter); len(out.general) < 2; time.Sleep(time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("%d of the 2 requests queued", len(out.general))
+		}
 	}
 	cancel()
-	if err := <-abandoned; !errors.Is(err, context.Canceled) {
+	if err := within(t, abandoned); !errors.Is(err, context.Canceled) {
 		t.Fatalf("the abandoned call got %v", err)
 	}
 	if len(h.slots) != 2 {
 		t.Fatalf("slots %d before the end, want 2", len(h.slots))
 	}
 	h.disconnect()
-	if err := <-waiting; !errors.Is(err, ErrSessionEnded) {
+	if err := within(t, waiting); !errors.Is(err, ErrSessionEnded) {
 		t.Fatalf("the waiting call got %v", err)
 	}
 	if len(h.slots) != 0 {
