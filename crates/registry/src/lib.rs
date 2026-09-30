@@ -1653,6 +1653,10 @@ mod tests {
         let mut out = String::new();
         walk(&root.join("crates"), &mut out);
         walk(&root.join("apps/desktop/src-tauri/src"), &mut out);
+        // The sidecar SDKs and their examples are workspace members too, and
+        // DEVELOPMENT.md documents the variables their tests read
+        // (`SRELENS_HELLO_WORLD_GO`).
+        walk(&root.join("sdk"), &mut out);
         assert!(!out.is_empty(), "found no Rust sources to scan");
         out
     }
