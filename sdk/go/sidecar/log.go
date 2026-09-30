@@ -87,12 +87,16 @@ func (h *logHandler) WithGroup(name string) slog.Handler {
 	return &next
 }
 
-// appendAttr formats a as key=value (a group's attributes as group.key=value).
+// appendAttr formats a as key=value (a group's attributes as group.key=value,
+// and a group with an empty key's inlined, as slog's handlers do).
 func appendAttr(pairs []string, prefix string, a slog.Attr) []string {
 	v := a.Value.Resolve()
 	if v.Kind() == slog.KindGroup {
+		if a.Key != "" {
+			prefix += a.Key + "."
+		}
 		for _, inner := range v.Group() {
-			pairs = appendAttr(pairs, prefix+a.Key+".", inner)
+			pairs = appendAttr(pairs, prefix, inner)
 		}
 		return pairs
 	}

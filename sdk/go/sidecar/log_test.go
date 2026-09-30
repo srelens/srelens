@@ -54,9 +54,28 @@ func TestAttributesFollowTheMessageAndTargetNamesTheTarget(t *testing.T) {
 	}
 }
 
+// A group with an empty key has its attributes inlined, as slog's own
+// handlers do: no stray leading dot.
+func TestAGroupWithAnEmptyKeyIsInlined(t *testing.T) {
+	got := logged(slog.LevelInfo, func(l *slog.Logger) {
+		l.Info("scan", slog.Group("", slog.Int("x", 1)))
+		l.WithGroup("db").Info("query", slog.Group("", slog.Int("rows", 2)))
+		l.With(slog.Group("", slog.String("zone", "a"))).Info("hit")
+	})
+	want := "INFO scanner: scan x=1\nINFO scanner: query db.rows=2\nINFO scanner: hit zone=a\n"
+	if got != want {
+		t.Fatalf("%q, want %q", got, want)
+	}
+}
+
+// After the 8 bytes of "INFO s: ", 2-byte runes put the cut at 4 KiB on a
+// rune's start; 3-byte runes put it inside one, and the cut must back off to
+// that rune's start.
 func TestALineIsCutToWhatSrelensKeepsOnACharacterBoundary(t *testing.T) {
-	lines := logLines(slog.LevelInfo, "s", strings.Repeat("é", 3000))
-	if len(lines) != 1 || len(lines[0]) > logLineBytes || len(lines[0]) <= logLineBytes-4 || !utf8.ValidString(lines[0]) {
-		t.Fatalf("%d lines, the first %d bytes", len(lines), len(lines[0]))
+	for _, r := range []string{"é", "€"} {
+		lines := logLines(slog.LevelInfo, "s", strings.Repeat(r, 3000))
+		if len(lines) != 1 || len(lines[0]) > logLineBytes || len(lines[0]) <= logLineBytes-4 || !utf8.ValidString(lines[0]) {
+			t.Fatalf("%s: %d lines, the first %d bytes, valid UTF-8 %v", r, len(lines), len(lines[0]), utf8.ValidString(lines[0]))
+		}
 	}
 }
