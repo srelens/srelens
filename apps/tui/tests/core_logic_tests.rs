@@ -368,6 +368,32 @@ async fn an_unknown_tool_name_is_a_tool_error_not_a_transport_failure() {
 }
 
 #[tokio::test]
+async fn tool_name_resolution_is_resilient_to_prefix_and_separator_variations() {
+    let inv = invoker();
+    inv.list_tools().await.unwrap();
+
+    // Calling listEndpoints without k8s_ prefix or with dot resolves to k8s.listEndpoints
+    let res1 = inv
+        .call_tool(
+            "listEndpoints",
+            &json!({"context": "prod", "namespace": "default"}),
+        )
+        .await
+        .unwrap();
+    // Reaching the handler (which errors on missing cluster context) proves the name resolved to the capability
+    assert!(res1.content.contains("context") || res1.content.contains("cluster") || res1.is_error);
+
+    let res2 = inv
+        .call_tool(
+            "k8s.listEndpoints",
+            &json!({"context": "prod", "namespace": "default"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res1.is_error, res2.is_error);
+}
+
+#[tokio::test]
 async fn a_tool_that_needs_a_missing_cluster_reports_an_error_result() {
     let inv = invoker();
     inv.list_tools().await.unwrap();

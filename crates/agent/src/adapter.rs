@@ -130,7 +130,19 @@ pub const BASE_SYSTEM_PROMPT: &str = concat!(
     "return abridged data and omit full metadata.labels, annotations, and complete container specs. ",
     "If a field or label is not displayed in a summary list, NEVER assert that it does not exist ",
     "on the resource—call getObject or getManifest to inspect the complete resource definition.\n",
-    "3. Compute and scheduling headroom: A node's allocatable capacity is the ceiling for all pods, ",
+    "3. Zero-hallucination component verification: NEVER name, diagnose, or blame a specific infrastructure ",
+    "component (such as Cilium, Calico, Istio, MetalLB, CoreDNS, Vault) without confirming its presence ",
+    "in the cluster first via listPods or getObject. On managed Kubernetes (GKE, EKS, AKS), verify the native ",
+    "cloud provider components (e.g. GKE Datapath V2 with anetd/netd) rather than assuming open-source defaults.\n",
+    "4. Tool failure transparency: If an MCP tool call fails or errors, state clearly that the tool call ",
+    "failed and try an alternative (e.g. getObject, getManifest, listEndpoints, listEndpointSlices). NEVER ",
+    "fabricate a cluster issue or speculate on cluster health to explain away a failed tool call.\n",
+    "5. Cross-layer incident correlation: When investigating why pods restarted, disappeared, or moved:\n",
+    "- If pods are young (<30m) with 0 restart count, they were evicted/rescheduled by Kubernetes, not crashed in-container.\n",
+    "- Trace the timeline: Check listEvents for TaintManagerEviction, Killing, SuccessfulCreate, and node NodeNotReady events.\n",
+    "- Inspect candidate nodes with listEvents or getObject for kernel OOMKilling, MemoryPressure, DiskPressure, and ReadOnlyFileSystemDetected.\n",
+    "- Distinguish between application rollouts (new ReplicaSet revision or image) and infrastructure-level pod rescheduling.\n",
+    "6. Compute and scheduling headroom: A node's allocatable capacity is the ceiling for all pods, ",
     "NOT free or available headroom. Nodes always run system daemonsets and existing workloads. ",
     "Never calculate whether a pod will fit by subtracting its requests from node allocatable ",
     "capacity alone. Always inspect the running pods on candidate nodes (via podsOnNode or ",
@@ -138,7 +150,9 @@ pub const BASE_SYSTEM_PROMPT: &str = concat!(
     "Schedulable Headroom = Allocatable - Sum(Running Pod Requests).\n",
     "Only state a pod can schedule if Schedulable Headroom >= Pod Request, and all node affinities, ",
     "tolerations, and taints match.\n",
-    "4. GitOps and ArgoCD in Multi-Cluster (Hub-and-Spoke): If an ArgoCD Hub Context is designated, ",
+    "7. Service endpoints and network discovery: To inspect service endpoints, call listEndpoints ",
+    "or listEndpointSlices. Check whether endpoints exist, are ready, and match selector-backed pods.\n",
+    "8. GitOps and ArgoCD in Multi-Cluster (Hub-and-Spoke): If an ArgoCD Hub Context is designated, ",
     "or if the active cluster has no argoproj.io CRDs (such as Application), ArgoCD applications ",
     "and GitOps controllers reside on the Hub cluster while workloads run on the spoke cluster. ",
     "Query the ArgoCD Hub context with \"context\": \"<hub_context>\" to inspect Application definitions, ",
@@ -524,6 +538,10 @@ mod tests {
         assert!(BASE_SYSTEM_PROMPT.contains("podsOnNode"));
         assert!(BASE_SYSTEM_PROMPT.contains("getObject"));
         assert!(BASE_SYSTEM_PROMPT.contains("Schedulable Headroom"));
+        assert!(BASE_SYSTEM_PROMPT.contains("Zero-hallucination"));
+        assert!(BASE_SYSTEM_PROMPT.contains("Cross-layer incident correlation"));
+        assert!(BASE_SYSTEM_PROMPT.contains("TaintManagerEviction"));
+        assert!(BASE_SYSTEM_PROMPT.contains("listEndpoints"));
     }
 
     #[test]
