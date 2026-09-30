@@ -282,18 +282,27 @@ func (se *session) answerError(id protocol.RequestID, code int64, message string
 	se.send(se.out.general, protocol.Response{ID: id, Error: &protocol.RPCError{Code: code, Message: message, Data: data}})
 }
 
-// send queues an answer. One too large to send is answered with why instead,
-// so srelens never waits on an answer the SDK could not write.
+// send queues an answer. One too large to send, or that fails to serialize
+// for any other reason, is answered with why instead, so srelens never waits
+// on an answer the SDK could not write. Nothing more can be done once the
+// writer has stopped: the pipe to srelens is already gone.
 func (se *session) send(lane chan []byte, resp protocol.Response) {
 	err := se.out.send(lane, resp, nil)
+	if err == nil || errors.Is(err, errWriterStopped) {
+		return
+	}
+	var why *protocol.RPCError
 	var over *errOverLimit
 	if errors.As(err, &over) {
-		why := &protocol.RPCError{
+		why = &protocol.RPCError{
 			Code:    protocol.CodeInternalError,
 			Message: fmt.Sprintf("the answer is %d bytes, over the %s a message may be", over.bytes, limitText()),
 		}
-		_ = se.out.send(lane, protocol.Response{ID: resp.ID, Error: why}, nil)
+	} else {
+		slog.Error(fmt.Sprintf("the answer to request %s could not be serialized: %v", resp.ID, err))
+		why = &protocol.RPCError{Code: protocol.CodeInternalError, Message: "the answer could not be serialized"}
 	}
+	_ = se.out.send(lane, protocol.Response{ID: resp.ID, Error: why}, nil)
 }
 
 // cancelAll stops every running handler with cause, and forgets them: nothing

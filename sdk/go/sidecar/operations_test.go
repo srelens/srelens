@@ -2,6 +2,7 @@ package sidecar_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -274,6 +275,79 @@ func mustPanic(t *testing.T, what string, f func()) {
 		}
 	}()
 	f()
+}
+
+// TestATypedNilErrorIsAnsweredInternalErrorInsteadOfCrashing reproduces the
+// bug where a handler that returns a typed-nil *sidecar.Error (a non-nil
+// error interface holding a nil *Error) crashed the whole sidecar: asRPCError
+// found the *Error via errors.As and dereferenced it unchecked.
+func TestATypedNilErrorIsAnsweredInternalErrorInsteadOfCrashing(t *testing.T) {
+	s := sidecar.New("t", "1")
+	sidecar.Operation(s, "nilerr", func(context.Context, struct{}) (struct{}, error) {
+		var serr *sidecar.Error
+		return struct{}{}, serr
+	})
+	h := start(t, s)
+	h.initialize()
+	id := h.request("nilerr", map[string]any{})
+	want := "the handler for `nilerr` returned a nil *sidecar.Error"
+	if e := errorOf(t, h.answer(id)); e.code != -32603 || e.message != want {
+		t.Fatalf("%+v, want message %q", e, want)
+	}
+	id = h.request("health", map[string]any{})
+	h.answer(id)
+	if err := h.finish(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestAnErrorWithInvalidJSONDataDropsTheDataAndStillAnswers reproduces the
+// bug where a handler's *sidecar.Error carrying Data that is not valid JSON
+// made outbox.send's json.Marshal fail; session.send only handled the
+// over-limit case, so the answer was silently dropped and srelens waited
+// until its timeout.
+func TestAnErrorWithInvalidJSONDataDropsTheDataAndStillAnswers(t *testing.T) {
+	s := sidecar.New("t", "1")
+	sidecar.Operation(s, "baddata", func(context.Context, struct{}) (struct{}, error) {
+		return struct{}{}, &sidecar.Error{Code: -32050, Message: "quota", Data: json.RawMessage("not json")}
+	})
+	h := start(t, s)
+	h.initialize()
+	id := h.request("baddata", map[string]any{})
+	e := errorOf(t, h.answer(id))
+	if e.code != -32050 || e.message != "quota" || e.data != nil {
+		t.Fatalf("%+v", e)
+	}
+	if err := h.finish(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// panickyError's Error method panics: a handler could return one instead of
+// a well-behaved error.
+type panickyError struct{}
+
+func (panickyError) Error() string { panic("boom from Error()") }
+
+// TestAHandlersErrorThatPanicsWhenReadIsAnsweredInternalErrorAndTheSidecarGoesOn
+// reproduces the bug where asRPCError, called outside guarded, propagated a
+// panic from a handler's own error type and crashed the sidecar.
+func TestAHandlersErrorThatPanicsWhenReadIsAnsweredInternalErrorAndTheSidecarGoesOn(t *testing.T) {
+	s := sidecar.New("t", "1")
+	sidecar.Operation(s, "panicky", func(context.Context, struct{}) (struct{}, error) {
+		return struct{}{}, panickyError{}
+	})
+	h := start(t, s)
+	h.initialize()
+	id := h.request("panicky", map[string]any{})
+	if e := errorOf(t, h.answer(id)); e.code != -32603 {
+		t.Fatalf("%+v", e)
+	}
+	id = h.request("health", map[string]any{})
+	h.answer(id)
+	if err := h.finish(); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestANameThatIsReservedMalformedOrTakenCannotBeRegistered(t *testing.T) {

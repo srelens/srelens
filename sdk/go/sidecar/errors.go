@@ -36,7 +36,15 @@ type Error struct {
 	Data    json.RawMessage
 }
 
-func (e *Error) Error() string { return e.Message }
+// Error is safe on a nil *Error: a handler may return one by mistake (for
+// example, a nil *Error stored in a struct{}-typed local that is later
+// returned as the error), and it must not crash the sidecar.
+func (e *Error) Error() string {
+	if e == nil {
+		return "(nil *sidecar.Error)"
+	}
+	return e.Message
+}
 
 // NewError is a failure with code and message.
 func NewError(code int64, message string) *Error { return &Error{Code: code, Message: message} }
@@ -75,11 +83,29 @@ func guarded[T any](what string, f func() (T, error)) (result T, err error) {
 }
 
 // asRPCError is the answer for a handler's error. what names the handler
-// ("the handler for `greet`").
-func asRPCError(err error, what string) *protocol.RPCError {
+// ("the handler for `greet`"). A handler's error is untrusted: asRPCError
+// never panics (a nil *Error, or an error type whose Error, Is or As method
+// panics, is answered -32603 instead), and never returns an *RPCError that
+// cannot be serialized (an *Error whose Data is not valid JSON is answered
+// with its Code and Message but no Data).
+func asRPCError(err error, what string) (rpcErr *protocol.RPCError) {
+	defer func() {
+		if p := recover(); p != nil {
+			slog.Error(fmt.Sprintf("%s's error could not be read: %v\n%s", what, p, debug.Stack()))
+			rpcErr = &protocol.RPCError{Code: protocol.CodeInternalError, Message: what + "'s error could not be read"}
+		}
+	}()
 	var e *Error
 	if errors.As(err, &e) {
-		return &protocol.RPCError{Code: e.Code, Message: e.Message, Data: e.Data}
+		if e == nil {
+			return &protocol.RPCError{Code: protocol.CodeInternalError, Message: what + " returned a nil *sidecar.Error"}
+		}
+		data := e.Data
+		if len(data) > 0 && !json.Valid(data) {
+			slog.Warn(fmt.Sprintf("%s returned a *sidecar.Error whose Data is not valid JSON: dropping it", what))
+			data = nil
+		}
+		return &protocol.RPCError{Code: e.Code, Message: e.Message, Data: data}
 	}
 	var c *ContextError
 	if errors.As(err, &c) {
