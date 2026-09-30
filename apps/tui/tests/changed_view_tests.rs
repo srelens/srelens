@@ -697,6 +697,15 @@ fn an_unchanged_row_says_why_it_is_shown() {
     assert!(rendered.contains("[u] Hide unchanged"));
     // Rows that did change carry no marker.
     assert!(!rendered.contains("payment-worker (unchanged)"));
+
+    // A healthy workload shown under include_failing due to historical warnings in window
+    state.selected_idx = 2;
+    state.report.as_mut().unwrap().deployments[2].change_kind =
+        srelens_kube::changed::ChangeKind::FailingOnly;
+    let rendered_healthy = render_card(&state);
+    assert!(rendered_healthy.contains(
+        "Not changed in the last 1h; shown because warning events occurred in this window (u to hide)."
+    ));
 }
 
 fn footer_line(width: u16, height: u16, state: &ChangedViewState) -> String {

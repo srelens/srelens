@@ -11428,6 +11428,17 @@ impl App {
             updated_at: std::time::Instant::now(),
         };
 
+        if let Some(direct) = crate::quick_rca::evaluate_direct_rca(&d) {
+            changed.ai_summaries.insert(
+                key,
+                entry(QuickRcaStatus::Ready {
+                    root_cause: direct.root_cause,
+                    action_item: direct.action_item,
+                }),
+            );
+            return;
+        }
+
         // Said before any request goes out, and said precisely: Cursor has a
         // key but no HTTP path, so "no API key" would be false for it.
         let config = if provider == crate::ai_config::AiProvider::Cursor {

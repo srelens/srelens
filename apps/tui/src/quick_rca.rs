@@ -8,7 +8,7 @@
 //! Everything here except [`run`] is pure, so the prompt and the parser are
 //! tested without a network.
 
-use srelens_kube::changed::AppDeploymentChange;
+use srelens_kube::changed::{AppDeploymentChange, IncidentStatus};
 use srelens_llm::{HttpProvider, Provider, ProviderConfig, StreamItem, Turn};
 use srelens_registry::github::RolloutCause;
 
@@ -42,6 +42,26 @@ pub enum LogEvidence {
 pub struct QuickRcaReply {
     pub root_cause: String,
     pub action_item: String,
+}
+
+/// Check if the workload is currently healthy. If so, returns a direct
+/// healthy assessment immediately without dispatching a network LLM completion.
+pub fn evaluate_direct_rca(d: &AppDeploymentChange) -> Option<QuickRcaReply> {
+    if d.incident_status == IncidentStatus::Healthy
+        && d.ready_replicas == d.desired_replicas
+        && d.failing_pods_count == 0
+        && d.pod_symptoms.is_empty()
+    {
+        Some(QuickRcaReply {
+            root_cause: format!(
+                "Workload is healthy with {}/{} replicas ready.",
+                d.ready_replicas, d.desired_replicas
+            ),
+            action_item: "No remediation needed.".to_string(),
+        })
+    } else {
+        None
+    }
 }
 
 fn clip(s: &str) -> String {
@@ -598,5 +618,26 @@ mod tests {
         let r = parse_reply("Action Item: Roll back to revision 4.").unwrap();
         assert_eq!(r.root_cause, "Not stated by the model.");
         assert_eq!(r.action_item, "Roll back to revision 4.");
+    }
+
+    #[test]
+    fn evaluate_direct_rca_identifies_healthy_workload_and_skips_failing() {
+        let mut d = workload();
+        // Failing workload returns None for direct evaluation
+        assert!(evaluate_direct_rca(&d).is_none());
+
+        // Healthy workload returns direct assessment
+        d.incident_status = IncidentStatus::Healthy;
+        d.ready_replicas = 2;
+        d.desired_replicas = 2;
+        d.failing_pods_count = 0;
+        d.pod_symptoms.clear();
+
+        let direct = evaluate_direct_rca(&d).expect("healthy workload has direct assessment");
+        assert_eq!(
+            direct.root_cause,
+            "Workload is healthy with 2/2 replicas ready."
+        );
+        assert_eq!(direct.action_item, "No remediation needed.");
     }
 }

@@ -1275,13 +1275,23 @@ fn render_deployment_diagnostic_card(f: &mut Frame, area: Rect, state: &ChangedV
             ),
             Style::default().fg(Theme::dim()),
         ))),
-        ChangeKind::FailingOnly => lines.push(Line::from(Span::styled(
-            format!(
-                "Not changed in the last {}; shown because it is failing now (u to hide).",
-                state.current_window_label()
-            ),
-            Style::default().fg(Theme::dim()),
-        ))),
+        ChangeKind::FailingOnly => {
+            let reason = if d.incident_status == IncidentStatus::Healthy {
+                format!(
+                    "Not changed in the last {}; shown because warning events occurred in this window (u to hide).",
+                    state.current_window_label()
+                )
+            } else {
+                format!(
+                    "Not changed in the last {}; shown because it is failing now (u to hide).",
+                    state.current_window_label()
+                )
+            };
+            lines.push(Line::from(Span::styled(
+                reason,
+                Style::default().fg(Theme::dim()),
+            )));
+        }
     }
 
     push_gap(&mut lines);
