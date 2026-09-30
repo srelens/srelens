@@ -33,6 +33,24 @@ var (
 	ErrStreamFinished = errors.New("the stream already ended: its handler returned")
 	// ErrFrameTooLarge matches a *FrameTooLargeError.
 	ErrFrameTooLarge = errors.New("the frame is over the message limit")
+	// ErrNoSession is every host call's error for a context the SDK did not
+	// make, such as a unit test's.
+	ErrNoSession = errors.New("no session with srelens: this context did not come from the sidecar SDK")
+	// ErrConsentDenied matches srelens's -32002: a person declined, or no one
+	// could be asked. Nothing ran.
+	ErrConsentDenied = errors.New("srelens was not given consent")
+	// ErrCapabilityFailed matches -32003: srelens or the cluster refused or
+	// failed the call.
+	ErrCapabilityFailed = errors.New("srelens refused the call")
+	// ErrInvalidParams matches -32602: srelens refused the call's params.
+	ErrInvalidParams = errors.New("srelens refused the call's params")
+	// ErrCallCancelled matches -32800: the call to srelens was cancelled.
+	ErrCallCancelled = errors.New("the call to srelens was cancelled")
+	// ErrCallTooLarge matches a *CallTooLargeError: never sent.
+	ErrCallTooLarge = errors.New("the call is over the message limit")
+	// ErrInvalidCall is a call with a field srelens would refuse, refused
+	// before it was sent.
+	ErrInvalidCall = errors.New("srelens would refuse this call")
 )
 
 // Error is a handler's failure as srelens is to be told it: a JSON-RPC
@@ -132,3 +150,50 @@ func (e *FrameTooLargeError) Error() string {
 }
 
 func (e *FrameTooLargeError) Is(target error) bool { return target == ErrFrameTooLarge }
+
+// HostError is srelens's answer refusing or failing a call. errors.Is
+// matches it to ErrConsentDenied, ErrCapabilityFailed, ErrInvalidParams or
+// ErrCallCancelled by its code.
+type HostError struct {
+	Code    int64
+	Message string
+	Data    json.RawMessage
+}
+
+func (e *HostError) Error() string {
+	switch e.Code {
+	case protocol.CodeConsentDenied:
+		return "srelens was not given consent: " + e.Message
+	case protocol.CodeCapabilityFailed:
+		return "srelens refused the call: " + e.Message
+	case protocol.CodeInvalidParams:
+		return "srelens refused the call's params: " + e.Message
+	case protocol.CodeRequestCancelled:
+		return "the call to srelens was cancelled"
+	}
+	return fmt.Sprintf("srelens answered with an error: %s (%d)", e.Message, e.Code)
+}
+
+func (e *HostError) Is(target error) bool {
+	switch target {
+	case ErrConsentDenied:
+		return e.Code == protocol.CodeConsentDenied
+	case ErrCapabilityFailed:
+		return e.Code == protocol.CodeCapabilityFailed
+	case ErrInvalidParams:
+		return e.Code == protocol.CodeInvalidParams
+	case ErrCallCancelled:
+		return e.Code == protocol.CodeRequestCancelled
+	}
+	return false
+}
+
+// CallTooLargeError is a call over the message limit: it was never sent, and
+// the session goes on.
+type CallTooLargeError struct{ Bytes int }
+
+func (e *CallTooLargeError) Error() string {
+	return fmt.Sprintf("the call is %d bytes, over the %s a message may be, so it was not sent", e.Bytes, limitText())
+}
+
+func (e *CallTooLargeError) Is(target error) bool { return target == ErrCallTooLarge }

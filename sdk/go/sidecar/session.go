@@ -28,6 +28,7 @@ type shared struct {
 	dataDir    string
 	limits     protocol.InitializeLimits
 	apiVersion string
+	host       *Host
 }
 
 type session struct {
@@ -300,7 +301,11 @@ func (se *session) notify(note protocol.Notification) {
 }
 
 // answered routes srelens's answer to one of the sidecar's calls.
-func (se *session) answered(protocol.Response) {}
+func (se *session) answered(resp protocol.Response) {
+	if se.shared != nil {
+		se.shared.host.answered(resp)
+	}
+}
 
 func (se *session) initialize(id protocol.RequestID, raw json.RawMessage) {
 	if se.shared != nil {
@@ -326,7 +331,7 @@ func (se *session) initialize(id protocol.RequestID, raw json.RawMessage) {
 			strings.Join(supportedVersions, ", "), strings.Join(params.APIVersions, ", ")), data)
 		return
 	}
-	se.shared = &shared{dataDir: params.DataDirectory, limits: params.Limits, apiVersion: chosen}
+	se.shared = &shared{dataDir: params.DataDirectory, limits: params.Limits, apiVersion: chosen, host: newHost(se.out, params.Limits)}
 	se.base = context.WithValue(context.Background(), sessionKey{}, se.shared)
 	result, _ := json.Marshal(protocol.InitializeResult{
 		APIVersion: chosen,
@@ -383,7 +388,11 @@ func (se *session) cancelAll(cause error) {
 	}
 }
 
-// end stops every handler: the session is over.
+// end stops every handler: the session is over. The host is disconnected
+// first, so a call a handler abandons as it stops sends nothing.
 func (se *session) end() {
+	if se.shared != nil {
+		se.shared.host.disconnect()
+	}
 	se.cancelAll(ErrSessionEnded)
 }
