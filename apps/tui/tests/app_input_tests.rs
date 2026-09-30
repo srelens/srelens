@@ -5924,69 +5924,33 @@ async fn changed_view_moves_with_arrows_and_ignores_j_and_k() {
 }
 
 #[tokio::test]
-async fn changed_view_u_widens_the_scope_and_drops_the_narrow_answer() {
+async fn changed_view_u_and_s_are_not_bound_and_t_toggles_band_focus() {
     let settings = common::env::isolate_settings();
     let (mut app, _rx) = changed_app_with_report(&settings).await;
-    assert!(changed_state(&app).include_failing, "inclusive by default");
     app.changed_refreshing = false;
 
+    // 'u' and 'S' are not bound
     press(&mut app, ch('u')).await;
-    let c = changed_state(&app);
-    assert!(!c.include_failing);
-    assert!(c.is_loading);
-    assert!(app.changed_refreshing, "the narrower scope is fetched");
-
-    // The wide answer from before the toggle lands late: dropped, refetched.
-    app.handle_changed_triage_result(
-        "fake-cluster",
-        Some("default"),
-        Ok(changed_report_with_two_workloads(true)),
-    );
-    let c = changed_state(&app);
-    assert!(
-        c.report.as_ref().is_some_and(|r| r.deployments.len() == 1),
-        "still the report from before"
-    );
-    assert!(c.is_loading);
-
-    app.handle_changed_triage_result(
-        "fake-cluster",
-        Some("default"),
-        Ok(changed_report_with_two_workloads(false)),
-    );
-    let c = changed_state(&app);
-    assert_eq!(c.report.as_ref().unwrap().deployments.len(), 2);
-    assert!(!c.is_loading);
-}
-
-#[tokio::test]
-async fn changed_view_capital_s_includes_scaled_and_drops_the_narrow_answer() {
-    let settings = common::env::isolate_settings();
-    let (mut app, _rx) = changed_app_with_report(&settings).await;
-    assert!(
-        changed_state(&app).include_scaled,
-        "scale-only rows included by default"
-    );
-    app.changed_refreshing = false;
+    assert!(!app.changed_refreshing);
 
     press(&mut app, ch('S')).await;
-    let c = changed_state(&app);
-    assert!(!c.include_scaled);
-    assert!(c.include_failing, "S is not u");
-    assert!(app.changed_refreshing, "the narrower scope is fetched");
+    assert!(!app.changed_refreshing);
 
-    // The answer from before the toggle is dropped and refetched.
-    let mut wide = changed_report_with_two_workloads(true);
-    wide.includes_scaled = true;
-    app.handle_changed_triage_result("fake-cluster", Some("default"), Ok(wide));
-    assert!(changed_state(&app).is_loading);
-
-    let mut narrow = changed_report_with_two_workloads(true);
-    narrow.includes_scaled = false;
-    app.handle_changed_triage_result("fake-cluster", Some("default"), Ok(narrow));
-    let c = changed_state(&app);
-    assert!(!c.is_loading);
-    assert_eq!(c.report.as_ref().unwrap().deployments.len(), 2);
+    // 't' toggles band focus
+    assert_eq!(
+        changed_state(&app).effective_band_focus(),
+        srelens_tui::views::changed_view::TriageBandFocus::Incidents
+    );
+    press(&mut app, ch('t')).await;
+    assert_eq!(
+        changed_state(&app).effective_band_focus(),
+        srelens_tui::views::changed_view::TriageBandFocus::Timeline
+    );
+    press(&mut app, ch('t')).await;
+    assert_eq!(
+        changed_state(&app).effective_band_focus(),
+        srelens_tui::views::changed_view::TriageBandFocus::Incidents
+    );
 }
 
 #[tokio::test]

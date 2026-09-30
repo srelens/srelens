@@ -91,12 +91,8 @@ pub fn group_pod_symptoms(symptoms: &[PodIncidentDetail]) -> Vec<SymptomGroup> {
 
 /// The dim marker after a workload's name saying why it is listed, when it
 /// is not a rollout. A word, so colour is not the only signal.
-pub fn change_tag(kind: ChangeKind) -> Option<&'static str> {
-    match kind {
-        ChangeKind::Rollout => None,
-        ChangeKind::Scaled => Some(" (scaled)"),
-        ChangeKind::FailingOnly => Some(" (unchanged)"),
-    }
+pub fn change_tag(_kind: ChangeKind) -> Option<&'static str> {
+    None
 }
 
 /// When the row's change happened. Older reports carry no `changed_age`;
@@ -360,7 +356,7 @@ impl ChangedViewState {
             window_idx: 2, // Default to 1h
             incident_filter: IncidentFilter::All,
             include_failing: true,
-            include_scaled: true,
+            include_scaled: false,
             show_guide_banner: true,
         }
     }
@@ -622,12 +618,7 @@ impl ChangedViewState {
         report
             .deployments
             .iter()
-            .filter(|d| {
-                if !self.show_healthy_in_timeline && d.incident_status == IncidentStatus::Healthy {
-                    return false;
-                }
-                true
-            })
+            .filter(|d| d.change_kind == ChangeKind::Rollout)
             .filter(|d| match self.incident_filter {
                 IncidentFilter::All => true,
                 IncidentFilter::CrashingOnly => d.incident_status == IncidentStatus::CrashLoop,
@@ -923,64 +914,6 @@ pub fn render_guide_banner(f: &mut Frame, area: Rect, state: &ChangedViewState) 
 
     let line1 = Line::from(vec![
         Span::styled(
-            " [CHANGED] ",
-            Style::default()
-                .fg(Theme::cyan())
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("Rollouts in window  │  ", Style::default().fg(Theme::fg())),
-        Span::styled(
-            "[S] Scaled: ",
-            Style::default()
-                .fg(Theme::yellow())
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            if state.include_scaled { "ON" } else { "OFF" },
-            Style::default().fg(if state.include_scaled {
-                Theme::yellow()
-            } else {
-                Theme::dim()
-            }),
-        ),
-        Span::styled("  │  ", Style::default().fg(Theme::dim())),
-        Span::styled(
-            "[u] Failing: ",
-            Style::default()
-                .fg(Theme::red())
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            if state.include_failing { "ON" } else { "OFF" },
-            Style::default().fg(if state.include_failing {
-                Theme::red()
-            } else {
-                Theme::dim()
-            }),
-        ),
-        Span::styled("  │  ", Style::default().fg(Theme::dim())),
-        Span::styled(
-            "[h] Healthy Timeline: ",
-            Style::default()
-                .fg(Theme::green())
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            if state.show_healthy_in_timeline {
-                "ON"
-            } else {
-                "OFF"
-            },
-            Style::default().fg(if state.show_healthy_in_timeline {
-                Theme::green()
-            } else {
-                Theme::dim()
-            }),
-        ),
-    ]);
-
-    let line2 = Line::from(vec![
-        Span::styled(
             " [t] Focus: ",
             Style::default()
                 .fg(Theme::accent())
@@ -996,16 +929,49 @@ pub fn render_guide_banner(f: &mut Frame, area: Rect, state: &ChangedViewState) 
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            " (or Up/Down across bands)  │  ",
+            " (↑/↓ across bands)  │  ",
             Style::default().fg(Theme::dim()),
         ),
+        Span::styled(
+            "[w] Window: ",
+            Style::default()
+                .fg(Theme::cyan())
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            state.current_window_label(),
+            Style::default().fg(Theme::fg()),
+        ),
+        Span::styled("  │  ", Style::default().fg(Theme::dim())),
+        Span::styled(
+            "[f] Filter: ",
+            Style::default()
+                .fg(Theme::yellow())
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            state.incident_filter.label(),
+            Style::default().fg(Theme::fg()),
+        ),
+        Span::styled("  │  ", Style::default().fg(Theme::dim())),
         Span::styled(
             "[Tab] Infra: ",
             Style::default()
                 .fg(Theme::accent())
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled("Non-deployment warnings", Style::default().fg(Theme::fg())),
+        Span::styled(
+            format!("{} non-deployment warning(s)", state.filtered_infra().len()),
+            Style::default().fg(Theme::fg()),
+        ),
+    ]);
+
+    let line2 = Line::from(vec![
+        Span::styled(" 💡 SRE Triage: ", Style::default().fg(Theme::dim())),
+        Span::styled(
+            "Top band isolates active incidents. Bottom band isolates recent rollouts.",
+            Style::default().fg(Theme::dim()),
+        ),
     ]);
 
     let lines = if inner.height >= 2 {
@@ -1787,30 +1753,15 @@ fn render_timeline_table(
     } else {
         Style::default().fg(Theme::border())
     };
-    let h_hint = if state.show_healthy_in_timeline {
-        "h: Hide healthy"
-    } else {
-        "h: Show healthy"
-    };
-    let scope_title = match (state.include_scaled, state.include_failing) {
-        (false, false) => "Workloads Changed in Window",
-        (true, false) => "Workloads Changed or Scaled in Window",
-        (false, true) => "Workloads Changed or Failing in Window",
-        (true, true) => "Workloads Changed, Scaled or Failing in Window",
-    };
     let title = if is_focused {
         format!(
-            " 🕒 Timeline: {} [{}] ({}) [FOCUSED] ",
-            scope_title,
-            state.current_window_label(),
-            h_hint
+            " 🕒 Timeline: Recent Rollouts [{}] [FOCUSED] ",
+            state.current_window_label()
         )
     } else {
         format!(
-            " 🕒 Timeline: {} [{}] ({}) [Press 't' to focus] ",
-            scope_title,
-            state.current_window_label(),
-            h_hint
+            " 🕒 Timeline: Recent Rollouts [{}] [Press 't' to focus] ",
+            state.current_window_label()
         )
     };
 
@@ -1832,46 +1783,25 @@ fn render_timeline_table(
     if timeline.is_empty() {
         let msg = if !state.filter_query.is_empty() {
             format!(
-                "No workloads matching query '{}'. Press / to change search or Esc to clear.",
+                "No rollouts matching query '{}'. Press / to change search or Esc to clear.",
                 state.filter_query
             )
-        } else if !state.show_healthy_in_timeline {
-            "No unhealthy rollouts in timeline. Press 'h' to show healthy rollouts.".to_string()
         } else if state.incident_filter != IncidentFilter::All {
             format!(
-                "No workloads in the window match the {} filter. Press f to cycle it back to ALL.",
+                "No rollouts in the window match the {} filter. Press f to cycle it back to ALL.",
                 state.incident_filter.label()
             )
         } else {
-            let what = match (state.include_scaled, state.include_failing) {
-                (false, false) => "changed",
-                (true, false) => "changed or scaled",
-                (false, true) => "changed or failing",
-                (true, true) => "changed, scaled or failing",
-            };
-            let mut msg = format!(
-                "No workloads {} within the last {}. Use [ or ] to broaden the time window",
-                what,
+            format!(
+                "✨ 0 Rollouts in the last {}. No workloads deployed in this window.",
                 state.current_window_label()
-            );
-            let mut more = Vec::new();
-            if !state.include_scaled {
-                more.push("S to include scaled workloads");
-            }
-            if !state.include_failing {
-                more.push("u to include workloads failing without a change");
-            }
-            if !more.is_empty() {
-                msg.push_str(", or ");
-                msg.push_str(&more.join(", or "));
-            }
-            msg.push('.');
-            msg
+            )
         };
-        let p = Paragraph::new(msg)
-            .style(Style::default().fg(Theme::dim()))
-            .block(block)
-            .wrap(Wrap { trim: true });
+        let p = Paragraph::new(Line::from(vec![
+            Span::styled("  ", Style::default()),
+            Span::styled(msg, Style::default().fg(Theme::dim())),
+        ]))
+        .block(block);
         f.render_widget(p, area);
         return;
     }
@@ -2040,7 +1970,7 @@ fn render_deployment_diagnostic_card(f: &mut Frame, area: Rect, state: &ChangedV
         ChangeKind::Rollout => {}
         ChangeKind::Scaled => lines.push(Line::from(Span::styled(
             format!(
-                "{} {} ago; last rollout {} ago (S to hide).",
+                "{} {} ago; last rollout {} ago.",
                 d.change_detail.as_deref().unwrap_or("Scaled"),
                 row_age(d),
                 d.deployed_age
@@ -2050,12 +1980,12 @@ fn render_deployment_diagnostic_card(f: &mut Frame, area: Rect, state: &ChangedV
         ChangeKind::FailingOnly => {
             let reason = if d.incident_status == IncidentStatus::Healthy {
                 format!(
-                    "Not changed in the last {}; shown because warning events occurred in this window (u to hide).",
+                    "Not changed in the last {}; warning events occurred in this window.",
                     state.current_window_label()
                 )
             } else {
                 format!(
-                    "Not changed in the last {}; shown because it is failing now (u to hide).",
+                    "Not changed in the last {}; actively failing in this window.",
                     state.current_window_label()
                 )
             };

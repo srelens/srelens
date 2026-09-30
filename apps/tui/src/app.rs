@@ -7572,28 +7572,6 @@ impl App {
                 KeyCode::Char('t') => {
                     changed.toggle_band_focus();
                 }
-                KeyCode::Char('h') => {
-                    changed.show_healthy_in_timeline = !changed.show_healthy_in_timeline;
-                    let show = changed.show_healthy_in_timeline;
-                    changed.clamp_selection();
-                    self.set_toast(
-                        if show {
-                            "Timeline: showing all rollouts (including healthy)"
-                        } else {
-                            "Timeline: hiding healthy rollouts"
-                        }
-                        .to_string(),
-                        Theme::status_ok(),
-                    );
-                }
-                KeyCode::Char('u') => {
-                    changed.toggle_include_failing();
-                    self.refresh_changed_triage();
-                }
-                KeyCode::Char('S') => {
-                    changed.toggle_include_scaled();
-                    self.refresh_changed_triage();
-                }
                 KeyCode::Char('b') | KeyCode::Char('?') => {
                     changed.show_guide_banner = !changed.show_guide_banner;
                     let banner_on = changed.show_guide_banner;
@@ -11656,12 +11634,8 @@ impl App {
             // than show it under the new window's label, and fetch again.
             // The same holds for the `u` scope toggle.
             let wanted = changed.current_window().as_secs();
-            let wanted_scope = (changed.include_failing, changed.include_scaled);
             match result {
-                Ok(report)
-                    if report.window_seconds != wanted
-                        || (report.includes_failing, report.includes_scaled) != wanted_scope =>
-                {
+                Ok(report) if report.window_seconds != wanted => {
                     self.refresh_changed_triage();
                 }
                 Ok(report) => {

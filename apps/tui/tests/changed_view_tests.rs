@@ -691,12 +691,8 @@ fn an_unchanged_row_says_why_it_is_shown() {
 
     let rendered = render_card(&state);
 
-    assert!(
-        rendered.contains("checkout-api (unchanged)"),
-        "a word, not only colour"
-    );
-    assert!(rendered
-        .contains("Not changed in the last 1h; shown because it is failing now (u to hide)."));
+    assert!(!rendered.contains("checkout-api (unchanged)"));
+    assert!(rendered.contains("Not changed in the last 1h; actively failing in this window."));
     // Rows that did change carry no marker.
     assert!(!rendered.contains("payment-worker (unchanged)"));
 
@@ -705,9 +701,8 @@ fn an_unchanged_row_says_why_it_is_shown() {
     state.report.as_mut().unwrap().deployments[2].change_kind =
         srelens_kube::changed::ChangeKind::FailingOnly;
     let rendered_healthy = render_card(&state);
-    assert!(rendered_healthy.contains(
-        "Not changed in the last 1h; shown because warning events occurred in this window (u to hide)."
-    ));
+    assert!(rendered_healthy
+        .contains("Not changed in the last 1h; warning events occurred in this window."));
 }
 
 fn footer_line(width: u16, height: u16, state: &ChangedViewState) -> String {
@@ -764,41 +759,21 @@ fn an_empty_list_says_why_it_is_empty() {
     let mut report = sample_report();
     report.deployments.clear();
     let mut state = ChangedViewState::new();
-    state.include_failing = false;
-    state.include_scaled = false;
     state.set_report(report.clone());
-    let strict = render_card(&state);
-    // The message wraps; judge it on one line.
-    let strict_flat = strict
-        .replace('│', " ")
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
+    let rendered = render_card(&state);
+
     assert!(
-        strict_flat.contains("No workloads changed within the last 1h."),
-        "{strict_flat}"
+        rendered.contains("Timeline: Recent Rollouts [1h]"),
+        "{rendered}"
     );
     assert!(
-        strict_flat.contains("S to include scaled workloads"),
-        "{strict_flat}"
+        rendered.contains("0 Rollouts in the last 1h. No workloads deployed in this window."),
+        "{rendered}"
     );
-    assert!(strict_flat.contains("u to include workloads failing without a change"));
-
-    state.include_failing = true;
-    let wide = render_card(&state);
-    assert!(wide.contains("Workloads Changed or Failing in Window"));
-    assert!(wide.contains("No workloads changed or failing within the last 1h."));
-
-    state.include_failing = false;
-    state.include_scaled = true;
-    let scaled_only = render_card(&state);
-    assert!(scaled_only.contains("No workloads changed or scaled within the last 1h."));
-
-    // Default state: inclusive (both true)
-    let mut default_state = ChangedViewState::new();
-    default_state.set_report(report.clone());
-    let default_card = render_card(&default_state);
-    assert!(default_card.contains("No workloads changed, scaled or failing within the last 1h."));
+    assert!(
+        rendered.contains("Workload Incidents: 0 Active"),
+        "{rendered}"
+    );
 
     // Rows exist, but the incident filter hides them: say so, not "none".
     let mut state = ChangedViewState::new();
@@ -807,8 +782,7 @@ fn an_empty_list_says_why_it_is_empty() {
         state.cycle_filter(); // ALL -> CRASH -> OOM
     }
     let filtered = render_card(&state);
-    assert!(filtered.contains("No workloads in the window match the OOM filter."));
-    assert!(!filtered.contains("No workloads changed"));
+    assert!(filtered.contains("No rollouts in the window match the OOM filter."));
 }
 
 #[test]
@@ -828,10 +802,11 @@ fn a_scaled_row_shows_when_it_scaled_and_says_so() {
 
     let rendered = render_card(&state);
 
-    assert!(rendered.contains("checkout-api (scaled)"), "{rendered}");
+    assert!(rendered.contains("checkout-api"), "{rendered}");
+    assert!(!rendered.contains("checkout-api (scaled)"), "{rendered}");
     let row = rendered
         .lines()
-        .find(|l| l.contains("checkout-api (scaled)"))
+        .find(|l| l.contains("checkout-api"))
         .unwrap();
     assert!(row.contains("66d"), "DEPLOYED is rollout time: {row}");
     assert!(
@@ -841,19 +816,19 @@ fn a_scaled_row_shows_when_it_scaled_and_says_so() {
     assert!(row.contains("5m"), "RECENT CHANGE age: {row}");
     assert!(rendered.contains("DEPLOYED"), "column header");
     assert!(rendered.contains("RECENT CHANGE"), "column header");
-    assert!(rendered.contains("Scaled 3→4 5m ago; last rollout 66d ago (S to hide)."));
+    assert!(rendered.contains("Scaled 3→4 5m ago; last rollout 66d ago."));
 }
 
 #[test]
 fn scope_label_names_every_combination() {
     let mut state = ChangedViewState::new();
-    assert_eq!(state.scope_label(), "[CHANGED + SCALED + FAILING]");
-    state.include_scaled = false;
     assert_eq!(state.scope_label(), "[CHANGED + FAILING]");
-    state.include_failing = false;
-    assert_eq!(state.scope_label(), "[CHANGED]");
     state.include_scaled = true;
+    assert_eq!(state.scope_label(), "[CHANGED + SCALED + FAILING]");
+    state.include_failing = false;
     assert_eq!(state.scope_label(), "[CHANGED + SCALED]");
+    state.include_scaled = false;
+    assert_eq!(state.scope_label(), "[CHANGED]");
 }
 
 /// The card's rows, from its "Workload:" line to "Actions:", border-trimmed.
@@ -1489,11 +1464,13 @@ fn changed_view_renders_sre_guide_banner_and_respects_toggle_and_height() {
     let lines = render_lines(140, 35, |f| render_changed_view(f, f.area(), &state));
     let full = lines.join("\n");
     assert!(full.contains("SRE Scope & Triage Guide"), "{full}");
-    assert!(full.contains("[CHANGED]"), "{full}");
-    assert!(full.contains("[S] Scaled:"), "{full}");
-    assert!(full.contains("[u] Failing:"), "{full}");
+    assert!(full.contains("[t] Focus:"), "{full}");
+    assert!(full.contains("[w] Window: 1h"), "{full}");
+    assert!(full.contains("[f] Filter: ALL"), "{full}");
     assert!(full.contains("[Tab] Infra:"), "{full}");
-    assert!(full.contains("Non-deployment warnings"), "{full}");
+    assert!(full.contains("non-deployment warning(s)"), "{full}");
+    assert!(!full.contains("[S] Scaled:"), "{full}");
+    assert!(!full.contains("[u] Failing:"), "{full}");
     assert!(!full.contains("CNI, Ingress"), "{full}");
     assert!(!full.contains("Quick RCA  [a] Assistant"), "{full}");
 
