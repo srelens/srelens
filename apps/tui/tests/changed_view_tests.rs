@@ -374,7 +374,7 @@ fn renders_changed_view_wide_with_diagnostic_card() {
     assert!(rendered.contains("OOM: 0"));
     assert!(rendered.contains("ERROR: 0"));
     assert!(rendered.contains("PENDING: 1"));
-    assert!(rendered.contains("HEALTHY: 1"));
+    assert!(!rendered.contains("HEALTHY:"));
     assert!(!rendered.contains("Headline:"));
 
     // Table checks

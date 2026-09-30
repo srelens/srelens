@@ -1174,8 +1174,7 @@ pub fn render_changed_view(f: &mut Frame, area: Rect, state: &ChangedViewState) 
 /// scope, infra). They share one line when it fits and take two when not, so
 /// the controls are never clipped off a narrow terminal.
 fn summary_banner(state: &ChangedViewState) -> (Block<'static>, Line<'static>, Line<'static>) {
-    let (crashing, oom, error, pending, flapping, rolling, healthy) = if let Some(r) = &state.report
-    {
+    let (crashing, oom, error, pending, flapping, rolling) = if let Some(r) = &state.report {
         (
             r.summary.crashing_count,
             r.summary.oom_count,
@@ -1183,10 +1182,9 @@ fn summary_banner(state: &ChangedViewState) -> (Block<'static>, Line<'static>, L
             r.summary.pending_count,
             r.summary.flapping_count,
             r.summary.rolling_count,
-            r.summary.healthy_count,
         )
     } else {
-        (0, 0, 0, 0, 0, 0, 0)
+        (0, 0, 0, 0, 0, 0)
     };
 
     let infra_count = state
@@ -1201,10 +1199,8 @@ fn summary_banner(state: &ChangedViewState) -> (Block<'static>, Line<'static>, L
         Theme::status_warn()
     } else if rolling > 0 {
         Style::default().fg(Theme::cyan())
-    } else if healthy > 0 {
-        Theme::status_ok()
     } else {
-        Style::default().fg(Theme::border())
+        Theme::status_ok()
     };
 
     let title_badge = match state.active_tab {
@@ -1287,18 +1283,6 @@ fn summary_banner(state: &ChangedViewState) -> (Block<'static>, Line<'static>, L
             if rolling > 0 {
                 Style::default()
                     .bg(Theme::cyan())
-                    .fg(Color::Black)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Theme::dim())
-            },
-        ),
-        Span::raw("  "),
-        Span::styled(
-            format!(" 🟢 HEALTHY: {healthy} "),
-            if healthy > 0 {
-                Style::default()
-                    .bg(Theme::green())
                     .fg(Color::Black)
                     .add_modifier(Modifier::BOLD)
             } else {
