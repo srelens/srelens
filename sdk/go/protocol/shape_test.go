@@ -18,7 +18,7 @@ func TestTheShapesAreTheBrokers(t *testing.T) {
 		{"IsObjectName", IsObjectName, []string{"web.v1-2", "..."}, []string{".", "..", "web/1"}},
 		{"IsToken", IsToken, []string{"!", strings.Repeat("~", 128)}, []string{"u 1", "u\x7f", strings.Repeat("x", 129), "u\n1"}},
 		{"IsNamespace", IsNamespace, []string{"team-1", strings.Repeat("a", 63)}, []string{"Team", "-a", "a-", ""}},
-		{"IsClusterID", IsClusterID, []string{"  prod", strings.Repeat("x", 4096), "\xef\xbb\xbf"}, []string{"   ", "", strings.Repeat("x", 4097), "\xc2\xa0", "\xe3\x80\x80"}},
+		{"IsClusterID", IsClusterID, []string{"  prod", strings.Repeat("x", 4096), "\ufeff"}, []string{"   ", "", strings.Repeat("x", 4097), "\u00a0", "\u3000"}},
 	}
 	for _, c := range checks {
 		for _, v := range c.yes {
@@ -52,7 +52,7 @@ func TestTheSchemasClusterIDPatternAgreesWithSrelens(t *testing.T) {
 			cases = append(cases, string(c))
 		}
 	}
-	cases = append(cases, "\xef\xbb\xbf", "prod", "  prod", " ")
+	cases = append(cases, "\ufeff", "prod", "  prod", " ")
 	for _, c := range cases {
 		want := strings.TrimSpace(c) != ""
 		if got := notBlank.MatchString(c); got != want {
@@ -90,7 +90,7 @@ func TestNewCallContextChecksBothFields(t *testing.T) {
 		field     string
 	}{
 		{"", nil, "clusterId"},
-		{"\xc2\xa0", nil, "clusterId"},
+		{"\u00a0", nil, "clusterId"},
 		{strings.Repeat("x", 4097), nil, "clusterId"},
 		{"kind-dev", &bad, "namespace"},
 	} {
