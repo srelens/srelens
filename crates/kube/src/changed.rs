@@ -738,13 +738,22 @@ pub fn analyze_pod_failure(pod: &Pod, pod_events: &[&Event]) -> (FailureCategory
                 if cond.type_ == "PodScheduled" && cond.status == "False" {
                     let msg = cond.message.clone().unwrap_or_default();
                     let lower = msg.to_lowercase();
-                    if lower.contains("insufficient")
-                        || lower.contains("taint")
-                        || lower.contains("affinity")
-                        || lower.contains("nodes are available")
-                    {
-                        return (FailureCategory::Compute, Some(msg));
+                    if lower.contains("persistentvolumeclaim") || lower.contains("volume") {
+                        let detail = if !msg.is_empty() {
+                            msg
+                        } else {
+                            "Volume binding pending".to_string()
+                        };
+                        return (FailureCategory::Storage, Some(detail));
                     }
+                    let detail = if !msg.is_empty() {
+                        msg
+                    } else if let Some(ref reason) = cond.reason {
+                        reason.clone()
+                    } else {
+                        "Pod unschedulable (waiting for node placement)".to_string()
+                    };
+                    return (FailureCategory::Compute, Some(detail));
                 }
             }
         }
@@ -1420,7 +1429,6 @@ fn evaluate_pod_failures(
         if let Some(ref st) = p.status {
             if st.phase.as_deref() == Some("Pending") {
                 pending_pod_count += 1;
-                is_pod_failing = true;
                 pod_status_label = "Pending".to_string();
             }
             if let Some(ref c_statuses) = st.container_statuses {
@@ -1512,22 +1520,33 @@ fn evaluate_pod_failures(
             .cloned()
             .unwrap_or_default();
         let (cat, detail) = analyze_pod_failure(p, &pod_events);
-        // Only a pod failing now explains the workload. A pod unschedulable
-        // forty minutes ago keeps its FailedScheduling event for about an
-        // hour after it was placed; read from a Running pod, that event
-        // gave a healthy 3/3 Deployment a [COMPUTE] root cause.
-        if is_pod_failing
-            && cat != FailureCategory::None
-            && detected_failure_category == FailureCategory::None
-        {
-            detected_failure_category = cat;
-            if let Some(ref d) = detail {
-                detected_failure_detail = d.clone();
+        let all_containers_ready = p
+            .status
+            .as_ref()
+            .and_then(|s| s.container_statuses.as_ref())
+            .map(|cs| !cs.is_empty() && cs.iter().all(|c| c.ready))
+            .unwrap_or(false);
+
+        let is_running = p.status.as_ref().and_then(|s| s.phase.as_deref()) == Some("Running")
+            || all_containers_ready;
+        let is_stale_scheduling = is_running
+            && !is_pod_failing
+            && (cat == FailureCategory::Compute
+                || cat == FailureCategory::Storage
+                || cat == FailureCategory::Network);
+
+        if cat != FailureCategory::None && !is_stale_scheduling {
+            is_pod_failing = true;
+            if detected_failure_category == FailureCategory::None {
+                detected_failure_category = cat;
+                if let Some(ref d) = detail {
+                    detected_failure_detail = d.clone();
+                }
             }
         }
         if pod_status_label == "Pending" && pod_error_msg.is_empty() {
-            if let Some(d) = detail {
-                pod_error_msg = d;
+            if let Some(ref d) = detail {
+                pod_error_msg = d.clone();
             }
         }
 
@@ -2009,7 +2028,9 @@ pub fn evaluate_changed_triage(
             || oom_killed_count > 0
             || config_error_count > 0
             || image_error_count > 0
-            || pending_pod_count > 0
+            || (pending_pod_count > 0
+                && (ready_replicas < desired_replicas
+                    || detected_failure_category != FailureCategory::None))
             || progress_deadline_exceeded
             || (desired_replicas > 0 && ready_replicas < desired_replicas)
             || probe_eval.is_probe_failure
@@ -2167,7 +2188,10 @@ pub fn evaluate_changed_triage(
             IncidentStatus::ConfigError
         } else if image_error_count > 0 {
             IncidentStatus::ImageError
-        } else if pending_pod_count > 0 {
+        } else if pending_pod_count > 0
+            && (ready_replicas < desired_replicas
+                || detected_failure_category != FailureCategory::None)
+        {
             IncidentStatus::Pending
         } else if progress_deadline_exceeded {
             IncidentStatus::Stalled
@@ -2193,7 +2217,7 @@ pub fn evaluate_changed_triage(
             FailureCategory::App
         } else if image_error_count > 0 {
             FailureCategory::Image
-        } else if pending_pod_count > 0 {
+        } else if incident_status == IncidentStatus::Pending {
             FailureCategory::Compute
         } else {
             FailureCategory::None
@@ -2222,6 +2246,12 @@ pub fn evaluate_changed_triage(
             format!("{config_error_count} pod(s) configuration error")
         } else if image_error_count > 0 {
             format!("{image_error_count} pod(s) image pull failure")
+        } else if incident_status == IncidentStatus::Pending {
+            if ready_replicas < desired_replicas {
+                format!("{ready_replicas}/{desired_replicas} Ready (Pod unschedulable)")
+            } else {
+                "Pod unschedulable (waiting for node placement)".to_string()
+            }
         } else if progress_deadline_exceeded {
             "Rollout stalled: ProgressDeadlineExceeded".to_string()
         } else if ready_replicas < desired_replicas {
@@ -2332,7 +2362,9 @@ pub fn evaluate_changed_triage(
             || oom_killed_count > 0
             || config_error_count > 0
             || image_error_count > 0
-            || pending_pod_count > 0
+            || (pending_pod_count > 0
+                && (ready_replicas < desired_replicas
+                    || detected_failure_category != FailureCategory::None))
             || (desired_replicas > 0 && ready_replicas < desired_replicas)
             || probe_eval.is_probe_failure
             || probe_eval.has_active_restart_flapping;
@@ -2484,7 +2516,10 @@ pub fn evaluate_changed_triage(
             IncidentStatus::ConfigError
         } else if image_error_count > 0 {
             IncidentStatus::ImageError
-        } else if pending_pod_count > 0 {
+        } else if pending_pod_count > 0
+            && (ready_replicas < desired_replicas
+                || detected_failure_category != FailureCategory::None)
+        {
             IncidentStatus::Pending
         } else if rollout_status == RolloutStatus::Progressing {
             IncidentStatus::Rolling
@@ -2508,7 +2543,7 @@ pub fn evaluate_changed_triage(
             FailureCategory::App
         } else if image_error_count > 0 {
             FailureCategory::Image
-        } else if pending_pod_count > 0 {
+        } else if incident_status == IncidentStatus::Pending {
             FailureCategory::Compute
         } else {
             FailureCategory::None
@@ -2537,6 +2572,12 @@ pub fn evaluate_changed_triage(
             format!("{config_error_count} pod(s) configuration error")
         } else if image_error_count > 0 {
             format!("{image_error_count} pod(s) image pull failure")
+        } else if incident_status == IncidentStatus::Pending {
+            if ready_replicas < desired_replicas {
+                format!("{ready_replicas}/{desired_replicas} Ready (Pod unschedulable)")
+            } else {
+                "Pod unschedulable (waiting for node placement)".to_string()
+            }
         } else if ready_replicas < desired_replicas {
             format!("{ready_replicas}/{desired_replicas} Ready")
         } else {
@@ -2651,7 +2692,7 @@ pub fn evaluate_changed_triage(
             || oom_killed_count > 0
             || config_error_count > 0
             || image_error_count > 0
-            || pending_pod_count > 0
+            || (pending_pod_count > 0 && detected_failure_category != FailureCategory::None)
             || probe_eval.is_probe_failure
             || probe_eval.has_active_restart_flapping;
 
@@ -2802,7 +2843,7 @@ pub fn evaluate_changed_triage(
             IncidentStatus::ConfigError
         } else if image_error_count > 0 {
             IncidentStatus::ImageError
-        } else if pending_pod_count > 0 {
+        } else if pending_pod_count > 0 && detected_failure_category != FailureCategory::None {
             IncidentStatus::Pending
         } else if is_suspended {
             IncidentStatus::ScaledDown
@@ -2822,7 +2863,7 @@ pub fn evaluate_changed_triage(
             FailureCategory::App
         } else if image_error_count > 0 {
             FailureCategory::Image
-        } else if pending_pod_count > 0 {
+        } else if incident_status == IncidentStatus::Pending {
             FailureCategory::Compute
         } else {
             FailureCategory::None
@@ -2851,6 +2892,8 @@ pub fn evaluate_changed_triage(
             format!("{config_error_count} pod(s) configuration error")
         } else if image_error_count > 0 {
             format!("{image_error_count} pod(s) image pull failure")
+        } else if incident_status == IncidentStatus::Pending {
+            "Pod unschedulable (waiting for node placement)".to_string()
         } else if is_suspended {
             format!("CronJob suspended ({schedule_str})")
         } else {
@@ -6328,5 +6371,309 @@ mod tests {
             condense_diagnostic(FailureCategory::Storage, raw),
             "PVC \"data-pvc\" not found"
         );
+    }
+
+    #[test]
+    fn triage_normal_in_flight_surge_pod_during_rollout_is_rolling_not_pending() {
+        let now = Timestamp::from_second(1_700_000_000).unwrap();
+        let dep_time = Timestamp::from_second(1_700_000_000 - 60).unwrap();
+
+        let dep = Deployment {
+            metadata: ObjectMeta {
+                name: Some("api-bot".to_string()),
+                namespace: Some("default".to_string()),
+                ..Default::default()
+            },
+            spec: Some(DeploymentSpec {
+                replicas: Some(3),
+                ..Default::default()
+            }),
+            status: Some(DeploymentStatus {
+                replicas: Some(4),
+                updated_replicas: Some(1),
+                ready_replicas: Some(3),
+                available_replicas: Some(3),
+                ..Default::default()
+            }),
+        };
+
+        let current_rs = ReplicaSet {
+            metadata: ObjectMeta {
+                name: Some("api-bot-v2".to_string()),
+                namespace: Some("default".to_string()),
+                owner_references: Some(vec![make_owner_ref("Deployment", "api-bot")]),
+                creation_timestamp: Some(Time(dep_time)),
+                ..Default::default()
+            },
+            spec: Some(ReplicaSetSpec::default()),
+            status: Some(ReplicaSetStatus::default()),
+        };
+
+        let mut pods = Vec::new();
+        for i in 1..=3 {
+            pods.push(Pod {
+                metadata: ObjectMeta {
+                    name: Some(format!("api-bot-v2-ready-{i}")),
+                    namespace: Some("default".to_string()),
+                    owner_references: Some(vec![make_owner_ref("ReplicaSet", "api-bot-v2")]),
+                    ..Default::default()
+                },
+                spec: Some(PodSpec {
+                    node_name: Some("node-1".to_string()),
+                    ..Default::default()
+                }),
+                status: Some(PodStatus {
+                    phase: Some("Running".to_string()),
+                    container_statuses: Some(vec![ContainerStatus {
+                        name: "api-bot".to_string(),
+                        ready: true,
+                        ..Default::default()
+                    }]),
+                    ..Default::default()
+                }),
+            });
+        }
+
+        pods.push(Pod {
+            metadata: ObjectMeta {
+                name: Some("api-bot-v2-surge-4".to_string()),
+                namespace: Some("default".to_string()),
+                owner_references: Some(vec![make_owner_ref("ReplicaSet", "api-bot-v2")]),
+                ..Default::default()
+            },
+            spec: Some(PodSpec {
+                node_name: Some("node-2".to_string()),
+                ..Default::default()
+            }),
+            status: Some(PodStatus {
+                phase: Some("Pending".to_string()),
+                conditions: Some(vec![PodCondition {
+                    type_: "PodScheduled".to_string(),
+                    status: "True".to_string(),
+                    ..Default::default()
+                }]),
+                container_statuses: Some(vec![ContainerStatus {
+                    name: "api-bot".to_string(),
+                    ready: false,
+                    state: Some(ContainerState {
+                        waiting: Some(ContainerStateWaiting {
+                            reason: Some("ContainerCreating".to_string()),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+        });
+
+        let report = evaluate_changed_triage(
+            &[dep],
+            &[],
+            &[],
+            &[],
+            &[current_rs],
+            &pods,
+            &[],
+            &[],
+            Duration::from_secs(1800),
+            now,
+            Some("default".to_string()),
+            TriageOptions::default(),
+        );
+
+        assert_eq!(
+            report.summary.pending_count, 0,
+            "surge pod must not count as pending incident"
+        );
+        assert_eq!(
+            report.summary.rolling_count, 1,
+            "workload should count as rolling"
+        );
+        let change = &report.deployments[0];
+        assert_eq!(change.incident_status, IncidentStatus::Rolling);
+        assert_eq!(change.failure_category, FailureCategory::None);
+        assert!(!change.is_incident(), "routine rollout is not an incident");
+    }
+
+    #[test]
+    fn triage_blocked_surge_pod_during_rollout_is_pending_incident() {
+        let now = Timestamp::from_second(1_700_000_000).unwrap();
+        let dep_time = Timestamp::from_second(1_700_000_000 - 60).unwrap();
+
+        let dep = Deployment {
+            metadata: ObjectMeta {
+                name: Some("api-bot".to_string()),
+                namespace: Some("default".to_string()),
+                ..Default::default()
+            },
+            spec: Some(DeploymentSpec {
+                replicas: Some(3),
+                ..Default::default()
+            }),
+            status: Some(DeploymentStatus {
+                replicas: Some(4),
+                updated_replicas: Some(1),
+                ready_replicas: Some(3),
+                available_replicas: Some(3),
+                ..Default::default()
+            }),
+        };
+
+        let current_rs = ReplicaSet {
+            metadata: ObjectMeta {
+                name: Some("api-bot-v2".to_string()),
+                namespace: Some("default".to_string()),
+                owner_references: Some(vec![make_owner_ref("Deployment", "api-bot")]),
+                creation_timestamp: Some(Time(dep_time)),
+                ..Default::default()
+            },
+            spec: Some(ReplicaSetSpec::default()),
+            status: Some(ReplicaSetStatus::default()),
+        };
+
+        let mut pods = Vec::new();
+        for i in 1..=3 {
+            pods.push(Pod {
+                metadata: ObjectMeta {
+                    name: Some(format!("api-bot-v2-ready-{i}")),
+                    namespace: Some("default".to_string()),
+                    owner_references: Some(vec![make_owner_ref("ReplicaSet", "api-bot-v2")]),
+                    ..Default::default()
+                },
+                spec: Some(PodSpec {
+                    node_name: Some("node-1".to_string()),
+                    ..Default::default()
+                }),
+                status: Some(PodStatus {
+                    phase: Some("Running".to_string()),
+                    container_statuses: Some(vec![ContainerStatus {
+                        name: "api-bot".to_string(),
+                        ready: true,
+                        ..Default::default()
+                    }]),
+                    ..Default::default()
+                }),
+            });
+        }
+
+        pods.push(Pod {
+            metadata: ObjectMeta {
+                name: Some("api-bot-v2-surge-blocked".to_string()),
+                namespace: Some("default".to_string()),
+                owner_references: Some(vec![make_owner_ref("ReplicaSet", "api-bot-v2")]),
+                ..Default::default()
+            },
+            spec: Some(PodSpec::default()),
+            status: Some(PodStatus {
+                phase: Some("Pending".to_string()),
+                conditions: Some(vec![PodCondition {
+                    type_: "PodScheduled".to_string(),
+                    status: "False".to_string(),
+                    reason: Some("Unschedulable".to_string()),
+                    message: Some("0/24 nodes are available: 24 Insufficient cpu.".to_string()),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+        });
+
+        let report = evaluate_changed_triage(
+            &[dep],
+            &[],
+            &[],
+            &[],
+            &[current_rs],
+            &pods,
+            &[],
+            &[],
+            Duration::from_secs(1800),
+            now,
+            Some("default".to_string()),
+            TriageOptions::default(),
+        );
+
+        assert_eq!(
+            report.summary.pending_count, 1,
+            "blocked surge pod must count as pending incident"
+        );
+        let change = &report.deployments[0];
+        assert_eq!(change.incident_status, IncidentStatus::Pending);
+        assert_eq!(change.failure_category, FailureCategory::Compute);
+        assert!(change.is_incident());
+        assert!(change.failure_detail.contains("Insufficient cpu"));
+    }
+
+    #[test]
+    fn triage_degraded_pending_workload_without_events_reports_pod_unschedulable() {
+        let now = Timestamp::from_second(1_700_000_000).unwrap();
+        let dep_time = Timestamp::from_second(1_700_000_000 - 86400).unwrap();
+
+        let dep = Deployment {
+            metadata: ObjectMeta {
+                name: Some("sink-transformer".to_string()),
+                namespace: Some("default".to_string()),
+                ..Default::default()
+            },
+            spec: Some(DeploymentSpec {
+                replicas: Some(1),
+                ..Default::default()
+            }),
+            status: Some(DeploymentStatus {
+                replicas: Some(1),
+                updated_replicas: Some(1),
+                ready_replicas: Some(0),
+                available_replicas: Some(0),
+                ..Default::default()
+            }),
+        };
+
+        let current_rs = ReplicaSet {
+            metadata: ObjectMeta {
+                name: Some("sink-transformer-v1".to_string()),
+                namespace: Some("default".to_string()),
+                owner_references: Some(vec![make_owner_ref("Deployment", "sink-transformer")]),
+                creation_timestamp: Some(Time(dep_time)),
+                ..Default::default()
+            },
+            spec: Some(ReplicaSetSpec::default()),
+            status: Some(ReplicaSetStatus::default()),
+        };
+
+        let pod = Pod {
+            metadata: ObjectMeta {
+                name: Some("sink-transformer-v1-abc".to_string()),
+                namespace: Some("default".to_string()),
+                owner_references: Some(vec![make_owner_ref("ReplicaSet", "sink-transformer-v1")]),
+                ..Default::default()
+            },
+            spec: Some(PodSpec::default()),
+            status: Some(PodStatus {
+                phase: Some("Pending".to_string()),
+                ..Default::default()
+            }),
+        };
+
+        let report = evaluate_changed_triage(
+            &[dep],
+            &[],
+            &[],
+            &[],
+            &[current_rs],
+            &[pod],
+            &[],
+            &[],
+            Duration::from_secs(1800),
+            now,
+            Some("default".to_string()),
+            TriageOptions::default(),
+        );
+
+        assert_eq!(report.summary.pending_count, 1);
+        let change = &report.deployments[0];
+        assert_eq!(change.incident_status, IncidentStatus::Pending);
+        assert_eq!(change.failure_category, FailureCategory::Compute);
+        assert_eq!(change.failure_detail, "0/1 Ready (Pod unschedulable)");
     }
 }

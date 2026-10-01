@@ -1480,7 +1480,7 @@ fn build_workload_row(
                 .add_modifier(Modifier::BOLD),
         )),
         IncidentStatus::ProbeFailure => Cell::from(Span::styled(
-            " 🩺 PROBE FAIL ",
+            " 🩺 PROBE ",
             Style::default()
                 .bg(Theme::yellow())
                 .fg(Color::Black)
