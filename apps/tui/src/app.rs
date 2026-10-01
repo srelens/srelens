@@ -2617,6 +2617,10 @@ impl App {
                             self.modal = None;
                             self.switch_view_to_kind(ResourceKind::BgpPeers).await;
                         }
+                        KeyCode::Char('p') | KeyCode::Char('P') => {
+                            self.modal = None;
+                            self.switch_view_to_kind(ResourceKind::Changed).await;
+                        }
                         KeyCode::Char('i') | KeyCode::Char('I') => {
                             self.modal = None;
                             self.open_add_cluster_modal();
