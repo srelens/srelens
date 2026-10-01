@@ -1529,13 +1529,14 @@ fn evaluate_pod_failures(
 
         let is_running = p.status.as_ref().and_then(|s| s.phase.as_deref()) == Some("Running")
             || all_containers_ready;
-        let is_stale_scheduling = is_running
+        let is_stale_warning = is_running
             && !is_pod_failing
             && (cat == FailureCategory::Compute
                 || cat == FailureCategory::Storage
-                || cat == FailureCategory::Network);
+                || cat == FailureCategory::Network
+                || (cat == FailureCategory::Probe && all_containers_ready));
 
-        if cat != FailureCategory::None && !is_stale_scheduling {
+        if cat != FailureCategory::None && !is_stale_warning {
             is_pod_failing = true;
             if detected_failure_category == FailureCategory::None {
                 detected_failure_category = cat;
@@ -2205,7 +2206,9 @@ pub fn evaluate_changed_triage(
             IncidentStatus::Unknown
         };
 
-        let failure_category = if probe_eval.is_probe_failure {
+        let failure_category = if incident_status == IncidentStatus::Healthy {
+            FailureCategory::None
+        } else if probe_eval.is_probe_failure {
             FailureCategory::Probe
         } else if detected_failure_category != FailureCategory::None {
             detected_failure_category
@@ -2223,7 +2226,9 @@ pub fn evaluate_changed_triage(
             FailureCategory::None
         };
 
-        let failure_detail = if probe_eval.is_probe_failure {
+        let failure_detail = if incident_status == IncidentStatus::Healthy {
+            "Healthy".to_string()
+        } else if probe_eval.is_probe_failure {
             if let Some(ref d) = probe_eval.probe_failure_detail {
                 d.clone()
             } else if probe_eval.probe_failure_count > 0 {
@@ -2531,7 +2536,9 @@ pub fn evaluate_changed_triage(
             IncidentStatus::Unknown
         };
 
-        let failure_category = if probe_eval.is_probe_failure {
+        let failure_category = if incident_status == IncidentStatus::Healthy {
+            FailureCategory::None
+        } else if probe_eval.is_probe_failure {
             FailureCategory::Probe
         } else if detected_failure_category != FailureCategory::None {
             detected_failure_category
@@ -2549,7 +2556,9 @@ pub fn evaluate_changed_triage(
             FailureCategory::None
         };
 
-        let failure_detail = if probe_eval.is_probe_failure {
+        let failure_detail = if incident_status == IncidentStatus::Healthy {
+            "Healthy".to_string()
+        } else if probe_eval.is_probe_failure {
             if let Some(ref d) = probe_eval.probe_failure_detail {
                 d.clone()
             } else if probe_eval.probe_failure_count > 0 {
@@ -2851,7 +2860,9 @@ pub fn evaluate_changed_triage(
             IncidentStatus::Healthy
         };
 
-        let failure_category = if probe_eval.is_probe_failure {
+        let failure_category = if incident_status == IncidentStatus::Healthy {
+            FailureCategory::None
+        } else if probe_eval.is_probe_failure {
             FailureCategory::Probe
         } else if detected_failure_category != FailureCategory::None {
             detected_failure_category
@@ -6083,6 +6094,116 @@ mod tests {
             .summary
             .headline_message
             .starts_with("DEGRADED (PROBE FAILURE):"));
+    }
+
+    #[test]
+    fn test_healthy_deployment_discards_resolved_startup_probe_failure() {
+        use k8s_openapi::api::core::v1::{
+            Container, ContainerState, ContainerStatus, Pod, PodSpec, PodStatus, Probe,
+        };
+        let now = Timestamp::from_second(1_700_000_000).unwrap();
+        let dep = deployment("despegar", 2, 2);
+        let rs = [replicaset("despegar-rs", "despegar", 3600 * 4)];
+
+        let pod1 = Pod {
+            metadata: ObjectMeta {
+                name: Some("despegar-pod-1".to_string()),
+                namespace: Some("default".to_string()),
+                creation_timestamp: Some(Time(
+                    Timestamp::from_second(1_700_000_000 - 3600).unwrap(),
+                )),
+                owner_references: Some(vec![make_owner_ref("ReplicaSet", "despegar-rs")]),
+                ..Default::default()
+            },
+            spec: Some(PodSpec {
+                containers: vec![Container {
+                    name: "app".to_string(),
+                    startup_probe: Some(Probe {
+                        failure_threshold: Some(30),
+                        period_seconds: Some(10),
+                        timeout_seconds: Some(5),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            status: Some(PodStatus {
+                phase: Some("Running".to_string()),
+                container_statuses: Some(vec![ContainerStatus {
+                    name: "app".to_string(),
+                    ready: true,
+                    restart_count: 0,
+                    state: Some(ContainerState {
+                        running: Some(k8s_openapi::api::core::v1::ContainerStateRunning {
+                            started_at: Some(Time(
+                                Timestamp::from_second(1_700_000_000 - 3600).unwrap(),
+                            )),
+                        }),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }]),
+                conditions: Some(vec![k8s_openapi::api::core::v1::PodCondition {
+                    type_: "Ready".to_string(),
+                    status: "True".to_string(),
+                    last_transition_time: Some(Time(
+                        Timestamp::from_second(1_700_000_000 - 3550).unwrap(),
+                    )),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+        };
+
+        // Warning event from warmup before the pod became ready (1_700_000_000 - 3580 < 1_700_000_000 - 3550)
+        let ev = Event {
+            metadata: ObjectMeta {
+                name: Some("despegar-pod.unhealthy".to_string()),
+                namespace: Some("default".to_string()),
+                ..Default::default()
+            },
+            involved_object: k8s_openapi::api::core::v1::ObjectReference {
+                kind: Some("Pod".to_string()),
+                name: Some("despegar-pod-1".to_string()),
+                namespace: Some("default".to_string()),
+                field_path: Some("spec.containers{app}".to_string()),
+                ..Default::default()
+            },
+            reason: Some("Unhealthy".to_string()),
+            message: Some(
+                "Startup probe failed: dial tcp 10.244.1.5:8080: connect: connection refused"
+                    .to_string(),
+            ),
+            count: Some(2),
+            last_timestamp: Some(Time(Timestamp::from_second(1_700_000_000 - 3580).unwrap())),
+            type_: Some("Warning".to_string()),
+            ..Default::default()
+        };
+
+        let report = evaluate_changed_triage(
+            &[dep],
+            &[],
+            &[],
+            &[],
+            &rs,
+            &[pod1],
+            &[ev],
+            &[],
+            Duration::from_secs(86400),
+            now,
+            None,
+            TriageOptions::default(),
+        );
+
+        assert_eq!(report.deployments.len(), 1);
+        let d = &report.deployments[0];
+        assert_eq!(d.incident_status, IncidentStatus::Healthy);
+        assert_eq!(d.failure_category, FailureCategory::None);
+        assert_eq!(d.failure_detail, "Healthy");
+        assert_eq!(report.summary.probe_failure_count, 0);
+        assert_eq!(report.summary.crashing_count, 0);
+        assert_eq!(report.summary.oom_count, 0);
     }
 
     #[test]
