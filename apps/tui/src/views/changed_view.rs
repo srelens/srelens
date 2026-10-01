@@ -1565,11 +1565,12 @@ fn build_workload_row(
         "🟢 Healthy".to_string()
     };
     let detail_style = match d.failure_category {
-        FailureCategory::Compute | FailureCategory::Storage | FailureCategory::Network => {
-            Style::default()
-                .fg(Theme::yellow())
-                .add_modifier(Modifier::BOLD)
-        }
+        FailureCategory::Compute
+        | FailureCategory::Storage
+        | FailureCategory::Network
+        | FailureCategory::Probe => Style::default()
+            .fg(Theme::yellow())
+            .add_modifier(Modifier::BOLD),
         FailureCategory::App | FailureCategory::Image => Style::default()
             .fg(Theme::red())
             .add_modifier(Modifier::BOLD),
@@ -2001,11 +2002,12 @@ fn render_deployment_diagnostic_card(f: &mut Frame, area: Rect, state: &ChangedV
 
     // Line 3: Root Cause & Failure Detail
     let cat_style = match d.failure_category {
-        FailureCategory::Compute | FailureCategory::Storage | FailureCategory::Network => {
-            Style::default()
-                .fg(Theme::yellow())
-                .add_modifier(Modifier::BOLD)
-        }
+        FailureCategory::Compute
+        | FailureCategory::Storage
+        | FailureCategory::Network
+        | FailureCategory::Probe => Style::default()
+            .fg(Theme::yellow())
+            .add_modifier(Modifier::BOLD),
         FailureCategory::App | FailureCategory::Image => Style::default()
             .fg(Theme::red())
             .add_modifier(Modifier::BOLD),

@@ -107,6 +107,8 @@ pub enum FailureCategory {
     Storage, // PVC unbound, mount failure, volume attach failed
     #[serde(rename = "network")]
     Network, // CNI failure, IP allocation failure, pod sandbox error
+    #[serde(rename = "probe")]
+    Probe, // Readiness/Liveness/Startup probe failure (HTTP 500, timeout, connection refused)
     #[serde(rename = "image")]
     Image, // ImagePullBackOff, ErrImagePull, auth failure
     #[serde(rename = "app")]
@@ -121,6 +123,7 @@ impl FailureCategory {
             Self::Compute => "[COMPUTE]",
             Self::Storage => "[STORAGE]",
             Self::Network => "[NETWORK]",
+            Self::Probe => "[PROBE]",
             Self::Image => "[IMAGE]",
             Self::App => "[APP]",
             Self::None => "[OK]",
@@ -771,6 +774,9 @@ pub fn analyze_pod_failure(pod: &Pod, pod_events: &[&Event]) -> (FailureCategory
         }
         if reason == "Failed" && (msg_lower.contains("image") || msg_lower.contains("pull")) {
             return (FailureCategory::Image, Some(msg.to_string()));
+        }
+        if reason == "Unhealthy" || msg_lower.contains("probe failed") {
+            return (FailureCategory::Probe, Some(msg.to_string()));
         }
     }
 
@@ -2124,7 +2130,7 @@ pub fn evaluate_changed_triage(
             FailureCategory::Compute
         } else if is_flapping {
             if probe_failure_count > 0 && !restart_in_window {
-                FailureCategory::Network
+                FailureCategory::Probe
             } else {
                 FailureCategory::App
             }
@@ -2432,7 +2438,7 @@ pub fn evaluate_changed_triage(
             FailureCategory::Compute
         } else if is_flapping {
             if probe_failure_count > 0 && !restart_in_window {
-                FailureCategory::Network
+                FailureCategory::Probe
             } else {
                 FailureCategory::App
             }
@@ -2740,7 +2746,7 @@ pub fn evaluate_changed_triage(
             FailureCategory::Compute
         } else if is_flapping {
             if probe_failure_count > 0 && !restart_in_window {
-                FailureCategory::Network
+                FailureCategory::Probe
             } else {
                 FailureCategory::App
             }
@@ -6080,13 +6086,13 @@ mod tests {
     fn test_condense_probe_failures() {
         let raw = "Readiness probe failed: HTTP probe failed with statuscode: 500";
         assert_eq!(
-            condense_diagnostic(FailureCategory::Network, raw),
+            condense_diagnostic(FailureCategory::Probe, raw),
             "Readiness probe failed (HTTP 500)"
         );
 
         let conn_refused = "Liveness probe failed: Get \"http://10.254.100.93:8080/healthz\": dial tcp 10.254.100.93:8080: connect: connection refused";
         assert_eq!(
-            condense_diagnostic(FailureCategory::Network, conn_refused),
+            condense_diagnostic(FailureCategory::Probe, conn_refused),
             "Liveness probe failed (connection refused)"
         );
     }
