@@ -15,6 +15,10 @@ use crate::connect::request_timeout;
 
 const DEFAULT_TAIL_LINES: i64 = 200;
 
+/// Default number of trailing lines returned by the one-shot `k8s.podLogs` capability.
+/// Lowered from 200 to 80 to reduce token consumption during agentic investigations.
+pub const DEFAULT_POD_LOGS_TAIL_LINES: i64 = 80;
+
 /// The most of one log line a follow keeps, in bytes (#747). The rest of a
 /// longer line is read up to its newline and dropped, and the line says it was
 /// cut, so a container that writes a very long line, or no newline at all,
@@ -152,7 +156,7 @@ pub fn effective_tail_lines(all_lines: bool, tail_lines: Option<i64>) -> Option<
     if all_lines {
         None
     } else {
-        Some(tail_lines.unwrap_or(DEFAULT_TAIL_LINES))
+        Some(tail_lines.unwrap_or(DEFAULT_POD_LOGS_TAIL_LINES))
     }
 }
 
@@ -402,6 +406,9 @@ pub struct PodLogsIn {
     /// Only logs newer than this many seconds ago.
     #[serde(default)]
     pub since_seconds: Option<i64>,
+    /// Optional substring filter (case-insensitive) to retain only matching log lines.
+    #[serde(default)]
+    pub filter: Option<String>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -409,11 +416,78 @@ pub struct PodLogsOut {
     pub logs: String,
 }
 
+/// Maximum characters retained per single log line before truncation.
+pub const MAX_LOG_LINE_CHARS: usize = 400;
+/// Maximum total bytes returned by `k8s.podLogs` to prevent token exhaustion.
+pub const MAX_POD_LOGS_BYTES: usize = 12 * 1024;
+/// Number of head lines preserved on log truncation (e.g. startup / config).
+pub const LOG_HEAD_LINES_PRESERVED: usize = 10;
+/// Maximum tail lines preserved when truncating.
+pub const LOG_TAIL_LINES_PRESERVED: usize = 60;
+
+/// Compact and budget a pod's logs for token-efficient consumption by LLMs and API callers.
+///
+/// 1. If `filter` is specified, only lines containing `filter` (case-insensitive) are kept.
+/// 2. Long individual lines are clipped to [`MAX_LOG_LINE_CHARS`].
+/// 3. If the total log size exceeds [`MAX_POD_LOGS_BYTES`] or [`LOG_HEAD_LINES_PRESERVED`] + [`LOG_TAIL_LINES_PRESERVED`],
+///    the output is budgeted to preserve the initial startup lines and the most recent crash/error lines,
+///    with an explicit skipped count marker.
+pub fn compact_pod_logs(raw: String, filter: Option<&str>, all_lines: bool) -> String {
+    let mut lines: Vec<String> = raw
+        .lines()
+        .map(|l| {
+            if l.chars().count() > MAX_LOG_LINE_CHARS {
+                let clipped: String = l
+                    .chars()
+                    .take(MAX_LOG_LINE_CHARS.saturating_sub(15))
+                    .collect();
+                format!("{}...[clipped]", clipped)
+            } else {
+                l.to_string()
+            }
+        })
+        .collect();
+
+    if let Some(f) = filter.map(str::trim).filter(|s| !s.is_empty()) {
+        let needle = f.to_lowercase();
+        lines.retain(|line| line.to_lowercase().contains(&needle));
+        if lines.is_empty() {
+            return format!("[No log lines matched filter: \"{}\"]", f);
+        }
+    }
+
+    if all_lines {
+        return lines.join("\n");
+    }
+
+    let total_bytes: usize = lines.iter().map(|l| l.len() + 1).sum();
+    let max_lines = LOG_HEAD_LINES_PRESERVED + LOG_TAIL_LINES_PRESERVED;
+    if (total_bytes > MAX_POD_LOGS_BYTES || lines.len() > max_lines) && lines.len() > max_lines {
+        let head = &lines[..LOG_HEAD_LINES_PRESERVED];
+        let tail = &lines[lines.len() - LOG_TAIL_LINES_PRESERVED..];
+        let skipped_lines = lines.len() - max_lines;
+        let skipped_bytes: usize = lines
+            [LOG_HEAD_LINES_PRESERVED..lines.len() - LOG_TAIL_LINES_PRESERVED]
+            .iter()
+            .map(|l| l.len() + 1)
+            .sum();
+        let mut out = head.join("\n");
+        out.push_str(&format!(
+            "\n[... skipped {} lines ({} bytes) for token efficiency ...]\n",
+            skipped_lines, skipped_bytes
+        ));
+        out.push_str(&tail.join("\n"));
+        out
+    } else {
+        lines.join("\n")
+    }
+}
+
 /// `k8s.podLogs` — return the last N lines of a pod's logs, or all of them.
 pub fn pod_logs_capability(cache: Arc<ClientCache>) -> Capability {
     Capability::typed::<PodLogsIn, PodLogsOut, _, _>(
         "k8s.podLogs",
-        "fetch logs for a pod in a connected kube context: the last 200 lines by default (tail_lines to change), or set all_lines to get everything the runtime still retains (can be large)",
+        "fetch logs for a pod in a connected kube context: the last 80 lines by default (tail_lines to change), or set all_lines to get everything the runtime still retains (can be large)",
         Annotations::READ_ONLY,
         move |input: PodLogsIn| {
             let cache = cache.clone();
@@ -435,6 +509,7 @@ pub fn pod_logs_capability(cache: Arc<ClientCache>) -> Capability {
                     .await
                     .map_err(|_| CapabilityError::Handler("fetch logs timed out".into()))?
                     .map_err(|e| CapabilityError::Handler(e.to_string()))?;
+                let logs = compact_pod_logs(logs, input.filter.as_deref(), input.all_lines);
                 Ok(PodLogsOut { logs })
             }
         },
@@ -788,10 +863,12 @@ mod tests {
     }
 
     #[test]
-    fn without_all_lines_the_tail_defaults_to_200_or_the_given_count() {
-        // The default path — every existing caller, MCP agents included — is
-        // unchanged: omit both and you still get the last 200 lines.
-        assert_eq!(effective_tail_lines(false, None), Some(DEFAULT_TAIL_LINES));
+    fn without_all_lines_the_tail_defaults_to_80_or_the_given_count() {
+        // The one-shot podLogs default is 80 to prevent excessive token burn in assistant queries.
+        assert_eq!(
+            effective_tail_lines(false, None),
+            Some(DEFAULT_POD_LOGS_TAIL_LINES)
+        );
         assert_eq!(effective_tail_lines(false, Some(50)), Some(50));
     }
 
@@ -801,11 +878,53 @@ mod tests {
             serde_json::from_str(r#"{"context":"c","namespace":"n","pod":"p"}"#).unwrap();
         assert!(!input.all_lines);
         assert_eq!(input.tail_lines, None);
+        assert_eq!(input.filter, None);
         let input: PodLogsIn = serde_json::from_str(
-            r#"{"context":"c","namespace":"n","pod":"p","all_lines":true,"tail_lines":50}"#,
+            r#"{"context":"c","namespace":"n","pod":"p","all_lines":true,"tail_lines":50,"filter":"panic"}"#,
         )
         .unwrap();
         assert!(input.all_lines);
+        assert_eq!(input.filter.as_deref(), Some("panic"));
+    }
+
+    #[test]
+    fn compact_pod_logs_clips_excessively_long_single_lines() {
+        let long_line = "A".repeat(1000);
+        let output = compact_pod_logs(long_line, None, false);
+        assert!(output.contains("...[clipped]"));
+        assert!(output.chars().count() <= MAX_LOG_LINE_CHARS);
+    }
+
+    #[test]
+    fn compact_pod_logs_filters_lines_case_insensitively() {
+        let logs =
+            "INFO starting app\nWARN high memory\nERROR database connection timeout\nINFO ready";
+        let out = compact_pod_logs(logs.to_string(), Some("error"), false);
+        assert_eq!(out, "ERROR database connection timeout");
+
+        let none_matched = compact_pod_logs(logs.to_string(), Some("critical"), false);
+        assert_eq!(none_matched, "[No log lines matched filter: \"critical\"]");
+    }
+
+    #[test]
+    fn compact_pod_logs_budgets_large_streams_preserving_head_and_tail() {
+        let mut lines = Vec::new();
+        for i in 1..=200 {
+            lines.push(format!("line {:03}: application event log", i));
+        }
+        let raw = lines.join("\n");
+        let compacted = compact_pod_logs(raw, None, false);
+
+        // Head 10 preserved
+        assert!(compacted.contains("line 001: application event log"));
+        assert!(compacted.contains("line 010: application event log"));
+        // Skip marker present
+        assert!(compacted.contains("[... skipped 130 lines"));
+        // Tail 60 preserved (lines 141 to 200)
+        assert!(compacted.contains("line 141: application event log"));
+        assert!(compacted.contains("line 200: application event log"));
+        // Middle skipped
+        assert!(!compacted.contains("line 050: application event log"));
     }
 
     #[test]

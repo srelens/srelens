@@ -214,6 +214,22 @@ pub struct ObjectOut {
     pub object: serde_json::Value,
 }
 
+/// Strip noisy server metadata (`managedFields` and `kubectl.kubernetes.io/last-applied-configuration`)
+/// from a dynamic object before returning it to readers (`k8s.getManifest` and `k8s.getObject`).
+///
+/// `last-applied-configuration` is written by `kubectl apply` and stores the verbatim serialized
+/// JSON representation of the entire object inside an annotation. Returning it doubles the token
+/// weight of manifests and objects for zero information gain.
+pub(crate) fn strip_noisy_metadata(obj: &mut DynamicObject) {
+    obj.metadata.managed_fields = None;
+    if let Some(ref mut annotations) = obj.metadata.annotations {
+        annotations.remove("kubectl.kubernetes.io/last-applied-configuration");
+        if annotations.is_empty() {
+            obj.metadata.annotations = None;
+        }
+    }
+}
+
 /// `k8s.getObject` — fetch a resource as a structured JSON object (for rich
 /// detail rendering, vs. `k8s.getManifest` which returns YAML).
 pub fn get_object_capability(cache: Arc<ClientCache>) -> Capability {
@@ -243,7 +259,7 @@ pub fn get_object_capability(cache: Arc<ClientCache>) -> Capability {
                     .await
                     .map_err(|_| CapabilityError::Handler("get object timed out".into()))?
                     .map_err(|e| CapabilityError::Handler(e.to_string()))?;
-                obj.metadata.managed_fields = None;
+                strip_noisy_metadata(&mut obj);
                 let mut object = serde_json::to_value(obj)
                     .map_err(|e| CapabilityError::Handler(e.to_string()))?;
                 // Never return Secret values through the generic path; the UI
@@ -456,8 +472,8 @@ pub fn get_manifest_capability(cache: Arc<ClientCache>) -> Capability {
                     .await
                     .map_err(|_| CapabilityError::Handler("get manifest timed out".into()))?
                     .map_err(|e| CapabilityError::Handler(e.to_string()))?;
-                // Drop noisy server-managed fields for a readable manifest.
-                obj.metadata.managed_fields = None;
+                // Drop noisy server-managed fields and duplicated last-applied-configuration.
+                strip_noisy_metadata(&mut obj);
                 Ok(ManifestOut {
                     yaml: manifest_yaml(&obj, &ar)?,
                 })
@@ -1430,6 +1446,7 @@ mod tests {
                 "annotations": {
                     "kubectl.kubernetes.io/last-applied-configuration":
                         r#"{"kind":"Secret","data":{"password":"aHVudGVyMg=="}}"#,
+                    "example.com/tier": "database",
                 },
             },
             "type": "Opaque",
@@ -1460,8 +1477,76 @@ mod tests {
         assert!(yaml.contains("password"), "keys must survive: {yaml}");
         assert!(yaml.contains("plain"), "keys must survive: {yaml}");
         assert!(
-            yaml.contains("last-applied-configuration"),
-            "the annotation key survives, only its value is blanked: {yaml}"
+            !yaml.contains("last-applied-configuration"),
+            "last-applied-configuration must be stripped for token efficiency: {yaml}"
+        );
+        assert!(
+            yaml.contains("example.com/tier"),
+            "other annotation keys survive, only their values are blanked: {yaml}"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_manifest_and_get_object_strip_last_applied_configuration_from_workloads() {
+        let served = serde_json::json!({
+            "apiVersion": "apps/v1",
+            "kind": "Deployment",
+            "metadata": {
+                "name": "web",
+                "namespace": "prod",
+                "managedFields": [{"manager": "kubectl", "operation": "Update"}],
+                "annotations": {
+                    "kubectl.kubernetes.io/last-applied-configuration":
+                        r#"{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"web"},"spec":{"replicas":3}}"#,
+                    "deployment.kubernetes.io/revision": "2",
+                },
+            },
+            "spec": { "replicas": 3 },
+        });
+        let (client, _uris) =
+            crate::list_cap::test_support::mock_slow_pages(vec![served], std::time::Duration::ZERO);
+        let cache = ClientCache::new(PathBuf::from("/x"));
+        cache.preload("fake", client).await;
+
+        let manifest_cap = get_manifest_capability(cache.clone());
+        let manifest_out = (manifest_cap.handler)(serde_json::json!({
+            "context": "fake", "kind": "Deployment", "namespace": "prod", "name": "web"
+        }))
+        .await
+        .expect("manifest succeeds");
+        let yaml = manifest_out["yaml"].as_str().expect("yaml returned");
+        assert!(
+            !yaml.contains("last-applied-configuration"),
+            "last-applied stripped: {yaml}"
+        );
+        assert!(
+            !yaml.contains("managedFields"),
+            "managedFields stripped: {yaml}"
+        );
+        assert!(
+            yaml.contains("deployment.kubernetes.io/revision"),
+            "real annotations preserved: {yaml}"
+        );
+
+        let object_cap = get_object_capability(cache);
+        let obj_out = (object_cap.handler)(serde_json::json!({
+            "context": "fake", "kind": "Deployment", "namespace": "prod", "name": "web"
+        }))
+        .await
+        .expect("object succeeds");
+        let obj = &obj_out["object"];
+        assert!(
+            obj["metadata"]["managedFields"].is_null(),
+            "managedFields stripped in object"
+        );
+        assert!(
+            obj["metadata"]["annotations"]["kubectl.kubernetes.io/last-applied-configuration"]
+                .is_null(),
+            "last-applied stripped in object"
+        );
+        assert_eq!(
+            obj["metadata"]["annotations"]["deployment.kubernetes.io/revision"],
+            "2"
         );
     }
 
