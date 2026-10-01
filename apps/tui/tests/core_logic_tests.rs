@@ -380,8 +380,10 @@ async fn tool_name_resolution_is_resilient_to_prefix_and_separator_variations() 
         )
         .await
         .unwrap();
-    // Reaching the handler (which errors on missing cluster context) proves the name resolved to the capability
-    assert!(res1.content.contains("context") || res1.content.contains("cluster") || res1.is_error);
+    // Reaching the handler (which errors on reading kubeconfig) proves the name resolved to the capability
+    // rather than failing at the RPC dispatcher with "unknown tool".
+    assert!(!res1.content.contains("unknown tool"));
+    assert!(res1.content.starts_with("handler error:"));
 
     let res2 = inv
         .call_tool(
@@ -390,7 +392,18 @@ async fn tool_name_resolution_is_resilient_to_prefix_and_separator_variations() 
         )
         .await
         .unwrap();
+    assert_eq!(res1.content, res2.content);
     assert_eq!(res1.is_error, res2.is_error);
+
+    let res3 = inv
+        .call_tool(
+            "k8s_listEndpoints",
+            &json!({"context": "prod", "namespace": "default"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res1.content, res3.content);
+    assert_eq!(res1.is_error, res3.is_error);
 }
 
 #[tokio::test]

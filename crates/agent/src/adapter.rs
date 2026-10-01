@@ -138,7 +138,7 @@ pub const BASE_SYSTEM_PROMPT: &str = concat!(
     "failed and try an alternative (e.g. getObject, getManifest, listEndpoints, listEndpointSlices). NEVER ",
     "fabricate a cluster issue or speculate on cluster health to explain away a failed tool call.\n",
     "5. Cross-layer incident correlation: When investigating why pods restarted, disappeared, or moved:\n",
-    "- If pods are young (<30m) with 0 restart count, they were evicted/rescheduled by Kubernetes, not crashed in-container.\n",
+    "- Young pods (<30m) with 0 restart count do not establish why they were created. Check events and owner history before attributing their creation to eviction, replacement, scaling, or a rollout.\n",
     "- Trace the timeline: Check listEvents for TaintManagerEviction, Killing, SuccessfulCreate, and node NodeNotReady events.\n",
     "- Inspect candidate nodes with listEvents or getObject for kernel OOMKilling, MemoryPressure, DiskPressure, and ReadOnlyFileSystemDetected.\n",
     "- Distinguish between application rollouts (new ReplicaSet revision or image) and infrastructure-level pod rescheduling.\n",
@@ -872,6 +872,20 @@ mod tests {
         assert_eq!(
             v["mcpServers"]["srelens"]["headers"]["Authorization"],
             format!("Bearer {token}")
+        );
+    }
+
+    #[test]
+    fn prompt_does_not_categorically_attribute_young_pods_to_eviction() {
+        assert!(
+            !BASE_SYSTEM_PROMPT.contains("they were evicted/rescheduled by Kubernetes"),
+            "prompt must not speculate or categorically attribute young pods to eviction"
+        );
+        assert!(
+            BASE_SYSTEM_PROMPT.contains(
+                "Young pods (<30m) with 0 restart count do not establish why they were created"
+            ),
+            "prompt must guide assistant to verify before concluding eviction"
         );
     }
 }

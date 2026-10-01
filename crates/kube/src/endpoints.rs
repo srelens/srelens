@@ -10,7 +10,6 @@ use serde::{Deserialize, Serialize};
 use srelens_capability::{Annotations, Capability, CapabilityError};
 
 use crate::client_cache::ClientCache;
-use crate::connect::request_timeout;
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ListEndpointsIn {
@@ -40,13 +39,24 @@ pub struct EndpointSummary {
     /// Comma-separated list of ready endpoint IP:port addresses, following `kubectl get ep`.
     /// E.g. "10.254.98.20:15012, 10.254.98.23:15012" or "<none>".
     pub endpoints: String,
-    /// Ready count vs total count, e.g. "3/3".
+    /// Ready count vs total count, e.g. "3/3" or "1000/1000+" if truncated.
     #[serde(rename = "readyCount")]
     pub ready_count: String,
     /// Comma-joined port descriptions, e.g. "15012/TCP, 15010/TCP".
     pub ports: String,
     /// Structured list of individual endpoints for deep programmatic inspection.
     pub addresses: Vec<EndpointItem>,
+    /// Whether this Endpoints resource has been truncated by Kubernetes (>1000 endpoints),
+    /// based on the `endpoints.kubernetes.io/over-capacity` annotation.
+    #[serde(default)]
+    pub truncated: bool,
+    /// Preserves the raw `endpoints.kubernetes.io/over-capacity` annotation value, if set.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "overCapacity"
+    )]
+    pub over_capacity: Option<String>,
     /// `creationTimestamp` (RFC 3339), so callers can derive a live age.
     pub created: Option<String>,
     pub age: String,
@@ -58,11 +68,28 @@ pub struct EndpointSummary {
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ListEndpointsOut {
     pub endpoints: Vec<EndpointSummary>,
+    #[serde(default)]
+    pub truncated: bool,
+}
+
+fn format_host_port(ip: &str, port: i32) -> String {
+    if ip.contains(':') {
+        format!("[{ip}]:{port}")
+    } else {
+        format!("{ip}:{port}")
+    }
 }
 
 pub(crate) fn summarise(ep: Endpoints) -> EndpointSummary {
     let name = ep.metadata.name.clone().unwrap_or_default();
     let namespace = ep.metadata.namespace.clone().unwrap_or_default();
+
+    let over_capacity = ep
+        .metadata
+        .annotations
+        .as_ref()
+        .and_then(|a| a.get("endpoints.kubernetes.io/over-capacity").cloned());
+    let is_truncated = over_capacity.as_deref() == Some("truncated");
 
     let mut ready_count = 0;
     let mut not_ready_count = 0;
@@ -109,7 +136,7 @@ pub(crate) fn summarise(ep: Endpoints) -> EndpointSummary {
                         });
                     } else {
                         for p in ports {
-                            ep_strings.push(format!("{}:{}", addr.ip, p.port));
+                            ep_strings.push(format_host_port(&addr.ip, p.port));
                             addresses.push(EndpointItem {
                                 ip: addr.ip.clone(),
                                 port: Some(p.port),
@@ -166,6 +193,8 @@ pub(crate) fn summarise(ep: Endpoints) -> EndpointSummary {
     let total = ready_count + not_ready_count;
     let ready_count_str = if total == 0 {
         "0/0".to_string()
+    } else if is_truncated {
+        format!("{ready_count}/{total}+")
     } else {
         format!("{ready_count}/{total}")
     };
@@ -185,6 +214,8 @@ pub(crate) fn summarise(ep: Endpoints) -> EndpointSummary {
         ready_count: ready_count_str,
         ports: ports_str,
         addresses,
+        truncated: is_truncated,
+        over_capacity,
         created: crate::creation_rfc3339(ep.metadata.creation_timestamp.as_ref()),
         age: crate::humanize_age(ep.metadata.creation_timestamp.as_ref()),
         created_at: crate::creation_timestamp_iso(ep.metadata.creation_timestamp.as_ref()),
@@ -205,13 +236,14 @@ pub fn list_endpoints_capability(cache: Arc<ClientCache>) -> Capability {
                     .await
                     .map_err(CapabilityError::Handler)?;
                 let api: Api<Endpoints> = crate::scoped_api(client, &input.namespace);
-                let list =
-                    tokio::time::timeout(request_timeout(), api.list(&ListParams::default()))
-                        .await
-                        .map_err(|_| CapabilityError::Handler("list endpoints timed out".into()))?
-                        .map_err(|e| CapabilityError::Handler(e.to_string()))?;
+                // No outer timeout: `list_capped` spends `request_timeout()` on
+                // each page.
+                let (items, truncated) = crate::list_cap::list_capped(&api, ListParams::default())
+                    .await
+                    .map_err(|e| e.into_capability_error("list endpoints"))?;
                 Ok(ListEndpointsOut {
-                    endpoints: list.items.into_iter().map(summarise).collect(),
+                    endpoints: items.into_iter().map(summarise).collect(),
+                    truncated,
                 })
             }
         },
@@ -346,5 +378,67 @@ mod tests {
         assert_eq!(not_ready.ip, "10.254.98.99");
         assert!(!not_ready.ready);
         assert_eq!(not_ready.pod_name.as_deref(), Some("istiod-pod-starting"));
+    }
+
+    #[test]
+    fn summarises_ipv6_endpoints_with_brackets() {
+        let ep = Endpoints {
+            metadata: ObjectMeta {
+                name: Some("ipv6-svc".into()),
+                namespace: Some("default".into()),
+                ..Default::default()
+            },
+            subsets: Some(vec![EndpointSubset {
+                addresses: Some(vec![EndpointAddress {
+                    ip: "2001:db8::1".into(),
+                    ..Default::default()
+                }]),
+                ports: Some(vec![EndpointPort {
+                    port: 443,
+                    protocol: Some("TCP".into()),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }]),
+        };
+        let summary = summarise(ep);
+        assert_eq!(summary.endpoints, "[2001:db8::1]:443");
+        assert_eq!(summary.ready_count, "1/1");
+        assert!(!summary.truncated);
+    }
+
+    #[test]
+    fn summarises_over_capacity_truncated_endpoints() {
+        use std::collections::BTreeMap;
+        let mut annotations = BTreeMap::new();
+        annotations.insert(
+            "endpoints.kubernetes.io/over-capacity".to_string(),
+            "truncated".to_string(),
+        );
+
+        let ep = Endpoints {
+            metadata: ObjectMeta {
+                name: Some("huge-svc".into()),
+                namespace: Some("default".into()),
+                annotations: Some(annotations),
+                ..Default::default()
+            },
+            subsets: Some(vec![EndpointSubset {
+                addresses: Some(vec![EndpointAddress {
+                    ip: "10.0.0.1".into(),
+                    ..Default::default()
+                }]),
+                ports: Some(vec![EndpointPort {
+                    port: 80,
+                    protocol: Some("TCP".into()),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }]),
+        };
+        let summary = summarise(ep);
+        assert!(summary.truncated);
+        assert_eq!(summary.over_capacity.as_deref(), Some("truncated"));
+        assert_eq!(summary.ready_count, "1/1+");
     }
 }
