@@ -421,6 +421,7 @@ export function CodeEditor({
       editorTheme(minHeight, maxHeight, fill),
       syntaxHighlighting(highlightStyle),
       EditorView.editable.of(!readOnly),
+      EditorState.allowMultipleSelections.of(true),
       EditorState.readOnly.of(readOnly),
       EditorView.updateListener.of((u) => {
         if (u.docChanged) onChangeRef.current?.(u.state.doc.toString());
