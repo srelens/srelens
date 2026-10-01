@@ -801,6 +801,135 @@ pub fn parse_scale_event(message: &str) -> String {
     "Scaled".to_string()
 }
 
+/// Produces a punchy, single-line diagnostic summary for compact table rows,
+/// extracting core blockers from verbose scheduler, probe, or storage events.
+pub fn condense_diagnostic(_category: FailureCategory, detail: &str) -> String {
+    let trimmed = detail.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    // 1. Kubernetes scheduler node availability messages
+    if trimmed.contains("nodes are available:") || trimmed.contains("nodes available:") {
+        return condense_scheduling_failure(trimmed);
+    }
+
+    // 2. Probe failure events
+    if trimmed.starts_with("Readiness probe failed")
+        || trimmed.starts_with("Liveness probe failed")
+        || trimmed.starts_with("Startup probe failed")
+    {
+        let probe_type = if trimmed.starts_with("Readiness") {
+            "Readiness"
+        } else if trimmed.starts_with("Liveness") {
+            "Liveness"
+        } else {
+            "Startup"
+        };
+        let lower = trimmed.to_lowercase();
+        if let Some(pos) = lower.find("statuscode: ") {
+            let code = trimmed[pos + 12..]
+                .chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect::<String>();
+            if !code.is_empty() {
+                return format!("{probe_type} probe failed (HTTP {code})");
+            }
+        }
+        if lower.contains("connection refused") {
+            return format!("{probe_type} probe failed (connection refused)");
+        }
+        if lower.contains("timeout") || lower.contains("timed out") {
+            return format!("{probe_type} probe failed (timed out)");
+        }
+    }
+
+    // 3. Storage / PVC errors
+    if trimmed.to_lowercase().contains("persistentvolumeclaim") {
+        if let Some(pos) = trimmed.to_lowercase().find("persistentvolumeclaim ") {
+            let after = &trimmed[pos + 22..];
+            if let Some(name_end) = after.find(' ') {
+                let pvc_name = after[..name_end].trim_matches('"');
+                if trimmed.contains("not found") {
+                    return format!("PVC \"{pvc_name}\" not found");
+                }
+            }
+        }
+        if trimmed.contains("unbound immediate") || trimmed.contains("waiting for a volume") {
+            return "PVC volume binding pending".to_string();
+        }
+    }
+
+    // 4. Default: truncate nicely if excessively long (> 80 chars)
+    if trimmed.chars().count() > 80 {
+        let mut out: String = trimmed.chars().take(77).collect();
+        out.push('…');
+        out
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn condense_scheduling_failure(msg: &str) -> String {
+    // Extract node count prefix: e.g. "0/20 nodes are available:" -> "0/20 nodes:"
+    let (prefix, body) = if let Some(idx) = msg.find("nodes are available:") {
+        let node_part = msg[..idx].trim();
+        let body_part = &msg[idx + "nodes are available:".len()..];
+        (format!("{node_part} nodes:"), body_part)
+    } else if let Some(idx) = msg.find("nodes available:") {
+        let node_part = msg[..idx].trim();
+        let body_part = &msg[idx + "nodes available:".len()..];
+        (format!("{node_part} nodes:"), body_part)
+    } else {
+        ("Unschedulable:".to_string(), msg)
+    };
+
+    // Discard secondary preemption / claims trailer after period
+    let primary_reasons = body.split('.').next().unwrap_or(body).trim();
+
+    let mut reasons = Vec::new();
+    for part in primary_reasons.split(',') {
+        let p = part.trim();
+        if p.is_empty() {
+            continue;
+        }
+        let lower = p.to_lowercase();
+        // Extract count if present at start of segment
+        let count_str = p
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect::<String>();
+        let count_prefix = if !count_str.is_empty() {
+            format!("{count_str} ")
+        } else {
+            String::new()
+        };
+
+        if lower.contains("insufficient cpu") {
+            reasons.push(format!("{count_prefix}CPU"));
+        } else if lower.contains("insufficient memory") {
+            reasons.push(format!("{count_prefix}Memory"));
+        } else if lower.contains("affinity") || lower.contains("selector") {
+            reasons.push(format!("{count_prefix}Affinity"));
+        } else if lower.contains("taint") {
+            reasons.push(format!("{count_prefix}Taint"));
+        } else if lower.contains("too many pods") {
+            reasons.push(format!("{count_prefix}PodLimit"));
+        } else if lower.contains("volume") {
+            reasons.push(format!("{count_prefix}Volume"));
+        } else if !p.is_empty() {
+            let words: Vec<&str> = p.split_whitespace().take(3).collect();
+            reasons.push(words.join(" "));
+        }
+    }
+
+    if reasons.is_empty() {
+        prefix
+    } else {
+        format!("{prefix} {}", reasons.join(", "))
+    }
+}
+
 /// Whether any of `events` is a Warning that last fired at or after `cutoff`.
 fn warning_in_window(events: Option<&Vec<&Event>>, cutoff: &Timestamp) -> bool {
     events.into_iter().flatten().any(|ev| {
@@ -5935,5 +6064,39 @@ mod tests {
         let d = &report.deployments[0];
         assert_eq!(d.incident_status, IncidentStatus::Healthy);
         assert_eq!(report.summary.flapping_count, 0);
+    }
+
+    #[test]
+    fn test_condense_scheduling_failure_multiple_reasons() {
+        let raw = "0/20 nodes are available: 2 Insufficient cpu, 2 Too many pods, 3 node(s) had untolerated taint(s), 7 node(s) didn't match Pod's node affinity/selector, 9 Insufficient memory. no new claims to deallocate, preemption: 0/20 nodes are available: 10 No preemption victims found for incoming pod, 10 Preemption is not helpful for scheduling.";
+        let condensed = condense_diagnostic(FailureCategory::Compute, raw);
+        assert_eq!(
+            condensed,
+            "0/20 nodes: 2 CPU, 2 PodLimit, 3 Taint, 7 Affinity, 9 Memory"
+        );
+    }
+
+    #[test]
+    fn test_condense_probe_failures() {
+        let raw = "Readiness probe failed: HTTP probe failed with statuscode: 500";
+        assert_eq!(
+            condense_diagnostic(FailureCategory::Network, raw),
+            "Readiness probe failed (HTTP 500)"
+        );
+
+        let conn_refused = "Liveness probe failed: Get \"http://10.254.100.93:8080/healthz\": dial tcp 10.254.100.93:8080: connect: connection refused";
+        assert_eq!(
+            condense_diagnostic(FailureCategory::Network, conn_refused),
+            "Liveness probe failed (connection refused)"
+        );
+    }
+
+    #[test]
+    fn test_condense_pvc_failures() {
+        let raw = "persistentvolumeclaim \"data-pvc\" not found";
+        assert_eq!(
+            condense_diagnostic(FailureCategory::Storage, raw),
+            "PVC \"data-pvc\" not found"
+        );
     }
 }

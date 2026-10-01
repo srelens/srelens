@@ -736,16 +736,14 @@ impl App {
             self.argo_tick_counter = 0;
         }
 
-        // Refresh the Changed triage report every ~10 seconds (100 ticks at
-        // 100ms). Each refresh lists seven kinds cluster-wide and tails logs,
-        // so it runs slower than the cheap views; `r` refreshes on demand.
-        if matches!(self.active_view, ActiveView::Changed(_)) {
-            self.changed_tick_counter = self.changed_tick_counter.saturating_add(1);
-            if self.changed_tick_counter % 100 == 1 && !self.changed_refreshing {
+        // Refresh the Changed triage report every 5 seconds while active.
+        if let ActiveView::Changed(changed) = &mut self.active_view {
+            let due = changed
+                .last_refreshed_at
+                .map_or(true, |t| t.elapsed() >= std::time::Duration::from_secs(5));
+            if due && !self.changed_refreshing {
                 self.refresh_changed_triage();
             }
-        } else {
-            self.changed_tick_counter = 0;
         }
     }
 
@@ -7639,6 +7637,7 @@ impl App {
                     self.filter_buffer = changed.filter_query.clone();
                 }
                 KeyCode::Char('r') => {
+                    changed.is_refreshing = true;
                     let msg = if self.changed_refreshing || self.argo_refreshing {
                         "Refresh already in progress"
                     } else {
@@ -11174,6 +11173,7 @@ impl App {
             return;
         }
         let (window, ns, opts) = if let ActiveView::Changed(changed) = &mut self.active_view {
+            changed.is_refreshing = true;
             if changed.report.is_none() {
                 changed.is_loading = true;
             }
@@ -11620,6 +11620,8 @@ impl App {
     ) {
         self.changed_refreshing = false;
         if let ActiveView::Changed(changed) = &mut self.active_view {
+            changed.is_refreshing = false;
+            changed.last_refreshed_at = Some(std::time::Instant::now());
             let cur_ns = if self.active_namespace.is_empty() {
                 None
             } else {

@@ -331,6 +331,10 @@ pub struct ChangedViewState {
     pub include_scaled: bool,
     /// Whether to display the SRE scope and triage guide banner (`b` / `?`).
     pub show_guide_banner: bool,
+    /// Whether an asynchronous background or manual triage refresh is in flight.
+    pub is_refreshing: bool,
+    /// Timestamp of when the triage report was last successfully updated.
+    pub last_refreshed_at: Option<std::time::Instant>,
 }
 
 impl ChangedViewState {
@@ -355,6 +359,8 @@ impl ChangedViewState {
             include_failing: true,
             include_scaled: false,
             show_guide_banner: true,
+            is_refreshing: false,
+            last_refreshed_at: None,
         }
     }
 
@@ -1315,6 +1321,22 @@ fn summary_banner(state: &ChangedViewState) -> (Block<'static>, Line<'static>, L
                 .fg(Theme::fg())
                 .add_modifier(Modifier::BOLD),
         ),
+        if state.is_refreshing {
+            Span::styled(
+                "  │  ⟳ Refreshing...",
+                Style::default()
+                    .fg(Theme::cyan())
+                    .add_modifier(Modifier::BOLD),
+            )
+        } else if let Some(last) = state.last_refreshed_at {
+            let secs = last.elapsed().as_secs();
+            Span::styled(
+                format!("  │  ⟳ Live (5s) [{}s ago]", secs),
+                Style::default().fg(Theme::dim()),
+            )
+        } else {
+            Span::styled("  │  ⟳ Live (5s)", Style::default().fg(Theme::dim()))
+        },
     ]);
 
     (block, line1, controls)
@@ -1531,9 +1553,10 @@ fn build_workload_row(
     };
     let ready_cell = Cell::from(Span::styled(ready_str, ready_style));
 
-    let detail_text = if d.failure_category != FailureCategory::None || !d.failure_detail.is_empty()
-    {
-        format!("{} {}", d.failure_category.badge(), d.failure_detail)
+    let short_detail =
+        srelens_kube::changed::condense_diagnostic(d.failure_category, &d.failure_detail);
+    let detail_text = if d.failure_category != FailureCategory::None || !short_detail.is_empty() {
+        format!("{} {}", d.failure_category.badge(), short_detail)
             .trim()
             .to_string()
     } else if !d.image_diff.is_empty() {

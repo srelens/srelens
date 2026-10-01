@@ -1484,3 +1484,49 @@ fn changed_view_renders_sre_guide_banner_and_respects_toggle_and_height() {
         "{full_short}"
     );
 }
+
+#[test]
+fn changed_view_renders_live_refresh_status_and_condensed_diagnostic() {
+    let _settings = common::env::isolate_settings();
+    let mut state = ChangedViewState::new();
+    let mut report = sample_report();
+
+    // Set a verbose scheduling failure on the deployment
+    let verbose_sched = "0/20 nodes are available: 2 Insufficient cpu, 2 Too many pods, 3 node(s) had untolerated taint(s), 7 node(s) didn't match Pod's node affinity/selector, 9 Insufficient memory. no new claims to deallocate, preemption: 0/20 nodes are available: 10 No preemption victims found for incoming pod, 10 Preemption is not helpful for scheduling.";
+    report.deployments[0].failure_category = srelens_kube::changed::FailureCategory::Compute;
+    report.deployments[0].failure_detail = verbose_sched.to_string();
+    report.deployments[0].incident_status = srelens_kube::changed::IncidentStatus::Pending;
+    state.set_report(report);
+
+    // 1. Idle state shows live refresh indicator
+    let lines = render_lines(180, 35, |f| render_changed_view(f, f.area(), &state));
+    let full = lines.join("\n");
+    assert!(full.contains("⟳ Live (5s)"), "{full}");
+
+    // Table row contains condensed diagnostic and no preemption boilerplate
+    let row_line = lines.iter().find(|l| l.contains("checkout-api")).unwrap();
+    assert!(
+        row_line.contains("[COMPUTE] 0/20 nodes: 2 CPU, 2 PodLimit, 3 Taint, 7 Affinity, 9 Memory"),
+        "{row_line}"
+    );
+    assert!(
+        !row_line.contains("No preemption victims found"),
+        "table row should not contain preemption boilerplate: {row_line}"
+    );
+
+    // Bottom card retains the full diagnostic
+    let card = render_card(&state);
+    assert!(
+        card.contains("0/20 nodes are available: 2 Insufficient cpu"),
+        "card must keep full diagnostic: {card}"
+    );
+
+    // 2. Active refreshing state shows Refreshing...
+    state.is_refreshing = true;
+    let lines_refreshing = render_lines(160, 35, |f| render_changed_view(f, f.area(), &state));
+    let full_refreshing = lines_refreshing.join("\n");
+    assert!(
+        full_refreshing.contains("⟳ Refreshing..."),
+        "{full_refreshing}"
+    );
+}
