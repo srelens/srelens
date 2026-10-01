@@ -38,8 +38,8 @@ pub enum IncidentStatus {
     ImageError,
     #[serde(rename = "pending")]
     Pending,
-    #[serde(rename = "flapping")]
-    Flapping,
+    #[serde(rename = "probeFailure", alias = "flapping")]
+    ProbeFailure,
     #[serde(rename = "stalled")]
     Stalled,
     #[serde(rename = "rolling")]
@@ -60,7 +60,7 @@ impl IncidentStatus {
             Self::ConfigError => "ConfigError",
             Self::ImageError => "ImageError",
             Self::Pending => "Pending",
-            Self::Flapping => "Flapping",
+            Self::ProbeFailure => "ProbeFailure",
             Self::Stalled => "Stalled",
             Self::Rolling => "Rolling",
             Self::Healthy => "Healthy",
@@ -76,7 +76,7 @@ impl IncidentStatus {
             Self::ConfigError => "⚠️",
             Self::ImageError => "🚫",
             Self::Pending => "⏳",
-            Self::Flapping => "⚡",
+            Self::ProbeFailure => "🩺",
             Self::Stalled => "🚫",
             Self::Rolling => "🔄",
             Self::Healthy => "🟢",
@@ -94,7 +94,7 @@ impl IncidentStatus {
                 | Self::ImageError
                 | Self::Pending
                 | Self::Stalled
-                | Self::Flapping
+                | Self::ProbeFailure
         )
     }
 }
@@ -373,14 +373,21 @@ pub struct TriageSummary {
     pub error_count: usize,
     #[serde(rename = "pendingCount")]
     pub pending_count: usize,
-    #[serde(default, rename = "flappingCount")]
-    pub flapping_count: usize,
+    #[serde(default, rename = "probeFailureCount", alias = "flappingCount")]
+    pub probe_failure_count: usize,
     #[serde(rename = "rollingCount")]
     pub rolling_count: usize,
     #[serde(rename = "healthyCount")]
     pub healthy_count: usize,
     #[serde(rename = "headlineMessage")]
     pub headline_message: String,
+}
+
+impl TriageSummary {
+    #[inline]
+    pub fn flapping_count(&self) -> usize {
+        self.probe_failure_count
+    }
 }
 
 /// What a triage run includes and fetches.
@@ -1568,7 +1575,14 @@ fn evaluate_pod_failures(
     )
 }
 
-fn evaluate_workload_flapping(
+struct WorkloadProbeRestartEval {
+    is_probe_failure: bool,
+    probe_failure_count: usize,
+    probe_failure_detail: Option<String>,
+    has_active_restart_flapping: bool,
+}
+
+fn evaluate_workload_probes_and_restarts(
     current_pods: &[&Pod],
     events_by_object: &HashMap<(String, String, String), Vec<&Event>>,
     ns: &str,
@@ -1576,13 +1590,16 @@ fn evaluate_workload_flapping(
     now: Timestamp,
     ready_replicas: i32,
     desired_replicas: i32,
-) -> (bool, usize, bool) {
+) -> WorkloadProbeRestartEval {
     let recent_cutoff = now
         .checked_sub(SignedDuration::from_secs(900))
         .unwrap_or(now);
 
     let mut probe_failure_count = 0;
     let mut has_recent_probe_failure = false;
+    let mut latest_probe_detail: Option<String> = None;
+    let mut latest_probe_ts: Option<Timestamp> = None;
+    let mut min_failure_threshold: usize = 3;
 
     for p in current_pods {
         let p_name = p.metadata.name.as_deref().unwrap_or_default();
@@ -1604,7 +1621,10 @@ fn evaluate_workload_flapping(
             events_by_object.get(&("Pod".to_string(), ns.to_string(), p_name.to_string()))
         {
             for ev in p_events {
-                if ev.reason.as_deref() == Some("Unhealthy") {
+                let reason = ev.reason.as_deref().unwrap_or("");
+                let msg = ev.message.as_deref().unwrap_or("");
+                let msg_lower = msg.to_lowercase();
+                if reason == "Unhealthy" || msg_lower.contains("probe failed") {
                     let ev_ts = event_last_timestamp(ev);
                     if cutoff_ts.map_or(true, |c| ev_ts.is_some_and(|t| t >= *c)) {
                         // Ignore startup warmup probe failures that occurred before the pod successfully became ready
@@ -1622,6 +1642,77 @@ fn evaluate_workload_flapping(
                             if ev_ts.is_some_and(|t| t >= active_cutoff) {
                                 has_recent_probe_failure = true;
                             }
+
+                            // Extract probe kind and probe spec parameters from the Pod
+                            let probe_type = if msg_lower.contains("readiness") {
+                                "Readiness"
+                            } else if msg_lower.contains("liveness") {
+                                "Liveness"
+                            } else if msg_lower.contains("startup") {
+                                "Startup"
+                            } else {
+                                "Probe"
+                            };
+
+                            let target_container_name =
+                                ev.involved_object.field_path.as_deref().and_then(|fp| {
+                                    let start = fp.find('{')?;
+                                    let end = fp.rfind('}')?;
+                                    if end > start + 1 {
+                                        Some(&fp[start + 1..end])
+                                    } else {
+                                        None
+                                    }
+                                });
+
+                            let containers = p
+                                .spec
+                                .as_ref()
+                                .map(|s| s.containers.as_slice())
+                                .unwrap_or(&[]);
+                            let container = target_container_name
+                                .and_then(|c_name| containers.iter().find(|c| c.name == c_name))
+                                .or_else(|| {
+                                    containers.iter().find(|c| match probe_type {
+                                        "Readiness" => c.readiness_probe.is_some(),
+                                        "Liveness" => c.liveness_probe.is_some(),
+                                        "Startup" => c.startup_probe.is_some(),
+                                        _ => {
+                                            c.readiness_probe.is_some()
+                                                || c.liveness_probe.is_some()
+                                        }
+                                    })
+                                })
+                                .or_else(|| containers.first());
+
+                            let probe = container.and_then(|c| match probe_type {
+                                "Readiness" => c.readiness_probe.as_ref(),
+                                "Liveness" => c.liveness_probe.as_ref(),
+                                "Startup" => c.startup_probe.as_ref(),
+                                _ => c.readiness_probe.as_ref().or(c.liveness_probe.as_ref()),
+                            });
+
+                            let threshold = probe.and_then(|pr| pr.failure_threshold).unwrap_or(3);
+                            let period = probe.and_then(|pr| pr.period_seconds).unwrap_or(10);
+                            let timeout = probe.and_then(|pr| pr.timeout_seconds).unwrap_or(1);
+                            min_failure_threshold = min_failure_threshold.min(threshold as usize);
+
+                            let clean_err = if let Some(idx) = msg.find("probe failed: ") {
+                                msg[idx + "probe failed: ".len()..].trim()
+                            } else if let Some(idx) = msg.find("probe failed:") {
+                                msg[idx + "probe failed:".len()..].trim()
+                            } else {
+                                msg.trim()
+                            };
+
+                            let detail_str = format!(
+                                "{probe_type} probe failed (threshold: {threshold}, period: {period}s, timeout: {timeout}s): {clean_err}"
+                            );
+
+                            if latest_probe_detail.is_none() || ev_ts >= latest_probe_ts {
+                                latest_probe_detail = Some(detail_str);
+                                latest_probe_ts = ev_ts;
+                            }
                         }
                     }
                 }
@@ -1629,40 +1720,13 @@ fn evaluate_workload_flapping(
         }
     }
 
-    let restart_in_window = current_pods.iter().any(|p| {
-        let pod_created_in_window = p
-            .metadata
-            .creation_timestamp
-            .as_ref()
-            .and_then(|t| cutoff_ts.map(|c| t.0 >= *c))
-            .unwrap_or(false);
-        if pod_created_in_window
-            && p.status
-                .as_ref()
-                .and_then(|s| s.container_statuses.as_ref())
-                .map_or(false, |cs| cs.iter().any(|c| c.restart_count > 0))
-        {
-            return true;
-        }
-        if let Some(ref st) = p.status {
-            if let Some(ref cs_list) = st.container_statuses {
-                for cs in cs_list {
-                    if cs.restart_count > 0 {
-                        if let Some(ref term) =
-                            cs.last_state.as_ref().and_then(|s| s.terminated.as_ref())
-                        {
-                            if let Some(ref finished) = term.finished_at {
-                                if cutoff_ts.map_or(true, |c| finished.0 >= *c) {
-                                    return true;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+    let is_probe_failure = if probe_failure_count == 0 {
         false
-    });
+    } else if ready_replicas < desired_replicas {
+        true
+    } else {
+        probe_failure_count >= min_failure_threshold && has_recent_probe_failure
+    };
 
     let active_restart_cutoff = match cutoff_ts {
         Some(c) if *c > recent_cutoff => *c,
@@ -1702,17 +1766,12 @@ fn evaluate_workload_flapping(
         false
     });
 
-    let has_active_probe_flapping = if probe_failure_count == 0 {
-        false
-    } else if ready_replicas < desired_replicas {
-        true
-    } else {
-        probe_failure_count >= 3 && has_recent_probe_failure
-    };
-
-    let is_flapping = has_active_restart_flapping || has_active_probe_flapping;
-
-    (is_flapping, probe_failure_count, restart_in_window)
+    WorkloadProbeRestartEval {
+        is_probe_failure,
+        probe_failure_count,
+        probe_failure_detail: latest_probe_detail,
+        has_active_restart_flapping,
+    }
 }
 
 /// Evaluates deployments, statefulsets, cronjobs, replicasets, pods, events, and GitOps applications
@@ -1936,7 +1995,7 @@ pub fn evaluate_changed_triage(
             detected_failure_detail,
         ) = evaluate_pod_failures(&current_pods, &events_by_object, &dep_ns);
 
-        let (is_flapping, probe_failure_count, restart_in_window) = evaluate_workload_flapping(
+        let probe_eval = evaluate_workload_probes_and_restarts(
             &current_pods,
             &events_by_object,
             &dep_ns,
@@ -1953,7 +2012,8 @@ pub fn evaluate_changed_triage(
             || pending_pod_count > 0
             || progress_deadline_exceeded
             || (desired_replicas > 0 && ready_replicas < desired_replicas)
-            || is_flapping;
+            || probe_eval.is_probe_failure
+            || probe_eval.has_active_restart_flapping;
 
         let mut change_detail = None;
         let change = if rolled_out {
@@ -2087,7 +2147,8 @@ pub fn evaluate_changed_triage(
             && config_error_count == 0
             && image_error_count == 0
             && pending_pod_count == 0
-            && !is_flapping
+            && !probe_eval.is_probe_failure
+            && !probe_eval.has_active_restart_flapping
         {
             RolloutStatus::Complete
         } else if !failing_pod_names.is_empty() {
@@ -2098,7 +2159,9 @@ pub fn evaluate_changed_triage(
 
         let incident_status = if oom_killed_count > 0 {
             IncidentStatus::OomKilled
-        } else if crash_loop_count > 0 {
+        } else if probe_eval.is_probe_failure {
+            IncidentStatus::ProbeFailure
+        } else if crash_loop_count > 0 || probe_eval.has_active_restart_flapping {
             IncidentStatus::CrashLoop
         } else if config_error_count > 0 {
             IncidentStatus::ConfigError
@@ -2108,8 +2171,6 @@ pub fn evaluate_changed_triage(
             IncidentStatus::Pending
         } else if progress_deadline_exceeded {
             IncidentStatus::Stalled
-        } else if is_flapping {
-            IncidentStatus::Flapping
         } else if rollout_status == RolloutStatus::Progressing {
             IncidentStatus::Rolling
         } else if rollout_status == RolloutStatus::Complete {
@@ -2120,44 +2181,49 @@ pub fn evaluate_changed_triage(
             IncidentStatus::Unknown
         };
 
-        let failure_category = if detected_failure_category != FailureCategory::None {
+        let failure_category = if probe_eval.is_probe_failure {
+            FailureCategory::Probe
+        } else if detected_failure_category != FailureCategory::None {
             detected_failure_category
-        } else if oom_killed_count > 0 || crash_loop_count > 0 || config_error_count > 0 {
+        } else if oom_killed_count > 0
+            || crash_loop_count > 0
+            || probe_eval.has_active_restart_flapping
+            || config_error_count > 0
+        {
             FailureCategory::App
         } else if image_error_count > 0 {
             FailureCategory::Image
         } else if pending_pod_count > 0 {
             FailureCategory::Compute
-        } else if is_flapping {
-            if probe_failure_count > 0 && !restart_in_window {
-                FailureCategory::Probe
-            } else {
-                FailureCategory::App
-            }
         } else {
             FailureCategory::None
         };
 
-        let failure_detail = if !detected_failure_detail.is_empty() {
+        let failure_detail = if probe_eval.is_probe_failure {
+            if let Some(ref d) = probe_eval.probe_failure_detail {
+                d.clone()
+            } else if probe_eval.probe_failure_count > 0 {
+                format!(
+                    "{} probe failure(s) in window",
+                    probe_eval.probe_failure_count
+                )
+            } else {
+                "Probe failure in window".to_string()
+            }
+        } else if !detected_failure_detail.is_empty() {
             detected_failure_detail
         } else if oom_killed_count > 0 {
             format!("{oom_killed_count} pod(s) OOMKilled (Exit 137)")
         } else if crash_loop_count > 0 {
             format!("{crash_loop_count} pod(s) in CrashLoopBackOff")
+        } else if probe_eval.has_active_restart_flapping {
+            format!("{restart_count} container restart(s) in window (CrashLoopBackOff)")
         } else if config_error_count > 0 {
             format!("{config_error_count} pod(s) configuration error")
         } else if image_error_count > 0 {
             format!("{image_error_count} pod(s) image pull failure")
         } else if progress_deadline_exceeded {
             "Rollout stalled: ProgressDeadlineExceeded".to_string()
-        } else if is_flapping {
-            if probe_failure_count > 0 && restart_in_window && restart_count >= 2 {
-                format!("{restart_count} restart(s), {probe_failure_count} probe failure(s)")
-            } else if probe_failure_count > 0 {
-                format!("{probe_failure_count} probe failure(s) in window")
-            } else {
-                format!("{restart_count} container restart(s) in window")
-            }
         } else if ready_replicas < desired_replicas {
             format!("{ready_replicas}/{desired_replicas} Ready")
         } else {
@@ -2206,7 +2272,7 @@ pub fn evaluate_changed_triage(
             failing_pods_count: failing_pod_names.len(),
             crash_loop_count,
             oom_killed_count,
-            probe_failure_count,
+            probe_failure_count: probe_eval.probe_failure_count,
             restart_count,
             primary_symptoms,
             pod_symptoms,
@@ -2252,7 +2318,7 @@ pub fn evaluate_changed_triage(
             detected_failure_detail,
         ) = evaluate_pod_failures(&current_pods, &events_by_object, &sts_ns);
 
-        let (is_flapping, probe_failure_count, restart_in_window) = evaluate_workload_flapping(
+        let probe_eval = evaluate_workload_probes_and_restarts(
             &current_pods,
             &events_by_object,
             &sts_ns,
@@ -2268,7 +2334,8 @@ pub fn evaluate_changed_triage(
             || image_error_count > 0
             || pending_pod_count > 0
             || (desired_replicas > 0 && ready_replicas < desired_replicas)
-            || is_flapping;
+            || probe_eval.is_probe_failure
+            || probe_eval.has_active_restart_flapping;
 
         let sts_events = events_by_object
             .get(&("StatefulSet".to_string(), sts_ns.clone(), sts_name.clone()))
@@ -2397,7 +2464,8 @@ pub fn evaluate_changed_triage(
             && config_error_count == 0
             && image_error_count == 0
             && pending_pod_count == 0
-            && !is_flapping
+            && !probe_eval.is_probe_failure
+            && !probe_eval.has_active_restart_flapping
         {
             RolloutStatus::Complete
         } else if !failing_pod_names.is_empty() {
@@ -2408,7 +2476,9 @@ pub fn evaluate_changed_triage(
 
         let incident_status = if oom_killed_count > 0 {
             IncidentStatus::OomKilled
-        } else if crash_loop_count > 0 {
+        } else if probe_eval.is_probe_failure {
+            IncidentStatus::ProbeFailure
+        } else if crash_loop_count > 0 || probe_eval.has_active_restart_flapping {
             IncidentStatus::CrashLoop
         } else if config_error_count > 0 {
             IncidentStatus::ConfigError
@@ -2416,8 +2486,6 @@ pub fn evaluate_changed_triage(
             IncidentStatus::ImageError
         } else if pending_pod_count > 0 {
             IncidentStatus::Pending
-        } else if is_flapping {
-            IncidentStatus::Flapping
         } else if rollout_status == RolloutStatus::Progressing {
             IncidentStatus::Rolling
         } else if rollout_status == RolloutStatus::Complete {
@@ -2428,42 +2496,47 @@ pub fn evaluate_changed_triage(
             IncidentStatus::Unknown
         };
 
-        let failure_category = if detected_failure_category != FailureCategory::None {
+        let failure_category = if probe_eval.is_probe_failure {
+            FailureCategory::Probe
+        } else if detected_failure_category != FailureCategory::None {
             detected_failure_category
-        } else if oom_killed_count > 0 || crash_loop_count > 0 || config_error_count > 0 {
+        } else if oom_killed_count > 0
+            || crash_loop_count > 0
+            || probe_eval.has_active_restart_flapping
+            || config_error_count > 0
+        {
             FailureCategory::App
         } else if image_error_count > 0 {
             FailureCategory::Image
         } else if pending_pod_count > 0 {
             FailureCategory::Compute
-        } else if is_flapping {
-            if probe_failure_count > 0 && !restart_in_window {
-                FailureCategory::Probe
-            } else {
-                FailureCategory::App
-            }
         } else {
             FailureCategory::None
         };
 
-        let failure_detail = if !detected_failure_detail.is_empty() {
+        let failure_detail = if probe_eval.is_probe_failure {
+            if let Some(ref d) = probe_eval.probe_failure_detail {
+                d.clone()
+            } else if probe_eval.probe_failure_count > 0 {
+                format!(
+                    "{} probe failure(s) in window",
+                    probe_eval.probe_failure_count
+                )
+            } else {
+                "Probe failure in window".to_string()
+            }
+        } else if !detected_failure_detail.is_empty() {
             detected_failure_detail
         } else if oom_killed_count > 0 {
             format!("{oom_killed_count} pod(s) OOMKilled (Exit 137)")
         } else if crash_loop_count > 0 {
             format!("{crash_loop_count} pod(s) in CrashLoopBackOff")
+        } else if probe_eval.has_active_restart_flapping {
+            format!("{restart_count} container restart(s) in window (CrashLoopBackOff)")
         } else if config_error_count > 0 {
             format!("{config_error_count} pod(s) configuration error")
         } else if image_error_count > 0 {
             format!("{image_error_count} pod(s) image pull failure")
-        } else if is_flapping {
-            if probe_failure_count > 0 && restart_in_window && restart_count >= 2 {
-                format!("{restart_count} restart(s), {probe_failure_count} probe failure(s)")
-            } else if probe_failure_count > 0 {
-                format!("{probe_failure_count} probe failure(s) in window")
-            } else {
-                format!("{restart_count} container restart(s) in window")
-            }
         } else if ready_replicas < desired_replicas {
             format!("{ready_replicas}/{desired_replicas} Ready")
         } else {
@@ -2507,7 +2580,7 @@ pub fn evaluate_changed_triage(
             failing_pods_count: failing_pod_names.len(),
             crash_loop_count,
             oom_killed_count,
-            probe_failure_count,
+            probe_failure_count: probe_eval.probe_failure_count,
             restart_count,
             primary_symptoms,
             pod_symptoms,
@@ -2564,7 +2637,7 @@ pub fn evaluate_changed_triage(
             detected_failure_detail,
         ) = evaluate_pod_failures(&current_pods, &events_by_object, &cj_ns);
 
-        let (is_flapping, probe_failure_count, restart_in_window) = evaluate_workload_flapping(
+        let probe_eval = evaluate_workload_probes_and_restarts(
             &current_pods,
             &events_by_object,
             &cj_ns,
@@ -2579,7 +2652,8 @@ pub fn evaluate_changed_triage(
             || config_error_count > 0
             || image_error_count > 0
             || pending_pod_count > 0
-            || is_flapping;
+            || probe_eval.is_probe_failure
+            || probe_eval.has_active_restart_flapping;
 
         let cj_events = events_by_object
             .get(&("CronJob".to_string(), cj_ns.clone(), cj_name.clone()))
@@ -2720,7 +2794,9 @@ pub fn evaluate_changed_triage(
 
         let incident_status = if oom_killed_count > 0 {
             IncidentStatus::OomKilled
-        } else if crash_loop_count > 0 {
+        } else if probe_eval.is_probe_failure {
+            IncidentStatus::ProbeFailure
+        } else if crash_loop_count > 0 || probe_eval.has_active_restart_flapping {
             IncidentStatus::CrashLoop
         } else if config_error_count > 0 {
             IncidentStatus::ConfigError
@@ -2728,50 +2804,53 @@ pub fn evaluate_changed_triage(
             IncidentStatus::ImageError
         } else if pending_pod_count > 0 {
             IncidentStatus::Pending
-        } else if is_flapping {
-            IncidentStatus::Flapping
         } else if is_suspended {
             IncidentStatus::ScaledDown
         } else {
             IncidentStatus::Healthy
         };
 
-        let failure_category = if detected_failure_category != FailureCategory::None {
+        let failure_category = if probe_eval.is_probe_failure {
+            FailureCategory::Probe
+        } else if detected_failure_category != FailureCategory::None {
             detected_failure_category
-        } else if oom_killed_count > 0 || crash_loop_count > 0 || config_error_count > 0 {
+        } else if oom_killed_count > 0
+            || crash_loop_count > 0
+            || probe_eval.has_active_restart_flapping
+            || config_error_count > 0
+        {
             FailureCategory::App
         } else if image_error_count > 0 {
             FailureCategory::Image
         } else if pending_pod_count > 0 {
             FailureCategory::Compute
-        } else if is_flapping {
-            if probe_failure_count > 0 && !restart_in_window {
-                FailureCategory::Probe
-            } else {
-                FailureCategory::App
-            }
         } else {
             FailureCategory::None
         };
 
-        let failure_detail = if !detected_failure_detail.is_empty() {
+        let failure_detail = if probe_eval.is_probe_failure {
+            if let Some(ref d) = probe_eval.probe_failure_detail {
+                d.clone()
+            } else if probe_eval.probe_failure_count > 0 {
+                format!(
+                    "{} probe failure(s) in window",
+                    probe_eval.probe_failure_count
+                )
+            } else {
+                "Probe failure in window".to_string()
+            }
+        } else if !detected_failure_detail.is_empty() {
             detected_failure_detail
         } else if oom_killed_count > 0 {
             format!("{oom_killed_count} pod(s) OOMKilled (Exit 137)")
         } else if crash_loop_count > 0 {
             format!("{crash_loop_count} pod(s) in CrashLoopBackOff")
+        } else if probe_eval.has_active_restart_flapping {
+            format!("{restart_count} container restart(s) in window (CrashLoopBackOff)")
         } else if config_error_count > 0 {
             format!("{config_error_count} pod(s) configuration error")
         } else if image_error_count > 0 {
             format!("{image_error_count} pod(s) image pull failure")
-        } else if is_flapping {
-            if probe_failure_count > 0 && restart_in_window && restart_count >= 2 {
-                format!("{restart_count} restart(s), {probe_failure_count} probe failure(s)")
-            } else if probe_failure_count > 0 {
-                format!("{probe_failure_count} probe failure(s) in window")
-            } else {
-                format!("{restart_count} container restart(s) in window")
-            }
         } else if is_suspended {
             format!("CronJob suspended ({schedule_str})")
         } else {
@@ -2815,7 +2894,7 @@ pub fn evaluate_changed_triage(
             failing_pods_count: failing_pod_names.len(),
             crash_loop_count,
             oom_killed_count,
-            probe_failure_count,
+            probe_failure_count: probe_eval.probe_failure_count,
             restart_count,
             primary_symptoms,
             pod_symptoms,
@@ -2829,10 +2908,10 @@ pub fn evaluate_changed_triage(
         let rank = |s: IncidentStatus| match s {
             IncidentStatus::OomKilled => 0,
             IncidentStatus::CrashLoop => 1,
-            IncidentStatus::ConfigError => 2,
-            IncidentStatus::ImageError => 3,
-            IncidentStatus::Pending => 4,
-            IncidentStatus::Flapping => 5,
+            IncidentStatus::ProbeFailure => 2,
+            IncidentStatus::ConfigError => 3,
+            IncidentStatus::ImageError => 4,
+            IncidentStatus::Pending => 5,
             IncidentStatus::Stalled => 6,
             IncidentStatus::Rolling => 7,
             IncidentStatus::Healthy => 8,
@@ -2943,6 +3022,10 @@ pub fn evaluate_changed_triage(
         .iter()
         .filter(|d| d.incident_status == IncidentStatus::OomKilled)
         .count();
+    let probe_failure_count = deployment_changes
+        .iter()
+        .filter(|d| d.incident_status == IncidentStatus::ProbeFailure)
+        .count();
     let error_count = deployment_changes
         .iter()
         .filter(|d| {
@@ -2953,10 +3036,6 @@ pub fn evaluate_changed_triage(
     let pending_count = deployment_changes
         .iter()
         .filter(|d| d.incident_status == IncidentStatus::Pending)
-        .count();
-    let flapping_count = deployment_changes
-        .iter()
-        .filter(|d| d.incident_status == IncidentStatus::Flapping)
         .count();
     let rolling_count = deployment_changes
         .iter()
@@ -2981,6 +3060,13 @@ pub fn evaluate_changed_triage(
             .map(|d| format!("{}: {}", d.app_name, d.failure_detail))
             .unwrap_or_default();
         format!("CRITICAL (CRASH): {first}")
+    } else if probe_failure_count > 0 {
+        let first = deployment_changes
+            .iter()
+            .find(|d| d.incident_status == IncidentStatus::ProbeFailure)
+            .map(|d| format!("{}: {}", d.app_name, d.failure_detail))
+            .unwrap_or_default();
+        format!("DEGRADED (PROBE FAILURE): {first}")
     } else if error_count > 0 {
         let first = deployment_changes
             .iter()
@@ -2998,13 +3084,6 @@ pub fn evaluate_changed_triage(
             .map(|d| format!("{}: {}", d.app_name, d.failure_detail))
             .unwrap_or_default();
         format!("BLOCKED (INFRA): {first}")
-    } else if flapping_count > 0 {
-        let first = deployment_changes
-            .iter()
-            .find(|d| d.incident_status == IncidentStatus::Flapping)
-            .map(|d| format!("{}: {}", d.app_name, d.failure_detail))
-            .unwrap_or_default();
-        format!("DEGRADED (FLAPPING): {first}")
     } else if rolling_count > 0 {
         format!("{rolling_count} workload(s) currently rolling update")
     } else if healthy_count > 0 {
@@ -3023,7 +3102,7 @@ pub fn evaluate_changed_triage(
             oom_count,
             error_count,
             pending_count,
-            flapping_count,
+            probe_failure_count,
             rolling_count,
             healthy_count,
             headline_message,
@@ -5806,7 +5885,7 @@ mod tests {
     }
 
     #[test]
-    fn a_workload_with_restart_surge_or_probe_failures_is_reported_as_flapping() {
+    fn a_workload_with_restart_surge_without_probe_failures_is_reported_as_crashloop() {
         use k8s_openapi::api::core::v1::ContainerStateRunning;
         let now = Timestamp::from_second(1_700_000_000).unwrap();
         let dep = deployment("api", 1, 1);
@@ -5860,9 +5939,154 @@ mod tests {
         assert_eq!(report.deployments.len(), 1);
         assert_eq!(
             report.deployments[0].incident_status,
-            IncidentStatus::Flapping
+            IncidentStatus::CrashLoop
         );
-        assert_eq!(report.summary.flapping_count, 1);
+        assert!(report.deployments[0]
+            .failure_detail
+            .contains("CrashLoopBackOff"));
+        assert_eq!(report.summary.crashing_count, 1);
+        assert_eq!(report.summary.probe_failure_count, 0);
+    }
+
+    #[test]
+    fn a_workload_with_failing_probes_is_reported_as_probe_failure_with_spec_parameters() {
+        use k8s_openapi::api::core::v1::{Container, Probe};
+        let now = Timestamp::from_second(1_700_000_000).unwrap();
+        let dep = deployment("bidservice", 1, 1);
+        let rs = [replicaset("bidservice-rs", "bidservice", 86400 * 3)];
+        let pod = Pod {
+            metadata: ObjectMeta {
+                name: Some("bidservice-pod".to_string()),
+                namespace: Some("default".to_string()),
+                creation_timestamp: Some(Time(
+                    Timestamp::from_second(1_700_000_000 - 600).unwrap(),
+                )),
+                owner_references: Some(vec![make_owner_ref("ReplicaSet", "bidservice-rs")]),
+                ..Default::default()
+            },
+            spec: Some(PodSpec {
+                containers: vec![Container {
+                    name: "bidservice".to_string(),
+                    readiness_probe: Some(Probe {
+                        failure_threshold: Some(3),
+                        period_seconds: Some(10),
+                        timeout_seconds: Some(5),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            status: Some(PodStatus {
+                phase: Some("Running".to_string()),
+                container_statuses: Some(vec![ContainerStatus {
+                    name: "bidservice".to_string(),
+                    ready: false,
+                    restart_count: 0,
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+        };
+
+        let ev = Event {
+            metadata: ObjectMeta {
+                name: Some("bidservice-pod.unhealthy".to_string()),
+                namespace: Some("default".to_string()),
+                ..Default::default()
+            },
+            involved_object: k8s_openapi::api::core::v1::ObjectReference {
+                kind: Some("Pod".to_string()),
+                name: Some("bidservice-pod".to_string()),
+                namespace: Some("default".to_string()),
+                field_path: Some("spec.containers{bidservice}".to_string()),
+                ..Default::default()
+            },
+            reason: Some("Unhealthy".to_string()),
+            message: Some(
+                "Readiness probe failed: HTTP probe failed with statuscode: 500".to_string(),
+            ),
+            count: Some(5),
+            last_timestamp: Some(Time(Timestamp::from_second(1_700_000_000 - 50).unwrap())),
+            type_: Some("Warning".to_string()),
+            ..Default::default()
+        };
+
+        let report = evaluate_changed_triage(
+            &[dep],
+            &[],
+            &[],
+            &[],
+            &rs,
+            &[pod],
+            &[ev],
+            &[],
+            Duration::from_secs(3600),
+            now,
+            None,
+            TriageOptions::default(),
+        );
+
+        assert_eq!(report.deployments.len(), 1);
+        let d = &report.deployments[0];
+        assert_eq!(d.incident_status, IncidentStatus::ProbeFailure);
+        assert_eq!(d.failure_category, FailureCategory::Probe);
+        assert_eq!(
+            d.failure_detail,
+            "Readiness probe failed (threshold: 3, period: 10s, timeout: 5s): HTTP probe failed with statuscode: 500"
+        );
+        assert_eq!(report.summary.probe_failure_count, 1);
+        assert!(report
+            .summary
+            .headline_message
+            .starts_with("DEGRADED (PROBE FAILURE):"));
+    }
+
+    #[test]
+    fn probe_failure_and_summary_serde_wire_compatibility() {
+        // Deserializing "probeFailure"
+        let status: IncidentStatus = serde_json::from_str("\"probeFailure\"").unwrap();
+        assert_eq!(status, IncidentStatus::ProbeFailure);
+
+        // Deserializing legacy "flapping"
+        let legacy_status: IncidentStatus = serde_json::from_str("\"flapping\"").unwrap();
+        assert_eq!(legacy_status, IncidentStatus::ProbeFailure);
+
+        // Serializing produces "probeFailure"
+        let serialized = serde_json::to_string(&IncidentStatus::ProbeFailure).unwrap();
+        assert_eq!(serialized, "\"probeFailure\"");
+
+        // Deserializing TriageSummary with "probeFailureCount"
+        let json_new = serde_json::json!({
+            "totalDeployments": 1,
+            "crashingCount": 0,
+            "oomCount": 0,
+            "errorCount": 0,
+            "pendingCount": 0,
+            "probeFailureCount": 2,
+            "rollingCount": 0,
+            "healthyCount": 0,
+            "headlineMessage": "test"
+        });
+        let summary: TriageSummary = serde_json::from_value(json_new).unwrap();
+        assert_eq!(summary.probe_failure_count, 2);
+        assert_eq!(summary.flapping_count(), 2);
+
+        // Deserializing TriageSummary with legacy "flappingCount"
+        let json_legacy = serde_json::json!({
+            "totalDeployments": 1,
+            "crashingCount": 0,
+            "oomCount": 0,
+            "errorCount": 0,
+            "pendingCount": 0,
+            "flappingCount": 3,
+            "rollingCount": 0,
+            "healthyCount": 0,
+            "headlineMessage": "test"
+        });
+        let summary_legacy: TriageSummary = serde_json::from_value(json_legacy).unwrap();
+        assert_eq!(summary_legacy.probe_failure_count, 3);
+        assert_eq!(summary_legacy.flapping_count(), 3);
     }
 
     #[test]
@@ -5952,7 +6176,7 @@ mod tests {
         let d = &report.deployments[0];
         assert_eq!(d.incident_status, IncidentStatus::Healthy);
         assert_eq!(d.probe_failure_count, 0);
-        assert_eq!(report.summary.flapping_count, 0);
+        assert_eq!(report.summary.probe_failure_count, 0);
     }
 
     #[test]
@@ -6069,7 +6293,7 @@ mod tests {
         assert_eq!(report.deployments.len(), 1);
         let d = &report.deployments[0];
         assert_eq!(d.incident_status, IncidentStatus::Healthy);
-        assert_eq!(report.summary.flapping_count, 0);
+        assert_eq!(report.summary.probe_failure_count, 0);
     }
 
     #[test]

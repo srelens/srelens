@@ -188,7 +188,7 @@ pub enum IncidentFilter {
     OomOnly,
     ErrorOnly,
     PendingOnly,
-    FlappingOnly,
+    ProbeOnly,
     RollingOnly,
 }
 
@@ -200,7 +200,7 @@ impl IncidentFilter {
             Self::OomOnly => "OOM",
             Self::ErrorOnly => "ERROR",
             Self::PendingOnly => "PENDING (INFRA)",
-            Self::FlappingOnly => "FLAPPING",
+            Self::ProbeOnly => "PROBE",
             Self::RollingOnly => "ROLLING",
         }
     }
@@ -211,8 +211,8 @@ impl IncidentFilter {
             Self::CrashingOnly => Self::OomOnly,
             Self::OomOnly => Self::ErrorOnly,
             Self::ErrorOnly => Self::PendingOnly,
-            Self::PendingOnly => Self::FlappingOnly,
-            Self::FlappingOnly => Self::RollingOnly,
+            Self::PendingOnly => Self::ProbeOnly,
+            Self::ProbeOnly => Self::RollingOnly,
             Self::RollingOnly => Self::All,
         }
     }
@@ -602,7 +602,7 @@ impl ChangedViewState {
                         || d.incident_status == IncidentStatus::ImageError
                 }
                 IncidentFilter::PendingOnly => d.incident_status == IncidentStatus::Pending,
-                IncidentFilter::FlappingOnly => d.incident_status == IncidentStatus::Flapping,
+                IncidentFilter::ProbeOnly => d.incident_status == IncidentStatus::ProbeFailure,
                 IncidentFilter::RollingOnly => {
                     d.incident_status == IncidentStatus::Rolling
                         || d.incident_status == IncidentStatus::Stalled
@@ -630,7 +630,7 @@ impl ChangedViewState {
                         || d.incident_status == IncidentStatus::ImageError
                 }
                 IncidentFilter::PendingOnly => d.incident_status == IncidentStatus::Pending,
-                IncidentFilter::FlappingOnly => d.incident_status == IncidentStatus::Flapping,
+                IncidentFilter::ProbeOnly => d.incident_status == IncidentStatus::ProbeFailure,
                 IncidentFilter::RollingOnly => {
                     d.incident_status == IncidentStatus::Rolling
                         || d.incident_status == IncidentStatus::Stalled
@@ -680,7 +680,7 @@ impl ChangedViewState {
                         || d.incident_status == IncidentStatus::ImageError
                 }
                 IncidentFilter::PendingOnly => d.incident_status == IncidentStatus::Pending,
-                IncidentFilter::FlappingOnly => d.incident_status == IncidentStatus::Flapping,
+                IncidentFilter::ProbeOnly => d.incident_status == IncidentStatus::ProbeFailure,
                 IncidentFilter::RollingOnly => {
                     d.incident_status == IncidentStatus::Rolling
                         || d.incident_status == IncidentStatus::Stalled
@@ -1180,13 +1180,13 @@ pub fn render_changed_view(f: &mut Frame, area: Rect, state: &ChangedViewState) 
 /// scope, infra). They share one line when it fits and take two when not, so
 /// the controls are never clipped off a narrow terminal.
 fn summary_banner(state: &ChangedViewState) -> (Block<'static>, Line<'static>, Line<'static>) {
-    let (crashing, oom, error, pending, flapping, rolling) = if let Some(r) = &state.report {
+    let (crashing, oom, error, pending, probe_failures, rolling) = if let Some(r) = &state.report {
         (
             r.summary.crashing_count,
             r.summary.oom_count,
             r.summary.error_count,
             r.summary.pending_count,
-            r.summary.flapping_count,
+            r.summary.probe_failure_count,
             r.summary.rolling_count,
         )
     } else {
@@ -1201,7 +1201,7 @@ fn summary_banner(state: &ChangedViewState) -> (Block<'static>, Line<'static>, L
 
     let border_style = if crashing > 0 || oom > 0 {
         Theme::status_error()
-    } else if error > 0 || pending > 0 || flapping > 0 {
+    } else if error > 0 || pending > 0 || probe_failures > 0 {
         Theme::status_warn()
     } else if rolling > 0 {
         Style::default().fg(Theme::cyan())
@@ -1273,8 +1273,8 @@ fn summary_banner(state: &ChangedViewState) -> (Block<'static>, Line<'static>, L
         ),
         Span::raw("  "),
         Span::styled(
-            format!(" ⚡ FLAP: {flapping} "),
-            if flapping > 0 {
+            format!(" 🩺 PROBE: {probe_failures} "),
+            if probe_failures > 0 {
                 Style::default()
                     .bg(Theme::yellow())
                     .fg(Color::Black)
@@ -1479,8 +1479,8 @@ fn build_workload_row(
                 .fg(Color::Black)
                 .add_modifier(Modifier::BOLD),
         )),
-        IncidentStatus::Flapping => Cell::from(Span::styled(
-            " ⚡ FLAPPING ",
+        IncidentStatus::ProbeFailure => Cell::from(Span::styled(
+            " 🩺 PROBE FAIL ",
             Style::default()
                 .bg(Theme::yellow())
                 .fg(Color::Black)
