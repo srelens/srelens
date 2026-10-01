@@ -13,14 +13,15 @@ use std::time::Duration;
 use k8s_openapi::api::apps::v1::{Deployment, ReplicaSet, StatefulSet};
 use k8s_openapi::api::batch::v1::{CronJob, Job};
 use k8s_openapi::api::core::v1::{Event, Pod};
-use k8s_openapi::jiff::Timestamp;
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+use k8s_openapi::jiff::{SignedDuration, Timestamp};
 use kube::api::ListParams;
 use kube::Api;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use srelens_capability::{Annotations, Capability, CapabilityError};
+use srelens_capability::{Annotations, Capability, CapabilityError, ReferenceFormat};
 
-use crate::argo::ArgoApplication;
+use crate::argo::{ArgoApplication, ArgoSyncHistoryItem};
 use crate::client_cache::ClientCache;
 use crate::connect::request_timeout;
 use crate::events::{event_last_timestamp, EventSummary};
@@ -37,6 +38,8 @@ pub enum IncidentStatus {
     ImageError,
     #[serde(rename = "pending")]
     Pending,
+    #[serde(rename = "probeFailure", alias = "flapping")]
+    ProbeFailure,
     #[serde(rename = "stalled")]
     Stalled,
     #[serde(rename = "rolling")]
@@ -57,6 +60,7 @@ impl IncidentStatus {
             Self::ConfigError => "ConfigError",
             Self::ImageError => "ImageError",
             Self::Pending => "Pending",
+            Self::ProbeFailure => "ProbeFailure",
             Self::Stalled => "Stalled",
             Self::Rolling => "Rolling",
             Self::Healthy => "Healthy",
@@ -72,12 +76,26 @@ impl IncidentStatus {
             Self::ConfigError => "⚠️",
             Self::ImageError => "🚫",
             Self::Pending => "⏳",
+            Self::ProbeFailure => "🩺",
             Self::Stalled => "🚫",
             Self::Rolling => "🔄",
             Self::Healthy => "🟢",
             Self::ScaledDown => "⚪",
             Self::Unknown => "❓",
         }
+    }
+
+    pub fn is_incident(&self) -> bool {
+        matches!(
+            self,
+            Self::CrashLoop
+                | Self::OomKilled
+                | Self::ConfigError
+                | Self::ImageError
+                | Self::Pending
+                | Self::Stalled
+                | Self::ProbeFailure
+        )
     }
 }
 
@@ -89,6 +107,8 @@ pub enum FailureCategory {
     Storage, // PVC unbound, mount failure, volume attach failed
     #[serde(rename = "network")]
     Network, // CNI failure, IP allocation failure, pod sandbox error
+    #[serde(rename = "probe")]
+    Probe, // Readiness/Liveness/Startup probe failure (HTTP 500, timeout, connection refused)
     #[serde(rename = "image")]
     Image, // ImagePullBackOff, ErrImagePull, auth failure
     #[serde(rename = "app")]
@@ -103,6 +123,7 @@ impl FailureCategory {
             Self::Compute => "[COMPUTE]",
             Self::Storage => "[STORAGE]",
             Self::Network => "[NETWORK]",
+            Self::Probe => "[PROBE]",
             Self::Image => "[IMAGE]",
             Self::App => "[APP]",
             Self::None => "[OK]",
@@ -110,7 +131,7 @@ impl FailureCategory {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct GitOpsReleaseInfo {
     #[serde(rename = "appName")]
     pub app_name: String,
@@ -128,6 +149,48 @@ pub struct GitOpsReleaseInfo {
     pub sync_age: String,
     #[serde(rename = "syncMessage")]
     pub sync_message: Option<String>,
+    /// Whether `sync_message` holds a degraded health message rather than an
+    /// operation/sync error.
+    #[serde(default, rename = "isHealthMessage")]
+    pub is_health_message: bool,
+    /// How the workload was matched to the app: `trackingId` (Argo's
+    /// `argocd.argoproj.io/tracking-id` annotation), `resources` (the app's
+    /// resource list) or `label` (the instance label).
+    #[serde(default, rename = "matchedBy")]
+    pub matched_by: String,
+    /// The Argo sync that produced the workload's current rollout.
+    #[serde(default)]
+    pub rollout: Option<ArgoRollout>,
+    /// Why no sync could be named as the rollout's cause. Set exactly when
+    /// `rollout` is `None`.
+    #[serde(default, rename = "rolloutUnmatched")]
+    pub rollout_unmatched: Option<String>,
+}
+
+/// One `status.history` entry of an Argo Application, named as the sync that
+/// rolled a workload out, with the entry before it so a reader can ask what
+/// changed between the two revisions.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ArgoRollout {
+    #[serde(rename = "historyId")]
+    pub history_id: i64,
+    /// Full revision: a git SHA, or a chart version when `isChart`.
+    pub revision: String,
+    #[serde(rename = "previousRevision")]
+    pub previous_revision: Option<String>,
+    #[serde(rename = "deployedAt")]
+    pub deployed_at: String,
+    #[serde(rename = "initiatedBy")]
+    pub initiated_by: Option<String>,
+    #[serde(rename = "repoUrl")]
+    pub repo_url: String,
+    /// The source path at that sync, which may differ from today's spec.
+    pub path: String,
+    #[serde(rename = "isChart")]
+    pub is_chart: bool,
+    /// Matched by "latest sync in the window", not by the time the rollout
+    /// was created: StatefulSets and CronJobs expose no such time here.
+    pub approximate: bool,
 }
 
 /// Why a workload is in the report.
@@ -206,6 +269,14 @@ pub struct AppDeploymentChange {
     pub gitops: Option<GitOpsReleaseInfo>,
     #[serde(default, rename = "argoRolloutInWindow")]
     pub argo_rollout_in_window: Option<String>,
+    /// The workload's tracking id names an Argo app that could not be read:
+    /// Argo was unreachable, or did not list that app. Not the same fact as
+    /// "not managed by Argo", which is `gitops: None` with this unset.
+    #[serde(default, rename = "gitopsUnresolved")]
+    pub gitops_unresolved: Option<String>,
+    /// A cause the cluster itself records, e.g. a rollout restart.
+    #[serde(default, rename = "localCause")]
+    pub local_cause: Option<String>,
     #[serde(rename = "errorLogSnippet")]
     pub error_log_snippet: Option<Vec<String>>,
     /// The pod the snippet was tailed from; not always the first failing
@@ -269,6 +340,12 @@ pub struct AppDeploymentChange {
     pub top_events: Vec<EventSummary>,
 }
 
+impl AppDeploymentChange {
+    pub fn is_incident(&self) -> bool {
+        self.incident_status.is_incident()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct InfraChangeItem {
     pub age: String,
@@ -296,6 +373,8 @@ pub struct TriageSummary {
     pub error_count: usize,
     #[serde(rename = "pendingCount")]
     pub pending_count: usize,
+    #[serde(default, rename = "probeFailureCount", alias = "flappingCount")]
+    pub probe_failure_count: usize,
     #[serde(rename = "rollingCount")]
     pub rolling_count: usize,
     #[serde(rename = "healthyCount")]
@@ -304,20 +383,36 @@ pub struct TriageSummary {
     pub headline_message: String,
 }
 
+impl TriageSummary {
+    #[inline]
+    pub fn flapping_count(&self) -> usize {
+        self.probe_failure_count
+    }
+}
+
 /// What a triage run includes and fetches.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TriageOptions {
     /// Also report workloads that did not change in the window but are
     /// failing in it (a Warning on a pod or the current ReplicaSet). They
-    /// are marked [`ChangeKind::FailingOnly`].
+    /// are marked [`ChangeKind::FailingOnly`]. Enabled by default.
     pub include_failing: bool,
     /// Also report Deployments whose only change in the window is a replica
-    /// count (HPA or `kubectl scale`), marked [`ChangeKind::Scaled`]. Off by
-    /// default: on an autoscaled cluster nearly everything scales hourly.
+    /// count (HPA or `kubectl scale`), marked [`ChangeKind::Scaled`]. Enabled by default.
     pub include_scaled: bool,
     /// Tail a five-line log snippet per failing workload. The TUI leaves
     /// this off (its card links to the full logs); MCP callers get it.
     pub log_snippets: bool,
+}
+
+impl Default for TriageOptions {
+    fn default() -> Self {
+        Self {
+            include_failing: true,
+            include_scaled: true,
+            log_snippets: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -337,6 +432,46 @@ pub struct ChangedTriageReport {
     pub includes_failing: bool,
     #[serde(default, rename = "includesScaled")]
     pub includes_scaled: bool,
+    /// How complete the Argo data behind the GitOps fields is, so a reader
+    /// can tell "not managed by Argo" from "Argo data not all in yet".
+    #[serde(default)]
+    pub argo: ArgoCoverage,
+}
+
+/// How much of the Argo picture a report was matched against.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum ArgoCoverageState {
+    /// Every Application Argo lists for this cluster, fetched recently.
+    #[serde(rename = "complete")]
+    Complete,
+    /// Some Applications are still loading, or the listing stopped early.
+    #[serde(rename = "partial")]
+    Partial,
+    /// A complete list, but older than [`ARGO_STALE_AFTER`], or kept after a
+    /// refresh failed.
+    #[serde(rename = "stale")]
+    Stale,
+    /// Argo could not be read, and nothing is known.
+    #[serde(rename = "unavailable")]
+    Unavailable,
+    /// No Argo CD manages this cluster.
+    #[default]
+    #[serde(rename = "none")]
+    NoArgo,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ArgoCoverage {
+    pub state: ArgoCoverageState,
+    #[serde(default, rename = "fetchedAt")]
+    pub fetched_at: Option<String>,
+    #[serde(default, rename = "appsLoaded")]
+    pub apps_loaded: usize,
+    /// The hub cluster the Applications were read from, when not this one.
+    #[serde(default)]
+    pub hub: Option<String>,
+    #[serde(default)]
+    pub error: Option<String>,
 }
 
 /// Maximum window for triage query (30 days).
@@ -494,6 +629,30 @@ fn format_image_diff(prev: &[String], curr: &[String]) -> String {
     }
 }
 
+/// The pod template annotation `kubectl rollout restart` (and Argo's
+/// Restart action) stamps to force a new ReplicaSet.
+const RESTARTED_AT: &str = "kubectl.kubernetes.io/restartedAt";
+
+/// "rollout restart at T" when the current ReplicaSet differs from the
+/// previous one only by its restart stamp. A stamp that arrived alongside a
+/// spec change does not explain the rollout, so it is not reported.
+fn restart_cause(current: &ReplicaSet, previous: Option<&ReplicaSet>) -> Option<String> {
+    let template = |rs: &ReplicaSet| rs.spec.as_ref()?.template.clone();
+    let stamp = |rs: &ReplicaSet| {
+        template(rs)?
+            .metadata?
+            .annotations?
+            .get(RESTARTED_AT)
+            .cloned()
+    };
+    let previous = previous?;
+    let stamped = stamp(current)?;
+    let same_spec =
+        template(current).and_then(|t| t.spec) == template(previous).and_then(|t| t.spec);
+    (same_spec && stamp(previous).as_ref() != Some(&stamped))
+        .then(|| format!("rollout restart at {stamped}"))
+}
+
 fn parse_revision(rs: &ReplicaSet) -> i64 {
     rs.metadata
         .annotations
@@ -509,21 +668,25 @@ pub fn analyze_pod_failure(pod: &Pod, pod_events: &[&Event]) -> (FailureCategory
         // 1. Container Waiting / Terminated state
         if let Some(ref c_statuses) = st.container_statuses {
             for cs in c_statuses {
-                if let Some(ref term) = cs.last_state.as_ref().and_then(|s| s.terminated.as_ref()) {
-                    if term.exit_code == 137 || term.reason.as_deref() == Some("OOMKilled") {
-                        return (
-                            FailureCategory::App,
-                            Some(format!("{} OOMKilled (Exit Code 137)", cs.name)),
-                        );
-                    }
-                    if term.exit_code != 0 {
-                        return (
-                            FailureCategory::App,
-                            Some(format!(
-                                "{} terminated with Exit Code {}",
-                                cs.name, term.exit_code
-                            )),
-                        );
+                if !cs.ready {
+                    if let Some(ref term) =
+                        cs.last_state.as_ref().and_then(|s| s.terminated.as_ref())
+                    {
+                        if term.exit_code == 137 || term.reason.as_deref() == Some("OOMKilled") {
+                            return (
+                                FailureCategory::App,
+                                Some(format!("{} OOMKilled (Exit Code 137)", cs.name)),
+                            );
+                        }
+                        if term.exit_code != 0 {
+                            return (
+                                FailureCategory::App,
+                                Some(format!(
+                                    "{} terminated with Exit Code {}",
+                                    cs.name, term.exit_code
+                                )),
+                            );
+                        }
                     }
                 }
                 if let Some(ref term) = cs.state.as_ref().and_then(|s| s.terminated.as_ref()) {
@@ -575,13 +738,22 @@ pub fn analyze_pod_failure(pod: &Pod, pod_events: &[&Event]) -> (FailureCategory
                 if cond.type_ == "PodScheduled" && cond.status == "False" {
                     let msg = cond.message.clone().unwrap_or_default();
                     let lower = msg.to_lowercase();
-                    if lower.contains("insufficient")
-                        || lower.contains("taint")
-                        || lower.contains("affinity")
-                        || lower.contains("nodes are available")
-                    {
-                        return (FailureCategory::Compute, Some(msg));
+                    if lower.contains("persistentvolumeclaim") || lower.contains("volume") {
+                        let detail = if !msg.is_empty() {
+                            msg
+                        } else {
+                            "Volume binding pending".to_string()
+                        };
+                        return (FailureCategory::Storage, Some(detail));
                     }
+                    let detail = if !msg.is_empty() {
+                        msg
+                    } else if let Some(ref reason) = cond.reason {
+                        reason.clone()
+                    } else {
+                        "Pod unschedulable (waiting for node placement)".to_string()
+                    };
+                    return (FailureCategory::Compute, Some(detail));
                 }
             }
         }
@@ -619,6 +791,9 @@ pub fn analyze_pod_failure(pod: &Pod, pod_events: &[&Event]) -> (FailureCategory
         if reason == "Failed" && (msg_lower.contains("image") || msg_lower.contains("pull")) {
             return (FailureCategory::Image, Some(msg.to_string()));
         }
+        if reason == "Unhealthy" || msg_lower.contains("probe failed") {
+            return (FailureCategory::Probe, Some(msg.to_string()));
+        }
     }
 
     (FailureCategory::None, None)
@@ -646,6 +821,135 @@ pub fn parse_scale_event(message: &str) -> String {
         }
     }
     "Scaled".to_string()
+}
+
+/// Produces a punchy, single-line diagnostic summary for compact table rows,
+/// extracting core blockers from verbose scheduler, probe, or storage events.
+pub fn condense_diagnostic(_category: FailureCategory, detail: &str) -> String {
+    let trimmed = detail.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    // 1. Kubernetes scheduler node availability messages
+    if trimmed.contains("nodes are available:") || trimmed.contains("nodes available:") {
+        return condense_scheduling_failure(trimmed);
+    }
+
+    // 2. Probe failure events
+    if trimmed.starts_with("Readiness probe failed")
+        || trimmed.starts_with("Liveness probe failed")
+        || trimmed.starts_with("Startup probe failed")
+    {
+        let probe_type = if trimmed.starts_with("Readiness") {
+            "Readiness"
+        } else if trimmed.starts_with("Liveness") {
+            "Liveness"
+        } else {
+            "Startup"
+        };
+        let lower = trimmed.to_lowercase();
+        if let Some(pos) = lower.find("statuscode: ") {
+            let code = trimmed[pos + 12..]
+                .chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect::<String>();
+            if !code.is_empty() {
+                return format!("{probe_type} probe failed (HTTP {code})");
+            }
+        }
+        if lower.contains("connection refused") {
+            return format!("{probe_type} probe failed (connection refused)");
+        }
+        if lower.contains("timeout") || lower.contains("timed out") {
+            return format!("{probe_type} probe failed (timed out)");
+        }
+    }
+
+    // 3. Storage / PVC errors
+    if trimmed.to_lowercase().contains("persistentvolumeclaim") {
+        if let Some(pos) = trimmed.to_lowercase().find("persistentvolumeclaim ") {
+            let after = &trimmed[pos + 22..];
+            if let Some(name_end) = after.find(' ') {
+                let pvc_name = after[..name_end].trim_matches('"');
+                if trimmed.contains("not found") {
+                    return format!("PVC \"{pvc_name}\" not found");
+                }
+            }
+        }
+        if trimmed.contains("unbound immediate") || trimmed.contains("waiting for a volume") {
+            return "PVC volume binding pending".to_string();
+        }
+    }
+
+    // 4. Default: truncate nicely if excessively long (> 80 chars)
+    if trimmed.chars().count() > 80 {
+        let mut out: String = trimmed.chars().take(77).collect();
+        out.push('…');
+        out
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn condense_scheduling_failure(msg: &str) -> String {
+    // Extract node count prefix: e.g. "0/20 nodes are available:" -> "0/20 nodes:"
+    let (prefix, body) = if let Some(idx) = msg.find("nodes are available:") {
+        let node_part = msg[..idx].trim();
+        let body_part = &msg[idx + "nodes are available:".len()..];
+        (format!("{node_part} nodes:"), body_part)
+    } else if let Some(idx) = msg.find("nodes available:") {
+        let node_part = msg[..idx].trim();
+        let body_part = &msg[idx + "nodes available:".len()..];
+        (format!("{node_part} nodes:"), body_part)
+    } else {
+        ("Unschedulable:".to_string(), msg)
+    };
+
+    // Discard secondary preemption / claims trailer after period
+    let primary_reasons = body.split('.').next().unwrap_or(body).trim();
+
+    let mut reasons = Vec::new();
+    for part in primary_reasons.split(',') {
+        let p = part.trim();
+        if p.is_empty() {
+            continue;
+        }
+        let lower = p.to_lowercase();
+        // Extract count if present at start of segment
+        let count_str = p
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect::<String>();
+        let count_prefix = if !count_str.is_empty() {
+            format!("{count_str} ")
+        } else {
+            String::new()
+        };
+
+        if lower.contains("insufficient cpu") {
+            reasons.push(format!("{count_prefix}CPU"));
+        } else if lower.contains("insufficient memory") {
+            reasons.push(format!("{count_prefix}Memory"));
+        } else if lower.contains("affinity") || lower.contains("selector") {
+            reasons.push(format!("{count_prefix}Affinity"));
+        } else if lower.contains("taint") {
+            reasons.push(format!("{count_prefix}Taint"));
+        } else if lower.contains("too many pods") {
+            reasons.push(format!("{count_prefix}PodLimit"));
+        } else if lower.contains("volume") {
+            reasons.push(format!("{count_prefix}Volume"));
+        } else if !p.is_empty() {
+            let words: Vec<&str> = p.split_whitespace().take(3).collect();
+            reasons.push(words.join(" "));
+        }
+    }
+
+    if reasons.is_empty() {
+        prefix
+    } else {
+        format!("{prefix} {}", reasons.join(", "))
+    }
 }
 
 /// Whether any of `events` is a Warning that last fired at or after `cutoff`.
@@ -702,9 +1006,9 @@ pub fn failing_container_name(pod: &Pod) -> Option<String> {
                     .is_some_and(|r| r != "ContainerCreating" && r != "PodInitializing");
                 waiting_on_error
                     || exited_non_zero(cs.state.as_ref())
-                    || exited_non_zero(cs.last_state.as_ref())
+                    || (!cs.ready && exited_non_zero(cs.last_state.as_ref()))
             })
-            .or_else(|| list.iter().find(|cs| cs.restart_count > 0));
+            .or_else(|| list.iter().find(|cs| !cs.ready && cs.restart_count > 0));
         if let Some(cs) = failing {
             return Some(cs.name.clone());
         }
@@ -736,49 +1040,339 @@ fn log_target(symptoms: &[PodIncidentDetail], pods: &[&Pod]) -> (Option<String>,
     (Some(sym.pod_name.clone()), container)
 }
 
-/// Match a workload to the ArgoCD Application that manages it, by the app's
-/// resource list or by the instance label, and describe its last sync.
+/// Argo CD's resource tracking annotation.
+const TRACKING_ID: &str = "argocd.argoproj.io/tracking-id";
+
+/// Longest gap between a rollout's creation and the end of the sync that
+/// made it, used when Argo recorded no start time for the sync.
+const SYNC_SKEW: SignedDuration = SignedDuration::from_secs(15 * 60);
+
+/// Clock difference allowed between Argo's controller, which stamps the
+/// history, and the API server, which stamps the ReplicaSet.
+const CLOCK_SLACK: SignedDuration = SignedDuration::from_secs(60);
+
+/// How a row's `gitops_unresolved` ends when Argo answered without the app;
+/// [`apply_argo_coverage`] replaces it when the answer was not all of Argo.
+const NOT_LISTED: &str = ", which Argo did not list";
+
+/// A complete Argo list older than this is reported as stale.
+const ARGO_STALE_AFTER: SignedDuration =
+    SignedDuration::from_secs(crate::argo::ARGO_FRESH_FOR.as_secs() as i64);
+
+/// What a rollout newer than the Argo data says instead of "no Argo sync
+/// around this rollout": its sync cannot be in that history yet.
+const ARGO_OLDER_THAN_ROLLOUT: &str = "Argo data is older than this rollout; refreshing";
+
+/// How complete `snapshot` is, as the report states it.
+pub fn argo_coverage(snapshot: &ArgoSnapshot, now: Timestamp) -> ArgoCoverage {
+    let old = snapshot
+        .fetched_at
+        .is_some_and(|t| now.duration_since(t) > ARGO_STALE_AFTER);
+    let state = match (&snapshot.error, snapshot.apps.is_empty()) {
+        (Some(e), _) if e == crate::argo::NO_ARGO => ArgoCoverageState::NoArgo,
+        (Some(_), true) => ArgoCoverageState::Unavailable,
+        _ if !snapshot.complete => ArgoCoverageState::Partial,
+        (Some(_), false) => ArgoCoverageState::Stale,
+        _ if old => ArgoCoverageState::Stale,
+        _ => ArgoCoverageState::Complete,
+    };
+    ArgoCoverage {
+        state,
+        fetched_at: snapshot.fetched_at.map(|t| t.to_string()),
+        apps_loaded: snapshot.apps.len(),
+        hub: snapshot.hub.clone(),
+        error: snapshot.error.clone(),
+    }
+}
+
+/// Put `coverage` on the report and keep every row honest about it: with
+/// part of Argo, or none, a row without an app has an unknown owner, not no
+/// owner; and a rollout newer than the data has a sync the data cannot hold.
+fn apply_argo_coverage(report: &mut ChangedTriageReport, coverage: ArgoCoverage) {
+    let fetched_at = coverage
+        .fetched_at
+        .as_deref()
+        .and_then(|t| t.parse::<Timestamp>().ok());
+    let n = coverage.apps_loaded;
+    let err = coverage.error.as_deref().unwrap_or("unknown error");
+    // (after a tracking id's app name, for a row with no app at all)
+    let pending = match coverage.state {
+        ArgoCoverageState::Partial => Some((
+            format!("the Argo list is still loading ({n} apps so far)"),
+            format!("Argo list incomplete ({n} apps loaded); ownership not known yet"),
+        )),
+        ArgoCoverageState::Unavailable => Some((
+            format!("Argo unavailable: {err}"),
+            format!("Argo unavailable: {err}; ownership not known"),
+        )),
+        _ => None,
+    };
+    for d in &mut report.deployments {
+        if let Some((after_app, unowned)) = &pending {
+            match d.gitops_unresolved.as_mut() {
+                Some(msg) => {
+                    if let Some(head) = msg.strip_suffix(NOT_LISTED) {
+                        *msg = format!("{head}; {after_app}");
+                    }
+                }
+                None if d.gitops.is_none() => d.gitops_unresolved = Some(unowned.clone()),
+                None => {}
+            }
+        }
+        let created = d
+            .deployed_at
+            .as_deref()
+            .and_then(|t| t.parse::<Timestamp>().ok());
+        if let (Some(g), Some(at), Some(created), "Deployment") =
+            (d.gitops.as_mut(), fetched_at, created, d.kind.as_str())
+        {
+            if g.rollout.is_none() && created > at {
+                g.rollout_unmatched = Some(ARGO_OLDER_THAN_ROLLOUT.to_string());
+            }
+        }
+    }
+    report.argo = coverage;
+}
+
+/// The workload a [`gitops_release_for`] lookup is about.
+struct Workload<'a> {
+    api_version: &'a str,
+    kind: &'a str,
+    name: &'a str,
+    ns: &'a str,
+    meta: &'a ObjectMeta,
+    /// When the current rollout was created: a Deployment's current
+    /// ReplicaSet. `None` where this report holds no such object.
+    rollout_created: Option<Timestamp>,
+}
+
+/// What [`gitops_release_for`] found for one workload.
+#[derive(Default)]
+struct GitOpsMatch {
+    info: Option<GitOpsReleaseInfo>,
+    rollout_in_window: Option<String>,
+    unresolved: Option<String>,
+}
+
+/// The index of the `history` entry whose sync created a rollout at
+/// `created`: the sync running at that moment, else the first to finish
+/// within [`SYNC_SKEW`] after it. `None` when no sync accounts for it — a
+/// change made outside Argo, or a sync already trimmed from the history.
+pub fn causal_history_entry(history: &[ArgoSyncHistoryItem], created: Timestamp) -> Option<usize> {
+    let parse = |s: &str| s.parse::<Timestamp>().ok();
+    let earliest =
+        |hits: Vec<(usize, Timestamp)>| hits.into_iter().min_by_key(|(_, d)| *d).map(|(i, _)| i);
+
+    let during = history
+        .iter()
+        .enumerate()
+        .filter_map(|(i, h)| {
+            let deployed = parse(&h.deployed_at)?;
+            let started = parse(&h.deploy_started_at)?;
+            (created.duration_since(started) >= -CLOCK_SLACK
+                && deployed.duration_since(created) >= -CLOCK_SLACK)
+                .then_some((i, deployed))
+        })
+        .collect();
+    if let Some(i) = earliest(during) {
+        return Some(i);
+    }
+
+    let after = history
+        .iter()
+        .enumerate()
+        .filter_map(|(i, h)| {
+            let deployed = parse(&h.deployed_at)?;
+            let gap = deployed.duration_since(created);
+            (gap >= -CLOCK_SLACK && gap <= SYNC_SKEW).then_some((i, deployed))
+        })
+        .collect();
+    earliest(after)
+}
+
+/// The sync behind a workload's current rollout, or why none can be named.
+fn rollout_for(
+    history: &[ArgoSyncHistoryItem],
+    created: Option<Timestamp>,
+    cutoff: Option<&Timestamp>,
+) -> Result<ArgoRollout, String> {
+    let (idx, approximate) = match created {
+        Some(created) => (
+            causal_history_entry(history, created).ok_or_else(|| {
+                "no Argo sync around this rollout: a change made outside Argo, \
+                 or a sync older than the app's history"
+                    .to_string()
+            })?,
+            false,
+        ),
+        None => {
+            let latest = history
+                .iter()
+                .enumerate()
+                .filter_map(|(i, h)| Some((i, h.deployed_at.parse::<Timestamp>().ok()?)))
+                .filter(|(_, d)| cutoff.is_some_and(|c| d >= c))
+                .max_by_key(|(_, d)| *d)
+                .map(|(i, _)| i);
+            (
+                latest.ok_or_else(|| "no Argo sync in this window".to_string())?,
+                true,
+            )
+        }
+    };
+    let entry = &history[idx];
+    // Only a sync of the same source bounds a meaningful range of changes.
+    let previous_revision = history
+        .iter()
+        .filter(|h| h.id < entry.id && h.repo_url == entry.repo_url && h.is_chart == entry.is_chart)
+        .max_by_key(|h| h.id)
+        .map(|h| h.revision.clone())
+        .filter(|r| !r.is_empty() && r != &entry.revision);
+    Ok(ArgoRollout {
+        history_id: entry.id,
+        revision: entry.revision.clone(),
+        previous_revision,
+        deployed_at: entry.deployed_at.clone(),
+        initiated_by: entry.initiated_by.clone(),
+        repo_url: entry.repo_url.clone(),
+        path: entry.path.clone(),
+        is_chart: entry.is_chart,
+        approximate,
+    })
+}
+
+/// A revision as a reader scans it: seven characters of a git SHA, a chart
+/// version whole.
+fn short_revision(rev: &str, is_chart: bool) -> String {
+    if is_chart {
+        rev.to_string()
+    } else {
+        rev.chars().take(7).collect()
+    }
+}
+
+/// Match a workload to the ArgoCD Application that manages it, describe its
+/// last sync, and name the sync behind its current rollout.
 ///
-/// The second value is set only when that sync finished inside the window:
-/// "a release landed during the incident" is a claim about time, and an app
-/// that last synced a week ago must not make it.
+/// A tracking id that names the workload decides the app, because Argo
+/// manages a resource by that id. When it names an app Argo did not list,
+/// the answer is "unresolved", not an app guessed from labels. Without one,
+/// the app's resource list decides, then the instance label.
+///
+/// `rollout_in_window` is set only when that sync finished inside the
+/// window: "a release landed during the incident" is a claim about time, and
+/// an app that last synced a week ago must not make it.
 fn gitops_release_for(
     argo_apps: &[ArgoApplication],
-    kind: &str,
-    name: &str,
-    ns: &str,
-    labels: Option<&std::collections::BTreeMap<String, String>>,
+    w: &Workload,
     now: Timestamp,
     cutoff: Option<&Timestamp>,
-) -> (Option<GitOpsReleaseInfo>, Option<String>) {
-    let instance = labels.and_then(|l| {
-        l.get("app.kubernetes.io/instance")
-            .or_else(|| l.get("argocd.argoproj.io/instance"))
-    });
-    let Some(app) = argo_apps.iter().find(|app| {
-        app.resources
+) -> GitOpsMatch {
+    let tracked = w
+        .meta
+        .annotations
+        .as_ref()
+        .and_then(|a| a.get(TRACKING_ID))
+        .and_then(|id| {
+            let obj = serde_json::json!({
+                "apiVersion": w.api_version,
+                "kind": w.kind,
+                "metadata": { "name": w.name, "namespace": w.ns },
+            });
+            ReferenceFormat::ArgocdTrackingId.owner(id, &obj)
+        });
+    let (app, matched_by) = if let Some((app_ns, app_name)) = &tracked {
+        let found = argo_apps
             .iter()
-            .any(|r| r.kind == kind && r.name == name && r.namespace == ns)
-            || instance.is_some_and(|v| v == &app.name)
-    }) else {
-        return (None, None);
+            .find(|a| &a.name == app_name && app_ns.as_ref().is_none_or(|n| n == &a.namespace));
+        match found {
+            Some(app) => (app, "trackingId"),
+            None => {
+                let label = match app_ns {
+                    Some(n) => format!("{n}/{app_name}"),
+                    None => app_name.clone(),
+                };
+                return GitOpsMatch {
+                    unresolved: Some(format!("tracking id names Argo app {label}{NOT_LISTED}")),
+                    ..Default::default()
+                };
+            }
+        }
+    } else {
+        let instance = w.meta.labels.as_ref().and_then(|l| {
+            l.get("app.kubernetes.io/instance")
+                .or_else(|| l.get("argocd.argoproj.io/instance"))
+        });
+        let by_resource = argo_apps.iter().find(|app| {
+            app.resources
+                .iter()
+                .any(|r| r.kind == w.kind && r.name == w.name && r.namespace == w.ns)
+        });
+        if let Some(app) = by_resource {
+            (app, "resources")
+        } else if let Some(app) = instance.and_then(|v| argo_apps.iter().find(|a| &a.name == v)) {
+            (app, "label")
+        } else {
+            return GitOpsMatch::default();
+        }
     };
 
     let short_rev: String = app.sync_revision.chars().take(7).collect();
     let synced_at = app.last_sync_time.parse::<Timestamp>().ok();
+    let age_since = |ts: Timestamp| crate::format_age(now.duration_since(ts).as_secs().max(0));
     let sync_age = match synced_at {
-        Some(ts) => crate::format_age(now.duration_since(ts).as_secs()),
+        Some(ts) => age_since(ts),
         None if app.last_sync_time.is_empty() => "-".to_string(),
         None => app.last_sync_time.clone(),
     };
-    let rollout_in_window = match (synced_at, cutoff) {
-        (Some(ts), Some(cutoff)) if ts >= *cutoff && !short_rev.is_empty() => {
+
+    let (rollout, rollout_unmatched) = if app.sync_history.is_empty() {
+        (None, Some("the app records no sync history".to_string()))
+    } else {
+        match rollout_for(&app.sync_history, w.rollout_created, cutoff) {
+            Ok(r) => (Some(r), None),
+            Err(why) => (None, Some(why)),
+        }
+    };
+
+    let in_window = |ts: Option<Timestamp>| match (ts, cutoff) {
+        (Some(ts), Some(cutoff)) => ts >= *cutoff,
+        _ => false,
+    };
+    let rollout_in_window = match &rollout {
+        Some(r) => {
+            let deployed = r.deployed_at.parse::<Timestamp>().ok();
+            in_window(deployed).then(|| {
+                format!(
+                    "rev {} synced {} ago",
+                    short_revision(&r.revision, r.is_chart),
+                    deployed.map(age_since).unwrap_or_default()
+                )
+            })
+        }
+        // Without history the last sync is all Argo tells us.
+        None if app.sync_history.is_empty() && in_window(synced_at) && !short_rev.is_empty() => {
             Some(format!("rev {short_rev} synced {sync_age} ago"))
         }
-        _ => None,
+        None => None,
+    };
+
+    let (sync_message, is_health_message) = if !app.operation_message.is_empty()
+        && !app.operation_message.starts_with("successfully synced")
+        && (app.operation_phase == "Failed"
+            || app.operation_phase == "Error"
+            || app.sync_status != "Synced")
+    {
+        (Some(app.operation_message.clone()), false)
+    } else if !app.health_message.is_empty() && app.health_status != "Healthy" {
+        (Some(app.health_message.clone()), true)
+    } else {
+        (None, false)
     };
 
     let info = GitOpsReleaseInfo {
+        matched_by: matched_by.to_string(),
+        rollout,
+        rollout_unmatched,
         app_name: app.name.clone(),
         sync_status: app.sync_status.clone(),
         health_status: app.health_status.clone(),
@@ -786,15 +1380,14 @@ fn gitops_release_for(
         target_revision: app.target_revision.clone(),
         sync_revision: short_rev,
         sync_age,
-        sync_message: if !app.operation_message.is_empty() {
-            Some(app.operation_message.clone())
-        } else if !app.health_message.is_empty() {
-            Some(app.health_message.clone())
-        } else {
-            None
-        },
+        sync_message,
+        is_health_message,
     };
-    (Some(info), rollout_in_window)
+    GitOpsMatch {
+        info: Some(info),
+        rollout_in_window,
+        unresolved: None,
+    }
 }
 
 fn evaluate_pod_failures(
@@ -836,7 +1429,6 @@ fn evaluate_pod_failures(
         if let Some(ref st) = p.status {
             if st.phase.as_deref() == Some("Pending") {
                 pending_pod_count += 1;
-                is_pod_failing = true;
                 pod_status_label = "Pending".to_string();
             }
             if let Some(ref c_statuses) = st.container_statuses {
@@ -874,25 +1466,28 @@ fn evaluate_pod_failures(
                                 .unwrap_or_else(|| reason.to_string());
                         }
                     }
-                    if let Some(ref term) =
-                        cs.last_state.as_ref().and_then(|s| s.terminated.as_ref())
-                    {
-                        if term.exit_code == 137 || term.reason.as_deref() == Some("OOMKilled") {
-                            is_pod_failing = true;
-                            oom_killed_count += 1;
-                            pod_status_label = "OOMKilled".to_string();
-                            pod_error_msg = "exit code 137".to_string();
-                        } else if term.exit_code != 0 {
-                            is_pod_failing = true;
-                            exited_non_zero = true;
-                            if pod_status_label.is_empty() {
-                                pod_status_label = "Error".to_string();
-                            }
-                            if pod_status_label == "CrashLoopBackOff"
-                                || pod_error_msg.is_empty()
-                                || pod_error_msg.starts_with("back-off")
+                    if !cs.ready {
+                        if let Some(ref term) =
+                            cs.last_state.as_ref().and_then(|s| s.terminated.as_ref())
+                        {
+                            if term.exit_code == 137 || term.reason.as_deref() == Some("OOMKilled")
                             {
-                                pod_error_msg = format!("exited with code {}", term.exit_code);
+                                is_pod_failing = true;
+                                oom_killed_count += 1;
+                                pod_status_label = "OOMKilled".to_string();
+                                pod_error_msg = "exit code 137".to_string();
+                            } else if term.exit_code != 0 {
+                                is_pod_failing = true;
+                                exited_non_zero = true;
+                                if pod_status_label.is_empty() {
+                                    pod_status_label = "Error".to_string();
+                                }
+                                if pod_status_label == "CrashLoopBackOff"
+                                    || pod_error_msg.is_empty()
+                                    || pod_error_msg.starts_with("back-off")
+                                {
+                                    pod_error_msg = format!("exited with code {}", term.exit_code);
+                                }
                             }
                         }
                     }
@@ -925,22 +1520,34 @@ fn evaluate_pod_failures(
             .cloned()
             .unwrap_or_default();
         let (cat, detail) = analyze_pod_failure(p, &pod_events);
-        // Only a pod failing now explains the workload. A pod unschedulable
-        // forty minutes ago keeps its FailedScheduling event for about an
-        // hour after it was placed; read from a Running pod, that event
-        // gave a healthy 3/3 Deployment a [COMPUTE] root cause.
-        if is_pod_failing
-            && cat != FailureCategory::None
-            && detected_failure_category == FailureCategory::None
-        {
-            detected_failure_category = cat;
-            if let Some(ref d) = detail {
-                detected_failure_detail = d.clone();
+        let all_containers_ready = p
+            .status
+            .as_ref()
+            .and_then(|s| s.container_statuses.as_ref())
+            .map(|cs| !cs.is_empty() && cs.iter().all(|c| c.ready))
+            .unwrap_or(false);
+
+        let is_running = p.status.as_ref().and_then(|s| s.phase.as_deref()) == Some("Running")
+            || all_containers_ready;
+        let is_stale_warning = is_running
+            && !is_pod_failing
+            && (cat == FailureCategory::Compute
+                || cat == FailureCategory::Storage
+                || cat == FailureCategory::Network
+                || (cat == FailureCategory::Probe && all_containers_ready));
+
+        if cat != FailureCategory::None && !is_stale_warning {
+            is_pod_failing = true;
+            if detected_failure_category == FailureCategory::None {
+                detected_failure_category = cat;
+                if let Some(ref d) = detail {
+                    detected_failure_detail = d.clone();
+                }
             }
         }
         if pod_status_label == "Pending" && pod_error_msg.is_empty() {
-            if let Some(d) = detail {
-                pod_error_msg = d;
+            if let Some(ref d) = detail {
+                pod_error_msg = d.clone();
             }
         }
 
@@ -986,6 +1593,205 @@ fn evaluate_pod_failures(
         detected_failure_category,
         detected_failure_detail,
     )
+}
+
+struct WorkloadProbeRestartEval {
+    is_probe_failure: bool,
+    probe_failure_count: usize,
+    probe_failure_detail: Option<String>,
+    has_active_restart_flapping: bool,
+}
+
+fn evaluate_workload_probes_and_restarts(
+    current_pods: &[&Pod],
+    events_by_object: &HashMap<(String, String, String), Vec<&Event>>,
+    ns: &str,
+    cutoff_ts: Option<&Timestamp>,
+    now: Timestamp,
+    ready_replicas: i32,
+    desired_replicas: i32,
+) -> WorkloadProbeRestartEval {
+    let recent_cutoff = now
+        .checked_sub(SignedDuration::from_secs(900))
+        .unwrap_or(now);
+
+    let mut probe_failure_count = 0;
+    let mut has_recent_probe_failure = false;
+    let mut latest_probe_detail: Option<String> = None;
+    let mut latest_probe_ts: Option<Timestamp> = None;
+    let mut min_failure_threshold: usize = 3;
+
+    for p in current_pods {
+        let p_name = p.metadata.name.as_deref().unwrap_or_default();
+        let ready_transition_time = p
+            .status
+            .as_ref()
+            .and_then(|s| s.conditions.as_ref())
+            .and_then(|conds| {
+                conds.iter().find_map(|c| {
+                    if c.type_ == "Ready" && c.status == "True" {
+                        c.last_transition_time.as_ref().map(|t| t.0)
+                    } else {
+                        None
+                    }
+                })
+            });
+
+        if let Some(p_events) =
+            events_by_object.get(&("Pod".to_string(), ns.to_string(), p_name.to_string()))
+        {
+            for ev in p_events {
+                let reason = ev.reason.as_deref().unwrap_or("");
+                let msg = ev.message.as_deref().unwrap_or("");
+                let msg_lower = msg.to_lowercase();
+                if reason == "Unhealthy" || msg_lower.contains("probe failed") {
+                    let ev_ts = event_last_timestamp(ev);
+                    if cutoff_ts.map_or(true, |c| ev_ts.is_some_and(|t| t >= *c)) {
+                        // Ignore startup warmup probe failures that occurred before the pod successfully became ready
+                        let is_startup_warmup = match (ready_transition_time, ev_ts) {
+                            (Some(ready_t), Some(event_t)) => event_t <= ready_t,
+                            _ => false,
+                        };
+                        if !is_startup_warmup {
+                            let count = ev.count.unwrap_or(1) as usize;
+                            probe_failure_count += count;
+                            let active_cutoff = match cutoff_ts {
+                                Some(c) if *c > recent_cutoff => *c,
+                                _ => recent_cutoff,
+                            };
+                            if ev_ts.is_some_and(|t| t >= active_cutoff) {
+                                has_recent_probe_failure = true;
+                            }
+
+                            // Extract probe kind and probe spec parameters from the Pod
+                            let probe_type = if msg_lower.contains("readiness") {
+                                "Readiness"
+                            } else if msg_lower.contains("liveness") {
+                                "Liveness"
+                            } else if msg_lower.contains("startup") {
+                                "Startup"
+                            } else {
+                                "Probe"
+                            };
+
+                            let target_container_name =
+                                ev.involved_object.field_path.as_deref().and_then(|fp| {
+                                    let start = fp.find('{')?;
+                                    let end = fp.rfind('}')?;
+                                    if end > start + 1 {
+                                        Some(&fp[start + 1..end])
+                                    } else {
+                                        None
+                                    }
+                                });
+
+                            let containers = p
+                                .spec
+                                .as_ref()
+                                .map(|s| s.containers.as_slice())
+                                .unwrap_or(&[]);
+                            let container = target_container_name
+                                .and_then(|c_name| containers.iter().find(|c| c.name == c_name))
+                                .or_else(|| {
+                                    containers.iter().find(|c| match probe_type {
+                                        "Readiness" => c.readiness_probe.is_some(),
+                                        "Liveness" => c.liveness_probe.is_some(),
+                                        "Startup" => c.startup_probe.is_some(),
+                                        _ => {
+                                            c.readiness_probe.is_some()
+                                                || c.liveness_probe.is_some()
+                                        }
+                                    })
+                                })
+                                .or_else(|| containers.first());
+
+                            let probe = container.and_then(|c| match probe_type {
+                                "Readiness" => c.readiness_probe.as_ref(),
+                                "Liveness" => c.liveness_probe.as_ref(),
+                                "Startup" => c.startup_probe.as_ref(),
+                                _ => c.readiness_probe.as_ref().or(c.liveness_probe.as_ref()),
+                            });
+
+                            let threshold = probe.and_then(|pr| pr.failure_threshold).unwrap_or(3);
+                            let period = probe.and_then(|pr| pr.period_seconds).unwrap_or(10);
+                            let timeout = probe.and_then(|pr| pr.timeout_seconds).unwrap_or(1);
+                            min_failure_threshold = min_failure_threshold.min(threshold as usize);
+
+                            let clean_err = if let Some(idx) = msg.find("probe failed: ") {
+                                msg[idx + "probe failed: ".len()..].trim()
+                            } else if let Some(idx) = msg.find("probe failed:") {
+                                msg[idx + "probe failed:".len()..].trim()
+                            } else {
+                                msg.trim()
+                            };
+
+                            let detail_str = format!(
+                                "{probe_type} probe failed (threshold: {threshold}, period: {period}s, timeout: {timeout}s): {clean_err}"
+                            );
+
+                            if latest_probe_detail.is_none() || ev_ts >= latest_probe_ts {
+                                latest_probe_detail = Some(detail_str);
+                                latest_probe_ts = ev_ts;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let is_probe_failure = if probe_failure_count == 0 {
+        false
+    } else if ready_replicas < desired_replicas {
+        true
+    } else {
+        probe_failure_count >= min_failure_threshold && has_recent_probe_failure
+    };
+
+    let active_restart_cutoff = match cutoff_ts {
+        Some(c) if *c > recent_cutoff => *c,
+        _ => recent_cutoff,
+    };
+
+    let has_active_restart_flapping = current_pods.iter().any(|p| {
+        if let Some(ref st) = p.status {
+            if let Some(ref cs_list) = st.container_statuses {
+                for cs in cs_list {
+                    if cs.restart_count >= 2 {
+                        if !cs.ready {
+                            return true;
+                        }
+                        if let Some(ref running) =
+                            cs.state.as_ref().and_then(|s| s.running.as_ref())
+                        {
+                            if let Some(ref started) = running.started_at {
+                                if started.0 >= active_restart_cutoff {
+                                    return true;
+                                }
+                            }
+                        }
+                        if let Some(ref term) =
+                            cs.last_state.as_ref().and_then(|s| s.terminated.as_ref())
+                        {
+                            if let Some(ref finished) = term.finished_at {
+                                if finished.0 >= active_restart_cutoff {
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        false
+    });
+
+    WorkloadProbeRestartEval {
+        is_probe_failure,
+        probe_failure_count,
+        probe_failure_detail: latest_probe_detail,
+        has_active_restart_flapping,
+    }
 }
 
 /// Evaluates deployments, statefulsets, cronjobs, replicasets, pods, events, and GitOps applications
@@ -1175,6 +1981,62 @@ pub fn evaluate_changed_triage(
             .cloned()
             .unwrap_or_default();
 
+        let desired_replicas = dep.spec.as_ref().and_then(|s| s.replicas).unwrap_or(1);
+        let status = dep.status.as_ref();
+        let updated_replicas = status.and_then(|s| s.updated_replicas).unwrap_or(0);
+        let ready_replicas = status.and_then(|s| s.ready_replicas).unwrap_or(0);
+        let available_replicas = status.and_then(|s| s.available_replicas).unwrap_or(0);
+
+        let mut progress_deadline_exceeded = false;
+        if let Some(st) = status {
+            if let Some(ref conds) = st.conditions {
+                for c in conds {
+                    if c.type_ == "Progressing"
+                        && c.status == "False"
+                        && c.reason.as_deref() == Some("ProgressDeadlineExceeded")
+                    {
+                        progress_deadline_exceeded = true;
+                    }
+                }
+            }
+        }
+
+        let (
+            failing_pod_names,
+            crash_loop_count,
+            oom_killed_count,
+            config_error_count,
+            image_error_count,
+            pending_pod_count,
+            restart_count,
+            primary_symptoms,
+            pod_symptoms,
+            detected_failure_category,
+            detected_failure_detail,
+        ) = evaluate_pod_failures(&current_pods, &events_by_object, &dep_ns);
+
+        let probe_eval = evaluate_workload_probes_and_restarts(
+            &current_pods,
+            &events_by_object,
+            &dep_ns,
+            cutoff_ts.as_ref(),
+            now,
+            ready_replicas,
+            desired_replicas,
+        );
+
+        let is_actively_failing = crash_loop_count > 0
+            || oom_killed_count > 0
+            || config_error_count > 0
+            || image_error_count > 0
+            || (pending_pod_count > 0
+                && (ready_replicas < desired_replicas
+                    || detected_failure_category != FailureCategory::None))
+            || progress_deadline_exceeded
+            || (desired_replicas > 0 && ready_replicas < desired_replicas)
+            || probe_eval.is_probe_failure
+            || probe_eval.has_active_restart_flapping;
+
         let mut change_detail = None;
         let change = if rolled_out {
             Some((ChangeKind::Rollout, deployed_age.clone()))
@@ -1184,10 +2046,9 @@ pub fn evaluate_changed_triage(
             change_detail = Some(parse_scale_event(ev.message.as_deref().unwrap_or("")));
             Some((ChangeKind::Scaled, age_of(t)))
         } else if opts.include_failing {
-            // Not changed in the window, but failing in it: a Warning on the
-            // current ReplicaSet (FailedCreate on a quota) or on a pod.
-            cutoff_ts.as_ref().and_then(|cutoff| {
-                let failing =
+            // Actively failing or warned in the window
+            let failing = is_actively_failing
+                || cutoff_ts.as_ref().is_some_and(|cutoff| {
                     warning_in_window(
                         events_by_object.get(&(
                             "ReplicaSet".to_string(),
@@ -1195,9 +2056,9 @@ pub fn evaluate_changed_triage(
                             current_rs_name.to_string(),
                         )),
                         cutoff,
-                    ) || pods_warned_in_window(&current_pods, &events_by_object, &dep_ns, cutoff);
-                failing.then(|| (ChangeKind::FailingOnly, deployed_age.clone()))
-            })
+                    ) || pods_warned_in_window(&current_pods, &events_by_object, &dep_ns, cutoff)
+                });
+            failing.then(|| (ChangeKind::FailingOnly, deployed_age.clone()))
         } else {
             None
         };
@@ -1241,42 +2102,7 @@ pub fn evaluate_changed_triage(
                 .cloned()
         });
 
-        let desired_replicas = dep.spec.as_ref().and_then(|s| s.replicas).unwrap_or(1);
-        let status = dep.status.as_ref();
-        let updated_replicas = status.and_then(|s| s.updated_replicas).unwrap_or(0);
-        let ready_replicas = status.and_then(|s| s.ready_replicas).unwrap_or(0);
-        let available_replicas = status.and_then(|s| s.available_replicas).unwrap_or(0);
-
-        let mut progress_deadline_exceeded = false;
-        if let Some(st) = status {
-            if let Some(ref conds) = st.conditions {
-                for c in conds {
-                    if c.type_ == "Progressing"
-                        && c.status == "False"
-                        && c.reason.as_deref() == Some("ProgressDeadlineExceeded")
-                    {
-                        progress_deadline_exceeded = true;
-                    }
-                }
-            }
-        }
-
-        let (
-            failing_pod_names,
-            crash_loop_count,
-            oom_killed_count,
-            config_error_count,
-            image_error_count,
-            pending_pod_count,
-            restart_count,
-            primary_symptoms,
-            pod_symptoms,
-            detected_failure_category,
-            detected_failure_detail,
-        ) = evaluate_pod_failures(&current_pods, &events_by_object, &dep_ns);
-
         let mut correlated_events: Vec<EventSummary> = Vec::new();
-        let mut probe_failure_count = 0;
 
         for ev in &dep_events {
             if !is_noisy_normal_event(ev.reason.as_deref().unwrap_or(""), ev.type_.as_deref()) {
@@ -1305,9 +2131,6 @@ pub fn evaluate_changed_triage(
                 events_by_object.get(&("Pod".to_string(), dep_ns.clone(), p_name))
             {
                 for ev in p_events {
-                    if ev.reason.as_deref() == Some("Unhealthy") {
-                        probe_failure_count += ev.count.unwrap_or(1) as usize;
-                    }
                     if !is_noisy_normal_event(
                         ev.reason.as_deref().unwrap_or(""),
                         ev.type_.as_deref(),
@@ -1318,15 +2141,22 @@ pub fn evaluate_changed_triage(
             }
         }
 
-        let (gitops, argo_rollout_in_window) = gitops_release_for(
+        let gitops_match = gitops_release_for(
             argo_apps,
-            "Deployment",
-            &dep_name,
-            &dep_ns,
-            dep.metadata.labels.as_ref(),
+            &Workload {
+                api_version: "apps/v1",
+                kind: "Deployment",
+                name: &dep_name,
+                ns: &dep_ns,
+                meta: &dep.metadata,
+                rollout_created: current_rs
+                    .and_then(|rs| rs.metadata.creation_timestamp.as_ref())
+                    .map(|t| t.0),
+            },
             now,
             cutoff_ts.as_ref(),
         );
+        let local_cause = current_rs.and_then(|rs| restart_cause(rs, prev_rs));
 
         let rollout_status = if desired_replicas == 0 {
             RolloutStatus::ScaledDown
@@ -1339,6 +2169,8 @@ pub fn evaluate_changed_triage(
             && config_error_count == 0
             && image_error_count == 0
             && pending_pod_count == 0
+            && !probe_eval.is_probe_failure
+            && !probe_eval.has_active_restart_flapping
         {
             RolloutStatus::Complete
         } else if !failing_pod_names.is_empty() {
@@ -1349,13 +2181,18 @@ pub fn evaluate_changed_triage(
 
         let incident_status = if oom_killed_count > 0 {
             IncidentStatus::OomKilled
-        } else if crash_loop_count > 0 {
+        } else if probe_eval.is_probe_failure {
+            IncidentStatus::ProbeFailure
+        } else if crash_loop_count > 0 || probe_eval.has_active_restart_flapping {
             IncidentStatus::CrashLoop
         } else if config_error_count > 0 {
             IncidentStatus::ConfigError
         } else if image_error_count > 0 {
             IncidentStatus::ImageError
-        } else if pending_pod_count > 0 {
+        } else if pending_pod_count > 0
+            && (ready_replicas < desired_replicas
+                || detected_failure_category != FailureCategory::None)
+        {
             IncidentStatus::Pending
         } else if progress_deadline_exceeded {
             IncidentStatus::Stalled
@@ -1369,28 +2206,57 @@ pub fn evaluate_changed_triage(
             IncidentStatus::Unknown
         };
 
-        let failure_category = if detected_failure_category != FailureCategory::None {
+        let failure_category = if incident_status == IncidentStatus::Healthy {
+            FailureCategory::None
+        } else if probe_eval.is_probe_failure {
+            FailureCategory::Probe
+        } else if detected_failure_category != FailureCategory::None {
             detected_failure_category
-        } else if oom_killed_count > 0 || crash_loop_count > 0 || config_error_count > 0 {
+        } else if oom_killed_count > 0
+            || crash_loop_count > 0
+            || probe_eval.has_active_restart_flapping
+            || config_error_count > 0
+        {
             FailureCategory::App
         } else if image_error_count > 0 {
             FailureCategory::Image
-        } else if pending_pod_count > 0 {
+        } else if incident_status == IncidentStatus::Pending {
             FailureCategory::Compute
         } else {
             FailureCategory::None
         };
 
-        let failure_detail = if !detected_failure_detail.is_empty() {
+        let failure_detail = if incident_status == IncidentStatus::Healthy {
+            "Healthy".to_string()
+        } else if probe_eval.is_probe_failure {
+            if let Some(ref d) = probe_eval.probe_failure_detail {
+                d.clone()
+            } else if probe_eval.probe_failure_count > 0 {
+                format!(
+                    "{} probe failure(s) in window",
+                    probe_eval.probe_failure_count
+                )
+            } else {
+                "Probe failure in window".to_string()
+            }
+        } else if !detected_failure_detail.is_empty() {
             detected_failure_detail
         } else if oom_killed_count > 0 {
             format!("{oom_killed_count} pod(s) OOMKilled (Exit 137)")
         } else if crash_loop_count > 0 {
             format!("{crash_loop_count} pod(s) in CrashLoopBackOff")
+        } else if probe_eval.has_active_restart_flapping {
+            format!("{restart_count} container restart(s) in window (CrashLoopBackOff)")
         } else if config_error_count > 0 {
             format!("{config_error_count} pod(s) configuration error")
         } else if image_error_count > 0 {
             format!("{image_error_count} pod(s) image pull failure")
+        } else if incident_status == IncidentStatus::Pending {
+            if ready_replicas < desired_replicas {
+                format!("{ready_replicas}/{desired_replicas} Ready (Pod unschedulable)")
+            } else {
+                "Pod unschedulable (waiting for node placement)".to_string()
+            }
         } else if progress_deadline_exceeded {
             "Rollout stalled: ProgressDeadlineExceeded".to_string()
         } else if ready_replicas < desired_replicas {
@@ -1404,6 +2270,10 @@ pub fn evaluate_changed_triage(
             _ => failure_detail,
         };
 
+        if change_kind == ChangeKind::FailingOnly && incident_status == IncidentStatus::Healthy {
+            continue;
+        }
+
         let (error_log_pod, error_log_container) = log_target(&pod_symptoms, &current_pods);
         deployment_changes.push(AppDeploymentChange {
             app_name: dep_name,
@@ -1412,8 +2282,10 @@ pub fn evaluate_changed_triage(
             incident_status,
             failure_category,
             failure_detail,
-            gitops,
-            argo_rollout_in_window,
+            gitops: gitops_match.info,
+            argo_rollout_in_window: gitops_match.rollout_in_window,
+            gitops_unresolved: gitops_match.unresolved,
+            local_cause,
             error_log_snippet: None,
             error_log_pod,
             error_log_container,
@@ -1435,7 +2307,7 @@ pub fn evaluate_changed_triage(
             failing_pods_count: failing_pod_names.len(),
             crash_loop_count,
             oom_killed_count,
-            probe_failure_count,
+            probe_failure_count: probe_eval.probe_failure_count,
             restart_count,
             primary_symptoms,
             pod_symptoms,
@@ -1454,79 +2326,10 @@ pub fn evaluate_changed_triage(
         }
         let sts_name = sts.metadata.name.clone().unwrap_or_default();
 
-        let mut in_window = false;
-        let mut deployed_at = None;
-        let mut deployed_age = "-".to_string();
-
-        if let Some(ref ct) = sts.metadata.creation_timestamp {
-            deployed_at = Some(ct.0.to_string());
-            deployed_age = crate::format_age(now.duration_since(ct.0).as_secs().max(0));
-            if let Some(ref cutoff) = cutoff_ts {
-                if ct.0 >= *cutoff {
-                    in_window = true;
-                }
-            }
-        }
-
-        let sts_events = events_by_object
-            .get(&("StatefulSet".to_string(), sts_ns.clone(), sts_name.clone()))
-            .cloned()
-            .unwrap_or_default();
-        for ev in &sts_events {
-            if let Some(last_ts) = event_last_timestamp(ev) {
-                if let Some(ref cutoff) = cutoff_ts {
-                    if last_ts >= *cutoff {
-                        in_window = true;
-                        break;
-                    }
-                }
-            }
-        }
-
         let current_pods = pods_by_sts
             .get(&(sts_ns.clone(), sts_name.clone()))
             .cloned()
             .unwrap_or_default();
-
-        for p in &current_pods {
-            if let Some(ref ct) = p.metadata.creation_timestamp {
-                if let Some(ref cutoff) = cutoff_ts {
-                    if ct.0 >= *cutoff {
-                        in_window = true;
-                        break;
-                    }
-                }
-            }
-        }
-        let mut change_kind = ChangeKind::Rollout;
-        if !in_window && opts.include_failing {
-            if let Some(ref cutoff) = cutoff_ts {
-                in_window =
-                    pods_warned_in_window(&current_pods, &events_by_object, &sts_ns, cutoff);
-                if in_window {
-                    change_kind = ChangeKind::FailingOnly;
-                }
-            }
-        }
-
-        if !in_window {
-            continue;
-        }
-
-        tracked_objects.insert(("StatefulSet".to_string(), sts_ns.clone(), sts_name.clone()));
-        for p in &current_pods {
-            let pod_name = p.metadata.name.clone().unwrap_or_default();
-            tracked_objects.insert(("Pod".to_string(), sts_ns.clone(), pod_name));
-        }
-
-        let current_images = extract_sts_container_images(sts);
-        let image_diff = current_images.join(", ");
-        let current_revision = sts
-            .status
-            .as_ref()
-            .and_then(|s| s.current_revision.clone())
-            .or_else(|| sts.status.as_ref().and_then(|s| s.update_revision.clone()))
-            .unwrap_or_else(|| "1".to_string());
 
         let desired_replicas = sts.spec.as_ref().and_then(|s| s.replicas).unwrap_or(1);
         let st = sts.status.as_ref();
@@ -1550,8 +2353,108 @@ pub fn evaluate_changed_triage(
             detected_failure_detail,
         ) = evaluate_pod_failures(&current_pods, &events_by_object, &sts_ns);
 
+        let probe_eval = evaluate_workload_probes_and_restarts(
+            &current_pods,
+            &events_by_object,
+            &sts_ns,
+            cutoff_ts.as_ref(),
+            now,
+            ready_replicas,
+            desired_replicas,
+        );
+
+        let is_actively_failing = crash_loop_count > 0
+            || oom_killed_count > 0
+            || config_error_count > 0
+            || image_error_count > 0
+            || (pending_pod_count > 0
+                && (ready_replicas < desired_replicas
+                    || detected_failure_category != FailureCategory::None))
+            || (desired_replicas > 0 && ready_replicas < desired_replicas)
+            || probe_eval.is_probe_failure
+            || probe_eval.has_active_restart_flapping;
+
+        let sts_events = events_by_object
+            .get(&("StatefulSet".to_string(), sts_ns.clone(), sts_name.clone()))
+            .cloned()
+            .unwrap_or_default();
+
+        let latest_pod_created = current_pods
+            .iter()
+            .filter_map(|p| p.metadata.creation_timestamp.as_ref().map(|t| t.0))
+            .max();
+        let latest_event_ts = sts_events
+            .iter()
+            .filter_map(|ev| event_last_timestamp(ev))
+            .max();
+
+        let deployed_at_ts =
+            latest_pod_created.or_else(|| sts.metadata.creation_timestamp.as_ref().map(|t| t.0));
+        let deployed_at = deployed_at_ts.map(|t| t.to_string());
+        let deployed_age = deployed_at_ts
+            .map(|t| crate::format_age(now.duration_since(t).as_secs().max(0)))
+            .unwrap_or_else(|| "-".to_string());
+
+        let mut in_window = false;
+        let mut change_kind = ChangeKind::Rollout;
+        let mut changed_age = deployed_age.clone();
+
+        if let Some(pod_ts) = latest_pod_created {
+            if cutoff_ts.as_ref().is_some_and(|c| &pod_ts >= c) {
+                in_window = true;
+                change_kind = ChangeKind::Rollout;
+                changed_age = crate::format_age(now.duration_since(pod_ts).as_secs().max(0));
+            }
+        }
+        if !in_window {
+            if let Some(ev_t) = latest_event_ts {
+                if cutoff_ts.as_ref().is_some_and(|c| &ev_t >= c) {
+                    in_window = true;
+                    change_kind = ChangeKind::Scaled;
+                    changed_age = crate::format_age(now.duration_since(ev_t).as_secs().max(0));
+                }
+            }
+        }
+        if !in_window && (opts.include_failing || is_actively_failing) {
+            let failing = is_actively_failing
+                || cutoff_ts.as_ref().is_some_and(|cutoff| {
+                    pods_warned_in_window(&current_pods, &events_by_object, &sts_ns, cutoff)
+                });
+            if failing {
+                in_window = true;
+                change_kind = ChangeKind::FailingOnly;
+                changed_age = deployed_age.clone();
+            }
+        }
+        if !in_window && opts.include_scaled {
+            if let Some(ref ct) = sts.metadata.creation_timestamp {
+                if cutoff_ts.as_ref().is_some_and(|c| &ct.0 >= c) {
+                    in_window = true;
+                    change_kind = ChangeKind::Rollout;
+                }
+            }
+        }
+
+        if !in_window {
+            continue;
+        }
+
+        tracked_objects.insert(("StatefulSet".to_string(), sts_ns.clone(), sts_name.clone()));
+        for p in &current_pods {
+            let pod_name = p.metadata.name.clone().unwrap_or_default();
+            tracked_objects.insert(("Pod".to_string(), sts_ns.clone(), pod_name));
+        }
+
+        let current_images = extract_sts_container_images(sts);
+        let image_diff = current_images.join(", ");
+        let current_revision = sts
+            .status
+            .as_ref()
+            .and_then(|s| s.current_revision.clone())
+            .or_else(|| sts.status.as_ref().and_then(|s| s.update_revision.clone()))
+            .unwrap_or_else(|| "1".to_string());
+
         let mut correlated_events: Vec<EventSummary> = Vec::new();
-        let mut probe_failure_count = 0;
 
         for ev in &sts_events {
             if !is_noisy_normal_event(ev.reason.as_deref().unwrap_or(""), ev.type_.as_deref()) {
@@ -1564,9 +2467,6 @@ pub fn evaluate_changed_triage(
                 events_by_object.get(&("Pod".to_string(), sts_ns.clone(), p_name))
             {
                 for ev in p_events {
-                    if ev.reason.as_deref() == Some("Unhealthy") {
-                        probe_failure_count += ev.count.unwrap_or(1) as usize;
-                    }
                     if !is_noisy_normal_event(
                         ev.reason.as_deref().unwrap_or(""),
                         ev.type_.as_deref(),
@@ -1577,15 +2477,20 @@ pub fn evaluate_changed_triage(
             }
         }
 
-        let (gitops, argo_rollout_in_window) = gitops_release_for(
+        let gitops_match = gitops_release_for(
             argo_apps,
-            "StatefulSet",
-            &sts_name,
-            &sts_ns,
-            sts.metadata.labels.as_ref(),
+            &Workload {
+                api_version: "apps/v1",
+                kind: "StatefulSet",
+                name: &sts_name,
+                ns: &sts_ns,
+                meta: &sts.metadata,
+                rollout_created: None,
+            },
             now,
             cutoff_ts.as_ref(),
         );
+        let local_cause = None;
 
         let rollout_status = if desired_replicas == 0 {
             RolloutStatus::ScaledDown
@@ -1596,6 +2501,8 @@ pub fn evaluate_changed_triage(
             && config_error_count == 0
             && image_error_count == 0
             && pending_pod_count == 0
+            && !probe_eval.is_probe_failure
+            && !probe_eval.has_active_restart_flapping
         {
             RolloutStatus::Complete
         } else if !failing_pod_names.is_empty() {
@@ -1606,13 +2513,18 @@ pub fn evaluate_changed_triage(
 
         let incident_status = if oom_killed_count > 0 {
             IncidentStatus::OomKilled
-        } else if crash_loop_count > 0 {
+        } else if probe_eval.is_probe_failure {
+            IncidentStatus::ProbeFailure
+        } else if crash_loop_count > 0 || probe_eval.has_active_restart_flapping {
             IncidentStatus::CrashLoop
         } else if config_error_count > 0 {
             IncidentStatus::ConfigError
         } else if image_error_count > 0 {
             IncidentStatus::ImageError
-        } else if pending_pod_count > 0 {
+        } else if pending_pod_count > 0
+            && (ready_replicas < desired_replicas
+                || detected_failure_category != FailureCategory::None)
+        {
             IncidentStatus::Pending
         } else if rollout_status == RolloutStatus::Progressing {
             IncidentStatus::Rolling
@@ -1624,33 +2536,66 @@ pub fn evaluate_changed_triage(
             IncidentStatus::Unknown
         };
 
-        let failure_category = if detected_failure_category != FailureCategory::None {
+        let failure_category = if incident_status == IncidentStatus::Healthy {
+            FailureCategory::None
+        } else if probe_eval.is_probe_failure {
+            FailureCategory::Probe
+        } else if detected_failure_category != FailureCategory::None {
             detected_failure_category
-        } else if oom_killed_count > 0 || crash_loop_count > 0 || config_error_count > 0 {
+        } else if oom_killed_count > 0
+            || crash_loop_count > 0
+            || probe_eval.has_active_restart_flapping
+            || config_error_count > 0
+        {
             FailureCategory::App
         } else if image_error_count > 0 {
             FailureCategory::Image
-        } else if pending_pod_count > 0 {
+        } else if incident_status == IncidentStatus::Pending {
             FailureCategory::Compute
         } else {
             FailureCategory::None
         };
 
-        let failure_detail = if !detected_failure_detail.is_empty() {
+        let failure_detail = if incident_status == IncidentStatus::Healthy {
+            "Healthy".to_string()
+        } else if probe_eval.is_probe_failure {
+            if let Some(ref d) = probe_eval.probe_failure_detail {
+                d.clone()
+            } else if probe_eval.probe_failure_count > 0 {
+                format!(
+                    "{} probe failure(s) in window",
+                    probe_eval.probe_failure_count
+                )
+            } else {
+                "Probe failure in window".to_string()
+            }
+        } else if !detected_failure_detail.is_empty() {
             detected_failure_detail
         } else if oom_killed_count > 0 {
             format!("{oom_killed_count} pod(s) OOMKilled (Exit 137)")
         } else if crash_loop_count > 0 {
             format!("{crash_loop_count} pod(s) in CrashLoopBackOff")
+        } else if probe_eval.has_active_restart_flapping {
+            format!("{restart_count} container restart(s) in window (CrashLoopBackOff)")
         } else if config_error_count > 0 {
             format!("{config_error_count} pod(s) configuration error")
         } else if image_error_count > 0 {
             format!("{image_error_count} pod(s) image pull failure")
+        } else if incident_status == IncidentStatus::Pending {
+            if ready_replicas < desired_replicas {
+                format!("{ready_replicas}/{desired_replicas} Ready (Pod unschedulable)")
+            } else {
+                "Pod unschedulable (waiting for node placement)".to_string()
+            }
         } else if ready_replicas < desired_replicas {
             format!("{ready_replicas}/{desired_replicas} Ready")
         } else {
             "Healthy".to_string()
         };
+
+        if change_kind == ChangeKind::FailingOnly && incident_status == IncidentStatus::Healthy {
+            continue;
+        }
 
         let (error_log_pod, error_log_container) = log_target(&pod_symptoms, &current_pods);
         deployment_changes.push(AppDeploymentChange {
@@ -1660,13 +2605,15 @@ pub fn evaluate_changed_triage(
             incident_status,
             failure_category,
             failure_detail,
-            gitops,
-            argo_rollout_in_window,
+            gitops: gitops_match.info,
+            argo_rollout_in_window: gitops_match.rollout_in_window,
+            gitops_unresolved: gitops_match.unresolved,
+            local_cause,
             error_log_snippet: None,
             error_log_pod,
             error_log_container,
             change_kind,
-            changed_age: deployed_age.clone(),
+            changed_age,
             change_detail: None,
             deployed_at,
             deployed_age,
@@ -1683,7 +2630,7 @@ pub fn evaluate_changed_triage(
             failing_pods_count: failing_pod_names.len(),
             crash_loop_count,
             oom_killed_count,
-            probe_failure_count,
+            probe_failure_count: probe_eval.probe_failure_count,
             restart_count,
             primary_symptoms,
             pod_symptoms,
@@ -1702,47 +2649,6 @@ pub fn evaluate_changed_triage(
         }
         let cj_name = cj.metadata.name.clone().unwrap_or_default();
 
-        let mut in_window = false;
-        let mut deployed_at = None;
-        let mut deployed_age = "-".to_string();
-
-        if let Some(ref ct) = cj.metadata.creation_timestamp {
-            deployed_at = Some(ct.0.to_string());
-            deployed_age = crate::format_age(now.duration_since(ct.0).as_secs().max(0));
-            if let Some(ref cutoff) = cutoff_ts {
-                if ct.0 >= *cutoff {
-                    in_window = true;
-                }
-            }
-        }
-
-        if let Some(ref st) = cj.status {
-            if let Some(ref sched) = st.last_schedule_time {
-                deployed_at = Some(sched.0.to_string());
-                deployed_age = crate::format_age(now.duration_since(sched.0).as_secs().max(0));
-                if let Some(ref cutoff) = cutoff_ts {
-                    if sched.0 >= *cutoff {
-                        in_window = true;
-                    }
-                }
-            }
-        }
-
-        let cj_events = events_by_object
-            .get(&("CronJob".to_string(), cj_ns.clone(), cj_name.clone()))
-            .cloned()
-            .unwrap_or_default();
-        for ev in &cj_events {
-            if let Some(last_ts) = event_last_timestamp(ev) {
-                if let Some(ref cutoff) = cutoff_ts {
-                    if last_ts >= *cutoff {
-                        in_window = true;
-                        break;
-                    }
-                }
-            }
-        }
-
         let mut current_pods: Vec<&Pod> = Vec::new();
         if let Some(owned_jobs) = jobs_by_cj.get(&(cj_ns.clone(), cj_name.clone())) {
             for job in owned_jobs {
@@ -1755,22 +2661,111 @@ pub fn evaluate_changed_triage(
             }
         }
 
-        for p in &current_pods {
-            if let Some(ref ct) = p.metadata.creation_timestamp {
-                if let Some(ref cutoff) = cutoff_ts {
-                    if ct.0 >= *cutoff {
-                        in_window = true;
-                        break;
-                    }
+        let is_suspended = cj.spec.as_ref().and_then(|s| s.suspend).unwrap_or(false);
+        let desired_replicas = if is_suspended { 0 } else { 1 };
+        let ready_replicas = current_pods
+            .iter()
+            .filter(|p| {
+                p.status.as_ref().and_then(|s| s.phase.as_deref()) == Some("Running")
+                    || p.status.as_ref().and_then(|s| s.phase.as_deref()) == Some("Succeeded")
+            })
+            .count() as i32;
+        let updated_replicas = ready_replicas;
+        let available_replicas = ready_replicas;
+
+        let (
+            failing_pod_names,
+            crash_loop_count,
+            oom_killed_count,
+            config_error_count,
+            image_error_count,
+            pending_pod_count,
+            restart_count,
+            primary_symptoms,
+            pod_symptoms,
+            detected_failure_category,
+            detected_failure_detail,
+        ) = evaluate_pod_failures(&current_pods, &events_by_object, &cj_ns);
+
+        let probe_eval = evaluate_workload_probes_and_restarts(
+            &current_pods,
+            &events_by_object,
+            &cj_ns,
+            cutoff_ts.as_ref(),
+            now,
+            1,
+            1,
+        );
+
+        let is_actively_failing = crash_loop_count > 0
+            || oom_killed_count > 0
+            || config_error_count > 0
+            || image_error_count > 0
+            || (pending_pod_count > 0 && detected_failure_category != FailureCategory::None)
+            || probe_eval.is_probe_failure
+            || probe_eval.has_active_restart_flapping;
+
+        let cj_events = events_by_object
+            .get(&("CronJob".to_string(), cj_ns.clone(), cj_name.clone()))
+            .cloned()
+            .unwrap_or_default();
+
+        let latest_pod_created = current_pods
+            .iter()
+            .filter_map(|p| p.metadata.creation_timestamp.as_ref().map(|t| t.0))
+            .max();
+        let latest_sched = cj
+            .status
+            .as_ref()
+            .and_then(|s| s.last_schedule_time.as_ref().map(|t| t.0));
+        let latest_event_ts = cj_events
+            .iter()
+            .filter_map(|ev| event_last_timestamp(ev))
+            .max();
+
+        let cj_created = cj.metadata.creation_timestamp.as_ref().map(|t| t.0);
+        let deployed_at_ts = cj_created.or(latest_sched).or(latest_pod_created);
+        let deployed_at = deployed_at_ts.map(|t| t.to_string());
+        let deployed_age = deployed_at_ts
+            .map(|t| crate::format_age(now.duration_since(t).as_secs().max(0)))
+            .unwrap_or_else(|| "-".to_string());
+
+        let mut in_window = false;
+        let mut change_kind = ChangeKind::Rollout;
+        let mut changed_age = deployed_age.clone();
+
+        if let Some(ts) = cj_created {
+            if cutoff_ts.as_ref().is_some_and(|c| &ts >= c) {
+                in_window = true;
+                change_kind = ChangeKind::Rollout;
+                changed_age = crate::format_age(now.duration_since(ts).as_secs().max(0));
+            }
+        }
+        if !in_window {
+            if let Some(ev_t) = latest_event_ts {
+                if cutoff_ts.as_ref().is_some_and(|c| &ev_t >= c) {
+                    in_window = true;
+                    change_kind = ChangeKind::Scaled;
+                    changed_age = crate::format_age(now.duration_since(ev_t).as_secs().max(0));
                 }
             }
         }
-        let mut change_kind = ChangeKind::Rollout;
-        if !in_window && opts.include_failing {
-            if let Some(ref cutoff) = cutoff_ts {
-                in_window = pods_warned_in_window(&current_pods, &events_by_object, &cj_ns, cutoff);
-                if in_window {
-                    change_kind = ChangeKind::FailingOnly;
+        if !in_window && (opts.include_failing || is_actively_failing) {
+            let failing = is_actively_failing
+                || cutoff_ts.as_ref().is_some_and(|cutoff| {
+                    pods_warned_in_window(&current_pods, &events_by_object, &cj_ns, cutoff)
+                });
+            if failing {
+                in_window = true;
+                change_kind = ChangeKind::FailingOnly;
+                changed_age = deployed_age.clone();
+            }
+        }
+        if !in_window && opts.include_scaled {
+            if let Some(ref ct) = cj.metadata.creation_timestamp {
+                if cutoff_ts.as_ref().is_some_and(|c| &ct.0 >= c) {
+                    in_window = true;
+                    change_kind = ChangeKind::Rollout;
                 }
             }
         }
@@ -1801,34 +2796,7 @@ pub fn evaluate_changed_triage(
             .map(|s| s.schedule.clone())
             .unwrap_or_else(|| "-".to_string());
 
-        let is_suspended = cj.spec.as_ref().and_then(|s| s.suspend).unwrap_or(false);
-        let desired_replicas = if is_suspended { 0 } else { 1 };
-        let ready_replicas = current_pods
-            .iter()
-            .filter(|p| {
-                p.status.as_ref().and_then(|s| s.phase.as_deref()) == Some("Running")
-                    || p.status.as_ref().and_then(|s| s.phase.as_deref()) == Some("Succeeded")
-            })
-            .count() as i32;
-        let updated_replicas = ready_replicas;
-        let available_replicas = ready_replicas;
-
-        let (
-            failing_pod_names,
-            crash_loop_count,
-            oom_killed_count,
-            config_error_count,
-            image_error_count,
-            pending_pod_count,
-            restart_count,
-            primary_symptoms,
-            pod_symptoms,
-            detected_failure_category,
-            detected_failure_detail,
-        ) = evaluate_pod_failures(&current_pods, &events_by_object, &cj_ns);
-
         let mut correlated_events: Vec<EventSummary> = Vec::new();
-        let probe_failure_count = 0;
 
         for ev in &cj_events {
             if !is_noisy_normal_event(ev.reason.as_deref().unwrap_or(""), ev.type_.as_deref()) {
@@ -1851,15 +2819,20 @@ pub fn evaluate_changed_triage(
             }
         }
 
-        let (gitops, argo_rollout_in_window) = gitops_release_for(
+        let gitops_match = gitops_release_for(
             argo_apps,
-            "CronJob",
-            &cj_name,
-            &cj_ns,
-            cj.metadata.labels.as_ref(),
+            &Workload {
+                api_version: "batch/v1",
+                kind: "CronJob",
+                name: &cj_name,
+                ns: &cj_ns,
+                meta: &cj.metadata,
+                rollout_created: None,
+            },
             now,
             cutoff_ts.as_ref(),
         );
+        let local_cause = None;
 
         let rollout_status = if is_suspended {
             RolloutStatus::ScaledDown
@@ -1871,13 +2844,15 @@ pub fn evaluate_changed_triage(
 
         let incident_status = if oom_killed_count > 0 {
             IncidentStatus::OomKilled
-        } else if crash_loop_count > 0 {
+        } else if probe_eval.is_probe_failure {
+            IncidentStatus::ProbeFailure
+        } else if crash_loop_count > 0 || probe_eval.has_active_restart_flapping {
             IncidentStatus::CrashLoop
         } else if config_error_count > 0 {
             IncidentStatus::ConfigError
         } else if image_error_count > 0 {
             IncidentStatus::ImageError
-        } else if pending_pod_count > 0 {
+        } else if pending_pod_count > 0 && detected_failure_category != FailureCategory::None {
             IncidentStatus::Pending
         } else if is_suspended {
             IncidentStatus::ScaledDown
@@ -1885,33 +2860,60 @@ pub fn evaluate_changed_triage(
             IncidentStatus::Healthy
         };
 
-        let failure_category = if detected_failure_category != FailureCategory::None {
+        let failure_category = if incident_status == IncidentStatus::Healthy {
+            FailureCategory::None
+        } else if probe_eval.is_probe_failure {
+            FailureCategory::Probe
+        } else if detected_failure_category != FailureCategory::None {
             detected_failure_category
-        } else if oom_killed_count > 0 || crash_loop_count > 0 || config_error_count > 0 {
+        } else if oom_killed_count > 0
+            || crash_loop_count > 0
+            || probe_eval.has_active_restart_flapping
+            || config_error_count > 0
+        {
             FailureCategory::App
         } else if image_error_count > 0 {
             FailureCategory::Image
-        } else if pending_pod_count > 0 {
+        } else if incident_status == IncidentStatus::Pending {
             FailureCategory::Compute
         } else {
             FailureCategory::None
         };
 
-        let failure_detail = if !detected_failure_detail.is_empty() {
+        let failure_detail = if probe_eval.is_probe_failure {
+            if let Some(ref d) = probe_eval.probe_failure_detail {
+                d.clone()
+            } else if probe_eval.probe_failure_count > 0 {
+                format!(
+                    "{} probe failure(s) in window",
+                    probe_eval.probe_failure_count
+                )
+            } else {
+                "Probe failure in window".to_string()
+            }
+        } else if !detected_failure_detail.is_empty() {
             detected_failure_detail
         } else if oom_killed_count > 0 {
             format!("{oom_killed_count} pod(s) OOMKilled (Exit 137)")
         } else if crash_loop_count > 0 {
             format!("{crash_loop_count} pod(s) in CrashLoopBackOff")
+        } else if probe_eval.has_active_restart_flapping {
+            format!("{restart_count} container restart(s) in window (CrashLoopBackOff)")
         } else if config_error_count > 0 {
             format!("{config_error_count} pod(s) configuration error")
         } else if image_error_count > 0 {
             format!("{image_error_count} pod(s) image pull failure")
+        } else if incident_status == IncidentStatus::Pending {
+            "Pod unschedulable (waiting for node placement)".to_string()
         } else if is_suspended {
             format!("CronJob suspended ({schedule_str})")
         } else {
             format!("Scheduled ({schedule_str})")
         };
+
+        if change_kind == ChangeKind::FailingOnly && incident_status == IncidentStatus::Healthy {
+            continue;
+        }
 
         let (error_log_pod, error_log_container) = log_target(&pod_symptoms, &current_pods);
         deployment_changes.push(AppDeploymentChange {
@@ -1921,13 +2923,15 @@ pub fn evaluate_changed_triage(
             incident_status,
             failure_category,
             failure_detail,
-            gitops,
-            argo_rollout_in_window,
+            gitops: gitops_match.info,
+            argo_rollout_in_window: gitops_match.rollout_in_window,
+            gitops_unresolved: gitops_match.unresolved,
+            local_cause,
             error_log_snippet: None,
             error_log_pod,
             error_log_container,
             change_kind,
-            changed_age: deployed_age.clone(),
+            changed_age,
             change_detail: None,
             deployed_at,
             deployed_age,
@@ -1944,7 +2948,7 @@ pub fn evaluate_changed_triage(
             failing_pods_count: failing_pod_names.len(),
             crash_loop_count,
             oom_killed_count,
-            probe_failure_count,
+            probe_failure_count: probe_eval.probe_failure_count,
             restart_count,
             primary_symptoms,
             pod_symptoms,
@@ -1958,17 +2962,23 @@ pub fn evaluate_changed_triage(
         let rank = |s: IncidentStatus| match s {
             IncidentStatus::OomKilled => 0,
             IncidentStatus::CrashLoop => 1,
-            IncidentStatus::ConfigError => 2,
-            IncidentStatus::ImageError => 3,
-            IncidentStatus::Pending => 4,
-            IncidentStatus::Stalled => 5,
-            IncidentStatus::Rolling => 6,
-            IncidentStatus::Healthy => 7,
-            IncidentStatus::ScaledDown => 8,
-            IncidentStatus::Unknown => 9,
+            IncidentStatus::ProbeFailure => 2,
+            IncidentStatus::ConfigError => 3,
+            IncidentStatus::ImageError => 4,
+            IncidentStatus::Pending => 5,
+            IncidentStatus::Stalled => 6,
+            IncidentStatus::Rolling => 7,
+            IncidentStatus::Healthy => 8,
+            IncidentStatus::ScaledDown => 9,
+            IncidentStatus::Unknown => 10,
         };
         rank(a.incident_status)
             .cmp(&rank(b.incident_status))
+            .then_with(|| {
+                let a_deficit = a.ready_replicas < a.desired_replicas;
+                let b_deficit = b.ready_replicas < b.desired_replicas;
+                b_deficit.cmp(&a_deficit)
+            })
             .then((a.change_kind as u8).cmp(&(b.change_kind as u8)))
     });
 
@@ -2066,6 +3076,10 @@ pub fn evaluate_changed_triage(
         .iter()
         .filter(|d| d.incident_status == IncidentStatus::OomKilled)
         .count();
+    let probe_failure_count = deployment_changes
+        .iter()
+        .filter(|d| d.incident_status == IncidentStatus::ProbeFailure)
+        .count();
     let error_count = deployment_changes
         .iter()
         .filter(|d| {
@@ -2100,6 +3114,13 @@ pub fn evaluate_changed_triage(
             .map(|d| format!("{}: {}", d.app_name, d.failure_detail))
             .unwrap_or_default();
         format!("CRITICAL (CRASH): {first}")
+    } else if probe_failure_count > 0 {
+        let first = deployment_changes
+            .iter()
+            .find(|d| d.incident_status == IncidentStatus::ProbeFailure)
+            .map(|d| format!("{}: {}", d.app_name, d.failure_detail))
+            .unwrap_or_default();
+        format!("DEGRADED (PROBE FAILURE): {first}")
     } else if error_count > 0 {
         let first = deployment_changes
             .iter()
@@ -2135,6 +3156,7 @@ pub fn evaluate_changed_triage(
             oom_count,
             error_count,
             pending_count,
+            probe_failure_count,
             rolling_count,
             healthy_count,
             headline_message,
@@ -2143,6 +3165,7 @@ pub fn evaluate_changed_triage(
         infra_changes,
         includes_failing: opts.include_failing,
         includes_scaled: opts.include_scaled,
+        argo: ArgoCoverage::default(),
     }
 }
 
@@ -2165,6 +3188,88 @@ fn default_since() -> String {
     "30m".to_string()
 }
 
+/// Where to look for the Argo Applications that manage a cluster: Argo on
+/// the cluster itself, else the hub, matched to this cluster by its Argo
+/// cluster name or API server URL. The default is the cluster itself only.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ArgoLookup {
+    pub hub_context: Option<String>,
+    pub cluster_name: Option<String>,
+    pub server_url: Option<String>,
+}
+
+/// The Argo Applications a triage run matches workloads against, and how
+/// much of Argo they are.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ArgoSnapshot {
+    /// The Applications whose destination is this cluster.
+    pub apps: Vec<ArgoApplication>,
+    pub fetched_at: Option<Timestamp>,
+    /// Every page arrived: not still streaming, not truncated.
+    pub complete: bool,
+    /// Why the latest read failed; `NO_ARGO` means there is no Argo at all.
+    pub error: Option<String>,
+    /// The hub the apps came from, when not this cluster.
+    pub hub: Option<String>,
+}
+
+/// Where a triage run gets its Argo data.
+#[derive(Debug, Clone)]
+pub enum ArgoSource {
+    /// Apps the caller already holds (the TUI's shared snapshot): no Argo
+    /// call, so the report never waits on a hub listing thousands of apps.
+    Snapshot(ArgoSnapshot),
+    /// Look them up now, within `budget` overall (MCP `k8s.listChanges`).
+    Lookup {
+        lookup: ArgoLookup,
+        budget: Duration,
+    },
+}
+
+/// The Argo lookup behind [`ArgoSource::Lookup`], never longer than `budget`.
+async fn lookup_snapshot(
+    cache: &Arc<ClientCache>,
+    context: &str,
+    lookup: &ArgoLookup,
+    budget: Duration,
+) -> ArgoSnapshot {
+    let fetch = crate::argo::fetch_argo_applications_cached(
+        cache,
+        context,
+        lookup.cluster_name.as_deref(),
+        lookup.server_url.as_deref(),
+        lookup.hub_context.as_deref(),
+        None,
+        true,
+        false,
+    );
+    match tokio::time::timeout(budget, fetch).await {
+        Ok(Ok(r)) => ArgoSnapshot {
+            complete: !r.truncated,
+            hub: if r.is_remote_hub {
+                lookup.hub_context.clone()
+            } else {
+                None
+            },
+            apps: r.filtered_apps,
+            fetched_at: r
+                .fetched_at
+                .and_then(|ts| Timestamp::from_second(ts as i64).ok())
+                .or_else(|| Some(Timestamp::now())),
+            error: None,
+        },
+        Ok(Err(e)) => ArgoSnapshot {
+            error: Some(e),
+            ..Default::default()
+        },
+        Err(_) => ArgoSnapshot {
+            error: Some(format!("Argo lookup timed out after {}s", budget.as_secs())),
+            hub: lookup.hub_context.clone(),
+            ..Default::default()
+        },
+    }
+}
+
 /// Fetches and evaluates the holistic triage report for recent changes across a cluster context.
 pub async fn fetch_changed_triage(
     cache: &Arc<ClientCache>,
@@ -2172,6 +3277,7 @@ pub async fn fetch_changed_triage(
     namespace: Option<&str>,
     window: Duration,
     opts: TriageOptions,
+    argo: ArgoSource,
 ) -> Result<ChangedTriageReport, String> {
     let client = cache.get(context).await.map_err(|e| e.to_string())?;
     let ns_str = namespace.unwrap_or("");
@@ -2189,6 +3295,16 @@ pub async fn fetch_changed_triage(
     let lp = ListParams::default();
     let ns_opt = namespace.filter(|s| !s.is_empty()).map(|s| s.to_string());
 
+    // A snapshot is ready now; a lookup runs beside the lists, bounded.
+    let argo_fut = async {
+        match argo {
+            ArgoSource::Snapshot(snapshot) => snapshot,
+            ArgoSource::Lookup { lookup, budget } => {
+                lookup_snapshot(cache, context, &lookup, budget).await
+            }
+        }
+    };
+
     // One round trip of wall time, not seven. Deployments, ReplicaSets, Pods
     // and Events are the core and fail the report; StatefulSets, CronJobs,
     // Jobs and Argo are optional and degrade to empty (RBAC may refuse them,
@@ -2201,9 +3317,7 @@ pub async fn fetch_changed_triage(
         tokio::time::timeout(timeout, rs_api.list(&lp)),
         tokio::time::timeout(timeout, pod_api.list(&lp)),
         tokio::time::timeout(timeout, ev_api.list(&lp)),
-        crate::argo::fetch_argo_applications_cached(
-            cache, context, None, None, None, None, true, false,
-        ),
+        argo_fut,
     );
 
     fn required<T>(
@@ -2236,11 +3350,11 @@ pub async fn fetch_changed_triage(
     let sts = optional(sts);
     let cjs = optional(cjs);
     let jobs = optional(jobs);
-    let argo_apps = argo.map(|r| r.filtered_apps).unwrap_or_default();
-
+    let coverage = argo_coverage(&argo, now);
     let mut report = evaluate_changed_triage(
-        &deps, &sts, &cjs, &jobs, &rs, &pods, &events, &argo_apps, window, now, ns_opt, opts,
+        &deps, &sts, &cjs, &jobs, &rs, &pods, &events, &argo.apps, window, now, ns_opt, opts,
     );
+    apply_argo_coverage(&mut report, coverage);
     if !opts.log_snippets {
         return Ok(report);
     }
@@ -2356,6 +3470,10 @@ fn log_snippet_lines(text: &str) -> Option<Vec<String>> {
     (!lines.is_empty() && !kubelet_refusal).then_some(lines)
 }
 
+/// How long `k8s.listChanges` waits for Argo before reporting its coverage
+/// as incomplete, rather than holding the whole report.
+const MCP_ARGO_BUDGET: Duration = Duration::from_secs(20);
+
 /// `k8s.listChanges` — provides holistic deployment & change incident triage for MCP and agents.
 pub fn list_changes_capability(cache: Arc<ClientCache>) -> Capability {
     Capability::typed::<ListChangesIn, ChangedTriageReport, _, _>(
@@ -2376,9 +3494,19 @@ pub fn list_changes_capability(cache: Arc<ClientCache>) -> Capability {
                     include_scaled: input.include_scaled,
                     log_snippets: true,
                 };
-                fetch_changed_triage(&cache, &input.context, ns_opt, window, opts)
-                    .await
-                    .map_err(CapabilityError::Handler)
+                fetch_changed_triage(
+                    &cache,
+                    &input.context,
+                    ns_opt,
+                    window,
+                    opts,
+                    ArgoSource::Lookup {
+                        lookup: ArgoLookup::default(),
+                        budget: MCP_ARGO_BUDGET,
+                    },
+                )
+                .await
+                .map_err(CapabilityError::Handler)
             }
         },
     )
@@ -2597,6 +3725,130 @@ mod tests {
         assert_eq!(change.oom_killed_count, 1);
         assert_eq!(change.crash_loop_count, 1);
         assert!(change.failure_detail.contains("OOMKilled"));
+    }
+
+    #[test]
+    fn triage_ignores_historical_oom_when_pod_is_currently_ready() {
+        let now = Timestamp::from_second(1_700_000_000).unwrap();
+        let dep_time = Timestamp::from_second(1_700_000_000 - 300).unwrap();
+
+        let dep = Deployment {
+            metadata: ObjectMeta {
+                name: Some("bookwize".to_string()),
+                namespace: Some("connector".to_string()),
+                creation_timestamp: Some(Time(dep_time)),
+                ..Default::default()
+            },
+            spec: Some(DeploymentSpec {
+                replicas: Some(2),
+                ..Default::default()
+            }),
+            status: Some(DeploymentStatus {
+                replicas: Some(2),
+                ready_replicas: Some(2),
+                updated_replicas: Some(2),
+                available_replicas: Some(2),
+                ..Default::default()
+            }),
+        };
+
+        let mut ann = BTreeMap::new();
+        ann.insert(
+            "deployment.kubernetes.io/revision".to_string(),
+            "1".to_string(),
+        );
+
+        let rs = ReplicaSet {
+            metadata: ObjectMeta {
+                name: Some("bookwize-7cb7".to_string()),
+                namespace: Some("connector".to_string()),
+                owner_references: Some(vec![make_owner_ref("Deployment", "bookwize")]),
+                annotations: Some(ann),
+                creation_timestamp: Some(Time(dep_time)),
+                ..Default::default()
+            },
+            spec: Some(ReplicaSetSpec {
+                replicas: Some(2),
+                template: Some(PodTemplateSpec {
+                    spec: Some(PodSpec {
+                        containers: vec![Container {
+                            name: "bookwize".to_string(),
+                            image: Some("acme/bookwize:v1".to_string()),
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            status: Some(ReplicaSetStatus {
+                replicas: 2,
+                ready_replicas: Some(2),
+                ..Default::default()
+            }),
+        };
+
+        // Pod has 1 restart with historical OOM in last_state, but is currently Running and Ready (ready: true)
+        let pod = Pod {
+            metadata: ObjectMeta {
+                name: Some("bookwize-7cb7-x7fsf".to_string()),
+                namespace: Some("connector".to_string()),
+                owner_references: Some(vec![make_owner_ref("ReplicaSet", "bookwize-7cb7")]),
+                ..Default::default()
+            },
+            spec: Some(PodSpec::default()),
+            status: Some(PodStatus {
+                container_statuses: Some(vec![ContainerStatus {
+                    name: "bookwize".to_string(),
+                    ready: true,
+                    restart_count: 1,
+                    state: Some(ContainerState {
+                        running: Some(Default::default()),
+                        ..Default::default()
+                    }),
+                    last_state: Some(ContainerState {
+                        terminated: Some(ContainerStateTerminated {
+                            exit_code: 137,
+                            reason: Some("OOMKilled".to_string()),
+                            finished_at: Some(Time(
+                                Timestamp::from_second(1_700_000_000 - 18000).unwrap(),
+                            )),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+        };
+
+        let report = evaluate_changed_triage(
+            &[dep],
+            &[],
+            &[],
+            &[],
+            &[rs],
+            &[pod],
+            &[],
+            &[],
+            Duration::from_secs(1800), // 30m
+            now,
+            Some("connector".to_string()),
+            TriageOptions::default(),
+        );
+
+        assert_eq!(report.summary.total_deployments, 1);
+        assert_eq!(report.summary.oom_count, 0);
+
+        let change = &report.deployments[0];
+        assert_eq!(change.app_name, "bookwize");
+        assert_eq!(change.incident_status, IncidentStatus::Healthy);
+        assert_eq!(change.oom_killed_count, 0);
+        assert_eq!(change.crash_loop_count, 0);
+        assert_eq!(change.ready_replicas, 2);
+        assert_eq!(change.desired_replicas, 2);
     }
 
     #[test]
@@ -3316,7 +4568,7 @@ mod tests {
     }
 
     #[test]
-    fn an_old_rollout_failing_in_the_window_is_reported_only_when_asked() {
+    fn an_old_rollout_failing_is_reported_by_default_and_suppressed_when_failing_disabled() {
         // Rolled out three days ago; crash-looping now, BackOff 2m ago.
         let crashing = [deployment("api", 1, 0), deployment("quiet", 1, 1)];
         let rs = [
@@ -3329,23 +4581,9 @@ mod tests {
         ];
         let events = [event("Pod", "api-6f7-x1", "Warning", "BackOff", 120)];
 
-        // By default the window means "changed": nothing here changed.
-        let strict = triage(&crashing, &rs, &pods, &events, &[]);
-        assert!(strict.deployments.is_empty(), "{:?}", strict.deployments);
-        assert!(!strict.includes_failing);
-
-        let wide = triage_with(
-            &crashing,
-            &rs,
-            &pods,
-            &events,
-            &[],
-            TriageOptions {
-                include_failing: true,
-                ..TriageOptions::default()
-            },
-        );
-        let names: Vec<&str> = wide
+        // By default active failures are ALWAYS reported: api is in, quiet stays out.
+        let default_rep = triage(&crashing, &rs, &pods, &events, &[]);
+        let names: Vec<&str> = default_rep
             .deployments
             .iter()
             .map(|d| d.app_name.as_str())
@@ -3353,19 +4591,35 @@ mod tests {
         assert_eq!(
             names,
             ["api"],
-            "the quiet, old, healthy deployment stays out"
+            "active failure is reported; the quiet, old, healthy deployment stays out"
         );
-        assert!(wide.includes_failing);
-        let api = &wide.deployments[0];
+        assert!(default_rep.includes_failing);
+        let api = &default_rep.deployments[0];
         assert_eq!(api.incident_status, IncidentStatus::CrashLoop);
         assert!(
             api.change_kind == ChangeKind::FailingOnly,
             "marked as included for failing, not for changing"
         );
+
+        // When include_failing is explicitly disabled, unchanged failing workloads stay out.
+        let strict = triage_with(
+            &crashing,
+            &rs,
+            &pods,
+            &events,
+            &[],
+            TriageOptions {
+                include_failing: false,
+                include_scaled: false,
+                log_snippets: false,
+            },
+        );
+        assert!(strict.deployments.is_empty(), "{:?}", strict.deployments);
+        assert!(!strict.includes_failing);
     }
 
     #[test]
-    fn a_replicaset_that_cannot_create_pods_is_reported_only_when_asked() {
+    fn a_replicaset_that_cannot_create_pods_is_reported_by_default() {
         let deps = [deployment("batch", 2, 0)];
         let rs = [replicaset("batch-9c", "batch", 3 * 86_400)];
         let events = [event(
@@ -3376,22 +4630,27 @@ mod tests {
             60,
         )];
 
-        assert!(triage(&deps, &rs, &[], &events, &[]).deployments.is_empty());
+        let default_rep = triage(&deps, &rs, &[], &events, &[]);
+        assert_eq!(default_rep.deployments.len(), 1);
+        assert_eq!(default_rep.deployments[0].app_name, "batch");
+        assert_eq!(
+            default_rep.deployments[0].change_kind,
+            ChangeKind::FailingOnly
+        );
 
-        let wide = triage_with(
+        let strict = triage_with(
             &deps,
             &rs,
             &[],
             &events,
             &[],
             TriageOptions {
-                include_failing: true,
-                ..TriageOptions::default()
+                include_failing: false,
+                include_scaled: false,
+                log_snippets: false,
             },
         );
-        assert_eq!(wide.deployments.len(), 1);
-        assert_eq!(wide.deployments[0].app_name, "batch");
-        assert_eq!(wide.deployments[0].change_kind, ChangeKind::FailingOnly);
+        assert!(strict.deployments.is_empty());
     }
 
     #[test]
@@ -3516,26 +4775,10 @@ mod tests {
             300,
         )];
 
-        let strict = triage(&deps, &rs, &pods, &events, &[]);
-        assert!(
-            strict.deployments.is_empty(),
-            "a scale alone is not a change"
-        );
-        assert!(!strict.includes_scaled);
-
-        let wide = triage_with(
-            &deps,
-            &rs,
-            &pods,
-            &events,
-            &[],
-            TriageOptions {
-                include_scaled: true,
-                ..TriageOptions::default()
-            },
-        );
-        assert!(wide.includes_scaled);
-        let d = &wide.deployments[0];
+        let default_rep = triage(&deps, &rs, &pods, &events, &[]);
+        assert_eq!(default_rep.deployments.len(), 1);
+        assert!(default_rep.includes_scaled);
+        let d = &default_rep.deployments[0];
         assert_eq!(d.change_kind, ChangeKind::Scaled);
         assert_eq!(
             d.changed_age, "5m",
@@ -3547,6 +4790,24 @@ mod tests {
             d.failure_detail, "Scaled 3→4",
             "the scale is the news on a healthy row"
         );
+
+        let strict = triage_with(
+            &deps,
+            &rs,
+            &pods,
+            &events,
+            &[],
+            TriageOptions {
+                include_failing: false,
+                include_scaled: false,
+                log_snippets: false,
+            },
+        );
+        assert!(
+            strict.deployments.is_empty(),
+            "a scale alone is not a rollout when scaled is excluded"
+        );
+        assert!(!strict.includes_scaled);
     }
 
     #[test]
@@ -3826,5 +5087,1714 @@ mod tests {
         assert!(dep.remove("errorLogContainer").is_some());
         let back: ChangedTriageReport = serde_json::from_value(raw).unwrap();
         assert_eq!(back.deployments[0].error_log_pod, None);
+    }
+
+    // NOW is 2023-11-14T22:13:20Z; `replicaset(.., 300)` was created at 22:08:20Z.
+    const SHA_OLD: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const SHA_PREV: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const SHA_NOW: &str = "cccccccccccccccccccccccccccccccccccccccc";
+
+    fn hist(id: i64, rev: &str, started: &str, deployed: &str) -> serde_json::Value {
+        let mut h = serde_json::json!({
+            "id": id,
+            "revision": rev,
+            "deployedAt": deployed,
+            "initiatedBy": { "username": "alice" },
+            "source": { "repoURL": "https://github.com/acme/deploy.git", "path": "apps/shop" }
+        });
+        if !started.is_empty() {
+            h["deployStartedAt"] = serde_json::json!(started);
+        }
+        h
+    }
+
+    fn argo_app(name: &str, ns: &str, history: Vec<serde_json::Value>) -> ArgoApplication {
+        ArgoApplication::from_json(&serde_json::json!({
+            "metadata": { "name": name, "namespace": ns },
+            "spec": { "source": { "repoURL": "https://github.com/acme/deploy.git", "path": "apps/shop" } },
+            "status": { "sync": { "revision": SHA_NOW }, "history": history }
+        }))
+    }
+
+    /// A sync three hours ago, then the one that ran while `api-new` was created.
+    fn shop_history() -> Vec<serde_json::Value> {
+        vec![
+            hist(6, SHA_PREV, "2023-11-14T19:00:00Z", "2023-11-14T19:01:00Z"),
+            hist(7, SHA_NOW, "2023-11-14T22:08:00Z", "2023-11-14T22:08:40Z"),
+        ]
+    }
+
+    fn tracked_deployment(tracking_id: Option<&str>, instance: Option<&str>) -> Deployment {
+        let mut dep = deployment("api", 1, 1);
+        if let Some(id) = tracking_id {
+            dep.metadata.annotations =
+                Some(BTreeMap::from([(TRACKING_ID.to_string(), id.to_string())]));
+        }
+        if let Some(app) = instance {
+            dep.metadata.labels = Some(BTreeMap::from([(
+                "app.kubernetes.io/instance".to_string(),
+                app.to_string(),
+            )]));
+        }
+        dep
+    }
+
+    #[test]
+    fn a_tracking_id_decides_the_app_and_names_the_sync_behind_the_rollout() {
+        let dep = tracked_deployment(Some("shop:apps/Deployment:default/api"), Some("other"));
+        let apps = [
+            argo_app("other", "argocd", vec![]),
+            argo_app("shop", "argocd", shop_history()),
+        ];
+        let report = triage(
+            &[dep],
+            &[replicaset("api-new", "api", 300)],
+            &[],
+            &[],
+            &apps,
+        );
+
+        let d = &report.deployments[0];
+        let g = d.gitops.as_ref().expect("matched");
+        assert_eq!(
+            g.app_name, "shop",
+            "the tracking id beats the instance label"
+        );
+        assert_eq!(g.matched_by, "trackingId");
+        let r = g.rollout.as_ref().expect("the sync running at 22:08:20");
+        assert_eq!(r.history_id, 7);
+        assert_eq!(r.revision, SHA_NOW);
+        assert_eq!(r.previous_revision.as_deref(), Some(SHA_PREV));
+        assert_eq!(r.initiated_by.as_deref(), Some("alice"));
+        assert_eq!(r.path, "apps/shop");
+        assert!(!r.approximate);
+        assert_eq!(g.rollout_unmatched, None);
+        assert!(d
+            .argo_rollout_in_window
+            .as_deref()
+            .is_some_and(|s| s.starts_with("rev ccccccc synced")));
+        assert_eq!(d.gitops_unresolved, None);
+    }
+
+    #[test]
+    fn a_namespaced_tracking_id_picks_the_app_in_that_namespace() {
+        let dep = tracked_deployment(Some("team_shop:apps/Deployment:default/api"), None);
+        let apps = [
+            argo_app("shop", "argocd", vec![]),
+            argo_app("shop", "team", shop_history()),
+        ];
+        let report = triage(
+            &[dep],
+            &[replicaset("api-new", "api", 300)],
+            &[],
+            &[],
+            &apps,
+        );
+        let g = report.deployments[0].gitops.as_ref().unwrap();
+        assert!(
+            g.rollout.is_some(),
+            "the app in `team`, which has the history"
+        );
+    }
+
+    #[test]
+    fn a_tracking_id_copied_from_another_workload_is_ignored() {
+        let dep = tracked_deployment(Some("shop:apps/Deployment:default/web"), Some("other"));
+        let apps = [
+            argo_app("shop", "argocd", shop_history()),
+            argo_app("other", "argocd", vec![]),
+        ];
+        let report = triage(
+            &[dep],
+            &[replicaset("api-new", "api", 300)],
+            &[],
+            &[],
+            &apps,
+        );
+        let g = report.deployments[0].gitops.as_ref().unwrap();
+        assert_eq!(g.app_name, "other");
+        assert_eq!(g.matched_by, "label");
+    }
+
+    #[test]
+    fn the_app_resource_list_beats_an_instance_label_naming_another_app() {
+        let dep = tracked_deployment(None, Some("other"));
+        let mut owner = argo_app("shop", "argocd", vec![]);
+        owner.resources.push(crate::argo::ArgoResourceItem {
+            group: "apps".into(),
+            version: "v1".into(),
+            kind: "Deployment".into(),
+            namespace: "default".into(),
+            name: "api".into(),
+            status: "Synced".into(),
+            health: "Healthy".into(),
+            message: String::new(),
+            hook: None,
+        });
+        let apps = [argo_app("other", "argocd", vec![]), owner];
+        let report = triage(
+            &[dep],
+            &[replicaset("api-new", "api", 300)],
+            &[],
+            &[],
+            &apps,
+        );
+        let g = report.deployments[0].gitops.as_ref().unwrap();
+        assert_eq!(
+            (g.app_name.as_str(), g.matched_by.as_str()),
+            ("shop", "resources")
+        );
+    }
+
+    #[test]
+    fn a_tracking_id_naming_an_unlisted_app_is_unresolved_not_unmanaged() {
+        let dep = tracked_deployment(Some("shop:apps/Deployment:default/api"), Some("other"));
+        let apps = [argo_app("other", "argocd", vec![])];
+        let mut report = triage(
+            &[dep],
+            &[replicaset("api-new", "api", 300)],
+            &[],
+            &[],
+            &apps,
+        );
+
+        let d = &report.deployments[0];
+        assert_eq!(d.gitops, None, "no guess from the label");
+        assert_eq!(
+            d.gitops_unresolved.as_deref(),
+            Some("tracking id names Argo app shop, which Argo did not list")
+        );
+
+        let unavailable = ArgoSnapshot {
+            error: Some("list timed out".into()),
+            ..Default::default()
+        };
+        apply_argo_coverage(&mut report, argo_coverage(&unavailable, now()));
+        assert_eq!(report.argo.state, ArgoCoverageState::Unavailable);
+        assert_eq!(report.argo.error.as_deref(), Some("list timed out"));
+        assert_eq!(
+            report.deployments[0].gitops_unresolved.as_deref(),
+            Some("tracking id names Argo app shop; Argo unavailable: list timed out")
+        );
+    }
+
+    #[test]
+    fn a_rollout_no_sync_accounts_for_is_unmatched_with_a_reason() {
+        let dep = tracked_deployment(Some("shop:apps/Deployment:default/api"), None);
+        let apps = [argo_app(
+            "shop",
+            "argocd",
+            vec![hist(
+                6,
+                SHA_PREV,
+                "2023-11-14T19:00:00Z",
+                "2023-11-14T19:01:00Z",
+            )],
+        )];
+        let report = triage(
+            &[dep],
+            &[replicaset("api-new", "api", 300)],
+            &[],
+            &[],
+            &apps,
+        );
+        let d = &report.deployments[0];
+        let g = d.gitops.as_ref().unwrap();
+        assert_eq!(g.rollout, None);
+        assert!(g
+            .rollout_unmatched
+            .as_deref()
+            .is_some_and(|s| s.starts_with("no Argo sync around this rollout")));
+        assert_eq!(
+            d.argo_rollout_in_window, None,
+            "the old sync is not this rollout"
+        );
+    }
+
+    #[test]
+    fn causal_history_entry_prefers_the_running_sync_then_one_finishing_soon_after() {
+        let created: Timestamp = "2023-11-14T22:08:20Z".parse().unwrap();
+        let item = |id, started: &str, deployed: &str| ArgoSyncHistoryItem {
+            id,
+            deployed_at: deployed.into(),
+            deploy_started_at: started.into(),
+            ..Default::default()
+        };
+
+        let running = [
+            item(1, "2023-11-14T19:00:00Z", "2023-11-14T19:01:00Z"),
+            item(2, "2023-11-14T22:08:00Z", "2023-11-14T22:08:40Z"),
+            item(3, "2023-11-14T22:10:00Z", "2023-11-14T22:10:30Z"),
+        ];
+        assert_eq!(causal_history_entry(&running, created), Some(1));
+
+        // No start times recorded: the first sync to finish after, within 15m.
+        let no_starts = [
+            item(1, "", "2023-11-14T22:05:00Z"),
+            item(2, "", "2023-11-14T22:09:00Z"),
+            item(3, "", "2023-11-14T22:12:00Z"),
+        ];
+        assert_eq!(causal_history_entry(&no_starts, created), Some(1));
+
+        let too_late = [item(1, "", "2023-11-14T22:30:00Z")];
+        assert_eq!(causal_history_entry(&too_late, created), None);
+        assert_eq!(causal_history_entry(&[], created), None);
+    }
+
+    #[test]
+    fn the_first_sync_of_an_app_has_no_previous_revision() {
+        let dep = tracked_deployment(Some("shop:apps/Deployment:default/api"), None);
+        let apps = [argo_app(
+            "shop",
+            "argocd",
+            vec![
+                // A sync of another source does not bound this one's changes.
+                serde_json::json!({
+                    "id": 6, "revision": SHA_OLD, "deployedAt": "2023-11-14T19:01:00Z",
+                    "source": { "repoURL": "https://github.com/acme/legacy.git" }
+                }),
+                hist(7, SHA_NOW, "2023-11-14T22:08:00Z", "2023-11-14T22:08:40Z"),
+            ],
+        )];
+        let report = triage(
+            &[dep],
+            &[replicaset("api-new", "api", 300)],
+            &[],
+            &[],
+            &apps,
+        );
+        let r = report.deployments[0]
+            .gitops
+            .as_ref()
+            .unwrap()
+            .rollout
+            .as_ref()
+            .unwrap();
+        assert_eq!(r.revision, SHA_NOW);
+        assert_eq!(r.previous_revision, None);
+    }
+
+    fn templated_rs(
+        name: &str,
+        created_secs_ago: i64,
+        image: &str,
+        restarted_at: Option<&str>,
+    ) -> ReplicaSet {
+        let mut rs = replicaset(name, "api", created_secs_ago);
+        rs.spec = Some(ReplicaSetSpec {
+            template: Some(PodTemplateSpec {
+                metadata: Some(ObjectMeta {
+                    annotations: restarted_at
+                        .map(|t| BTreeMap::from([(RESTARTED_AT.to_string(), t.to_string())])),
+                    ..Default::default()
+                }),
+                spec: Some(PodSpec {
+                    containers: vec![Container {
+                        name: "app".into(),
+                        image: Some(image.into()),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }),
+            }),
+            ..Default::default()
+        });
+        rs
+    }
+
+    #[test]
+    fn a_rollout_restart_is_the_local_cause_only_when_nothing_else_changed() {
+        let prev = templated_rs("api-old", 86_400, "shop:1.4.2", None);
+        let restarted = templated_rs("api-new", 300, "shop:1.4.2", Some("2023-11-14T22:08:19Z"));
+        assert_eq!(
+            restart_cause(&restarted, Some(&prev)).as_deref(),
+            Some("rollout restart at 2023-11-14T22:08:19Z")
+        );
+
+        let bumped = templated_rs("api-new", 300, "shop:1.4.3", Some("2023-11-14T22:08:19Z"));
+        assert_eq!(
+            restart_cause(&bumped, Some(&prev)),
+            None,
+            "the image change is the news"
+        );
+
+        let again = templated_rs(
+            "api-old",
+            86_400,
+            "shop:1.4.2",
+            Some("2023-11-14T22:08:19Z"),
+        );
+        assert_eq!(
+            restart_cause(&restarted, Some(&again)),
+            None,
+            "same stamp: no restart"
+        );
+        assert_eq!(
+            restart_cause(&restarted, None),
+            None,
+            "a first rollout is not a restart"
+        );
+
+        let report = triage(
+            &[deployment("api", 1, 1)],
+            &[prev, restarted],
+            &[],
+            &[],
+            &[],
+        );
+        assert_eq!(
+            report.deployments[0].local_cause.as_deref(),
+            Some("rollout restart at 2023-11-14T22:08:19Z")
+        );
+    }
+
+    #[test]
+    fn the_report_names_the_why_fields_in_camel_case() {
+        let dep = tracked_deployment(Some("shop:apps/Deployment:default/api"), None);
+        let apps = [argo_app("shop", "argocd", shop_history())];
+        let mut report = triage(
+            &[dep],
+            &[replicaset("api-new", "api", 300)],
+            &[],
+            &[],
+            &apps,
+        );
+        report.argo = ArgoCoverage {
+            state: ArgoCoverageState::Partial,
+            fetched_at: Some("2023-11-14T22:10:00Z".into()),
+            apps_loaded: 1,
+            hub: Some("tools".into()),
+            error: None,
+        };
+        let raw = serde_json::to_value(&report).unwrap();
+        let d = &raw["deployments"][0];
+        assert_eq!(d["gitops"]["matchedBy"], "trackingId");
+        assert_eq!(d["gitops"]["rollout"]["previousRevision"], SHA_PREV);
+        assert_eq!(d["gitops"]["rollout"]["historyId"], 7);
+        assert!(d.get("gitopsUnresolved").is_some());
+        assert!(d.get("localCause").is_some());
+        assert_eq!(raw["argo"]["state"], "partial");
+        assert_eq!(raw["argo"]["fetchedAt"], "2023-11-14T22:10:00Z");
+        assert_eq!(raw["argo"]["appsLoaded"], 1);
+        assert_eq!(raw["argo"]["hub"], "tools");
+
+        // An older host's report, with none of the new keys, still reads.
+        let mut old = raw.clone();
+        old.as_object_mut().unwrap().remove("argo");
+        let od = old["deployments"][0].as_object_mut().unwrap();
+        od.remove("gitopsUnresolved");
+        od.remove("localCause");
+        let og = od["gitops"].as_object_mut().unwrap();
+        og.remove("matchedBy");
+        og.remove("rollout");
+        og.remove("rolloutUnmatched");
+        let back: ChangedTriageReport = serde_json::from_value(old).unwrap();
+        assert_eq!(back.deployments[0].gitops.as_ref().unwrap().rollout, None);
+    }
+
+    fn now() -> Timestamp {
+        Timestamp::from_second(NOW).unwrap()
+    }
+
+    fn ago(secs: i64) -> Timestamp {
+        Timestamp::from_second(NOW - secs).unwrap()
+    }
+
+    #[test]
+    fn argo_coverage_names_how_much_of_argo_a_report_saw() {
+        let state = |s: ArgoSnapshot| argo_coverage(&s, now()).state;
+        let app = || vec![argo_app("shop", "argocd", vec![])];
+        assert_eq!(
+            state(ArgoSnapshot {
+                error: Some(crate::argo::NO_ARGO.into()),
+                ..Default::default()
+            }),
+            ArgoCoverageState::NoArgo
+        );
+        assert_eq!(
+            state(ArgoSnapshot {
+                error: Some("boom".into()),
+                ..Default::default()
+            }),
+            ArgoCoverageState::Unavailable
+        );
+        assert_eq!(
+            state(ArgoSnapshot {
+                apps: app(),
+                complete: false,
+                ..Default::default()
+            }),
+            ArgoCoverageState::Partial
+        );
+        assert_eq!(
+            state(ArgoSnapshot {
+                apps: app(),
+                complete: true,
+                fetched_at: Some(ago(3600)),
+                ..Default::default()
+            }),
+            ArgoCoverageState::Stale
+        );
+        assert_eq!(
+            state(ArgoSnapshot {
+                apps: app(),
+                complete: true,
+                error: Some("refresh failed".into()),
+                fetched_at: Some(ago(10)),
+                ..Default::default()
+            }),
+            ArgoCoverageState::Stale,
+            "kept after a failed refresh"
+        );
+        assert_eq!(
+            state(ArgoSnapshot {
+                apps: app(),
+                complete: true,
+                fetched_at: Some(ago(8 * 60)),
+                ..Default::default()
+            }),
+            ArgoCoverageState::Complete,
+            "8 minutes old is within 10m TTL, not stale"
+        );
+        assert_eq!(
+            state(ArgoSnapshot {
+                apps: app(),
+                complete: true,
+                fetched_at: Some(ago(10)),
+                ..Default::default()
+            }),
+            ArgoCoverageState::Complete
+        );
+    }
+
+    #[test]
+    fn with_part_of_argo_a_row_without_an_app_has_an_unknown_owner() {
+        let partial = ArgoSnapshot {
+            apps: vec![argo_app("other", "argocd", vec![])],
+            complete: false,
+            ..Default::default()
+        };
+        let rs = [replicaset("api-new", "api", 300)];
+
+        let mut plain = triage(&[deployment("api", 1, 1)], &rs, &[], &[], &partial.apps);
+        apply_argo_coverage(&mut plain, argo_coverage(&partial, now()));
+        let d = &plain.deployments[0];
+        assert_eq!(d.gitops, None);
+        assert_eq!(
+            d.gitops_unresolved.as_deref(),
+            Some("Argo list incomplete (1 apps loaded); ownership not known yet")
+        );
+
+        let tracked = tracked_deployment(Some("shop:apps/Deployment:default/api"), None);
+        let mut report = triage(&[tracked], &rs, &[], &[], &partial.apps);
+        apply_argo_coverage(&mut report, argo_coverage(&partial, now()));
+        assert_eq!(
+            report.deployments[0].gitops_unresolved.as_deref(),
+            Some("tracking id names Argo app shop; the Argo list is still loading (1 apps so far)")
+        );
+
+        // With all of Argo, no app means no Argo owner.
+        let complete = ArgoSnapshot {
+            complete: true,
+            fetched_at: Some(ago(10)),
+            ..partial
+        };
+        let mut unmanaged = triage(&[deployment("api", 1, 1)], &rs, &[], &[], &complete.apps);
+        apply_argo_coverage(&mut unmanaged, argo_coverage(&complete, now()));
+        assert_eq!(unmanaged.deployments[0].gitops_unresolved, None);
+        assert_eq!(unmanaged.argo.state, ArgoCoverageState::Complete);
+    }
+
+    #[test]
+    fn a_rollout_newer_than_the_argo_data_says_the_data_is_older() {
+        let dep = tracked_deployment(Some("shop:apps/Deployment:default/api"), None);
+        let apps = vec![argo_app(
+            "shop",
+            "argocd",
+            vec![hist(
+                6,
+                SHA_PREV,
+                "2023-11-14T19:00:00Z",
+                "2023-11-14T19:01:00Z",
+            )],
+        )];
+        // The ReplicaSet was created 300s ago; the snapshot is an hour old.
+        let old = ArgoSnapshot {
+            apps: apps.clone(),
+            complete: true,
+            fetched_at: Some(ago(3600)),
+            ..Default::default()
+        };
+        let mut report = triage(
+            &[dep.clone()],
+            &[replicaset("api-new", "api", 300)],
+            &[],
+            &[],
+            &apps,
+        );
+        apply_argo_coverage(&mut report, argo_coverage(&old, now()));
+        let g = report.deployments[0].gitops.as_ref().unwrap();
+        assert_eq!(
+            g.rollout_unmatched.as_deref(),
+            Some(ARGO_OLDER_THAN_ROLLOUT)
+        );
+
+        // Fetched after the rollout: its sync is genuinely not in the history.
+        let fresh = ArgoSnapshot {
+            fetched_at: Some(ago(10)),
+            ..old
+        };
+        let mut report = triage(
+            &[dep],
+            &[replicaset("api-new", "api", 300)],
+            &[],
+            &[],
+            &apps,
+        );
+        apply_argo_coverage(&mut report, argo_coverage(&fresh, now()));
+        let g = report.deployments[0].gitops.as_ref().unwrap();
+        assert!(g
+            .rollout_unmatched
+            .as_deref()
+            .is_some_and(|s| s.starts_with("no Argo sync around this rollout")));
+    }
+
+    /// A cluster answering every list with nothing and recording each path;
+    /// with `argo_hangs`, Argo Application lists never answer.
+    fn cluster_client(argo_hangs: bool) -> (kube::Client, Arc<std::sync::Mutex<Vec<String>>>) {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = seen.clone();
+        let service = tower::service_fn(move |request: http::Request<kube::client::Body>| {
+            let log = log.clone();
+            async move {
+                let path = request.uri().path().to_string();
+                log.lock().unwrap().push(path.clone());
+                if argo_hangs && path.contains("argoproj.io") {
+                    tokio::time::sleep(Duration::from_secs(3600)).await;
+                }
+                let body = serde_json::json!({
+                    "apiVersion": "v1", "kind": "List",
+                    "metadata": {"resourceVersion": "1"}, "items": []
+                });
+                Ok::<_, std::convert::Infallible>(
+                    http::Response::builder()
+                        .status(200)
+                        .header("content-type", "application/json")
+                        .body(kube::client::Body::from(body.to_string().into_bytes()))
+                        .unwrap(),
+                )
+            }
+        });
+        (kube::Client::new(service, "default"), seen)
+    }
+
+    #[tokio::test]
+    async fn a_snapshot_triage_asks_argo_nothing() {
+        let (client, seen) = cluster_client(false);
+        let cache = ClientCache::new_many(vec![]);
+        cache.preload("snapshot-ctx", client).await;
+        let snapshot = ArgoSnapshot {
+            apps: vec![argo_app("shop", "argocd", shop_history())],
+            fetched_at: Some(Timestamp::now()),
+            complete: true,
+            error: None,
+            hub: Some("tools".into()),
+        };
+        let report = fetch_changed_triage(
+            &cache,
+            "snapshot-ctx",
+            Some("default"),
+            Duration::from_secs(1800),
+            TriageOptions::default(),
+            ArgoSource::Snapshot(snapshot),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(report.argo.state, ArgoCoverageState::Complete);
+        assert_eq!(report.argo.apps_loaded, 1);
+        assert_eq!(report.argo.hub.as_deref(), Some("tools"));
+        let seen = seen.lock().unwrap();
+        assert!(seen.iter().any(|p| p.contains("deployments")), "{seen:?}");
+        assert!(
+            !seen.iter().any(|p| p.contains("argoproj.io")),
+            "no Argo call with a snapshot: {seen:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_lookup_past_its_budget_still_returns_the_report() {
+        let (client, _seen) = cluster_client(true);
+        let cache = ClientCache::new_many(vec![]);
+        cache.preload("budget-ctx", client).await;
+        let report = fetch_changed_triage(
+            &cache,
+            "budget-ctx",
+            Some("default"),
+            Duration::from_secs(1800),
+            TriageOptions::default(),
+            ArgoSource::Lookup {
+                lookup: ArgoLookup::default(),
+                budget: Duration::from_secs(5),
+            },
+        )
+        .await
+        .expect("the report does not wait on Argo past the budget");
+
+        assert_eq!(report.argo.state, ArgoCoverageState::Unavailable);
+        assert_eq!(
+            report.argo.error.as_deref(),
+            Some("Argo lookup timed out after 5s")
+        );
+    }
+
+    #[tokio::test]
+    async fn lookup_snapshot_preserves_cached_fetched_at() {
+        let _lock = crate::argo::CACHE_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::argo::invalidate_argo_applications_cache();
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("SRELENS_CACHE_DIR", dir.path());
+        let ctx = "test-lookup-fetched-at";
+        let cache = ClientCache::new_many(vec![]);
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let target_ts = now - 500;
+        let fresh_result = crate::argo::ArgoApplicationsFetchResult {
+            all_apps: vec![],
+            filtered_apps: vec![],
+            is_remote_hub: false,
+            truncated: false,
+            fetched_at: Some(target_ts),
+        };
+        crate::argo::save_argo_apps_disk_cache(ctx, &fresh_result);
+
+        let snap =
+            lookup_snapshot(&cache, ctx, &ArgoLookup::default(), Duration::from_secs(5)).await;
+
+        let expected_ts = Timestamp::from_second(target_ts as i64).unwrap();
+        assert_eq!(
+            snap.fetched_at,
+            Some(expected_ts),
+            "lookup_snapshot must preserve cached fetched_at instead of stamping now"
+        );
+
+        crate::argo::invalidate_argo_disk_cache(ctx);
+        std::env::remove_var("SRELENS_CACHE_DIR");
+    }
+
+    #[test]
+    fn successful_sync_message_is_not_treated_as_sync_error() {
+        let app = ArgoApplication::from_json(&serde_json::json!({
+            "metadata": { "name": "shop", "namespace": "argocd" },
+            "spec": { "source": { "repoURL": "https://github.com/acme/deploy.git", "path": "apps/shop" } },
+            "status": {
+                "sync": { "status": "Synced", "revision": SHA_NOW },
+                "health": { "status": "Healthy" },
+                "operationState": {
+                    "phase": "Succeeded",
+                    "message": "successfully synced (all tasks run)"
+                },
+                "history": shop_history()
+            }
+        }));
+        let dep = tracked_deployment(Some("shop:apps/Deployment:default/api"), None);
+        let rs = [replicaset("api-new", "api", 300)];
+        let report = triage(&[dep], &rs, &[], &[], &[app]);
+        let gitops = report.deployments[0].gitops.as_ref().unwrap();
+        assert_eq!(
+            gitops.sync_message, None,
+            "a successful sync message must not be recorded as sync_message"
+        );
+    }
+
+    #[test]
+    fn failed_sync_message_is_recorded_as_sync_error() {
+        let app = ArgoApplication::from_json(&serde_json::json!({
+            "metadata": { "name": "shop", "namespace": "argocd" },
+            "spec": { "source": { "repoURL": "https://github.com/acme/deploy.git", "path": "apps/shop" } },
+            "status": {
+                "sync": { "status": "Failed", "revision": SHA_NOW },
+                "health": { "status": "Degraded" },
+                "operationState": {
+                    "phase": "Failed",
+                    "message": "one or more synchronization tasks are not valid"
+                },
+                "history": shop_history()
+            }
+        }));
+        let dep = tracked_deployment(Some("shop:apps/Deployment:default/api"), None);
+        let rs = [replicaset("api-new", "api", 300)];
+        let report = triage(&[dep], &rs, &[], &[], &[app]);
+        let gitops = report.deployments[0].gitops.as_ref().unwrap();
+        assert_eq!(
+            gitops.sync_message.as_deref(),
+            Some("one or more synchronization tasks are not valid")
+        );
+        assert!(
+            !gitops.is_health_message,
+            "operation error must not be marked as health message"
+        );
+    }
+
+    #[test]
+    fn degraded_health_message_sets_is_health_message_flag() {
+        let app = ArgoApplication::from_json(&serde_json::json!({
+            "metadata": { "name": "shop", "namespace": "argocd" },
+            "spec": { "source": { "repoURL": "https://github.com/acme/deploy.git", "path": "apps/shop" } },
+            "status": {
+                "sync": { "status": "OutOfSync", "revision": SHA_NOW },
+                "health": { "status": "Degraded", "message": "Deployment has 0/2 ready pods" },
+                "history": shop_history()
+            }
+        }));
+        let dep = tracked_deployment(Some("shop:apps/Deployment:default/api"), None);
+        let rs = [replicaset("api-new", "api", 300)];
+        let report = triage(&[dep], &rs, &[], &[], &[app]);
+        let gitops = report.deployments[0].gitops.as_ref().unwrap();
+        assert_eq!(
+            gitops.sync_message.as_deref(),
+            Some("Deployment has 0/2 ready pods")
+        );
+        assert!(
+            gitops.is_health_message,
+            "health message must be marked as is_health_message"
+        );
+    }
+
+    #[test]
+    fn routine_cronjob_schedule_ticks_are_not_reported_as_rollouts() {
+        use k8s_openapi::api::batch::v1::{CronJobSpec, CronJobStatus, JobSpec, JobTemplateSpec};
+        let now = Timestamp::from_second(1_700_000_000).unwrap();
+        let old_creation = Timestamp::from_second(1_700_000_000 - 86400 * 10).unwrap();
+        let sched_time = Timestamp::from_second(1_700_000_000 - 300).unwrap();
+
+        let cj = CronJob {
+            metadata: ObjectMeta {
+                name: Some("routine-sync".to_string()),
+                namespace: Some("default".to_string()),
+                creation_timestamp: Some(Time(old_creation)),
+                ..Default::default()
+            },
+            spec: Some(CronJobSpec {
+                schedule: "*/5 * * * *".to_string(),
+                job_template: JobTemplateSpec {
+                    spec: Some(JobSpec::default()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            status: Some(CronJobStatus {
+                last_schedule_time: Some(Time(sched_time)),
+                ..Default::default()
+            }),
+        };
+
+        let report = evaluate_changed_triage(
+            &[],
+            &[],
+            &[cj],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            Duration::from_secs(3600),
+            now,
+            None,
+            TriageOptions::default(),
+        );
+
+        assert!(
+            report.deployments.is_empty(),
+            "Routine schedule ticks must not appear as rollouts in changed report"
+        );
+    }
+
+    #[test]
+    fn an_unchanged_workload_with_stale_warning_that_is_healthy_is_not_reported_as_failing() {
+        let deps = [deployment("advertiser-hub", 2, 2)];
+        let rs = [replicaset(
+            "advertiser-hub-old",
+            "advertiser-hub",
+            86400 * 5,
+        )];
+        let events = [event(
+            "ReplicaSet",
+            "advertiser-hub-old",
+            "Warning",
+            "FailedCreate",
+            300,
+        )];
+
+        let report = triage(&deps, &rs, &[], &events, &[]);
+        assert!(
+            report.deployments.is_empty(),
+            "A healthy 2/2 workload with an old warning must not appear as FailingOnly"
+        );
+    }
+
+    #[test]
+    fn a_workload_with_restart_surge_without_probe_failures_is_reported_as_crashloop() {
+        use k8s_openapi::api::core::v1::ContainerStateRunning;
+        let now = Timestamp::from_second(1_700_000_000).unwrap();
+        let dep = deployment("api", 1, 1);
+        let rs = [replicaset("api-rs", "api", 86400 * 3)];
+        let pod = Pod {
+            metadata: ObjectMeta {
+                name: Some("api-rs-pod".to_string()),
+                namespace: Some("default".to_string()),
+                creation_timestamp: Some(Time(
+                    Timestamp::from_second(1_700_000_000 - 300).unwrap(),
+                )),
+                owner_references: Some(vec![make_owner_ref("ReplicaSet", "api-rs")]),
+                ..Default::default()
+            },
+            spec: Some(PodSpec::default()),
+            status: Some(PodStatus {
+                phase: Some("Running".to_string()),
+                container_statuses: Some(vec![ContainerStatus {
+                    name: "api".to_string(),
+                    ready: true,
+                    restart_count: 3,
+                    state: Some(ContainerState {
+                        running: Some(ContainerStateRunning {
+                            started_at: Some(Time(
+                                Timestamp::from_second(1_700_000_000 - 100).unwrap(),
+                            )),
+                        }),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+        };
+
+        let report = evaluate_changed_triage(
+            &[dep],
+            &[],
+            &[],
+            &[],
+            &rs,
+            &[pod],
+            &[],
+            &[],
+            Duration::from_secs(3600),
+            now,
+            None,
+            TriageOptions::default(),
+        );
+
+        assert_eq!(report.deployments.len(), 1);
+        assert_eq!(
+            report.deployments[0].incident_status,
+            IncidentStatus::CrashLoop
+        );
+        assert!(report.deployments[0]
+            .failure_detail
+            .contains("CrashLoopBackOff"));
+        assert_eq!(report.summary.crashing_count, 1);
+        assert_eq!(report.summary.probe_failure_count, 0);
+    }
+
+    #[test]
+    fn a_workload_with_failing_probes_is_reported_as_probe_failure_with_spec_parameters() {
+        use k8s_openapi::api::core::v1::{Container, Probe};
+        let now = Timestamp::from_second(1_700_000_000).unwrap();
+        let dep = deployment("bidservice", 1, 1);
+        let rs = [replicaset("bidservice-rs", "bidservice", 86400 * 3)];
+        let pod = Pod {
+            metadata: ObjectMeta {
+                name: Some("bidservice-pod".to_string()),
+                namespace: Some("default".to_string()),
+                creation_timestamp: Some(Time(
+                    Timestamp::from_second(1_700_000_000 - 600).unwrap(),
+                )),
+                owner_references: Some(vec![make_owner_ref("ReplicaSet", "bidservice-rs")]),
+                ..Default::default()
+            },
+            spec: Some(PodSpec {
+                containers: vec![Container {
+                    name: "bidservice".to_string(),
+                    readiness_probe: Some(Probe {
+                        failure_threshold: Some(3),
+                        period_seconds: Some(10),
+                        timeout_seconds: Some(5),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            status: Some(PodStatus {
+                phase: Some("Running".to_string()),
+                container_statuses: Some(vec![ContainerStatus {
+                    name: "bidservice".to_string(),
+                    ready: false,
+                    restart_count: 0,
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+        };
+
+        let ev = Event {
+            metadata: ObjectMeta {
+                name: Some("bidservice-pod.unhealthy".to_string()),
+                namespace: Some("default".to_string()),
+                ..Default::default()
+            },
+            involved_object: k8s_openapi::api::core::v1::ObjectReference {
+                kind: Some("Pod".to_string()),
+                name: Some("bidservice-pod".to_string()),
+                namespace: Some("default".to_string()),
+                field_path: Some("spec.containers{bidservice}".to_string()),
+                ..Default::default()
+            },
+            reason: Some("Unhealthy".to_string()),
+            message: Some(
+                "Readiness probe failed: HTTP probe failed with statuscode: 500".to_string(),
+            ),
+            count: Some(5),
+            last_timestamp: Some(Time(Timestamp::from_second(1_700_000_000 - 50).unwrap())),
+            type_: Some("Warning".to_string()),
+            ..Default::default()
+        };
+
+        let report = evaluate_changed_triage(
+            &[dep],
+            &[],
+            &[],
+            &[],
+            &rs,
+            &[pod],
+            &[ev],
+            &[],
+            Duration::from_secs(3600),
+            now,
+            None,
+            TriageOptions::default(),
+        );
+
+        assert_eq!(report.deployments.len(), 1);
+        let d = &report.deployments[0];
+        assert_eq!(d.incident_status, IncidentStatus::ProbeFailure);
+        assert_eq!(d.failure_category, FailureCategory::Probe);
+        assert_eq!(
+            d.failure_detail,
+            "Readiness probe failed (threshold: 3, period: 10s, timeout: 5s): HTTP probe failed with statuscode: 500"
+        );
+        assert_eq!(report.summary.probe_failure_count, 1);
+        assert!(report
+            .summary
+            .headline_message
+            .starts_with("DEGRADED (PROBE FAILURE):"));
+    }
+
+    #[test]
+    fn test_healthy_deployment_discards_resolved_startup_probe_failure() {
+        use k8s_openapi::api::core::v1::{
+            Container, ContainerState, ContainerStatus, Pod, PodSpec, PodStatus, Probe,
+        };
+        let now = Timestamp::from_second(1_700_000_000).unwrap();
+        let dep = deployment("despegar", 2, 2);
+        let rs = [replicaset("despegar-rs", "despegar", 3600 * 4)];
+
+        let pod1 = Pod {
+            metadata: ObjectMeta {
+                name: Some("despegar-pod-1".to_string()),
+                namespace: Some("default".to_string()),
+                creation_timestamp: Some(Time(
+                    Timestamp::from_second(1_700_000_000 - 3600).unwrap(),
+                )),
+                owner_references: Some(vec![make_owner_ref("ReplicaSet", "despegar-rs")]),
+                ..Default::default()
+            },
+            spec: Some(PodSpec {
+                containers: vec![Container {
+                    name: "app".to_string(),
+                    startup_probe: Some(Probe {
+                        failure_threshold: Some(30),
+                        period_seconds: Some(10),
+                        timeout_seconds: Some(5),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            status: Some(PodStatus {
+                phase: Some("Running".to_string()),
+                container_statuses: Some(vec![ContainerStatus {
+                    name: "app".to_string(),
+                    ready: true,
+                    restart_count: 0,
+                    state: Some(ContainerState {
+                        running: Some(k8s_openapi::api::core::v1::ContainerStateRunning {
+                            started_at: Some(Time(
+                                Timestamp::from_second(1_700_000_000 - 3600).unwrap(),
+                            )),
+                        }),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }]),
+                conditions: Some(vec![k8s_openapi::api::core::v1::PodCondition {
+                    type_: "Ready".to_string(),
+                    status: "True".to_string(),
+                    last_transition_time: Some(Time(
+                        Timestamp::from_second(1_700_000_000 - 3550).unwrap(),
+                    )),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+        };
+
+        // Warning event from warmup before the pod became ready (1_700_000_000 - 3580 < 1_700_000_000 - 3550)
+        let ev = Event {
+            metadata: ObjectMeta {
+                name: Some("despegar-pod.unhealthy".to_string()),
+                namespace: Some("default".to_string()),
+                ..Default::default()
+            },
+            involved_object: k8s_openapi::api::core::v1::ObjectReference {
+                kind: Some("Pod".to_string()),
+                name: Some("despegar-pod-1".to_string()),
+                namespace: Some("default".to_string()),
+                field_path: Some("spec.containers{app}".to_string()),
+                ..Default::default()
+            },
+            reason: Some("Unhealthy".to_string()),
+            message: Some(
+                "Startup probe failed: dial tcp 10.244.1.5:8080: connect: connection refused"
+                    .to_string(),
+            ),
+            count: Some(2),
+            last_timestamp: Some(Time(Timestamp::from_second(1_700_000_000 - 3580).unwrap())),
+            type_: Some("Warning".to_string()),
+            ..Default::default()
+        };
+
+        let report = evaluate_changed_triage(
+            &[dep],
+            &[],
+            &[],
+            &[],
+            &rs,
+            &[pod1],
+            &[ev],
+            &[],
+            Duration::from_secs(86400),
+            now,
+            None,
+            TriageOptions::default(),
+        );
+
+        assert_eq!(report.deployments.len(), 1);
+        let d = &report.deployments[0];
+        assert_eq!(d.incident_status, IncidentStatus::Healthy);
+        assert_eq!(d.failure_category, FailureCategory::None);
+        assert_eq!(d.failure_detail, "Healthy");
+        assert_eq!(report.summary.probe_failure_count, 0);
+        assert_eq!(report.summary.crashing_count, 0);
+        assert_eq!(report.summary.oom_count, 0);
+    }
+
+    #[test]
+    fn probe_failure_and_summary_serde_wire_compatibility() {
+        // Deserializing "probeFailure"
+        let status: IncidentStatus = serde_json::from_str("\"probeFailure\"").unwrap();
+        assert_eq!(status, IncidentStatus::ProbeFailure);
+
+        // Deserializing legacy "flapping"
+        let legacy_status: IncidentStatus = serde_json::from_str("\"flapping\"").unwrap();
+        assert_eq!(legacy_status, IncidentStatus::ProbeFailure);
+
+        // Serializing produces "probeFailure"
+        let serialized = serde_json::to_string(&IncidentStatus::ProbeFailure).unwrap();
+        assert_eq!(serialized, "\"probeFailure\"");
+
+        // Deserializing TriageSummary with "probeFailureCount"
+        let json_new = serde_json::json!({
+            "totalDeployments": 1,
+            "crashingCount": 0,
+            "oomCount": 0,
+            "errorCount": 0,
+            "pendingCount": 0,
+            "probeFailureCount": 2,
+            "rollingCount": 0,
+            "healthyCount": 0,
+            "headlineMessage": "test"
+        });
+        let summary: TriageSummary = serde_json::from_value(json_new).unwrap();
+        assert_eq!(summary.probe_failure_count, 2);
+        assert_eq!(summary.flapping_count(), 2);
+
+        // Deserializing TriageSummary with legacy "flappingCount"
+        let json_legacy = serde_json::json!({
+            "totalDeployments": 1,
+            "crashingCount": 0,
+            "oomCount": 0,
+            "errorCount": 0,
+            "pendingCount": 0,
+            "flappingCount": 3,
+            "rollingCount": 0,
+            "healthyCount": 0,
+            "headlineMessage": "test"
+        });
+        let summary_legacy: TriageSummary = serde_json::from_value(json_legacy).unwrap();
+        assert_eq!(summary_legacy.probe_failure_count, 3);
+        assert_eq!(summary_legacy.flapping_count(), 3);
+    }
+
+    #[test]
+    fn triage_ignores_startup_probe_failures_when_pod_is_now_ready() {
+        use k8s_openapi::api::core::v1::{ContainerStateRunning, PodCondition};
+        let now = Timestamp::from_second(1_700_000_000).unwrap();
+        let dep = deployment("advertiser-hub", 1, 1);
+        let rs = [replicaset("advertiser-hub-rs", "advertiser-hub", 3600)];
+
+        let ready_time = Timestamp::from_second(1_700_000_000 - 840).unwrap();
+        let pod = Pod {
+            metadata: ObjectMeta {
+                name: Some("advertiser-hub-pod".to_string()),
+                namespace: Some("default".to_string()),
+                creation_timestamp: Some(Time(
+                    Timestamp::from_second(1_700_000_000 - 900).unwrap(),
+                )),
+                owner_references: Some(vec![make_owner_ref("ReplicaSet", "advertiser-hub-rs")]),
+                ..Default::default()
+            },
+            spec: Some(PodSpec::default()),
+            status: Some(PodStatus {
+                phase: Some("Running".to_string()),
+                conditions: Some(vec![PodCondition {
+                    type_: "Ready".to_string(),
+                    status: "True".to_string(),
+                    last_transition_time: Some(Time(ready_time)),
+                    ..Default::default()
+                }]),
+                container_statuses: Some(vec![ContainerStatus {
+                    name: "advertiser-hub".to_string(),
+                    ready: true,
+                    restart_count: 0,
+                    state: Some(ContainerState {
+                        running: Some(ContainerStateRunning {
+                            started_at: Some(Time(
+                                Timestamp::from_second(1_700_000_000 - 890).unwrap(),
+                            )),
+                        }),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+        };
+
+        // Unhealthy event occurred at 1_700_000_000 - 850 (BEFORE ready_time at -840)
+        let ev = Event {
+            metadata: ObjectMeta {
+                name: Some("advertiser-hub-pod.unhealthy".to_string()),
+                namespace: Some("default".to_string()),
+                ..Default::default()
+            },
+            involved_object: k8s_openapi::api::core::v1::ObjectReference {
+                kind: Some("Pod".to_string()),
+                name: Some("advertiser-hub-pod".to_string()),
+                namespace: Some("default".to_string()),
+                ..Default::default()
+            },
+            reason: Some("Unhealthy".to_string()),
+            message: Some(
+                "Readiness probe failed: HTTP probe failed with statuscode: 500".to_string(),
+            ),
+            count: Some(6),
+            last_timestamp: Some(Time(Timestamp::from_second(1_700_000_000 - 850).unwrap())),
+            type_: Some("Warning".to_string()),
+            ..Default::default()
+        };
+
+        let report = evaluate_changed_triage(
+            &[dep],
+            &[],
+            &[],
+            &[],
+            &rs,
+            &[pod],
+            &[ev],
+            &[],
+            Duration::from_secs(86400), // 24h window
+            now,
+            None,
+            TriageOptions::default(),
+        );
+
+        assert_eq!(report.deployments.len(), 1);
+        let d = &report.deployments[0];
+        assert_eq!(d.incident_status, IncidentStatus::Healthy);
+        assert_eq!(d.probe_failure_count, 0);
+        assert_eq!(report.summary.probe_failure_count, 0);
+    }
+
+    #[test]
+    fn triage_ignores_historical_restarts_when_pod_is_now_ready_and_stable() {
+        use k8s_openapi::api::core::v1::{ContainerStateRunning, PodCondition};
+        let now = Timestamp::from_second(1_700_000_000).unwrap();
+        let dep = deployment("ctrip", 2, 2);
+        let rs = [replicaset("ctrip-rs", "ctrip", 18000)];
+
+        // Pod restarted 2 times 3 hours ago (10800s ago), but has been running stably since
+        let pod1 = Pod {
+            metadata: ObjectMeta {
+                name: Some("ctrip-pod-1".to_string()),
+                namespace: Some("default".to_string()),
+                creation_timestamp: Some(Time(
+                    Timestamp::from_second(1_700_000_000 - 14400).unwrap(),
+                )),
+                owner_references: Some(vec![make_owner_ref("ReplicaSet", "ctrip-rs")]),
+                ..Default::default()
+            },
+            spec: Some(PodSpec::default()),
+            status: Some(PodStatus {
+                phase: Some("Running".to_string()),
+                conditions: Some(vec![PodCondition {
+                    type_: "Ready".to_string(),
+                    status: "True".to_string(),
+                    last_transition_time: Some(Time(
+                        Timestamp::from_second(1_700_000_000 - 10800).unwrap(),
+                    )),
+                    ..Default::default()
+                }]),
+                container_statuses: Some(vec![ContainerStatus {
+                    name: "ctrip".to_string(),
+                    ready: true,
+                    restart_count: 2,
+                    state: Some(ContainerState {
+                        running: Some(ContainerStateRunning {
+                            started_at: Some(Time(
+                                Timestamp::from_second(1_700_000_000 - 10800).unwrap(),
+                            )),
+                        }),
+                        ..Default::default()
+                    }),
+                    last_state: Some(ContainerState {
+                        terminated: Some(k8s_openapi::api::core::v1::ContainerStateTerminated {
+                            exit_code: 1,
+                            finished_at: Some(Time(
+                                Timestamp::from_second(1_700_000_000 - 10801).unwrap(),
+                            )),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+        };
+
+        let pod2 = Pod {
+            metadata: ObjectMeta {
+                name: Some("ctrip-pod-2".to_string()),
+                namespace: Some("default".to_string()),
+                creation_timestamp: Some(Time(
+                    Timestamp::from_second(1_700_000_000 - 14400).unwrap(),
+                )),
+                owner_references: Some(vec![make_owner_ref("ReplicaSet", "ctrip-rs")]),
+                ..Default::default()
+            },
+            spec: Some(PodSpec::default()),
+            status: Some(PodStatus {
+                phase: Some("Running".to_string()),
+                conditions: Some(vec![PodCondition {
+                    type_: "Ready".to_string(),
+                    status: "True".to_string(),
+                    last_transition_time: Some(Time(
+                        Timestamp::from_second(1_700_000_000 - 14400).unwrap(),
+                    )),
+                    ..Default::default()
+                }]),
+                container_statuses: Some(vec![ContainerStatus {
+                    name: "ctrip".to_string(),
+                    ready: true,
+                    restart_count: 0,
+                    state: Some(ContainerState {
+                        running: Some(ContainerStateRunning {
+                            started_at: Some(Time(
+                                Timestamp::from_second(1_700_000_000 - 14400).unwrap(),
+                            )),
+                        }),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+        };
+
+        let report = evaluate_changed_triage(
+            &[dep],
+            &[],
+            &[],
+            &[],
+            &rs,
+            &[pod1, pod2],
+            &[],
+            &[],
+            Duration::from_secs(86400), // 24h window
+            now,
+            None,
+            TriageOptions::default(),
+        );
+
+        assert_eq!(report.deployments.len(), 1);
+        let d = &report.deployments[0];
+        assert_eq!(d.incident_status, IncidentStatus::Healthy);
+        assert_eq!(report.summary.probe_failure_count, 0);
+    }
+
+    #[test]
+    fn test_condense_scheduling_failure_multiple_reasons() {
+        let raw = "0/20 nodes are available: 2 Insufficient cpu, 2 Too many pods, 3 node(s) had untolerated taint(s), 7 node(s) didn't match Pod's node affinity/selector, 9 Insufficient memory. no new claims to deallocate, preemption: 0/20 nodes are available: 10 No preemption victims found for incoming pod, 10 Preemption is not helpful for scheduling.";
+        let condensed = condense_diagnostic(FailureCategory::Compute, raw);
+        assert_eq!(
+            condensed,
+            "0/20 nodes: 2 CPU, 2 PodLimit, 3 Taint, 7 Affinity, 9 Memory"
+        );
+    }
+
+    #[test]
+    fn test_condense_probe_failures() {
+        let raw = "Readiness probe failed: HTTP probe failed with statuscode: 500";
+        assert_eq!(
+            condense_diagnostic(FailureCategory::Probe, raw),
+            "Readiness probe failed (HTTP 500)"
+        );
+
+        let conn_refused = "Liveness probe failed: Get \"http://10.254.100.93:8080/healthz\": dial tcp 10.254.100.93:8080: connect: connection refused";
+        assert_eq!(
+            condense_diagnostic(FailureCategory::Probe, conn_refused),
+            "Liveness probe failed (connection refused)"
+        );
+    }
+
+    #[test]
+    fn test_condense_pvc_failures() {
+        let raw = "persistentvolumeclaim \"data-pvc\" not found";
+        assert_eq!(
+            condense_diagnostic(FailureCategory::Storage, raw),
+            "PVC \"data-pvc\" not found"
+        );
+    }
+
+    #[test]
+    fn triage_normal_in_flight_surge_pod_during_rollout_is_rolling_not_pending() {
+        let now = Timestamp::from_second(1_700_000_000).unwrap();
+        let dep_time = Timestamp::from_second(1_700_000_000 - 60).unwrap();
+
+        let dep = Deployment {
+            metadata: ObjectMeta {
+                name: Some("api-bot".to_string()),
+                namespace: Some("default".to_string()),
+                ..Default::default()
+            },
+            spec: Some(DeploymentSpec {
+                replicas: Some(3),
+                ..Default::default()
+            }),
+            status: Some(DeploymentStatus {
+                replicas: Some(4),
+                updated_replicas: Some(1),
+                ready_replicas: Some(3),
+                available_replicas: Some(3),
+                ..Default::default()
+            }),
+        };
+
+        let current_rs = ReplicaSet {
+            metadata: ObjectMeta {
+                name: Some("api-bot-v2".to_string()),
+                namespace: Some("default".to_string()),
+                owner_references: Some(vec![make_owner_ref("Deployment", "api-bot")]),
+                creation_timestamp: Some(Time(dep_time)),
+                ..Default::default()
+            },
+            spec: Some(ReplicaSetSpec::default()),
+            status: Some(ReplicaSetStatus::default()),
+        };
+
+        let mut pods = Vec::new();
+        for i in 1..=3 {
+            pods.push(Pod {
+                metadata: ObjectMeta {
+                    name: Some(format!("api-bot-v2-ready-{i}")),
+                    namespace: Some("default".to_string()),
+                    owner_references: Some(vec![make_owner_ref("ReplicaSet", "api-bot-v2")]),
+                    ..Default::default()
+                },
+                spec: Some(PodSpec {
+                    node_name: Some("node-1".to_string()),
+                    ..Default::default()
+                }),
+                status: Some(PodStatus {
+                    phase: Some("Running".to_string()),
+                    container_statuses: Some(vec![ContainerStatus {
+                        name: "api-bot".to_string(),
+                        ready: true,
+                        ..Default::default()
+                    }]),
+                    ..Default::default()
+                }),
+            });
+        }
+
+        pods.push(Pod {
+            metadata: ObjectMeta {
+                name: Some("api-bot-v2-surge-4".to_string()),
+                namespace: Some("default".to_string()),
+                owner_references: Some(vec![make_owner_ref("ReplicaSet", "api-bot-v2")]),
+                ..Default::default()
+            },
+            spec: Some(PodSpec {
+                node_name: Some("node-2".to_string()),
+                ..Default::default()
+            }),
+            status: Some(PodStatus {
+                phase: Some("Pending".to_string()),
+                conditions: Some(vec![PodCondition {
+                    type_: "PodScheduled".to_string(),
+                    status: "True".to_string(),
+                    ..Default::default()
+                }]),
+                container_statuses: Some(vec![ContainerStatus {
+                    name: "api-bot".to_string(),
+                    ready: false,
+                    state: Some(ContainerState {
+                        waiting: Some(ContainerStateWaiting {
+                            reason: Some("ContainerCreating".to_string()),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+        });
+
+        let report = evaluate_changed_triage(
+            &[dep],
+            &[],
+            &[],
+            &[],
+            &[current_rs],
+            &pods,
+            &[],
+            &[],
+            Duration::from_secs(1800),
+            now,
+            Some("default".to_string()),
+            TriageOptions::default(),
+        );
+
+        assert_eq!(
+            report.summary.pending_count, 0,
+            "surge pod must not count as pending incident"
+        );
+        assert_eq!(
+            report.summary.rolling_count, 1,
+            "workload should count as rolling"
+        );
+        let change = &report.deployments[0];
+        assert_eq!(change.incident_status, IncidentStatus::Rolling);
+        assert_eq!(change.failure_category, FailureCategory::None);
+        assert!(!change.is_incident(), "routine rollout is not an incident");
+    }
+
+    #[test]
+    fn triage_blocked_surge_pod_during_rollout_is_pending_incident() {
+        let now = Timestamp::from_second(1_700_000_000).unwrap();
+        let dep_time = Timestamp::from_second(1_700_000_000 - 60).unwrap();
+
+        let dep = Deployment {
+            metadata: ObjectMeta {
+                name: Some("api-bot".to_string()),
+                namespace: Some("default".to_string()),
+                ..Default::default()
+            },
+            spec: Some(DeploymentSpec {
+                replicas: Some(3),
+                ..Default::default()
+            }),
+            status: Some(DeploymentStatus {
+                replicas: Some(4),
+                updated_replicas: Some(1),
+                ready_replicas: Some(3),
+                available_replicas: Some(3),
+                ..Default::default()
+            }),
+        };
+
+        let current_rs = ReplicaSet {
+            metadata: ObjectMeta {
+                name: Some("api-bot-v2".to_string()),
+                namespace: Some("default".to_string()),
+                owner_references: Some(vec![make_owner_ref("Deployment", "api-bot")]),
+                creation_timestamp: Some(Time(dep_time)),
+                ..Default::default()
+            },
+            spec: Some(ReplicaSetSpec::default()),
+            status: Some(ReplicaSetStatus::default()),
+        };
+
+        let mut pods = Vec::new();
+        for i in 1..=3 {
+            pods.push(Pod {
+                metadata: ObjectMeta {
+                    name: Some(format!("api-bot-v2-ready-{i}")),
+                    namespace: Some("default".to_string()),
+                    owner_references: Some(vec![make_owner_ref("ReplicaSet", "api-bot-v2")]),
+                    ..Default::default()
+                },
+                spec: Some(PodSpec {
+                    node_name: Some("node-1".to_string()),
+                    ..Default::default()
+                }),
+                status: Some(PodStatus {
+                    phase: Some("Running".to_string()),
+                    container_statuses: Some(vec![ContainerStatus {
+                        name: "api-bot".to_string(),
+                        ready: true,
+                        ..Default::default()
+                    }]),
+                    ..Default::default()
+                }),
+            });
+        }
+
+        pods.push(Pod {
+            metadata: ObjectMeta {
+                name: Some("api-bot-v2-surge-blocked".to_string()),
+                namespace: Some("default".to_string()),
+                owner_references: Some(vec![make_owner_ref("ReplicaSet", "api-bot-v2")]),
+                ..Default::default()
+            },
+            spec: Some(PodSpec::default()),
+            status: Some(PodStatus {
+                phase: Some("Pending".to_string()),
+                conditions: Some(vec![PodCondition {
+                    type_: "PodScheduled".to_string(),
+                    status: "False".to_string(),
+                    reason: Some("Unschedulable".to_string()),
+                    message: Some("0/24 nodes are available: 24 Insufficient cpu.".to_string()),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+        });
+
+        let report = evaluate_changed_triage(
+            &[dep],
+            &[],
+            &[],
+            &[],
+            &[current_rs],
+            &pods,
+            &[],
+            &[],
+            Duration::from_secs(1800),
+            now,
+            Some("default".to_string()),
+            TriageOptions::default(),
+        );
+
+        assert_eq!(
+            report.summary.pending_count, 1,
+            "blocked surge pod must count as pending incident"
+        );
+        let change = &report.deployments[0];
+        assert_eq!(change.incident_status, IncidentStatus::Pending);
+        assert_eq!(change.failure_category, FailureCategory::Compute);
+        assert!(change.is_incident());
+        assert!(change.failure_detail.contains("Insufficient cpu"));
+    }
+
+    #[test]
+    fn triage_degraded_pending_workload_without_events_reports_pod_unschedulable() {
+        let now = Timestamp::from_second(1_700_000_000).unwrap();
+        let dep_time = Timestamp::from_second(1_700_000_000 - 86400).unwrap();
+
+        let dep = Deployment {
+            metadata: ObjectMeta {
+                name: Some("sink-transformer".to_string()),
+                namespace: Some("default".to_string()),
+                ..Default::default()
+            },
+            spec: Some(DeploymentSpec {
+                replicas: Some(1),
+                ..Default::default()
+            }),
+            status: Some(DeploymentStatus {
+                replicas: Some(1),
+                updated_replicas: Some(1),
+                ready_replicas: Some(0),
+                available_replicas: Some(0),
+                ..Default::default()
+            }),
+        };
+
+        let current_rs = ReplicaSet {
+            metadata: ObjectMeta {
+                name: Some("sink-transformer-v1".to_string()),
+                namespace: Some("default".to_string()),
+                owner_references: Some(vec![make_owner_ref("Deployment", "sink-transformer")]),
+                creation_timestamp: Some(Time(dep_time)),
+                ..Default::default()
+            },
+            spec: Some(ReplicaSetSpec::default()),
+            status: Some(ReplicaSetStatus::default()),
+        };
+
+        let pod = Pod {
+            metadata: ObjectMeta {
+                name: Some("sink-transformer-v1-abc".to_string()),
+                namespace: Some("default".to_string()),
+                owner_references: Some(vec![make_owner_ref("ReplicaSet", "sink-transformer-v1")]),
+                ..Default::default()
+            },
+            spec: Some(PodSpec::default()),
+            status: Some(PodStatus {
+                phase: Some("Pending".to_string()),
+                ..Default::default()
+            }),
+        };
+
+        let report = evaluate_changed_triage(
+            &[dep],
+            &[],
+            &[],
+            &[],
+            &[current_rs],
+            &[pod],
+            &[],
+            &[],
+            Duration::from_secs(1800),
+            now,
+            Some("default".to_string()),
+            TriageOptions::default(),
+        );
+
+        assert_eq!(report.summary.pending_count, 1);
+        let change = &report.deployments[0];
+        assert_eq!(change.incident_status, IncidentStatus::Pending);
+        assert_eq!(change.failure_category, FailureCategory::Compute);
+        assert_eq!(change.failure_detail, "0/1 Ready (Pod unschedulable)");
     }
 }

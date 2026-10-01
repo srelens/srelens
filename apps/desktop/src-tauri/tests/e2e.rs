@@ -277,6 +277,11 @@ const EXCLUDED: &[(&str, &str)] = &[
          image, so this is covered by unit tests with an injected fetch rather than the network",
     ),
     (
+        "github.rolloutCause",
+        "calls api.github.com, not the cluster; covered by unit tests in \
+         crates/registry/src/github.rs against a local server",
+    ),
+    (
         "toolbox.upgradePlugin",
         "an upgrade is a no-op on a freshly-installed plugin (already latest); the install/remove \
          cases below exercise the same kubectl-krew subprocess path",
@@ -1077,6 +1082,10 @@ async fn run_suite() {
         )
         .await;
     assert!(out["deployments"].is_array());
+    assert!(
+        out["argo"]["state"].is_string(),
+        "the report says how much of Argo it saw: {out}"
+    );
 
     let out = h
         .ok("k8s.listJobs", json!({ "context": ctx, "namespace": NS }))

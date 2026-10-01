@@ -984,6 +984,264 @@ pub fn default_columns_for_kind(kind: &ResourceKind) -> Vec<ColumnDef> {
                 width: Constraint::Length(8),
             },
         ],
+        ResourceKind::ReplicaSets => vec![
+            ColumnDef {
+                name: "NAMESPACE",
+                key: "namespace",
+                width: Constraint::Length(18),
+            },
+            ColumnDef {
+                name: "NAME",
+                key: "name",
+                width: Constraint::Min(25),
+            },
+            ColumnDef {
+                name: "DESIRED",
+                key: "printer:.spec.replicas",
+                width: Constraint::Length(9),
+            },
+            ColumnDef {
+                name: "CURRENT",
+                key: "printer:.status.replicas",
+                width: Constraint::Length(9),
+            },
+            ColumnDef {
+                name: "READY",
+                key: "printer:.status.readyReplicas",
+                width: Constraint::Length(8),
+            },
+            ColumnDef {
+                name: "AGE",
+                key: "age",
+                width: Constraint::Length(8),
+            },
+        ],
+        ResourceKind::PodDisruptionBudgets => vec![
+            ColumnDef {
+                name: "NAMESPACE",
+                key: "namespace",
+                width: Constraint::Length(18),
+            },
+            ColumnDef {
+                name: "NAME",
+                key: "name",
+                width: Constraint::Min(25),
+            },
+            ColumnDef {
+                name: "MIN AVAILABLE",
+                key: "printer:.spec.minAvailable",
+                width: Constraint::Length(14),
+            },
+            ColumnDef {
+                name: "MAX UNAVAIL",
+                key: "printer:.spec.maxUnavailable",
+                width: Constraint::Length(13),
+            },
+            ColumnDef {
+                name: "ALLOWED DISRUPT",
+                key: "printer:.status.disruptionsAllowed",
+                width: Constraint::Length(16),
+            },
+            ColumnDef {
+                name: "AGE",
+                key: "age",
+                width: Constraint::Length(8),
+            },
+        ],
+        ResourceKind::HorizontalPodAutoscalers => vec![
+            ColumnDef {
+                name: "NAMESPACE",
+                key: "namespace",
+                width: Constraint::Length(18),
+            },
+            ColumnDef {
+                name: "NAME",
+                key: "name",
+                width: Constraint::Min(25),
+            },
+            ColumnDef {
+                name: "REFERENCE",
+                key: "printer:.spec.scaleTargetRef.name",
+                width: Constraint::Min(20),
+            },
+            ColumnDef {
+                name: "MINPODS",
+                key: "printer:.spec.minReplicas",
+                width: Constraint::Length(9),
+            },
+            ColumnDef {
+                name: "MAXPODS",
+                key: "printer:.spec.maxReplicas",
+                width: Constraint::Length(9),
+            },
+            ColumnDef {
+                name: "REPLICAS",
+                key: "printer:.status.currentReplicas",
+                width: Constraint::Length(10),
+            },
+            ColumnDef {
+                name: "AGE",
+                key: "age",
+                width: Constraint::Length(8),
+            },
+        ],
+        ResourceKind::ResourceQuotas => vec![
+            ColumnDef {
+                name: "NAMESPACE",
+                key: "namespace",
+                width: Constraint::Length(18),
+            },
+            ColumnDef {
+                name: "NAME",
+                key: "name",
+                width: Constraint::Min(25),
+            },
+            ColumnDef {
+                name: "AGE",
+                key: "age",
+                width: Constraint::Length(8),
+            },
+        ],
+        ResourceKind::LimitRanges => vec![
+            ColumnDef {
+                name: "NAMESPACE",
+                key: "namespace",
+                width: Constraint::Length(18),
+            },
+            ColumnDef {
+                name: "NAME",
+                key: "name",
+                width: Constraint::Min(25),
+            },
+            ColumnDef {
+                name: "AGE",
+                key: "age",
+                width: Constraint::Length(8),
+            },
+        ],
+        ResourceKind::Endpoints => vec![
+            ColumnDef {
+                name: "NAMESPACE",
+                key: "namespace",
+                width: Constraint::Length(18),
+            },
+            ColumnDef {
+                name: "NAME",
+                key: "name",
+                width: Constraint::Min(25),
+            },
+            ColumnDef {
+                name: "ENDPOINTS",
+                key: "printer:.subsets[0].addresses[0].ip",
+                width: Constraint::Min(25),
+            },
+            ColumnDef {
+                name: "AGE",
+                key: "age",
+                width: Constraint::Length(8),
+            },
+        ],
+        ResourceKind::PriorityClasses => vec![
+            ColumnDef {
+                name: "NAME",
+                key: "name",
+                width: Constraint::Min(25),
+            },
+            ColumnDef {
+                name: "VALUE",
+                key: "printer:.value",
+                width: Constraint::Length(12),
+            },
+            ColumnDef {
+                name: "GLOBAL DEFAULT",
+                key: "printer:.globalDefault",
+                width: Constraint::Length(16),
+            },
+            ColumnDef {
+                name: "PREEMPTION",
+                key: "printer:.preemptionPolicy",
+                width: Constraint::Length(16),
+            },
+            ColumnDef {
+                name: "AGE",
+                key: "age",
+                width: Constraint::Length(8),
+            },
+        ],
+        ResourceKind::RuntimeClasses => vec![
+            ColumnDef {
+                name: "NAME",
+                key: "name",
+                width: Constraint::Min(25),
+            },
+            ColumnDef {
+                name: "HANDLER",
+                key: "printer:.handler",
+                width: Constraint::Min(20),
+            },
+            ColumnDef {
+                name: "AGE",
+                key: "age",
+                width: Constraint::Length(8),
+            },
+        ],
+        ResourceKind::Leases => vec![
+            ColumnDef {
+                name: "NAMESPACE",
+                key: "namespace",
+                width: Constraint::Length(18),
+            },
+            ColumnDef {
+                name: "NAME",
+                key: "name",
+                width: Constraint::Min(25),
+            },
+            ColumnDef {
+                name: "HOLDER",
+                key: "printer:.spec.holderIdentity",
+                width: Constraint::Min(25),
+            },
+            ColumnDef {
+                name: "AGE",
+                key: "age",
+                width: Constraint::Length(8),
+            },
+        ],
+        ResourceKind::MutatingWebhookConfigurations
+        | ResourceKind::ValidatingWebhookConfigurations => vec![
+            ColumnDef {
+                name: "NAME",
+                key: "name",
+                width: Constraint::Min(35),
+            },
+            ColumnDef {
+                name: "WEBHOOKS",
+                key: "printer:.webhooks[0].name",
+                width: Constraint::Min(25),
+            },
+            ColumnDef {
+                name: "AGE",
+                key: "age",
+                width: Constraint::Length(8),
+            },
+        ],
+        ResourceKind::IngressClasses => vec![
+            ColumnDef {
+                name: "NAME",
+                key: "name",
+                width: Constraint::Min(25),
+            },
+            ColumnDef {
+                name: "CONTROLLER",
+                key: "printer:.spec.controller",
+                width: Constraint::Min(30),
+            },
+            ColumnDef {
+                name: "AGE",
+                key: "age",
+                width: Constraint::Length(8),
+            },
+        ],
         ResourceKind::CustomResource(crd) => {
             let mut cols = Vec::new();
             if crd.namespaced {

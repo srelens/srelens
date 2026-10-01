@@ -48,6 +48,7 @@ tower = { version = "0.5", features = ["util"], optional = true }
 test-support = ["dep:tower"]
 
 [dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
+# test-util: paging tests pause the clock instead of waiting out a 15s page timeout.
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "test-util"] }
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }

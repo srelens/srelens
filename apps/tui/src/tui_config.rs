@@ -14,6 +14,7 @@ pub const MIN_COMMAND_POPUP_TEXT_SCALE: u8 = 1;
 pub const MAX_COMMAND_POPUP_TEXT_SCALE: u8 = 4;
 
 pub const DEFAULT_SHOW_FEATURE_BANNER: bool = true;
+pub const DEFAULT_SHOW_CHANGED_GUIDE: bool = true;
 pub const DEFAULT_CHECK_UPDATES: bool = true;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -193,6 +194,7 @@ pub struct TuiConfig {
     #[serde(alias = "commandPopupTextScale")]
     pub command_popup_density: CommandPopupDensity,
     pub show_feature_banner: bool,
+    pub show_changed_guide: bool,
     pub check_updates: bool,
     pub argo_hub_context: Option<String>,
     pub argo_hub_kubeconfig: Option<PathBuf>,
@@ -213,6 +215,7 @@ impl Default for TuiConfig {
             command_popup_max_visible: DEFAULT_COMMAND_POPUP_MAX_VISIBLE,
             command_popup_density: CommandPopupDensity::default(),
             show_feature_banner: DEFAULT_SHOW_FEATURE_BANNER,
+            show_changed_guide: DEFAULT_SHOW_CHANGED_GUIDE,
             check_updates: DEFAULT_CHECK_UPDATES,
             argo_hub_context: None,
             argo_hub_kubeconfig: None,
@@ -445,6 +448,7 @@ mod tests {
         assert_eq!(config.command_popup_density, CommandPopupDensity::Large);
         assert!(!config.show_feature_banner);
         // And the ones it does not come back as the documented defaults.
+        assert_eq!(config.show_changed_guide, DEFAULT_SHOW_CHANGED_GUIDE);
         assert_eq!(config.check_updates, DEFAULT_CHECK_UPDATES);
         assert_eq!(config.argo_hub_context, None);
         assert_eq!(config.argo_hub_kubeconfig, None);

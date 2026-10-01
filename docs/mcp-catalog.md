@@ -7,7 +7,7 @@ Everything this server exposes over MCP, generated from the live registry so it 
 
 ## Tools
 
-123 tools, grouped by area and then by how a call is gated. Argument schemas are not reproduced here — call `tools/list` for those, which cannot go stale.
+124 tools, grouped by area and then by how a call is gated. Argument schemas are not reproduced here — call `tools/list` for those, which cannot go stale.
 
 **Impact** is how much a successful call disturbs — `low`, `medium` or `high` — and is a different question from the section heading, which is how the call is gated. A capability that accepts several named operations carries the highest level any of them reaches; the per-operation level travels with the resource.
 
@@ -159,7 +159,7 @@ Everything this server exposes over MCP, generated from the live registry so it 
 | `toolbox.removePlugin` | medium | remove an installed krew plugin |
 | `toolbox.upgradePlugin` | medium | upgrade an installed krew plugin |
 
-### Server — read-only (16)
+### Server — read-only (17)
 
 | Tool | Impact | Summary |
 | --- | --- | --- |
@@ -177,6 +177,7 @@ Everything this server exposes over MCP, generated from the live registry so it 
 | `extensions.resource` | low | Inspect the selected resource of an enabled app |
 | `extensions.streams` | low | Report the open app streams in this process and the traffic each app has sent |
 | `extensions.validate` | low | Check a declarative extension manifest exactly as installing it would and return every problem; does not install it |
+| `github.rolloutCause` | low | why an Argo sync rolled out: the github.com commits between the previous and the synced revision that touched the app's path, and the pull requests they came from |
 | `ping` | low | health check; echoes the input back as { pong: <input> } |
 | `settings.get` | low | read durable desktop settings; omit key to return the complete map |
 

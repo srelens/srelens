@@ -71,6 +71,9 @@ pub const WEB_DENIED_CAPABILITIES: &[&str] = &[
     "toolbox.installPlugin",
     "toolbox.upgradePlugin",
     "toolbox.removePlugin",
+    // Uses the process-wide GitHub token (GITHUB_TOKEN / GH_TOKEN) on the host;
+    // unsafe on a multi-user shared web container.
+    "github.rolloutCause",
 ];
 
 /// Installed apps' operations, `plugin/<id>/<operation>` (#574), are MCP tools, and
@@ -468,6 +471,10 @@ pub(crate) mod tests {
         let (status, body) = post("/api/capability/k8s.deleteContext", Body::empty()).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(body["error"], json!("capability not available in web mode"));
+
+        let (status, body) = post("/api/capability/github.rolloutCause", Body::empty()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], json!("capability not available in web mode"));
     }
 
     /// Apps are per user on the web (#515), so none of their capabilities is
@@ -747,7 +754,10 @@ pub(crate) mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert_eq!(refused["error"], json!("capability not available in web mode"));
+        assert_eq!(
+            refused["error"],
+            json!("capability not available in web mode")
+        );
 
         let reset = json!({"action": "settings", "id": "org.example.argocd", "settings": {}});
         let (status, saved) = call(&state, &erin, "extensions.configure", reset).await;
@@ -948,7 +958,11 @@ pub(crate) mod tests {
         ] {
             let (status, body) = post(&format!("/api/capability/{id}"), Body::empty()).await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "{id} must be denied");
-            assert_eq!(body["error"], json!("capability not available in web mode"), "{id}");
+            assert_eq!(
+                body["error"],
+                json!("capability not available in web mode"),
+                "{id}"
+            );
         }
     }
 
@@ -957,7 +971,11 @@ pub(crate) mod tests {
         for id in ["k8s.helmRepoAdd", "k8s.helmRepoUpdate"] {
             let (status, body) = post(&format!("/api/capability/{id}"), Body::empty()).await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "{id} must be denied");
-            assert_eq!(body["error"], json!("capability not available in web mode"), "{id}");
+            assert_eq!(
+                body["error"],
+                json!("capability not available in web mode"),
+                "{id}"
+            );
         }
     }
 
@@ -973,7 +991,11 @@ pub(crate) mod tests {
         ] {
             let (status, body) = post(&format!("/api/capability/{id}"), Body::empty()).await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "{id} must be denied");
-            assert_eq!(body["error"], json!("capability not available in web mode"), "{id}");
+            assert_eq!(
+                body["error"],
+                json!("capability not available in web mode"),
+                "{id}"
+            );
         }
     }
 
