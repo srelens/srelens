@@ -1433,6 +1433,153 @@ fn evaluate_pod_failures(
     )
 }
 
+fn evaluate_workload_flapping(
+    current_pods: &[&Pod],
+    events_by_object: &HashMap<(String, String, String), Vec<&Event>>,
+    ns: &str,
+    cutoff_ts: Option<&Timestamp>,
+    now: Timestamp,
+    ready_replicas: i32,
+    desired_replicas: i32,
+) -> (bool, usize, bool) {
+    let recent_cutoff = now
+        .checked_sub(SignedDuration::from_secs(900))
+        .unwrap_or(now);
+
+    let mut probe_failure_count = 0;
+    let mut has_recent_probe_failure = false;
+
+    for p in current_pods {
+        let p_name = p.metadata.name.as_deref().unwrap_or_default();
+        let ready_transition_time = p
+            .status
+            .as_ref()
+            .and_then(|s| s.conditions.as_ref())
+            .and_then(|conds| {
+                conds.iter().find_map(|c| {
+                    if c.type_ == "Ready" && c.status == "True" {
+                        c.last_transition_time.as_ref().map(|t| t.0)
+                    } else {
+                        None
+                    }
+                })
+            });
+
+        if let Some(p_events) =
+            events_by_object.get(&("Pod".to_string(), ns.to_string(), p_name.to_string()))
+        {
+            for ev in p_events {
+                if ev.reason.as_deref() == Some("Unhealthy") {
+                    let ev_ts = event_last_timestamp(ev);
+                    if cutoff_ts.map_or(true, |c| ev_ts.is_some_and(|t| t >= *c)) {
+                        // Ignore startup warmup probe failures that occurred before the pod successfully became ready
+                        let is_startup_warmup = match (ready_transition_time, ev_ts) {
+                            (Some(ready_t), Some(event_t)) => event_t <= ready_t,
+                            _ => false,
+                        };
+                        if !is_startup_warmup {
+                            let count = ev.count.unwrap_or(1) as usize;
+                            probe_failure_count += count;
+                            let active_cutoff = match cutoff_ts {
+                                Some(c) if *c > recent_cutoff => *c,
+                                _ => recent_cutoff,
+                            };
+                            if ev_ts.is_some_and(|t| t >= active_cutoff) {
+                                has_recent_probe_failure = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let restart_in_window = current_pods.iter().any(|p| {
+        let pod_created_in_window = p
+            .metadata
+            .creation_timestamp
+            .as_ref()
+            .and_then(|t| cutoff_ts.map(|c| t.0 >= *c))
+            .unwrap_or(false);
+        if pod_created_in_window
+            && p.status
+                .as_ref()
+                .and_then(|s| s.container_statuses.as_ref())
+                .map_or(false, |cs| cs.iter().any(|c| c.restart_count > 0))
+        {
+            return true;
+        }
+        if let Some(ref st) = p.status {
+            if let Some(ref cs_list) = st.container_statuses {
+                for cs in cs_list {
+                    if cs.restart_count > 0 {
+                        if let Some(ref term) =
+                            cs.last_state.as_ref().and_then(|s| s.terminated.as_ref())
+                        {
+                            if let Some(ref finished) = term.finished_at {
+                                if cutoff_ts.map_or(true, |c| finished.0 >= *c) {
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        false
+    });
+
+    let active_restart_cutoff = match cutoff_ts {
+        Some(c) if *c > recent_cutoff => *c,
+        _ => recent_cutoff,
+    };
+
+    let has_active_restart_flapping = current_pods.iter().any(|p| {
+        if let Some(ref st) = p.status {
+            if let Some(ref cs_list) = st.container_statuses {
+                for cs in cs_list {
+                    if cs.restart_count >= 2 {
+                        if !cs.ready {
+                            return true;
+                        }
+                        if let Some(ref running) =
+                            cs.state.as_ref().and_then(|s| s.running.as_ref())
+                        {
+                            if let Some(ref started) = running.started_at {
+                                if started.0 >= active_restart_cutoff {
+                                    return true;
+                                }
+                            }
+                        }
+                        if let Some(ref term) =
+                            cs.last_state.as_ref().and_then(|s| s.terminated.as_ref())
+                        {
+                            if let Some(ref finished) = term.finished_at {
+                                if finished.0 >= active_restart_cutoff {
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        false
+    });
+
+    let has_active_probe_flapping = if probe_failure_count == 0 {
+        false
+    } else if ready_replicas < desired_replicas {
+        true
+    } else {
+        probe_failure_count >= 3 && has_recent_probe_failure
+    };
+
+    let is_flapping = has_active_restart_flapping || has_active_probe_flapping;
+
+    (is_flapping, probe_failure_count, restart_in_window)
+}
+
 /// Evaluates deployments, statefulsets, cronjobs, replicasets, pods, events, and GitOps applications
 /// to produce an SRE post-page incident triage report.
 pub fn evaluate_changed_triage(
@@ -1654,60 +1801,15 @@ pub fn evaluate_changed_triage(
             detected_failure_detail,
         ) = evaluate_pod_failures(&current_pods, &events_by_object, &dep_ns);
 
-        let restart_in_window = current_pods.iter().any(|p| {
-            let pod_created_in_window = p
-                .metadata
-                .creation_timestamp
-                .as_ref()
-                .and_then(|t| cutoff_ts.as_ref().map(|c| t.0 >= *c))
-                .unwrap_or(false);
-            if pod_created_in_window
-                && p.status
-                    .as_ref()
-                    .and_then(|s| s.container_statuses.as_ref())
-                    .map_or(false, |cs| cs.iter().any(|c| c.restart_count > 0))
-            {
-                return true;
-            }
-            if let Some(ref st) = p.status {
-                if let Some(ref cs_list) = st.container_statuses {
-                    for cs in cs_list {
-                        if cs.restart_count > 0 {
-                            if let Some(ref term) =
-                                cs.last_state.as_ref().and_then(|s| s.terminated.as_ref())
-                            {
-                                if let Some(ref finished) = term.finished_at {
-                                    if cutoff_ts.as_ref().map_or(true, |c| finished.0 >= *c) {
-                                        return true;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            false
-        });
-
-        let mut probe_failure_count = 0;
-        for p in &current_pods {
-            let p_name = p.metadata.name.clone().unwrap_or_default();
-            if let Some(p_events) =
-                events_by_object.get(&("Pod".to_string(), dep_ns.clone(), p_name))
-            {
-                for ev in p_events {
-                    if ev.reason.as_deref() == Some("Unhealthy") {
-                        if cutoff_ts
-                            .as_ref()
-                            .map_or(true, |c| event_last_timestamp(ev).is_some_and(|t| t >= *c))
-                        {
-                            probe_failure_count += ev.count.unwrap_or(1) as usize;
-                        }
-                    }
-                }
-            }
-        }
-        let is_flapping = (restart_in_window && restart_count >= 2) || probe_failure_count > 0;
+        let (is_flapping, probe_failure_count, restart_in_window) = evaluate_workload_flapping(
+            &current_pods,
+            &events_by_object,
+            &dep_ns,
+            cutoff_ts.as_ref(),
+            now,
+            ready_replicas,
+            desired_replicas,
+        );
 
         let is_actively_failing = crash_loop_count > 0
             || oom_killed_count > 0
@@ -2015,60 +2117,15 @@ pub fn evaluate_changed_triage(
             detected_failure_detail,
         ) = evaluate_pod_failures(&current_pods, &events_by_object, &sts_ns);
 
-        let restart_in_window = current_pods.iter().any(|p| {
-            let pod_created_in_window = p
-                .metadata
-                .creation_timestamp
-                .as_ref()
-                .and_then(|t| cutoff_ts.as_ref().map(|c| t.0 >= *c))
-                .unwrap_or(false);
-            if pod_created_in_window
-                && p.status
-                    .as_ref()
-                    .and_then(|s| s.container_statuses.as_ref())
-                    .map_or(false, |cs| cs.iter().any(|c| c.restart_count > 0))
-            {
-                return true;
-            }
-            if let Some(ref st) = p.status {
-                if let Some(ref cs_list) = st.container_statuses {
-                    for cs in cs_list {
-                        if cs.restart_count > 0 {
-                            if let Some(ref term) =
-                                cs.last_state.as_ref().and_then(|s| s.terminated.as_ref())
-                            {
-                                if let Some(ref finished) = term.finished_at {
-                                    if cutoff_ts.as_ref().map_or(true, |c| finished.0 >= *c) {
-                                        return true;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            false
-        });
-
-        let mut probe_failure_count = 0;
-        for p in &current_pods {
-            let p_name = p.metadata.name.clone().unwrap_or_default();
-            if let Some(p_events) =
-                events_by_object.get(&("Pod".to_string(), sts_ns.clone(), p_name))
-            {
-                for ev in p_events {
-                    if ev.reason.as_deref() == Some("Unhealthy") {
-                        if cutoff_ts
-                            .as_ref()
-                            .map_or(true, |c| event_last_timestamp(ev).is_some_and(|t| t >= *c))
-                        {
-                            probe_failure_count += ev.count.unwrap_or(1) as usize;
-                        }
-                    }
-                }
-            }
-        }
-        let is_flapping = (restart_in_window && restart_count >= 2) || probe_failure_count > 0;
+        let (is_flapping, probe_failure_count, restart_in_window) = evaluate_workload_flapping(
+            &current_pods,
+            &events_by_object,
+            &sts_ns,
+            cutoff_ts.as_ref(),
+            now,
+            ready_replicas,
+            desired_replicas,
+        );
 
         let is_actively_failing = crash_loop_count > 0
             || oom_killed_count > 0
@@ -2372,60 +2429,15 @@ pub fn evaluate_changed_triage(
             detected_failure_detail,
         ) = evaluate_pod_failures(&current_pods, &events_by_object, &cj_ns);
 
-        let restart_in_window = current_pods.iter().any(|p| {
-            let pod_created_in_window = p
-                .metadata
-                .creation_timestamp
-                .as_ref()
-                .and_then(|t| cutoff_ts.as_ref().map(|c| t.0 >= *c))
-                .unwrap_or(false);
-            if pod_created_in_window
-                && p.status
-                    .as_ref()
-                    .and_then(|s| s.container_statuses.as_ref())
-                    .map_or(false, |cs| cs.iter().any(|c| c.restart_count > 0))
-            {
-                return true;
-            }
-            if let Some(ref st) = p.status {
-                if let Some(ref cs_list) = st.container_statuses {
-                    for cs in cs_list {
-                        if cs.restart_count > 0 {
-                            if let Some(ref term) =
-                                cs.last_state.as_ref().and_then(|s| s.terminated.as_ref())
-                            {
-                                if let Some(ref finished) = term.finished_at {
-                                    if cutoff_ts.as_ref().map_or(true, |c| finished.0 >= *c) {
-                                        return true;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            false
-        });
-
-        let mut probe_failure_count = 0;
-        for p in &current_pods {
-            let p_name = p.metadata.name.clone().unwrap_or_default();
-            if let Some(p_events) =
-                events_by_object.get(&("Pod".to_string(), cj_ns.clone(), p_name))
-            {
-                for ev in p_events {
-                    if ev.reason.as_deref() == Some("Unhealthy") {
-                        if cutoff_ts
-                            .as_ref()
-                            .map_or(true, |c| event_last_timestamp(ev).is_some_and(|t| t >= *c))
-                        {
-                            probe_failure_count += ev.count.unwrap_or(1) as usize;
-                        }
-                    }
-                }
-            }
-        }
-        let is_flapping = (restart_in_window && restart_count >= 2) || probe_failure_count > 0;
+        let (is_flapping, probe_failure_count, restart_in_window) = evaluate_workload_flapping(
+            &current_pods,
+            &events_by_object,
+            &cj_ns,
+            cutoff_ts.as_ref(),
+            now,
+            1,
+            1,
+        );
 
         let is_actively_failing = crash_loop_count > 0
             || oom_killed_count > 0
@@ -5716,5 +5728,212 @@ mod tests {
             IncidentStatus::Flapping
         );
         assert_eq!(report.summary.flapping_count, 1);
+    }
+
+    #[test]
+    fn triage_ignores_startup_probe_failures_when_pod_is_now_ready() {
+        use k8s_openapi::api::core::v1::{ContainerStateRunning, PodCondition};
+        let now = Timestamp::from_second(1_700_000_000).unwrap();
+        let dep = deployment("advertiser-hub", 1, 1);
+        let rs = [replicaset("advertiser-hub-rs", "advertiser-hub", 3600)];
+
+        let ready_time = Timestamp::from_second(1_700_000_000 - 840).unwrap();
+        let pod = Pod {
+            metadata: ObjectMeta {
+                name: Some("advertiser-hub-pod".to_string()),
+                namespace: Some("default".to_string()),
+                creation_timestamp: Some(Time(
+                    Timestamp::from_second(1_700_000_000 - 900).unwrap(),
+                )),
+                owner_references: Some(vec![make_owner_ref("ReplicaSet", "advertiser-hub-rs")]),
+                ..Default::default()
+            },
+            spec: Some(PodSpec::default()),
+            status: Some(PodStatus {
+                phase: Some("Running".to_string()),
+                conditions: Some(vec![PodCondition {
+                    type_: "Ready".to_string(),
+                    status: "True".to_string(),
+                    last_transition_time: Some(Time(ready_time)),
+                    ..Default::default()
+                }]),
+                container_statuses: Some(vec![ContainerStatus {
+                    name: "advertiser-hub".to_string(),
+                    ready: true,
+                    restart_count: 0,
+                    state: Some(ContainerState {
+                        running: Some(ContainerStateRunning {
+                            started_at: Some(Time(
+                                Timestamp::from_second(1_700_000_000 - 890).unwrap(),
+                            )),
+                        }),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+        };
+
+        // Unhealthy event occurred at 1_700_000_000 - 850 (BEFORE ready_time at -840)
+        let ev = Event {
+            metadata: ObjectMeta {
+                name: Some("advertiser-hub-pod.unhealthy".to_string()),
+                namespace: Some("default".to_string()),
+                ..Default::default()
+            },
+            involved_object: k8s_openapi::api::core::v1::ObjectReference {
+                kind: Some("Pod".to_string()),
+                name: Some("advertiser-hub-pod".to_string()),
+                namespace: Some("default".to_string()),
+                ..Default::default()
+            },
+            reason: Some("Unhealthy".to_string()),
+            message: Some(
+                "Readiness probe failed: HTTP probe failed with statuscode: 500".to_string(),
+            ),
+            count: Some(6),
+            last_timestamp: Some(Time(Timestamp::from_second(1_700_000_000 - 850).unwrap())),
+            type_: Some("Warning".to_string()),
+            ..Default::default()
+        };
+
+        let report = evaluate_changed_triage(
+            &[dep],
+            &[],
+            &[],
+            &[],
+            &rs,
+            &[pod],
+            &[ev],
+            &[],
+            Duration::from_secs(86400), // 24h window
+            now,
+            None,
+            TriageOptions::default(),
+        );
+
+        assert_eq!(report.deployments.len(), 1);
+        let d = &report.deployments[0];
+        assert_eq!(d.incident_status, IncidentStatus::Healthy);
+        assert_eq!(d.probe_failure_count, 0);
+        assert_eq!(report.summary.flapping_count, 0);
+    }
+
+    #[test]
+    fn triage_ignores_historical_restarts_when_pod_is_now_ready_and_stable() {
+        use k8s_openapi::api::core::v1::{ContainerStateRunning, PodCondition};
+        let now = Timestamp::from_second(1_700_000_000).unwrap();
+        let dep = deployment("ctrip", 2, 2);
+        let rs = [replicaset("ctrip-rs", "ctrip", 18000)];
+
+        // Pod restarted 2 times 3 hours ago (10800s ago), but has been running stably since
+        let pod1 = Pod {
+            metadata: ObjectMeta {
+                name: Some("ctrip-pod-1".to_string()),
+                namespace: Some("default".to_string()),
+                creation_timestamp: Some(Time(
+                    Timestamp::from_second(1_700_000_000 - 14400).unwrap(),
+                )),
+                owner_references: Some(vec![make_owner_ref("ReplicaSet", "ctrip-rs")]),
+                ..Default::default()
+            },
+            spec: Some(PodSpec::default()),
+            status: Some(PodStatus {
+                phase: Some("Running".to_string()),
+                conditions: Some(vec![PodCondition {
+                    type_: "Ready".to_string(),
+                    status: "True".to_string(),
+                    last_transition_time: Some(Time(
+                        Timestamp::from_second(1_700_000_000 - 10800).unwrap(),
+                    )),
+                    ..Default::default()
+                }]),
+                container_statuses: Some(vec![ContainerStatus {
+                    name: "ctrip".to_string(),
+                    ready: true,
+                    restart_count: 2,
+                    state: Some(ContainerState {
+                        running: Some(ContainerStateRunning {
+                            started_at: Some(Time(
+                                Timestamp::from_second(1_700_000_000 - 10800).unwrap(),
+                            )),
+                        }),
+                        ..Default::default()
+                    }),
+                    last_state: Some(ContainerState {
+                        terminated: Some(k8s_openapi::api::core::v1::ContainerStateTerminated {
+                            exit_code: 1,
+                            finished_at: Some(Time(
+                                Timestamp::from_second(1_700_000_000 - 10801).unwrap(),
+                            )),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+        };
+
+        let pod2 = Pod {
+            metadata: ObjectMeta {
+                name: Some("ctrip-pod-2".to_string()),
+                namespace: Some("default".to_string()),
+                creation_timestamp: Some(Time(
+                    Timestamp::from_second(1_700_000_000 - 14400).unwrap(),
+                )),
+                owner_references: Some(vec![make_owner_ref("ReplicaSet", "ctrip-rs")]),
+                ..Default::default()
+            },
+            spec: Some(PodSpec::default()),
+            status: Some(PodStatus {
+                phase: Some("Running".to_string()),
+                conditions: Some(vec![PodCondition {
+                    type_: "Ready".to_string(),
+                    status: "True".to_string(),
+                    last_transition_time: Some(Time(
+                        Timestamp::from_second(1_700_000_000 - 14400).unwrap(),
+                    )),
+                    ..Default::default()
+                }]),
+                container_statuses: Some(vec![ContainerStatus {
+                    name: "ctrip".to_string(),
+                    ready: true,
+                    restart_count: 0,
+                    state: Some(ContainerState {
+                        running: Some(ContainerStateRunning {
+                            started_at: Some(Time(
+                                Timestamp::from_second(1_700_000_000 - 14400).unwrap(),
+                            )),
+                        }),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+        };
+
+        let report = evaluate_changed_triage(
+            &[dep],
+            &[],
+            &[],
+            &[],
+            &rs,
+            &[pod1, pod2],
+            &[],
+            &[],
+            Duration::from_secs(86400), // 24h window
+            now,
+            None,
+            TriageOptions::default(),
+        );
+
+        assert_eq!(report.deployments.len(), 1);
+        let d = &report.deployments[0];
+        assert_eq!(d.incident_status, IncidentStatus::Healthy);
+        assert_eq!(report.summary.flapping_count, 0);
     }
 }
