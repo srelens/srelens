@@ -443,9 +443,12 @@ async fn at_most_eight_calls_are_in_flight_and_the_ninth_waits() {
     for _ in 0..8 {
         calls.push(host.call().await);
     }
-    // The ninth is not sent until one is answered.
-    let id = host.request("health", json!({})).await;
-    assert_eq!(host.answer(id).await["result"], json!({}));
+    // The ninth is not sent until one is answered. Not fenced with `health`,
+    // whose answer goes ahead of a queued call.
+    assert!(
+        host.next_within(Duration::from_millis(300)).await.is_none(),
+        "the ninth call must wait for a slot"
+    );
     host.reply(&calls[0]["id"], Ok(json!(1))).await;
     let mut ninth_seen = false;
     for _ in 0..2 {
