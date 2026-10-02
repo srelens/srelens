@@ -133,8 +133,13 @@ const NO_READING: u64 = u64::MAX;
 /// Why the watchdog stopped a sidecar.
 #[cfg(unix)]
 enum Reason {
-    Memory { measured: u64, limit: u64 },
+    Memory {
+        measured: u64,
+        limit: u64,
+    },
     Unmeasured(io::Error),
+    /// Its `SIGSTOP` failed, so it could not be held to its CPU limit.
+    Unpaused(io::Error),
 }
 
 /// `child` under the watchdog: [`Launched::from_child`]'s wait task, plus a
@@ -144,8 +149,8 @@ enum Reason {
 /// never reaped while it is being read or signalled, and its PID cannot be
 /// another process's. `child` must be spawned with `kill_on_drop(true)`: if
 /// the task panics, dropping the child kills the sidecar, so a failed
-/// watchdog stops it rather than leaving it unwatched. A reading that fails
-/// while the sidecar runs stops it too.
+/// watchdog stops it rather than leaving it unwatched. A reading or a pause
+/// that fails while the sidecar runs stops it too.
 ///
 /// The [`super::Process`]'s memory reader answers the last reading, `None`
 /// before the first and after the exit; it makes no system call itself.
@@ -198,13 +203,24 @@ pub(crate) fn watched(
                     break kill(&mut child).await;
                 }
                 Verdict::Pause(pause) => {
-                    signal(pid, libc::SIGSTOP);
+                    if let Err(e) = signal(pid, libc::SIGSTOP) {
+                        match unpaused(e) {
+                            None => continue,
+                            Some(why) => {
+                                reason = Some(why);
+                                break kill(&mut child).await;
+                            }
+                        }
+                    }
                     tokio::select! {
                         status = child.wait() => break status,
                         _ = stopped.recv() => break kill(&mut child).await,
                         () = tokio::time::sleep(pause) => {}
                     }
-                    signal(pid, libc::SIGCONT);
+                    // A failed SIGCONT is ignored: the SIGSTOP to the same
+                    // unreaped PID succeeded, so the sidecar is either being
+                    // resumed or gone, and its exit is waited for next.
+                    let _ = signal(pid, libc::SIGCONT);
                 }
             }
         };
@@ -240,6 +256,11 @@ fn explain(mut exit: Exit, reason: Option<Reason>) -> Exit {
             exit.description =
                 format!("was stopped because srelens could not measure its memory and CPU: {e}");
         }
+        Some(Reason::Unpaused(e)) => {
+            exit.description = format!(
+                "was stopped because srelens could not pause it to hold it to its CPU limit: {e}"
+            );
+        }
         None => {}
     }
     exit
@@ -252,15 +273,26 @@ async fn kill(child: &mut tokio::process::Child) -> io::Result<ExitStatus> {
 }
 
 /// Send `signal` to the sidecar: only ever to a child not yet reaped, so the
-/// PID is still its own. A PID too large for `pid_t` is not sent to, since a
-/// negative one would signal a process group.
+/// PID is still its own. A PID too large for `pid_t` is an error, not sent
+/// to, since a negative one would signal a process group.
 #[cfg(unix)]
-fn signal(pid: u32, signal: libc::c_int) {
-    let Ok(pid) = libc::pid_t::try_from(pid) else {
-        return;
-    };
+fn signal(pid: u32, signal: libc::c_int) -> io::Result<()> {
+    let pid = libc::pid_t::try_from(pid).map_err(io::Error::other)?;
     // SAFETY: kill(2) with a PID and a signal number; no memory is passed.
-    unsafe { libc::kill(pid, signal) };
+    if unsafe { libc::kill(pid, signal) } == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+/// Why to stop the sidecar after a `SIGSTOP` that failed with `e`, if at
+/// all. `ESRCH` is a sidecar that is gone: nothing, and the loop goes back to
+/// waiting for its exit. Anything else leaves it running past its CPU limit
+/// with no way to hold it there, so it is stopped, as after a failed reading.
+#[cfg(unix)]
+fn unpaused(e: io::Error) -> Option<Reason> {
+    (e.raw_os_error() != Some(libc::ESRCH)).then_some(Reason::Unpaused(e))
 }
 
 #[cfg(test)]
@@ -504,6 +536,29 @@ mod explain_tests {
     fn an_exit_the_watchdog_had_no_reason_for_is_left_as_it_was() {
         for ended in [exited(0), killed(libc::SIGKILL)] {
             assert_eq!(explain(ended.clone(), None), ended);
+        }
+    }
+
+    #[test]
+    fn a_pause_that_fails_because_it_is_gone_goes_back_to_waiting_for_its_exit() {
+        assert!(unpaused(io::Error::from_raw_os_error(libc::ESRCH)).is_none());
+    }
+
+    #[test]
+    fn a_pause_that_fails_for_any_other_reason_stops_it() {
+        for e in [
+            io::Error::from_raw_os_error(libc::EPERM),
+            io::Error::other("no PID to signal"),
+        ] {
+            let why = e.to_string();
+            let told = explain(killed(libc::SIGKILL), unpaused(e));
+            assert_eq!(
+                told.description,
+                format!(
+                    "was stopped because srelens could not pause it to hold it to its CPU limit: {why}"
+                )
+            );
+            assert!(!told.memory_limit);
         }
     }
 
