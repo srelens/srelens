@@ -97,6 +97,7 @@ impl std::error::Error for SidecarError {}
 ///         HostError::ConsentDenied(_) => "denied",
 ///         HostError::CapabilityFailed(_) => "failed",
 ///         HostError::InvalidParams(_) => "invalid",
+///         HostError::InvalidCall(_) => "not sent",
 ///         HostError::Cancelled => "cancelled",
 ///         HostError::Rpc(_) => "rpc",
 ///         HostError::TooLarge(_) => "too large",
@@ -114,6 +115,12 @@ pub enum HostError {
     CapabilityFailed(String),
     /// srelens refused the call's params (`-32602`).
     InvalidParams(String),
+    /// A field of the call is one srelens would refuse, so the call was not
+    /// sent: no slot was taken and srelens did not see it. The message names
+    /// the field and the shape it must have. A handler that passes this on
+    /// with `?` fails with `-32603`: a call the sidecar built wrong is the
+    /// sidecar's bug, not a refusal from srelens ([`HostError::InvalidParams`]).
+    InvalidCall(String),
     /// The call was cancelled (`-32800`).
     Cancelled,
     /// Any other error srelens answered with.
@@ -143,6 +150,7 @@ impl fmt::Display for HostError {
             HostError::ConsentDenied(why) => write!(f, "srelens was not given consent: {why}"),
             HostError::CapabilityFailed(why) => write!(f, "srelens refused the call: {why}"),
             HostError::InvalidParams(why) => write!(f, "srelens refused the call's params: {why}"),
+            HostError::InvalidCall(why) => write!(f, "the call was not sent: {why}"),
             HostError::Cancelled => f.write_str("the call to srelens was cancelled"),
             HostError::Rpc(error) => write!(f, "srelens answered with an error: {error}"),
             HostError::TooLarge(bytes) => write!(

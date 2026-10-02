@@ -114,14 +114,12 @@ struct Session {
     shared: Option<Arc<Shared>>,
     running: Running,
     tasks: JoinSet<()>,
-    host: Host,
 }
 
 impl Session {
     fn new(sidecar: Sidecar, outbox: Outbox) -> Session {
         Session {
             sidecar: Arc::new(sidecar),
-            host: Host::new(outbox.clone()),
             outbox,
             shared: None,
             running: Running::default(),
@@ -137,7 +135,13 @@ impl Session {
         match message {
             Message::Request(request) => return self.request(request).await,
             Message::Notification(note) => self.notify(note).await,
-            Message::Response(response) => self.host.answered(response),
+            // Only a handler calls srelens, and none runs before `initialize`:
+            // an answer before it is for no call, so it is dropped.
+            Message::Response(response) => {
+                if let Some(shared) = &self.shared {
+                    shared.host.answered(response);
+                }
+            }
         }
         Flow::Continue
     }
@@ -336,11 +340,14 @@ impl Session {
             );
             return answer(&self.outbox, id, Err(why)).await;
         };
+        // Built here, not in `Session::new`: how many calls it may have in
+        // flight comes in the limits.
+        let host = Host::new(self.outbox.clone(), &params.limits);
         self.shared = Some(Arc::new(Shared {
             data_dir: params.data_directory.into(),
             limits: params.limits,
             api_version: (*chosen).to_owned(),
-            host: self.host.clone(),
+            host,
         }));
         let result = InitializeResult {
             api_version: (*chosen).to_owned(),
@@ -392,7 +399,10 @@ impl Session {
     /// session's own shutdown by sending a `$/cancelRequest` of its own (see
     /// `CancelOnDrop` in `host.rs`).
     fn end(&mut self) {
-        self.host.disconnect();
+        // No host before `initialize`, and then no handler to disconnect.
+        if let Some(shared) = &self.shared {
+            shared.host.disconnect();
+        }
         self.cancel_all();
         self.tasks.abort_all();
     }
