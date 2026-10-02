@@ -399,6 +399,11 @@ pub fn parse_gpu_cluster_info(nodes: &[Node], pods: &[Pod]) -> GpuClusterInfo {
                                         }
                                     }
                                 }
+                                if let Some(q) = res_map.get("nvidia.com/vgpu") {
+                                    if let Ok(val) = q.0.trim().parse::<i64>() {
+                                        c_gpu += val;
+                                    }
+                                }
                                 // HAMi / virtual GPU memory in MiB
                                 if let Some(q) = res_map
                                     .get("nvidia.com/gpumem")
@@ -593,25 +598,36 @@ pub fn parse_hami_register_annotation(ann: &str) -> Option<HamiRegisterInfo> {
     if devices.is_empty() {
         return None;
     }
-    let physical_gpu_count = devices.len() as i64;
-    let physical_vram_total_mib: i64 = devices.iter().filter_map(|d| d.devmem).sum();
-    let virtual_gpu_count: i64 = devices
+    let healthy_devices: Vec<&HamiDeviceRegister> = devices
         .iter()
         .filter(|d| d.health.unwrap_or(true))
-        .filter_map(|d| d.count)
-        .sum();
-    let virtual_vram_total_mib: i64 = devices
+        .collect();
+
+    let physical_gpu_count = healthy_devices.len() as i64;
+    let physical_vram_total_mib: i64 = healthy_devices.iter().filter_map(|d| d.devmem).sum();
+    let virtual_gpu_count: i64 = healthy_devices.iter().filter_map(|d| d.count).sum();
+    let virtual_vram_total_mib: i64 = healthy_devices
         .iter()
-        .filter(|d| d.health.unwrap_or(true))
-        .map(|d| d.devmem.unwrap_or(0))
+        .map(|d| d.devmem.unwrap_or(0) * d.count.unwrap_or(1))
         .sum();
-    let model = devices.iter().find_map(|d| {
-        d.device_type.as_deref().map(|t| {
-            t.trim_start_matches("NVIDIA-")
-                .trim_start_matches("NVIDIA ")
-                .replace('-', " ")
+    let model = healthy_devices
+        .iter()
+        .find_map(|d| {
+            d.device_type.as_deref().map(|t| {
+                t.trim_start_matches("NVIDIA-")
+                    .trim_start_matches("NVIDIA ")
+                    .replace('-', " ")
+            })
         })
-    });
+        .or_else(|| {
+            devices.iter().find_map(|d| {
+                d.device_type.as_deref().map(|t| {
+                    t.trim_start_matches("NVIDIA-")
+                        .trim_start_matches("NVIDIA ")
+                        .replace('-', " ")
+                })
+            })
+        });
     Some(HamiRegisterInfo {
         physical_gpu_count,
         physical_vram_total_mib,
@@ -860,8 +876,8 @@ mod tests {
         let cluster = parse_gpu_cluster_info(&[node], &[pod]);
         assert_eq!(cluster.total_gpus, 10);
         assert_eq!(cluster.total_allocated_gpus, 1);
-        // 1 T4 physical GPU = 15360 MiB total VRAM
-        assert_eq!(cluster.total_vram_mib, 15360);
+        // 10 vGPUs * 15360 MiB = 153600 MiB total virtual VRAM pool
+        assert_eq!(cluster.total_vram_mib, 153600);
         assert_eq!(cluster.total_allocated_vram_mib, 5120);
 
         let n = &cluster.nodes[0];
@@ -869,7 +885,7 @@ mod tests {
         assert_eq!(n.physical_gpu_count, 1);
         assert_eq!(n.physical_vram_total_mib, Some(15360));
         assert_eq!(n.gpu_model.as_deref(), Some("Tesla T4"));
-        assert_eq!(n.vram_capacity_total_mib, Some(15360));
+        assert_eq!(n.vram_capacity_total_mib, Some(153600));
         assert_eq!(n.vram_requests_total_mib, 5120);
     }
 
@@ -881,12 +897,68 @@ mod tests {
         ]"#;
 
         let info = parse_hami_register_annotation(ann).expect("should parse");
-        // Physical count sees both devices:
-        assert_eq!(info.physical_gpu_count, 2);
-        assert_eq!(info.physical_vram_total_mib, 30720);
+        // Physical count sees healthy devices only, avoiding masked saturation:
+        assert_eq!(info.physical_gpu_count, 1);
+        assert_eq!(info.physical_vram_total_mib, 15360);
         // Virtual count and allocatable vVRAM only count the healthy device:
         assert_eq!(info.virtual_gpu_count, 10);
-        assert_eq!(info.virtual_vram_total_mib, 15360);
+        assert_eq!(info.virtual_vram_total_mib, 153600);
         assert_eq!(info.model.as_deref(), Some("Tesla T4"));
+    }
+
+    #[test]
+    fn test_parse_gpu_cluster_info_with_vgpu_pod_requests() {
+        use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
+        let mut node_capacity = BTreeMap::new();
+        node_capacity.insert("nvidia.com/vgpu".to_string(), Quantity("8".to_string()));
+
+        let node = Node {
+            metadata: ObjectMeta {
+                name: Some("vgpu-node-1".to_string()),
+                ..Default::default()
+            },
+            status: Some(NodeStatus {
+                capacity: Some(node_capacity.clone()),
+                allocatable: Some(node_capacity),
+                ..Default::default()
+            }),
+            spec: None,
+        };
+
+        let mut pod_requests = BTreeMap::new();
+        pod_requests.insert("nvidia.com/vgpu".to_string(), Quantity("2".to_string()));
+
+        let pod = Pod {
+            metadata: ObjectMeta {
+                name: Some("vgpu-pod-1".to_string()),
+                namespace: Some("default".to_string()),
+                ..Default::default()
+            },
+            spec: Some(PodSpec {
+                node_name: Some("vgpu-node-1".to_string()),
+                containers: vec![Container {
+                    name: "app".to_string(),
+                    resources: Some(ResourceRequirements {
+                        requests: Some(pod_requests),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            status: Some(PodStatus {
+                phase: Some("Running".to_string()),
+                ..Default::default()
+            }),
+        };
+
+        let cluster = parse_gpu_cluster_info(&[node], &[pod]);
+        assert_eq!(cluster.total_gpus, 8);
+        assert_eq!(cluster.total_allocated_gpus, 2);
+        assert_eq!(cluster.nodes.len(), 1);
+        assert_eq!(cluster.nodes[0].gpu_capacity, 8);
+        assert_eq!(cluster.nodes[0].gpu_requests, 2);
+        assert_eq!(cluster.nodes[0].pods.len(), 1);
+        assert_eq!(cluster.nodes[0].pods[0].gpu_requests, 2);
     }
 }

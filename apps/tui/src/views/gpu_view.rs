@@ -447,6 +447,21 @@ fn render_details_pane(f: &mut Frame, area: Rect, state: &GpuViewState) {
     render_node_pods_table(f, chunks[1], state, node);
 }
 
+fn format_compact_gib_val(mib: i64) -> String {
+    if mib <= 0 {
+        "0".to_string()
+    } else {
+        let gib = mib as f64 / 1024.0;
+        if gib < 1.0 {
+            format!("{:.1}", gib)
+        } else if (gib - gib.round()).abs() < 0.05 || gib >= 10.0 {
+            format!("{:.0}", gib.round() as i64)
+        } else {
+            format!("{:.1}", gib)
+        }
+    }
+}
+
 fn render_node_gpu_summary(f: &mut Frame, area: Rect, node: &GpuNodeInfo) {
     let block = Block::default()
         .borders(Borders::ALL)
@@ -549,15 +564,15 @@ fn render_node_gpu_summary(f: &mut Frame, area: Rect, node: &GpuNodeInfo) {
                     * 100.0)
                     .round() as u16;
                 let label = if inner_chunks[2].width < 50 {
-                    let req_g = node.vram_requests_total_mib / 1024;
+                    let req_str = format_compact_gib_val(node.vram_requests_total_mib);
                     let phys_g = phys_vram / 1024;
                     let tot_g = tot_vram / 1024;
                     format!(
                         "Phys: {}/{}G ({:.0}%) • vPool: {}/{}G",
-                        req_g,
+                        req_str,
                         phys_g,
                         (node.vram_requests_total_mib as f64 / phys_vram.max(1) as f64) * 100.0,
-                        req_g,
+                        req_str,
                         tot_g
                     )
                 } else if inner_chunks[2].width < 70 {

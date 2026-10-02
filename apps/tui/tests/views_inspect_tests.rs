@@ -2826,7 +2826,7 @@ fn gpu_view_renders_hami_empty_node_free_message() {
         gpu_allocatable: 10,
         gpu_requests: 0,
         vram_per_gpu_mib: Some(15360),
-        vram_capacity_total_mib: Some(15360),
+        vram_capacity_total_mib: Some(153600),
         vram_requests_total_mib: 0,
         pods: vec![],
         is_virtual_gpu: true,
@@ -2839,7 +2839,7 @@ fn gpu_view_renders_hami_empty_node_free_message() {
         total_gpu_nodes: 1,
         total_gpus: 10,
         total_allocated_gpus: 0,
-        total_vram_mib: 15360,
+        total_vram_mib: 153600,
         total_allocated_vram_mib: 0,
         total_gpu_pods: 0,
     };
@@ -2849,7 +2849,7 @@ fn gpu_view_renders_hami_empty_node_free_message() {
 
     let text = render_gpu(160, 40, &state);
     assert!(
-        text.contains("All 10 vGPUs (15 GiB vVRAM) are free and ready to accept workloads."),
+        text.contains("All 10 vGPUs (150 GiB vVRAM) are free and ready to accept workloads."),
         "{text}"
     );
 }
@@ -2857,7 +2857,7 @@ fn gpu_view_renders_hami_empty_node_free_message() {
 #[test]
 fn gpu_view_renders_compact_vram_gauge_on_narrow_terminal() {
     let _theme = common::theme::lock();
-    let node = srelens_kube::gpu_info::GpuNodeInfo {
+    let mut node = srelens_kube::gpu_info::GpuNodeInfo {
         name: "gpu-node-hami".to_string(),
         status: "Ready".to_string(),
         unschedulable: false,
@@ -2879,7 +2879,7 @@ fn gpu_view_renders_compact_vram_gauge_on_narrow_terminal() {
     };
 
     let info = srelens_kube::gpu_info::GpuClusterInfo {
-        nodes: vec![node],
+        nodes: vec![node.clone()],
         total_gpu_nodes: 1,
         total_gpus: 10,
         total_allocated_gpus: 3,
@@ -2896,6 +2896,24 @@ fn gpu_view_renders_compact_vram_gauge_on_narrow_terminal() {
     assert!(
         text_narrow.contains("Phys: 15/15G (100%) • vPool: 15/150G"),
         "{text_narrow}"
+    );
+
+    // Verify small request (e.g. 512 MiB = 0.5 GiB) is not rounded down to 0G:
+    node.vram_requests_total_mib = 512;
+    let mut small_state = srelens_tui::views::gpu_view::GpuViewState::new();
+    small_state.set_info(srelens_kube::gpu_info::GpuClusterInfo {
+        nodes: vec![node],
+        total_gpu_nodes: 1,
+        total_gpus: 10,
+        total_allocated_gpus: 1,
+        total_vram_mib: 153600,
+        total_allocated_vram_mib: 512,
+        total_gpu_pods: 0,
+    });
+    let text_small = render_gpu(85, 30, &small_state);
+    assert!(
+        text_small.contains("Phys: 0.5/15G (3%) • vPool: 0.5/150G"),
+        "{text_small}"
     );
 
     // Terminal width 110: right pane will be around 64 cols (< 70)
