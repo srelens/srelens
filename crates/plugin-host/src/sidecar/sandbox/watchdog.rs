@@ -597,10 +597,15 @@ mod loop_tests {
     #[tokio::test]
     async fn a_reading_that_fails_because_it_has_exited_reports_its_own_exit() {
         // The shell outlives the wait task's first poll, so the first reading
-        // is taken; that reading waits until the shell has exited, then fails,
+        // is taken. That reading waits until the shell has exited, however
+        // long a loaded machine takes (the wait task is inside the sampler, so
+        // the shell stays unreaped and `ps` shows it as a zombie), then fails,
         // as a reading of an ended process may.
-        let sampler = Fake(|_| {
-            std::thread::sleep(Duration::from_millis(300));
+        let sampler = Fake(|pid| {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while state(pid) != "Z" && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+            }
             Err(io::Error::other("no such process"))
         });
         let mut launched = watched(
