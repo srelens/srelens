@@ -1,6 +1,6 @@
 module github.com/srelens/srelens/sdk/examples/hello-world/go
 
-go 1.25
+go 1.25.0
 
 require github.com/srelens/srelens/sdk/go v0.0.0
 
