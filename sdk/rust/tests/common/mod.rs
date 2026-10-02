@@ -12,11 +12,46 @@ use std::sync::OnceLock;
 use std::time::Duration;
 use tokio::io::DuplexStream;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines, ReadHalf, WriteHalf};
+use tokio::runtime::{Handle, Runtime};
 use tokio::task::JoinHandle;
 
 /// How long a test waits for the sidecar to write. Far above anything the
 /// SDK should need; a wait this long is a failure.
 pub const WAIT: Duration = Duration::from_secs(5);
+
+/// How many bytes the pipe holds each way unless a test asks for fewer:
+/// more than any test here writes, so nothing waits on it.
+const PIPE: usize = 1 << 20;
+
+/// A multi-thread runtime of its own for a sidecar's handlers, as an
+/// author's `#[tokio::main]` is: a test can block every one of its workers
+/// and still read what the sidecar writes. Dropping it does not wait for
+/// its tasks, so async code may drop it, and a handler still blocked does
+/// not hold the test up.
+pub struct HandlerRuntime(Option<Runtime>);
+
+impl HandlerRuntime {
+    pub fn new(workers: usize) -> HandlerRuntime {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(workers)
+            .enable_all()
+            .build()
+            .expect("a runtime for the handlers");
+        HandlerRuntime(Some(runtime))
+    }
+
+    pub fn handle(&self) -> &Handle {
+        self.0.as_ref().expect("not dropped").handle()
+    }
+}
+
+impl Drop for HandlerRuntime {
+    fn drop(&mut self) {
+        if let Some(runtime) = self.0.take() {
+            runtime.shutdown_background();
+        }
+    }
+}
 
 fn sidecar_message() -> &'static jsonschema::Validator {
     static VALIDATOR: OnceLock<jsonschema::Validator> = OnceLock::new();
@@ -45,9 +80,26 @@ pub struct FakeHost {
 
 impl FakeHost {
     pub fn start(sidecar: Sidecar) -> FakeHost {
-        let (host_end, sidecar_end) = tokio::io::duplex(1 << 20);
+        FakeHost::launch(sidecar, &Handle::current(), PIPE)
+    }
+
+    /// [`FakeHost::start`], with the sidecar run on `handlers`, an author's
+    /// runtime, instead of the test's own: its handlers run there.
+    pub fn start_on(sidecar: Sidecar, handlers: &Handle) -> FakeHost {
+        FakeHost::launch(sidecar, handlers, PIPE)
+    }
+
+    /// [`FakeHost::start`], over a pipe that holds only `bytes` each way:
+    /// once the test stops reading, what the sidecar writes next waits in
+    /// the SDK's own queue, not in the pipe.
+    pub fn start_with_pipe(sidecar: Sidecar, bytes: usize) -> FakeHost {
+        FakeHost::launch(sidecar, &Handle::current(), bytes)
+    }
+
+    fn launch(sidecar: Sidecar, handlers: &Handle, pipe: usize) -> FakeHost {
+        let (host_end, sidecar_end) = tokio::io::duplex(pipe);
         let (sidecar_in, sidecar_out) = tokio::io::split(sidecar_end);
-        let session = tokio::spawn(sidecar.run(sidecar_in, sidecar_out));
+        let session = handlers.spawn(sidecar.run(sidecar_in, sidecar_out));
         let (from, to) = tokio::io::split(host_end);
         FakeHost {
             to_sidecar: to,
@@ -180,6 +232,15 @@ impl FakeHost {
             .expect("the session did not panic");
         drain(&mut self.from_sidecar).await;
         ended
+    }
+
+    /// Drop the sidecar's `run` future, as an author's `select!` that takes
+    /// another branch does, with its stdin still open; then wait for its
+    /// stdout to end, and check nothing was left on it unread (see
+    /// [`drain`]).
+    pub async fn abandon(mut self) {
+        self.session.abort();
+        drain(&mut self.from_sidecar).await;
     }
 
     /// Wait for the session to end without closing stdin (after `shutdown`).

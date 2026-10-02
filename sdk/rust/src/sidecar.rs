@@ -74,6 +74,12 @@ impl Sidecar {
 
     /// Serve srelens over `reader` and `writer` until it shuts the sidecar
     /// down or its input ends. For tests; a sidecar runs [`Sidecar::run_stdio`].
+    /// The reading and writing run on a thread of their own, the handlers on
+    /// the runtime that polls this. Dropping the future ends the session, as
+    /// the end of its input would. A `reader` or `writer` that runtime's
+    /// reactor drives, such as a socket or a child's pipe, still needs that
+    /// runtime to deliver its I/O; stdin, stdout and `tokio::io::duplex` do
+    /// not.
     pub async fn run<R, W>(self, reader: R, writer: W) -> Result<(), SidecarError>
     where
         R: AsyncRead + Unpin + Send + 'static,
@@ -85,8 +91,10 @@ impl Sidecar {
     /// Serve `name`: srelens's request `name` runs `handler` with its params
     /// read as `I`. Params that do not read as `I` are answered `-32602`
     /// without running it; its `O` is the result, and its `Error` the error.
-    /// Never block `handler`'s thread: run blocking work with
-    /// `tokio::task::spawn_blocking`, or srelens's `health` check can starve.
+    /// Run blocking work with `tokio::task::spawn_blocking`: a handler that
+    /// blocks its thread holds up the other handlers waiting for that
+    /// worker. srelens's `health` check is answered on the SDK's own thread
+    /// either way.
     pub fn operation<I, O, F, Fut>(mut self, name: &str, handler: F) -> Sidecar
     where
         I: DeserializeOwned + Send + 'static,
@@ -134,8 +142,8 @@ impl Sidecar {
     /// when stdin closes, 1 when srelens wrote something that is not
     /// JSON-RPC. Installs the stderr logger, at the level set with
     /// [`Sidecar::log_level`], and the panic hook first. Exits the process
-    /// rather than returning: tokio's stdin reader cannot be cancelled, and
-    /// would keep the runtime from shutting down.
+    /// rather than returning: a handler's blocking work, which nothing can
+    /// cancel, would keep your runtime from shutting down.
     pub async fn run_stdio(self) -> std::process::ExitCode {
         crate::logging::install(self.log_level);
         let code = match self.run(tokio::io::stdin(), tokio::io::stdout()).await {
