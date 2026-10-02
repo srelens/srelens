@@ -58,6 +58,9 @@ impl Log for Stderr {
     }
 
     fn log(&self, record: &Record) {
+        if !self.enabled(record.metadata()) {
+            return;
+        }
         let text = record.args().to_string();
         let mut stderr = std::io::stderr().lock();
         for line in lines(record.level(), record.target(), &text) {
@@ -188,5 +191,29 @@ mod tests {
         assert!(!at_debug.contains("TRACE-LINE"), "{at_debug}");
         assert!(at_info.contains("INFO-LINE"), "{at_info}");
         assert!(!at_info.contains("DEBUG-LINE"), "{at_info}");
+    }
+
+    #[test]
+    fn log_drops_a_record_below_its_level_when_called_directly() {
+        if std::env::var(CHILD).is_ok() {
+            // Not installed, so the macros' own filter is not in play.
+            let stderr = Stderr::new(LevelFilter::Info);
+            for (level, text) in [(Level::Debug, "DEBUG-LINE"), (Level::Info, "INFO-LINE")] {
+                let args = format_args!("{text}");
+                stderr.log(
+                    &Record::builder()
+                        .level(level)
+                        .target("s")
+                        .args(args)
+                        .build(),
+                );
+            }
+            return;
+        }
+        let test = "logging::tests::log_drops_a_record_below_its_level_when_called_directly";
+        let written = stderr_of_child(test, "direct");
+        // `INFO-LINE` shows the child ran this test at all.
+        assert!(written.contains("INFO-LINE"), "{written}");
+        assert!(!written.contains("DEBUG-LINE"), "{written}");
     }
 }

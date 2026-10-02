@@ -48,8 +48,7 @@ impl Sidecar {
 
     /// The least severe level [`Sidecar::run_stdio`] writes to srelens's
     /// log; `Info` unless set. `LevelFilter::Off` writes no records, but a
-    /// panic is still written. There is no environment variable for it: a
-    /// sandboxed sidecar gets no environment to read a level from (#768).
+    /// panic is still written.
     pub fn log_level(mut self, level: LevelFilter) -> Sidecar {
         self.log_level = level;
         self
