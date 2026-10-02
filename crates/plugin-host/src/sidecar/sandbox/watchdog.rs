@@ -460,9 +460,9 @@ mod tests {
         // First reading: 200 ms of CPU in 100 ms against 0.25: 25 ms allowed, 175 ms owed.
         let verdict1 = dog.observe(&usage(1, 200), t + ms(100));
         assert!(pause_of(verdict1, ms(700)), "{verdict1:?}");
-        // Second reading: 200 ms total CPU, so 0 ms new usage. Debt carries over.
-        // 175 ms owed + 0 ms used = 175 ms owed, paying back takes 700 ms at 0.25.
-        // But we're only 100 ms later, so debt is now 175 ms owed.
+        // Second reading, 100 ms later: 400 ms of CPU, so 200 ms more against
+        // 25 ms allowed. The 175 ms still owed carries over: 350 ms owed,
+        // which 1,400 ms at 0.25 pays back.
         let verdict2 = dog.observe(&usage(1, 400), t + ms(200));
         assert!(pause_of(verdict2, ms(1_400)), "debt carries: {verdict2:?}");
     }
@@ -486,7 +486,7 @@ mod tests {
             let t = Instant::now();
             dog.observe(&usage(1, 0), t);
             // 102.5 s of CPU in 100 ms against ceiling 1024: 102.4 s allowed,
-            // 100 ms owed, which 100 ms at 1024 CPUs pays back.
+            // 100 ms owed, which about 98 µs at 1024 CPUs pays back.
             let verdict = dog.observe(&usage(1, 102_500), t + ms(100));
             assert!(
                 pause_of(verdict, Duration::from_nanos(97_656)),
@@ -724,10 +724,12 @@ mod loop_tests {
             "T",
             "stopped for its debt"
         );
-        assert_eq!(
-            state_when(pid, Duration::from_secs(3), |s| s != "T").await,
-            "S",
-            "running again once the debt is paid"
+        // Sleeping, or briefly running just after the SIGCONT: neither
+        // stopped nor gone.
+        let again = state_when(pid, Duration::from_secs(3), |s| s != "T").await;
+        assert!(
+            !matches!(again.as_str(), "T" | "Z" | ""),
+            "running again once the debt is paid: {again:?}"
         );
         (launched.process.killer())();
         exit_of(&mut launched).await;
