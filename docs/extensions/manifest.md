@@ -1152,7 +1152,8 @@ executable app may declare everything a declarative one does as well.
   launcher is found beside the srelens binary or at `SRELENS_SANDBOX_LAUNCHER`, and the
   cgroup delegated to srelens is named by `SRELENS_SANDBOX_CGROUP_ROOT`; without them
   the sidecar is refused with what is missing. macOS refuses every sidecar until its
-  host-enforced limits exist ([#713](https://github.com/srelens/srelens/issues/713)).
+  host-enforced limits, which are built, have been checked with Seatbelt on a macOS 27
+  Mac ([#713](https://github.com/srelens/srelens/issues/713)).
 - **Its input is the host's to check.** Every call is held to the operation's declared
   inputs before the sidecar sees it: no field it does not declare, every required one
   present, each of its type, each string within its `maxLength`, and the whole call

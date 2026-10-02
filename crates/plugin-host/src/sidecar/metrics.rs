@@ -3,8 +3,8 @@
 //!
 //! The one way in is [`Inspect::metrics`], a snapshot. A host holds a
 //! supervisor as `dyn Inspect` and reads nothing else, so the supervisor's
-//! internals stay its own while other work (#573's broker, #713's macOS
-//! watchdog) changes them.
+//! internals stay its own while other work (#573's broker; the macOS
+//! watchdog's last reading, #713) changes them.
 //!
 //! Everything here is kept in memory and bounded: counters, the last
 //! [`LATENCY_SAMPLES`] round trips, and the state. Nothing is written to disk

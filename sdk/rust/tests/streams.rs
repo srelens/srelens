@@ -93,6 +93,42 @@ async fn a_failing_stream_ends_with_its_error() {
 }
 
 #[tokio::test]
+async fn a_stream_handler_that_panics_ends_its_stream_with_one_error_and_the_sidecar_goes_on() {
+    let sidecar = Sidecar::new("t", "1").stream(
+        "boom",
+        |_ctx: Context, _: Value, frames: Frames| async move {
+            frames.send(&"first").await?;
+            if true {
+                panic!("nil map");
+            }
+            Ok::<(), Error>(())
+        },
+    );
+    let mut host = FakeHost::start(sidecar);
+    host.initialize().await;
+    let id = host
+        .request(
+            "stream/open",
+            json!({"stream": 10, "method": "boom", "params": {}}),
+        )
+        .await;
+    host.answer(id).await;
+    assert_eq!(
+        host.recv().await,
+        json!({"jsonrpc": "2.0", "method": "stream/data", "params": {"stream": 10, "data": "first"}})
+    );
+    assert_eq!(
+        host.recv().await,
+        json!({"jsonrpc": "2.0", "method": "stream/error", "params": {"stream": 10, "message": "the stream `boom` panicked"}})
+    );
+    // The next line answers this: the stream was ended once, and the
+    // sidecar still serves. `finish` fails on any line not read.
+    let health = host.request("health", json!({})).await;
+    assert_eq!(host.answer(health).await["result"], json!({}));
+    host.finish().await.unwrap();
+}
+
+#[tokio::test]
 async fn an_unknown_stream_or_bad_input_is_refused_before_it_opens() {
     let mut host = FakeHost::start(sidecar());
     host.initialize().await;

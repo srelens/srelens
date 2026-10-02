@@ -42,14 +42,25 @@ fn cut(mut line: String) -> String {
     line
 }
 
-struct Stderr;
+struct Stderr {
+    level: LevelFilter,
+}
+
+impl Stderr {
+    fn new(level: LevelFilter) -> Stderr {
+        Stderr { level }
+    }
+}
 
 impl Log for Stderr {
-    fn enabled(&self, _: &Metadata) -> bool {
-        true
+    fn enabled(&self, metadata: &Metadata) -> bool {
+        metadata.level() <= self.level
     }
 
     fn log(&self, record: &Record) {
+        if !self.enabled(record.metadata()) {
+            return;
+        }
         let text = record.args().to_string();
         let mut stderr = std::io::stderr().lock();
         for line in lines(record.level(), record.target(), &text) {
@@ -62,11 +73,14 @@ impl Log for Stderr {
     }
 }
 
-/// Log to stderr at `Info` and above, and write panics as srelens reads
-/// them. Once per process; a second call changes nothing.
-pub(crate) fn install() {
-    if log::set_boxed_logger(Box::new(Stderr)).is_ok() {
-        log::set_max_level(LevelFilter::Info);
+/// Log to stderr at `level` and above, and write panics as srelens reads
+/// them. Once per process; a second call changes nothing. If the program has
+/// already installed a `log` logger of its own, ours is not installed and
+/// `level` is not applied: that logger's own filtering applies. The panic
+/// hook is set either way.
+pub(crate) fn install(level: LevelFilter) {
+    if log::set_boxed_logger(Box::new(Stderr::new(level))).is_ok() {
+        log::set_max_level(level);
     }
     std::panic::set_hook(Box::new(|info| {
         let message = info
@@ -130,5 +144,79 @@ mod tests {
             "panic: boom at src/main.rs:3:5"
         );
         assert_eq!(panic_line("boom", None), "panic: boom");
+    }
+
+    #[test]
+    fn a_record_is_enabled_at_the_level_and_above_and_not_below_it() {
+        let at = |level: Level| Metadata::builder().level(level).target("s").build();
+        let info = Stderr::new(LevelFilter::Info);
+        assert!(info.enabled(&at(Level::Error)));
+        assert!(info.enabled(&at(Level::Info)));
+        assert!(!info.enabled(&at(Level::Debug)));
+        let debug = Stderr::new(LevelFilter::Debug);
+        assert!(debug.enabled(&at(Level::Debug)));
+        assert!(!debug.enabled(&at(Level::Trace)));
+        let off = Stderr::new(LevelFilter::Off);
+        assert!(!off.enabled(&at(Level::Error)));
+    }
+
+    // The logger and the `log` crate's max level are process-global, so a test
+    // that installs them runs itself again as a child process, which sees this
+    // variable, and reads what the child wrote to stderr.
+    const CHILD: &str = "SRELENS_SDK_LOG_CHILD";
+
+    fn stderr_of_child(test: &str, mode: &str) -> String {
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([test, "--exact", "--nocapture", "--test-threads=1"])
+            .env(CHILD, mode)
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&child.stderr).into_owned();
+        assert!(child.status.success(), "the child failed: {stderr}");
+        stderr
+    }
+
+    #[test]
+    fn install_sets_the_level_the_log_macros_filter_at() {
+        if let Ok(level) = std::env::var(CHILD) {
+            install(level.parse().unwrap());
+            log::trace!("TRACE-LINE");
+            log::debug!("DEBUG-LINE");
+            log::info!("INFO-LINE");
+            return;
+        }
+        let test = "logging::tests::install_sets_the_level_the_log_macros_filter_at";
+        let at_debug = stderr_of_child(test, "debug");
+        let at_info = stderr_of_child(test, "info");
+        // `INFO-LINE` in both shows the child ran this test at all.
+        assert!(at_debug.contains("INFO-LINE"), "{at_debug}");
+        assert!(at_debug.contains("DEBUG-LINE"), "{at_debug}");
+        assert!(!at_debug.contains("TRACE-LINE"), "{at_debug}");
+        assert!(at_info.contains("INFO-LINE"), "{at_info}");
+        assert!(!at_info.contains("DEBUG-LINE"), "{at_info}");
+    }
+
+    #[test]
+    fn log_drops_a_record_below_its_level_when_called_directly() {
+        if std::env::var(CHILD).is_ok() {
+            // Not installed, so the macros' own filter is not in play.
+            let stderr = Stderr::new(LevelFilter::Info);
+            for (level, text) in [(Level::Debug, "DEBUG-LINE"), (Level::Info, "INFO-LINE")] {
+                let args = format_args!("{text}");
+                stderr.log(
+                    &Record::builder()
+                        .level(level)
+                        .target("s")
+                        .args(args)
+                        .build(),
+                );
+            }
+            return;
+        }
+        let test = "logging::tests::log_drops_a_record_below_its_level_when_called_directly";
+        let written = stderr_of_child(test, "direct");
+        // `INFO-LINE` shows the child ran this test at all.
+        assert!(written.contains("INFO-LINE"), "{written}");
+        assert!(!written.contains("DEBUG-LINE"), "{written}");
     }
 }
