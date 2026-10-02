@@ -223,7 +223,9 @@ async fn a_cancelled_request_is_answered_request_cancelled_once_and_its_handler_
     let id = host.request("slow", json!({})).await;
     host.notify("$/cancelRequest", json!({"id": id})).await;
     assert_eq!(host.answer(id).await["error"]["code"], -32800);
-    // The handler's own late answer is dropped: the next line answers this.
+    // The handler's own late answer is dropped, which `finish` shows: it
+    // fails on any line left unread. `health` shows only that the sidecar
+    // still serves, since its answer can go ahead of a queued line.
     let health = host.request("health", json!({})).await;
     assert_eq!(host.answer(health).await["result"], json!({}));
     // The handler runs on another thread: give it a moment to see the cancel.

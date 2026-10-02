@@ -121,8 +121,9 @@ async fn a_stream_handler_that_panics_ends_its_stream_with_one_error_and_the_sid
         host.recv().await,
         json!({"jsonrpc": "2.0", "method": "stream/error", "params": {"stream": 10, "message": "the stream `boom` panicked"}})
     );
-    // The next line answers this: the stream was ended once, and the
-    // sidecar still serves. `finish` fails on any line not read.
+    // The sidecar still serves. That the stream was ended once is what
+    // `finish` shows, failing on any line not read: `health`'s answer can go
+    // ahead of a queued line.
     let health = host.request("health", json!({})).await;
     assert_eq!(host.answer(health).await["result"], json!({}));
     host.finish().await.unwrap();

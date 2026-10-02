@@ -2,7 +2,8 @@
 //! handlers. `health` and the other lifecycle calls are answered here, on the
 //! reader, never behind handler work: the reader and the writer run on a
 //! thread of the session's own, so a handler that blocks its thread cannot
-//! hold them up, and lifecycle answers go ahead of queued lines.
+//! hold them up, and the answers to `activate`, `health` and `deactivate` go
+//! ahead of queued lines. Those to `initialize` and `shutdown` do not.
 
 use serde_json::{json, Value};
 use srelens_sidecar_protocol::{

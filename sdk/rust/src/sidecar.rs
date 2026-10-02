@@ -76,7 +76,10 @@ impl Sidecar {
     /// down or its input ends. For tests; a sidecar runs [`Sidecar::run_stdio`].
     /// The reading and writing run on a thread of their own, the handlers on
     /// the runtime that polls this. Dropping the future ends the session, as
-    /// the end of its input would.
+    /// the end of its input would. A `reader` or `writer` that runtime's
+    /// reactor drives, such as a socket or a child's pipe, still needs that
+    /// runtime to deliver its I/O; stdin, stdout and `tokio::io::duplex` do
+    /// not.
     pub async fn run<R, W>(self, reader: R, writer: W) -> Result<(), SidecarError>
     where
         R: AsyncRead + Unpin + Send + 'static,
