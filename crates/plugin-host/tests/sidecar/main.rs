@@ -528,7 +528,8 @@ async fn a_sandbox_this_machine_cannot_provide_is_refused_without_retrying() {
 #[tokio::test(start_paused = true)]
 async fn a_backend_that_enforces_no_limits_is_refused_before_anything_starts() {
     let launcher = FakeLauncher::well_behaved().enforcing(Enforcement::Missing(
-        "macOS has no memory limit yet (#713)".into(),
+        "srelens's memory and CPU watchdog for macOS has not yet been checked with Seatbelt on a macOS 27 Mac (#713)"
+            .into(),
     ));
     let supervisor = start(&launcher);
     let SidecarStatus::Refused { reason } =
