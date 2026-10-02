@@ -373,6 +373,13 @@ jobs:
           cargo test -p srelens-plugin-host --lib sidecar
           cargo test -p srelens-plugin-host --test sidecar --test sidecar_process
           cargo test -p srelens-sidecar -p srelens-sidecar-hello-world
+      # Not a sidecar suite: the one Windows runner is here. Kubeconfig exec
+      # plugins must start without a console window, or a release build of
+      # the desktop opens one per token fetch (#775). The test pins that the
+      # variable the desktop sets is the one kube-rs reads; Linux skips it.
+      - name: Exec plugins start without a console window
+        if: runner.os == 'Windows'
+        run: cargo test -p srelens-kube --test exec_plugin_console
 
   # The WebDriver smoke suite (issue #30): the REAL built app — WebView and
   # all — driven through tauri-driver against a kind cluster. This is the

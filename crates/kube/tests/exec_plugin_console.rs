@@ -1,8 +1,10 @@
 //! Kubeconfig exec plugins (`aws eks get-token` and the like) are console
 //! programs. A release build of the desktop app has no console of its own, so
-//! on Windows each one it started opened a console window (#775). Once
-//! `hide_exec_plugin_windows` has run, kube-rs starts them with
-//! `CREATE_NO_WINDOW`, and the plugin gets a console with no window.
+//! on Windows each one it started opened a console window (#775). The desktop
+//! sets [`HIDE_EXEC_PLUGIN_WINDOWS_ENV`] to `1` at startup; this pins that
+//! kube-rs then starts them with `CREATE_NO_WINDOW`, so the plugin gets a
+//! console with no window. It runs in the Windows CI job, so a kube upgrade
+//! that renames or drops the variable fails there.
 //!
 //! A test binary of its own, because it changes this process's environment.
 #![cfg(windows)]
@@ -10,6 +12,7 @@
 use std::path::{Path, PathBuf};
 
 use srelens_kube::client_cache::ClientCache;
+use srelens_kube::connect::HIDE_EXEC_PLUGIN_WINDOWS_ENV;
 
 /// What one run of the probe plugin found about its console.
 struct Console {
@@ -69,8 +72,8 @@ fn probe_kubeconfig(dir: &Path) -> PathBuf {
 
 #[test]
 fn exec_plugins_start_without_a_console_window() {
-    // First, while this is the only thread doing anything: it sets a variable.
-    srelens_desktop_lib::hide_exec_plugin_windows();
+    // First, while this is the only thread doing anything.
+    std::env::set_var(HIDE_EXEC_PLUGIN_WINDOWS_ENV, "1");
 
     // An apostrophe, as in `C:\Users\O'Brien`, would end a single-quoted
     // PowerShell string in the probe if it were not escaped.
