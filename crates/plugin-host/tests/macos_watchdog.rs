@@ -3,7 +3,8 @@
 //! Seatbelt. The watchdog does not depend on Seatbelt, so this runs on
 //! GitHub's macOS runners, which are older than macOS 27, the one version the
 //! Seatbelt profile was checked on. The `macos-watchdog` CI job runs it; with
-//! Seatbelt, the conformance suite's checks 5 and 6 are run by hand on a Mac.
+//! Seatbelt, the conformance suite's checks 5 and 6 are run by hand on a
+//! macOS 27 Mac, release-built (that file's header says how).
 #![cfg(target_os = "macos")]
 
 use serde_json::{json, Value};
@@ -104,7 +105,9 @@ async fn memory_held_past_the_limit_stops_it_at_the_limit() {
     // freed again before the next reading can pass unseen.
     let _ = probe.call("hold", json!({"mib": 512})).await;
     let exit = probe.exit().await;
-    // The measured figure is the overshoot the issue asks to record.
+    // The measured figure is how far it overshot. `cargo test` builds the
+    // probe unoptimised, which allocates slowly, so this understates it; the
+    // figure the issue asks to record is a release-built probe's.
     eprintln!(
         "hold 512 MiB against 128 MiB: {} after {:?}",
         exit.description,

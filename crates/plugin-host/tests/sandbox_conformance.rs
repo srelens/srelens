@@ -22,13 +22,15 @@
 //! 3. the failure is one a sandbox produces for that operation (`Denial`).
 //!
 //! On macOS the supervisor refuses sidecars until the #713 watchdog has been
-//! checked on a Mac. The checks run there anyway, through a launcher that
-//! vouches for limits (see `IsolationOnly`): the isolation checks, and the
-//! memory and CPU checks against the watchdog `launch` attaches. Run them by
-//! hand on a macOS 27 Mac:
+//! checked with Seatbelt on a macOS 27 Mac. The checks run there anyway,
+//! through a launcher that vouches for limits (see `IsolationOnly`): the
+//! isolation checks, and the memory and CPU checks against the watchdog
+//! `launch` attaches. Run them by hand on a macOS 27 Mac, release-built: how
+//! far the memory check overshoots is how much the probe allocates between
+//! two readings, which a debug-built probe, allocating slowly, understates.
 //!
 //! ```text
-//! cargo test -p srelens-plugin-host --test sandbox_conformance -- --ignored --test-threads=1 --nocapture
+//! cargo test --release -p srelens-plugin-host --test sandbox_conformance -- --ignored --test-threads=1 --nocapture
 //! ```
 
 use serde_json::{json, Value};
@@ -56,8 +58,8 @@ fn limits() -> Limits {
 }
 
 /// On macOS, the OS sandbox with its limits vouched for, as they will be once
-/// the watchdog is checked on a Mac, so its isolation and its watchdog can be
-/// checked. Anywhere else, the OS sandbox unchanged.
+/// the watchdog is checked with Seatbelt on a macOS 27 Mac, so its isolation
+/// and its watchdog can be checked. Anywhere else, the OS sandbox unchanged.
 struct IsolationOnly(OsSandbox);
 
 impl Launcher for IsolationOnly {
