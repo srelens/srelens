@@ -184,7 +184,7 @@ fn the_schema_carries_what_an_sdk_needs_beside_the_types() {
 }
 
 /// Every type the crate exports has a definition, including one no
-/// `subschema_for` call in `METHODS` reaches: `UnsupportedApiVersion`, the
+/// `subschema_for` call in `METHOD_SCHEMAS` reaches: `UnsupportedApiVersion`, the
 /// `data` of error -32001, which the Go SDK can only see through the schema.
 #[test]
 fn every_type_the_crate_exports_has_a_definition() {

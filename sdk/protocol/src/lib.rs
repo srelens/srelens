@@ -6,8 +6,18 @@
 //! SDKs (#576) share these constants and types, and the committed
 //! `schemas/sidecar-protocol.v0.1.json` is generated from them. The prose is
 //! `docs/extensions/sidecar-protocol.md`.
+//!
+//! # The `schema` feature
+//!
+//! The JSON Schema is generated from these types with schemars, which most
+//! sidecars have no use for, so it is behind the `schema` feature, off by
+//! default. With it on, the types derive `schemars::JsonSchema` and the crate
+//! has `schema()` and `schema_file()`. Without it, a sidecar builds none
+//! of schemars, dyn-clone, schemars_derive or serde_derive_internals, and the
+//! wire types and constants are the same. The tests that hold the committed
+//! schema (this crate's, srelens-sidecar's and srelens-plugin-host's) turn it on,
+//! as dev-dependencies.
 
-use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fmt;
@@ -15,6 +25,7 @@ use std::fmt;
 mod bounds;
 mod messages;
 mod methods;
+#[cfg(feature = "schema")]
 mod schema;
 pub mod shape;
 mod wire;
@@ -24,6 +35,7 @@ pub use bounds::{
     MAX_OBJECT_NAME_LEN, MAX_TOKEN_LEN,
 };
 pub use methods::{is_reserved, Direction, Kind, MethodSpec, METHODS};
+#[cfg(feature = "schema")]
 pub use schema::{schema, schema_file};
 
 pub use messages::{
@@ -120,7 +132,8 @@ pub mod code {
 }
 
 /// A JSON-RPC error object.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RpcError {
     pub code: i64,
     pub message: String,

@@ -70,6 +70,9 @@ srelens-mcp = { path = "../mcp" }
 tokio = { version = "1", features = ["macros", "rt", "io-std", "test-util"] }
 tempfile = "3"
 proptest = { version = "1", default-features = false, features = ["std"] }
+# The protocol's schema is generated only with its `schema` feature, off by
+# default for sidecar authors; the broker's tests and `tests/sidecar` read it.
+srelens-sidecar-protocol = { path = "../../sdk/protocol", features = ["schema"] }
 # Holds what srelens writes, and the broker's `host/*` checks, to the committed
 # sidecar protocol schema (#576). No default features: see sdk/protocol/Cargo.toml.
 jsonschema = { version = "0.58", default-features = false }

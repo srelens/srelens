@@ -11,16 +11,84 @@
 //!   this file.
 //!
 //! A response's result cannot be tied to its request inside one line, which
-//! does not carry the method: the method table is where result types live.
+//! does not carry the method: the method table (`x-srelens-methods`, from
+//! `METHODS` and `METHOD_SCHEMAS`) is where result types live.
+//!
+//! This module is the crate's `schema` feature: schemars is only a dependency
+//! with it on (see `Cargo.toml`).
 
-use schemars::gen::SchemaSettings;
+use schemars::gen::{SchemaGenerator, SchemaSettings};
+use schemars::schema::Schema;
+use schemars::JsonSchema;
 use serde_json::{json, Map, Value};
 
+use crate::messages::{
+    CancelParams, Empty, HostActionParams, HostReadParams, HostResourceParams, InitializeParams,
+    InitializeResult, StreamCancelParams, StreamCloseParams, StreamDataParams, StreamErrorParams,
+    StreamOpenParams,
+};
 use crate::methods::{Kind, METHODS};
 use crate::{
-    code, RequestId, RpcError, UnsupportedApiVersion, MAX_IDENTIFIER_LEN, MAX_MESSAGE_BYTES,
-    SIDECAR_API_VERSIONS,
+    code, method, RequestId, RpcError, UnsupportedApiVersion, MAX_IDENTIFIER_LEN,
+    MAX_MESSAGE_BYTES, SIDECAR_API_VERSIONS,
 };
+
+/// Writes a type's schema into the generator, and returns a reference to it.
+type SchemaFn = fn(&mut SchemaGenerator) -> Schema;
+
+/// The types of one method's params and result. [`METHODS`] says who sends a
+/// method and whether it is answered, and works without schemars; this is the
+/// part of a method's entry that needs it, so it lives with the generator.
+struct MethodSchema {
+    name: &'static str,
+    /// Its params' schema, as a reference into the definitions.
+    params: SchemaFn,
+    /// A request's result schema. `None` for a notification.
+    result: Option<SchemaFn>,
+}
+
+fn of<T: JsonSchema>(generator: &mut SchemaGenerator) -> Schema {
+    generator.subschema_for::<T>()
+}
+
+const fn request_types(name: &'static str, params: SchemaFn, result: SchemaFn) -> MethodSchema {
+    MethodSchema {
+        name,
+        params,
+        result: Some(result),
+    }
+}
+
+const fn notification_types(name: &'static str, params: SchemaFn) -> MethodSchema {
+    MethodSchema {
+        name,
+        params,
+        result: None,
+    }
+}
+
+/// The types of every method in [`METHODS`], keyed by name; a test holds the
+/// two tables to each other.
+static METHOD_SCHEMAS: &[MethodSchema] = &[
+    request_types(
+        method::INITIALIZE,
+        of::<InitializeParams>,
+        of::<InitializeResult>,
+    ),
+    request_types(method::ACTIVATE, of::<Empty>, of::<Empty>),
+    request_types(method::HEALTH, of::<Empty>, of::<Empty>),
+    request_types(method::DEACTIVATE, of::<Empty>, of::<Empty>),
+    request_types(method::SHUTDOWN, of::<Empty>, of::<Empty>),
+    request_types(method::STREAM_OPEN, of::<StreamOpenParams>, of::<Value>),
+    notification_types(method::CANCEL, of::<CancelParams>),
+    notification_types(method::STREAM_CANCEL, of::<StreamCancelParams>),
+    notification_types(method::STREAM_DATA, of::<StreamDataParams>),
+    notification_types(method::STREAM_CLOSE, of::<StreamCloseParams>),
+    notification_types(method::STREAM_ERROR, of::<StreamErrorParams>),
+    request_types(method::HOST_READ, of::<HostReadParams>, of::<Value>),
+    request_types(method::HOST_RESOURCE, of::<HostResourceParams>, of::<Value>),
+    request_types(method::HOST_ACTION, of::<HostActionParams>, of::<Value>),
+];
 
 /// The newest sidecar API line, `0.1` for 0.1.0.
 fn line() -> String {
@@ -38,7 +106,7 @@ pub fn schema() -> Value {
     let mut generator = SchemaSettings::draft07().into_generator();
     let request_id = to_value(generator.subschema_for::<RequestId>());
     let rpc_error = to_value(generator.subschema_for::<RpcError>());
-    // Not the `data` of any params or result in METHODS: it is the `data` of
+    // Not the `data` of any params or result in METHOD_SCHEMAS: it is the `data` of
     // error -32001, so nothing but `x-srelens-errorData` reaches it below.
     let unsupported_api_version = to_value(generator.subschema_for::<UnsupportedApiVersion>());
     // srelens numbers its own requests from 1.
@@ -48,13 +116,17 @@ pub fn schema() -> Value {
     let mut host = Vec::new();
     let mut sidecar = Vec::new();
     for spec in METHODS {
-        let params = to_value((spec.params)(&mut generator));
+        let types = METHOD_SCHEMAS
+            .iter()
+            .find(|types| types.name == spec.name)
+            .unwrap_or_else(|| panic!("{} has no entry in METHOD_SCHEMAS", spec.name));
+        let params = to_value((types.params)(&mut generator));
         let mut entry = json!({
             "direction": spec.direction.wire_name(),
             "kind": spec.kind.wire_name(),
             "params": params,
         });
-        if let Some(result) = spec.result {
+        if let Some(result) = types.result {
             entry["result"] = to_value(result(&mut generator));
         }
         table.insert(spec.name.to_owned(), entry);
@@ -225,5 +297,37 @@ fn strip_nonstandard_formats(value: &mut Value) {
         }
         Value::Array(items) => items.iter_mut().for_each(strip_nonstandard_formats),
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `METHODS` says who sends what; `METHOD_SCHEMAS` says what its params
+    /// and result look like. A method in one and not the other would make
+    /// `schema()` panic, or leave a method out of the committed schema.
+    #[test]
+    fn the_method_table_and_the_schema_table_hold_the_same_methods() {
+        assert_eq!(METHOD_SCHEMAS.len(), METHODS.len());
+        for spec in METHODS {
+            let entries: Vec<_> = METHOD_SCHEMAS
+                .iter()
+                .filter(|types| types.name == spec.name)
+                .collect();
+            assert_eq!(
+                entries.len(),
+                1,
+                "{} is in the schema table {} times",
+                spec.name,
+                entries.len()
+            );
+            assert_eq!(
+                entries[0].result.is_some(),
+                spec.kind == Kind::Request,
+                "{}: a request has a result type and a notification has none",
+                spec.name
+            );
+        }
     }
 }

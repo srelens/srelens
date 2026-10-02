@@ -1,17 +1,9 @@
-//! Every method of the protocol, once: who sends it, whether it is answered,
-//! and the types of its params and result. The schema's `x-srelens-methods`
-//! is generated from this table, and [`is_reserved`] reads it.
+//! Every method of the protocol, once: who sends it and whether it is
+//! answered. The schema's `x-srelens-methods` is generated from this table
+//! and the one beside the schema generator that gives each method's params
+//! and result types (behind the `schema` feature), and [`is_reserved`] reads
+//! this one.
 
-use schemars::gen::SchemaGenerator;
-use schemars::schema::Schema;
-use schemars::JsonSchema;
-use serde_json::Value;
-
-use crate::messages::{
-    CancelParams, Empty, HostActionParams, HostReadParams, HostResourceParams, InitializeParams,
-    InitializeResult, StreamCancelParams, StreamCloseParams, StreamDataParams, StreamErrorParams,
-    StreamOpenParams,
-};
 use crate::method;
 
 /// Who sends a method.
@@ -65,42 +57,21 @@ pub struct MethodSpec {
     pub name: &'static str,
     pub direction: Direction,
     pub kind: Kind,
-    /// Its params' schema, as a reference into the definitions.
-    pub params: fn(&mut SchemaGenerator) -> Schema,
-    /// A request's result schema. `None` for a notification.
-    pub result: Option<fn(&mut SchemaGenerator) -> Schema>,
 }
 
-fn of<T: JsonSchema>(generator: &mut SchemaGenerator) -> Schema {
-    generator.subschema_for::<T>()
-}
-
-const fn request(
-    name: &'static str,
-    direction: Direction,
-    params: fn(&mut SchemaGenerator) -> Schema,
-    result: fn(&mut SchemaGenerator) -> Schema,
-) -> MethodSpec {
+const fn request(name: &'static str, direction: Direction) -> MethodSpec {
     MethodSpec {
         name,
         direction,
         kind: Kind::Request,
-        params,
-        result: Some(result),
     }
 }
 
-const fn notification(
-    name: &'static str,
-    direction: Direction,
-    params: fn(&mut SchemaGenerator) -> Schema,
-) -> MethodSpec {
+const fn notification(name: &'static str, direction: Direction) -> MethodSpec {
     MethodSpec {
         name,
         direction,
         kind: Kind::Notification,
-        params,
-        result: None,
     }
 }
 
@@ -110,49 +81,20 @@ use Direction::{Both, HostToSidecar, SidecarToHost};
 /// them. An app operation is a request from srelens with any method name
 /// that is not reserved, and any params; it has no entry.
 pub static METHODS: &[MethodSpec] = &[
-    request(
-        method::INITIALIZE,
-        HostToSidecar,
-        of::<InitializeParams>,
-        of::<InitializeResult>,
-    ),
-    request(method::ACTIVATE, HostToSidecar, of::<Empty>, of::<Empty>),
-    request(method::HEALTH, HostToSidecar, of::<Empty>, of::<Empty>),
-    request(method::DEACTIVATE, HostToSidecar, of::<Empty>, of::<Empty>),
-    request(method::SHUTDOWN, HostToSidecar, of::<Empty>, of::<Empty>),
-    request(
-        method::STREAM_OPEN,
-        HostToSidecar,
-        of::<StreamOpenParams>,
-        of::<Value>,
-    ),
-    notification(method::CANCEL, Both, of::<CancelParams>),
-    notification(
-        method::STREAM_CANCEL,
-        HostToSidecar,
-        of::<StreamCancelParams>,
-    ),
-    notification(method::STREAM_DATA, SidecarToHost, of::<StreamDataParams>),
-    notification(method::STREAM_CLOSE, SidecarToHost, of::<StreamCloseParams>),
-    notification(method::STREAM_ERROR, SidecarToHost, of::<StreamErrorParams>),
-    request(
-        method::HOST_READ,
-        SidecarToHost,
-        of::<HostReadParams>,
-        of::<Value>,
-    ),
-    request(
-        method::HOST_RESOURCE,
-        SidecarToHost,
-        of::<HostResourceParams>,
-        of::<Value>,
-    ),
-    request(
-        method::HOST_ACTION,
-        SidecarToHost,
-        of::<HostActionParams>,
-        of::<Value>,
-    ),
+    request(method::INITIALIZE, HostToSidecar),
+    request(method::ACTIVATE, HostToSidecar),
+    request(method::HEALTH, HostToSidecar),
+    request(method::DEACTIVATE, HostToSidecar),
+    request(method::SHUTDOWN, HostToSidecar),
+    request(method::STREAM_OPEN, HostToSidecar),
+    notification(method::CANCEL, Both),
+    notification(method::STREAM_CANCEL, HostToSidecar),
+    notification(method::STREAM_DATA, SidecarToHost),
+    notification(method::STREAM_CLOSE, SidecarToHost),
+    notification(method::STREAM_ERROR, SidecarToHost),
+    request(method::HOST_READ, SidecarToHost),
+    request(method::HOST_RESOURCE, SidecarToHost),
+    request(method::HOST_ACTION, SidecarToHost),
 ];
 
 /// Whether `name` is one of the host's own methods, which an app request may
@@ -217,18 +159,6 @@ mod tests {
             assert_eq!(entries, 1, "{name} is in the table {entries} times");
         }
         assert_eq!(METHODS.len(), all.len(), "a method the list above lacks");
-    }
-
-    #[test]
-    fn a_request_has_a_result_and_a_notification_has_none() {
-        for spec in METHODS {
-            assert_eq!(
-                spec.result.is_some(),
-                spec.kind == Kind::Request,
-                "{}",
-                spec.name
-            );
-        }
     }
 
     #[test]

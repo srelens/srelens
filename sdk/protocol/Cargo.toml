@@ -7,13 +7,27 @@ license.workspace = true
 # Stays in this repository until the protocol is stable (#576).
 publish = false
 
+[features]
+# The protocol's JSON Schema: the `JsonSchema` derives on its types, `schema()`
+# and `schema_file()`. Off by default, so a sidecar does not build schemars and
+# the three crates it brings (dyn-clone, schemars_derive, serde_derive_internals)
+# for a schema it never generates. The tests that hold the committed schema
+# (this crate's, srelens-sidecar's and srelens-plugin-host's) turn it on, as
+# dev-dependencies.
+schema = ["dep:schemars"]
+
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 # float_roundtrip, as srelens-plugin-host has it: `cpus` reads back exactly.
 serde_json = { version = "1", features = ["float_roundtrip"] }
-schemars = "0.8"
+schemars = { version = "0.8", optional = true }
 
 [dev-dependencies]
+# This crate's tests check the committed schema, so they need the `schema`
+# feature. Naming the crate here turns it on for them, and only for them: a
+# plain `cargo test -p srelens-sidecar-protocol` runs every test, and
+# `cargo tree -e no-dev` and a normal build leave it off.
+srelens-sidecar-protocol = { path = ".", features = ["schema"] }
 # Validates the message fixtures against the committed schema. No default
 # features: they bring an HTTP resolver and rustls with a second crypto
 # provider, which panics kube's client in the workspace build (AGENTS.md).

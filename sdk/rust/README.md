@@ -68,6 +68,28 @@ Declare the operations in the app's manifest
 - **Environment.** It holds only what srelens names, so don't rely on `HOME` or `PATH`.
 - **Memory.** It is capped. Linux kills the process at the limit; on Windows, an allocation fails.
 
+## Dependencies
+
+A sidecar built on this crate does not build `schemars`, `schemars_derive`,
+`dyn-clone` or `serde_derive_internals`, and adds none of them to your
+`Cargo.lock`. They generate the protocol's JSON Schema, which is the `schema`
+feature of `srelens-sidecar-protocol`: off by default, and never turned on by
+this crate. Cargo resolves a dependency's dev-dependencies only for workspace
+members, so outside this repository a plain `cargo tree` shows none of them
+either. Inside it, where `srelens-sidecar` is a workspace member, a plain
+`cargo tree -p srelens-sidecar` lists them through the dev-dependencies the
+tests use; add `-e no-dev` for the tree an author builds.
+
+Turn the feature on only to hold messages to the schema in your own tests, as a
+dev-dependency (`srelens-sidecar-protocol = { .., features = ["schema"] }`, taken
+from wherever you take this crate). That is what this crate's
+`tests/common/mod.rs` does, and what a copy of its fake host needs, with the
+`jsonschema` crate. Cargo builds a crate once per build, with every feature
+the build asks for, and a build with test targets (`cargo test`, `cargo clippy
+--all-targets`) includes the workspace members' dev-dependencies. So in a
+workspace where a member has that dev-dependency, those builds compile
+schemars; a build without test targets (`cargo build`) does not.
+
 ## Testing your sidecar
 
 `Sidecar::run(reader, writer)` serves any async pipes. Drive it in a test with
