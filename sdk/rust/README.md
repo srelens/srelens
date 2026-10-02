@@ -70,21 +70,25 @@ Declare the operations in the app's manifest
 
 ## Dependencies
 
-A sidecar built on this crate builds none of `schemars`, `schemars_derive`,
-`dyn-clone` or `serde_derive_internals`. They generate the protocol's JSON
-Schema, which is the `schema` feature of `srelens-sidecar-protocol`: off by
-default, and never turned on by this crate. `cargo tree -p <your sidecar> -e
-no-dev` shows your build; without `-e no-dev` it also lists them, through the
-dev-dependencies this crate's own tests use.
+A sidecar built on this crate does not build `schemars`, `schemars_derive`,
+`dyn-clone` or `serde_derive_internals`, and adds none of them to your
+`Cargo.lock`. They generate the protocol's JSON Schema, which is the `schema`
+feature of `srelens-sidecar-protocol`: off by default, and never turned on by
+this crate. Cargo resolves a dependency's dev-dependencies only for workspace
+members, so outside this repository a plain `cargo tree` shows none of them
+either. Inside it, where `srelens-sidecar` is a workspace member, a plain
+`cargo tree -p srelens-sidecar` lists them through the dev-dependencies the
+tests use; add `-e no-dev` for the tree an author builds.
 
 Turn the feature on only to hold messages to the schema in your own tests, as a
 dev-dependency (`srelens-sidecar-protocol = { .., features = ["schema"] }`, taken
 from wherever you take this crate). That is what this crate's
 `tests/common/mod.rs` does, and what a copy of its fake host needs, with the
 `jsonschema` crate. Cargo builds a crate once per build, with every feature
-any part of the build asks for, so a workspace that builds your sidecar beside
-something that turns `schema` on (srelens's own plugin host does) builds
-schemars as well; your sidecar's own build does not.
+the build asks for, and a build with test targets (`cargo test`, `cargo clippy
+--all-targets`) includes the workspace members' dev-dependencies. So in a
+workspace where a member has that dev-dependency, those builds compile
+schemars; a build without test targets (`cargo build`) does not.
 
 ## Testing your sidecar
 

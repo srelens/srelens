@@ -11,7 +11,8 @@
 //!   this file.
 //!
 //! A response's result cannot be tied to its request inside one line, which
-//! does not carry the method: the method table is where result types live.
+//! does not carry the method: the method table (`x-srelens-methods`, from
+//! `METHODS` and `METHOD_SCHEMAS`) is where result types live.
 //!
 //! This module is the crate's `schema` feature: schemars is only a dependency
 //! with it on (see `Cargo.toml`).
@@ -105,7 +106,7 @@ pub fn schema() -> Value {
     let mut generator = SchemaSettings::draft07().into_generator();
     let request_id = to_value(generator.subschema_for::<RequestId>());
     let rpc_error = to_value(generator.subschema_for::<RpcError>());
-    // Not the `data` of any params or result in METHODS: it is the `data` of
+    // Not the `data` of any params or result in METHOD_SCHEMAS: it is the `data` of
     // error -32001, so nothing but `x-srelens-errorData` reaches it below.
     let unsupported_api_version = to_value(generator.subschema_for::<UnsupportedApiVersion>());
     // srelens numbers its own requests from 1.
