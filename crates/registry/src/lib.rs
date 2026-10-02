@@ -15,6 +15,7 @@ mod catalog;
 mod durable;
 pub use catalog::{catalog_of, CatalogEntry};
 mod extensions;
+pub mod github;
 mod settings;
 /// The extension readers' fuzz entry points, for the targets in `fuzz/`. Not an API.
 #[cfg(feature = "fuzzing")]
@@ -529,6 +530,7 @@ fn build_with(
     reg.register(srelens_kube::ingresses::list_ingresses_capability(
         cache.clone(),
     ));
+    reg.register(srelens_kube::endpoints::list_endpoints_capability(cache.clone()));
     reg.register(srelens_kube::endpointslices::list_endpointslices_capability(cache.clone()));
     reg.register(srelens_kube::networkpolicies::list_networkpolicies_capability(cache.clone()));
     reg.register(srelens_kube::pvcs::list_pvcs_capability(cache.clone()));
@@ -572,6 +574,13 @@ fn build_with(
     reg.register(srelens_kube::changed::list_changes_capability(
         cache.clone(),
     ));
+    // Why a `k8s.listChanges` rollout happened: its Argo sync's GitHub PRs.
+    // Desktop only, like `network.http` (#568): on the web host the request
+    // would leave from the shared server, with the server's GITHUB_TOKEN,
+    // for whichever user asked.
+    if network == BrokeredNetwork::Desktop {
+        reg.register(github::rollout_cause_capability());
+    }
     reg.register(srelens_kube::metrics::node_metrics_capability(
         cache.clone(),
     ));
@@ -1272,10 +1281,16 @@ mod tests {
         let desktop_reg = build_registry();
         let desktop: std::collections::BTreeSet<&str> = desktop_reg.ids().into_iter().collect();
         let host_only: Vec<&str> = desktop.difference(&web).copied().collect();
-        // No secret store on the web yet (#522), so no way to hand one a secret.
+        // No secret store on the web yet (#522), so no way to hand one a secret;
+        // no GitHub reads made from the shared server with its token.
         assert_eq!(
             host_only,
-            ["extension.secretStore", "settings.get", "settings.set"]
+            [
+                "extension.secretStore",
+                "github.rolloutCause",
+                "settings.get",
+                "settings.set"
+            ]
         );
         assert!(web.is_subset(&desktop));
 
@@ -1653,6 +1668,10 @@ mod tests {
         let mut out = String::new();
         walk(&root.join("crates"), &mut out);
         walk(&root.join("apps/desktop/src-tauri/src"), &mut out);
+        // The sidecar SDKs and their examples are workspace members too, and
+        // DEVELOPMENT.md documents the variables their tests read
+        // (`SRELENS_HELLO_WORLD_GO`).
+        walk(&root.join("sdk"), &mut out);
         assert!(!out.is_empty(), "found no Rust sources to scan");
         out
     }

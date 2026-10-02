@@ -18,7 +18,7 @@
           "description": "A cluster as srelens names it: the `context` of the request the sidecar is serving, a kubeconfig context's stable ID, pinned ID or name. At most 4096 bytes as UTF-8, and not blank.",
           "maxLength": 4096,
           "minLength": 1,
-          "pattern": "\\S",
+          "pattern": "[^\t\n\u000b\f\r \u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]",
           "type": "string"
         },
         "namespace": {

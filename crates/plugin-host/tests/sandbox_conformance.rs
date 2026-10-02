@@ -873,3 +873,34 @@ async fn the_data_directory_size_limit_holds() {
     eprintln!("stopped: {reason}");
     assert!(reason.contains("over its 8 MiB limit"), "{reason}");
 }
+
+/// The Inspector's memory reading (#575, #753): the backend measures a running
+/// sidecar's memory, within its limit and growing when it holds more, and
+/// reports none once it has stopped. Linux reads the cgroup's `memory.current`;
+/// Windows reads the process's committed private memory, which is what the
+/// Job Object's limit caps. macOS has no reading until its watchdog (#713).
+#[cfg(not(target_os = "macos"))]
+#[tokio::test]
+#[ignore = "needs this OS's sandbox; run by the sandbox-conformance CI job"]
+async fn the_sidecars_memory_is_measured_while_it_runs() {
+    let fixture = Fixture::new();
+    let sidecar = sidecar(&fixture).await;
+    let limit = limits().memory_bytes;
+    let before = sidecar.metrics().memory_bytes;
+    assert!(
+        matches!(before, Some(n) if n > 0 && n <= limit),
+        "while it runs, within its {limit}-byte limit: {before:?}"
+    );
+    let held = 32u64 << 20;
+    match call(&sidecar, "hold", json!({"mib": held >> 20})).await {
+        Reply::Ok(_) => {}
+        other => panic!("the probe could not hold {held} bytes: {other:?}"),
+    }
+    let after = sidecar.metrics().memory_bytes;
+    assert!(
+        matches!((before, after), (Some(b), Some(a)) if a >= b + held / 2 && a <= limit),
+        "holding {held} bytes more: {before:?} then {after:?}"
+    );
+    sidecar.stop().await;
+    assert_eq!(sidecar.metrics().memory_bytes, None, "once it has stopped");
+}

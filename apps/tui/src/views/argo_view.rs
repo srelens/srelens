@@ -19,6 +19,8 @@ pub struct ArgoViewState {
     pub is_remote_hub: bool,
     pub hub_context_name: Option<String>,
     pub show_all_hub_apps: bool,
+    pub is_streaming: bool,
+    pub fetched_at: Option<u64>,
 }
 
 impl ArgoViewState {
@@ -33,6 +35,8 @@ impl ArgoViewState {
             is_remote_hub: false,
             hub_context_name: None,
             show_all_hub_apps: false,
+            is_streaming: false,
+            fetched_at: None,
         }
     }
 
@@ -190,36 +194,46 @@ fn health_status_badge(health: &str) -> (&'static str, Style) {
 pub fn render_argo_view(f: &mut Frame, area: Rect, state: &ArgoViewState) {
     let displayed = state.displayed_applications();
     let filtered = state.filtered_indices();
-    let count_text = if state.filter_query.is_empty() {
+    let count_text = if state.is_streaming || (state.is_loading && !displayed.is_empty()) {
+        if state.filter_query.is_empty() {
+            format!("{} (syncing...)", displayed.len())
+        } else {
+            format!("{}/{} (syncing...)", filtered.len(), displayed.len())
+        }
+    } else if state.filter_query.is_empty() {
         format!("{}", displayed.len())
     } else {
         format!("{}/{}", filtered.len(), displayed.len())
     };
 
+    let age_tag = state
+        .fetched_at
+        .map(|ts| {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let secs = now.saturating_sub(ts) as i64;
+            format!(", as of {} ago", srelens_kube::format_age(secs.max(0)))
+        })
+        .unwrap_or_default();
+
     let hub_tag = if state.is_remote_hub {
         let name = state.hub_context_name.as_deref().unwrap_or("Hub");
         if state.show_all_hub_apps {
-            format!(" [Hub: {} · All Hub Apps] ", name)
+            format!(" [Hub: {} · All Hub Apps{}] ", name, age_tag)
         } else {
-            format!(" [Hub: {} · Spoke Filtered] ", name)
+            format!(" [Hub: {} · Spoke Filtered{}] ", name, age_tag)
         }
+    } else if !age_tag.is_empty() {
+        format!(" [{}] ", age_tag.trim_start_matches(", "))
     } else {
         String::new()
     };
 
-    let toggle_hint = if state.is_remote_hub {
-        if state.show_all_hub_apps {
-            " <a> Current Spoke "
-        } else {
-            " <a> View All Hub Apps "
-        }
-    } else {
-        ""
-    };
-
     let title = format!(
-        " 🐙 ArgoCD Applications [{}] {}(<Enter> Details  <x> Actions / AI{} <s> Sync  <p> Toggle Auto-Sync  <R> Hard Refresh  <g> Git  <c> Config Hub  <r> Reload  <Esc> Back) ",
-        count_text, hub_tag, toggle_hint
+        " 🐙 ArgoCD Applications [{}] {}(<Enter> Details  <x> Actions / AI  <g> Git  <c> Config Hub  <r> Reload  <Esc> Back) ",
+        count_text, hub_tag
     );
 
     let block = Block::default()
@@ -231,7 +245,7 @@ pub fn render_argo_view(f: &mut Frame, area: Rect, state: &ArgoViewState) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    if state.is_loading {
+    if state.is_loading && displayed.is_empty() {
         let loading_msg = Paragraph::new("⟳ Loading ArgoCD applications...")
             .wrap(Wrap { trim: true })
             .style(Style::default().fg(Theme::cyan()));
@@ -691,6 +705,14 @@ mod tests {
             true,
             Some("hub-ctx".to_string()),
         );
+        terminal
+            .draw(|f| {
+                render_argo_view(f, f.area(), &state);
+            })
+            .unwrap();
+
+        // 5. Streaming state with active sync indicator
+        state.is_streaming = true;
         terminal
             .draw(|f| {
                 render_argo_view(f, f.area(), &state);

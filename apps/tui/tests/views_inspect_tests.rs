@@ -2191,27 +2191,30 @@ fn tui_config_view_state_field_navigation_and_adjustments() {
     assert_eq!(state.selected_field, 4);
 
     state.select_next_field();
-    assert_eq!(state.selected_field, 5);
+    assert_eq!(state.selected_field, 5, "Changed SRE Guide Banner");
 
     state.select_next_field();
-    assert_eq!(state.selected_field, 6);
+    assert_eq!(state.selected_field, 6, "ArgoCD Hub Context");
 
     state.select_next_field();
-    assert_eq!(state.selected_field, 7, "ArgoCD UI URL");
+    assert_eq!(state.selected_field, 7, "ArgoCD Hub Kubeconfig");
 
     state.select_next_field();
-    assert_eq!(state.selected_field, 8, "ArgoCD fetch timeout");
+    assert_eq!(state.selected_field, 8, "ArgoCD UI URL");
+
+    state.select_next_field();
+    assert_eq!(state.selected_field, 9, "ArgoCD fetch timeout");
 
     state.select_next_field();
     assert_eq!(state.selected_field, 0, "wraps after the last field");
 
     state.select_prev_field();
-    assert_eq!(state.selected_field, 8, "wraps back to the last field");
+    assert_eq!(state.selected_field, 9, "wraps back to the last field");
 
     state.select_prev_field();
     state.select_prev_field();
     state.select_prev_field();
-    assert_eq!(state.selected_field, 5);
+    assert_eq!(state.selected_field, 6);
 
     let mut config = TuiConfig::default();
     assert_eq!(config.command_popup_max_width, 65);
@@ -2219,10 +2222,11 @@ fn tui_config_view_state_field_navigation_and_adjustments() {
     assert_eq!(config.command_popup_density, CommandPopupDensity::Compact);
     assert!(config.show_feature_banner);
     assert!(config.check_updates);
+    assert!(config.show_changed_guide);
     assert_eq!(config.argo_hub_context, None);
     assert_eq!(config.argo_hub_kubeconfig, None);
 
-    // Selected field 5: ArgoCD Hub Context cycling and editing
+    // Selected field 6: ArgoCD Hub Context cycling and editing
     state.available_contexts = vec!["ctx-mgmt".to_string(), "ctx-prod".to_string()];
     let _ = state.adjust_current(1, &mut config);
     assert_eq!(config.argo_hub_context.as_deref(), Some("ctx-mgmt"));
@@ -2231,7 +2235,7 @@ fn tui_config_view_state_field_navigation_and_adjustments() {
     let _ = state.adjust_current(1, &mut config);
     assert_eq!(config.argo_hub_context, None); // cycled back to None
 
-    // Direct editing of field 5 with cursor movement and insertion
+    // Direct editing of field 6 with cursor movement and insertion
     state.start_editing(&config);
     assert!(state.is_editing);
     assert_eq!(state.cursor_pos(), 0);
@@ -2273,9 +2277,9 @@ fn tui_config_view_state_field_navigation_and_adjustments() {
     let _ = state.clear_current(&mut config);
     assert_eq!(config.argo_hub_context, None);
 
-    // Selected field 6: ArgoCD Hub Kubeconfig Path editing and clearing
+    // Selected field 7: ArgoCD Hub Kubeconfig Path editing and clearing
     state.select_next_field();
-    assert_eq!(state.selected_field, 6);
+    assert_eq!(state.selected_field, 7);
     state.start_editing(&config);
     assert!(state.is_editing);
     state.edit_buffer = "/path/to/custom/kubeconfig".to_string();
@@ -2291,8 +2295,17 @@ fn tui_config_view_state_field_navigation_and_adjustments() {
     let _ = state.clear_current(&mut config);
     assert_eq!(config.argo_hub_kubeconfig, None);
 
-    // Selected field 4: Startup Update Check toggle
+    // Selected field 5: Changed SRE Guide Banner toggle
     state.select_prev_field();
+    state.select_prev_field();
+    assert_eq!(state.selected_field, 5);
+    assert!(config.show_changed_guide);
+    let _ = state.adjust_current(1, &mut config);
+    assert!(!config.show_changed_guide);
+    let _ = state.cycle_current(&mut config);
+    assert!(config.show_changed_guide);
+
+    // Selected field 4: Startup Update Check toggle
     state.select_prev_field();
     assert_eq!(state.selected_field, 4);
     assert!(config.check_updates);
@@ -2304,6 +2317,7 @@ fn tui_config_view_state_field_navigation_and_adjustments() {
     // Selected field 3: Startup Feature Banner toggle
     state.select_prev_field();
     assert_eq!(state.selected_field, 3);
+    assert!(config.show_feature_banner);
     let _ = state.adjust_current(1, &mut config);
     assert!(!config.show_feature_banner);
     let _ = state.cycle_current(&mut config);
@@ -2381,6 +2395,7 @@ fn tui_config_view_renders_cards_and_live_preview_at_wide_and_narrow() {
         command_popup_density: CommandPopupDensity::Compact,
         show_feature_banner: true,
         check_updates: true,
+        show_changed_guide: true,
         argo_hub_context: None,
         argo_hub_kubeconfig: None,
         argo_ui_url: None,
@@ -2447,7 +2462,7 @@ fn tui_config_view_renders_cards_and_live_preview_at_wide_and_narrow() {
 
     // Startup update check preview when selected_field == 4
     let mut update_state = TuiConfigViewState::new();
-    update_state.selected_field = 4;
+    update_state.selected_field = srelens_tui::views::tui_config_view::FIELD_STARTUP_UPDATES;
     let update_lines = common::render_lines(120, 30, |f| {
         render_tui_config_view(f, f.area(), &update_state, &config)
     });
@@ -2461,9 +2476,25 @@ fn tui_config_view_renders_cards_and_live_preview_at_wide_and_narrow() {
         "shows header indicator preview"
     );
 
-    // ArgoCD GitOps Live Preview when selected_field == 5
+    // Changed Guide preview when selected_field == FIELD_CHANGED_GUIDE
+    let mut guide_state = TuiConfigViewState::new();
+    guide_state.selected_field = srelens_tui::views::tui_config_view::FIELD_CHANGED_GUIDE;
+    let guide_lines = common::render_lines(120, 30, |f| {
+        render_tui_config_view(f, f.area(), &guide_state, &config)
+    });
+    let guide_full = guide_lines.join("\n");
+    assert!(
+        guide_full.contains("Live Preview: Changed SRE Triage Guide"),
+        "shows guide preview title: {guide_full}"
+    );
+    assert!(
+        guide_full.contains("SRE Scope & Triage Guide"),
+        "shows guide banner content: {guide_full}"
+    );
+
+    // ArgoCD GitOps Live Preview when selected_field == FIELD_ARGO_HUB_CONTEXT
     let mut argo_state = TuiConfigViewState::new();
-    argo_state.selected_field = 5;
+    argo_state.selected_field = srelens_tui::views::tui_config_view::FIELD_ARGO_HUB_CONTEXT;
     argo_state.available_contexts = vec!["ctx-mgmt".to_string(), "ctx-worker".to_string()];
     let argo_lines = common::render_lines(120, 30, |f| {
         render_tui_config_view(f, f.area(), &argo_state, &config)
@@ -2481,7 +2512,7 @@ fn tui_config_view_renders_cards_and_live_preview_at_wide_and_narrow() {
 
     // Edit modal dialog when is_editing == true
     let mut edit_state = TuiConfigViewState::new();
-    edit_state.selected_field = 5;
+    edit_state.selected_field = srelens_tui::views::tui_config_view::FIELD_ARGO_HUB_CONTEXT;
     edit_state.is_editing = true;
     edit_state.edit_buffer = "my-argo-hub".to_string();
     edit_state.edit_cursor = "my-argo-hub".chars().count();

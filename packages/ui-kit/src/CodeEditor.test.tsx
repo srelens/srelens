@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { render, waitFor } from "@testing-library/react";
+import { fireEvent, render, waitFor } from "@testing-library/react";
+import { EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { openSearchPanel } from "@codemirror/search";
 import { CodeEditor } from "./CodeEditor";
@@ -59,6 +60,25 @@ describe("CodeEditor", () => {
     const { container } = render(<CodeEditor value="a: 1" fill minHeight={100} maxHeight={400} />);
     expect(container.querySelector(".cm-editor")).not.toBeNull();
   });
+
+  it("selects every search match", () => {
+    // `selectMatches` dispatches one range per match, but a state that does not
+    // allow multiple selections collapses them to one — the widget's select-all
+    // control looks enabled and quietly selects a single match.
+    const { container } = render(<CodeEditor value="one two one three one" />);
+    const view = EditorView.findFromDOM(container.querySelector<HTMLElement>(".cm-editor")!)!;
+    expect(view.state.facet(EditorState.allowMultipleSelections)).toBe(true);
+
+    openSearchPanel(view);
+    const find = container.querySelector<HTMLInputElement>('input[aria-label="Find"]')!;
+    find.value = "one";
+    // The widget searches as you type, off `input` rather than `change`.
+    fireEvent.input(find);
+    fireEvent.click(container.querySelector<HTMLButtonElement>('button[aria-label="Select all matches"]')!);
+
+    expect(view.state.selection.ranges).toHaveLength(3);
+  });
+
   it("does not report a prop-driven value change as a user edit", () => {
     // Reset and reload replace the document from outside. The dispatch that
     // does it changes the doc, so an unconditional listener reports it as

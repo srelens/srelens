@@ -368,6 +368,45 @@ async fn an_unknown_tool_name_is_a_tool_error_not_a_transport_failure() {
 }
 
 #[tokio::test]
+async fn tool_name_resolution_is_resilient_to_prefix_and_separator_variations() {
+    let inv = invoker();
+    inv.list_tools().await.unwrap();
+
+    // Calling listEndpoints without k8s_ prefix or with dot resolves to k8s.listEndpoints
+    let res1 = inv
+        .call_tool(
+            "listEndpoints",
+            &json!({"context": "prod", "namespace": "default"}),
+        )
+        .await
+        .unwrap();
+    // Reaching the handler (which errors on reading kubeconfig) proves the name resolved to the capability
+    // rather than failing at the RPC dispatcher with "unknown tool".
+    assert!(!res1.content.contains("unknown tool"));
+    assert!(res1.content.starts_with("handler error:"));
+
+    let res2 = inv
+        .call_tool(
+            "k8s.listEndpoints",
+            &json!({"context": "prod", "namespace": "default"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res1.content, res2.content);
+    assert_eq!(res1.is_error, res2.is_error);
+
+    let res3 = inv
+        .call_tool(
+            "k8s_listEndpoints",
+            &json!({"context": "prod", "namespace": "default"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res1.content, res3.content);
+    assert_eq!(res1.is_error, res3.is_error);
+}
+
+#[tokio::test]
 async fn a_tool_that_needs_a_missing_cluster_reports_an_error_result() {
     let inv = invoker();
     inv.list_tools().await.unwrap();
@@ -1529,6 +1568,15 @@ fn all_static_kinds() -> Vec<ResourceKind> {
         ResourceKind::Settings,
         ResourceKind::TuiConfig,
         ResourceKind::Workloads,
+        ResourceKind::ReplicaSets,
+        ResourceKind::HorizontalPodAutoscalers,
+        ResourceKind::PodDisruptionBudgets,
+        ResourceKind::PriorityClasses,
+        ResourceKind::RuntimeClasses,
+        ResourceKind::Leases,
+        ResourceKind::MutatingWebhookConfigurations,
+        ResourceKind::ValidatingWebhookConfigurations,
+        ResourceKind::IngressClasses,
     ]
 }
 
@@ -1565,8 +1613,7 @@ fn watch_kinds_are_lowercase_plurals_for_watchable_kinds_only() {
             None => assert!(
                 matches!(
                     kind,
-                    ResourceKind::Endpoints
-                        | ResourceKind::CustomResourceDefinitions
+                    ResourceKind::CustomResourceDefinitions
                         | ResourceKind::HelmReleases
                         | ResourceKind::PortForwards
                         | ResourceKind::Overview
@@ -1580,7 +1627,7 @@ fn watch_kinds_are_lowercase_plurals_for_watchable_kinds_only() {
             ),
         }
     }
-    assert_eq!(watchable, 25);
+    assert_eq!(watchable, 35);
     assert_eq!(
         ResourceKind::CustomResource(cilium_pool()).watch_kind(),
         None
@@ -1645,6 +1692,11 @@ fn cluster_scoped_kinds_are_not_namespaced() {
         ResourceKind::Overview,
         ResourceKind::Toolbox,
         ResourceKind::Assistant,
+        ResourceKind::PriorityClasses,
+        ResourceKind::RuntimeClasses,
+        ResourceKind::MutatingWebhookConfigurations,
+        ResourceKind::ValidatingWebhookConfigurations,
+        ResourceKind::IngressClasses,
     ];
     for kind in all_static_kinds() {
         assert_eq!(
@@ -1749,6 +1801,60 @@ fn resolve_matches_static_commands_case_insensitively_then_by_prefix() {
     assert_eq!(
         resolve_command(":netpo"),
         Some(CommandTarget::Resource(ResourceKind::NetworkPolicies))
+    );
+    assert_eq!(
+        resolve_command(":pdb"),
+        Some(CommandTarget::Resource(ResourceKind::PodDisruptionBudgets))
+    );
+    assert_eq!(
+        resolve_command(":hpa"),
+        Some(CommandTarget::Resource(
+            ResourceKind::HorizontalPodAutoscalers
+        ))
+    );
+    assert_eq!(
+        resolve_command(":rs"),
+        Some(CommandTarget::Resource(ResourceKind::ReplicaSets))
+    );
+    assert_eq!(
+        resolve_command(":quota"),
+        Some(CommandTarget::Resource(ResourceKind::ResourceQuotas))
+    );
+    assert_eq!(
+        resolve_command(":limits"),
+        Some(CommandTarget::Resource(ResourceKind::LimitRanges))
+    );
+    assert_eq!(
+        resolve_command(":pc"),
+        Some(CommandTarget::Resource(ResourceKind::PriorityClasses))
+    );
+    assert_eq!(
+        resolve_command(":rc"),
+        Some(CommandTarget::Resource(ResourceKind::RuntimeClasses))
+    );
+    assert_eq!(
+        resolve_command(":lease"),
+        Some(CommandTarget::Resource(ResourceKind::Leases))
+    );
+    assert_eq!(
+        resolve_command(":mwc"),
+        Some(CommandTarget::Resource(
+            ResourceKind::MutatingWebhookConfigurations
+        ))
+    );
+    assert_eq!(
+        resolve_command(":vwc"),
+        Some(CommandTarget::Resource(
+            ResourceKind::ValidatingWebhookConfigurations
+        ))
+    );
+    assert_eq!(
+        resolve_command(":ic"),
+        Some(CommandTarget::Resource(ResourceKind::IngressClasses))
+    );
+    assert_eq!(
+        resolve_command(":endpoints"),
+        Some(CommandTarget::Resource(ResourceKind::Endpoints))
     );
     assert_eq!(resolve_command(":?"), Some(CommandTarget::Help));
     assert_eq!(resolve_command(":exit"), Some(CommandTarget::Quit));
@@ -1953,6 +2059,7 @@ fn tui_config_file_paths_clamping_and_round_trip() {
         command_popup_density: CommandPopupDensity::Large,
         show_feature_banner: true,
         check_updates: true,
+        show_changed_guide: true,
         argo_hub_context: None,
         argo_hub_kubeconfig: None,
         argo_ui_url: None,
@@ -1975,6 +2082,7 @@ fn tui_config_file_paths_clamping_and_round_trip() {
         command_popup_density: CommandPopupDensity::Compact,
         show_feature_banner: true,
         check_updates: true,
+        show_changed_guide: true,
         argo_hub_context: None,
         argo_hub_kubeconfig: None,
         argo_ui_url: None,
@@ -1994,6 +2102,7 @@ fn tui_config_file_paths_clamping_and_round_trip() {
         command_popup_density: CommandPopupDensity::Large,
         show_feature_banner: false,
         check_updates: false,
+        show_changed_guide: false,
         argo_hub_context: None,
         argo_hub_kubeconfig: None,
         argo_ui_url: None,

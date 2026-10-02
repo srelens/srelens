@@ -36,7 +36,12 @@ The first `pnpm dev` compiles the full Rust dependency tree and takes a few minu
 | `pnpm tauri icon apps/desktop/src-tauri/icons/icon.svg` | Regenerate the full app icon set from the source SVG |
 | `UPDATE_CATALOG=1 cargo test -p srelens-registry` | Regenerate the committed capability catalog after adding a capability |
 | `UPDATE_CATALOG=1 cargo test -p srelens-plugin-host --test schema` | Regenerate the committed extension manifest schema after changing a manifest field |
-| `UPDATE_CATALOG=1 cargo test -p srelens-sidecar-protocol --test schema` | Regenerate the committed sidecar protocol schema after changing a protocol type |
+| `UPDATE_CATALOG=1 cargo test -p srelens-sidecar-protocol --test schema` | Regenerate the committed sidecar protocol schema after changing a protocol type; then run `go generate ./...` in `sdk/go`, whose generated types CI holds to the schema |
+| `cargo test -p srelens-sidecar -p srelens-sidecar-hello-world` | The Rust sidecar SDK and its example, which runs the real binary under the supervisor |
+| `cd sdk/go && go test ./...` | The Go sidecar SDK (CI adds `-race`, which needs cgo and a C compiler) |
+| `cd sdk/go && go generate ./...` | Regenerate `protocol/protocol_gen.go` after the protocol schema changes |
+| `go build -C sdk/examples/hello-world/go -o "$PWD/target/hello-world-go" .`, then `SRELENS_HELLO_WORLD_GO="$PWD/target/hello-world-go" cargo test -p srelens-sidecar-hello-world --test supervised -- --ignored` | The Go example under the supervisor; add `--test sandboxed` and the sandbox variables in the next row to run both examples in the sandbox too (on Windows, the binary ends `.exe` and the path must be a Windows one, such as `$(pwd -W)` in Git Bash) |
+| `cargo build -p srelens-plugin-host --bin srelens-sandbox-launch`, then `SRELENS_SANDBOX_LAUNCHER="$PWD/target/debug/srelens-sandbox-launch" SRELENS_HELLO_WORLD_GO="$PWD/target/hello-world-go" SRELENS_SANDBOX_CGROUP_ROOT=/sys/fs/cgroup/<delegated> cargo test -p srelens-sidecar-hello-world --test sandboxed --test supervised -- --ignored --test-threads=1` | The example inside the OS sandbox, run from the workspace root (Linux needs the launcher built first and passed as an absolute path, plus `SRELENS_SANDBOX_CGROUP_ROOT`; on Windows neither variable is needed) |
 | `PROPTEST_RNG_SEED=7 PROPTEST_CASES=10000 cargo test -p srelens-registry --lib fuzzing` | Run the extension parser property tests past their fixed cases |
 | `cargo +nightly fuzz run manifest` | Fuzz an extension parser (Linux or macOS, nightly); setup in [docs/extensions/testing.md](extensions/testing.md#fuzzing) |
 

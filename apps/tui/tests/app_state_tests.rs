@@ -1950,12 +1950,13 @@ async fn assistant_history_and_slash_suggestions_drive_the_arrow_keys() {
 }
 
 #[tokio::test]
-async fn assistant_busy_turn_can_be_cancelled_with_esc_or_ctrl_c() {
+async fn assistant_busy_turn_survives_esc_and_is_cancelled_with_ctrl_c() {
     let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
-    app.active_view = ActiveView::Assistant;
+    let previous = std::mem::replace(&mut app.active_view, ActiveView::Assistant);
+    app.nav_stack.push(previous);
 
-    // 1. Cancel via Esc
+    // 1. Esc leaves the Assistant; the turn keeps running in the background.
     app.assistant_state.is_busy = true;
     let task1 = tokio::spawn(async {
         tokio::time::sleep(std::time::Duration::from_secs(60)).await;
@@ -1964,28 +1965,16 @@ async fn assistant_busy_turn_can_be_cancelled_with_esc_or_ctrl_c() {
 
     app.handle_key_event(common::key(KeyCode::Esc)).await;
     assert!(
-        !app.assistant_state.is_busy,
-        "Esc cancels busy assistant state"
+        !matches!(app.active_view, ActiveView::Assistant),
+        "Esc goes back"
     );
-    assert!(
-        app.assistant_state.task.is_none(),
-        "assistant task handle was taken"
-    );
-    assert_eq!(toast(&app), "✓ Assistant generation cancelled");
-    assert!(app
-        .assistant_state
-        .messages
-        .last()
-        .unwrap()
-        .content
-        .contains("[Cancelled by user]"));
-    let res1 = tokio::time::timeout(std::time::Duration::from_millis(500), task1).await;
-    assert!(
-        res1.is_ok() && res1.unwrap().unwrap_err().is_cancelled(),
-        "task1 was aborted"
-    );
+    assert!(app.assistant_state.is_busy, "Esc does not cancel the turn");
+    assert!(app.assistant_state.task.is_some(), "the task is kept");
+    assert!(!task1.is_finished(), "task1 is still running");
+    task1.abort();
 
     // 2. Cancel via Ctrl+c when busy and no selection, and verify running tool call is closed
+    app.active_view = ActiveView::Assistant;
     app.assistant_state.is_busy = true;
     let task2 = tokio::spawn(async {
         tokio::time::sleep(std::time::Duration::from_secs(60)).await;

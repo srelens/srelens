@@ -1,0 +1,21 @@
+[package]
+name = "srelens-sidecar"
+description = "Write a srelens sidecar in Rust: the lifecycle, calls to the host, streams, cancellation and logging"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+# Stays in this repository until the protocol is stable (#576).
+publish = false
+
+[dependencies]
+srelens-sidecar-protocol = { path = "../protocol" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "io-util", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["rt"] }  # CancellationToken; AbortOnDropHandle needs "rt"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["float_roundtrip"] }
+log = { version = "0.4", features = ["std"] }
+
+[dev-dependencies]
+# Holds every line the SDK writes to the committed schema. No default
+# features: they bring a second rustls provider (AGENTS.md).
+jsonschema = { version = "0.58", default-features = false }

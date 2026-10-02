@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/plugin-host", "crates/agent", "crates/capability", "crates/mcp", "crates/kube", "crates/streams", "crates/server", "crates/registry", "crates/llm", "apps/desktop/src-tauri", "apps/tui", "sdk/protocol"]
+members = ["crates/plugin-host", "crates/agent", "crates/capability", "crates/mcp", "crates/kube", "crates/streams", "crates/server", "crates/registry", "crates/llm", "apps/desktop/src-tauri", "apps/tui", "sdk/protocol", "sdk/rust", "sdk/examples/hello-world/rust"]
 
 [workspace.package]
 edition = "2021"

@@ -1044,7 +1044,7 @@ pub fn render_assistant_view(
         None => String::new(),
     };
     let back_or_cancel = if state.is_busy {
-        "<Esc>/<Ctrl+c> Cancel"
+        "<Ctrl+c> Cancel, <Esc> Back"
     } else {
         "<Esc> Back"
     };
@@ -1442,7 +1442,7 @@ pub fn render_assistant_view(
 
     // 2. Input box
     let input_title = if state.is_busy {
-        " Assistant is thinking... (<Esc> or <Ctrl+c> to Cancel) ".to_string()
+        " Assistant is thinking... (<Ctrl+c> to Cancel, <Esc> to leave it running) ".to_string()
     } else if !state.slash_suggestions.is_empty() {
         " Ask Assistant (⚡ SRE Playbooks: <Tab>/<Enter> Apply, ↑/↓ Select, <Esc> Dismiss) "
             .to_string()
@@ -1615,7 +1615,7 @@ pub fn format_message_content_with_width(
             if i < lines.len() && lines[i].trim().starts_with("```") {
                 i += 1; // skip closing ```
             }
-            render_code_block(out, lang, &code_lines);
+            render_code_block(out, lang, &code_lines, max_width);
             continue;
         }
 
@@ -1639,12 +1639,10 @@ pub fn format_message_content_with_width(
                 .all(|c| c == '-' || c == '*' || c == '_' || c.is_whitespace())
             && trimmed.len() >= 3
         {
+            let hr_len = max_width.map(|w| w.saturating_sub(4).max(10)).unwrap_or(72);
             out.push(Line::from(vec![
                 Span::raw("  "),
-                Span::styled(
-                    "────────────────────────────────────────────────────────────────────────",
-                    Style::default().fg(Theme::BORDER),
-                ),
+                Span::styled("─".repeat(hr_len), Style::default().fg(Theme::BORDER)),
             ]));
             i += 1;
             continue;
@@ -1793,13 +1791,103 @@ pub fn format_message_content_with_width(
     }
 }
 
-fn render_code_block(out: &mut Vec<Line<'static>>, lang: &str, code_lines: &[&str]) {
+fn wrap_code_line(line: &str, width: usize) -> Vec<String> {
+    let width = width.max(10);
+    let total_w = unicode_width::UnicodeWidthStr::width(line);
+    if total_w <= width {
+        return vec![line.to_string()];
+    }
+
+    let leading_spaces = line.len() - line.trim_start().len();
+    let indent_str = &line[..leading_spaces];
+    let content = &line[leading_spaces..];
+
+    let mut result = Vec::new();
+    let mut current_line = indent_str.to_string();
+    let mut current_w = unicode_width::UnicodeWidthStr::width(indent_str);
+
+    // Tokenize content by whitespace and common punctuation delimiters
+    let mut tokens = Vec::new();
+    let mut cur_token = String::new();
+    for ch in content.chars() {
+        cur_token.push(ch);
+        if ch == ' ' || ch == ',' || ch == '/' || ch == '-' || ch == ';' {
+            tokens.push(cur_token.clone());
+            cur_token.clear();
+        }
+    }
+    if !cur_token.is_empty() {
+        tokens.push(cur_token);
+    }
+
+    let cont_indent = if leading_spaces > 0 {
+        indent_str.to_string()
+    } else {
+        "  ".to_string()
+    };
+    let cont_indent_w = unicode_width::UnicodeWidthStr::width(cont_indent.as_str());
+
+    for token in tokens {
+        let token_w = unicode_width::UnicodeWidthStr::width(token.as_str());
+        if current_w + token_w <= width {
+            current_line.push_str(&token);
+            current_w += token_w;
+        } else {
+            if current_w > unicode_width::UnicodeWidthStr::width(indent_str)
+                && !current_line.trim().is_empty()
+            {
+                result.push(current_line);
+                current_line = cont_indent.clone();
+                current_w = cont_indent_w;
+            }
+
+            let token_trimmed = if current_line == cont_indent {
+                token.trim_start()
+            } else {
+                token.as_str()
+            };
+            let token_trimmed_w = unicode_width::UnicodeWidthStr::width(token_trimmed);
+
+            if current_w + token_trimmed_w <= width {
+                current_line.push_str(token_trimmed);
+                current_w += token_trimmed_w;
+            } else {
+                for ch in token_trimmed.chars() {
+                    let ch_w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1);
+                    if current_w + ch_w > width && !current_line.trim().is_empty() {
+                        result.push(current_line);
+                        current_line = cont_indent.clone();
+                        current_w = cont_indent_w;
+                    }
+                    current_line.push(ch);
+                    current_w += ch_w;
+                }
+            }
+        }
+    }
+
+    if !current_line.trim().is_empty() || result.is_empty() {
+        result.push(current_line);
+    }
+
+    result
+}
+
+fn render_code_block(
+    out: &mut Vec<Line<'static>>,
+    lang: &str,
+    code_lines: &[&str],
+    max_width: Option<usize>,
+) {
     let border_style = Style::default().fg(Theme::BORDER);
     let lang_display = if lang.is_empty() { "code" } else { lang };
 
+    let box_w = max_width.map(|w| w.saturating_sub(2).max(20)).unwrap_or(67);
+    let inner_w = box_w.saturating_sub(2).max(10);
+
     // Header border: ┌── lang ────────────────────────────────────────
     let header_prefix = format!("── {} ", lang_display);
-    let bar_len = 65usize.saturating_sub(header_prefix.len());
+    let bar_len = (box_w.saturating_sub(2)).saturating_sub(header_prefix.len());
     let top_line = format!("┌{}{}", header_prefix, "─".repeat(bar_len));
     out.push(Line::from(vec![
         Span::raw("  "),
@@ -1808,49 +1896,56 @@ fn render_code_block(out: &mut Vec<Line<'static>>, lang: &str, code_lines: &[&st
 
     // Code lines with prefix "│ "
     for code_line in code_lines {
-        let mut spans = vec![Span::raw("  "), Span::styled("│ ", border_style)];
-
-        let trimmed_code = code_line.trim_start();
-        if trimmed_code.starts_with('#') || trimmed_code.starts_with("//") {
-            // Comment
-            spans.push(Span::styled(
-                code_line.to_string(),
-                Style::default()
-                    .fg(Theme::DIM)
-                    .add_modifier(Modifier::ITALIC),
-            ));
-        } else if trimmed_code.contains(':') && !trimmed_code.starts_with("http") {
-            // YAML / Key-value
-            if let Some(colon_idx) = code_line.find(':') {
-                let key = &code_line[..=colon_idx];
-                let val = &code_line[colon_idx + 1..];
-                spans.push(Span::styled(
-                    key.to_string(),
-                    Style::default().fg(Theme::CYAN),
-                ));
-                spans.push(Span::styled(
-                    val.to_string(),
-                    Style::default().fg(Theme::FG),
-                ));
-            } else {
-                spans.push(Span::styled(
-                    code_line.to_string(),
-                    Style::default().fg(Theme::FG),
-                ));
-            }
-        } else {
-            spans.push(Span::styled(
-                code_line.to_string(),
-                Style::default().fg(Theme::FG),
-            ));
+        if code_line.trim().is_empty() {
+            out.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled("│", border_style),
+            ]));
+            continue;
         }
-        out.push(Line::from(spans));
+
+        let wrapped_sub_lines = wrap_code_line(code_line, inner_w);
+        let trimmed_code = code_line.trim_start();
+        let is_comment = trimmed_code.starts_with('#') || trimmed_code.starts_with("//");
+        let is_kv = trimmed_code.contains(':') && !trimmed_code.starts_with("http");
+
+        for (idx, sub_line) in wrapped_sub_lines.into_iter().enumerate() {
+            let mut spans = vec![Span::raw("  "), Span::styled("│ ", border_style)];
+
+            if is_comment {
+                spans.push(Span::styled(
+                    sub_line,
+                    Style::default()
+                        .fg(Theme::DIM)
+                        .add_modifier(Modifier::ITALIC),
+                ));
+            } else if is_kv && idx == 0 {
+                if let Some(colon_idx) = sub_line.find(':') {
+                    let key = &sub_line[..=colon_idx];
+                    let val = &sub_line[colon_idx + 1..];
+                    spans.push(Span::styled(
+                        key.to_string(),
+                        Style::default().fg(Theme::CYAN),
+                    ));
+                    spans.push(Span::styled(
+                        val.to_string(),
+                        Style::default().fg(Theme::FG),
+                    ));
+                } else {
+                    spans.push(Span::styled(sub_line, Style::default().fg(Theme::FG)));
+                }
+            } else {
+                spans.push(Span::styled(sub_line, Style::default().fg(Theme::FG)));
+            }
+            out.push(Line::from(spans));
+        }
     }
 
     // Bottom border: └────────────────────────────────────────────────
+    let bot_bar_len = box_w.saturating_sub(1);
     out.push(Line::from(vec![
         Span::raw("  "),
-        Span::styled(format!("└{}", "─".repeat(66)), border_style),
+        Span::styled(format!("└{}", "─".repeat(bot_bar_len)), border_style),
     ]));
 }
 
@@ -2496,6 +2591,61 @@ Done.";
         assert!(text_dump.contains("└"));
         // Make sure no raw ``` remains
         assert!(!text_dump.contains("```"));
+    }
+
+    #[test]
+    fn test_format_message_content_with_long_code_block_wrapping() {
+        let content = "\
+Events: FailedScheduling from optimize-scheduler:
+```code
+0/20 nodes are available: 1 node(s) were unschedulable, 11 node(s) didn't match Pod's node affinity/selector, 2 Insufficient cpu, 2 node(s) had untolerated taint(s), 6 Insufficient memory.
+```";
+
+        let mut lines = Vec::new();
+        format_message_content_with_width(&mut lines, content, Some(80));
+
+        for l in &lines {
+            let line_w: usize = l
+                .spans
+                .iter()
+                .map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref()))
+                .sum();
+            assert!(
+                line_w <= 80,
+                "line exceeded 80 chars: '{}' (width {})",
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>(),
+                line_w
+            );
+        }
+
+        let code_box_lines: Vec<String> = lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<Vec<_>>()
+                    .join("")
+            })
+            .filter(|s| s.contains('│'))
+            .collect();
+
+        // Ensure the long event wrapped across multiple boxed lines
+        assert!(
+            code_box_lines.len() >= 3,
+            "expected at least 3 wrapped lines for long event, got {}",
+            code_box_lines.len()
+        );
+        for line in &code_box_lines {
+            assert!(
+                line.starts_with("  │ "),
+                "each wrapped code line must maintain left border prefix, got: '{}'",
+                line
+            );
+        }
     }
 
     #[test]

@@ -224,7 +224,8 @@ impl Process {
     }
 
     /// The same process, with a way to read its memory use for the Inspector
-    /// (#575): the cgroup's `memory.current` on Linux. A backend that cannot
+    /// (#575): the cgroup's `memory.current` on Linux, and the process's
+    /// committed private memory on Windows (#753). A backend that cannot
     /// measure it leaves it out, and the Inspector says so rather than
     /// showing a number. macOS's watchdog samples the same figure (#713).
     pub fn with_memory(

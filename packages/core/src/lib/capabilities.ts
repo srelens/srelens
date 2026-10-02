@@ -165,8 +165,9 @@ export const CAPABILITY_CATALOG: readonly CapabilityFacts[] = rows as readonly C
  * web server builds each user's registry through `build_registry_for_user`,
  * which registers that user's own apps (#515) but no settings capabilities,
  * because web settings are per-user SQLite rows rather than a file on the host,
- * and no secret store, because the web host keeps no app secrets yet (#522);
- * `a_web_users_registry_has_apps_but_no_desktop_settings`
+ * no secret store, because the web host keeps no app secrets yet (#522), and no
+ * `github.rolloutCause`, which would read GitHub from the shared server with
+ * the server's token; `a_web_users_registry_has_apps_but_no_desktop_settings`
  * (`crates/registry/src/lib.rs`) pins this list as the difference.
  *
  * Named here so a count shown to a reader is a count of what THEIR build
@@ -174,7 +175,7 @@ export const CAPABILITY_CATALOG: readonly CapabilityFacts[] = rows as readonly C
  * fixing a large one is how the large one came to be.
  */
 export const HOST_ONLY_CAPABILITY_IDS: readonly string[] = [
-  "settings.get", "settings.set", "extension.secretStore",
+  "settings.get", "settings.set", "extension.secretStore", "github.rolloutCause",
 ];
 
 /**

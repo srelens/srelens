@@ -7,8 +7,8 @@ party write one.
 | Path | What | Status |
 |---|---|---|
 | `protocol/` | `srelens-sidecar-protocol`: the wire's constants and a type for every message. srelens builds its own messages from it, and [`schemas/sidecar-protocol.v0.1.json`](../schemas/sidecar-protocol.v0.1.json) is generated from it | here |
-| `rust/` | The Rust SDK: lifecycle, calls to the host with an explicit context, streams, cancellation, logging | [#576](https://github.com/srelens/srelens/issues/576) |
-| `go/` | The Go SDK, generated from the schema | [#576](https://github.com/srelens/srelens/issues/576) |
-| `examples/hello-world/` | A minimal sidecar in each language | [#576](https://github.com/srelens/srelens/issues/576) |
+| `rust/` | The Rust SDK: lifecycle, calls to the host with an explicit context, streams, cancellation, logging | here |
+| `go/` | The Go SDK, with its protocol types generated from the schema | here |
+| `examples/hello-world/` | A minimal sidecar in each language, run under the real supervisor by one suite | Rust and Go here |
 
 Everything here stays in this repository, unpublished, until the protocol is stable.

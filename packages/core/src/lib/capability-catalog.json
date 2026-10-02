@@ -173,6 +173,15 @@
     "confirm": null
   },
   {
+    "id": "github.rolloutCause",
+    "readOnly": true,
+    "destructive": false,
+    "requiresConfirm": false,
+    "sensitive": false,
+    "impact": "low",
+    "confirm": null
+  },
+  {
     "id": "k8s.annotate",
     "readOnly": false,
     "destructive": false,
@@ -543,6 +552,15 @@
   },
   {
     "id": "k8s.listEndpointSlices",
+    "readOnly": true,
+    "destructive": false,
+    "requiresConfirm": false,
+    "sensitive": false,
+    "impact": "low",
+    "confirm": null
+  },
+  {
+    "id": "k8s.listEndpoints",
     "readOnly": true,
     "destructive": false,
     "requiresConfirm": false,

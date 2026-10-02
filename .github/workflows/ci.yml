@@ -247,6 +247,45 @@ jobs:
           path: ${{ runner.temp }}/extension-budgets
           if-no-files-found: error
 
+  # The Go sidecar SDK (sdk/go) and its example. The generated protocol file
+  # must be what the committed schema generates, the code gofmt'd and vetted,
+  # and the tests must pass under the race detector (which needs cgo, so it
+  # runs here and not on a Windows machine without a C compiler). The
+  # example's end-to-end runs are in sandbox-conformance, which has the
+  # supervisor and the sandbox.
+  go:
+    name: go sdk
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: sdk/go/go.mod
+          cache-dependency-path: |
+            sdk/go/go.sum
+            sdk/examples/hello-world/go/go.sum
+      - name: The generated protocol file is current
+        working-directory: sdk/go
+        run: |
+          go generate ./...
+          git diff --exit-code
+      - name: Format and vet
+        run: |
+          for module in sdk/go sdk/examples/hello-world/go; do
+            unformatted=$(cd "$module" && gofmt -l .)
+            if [ -n "$unformatted" ]; then
+              echo "::error::gofmt would change, in $module: $unformatted"
+              exit 1
+            fi
+            (cd "$module" && go vet ./...)
+          done
+      - name: Tests, with the race detector
+        run: |
+          (cd sdk/go && go test -race -cover ./...)
+          (cd sdk/examples/hello-world/go && go test -race ./...)
+
   # The sidecar sandbox conformance suite (#572): the #571 spike's seven
   # checks, and two for what it left open (the host's environment, Unix
   # sockets), run against the production sandbox backend through the real
@@ -275,8 +314,17 @@ jobs:
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: sdk/go/go.mod
+          cache-dependency-path: |
+            sdk/go/go.sum
+            sdk/examples/hello-world/go/go.sum
       - name: Build the suites
-        run: cargo test -p srelens-plugin-host --no-run
+        run: cargo test -p srelens-plugin-host -p srelens-sidecar-hello-world --no-run
+      - name: Build the Go example
+        shell: bash
+        run: go build -C sdk/examples/hello-world/go -o "../../../../target/hello-world-go${{ runner.os == 'Windows' && '.exe' || '' }}" .
       # A cgroup v2 subtree the runner's user owns, with the memory and cpu
       # controllers enabled for its children: what a systemd desktop would
       # delegate to srelens (a user scope with Delegate=yes). cgroup v2 lets a
@@ -301,11 +349,21 @@ jobs:
           echo $$ | sudo tee /sys/fs/cgroup/srelens-ci/host/cgroup.procs
           echo "+memory +cpu" > /sys/fs/cgroup/srelens-ci/cgroup.subtree_control
           cargo test -p srelens-plugin-host --test sandbox_conformance -- --ignored --test-threads=1 --nocapture
+          SRELENS_SANDBOX_LAUNCHER="$PWD/target/debug/srelens-sandbox-launch" \
+          SRELENS_HELLO_WORLD_GO="$PWD/target/hello-world-go" \
+            cargo test -p srelens-sidecar-hello-world --test sandboxed --test supervised -- --ignored --test-threads=1 --nocapture
       # One thread, and the AppContainer profile's cleanup is the test that
       # sorts last.
       - name: Conformance
         if: runner.os == 'Windows'
         run: cargo test -p srelens-plugin-host --test sandbox_conformance -- --ignored --test-threads=1 --nocapture
+      # The Rust and Go examples, unconfined and in the AppContainer: every
+      # ignored case of both suites.
+      - name: The SDK examples, unconfined and in the sandbox
+        if: runner.os == 'Windows'
+        run: |
+          $env:SRELENS_HELLO_WORLD_GO = "$PWD\target\hello-world-go.exe"
+          cargo test -p srelens-sidecar-hello-world --test sandboxed --test supervised -- --ignored --test-threads=1 --nocapture
       # bash, not the default PowerShell, which fails a step only on its last
       # command's exit status.
       - name: The other sidecar suites
@@ -314,6 +372,14 @@ jobs:
         run: |
           cargo test -p srelens-plugin-host --lib sidecar
           cargo test -p srelens-plugin-host --test sidecar --test sidecar_process
+          cargo test -p srelens-sidecar -p srelens-sidecar-hello-world
+      # Not a sidecar suite: the one Windows runner is here. Kubeconfig exec
+      # plugins must start without a console window, or a release build of
+      # the desktop opens one per token fetch (#775). The test pins that the
+      # variable the desktop sets is the one kube-rs reads; Linux skips it.
+      - name: Exec plugins start without a console window
+        if: runner.os == 'Windows'
+        run: cargo test -p srelens-kube --test exec_plugin_console
 
   # The WebDriver smoke suite (issue #30): the REAL built app — WebView and
   # all — driven through tauri-driver against a kind cluster. This is the

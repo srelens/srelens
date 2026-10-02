@@ -499,6 +499,7 @@ export function CodeEditor({
       editorTheme(minHeight, maxHeight, fill, flush),
       syntaxHighlighting(highlightStyle),
       EditorView.editable.of(!readOnly),
+      EditorState.allowMultipleSelections.of(true),
       EditorState.readOnly.of(readOnly),
       EditorView.updateListener.of((u) => {
         // The cursor is a fact about the view, not an edit: reported whether

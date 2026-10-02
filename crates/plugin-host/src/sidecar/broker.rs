@@ -42,10 +42,11 @@ use std::sync::Arc;
 
 use super::connection::Broker;
 use super::protocol::{code, method, RpcError};
-pub use srelens_sidecar_protocol::CallContext;
-use srelens_sidecar_protocol::{
-    MAX_CLUSTER_ID_BYTES, MAX_IDENTIFIER_LEN, MAX_NAMESPACE_LEN, MAX_OBJECT_NAME_LEN, MAX_TOKEN_LEN,
+use srelens_sidecar_protocol::shape::{
+    is_cluster_id, is_identifier, is_namespace, is_object_name, is_token,
 };
+pub use srelens_sidecar_protocol::CallContext;
+use srelens_sidecar_protocol::MAX_CLUSTER_ID_BYTES;
 
 /// Who the sidecar is: the installed app its supervisor started it for.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -419,7 +420,7 @@ fn call_context(context: Option<Value>) -> Result<CallContext, RpcError> {
     }
     let parsed: CallContext =
         serde_json::from_value(context).map_err(|e| invalid(format!("{CONTEXT_SHAPE} ({e})")))?;
-    if parsed.cluster_id.trim().is_empty() || parsed.cluster_id.len() > MAX_CLUSTER_ID_BYTES {
+    if !is_cluster_id(&parsed.cluster_id) {
         return Err(invalid(format!(
             "`context.clusterId` must name a cluster, in at most {MAX_CLUSTER_ID_BYTES} bytes"
         )));
@@ -451,46 +452,6 @@ const IDENTIFIER: &str = "1 to 64 ASCII letters, digits and hyphens, as the mani
 const OBJECT_NAME: &str =
     "a Kubernetes object name: 1 to 253 ASCII letters, digits, dots and hyphens";
 const TOKEN: &str = "1 to 128 printable ASCII characters, as the object carries it";
-
-/// A binding or action name, as the manifest holds one to (`identifier` in
-/// `manifest.rs`).
-fn is_identifier(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= MAX_IDENTIFIER_LEN
-        && value
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
-}
-
-/// An object name, as `ResourceIn::validate` (`crates/kube/src/gitops.rs`)
-/// holds one to.
-fn is_object_name(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= MAX_OBJECT_NAME_LEN
-        && value != "."
-        && value != ".."
-        && value
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
-}
-
-/// A `uid` or `resourceVersion`: short, and nothing that is not a visible
-/// character.
-fn is_token(value: &str) -> bool {
-    !value.is_empty() && value.len() <= MAX_TOKEN_LEN && value.bytes().all(|b| b.is_ascii_graphic())
-}
-
-/// A Kubernetes namespace name: an RFC 1123 label. The rule `extensions.read`
-/// holds a namespace to.
-fn is_namespace(name: &str) -> bool {
-    !name.is_empty()
-        && name.len() <= MAX_NAMESPACE_LEN
-        && name
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-        && !name.starts_with('-')
-        && !name.ends_with('-')
-}
 
 #[cfg(test)]
 mod tests {
@@ -1213,6 +1174,15 @@ mod tests {
             json!({"clusterId": "x".repeat(4097), "namespace": "a"}),
             json!({"clusterId": "", "namespace": "team"}),
             json!({"clusterId": "   ", "namespace": "team"}),
+            // White space as srelens reads it (Unicode White_Space), which
+            // regex engines' `\s` does not agree on.
+            json!({"clusterId": "\u{0b}", "namespace": "team"}),
+            json!({"clusterId": "\u{85}", "namespace": "team"}),
+            json!({"clusterId": "\u{a0}", "namespace": "team"}),
+            json!({"clusterId": "\u{3000}", "namespace": "team"}),
+            json!({"clusterId": "\u{2028}\u{205f}", "namespace": "team"}),
+            json!({"clusterId": "\u{feff}", "namespace": "team"}),
+            json!({"clusterId": "\u{a0}prod", "namespace": "team"}),
             json!({"clusterId": 7, "namespace": "team"}),
             json!({"clusterId": "prod"}),
             json!({"namespace": "team"}),
