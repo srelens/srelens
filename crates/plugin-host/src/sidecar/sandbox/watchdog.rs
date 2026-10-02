@@ -119,6 +119,20 @@ pub(crate) fn ticks_to_cpu(ticks: u64, numer: u32, denom: u32) -> Duration {
     Duration::from_nanos(u64::try_from(nanos).unwrap_or(u64::MAX))
 }
 
+/// The Mach timebase from what `mach_timebase_info` returned (`kern`) and
+/// wrote (`numer`, `denom`): only from a call that succeeded
+/// (`KERN_SUCCESS`, 0) with neither part zero. Anything else is an error,
+/// not 1/1, which would under-count Apple Silicon's CPU about 42 times.
+pub(crate) fn timebase(kern: i32, numer: u32, denom: u32) -> Result<(u32, u32), String> {
+    if kern != 0 {
+        return Err(format!("mach_timebase_info failed with {kern}"));
+    }
+    if numer == 0 || denom == 0 {
+        return Err(format!("mach_timebase_info gave {numer}/{denom}"));
+    }
+    Ok((numer, denom))
+}
+
 /// Reads a sidecar's [`Usage`] by its PID: the macOS backend's reads
 /// `proc_pid_rusage`; the tests' are scripted.
 #[cfg(unix)]
@@ -422,6 +436,20 @@ mod tests {
             Duration::from_nanos(u64::MAX),
             "saturates"
         );
+    }
+
+    #[test]
+    fn a_mach_timebase_is_used_only_when_it_was_read_and_has_no_zero() {
+        assert_eq!(timebase(0, 125, 3), Ok((125, 3)), "Apple Silicon");
+        assert_eq!(timebase(0, 1, 1), Ok((1, 1)), "Intel");
+        // A failed call (5 is KERN_FAILURE), or a part left at zero: read as
+        // 1/1, either would under-count Apple Silicon's CPU about 42 times.
+        for (kern, numer, denom) in [(5, 125, 3), (0, 0, 3), (0, 125, 0), (0, 0, 0)] {
+            assert!(
+                timebase(kern, numer, denom).is_err(),
+                "{kern}: {numer}/{denom}"
+            );
+        }
     }
 
     #[test]

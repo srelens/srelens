@@ -80,10 +80,15 @@ pub(super) fn launch(
 /// under, public so `tests/macos_watchdog.rs` can run it on a process without
 /// Seatbelt. It takes a child already started, so it is not a way to run
 /// anything unconfined. `child` must have all three stdio streams piped and
-/// `kill_on_drop(true)`.
+/// `kill_on_drop(true)`: on an error it is dropped, which kills it.
 #[doc(hidden)]
 pub fn watch(child: tokio::process::Child, limits: &Limits) -> Result<Launched, LaunchError> {
-    watchdog::watched(child, Exit::from_status, limits, Rusage::new())
+    let rusage = Rusage::new().map_err(|e| {
+        LaunchError::Failed(format!(
+            "srelens could not read the Mach timebase it needs to measure the app's CPU: {e}"
+        ))
+    })?;
+    watchdog::watched(child, Exit::from_status, limits, rusage)
 }
 
 /// Reads a process's physical footprint and CPU time with
@@ -98,14 +103,12 @@ impl Rusage {
     // libc deprecates its Mach functions in favour of the mach2 crate; one
     // call does not justify the dependency.
     #[allow(deprecated)]
-    fn new() -> Rusage {
+    fn new() -> Result<Rusage, String> {
         let mut base = libc::mach_timebase_info { numer: 0, denom: 0 };
         // SAFETY: a valid out-pointer.
-        unsafe { libc::mach_timebase_info(&mut base) };
-        Rusage {
-            numer: base.numer,
-            denom: base.denom,
-        }
+        let kern = unsafe { libc::mach_timebase_info(&mut base) };
+        let (numer, denom) = watchdog::timebase(kern, base.numer, base.denom)?;
+        Ok(Rusage { numer, denom })
     }
 }
 
