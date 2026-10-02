@@ -33,6 +33,11 @@ mod macos;
 #[cfg(windows)]
 mod windows;
 
+// Only the macOS backend runs the watchdog; every OS tests its policy, and
+// Linux its loop too.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+mod watchdog;
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[doc(hidden)]
 pub mod launch;
