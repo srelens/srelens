@@ -60,6 +60,18 @@ impl Outbox {
             .map_err(|_| Unsent::Closed)
     }
 
+    /// Wait for room for one line on the general lane, queuing nothing yet.
+    /// Waiting for room is the only part of [`Outbox::send`] that waits:
+    /// filling it does not, so a caller can decide whether to queue its line
+    /// at all at the last moment, under a lock of its own.
+    pub(crate) async fn room(&self) -> Result<Room<'_>, Unsent> {
+        self.general
+            .reserve()
+            .await
+            .map(Room)
+            .map_err(|_| Unsent::Closed)
+    }
+
     /// Queue the answer to `activate`, `health` or `deactivate`, which the
     /// writer takes ahead of everything [`Outbox::send`] queued.
     pub(crate) async fn send_lifecycle(&self, message: &impl Serialize) -> Result<(), Unsent> {
@@ -76,6 +88,20 @@ impl Outbox {
         if self.general.send(Line::Close(done)).await.is_ok() {
             let _ = closed.await;
         }
+    }
+}
+
+/// Room for one line on the general lane ([`Outbox::room`]). Dropped
+/// unfilled, it is given back.
+pub(crate) struct Room<'a>(mpsc::Permit<'a, Line>);
+
+impl Room<'_> {
+    /// Queue `message` as one line here, at once, behind every line queued
+    /// before. Over the limit, it is not queued, and the room is given back.
+    pub(crate) fn send(self, message: &impl Serialize) -> Result<(), Unsent> {
+        let line = line(message)?;
+        self.0.send(Line::Text(line));
+        Ok(())
     }
 }
 

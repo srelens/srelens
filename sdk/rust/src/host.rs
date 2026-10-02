@@ -64,6 +64,11 @@ struct Inner {
     /// arrives after refuses at once rather than queuing anything.
     waiting: Mutex<Option<HashMap<String, Waiting>>>,
     places: Arc<Semaphore>,
+    /// Tests only: where the next task sending a dropped call's cancel
+    /// waits, once it has room for the cancel and before it checks the host
+    /// and queues it (see [`Host::hold_next_cancel`]).
+    #[cfg(test)]
+    cancel_gate: Mutex<Option<CancelGate>>,
 }
 
 impl Host {
@@ -75,6 +80,8 @@ impl Host {
                 next: AtomicU64::new(0),
                 waiting: Mutex::new(Some(HashMap::new())),
                 places: Arc::new(Semaphore::new(call_slots(limits))),
+                #[cfg(test)]
+                cancel_gate: Mutex::new(None),
             }),
         }
     }
@@ -328,8 +335,13 @@ fn check(context: &CallContext, fields: &[Field<'_>]) -> Result<(), HostError> {
 ///   the way out, so a call left unanswered by design (the drained-output
 ///   check in `tests/common/mod.rs`) would fail at random. Once the host is
 ///   disconnected its semaphore is closed, so a drop after that point sends
-///   nothing, and the task a drop before it spawned checks again before it
-///   sends: that task may run only after the shutdown answer.
+///   nothing. A drop before it spawns the task that sends the cancel, which
+///   may run, or be descheduled, until after the session has answered
+///   `shutdown`. That task waits for room in the queue first, holding no
+///   lock, then checks that the host is connected and queues the cancel as
+///   one step, under the `waiting` lock `disconnect` takes. The session
+///   answers `shutdown` only once `disconnect` has returned, so the cancel is
+///   queued ahead of that answer or not at all.
 struct CancelOnDrop {
     host: Host,
     id: Option<String>,
@@ -377,13 +389,71 @@ impl Drop for CancelOnDrop {
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             runtime.spawn(async move {
                 // This task runs when the handlers' runtime gets to it, which
-                // may be after the session answered `shutdown`: its last line.
-                if host.inner.places.is_closed() {
+                // may be after the session answered `shutdown`: its last
+                // line. Room first, holding no lock, since that can wait.
+                let Ok(room) = host.inner.outbox.room().await else {
                     return;
+                };
+                #[cfg(test)]
+                let _done = host.wait_at_cancel_gate().await;
+                // Then, as one step under the lock `disconnect` takes, which
+                // returns before the session answers `shutdown`: the host is
+                // still connected and the cancel is queued ahead of that
+                // answer, or it is not and the room is given back.
+                let waiting = host.inner.waiting.lock().expect("not poisoned");
+                if waiting.is_some() {
+                    let _ = room.send(&cancel);
                 }
-                let _ = host.inner.outbox.send(&cancel).await;
             });
         }
+    }
+}
+
+/// Tests only: holds the task that sends a dropped call's cancel at one
+/// point, so a test can run the session's end while it waits there.
+#[cfg(test)]
+struct CancelGate {
+    /// Told when the task reaches the gate.
+    reached: oneshot::Sender<()>,
+    /// The task waits here until the test sends, or drops this.
+    release: oneshot::Receiver<()>,
+    /// Dropped once the task has finished, whether it sent or not.
+    done: oneshot::Sender<()>,
+}
+
+#[cfg(test)]
+impl Host {
+    /// Hold the next cancel task at its gate. Returns its `reached`, the
+    /// sender that releases it, and its `done` (an error once it finished).
+    pub(crate) fn hold_next_cancel(
+        &self,
+    ) -> (
+        oneshot::Receiver<()>,
+        oneshot::Sender<()>,
+        oneshot::Receiver<()>,
+    ) {
+        let (reached, reached_rx) = oneshot::channel();
+        let (release_tx, release) = oneshot::channel();
+        let (done, done_rx) = oneshot::channel();
+        *self.inner.cancel_gate.lock().expect("not poisoned") = Some(CancelGate {
+            reached,
+            release,
+            done,
+        });
+        (reached_rx, release_tx, done_rx)
+    }
+
+    /// Wait at the gate, if a test set one; the guard to hold until done.
+    async fn wait_at_cancel_gate(&self) -> Option<oneshot::Sender<()>> {
+        let gate = self
+            .inner
+            .cancel_gate
+            .lock()
+            .expect("not poisoned")
+            .take()?;
+        let _ = gate.reached.send(());
+        let _ = gate.release.await;
+        Some(gate.done)
     }
 }
 

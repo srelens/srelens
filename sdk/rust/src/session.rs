@@ -585,13 +585,18 @@ mod tests {
         /// Before `shutdown` arrived, with the `$/cancelRequest` the drop
         /// spawned still unsent when the session answers it.
         BeforeShutdown,
+        /// Before `shutdown` arrived, with the task sending the
+        /// `$/cancelRequest` already running, and held just before it queues
+        /// the cancel while the session ends and answers: a thread of the
+        /// handlers' runtime descheduled there.
+        BeforeShutdownWithItsCancelHeld,
     }
 
     /// The shutdown answer is the session's last line, though a call to
     /// srelens is dropped unanswered around it, as `dropped` says. Such a
     /// drop spawns a `$/cancelRequest` while the host is connected; this
-    /// test's runtime runs that task only when the test yields, after the
-    /// shutdown answer is queued.
+    /// test's runtime runs that task only when the test yields, or awaits
+    /// the task's gate.
     async fn the_shutdown_answer_is_the_last_line(dropped: Dropped) {
         let (outbox, writer) = Outbox::new();
         let written = tokio::spawn(async move {
@@ -620,6 +625,16 @@ mod tests {
             Dropped::BeforeShutdown => {
                 drop(call);
                 session.handle(shutdown).await
+            }
+            Dropped::BeforeShutdownWithItsCancelHeld => {
+                let (reached, release, done) = host.hold_next_cancel();
+                drop(call);
+                reached.await.expect("the cancel task reached its gate");
+                let flow = session.handle(shutdown).await;
+                let _ = release.send(());
+                // An error once the task has finished, sent or not.
+                let _ = done.await;
+                flow
             }
         };
         assert!(matches!(flow, Flow::Shutdown));
@@ -651,5 +666,14 @@ mod tests {
     #[tokio::test]
     async fn a_cancel_still_unsent_at_shutdown_is_not_sent_after_the_shutdown_answer() {
         the_shutdown_answer_is_the_last_line(Dropped::BeforeShutdown).await;
+    }
+
+    // The task sending a cancel can be descheduled after it saw the host
+    // connected and before it queues the cancel, while the session thread
+    // ends the session and answers `shutdown`. Seeing the host connected and
+    // queuing the cancel must happen as one step against that end.
+    #[tokio::test]
+    async fn a_cancel_held_between_its_check_and_its_send_is_not_sent_after_the_shutdown_answer() {
+        the_shutdown_answer_is_the_last_line(Dropped::BeforeShutdownWithItsCancelHeld).await;
     }
 }
