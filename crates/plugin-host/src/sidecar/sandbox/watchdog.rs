@@ -209,26 +209,40 @@ pub(crate) fn watched(
             }
         };
         reading.store(NO_READING, Ordering::Relaxed);
-        let mut exit = describe(status);
-        match reason {
-            Some(Reason::Memory { measured, limit }) => {
-                exit.memory_limit = true;
-                exit.description = format!(
-                    "was stopped at its {} MiB memory limit (srelens measured {} MiB)",
-                    limit / MIB,
-                    measured / MIB
-                );
-            }
-            Some(Reason::Unmeasured(e)) => {
-                exit.description = format!(
-                    "was stopped because srelens could not measure its memory and CPU: {e}"
-                );
-            }
-            None => {}
-        }
-        let _ = ended.send(exit);
+        let _ = ended.send(explain(describe(status), reason));
     });
     Ok(launched)
+}
+
+/// The sidecar's `exit`, told as the watchdog's stop when the watchdog had a
+/// `reason` to stop it and its `SIGKILL` is what ended it.
+///
+/// Any other exit is the sidecar's own and is left as it was: a reading of a
+/// process that is exiting, but not yet a zombie, can fail (`ESRCH` on
+/// macOS), and the kill that follows then finds a crash or an exit code to
+/// report, not the watchdog's stop.
+#[cfg(unix)]
+fn explain(mut exit: Exit, reason: Option<Reason>) -> Exit {
+    if exit.signal != Some(libc::SIGKILL) {
+        return exit;
+    }
+    match reason {
+        Some(Reason::Memory { measured, limit }) => {
+            exit.memory_limit = true;
+            // Rounded up, so a reading just past the limit is not shown at it.
+            exit.description = format!(
+                "was stopped at its {} MiB memory limit (srelens measured {} MiB)",
+                limit / MIB,
+                measured.div_ceil(MIB)
+            );
+        }
+        Some(Reason::Unmeasured(e)) => {
+            exit.description =
+                format!("was stopped because srelens could not measure its memory and CPU: {e}");
+        }
+        None => {}
+    }
+    exit
 }
 
 #[cfg(unix)]
@@ -419,6 +433,87 @@ mod tests {
                 "{cpus}: {verdict:?}"
             );
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod explain_tests {
+    use super::*;
+    use std::os::unix::process::ExitStatusExt;
+
+    /// The exit `from_status` gives for a raw wait status.
+    fn exit(raw: i32) -> Exit {
+        Exit::from_status(Ok(ExitStatus::from_raw(raw)))
+    }
+
+    /// Killed by `signal`.
+    fn killed(signal: libc::c_int) -> Exit {
+        exit(signal)
+    }
+
+    /// Exited with `code`.
+    fn exited(code: i32) -> Exit {
+        exit(code << 8)
+    }
+
+    fn unmeasured() -> Option<Reason> {
+        Some(Reason::Unmeasured(io::Error::from_raw_os_error(
+            libc::ESRCH,
+        )))
+    }
+
+    fn over(measured: u64, limit: u64) -> Option<Reason> {
+        Some(Reason::Memory { measured, limit })
+    }
+
+    #[test]
+    fn the_watchdogs_sigkill_after_a_memory_reading_is_a_stop_at_the_memory_limit() {
+        let told = explain(killed(libc::SIGKILL), over(129 * MIB, 128 * MIB));
+        assert_eq!(
+            told.description,
+            "was stopped at its 128 MiB memory limit (srelens measured 129 MiB)"
+        );
+        assert!(told.memory_limit);
+        assert_eq!(told.signal, Some(libc::SIGKILL));
+    }
+
+    #[test]
+    fn the_watchdogs_sigkill_after_a_failed_reading_says_the_reading_failed() {
+        let told = explain(killed(libc::SIGKILL), unmeasured());
+        assert!(
+            told.description
+                .starts_with("was stopped because srelens could not measure its memory and CPU: "),
+            "{}",
+            told.description
+        );
+        assert!(!told.memory_limit);
+    }
+
+    #[test]
+    fn an_exit_of_its_own_while_the_watchdog_stopped_it_is_left_as_it_was() {
+        // A reading of a process that is exiting, but not yet a zombie, can
+        // fail: the watchdog then kills a process that has already ended.
+        for ended in [exited(3), killed(libc::SIGSEGV)] {
+            for reason in [unmeasured(), over(129 * MIB, 128 * MIB)] {
+                assert_eq!(explain(ended.clone(), reason), ended);
+            }
+        }
+    }
+
+    #[test]
+    fn an_exit_the_watchdog_had_no_reason_for_is_left_as_it_was() {
+        for ended in [exited(0), killed(libc::SIGKILL)] {
+            assert_eq!(explain(ended.clone(), None), ended);
+        }
+    }
+
+    #[test]
+    fn a_measurement_just_past_the_limit_is_rounded_up() {
+        let told = explain(killed(libc::SIGKILL), over(256 * MIB + 1, 256 * MIB));
+        assert_eq!(
+            told.description,
+            "was stopped at its 256 MiB memory limit (srelens measured 257 MiB)"
+        );
     }
 }
 
