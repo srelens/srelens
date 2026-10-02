@@ -608,7 +608,8 @@ pub fn parse_hami_register_annotation(ann: &str) -> Option<HamiRegisterInfo> {
     let virtual_gpu_count: i64 = healthy_devices.iter().filter_map(|d| d.count).sum();
     let virtual_vram_total_mib: i64 = healthy_devices
         .iter()
-        .map(|d| d.devmem.unwrap_or(0) * d.count.unwrap_or(1))
+        .filter(|d| d.count.unwrap_or(0) > 0)
+        .map(|d| d.devmem.unwrap_or(0))
         .sum();
     let model = healthy_devices
         .iter()
@@ -876,8 +877,8 @@ mod tests {
         let cluster = parse_gpu_cluster_info(&[node], &[pod]);
         assert_eq!(cluster.total_gpus, 10);
         assert_eq!(cluster.total_allocated_gpus, 1);
-        // 10 vGPUs * 15360 MiB = 153600 MiB total virtual VRAM pool
-        assert_eq!(cluster.total_vram_mib, 153600);
+        // 1 T4 physical GPU = 15360 MiB total VRAM
+        assert_eq!(cluster.total_vram_mib, 15360);
         assert_eq!(cluster.total_allocated_vram_mib, 5120);
 
         let n = &cluster.nodes[0];
@@ -885,7 +886,7 @@ mod tests {
         assert_eq!(n.physical_gpu_count, 1);
         assert_eq!(n.physical_vram_total_mib, Some(15360));
         assert_eq!(n.gpu_model.as_deref(), Some("Tesla T4"));
-        assert_eq!(n.vram_capacity_total_mib, Some(153600));
+        assert_eq!(n.vram_capacity_total_mib, Some(15360));
         assert_eq!(n.vram_requests_total_mib, 5120);
     }
 
@@ -902,7 +903,7 @@ mod tests {
         assert_eq!(info.physical_vram_total_mib, 15360);
         // Virtual count and allocatable vVRAM only count the healthy device:
         assert_eq!(info.virtual_gpu_count, 10);
-        assert_eq!(info.virtual_vram_total_mib, 153600);
+        assert_eq!(info.virtual_vram_total_mib, 15360);
         assert_eq!(info.model.as_deref(), Some("Tesla T4"));
     }
 

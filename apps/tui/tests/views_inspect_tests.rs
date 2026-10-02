@@ -495,10 +495,10 @@ fn node_inspector_gpu_gauge_shows_virtual_gpus_and_total_virtual_vram_for_hami()
     details.gpu_capacity_count = 10;
     details.gpu_allocatable_count = 10;
     details.virtual_gpu_count = Some(10);
-    details.virtual_gpu_memory_total_mib = Some(153600);
+    details.virtual_gpu_memory_total_mib = Some(15360);
     details.gpu_requests_count = 3;
-    // 10 vGPUs * 15 GiB = 150 GiB total virtual VRAM
-    details.gpu_memory_total_mib = Some(153600);
+    // 1 physical T4 with 10 vGPUs sharing 15 GiB total VRAM
+    details.gpu_memory_total_mib = Some(15360);
     details.gpu_memory_requests_mib = 15360; // 15 GiB requested
     let state = node_state(details);
     let text_wide = render_node(260, 40, &state);
@@ -509,7 +509,7 @@ fn node_inspector_gpu_gauge_shows_virtual_gpus_and_total_virtual_vram_for_hami()
     );
     // GPU gauge VRAM allocation showing virtual pool and physical capacity on wide screen:
     assert!(
-        text_wide.contains("Tesla T4 (Alloc): 15.0/150G (10% HAMi vPool) • 1x 15G Phys"),
+        text_wide.contains("Tesla T4 (Alloc): 15.0/15G (100% HAMi vPool) • 1x 15G Phys"),
         "{text_wide}"
     );
 
@@ -517,14 +517,14 @@ fn node_inspector_gpu_gauge_shows_virtual_gpus_and_total_virtual_vram_for_hami()
     let text_ultra = render_node(320, 40, &state);
     assert!(
         text_ultra
-            .contains("Tesla T4 (Alloc): 15.0/150G (10% HAMi vPool) • 1x 15G Phys (100% [Sat])"),
+            .contains("Tesla T4 (Alloc): 15.0/15G (100% HAMi vPool) • 1x 15G Phys (100% [Sat])"),
         "{text_ultra}"
     );
 
     // Compact GPU gauge on narrower screens:
     let text_compact = render_node(200, 40, &state);
     assert!(
-        text_compact.contains("Tesla T4 (Alloc): 15.0/150G (10% HAMi pool)"),
+        text_compact.contains("Tesla T4 (Alloc): 15.0/15G (100% HAMi pool)"),
         "{text_compact}"
     );
 }
@@ -541,9 +541,9 @@ fn node_inspector_renders_multi_gpu_physical_multiplier_for_hami_nodes() {
     details.gpu_capacity_count = 40;
     details.gpu_allocatable_count = 40;
     details.virtual_gpu_count = Some(40);
-    details.virtual_gpu_memory_total_mib = Some(614400);
+    details.virtual_gpu_memory_total_mib = Some(61440);
     details.gpu_requests_count = 4;
-    details.gpu_memory_total_mib = Some(614400);
+    details.gpu_memory_total_mib = Some(61440);
     details.gpu_memory_requests_mib = 30720; // 30 GiB requested (50% phys, so not saturated)
     let state = node_state(details);
     let text_wide = render_node(260, 40, &state);
@@ -553,13 +553,13 @@ fn node_inspector_renders_multi_gpu_physical_multiplier_for_hami_nodes() {
         "{text_wide}"
     );
     assert!(
-        text_wide.contains("Tesla T4 (Alloc): 30.0/600G (5% HAMi vPool) • 4x 60G Phys"),
+        text_wide.contains("Tesla T4 (Alloc): 30.0/60G (50% HAMi vPool) • 4x 60G Phys"),
         "{text_wide}"
     );
 
     let text_ultra = render_node(320, 40, &state);
     assert!(
-        text_ultra.contains("Tesla T4 (Alloc): 30.0/600G (5% HAMi vPool) • 4x 60G Phys (50%)"),
+        text_ultra.contains("Tesla T4 (Alloc): 30.0/60G (50% HAMi vPool) • 4x 60G Phys (50%)"),
         "{text_ultra}"
     );
 }
@@ -2748,7 +2748,7 @@ fn gpu_view_renders_hami_virtual_gpus_with_dual_reality() {
         gpu_allocatable: 10,
         gpu_requests: 3,
         vram_per_gpu_mib: Some(15360),
-        vram_capacity_total_mib: Some(153600),
+        vram_capacity_total_mib: Some(15360),
         vram_requests_total_mib: 15360,
         pods: vec![srelens_kube::gpu_info::GpuPodItem {
             name: "test-pod-0".to_string(),
@@ -2771,7 +2771,7 @@ fn gpu_view_renders_hami_virtual_gpus_with_dual_reality() {
         total_gpu_nodes: 1,
         total_gpus: 10,
         total_allocated_gpus: 3,
-        total_vram_mib: 153600,
+        total_vram_mib: 15360,
         total_allocated_vram_mib: 15360,
         total_gpu_pods: 1,
     };
@@ -2783,7 +2783,7 @@ fn gpu_view_renders_hami_virtual_gpus_with_dual_reality() {
 
     // Left table:
     assert!(text.contains("3/10v"), "{text}");
-    assert!(text.contains("15/150G(v)"), "{text}");
+    assert!(text.contains("15/15G(v)"), "{text}");
 
     // Right details header:
     assert!(text.contains("1x Tesla T4 (HAMi 10 vGPUs)"), "{text}");
@@ -2795,7 +2795,7 @@ fn gpu_view_renders_hami_virtual_gpus_with_dual_reality() {
         "{text}"
     );
     assert!(
-        text.contains("Virtual Pool: 15 GiB / 150 GiB vVRAM"),
+        text.contains("Virtual Pool: 15 GiB / 15 GiB vVRAM"),
         "{text}"
     );
 
@@ -2826,7 +2826,7 @@ fn gpu_view_renders_hami_empty_node_free_message() {
         gpu_allocatable: 10,
         gpu_requests: 0,
         vram_per_gpu_mib: Some(15360),
-        vram_capacity_total_mib: Some(153600),
+        vram_capacity_total_mib: Some(15360),
         vram_requests_total_mib: 0,
         pods: vec![],
         is_virtual_gpu: true,
@@ -2839,7 +2839,7 @@ fn gpu_view_renders_hami_empty_node_free_message() {
         total_gpu_nodes: 1,
         total_gpus: 10,
         total_allocated_gpus: 0,
-        total_vram_mib: 153600,
+        total_vram_mib: 15360,
         total_allocated_vram_mib: 0,
         total_gpu_pods: 0,
     };
@@ -2849,7 +2849,7 @@ fn gpu_view_renders_hami_empty_node_free_message() {
 
     let text = render_gpu(160, 40, &state);
     assert!(
-        text.contains("All 10 vGPUs (150 GiB vVRAM) are free and ready to accept workloads."),
+        text.contains("All 10 vGPUs (15 GiB vVRAM) are free and ready to accept workloads."),
         "{text}"
     );
 }
@@ -2870,7 +2870,7 @@ fn gpu_view_renders_compact_vram_gauge_on_narrow_terminal() {
         gpu_allocatable: 10,
         gpu_requests: 3,
         vram_per_gpu_mib: Some(15360),
-        vram_capacity_total_mib: Some(153600),
+        vram_capacity_total_mib: Some(15360),
         vram_requests_total_mib: 15360,
         pods: vec![],
         is_virtual_gpu: true,
@@ -2883,7 +2883,7 @@ fn gpu_view_renders_compact_vram_gauge_on_narrow_terminal() {
         total_gpu_nodes: 1,
         total_gpus: 10,
         total_allocated_gpus: 3,
-        total_vram_mib: 153600,
+        total_vram_mib: 15360,
         total_allocated_vram_mib: 15360,
         total_gpu_pods: 0,
     };
@@ -2894,7 +2894,7 @@ fn gpu_view_renders_compact_vram_gauge_on_narrow_terminal() {
     // Terminal width 85: right pane will be around 41 cols (< 50)
     let text_narrow = render_gpu(85, 30, &state);
     assert!(
-        text_narrow.contains("Phys: 15/15G (100%) • vPool: 15/150G"),
+        text_narrow.contains("Phys: 15/15G (100%) • vPool: 15/15G"),
         "{text_narrow}"
     );
 
@@ -2902,24 +2902,42 @@ fn gpu_view_renders_compact_vram_gauge_on_narrow_terminal() {
     node.vram_requests_total_mib = 512;
     let mut small_state = srelens_tui::views::gpu_view::GpuViewState::new();
     small_state.set_info(srelens_kube::gpu_info::GpuClusterInfo {
-        nodes: vec![node],
+        nodes: vec![node.clone()],
         total_gpu_nodes: 1,
         total_gpus: 10,
         total_allocated_gpus: 1,
-        total_vram_mib: 153600,
+        total_vram_mib: 15360,
         total_allocated_vram_mib: 512,
         total_gpu_pods: 0,
     });
     let text_small = render_gpu(85, 30, &small_state);
     assert!(
-        text_small.contains("Phys: 0.5/15G (3%) • vPool: 0.5/150G"),
+        text_small.contains("Phys: 0.5/15G (3%) • vPool: 0.5/15G"),
         "{text_small}"
+    );
+
+    // Verify fractional request >= 10 GiB (e.g. 10752 MiB = 10.5 GiB) preserves .5 decimal precision:
+    node.vram_requests_total_mib = 10752;
+    let mut frac_state = srelens_tui::views::gpu_view::GpuViewState::new();
+    frac_state.set_info(srelens_kube::gpu_info::GpuClusterInfo {
+        nodes: vec![node],
+        total_gpu_nodes: 1,
+        total_gpus: 10,
+        total_allocated_gpus: 1,
+        total_vram_mib: 15360,
+        total_allocated_vram_mib: 10752,
+        total_gpu_pods: 0,
+    });
+    let text_frac = render_gpu(85, 30, &frac_state);
+    assert!(
+        text_frac.contains("Phys: 10.5/15G (70%) • vPool: 10.5/15G"),
+        "{text_frac}"
     );
 
     // Terminal width 110: right pane will be around 64 cols (< 70)
     let text_mid = render_gpu(110, 30, &state);
     assert!(
-        text_mid.contains("Phys: 15 GiB/15 GiB (100%) • vPool: 15 GiB/150 GiB"),
+        text_mid.contains("Phys: 15 GiB/15 GiB (100%) • vPool: 15 GiB/15 GiB"),
         "{text_mid}"
     );
 }

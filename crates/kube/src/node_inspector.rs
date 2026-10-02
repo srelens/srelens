@@ -920,12 +920,12 @@ mod tests {
         assert_eq!(details.physical_gpu_count, 1);
         assert_eq!(details.physical_gpu_memory_total_mib, Some(15360));
         assert_eq!(details.virtual_gpu_count, Some(10));
-        assert_eq!(details.virtual_gpu_memory_total_mib, Some(153600));
+        assert_eq!(details.virtual_gpu_memory_total_mib, Some(15360));
         assert_eq!(details.gpu_capacity_count, 10);
         assert_eq!(details.gpu_allocatable_count, 10);
         assert_eq!(details.gpu_requests_count, 1);
-        // 10 vGPUs * 15360 MiB = 153600 MiB = 150 GiB total virtual VRAM pool
-        assert_eq!(details.gpu_memory_total_mib, Some(153600));
+        // 1 T4 physical GPU = 15360 MiB total VRAM
+        assert_eq!(details.gpu_memory_total_mib, Some(15360));
         assert_eq!(details.gpu_memory_requests_mib, 5120);
         assert_eq!(details.gpu_model.as_deref(), Some("Tesla T4"));
         assert_eq!(details.pods.len(), 1);

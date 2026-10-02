@@ -452,9 +452,7 @@ fn format_compact_gib_val(mib: i64) -> String {
         "0".to_string()
     } else {
         let gib = mib as f64 / 1024.0;
-        if gib < 1.0 {
-            format!("{:.1}", gib)
-        } else if (gib - gib.round()).abs() < 0.05 || gib >= 10.0 {
+        if (gib - gib.round()).abs() < 0.05 {
             format!("{:.0}", gib.round() as i64)
         } else {
             format!("{:.1}", gib)
