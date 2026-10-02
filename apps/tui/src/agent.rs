@@ -103,13 +103,24 @@ impl ToolInvoker for McpToolInvoker {
     }
 
     async fn call_tool(&self, name: &str, args: &Value) -> Result<ToolCallResult, LlmError> {
-        let real_name = self
-            .aliases
-            .lock()
-            .unwrap()
-            .get(name)
-            .cloned()
-            .unwrap_or_else(|| name.to_string());
+        let real_name = {
+            let aliases = self.aliases.lock().unwrap();
+            aliases
+                .get(name)
+                .cloned()
+                .or_else(|| {
+                    let k8s_name = format!("k8s_{name}");
+                    aliases.get(&k8s_name).cloned()
+                })
+                .or_else(|| {
+                    if name.starts_with("k8s_") {
+                        Some(name.replacen('_', ".", 1))
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_else(|| name.to_string())
+        };
         let req = json!({
             "jsonrpc": "2.0",
             "id": 1,

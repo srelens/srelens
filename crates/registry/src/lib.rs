@@ -530,6 +530,7 @@ fn build_with(
     reg.register(srelens_kube::ingresses::list_ingresses_capability(
         cache.clone(),
     ));
+    reg.register(srelens_kube::endpoints::list_endpoints_capability(cache.clone()));
     reg.register(srelens_kube::endpointslices::list_endpointslices_capability(cache.clone()));
     reg.register(srelens_kube::networkpolicies::list_networkpolicies_capability(cache.clone()));
     reg.register(srelens_kube::pvcs::list_pvcs_capability(cache.clone()));

@@ -368,6 +368,45 @@ async fn an_unknown_tool_name_is_a_tool_error_not_a_transport_failure() {
 }
 
 #[tokio::test]
+async fn tool_name_resolution_is_resilient_to_prefix_and_separator_variations() {
+    let inv = invoker();
+    inv.list_tools().await.unwrap();
+
+    // Calling listEndpoints without k8s_ prefix or with dot resolves to k8s.listEndpoints
+    let res1 = inv
+        .call_tool(
+            "listEndpoints",
+            &json!({"context": "prod", "namespace": "default"}),
+        )
+        .await
+        .unwrap();
+    // Reaching the handler (which errors on reading kubeconfig) proves the name resolved to the capability
+    // rather than failing at the RPC dispatcher with "unknown tool".
+    assert!(!res1.content.contains("unknown tool"));
+    assert!(res1.content.starts_with("handler error:"));
+
+    let res2 = inv
+        .call_tool(
+            "k8s.listEndpoints",
+            &json!({"context": "prod", "namespace": "default"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res1.content, res2.content);
+    assert_eq!(res1.is_error, res2.is_error);
+
+    let res3 = inv
+        .call_tool(
+            "k8s_listEndpoints",
+            &json!({"context": "prod", "namespace": "default"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res1.content, res3.content);
+    assert_eq!(res1.is_error, res3.is_error);
+}
+
+#[tokio::test]
 async fn a_tool_that_needs_a_missing_cluster_reports_an_error_result() {
     let inv = invoker();
     inv.list_tools().await.unwrap();

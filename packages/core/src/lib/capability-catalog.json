@@ -560,6 +560,15 @@
     "confirm": null
   },
   {
+    "id": "k8s.listEndpoints",
+    "readOnly": true,
+    "destructive": false,
+    "requiresConfirm": false,
+    "sensitive": false,
+    "impact": "low",
+    "confirm": null
+  },
+  {
     "id": "k8s.listEvents",
     "readOnly": true,
     "destructive": false,

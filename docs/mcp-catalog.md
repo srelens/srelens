@@ -7,11 +7,11 @@ Everything this server exposes over MCP, generated from the live registry so it 
 
 ## Tools
 
-124 tools, grouped by area and then by how a call is gated. Argument schemas are not reproduced here — call `tools/list` for those, which cannot go stale.
+125 tools, grouped by area and then by how a call is gated. Argument schemas are not reproduced here — call `tools/list` for those, which cannot go stale.
 
 **Impact** is how much a successful call disturbs — `low`, `medium` or `high` — and is a different question from the section heading, which is how the call is gated. A capability that accepts several named operations carries the highest level any of them reaches; the per-operation level travels with the resource.
 
-### Kubernetes — read-only (56)
+### Kubernetes — read-only (57)
 
 | Tool | Impact | Summary |
 | --- | --- | --- |
@@ -34,6 +34,7 @@ Everything this server exposes over MCP, generated from the live registry so it 
 | `k8s.listDaemonSets` | low | list DaemonSets in a namespace of a connected kube context |
 | `k8s.listDeployments` | low | list deployments in a namespace of a connected kube context |
 | `k8s.listEndpointSlices` | low | list EndpointSlices in a namespace of a connected kube context |
+| `k8s.listEndpoints` | low | list Endpoints in a namespace of a connected kube context |
 | `k8s.listEvents` | low | list events in a connected kube context |
 | `k8s.listIngresses` | low | list Ingresses in a namespace of a connected kube context |
 | `k8s.listJobs` | low | list Jobs in a namespace of a connected kube context |

@@ -140,6 +140,7 @@ pub mod daemonsets;
 pub mod debug;
 pub mod deployments;
 pub mod endpoint_query;
+pub mod endpoints;
 pub mod endpointslices;
 pub mod events;
 pub mod exec;
