@@ -52,6 +52,7 @@ Declare the operations in the app's manifest
 - **Logging.**
   - Use the `log` crate. Records go to stderr as `LEVEL target: message`, which srelens keeps in the app's log at that level.
   - Each line is cut to the 4 KiB srelens keeps.
+  - `.log_level(log::LevelFilter::Debug)` lowers the level from `Info`. It is a setting on the builder and nothing else: a sandboxed sidecar gets no environment to read a level from, so read your own variable and pass it in if you want one. The `log` crate's `max_level_*` features still cap what a build can emit. If your program installs a `log` logger of its own before `run_stdio`, the SDK's is not installed, so the level does not apply and that logger's own filtering does. `log::LevelFilter::Off` also silences the SDK's own failure line, while a panic is still written.
   - A panic is logged as an error.
 - **Exit.** The process exits after `shutdown`, or when srelens goes away, having flushed everything queued first — the session never cuts off its own last line. It exits 0 once that is done, and 1 if reading or writing the pipe to srelens failed, or srelens broke the protocol.
 

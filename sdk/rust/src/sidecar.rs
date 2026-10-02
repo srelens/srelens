@@ -1,3 +1,4 @@
+use log::LevelFilter;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::Value;
@@ -30,6 +31,7 @@ pub(crate) struct Registry {
 pub struct Sidecar {
     pub(crate) identity: Peer,
     pub(crate) registry: Registry,
+    pub(crate) log_level: LevelFilter,
 }
 
 impl Sidecar {
@@ -40,7 +42,19 @@ impl Sidecar {
                 version: version.into(),
             },
             registry: Registry::default(),
+            log_level: LevelFilter::Info,
         }
+    }
+
+    /// The least severe level [`Sidecar::run_stdio`] writes to srelens's
+    /// log; `Info` unless set. `LevelFilter::Off` writes no records, but a
+    /// panic is still written. The level is for the SDK's own stderr logger:
+    /// if the program installs a `log` logger of its own before
+    /// [`Sidecar::run_stdio`], the SDK's is not installed, and that logger's
+    /// own filtering applies.
+    pub fn log_level(mut self, level: LevelFilter) -> Sidecar {
+        self.log_level = level;
+        self
     }
 
     /// Panics when `name` cannot name an operation, or is taken: a
@@ -118,11 +132,12 @@ impl Sidecar {
 
     /// Serve srelens over stdin and stdout, then exit: 0 after `shutdown` or
     /// when stdin closes, 1 when srelens wrote something that is not
-    /// JSON-RPC. Installs the stderr logger and the panic hook first. Exits
-    /// the process rather than returning: tokio's stdin reader cannot be
-    /// cancelled, and would keep the runtime from shutting down.
+    /// JSON-RPC. Installs the stderr logger, at the level set with
+    /// [`Sidecar::log_level`], and the panic hook first. Exits the process
+    /// rather than returning: tokio's stdin reader cannot be cancelled, and
+    /// would keep the runtime from shutting down.
     pub async fn run_stdio(self) -> std::process::ExitCode {
-        crate::logging::install();
+        crate::logging::install(self.log_level);
         let code = match self.run(tokio::io::stdin(), tokio::io::stdout()).await {
             Ok(()) => 0,
             Err(e) => {
@@ -132,5 +147,18 @@ impl Sidecar {
         };
         log::logger().flush();
         std::process::exit(code)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_log_level_is_info_unless_set() {
+        let sidecar = Sidecar::new("t", "1");
+        assert_eq!(sidecar.log_level, LevelFilter::Info);
+        let sidecar = sidecar.log_level(LevelFilter::Debug);
+        assert_eq!(sidecar.log_level, LevelFilter::Debug);
     }
 }
