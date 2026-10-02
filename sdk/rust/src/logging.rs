@@ -153,4 +153,40 @@ mod tests {
         let off = Stderr::new(LevelFilter::Off);
         assert!(!off.enabled(&at(Level::Error)));
     }
+
+    // The logger and the `log` crate's max level are process-global, so a test
+    // that installs them runs itself again as a child process, which sees this
+    // variable, and reads what the child wrote to stderr.
+    const CHILD: &str = "SRELENS_SDK_LOG_CHILD";
+
+    fn stderr_of_child(test: &str, mode: &str) -> String {
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([test, "--exact", "--nocapture", "--test-threads=1"])
+            .env(CHILD, mode)
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&child.stderr).into_owned();
+        assert!(child.status.success(), "the child failed: {stderr}");
+        stderr
+    }
+
+    #[test]
+    fn install_sets_the_level_the_log_macros_filter_at() {
+        if let Ok(level) = std::env::var(CHILD) {
+            install(level.parse().unwrap());
+            log::trace!("TRACE-LINE");
+            log::debug!("DEBUG-LINE");
+            log::info!("INFO-LINE");
+            return;
+        }
+        let test = "logging::tests::install_sets_the_level_the_log_macros_filter_at";
+        let at_debug = stderr_of_child(test, "debug");
+        let at_info = stderr_of_child(test, "info");
+        // `INFO-LINE` in both shows the child ran this test at all.
+        assert!(at_debug.contains("INFO-LINE"), "{at_debug}");
+        assert!(at_debug.contains("DEBUG-LINE"), "{at_debug}");
+        assert!(!at_debug.contains("TRACE-LINE"), "{at_debug}");
+        assert!(at_info.contains("INFO-LINE"), "{at_info}");
+        assert!(!at_info.contains("DEBUG-LINE"), "{at_info}");
+    }
 }
