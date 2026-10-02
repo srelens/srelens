@@ -48,7 +48,10 @@ impl Sidecar {
 
     /// The least severe level [`Sidecar::run_stdio`] writes to srelens's
     /// log; `Info` unless set. `LevelFilter::Off` writes no records, but a
-    /// panic is still written.
+    /// panic is still written. The level is for the SDK's own stderr logger:
+    /// if the program installs a `log` logger of its own before
+    /// [`Sidecar::run_stdio`], the SDK's is not installed, and that logger's
+    /// own filtering applies.
     pub fn log_level(mut self, level: LevelFilter) -> Sidecar {
         self.log_level = level;
         self

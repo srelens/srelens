@@ -74,7 +74,10 @@ impl Log for Stderr {
 }
 
 /// Log to stderr at `level` and above, and write panics as srelens reads
-/// them. Once per process; a second call changes nothing.
+/// them. Once per process; a second call changes nothing. If the program has
+/// already installed a `log` logger of its own, ours is not installed and
+/// `level` is not applied: that logger's own filtering applies. The panic
+/// hook is set either way.
 pub(crate) fn install(level: LevelFilter) {
     if log::set_boxed_logger(Box::new(Stderr::new(level))).is_ok() {
         log::set_max_level(level);
