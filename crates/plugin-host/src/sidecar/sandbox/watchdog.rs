@@ -9,8 +9,18 @@
 //! sees the sidecar every [`SAMPLE_EVERY`], so it bounds sustained use, and a
 //! burst between two readings can exceed the limit.
 
+#[cfg(unix)]
+use std::io;
+#[cfg(unix)]
+use std::process::ExitStatus;
+#[cfg(unix)]
+use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(unix)]
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+#[cfg(unix)]
+use super::{Exit, LaunchError, Launched, Waiter};
 use crate::sidecar::Limits;
 
 /// How often the watchdog reads a sidecar. The host's, not the app's: it is
@@ -107,6 +117,136 @@ pub(crate) fn ticks_to_cpu(ticks: u64, numer: u32, denom: u32) -> Duration {
     let (numer, denom) = if denom == 0 { (1, 1) } else { (numer, denom) };
     let nanos = u128::from(ticks) * u128::from(numer) / u128::from(denom);
     Duration::from_nanos(u64::try_from(nanos).unwrap_or(u64::MAX))
+}
+
+/// Reads a sidecar's [`Usage`] by its PID: the macOS backend's reads
+/// `proc_pid_rusage`; the tests' are scripted.
+#[cfg(unix)]
+pub(crate) trait Sampler: Send + 'static {
+    fn sample(&mut self, pid: u32) -> io::Result<Usage>;
+}
+
+/// The memory reader's value before the first reading and after the exit.
+#[cfg(unix)]
+const NO_READING: u64 = u64::MAX;
+
+/// Why the watchdog stopped a sidecar.
+#[cfg(unix)]
+enum Reason {
+    Memory { measured: u64, limit: u64 },
+    Unmeasured(io::Error),
+}
+
+/// `child` under the watchdog: [`Launched::from_child`]'s wait task, plus a
+/// reading every [`SAMPLE_EVERY`] that [`Watchdog`] judges.
+///
+/// The readings run in the task that waits on the child, so the child is
+/// never reaped while it is being read or signalled, and its PID cannot be
+/// another process's. `child` must be spawned with `kill_on_drop(true)`: if
+/// the task panics, dropping the child kills the sidecar, so a failed
+/// watchdog stops it rather than leaving it unwatched. A reading that fails
+/// while the sidecar runs stops it too.
+///
+/// The [`super::Process`]'s memory reader answers the last reading, `None`
+/// before the first and after the exit; it makes no system call itself.
+#[cfg(unix)]
+pub(crate) fn watched(
+    mut child: tokio::process::Child,
+    describe: impl FnOnce(io::Result<ExitStatus>) -> Exit + Send + 'static,
+    limits: &Limits,
+    mut sampler: impl Sampler,
+) -> Result<Launched, LaunchError> {
+    let (mut launched, Waiter { mut stopped, ended }) = Launched::piped(&mut child)?;
+    let reading = Arc::new(AtomicU64::new(NO_READING));
+    let reader = reading.clone();
+    launched.process = launched
+        .process
+        .with_memory(move || match reader.load(Ordering::Relaxed) {
+            NO_READING => None,
+            bytes => Some(bytes),
+        });
+    let mut watchdog = Watchdog::new(limits);
+    let limit = limits.memory_bytes;
+    tokio::spawn(async move {
+        let mut ticks = tokio::time::interval(SAMPLE_EVERY);
+        ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut reason = None;
+        let status = loop {
+            tokio::select! {
+                status = child.wait() => break status,
+                // A kill, or every handle to the process dropped.
+                _ = stopped.recv() => break kill(&mut child).await,
+                _ = ticks.tick() => {}
+            }
+            let Some(pid) = child.id() else { continue };
+            let usage = match sampler.sample(pid) {
+                Ok(usage) => usage,
+                // It may have just exited: then that is how it ended.
+                Err(e) => match child.try_wait() {
+                    Ok(Some(status)) => break Ok(status),
+                    _ => {
+                        reason = Some(Reason::Unmeasured(e));
+                        break kill(&mut child).await;
+                    }
+                },
+            };
+            reading.store(usage.footprint, Ordering::Relaxed);
+            match watchdog.observe(&usage, Instant::now()) {
+                Verdict::Run => {}
+                Verdict::Kill { measured } => {
+                    reason = Some(Reason::Memory { measured, limit });
+                    break kill(&mut child).await;
+                }
+                Verdict::Pause(pause) => {
+                    signal(pid, libc::SIGSTOP);
+                    tokio::select! {
+                        status = child.wait() => break status,
+                        _ = stopped.recv() => break kill(&mut child).await,
+                        () = tokio::time::sleep(pause) => {}
+                    }
+                    signal(pid, libc::SIGCONT);
+                }
+            }
+        };
+        reading.store(NO_READING, Ordering::Relaxed);
+        let mut exit = describe(status);
+        match reason {
+            Some(Reason::Memory { measured, limit }) => {
+                exit.memory_limit = true;
+                exit.description = format!(
+                    "was stopped at its {} MiB memory limit (srelens measured {} MiB)",
+                    limit / MIB,
+                    measured / MIB
+                );
+            }
+            Some(Reason::Unmeasured(e)) => {
+                exit.description = format!(
+                    "was stopped because srelens could not measure its memory and CPU: {e}"
+                );
+            }
+            None => {}
+        }
+        let _ = ended.send(exit);
+    });
+    Ok(launched)
+}
+
+#[cfg(unix)]
+async fn kill(child: &mut tokio::process::Child) -> io::Result<ExitStatus> {
+    let _ = child.start_kill();
+    child.wait().await
+}
+
+/// Send `signal` to the sidecar: only ever to a child not yet reaped, so the
+/// PID is still its own. A PID too large for `pid_t` is not sent to, since a
+/// negative one would signal a process group.
+#[cfg(unix)]
+fn signal(pid: u32, signal: libc::c_int) {
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return;
+    };
+    // SAFETY: kill(2) with a PID and a signal number; no memory is passed.
+    unsafe { libc::kill(pid, signal) };
 }
 
 #[cfg(test)]
@@ -279,5 +419,242 @@ mod tests {
                 "{cpus}: {verdict:?}"
             );
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod loop_tests {
+    use super::*;
+    use crate::sidecar::sandbox::{Exit, Launched};
+    use std::io;
+    use std::process::Stdio;
+
+    /// A sampler from a closure.
+    struct Fake<F>(F);
+
+    impl<F: FnMut(u32) -> io::Result<Usage> + Send + 'static> Sampler for Fake<F> {
+        fn sample(&mut self, pid: u32) -> io::Result<Usage> {
+            (self.0)(pid)
+        }
+    }
+
+    fn command(program: &str, args: &[&str]) -> tokio::process::Child {
+        tokio::process::Command::new(program)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap()
+    }
+
+    fn limits() -> Limits {
+        Limits {
+            memory_bytes: 128 * MIB,
+            cpus: 1.0,
+            ..Limits::default()
+        }
+    }
+
+    /// The process's state letter from `ps`: `T` stopped, `S` sleeping, `Z` a
+    /// zombie; empty once it is gone.
+    fn state(pid: u32) -> String {
+        let out = std::process::Command::new("ps")
+            .args(["-o", "stat=", "-p", &pid.to_string()])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout)
+            .trim()
+            .chars()
+            .take(1)
+            .collect()
+    }
+
+    /// Its state once `ok` holds, or its last after `within`.
+    async fn state_when(pid: u32, within: Duration, ok: impl Fn(&str) -> bool) -> String {
+        let deadline = Instant::now() + within;
+        loop {
+            let now = state(pid);
+            if ok(&now) || Instant::now() >= deadline {
+                return now;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    async fn exit_of(launched: &mut Launched) -> Exit {
+        tokio::time::timeout(Duration::from_secs(5), launched.process.exit())
+            .await
+            .expect("it ended within 5 s")
+    }
+
+    /// `seconds` of CPU by the second reading and none after it: one pause of
+    /// about that long at 1 CPU, then it runs again.
+    fn burst_of(seconds: u64) -> Fake<impl FnMut(u32) -> io::Result<Usage> + Send + 'static> {
+        let mut readings = 0u32;
+        Fake(move |_| {
+            readings += 1;
+            let cpu = if readings < 2 {
+                Duration::ZERO
+            } else {
+                Duration::from_secs(seconds)
+            };
+            Ok(Usage {
+                footprint: MIB,
+                cpu,
+            })
+        })
+    }
+
+    #[tokio::test]
+    async fn memory_over_the_limit_stops_it_and_says_what_was_measured() {
+        let sampler = Fake(|_| {
+            Ok(Usage {
+                footprint: 129 * MIB,
+                cpu: Duration::ZERO,
+            })
+        });
+        let mut launched = watched(
+            command("sleep", &["30"]),
+            Exit::from_status,
+            &limits(),
+            sampler,
+        )
+        .unwrap();
+        let exit = exit_of(&mut launched).await;
+        assert!(exit.memory_limit, "{exit:?}");
+        assert_eq!(
+            exit.description,
+            "was stopped at its 128 MiB memory limit (srelens measured 129 MiB)"
+        );
+        assert_eq!(exit.signal, Some(libc::SIGKILL));
+    }
+
+    #[tokio::test]
+    async fn cpu_over_the_rate_stops_it_and_then_lets_it_run_again() {
+        let mut launched = watched(
+            command("sleep", &["30"]),
+            Exit::from_status,
+            &limits(),
+            burst_of(1),
+        )
+        .unwrap();
+        let pid = launched.process.pid().unwrap();
+        assert_eq!(
+            state_when(pid, Duration::from_secs(2), |s| s == "T").await,
+            "T",
+            "stopped for its debt"
+        );
+        assert_eq!(
+            state_when(pid, Duration::from_secs(3), |s| s != "T").await,
+            "S",
+            "running again once the debt is paid"
+        );
+        (launched.process.killer())();
+        exit_of(&mut launched).await;
+    }
+
+    #[tokio::test]
+    async fn a_kill_during_a_pause_stops_it() {
+        // A hundred seconds of CPU: a pause far longer than the test.
+        let mut launched = watched(
+            command("sleep", &["30"]),
+            Exit::from_status,
+            &limits(),
+            burst_of(100),
+        )
+        .unwrap();
+        let pid = launched.process.pid().unwrap();
+        assert_eq!(
+            state_when(pid, Duration::from_secs(2), |s| s == "T").await,
+            "T"
+        );
+        (launched.process.killer())();
+        let exit = exit_of(&mut launched).await;
+        assert_eq!(exit.signal, Some(libc::SIGKILL), "{exit:?}");
+        assert!(!exit.memory_limit);
+    }
+
+    #[tokio::test]
+    async fn a_reading_that_fails_while_it_runs_stops_it() {
+        let sampler = Fake(|_| Err(io::Error::other("no reading")));
+        let mut launched = watched(
+            command("sleep", &["30"]),
+            Exit::from_status,
+            &limits(),
+            sampler,
+        )
+        .unwrap();
+        let exit = exit_of(&mut launched).await;
+        assert_eq!(
+            exit.description,
+            "was stopped because srelens could not measure its memory and CPU: no reading"
+        );
+        assert_eq!(exit.signal, Some(libc::SIGKILL));
+    }
+
+    #[tokio::test]
+    async fn a_reading_that_fails_because_it_has_exited_reports_its_own_exit() {
+        // The shell outlives the wait task's first poll, so the first reading
+        // is taken; that reading waits until the shell has exited, then fails,
+        // as a reading of an ended process may.
+        let sampler = Fake(|_| {
+            std::thread::sleep(Duration::from_millis(300));
+            Err(io::Error::other("no such process"))
+        });
+        let mut launched = watched(
+            command("sh", &["-c", "sleep 0.1; exit 3"]),
+            Exit::from_status,
+            &limits(),
+            sampler,
+        )
+        .unwrap();
+        let exit = exit_of(&mut launched).await;
+        assert_eq!(exit.description, "exited with status 3");
+        assert_eq!(exit.code, Some(3));
+    }
+
+    #[tokio::test]
+    async fn a_watchdog_that_panics_stops_the_sidecar() {
+        let sampler = Fake(|_| -> io::Result<Usage> { panic!("the sampler failed") });
+        let mut launched = watched(
+            command("sleep", &["30"]),
+            Exit::from_status,
+            &limits(),
+            sampler,
+        )
+        .unwrap();
+        let pid = launched.process.pid().unwrap();
+        let exit = exit_of(&mut launched).await;
+        assert_eq!(exit.description, "ended, and srelens lost track of how");
+        let gone = state_when(pid, Duration::from_secs(2), |s| s.is_empty() || s == "Z").await;
+        assert!(gone.is_empty() || gone == "Z", "still {gone}");
+    }
+
+    #[tokio::test]
+    async fn the_memory_reader_answers_the_last_reading_and_none_after_the_exit() {
+        let sampler = Fake(|_| {
+            Ok(Usage {
+                footprint: 42 * MIB,
+                cpu: Duration::ZERO,
+            })
+        });
+        let mut launched = watched(
+            command("sleep", &["30"]),
+            Exit::from_status,
+            &limits(),
+            sampler,
+        )
+        .unwrap();
+        let memory = launched.process.memory().expect("a reader");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while memory().is_none() && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(memory(), Some(42 * MIB));
+        (launched.process.killer())();
+        exit_of(&mut launched).await;
+        assert_eq!(memory(), None, "after the exit");
     }
 }

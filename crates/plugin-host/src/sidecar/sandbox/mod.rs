@@ -261,6 +261,15 @@ impl Process {
     }
 }
 
+/// What a backend's wait task holds: the requests to stop the process, and
+/// where its exit goes.
+struct Waiter {
+    /// A kill, or `None` once every handle to the process is dropped, which
+    /// must stop it too.
+    stopped: mpsc::UnboundedReceiver<()>,
+    ended: oneshot::Sender<Exit>,
+}
+
 impl Launched {
     /// A launched child with all three stdio streams piped. `describe` turns
     /// its exit status into an [`Exit`], after the child has been reaped, so a
@@ -270,14 +279,7 @@ impl Launched {
         mut child: tokio::process::Child,
         describe: impl FnOnce(io::Result<ExitStatus>) -> Exit + Send + 'static,
     ) -> Result<Launched, LaunchError> {
-        let missing =
-            |what: &str| LaunchError::Failed(format!("the sidecar's {what} is not piped"));
-        let stdin = child.stdin.take().ok_or_else(|| missing("stdin"))?;
-        let stdout = child.stdout.take().ok_or_else(|| missing("stdout"))?;
-        let stderr = child.stderr.take().ok_or_else(|| missing("stderr"))?;
-        let pid = child.id();
-        let (stop, mut stopped) = mpsc::unbounded_channel::<()>();
-        let (ended, exit) = oneshot::channel();
+        let (launched, Waiter { mut stopped, ended }) = Launched::piped(&mut child)?;
         tokio::spawn(async move {
             let status = tokio::select! {
                 status = child.wait() => status,
@@ -289,6 +291,21 @@ impl Launched {
             };
             let _ = ended.send(describe(status));
         });
+        Ok(launched)
+    }
+
+    /// The pipes and the [`Process`] of a child spawned with all three stdio
+    /// streams piped, and the [`Waiter`] for the task that then waits on it:
+    /// [`Launched::from_child`]'s, or the watchdog's.
+    fn piped(child: &mut tokio::process::Child) -> Result<(Launched, Waiter), LaunchError> {
+        let missing =
+            |what: &str| LaunchError::Failed(format!("the sidecar's {what} is not piped"));
+        let stdin = child.stdin.take().ok_or_else(|| missing("stdin"))?;
+        let stdout = child.stdout.take().ok_or_else(|| missing("stdout"))?;
+        let stderr = child.stderr.take().ok_or_else(|| missing("stderr"))?;
+        let pid = child.id();
+        let (stop, stopped) = mpsc::unbounded_channel::<()>();
+        let (ended, exit) = oneshot::channel();
         let exit = async move {
             exit.await.unwrap_or_else(|_| Exit {
                 description: "ended, and srelens lost track of how".into(),
@@ -297,14 +314,15 @@ impl Launched {
                 memory_limit: false,
             })
         };
-        Ok(Launched {
+        let launched = Launched {
             stdin: Box::new(stdin),
             stdout: Box::new(stdout),
             stderr: Box::new(stderr),
             process: Process::new(pid, exit, move || {
                 let _ = stop.send(());
             }),
-        })
+        };
+        Ok((launched, Waiter { stopped, ended }))
     }
 }
 
