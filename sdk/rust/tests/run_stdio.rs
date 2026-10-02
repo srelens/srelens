@@ -10,7 +10,10 @@ use srelens_sidecar::{Context, Error, Sidecar};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
+/// How long the child gets to exit once its input has ended.
+const EXIT_WITHIN: Duration = Duration::from_secs(10);
 const CHILD: &str = "SRELENS_SDK_RUN_STDIO_CHILD";
 const TEST: &str = "run_stdio_logs_at_the_level_set_with_log_level_and_at_info_without_one";
 
@@ -83,7 +86,22 @@ fn stderr_of_child(mode: &str) -> String {
         }
     }
     drop(stdin);
-    let status = child.wait().unwrap();
+    // Bounded, so a sidecar that never exits fails the test instead of hanging it.
+    let deadline = Instant::now() + EXIT_WITHIN;
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!(
+                "the sidecar did not exit within {} s after stdin closed",
+                EXIT_WITHIN.as_secs()
+            );
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
     let mut stderr = String::new();
     child
         .stderr
