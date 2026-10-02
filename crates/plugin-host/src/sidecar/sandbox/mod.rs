@@ -5,7 +5,7 @@
 //! | OS | Isolation | Memory and CPU |
 //! |---|---|---|
 //! | Linux | Landlock and a seccomp filter, applied by `srelens-sandbox-launch` before it `exec`s the sidecar | a cgroup v2 directory the host creates under a delegated root |
-//! | macOS | Seatbelt, through `/usr/bin/sandbox-exec` | a host-side watchdog (`watchdog.rs`, #713), weaker than the kernel's; not yet checked on a Mac, so sidecars are still refused |
+//! | macOS | Seatbelt, through `/usr/bin/sandbox-exec` | a host-side watchdog (`watchdog.rs`, #713), weaker than the kernel's; not yet checked with Seatbelt on a macOS 27 Mac, so sidecars are still refused |
 //! | Windows | an AppContainer with no capabilities | the Job Object the process starts in |
 //! | anything else | none | none |
 //!
@@ -88,7 +88,7 @@ pub enum Enforcement {
     Kernel,
     /// The host watches and stops the sidecar past the limit, which a burst
     /// between two samples can exceed. macOS, once its watchdog (#713) has
-    /// been checked on a Mac.
+    /// been checked with Seatbelt on a macOS 27 Mac.
     Host,
     /// Nothing does, for the reason given. The supervisor refuses to start a
     /// sidecar then: isolation without limits was considered for macOS and

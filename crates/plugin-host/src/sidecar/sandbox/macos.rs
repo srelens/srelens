@@ -5,10 +5,10 @@
 //! (`setrlimit` refuses `RLIMIT_DATA` and `RLIMIT_AS`; `RLIMIT_CPU` is a
 //! lifetime budget). The accepted decision is a host-side watchdog (#713):
 //! [`launch`] puts the sidecar under one (`watchdog.rs`), which stops it past
-//! its memory limit and pauses it past its CPU rate. It has not been checked
-//! on a Mac with Seatbelt yet, so [`LIMITS_MISSING`] is still what this
-//! backend reports and the supervisor refuses to start a sidecar. [`launch`]
-//! still works, so the isolation and the watchdog can be checked
+//! its memory limit and pauses it past its CPU rate. It has not yet been
+//! checked with Seatbelt on a macOS 27 Mac, so [`LIMITS_MISSING`] is still
+//! what this backend reports and the supervisor refuses to start a sidecar.
+//! [`launch`] still works, so the isolation and the watchdog can be checked
 //! (`tests/sandbox_conformance.rs`, `tests/macos_watchdog.rs`).
 //!
 //! The spike's launcher also set `RLIMIT_DATA`, `RLIMIT_AS` and a 60-second
@@ -22,7 +22,7 @@ use super::watchdog::{self, Sampler, Usage};
 use super::{Exit, LaunchError, Launched, SandboxConfig, SidecarCommand};
 use crate::sidecar::Limits;
 
-pub(super) const LIMITS_MISSING: &str = "srelens's memory and CPU watchdog for macOS has not been checked on a Mac yet (#713), so srelens does not run executable apps here";
+pub(super) const LIMITS_MISSING: &str = "srelens's memory and CPU watchdog for macOS has not yet been checked with Seatbelt on a macOS 27 Mac (#713), so srelens does not run executable apps here";
 
 pub(super) fn launch(
     config: &SandboxConfig,

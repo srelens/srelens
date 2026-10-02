@@ -424,13 +424,13 @@ in `crates/plugin-host/src/sidecar/sandbox/`:
 |---|---|---|
 | Linux | Landlock and a seccomp filter, applied by `srelens-sandbox-launch` before it runs the sidecar | a cgroup v2 directory under a root delegated to srelens |
 | Windows | an AppContainer with no capabilities, one profile per app | the Job Object the process starts in |
-| macOS | Seatbelt through `/usr/bin/sandbox-exec` | a host-side watchdog ([#713](https://github.com/srelens/srelens/issues/713)), weaker than the kernel's: **every sidecar is still refused** until it has been checked on a Mac |
+| macOS | Seatbelt through `/usr/bin/sandbox-exec` | a host-side watchdog ([#713](https://github.com/srelens/srelens/issues/713)), weaker than the kernel's: **every sidecar is still refused** until it has been checked with Seatbelt on a macOS 27 Mac |
 | any other OS | — | — |
 
 A sidecar is **refused, never started unconfined**:
 
 - on an OS with no backend;
-- on macOS, until its watchdog has been checked on a Mac (#713);
+- on macOS, until its watchdog has been checked with Seatbelt on a macOS 27 Mac (#713);
 - on Linux without Landlock, without the launcher, or without a delegated cgroup;
 - anywhere the backend cannot set a limit.
 
