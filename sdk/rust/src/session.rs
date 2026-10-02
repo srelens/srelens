@@ -1,6 +1,8 @@
 //! One session with srelens: the reader loop, the lifecycle, and the running
 //! handlers. `health` and the other lifecycle calls are answered here, on the
-//! reader, never behind handler work.
+//! reader, never behind handler work: the reader and the writer run on a
+//! thread of the session's own, so a handler that blocks its thread cannot
+//! hold them up, and lifecycle answers go ahead of queued lines.
 
 use serde_json::{json, Value};
 use srelens_sidecar_protocol::{
@@ -11,6 +13,8 @@ use srelens_sidecar_protocol::{
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, BufReader};
+use tokio::runtime::Handle;
+use tokio::sync::oneshot;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
@@ -38,14 +42,60 @@ enum Flow {
     Shutdown,
 }
 
+/// Serve srelens on a thread of the session's own, under a single-threaded
+/// runtime of its own: reading srelens's lines, answering the lifecycle and
+/// writing every line happen there. The handlers run on the runtime polling
+/// this, the author's, so `tokio::spawn` and `Handle::current()` in a
+/// handler mean what they always did.
 pub(crate) async fn serve<R, W>(sidecar: Sidecar, reader: R, writer: W) -> Result<(), SidecarError>
 where
     R: AsyncRead + Unpin + Send + 'static,
     W: AsyncWrite + Unpin + Send + 'static,
 {
+    // The author's runtime, which polls this: the handlers run there.
+    let handlers = Handle::current();
+    let (done, ended) = oneshot::channel();
+    // Dropping this future, as an author's `select!` may, ends the session as
+    // the end of its input would.
+    let stop = CancellationToken::new();
+    let _stop_when_dropped = stop.clone().drop_guard();
+    std::thread::Builder::new()
+        .name("srelens-session".to_owned())
+        .spawn(move || {
+            let ended = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => {
+                    let runtime = OwnRuntime(Some(runtime));
+                    runtime.block_on(session(sidecar, reader, writer, handlers, stop))
+                }
+                Err(e) => Err(SidecarError::Io(e)),
+            };
+            let _ = done.send(ended);
+        })
+        .map_err(SidecarError::Io)?;
+    ended.await.unwrap_or_else(|_| {
+        Err(SidecarError::Io(std::io::Error::other(
+            "the session thread stopped",
+        )))
+    })
+}
+
+async fn session<R, W>(
+    sidecar: Sidecar,
+    reader: R,
+    writer: W,
+    handlers: Handle,
+    stop: CancellationToken,
+) -> Result<(), SidecarError>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin + Send + 'static,
+{
     let (outbox, lines) = Outbox::new();
     let mut writer = tokio::spawn(lines.run(writer));
-    let mut session = Session::new(sidecar, outbox.clone());
+    let mut session = Session::new(sidecar, outbox.clone(), handlers);
     let mut input = BufReader::new(reader).lines();
     // Whether the loop below already consumed (awaited) the writer's
     // JoinHandle: that happens only when the writer itself ends the
@@ -80,6 +130,7 @@ where
                 writer_consumed = true;
                 break Err(writer_stopped(result));
             }
+            () = stop.cancelled() => break Ok(()),
         }
     };
     session.end();
@@ -98,6 +149,26 @@ where
     ended
 }
 
+/// The session thread's runtime. However the thread ends, a panic included,
+/// it is shut down without waiting for its blocking tasks: a read of stdin
+/// is one, and nothing can cancel it, so a plain drop would wait for srelens
+/// to write again, and the session would never report that it ended.
+struct OwnRuntime(Option<tokio::runtime::Runtime>);
+
+impl OwnRuntime {
+    fn block_on<F: std::future::Future>(&self, future: F) -> F::Output {
+        self.0.as_ref().expect("not shut down").block_on(future)
+    }
+}
+
+impl Drop for OwnRuntime {
+    fn drop(&mut self) {
+        if let Some(runtime) = self.0.take() {
+            runtime.shutdown_background();
+        }
+    }
+}
+
 /// Why the session ends when the writer stops on its own, before the
 /// session otherwise decided to: the writer's own error if it had one, or a
 /// stand-in if it returned `Ok` unasked or panicked.
@@ -114,16 +185,19 @@ struct Session {
     shared: Option<Arc<Shared>>,
     running: Running,
     tasks: JoinSet<()>,
+    /// The author's runtime, where every handler runs.
+    handlers: Handle,
 }
 
 impl Session {
-    fn new(sidecar: Sidecar, outbox: Outbox) -> Session {
+    fn new(sidecar: Sidecar, outbox: Outbox, handlers: Handle) -> Session {
         Session {
             sidecar: Arc::new(sidecar),
             outbox,
             shared: None,
             running: Running::default(),
             tasks: JoinSet::new(),
+            handlers,
         }
     }
 
@@ -204,7 +278,7 @@ impl Session {
             .insert(key.clone(), cancel.clone());
         let (outbox, running, name) = (self.outbox.clone(), self.running.clone(), name.to_owned());
         let work = handler(Context::new(shared, cancel), params);
-        self.tasks.spawn(async move {
+        let task = async move {
             // Its own task, so a panic is caught here; aborted with this one.
             let handler = AbortOnDropHandle::new(tokio::spawn(work));
             let outcome = match handler.await {
@@ -223,7 +297,8 @@ impl Session {
                 return;
             }
             answer(&outbox, id, outcome).await;
-        });
+        };
+        self.tasks.spawn_on(task, &self.handlers);
     }
 
     async fn open_stream(&mut self, id: RequestId, params: Value) {
@@ -262,7 +337,7 @@ impl Session {
             open.stream,
             open.method,
         );
-        self.tasks.spawn(async move {
+        let task = async move {
             let handler = AbortOnDropHandle::new(tokio::spawn(work));
             let ended = match handler.await {
                 Ok(result) => result.map_err(|e| e.message().to_owned()),
@@ -307,7 +382,8 @@ impl Session {
                 );
                 let _ = outbox.send(&short).await;
             }
-        });
+        };
+        self.tasks.spawn_on(task, &self.handlers);
     }
 
     async fn initialize(&mut self, id: RequestId, params: Value) {
@@ -477,7 +553,7 @@ mod tests {
             });
         let (outbox, writer) = Outbox::new();
         tokio::spawn(writer.run(tokio::io::sink()));
-        let mut session = Session::new(sidecar, outbox);
+        let mut session = Session::new(sidecar, outbox, Handle::current());
 
         session.handle(Message::parse(&init_line()).unwrap()).await;
 
@@ -512,7 +588,7 @@ mod tests {
             let mut out = Vec::new();
             writer.run(&mut out).await.map(|()| out)
         });
-        let mut session = Session::new(Sidecar::new("t", "1"), outbox.clone());
+        let mut session = Session::new(Sidecar::new("t", "1"), outbox.clone(), Handle::current());
         session.handle(Message::parse(&init_line()).unwrap()).await;
         let host = session.shared.as_ref().expect("initialized").host.clone();
         let context = crate::CallContext::new("kind-dev", None).unwrap();
