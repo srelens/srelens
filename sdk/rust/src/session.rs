@@ -164,8 +164,16 @@ impl Session {
         }
         match method.as_str() {
             method::ACTIVATE | method::HEALTH | method::DEACTIVATE => {
-                answer(&self.outbox, id, Ok(json!({}))).await;
+                // Ahead of every frame and answer queued: srelens restarts a
+                // sidecar that leaves `health` unanswered. `{}` with srelens's
+                // id is never near the size limit.
+                let _ = self
+                    .outbox
+                    .send_lifecycle(&Response::ok(id, json!({})))
+                    .await;
             }
+            // On the general lane, behind every line queued before it, as the
+            // session's last line.
             method::SHUTDOWN => {
                 self.cancel_all();
                 answer(&self.outbox, id, Ok(json!({}))).await;

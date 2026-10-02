@@ -1,11 +1,12 @@
 mod common;
 
-use common::FakeHost;
+use common::{FakeHost, WAIT};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use srelens_sidecar::{Context, Error, Frames, Sidecar, StreamClosed};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use tokio::sync::mpsc;
 
 #[derive(Deserialize)]
 struct Count {
@@ -131,11 +132,19 @@ async fn a_cancelled_stream_stops_and_sends_no_terminal_frame() {
     host.answer(id).await;
     host.recv().await;
     host.notify("stream/cancel", json!({"stream": 5})).await;
-    // Frames already queued may still arrive before the answer to this.
-    let health = host.request("health", json!({})).await;
+    // Fenced by a request answered in the same queue as the frames, which is
+    // first in, first out: unlike `health`, whose answer goes ahead of queued
+    // frames, this answer arrives only after every frame queued before it.
+    let fence = host
+        .request(
+            "stream/open",
+            json!({"stream": 6, "method": "nope", "params": {}}),
+        )
+        .await;
     loop {
         let line = host.recv().await;
-        if line.get("id") == Some(&json!(health)) {
+        if line.get("id") == Some(&json!(fence)) {
+            assert_eq!(line["error"]["code"], -32601, "the fence: {line}");
             break;
         }
         assert_eq!(
@@ -257,6 +266,101 @@ async fn a_frame_over_the_message_limit_is_refused_to_the_handler() {
         "{end}"
     );
     host.finish().await.unwrap();
+}
+
+/// How many frames `flood` sends.
+const FLOOD: u64 = 200;
+
+/// The SDK's queue holds 64 lines, and its writer one more it is writing.
+const QUEUED: u64 = 64;
+
+/// A sidecar whose stream `flood` sends [`FLOOD`] frames as fast as they are
+/// queued, telling `sent` the number of each once it is.
+fn flooding(sent: mpsc::UnboundedSender<u64>) -> Sidecar {
+    Sidecar::new("t", "1").stream("flood", move |_ctx: Context, _: Value, frames: Frames| {
+        let sent = sent.clone();
+        async move {
+            for n in 0..FLOOD {
+                frames.send(&n).await?;
+                let _ = sent.send(n);
+            }
+            Ok::<_, Error>(())
+        }
+    })
+}
+
+/// Open `flood` as stream 1 over a pipe too small to hold one frame, and
+/// return once the SDK's queue is full of its frames: the writer is held on
+/// the first, until the test reads.
+async fn flooded() -> FakeHost {
+    let (sent_tx, mut sent) = mpsc::unbounded_channel();
+    let mut host = FakeHost::start_with_pipe(flooding(sent_tx), 16);
+    host.initialize().await;
+    let id = host
+        .request(
+            "stream/open",
+            json!({"stream": 1, "method": "flood", "params": {}}),
+        )
+        .await;
+    host.answer(id).await;
+    loop {
+        let n = tokio::time::timeout(WAIT, sent.recv())
+            .await
+            .expect("the stream queued its frames in time")
+            .expect("the stream is still running");
+        if n + 1 >= QUEUED {
+            return host;
+        }
+    }
+}
+
+#[tokio::test]
+async fn health_is_answered_ahead_of_a_full_queue_of_frames() {
+    let mut host = flooded().await;
+    let health = host.request("health", json!({})).await;
+    let mut ahead = 0;
+    loop {
+        let line = host.recv().await;
+        if line.get("id") == Some(&json!(health)) {
+            assert_eq!(line["result"], json!({}));
+            break;
+        }
+        assert_eq!(line["method"], "stream/data", "{line}");
+        ahead += 1;
+    }
+    // The frame the writer was already writing, and perhaps the next before
+    // the answer was queued; never the queue's worth.
+    assert!(
+        ahead < QUEUED / 2,
+        "{ahead} frames were written ahead of the health answer"
+    );
+    for _ in ahead..FLOOD {
+        assert_eq!(host.recv().await["method"], "stream/data");
+    }
+    assert_eq!(host.recv().await["method"], "stream/close");
+    host.finish().await.unwrap();
+}
+
+#[tokio::test]
+async fn the_shutdown_answer_follows_the_frames_queued_before_it_and_nothing_follows_it() {
+    let mut host = flooded().await;
+    let shutdown = host.request("shutdown", json!({})).await;
+    let mut ahead = 0;
+    loop {
+        let line = host.recv().await;
+        if line.get("id") == Some(&json!(shutdown)) {
+            assert_eq!(line["result"], json!({}));
+            break;
+        }
+        assert_eq!(line["method"], "stream/data", "{line}");
+        ahead += 1;
+    }
+    assert!(
+        ahead >= QUEUED,
+        "only {ahead} frames were written ahead of the shutdown answer"
+    );
+    // `ended` fails on any line after it: a frame, or the stream's close.
+    host.ended().await.unwrap();
 }
 
 #[tokio::test]
