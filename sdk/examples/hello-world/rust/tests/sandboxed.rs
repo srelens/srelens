@@ -6,11 +6,14 @@
 //! workspace root:
 //! ```text
 //! cargo build -p srelens-plugin-host --bin srelens-sandbox-launch
+//! go build -C sdk/examples/hello-world/go -o "$PWD/target/hello-world-go" .
 //! SRELENS_SANDBOX_LAUNCHER="$PWD/target/debug/srelens-sandbox-launch" \
 //! SRELENS_SANDBOX_CGROUP_ROOT=/sys/fs/cgroup/<delegated> \
-//!   cargo test -p srelens-sidecar-hello-world --test sandboxed -- --ignored --test-threads=1
+//! SRELENS_HELLO_WORLD_GO="$PWD/target/hello-world-go" \
+//!   cargo test -p srelens-sidecar-hello-world --test sandboxed --test supervised -- --ignored --test-threads=1
 //! ```
-//! On Windows, neither variable is needed.
+//! On Windows, `SRELENS_SANDBOX_LAUNCHER` and `SRELENS_SANDBOX_CGROUP_ROOT`
+//! are not needed, and the Go binary ends `.exe`.
 
 mod common;
 
@@ -18,9 +21,7 @@ use srelens_plugin_host::sidecar::{Limits, OsSandbox, SandboxConfig};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-#[tokio::test]
-#[ignore = "needs the OS sandbox; run by the sandbox-conformance CI job"]
-async fn the_hello_world_sidecar_serves_srelens_inside_the_os_sandbox() {
+fn sandbox() -> Arc<OsSandbox> {
     let launcher = std::env::var_os("SRELENS_SANDBOX_LAUNCHER").map(PathBuf::from);
     if cfg!(target_os = "linux") {
         assert!(
@@ -28,9 +29,30 @@ async fn the_hello_world_sidecar_serves_srelens_inside_the_os_sandbox() {
             "set SRELENS_SANDBOX_LAUNCHER to srelens-sandbox-launch"
         );
     }
-    let sandbox = OsSandbox::new(SandboxConfig {
+    Arc::new(OsSandbox::new(SandboxConfig {
         launcher,
         cgroup_root: std::env::var_os("SRELENS_SANDBOX_CGROUP_ROOT").map(PathBuf::from),
-    });
-    common::whole_life(Arc::new(sandbox), Limits::default()).await;
+    }))
+}
+
+#[tokio::test]
+#[ignore = "needs the OS sandbox; run by the sandbox-conformance CI job"]
+async fn the_rust_hello_world_serves_srelens_inside_the_os_sandbox() {
+    common::whole_life(
+        common::program(common::Language::Rust),
+        sandbox(),
+        Limits::default(),
+    )
+    .await;
+}
+
+#[tokio::test]
+#[ignore = "needs the OS sandbox and the Go example built; run by the sandbox-conformance CI job"]
+async fn the_go_hello_world_serves_srelens_inside_the_os_sandbox() {
+    common::whole_life(
+        common::program(common::Language::Go),
+        sandbox(),
+        Limits::default(),
+    )
+    .await;
 }

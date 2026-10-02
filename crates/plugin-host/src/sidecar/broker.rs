@@ -1174,6 +1174,15 @@ mod tests {
             json!({"clusterId": "x".repeat(4097), "namespace": "a"}),
             json!({"clusterId": "", "namespace": "team"}),
             json!({"clusterId": "   ", "namespace": "team"}),
+            // White space as srelens reads it (Unicode White_Space), which
+            // regex engines' `\s` does not agree on.
+            json!({"clusterId": "\u{0b}", "namespace": "team"}),
+            json!({"clusterId": "\u{85}", "namespace": "team"}),
+            json!({"clusterId": "\u{a0}", "namespace": "team"}),
+            json!({"clusterId": "\u{3000}", "namespace": "team"}),
+            json!({"clusterId": "\u{2028}\u{205f}", "namespace": "team"}),
+            json!({"clusterId": "\u{feff}", "namespace": "team"}),
+            json!({"clusterId": "\u{a0}prod", "namespace": "team"}),
             json!({"clusterId": 7, "namespace": "team"}),
             json!({"clusterId": "prod"}),
             json!({"namespace": "team"}),

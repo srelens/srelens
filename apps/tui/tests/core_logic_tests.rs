@@ -1568,6 +1568,15 @@ fn all_static_kinds() -> Vec<ResourceKind> {
         ResourceKind::Settings,
         ResourceKind::TuiConfig,
         ResourceKind::Workloads,
+        ResourceKind::ReplicaSets,
+        ResourceKind::HorizontalPodAutoscalers,
+        ResourceKind::PodDisruptionBudgets,
+        ResourceKind::PriorityClasses,
+        ResourceKind::RuntimeClasses,
+        ResourceKind::Leases,
+        ResourceKind::MutatingWebhookConfigurations,
+        ResourceKind::ValidatingWebhookConfigurations,
+        ResourceKind::IngressClasses,
     ]
 }
 
@@ -1604,8 +1613,7 @@ fn watch_kinds_are_lowercase_plurals_for_watchable_kinds_only() {
             None => assert!(
                 matches!(
                     kind,
-                    ResourceKind::Endpoints
-                        | ResourceKind::CustomResourceDefinitions
+                    ResourceKind::CustomResourceDefinitions
                         | ResourceKind::HelmReleases
                         | ResourceKind::PortForwards
                         | ResourceKind::Overview
@@ -1619,7 +1627,7 @@ fn watch_kinds_are_lowercase_plurals_for_watchable_kinds_only() {
             ),
         }
     }
-    assert_eq!(watchable, 25);
+    assert_eq!(watchable, 35);
     assert_eq!(
         ResourceKind::CustomResource(cilium_pool()).watch_kind(),
         None
@@ -1684,6 +1692,11 @@ fn cluster_scoped_kinds_are_not_namespaced() {
         ResourceKind::Overview,
         ResourceKind::Toolbox,
         ResourceKind::Assistant,
+        ResourceKind::PriorityClasses,
+        ResourceKind::RuntimeClasses,
+        ResourceKind::MutatingWebhookConfigurations,
+        ResourceKind::ValidatingWebhookConfigurations,
+        ResourceKind::IngressClasses,
     ];
     for kind in all_static_kinds() {
         assert_eq!(
@@ -1788,6 +1801,60 @@ fn resolve_matches_static_commands_case_insensitively_then_by_prefix() {
     assert_eq!(
         resolve_command(":netpo"),
         Some(CommandTarget::Resource(ResourceKind::NetworkPolicies))
+    );
+    assert_eq!(
+        resolve_command(":pdb"),
+        Some(CommandTarget::Resource(ResourceKind::PodDisruptionBudgets))
+    );
+    assert_eq!(
+        resolve_command(":hpa"),
+        Some(CommandTarget::Resource(
+            ResourceKind::HorizontalPodAutoscalers
+        ))
+    );
+    assert_eq!(
+        resolve_command(":rs"),
+        Some(CommandTarget::Resource(ResourceKind::ReplicaSets))
+    );
+    assert_eq!(
+        resolve_command(":quota"),
+        Some(CommandTarget::Resource(ResourceKind::ResourceQuotas))
+    );
+    assert_eq!(
+        resolve_command(":limits"),
+        Some(CommandTarget::Resource(ResourceKind::LimitRanges))
+    );
+    assert_eq!(
+        resolve_command(":pc"),
+        Some(CommandTarget::Resource(ResourceKind::PriorityClasses))
+    );
+    assert_eq!(
+        resolve_command(":rc"),
+        Some(CommandTarget::Resource(ResourceKind::RuntimeClasses))
+    );
+    assert_eq!(
+        resolve_command(":lease"),
+        Some(CommandTarget::Resource(ResourceKind::Leases))
+    );
+    assert_eq!(
+        resolve_command(":mwc"),
+        Some(CommandTarget::Resource(
+            ResourceKind::MutatingWebhookConfigurations
+        ))
+    );
+    assert_eq!(
+        resolve_command(":vwc"),
+        Some(CommandTarget::Resource(
+            ResourceKind::ValidatingWebhookConfigurations
+        ))
+    );
+    assert_eq!(
+        resolve_command(":ic"),
+        Some(CommandTarget::Resource(ResourceKind::IngressClasses))
+    );
+    assert_eq!(
+        resolve_command(":endpoints"),
+        Some(CommandTarget::Resource(ResourceKind::Endpoints))
     );
     assert_eq!(resolve_command(":?"), Some(CommandTarget::Help));
     assert_eq!(resolve_command(":exit"), Some(CommandTarget::Quit));
@@ -1992,6 +2059,7 @@ fn tui_config_file_paths_clamping_and_round_trip() {
         command_popup_density: CommandPopupDensity::Large,
         show_feature_banner: true,
         check_updates: true,
+        show_changed_guide: true,
         argo_hub_context: None,
         argo_hub_kubeconfig: None,
         argo_ui_url: None,
@@ -2014,6 +2082,7 @@ fn tui_config_file_paths_clamping_and_round_trip() {
         command_popup_density: CommandPopupDensity::Compact,
         show_feature_banner: true,
         check_updates: true,
+        show_changed_guide: true,
         argo_hub_context: None,
         argo_hub_kubeconfig: None,
         argo_ui_url: None,
@@ -2033,6 +2102,7 @@ fn tui_config_file_paths_clamping_and_round_trip() {
         command_popup_density: CommandPopupDensity::Large,
         show_feature_banner: false,
         check_updates: false,
+        show_changed_guide: false,
         argo_hub_context: None,
         argo_hub_kubeconfig: None,
         argo_ui_url: None,

@@ -17,7 +17,29 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-pub const HELLO: &str = env!("CARGO_BIN_EXE_hello-world");
+/// Which example a run starts.
+#[derive(Clone, Copy, Debug)]
+pub enum Language {
+    Rust,
+    Go,
+}
+
+/// The example's binary. The Rust one is this package's own; the Go one is
+/// built by `go build -C sdk/examples/hello-world/go -o <path> .` and named
+/// by `SRELENS_HELLO_WORLD_GO`, an absolute path. Its cases are `#[ignore]`d,
+/// and one run without the variable fails saying so rather than passing.
+pub fn program(language: Language) -> PathBuf {
+    match language {
+        Language::Rust => PathBuf::from(env!("CARGO_BIN_EXE_hello-world")),
+        Language::Go => std::env::var_os("SRELENS_HELLO_WORLD_GO")
+            .map(PathBuf::from)
+            .expect(
+                "set SRELENS_HELLO_WORLD_GO to the Go hello-world binary, built with \
+                 `go build -C sdk/examples/hello-world/go -o <path> .`",
+            ),
+    }
+}
+
 const APP_ID: &str = "org.example.hello-world";
 const WAIT: Duration = Duration::from_secs(30);
 
@@ -54,11 +76,11 @@ pub fn data_dir() -> PathBuf {
         .to_owned()
 }
 
-pub fn config(limits: Limits) -> SidecarConfig {
+pub fn config(program: PathBuf, limits: Limits) -> SidecarConfig {
     SidecarConfig {
         command: SidecarCommand {
             app_id: APP_ID.into(),
-            program: HELLO.into(),
+            program,
             args: Vec::new(),
             env: Vec::new(),
             data_dir: data_dir(),
@@ -99,8 +121,8 @@ async fn logged(supervisor: &Supervisor, needle: &str) -> bool {
 }
 
 /// Start, serve every kind of call, stop: what srelens does with a sidecar.
-pub async fn whole_life(launcher: Arc<dyn Launcher>, limits: Limits) {
-    let supervisor = Supervisor::start(config(limits), launcher, Arc::new(Pods));
+pub async fn whole_life(program: PathBuf, launcher: Arc<dyn Launcher>, limits: Limits) {
+    let supervisor = Supervisor::start(config(program, limits), launcher, Arc::new(Pods));
     let running = until(&supervisor, |s| {
         matches!(
             s,

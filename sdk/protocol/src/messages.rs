@@ -351,14 +351,21 @@ fn namespace(_: &mut SchemaGenerator) -> Schema {
     }))
 }
 
+/// Every Unicode `White_Space` character: what `str::trim` trims, and so what
+/// makes a `clusterId` blank ([`crate::shape::is_cluster_id`]). Written out,
+/// because regex engines read `\s` differently: Go's RE2 as ASCII only, and
+/// ECMA-262 with U+FEFF and without U+0085.
+const WHITE_SPACE: &str = "\t\n\u{0b}\u{0c}\r \u{85}\u{a0}\u{1680}\u{2000}-\u{200a}\u{2028}\u{2029}\u{202f}\u{205f}\u{3000}";
+
 fn cluster_id(_: &mut SchemaGenerator) -> Schema {
     schema(json!({
         "type": "string",
         "minLength": 1,
         // Characters, where srelens counts bytes: an SDK checks the bytes itself.
         "maxLength": MAX_CLUSTER_ID_BYTES,
-        // Not blank: at least one character that is not white space.
-        "pattern": "\\S",
+        // Not blank: at least one character that is not white space, as a
+        // class every engine reads the same way (see WHITE_SPACE).
+        "pattern": format!("[^{WHITE_SPACE}]"),
     }))
 }
 

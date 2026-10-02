@@ -35,6 +35,22 @@ impl Launcher for Unconfined {
 }
 
 #[tokio::test]
-async fn the_hello_world_sidecar_serves_srelens_through_its_whole_life() {
-    common::whole_life(Arc::new(Unconfined), Limits::default()).await;
+async fn the_rust_hello_world_serves_srelens_through_its_whole_life() {
+    common::whole_life(
+        common::program(common::Language::Rust),
+        Arc::new(Unconfined),
+        Limits::default(),
+    )
+    .await;
+}
+
+#[tokio::test]
+#[ignore = "needs the Go example built: set SRELENS_HELLO_WORLD_GO"]
+async fn the_go_hello_world_serves_srelens_through_its_whole_life() {
+    common::whole_life(
+        common::program(common::Language::Go),
+        Arc::new(Unconfined),
+        Limits::default(),
+    )
+    .await;
 }

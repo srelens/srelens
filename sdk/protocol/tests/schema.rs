@@ -13,6 +13,21 @@ fn committed_path() -> PathBuf {
         .join(schema_file())
 }
 
+/// The schema as committed: pretty JSON, with every non-ASCII white-space
+/// character written as a `\u` escape. They occur only inside strings (the
+/// `clusterId` pattern), where an escape reads back as the same character.
+fn committed_text(schema: &Value) -> String {
+    let mut text = String::new();
+    for c in serde_json::to_string_pretty(schema).unwrap().chars() {
+        if c.is_whitespace() && !c.is_ascii() {
+            text.push_str(&format!("\\u{:04x}", c as u32));
+        } else {
+            text.push(c);
+        }
+    }
+    text + "\n"
+}
+
 /// Regenerate with `UPDATE_CATALOG=1 cargo test -p srelens-sidecar-protocol --test schema`,
 /// the knob the manifest schema and the capability catalog use.
 #[test]
@@ -20,11 +35,7 @@ fn committed_protocol_schema_matches_the_types() {
     let path = committed_path();
     let generated = schema();
     if std::env::var("UPDATE_CATALOG").is_ok() {
-        std::fs::write(
-            &path,
-            serde_json::to_string_pretty(&generated).unwrap() + "\n",
-        )
-        .unwrap();
+        std::fs::write(&path, committed_text(&generated)).unwrap();
         return;
     }
     let committed = std::fs::read_to_string(&path).unwrap_or_else(|_| {
@@ -243,4 +254,62 @@ fn an_app_request_is_an_operation_the_manifest_could_declare() {
     for instance in invalid {
         assert!(!validator.is_valid(&instance), "{instance}");
     }
+}
+
+/// Regex engines read the class shorthands differently: Rust's `regex` and
+/// ECMA-262 by Unicode, each its own way (ECMA's `\s` takes U+FEFF and not
+/// U+0085), and Go's RE2 as ASCII only. A pattern that used one would accept
+/// a different set of values in each SDK, so none may.
+#[test]
+fn no_pattern_uses_a_class_shorthand_engines_read_differently() {
+    let schema = schema();
+    let mut patterns = Vec::new();
+    strings_under(&schema, "pattern", &mut patterns);
+    assert!(!patterns.is_empty());
+    for pattern in patterns {
+        for shorthand in ["\\s", "\\S", "\\w", "\\W", "\\d", "\\D", "\\b", "\\B"] {
+            assert!(
+                !pattern.contains(shorthand),
+                "{pattern:?} uses {shorthand}, which regex engines read differently"
+            );
+        }
+    }
+}
+
+/// The `clusterId` pattern tells blank from not blank exactly as srelens's
+/// `shape::is_cluster_id` does: a value is not blank when it holds a
+/// character that `char::is_whitespace` (Unicode `White_Space`) rejects.
+#[test]
+fn the_cluster_id_pattern_is_exactly_not_white_space() {
+    let schema = schema();
+    let pattern = schema["definitions"]["CallContext"]["properties"]["clusterId"]["pattern"]
+        .as_str()
+        .expect("clusterId has a pattern");
+    let not_blank = regex::Regex::new(pattern).expect("the pattern compiles");
+    for c in (0u32..=0xFFFF).filter_map(char::from_u32) {
+        assert_eq!(
+            not_blank.is_match(&c.to_string()),
+            !c.is_whitespace(),
+            "U+{:04X}",
+            c as u32
+        );
+    }
+}
+
+/// The committed file writes every non-ASCII white-space character as a `\u`
+/// escape: the `clusterId` pattern lists them, and raw they would be
+/// invisible in the file and in review (GitHub flags hidden characters).
+#[test]
+fn the_committed_schema_shows_every_white_space_character_as_an_escape() {
+    let committed = std::fs::read_to_string(committed_path()).unwrap();
+    let hidden: Vec<String> = committed
+        .chars()
+        .filter(|c| c.is_whitespace() && !c.is_ascii())
+        .map(|c| format!("U+{:04X}", c as u32))
+        .collect();
+    assert!(
+        hidden.is_empty(),
+        "{} holds raw {hidden:?}: run UPDATE_CATALOG=1 cargo test -p srelens-sidecar-protocol --test schema",
+        committed_path().display()
+    );
 }
