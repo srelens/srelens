@@ -45,9 +45,11 @@ Declare the operations in the app's manifest
 - **Calls to srelens.**
   - The calls are `ctx.host().read`, `.resource` and `.action`. Each names its cluster with a `CallContext`.
   - srelens adds no cluster to an operation's input: declare one, and pass it on.
-  - At most 8 calls are in flight, which is srelens's limit; the rest wait.
+  - Every field is checked before the call is sent, against the shape srelens holds it to: `clusterId` is not blank and at most 4096 bytes, `namespace` is a Kubernetes namespace name or `None`, `capability` and `action` are identifiers (1 to 64 ASCII letters, digits and hyphens), `name` is an object name (up to 253 ASCII letters, digits, dots and hyphens), and `uid` and `resourceVersion` are 1 to 128 printable ASCII characters. A call with a field srelens would refuse fails with `HostError::InvalidCall`, naming the field. Nothing is sent and no slot is taken.
+  - A `CallContext` written as a struct literal is checked too, as `CallContext::new` checks its arguments. `CallContext::validate` runs the same check on one you hold.
+  - At most 8 calls are in flight, which is srelens's limit, or fewer when the `maxConcurrentRequests` srelens sends in `initialize` is lower (0 is read as 8); the rest wait.
   - Dropping a call's future cancels it at srelens once srelens has seen the request; dropped while still waiting for a slot, its place is freed at once instead, since srelens never saw it.
-  - Refusals come back as `HostError`: `ConsentDenied`, `CapabilityFailed`, `InvalidParams`, `Cancelled`, `Rpc` or `Disconnected`. A call too large to send is refused before it is sent (`HostError::TooLarge`), and the session goes on.
+  - Refusals come back as `HostError`: `ConsentDenied`, `CapabilityFailed`, `InvalidParams` (srelens refused the params), `InvalidCall` (the SDK refused the call before sending it), `Cancelled`, `Rpc` or `Disconnected`. `TooLarge` is only a backstop: every field has a length limit far under the message limit, so a call that passes the checks is never too large to send.
 - **Limits.** No line goes over the protocol's 4 MiB. A result that would be larger is answered with an error instead, and a frame that would be larger is refused to your handler, as is one that cannot be serialized (`StreamClosed::Invalid`).
 - **Logging.**
   - Use the `log` crate. Records go to stderr as `LEVEL target: message`, which srelens keeps in the app's log at that level.

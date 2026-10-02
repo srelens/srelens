@@ -1,7 +1,11 @@
 //! Calls from the sidecar to srelens (`host/read`, `host/resource`,
-//! `host/action`). srelens works on at most 8 of a sidecar's calls at once
-//! and stops a sidecar with 16 unanswered, so at most
-//! [`HOST_CALLS_IN_FLIGHT`] are sent at once and the rest wait here.
+//! `host/action`). Each is checked first: a field srelens would refuse is
+//! refused here (`HostError::InvalidCall`), taking no slot and sending
+//! nothing. srelens works on at most [`HOST_CALLS_IN_FLIGHT`] (8) of a
+//! sidecar's calls at once, or fewer when `initialize`'s
+//! `maxConcurrentRequests` is lower (`call_slots`), and stops a sidecar with
+//! 16 unanswered, so at most that many are sent at once and the rest wait
+//! here.
 //!
 //! Whether a dropped call's request had already reached the wire decides
 //! what happens to its slot. Dropped before that (the outbox's queue was
@@ -13,8 +17,8 @@
 
 use serde_json::Value;
 use srelens_sidecar_protocol::{
-    method, CallContext, CancelParams, HostActionParams, HostReadParams, HostResourceParams,
-    Notification, Request, RequestId, Response, RpcError,
+    method, shape, CallContext, CancelParams, HostActionParams, HostReadParams, HostResourceParams,
+    InitializeLimits, Notification, Request, RequestId, Response, RpcError,
 };
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -26,12 +30,27 @@ use crate::HostError;
 
 pub(crate) const HOST_CALLS_IN_FLIGHT: usize = 8;
 
+/// How many of a sidecar's calls may be in flight at once, given the limits
+/// `initialize` brought: the host's `maxConcurrentRequests`, and never more
+/// than [`HOST_CALLS_IN_FLIGHT`], which is what srelens works on at once. A
+/// limit of 0 is read as that most, not as none (a semaphore with no permit
+/// would hold every call forever), as is one too big for a `usize`.
+fn call_slots(limits: &InitializeLimits) -> usize {
+    match usize::try_from(limits.max_concurrent_requests) {
+        Ok(0) | Err(_) => HOST_CALLS_IN_FLIGHT,
+        Ok(n) => n.min(HOST_CALLS_IN_FLIGHT),
+    }
+}
+
 struct Waiting {
     answer: oneshot::Sender<Result<Value, RpcError>>,
     _place: OwnedSemaphorePermit,
 }
 
 /// The way to srelens from a handler: `ctx.host()`.
+///
+/// Every call's fields are checked before it is sent: one srelens would
+/// refuse fails the call with [`HostError::InvalidCall`], naming the field.
 #[derive(Clone)]
 pub struct Host {
     inner: Arc<Inner>,
@@ -48,13 +67,14 @@ struct Inner {
 }
 
 impl Host {
-    pub(crate) fn new(outbox: Outbox) -> Host {
+    /// The way to srelens for a session whose host brought `limits`.
+    pub(crate) fn new(outbox: Outbox, limits: &InitializeLimits) -> Host {
         Host {
             inner: Arc::new(Inner {
                 outbox,
                 next: AtomicU64::new(0),
                 waiting: Mutex::new(Some(HashMap::new())),
-                places: Arc::new(Semaphore::new(HOST_CALLS_IN_FLIGHT)),
+                places: Arc::new(Semaphore::new(call_slots(limits))),
             }),
         }
     }
@@ -62,6 +82,7 @@ impl Host {
     /// Read one of the app's declared readers, or one of its `network.http`
     /// requests, on the cluster `context` names.
     pub async fn read(&self, context: &CallContext, capability: &str) -> Result<Value, HostError> {
+        check(context, &[Field::identifier("capability", capability)])?;
         let params = HostReadParams {
             context: context.clone(),
             capability: capability.to_owned(),
@@ -80,6 +101,13 @@ impl Host {
         capability: &str,
         name: &str,
     ) -> Result<Value, HostError> {
+        check(
+            context,
+            &[
+                Field::identifier("capability", capability),
+                Field::object_name("name", name),
+            ],
+        )?;
         let params = HostResourceParams {
             context: context.clone(),
             capability: capability.to_owned(),
@@ -103,6 +131,16 @@ impl Host {
         uid: &str,
         resource_version: &str,
     ) -> Result<Value, HostError> {
+        check(
+            context,
+            &[
+                Field::identifier("capability", capability),
+                Field::object_name("name", name),
+                Field::identifier("action", action),
+                Field::token("uid", uid),
+                Field::token("resourceVersion", resource_version),
+            ],
+        )?;
         let params = HostActionParams {
             context: context.clone(),
             capability: capability.to_owned(),
@@ -199,6 +237,74 @@ impl Host {
     }
 }
 
+// The shapes srelens's broker holds a call's fields to, in its words
+// (`crates/plugin-host/src/sidecar/broker.rs`).
+const IDENTIFIER_RULE: &str = "1 to 64 ASCII letters, digits and hyphens, as the manifest names it";
+const OBJECT_NAME_RULE: &str =
+    "a Kubernetes object name: 1 to 253 ASCII letters, digits, dots and hyphens";
+const TOKEN_RULE: &str = "1 to 128 printable ASCII characters, as the object carries it";
+
+/// A string field of a call, with the shape srelens holds it to.
+struct Field<'a> {
+    /// The field's name on the wire.
+    name: &'static str,
+    value: &'a str,
+    fits: fn(&str) -> bool,
+    rule: &'static str,
+}
+
+impl<'a> Field<'a> {
+    fn identifier(name: &'static str, value: &'a str) -> Field<'a> {
+        Field {
+            name,
+            value,
+            fits: shape::is_identifier,
+            rule: IDENTIFIER_RULE,
+        }
+    }
+
+    fn object_name(name: &'static str, value: &'a str) -> Field<'a> {
+        Field {
+            name,
+            value,
+            fits: shape::is_object_name,
+            rule: OBJECT_NAME_RULE,
+        }
+    }
+
+    fn token(name: &'static str, value: &'a str) -> Field<'a> {
+        Field {
+            name,
+            value,
+            fits: shape::is_token,
+            rule: TOKEN_RULE,
+        }
+    }
+}
+
+/// Refuse a call srelens would refuse, before it takes a slot or is queued:
+/// `context` first, then `fields` in order, naming the first that does not
+/// fit. srelens's own answer for such a call is `-32602`, after a round trip
+/// and one of the call slots.
+///
+/// There is nothing to check for `MAX_CALL_FIELD_BYTES`: it caps a call's
+/// `id` and `method`, not a field, and the SDK writes both itself (`c-N`, and
+/// one of the `method::HOST_*` names).
+fn check(context: &CallContext, fields: &[Field<'_>]) -> Result<(), HostError> {
+    context
+        .validate()
+        .map_err(|why| HostError::InvalidCall(why.to_string()))?;
+    for field in fields {
+        if !(field.fits)(field.value) {
+            return Err(HostError::InvalidCall(format!(
+                "`{}` must be {}",
+                field.name, field.rule
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Cancels a call at srelens when its future is dropped before the answer,
 /// unless its request never reached the wire.
 ///
@@ -281,6 +387,33 @@ mod tests {
     use serde_json::json;
     use std::time::Duration;
 
+    fn limits(max_concurrent_requests: u64) -> InitializeLimits {
+        InitializeLimits {
+            request_timeout_ms: 30_000,
+            max_concurrent_requests,
+            max_streams: 5,
+            memory_bytes: 256 * 1024 * 1024,
+            cpus: 1.0,
+            data_bytes: 1 << 30,
+            data_entries: 100_000,
+        }
+    }
+
+    #[test]
+    fn the_hosts_limit_sets_the_slots_but_never_above_eight() {
+        assert_eq!(call_slots(&limits(1)), 1);
+        assert_eq!(call_slots(&limits(2)), 2);
+        assert_eq!(call_slots(&limits(8)), 8);
+        assert_eq!(call_slots(&limits(20)), 8);
+        assert_eq!(call_slots(&limits(u64::MAX)), 8);
+    }
+
+    #[test]
+    fn a_limit_of_zero_means_eight_not_no_slot_at_all() {
+        // A semaphore with no permit would hold every call forever.
+        assert_eq!(call_slots(&limits(0)), 8);
+    }
+
     #[tokio::test]
     async fn a_call_dropped_before_its_request_is_queued_frees_its_slot() {
         let (outbox, _writer) = Outbox::new();
@@ -289,7 +422,7 @@ mod tests {
         for n in 0..64u64 {
             outbox.send(&json!(n)).await.unwrap();
         }
-        let host = Host::new(outbox);
+        let host = Host::new(outbox, &limits(HOST_CALLS_IN_FLIGHT as u64));
         let context = CallContext::new("kind-dev", Some("team")).unwrap();
         let outcome =
             tokio::time::timeout(Duration::from_millis(20), host.read(&context, "apps")).await;
@@ -297,6 +430,35 @@ mod tests {
             outcome.is_err(),
             "expected the call to still be waiting for room in the queue"
         );
+        assert_eq!(host.inner.places.available_permits(), HOST_CALLS_IN_FLIGHT);
+        assert!(host
+            .inner
+            .waiting
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .is_empty());
+    }
+
+    // `read`, `resource` and `action` check every field first, and every
+    // field has a short cap, so a call that gets past them is far under the
+    // message limit. `call` still holds the limit, as the backstop, and this
+    // is the only way to reach it.
+    #[tokio::test]
+    async fn a_call_over_the_message_limit_is_refused_as_too_large_and_frees_its_slot() {
+        let (outbox, _writer) = Outbox::new();
+        let host = Host::new(outbox, &limits(HOST_CALLS_IN_FLIGHT as u64));
+        let params = json!({"data": "x".repeat(5 * 1024 * 1024)});
+        let error = host
+            .call(method::HOST_READ, params)
+            .await
+            .expect_err("a call over the limit cannot be sent");
+        assert!(
+            matches!(error, HostError::TooLarge(bytes) if bytes > 5 * 1024 * 1024),
+            "{error:?}"
+        );
+        assert!(error.to_string().contains("4 MiB"), "{error}");
         assert_eq!(host.inner.places.available_permits(), HOST_CALLS_IN_FLIGHT);
         assert!(host
             .inner

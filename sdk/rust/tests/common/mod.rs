@@ -147,10 +147,20 @@ impl FakeHost {
 
     /// Initialize and activate, as the supervisor does; `initialize`'s result.
     pub async fn initialize(&mut self) -> Value {
+        self.initialize_with_concurrency(8).await
+    }
+
+    /// [`FakeHost::initialize`] for a host whose `maxConcurrentRequests` is
+    /// `max_concurrent_requests`.
+    pub async fn initialize_with_concurrency(&mut self, max_concurrent_requests: u64) -> Value {
         let id = self
             .request(
                 "initialize",
-                initialize_params(&["0.1.0"], &self.data_dir.to_string_lossy()),
+                initialize_params_with_concurrency(
+                    &["0.1.0"],
+                    &self.data_dir.to_string_lossy(),
+                    max_concurrent_requests,
+                ),
             )
             .await;
         let initialized = self.answer(id).await;
@@ -212,10 +222,18 @@ async fn drain(from_sidecar: &mut Lines<BufReader<ReadHalf<DuplexStream>>>) {
 }
 
 pub fn initialize_params(offered: &[&str], data_dir: &str) -> Value {
+    initialize_params_with_concurrency(offered, data_dir, 8)
+}
+
+pub fn initialize_params_with_concurrency(
+    offered: &[&str],
+    data_dir: &str,
+    max_concurrent_requests: u64,
+) -> Value {
     json!({
         "apiVersions": offered,
         "host": {"name": "srelens", "version": "0.15.0"},
-        "limits": {"requestTimeoutMs": 30000, "maxConcurrentRequests": 8, "maxStreams": 5,
+        "limits": {"requestTimeoutMs": 30000, "maxConcurrentRequests": max_concurrent_requests, "maxStreams": 5,
                    "memoryBytes": 268435456u64, "cpus": 1.0, "dataBytes": 1073741824u64, "dataEntries": 100000},
         "dataDirectory": data_dir,
     })

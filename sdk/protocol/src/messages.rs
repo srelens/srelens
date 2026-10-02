@@ -213,7 +213,7 @@ pub struct HostActionParams {
     pub resource_version: String,
 }
 
-/// Why [`CallContext::new`] refused.
+/// Why [`CallContext::new`] or [`CallContext::validate`] refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ContextError {
     ClusterId,
@@ -246,19 +246,28 @@ impl CallContext {
         cluster: impl Into<String>,
         namespace: Option<&str>,
     ) -> Result<CallContext, ContextError> {
-        let cluster_id = cluster.into();
-        if !crate::shape::is_cluster_id(&cluster_id) {
+        let context = CallContext {
+            cluster_id: cluster.into(),
+            namespace: namespace.map(str::to_owned),
+        };
+        context.validate()?;
+        Ok(context)
+    }
+
+    /// Whether this context passes the checks [`CallContext::new`] makes.
+    /// The fields are `pub`, so a context written as a struct literal or read
+    /// from JSON can skip `new`: this holds it to the same shapes, for a
+    /// caller that checks a call before sending it.
+    pub fn validate(&self) -> Result<(), ContextError> {
+        if !crate::shape::is_cluster_id(&self.cluster_id) {
             return Err(ContextError::ClusterId);
         }
-        if let Some(namespace) = namespace {
+        if let Some(namespace) = &self.namespace {
             if !crate::shape::is_namespace(namespace) {
-                return Err(ContextError::Namespace(namespace.to_owned()));
+                return Err(ContextError::Namespace(namespace.clone()));
             }
         }
-        Ok(CallContext {
-            cluster_id,
-            namespace: namespace.map(str::to_owned),
-        })
+        Ok(())
     }
 }
 
@@ -617,5 +626,40 @@ mod tests {
             assert_eq!(refused, ContextError::Namespace(namespace.to_owned()));
             assert!(refused.to_string().contains("namespace"), "{refused}");
         }
+    }
+
+    #[test]
+    fn a_context_built_by_hand_is_checked_by_validate_as_new_checks_its_arguments() {
+        // The fields are `pub`, so a struct literal skips `new`'s checks.
+        let by_hand = |cluster_id: &str, namespace: Option<&str>| CallContext {
+            cluster_id: cluster_id.to_owned(),
+            namespace: namespace.map(str::to_owned),
+        };
+        assert_eq!(by_hand("kind-dev", Some("team")).validate(), Ok(()));
+        assert_eq!(by_hand("kind-dev", None).validate(), Ok(()));
+        assert_eq!(by_hand(&"x".repeat(4096), None).validate(), Ok(()));
+        for cluster in ["", "   ", &"x".repeat(4097), &"é".repeat(3000)] {
+            assert_eq!(
+                by_hand(cluster, None).validate(),
+                Err(ContextError::ClusterId),
+                "{:?}",
+                cluster.chars().take(8).collect::<String>()
+            );
+        }
+        for namespace in ["", "Team", "-team", "team-", "te.am", &"a".repeat(64)] {
+            assert_eq!(
+                by_hand("kind-dev", Some(namespace)).validate(),
+                Err(ContextError::Namespace(namespace.to_owned())),
+                "{namespace:?}"
+            );
+        }
+        // The cluster is checked first, as `new` does.
+        assert_eq!(
+            by_hand("", Some("Team")).validate(),
+            Err(ContextError::ClusterId)
+        );
+        // What `new` builds always validates.
+        let built = CallContext::new("kind-dev", Some("team")).unwrap();
+        assert_eq!(built.validate(), Ok(()));
     }
 }
