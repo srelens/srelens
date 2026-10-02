@@ -752,25 +752,30 @@ fn render_gauges_card(f: &mut Frame, area: Rect, d: &NodeInspectorDetails) {
                 * 100.0)
                 .round() as u64)
                 .min(999) as u16;
-            let suffix = if gauge_chunks[3].width >= 64 {
+            let suffix = if gauge_chunks[3].width >= 72 {
                 format!(
-                    ": {:.1}/{:.1} GiB Phys ({}% of {:.0}G vVRAM) ",
-                    req_vram_gib, phys_vram_gib, virt_pct, virt_vram_gib
+                    ": {:.1}/{:.0}G ({}% HAMi vPool) • 1x {:.0}G Phys ({}%) ",
+                    req_vram_gib, virt_vram_gib, virt_pct, phys_vram_gib, phys_pct
+                )
+            } else if gauge_chunks[3].width >= 58 {
+                format!(
+                    ": {:.1}/{:.0}G ({}% HAMi vPool) • 1x {:.0}G Phys ",
+                    req_vram_gib, virt_vram_gib, virt_pct, phys_vram_gib
                 )
             } else if gauge_chunks[3].width >= 46 {
                 format!(
-                    ": {:.1}/{:.1}G ({}% virt) ",
-                    req_vram_gib, phys_vram_gib, virt_pct
+                    ": {:.1}/{:.0}G ({}% HAMi pool) ",
+                    req_vram_gib, virt_vram_gib, virt_pct
                 )
-            } else if gauge_chunks[3].width >= 38 {
+            } else if gauge_chunks[3].width >= 36 {
                 format!(
-                    ": {:.1}/{:.1}G ({}% v) ",
-                    req_vram_gib, phys_vram_gib, virt_pct
+                    ": {:.1}/{:.0}G ({}% HAMi) ",
+                    req_vram_gib, virt_vram_gib, virt_pct
                 )
             } else {
-                format!(": {:.0}/{:.0}G ", req_vram_gib, phys_vram_gib)
+                format!(": {:.0}/{:.0}G ", req_vram_gib, virt_vram_gib)
             };
-            (suffix, phys_pct)
+            (suffix, virt_pct)
         } else if d.gpu_memory_requests_mib > 0 && d.gpu_memory_total_mib.unwrap_or(0) > 0 {
             let total_vram_mib = d.gpu_memory_total_mib.unwrap_or(15360);
             let req_vram_gib = d.gpu_memory_requests_mib as f64 / 1024.0;
@@ -821,7 +826,7 @@ fn render_gauges_card(f: &mut Frame, area: Rect, d: &NodeInspectorDetails) {
         } else if gpu_pct > 75 {
             Theme::YELLOW
         } else {
-            Theme::YELLOW
+            Theme::GREEN
         };
 
         let gpu_gauge = Gauge::default()
@@ -1365,6 +1370,10 @@ mod tests {
             gpu_memory_total_mib: None,
             gpu_memory_requests_mib: 0,
             is_virtual_gpu: false,
+            physical_gpu_count: 0,
+            physical_gpu_memory_total_mib: None,
+            virtual_gpu_count: None,
+            virtual_gpu_memory_total_mib: None,
             conditions: vec![],
             taints: vec![],
             pods: vec![

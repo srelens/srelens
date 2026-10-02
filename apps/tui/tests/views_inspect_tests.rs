@@ -507,16 +507,16 @@ fn node_inspector_gpu_gauge_shows_virtual_gpus_and_total_virtual_vram_for_hami()
         text_wide.contains("1x Tesla T4 (HAMi 10 vGPUs)"),
         "{text_wide}"
     );
-    // GPU gauge VRAM allocation showing physical capacity and virtual percentage on wide screen:
+    // GPU gauge VRAM allocation showing virtual pool and physical capacity on wide screen:
     assert!(
-        text_wide.contains("Tesla T4 (Alloc): 15.0/15.0 GiB Phys (10% of 150G vVRAM)"),
+        text_wide.contains("Tesla T4 (Alloc): 15.0/150G (10% HAMi vPool) • 1x 15G Phys"),
         "{text_wide}"
     );
 
     // Compact GPU gauge on narrower screens:
     let text_compact = render_node(200, 40, &state);
     assert!(
-        text_compact.contains("Tesla T4 (Alloc): 15.0/15.0G (10% virt)"),
+        text_compact.contains("Tesla T4 (Alloc): 15.0/150G (10% HAMi pool)"),
         "{text_compact}"
     );
 }
@@ -2718,4 +2718,11 @@ fn gpu_view_renders_hami_virtual_gpus_with_dual_reality() {
     // Summary footer:
     assert!(text.contains("Available vGPUs: "), "{text}");
     assert!(text.contains("Available vVRAM: "), "{text}");
+
+    // Legend on bottom border and refined free message:
+    assert!(text.contains("v: Virtual GPUs detected (HAMi)"), "{text}");
+    assert!(
+        text.contains("All 10 vGPUs (150 GiB vVRAM) are free and ready to accept workloads."),
+        "{text}"
+    );
 }

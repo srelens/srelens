@@ -227,13 +227,32 @@ fn render_nodes_list(f: &mut Frame, area: Rect, state: &GpuViewState, max_node_n
             .add_modifier(Modifier::BOLD)
     };
 
-    let block = Block::default()
+    let nodes = state
+        .cluster_info
+        .as_ref()
+        .map(|ci| &ci.nodes[..])
+        .unwrap_or(&[]);
+    let has_virtual_gpus = nodes.iter().any(|n| n.is_virtual_gpu);
+
+    let mut block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(border_color))
         .title(Span::styled(
             format!(" ⚡ GPU NODES ({}) ", node_count),
             title_style,
         ));
+
+    if has_virtual_gpus {
+        let legend_text = if area.width >= 42 {
+            " v: Virtual GPUs detected (HAMi) "
+        } else {
+            " v: Virtual GPUs (HAMi) "
+        };
+        block = block.title_bottom(Span::styled(
+            legend_text,
+            Style::default().fg(Theme::CYAN).add_modifier(Modifier::DIM),
+        ));
+    }
 
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -268,11 +287,6 @@ fn render_nodes_list(f: &mut Frame, area: Rect, state: &GpuViewState, max_node_n
         return;
     }
 
-    let nodes = state
-        .cluster_info
-        .as_ref()
-        .map(|ci| &ci.nodes[..])
-        .unwrap_or(&[]);
     if nodes.is_empty() {
         let p = Paragraph::new(vec![
             Line::from(""),
@@ -678,6 +692,24 @@ fn render_node_pods_table(f: &mut Frame, area: Rect, state: &GpuViewState, node:
     state.last_pods_pane_rect.set(inner);
 
     if node.pods.is_empty() {
+        let free_msg = if node.is_virtual_gpu {
+            let vram_cap = node
+                .vram_capacity_total_mib
+                .map(|m| format!("{} vVRAM", format_vram_mib(m)))
+                .unwrap_or_else(|| "-".to_string());
+            format!(
+                "  All {} vGPUs ({}) are free and ready to accept workloads.",
+                node.gpu_capacity, vram_cap
+            )
+        } else {
+            format!(
+                "  All {} GPUs ({}) are free and ready to accept workloads.",
+                node.gpu_capacity,
+                node.vram_capacity_total_mib
+                    .map(format_vram_mib)
+                    .unwrap_or_else(|| "-".to_string())
+            )
+        };
         let p = Paragraph::new(vec![
             Line::from(""),
             Line::from(Span::styled(
@@ -685,16 +717,7 @@ fn render_node_pods_table(f: &mut Frame, area: Rect, state: &GpuViewState, node:
                 Style::default().fg(Theme::GREEN),
             )),
             Line::from(""),
-            Line::from(Span::styled(
-                format!(
-                    "  All {} GPUs ({}) are free and ready to accept workloads.",
-                    node.gpu_capacity,
-                    node.vram_capacity_total_mib
-                        .map(format_vram_mib)
-                        .unwrap_or_else(|| "-".to_string())
-                ),
-                Style::default().fg(Theme::DIM),
-            )),
+            Line::from(Span::styled(free_msg, Style::default().fg(Theme::DIM))),
         ])
         .wrap(Wrap { trim: false });
         f.render_widget(p, inner);
@@ -897,6 +920,9 @@ mod tests {
             vram_capacity_total_mib: Some(655360),
             vram_requests_total_mib: 327680,
             pods: vec![pod.clone()],
+            is_virtual_gpu: false,
+            physical_gpu_count: 8,
+            physical_vram_total_mib: Some(655360),
         };
 
         let node2 = GpuNodeInfo {
@@ -915,6 +941,9 @@ mod tests {
             vram_capacity_total_mib: Some(15360),
             vram_requests_total_mib: 0,
             pods: vec![],
+            is_virtual_gpu: false,
+            physical_gpu_count: 1,
+            physical_vram_total_mib: Some(15360),
         };
 
         let info = GpuClusterInfo {
@@ -971,6 +1000,9 @@ mod tests {
             vram_capacity_total_mib: Some(655360),
             vram_requests_total_mib: 0,
             pods: vec![],
+            is_virtual_gpu: false,
+            physical_gpu_count: 8,
+            physical_vram_total_mib: Some(655360),
         };
 
         let info = GpuClusterInfo {
@@ -1079,6 +1111,9 @@ mod tests {
             vram_capacity_total_mib: Some(65536),
             vram_requests_total_mib: 60000, // > 90% -> Red
             pods: vec![pod1.clone(), pod2.clone()],
+            is_virtual_gpu: false,
+            physical_gpu_count: 4,
+            physical_vram_total_mib: Some(65536),
         };
 
         let node_notready = GpuNodeInfo {
@@ -1097,6 +1132,9 @@ mod tests {
             vram_capacity_total_mib: None,
             vram_requests_total_mib: 0,
             pods: vec![],
+            is_virtual_gpu: false,
+            physical_gpu_count: 2,
+            physical_vram_total_mib: None,
         };
 
         let populated_info = GpuClusterInfo {

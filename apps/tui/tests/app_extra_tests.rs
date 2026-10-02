@@ -1602,6 +1602,10 @@ fn inspector(name: &str, unschedulable: bool, with_pods: bool) -> NodeInspectorS
         gpu_memory_total_mib: None,
         gpu_memory_requests_mib: 0,
         is_virtual_gpu: false,
+        physical_gpu_count: 0,
+        physical_gpu_memory_total_mib: None,
+        virtual_gpu_count: None,
+        virtual_gpu_memory_total_mib: None,
         conditions: vec![],
         taints: vec![],
         pods: if with_pods {
