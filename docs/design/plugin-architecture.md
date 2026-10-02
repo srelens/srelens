@@ -631,7 +631,8 @@ and `windows-latest`.
 
 On macOS 27.0 (26A428), arm64, the suite's isolation checks were run by hand and all
 seven passed: 1 to 4, 7, the environment and the Unix socket. The CPU and memory checks
-are not run on macOS.
+run on macOS too, against the watchdog, but have not yet been run by hand on a Mac with
+Seatbelt (see What remains).
 
 ### What the spike did not establish
 
