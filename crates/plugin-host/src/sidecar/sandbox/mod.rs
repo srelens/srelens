@@ -5,7 +5,7 @@
 //! | OS | Isolation | Memory and CPU |
 //! |---|---|---|
 //! | Linux | Landlock and a seccomp filter, applied by `srelens-sandbox-launch` before it `exec`s the sidecar | a cgroup v2 directory the host creates under a delegated root |
-//! | macOS | Seatbelt, through `/usr/bin/sandbox-exec` | not enforced: host-side watchdog, #713, not built |
+//! | macOS | Seatbelt, through `/usr/bin/sandbox-exec` | a host-side watchdog (`watchdog.rs`, #713), weaker than the kernel's; not yet checked with Seatbelt on a macOS 27 Mac, so sidecars are still refused |
 //! | Windows | an AppContainer with no capabilities | the Job Object the process starts in |
 //! | anything else | none | none |
 //!
@@ -33,10 +33,18 @@ mod macos;
 #[cfg(windows)]
 mod windows;
 
+// Only the macOS backend runs the watchdog; every OS tests its policy, and
+// Linux its loop too.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+mod watchdog;
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[doc(hidden)]
 pub mod launch;
 
+#[cfg(target_os = "macos")]
+#[doc(hidden)]
+pub use macos::watch;
 #[cfg(windows)]
 pub use windows::delete_profile;
 
@@ -79,7 +87,8 @@ pub enum Enforcement {
     /// The kernel refuses or stops at the limit: a Job Object, a cgroup.
     Kernel,
     /// The host watches and stops the sidecar past the limit, which a burst
-    /// between two samples can exceed. macOS, once #713 is built.
+    /// between two samples can exceed. macOS, once its watchdog (#713) has
+    /// been checked with Seatbelt on a macOS 27 Mac.
     Host,
     /// Nothing does, for the reason given. The supervisor refuses to start a
     /// sidecar then: isolation without limits was considered for macOS and
@@ -224,10 +233,11 @@ impl Process {
     }
 
     /// The same process, with a way to read its memory use for the Inspector
-    /// (#575): the cgroup's `memory.current` on Linux, and the process's
-    /// committed private memory on Windows (#753). A backend that cannot
+    /// (#575): the cgroup's `memory.current` on Linux, the process's committed
+    /// private memory on Windows (#753), and the watchdog's last reading of the
+    /// process's physical footprint on macOS (#713). A backend that cannot
     /// measure it leaves it out, and the Inspector says so rather than
-    /// showing a number. macOS's watchdog samples the same figure (#713).
+    /// showing a number.
     pub fn with_memory(
         mut self,
         probe: impl Fn() -> Option<u64> + Send + Sync + 'static,
@@ -256,6 +266,15 @@ impl Process {
     }
 }
 
+/// What a backend's wait task holds: the requests to stop the process, and
+/// where its exit goes.
+struct Waiter {
+    /// A kill, or `None` once every handle to the process is dropped, which
+    /// must stop it too.
+    stopped: mpsc::UnboundedReceiver<()>,
+    ended: oneshot::Sender<Exit>,
+}
+
 impl Launched {
     /// A launched child with all three stdio streams piped. `describe` turns
     /// its exit status into an [`Exit`], after the child has been reaped, so a
@@ -265,14 +284,7 @@ impl Launched {
         mut child: tokio::process::Child,
         describe: impl FnOnce(io::Result<ExitStatus>) -> Exit + Send + 'static,
     ) -> Result<Launched, LaunchError> {
-        let missing =
-            |what: &str| LaunchError::Failed(format!("the sidecar's {what} is not piped"));
-        let stdin = child.stdin.take().ok_or_else(|| missing("stdin"))?;
-        let stdout = child.stdout.take().ok_or_else(|| missing("stdout"))?;
-        let stderr = child.stderr.take().ok_or_else(|| missing("stderr"))?;
-        let pid = child.id();
-        let (stop, mut stopped) = mpsc::unbounded_channel::<()>();
-        let (ended, exit) = oneshot::channel();
+        let (launched, Waiter { mut stopped, ended }) = Launched::piped(&mut child)?;
         tokio::spawn(async move {
             let status = tokio::select! {
                 status = child.wait() => status,
@@ -284,6 +296,21 @@ impl Launched {
             };
             let _ = ended.send(describe(status));
         });
+        Ok(launched)
+    }
+
+    /// The pipes and the [`Process`] of a child spawned with all three stdio
+    /// streams piped, and the [`Waiter`] for the task that then waits on it:
+    /// [`Launched::from_child`]'s, or the watchdog's.
+    fn piped(child: &mut tokio::process::Child) -> Result<(Launched, Waiter), LaunchError> {
+        let missing =
+            |what: &str| LaunchError::Failed(format!("the sidecar's {what} is not piped"));
+        let stdin = child.stdin.take().ok_or_else(|| missing("stdin"))?;
+        let stdout = child.stdout.take().ok_or_else(|| missing("stdout"))?;
+        let stderr = child.stderr.take().ok_or_else(|| missing("stderr"))?;
+        let pid = child.id();
+        let (stop, stopped) = mpsc::unbounded_channel::<()>();
+        let (ended, exit) = oneshot::channel();
         let exit = async move {
             exit.await.unwrap_or_else(|_| Exit {
                 description: "ended, and srelens lost track of how".into(),
@@ -292,14 +319,15 @@ impl Launched {
                 memory_limit: false,
             })
         };
-        Ok(Launched {
+        let launched = Launched {
             stdin: Box::new(stdin),
             stdout: Box::new(stdout),
             stderr: Box::new(stderr),
             process: Process::new(pid, exit, move || {
                 let _ = stop.send(());
             }),
-        })
+        };
+        Ok((launched, Waiter { stopped, ended }))
     }
 }
 
@@ -398,11 +426,11 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn macos_reports_its_limits_as_not_enforced_until_the_watchdog_exists() {
+    fn macos_reports_its_limits_as_not_enforced_until_the_watchdog_is_checked_on_a_mac() {
         let Enforcement::Missing(why) = OsSandbox::new(SandboxConfig::default()).enforcement()
         else {
             panic!("macOS claims its limits are enforced");
         };
-        assert!(why.contains("#713"), "{why}");
+        assert!(why.contains("watchdog") && why.contains("#713"), "{why}");
     }
 }

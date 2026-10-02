@@ -297,8 +297,9 @@ jobs:
   #
   # Not macOS: GitHub's macOS runners are older than macOS 27, the one version
   # the Seatbelt profile was verified on, and srelens refuses sidecars on
-  # macOS until its memory and CPU watchdog exists (#713). The suite runs
-  # there by hand, and its header says how.
+  # macOS until its watchdog has been checked on a macOS 27 Mac (#713). The
+  # suite runs there by hand, and its header says how; `macos-watchdog` below
+  # runs the watchdog itself, without Seatbelt.
   sandbox-conformance:
     name: sandbox conformance (${{ matrix.os }})
     strategy:
@@ -380,6 +381,40 @@ jobs:
       - name: Exec plugins start without a console window
         if: runner.os == 'Windows'
         run: cargo test -p srelens-kube --test exec_plugin_console
+
+  # The macOS memory and CPU watchdog (#713) on a real process. It does not
+  # depend on Seatbelt, so it runs on the runners' older macOS: its policy
+  # and its loop, and tests/macos_watchdog.rs, which holds the probe to
+  # 128 MiB and 0.25 CPUs and prints how far a hold overshot. It also builds
+  # the conformance suite, whose checks 5 and 6 run with Seatbelt by hand on a
+  # macOS 27 Mac before macOS runs sidecars.
+  macos-watchdog:
+    name: macOS watchdog
+    runs-on: macos-latest
+    # A hang stops here, not at the 6-hour default.
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      # It only builds and runs tests, so the token need not stay in
+      # .git/config while the repository's code runs.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # v1
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # One thread for the integration test, so its other tests (the 512 MiB
+      # hold, the memory reading) do not compete with the CPU test for the
+      # runner's cores. The CPU test's control and its throttled burn already
+      # run one after the other.
+      - name: The watchdog
+        run: |
+          sw_vers
+          cargo test -p srelens-plugin-host --test sandbox_conformance --no-run
+          cargo test -p srelens-plugin-host --lib sidecar::sandbox
+          cargo test -p srelens-plugin-host --test macos_watchdog -- --test-threads=1 --nocapture
 
   # The WebDriver smoke suite (issue #30): the REAL built app — WebView and
   # all — driven through tauri-driver against a kind cluster. This is the
