@@ -42,11 +42,19 @@ fn cut(mut line: String) -> String {
     line
 }
 
-struct Stderr;
+struct Stderr {
+    level: LevelFilter,
+}
+
+impl Stderr {
+    fn new(level: LevelFilter) -> Stderr {
+        Stderr { level }
+    }
+}
 
 impl Log for Stderr {
-    fn enabled(&self, _: &Metadata) -> bool {
-        true
+    fn enabled(&self, metadata: &Metadata) -> bool {
+        metadata.level() <= self.level
     }
 
     fn log(&self, record: &Record) {
@@ -62,11 +70,11 @@ impl Log for Stderr {
     }
 }
 
-/// Log to stderr at `Info` and above, and write panics as srelens reads
+/// Log to stderr at `level` and above, and write panics as srelens reads
 /// them. Once per process; a second call changes nothing.
-pub(crate) fn install() {
-    if log::set_boxed_logger(Box::new(Stderr)).is_ok() {
-        log::set_max_level(LevelFilter::Info);
+pub(crate) fn install(level: LevelFilter) {
+    if log::set_boxed_logger(Box::new(Stderr::new(level))).is_ok() {
+        log::set_max_level(level);
     }
     std::panic::set_hook(Box::new(|info| {
         let message = info
@@ -130,5 +138,19 @@ mod tests {
             "panic: boom at src/main.rs:3:5"
         );
         assert_eq!(panic_line("boom", None), "panic: boom");
+    }
+
+    #[test]
+    fn a_record_is_enabled_at_the_level_and_above_and_not_below_it() {
+        let at = |level: Level| Metadata::builder().level(level).target("s").build();
+        let info = Stderr::new(LevelFilter::Info);
+        assert!(info.enabled(&at(Level::Error)));
+        assert!(info.enabled(&at(Level::Info)));
+        assert!(!info.enabled(&at(Level::Debug)));
+        let debug = Stderr::new(LevelFilter::Debug);
+        assert!(debug.enabled(&at(Level::Debug)));
+        assert!(!debug.enabled(&at(Level::Trace)));
+        let off = Stderr::new(LevelFilter::Off);
+        assert!(!off.enabled(&at(Level::Error)));
     }
 }
