@@ -54,6 +54,8 @@ windows-sys = { version = "0.59", features = [
   "Win32_System_Com",
   "Win32_System_JobObjects",
   "Win32_System_Pipes",
+  # K32GetProcessMemoryInfo, for a sidecar's memory in the Inspector (#753).
+  "Win32_System_ProcessStatus",
   "Win32_System_Threading",
 ] }
 
