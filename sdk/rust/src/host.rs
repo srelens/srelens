@@ -33,8 +33,8 @@ pub(crate) const HOST_CALLS_IN_FLIGHT: usize = 8;
 /// How many of a sidecar's calls may be in flight at once, given the limits
 /// `initialize` brought: the host's `maxConcurrentRequests`, and never more
 /// than [`HOST_CALLS_IN_FLIGHT`], which is what srelens works on at once. A
-/// limit of 0 is read as that most, not as none (a semaphore with no permit
-/// would hold every call forever), as is one too big for a `usize`.
+/// limit of 0 is read as 8, not as none (a semaphore with no permit would
+/// hold every call forever), and so is one too big for a `usize`.
 fn call_slots(limits: &InitializeLimits) -> usize {
     match usize::try_from(limits.max_concurrent_requests) {
         Ok(0) | Err(_) => HOST_CALLS_IN_FLIGHT,

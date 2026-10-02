@@ -209,6 +209,112 @@ async fn a_bad_call_is_refused_at_once_even_when_every_slot_is_taken() {
     host.finish().await.unwrap();
 }
 
+/// Run `call` in an operation and check that the host is sent `method` with
+/// exactly `params`. The values below pass the shape of the field they are
+/// given for and fail the others: a field checked against the wrong shape
+/// would refuse what srelens accepts, and nothing would reach the wire.
+async fn is_sent<F, Fut>(method: &str, params: Value, call: F)
+where
+    F: Fn(Host) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Result<Value, HostError>> + Send + 'static,
+{
+    let call = Arc::new(call);
+    let sidecar = Sidecar::new("t", "1").operation("go", move |ctx: Context, _: Value| {
+        let call = call.clone();
+        async move { Ok::<_, Error>(call(ctx.host().clone()).await?) }
+    });
+    let mut host = FakeHost::start(sidecar);
+    host.initialize().await;
+    let id = host.request("go", json!({})).await;
+    let sent = host.call().await;
+    assert_eq!(sent["method"], method);
+    assert_eq!(sent["params"], params);
+    host.reply(&sent["id"], Ok(json!({"answered": method})))
+        .await;
+    assert_eq!(host.answer(id).await["result"], json!({"answered": method}));
+    host.finish().await.unwrap();
+}
+
+fn context_json() -> Value {
+    json!({"clusterId": "kind-dev", "namespace": "team"})
+}
+
+#[tokio::test]
+async fn a_dotted_object_name_is_sent() {
+    // A dot is an object name's, not an identifier's.
+    is_sent(
+        "host/resource",
+        json!({"context": context_json(), "capability": "apps", "name": "web.v1-2"}),
+        |host| async move { host.resource(&prod(), "apps", "web.v1-2").await },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn an_object_name_of_253_characters_is_sent() {
+    // An identifier stops at 64; an object name at 253.
+    let name = "a".repeat(253);
+    let expected = name.clone();
+    is_sent(
+        "host/resource",
+        json!({"context": context_json(), "capability": "apps", "name": expected}),
+        move |host| {
+            let name = name.clone();
+            async move { host.resource(&prod(), "apps", &name).await }
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn an_action_on_a_dotted_object_name_is_sent() {
+    is_sent(
+        "host/action",
+        json!({"context": context_json(), "capability": "apps", "name": "web.v1-2",
+               "action": "sync", "uid": "u-1", "resourceVersion": "42"}),
+        |host| async move {
+            host.action(&prod(), "apps", "web.v1-2", "sync", "u-1", "42")
+                .await
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_uid_with_visible_characters_an_identifier_refuses_is_sent() {
+    // A token is any printable ASCII, `:` and `/` included.
+    is_sent(
+        "host/action",
+        json!({"context": context_json(), "capability": "apps", "name": "web",
+               "action": "sync", "uid": "a:b/c", "resourceVersion": "42"}),
+        |host| async move {
+            host.action(&prod(), "apps", "web", "sync", "a:b/c", "42")
+                .await
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_resource_version_of_128_visible_characters_is_sent() {
+    // A token goes to 128 characters, and `~` is not an identifier's.
+    let version = "~".repeat(128);
+    let expected = version.clone();
+    is_sent(
+        "host/action",
+        json!({"context": context_json(), "capability": "apps", "name": "web",
+               "action": "sync", "uid": "u-1", "resourceVersion": expected}),
+        move |host| {
+            let version = version.clone();
+            async move {
+                host.action(&prod(), "apps", "web", "sync", "u-1", &version)
+                    .await
+            }
+        },
+    )
+    .await;
+}
+
 #[tokio::test]
 async fn each_host_call_names_its_context_and_gets_the_hosts_answer() {
     let sidecar = Sidecar::new("t", "1")
@@ -566,6 +672,9 @@ async fn a_name_over_the_message_limit_is_refused_as_invalid_without_echoing_it_
         matches!(&error, HostError::InvalidCall(why) if why.contains("`name`")),
         "the session with srelens is still live; the call alone was refused: {error:?}"
     );
+    // The refusal must not echo the 5 MiB value. It is the rule's sentence
+    // and the field's name, about 110 bytes, so a few hundred leaves room to
+    // reword it and is nowhere near the size of the value.
     assert!(
         error.to_string().len() < 300,
         "{} bytes",
