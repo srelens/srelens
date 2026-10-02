@@ -237,4 +237,47 @@ mod tests {
             "saturates"
         );
     }
+
+    #[test]
+    fn a_debt_still_owed_at_the_next_reading_carries_over() {
+        let mut dog = watchdog(128, 0.25);
+        let t = Instant::now();
+        dog.observe(&usage(1, 0), t);
+        // First reading: 200 ms of CPU in 100 ms against 0.25: 25 ms allowed, 175 ms owed.
+        let verdict1 = dog.observe(&usage(1, 200), t + ms(100));
+        assert!(pause_of(verdict1, ms(700)), "{verdict1:?}");
+        // Second reading: 200 ms total CPU, so 0 ms new usage. Debt carries over.
+        // 175 ms owed + 0 ms used = 175 ms owed, paying back takes 700 ms at 0.25.
+        // But we're only 100 ms later, so debt is now 175 ms owed.
+        let verdict2 = dog.observe(&usage(1, 400), t + ms(200));
+        assert!(pause_of(verdict2, ms(1_400)), "debt carries: {verdict2:?}");
+    }
+
+    #[test]
+    fn a_cpu_reading_lower_than_the_previous_one_becomes_the_new_baseline() {
+        let mut dog = watchdog(128, 0.25);
+        let t = Instant::now();
+        dog.observe(&usage(1, 100), t);
+        // CPU drops from 100 to 50: counts as 0 used, 50 becomes the new baseline.
+        assert_eq!(dog.observe(&usage(1, 50), t + ms(100)), Verdict::Run);
+        // From baseline 50, we're at 100 after 100 ms: 50 ms used, 25 allowed, 25 owed.
+        let verdict = dog.observe(&usage(1, 100), t + ms(200));
+        assert!(pause_of(verdict, ms(100)), "{verdict:?}");
+    }
+
+    #[test]
+    fn a_cpu_limit_above_the_ceiling_or_infinite_is_held_to_the_ceiling() {
+        for cpus in [2048.0, f64::INFINITY] {
+            let mut dog = watchdog(128, cpus);
+            let t = Instant::now();
+            dog.observe(&usage(1, 0), t);
+            // 102.5 s of CPU in 100 ms against ceiling 1024: 102.4 s allowed,
+            // 100 ms owed, which 100 ms at 1024 CPUs pays back.
+            let verdict = dog.observe(&usage(1, 102_500), t + ms(100));
+            assert!(
+                pause_of(verdict, Duration::from_nanos(97_656)),
+                "{cpus}: {verdict:?}"
+            );
+        }
+    }
 }
