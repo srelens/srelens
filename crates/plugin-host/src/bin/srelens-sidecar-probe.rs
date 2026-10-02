@@ -274,6 +274,25 @@ fn handle(method: &str, params: &Value) -> Result<Action, Fail> {
             let sum = buf.iter().step_by(4096).map(|b| *b as u64).sum::<u64>();
             answer(json!({"mib": mib, "checksum": sum}))
         }
+        "hold" => {
+            // `mib` MiB, touched and kept for the rest of the probe's life, so
+            // the Inspector's memory reading has something to show (#753).
+            let mib = params["mib"].as_u64().ok_or("missing mib".to_owned())?;
+            let len = usize::try_from(mib)
+                .ok()
+                .and_then(|mib| mib.checked_mul(1024 * 1024))
+                .ok_or_else(|| Fail::new("InvalidInput", format!("{mib} MiB is too large")))?;
+            let mut buf: Vec<u8> = Vec::new();
+            buf.try_reserve_exact(len).map_err(|e| {
+                Fail::new(
+                    "OutOfMemory",
+                    format!("allocation of {mib} MiB refused: {e}"),
+                )
+            })?;
+            buf.resize(len, 0x5A);
+            buf.leak();
+            answer(json!({"mib": mib}))
+        }
         "burn_cpu" => {
             let millis = params["millis"]
                 .as_u64()
