@@ -2920,7 +2920,7 @@ fn gpu_view_renders_compact_vram_gauge_on_narrow_terminal() {
     node.vram_requests_total_mib = 10752;
     let mut frac_state = srelens_tui::views::gpu_view::GpuViewState::new();
     frac_state.set_info(srelens_kube::gpu_info::GpuClusterInfo {
-        nodes: vec![node],
+        nodes: vec![node.clone()],
         total_gpu_nodes: 1,
         total_gpus: 10,
         total_allocated_gpus: 1,
@@ -2932,6 +2932,42 @@ fn gpu_view_renders_compact_vram_gauge_on_narrow_terminal() {
     assert!(
         text_frac.contains("Phys: 10.5/15G (70%) • vPool: 10.5/15G"),
         "{text_frac}"
+    );
+
+    // Verify sub-0.1 GiB request (e.g. 51 MiB) renders as 0.05G without rounding to 0G:
+    node.vram_requests_total_mib = 51;
+    let mut tiny_state = srelens_tui::views::gpu_view::GpuViewState::new();
+    tiny_state.set_info(srelens_kube::gpu_info::GpuClusterInfo {
+        nodes: vec![node.clone()],
+        total_gpu_nodes: 1,
+        total_gpus: 10,
+        total_allocated_gpus: 1,
+        total_vram_mib: 15360,
+        total_allocated_vram_mib: 51,
+        total_gpu_pods: 0,
+    });
+    let text_tiny = render_gpu(85, 30, &tiny_state);
+    assert!(
+        text_tiny.contains("Phys: 0.05/15G (0%) • vPool: 0.05/15G"),
+        "{text_tiny}"
+    );
+
+    // Verify near-1 GiB fractional request (1000 MiB) renders as 1.0G without rounding to integer 1G:
+    node.vram_requests_total_mib = 1000;
+    let mut near_one_state = srelens_tui::views::gpu_view::GpuViewState::new();
+    near_one_state.set_info(srelens_kube::gpu_info::GpuClusterInfo {
+        nodes: vec![node],
+        total_gpu_nodes: 1,
+        total_gpus: 10,
+        total_allocated_gpus: 1,
+        total_vram_mib: 15360,
+        total_allocated_vram_mib: 1000,
+        total_gpu_pods: 0,
+    });
+    let text_near_one = render_gpu(85, 30, &near_one_state);
+    assert!(
+        text_near_one.contains("Phys: 1.0/15G (7%) • vPool: 1.0/15G"),
+        "{text_near_one}"
     );
 
     // Terminal width 110: right pane will be around 64 cols (< 70)

@@ -908,6 +908,23 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_hami_register_annotation_zero_count_filter() {
+        let ann = r#"[
+            {"id":"GPU-1","count":10,"devmem":15360,"devcore":100,"type":"NVIDIA-Tesla T4","health":true},
+            {"id":"GPU-2","count":0,"devmem":15360,"devcore":100,"type":"NVIDIA-Tesla T4","health":true}
+        ]"#;
+
+        let info = parse_hami_register_annotation(ann).expect("should parse");
+        // Both devices are healthy physical GPUs:
+        assert_eq!(info.physical_gpu_count, 2);
+        assert_eq!(info.physical_vram_total_mib, 30720);
+        // Only GPU-1 has positive count and contributes to virtual vGPUs and virtual VRAM pool:
+        assert_eq!(info.virtual_gpu_count, 10);
+        assert_eq!(info.virtual_vram_total_mib, 15360);
+        assert_eq!(info.model.as_deref(), Some("Tesla T4"));
+    }
+
+    #[test]
     fn test_parse_gpu_cluster_info_with_vgpu_pod_requests() {
         use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
         let mut node_capacity = BTreeMap::new();

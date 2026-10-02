@@ -450,10 +450,12 @@ fn render_details_pane(f: &mut Frame, area: Rect, state: &GpuViewState) {
 fn format_compact_gib_val(mib: i64) -> String {
     if mib <= 0 {
         "0".to_string()
+    } else if mib % 1024 == 0 {
+        format!("{}", mib / 1024)
     } else {
         let gib = mib as f64 / 1024.0;
-        if (gib - gib.round()).abs() < 0.05 {
-            format!("{:.0}", gib.round() as i64)
+        if gib < 0.1 {
+            format!("{:.2}", gib)
         } else {
             format!("{:.1}", gib)
         }
