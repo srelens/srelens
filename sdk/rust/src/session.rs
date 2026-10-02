@@ -34,8 +34,8 @@ pub(crate) enum Key {
 
 /// Running handlers' cancellation tokens. A handler finishing, or srelens's
 /// cancel (`$/cancelRequest` or `stream/cancel`), removes the entry and
-/// answers. At session end every remaining entry is removed by `cancel_all`
-/// and nothing more is written for it.
+/// answers. At session end every remaining entry is removed by
+/// `Session::end`, and nothing more is written for it.
 pub(crate) type Running = Arc<Mutex<HashMap<Key, CancellationToken>>>;
 
 enum Flow {
@@ -474,25 +474,31 @@ impl Session {
         }
     }
 
-    fn cancel_all(&self) {
-        for (_, token) in self.running.lock().expect("not poisoned").drain() {
-            token.cancel();
-        }
-    }
-
-    /// The session is over: stop every handler. The host is disconnected
-    /// first, before handlers are cancelled or aborted: a cancelled handler
-    /// may give up its call to srelens, and aborting one drops its pending
-    /// host-call futures, and each such drop would otherwise race the
-    /// session's own shutdown by sending a `$/cancelRequest` of its own (see
-    /// `CancelOnDrop` in `host.rs`). Runs before the `shutdown` answer, and
-    /// again, doing nothing more, once the session ends.
+    /// The session is over: stop every handler, in this order. Every entry
+    /// is taken out of `running` first: disconnecting the host wakes each
+    /// handler waiting on a call to srelens, on another thread, and one that
+    /// still found its entry would answer. The host is disconnected before
+    /// handlers are cancelled or aborted: a cancelled handler may give up its
+    /// call to srelens, and aborting one drops its pending host-call futures,
+    /// and each such drop would otherwise race the session's own shutdown by
+    /// sending a `$/cancelRequest` of its own (see `CancelOnDrop` in
+    /// `host.rs`). Runs before the `shutdown` answer, and again, doing
+    /// nothing more, once the session ends.
     fn end(&mut self) {
+        let running: Vec<CancellationToken> = self
+            .running
+            .lock()
+            .expect("not poisoned")
+            .drain()
+            .map(|(_, token)| token)
+            .collect();
         // No host before `initialize`, and then no handler to disconnect.
         if let Some(shared) = &self.shared {
             shared.host.disconnect();
         }
-        self.cancel_all();
+        for token in running {
+            token.cancel();
+        }
         self.tasks.abort_all();
     }
 }
@@ -675,5 +681,42 @@ mod tests {
     #[tokio::test]
     async fn a_cancel_held_between_its_check_and_its_send_is_not_sent_after_the_shutdown_answer() {
         the_shutdown_answer_is_the_last_line(Dropped::BeforeShutdownWithItsCancelHeld).await;
+    }
+
+    // Disconnecting the host wakes every handler waiting on a call to
+    // srelens with `Disconnected`, on the handlers' runtime: another thread,
+    // free to run before `end` goes on. A handler that still found its entry
+    // in `running` then would answer after the session ended, or after its
+    // `shutdown` answer. So by the time the host is disconnected, no handler
+    // may be left in `running`.
+    #[tokio::test]
+    async fn no_handler_is_left_running_when_the_host_is_disconnected() {
+        let sidecar =
+            Sidecar::new("t", "1").operation("wait", |ctx: Context, _: Value| async move {
+                ctx.cancelled().await;
+                Ok::<_, Error>(())
+            });
+        let (outbox, writer) = Outbox::new();
+        tokio::spawn(writer.run(tokio::io::sink()));
+        let mut session = Session::new(sidecar, outbox, Handle::current());
+        session.handle(Message::parse(&init_line()).unwrap()).await;
+        let wait = json!({"jsonrpc": "2.0", "id": 1, "method": "wait", "params": {}});
+        session
+            .handle(Message::parse(&wait.to_string()).unwrap())
+            .await;
+        assert_eq!(session.running.lock().unwrap().len(), 1, "the handler runs");
+        let running = session.running.clone();
+        let left = Arc::new(Mutex::new(None));
+        let seen = left.clone();
+        let host = &session.shared.as_ref().expect("initialized").host;
+        host.on_disconnect(move || {
+            *seen.lock().unwrap() = Some(running.lock().unwrap().len());
+        });
+        session.end();
+        assert_eq!(
+            *left.lock().unwrap(),
+            Some(0),
+            "handlers still in `running` when the host was disconnected"
+        );
     }
 }

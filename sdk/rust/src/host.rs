@@ -69,6 +69,10 @@ struct Inner {
     /// and queues it (see [`Host::hold_next_cancel`]).
     #[cfg(test)]
     cancel_gate: Mutex<Option<CancelGate>>,
+    /// Tests only: run as [`Host::disconnect`] starts, before it wakes any
+    /// call (see [`Host::on_disconnect`]).
+    #[cfg(test)]
+    on_disconnect: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl Host {
@@ -82,6 +86,8 @@ impl Host {
                 places: Arc::new(Semaphore::new(call_slots(limits))),
                 #[cfg(test)]
                 cancel_gate: Mutex::new(None),
+                #[cfg(test)]
+                on_disconnect: Mutex::new(None),
             }),
         }
     }
@@ -239,6 +245,18 @@ impl Host {
     /// map), and a call already past its `acquire_owned` but not yet holding
     /// the lock below refuses at once instead of queuing anything.
     pub(crate) fn disconnect(&self) {
+        #[cfg(test)]
+        {
+            let hook = self
+                .inner
+                .on_disconnect
+                .lock()
+                .expect("not poisoned")
+                .take();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
         self.inner.places.close();
         *self.inner.waiting.lock().expect("not poisoned") = None;
     }
@@ -441,6 +459,11 @@ impl Host {
             done,
         });
         (reached_rx, release_tx, done_rx)
+    }
+
+    /// Run `hook` as the next [`Host::disconnect`] starts.
+    pub(crate) fn on_disconnect(&self, hook: impl FnOnce() + Send + 'static) {
+        *self.inner.on_disconnect.lock().expect("not poisoned") = Some(Box::new(hook));
     }
 
     /// Wait at the gate, if a test set one; the guard to hold until done.
