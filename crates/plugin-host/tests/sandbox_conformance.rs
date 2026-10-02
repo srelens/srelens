@@ -21,10 +21,15 @@
 //!    without it the result says nothing about the sandbox: INCONCLUSIVE), and
 //! 3. the failure is one a sandbox produces for that operation (`Denial`).
 //!
-//! On macOS the supervisor refuses sidecars, because nothing limits their
-//! memory and CPU until #713; the isolation checks run there anyway, through a
-//! launcher that vouches for limits (see `IsolationOnly`), and the memory and
-//! CPU checks are skipped.
+//! On macOS the supervisor refuses sidecars until the #713 watchdog has been
+//! checked on a Mac. The checks run there anyway, through a launcher that
+//! vouches for limits (see `IsolationOnly`): the isolation checks, and the
+//! memory and CPU checks against the watchdog `launch` attaches. Run them by
+//! hand on a macOS 27 Mac:
+//!
+//! ```text
+//! cargo test -p srelens-plugin-host --test sandbox_conformance -- --ignored --test-threads=1 --nocapture
+//! ```
 
 use serde_json::{json, Value};
 use srelens_plugin_host::sidecar::data::DataDir;
@@ -50,9 +55,9 @@ fn limits() -> Limits {
     }
 }
 
-/// On macOS, the OS sandbox with its missing limits vouched for, so the
-/// isolation it does provide can be checked. Anywhere else, the OS sandbox
-/// unchanged.
+/// On macOS, the OS sandbox with its limits vouched for, as they will be once
+/// the watchdog is checked on a Mac, so its isolation and its watchdog can be
+/// checked. Anywhere else, the OS sandbox unchanged.
 struct IsolationOnly(OsSandbox);
 
 impl Launcher for IsolationOnly {
@@ -181,8 +186,6 @@ struct Failure {
 
 /// What came back from one probe request.
 #[derive(Debug)]
-// The memory check, the one reader of `Stopped`'s text, does not run on macOS.
-#[cfg_attr(target_os = "macos", allow(dead_code))]
 enum Reply {
     Ok(Value),
     Refused(Failure),
@@ -205,9 +208,36 @@ async fn call(sidecar: &Supervisor, method: &str, params: Value) -> Reply {
     }
 }
 
+/// How the sidecar stopped, once it has: `Reply::Stopped` with the
+/// supervisor's reason, or `Reply::Ok` if it still runs after 5 s.
+async fn stopped(sidecar: &Supervisor) -> Reply {
+    let mut status = sidecar.watch();
+    let disabled = tokio::time::timeout(
+        Duration::from_secs(5),
+        status.wait_for(|s| matches!(s, SidecarStatus::Disabled { .. })),
+    )
+    .await;
+    match disabled.ok().and_then(Result::ok).map(|s| s.clone()) {
+        Some(SidecarStatus::Disabled { reason }) => Reply::Stopped(reason),
+        _ => Reply::Ok(Value::Null),
+    }
+}
+
+/// The supervisor's memory reading once `ok` holds, or its last after 2 s:
+/// on macOS it is the watchdog's last reading, up to 50 ms old.
+async fn memory_reading(sidecar: &Supervisor, ok: impl Fn(u64) -> bool) -> Option<u64> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let reading = sidecar.metrics().memory_bytes;
+        if reading.is_some_and(&ok) || std::time::Instant::now() >= deadline {
+            return reading;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 /// Which refusal a check expects. The spike's `Denial::accepts`.
 #[derive(Debug, Clone, Copy)]
-#[cfg_attr(target_os = "macos", allow(dead_code))]
 enum Denial {
     File,
     /// A hard link to a file outside the grant: a filesystem refusal, or
@@ -423,7 +453,6 @@ async fn check_4_no_child_process() {
 }
 
 /// The same workload with no sandbox, for the memory and CPU controls.
-#[cfg(not(target_os = "macos"))]
 async fn unconfined(fixture: &Fixture, method: &str, params: Value) -> Value {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
     let mut child = tokio::process::Command::new(fixture.probe())
@@ -444,7 +473,6 @@ async fn unconfined(fixture: &Fixture, method: &str, params: Value) -> Value {
     answer["result"].clone()
 }
 
-#[cfg(not(target_os = "macos"))]
 #[tokio::test]
 #[ignore = "needs this OS's sandbox; run by the sandbox-conformance CI job"]
 async fn check_5_memory_past_the_limit_is_refused_or_stops_the_sidecar_at_the_limit() {
@@ -455,8 +483,21 @@ async fn check_5_memory_past_the_limit_is_refused_or_stops_the_sidecar_at_the_li
         "INCONCLUSIVE: 512 MiB could not be allocated unconfined: {control}"
     );
     let sidecar = sidecar(&fixture).await;
-    let reply = call(&sidecar, "allocate", json!({"mib": 512})).await;
-    eprintln!("allocate 512 MiB (limit 128 MiB): {reply:?}");
+    // macOS's watchdog bounds sustained use: memory allocated and freed again
+    // between two of its readings can pass unseen, so there the probe holds it.
+    let method = if cfg!(target_os = "macos") {
+        "hold"
+    } else {
+        "allocate"
+    };
+    let reply = call(&sidecar, method, json!({"mib": 512})).await;
+    eprintln!("{method} 512 MiB (limit 128 MiB): {reply:?}");
+    let reply = match reply {
+        // macOS: the reading that sees the held memory can come just after
+        // the answer.
+        Reply::Ok(_) if cfg!(target_os = "macos") => stopped(&sidecar).await,
+        other => other,
+    };
     match reply {
         // Windows: the Job Object refuses the allocation; the sidecar lives on.
         Reply::Refused(failure) if Denial::Memory.accepts(&failure) => {
@@ -465,7 +506,7 @@ async fn check_5_memory_past_the_limit_is_refused_or_stops_the_sidecar_at_the_li
                 Reply::Ok(_)
             ));
         }
-        // Linux: the cgroup OOM-kills it, with its counters as evidence.
+        // Linux: the cgroup OOM-kills it, with its counters as evidence. macOS: the watchdog kills it.
         Reply::Stopped(why) => assert!(
             why.contains("memory limit"),
             "stopped, but not by the limit: {why}"
@@ -474,7 +515,6 @@ async fn check_5_memory_past_the_limit_is_refused_or_stops_the_sidecar_at_the_li
     }
 }
 
-#[cfg(not(target_os = "macos"))]
 #[tokio::test]
 #[ignore = "needs this OS's sandbox; run by the sandbox-conformance CI job"]
 async fn check_6_cpu_is_throttled_to_the_limit() {
@@ -878,15 +918,15 @@ async fn the_data_directory_size_limit_holds() {
 /// sidecar's memory, within its limit and growing when it holds more, and
 /// reports none once it has stopped. Linux reads the cgroup's `memory.current`;
 /// Windows reads the process's committed private memory, which is what the
-/// Job Object's limit caps. macOS has no reading until its watchdog (#713).
-#[cfg(not(target_os = "macos"))]
+/// Job Object's limit caps. macOS reads the process's physical footprint, in
+/// the watchdog's samples (#713).
 #[tokio::test]
 #[ignore = "needs this OS's sandbox; run by the sandbox-conformance CI job"]
 async fn the_sidecars_memory_is_measured_while_it_runs() {
     let fixture = Fixture::new();
     let sidecar = sidecar(&fixture).await;
     let limit = limits().memory_bytes;
-    let before = sidecar.metrics().memory_bytes;
+    let before = memory_reading(&sidecar, |n| n > 0).await;
     assert!(
         matches!(before, Some(n) if n > 0 && n <= limit),
         "while it runs, within its {limit}-byte limit: {before:?}"
@@ -896,7 +936,7 @@ async fn the_sidecars_memory_is_measured_while_it_runs() {
         Reply::Ok(_) => {}
         other => panic!("the probe could not hold {held} bytes: {other:?}"),
     }
-    let after = sidecar.metrics().memory_bytes;
+    let after = memory_reading(&sidecar, |n| matches!(before, Some(b) if n >= b + held / 2)).await;
     assert!(
         matches!((before, after), (Some(b), Some(a)) if a >= b + held / 2 && a <= limit),
         "holding {held} bytes more: {before:?} then {after:?}"
