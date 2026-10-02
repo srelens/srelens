@@ -172,10 +172,12 @@ impl Session {
                     .send_lifecycle(&Response::ok(id, json!({})))
                     .await;
             }
-            // On the general lane, behind every line queued before it, as the
-            // session's last line.
+            // Ended before the answer, as Go's session does: a handler giving
+            // up a call to srelens on its way out, on its own thread, then
+            // sends nothing after the answer. The answer is the session's last
+            // line, on the general lane, behind every line queued before it.
             method::SHUTDOWN => {
-                self.cancel_all();
+                self.end();
                 answer(&self.outbox, id, Ok(json!({}))).await;
                 return Flow::Shutdown;
             }
@@ -402,10 +404,12 @@ impl Session {
     }
 
     /// The session is over: stop every handler. The host is disconnected
-    /// first, before handlers are aborted: aborting a handler drops its
-    /// pending host-call futures, and each drop would otherwise race the
+    /// first, before handlers are cancelled or aborted: a cancelled handler
+    /// may give up its call to srelens, and aborting one drops its pending
+    /// host-call futures, and each such drop would otherwise race the
     /// session's own shutdown by sending a `$/cancelRequest` of its own (see
-    /// `CancelOnDrop` in `host.rs`).
+    /// `CancelOnDrop` in `host.rs`). Runs before the `shutdown` answer, and
+    /// again, doing nothing more, once the session ends.
     fn end(&mut self) {
         // No host before `initialize`, and then no handler to disconnect.
         if let Some(shared) = &self.shared {
@@ -493,6 +497,49 @@ mod tests {
             session.tasks.len() <= 16,
             "expected finished handler tasks to be reaped, found {} still tracked",
             session.tasks.len()
+        );
+    }
+
+    // `shutdown` cancels every handler, and one that gives up its call to
+    // srelens then drops it -- on its own thread, so possibly after the
+    // shutdown answer is queued and before the session has ended. That
+    // answer is the session's last line, so the drop must not send a
+    // `$/cancelRequest` after it.
+    #[tokio::test]
+    async fn a_call_given_up_after_shutdown_is_not_cancelled_after_the_shutdown_answer() {
+        let (outbox, writer) = Outbox::new();
+        let written = tokio::spawn(async move {
+            let mut out = Vec::new();
+            writer.run(&mut out).await.map(|()| out)
+        });
+        let mut session = Session::new(Sidecar::new("t", "1"), outbox.clone());
+        session.handle(Message::parse(&init_line()).unwrap()).await;
+        let host = session.shared.as_ref().expect("initialized").host.clone();
+        let context = crate::CallContext::new("kind-dev", None).unwrap();
+        let mut call = Box::pin(host.read(&context, "apps"));
+        // Polled once: its request is queued, and it waits for the answer.
+        tokio::select! {
+            biased;
+            _ = &mut call => panic!("the call finished, though srelens never answered it"),
+            () = std::future::ready(()) => {}
+        }
+        let shutdown = json!({"jsonrpc": "2.0", "id": 1, "method": "shutdown", "params": {}});
+        let flow = session
+            .handle(Message::parse(&shutdown.to_string()).unwrap())
+            .await;
+        assert!(matches!(flow, Flow::Shutdown));
+        drop(call);
+        // Lets a `$/cancelRequest` the drop spawned reach the queue before
+        // the session ends.
+        tokio::task::yield_now().await;
+        session.end();
+        outbox.close().await;
+        let written = String::from_utf8(written.await.unwrap().unwrap()).unwrap();
+        let last: Value = serde_json::from_str(written.lines().last().unwrap()).unwrap();
+        assert_eq!(
+            last,
+            json!({"jsonrpc": "2.0", "id": 1, "result": {}}),
+            "the last line written:\n{written}"
         );
     }
 }
