@@ -519,13 +519,21 @@ fn node_header_lines(d: &NodeInspectorDetails) -> Vec<Line<'_>> {
     }
 
     if d.has_gpu {
-        let model = d.gpu_model.as_deref().unwrap_or("GPU Accelerator");
+        let raw_model = d.gpu_model.as_deref().unwrap_or("GPU Accelerator");
+        let model = crate::views::sanitize_span_text(raw_model);
         let badge_text = if d.is_virtual_gpu && d.gpu_allocatable_count > 1 {
             let phys_count = d.physical_gpu_count.max(1);
-            format!(
-                "[⚡ {}x {} (HAMi {} vGPUs)] ",
-                phys_count, model, d.gpu_allocatable_count
-            )
+            if d.virtual_gpu_count.is_some() {
+                format!(
+                    "[⚡ {}x {} (HAMi {} vGPUs)] ",
+                    phys_count, model, d.gpu_allocatable_count
+                )
+            } else {
+                format!(
+                    "[⚡ {}x {} ({} vGPUs)] ",
+                    phys_count, model, d.gpu_allocatable_count
+                )
+            }
         } else {
             format!("[⚡ {}] ", model)
         };
@@ -733,55 +741,115 @@ fn render_gauges_card(f: &mut Frame, area: Rect, d: &NodeInspectorDetails) {
 
     // 4. GPU Gauge (if present)
     if has_gpu {
-        let model_label = d.gpu_model.as_deref().unwrap_or("GPU");
+        let raw_model_label = d.gpu_model.as_deref().unwrap_or("GPU");
+        let model_label = crate::views::sanitize_span_text(raw_model_label);
 
-        let (gpu_suffix, gpu_pct) = if d.is_virtual_gpu {
+        let (gpu_suffix, gpu_pct, is_phys_sat) = if d.is_virtual_gpu {
             let req_vram_gib = d.gpu_memory_requests_mib as f64 / 1024.0;
-            let phys_vram_mib = d.physical_gpu_memory_total_mib.unwrap_or(15360);
-            let phys_vram_gib = phys_vram_mib as f64 / 1024.0;
-            let virt_vram_mib = d
+            let maybe_phys_vram = d.physical_gpu_memory_total_mib.filter(|&m| m > 0);
+            let maybe_virt_vram = d
                 .virtual_gpu_memory_total_mib
                 .or(d.gpu_memory_total_mib)
-                .unwrap_or(phys_vram_mib * 10);
-            let virt_vram_gib = virt_vram_mib as f64 / 1024.0;
-            let phys_pct = (((d.gpu_memory_requests_mib as f64 / phys_vram_mib.max(1) as f64)
-                * 100.0)
-                .round() as u64)
-                .min(999) as u16;
-            let virt_pct = (((d.gpu_memory_requests_mib as f64 / virt_vram_mib.max(1) as f64)
-                * 100.0)
-                .round() as u64)
-                .min(999) as u16;
-            let suffix = if gauge_chunks[3].width >= 72 {
-                format!(
-                    ": {:.1}/{:.0}G ({}% HAMi vPool) • 1x {:.0}G Phys ({}%) ",
-                    req_vram_gib, virt_vram_gib, virt_pct, phys_vram_gib, phys_pct
-                )
-            } else if gauge_chunks[3].width >= 58 {
-                format!(
-                    ": {:.1}/{:.0}G ({}% HAMi vPool) • 1x {:.0}G Phys ",
-                    req_vram_gib, virt_vram_gib, virt_pct, phys_vram_gib
-                )
-            } else if gauge_chunks[3].width >= 46 {
-                format!(
-                    ": {:.1}/{:.0}G ({}% HAMi pool) ",
-                    req_vram_gib, virt_vram_gib, virt_pct
-                )
-            } else if gauge_chunks[3].width >= 36 {
-                format!(
-                    ": {:.1}/{:.0}G ({}% HAMi) ",
-                    req_vram_gib, virt_vram_gib, virt_pct
-                )
+                .filter(|&m| m > 0);
+
+            if let Some(virt_vram_mib) = maybe_virt_vram {
+                let virt_vram_gib = virt_vram_mib as f64 / 1024.0;
+                let virt_pct = (((d.gpu_memory_requests_mib as f64 / virt_vram_mib.max(1) as f64)
+                    * 100.0)
+                    .round() as u64)
+                    .min(999) as u16;
+
+                let (phys_str, phys_sat) = if let Some(phys_vram_mib) = maybe_phys_vram {
+                    let phys_vram_gib = phys_vram_mib as f64 / 1024.0;
+                    let phys_pct =
+                        (((d.gpu_memory_requests_mib as f64 / phys_vram_mib.max(1) as f64) * 100.0)
+                            .round() as u64)
+                            .min(999) as u16;
+                    let phys_prefix = if d.physical_gpu_count > 1 {
+                        format!("{}x ", d.physical_gpu_count)
+                    } else if d.physical_gpu_count == 1 {
+                        "1x ".to_string()
+                    } else {
+                        String::new()
+                    };
+                    (
+                        Some((phys_prefix, phys_vram_gib, phys_pct)),
+                        phys_pct >= 100,
+                    )
+                } else {
+                    (None, false)
+                };
+
+                let suffix = if let Some((phys_prefix, phys_vram_gib, phys_pct)) = phys_str {
+                    let sat_label = if phys_sat { " [Sat]" } else { "" };
+                    if gauge_chunks[3].width >= 76 {
+                        format!(
+                            ": {:.1}/{:.0}G ({}% HAMi vPool) • {}{:.0}G Phys ({}%{}) ",
+                            req_vram_gib,
+                            virt_vram_gib,
+                            virt_pct,
+                            phys_prefix,
+                            phys_vram_gib,
+                            phys_pct,
+                            sat_label
+                        )
+                    } else if gauge_chunks[3].width >= 58 {
+                        format!(
+                            ": {:.1}/{:.0}G ({}% HAMi vPool) • {}{:.0}G Phys ",
+                            req_vram_gib, virt_vram_gib, virt_pct, phys_prefix, phys_vram_gib,
+                        )
+                    } else if gauge_chunks[3].width >= 46 {
+                        format!(
+                            ": {:.1}/{:.0}G ({}% HAMi pool) ",
+                            req_vram_gib, virt_vram_gib, virt_pct
+                        )
+                    } else if gauge_chunks[3].width >= 36 {
+                        format!(
+                            ": {:.1}/{:.0}G ({}% HAMi) ",
+                            req_vram_gib, virt_vram_gib, virt_pct
+                        )
+                    } else {
+                        format!(": {:.0}/{:.0}G ", req_vram_gib, virt_vram_gib)
+                    }
+                } else {
+                    // Physical VRAM is not known: omit physical VRAM rather than guessing
+                    if gauge_chunks[3].width >= 48 {
+                        format!(
+                            ": {:.1}/{:.0}G ({}% HAMi vPool) ",
+                            req_vram_gib, virt_vram_gib, virt_pct
+                        )
+                    } else if gauge_chunks[3].width >= 36 {
+                        format!(
+                            ": {:.1}/{:.0}G ({}% HAMi) ",
+                            req_vram_gib, virt_vram_gib, virt_pct
+                        )
+                    } else {
+                        format!(": {:.0}/{:.0}G ", req_vram_gib, virt_vram_gib)
+                    }
+                };
+                (suffix, virt_pct, phys_sat)
             } else {
-                format!(": {:.0}/{:.0}G ", req_vram_gib, virt_vram_gib)
-            };
-            (suffix, virt_pct)
+                // Unknown VRAM: don't invent capacity, render vGPU slice counts instead
+                let gpu_alloc = d.gpu_allocatable_count.max(d.gpu_capacity_count).max(1);
+                let pct = (((d.gpu_requests_count as f64 / gpu_alloc as f64) * 100.0).round()
+                    as u64)
+                    .min(999) as u16;
+                let suffix = if gauge_chunks[3].width >= 42 {
+                    format!(
+                        ": {}/{} vGPUs ({}% HAMi) ",
+                        d.gpu_requests_count, gpu_alloc, pct
+                    )
+                } else {
+                    format!(": {}/{} vGPUs ", d.gpu_requests_count, gpu_alloc)
+                };
+                (suffix, pct, false)
+            }
         } else if d.gpu_memory_requests_mib > 0 && d.gpu_memory_total_mib.unwrap_or(0) > 0 {
-            let total_vram_mib = d.gpu_memory_total_mib.unwrap_or(15360);
+            let total_vram_mib = d.gpu_memory_total_mib.unwrap_or(0);
             let req_vram_gib = d.gpu_memory_requests_mib as f64 / 1024.0;
             let total_vram_gib = total_vram_mib as f64 / 1024.0;
-            let pct = (((d.gpu_memory_requests_mib as f64 / total_vram_mib as f64) * 100.0).round()
-                as u64)
+            let pct = (((d.gpu_memory_requests_mib as f64 / total_vram_mib.max(1) as f64) * 100.0)
+                .round() as u64)
                 .min(999) as u16;
             let suffix = if gauge_chunks[3].width >= 48 {
                 format!(
@@ -791,7 +859,7 @@ fn render_gauges_card(f: &mut Frame, area: Rect, d: &NodeInspectorDetails) {
             } else {
                 format!(": {:.1}/{:.1}G ({}%) ", req_vram_gib, total_vram_gib, pct)
             };
-            (suffix, pct)
+            (suffix, pct, false)
         } else {
             let gpu_alloc = d.gpu_allocatable_count.max(d.gpu_capacity_count).max(1);
             let pct = (((d.gpu_requests_count as f64 / gpu_alloc as f64) * 100.0).round() as u64)
@@ -804,7 +872,7 @@ fn render_gauges_card(f: &mut Frame, area: Rect, d: &NodeInspectorDetails) {
             } else {
                 format!(": {}/{} ({}%) ", d.gpu_requests_count, gpu_alloc, pct)
             };
-            (suffix, pct)
+            (suffix, pct, false)
         };
 
         let gpu_title = Line::from(vec![
@@ -821,7 +889,7 @@ fn render_gauges_card(f: &mut Frame, area: Rect, d: &NodeInspectorDetails) {
             Span::styled(gpu_suffix, Style::default().fg(Theme::YELLOW)),
         ]);
 
-        let gpu_color = if gpu_pct > 90 {
+        let gpu_color = if is_phys_sat || gpu_pct > 90 {
             Theme::RED
         } else if gpu_pct > 75 {
             Theme::YELLOW

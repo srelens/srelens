@@ -180,8 +180,8 @@ pub fn render(f: &mut Frame, area: Rect, state: &GpuViewState) {
 
     // Left pane needs:
     // border (2) + prefix (1) + node_name (max_node_name_len) + space (1) +
-    // status (10) + gpus (8) + vram (10) = max_node_name_len + 32
-    let needed_left_width = (max_node_name_len + 32) as u16;
+    // status (10) + gpus (8) + vram (11) = max_node_name_len + 33
+    let needed_left_width = (max_node_name_len + 33) as u16;
     let left_width = if area.width > 90 {
         // Reserve at least 48 cols for right details pane if space allows
         needed_left_width.min(area.width.saturating_sub(48)).max(44)
@@ -340,7 +340,7 @@ fn render_nodes_list(f: &mut Frame, area: Rect, state: &GpuViewState, max_node_n
         ),
         Span::styled(format!("{:<9} ", "STATUS"), Theme::table_header()),
         Span::styled(format!("{:<7} ", "GPUS"), Theme::table_header()),
-        Span::styled(format!("{:<10}", "VRAM"), Theme::table_header()),
+        Span::styled(format!("{:<11}", "VRAM"), Theme::table_header()),
     ]));
     lines.push(Line::from(Span::styled(
         "─".repeat(inner.width as usize),
@@ -400,7 +400,7 @@ fn render_nodes_list(f: &mut Frame, area: Rect, state: &GpuViewState, max_node_n
             ),
             status_span,
             Span::styled(format!(" {:<6} ", gpus_str), row_style),
-            Span::styled(format!("{:<10}", vram_str), row_style),
+            Span::styled(format!("{:<11}", vram_str), row_style),
         ]));
     }
 
@@ -474,7 +474,8 @@ fn render_node_gpu_summary(f: &mut Frame, area: Rect, node: &GpuNodeInfo) {
         .split(inner);
 
     // 1. Hardware details line
-    let model = node.gpu_model.as_deref().unwrap_or("Unknown GPU");
+    let raw_model = node.gpu_model.as_deref().unwrap_or("Unknown GPU");
+    let model = crate::views::sanitize_span_text(raw_model);
     let model_display = if node.is_virtual_gpu {
         let phys_count = node.physical_gpu_count.max(1);
         format!(
@@ -482,7 +483,7 @@ fn render_node_gpu_summary(f: &mut Frame, area: Rect, node: &GpuNodeInfo) {
             phys_count, model, node.gpu_capacity
         )
     } else {
-        model.to_string()
+        model
     };
     let driver = node.gpu_driver_version.as_deref().unwrap_or("-");
     let cuda = node.gpu_cuda_version.as_deref().unwrap_or("-");
@@ -547,22 +548,54 @@ fn render_node_gpu_summary(f: &mut Frame, area: Rect, node: &GpuNodeInfo) {
                 let phys_pct = ((node.vram_requests_total_mib as f64 / phys_vram.max(1) as f64)
                     * 100.0)
                     .round() as u16;
-                let label = format!(
-                    "Physical VRAM (Alloc): {} / {} ({:.1}%) • Virtual Pool: {} / {} vVRAM",
-                    format_vram_mib(node.vram_requests_total_mib),
-                    format_vram_mib(phys_vram),
-                    (node.vram_requests_total_mib as f64 / phys_vram.max(1) as f64) * 100.0,
-                    format_vram_mib(node.vram_requests_total_mib),
-                    format_vram_mib(tot_vram),
-                );
+                let label = if inner_chunks[2].width < 50 {
+                    let req_g = node.vram_requests_total_mib / 1024;
+                    let phys_g = phys_vram / 1024;
+                    let tot_g = tot_vram / 1024;
+                    format!(
+                        "Phys: {}/{}G ({:.0}%) • vPool: {}/{}G",
+                        req_g,
+                        phys_g,
+                        (node.vram_requests_total_mib as f64 / phys_vram.max(1) as f64) * 100.0,
+                        req_g,
+                        tot_g
+                    )
+                } else if inner_chunks[2].width < 70 {
+                    format!(
+                        "Phys: {}/{} ({:.0}%) • vPool: {}/{}",
+                        format_vram_mib(node.vram_requests_total_mib),
+                        format_vram_mib(phys_vram),
+                        (node.vram_requests_total_mib as f64 / phys_vram.max(1) as f64) * 100.0,
+                        format_vram_mib(node.vram_requests_total_mib),
+                        format_vram_mib(tot_vram),
+                    )
+                } else {
+                    format!(
+                        "Physical VRAM (Alloc): {} / {} ({:.1}%) • Virtual Pool: {} / {} vVRAM",
+                        format_vram_mib(node.vram_requests_total_mib),
+                        format_vram_mib(phys_vram),
+                        (node.vram_requests_total_mib as f64 / phys_vram.max(1) as f64) * 100.0,
+                        format_vram_mib(node.vram_requests_total_mib),
+                        format_vram_mib(tot_vram),
+                    )
+                };
                 (label, phys_pct)
             } else {
-                let label = format!(
-                    "vVRAM (Alloc): {} / {} ({:.1}%)",
-                    format_vram_mib(node.vram_requests_total_mib),
-                    format_vram_mib(tot_vram),
-                    (node.vram_requests_total_mib as f64 / vram_cap as f64) * 100.0
-                );
+                let label = if inner_chunks[2].width < 45 {
+                    format!(
+                        "vVRAM: {}/{} ({:.0}%)",
+                        format_vram_mib(node.vram_requests_total_mib),
+                        format_vram_mib(tot_vram),
+                        (node.vram_requests_total_mib as f64 / vram_cap as f64) * 100.0
+                    )
+                } else {
+                    format!(
+                        "vVRAM (Alloc): {} / {} ({:.1}%)",
+                        format_vram_mib(node.vram_requests_total_mib),
+                        format_vram_mib(tot_vram),
+                        (node.vram_requests_total_mib as f64 / vram_cap as f64) * 100.0
+                    )
+                };
                 (label, virt_pct)
             }
         } else {

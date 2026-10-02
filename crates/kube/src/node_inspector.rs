@@ -257,8 +257,6 @@ pub fn parse_node_details(node: &Node, pods: &[Pod]) -> NodeInspectorDetails {
         .unwrap_or(0);
 
     // 7. GPU & Accelerator Detection
-    let mut gpu_capacity_count: i64 = 0;
-    let mut gpu_allocatable_count: i64 = 0;
     let mut is_virtual_gpu = false;
     let mut physical_gpu_count = 0;
     let mut physical_gpu_memory_total_mib = None;
@@ -276,47 +274,32 @@ pub fn parse_node_details(node: &Node, pods: &[Pod]) -> NodeInspectorDetails {
     let mut hami_vram_total_mib: Option<i64> = None;
     let mut hami_model_name: Option<String> = None;
 
-    if let Some(h) = &hami_info {
-        if h.virtual_gpu_count > 0 {
-            is_virtual_gpu = true;
-            physical_gpu_count = h.physical_gpu_count;
-            if h.physical_vram_total_mib > 0 {
-                physical_gpu_memory_total_mib = Some(h.physical_vram_total_mib);
-            }
-            virtual_gpu_count = Some(h.virtual_gpu_count);
-            gpu_capacity_count = gpu_capacity_count.max(h.virtual_gpu_count);
-            gpu_allocatable_count = gpu_allocatable_count.max(h.virtual_gpu_count);
-            if h.virtual_vram_total_mib > 0 {
-                virtual_gpu_memory_total_mib = Some(h.virtual_vram_total_mib);
-                hami_vram_total_mib = Some(h.virtual_vram_total_mib);
-            }
-            hami_model_name = h.model.clone();
-        }
-    }
-
     // Discrete GPU keys
     let discrete_gpu_keys = ["nvidia.com/gpu", "amd.com/gpu", "google.com/tpu"];
+
+    let mut discrete_gpu_capacity = 0;
+    let mut discrete_gpu_allocatable = 0;
 
     for key in &discrete_gpu_keys {
         if let Some(cap) = capacity.and_then(|c| c.get(*key)) {
             if let Ok(count) = cap.0.trim().parse::<i64>() {
-                gpu_capacity_count = gpu_capacity_count.max(count);
+                discrete_gpu_capacity = discrete_gpu_capacity.max(count);
             }
         }
         if let Some(alloc) = allocatable.and_then(|a| a.get(*key)) {
             if let Ok(count) = alloc.0.trim().parse::<i64>() {
-                gpu_allocatable_count = gpu_allocatable_count.max(count);
+                discrete_gpu_allocatable = discrete_gpu_allocatable.max(count);
             }
         }
     }
 
     // Check MIG slices if no standard GPU was found
-    if gpu_capacity_count == 0 {
+    if discrete_gpu_capacity == 0 {
         if let Some(cap) = capacity {
             for (k, v) in cap {
                 if k.starts_with("nvidia.com/mig-") {
                     if let Ok(count) = v.0.trim().parse::<i64>() {
-                        gpu_capacity_count += count;
+                        discrete_gpu_capacity += count;
                     }
                 }
             }
@@ -325,26 +308,67 @@ pub fn parse_node_details(node: &Node, pods: &[Pod]) -> NodeInspectorDetails {
             for (k, v) in alloc {
                 if k.starts_with("nvidia.com/mig-") {
                     if let Ok(count) = v.0.trim().parse::<i64>() {
-                        gpu_allocatable_count += count;
+                        discrete_gpu_allocatable += count;
                     }
                 }
             }
         }
     }
 
-    // Check nvidia.com/vgpu capacity if present
+    // Check nvidia.com/vgpu capacity and allocatable if present
+    let mut vgpu_capacity = 0;
+    let mut vgpu_allocatable = 0;
     if let Some(cap) = capacity.and_then(|c| c.get("nvidia.com/vgpu")) {
         if let Ok(count) = cap.0.trim().parse::<i64>() {
-            gpu_capacity_count = gpu_capacity_count.max(count);
-            is_virtual_gpu = true;
+            vgpu_capacity = count;
         }
     }
     if let Some(alloc) = allocatable.and_then(|a| a.get("nvidia.com/vgpu")) {
         if let Ok(count) = alloc.0.trim().parse::<i64>() {
-            gpu_allocatable_count = gpu_allocatable_count.max(count);
-            is_virtual_gpu = true;
+            vgpu_allocatable = count;
         }
     }
+
+    let (gpu_capacity_count, gpu_allocatable_count) = if let Some(h) = &hami_info {
+        if h.virtual_gpu_count > 0 {
+            is_virtual_gpu = true;
+            physical_gpu_count = h.physical_gpu_count;
+            if h.physical_vram_total_mib > 0 {
+                physical_gpu_memory_total_mib = Some(h.physical_vram_total_mib);
+            }
+            virtual_gpu_count = Some(h.virtual_gpu_count);
+            let cap = vgpu_capacity.max(h.virtual_gpu_count);
+            let alloc = if vgpu_allocatable > 0 {
+                vgpu_allocatable
+            } else if discrete_gpu_allocatable > 0 {
+                discrete_gpu_allocatable
+            } else {
+                h.virtual_gpu_count
+            };
+            if h.virtual_vram_total_mib > 0 {
+                virtual_gpu_memory_total_mib = Some(h.virtual_vram_total_mib);
+                hami_vram_total_mib = Some(h.virtual_vram_total_mib);
+            }
+            hami_model_name = h.model.clone();
+            (cap, alloc)
+        } else {
+            (discrete_gpu_capacity, discrete_gpu_allocatable)
+        }
+    } else if vgpu_capacity > 0 || vgpu_allocatable > 0 {
+        is_virtual_gpu = true;
+        if discrete_gpu_capacity > 0 {
+            physical_gpu_count = discrete_gpu_capacity;
+        }
+        let cap = vgpu_capacity;
+        let alloc = if vgpu_allocatable > 0 {
+            vgpu_allocatable
+        } else {
+            vgpu_capacity
+        };
+        (cap, alloc)
+    } else {
+        (discrete_gpu_capacity, discrete_gpu_allocatable)
+    };
 
     // GPU Model & Driver Info
     let gpu_model = labels
@@ -440,6 +464,9 @@ pub fn parse_node_details(node: &Node, pods: &[Pod]) -> NodeInspectorDetails {
     if !is_virtual_gpu {
         physical_gpu_count = gpu_capacity_count;
         physical_gpu_memory_total_mib = gpu_memory_total_mib;
+    } else if physical_gpu_count > 0 && physical_gpu_memory_total_mib.is_none() {
+        physical_gpu_memory_total_mib =
+            vram_per_gpu_mib.map(|per_gpu| per_gpu * physical_gpu_count);
     }
 
     let has_gpu = gpu_capacity_count > 0
@@ -893,12 +920,12 @@ mod tests {
         assert_eq!(details.physical_gpu_count, 1);
         assert_eq!(details.physical_gpu_memory_total_mib, Some(15360));
         assert_eq!(details.virtual_gpu_count, Some(10));
-        assert_eq!(details.virtual_gpu_memory_total_mib, Some(153600));
+        assert_eq!(details.virtual_gpu_memory_total_mib, Some(15360));
         assert_eq!(details.gpu_capacity_count, 10);
         assert_eq!(details.gpu_allocatable_count, 10);
         assert_eq!(details.gpu_requests_count, 1);
-        // 10 vGPUs * 15360 MiB = 153600 MiB = 150 GiB
-        assert_eq!(details.gpu_memory_total_mib, Some(153600));
+        // 1 T4 physical GPU = 15360 MiB total VRAM
+        assert_eq!(details.gpu_memory_total_mib, Some(15360));
         assert_eq!(details.gpu_memory_requests_mib, 5120);
         assert_eq!(details.gpu_model.as_deref(), Some("Tesla T4"));
         assert_eq!(details.pods.len(), 1);

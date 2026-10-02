@@ -513,11 +513,54 @@ fn node_inspector_gpu_gauge_shows_virtual_gpus_and_total_virtual_vram_for_hami()
         "{text_wide}"
     );
 
+    // Ultra-wide GPU gauge showing physical percentage and saturation tag:
+    let text_ultra = render_node(320, 40, &state);
+    assert!(
+        text_ultra
+            .contains("Tesla T4 (Alloc): 15.0/150G (10% HAMi vPool) • 1x 15G Phys (100% [Sat])"),
+        "{text_ultra}"
+    );
+
     // Compact GPU gauge on narrower screens:
     let text_compact = render_node(200, 40, &state);
     assert!(
         text_compact.contains("Tesla T4 (Alloc): 15.0/150G (10% HAMi pool)"),
         "{text_compact}"
+    );
+}
+
+#[test]
+fn node_inspector_renders_multi_gpu_physical_multiplier_for_hami_nodes() {
+    let _theme = common::theme::lock();
+    let mut details = node_details("multi-gpu-node");
+    details.has_gpu = true;
+    details.is_virtual_gpu = true;
+    details.gpu_model = Some("Tesla T4".to_string());
+    details.physical_gpu_count = 4;
+    details.physical_gpu_memory_total_mib = Some(61440);
+    details.gpu_capacity_count = 40;
+    details.gpu_allocatable_count = 40;
+    details.virtual_gpu_count = Some(40);
+    details.virtual_gpu_memory_total_mib = Some(614400);
+    details.gpu_requests_count = 4;
+    details.gpu_memory_total_mib = Some(614400);
+    details.gpu_memory_requests_mib = 30720; // 30 GiB requested (50% phys, so not saturated)
+    let state = node_state(details);
+    let text_wide = render_node(260, 40, &state);
+
+    assert!(
+        text_wide.contains("4x Tesla T4 (HAMi 40 vGPUs)"),
+        "{text_wide}"
+    );
+    assert!(
+        text_wide.contains("Tesla T4 (Alloc): 30.0/600G (5% HAMi vPool) • 4x 60G Phys"),
+        "{text_wide}"
+    );
+
+    let text_ultra = render_node(320, 40, &state);
+    assert!(
+        text_ultra.contains("Tesla T4 (Alloc): 30.0/600G (5% HAMi vPool) • 4x 60G Phys (50%)"),
+        "{text_ultra}"
     );
 }
 
@@ -2707,7 +2750,17 @@ fn gpu_view_renders_hami_virtual_gpus_with_dual_reality() {
         vram_per_gpu_mib: Some(15360),
         vram_capacity_total_mib: Some(153600),
         vram_requests_total_mib: 15360,
-        pods: vec![],
+        pods: vec![srelens_kube::gpu_info::GpuPodItem {
+            name: "test-pod-0".to_string(),
+            namespace: "default".to_string(),
+            phase: "Running".to_string(),
+            gpu_requests: 3,
+            vram_requests_mib: 15360,
+            ready_containers: "1/1".to_string(),
+            restarts: 0,
+            age: "10m".to_string(),
+            containers: vec!["worker".to_string()],
+        }],
         is_virtual_gpu: true,
         physical_gpu_count: 1,
         physical_vram_total_mib: Some(15360),
@@ -2720,7 +2773,7 @@ fn gpu_view_renders_hami_virtual_gpus_with_dual_reality() {
         total_allocated_gpus: 3,
         total_vram_mib: 153600,
         total_allocated_vram_mib: 15360,
-        total_gpu_pods: 0,
+        total_gpu_pods: 1,
     };
 
     let mut state = srelens_tui::views::gpu_view::GpuViewState::new();
@@ -2750,10 +2803,105 @@ fn gpu_view_renders_hami_virtual_gpus_with_dual_reality() {
     assert!(text.contains("Available vGPUs: "), "{text}");
     assert!(text.contains("Available vVRAM: "), "{text}");
 
-    // Legend on bottom border and refined free message:
+    // Pods table:
+    assert!(text.contains("test-pod-0"), "{text}");
+
+    // Legend on bottom border:
     assert!(text.contains("v: Virtual GPUs detected (HAMi)"), "{text}");
+}
+
+#[test]
+fn gpu_view_renders_hami_empty_node_free_message() {
+    let _theme = common::theme::lock();
+    let node = srelens_kube::gpu_info::GpuNodeInfo {
+        name: "gpu-node-hami".to_string(),
+        status: "Ready".to_string(),
+        unschedulable: false,
+        roles: "worker".to_string(),
+        instance_type: "g4dn.xlarge".to_string(),
+        gpu_model: Some("Tesla T4".to_string()),
+        gpu_driver_version: Some("535.129.03".to_string()),
+        gpu_cuda_version: Some("12.2".to_string()),
+        gpu_capacity: 10,
+        gpu_allocatable: 10,
+        gpu_requests: 0,
+        vram_per_gpu_mib: Some(15360),
+        vram_capacity_total_mib: Some(15360),
+        vram_requests_total_mib: 0,
+        pods: vec![],
+        is_virtual_gpu: true,
+        physical_gpu_count: 1,
+        physical_vram_total_mib: Some(15360),
+    };
+
+    let info = srelens_kube::gpu_info::GpuClusterInfo {
+        nodes: vec![node],
+        total_gpu_nodes: 1,
+        total_gpus: 10,
+        total_allocated_gpus: 0,
+        total_vram_mib: 15360,
+        total_allocated_vram_mib: 0,
+        total_gpu_pods: 0,
+    };
+
+    let mut state = srelens_tui::views::gpu_view::GpuViewState::new();
+    state.set_info(info);
+
+    let text = render_gpu(160, 40, &state);
     assert!(
-        text.contains("All 10 vGPUs (150 GiB vVRAM) are free and ready to accept workloads."),
+        text.contains("All 10 vGPUs (15 GiB vVRAM) are free and ready to accept workloads."),
         "{text}"
+    );
+}
+
+#[test]
+fn gpu_view_renders_compact_vram_gauge_on_narrow_terminal() {
+    let _theme = common::theme::lock();
+    let node = srelens_kube::gpu_info::GpuNodeInfo {
+        name: "gpu-node-hami".to_string(),
+        status: "Ready".to_string(),
+        unschedulable: false,
+        roles: "worker".to_string(),
+        instance_type: "g4dn.xlarge".to_string(),
+        gpu_model: Some("Tesla T4".to_string()),
+        gpu_driver_version: Some("535.129.03".to_string()),
+        gpu_cuda_version: Some("12.2".to_string()),
+        gpu_capacity: 10,
+        gpu_allocatable: 10,
+        gpu_requests: 3,
+        vram_per_gpu_mib: Some(15360),
+        vram_capacity_total_mib: Some(153600),
+        vram_requests_total_mib: 15360,
+        pods: vec![],
+        is_virtual_gpu: true,
+        physical_gpu_count: 1,
+        physical_vram_total_mib: Some(15360),
+    };
+
+    let info = srelens_kube::gpu_info::GpuClusterInfo {
+        nodes: vec![node],
+        total_gpu_nodes: 1,
+        total_gpus: 10,
+        total_allocated_gpus: 3,
+        total_vram_mib: 153600,
+        total_allocated_vram_mib: 15360,
+        total_gpu_pods: 0,
+    };
+
+    let mut state = srelens_tui::views::gpu_view::GpuViewState::new();
+    state.set_info(info);
+
+    // Terminal width 85: right pane will be around 41 cols (< 50)
+    let text_narrow = render_gpu(85, 30, &state);
+    assert!(
+        text_narrow.contains("Phys: 15/15G (100%) • vPool: 15/150G"),
+        "{text_narrow}"
+    );
+
+    // Terminal width 110: right pane will be around 64 cols (< 70)
+    let text_mid = render_gpu(110, 30, &state);
+    assert!(
+        text_mid.contains("Phys: 15 GiB/15 GiB (100%) • vPool: 15 GiB/150 GiB"),
+        "{text_mid}"
     );
 }
