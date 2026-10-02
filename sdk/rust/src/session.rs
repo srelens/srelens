@@ -576,13 +576,22 @@ mod tests {
         );
     }
 
-    // `shutdown` cancels every handler, and one that gives up its call to
-    // srelens then drops it -- on its own thread, so possibly after the
-    // shutdown answer is queued and before the session has ended. That
-    // answer is the session's last line, so the drop must not send a
-    // `$/cancelRequest` after it.
-    #[tokio::test]
-    async fn a_call_given_up_after_shutdown_is_not_cancelled_after_the_shutdown_answer() {
+    /// When a handler drops its call to srelens, still unanswered, relative
+    /// to srelens's `shutdown`.
+    enum Dropped {
+        /// After the session handled `shutdown`.
+        AfterShutdown,
+        /// Before `shutdown` arrived, with the `$/cancelRequest` the drop
+        /// spawned still unsent when the session answers it.
+        BeforeShutdown,
+    }
+
+    /// The shutdown answer is the session's last line, though a call to
+    /// srelens is dropped unanswered around it, as `dropped` says. Such a
+    /// drop spawns a `$/cancelRequest` while the host is connected; this
+    /// test's runtime runs that task only when the test yields, after the
+    /// shutdown answer is queued.
+    async fn the_shutdown_answer_is_the_last_line(dropped: Dropped) {
         let (outbox, writer) = Outbox::new();
         let written = tokio::spawn(async move {
             let mut out = Vec::new();
@@ -600,11 +609,19 @@ mod tests {
             () = std::future::ready(()) => {}
         }
         let shutdown = json!({"jsonrpc": "2.0", "id": 1, "method": "shutdown", "params": {}});
-        let flow = session
-            .handle(Message::parse(&shutdown.to_string()).unwrap())
-            .await;
+        let shutdown = Message::parse(&shutdown.to_string()).unwrap();
+        let flow = match dropped {
+            Dropped::AfterShutdown => {
+                let flow = session.handle(shutdown).await;
+                drop(call);
+                flow
+            }
+            Dropped::BeforeShutdown => {
+                drop(call);
+                session.handle(shutdown).await
+            }
+        };
         assert!(matches!(flow, Flow::Shutdown));
-        drop(call);
         // Lets a `$/cancelRequest` the drop spawned reach the queue before
         // the session ends.
         tokio::task::yield_now().await;
@@ -617,5 +634,21 @@ mod tests {
             json!({"jsonrpc": "2.0", "id": 1, "result": {}}),
             "the last line written:\n{written}"
         );
+    }
+
+    // `shutdown` cancels every handler, and one that gives up its call to
+    // srelens then drops it -- on its own thread, so possibly after the
+    // shutdown answer is queued and before the session has ended.
+    #[tokio::test]
+    async fn a_call_given_up_after_shutdown_is_not_cancelled_after_the_shutdown_answer() {
+        the_shutdown_answer_is_the_last_line(Dropped::AfterShutdown).await;
+    }
+
+    // A call dropped before `shutdown` arrives spawns its `$/cancelRequest`
+    // on the handlers' runtime, which may be too busy to send it before the
+    // session has answered `shutdown`; by then it must send nothing.
+    #[tokio::test]
+    async fn a_cancel_still_unsent_at_shutdown_is_not_sent_after_the_shutdown_answer() {
+        the_shutdown_answer_is_the_last_line(Dropped::BeforeShutdown).await;
     }
 }

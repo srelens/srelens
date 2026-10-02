@@ -328,7 +328,8 @@ fn check(context: &CallContext, fields: &[Field<'_>]) -> Result<(), HostError> {
 ///   the way out, so a call left unanswered by design (the drained-output
 ///   check in `tests/common/mod.rs`) would fail at random. Once the host is
 ///   disconnected its semaphore is closed, so a drop after that point sends
-///   nothing.
+///   nothing, and the task a drop before it spawned checks again before it
+///   sends: that task may run only after the shutdown answer.
 struct CancelOnDrop {
     host: Host,
     id: Option<String>,
@@ -365,7 +366,7 @@ impl Drop for CancelOnDrop {
         if !still_waiting {
             return;
         }
-        let outbox = self.host.inner.outbox.clone();
+        let host = self.host.clone();
         let cancel = Notification::new(
             method::CANCEL,
             serde_json::to_value(CancelParams {
@@ -375,7 +376,12 @@ impl Drop for CancelOnDrop {
         );
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             runtime.spawn(async move {
-                let _ = outbox.send(&cancel).await;
+                // This task runs when the handlers' runtime gets to it, which
+                // may be after the session answered `shutdown`: its last line.
+                if host.inner.places.is_closed() {
+                    return;
+                }
+                let _ = host.inner.outbox.send(&cancel).await;
             });
         }
     }
