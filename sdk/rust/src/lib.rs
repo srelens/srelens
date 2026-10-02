@@ -16,9 +16,11 @@
 //! }
 //! ```
 //!
-//! The SDK answers the lifecycle and `health`, runs each request on its own
-//! task, cancels what srelens cancels, keeps every line within the protocol's
-//! limits, and exits when srelens says to or goes away.
+//! The SDK answers the lifecycle and `health` on a thread of its own, so a
+//! handler that blocks its thread cannot hold them up; runs each request on
+//! its own task, on your runtime; cancels what srelens cancels; keeps every
+//! line within the protocol's limits; and exits when srelens says to or goes
+//! away.
 
 mod context;
 mod error;

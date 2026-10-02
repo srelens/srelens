@@ -33,7 +33,7 @@ Declare the operations in the app's manifest
 
 ## What the SDK does for you
 
-- **Lifecycle.** It answers `initialize` (and picks the API version), `activate`, `deactivate`, `health` and `shutdown`. `health` is answered from the reader loop, so it gets through alongside handlers that are merely awaiting — not ones that are blocking their thread; see below.
+- **Lifecycle.** It answers `initialize` (and picks the API version), `activate`, `deactivate`, `health` and `shutdown`. It reads srelens's lines and writes its own on a thread of its own, and answers `activate`, `health` and `deactivate` ahead of any frames and answers already queued, so `health` gets through even while every handler blocks its thread. The handlers run on your runtime, the one that awaits `run_stdio`.
 - **Handlers.**
   - Each request runs on its own task, with its input read into your type. Input that does not fit is answered `-32602` without running the handler.
   - A handler's `Error` is the answer. A panic is answered `-32603`, and the sidecar keeps running.
@@ -59,7 +59,7 @@ Declare the operations in the app's manifest
 
 ## The sandbox, for authors
 
-- **Never block a handler's thread.** Run CPU-bound or blocking work with `tokio::task::spawn_blocking`, or srelens's health check can starve and srelens will restart the sidecar.
+- **Don't block a handler's thread.** Run CPU-bound or blocking work with `tokio::task::spawn_blocking`. srelens's health check is answered on the SDK's own thread either way, but a handler that blocks a worker of your runtime holds up every other handler waiting for that worker.
 - **Stdout is the protocol.** Never write to it (`println!`, `print!`, or a dependency that does). Log with the `log` crate, which goes to stderr.
 - **No network and no subprocesses.** To reach a cluster or the outside, go through `ctx.host()` and the capabilities your manifest declares.
 - **Scratch files.** Write only under `ctx.data_dir()`, which is also the working directory. `std::env::temp_dir()` is not writable on Windows.
