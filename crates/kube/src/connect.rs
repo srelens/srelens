@@ -68,6 +68,13 @@ pub fn init_timeout_from_env() -> u64 {
     request_timeout_secs()
 }
 
+/// The variable kube-rs reads before it starts a kubeconfig exec plugin: at
+/// `1`, it starts the plugin on Windows with `CREATE_NO_WINDOW`
+/// (kube-rs/kube#1901). kube 0.96 always did. Whether a host sets it is that
+/// host's call: the desktop app does, because its release build has no console
+/// and every plugin would otherwise open a window (#775).
+pub const HIDE_EXEC_PLUGIN_WINDOWS_ENV: &str = "KUBE_RS_UNSTABLE_CREATE_NO_WINDOW";
+
 /// The folder the app owns for kubeconfigs it manages itself — where a pasted
 /// config is saved. Tied to the bundle identifier, like `settings.json`, so it
 /// survives dev/installed builds and binary renames.
