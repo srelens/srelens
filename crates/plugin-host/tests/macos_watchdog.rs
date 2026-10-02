@@ -54,17 +54,26 @@ impl Probe {
     }
 
     /// One request's result; `None` when the probe ended before answering.
+    /// A probe that does neither within 30 s fails the test, rather than
+    /// hanging it.
     async fn call(&mut self, method: &str, params: Value) -> Option<Value> {
         let id = self.next;
         self.next += 1;
         let request = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
-        self.stdin
-            .write_all(format!("{request}\n").as_bytes())
+        let exchange = async {
+            self.stdin
+                .write_all(format!("{request}\n").as_bytes())
+                .await
+                .ok()?;
+            let line = self.lines.next_line().await.ok()??;
+            let answer: Value = serde_json::from_str(&line).expect("a JSON-RPC answer");
+            Some(answer["result"].clone())
+        };
+        tokio::time::timeout(Duration::from_secs(30), exchange)
             .await
-            .ok()?;
-        let line = self.lines.next_line().await.ok()??;
-        let answer: Value = serde_json::from_str(&line).expect("a JSON-RPC answer");
-        Some(answer["result"].clone())
+            .unwrap_or_else(|_| {
+                panic!("{method}: the probe neither answered nor ended within 30 s")
+            })
     }
 
     async fn exit(&mut self) -> Exit {

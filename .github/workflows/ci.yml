@@ -384,6 +384,8 @@ jobs:
   macos-watchdog:
     name: macOS watchdog
     runs-on: macos-latest
+    # A hang stops here, not at the 6-hour default.
+    timeout-minutes: 20
     permissions:
       contents: read
     steps:
@@ -392,8 +394,10 @@ jobs:
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      # One thread for the integration test: its CPU control and its throttle
-      # would otherwise compete for the runner's cores.
+      # One thread for the integration test, so its other tests (the 512 MiB
+      # hold, the memory reading) do not compete with the CPU test for the
+      # runner's cores. The CPU test's control and its throttled burn already
+      # run one after the other.
       - name: The watchdog
         run: |
           sw_vers
