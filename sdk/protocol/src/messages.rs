@@ -3,15 +3,18 @@
 //! srelens adds; what a sidecar sends srelens (`context` and the `host/*`
 //! calls) takes no field it does not name, as srelens refuses one.
 
-use schemars::gen::SchemaGenerator;
-use schemars::schema::Schema;
-use schemars::JsonSchema;
+#[cfg(feature = "schema")]
+use schemars::{gen::SchemaGenerator, schema::Schema, JsonSchema};
 use serde::{Deserialize, Deserializer, Serialize};
-use serde_json::{json, Value};
+#[cfg(feature = "schema")]
+use serde_json::json;
+use serde_json::Value;
 
+use crate::bounds::MAX_CLUSTER_ID_BYTES;
+// What only the schema's patterns and limits read.
+#[cfg(feature = "schema")]
 use crate::bounds::{
-    MAX_CALL_FIELD_BYTES, MAX_CLUSTER_ID_BYTES, MAX_IDENTIFIER_LEN, MAX_NAMESPACE_LEN,
-    MAX_OBJECT_NAME_LEN, MAX_TOKEN_LEN,
+    MAX_CALL_FIELD_BYTES, MAX_IDENTIFIER_LEN, MAX_NAMESPACE_LEN, MAX_OBJECT_NAME_LEN, MAX_TOKEN_LEN,
 };
 
 /// A request's id. srelens numbers its own from 1; a sidecar may use any
@@ -29,6 +32,7 @@ impl From<u64> for RequestId {
     }
 }
 
+#[cfg(feature = "schema")]
 impl JsonSchema for RequestId {
     fn schema_name() -> String {
         "RequestId".to_owned()
@@ -48,14 +52,16 @@ impl JsonSchema for RequestId {
 }
 
 /// One end of the conversation: srelens, or the sidecar.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 pub struct Peer {
     pub name: String,
     pub version: String,
 }
 
 /// The limits a sidecar runs under, so an SDK can hold itself to them.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct InitializeLimits {
     /// How long srelens waits for the answer to one request, in milliseconds.
@@ -76,7 +82,8 @@ pub struct InitializeLimits {
 
 /// `initialize`'s params: every sidecar API version srelens speaks, the
 /// limits in force, and the one directory the sidecar may write.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct InitializeParams {
     /// Every sidecar API version srelens speaks, oldest first.
@@ -89,7 +96,8 @@ pub struct InitializeParams {
 }
 
 /// A sidecar's answer to `initialize`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct InitializeResult {
     /// The version it chose, one of those offered.
@@ -100,7 +108,8 @@ pub struct InitializeResult {
 
 /// The `data` of error -32001, the answer to `initialize` from a sidecar that
 /// speaks none of the offered versions.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 pub struct UnsupportedApiVersion {
     /// The versions it does speak.
     pub supported: Vec<String>,
@@ -108,17 +117,20 @@ pub struct UnsupportedApiVersion {
 
 /// The params and result of `activate`, `health`, `deactivate` and
 /// `shutdown`: `{}`.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 pub struct Empty {}
 
 /// `$/cancelRequest`'s params: stop working on request `id`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 pub struct CancelParams {
     pub id: RequestId,
 }
 
 /// `stream/open`'s params: open stream `stream`, streaming `method`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 pub struct StreamOpenParams {
     /// The id srelens chose; every frame of the stream carries it.
     pub stream: u64,
@@ -127,89 +139,97 @@ pub struct StreamOpenParams {
 }
 
 /// `stream/data`'s params: one frame of stream `stream`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 pub struct StreamDataParams {
     pub stream: u64,
     pub data: Value,
 }
 
 /// `stream/close`'s params: stream `stream` ended.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 pub struct StreamCloseParams {
     pub stream: u64,
 }
 
 /// `stream/error`'s params: stream `stream` failed.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 pub struct StreamErrorParams {
     pub stream: u64,
     pub message: String,
 }
 
 /// `stream/cancel`'s params: stop sending stream `stream`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 pub struct StreamCancelParams {
     pub stream: u64,
 }
 
 /// The cluster and namespace one call names. Every call from a sidecar
 /// carries one: srelens has no current cluster to assume.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields, remote = "Self")]
-#[schemars(rename = "CallContext")]
+#[cfg_attr(feature = "schema", schemars(rename = "CallContext"))]
 pub struct CallContext {
     /// A cluster as srelens names it: the `context` of the request the
     /// sidecar is serving, a kubeconfig context's stable ID, pinned ID or
     /// name. At most 4096 bytes as UTF-8, and not blank.
-    #[schemars(schema_with = "cluster_id")]
+    #[cfg_attr(feature = "schema", schemars(schema_with = "cluster_id"))]
     pub cluster_id: String,
     /// A namespace, or null for every namespace or a cluster-scoped kind.
     /// Required, though it may be null: "no namespace" is said, not assumed.
     #[serde(deserialize_with = "explicit")]
-    #[schemars(schema_with = "namespace")]
+    #[cfg_attr(feature = "schema", schemars(schema_with = "namespace"))]
     pub namespace: Option<String>,
 }
 
 /// `host/read`'s params: read one of the app's declared readers, or one of
 /// its `network.http` requests.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields, remote = "Self")]
-#[schemars(rename = "HostReadParams")]
+#[cfg_attr(feature = "schema", schemars(rename = "HostReadParams"))]
 pub struct HostReadParams {
     pub context: CallContext,
-    #[schemars(schema_with = "identifier")]
+    #[cfg_attr(feature = "schema", schemars(schema_with = "identifier"))]
     pub capability: String,
 }
 
 /// `host/resource`'s params: inspect object `name` of a declared
 /// custom-resource reader.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields, remote = "Self")]
-#[schemars(rename = "HostResourceParams")]
+#[cfg_attr(feature = "schema", schemars(rename = "HostResourceParams"))]
 pub struct HostResourceParams {
     pub context: CallContext,
-    #[schemars(schema_with = "identifier")]
+    #[cfg_attr(feature = "schema", schemars(schema_with = "identifier"))]
     pub capability: String,
-    #[schemars(schema_with = "object_name")]
+    #[cfg_attr(feature = "schema", schemars(schema_with = "object_name"))]
     pub name: String,
 }
 
 /// `host/action`'s params: run one of the app's declared actions on object
 /// `name`, as read (`uid`, `resourceVersion`), once a person has confirmed it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields, remote = "Self")]
-#[schemars(rename = "HostActionParams")]
+#[cfg_attr(feature = "schema", schemars(rename = "HostActionParams"))]
 pub struct HostActionParams {
     pub context: CallContext,
-    #[schemars(schema_with = "identifier")]
+    #[cfg_attr(feature = "schema", schemars(schema_with = "identifier"))]
     pub capability: String,
-    #[schemars(schema_with = "object_name")]
+    #[cfg_attr(feature = "schema", schemars(schema_with = "object_name"))]
     pub name: String,
-    #[schemars(schema_with = "identifier")]
+    #[cfg_attr(feature = "schema", schemars(schema_with = "identifier"))]
     pub action: String,
-    #[schemars(schema_with = "token")]
+    #[cfg_attr(feature = "schema", schemars(schema_with = "token"))]
     pub uid: String,
-    #[schemars(schema_with = "token")]
+    #[cfg_attr(feature = "schema", schemars(schema_with = "token"))]
     pub resource_version: String,
 }
 
@@ -316,6 +336,7 @@ fn explicit<'de, D: Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error>
     Option::<String>::deserialize(d)
 }
 
+#[cfg(feature = "schema")]
 fn schema(value: Value) -> Schema {
     serde_json::from_value(value).expect("a JSON Schema")
 }
@@ -324,6 +345,7 @@ fn schema(value: Value) -> Schema {
 // whose conformance test holds these to it). Every pattern is RE2-compatible:
 // no lookaround, so `.` and `..` are refused with `not` rather than a lookahead.
 
+#[cfg(feature = "schema")]
 fn identifier(_: &mut SchemaGenerator) -> Schema {
     schema(json!({
         "type": "string",
@@ -333,6 +355,7 @@ fn identifier(_: &mut SchemaGenerator) -> Schema {
     }))
 }
 
+#[cfg(feature = "schema")]
 fn object_name(_: &mut SchemaGenerator) -> Schema {
     schema(json!({
         "type": "string",
@@ -343,6 +366,7 @@ fn object_name(_: &mut SchemaGenerator) -> Schema {
     }))
 }
 
+#[cfg(feature = "schema")]
 fn token(_: &mut SchemaGenerator) -> Schema {
     schema(json!({
         "type": "string",
@@ -352,6 +376,7 @@ fn token(_: &mut SchemaGenerator) -> Schema {
     }))
 }
 
+#[cfg(feature = "schema")]
 fn namespace(_: &mut SchemaGenerator) -> Schema {
     schema(json!({
         "type": ["string", "null"],
@@ -364,8 +389,10 @@ fn namespace(_: &mut SchemaGenerator) -> Schema {
 /// makes a `clusterId` blank ([`crate::shape::is_cluster_id`]). Written out,
 /// because regex engines read `\s` differently: Go's RE2 as ASCII only, and
 /// ECMA-262 with U+FEFF and without U+0085.
+#[cfg(feature = "schema")]
 const WHITE_SPACE: &str = "\t\n\u{0b}\u{0c}\r \u{85}\u{a0}\u{1680}\u{2000}-\u{200a}\u{2028}\u{2029}\u{202f}\u{205f}\u{3000}";
 
+#[cfg(feature = "schema")]
 fn cluster_id(_: &mut SchemaGenerator) -> Schema {
     schema(json!({
         "type": "string",

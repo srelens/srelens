@@ -68,6 +68,24 @@ Declare the operations in the app's manifest
 - **Environment.** It holds only what srelens names, so don't rely on `HOME` or `PATH`.
 - **Memory.** It is capped. Linux kills the process at the limit; on Windows, an allocation fails.
 
+## Dependencies
+
+A sidecar built on this crate builds none of `schemars`, `schemars_derive`,
+`dyn-clone` or `serde_derive_internals`. They generate the protocol's JSON
+Schema, which is the `schema` feature of `srelens-sidecar-protocol`: off by
+default, and never turned on by this crate. `cargo tree -p <your sidecar> -e
+no-dev` shows your build; without `-e no-dev` it also lists them, through the
+dev-dependencies this crate's own tests use.
+
+Turn the feature on only to hold messages to the schema in your own tests, as a
+dev-dependency (`srelens-sidecar-protocol = { .., features = ["schema"] }`, taken
+from wherever you take this crate). That is what this crate's
+`tests/common/mod.rs` does, and what a copy of its fake host needs, with the
+`jsonschema` crate. Cargo builds a crate once per build, with every feature
+any part of the build asks for, so a workspace that builds your sidecar beside
+something that turns `schema` on (srelens's own plugin host does) builds
+schemars as well; your sidecar's own build does not.
+
 ## Testing your sidecar
 
 `Sidecar::run(reader, writer)` serves any async pipes. Drive it in a test with

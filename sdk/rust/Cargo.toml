@@ -16,6 +16,10 @@ serde_json = { version = "1", features = ["float_roundtrip"] }
 log = { version = "0.4", features = ["std"] }
 
 [dev-dependencies]
+# The tests hold every line the SDK writes to the protocol's schema, which the
+# protocol crate only generates with its `schema` feature. As a dev-dependency
+# the feature is on for the tests and off for a sidecar that uses this crate.
+srelens-sidecar-protocol = { path = "../protocol", features = ["schema"] }
 # Holds every line the SDK writes to the committed schema. No default
 # features: they bring a second rustls provider (AGENTS.md).
 jsonschema = { version = "0.58", default-features = false }

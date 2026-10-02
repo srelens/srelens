@@ -322,6 +322,19 @@ jobs:
             sdk/examples/hello-world/go/go.sum
       - name: Build the suites
         run: cargo test -p srelens-plugin-host -p srelens-sidecar-hello-world --no-run
+      # The Rust SDK as a sidecar author builds it: the protocol crate without
+      # its `schema` feature. A workspace build and every test run turn the
+      # feature on (the plugin host's tests and the SDK's own need the schema),
+      # so nothing else compiles this configuration. It must build, the
+      # protocol crate without a warning for an item only the schema reads, and
+      # what an author builds (`cargo tree -e no-dev`) must hold no schemars:
+      # `dependencies.rs` fails if it does.
+      - name: The Rust SDK without the schema feature
+        if: runner.os == 'Linux'
+        run: |
+          cargo build --locked -p srelens-sidecar -p srelens-sidecar-hello-world
+          cargo rustc --locked -p srelens-sidecar-protocol --lib -- -D warnings
+          cargo test --locked -p srelens-sidecar --test dependencies
       - name: Build the Go example
         shell: bash
         run: go build -C sdk/examples/hello-world/go -o "../../../../target/hello-world-go${{ runner.os == 'Windows' && '.exe' || '' }}" .
