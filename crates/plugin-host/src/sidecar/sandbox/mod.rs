@@ -42,6 +42,9 @@ mod watchdog;
 #[doc(hidden)]
 pub mod launch;
 
+#[cfg(target_os = "macos")]
+#[doc(hidden)]
+pub use macos::watch;
 #[cfg(windows)]
 pub use windows::delete_profile;
 
@@ -421,11 +424,11 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn macos_reports_its_limits_as_not_enforced_until_the_watchdog_exists() {
+    fn macos_reports_its_limits_as_not_enforced_until_the_watchdog_is_checked_on_a_mac() {
         let Enforcement::Missing(why) = OsSandbox::new(SandboxConfig::default()).enforcement()
         else {
             panic!("macOS claims its limits are enforced");
         };
-        assert!(why.contains("#713"), "{why}");
+        assert!(why.contains("watchdog") && why.contains("#713"), "{why}");
     }
 }
