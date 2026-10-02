@@ -424,13 +424,13 @@ in `crates/plugin-host/src/sidecar/sandbox/`:
 |---|---|---|
 | Linux | Landlock and a seccomp filter, applied by `srelens-sandbox-launch` before it runs the sidecar | a cgroup v2 directory under a root delegated to srelens |
 | Windows | an AppContainer with no capabilities, one profile per app | the Job Object the process starts in |
-| macOS | Seatbelt through `/usr/bin/sandbox-exec` | **none yet: every sidecar is refused** until the host-side watchdog ([#713](https://github.com/srelens/srelens/issues/713)) exists |
+| macOS | Seatbelt through `/usr/bin/sandbox-exec` | a host-side watchdog ([#713](https://github.com/srelens/srelens/issues/713)), weaker than the kernel's: **every sidecar is still refused** until it has been checked on a Mac |
 | any other OS | — | — |
 
 A sidecar is **refused, never started unconfined**:
 
 - on an OS with no backend;
-- on macOS, until #713;
+- on macOS, until its watchdog has been checked on a Mac (#713);
 - on Linux without Landlock, without the launcher, or without a delegated cgroup;
 - anywhere the backend cannot set a limit.
 
@@ -578,5 +578,5 @@ uninstalled; locking it down while the app is installed is left for the escape r
 | An operation that answers with a stream: the protocol has streams, and nothing opens one on an app's behalf yet | — |
 | Shipping `srelens-sandbox-launch` in the desktop bundles, and finding a delegated cgroup on a systemd desktop; until then Linux names them with `SRELENS_SANDBOX_LAUNCHER` and `SRELENS_SANDBOX_CGROUP_ROOT` | — |
 | A "Clear data" action for an app refused for its data directory (`DataDir::clear` is there; the Inspector, #575, is where a person would find it) | not filed yet |
-| Memory and CPU limits on macOS | [#713](https://github.com/srelens/srelens/issues/713) |
+| Checking macOS's watchdog on a macOS 27 Mac, and then running sidecars there | [#713](https://github.com/srelens/srelens/issues/713) |
 | The escape-hardening review of the supervisor and its backends, which the ADR assigned to #572 | [#744](https://github.com/srelens/srelens/issues/744) |

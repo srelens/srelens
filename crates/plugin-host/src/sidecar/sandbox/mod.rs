@@ -5,7 +5,7 @@
 //! | OS | Isolation | Memory and CPU |
 //! |---|---|---|
 //! | Linux | Landlock and a seccomp filter, applied by `srelens-sandbox-launch` before it `exec`s the sidecar | a cgroup v2 directory the host creates under a delegated root |
-//! | macOS | Seatbelt, through `/usr/bin/sandbox-exec` | not enforced: host-side watchdog, #713, not built |
+//! | macOS | Seatbelt, through `/usr/bin/sandbox-exec` | a host-side watchdog (`watchdog.rs`, #713), weaker than the kernel's; not yet checked on a Mac, so sidecars are still refused |
 //! | Windows | an AppContainer with no capabilities | the Job Object the process starts in |
 //! | anything else | none | none |
 //!
@@ -87,7 +87,8 @@ pub enum Enforcement {
     /// The kernel refuses or stops at the limit: a Job Object, a cgroup.
     Kernel,
     /// The host watches and stops the sidecar past the limit, which a burst
-    /// between two samples can exceed. macOS, once #713 is built.
+    /// between two samples can exceed. macOS, once its watchdog (#713) has
+    /// been checked on a Mac.
     Host,
     /// Nothing does, for the reason given. The supervisor refuses to start a
     /// sidecar then: isolation without limits was considered for macOS and
@@ -232,10 +233,11 @@ impl Process {
     }
 
     /// The same process, with a way to read its memory use for the Inspector
-    /// (#575): the cgroup's `memory.current` on Linux, and the process's
-    /// committed private memory on Windows (#753). A backend that cannot
+    /// (#575): the cgroup's `memory.current` on Linux, the process's committed
+    /// private memory on Windows (#753), and the watchdog's last reading of the
+    /// process's physical footprint on macOS (#713). A backend that cannot
     /// measure it leaves it out, and the Inspector says so rather than
-    /// showing a number. macOS's watchdog samples the same figure (#713).
+    /// showing a number.
     pub fn with_memory(
         mut self,
         probe: impl Fn() -> Option<u64> + Send + Sync + 'static,
