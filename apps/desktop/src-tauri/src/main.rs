@@ -33,7 +33,7 @@ fn main() {
     // mode, so on Windows each exec plugin kube-rs starts (`aws eks get-token`)
     // would open a console window of its own (#775). Still single-threaded.
     #[cfg(not(debug_assertions))]
-    srelens_kube::connect::hide_exec_plugin_windows();
+    srelens_desktop_lib::hide_exec_plugin_windows();
 
     // Running from a Linux AppImage, keep the bundled GLib from scanning the
     // host's GIO modules (its gvfs modules use symbols the bundled GLib lacks,

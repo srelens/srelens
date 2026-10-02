@@ -9,6 +9,7 @@ mod bridge;
 pub mod bundle;
 mod bundle_cmd;
 pub mod capabilities;
+mod exec_plugin_console;
 pub mod extension_secrets;
 mod cluster_oidc;
 mod cluster_oidc_cmd;
@@ -67,6 +68,7 @@ use updater::{update_check, update_install};
 use watch::{start_resource_watch, stop_watch};
 
 pub use appimage::gio_module_dir_for_appimage;
+pub use exec_plugin_console::hide_exec_plugin_windows;
 pub use capabilities::{
     build_registry, build_registry_for_user, build_registry_with_paths,
     build_registry_with_paths_and_settings, default_settings_path,

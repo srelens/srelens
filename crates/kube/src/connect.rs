@@ -68,23 +68,6 @@ pub fn init_timeout_from_env() -> u64 {
     request_timeout_secs()
 }
 
-/// Have kube-rs start kubeconfig exec plugins without a console window.
-///
-/// On Windows, a process with no console of its own — the desktop app's
-/// release build is one — gives every console program it starts a new console
-/// window. Exec plugins are console programs (`aws eks get-token`,
-/// `gke-gcloud-auth-plugin`, `kubelogin`), so every token fetch flashed a
-/// window and took focus (#775). kube-rs passes `CREATE_NO_WINDOW` only when
-/// this variable is `1` (kube-rs/kube#1901); kube 0.96, which srelens used
-/// through v0.7.0, always did.
-///
-/// Call it first thing in `main`, while the process is still single-threaded.
-/// Does nothing off Windows.
-pub fn hide_exec_plugin_windows() {
-    #[cfg(windows)]
-    std::env::set_var("KUBE_RS_UNSTABLE_CREATE_NO_WINDOW", "1");
-}
-
 /// The folder the app owns for kubeconfigs it manages itself — where a pasted
 /// config is saved. Tied to the bundle identifier, like `settings.json`, so it
 /// survives dev/installed builds and binary renames.

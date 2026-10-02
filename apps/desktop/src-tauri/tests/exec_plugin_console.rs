@@ -44,7 +44,8 @@ fn probe_kubeconfig(dir: &Path) -> PathBuf {
              $report = @([Probe.Console]::GetConsoleWindow().ToInt64(), ($ids[0..($count - 1)] -join ','))\r\n\
              Set-Content -Path (Join-Path '{}' ([guid]::NewGuid().ToString())) -Value $report\r\n\
              Write-Output '{{\"apiVersion\":\"client.authentication.k8s.io/v1beta1\",\"kind\":\"ExecCredential\",\"status\":{{\"token\":\"t\",\"expirationTimestamp\":\"2099-01-01T00:00:00Z\"}}}}'\r\n",
-            runs.display()
+            // Doubled: the path sits in a single-quoted PowerShell string.
+            runs.display().to_string().replace('\'', "''")
         ),
     )
     .unwrap();
@@ -69,9 +70,14 @@ fn probe_kubeconfig(dir: &Path) -> PathBuf {
 #[test]
 fn exec_plugins_start_without_a_console_window() {
     // First, while this is the only thread doing anything: it sets a variable.
-    srelens_kube::connect::hide_exec_plugin_windows();
+    srelens_desktop_lib::hide_exec_plugin_windows();
 
-    let dir = tempfile::tempdir().unwrap();
+    // An apostrophe, as in `C:\Users\O'Brien`, would end a single-quoted
+    // PowerShell string in the probe if it were not escaped.
+    let dir = tempfile::Builder::new()
+        .prefix("srelens-o'775-")
+        .tempdir()
+        .unwrap();
     let cache = ClientCache::new(probe_kubeconfig(dir.path()));
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
