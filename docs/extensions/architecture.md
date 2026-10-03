@@ -46,6 +46,12 @@ Inspector. The broker's consent is the MCP host's: the desktop app's confirmatio
 prompt, naming the app, or `NoConsent` headless. See
 [Executable apps](manifest.md#executable-apps).
 
+Executable apps are a preview. They run out of the box on Windows. On Linux the sandbox
+launcher `srelens-sandbox-launch` and a delegated cgroup must be set up by hand, and named
+with `SRELENS_SANDBOX_LAUNCHER` and `SRELENS_SANDBOX_CGROUP_ROOT`. On macOS they do not run
+yet: srelens refuses every sidecar until its watchdog has been checked with Seatbelt on a
+macOS 27 Mac.
+
 ## App lifecycle
 
 Both desktop designs manage apps through **Settings → Apps**, from the catalog or a

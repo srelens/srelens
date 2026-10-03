@@ -4,6 +4,12 @@ An executable app runs as a sidecar that speaks JSON-RPC to srelens over its std
 stdout ([protocol](../docs/extensions/sidecar-protocol.md)). What is here helps a third
 party write one.
 
+Executable apps are a preview. They run out of the box on Windows. On Linux the sandbox
+launcher `srelens-sandbox-launch` and a delegated cgroup must be set up by hand, and named
+with `SRELENS_SANDBOX_LAUNCHER` and `SRELENS_SANDBOX_CGROUP_ROOT`. On macOS they do not run
+yet: srelens refuses every sidecar until its watchdog has been checked with Seatbelt on a
+macOS 27 Mac.
+
 | Path | What | Status |
 |---|---|---|
 | `protocol/` | `srelens-sidecar-protocol`: the wire's constants and a type for every message. srelens builds its own messages from it, and [`schemas/sidecar-protocol.v0.1.json`](../schemas/sidecar-protocol.v0.1.json) is generated from it; generating it (the `schema()` function and the `JsonSchema` derives, so schemars) is the crate's optional `schema` feature, off by default, so a sidecar does not build it | here |

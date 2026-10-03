@@ -12,7 +12,9 @@ mitigation and the risk that remains.
   with and checked against it first, with no kubeconfig, no network, none of srelens's
   environment and one directory of its own; it is refused wherever no sandbox exists,
   and an unsigned one needs the unsigned-apps setting
-  ([manifest.md](manifest.md#executable-apps)).
+  ([manifest.md](manifest.md#executable-apps)). Executable apps are a preview: they run
+  out of the box on Windows only, and Linux and macOS are set out in
+  [where they run](manifest.md#where-executable-apps-run).
 - **No ambient access.** Apps never receive kubeconfig, tokens, files or network
   access. Every call goes through the broker with fixed arguments, under the selected
   cluster's RBAC ([permissions.md](permissions.md)).

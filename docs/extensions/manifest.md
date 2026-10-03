@@ -1082,14 +1082,15 @@ The frames each source sends are in [streams.md](streams.md#logs).
 
 ## Executable apps
 
-**API 0.6** ([#574](https://github.com/srelens/srelens/issues/574)). An app of kind
+**API 0.6, preview** ([#574](https://github.com/srelens/srelens/issues/574)). An app of kind
 `executable` also runs a **sidecar**: a program it ships, which srelens starts in the
 operating system's sandbox and talks JSON-RPC to over stdio
 ([sidecar-protocol.md](sidecar-protocol.md)). It has no kubeconfig, no network, no
 environment of srelens's and one writable directory. It reaches the host only through
 the broker ([#573](https://github.com/srelens/srelens/issues/573)): what the app's
 readers read, and the app's declared actions, each put to a person first. An
-executable app may declare everything a declarative one does as well.
+executable app may declare everything a declarative one does as well. Executable apps are
+a preview: see [where they run](#where-executable-apps-run).
 
 ```json
 {
@@ -1129,6 +1130,22 @@ executable app may declare everything a declarative one does as well.
 | `operations[].title` | 1–120 characters, as every title. |
 | `operations[].inputs` | Up to 16 inputs, each `{ name, title?, type, required?, maxLength? }`. `type` is `string`, `integer`, `number` or `boolean`. `maxLength` is for a string: 1–65536 bytes, default 1024. |
 
+### Where executable apps run
+
+Executable apps are a preview, and so is API 0.6, until the API is frozen as 1.0
+([specification.md](specification.md#versioning)).
+
+- **Windows:** out of the box.
+- **Linux:** the sandbox launcher `srelens-sandbox-launch` and a delegated cgroup must be
+  set up by hand, and named with `SRELENS_SANDBOX_LAUNCHER` and
+  `SRELENS_SANDBOX_CGROUP_ROOT`. The bundles ship neither.
+- **macOS:** not yet. srelens refuses every sidecar until its memory and CPU watchdog has
+  been checked with Seatbelt on a macOS 27 Mac.
+- **The web host:** nowhere. It keeps no files for its apps, so it runs no sidecar.
+
+Where one cannot run, srelens refuses the app and says what is missing; it never starts a
+sidecar unconfined.
+
 ### What the host holds a sidecar to
 
 - **It installs from a package.** An executable app installs only from a
@@ -1151,9 +1168,10 @@ executable app may declare everything a declarative one does as well.
   [sidecar-protocol.md](sidecar-protocol.md#sandbox) describes. On Linux the sandbox
   launcher is found beside the srelens binary or at `SRELENS_SANDBOX_LAUNCHER`, and the
   cgroup delegated to srelens is named by `SRELENS_SANDBOX_CGROUP_ROOT`; without them
-  the sidecar is refused with what is missing. macOS refuses every sidecar until its
-  host-enforced limits, which are built, have been checked with Seatbelt on a macOS 27
-  Mac ([#713](https://github.com/srelens/srelens/issues/713)).
+  the sidecar is refused with what is missing, and the bundles ship neither. macOS
+  refuses every sidecar until its host-enforced limits, which are built, have been
+  checked with Seatbelt on a macOS 27 Mac
+  ([#713](https://github.com/srelens/srelens/issues/713)).
 - **Its input is the host's to check.** Every call is held to the operation's declared
   inputs before the sidecar sees it: no field it does not declare, every required one
   present, each of its type, each string within its `maxLength`, and the whole call

@@ -36,13 +36,13 @@ with the last exit's reason and the supervisor's actions:
 
 - **View logs** opens the Logs tab.
 - **Disable** turns the app off.
-- **Restart** is not offered yet. No host capability restarts a sidecar until
-  executable apps are wired to the registry ([#574](https://github.com/srelens/srelens/issues/574)).
+- **Restart** is not offered yet: no host capability restarts a sidecar.
 
-No app runs a process today: the manifest has no executable kind yet (#574).
-When #574 starts a sidecar it asks `AppRuntime::log(id)` for the app's log,
-passes that log to `Supervisor::start_with_log`, and shows the process with
-`AppRuntime::attach(id, supervisor)`. The Inspector reads the supervisor only
+The registry starts an executable app's process on its first operation call
+(`crates/registry/src/extensions/sidecars.rs`,
+[#574](https://github.com/srelens/srelens/issues/574)). It asks `AppRuntime::log(id)` for
+the app's log, passes that log to `Supervisor::start_with_log`, and shows the process
+with `AppRuntime::attach(id, supervisor)`. The Inspector reads the supervisor only
 through `Inspect::metrics`.
 
 ## Logs

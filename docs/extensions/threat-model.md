@@ -444,7 +444,7 @@ Out of scope as an attacker (see [Scope](#scope)), but the host still checks wha
 | [#563] | APP-8, PUB-4: update checks and downgrade protection |
 | [#564] | NET-3: additional catalog sources and imported roots |
 | [#744] ([#521]) | VULN-1: the escape-hardening review of the [#572] supervisor and its sandbox backends |
-| [#713] ([#521]) | VULN-1: host-enforced memory and CPU limits for sidecars on macOS, weaker than kernel enforcement; built, to be checked with Seatbelt on a macOS 27 Mac before macOS runs sidecars |
+| [#713] ([#521]) | VULN-1: host-enforced memory and CPU limits for sidecars on macOS, weaker than kernel enforcement. The issue is closed and the watchdog is built, but the switch to host enforcement waits for a check with Seatbelt on a macOS 27 Mac: until then macOS refuses every sidecar |
 | [#578] ([#522]) | WEB-4, WEB-5: the extension policy, shipped in part; left is a catalog source and version pin for each app the operator makes available |
 | [#739] ([#522]) | WEB-5: an administrator role, policy administration in the web settings, and enabling apps for users |
 | [#39] | Scope: CSP, update chain and the rest of the host |
