@@ -816,6 +816,9 @@ struct AllowAce {
     /// Whether it applies only to what is created inside the directory
     /// later, and so not to the directory itself.
     inherit_only: bool,
+    /// Whether files created inside the directory inherit it, as the staged
+    /// and the installed binary do.
+    object_inherit: bool,
 }
 
 /// The rights that let someone put their own file at a name in a directory,
@@ -858,8 +861,27 @@ fn is_broad_group(sid: &str) -> bool {
     || (sid.starts_with("S-1-5-21-") && sid.ends_with("-513"))
 }
 
+/// The rights that let someone change a FILE: write or append to it, delete
+/// it, rewrite its ACL, take ownership, and the generic rights that map onto
+/// those. A file's own ACL comes from its directory's file-inheritable
+/// entries, and the staged and the installed binary are files created there.
+#[cfg_attr(not(windows), allow(dead_code))]
+const FILE_CHANGE_RIGHTS: u32 = 0x0000_0002 // FILE_WRITE_DATA
+    | 0x0000_0004 // FILE_APPEND_DATA
+    | 0x0001_0000 // DELETE
+    | 0x0004_0000 // WRITE_DAC
+    | 0x0008_0000 // WRITE_OWNER
+    | 0x1000_0000 // GENERIC_ALL
+    | 0x4000_0000; // GENERIC_WRITE
+
 /// Whether a directory whose DACL holds `dacl` lets everyone with an account
-/// replace its entries.
+/// replace its entries, or change the files the update creates in it.
+///
+/// Two kinds of entry count. An entry that applies to the directory itself
+/// counts if it grants a replace right. An entry that files created inside
+/// inherit counts if it grants the right to change a file. The staged binary
+/// inherits that entry, so anyone could rewrite it between its read-back and
+/// the rename, and could rewrite the installed binary at any time after.
 ///
 /// `None` is a directory with no DACL at all, which Windows reads as full
 /// access for everyone. An empty one is the opposite: nobody is granted
@@ -875,7 +897,9 @@ fn broad_group_can_replace_entries(dacl: Option<&[AllowAce]>) -> bool {
         return true;
     };
     entries.iter().any(|entry| {
-        !entry.inherit_only && entry.mask & REPLACE_RIGHTS != 0 && is_broad_group(&entry.sid)
+        let on_the_directory = !entry.inherit_only && entry.mask & REPLACE_RIGHTS != 0;
+        let on_its_files = entry.object_inherit && entry.mask & FILE_CHANGE_RIGHTS != 0;
+        (on_the_directory || on_its_files) && is_broad_group(&entry.sid)
     })
 }
 
@@ -891,7 +915,7 @@ fn read_allow_entries(dir: &Path) -> Option<Option<Vec<AllowAce>>> {
     };
     use windows_sys::Win32::Security::{
         GetAce, ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, DACL_SECURITY_INFORMATION, INHERIT_ONLY_ACE,
-        PSECURITY_DESCRIPTOR,
+        OBJECT_INHERIT_ACE, PSECURITY_DESCRIPTOR,
     };
     use windows_sys::Win32::System::SystemServices::{
         ACCESS_ALLOWED_ACE_TYPE, ACCESS_ALLOWED_CALLBACK_ACE_TYPE,
@@ -970,6 +994,7 @@ fn read_allow_entries(dir: &Path) -> Option<Option<Vec<AllowAce>>> {
             sid,
             mask: allowed.Mask,
             inherit_only: u32::from(header.AceFlags) & INHERIT_ONLY_ACE != 0,
+            object_inherit: u32::from(header.AceFlags) & OBJECT_INHERIT_ACE != 0,
         });
     }
     Some(Some(entries))
@@ -1224,6 +1249,7 @@ mod tests {
             sid: sid.into(),
             mask,
             inherit_only: false,
+            object_inherit: false,
         }
     }
 
@@ -1302,18 +1328,62 @@ mod tests {
         )])));
     }
 
+    /// What the FILES created inside inherit counts too. The staged binary,
+    /// and after the rename the installed one, take their ACL from the
+    /// directory's file-inheritable entries. Modify for every account there
+    /// lets anyone rewrite the staged file between its read-back and the
+    /// rename, and the installed one at any time after. `C:\` carries exactly
+    /// this, as (OI)(CI)(IO) Modify for Authenticated Users.
+    #[test]
+    fn a_broad_group_that_may_change_the_files_created_inside_makes_it_unsafe() {
+        use super::{broad_group_can_replace_entries, AllowAce};
+
+        for (right, what) in [
+            (MODIFY, "Modify"),
+            (0x0000_0002, "write data"),
+            (0x0000_0004, "append data"),
+            (0x0001_0000, "delete"),
+            (0x0004_0000, "rewrite the ACL"),
+            (0x0008_0000, "take ownership"),
+            (0x1000_0000, "GENERIC_ALL"),
+            (0x4000_0000, "GENERIC_WRITE"),
+        ] {
+            let files_inherit = AllowAce {
+                sid: "S-1-5-11".into(),
+                mask: right,
+                inherit_only: true,
+                object_inherit: true,
+            };
+            assert!(
+                broad_group_can_replace_entries(Some(&[files_inherit])),
+                "{what}, inherited by the files"
+            );
+        }
+        // Reading and running what is inside is fine: `C:\Program Files`
+        // gives BUILTIN\Users exactly that, as (OI)(CI)(IO)(GR,GE).
+        let read_and_run = AllowAce {
+            sid: "S-1-5-32-545".into(),
+            mask: 0xA000_0000,
+            inherit_only: true,
+            object_inherit: true,
+        };
+        assert!(!broad_group_can_replace_entries(Some(&[read_and_run])));
+    }
+
     #[test]
     fn entries_for_children_only_or_for_a_named_group_do_not_count() {
         use super::{broad_group_can_replace_entries, AllowAce};
 
-        // `C:\` gives Authenticated Users Modify on what is created inside it
-        // later. That entry does not apply to `C:\` itself.
-        let inherit_only = AllowAce {
+        // Modify for Authenticated Users on the FOLDERS created inside later,
+        // (CI)(IO): it applies neither to this directory nor to the files the
+        // update creates in it.
+        let folders_only = AllowAce {
             sid: "S-1-5-11".into(),
             mask: MODIFY,
             inherit_only: true,
+            object_inherit: false,
         };
-        assert!(!broad_group_can_replace_entries(Some(&[inherit_only])));
+        assert!(!broad_group_can_replace_entries(Some(&[folders_only])));
         // A group someone chose to trust, like a group-writable directory on
         // Unix: Backup Operators.
         assert!(!broad_group_can_replace_entries(Some(&[ace(

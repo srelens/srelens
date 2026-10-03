@@ -1160,6 +1160,10 @@ fn a_windows_directory_anyone_can_write_to_is_refused_before_anything_is_downloa
         "*S-1-5-11:(WD)",
         // BUILTIN\Users: rewrite the ACL, and so grant itself the rest.
         "*S-1-5-32-545:(WDAC)",
+        // `C:\`'s own: Modify for Authenticated Users on whatever is created
+        // inside. The staged binary inherits it, so anyone could rewrite it
+        // between its read-back and the rename, and the installed one after.
+        "*S-1-5-11:(OI)(CI)(IO)(M)",
     ] {
         let dir = tempfile::tempdir().unwrap();
         let (plan, _) = staged(dir.path(), b"unused");
@@ -1188,9 +1192,10 @@ fn the_ordinary_windows_install_directories_are_not_refused() {
         // A folder planted at the binary's name breaks the update but
         // cannot be run.
         Some("*S-1-5-11:(AD)"),
-        // Also `C:\`'s: Modify for Authenticated Users, but only on what is
-        // created inside later (inherit-only), not on the directory itself.
-        Some("*S-1-5-11:(OI)(CI)(IO)(M)"),
+        // Modify for Authenticated Users on the FOLDERS created inside later,
+        // (CI)(IO): it reaches neither this directory nor the files the
+        // update creates in it.
+        Some("*S-1-5-11:(CI)(IO)(M)"),
         // A named group someone chose to trust, the counterpart of a
         // group-writable directory on Unix: Backup Operators.
         Some("*S-1-5-32-551:(M)"),
