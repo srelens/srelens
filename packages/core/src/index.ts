@@ -33,6 +33,7 @@ export * from "./lib/files";
 export * from "./lib/forward";
 export * from "./lib/helm";
 export * from "./lib/helmStatus";
+export * from "./lib/ingressUrl";
 export * from "./lib/k8sCapacity";
 export * from "./lib/k8sContainer";
 export * from "./lib/k8sHealth";

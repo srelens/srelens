@@ -1,7 +1,30 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen } from "@testing-library/react";
-import type { K8sObject } from "@srelens/core";
+import userEvent from "@testing-library/user-event";
+import { openExternal, type K8sObject } from "@srelens/core";
 import { IngressDetailsBody } from "./IngressBody";
+
+vi.mock("@srelens/core", async (original) => ({
+  ...(await original<typeof import("@srelens/core")>()),
+  openExternal: vi.fn(),
+}));
+
+/** jsdom ships no clipboard at all, so there is nothing to spy on. */
+const writeText = vi.fn();
+
+beforeEach(() => {
+  vi.mocked(openExternal).mockReset().mockResolvedValue(undefined);
+  writeText.mockReset().mockResolvedValue(undefined);
+  Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+});
+
+/** One rule, one path: what most of the address tests need. */
+function rule(host: string | undefined, path: string) {
+  return {
+    ...(host === undefined ? {} : { host }),
+    http: { paths: [{ path, pathType: "Prefix", backend: { service: { name: "web", port: { number: 80 } } } }] },
+  };
+}
 
 function ingress(
   spec: Record<string, unknown>,
@@ -150,6 +173,77 @@ describe("IngressDetailsBody", () => {
       expect(screen.getByText("a:80")).toBeDefined();
       expect(screen.getByText("b.example.com")).toBeDefined();
       expect(screen.getByText("b:8080")).toBeDefined();
+    });
+  });
+
+  describe("rule addresses (#774)", () => {
+    it("opens a rule's address in the system browser, over https when the Ingress terminates TLS for it", async () => {
+      render(
+        <IngressDetailsBody
+          object={ingress({
+            tls: [{ hosts: ["app.example.com"], secretName: "web-tls" }],
+            rules: [rule("app.example.com", "/api")],
+          })}
+        />,
+      );
+
+      await userEvent.click(screen.getByRole("button", { name: "https://app.example.com/api" }));
+
+      expect(openExternal).toHaveBeenCalledWith("https://app.example.com/api");
+    });
+
+    it("copies the same address the link opens", async () => {
+      render(<IngressDetailsBody object={ingress({ rules: [rule("app.example.com", "/api")] })} />);
+
+      await userEvent.click(screen.getByRole("button", { name: "Copy http://app.example.com/api" }));
+
+      expect(writeText).toHaveBeenCalledWith("http://app.example.com/api");
+    });
+
+    it("links a path ingress-nginx reads as a regex to the host's root", () => {
+      render(
+        <IngressDetailsBody
+          object={ingress(
+            { rules: [rule("app.example.com", "/api(/|$)(.*)")] },
+            {
+              name: "web",
+              namespace: "default",
+              annotations: { "nginx.ingress.kubernetes.io/rewrite-target": "/$2" },
+            },
+          )}
+        />,
+      );
+
+      expect(screen.getByRole("button", { name: "http://app.example.com/" })).toBeDefined();
+      // The rule's own path still reads as written, in its own column.
+      expect(screen.getByText("/api(/|$)(.*)")).toBeDefined();
+    });
+
+    it("shows a wildcard host as text, and copies it as it is", async () => {
+      render(<IngressDetailsBody object={ingress({ rules: [rule("*.corp.dev", "/")] })} />);
+
+      expect(screen.queryByRole("button", { name: /^https?:\/\// })).toBeNull();
+      await userEvent.click(screen.getByRole("button", { name: "Copy *.corp.dev" }));
+
+      expect(writeText).toHaveBeenCalledWith("*.corp.dev");
+      expect(openExternal).not.toHaveBeenCalled();
+    });
+
+    it("offers nothing to open or copy for a rule with no host", () => {
+      render(<IngressDetailsBody object={ingress({ rules: [rule(undefined, "/health")] })} />);
+
+      expect(screen.queryByRole("button", { name: /^https?:\/\// })).toBeNull();
+      expect(screen.queryByRole("button", { name: /^Copy / })).toBeNull();
+      expect(screen.getByText("—")).toBeDefined();
+    });
+
+    it("says so when the browser could not be opened", async () => {
+      vi.mocked(openExternal).mockRejectedValue(new Error("no handler for http"));
+      render(<IngressDetailsBody object={ingress({ rules: [rule("app.example.com", "/api")] })} />);
+
+      await userEvent.click(screen.getByRole("button", { name: "http://app.example.com/api" }));
+
+      expect(await screen.findByText("Could not open http://app.example.com/api")).toBeDefined();
     });
   });
 });
