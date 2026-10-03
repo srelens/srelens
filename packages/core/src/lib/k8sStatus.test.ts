@@ -382,31 +382,17 @@ describe("resourceStatusLine — kinds with no status line", () => {
 });
 
 /**
- * One pod row's vitals — the four fields `PodSummary` carries, defaulted to a
- * plain healthy pod so each test states only the facts it is about.
- *
- * The defaults are the healthy ones on purpose: a test that means "not ready"
- * has to SAY "0/1", so no assertion below passes because a fixture happened to
- * agree with it.
+ * One pod row's vitals — the fields `PodSummary` carries that `podStatus`
+ * reads — with no waiting reason unless a test says so.
  */
-const vitals = (over: Partial<PodVitals> & { phase: string }): PodVitals => ({
-  waitingReason: "",
-  ready: "1/1",
-  restarts: 0,
-  ...over,
-});
+const vitals = (over: PodVitals): PodVitals => ({ waitingReason: "", ...over });
 
 describe("podStatus — the one reading a list row and a fetched object share", () => {
   it("gives a crash-looping pod the same verdict the header derives from the object", () => {
     // The whole point of the shared function: `PodSummary` carries the phase,
-    // the waiting reason and the ready count, `K8sObject` carries the
+    // the waiting reason and kubectl's word, `K8sObject` carries the
     // container statuses those were summarised from, and both arrive here.
-    const backingOff = vitals({
-      phase: "Running",
-      waitingReason: "CrashLoopBackOff",
-      ready: "0/1",
-      restarts: 1123,
-    });
+    const backingOff = vitals({ phase: "Running", waitingReason: "CrashLoopBackOff" });
     expect(podStatus(backingOff)).toEqual({
       status: "CrashLoopBackOff",
       health: "danger",
@@ -428,12 +414,12 @@ describe("podStatus — the one reading a list row and a fetched object share", 
   });
 
   it("warns rather than fails for a pod still pulling or creating", () => {
-    expect(podStatus(vitals({ phase: "Pending", waitingReason: "ContainerCreating", ready: "0/1" }))).toEqual({
+    expect(podStatus(vitals({ phase: "Pending", waitingReason: "ContainerCreating" }))).toEqual({
       status: "ContainerCreating",
       health: "warning",
       flagged: true,
     });
-    expect(podStatus(vitals({ phase: "Pending", waitingReason: "ImagePullBackOff", ready: "0/1" }))).toEqual({
+    expect(podStatus(vitals({ phase: "Pending", waitingReason: "ImagePullBackOff" }))).toEqual({
       status: "ImagePullBackOff",
       health: "danger",
       flagged: true,
@@ -445,12 +431,12 @@ describe("podStatus — the one reading a list row and a fetched object share", 
   });
 
   it("keeps a finished pod finished, whatever a stale waiting entry says", () => {
-    expect(podStatus(vitals({ phase: "Succeeded", waitingReason: "CrashLoopBackOff", ready: "0/1" }))).toEqual({
+    expect(podStatus(vitals({ phase: "Succeeded", waitingReason: "CrashLoopBackOff" }))).toEqual({
       status: "Succeeded",
       health: "success",
       flagged: false,
     });
-    expect(podStatus(vitals({ phase: "Failed", waitingReason: "CrashLoopBackOff", ready: "0/1" }))).toEqual({
+    expect(podStatus(vitals({ phase: "Failed", waitingReason: "CrashLoopBackOff" }))).toEqual({
       status: "Failed",
       health: "danger",
       flagged: true,
@@ -464,207 +450,121 @@ describe("podStatus — the one reading a list row and a fetched object share", 
   it("flags a phase word it does not recognise without inventing a colour for it", () => {
     // `podFlagged`'s rule verbatim: anything the phase table does not call
     // healthy earns the dot. The tone stays neutral because nothing has told
-    // us it is red.
-    expect(podStatus(vitals({ phase: "Evicted" }))).toEqual({ status: "Evicted", health: "neutral", flagged: true });
+    // us it is red. (Not `Evicted`: that is a word kubectl uses, and it is red.)
+    expect(podStatus(vitals({ phase: "Mystery" }))).toEqual({ status: "Mystery", health: "neutral", flagged: true });
   });
 });
 
 /**
- * The flicker, and the property that ends it.
- *
- * Written against a real pod: `legacy-adapter-857bf965b8-4wclg` in `payments`
- * on `kind-srelens-demo`, restart count 1123, back-off 5m0s. A `kubectl get -w`
- * on it publishes exactly three shapes, and they are worth reading rather than
- * reasoning about, because the middle one is not the shape the docs suggest:
- *
- *     phase=Running ready=false restarts=1125 state=waiting(CrashLoopBackOff)
- *     phase=Running ready=false restarts=1126 state=terminated(Error)
- *     phase=Running ready=false restarts=1126 state=waiting(CrashLoopBackOff)
- *
- * The middle event is the flicker window. The container is NOT waiting there,
- * so `waitingReason` is `""` and the phase is still `Running` — and the old
- * rule, with nothing else to read, called the pod well. (Polling for it does
- * not work: at 0.25s intervals, 1400 samples never caught it. The window is
- * one status publish wide, which is why it took a watch.)
- *
- * Note the two columns that do NOT move across all three events: `ready` is
- * `false` in every one, and `restartCount` never goes down. That pair is the
- * signal, and the fixtures below are built out of it. The container state is
- * deliberately NOT: a pod caught mid-restart may be `terminated` (as here) or
- * `running` (as a slower container would be), and a rule keyed on which one
- * would have swapped one flicker for another.
+ * The word `kubectl get pods` prints — `PodSummary.status` on a row — read
+ * the way the spec's table reads it, first rule that matches.
  */
-describe("podStatus — a persistently unready pod does not flicker out of the list", () => {
-  /** The same pod, at the two moments a poll can catch it. */
-  const BACKING_OFF = vitals({
-    phase: "Running",
-    waitingReason: "CrashLoopBackOff",
-    ready: "0/1",
-    restarts: 1123,
-  });
-  const BETWEEN_RESTARTS = vitals({ phase: "Running", waitingReason: "", ready: "0/1", restarts: 1123 });
+describe("podStatus — kubectl's words, toned", () => {
+  const RED = { health: "danger", flagged: true } as const;
+  const AMBER = { health: "warning", flagged: true } as const;
+  const GREEN = { health: "success", flagged: false } as const;
+  const read = (phase: string, status: string, waitingReason = "") => podStatus({ phase, waitingReason, status });
 
-  it("condemns the pod at BOTH moments, on the same tone and the same dot", () => {
-    const backingOff = podStatus(BACKING_OFF);
-    const between = podStatus(BETWEEN_RESTARTS);
-    // Membership of every unhealthy list, and the tone that list counts by —
-    // `Overview`'s `worst()` reads `health`, so a tone that moved would
-    // flicker the tile's colour even with the row still present.
-    expect({ flagged: between.flagged, health: between.health }).toEqual({ flagged: true, health: "danger" });
-    expect({ flagged: backingOff.flagged, health: backingOff.health }).toEqual({ flagged: true, health: "danger" });
+  it("shows kubectl's word over the waiting reason and the phase", () => {
+    expect(read("Running", "OOMKilled")).toEqual({ status: "OOMKilled", ...RED });
   });
 
-  it("says NotReady in the moment there is no waiting reason to name", () => {
-    // The word is the one fact that legitimately differs: between restarts the
-    // kubelet is reporting no reason, so there is none to show. `NotReady` is
-    // the ready ratio read aloud, and it goes through `phaseKind` — which
-    // already tones that exact word danger for a Node — rather than pairing a
-    // word with a colour here.
-    expect(podStatus(BETWEEN_RESTARTS).status).toBe("NotReady");
-    expect(podStatus(BACKING_OFF).status).toBe("CrashLoopBackOff");
-  });
-
-  it("leaves a pod that is legitimately starting alone", () => {
-    // A container up for two seconds and not yet past its readiness probe is
-    // normal, and is NOT the same thing as one that is failing. The restart
-    // count is what separates them, and it is the only in-snapshot evidence
-    // there is: a row carries no clock, so "not ready yet" and "not ready for
-    // an hour" are the same row. A pod that has never restarted has not
-    // failed at anything.
-    expect(podStatus(vitals({ phase: "Running", ready: "0/1", restarts: 0 }))).toEqual({
-      status: "Running",
-      health: "success",
-      flagged: false,
-    });
-    expect(podStatus(vitals({ phase: "Running", ready: "1/2", restarts: 0 }))).toEqual({
-      status: "Running",
-      health: "success",
-      flagged: false,
-    });
-  });
-
-  it("leaves a pod that has restarted but recovered alone", () => {
-    // Restarts alone condemn nothing: the pod is ready NOW, which is the
-    // question. Only the pair — restarted, and still not ready — is a crash
-    // loop caught mid-breath.
-    expect(podStatus(vitals({ phase: "Running", ready: "1/1", restarts: 1123 }))).toEqual({
-      status: "Running",
-      health: "success",
-      flagged: false,
-    });
-    expect(podStatus(vitals({ phase: "Running", ready: "2/2", restarts: 4 }))).toEqual({
-      status: "Running",
-      health: "success",
-      flagged: false,
-    });
-  });
-
-  it("does NOT resurrect a Succeeded pod, however unready and however restarted", () => {
-    // The old bug this file was refactored around: a `Succeeded` pod with a
-    // green pill and a red dot. Its containers are TERMINATED, so its ready
-    // ratio is `0/1` forever — reading that ratio without stopping at the
-    // terminal phases would flag every finished pod in the cluster, which on
-    // the demo cluster is 53 of them.
-    expect(podStatus(vitals({ phase: "Succeeded", ready: "0/1", restarts: 0 }))).toEqual({
-      status: "Succeeded",
-      health: "success",
-      flagged: false,
-    });
-    expect(podStatus(vitals({ phase: "Succeeded", ready: "0/3", restarts: 7 }))).toEqual({
-      status: "Succeeded",
-      health: "success",
-      flagged: false,
-    });
-  });
-
-  it("does not re-word a Failed pod, which already has a word of its own", () => {
-    expect(podStatus(vitals({ phase: "Failed", ready: "0/1", restarts: 9 }))).toEqual({
-      status: "Failed",
-      health: "danger",
-      flagged: true,
-    });
-  });
-
-  it("keeps a Pending pod's own word rather than overriding it with the ratio", () => {
-    // Pending is already amber and already flagged; the ratio adds nothing
-    // and `NotReady` would lose the reader the fact that it is unscheduled.
-    expect(podStatus(vitals({ phase: "Pending", ready: "0/1", restarts: 2 }))).toEqual({
-      status: "Pending",
-      health: "warning",
-      flagged: true,
-    });
-  });
-
-  it("keeps an unrecognised phase word, which the ratio has no standing to overrule", () => {
-    expect(podStatus(vitals({ phase: "Evicted", ready: "0/1", restarts: 3 }))).toEqual({
-      status: "Evicted",
-      health: "neutral",
-      flagged: true,
-    });
-  });
-
-  it("reads a ratio it cannot parse as no reading, never as unready", () => {
-    // "0/0" is what the backend sends for a pod the kubelet has reported no
-    // containers for, and an empty or malformed cell is what a fixture sends.
-    // None of the three is evidence a pod is unready, and inventing a dot
-    // from an absence is how a healthy pod gets condemned.
-    for (const ready of ["0/0", "", "—", "1", "x/y"]) {
-      expect({ ready, verdict: podStatus(vitals({ phase: "Running", ready, restarts: 5 })) }).toEqual({
-        ready,
-        verdict: { status: "Running", health: "success", flagged: false },
-      });
+  it("keeps a finished pod's colours, whatever word kubectl gives it", () => {
+    expect(read("Succeeded", "Completed")).toEqual({ status: "Completed", ...GREEN });
+    for (const word of ["Evicted", "Error", "OOMKilled"]) {
+      expect(read("Failed", word)).toEqual({ status: word, ...RED });
     }
   });
 
-  it("derives the same verdict off a fetched object as off the row", () => {
-    // The two readings that must never disagree — the pods list row and the
-    // detail header, on the same pod at the same moment.
-    const object: K8sObject = {
-      kind: "Pod",
-      status: {
-        phase: "Running",
-        containerStatuses: [
-          {
-            name: "adapter",
-            ready: false,
-            restartCount: 1123,
-            // The live shape: terminated with exit code 1, no waiting entry.
-            state: { terminated: { exitCode: 1, reason: "Error", finishedAt: "2026-08-24T13:28:18Z" } },
-          },
-        ],
-      },
-    };
-    const line = resourceStatusLine("Pod", object)!;
-    expect(line).toEqual({ status: "NotReady", health: "danger", flagged: true, readyText: "0/1 ready" });
-    const { readyText, ...verdict } = line;
-    expect(verdict).toEqual(podStatus(BETWEEN_RESTARTS));
+  it("tones a waiting container's word by the back-off rule", () => {
+    expect(read("Running", "CrashLoopBackOff", "CrashLoopBackOff")).toEqual({ status: "CrashLoopBackOff", ...RED });
+    for (const word of ["CreateContainerConfigError", "ErrImagePull"]) {
+      expect(read("Pending", word, word)).toEqual({ status: word, ...AMBER });
+    }
   });
 
-  it("sums restarts across containers when reading an object, as the row does", () => {
-    // `summarise_pod` sums `restart_count` over every container status; a
-    // header that read only the first would disagree with its own row on a
-    // sidecar pod.
-    const object: K8sObject = {
-      kind: "Pod",
-      status: {
-        phase: "Running",
-        containerStatuses: [
-          { name: "app", ready: true, restartCount: 0, state: { running: {} } },
-          { name: "envoy", ready: false, restartCount: 12, state: { running: {} } },
-        ],
-      },
-    };
-    expect(resourceStatusLine("Pod", object)).toEqual({
-      status: "NotReady",
-      health: "danger",
-      flagged: true,
-      readyText: "1/2 ready",
-    });
+  it("reads an init container's word by what follows the prefix", () => {
+    expect(read("Pending", "Init:0/2")).toEqual({ status: "Init:0/2", ...AMBER });
+    for (const word of ["Init:Error", "Init:ExitCode:2", "Init:OOMKilled", "Init:CrashLoopBackOff"]) {
+      expect(read("Pending", word)).toEqual({ status: word, ...RED });
+    }
+    expect(read("Pending", "Init:ErrImagePull")).toEqual({ status: "Init:ErrImagePull", ...AMBER });
+  });
+
+  it("calls a terminated container's failure red on a pod still Running", () => {
+    for (const word of [
+      "Error",
+      "OOMKilled",
+      "ExitCode:1",
+      "Signal:9",
+      "ContainerCannotRun",
+      "DeadlineExceeded",
+      "ContainerStatusUnknown",
+      "StartError",
+    ]) {
+      expect(read("Running", word)).toEqual({ status: word, ...RED });
+    }
+  });
+
+  it("calls a pod on its way somewhere amber", () => {
+    for (const word of ["Pending", "PodInitializing", "SchedulingGated", "Terminating", "ContainerCreating"]) {
+      expect(read("Pending", word)).toEqual({ status: word, ...AMBER });
+    }
+    // A container that exited 0 under `restartPolicy: Always` is about to
+    // be restarted, not finished.
+    expect(read("Running", "Completed")).toEqual({ status: "Completed", ...AMBER });
+  });
+
+  it("keeps the phase table's red words red", () => {
+    for (const word of ["Unknown", "NotReady", "Failed"]) {
+      expect(read("Running", word)).toEqual({ status: word, ...RED });
+    }
+  });
+
+  it("calls kubectl's Running green", () => {
+    expect(read("Running", "Running")).toEqual({ status: "Running", ...GREEN });
+  });
+
+  it("flags a word it does not know without inventing a colour for it", () => {
+    expect(read("Running", "Mystery")).toEqual({ status: "Mystery", health: "neutral", flagged: true });
+  });
+});
+
+/**
+ * A crash-looping pod, at each moment a watch can catch it.
+ *
+ * Written against a real pod: `legacy-adapter-857bf965b8-4wclg` in `payments`
+ * on `kind-srelens-demo`, restart count 1123, back-off 5m0s. A
+ * `kubectl get -w` on it publishes these shapes, and kubectl prints a word for
+ * each one:
+ *
+ *     state=waiting(CrashLoopBackOff)           → CrashLoopBackOff
+ *     state=terminated(Error), exit code 1       → Error
+ *     state=running, not ready (between restarts) → Running
+ *
+ * The row carries kubectl's word as `status`, and `podStatus` tones it. The
+ * first two are red. The third is kubectl's `Running`, green and unflagged, by
+ * decision: the desktop matches kubectl exactly. That decision gave up an
+ * earlier `NotReady` rule, derived from the ready ratio and the restart count,
+ * which held the pod in the Overview's unhealthy list through that moment.
+ */
+describe("podStatus — a crash-looper reads kubectl's word at every moment", () => {
+  const BACKING_OFF = vitals({ phase: "Running", waitingReason: "CrashLoopBackOff", status: "CrashLoopBackOff" });
+  const EXITED = vitals({ phase: "Running", status: "Error" });
+  const UP_BETWEEN_RESTARTS = vitals({ phase: "Running", status: "Running" });
+
+  it("is red while its container is down, waiting or exited", () => {
+    expect(podStatus(BACKING_OFF)).toEqual({ status: "CrashLoopBackOff", health: "danger", flagged: true });
+    expect(podStatus(EXITED)).toEqual({ status: "Error", health: "danger", flagged: true });
+  });
+
+  it("reads Running, green, while its container is up between restarts, as kubectl does", () => {
+    expect(podStatus(UP_BETWEEN_RESTARTS)).toEqual({ status: "Running", health: "success", flagged: false });
   });
 
   it("leaves a pod the kubelet has not reported containers for alone", () => {
-    // No container statuses at all: `0/0`, no ratio to show, and nothing that
-    // says the pod is unready — only that nobody has looked yet.
+    // No container statuses at all: no ratio to show, and nothing that says
+    // the pod is unready — only that nobody has looked yet.
     const object: K8sObject = { kind: "Pod", status: { phase: "Running" } };
     expect(resourceStatusLine("Pod", object)).toEqual({
       status: "Running",
@@ -700,11 +600,12 @@ describe("the tone and the dot are paired structurally", () => {
       // in a back-off, and one merely on its way up.
       ["Pod", pod({ phase: "Running", containerStatuses: [container("a", { waiting: { reason: "CrashLoopBackOff" } }, false)] })],
       ["Pod", pod({ phase: "Pending", containerStatuses: [container("a", { waiting: { reason: "ContainerCreating" } }, false)] })],
-      // The unready branch, which neither the phase nor a waiting reason
-      // reaches: a crash-looper caught between restarts, up and not ready.
+      // A crash-looper caught between restarts, up and not ready: kubectl's
+      // `Running`, which is green.
       ["Pod", pod({ phase: "Running", containerStatuses: [container("a", { running: {} }, false, 1123)] })],
-      // A word the phase table does not know — the only producer of UNREADABLE.
-      ["Pod", pod({ phase: "Evicted" })],
+      // A word nothing knows, neither kubectl's table nor the phase table —
+      // the only producer of UNREADABLE.
+      ["Pod", pod({ phase: "Mystery" })],
       ["Deployment", deployment({ replicas: 3 }, { readyReplicas: 3 })],
       ["Deployment", deployment({ replicas: 3 }, { readyReplicas: 1 })],
       ["Deployment", deployment({ replicas: 0 }, {})],
