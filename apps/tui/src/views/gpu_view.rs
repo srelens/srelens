@@ -500,9 +500,11 @@ fn render_node_gpu_summary(f: &mut Frame, area: Rect, node: &GpuNodeInfo) {
     } else {
         model
     };
-    let driver = node.gpu_driver_version.as_deref().unwrap_or("-");
-    let cuda = node.gpu_cuda_version.as_deref().unwrap_or("-");
-    let itype = &node.instance_type;
+    let raw_driver = node.gpu_driver_version.as_deref().unwrap_or("-");
+    let driver = crate::views::sanitize_span_text(raw_driver);
+    let raw_cuda = node.gpu_cuda_version.as_deref().unwrap_or("-");
+    let cuda = crate::views::sanitize_span_text(raw_cuda);
+    let itype = crate::views::sanitize_span_text(&node.instance_type);
 
     let info_line = Line::from(vec![
         Span::styled("Model: ", Theme::header_label()),

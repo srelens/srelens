@@ -169,8 +169,8 @@ pub fn parse_gpu_cluster_info(nodes: &[Node], pods: &[Pod]) -> GpuClusterInfo {
             if h.virtual_gpu_count > 0 {
                 is_virtual_gpu = true;
                 physical_gpu_count = h.physical_gpu_count;
-                if h.physical_vram_total_mib > 0 {
-                    physical_vram_total_mib = Some(h.physical_vram_total_mib);
+                if let Some(phys_vram) = h.physical_vram_total_mib {
+                    physical_vram_total_mib = Some(phys_vram);
                 }
                 let cap = vgpu_capacity.max(h.virtual_gpu_count);
                 let alloc = if vgpu_allocatable > 0 {
@@ -264,38 +264,7 @@ pub fn parse_gpu_cluster_info(nodes: &[Node], pods: &[Pod]) -> GpuClusterInfo {
 
         if vram_per_gpu_mib.is_none() {
             if let Some(model) = &gpu_model {
-                let m = model.to_lowercase();
-                if m.contains("t4") {
-                    vram_per_gpu_mib = Some(15360); // 15 GiB
-                } else if m.contains("a100") {
-                    if m.contains("40gb") || m.contains("40g") {
-                        vram_per_gpu_mib = Some(40960); // 40 GiB
-                    } else {
-                        vram_per_gpu_mib = Some(81920); // 80 GiB
-                    }
-                } else if m.contains("h100") {
-                    vram_per_gpu_mib = Some(81920); // 80 GiB
-                } else if m.contains("h200") {
-                    vram_per_gpu_mib = Some(144384); // 141 GiB
-                } else if m.contains("b200") {
-                    vram_per_gpu_mib = Some(196608); // 192 GiB
-                } else if m.contains("l40") {
-                    vram_per_gpu_mib = Some(49152); // 48 GiB
-                } else if m.contains("l4") {
-                    vram_per_gpu_mib = Some(24576); // 24 GiB
-                } else if m.contains("a10") || m.contains("a30") {
-                    vram_per_gpu_mib = Some(24576); // 24 GiB
-                } else if m.contains("v100") {
-                    if m.contains("32gb") || m.contains("32g") {
-                        vram_per_gpu_mib = Some(32768);
-                    } else {
-                        vram_per_gpu_mib = Some(16384); // 16 GiB
-                    }
-                } else if m.contains("rtx 4090") || m.contains("rtx 3090") {
-                    vram_per_gpu_mib = Some(24576); // 24 GiB
-                } else if m.contains("a40") || m.contains("a6000") {
-                    vram_per_gpu_mib = Some(49152); // 48 GiB
-                }
+                vram_per_gpu_mib = hardware_vram_for_model(model);
             }
         }
 
@@ -477,8 +446,21 @@ pub fn parse_gpu_cluster_info(nodes: &[Node], pods: &[Pod]) -> GpuClusterInfo {
         if !is_virtual_gpu {
             physical_gpu_count = gpu_capacity;
             physical_vram_total_mib = total_node_vram_mib;
-        } else if physical_gpu_count > 0 && physical_vram_total_mib.is_none() {
-            physical_vram_total_mib = vram_per_gpu_mib.map(|per_gpu| per_gpu * physical_gpu_count);
+        } else if physical_gpu_count > 0 {
+            // Unscaled hardware source priority for virtual GPUs:
+            // 1. Authoritative hardware memory label from NVIDIA GFD (nvidia.com/gpu.memory)
+            // 2. Hardware specs from model name in annotation or node labels
+            if let Some(lbl_vram) = labels.and_then(|l| {
+                l.get("nvidia.com/gpu.memory")
+                    .and_then(|m| m.parse::<i64>().ok())
+            }) {
+                physical_vram_total_mib = Some(lbl_vram * physical_gpu_count);
+            } else if physical_vram_total_mib.is_none() {
+                physical_vram_total_mib = gpu_model
+                    .as_deref()
+                    .and_then(hardware_vram_for_model)
+                    .map(|per_gpu| per_gpu * physical_gpu_count);
+            }
         }
 
         cluster_total_gpus += gpu_capacity;
@@ -586,7 +568,7 @@ pub struct HamiDeviceRegister {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HamiRegisterInfo {
     pub physical_gpu_count: i64,
-    pub physical_vram_total_mib: i64,
+    pub physical_vram_total_mib: Option<i64>,
     pub virtual_gpu_count: i64,
     pub virtual_vram_total_mib: i64,
     pub model: Option<String>,
@@ -604,7 +586,6 @@ pub fn parse_hami_register_annotation(ann: &str) -> Option<HamiRegisterInfo> {
         .collect();
 
     let physical_gpu_count = healthy_devices.len() as i64;
-    let physical_vram_total_mib: i64 = healthy_devices.iter().filter_map(|d| d.devmem).sum();
     let virtual_gpu_count: i64 = healthy_devices.iter().filter_map(|d| d.count).sum();
     let virtual_vram_total_mib: i64 = healthy_devices
         .iter()
@@ -629,6 +610,16 @@ pub fn parse_hami_register_annotation(ann: &str) -> Option<HamiRegisterInfo> {
                 })
             })
         });
+
+    // Registered `devmem` can be scaled by HAMi (via `deviceMemoryScaling`), so we do not
+    // treat registered `devmem` as unscaled hardware physical VRAM. Obtain hardware memory
+    // strictly from an unscaled hardware source (well-known GPU model specs), or leave it
+    // unknown (`None`) when only scaled registration memory is available.
+    let physical_vram_total_mib = model
+        .as_deref()
+        .and_then(hardware_vram_for_model)
+        .map(|per_gpu| per_gpu * physical_gpu_count);
+
     Some(HamiRegisterInfo {
         physical_gpu_count,
         physical_vram_total_mib,
@@ -636,6 +627,44 @@ pub fn parse_hami_register_annotation(ann: &str) -> Option<HamiRegisterInfo> {
         virtual_vram_total_mib,
         model,
     })
+}
+
+/// Look up standard unscaled hardware VRAM in MiB for well-known GPU models.
+pub fn hardware_vram_for_model(model: &str) -> Option<i64> {
+    let m = model.to_lowercase();
+    if m.contains("t4") {
+        Some(15360) // 15 GiB
+    } else if m.contains("a100") {
+        if m.contains("40gb") || m.contains("40g") {
+            Some(40960) // 40 GiB
+        } else {
+            Some(81920) // 80 GiB
+        }
+    } else if m.contains("h100") {
+        Some(81920) // 80 GiB
+    } else if m.contains("h200") {
+        Some(144384) // 141 GiB
+    } else if m.contains("b200") {
+        Some(196608) // 192 GiB
+    } else if m.contains("l40") {
+        Some(49152) // 48 GiB
+    } else if m.contains("l4") {
+        Some(24576) // 24 GiB
+    } else if m.contains("a10") || m.contains("a30") {
+        Some(24576) // 24 GiB
+    } else if m.contains("v100") {
+        if m.contains("32gb") || m.contains("32g") {
+            Some(32768)
+        } else {
+            Some(16384) // 16 GiB
+        }
+    } else if m.contains("rtx 4090") || m.contains("rtx 3090") {
+        Some(24576) // 24 GiB
+    } else if m.contains("a40") || m.contains("a6000") {
+        Some(49152) // 48 GiB
+    } else {
+        None
+    }
 }
 
 /// Format MiB into a human-readable VRAM string (e.g. "80.0 GiB" or "512 MiB").
@@ -900,7 +929,7 @@ mod tests {
         let info = parse_hami_register_annotation(ann).expect("should parse");
         // Physical count sees healthy devices only, avoiding masked saturation:
         assert_eq!(info.physical_gpu_count, 1);
-        assert_eq!(info.physical_vram_total_mib, 15360);
+        assert_eq!(info.physical_vram_total_mib, Some(15360));
         // Virtual count and allocatable vVRAM only count the healthy device:
         assert_eq!(info.virtual_gpu_count, 10);
         assert_eq!(info.virtual_vram_total_mib, 15360);
@@ -917,11 +946,42 @@ mod tests {
         let info = parse_hami_register_annotation(ann).expect("should parse");
         // Both devices are healthy physical GPUs:
         assert_eq!(info.physical_gpu_count, 2);
-        assert_eq!(info.physical_vram_total_mib, 30720);
+        assert_eq!(info.physical_vram_total_mib, Some(30720));
         // Only GPU-1 has positive count and contributes to virtual vGPUs and virtual VRAM pool:
         assert_eq!(info.virtual_gpu_count, 10);
         assert_eq!(info.virtual_vram_total_mib, 15360);
         assert_eq!(info.model.as_deref(), Some("Tesla T4"));
+    }
+
+    #[test]
+    fn test_parse_hami_register_annotation_scaled_memory() {
+        // When HAMi memory scaling is configured (e.g. deviceMemoryScaling: 2.0 on a 15 GiB T4),
+        // devmem reports scaled memory (30720 MiB). Physical VRAM must come from unscaled hardware specs (15360 MiB).
+        let ann = r#"[
+            {"id":"GPU-1","count":10,"devmem":30720,"devcore":100,"type":"NVIDIA-Tesla T4","health":true}
+        ]"#;
+
+        let info = parse_hami_register_annotation(ann).expect("should parse");
+        assert_eq!(info.physical_gpu_count, 1);
+        assert_eq!(info.physical_vram_total_mib, Some(15360));
+        assert_eq!(info.virtual_gpu_count, 10);
+        assert_eq!(info.virtual_vram_total_mib, 30720);
+        assert_eq!(info.model.as_deref(), Some("Tesla T4"));
+    }
+
+    #[test]
+    fn test_parse_hami_register_annotation_unknown_model_leaves_physical_unknown() {
+        // When hardware model is unknown and no unscaled hardware source exists,
+        // physical VRAM must be left unknown (None) rather than reporting scaled registration memory.
+        let ann = r#"[
+            {"id":"GPU-1","count":8,"devmem":20480,"devcore":100,"type":"Custom-NPU","health":true}
+        ]"#;
+
+        let info = parse_hami_register_annotation(ann).expect("should parse");
+        assert_eq!(info.physical_gpu_count, 1);
+        assert_eq!(info.physical_vram_total_mib, None);
+        assert_eq!(info.virtual_gpu_count, 8);
+        assert_eq!(info.virtual_vram_total_mib, 20480);
     }
 
     #[test]

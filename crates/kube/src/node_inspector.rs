@@ -333,8 +333,8 @@ pub fn parse_node_details(node: &Node, pods: &[Pod]) -> NodeInspectorDetails {
         if h.virtual_gpu_count > 0 {
             is_virtual_gpu = true;
             physical_gpu_count = h.physical_gpu_count;
-            if h.physical_vram_total_mib > 0 {
-                physical_gpu_memory_total_mib = Some(h.physical_vram_total_mib);
+            if let Some(phys_vram) = h.physical_vram_total_mib {
+                physical_gpu_memory_total_mib = Some(phys_vram);
             }
             virtual_gpu_count = Some(h.virtual_gpu_count);
             let cap = vgpu_capacity.max(h.virtual_gpu_count);
@@ -420,38 +420,7 @@ pub fn parse_node_details(node: &Node, pods: &[Pod]) -> NodeInspectorDetails {
     // Fallback based on well-known GPU models
     if vram_per_gpu_mib.is_none() {
         if let Some(model) = &gpu_model {
-            let m_lower = model.to_lowercase();
-            if m_lower.contains("t4") {
-                vram_per_gpu_mib = Some(15360); // 15 GiB
-            } else if m_lower.contains("a100") {
-                if m_lower.contains("40gb") || m_lower.contains("40g") {
-                    vram_per_gpu_mib = Some(40960); // 40 GiB
-                } else {
-                    vram_per_gpu_mib = Some(81920); // 80 GiB
-                }
-            } else if m_lower.contains("h100") {
-                vram_per_gpu_mib = Some(81920); // 80 GiB
-            } else if m_lower.contains("h200") {
-                vram_per_gpu_mib = Some(144384); // 141 GiB
-            } else if m_lower.contains("b200") {
-                vram_per_gpu_mib = Some(196608); // 192 GiB
-            } else if m_lower.contains("l40") {
-                vram_per_gpu_mib = Some(49152); // 48 GiB
-            } else if m_lower.contains("l4") {
-                vram_per_gpu_mib = Some(24576); // 24 GiB
-            } else if m_lower.contains("a10") || m_lower.contains("a30") {
-                vram_per_gpu_mib = Some(24576); // 24 GiB
-            } else if m_lower.contains("v100") {
-                if m_lower.contains("32gb") || m_lower.contains("32g") {
-                    vram_per_gpu_mib = Some(32768);
-                } else {
-                    vram_per_gpu_mib = Some(16384); // 16 GiB
-                }
-            } else if m_lower.contains("rtx 4090") || m_lower.contains("rtx 3090") {
-                vram_per_gpu_mib = Some(24576); // 24 GiB
-            } else if m_lower.contains("a40") || m_lower.contains("a6000") {
-                vram_per_gpu_mib = Some(49152); // 48 GiB
-            }
+            vram_per_gpu_mib = crate::gpu_info::hardware_vram_for_model(model);
         }
     }
 
@@ -464,9 +433,21 @@ pub fn parse_node_details(node: &Node, pods: &[Pod]) -> NodeInspectorDetails {
     if !is_virtual_gpu {
         physical_gpu_count = gpu_capacity_count;
         physical_gpu_memory_total_mib = gpu_memory_total_mib;
-    } else if physical_gpu_count > 0 && physical_gpu_memory_total_mib.is_none() {
-        physical_gpu_memory_total_mib =
-            vram_per_gpu_mib.map(|per_gpu| per_gpu * physical_gpu_count);
+    } else if physical_gpu_count > 0 {
+        // Unscaled hardware source priority for virtual GPUs:
+        // 1. Authoritative hardware memory label from NVIDIA GFD (nvidia.com/gpu.memory)
+        // 2. Hardware specs from model name in annotation or node labels
+        if let Some(lbl_vram) = labels.and_then(|l| {
+            l.get("nvidia.com/gpu.memory")
+                .and_then(|m| m.parse::<i64>().ok())
+        }) {
+            physical_gpu_memory_total_mib = Some(lbl_vram * physical_gpu_count);
+        } else if physical_gpu_memory_total_mib.is_none() {
+            physical_gpu_memory_total_mib = gpu_model
+                .as_deref()
+                .and_then(crate::gpu_info::hardware_vram_for_model)
+                .map(|per_gpu| per_gpu * physical_gpu_count);
+        }
     }
 
     let has_gpu = gpu_capacity_count > 0
