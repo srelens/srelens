@@ -430,6 +430,37 @@ describe("ManifestEditor", () => {
     expect(isDisabled(screen.getByRole("button", { name: /apply/i }))).toBe(false);
   });
 
+  it("edit mode: does not gate a custom kind that reuses a built-in's NAME on the built-in's RBAC", async () => {
+    // A CRD may legally be called `Secret` (AGENTS.md). Resolved by name alone
+    // it was gated on patching CORE secrets — Apply disabled for someone who
+    // can edit the custom resource but not core Secrets. The apiVersion's
+    // group says which it is; a custom kind is ungated like any other, and
+    // the API server decides. Two renders, because the rule discriminates:
+    // the core Secret of the same name is still gated.
+    vi.mocked(useAccess).mockReturnValue({ allowed: () => false, reason: () => "", known: () => true, loading: false });
+    const custom = render(
+      <ManifestEditor
+        context="ctx"
+        yaml={"apiVersion: acme.io/v1\nkind: Secret\nmetadata:\n  name: api\n  namespace: prod\n"}
+        onYamlChange={() => {}}
+        confirm={{ kind: "Secret", name: "api" }}
+      />,
+    );
+    expect(isDisabled(custom.getByRole("button", { name: /apply/i }))).toBe(false);
+    expect(vi.mocked(useAccess)).toHaveBeenLastCalledWith("ctx", []);
+    custom.unmount();
+
+    render(
+      <ManifestEditor
+        context="ctx"
+        yaml={"apiVersion: v1\nkind: Secret\nmetadata:\n  name: api\n  namespace: prod\n"}
+        onYamlChange={() => {}}
+        confirm={{ kind: "Secret", name: "api" }}
+      />,
+    );
+    expect(isDisabled(screen.getByRole("button", { name: /apply/i }))).toBe(true);
+  });
+
   it("edit mode: disables Apply for a MULTI-document manifest whose first doc is a denied Deployment", async () => {
     // `parse()` throws on multi-document YAML — the identity must instead be
     // derived from the FIRST document via `parseAllDocuments`, or Apply is left

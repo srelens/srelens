@@ -153,10 +153,21 @@ export function ManifestEditor({
     if (!confirm) return null; // only gate edits; creates use a different verb (create)
     try {
       const docs = parseAllDocuments(yaml);
-      const first = docs[0]?.toJS() as { kind?: string; metadata?: { namespace?: string } } | null;
+      const first = docs[0]?.toJS() as
+        | { apiVersion?: string; kind?: string; metadata?: { namespace?: string } }
+        | null;
       if (!first?.kind) return null;
       const res = kindToResource(first.kind);
       if (!res) return null;
+      // A CRD may legally reuse a built-in kind's name (`Secret` in `acme.io`).
+      // Resolved by name alone it was gated on the BUILT-IN's RBAC, disabling
+      // Apply for someone who can edit the custom resource. The apiVersion's
+      // group says which it is; a custom kind is ungated like any other.
+      if (typeof first.apiVersion === "string") {
+        const slash = first.apiVersion.indexOf("/");
+        const group = slash === -1 ? "" : first.apiVersion.slice(0, slash);
+        if (group !== res.group) return null;
+      }
       const namespace = first.metadata?.namespace;
       // No declared namespace: the resource relies on the context's default, so
       // a preflight built with an empty namespace would be cluster-scoped and
