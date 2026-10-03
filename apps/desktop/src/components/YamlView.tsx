@@ -11,7 +11,7 @@ const CodeEditor = lazy(() => import("../ui/CodeEditor").then((m) => ({ default:
  * `k8s.getManifest`, then hands off to the shared {@link ManifestEditor} for
  * editing and server-side apply (behind a confirm).
  *
- * **Except a Secret, which is shown redacted and read-only** — the new
+ * **Except a (core) Secret, which is shown redacted and read-only** — the new
  * design's detail-pane YAML (`YamlPane` in ui-next's `detailData.tsx`), not
  * its Edit screen. `k8s.getManifest` is an ungated read: the host blanks a
  * Secret's values on it (#661), and this redacts again on arrival with
@@ -38,7 +38,10 @@ export function YamlView({
   const [original, setOriginal] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const [error, setError] = useState("");
-  const isSecret = kind === "Secret";
+  // The core Secret only. A CRD always has a group, so a custom kind that is
+  // merely named `Secret` arrives with `crd` set — the host does not redact
+  // it, and its drawer has no Overview tab to send anyone to.
+  const isSecret = kind === "Secret" && !crd;
 
   function load() {
     let active = true;

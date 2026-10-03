@@ -133,6 +133,29 @@ describe("YamlView", () => {
     expect(screen.queryByRole("button", { name: "Reset" })).toBeNull();
   });
 
+  it("leaves a custom kind that is merely NAMED Secret editable, and unredacted", async () => {
+    // A CRD always has a group, so `crd` set means this is not the core
+    // Secret — the host does not redact it either. Its drawer has no Overview
+    // tab to send anyone to, and no reason to lose its Apply.
+    getManifestMock.mockResolvedValue({
+      yaml: `apiVersion: acme.io/v1\nkind: Secret\nmetadata:\n  name: api\n  namespace: default\ndata:\n  password: ${SECRET_VALUE}\n`,
+    });
+    render(
+      <YamlView
+        context="kind-dev"
+        kind="Secret"
+        namespace="default"
+        name="api"
+        crd={{ group: "acme.io", version: "v1", plural: "secrets" }}
+      />,
+    );
+    const editor = (await screen.findByLabelText("Manifest YAML")) as HTMLTextAreaElement;
+    expect(editor.value).toContain(`password: ${SECRET_VALUE}`);
+    expect(editor.readOnly).toBe(false);
+    expect(screen.getByRole("button", { name: "Apply" })).toBeDefined();
+    expect(screen.queryByText(/Values redacted/)).toBeNull();
+  });
+
   it("fails closed: a Secret manifest that cannot be redacted is not shown at all", async () => {
     // An alias can carry a redacted value somewhere the redactor did not
     // blank, so `redactSecretManifest` refuses the document outright.
