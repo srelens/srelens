@@ -1,0 +1,36 @@
+# TEMPLATE. See srelens.srelens-tui.yaml.
+PackageIdentifier: srelens.srelens-tui
+PackageVersion: 0.0.0
+PackageLocale: en-US
+Publisher: srelens
+PublisherUrl: https://github.com/srelens
+PublisherSupportUrl: https://github.com/srelens/srelens/issues
+Author: srelens
+PackageName: srelens-tui
+PackageUrl: https://github.com/srelens/srelens
+License: MIT
+LicenseUrl: https://github.com/srelens/srelens/blob/main/LICENSE
+Copyright: Copyright (c) srelens contributors
+ShortDescription: Kubernetes control room in your terminal, built in Rust with k9s navigation
+Description: >-
+  srelens-tui is a terminal client for Kubernetes. It browses workloads,
+  networking, storage, RBAC and custom resources with live watch updates,
+  streams logs, opens exec sessions and port forwards, inspects Helm releases,
+  and shows a cluster overview with capacity, node readiness and GPU
+  allocation. It reads your existing kubeconfig and talks to the API server
+  directly, and it drives the kubectl and helm already on your PATH rather
+  than bundling its own.
+Moniker: srelens-tui
+Tags:
+  - kubernetes
+  - k8s
+  - cluster
+  - devops
+  - sre
+  - terminal
+  - tui
+  - kubectl
+  - helm
+ReleaseNotesUrl: https://github.com/srelens/srelens/releases/tag/srelens-v0.0.0
+ManifestType: defaultLocale
+ManifestVersion: 1.6.0
