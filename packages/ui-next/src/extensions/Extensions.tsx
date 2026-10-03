@@ -262,6 +262,10 @@ export function ExtensionManager() {
   /** Whether the administrator's policy makes every user keep this app (#578). */
   const required = (plugin: InstalledExtension) => state.policy?.requiredApps.includes(plugin.manifest.id) ?? false;
   const signedOnly = state.policy?.allowUnsignedApps === false;
+  /** Where executable apps run (#788). Only the web server reports a policy, and it never allows them; the desktop runs them per OS. */
+  const executableAppsHint = state.policy
+    ? "This server does not run executable apps."
+    : "Executable apps run sandboxed on Windows; on Linux only once the sandbox launcher and a delegated cgroup are set up by hand and the kernel has Landlock enabled; not yet on macOS.";
   return (
     <div className="extension-manager">
       <div className="extension-toolbar">
@@ -291,7 +295,7 @@ export function ExtensionManager() {
           Allow unsigned apps to modify clusters and run code
         </label>
         {signedOnly && <p className="extension-message">This server's policy allows only signed apps.</p>}
-        <p className="extension-message">Off by default. Read-only declarative apps need only their permission grants. Turning this off disables affected apps and keeps their settings. Turning it on does not re-enable them. Executable apps are not supported by this host.</p>
+        <p className="extension-message">Off by default. Read-only declarative apps need only their permission grants. Turning this off disables affected apps and keeps their settings. Turning it on does not re-enable them. {executableAppsHint}</p>
       </div>
       {error && (
         <p role="alert" className="extension-error">
