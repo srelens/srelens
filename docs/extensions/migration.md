@@ -7,12 +7,30 @@ Upgrading, downgrading, and moving an app between API versions.
 The rules are in [specification.md](specification.md#versioning). In practice:
 
 - A manifest keeps working on every host whose supported set still matches its range.
-  A `^0.1` app keeps installing on a host that also supports 0.2.
+  A `^0.3` app keeps installing on a host that also supports 0.4.
 - To use a field or contribution introduced in a newer API version, require that
-  version (for example `^0.2`) and publish a new app version. Hosts that do not support
+  version (for example `^0.5`) and publish a new app version. Hosts that do not support
   it report the version the app needs.
 - When a host retires the API version an installed app requires, the app is
   quarantined, not removed. Update it to a release that requires a supported version.
+
+## Upgrading from 0.15.0
+
+srelens 0.15.0 supports extension API 0.1 only. This release supports API 0.3 to 0.6 and
+does not support 0.1 or 0.2, so an installed app that requires API 0.1 is on a retired
+line. After the upgrade it is quarantined, not removed: it is disabled, and **Settings →
+Apps** shows the reason, that the app requires API `^0.1` and the host supports 0.3 to
+0.6. That includes Flux and Argo CD.
+
+Reinstall Flux and Argo CD from **Settings → Apps → Catalog**, which offers releases
+written for a supported API line. The reinstall goes through permission review again,
+lifts the quarantine and keeps the app's settings, apart from any the new release no
+longer declares, as an update does ([below](#updating-an-installed-app)). Until there is an
+Updates view ([#563](https://github.com/srelens/srelens/issues/563)), srelens does not
+look for new releases or offer them, so the reinstall is by hand.
+
+API 0.1 and 0.2 are retired without the window that applies from API 1.0
+([specification.md](specification.md#versioning)).
 
 ## Updating an installed app
 
@@ -54,7 +72,8 @@ disabled with that reason.
 
 ## Executable apps (#574)
 
-They are API 0.6. An app of kind `executable` requires `^0.6`; under `^0.5` it is told
+They are API 0.6, a preview ([where they run](manifest.md#where-executable-apps-run)). An
+app of kind `executable` requires `^0.6`; under `^0.5` it is told
 "the executable kind in `kind` requires API 0.6.0". A host from before 0.6 lists a
 `^0.6` release as incompatible rather than offering it. Nothing about a declarative
 app changes, on any line.
