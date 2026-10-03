@@ -84,7 +84,7 @@ pub async fn start_pod_exec<R: Runtime>(
     });
     match (kept, debug_pod) {
         (Ok(session), Some(debug_pod)) => {
-            shells.attach(session, debug_pod);
+            shells.attach(&app, &owned, window.label(), session, debug_pod);
             end.started(&app, session);
             Ok(session)
         }

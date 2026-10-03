@@ -27,6 +27,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use serde_json::Value;
 use srelens_kube::client_cache::ClientCache;
 use srelens_kube::debug::{delete_node_debug_pod, DebugPodDeleted};
+use srelens_kube::kube::Client;
 use srelens_streams::EventSink;
 use tauri::async_runtime::JoinHandle;
 use tauri::{AppHandle, Manager, Runtime};
@@ -60,18 +61,47 @@ impl DebugPod {
     }
 }
 
-/// The debug pod each node shell runs in, by exec session, and the deletes
-/// under way.
+/// The debug pod each node shell runs in, by exec session, the client each
+/// pod was made through, and the deletes under way.
 #[derive(Default)]
 pub struct NodeShells {
     shells: Mutex<HashMap<u64, DebugPod>>,
+    /// By pod uid: a pod is deleted through the client that made it, never
+    /// through a fresh lookup of its context's name, which a kubeconfig
+    /// change can point at another cluster.
+    clients: Mutex<HashMap<String, Client>>,
     /// Deletes started and not yet awaited: quitting waits for these too.
     deleting: Mutex<Vec<JoinHandle<()>>>,
 }
 
 impl NodeShells {
-    pub fn attach(&self, session: u64, pod: DebugPod) {
-        self.shells.lock().unwrap().insert(session, pod);
+    /// `pod` reached exec `session`, which `window` started: the session owns
+    /// it from here. Unless the window has ended since — a window's ending
+    /// closes its sessions, and a closed session sends no exit, so the pod
+    /// would sit on it until quitting — in which case it is deleted. The
+    /// ending holds this lock while it takes the window's sessions (see
+    /// [`NodeShells::lock`]), so the two cannot interleave.
+    pub fn attach<R: Runtime>(
+        &self,
+        app: &AppHandle<R>,
+        owned: &WindowStreams,
+        window: &str,
+        session: u64,
+        pod: DebugPod,
+    ) {
+        let mut shells = self.shells.lock().unwrap();
+        if owned.check(window, &Stream::Exec(session)) == Ok(true) {
+            shells.insert(session, pod);
+        } else {
+            drop(shells);
+            delete_soon(app, pod);
+        }
+    }
+
+    /// Hold the sessions' pods while a window's ending takes its sessions, so
+    /// [`NodeShells::attach`] cannot attach a pod in between.
+    pub(crate) fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<u64, DebugPod>> {
+        self.shells.lock().unwrap()
     }
 
     /// Take the pod `session` ran in, if it was a node shell.
@@ -94,7 +124,7 @@ impl NodeShells {
 /// made as that window's. If the window closed or reloaded since `epoch` —
 /// the page that asked is gone — the pod is deleted at once and the call
 /// refused.
-pub fn adopt<R: Runtime>(
+pub async fn adopt<R: Runtime>(
     app: &AppHandle<R>,
     owned: &WindowStreams,
     window: &str,
@@ -106,6 +136,15 @@ pub fn adopt<R: Runtime>(
         log::warn!("a node debug pod was created without its identity: {out}");
         return Ok(());
     };
+    // The client the capability just made it through, for its delete.
+    let cache = app
+        .try_state::<Arc<ClientCache>>()
+        .map(|cache| cache.inner().clone());
+    if let (Some(cache), Some(shells)) = (cache, app.try_state::<NodeShells>()) {
+        if let Ok(client) = cache.get(&pod.context).await {
+            shells.clients.lock().unwrap().insert(pod.uid.clone(), client);
+        }
+    }
     owned.keep(window, epoch, Stream::DebugPod(pod.clone()), || {
         delete_soon(app, pod)
     })
@@ -122,12 +161,17 @@ pub fn delete_soon<R: Runtime>(app: &AppHandle<R>, pod: DebugPod) {
 
 /// Delete `pod`, pinned to its uid, and say how that went.
 async fn delete<R: Runtime>(app: &AppHandle<R>, pod: DebugPod) {
-    let deleted = match app.try_state::<Arc<ClientCache>>() {
-        Some(cache) => match cache.get(&pod.context).await {
-            Ok(client) => delete_node_debug_pod(client, &pod.namespace, &pod.name, &pod.uid).await,
-            Err(e) => Err(e),
-        },
-        None => Err("srelens has no cluster connection to delete it with".to_owned()),
+    let pinned = app
+        .try_state::<NodeShells>()
+        .and_then(|shells| shells.clients.lock().unwrap().remove(&pod.uid));
+    let client = match (pinned, app.try_state::<Arc<ClientCache>>()) {
+        (Some(client), _) => Ok(client),
+        (None, Some(cache)) => cache.get(&pod.context).await,
+        (None, None) => Err("srelens has no cluster connection to delete it with".to_owned()),
+    };
+    let deleted = match client {
+        Ok(client) => delete_node_debug_pod(client, &pod.namespace, &pod.name, &pod.uid).await,
+        Err(e) => Err(e),
     };
     let DebugPod {
         context,
@@ -160,6 +204,12 @@ async fn delete<R: Runtime>(app: &AppHandle<R>, pod: DebugPod) {
     }
 }
 
+/// How long quitting waits for its deletes: one request's whole timeout, since
+/// they run side by side, and a moment more for them to start.
+pub fn quit_deadline(request_timeout: std::time::Duration) -> std::time::Duration {
+    request_timeout + std::time::Duration::from_secs(2)
+}
+
 /// Delete every debug pod still on a node, and finish the deletes already
 /// under way — the last window closing starts its own as srelens quits.
 pub async fn delete_all<R: Runtime>(app: &AppHandle<R>) {
@@ -173,10 +223,15 @@ pub async fn delete_all<R: Runtime>(app: &AppHandle<R>) {
     if let Some(owned) = app.try_state::<WindowStreams>() {
         pods.extend(owned.take_debug_pods());
     }
-    for pod in pods {
-        delete(app, pod).await;
-    }
-    for delete in under_way {
+    // Side by side: one slow cluster must not use up the others' time.
+    let started: Vec<JoinHandle<()>> = pods
+        .into_iter()
+        .map(|pod| {
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move { delete(&app, pod).await })
+        })
+        .collect();
+    for delete in started.into_iter().chain(under_way) {
         let _ = delete.await;
     }
 }
@@ -254,7 +309,7 @@ mod tests {
     use crate::bridge::{AppAudit, AppRegistry};
     use crate::extension_streams::AppExtensionStreams;
     use crate::window_streams::tests::mock_window;
-    use crate::window_streams::{on_window_event, window_streams_reset, WindowStreams};
+    use crate::window_streams::{on_window_event, window_streams_reset, Stream, WindowStreams};
 
     /// What the fake API server does with an exec.
     #[derive(Clone, Copy)]
@@ -638,6 +693,85 @@ mod tests {
         assert!(title.contains(&pod), "{title}");
         let detail = notice["detail"].as_str().unwrap();
         assert!(detail.contains("forbidden"), "{detail}");
+    }
+
+    /// The race a window closing opens while a shell starts (#799 review): the
+    /// shell's session is recorded as the window's, the window ends — which
+    /// closes the session, and a closed session sends no exit — and only then
+    /// does the pod reach the session. It must not stay attached to a session
+    /// no window holds, where nothing would ever delete it before quitting.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_pod_that_reaches_its_session_after_the_window_ended_is_deleted() {
+        let cluster = Cluster::start(200, Exec::Hangs);
+        let (app, main, _) = cluster.app();
+        let owned = app.state::<WindowStreams>();
+        let shells = app.state::<NodeShells>();
+        let pod = DebugPod {
+            context: "fake".into(),
+            namespace: "default".into(),
+            name: "srelens-node-debug-x9".into(),
+            uid: "uid-9".into(),
+        };
+        let epoch = owned.epoch("main");
+        owned.keep("main", epoch, Stream::Exec(42), || {}).unwrap();
+        on_window_event(&main, &WindowEvent::Destroyed);
+
+        shells.attach(app.handle(), &owned, "main", 42, pod);
+
+        assert!(shells.release(42).is_none(), "nothing attached to a session no window holds");
+        eventually("the pod was deleted", || cluster.deletes().len() == 1).await;
+        assert_eq!(cluster.deletes()[0].name, "srelens-node-debug-x9");
+    }
+
+    /// The kubeconfig changes while a node shell is open, and its context's
+    /// name now names another cluster (#799 review). The pod is deleted on
+    /// the cluster it was made on — by the client that made it, not by a
+    /// lookup of a name that may mean something else now, where a 404 would
+    /// read as "already gone".
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_pod_is_deleted_on_the_cluster_it_was_made_on_though_its_context_moved() {
+        let first = Cluster::start(200, Exec::Hangs);
+        let second = Cluster::start(200, Exec::Hangs);
+        let (app, main, _) = first.app();
+        let pod = debug_pod_in(&app, &main).await;
+        app.state::<Arc<ClientCache>>()
+            .set_paths(vec![second.kubeconfig.path().join("config")])
+            .await;
+
+        on_window_event(&main, &WindowEvent::Destroyed);
+        eventually("the pod was deleted where it was made", || {
+            first.deletes().len() == 1
+        })
+        .await;
+        assert_eq!(first.deletes()[0].name, pod);
+        assert!(second.deletes().is_empty(), "{:?}", second.deletes());
+    }
+
+    /// One delete may take a whole request timeout, so quitting waits longer
+    /// than that, however the timeout is set (#799 review).
+    #[test]
+    fn the_quit_deadline_outlasts_one_delete() {
+        for timeout in [Duration::from_secs(8), Duration::from_secs(120)] {
+            assert!(quit_deadline(timeout) > timeout, "{timeout:?}");
+        }
+    }
+
+    /// Quitting deletes its pods side by side, not one after another, so
+    /// several slow deletes take no longer than one (#799 review).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn quitting_deletes_its_pods_side_by_side() {
+        let cluster = Cluster::start_slow(200, Exec::Hangs, Duration::from_millis(700));
+        let (app, main, other) = cluster.app();
+        debug_pod_in(&app, &main).await;
+        debug_pod_in(&app, &other).await;
+        debug_pod_in(&app, &main).await;
+
+        let started = std::time::Instant::now();
+        delete_all(app.handle()).await;
+
+        assert_eq!(cluster.answered(), 3);
+        let took = started.elapsed();
+        assert!(took < Duration::from_millis(1600), "one after another: {took:?}");
     }
 
     /// Quitting as the last window closes: that window's delete is already

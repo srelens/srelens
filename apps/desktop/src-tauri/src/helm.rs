@@ -38,9 +38,15 @@ impl HelmOps {
     /// The window that started `session` is gone (`reason` says how): helm
     /// runs on, and how it ends is reported. `false` when it had already
     /// ended, or is not known.
-    pub fn let_go(&self, session: u64, window: &str, reason: &'static str) -> bool {
+    pub fn let_go<R: Runtime>(
+        &self,
+        app: &AppHandle<R>,
+        session: u64,
+        window: &str,
+        reason: &'static str,
+    ) -> bool {
         let op = self.0.lock().unwrap().remove(&session);
-        op.is_some_and(|op| op.let_go(window, reason))
+        op.is_some_and(|op| op.let_go(app, window, reason))
     }
 
     fn forget(&self, session: u64) {
@@ -64,8 +70,11 @@ enum OpState {
         window: String,
         reason: &'static str,
     },
-    /// helm exited, with this outcome as `helm:exit` carries it.
-    Exited(Value),
+    /// helm exited, at `at`, with `outcome` as `helm:exit` carries it.
+    Exited {
+        outcome: Value,
+        at: std::time::Instant,
+    },
 }
 
 impl HelmOp {
@@ -84,7 +93,7 @@ impl HelmOp {
     }
 
     fn has_exited(&self) -> bool {
-        matches!(*self.state.lock().unwrap(), OpState::Exited(_))
+        matches!(*self.state.lock().unwrap(), OpState::Exited { .. })
     }
 
     /// The start was refused: `window` closed or reloaded while helm was being
@@ -101,7 +110,7 @@ impl HelmOp {
                     reason: REASON,
                 }
             }
-            OpState::Exited(outcome) => {
+            OpState::Exited { outcome, .. } => {
                 let outcome = outcome.clone();
                 drop(state);
                 self.report(app, window, REASON, &outcome);
@@ -110,16 +119,30 @@ impl HelmOp {
         }
     }
 
-    fn let_go(&self, window: &str, reason: &'static str) -> bool {
+    /// `window` closed or reloaded (`reason` says which). A running operation
+    /// is let go of, and reported when it ends: `true`. One that exited only
+    /// just now may have gone out as the page went, unseen, so it is reported
+    /// at once; one that ended earlier was its page's to show.
+    fn let_go<R: Runtime>(&self, app: &AppHandle<R>, window: &str, reason: &'static str) -> bool {
+        /// How long before its window went an exit may not have been seen.
+        const JUST_EXITED: std::time::Duration = std::time::Duration::from_secs(5);
         let mut state = self.state.lock().unwrap();
-        if !matches!(*state, OpState::Watched) {
-            return false;
+        match &*state {
+            OpState::Watched => {
+                *state = OpState::LetGo {
+                    window: window.to_owned(),
+                    reason,
+                };
+                true
+            }
+            OpState::Exited { outcome, at } if at.elapsed() < JUST_EXITED => {
+                let outcome = outcome.clone();
+                drop(state);
+                self.report(app, window, reason, &outcome);
+                false
+            }
+            _ => false,
         }
-        *state = OpState::LetGo {
-            window: window.to_owned(),
-            reason,
-        };
-        true
     }
 
     /// helm exited, with `outcome` as it is sent on `helm:exit`: `null` for
@@ -127,7 +150,10 @@ impl HelmOp {
     fn exited<R: Runtime>(&self, app: &AppHandle<R>, outcome: &Value) {
         let was = std::mem::replace(
             &mut *self.state.lock().unwrap(),
-            OpState::Exited(outcome.clone()),
+            OpState::Exited {
+                outcome: outcome.clone(),
+                at: std::time::Instant::now(),
+            },
         );
         if let OpState::LetGo { window, reason } = was {
             self.report(app, &window, reason, outcome);
@@ -298,8 +324,36 @@ mod tests {
         let heard = notices(&app);
         let op = upgrade();
         op.exited(app.handle(), &Value::Null);
+        op.exited_long_ago();
 
-        assert!(!op.let_go("main", "closed"));
+        assert!(!op.let_go(app.handle(), "main", "closed"));
         assert!(heard.lock().unwrap().is_empty());
+    }
+
+    /// helm exited just as its window closed or reloaded (#799 review): the
+    /// exit went out while the page was going, and it may never have shown
+    /// it. An operation that ended that recently is reported when its window
+    /// lets go — a second sight of an outcome beats none.
+    #[test]
+    fn an_operation_that_ended_just_as_its_window_went_is_reported() {
+        let app = tauri::test::mock_app();
+        let heard = notices(&app);
+        let op = upgrade();
+        op.exited(app.handle(), &Value::String("helm exited with code 1".into()));
+
+        assert!(!op.let_go(app.handle(), "main", "reloaded"), "it is not running");
+
+        let heard = heard.lock().unwrap();
+        assert_eq!(heard.len(), 1, "{heard:?}");
+        assert_eq!(heard[0]["title"], "helm upgrade web failed");
+    }
+
+    impl HelmOp {
+        /// As if helm had exited a while before now.
+        fn exited_long_ago(&self) {
+            if let OpState::Exited { at, .. } = &mut *self.state.lock().unwrap() {
+                *at -= std::time::Duration::from_secs(60);
+            }
+        }
     }
 }

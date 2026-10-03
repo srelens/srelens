@@ -591,7 +591,9 @@ pub fn run() {
                     node_shells::delete_all(&app).await;
                     let _ = done.send(());
                 });
-                if finished.recv_timeout(std::time::Duration::from_secs(5)).is_err() {
+                let deadline =
+                    node_shells::quit_deadline(srelens_kube::connect::request_timeout());
+                if finished.recv_timeout(deadline).is_err() {
                     log::warn!("quit before every node debug pod was deleted");
                 }
             }

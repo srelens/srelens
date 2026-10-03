@@ -72,7 +72,7 @@ pub async fn invoke_capability<R: Runtime>(
             message
         })?;
     if let Some(input) = adopts {
-        node_shells::adopt(&app, &owned, window.label(), epoch, &input, &out)?;
+        node_shells::adopt(&app, &owned, window.label(), epoch, &input, &out).await?;
     }
     Ok(out)
 }

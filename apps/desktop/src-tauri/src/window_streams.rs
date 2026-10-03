@@ -252,6 +252,10 @@ pub fn end_window<R: Runtime>(
     window: &str,
     reason: CloseReason,
 ) -> WindowStreamsEnded {
+    // Held while the window's sessions are taken and their pods released, so
+    // a shell still starting cannot attach its pod in between (#734).
+    let shells = app.try_state::<NodeShells>();
+    let mut attached = shells.as_ref().map(|shells| shells.lock());
     let streams = app
         .try_state::<WindowStreams>()
         .map(|owned| owned.take(window))
@@ -271,10 +275,7 @@ pub fn end_window<R: Runtime>(
                     manager.close(*session);
                 }
                 // A node shell's pod goes with its shell (#734).
-                if let Some(pod) = app
-                    .try_state::<NodeShells>()
-                    .and_then(|shells| shells.release(*session))
-                {
+                if let Some(pod) = attached.as_mut().and_then(|pods| pods.remove(session)) {
                     ended.debug_pods += 1;
                     node_shells::delete_soon(app, pod);
                 }
@@ -313,13 +314,14 @@ pub fn end_window<R: Runtime>(
                 };
                 if app
                     .try_state::<HelmOps>()
-                    .is_some_and(|ops| ops.let_go(*session, window, reason))
+                    .is_some_and(|ops| ops.let_go(app, *session, window, reason))
                 {
                     ended.helm_left_running += 1;
                 }
             }
         }
     }
+    drop(attached);
     ended.app_streams = app
         .try_state::<AppExtensionStreams>()
         .and_then(|streams| {
