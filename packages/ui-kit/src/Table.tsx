@@ -672,12 +672,20 @@ export function Table<T>({
   // way is both uniform and simpler.
   useLayoutEffect(() => {
     if (isEmpty || Object.keys(columnWidths).length > 0) return;
-    const table = rootRef.current?.querySelector("table");
+    const root = rootRef.current;
+    const table = root?.querySelector("table");
     // Nothing to measure until a real row exists: a table showing only the
     // "no matching items" placeholder would freeze the placeholder's widths.
-    if (!table?.querySelector("tbody tr.tbl-row")) return;
+    if (!root || !table?.querySelector("tbody tr.tbl-row")) return;
     setColumnWidths(measureColumns(table));
     autoSized.current = true;
+    // The space these widths fit, for the observer below to compare against.
+    // Its first report — every browser sends one as soon as it starts watching
+    // — carries the same size, so it no longer reads as a resize and measures
+    // the table a second time. (#360) Taken here rather than when the observer
+    // starts: a table that empties out keeps its widths but stops watching, and
+    // if its space changes meanwhile, that first report is the only word of it.
+    containerWidth.current = scrollParentOf(root)?.clientWidth ?? 0;
     // measureColumns reads `columns`/`selection`, which `columnSignature` tracks.
   }, [isEmpty, visibleData.length, columnWidths, columnSignature]);
 
@@ -699,11 +707,6 @@ export function Table<T>({
     const root = rootRef.current;
     const box = root ? scrollParentOf(root) : null;
     if (!box || typeof ResizeObserver === "undefined") return;
-    // The width the columns were just measured at. An observer reports once
-    // as soon as it starts watching, with the size the box already has, and
-    // against a starting value of 0 that first report read as a resize: every
-    // mount dropped its widths and measured them again. (#360)
-    containerWidth.current = box.clientWidth;
     const observer = new ResizeObserver(() => {
       if (box.clientWidth === containerWidth.current) return;
       containerWidth.current = box.clientWidth;

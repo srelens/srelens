@@ -1096,6 +1096,38 @@ describe("Table column resizing", () => {
     expect(colWidths(container)).toEqual(["200px", "200px"]);
   });
 
+  it("re-fits a table whose space changed while it was empty", () => {
+    // An empty table stops observing, but keeps the widths it had pinned. When
+    // its rows come back into narrower space, the new observer's first report
+    // is the only word of the change, and it has to be read as one. (#789
+    // review: seeding the observer with the width it started at swallowed it.)
+    let boxWidth = 800;
+    vi.spyOn(Element.prototype, "clientWidth", "get").mockImplementation(() => boxWidth);
+    let headerWidth = 200;
+    vi.spyOn(HTMLTableCellElement.prototype, "getBoundingClientRect").mockImplementation(
+      () => ({ width: headerWidth }) as DOMRect,
+    );
+    const { callbacks } = stubResizeObserver();
+    const draw = (rows: typeof data) => (
+      <div style={{ overflowY: "auto" }}>
+        <Table columns={columns} data={rows} getRowKey={(r) => r.name} />
+      </div>
+    );
+    const { container, rerender } = render(draw(data));
+    expect(colWidths(container)).toEqual(["200px", "200px"]);
+
+    rerender(draw([]));
+    boxWidth = 640;
+    headerWidth = 100;
+    rerender(draw(data));
+    // Only the observer attached for the returning rows: the first one was
+    // disconnected when the table emptied.
+    const latest = callbacks[callbacks.length - 1];
+    act(() => latest([], {} as ResizeObserver));
+
+    expect(colWidths(container)).toEqual(["100px", "100px"]);
+  });
+
   it("leaves widths the reader dragged alone when the space around them changes", () => {
     let headerWidth = 200;
     vi.spyOn(HTMLTableCellElement.prototype, "getBoundingClientRect").mockImplementation(
