@@ -75,6 +75,7 @@ pub(crate) mod tests {
         app.manage(WatchManager::new(ClientCache::new_many(vec![])));
         app.manage(ExecManager::new(ClientCache::new_many(vec![])));
         app.manage(WindowStreams::default());
+        app.manage(crate::node_shells::NodeShells::default());
         let main = mock_window(&app, "main");
         let broadcast = Arc::new(Mutex::new(Vec::<String>::new()));
         for event in ["watch:w1", "exec:exit:x1"] {
@@ -112,6 +113,8 @@ pub(crate) mod tests {
             None,
             on_event,
             main.clone(),
+            app.handle().clone(),
+            app.state(),
             app.state(),
             app.state(),
         )

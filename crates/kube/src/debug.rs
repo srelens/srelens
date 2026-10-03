@@ -7,8 +7,10 @@
 //!   (optionally sharing another container's process namespace) and returns its
 //!   name — exec into that name for a debugger shell beside a distroless app.
 //! - `k8s.createNodeDebugPod` creates a privileged pod pinned to a node that
-//!   `nsenter`s into the host namespaces; the caller execs into it and deletes
-//!   it (via `k8s.deletePod`) when the shell closes.
+//!   `nsenter`s into the host namespaces, labelled [`NODE_DEBUG_LABEL`], and
+//!   answers its uid. The caller execs into it and deletes it when the shell
+//!   is done — on desktop the host does, through [`delete_node_debug_pod`],
+//!   which is pinned to that uid (#734); the web page uses `k8s.deletePod`.
 //!
 //! The JSON-building halves are pure and unit-tested; the API calls are covered
 //! by the kind integration suite.
@@ -16,7 +18,7 @@
 use std::sync::Arc;
 
 use k8s_openapi::api::core::v1::Pod;
-use kube::api::{Patch, PatchParams, PostParams};
+use kube::api::{DeleteParams, Patch, PatchParams, PostParams, Preconditions};
 use kube::Api;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -53,6 +55,9 @@ pub fn ephemeral_patch(name: &str, image: &str, target_container: Option<&str>) 
     json!({ "spec": { "ephemeralContainers": [container] } })
 }
 
+/// The label every node debug pod carries.
+pub const NODE_DEBUG_LABEL: &str = "srelens.dev/node-debug";
+
 /// The privileged, host-namespaced debug pod spec pinned to `node`. It shares
 /// the host PID/network/IPC namespaces and just stays alive; the caller then
 /// `exec`s `nsenter --target 1 …` into it to enter PID 1's namespaces for a real
@@ -64,7 +69,12 @@ pub fn node_debug_pod_spec(node: &str, image: &str) -> Value {
     json!({
         "apiVersion": "v1",
         "kind": "Pod",
-        "metadata": { "generateName": "srelens-node-debug-" },
+        "metadata": {
+            "generateName": "srelens-node-debug-",
+            // What a crashed session left behind is found by this (#734): the
+            // pod says what it is, not only what it happens to be called.
+            "labels": { NODE_DEBUG_LABEL: "true" },
+        },
         "spec": {
             "nodeName": node,
             "hostPID": true,
@@ -144,6 +154,9 @@ pub struct NodeDebugIn {
 pub struct NodeDebugOut {
     pub namespace: String,
     pub pod: String,
+    /// The pod's uid: a delete pinned to it cannot reach a different pod that
+    /// took the name since (#734).
+    pub uid: String,
 }
 
 /// `k8s.createNodeDebugPod` — create a privileged host-namespaced pod on a node.
@@ -175,10 +188,53 @@ pub fn node_debug_pod_capability(cache: Arc<ClientCache>) -> Capability {
                     .metadata
                     .name
                     .ok_or_else(|| CapabilityError::Handler("created pod has no name".into()))?;
-                Ok(NodeDebugOut { namespace, pod })
+                let uid = created
+                    .metadata
+                    .uid
+                    .ok_or_else(|| CapabilityError::Handler("created pod has no uid".into()))?;
+                Ok(NodeDebugOut { namespace, pod, uid })
             }
         },
     )
+}
+
+/// How a debug pod's delete ended, when it did not fail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DebugPodDeleted {
+    Deleted,
+    /// Nothing by that name is left to delete.
+    AlreadyGone,
+    /// A different pod has the name now, and it is not this one to delete.
+    Replaced,
+}
+
+/// Delete the node debug pod `namespace`/`name`, pinned to `uid` (#734).
+///
+/// The uid is a precondition, so the API server deletes that one object and
+/// refuses a different pod that has taken the name since — which comes back
+/// as `Replaced`, not as a failure. An error is a pod still on the node, for
+/// the caller to report.
+pub async fn delete_node_debug_pod(
+    client: kube::Client,
+    namespace: &str,
+    name: &str,
+    uid: &str,
+) -> Result<DebugPodDeleted, String> {
+    let api: Api<Pod> = Api::namespaced(client, namespace);
+    let params = DeleteParams {
+        preconditions: Some(Preconditions {
+            uid: Some(uid.to_owned()),
+            resource_version: None,
+        }),
+        ..DeleteParams::default()
+    };
+    match tokio::time::timeout(request_timeout(), api.delete(name, &params)).await {
+        Err(_) => Err(format!("deleting debug pod {namespace}/{name} timed out")),
+        Ok(Ok(_)) => Ok(DebugPodDeleted::Deleted),
+        Ok(Err(kube::Error::Api(status))) if status.code == 404 => Ok(DebugPodDeleted::AlreadyGone),
+        Ok(Err(kube::Error::Api(status))) if status.code == 409 => Ok(DebugPodDeleted::Replaced),
+        Ok(Err(e)) => Err(e.to_string()),
+    }
 }
 
 #[cfg(test)]

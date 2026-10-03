@@ -41,6 +41,7 @@ use tauri::{AppHandle, Manager, Runtime, Window, WindowEvent};
 
 use crate::extension_streams::AppExtensionStreams;
 use crate::helm::HelmOps;
+use crate::node_shells::{self, DebugPod, NodeShells};
 
 /// The built-in streams each window opened, and each window's epoch.
 #[derive(Default)]
@@ -63,6 +64,9 @@ pub enum Stream {
     Terminal(u64),
     /// A helm operation (#735). Let go of, never killed: see `crate::helm`.
     Helm(u64),
+    /// A node debug pod the window created and no shell runs in yet (#734).
+    /// Deleted with the window; see `crate::node_shells`.
+    DebugPod(DebugPod),
 }
 
 impl Stream {
@@ -75,6 +79,7 @@ impl Stream {
             Stream::Forward(id) => format!("Port-forward {id}"),
             Stream::Terminal(session) => format!("Terminal {session}"),
             Stream::Helm(session) => format!("Helm operation {session}"),
+            Stream::DebugPod(pod) => format!("Debug pod {}", pod.name),
         }
     }
 
@@ -87,6 +92,7 @@ impl Stream {
             Stream::Forward(_) => "port-forward",
             Stream::Terminal(_) => "terminal",
             Stream::Helm(_) => "helm operation",
+            Stream::DebugPod(_) => "debug pod",
         }
     }
 }
@@ -108,6 +114,7 @@ pub struct WindowStreamsEnded {
     pub forwards: usize,
     pub terminals: usize,
     pub helm_left_running: usize,
+    pub debug_pods: usize,
 }
 
 impl WindowStreams {
@@ -179,6 +186,44 @@ impl WindowStreams {
         ))
     }
 
+    /// Take the debug pod `context`/`namespace`/`name` out of `window`'s, if
+    /// it created it: a shell is opening into it, and owns it from here.
+    pub fn take_debug_pod(
+        &self,
+        window: &str,
+        context: &str,
+        namespace: &str,
+        name: &str,
+    ) -> Option<DebugPod> {
+        let mut windows = self.windows.lock().unwrap();
+        let owned = windows.get_mut(window)?;
+        let held = owned.streams.iter().find_map(|stream| match stream {
+            Stream::DebugPod(pod)
+                if pod.context == context && pod.namespace == namespace && pod.name == name =>
+            {
+                Some(pod.clone())
+            }
+            _ => None,
+        })?;
+        owned.streams.remove(&Stream::DebugPod(held.clone()));
+        Some(held)
+    }
+
+    /// Take every debug pod any window holds: srelens is quitting.
+    pub fn take_debug_pods(&self) -> Vec<DebugPod> {
+        let mut pods = Vec::new();
+        for owned in self.windows.lock().unwrap().values_mut() {
+            owned.streams.retain(|stream| match stream {
+                Stream::DebugPod(pod) => {
+                    pods.push(pod.clone());
+                    false
+                }
+                _ => true,
+            });
+        }
+        pods
+    }
+
     /// Bump `window`'s epoch and hand back everything it owned. The entry
     /// stays, holding the epoch: labels are reused (a context's window opens
     /// under the same label every time), and a start begun before this must
@@ -218,6 +263,18 @@ pub fn end_window<R: Runtime>(
                 if let Some(manager) = app.try_state::<ExecManager>() {
                     manager.close(*session);
                 }
+                // A node shell's pod goes with its shell (#734).
+                if let Some(pod) = app
+                    .try_state::<NodeShells>()
+                    .and_then(|shells| shells.release(*session))
+                {
+                    ended.debug_pods += 1;
+                    node_shells::delete_soon(app, pod);
+                }
+            }
+            Stream::DebugPod(pod) => {
+                ended.debug_pods += 1;
+                node_shells::delete_soon(app, pod.clone());
             }
             Stream::Log(channel) => {
                 ended.log_streams += 1;
@@ -268,14 +325,16 @@ pub fn end_window<R: Runtime>(
     if ended != WindowStreamsEnded::default() {
         log::info!(
             "window {window} ({reason:?}): ended {} app streams, {} watches, {} exec sessions, \
-             {} log streams, {} port-forwards, {} terminals; left {} helm operations running",
+             {} log streams, {} port-forwards, {} terminals; left {} helm operations running; \
+             deleting {} node debug pods",
             ended.app_streams,
             ended.watches,
             ended.execs,
             ended.log_streams,
             ended.forwards,
             ended.terminals,
-            ended.helm_left_running
+            ended.helm_left_running,
+            ended.debug_pods
         );
     }
     ended
@@ -412,6 +471,7 @@ pub(crate) mod tests {
             app.manage(HelmOps::default());
             app.manage(ExecManager::new(cache));
             app.manage(WindowStreams::default());
+            app.manage(crate::node_shells::NodeShells::default());
             app.manage(AppExtensionStreams(None));
             let main = mock_window(&app, "main");
             let other = mock_window(&app, "ctx-1");
@@ -462,6 +522,8 @@ pub(crate) mod tests {
             None,
             crate::sink::tests::recording().0,
             window.clone(),
+            app.handle().clone(),
+            app.state(),
             app.state(),
             app.state(),
         )
@@ -834,7 +896,7 @@ pub(crate) mod tests {
         assert!(!app.state::<ExecManager>().has_session(shell));
         assert_eq!(
             serde_json::to_value(&ended).unwrap(),
-            serde_json::json!({"appStreams": 0, "watches": 1, "execs": 1, "logStreams": 0, "forwards": 0, "terminals": 0, "helmLeftRunning": 0})
+            serde_json::json!({"appStreams": 0, "watches": 1, "execs": 1, "logStreams": 0, "forwards": 0, "terminals": 0, "helmLeftRunning": 0, "debugPods": 0})
         );
 
         // The reloaded page opens afresh; the next reset ends only that.
@@ -948,9 +1010,16 @@ pub(crate) mod tests {
                 .is_err()
         );
         assert!(
-            crate::exec::exec_close(shell, other.clone(), app.state(), app.state())
-                .await
-                .is_err()
+            crate::exec::exec_close(
+                shell,
+                other.clone(),
+                app.handle().clone(),
+                app.state(),
+                app.state(),
+                app.state()
+            )
+            .await
+            .is_err()
         );
         assert!(watches.has_channel("watch:main"), "the watch runs on");
         assert!(execs.has_session(shell), "and the shell");
@@ -960,9 +1029,16 @@ pub(crate) mod tests {
         crate::exec::exec_input(shell, "ls\n".into(), main.clone(), app.state(), app.state())
             .await
             .unwrap();
-        crate::exec::exec_close(shell, main.clone(), app.state(), app.state())
-            .await
-            .unwrap();
+        crate::exec::exec_close(
+            shell,
+            main.clone(),
+            app.handle().clone(),
+            app.state(),
+            app.state(),
+            app.state(),
+        )
+        .await
+        .unwrap();
         crate::watch::stop_watch("watch:main".into(), main.clone(), app.state(), app.state())
             .await
             .unwrap();
