@@ -23,9 +23,11 @@ Apps** shows the reason, that the app requires API `^0.1` and the host supports 
 0.6. That includes Flux and Argo CD.
 
 Reinstall Flux and Argo CD from **Settings → Apps → Catalog**, which offers releases
-written for a supported API line. The reinstall goes through permission review again,
-lifts the quarantine and keeps the app's settings, apart from any the new release no
-longer declares, as an update does ([below](#updating-an-installed-app)). Until there is an
+written for a supported API line. The reinstall goes through permission review again and
+lifts the quarantine. It keeps what an update keeps ([below](#updating-an-installed-app)):
+the app's cluster selection and its **Allow plain HTTP to this computer** choice, and a
+saved setting only if the new release still declares it. The current Flux and Argo CD
+releases declare none, so any settings saved under 0.15.0 are dropped. Until there is an
 Updates view ([#563](https://github.com/srelens/srelens/issues/563)), srelens does not
 look for new releases or offer them, so the reinstall is by hand.
 
@@ -35,9 +37,11 @@ API 0.1 and 0.2 are retired without the window that applies from API 1.0
 ## Updating an installed app
 
 Install the new release from the catalog, or paste the new manifest, to replace the
-installed version. The replacement goes through permission review again, keeps the
-app's settings and assigns a new revision; open views refresh against it. The
-application never silently replaces a manifest or expands its grants.
+installed version. The replacement goes through permission review again and assigns a
+new revision; open views refresh against it. It keeps the app's cluster selection and its
+**Allow plain HTTP to this computer** choice, and keeps a saved setting only if the new
+release still declares it and the value still passes its declaration. The application never
+silently replaces a manifest or expands its grants.
 
 For example, the updated Flux release requests an additional event-read grant for its
 dashboard, which the review shows.
@@ -54,8 +58,9 @@ versions** restores one:
   review again. One with the same permissions asks for confirmation.
 - The restored version is checked as installing it now would be: against its publisher
   signature, if it had one, and against this host's rules.
-- Settings are kept. The versions after the restored one are discarded, so going forward
-  again means installing the newer release.
+- Settings are kept as an update keeps them: only those the restored version declares.
+  The versions after the restored one are discarded, so going forward again means
+  installing the newer release.
 - The app gets a new revision, so open views refresh against the restored version.
 
 ## Logs, exec and port-forwards (#567)
@@ -113,7 +118,8 @@ Since #528, IDs under `org.srelens.` install only with the srelens signature:
 - Unsigned `org.srelens.` apps installed before the rule are quarantined when the
   inventory loads (#602): disabled, and refused if you try to enable them. **Settings →
   Apps** shows the reason. Reinstall the app from the Catalog to get the signed release,
-  which lifts the quarantine and keeps the app's settings, or remove it. An unsigned
+  which lifts the quarantine and keeps what an update keeps
+  ([above](#updating-an-installed-app)), or remove it. An unsigned
   kept version under such an ID cannot be restored either. There is no transition
   period.
 

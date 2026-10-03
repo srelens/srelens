@@ -1136,15 +1136,17 @@ Executable apps are a preview, and so is API 0.6, until the API is frozen as 1.0
 ([specification.md](specification.md#versioning)).
 
 - **Windows:** out of the box.
-- **Linux:** the sandbox launcher `srelens-sandbox-launch` and a delegated cgroup must be
-  set up by hand, and named with `SRELENS_SANDBOX_LAUNCHER` and
-  `SRELENS_SANDBOX_CGROUP_ROOT`. The bundles ship neither.
-- **macOS:** not yet. srelens refuses every sidecar until its memory and CPU watchdog has
-  been checked with Seatbelt on a macOS 27 Mac.
+- **Linux:** needs the sandbox launcher `srelens-sandbox-launch`, a cgroup v2 directory
+  delegated to srelens and a kernel with Landlock enabled. The bundles do not ship the
+  launcher, so set up the launcher and the cgroup by hand, naming them with
+  `SRELENS_SANDBOX_LAUNCHER` and `SRELENS_SANDBOX_CGROUP_ROOT`;
+  [DEVELOPMENT.md](../DEVELOPMENT.md#everyday-commands) has the recipe.
+- **macOS:** not yet. srelens refuses to start any sidecar until its memory and CPU
+  watchdog has been checked with Seatbelt on a macOS 27 Mac.
 - **The web host:** nowhere. It keeps no files for its apps, so it runs no sidecar.
 
-Where one cannot run, srelens refuses the app and says what is missing; it never starts a
-sidecar unconfined.
+Where one cannot run, srelens refuses to start its sidecar and says what is missing; it
+never starts a sidecar unconfined.
 
 ### What the host holds a sidecar to
 
@@ -1168,9 +1170,10 @@ sidecar unconfined.
   [sidecar-protocol.md](sidecar-protocol.md#sandbox) describes. On Linux the sandbox
   launcher is found beside the srelens binary or at `SRELENS_SANDBOX_LAUNCHER`, and the
   cgroup delegated to srelens is named by `SRELENS_SANDBOX_CGROUP_ROOT`; without them
-  the sidecar is refused with what is missing, and the bundles ship neither. macOS
-  refuses every sidecar until its host-enforced limits, which are built, have been
-  checked with Seatbelt on a macOS 27 Mac
+  srelens refuses to start its sidecar and says what is missing, and the bundles do not
+  ship the launcher.
+  On macOS srelens refuses to start any sidecar until its memory and CPU watchdog has
+  been checked with Seatbelt on a macOS 27 Mac
   ([#713](https://github.com/srelens/srelens/issues/713)).
 - **Its input is the host's to check.** Every call is held to the operation's declared
   inputs before the sidecar sees it: no field it does not declare, every required one

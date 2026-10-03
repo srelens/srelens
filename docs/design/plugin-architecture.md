@@ -73,10 +73,13 @@ no executable app: its capability route refuses every `plugin/…` id.
    CPU quotas are kernel-enforced on Windows and Linux, and host-enforced by the
    supervisor on macOS, a weaker guarantee accepted for macOS only (see
    [the macOS decision](#decision-macos-limits-are-host-enforced)). Sidecars run out of
-   the box on Windows. On Linux the sandbox launcher `srelens-sandbox-launch` and a
-   delegated cgroup must be set up by hand, named with `SRELENS_SANDBOX_LAUNCHER` and
-   `SRELENS_SANDBOX_CGROUP_ROOT`. On macOS srelens refuses every sidecar until its
-   watchdog has been checked with Seatbelt on a macOS 27 Mac. No renderer bridge
+   the box on Windows. On Linux they need the sandbox launcher `srelens-sandbox-launch`, a
+   cgroup v2 directory delegated to srelens and a kernel with Landlock enabled. The bundles
+   do not ship the launcher, so set up the launcher and the cgroup by hand, naming them with
+   `SRELENS_SANDBOX_LAUNCHER` and `SRELENS_SANDBOX_CGROUP_ROOT`
+   ([recipe](../DEVELOPMENT.md#everyday-commands)). On macOS they do not run yet. srelens
+   refuses to start any sidecar until its memory and CPU watchdog has been checked with
+   Seatbelt on a macOS 27 Mac. No renderer bridge
    is planned: contributions use host components. What each OS's sandbox can enforce
    is recorded under
    [Sandbox backends for executable extensions](#sandbox-backends-for-executable-extensions).
@@ -744,7 +747,8 @@ on a macOS 27 Mac (see [Follow-up work](#follow-up-work)).
 
 What the supervisor (#572) does until these are decided:
 
-- **A missing limit layer:** it refuses the app, and says which layer is missing.
+- **A missing limit layer:** it refuses to start the app's sidecar, and says which layer is
+  missing.
 - **AppContainer profiles:** one per app. Uninstalling an app tries to delete its profile,
   with its folder and its registry storage (#573). A profile that cannot be deleted is
   logged and stays. Nothing removes them when srelens itself is uninstalled.

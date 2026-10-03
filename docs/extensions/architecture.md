@@ -46,11 +46,13 @@ Inspector. The broker's consent is the MCP host's: the desktop app's confirmatio
 prompt, naming the app, or `NoConsent` headless. See
 [Executable apps](manifest.md#executable-apps).
 
-Executable apps are a preview. They run out of the box on Windows. On Linux the sandbox
-launcher `srelens-sandbox-launch` and a delegated cgroup must be set up by hand, and named
-with `SRELENS_SANDBOX_LAUNCHER` and `SRELENS_SANDBOX_CGROUP_ROOT`. On macOS they do not run
-yet: srelens refuses every sidecar until its watchdog has been checked with Seatbelt on a
-macOS 27 Mac.
+Executable apps are a preview. They run out of the box on Windows. On Linux they need the
+sandbox launcher `srelens-sandbox-launch`, a cgroup v2 directory delegated to srelens and a
+kernel with Landlock enabled. The bundles do not ship the launcher, so set up the launcher
+and the cgroup by hand, naming them with `SRELENS_SANDBOX_LAUNCHER` and
+`SRELENS_SANDBOX_CGROUP_ROOT` ([recipe](../DEVELOPMENT.md#everyday-commands)). On macOS they do not
+run yet. srelens refuses to start any sidecar until its memory and CPU watchdog has
+been checked with Seatbelt on a macOS 27 Mac.
 
 ## App lifecycle
 
@@ -74,7 +76,7 @@ extension replaced by `extensions.json`, so `settings.extensions.json`.
   assigns a new revision. The app keeps up to
   the last three versions it replaced, fewer when they would take the inventory past
   1 MiB; restoring one grants its permissions again after
-  review, keeps settings and assigns a new revision
+  review, keeps the settings it declares and assigns a new revision
   (see [migration.md](migration.md#rolling-back)).
 - Each installed version records its source: `catalog` when its exact bytes are a
   release in the cached catalog, otherwise `local`. The host decides this, not the caller.

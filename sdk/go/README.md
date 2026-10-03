@@ -1,5 +1,7 @@
 # sdk/go: the Go SDK for srelens sidecars
 
+Executable apps are a preview. They run out of the box on Windows, on Linux once the sandbox launcher, a delegated cgroup and Landlock are set up, and not yet on macOS ([where they run](../../docs/extensions/manifest.md#where-executable-apps-run)).
+
 An executable srelens app runs as a sidecar that speaks JSON-RPC to srelens over its stdin and stdout ([protocol](../../docs/extensions/sidecar-protocol.md)). This package does the protocol for you; you write handlers.
 
 ```go

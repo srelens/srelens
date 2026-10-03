@@ -114,7 +114,7 @@ accepted and still means the same thing. Anything else is **breaking**.
 |---|---|
 | New optional manifest field or new contribution type | Additive. Needs a new API minor; manifests that use it must require that minor. |
 | New host capability allowed as a binding target | Additive. Needs a new API minor. |
-| New host behaviour for existing manifests, with no manifest change (for example host-rendered resource inspection) | Additive. No API bump, but it must be recorded in the changelog and must not reject or reinterpret any accepted manifest. |
+| New host behaviour for existing manifests, with no manifest change (for example host-rendered resource inspection) | Additive. No API bump, but it must be recorded in the [API changelog](#api-changelog) and must not reject or reinterpret any accepted manifest. |
 | New optional field in a capability's output | Additive. |
 | Removing or renaming a field, making an optional field required, or narrowing accepted values | Breaking. |
 | Changing what an existing field means | Breaking. |
@@ -185,7 +185,7 @@ instead of offering them.
 
 ## Deprecation
 
-- A deprecated field or contribution is listed in the changelog with its replacement
+- A deprecated field or contribution is listed in the [API changelog](#api-changelog) with its replacement
   and the earliest API version that may remove it.
 - It keeps working unchanged in every API version that supports it. Once structured
   validation errors exist ([#533](https://github.com/srelens/srelens/issues/533)),

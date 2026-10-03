@@ -1,5 +1,7 @@
 # srelens-sidecar: the Rust SDK
 
+Executable apps are a preview. They run out of the box on Windows, on Linux once the sandbox launcher, a delegated cgroup and Landlock are set up, and not yet on macOS ([where they run](../../docs/extensions/manifest.md#where-executable-apps-run)).
+
 Write the sidecar of an executable app in Rust. srelens starts it in the OS
 sandbox and talks JSON-RPC to it over stdin and stdout
 ([protocol](../../docs/extensions/sidecar-protocol.md)). This crate is that

@@ -18,9 +18,12 @@ support 0.1 or 0.2. After the upgrade, an installed app that requires API 0.1 is
 quarantined: it is disabled, not removed, and **Settings → Apps** shows the reason. That
 includes Flux and Argo CD.
 
-Reinstall Flux and Argo CD from **Settings → Apps → Catalog**. Their settings are kept.
-Until an Updates view exists (srelens/srelens#563), srelens does not look for new releases
-or offer them, so the reinstall is by hand. The details are in
+Reinstall Flux and Argo CD from **Settings → Apps → Catalog**. The reinstall lifts the
+quarantine and keeps each app's cluster selection and its **Allow plain HTTP to this
+computer** choice. A saved setting is kept only if the new release still declares it, and
+the current Flux and Argo CD releases declare none, so settings saved under 0.15.0 are
+dropped. Until an Updates view exists (srelens/srelens#563), srelens does not look for new
+releases or offer them, so the reinstall is by hand. The details are in
 [migration.md](docs/extensions/migration.md#upgrading-from-0150).
 
 #### Preview
@@ -30,12 +33,14 @@ the API they need, API 0.6, until it is frozen as 1.0 (srelens/srelens#582). Whe
 run:
 
 - Windows: out of the box.
-- Linux: the sandbox launcher `srelens-sandbox-launch` and a delegated cgroup are not in the
-  bundles. Set them up by hand and name them with `SRELENS_SANDBOX_LAUNCHER` and
-  `SRELENS_SANDBOX_CGROUP_ROOT`. Without them srelens refuses the app and says what is
-  missing.
-- macOS: not yet. srelens refuses every sidecar until its memory and CPU watchdog has been
-  checked with Seatbelt on a macOS 27 Mac.
+- Linux: needs the sandbox launcher `srelens-sandbox-launch`, a cgroup v2 directory
+  delegated to srelens and a kernel with Landlock enabled. The bundles do not ship the
+  launcher, so set up the launcher and the cgroup by hand, naming them with
+  `SRELENS_SANDBOX_LAUNCHER` and `SRELENS_SANDBOX_CGROUP_ROOT`;
+  [DEVELOPMENT.md](docs/DEVELOPMENT.md#everyday-commands) has the recipe. Without them the
+  app installs, but srelens refuses to start its sidecar and says what is missing.
+- macOS: not yet. srelens refuses to start any sidecar until its memory and CPU watchdog has
+  been checked with Seatbelt on a macOS 27 Mac.
 
 An executable app also needs a verified publisher, or the off-by-default setting **Allow
 unsigned apps to modify clusters and run code**. What the platform does not yet protect is
@@ -49,8 +54,12 @@ listed in [security.md](docs/extensions/security.md#not-yet-protected).
   (srelens/srelens#674).
 - One host confirmation for UI and MCP writes, with impact levels (srelens/srelens#664,
   srelens/srelens#661). Every write is audited (srelens/srelens#660). An update shows its
-  access changes before it applies (srelens/srelens#681). An opt-in setting gates unsigned
-  apps that write (srelens/srelens#677).
+  access changes before it applies (srelens/srelens#681).
+- A setting, off by default, **Allow unsigned apps to modify clusters and run code**. An
+  unsigned app that declares write actions needs it (srelens/srelens#677), and so does one
+  with a `k8s.exec` binding (srelens/srelens#746) and every unsigned executable app,
+  whether or not it writes (srelens/srelens#751). An app signed by a verified publisher
+  does not.
 - Declarative UI: table columns (srelens/srelens#682), detail panels (srelens/srelens#683),
   status resolvers and badges (srelens/srelens#685), dashboard cards (srelens/srelens#686),
   commands (srelens/srelens#689), links (srelens/srelens#690, srelens/srelens#740), typed
@@ -66,11 +75,15 @@ listed in [security.md](docs/extensions/security.md#not-yet-protected).
   (srelens/srelens#741), and a signed catalog with publisher delegation
   (srelens/srelens#745).
 - Executable apps: the sidecar supervisor and JSON-RPC protocol (srelens/srelens#743),
-  broker callbacks and a data directory (srelens/srelens#750), per-app MCP tools
-  (srelens/srelens#751), the Extension Inspector with per-app logs and metrics
-  (srelens/srelens#749), the protocol package and its JSON Schema (srelens/srelens#756),
-  the Rust SDK (srelens/srelens#765) and the Go SDK (srelens/srelens#771). The sandbox
-  feasibility spike behind them is srelens/srelens#698.
+  broker callbacks and a data directory (srelens/srelens#750), the `executable` app kind,
+  which starts a sidecar on its first operation call (srelens/srelens#751), the Extension
+  Inspector with per-app logs and metrics (srelens/srelens#749), the protocol package and
+  its JSON Schema (srelens/srelens#756), the Rust SDK (srelens/srelens#765) and the Go SDK
+  (srelens/srelens#771). The sandbox feasibility spike behind them is
+  srelens/srelens#698.
+- MCP: every installed app's readers and declared actions, and an executable app's
+  operations, are MCP tools named `plugin/<id>/<name>`, and the servers send
+  `tools/list_changed` as apps change (srelens/srelens#751).
 - Sidecar limits: the Inspector shows a sidecar's memory on Windows
   (srelens/srelens#777). On macOS, a host-enforced memory and CPU watchdog is built
   (srelens/srelens#781). It is weaker than the kernel limits on Windows and Linux, because
@@ -93,10 +106,8 @@ listed in [security.md](docs/extensions/security.md#not-yet-protected).
   ([specification.md](docs/extensions/specification.md#versioning)).
 - Flux and Argo CD actions moved from core into app manifests (srelens/srelens#674). Fields
   first added to 0.3 moved to a new 0.4 line (srelens/srelens#715).
-- Unsigned apps that write, and executable apps, need **Allow unsigned apps to modify
-  clusters and run code** (off by default) unless a verified publisher signed them
-  (srelens/srelens#677).
-- App logos come from packages, not the bundle (srelens/srelens#741).
+- App logos come from packages, not the bundle (srelens/srelens#741). Flux and Argo CD show
+  their initials until their releases ship as packages.
 - The sidecar protocol crate's JSON Schema generation, `schema()` and the `JsonSchema`
   derives, is now an optional `schema` feature that is off by default. A sidecar built on
   the Rust SDK no longer builds schemars. Code that calls `schema()` must turn the feature
@@ -105,10 +116,18 @@ listed in [security.md](docs/extensions/security.md#not-yet-protected).
 #### Fixed
 
 - App pages route by context key (srelens/srelens#719) and find their cluster by its pinned
-  ID (srelens/srelens#726). Watched objects are keyed by namespace and name
-  (srelens/srelens#694).
+  ID (srelens/srelens#726).
 - Streams end with their window and are scoped to the window that owns them
-  (srelens/srelens#732, srelens/srelens#736, srelens/srelens#752, srelens/srelens#754). The
-  log line reader is bounded (srelens/srelens#748).
+  (srelens/srelens#732, srelens/srelens#736, srelens/srelens#752).
 - The Rust SDK answers `health`, `activate` and `deactivate` while its handlers block, and
   writes nothing after the `shutdown` answer (srelens/srelens#785).
+
+### Other fixes
+
+Not specific to extensions. The generated release notes list the rest.
+
+- On **All namespaces**, two objects with the same name in different namespaces no longer
+  show as one row, and deleting one no longer removes the other's row: typed watches are
+  keyed by namespace and name (srelens/srelens#694).
+- The log line reader is bounded, and a line that is not UTF-8 no longer ends the follow
+  (srelens/srelens#748).
