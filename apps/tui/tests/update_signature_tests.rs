@@ -40,6 +40,15 @@ fn mid_2020() -> SystemTime {
     at(1_593_561_600)
 }
 
+/// 2026-09-21, the day after 0.15.0 was signed. The release key was valid then
+/// and has a fixed life, so a test that read the real clock would start
+/// failing the day that key expires. That refusal is right, and
+/// `an_expired_key_is_refused_even_for_what_it_signed_while_valid` already
+/// pins it.
+fn while_0_15_0_was_current() -> SystemTime {
+    at(1_790_000_000)
+}
+
 #[test]
 fn a_real_release_s_checksums_verify_against_the_keys_compiled_in() {
     assert_eq!(
@@ -47,7 +56,7 @@ fn a_real_release_s_checksums_verify_against_the_keys_compiled_in() {
             &fixture("srelens-tui-0.15.0-SHA256SUMS.txt"),
             &fixture("srelens-tui-0.15.0-SHA256SUMS.txt.asc"),
             RELEASE_KEYS,
-            SystemTime::now(),
+            while_0_15_0_was_current(),
         ),
         Ok(RELEASE_KEY.to_string())
     );
