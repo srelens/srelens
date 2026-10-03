@@ -26,7 +26,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use serde_json::Value;
 use srelens_kube::client_cache::ClientCache;
-use srelens_kube::debug::{delete_node_debug_pod, DebugPodDeleted};
+use srelens_kube::debug::{delete_node_debug_pod, node_debug_pod_uid, DebugPodDeleted};
 use srelens_kube::kube::Client;
 use srelens_streams::EventSink;
 use tauri::async_runtime::JoinHandle;
@@ -136,18 +136,61 @@ pub async fn adopt<R: Runtime>(
         log::warn!("a node debug pod was created without its identity: {out}");
         return Ok(());
     };
-    // The client the capability just made it through, for its delete.
+    // The client the capability just made it through, for its delete — once
+    // it is shown to reach the pod. The kubeconfig can change while the pod
+    // is being created, and then the context's name already means another
+    // cluster, whose 404 would read as "already gone" while the pod stays.
     let cache = app
         .try_state::<Arc<ClientCache>>()
         .map(|cache| cache.inner().clone());
     if let (Some(cache), Some(shells)) = (cache, app.try_state::<NodeShells>()) {
         if let Ok(client) = cache.get(&pod.context).await {
-            shells.clients.lock().unwrap().insert(pod.uid.clone(), client);
+            match node_debug_pod_uid(client.clone(), &pod.namespace, &pod.name).await {
+                Ok(Some(uid)) if uid == pod.uid => {
+                    shells.clients.lock().unwrap().insert(pod.uid.clone(), client);
+                }
+                Ok(_) => {
+                    lost_track(app, &pod);
+                    return Ok(());
+                }
+                // Not checked: most likely the right cluster, and keeping it
+                // beats deleting by a name looked up again later.
+                Err(error) => {
+                    log::warn!("could not check node debug pod {}: {error}", pod.name);
+                    shells.clients.lock().unwrap().insert(pod.uid.clone(), client);
+                }
+            }
         }
     }
     owned.keep(window, epoch, Stream::DebugPod(pod.clone()), || {
         delete_soon(app, pod)
     })
+}
+
+/// The pod is not where its context now leads: the kubeconfig changed while
+/// it was being created. srelens cannot tell which cluster holds it, so it
+/// does not try to delete it, and says so.
+fn lost_track<R: Runtime>(app: &AppHandle<R>, pod: &DebugPod) {
+    let DebugPod {
+        context,
+        namespace,
+        name,
+        ..
+    } = pod;
+    log::warn!(
+        "node debug pod {namespace}/{name} is not on the cluster {context} now names: \
+         the kubeconfig changed while it was created; not deleting it"
+    );
+    host_notice::notify(
+        app,
+        Level::Error,
+        &format!("Couldn't keep track of debug pod {name}"),
+        &format!(
+            "The kubeconfig changed while it was being created, so srelens can't tell which \
+             cluster it is on and won't delete it. It is in namespace {namespace} on the \
+             cluster {context} named before the change, with host access: delete it yourself."
+        ),
+    );
 }
 
 /// Delete `pod` in the background. Quitting waits for it.
@@ -367,9 +410,19 @@ mod tests {
                                 Exec::Fails => (403, failure(403, "Forbidden", "exec is forbidden")),
                             }
                         } else if method == "GET" && path.contains("/pods/") {
-                            // What the exec waits for before it starts: the
-                            // pod's `debug` container, running.
-                            (200, running_pod(&path))
+                            // A pod this server made, its `debug` container
+                            // running — what an exec waits for — and nothing
+                            // else, as a real cluster has only its own pods.
+                            let name = path.split('?').next().unwrap_or("").rsplit('/').next();
+                            let name = name.unwrap_or("").to_owned();
+                            let made = name
+                                .strip_prefix("srelens-node-debug-x")
+                                .and_then(|n| n.parse::<usize>().ok())
+                                .filter(|n| *n <= created.load(Ordering::SeqCst));
+                            match made {
+                                Some(n) => (200, running_pod(&name, &format!("uid-{n}"))),
+                                None => (404, failure(404, "NotFound", "pods not found")),
+                            }
                         } else if method == "POST" {
                             let n = created.fetch_add(1, Ordering::SeqCst) + 1;
                             let namespace = path.split('/').nth(4).unwrap_or("default").to_owned();
@@ -448,9 +501,21 @@ mod tests {
         /// A MockRuntime app holding what a node shell touches, reaching this
         /// server, with windows `main` and `ctx-1`.
         fn app(&self) -> (tauri::App<MockRuntime>, Window<MockRuntime>, Window<MockRuntime>) {
-            let cache = ClientCache::new_many(vec![self.kubeconfig.path().join("config")]);
+            let cache = self.cache();
             let mut registry = Registry::new();
             registry.register(srelens_kube::debug::node_debug_pod_capability(cache.clone()));
+            Self::app_with(cache, registry)
+        }
+
+        fn cache(&self) -> Arc<ClientCache> {
+            ClientCache::new_many(vec![self.kubeconfig.path().join("config")])
+        }
+
+        /// As [`Cluster::app`], over `cache`, with the capabilities in `registry`.
+        fn app_with(
+            cache: Arc<ClientCache>,
+            registry: Registry,
+        ) -> (tauri::App<MockRuntime>, Window<MockRuntime>, Window<MockRuntime>) {
             let app = tauri::test::mock_app();
             app.manage(AppRegistry(registry));
             app.manage(AppAudit(Arc::new(NoopAudit)));
@@ -465,11 +530,10 @@ mod tests {
         }
     }
 
-    fn running_pod(path: &str) -> Value {
-        let name = path.split('?').next().unwrap_or("").rsplit('/').next().unwrap_or("");
+    fn running_pod(name: &str, uid: &str) -> Value {
         json!({
             "apiVersion": "v1", "kind": "Pod",
-            "metadata": { "name": name, "namespace": "default" },
+            "metadata": { "name": name, "namespace": "default", "uid": uid },
             "status": {
                 "phase": "Running",
                 "containerStatuses": [{
@@ -744,6 +808,46 @@ mod tests {
         })
         .await;
         assert_eq!(first.deletes()[0].name, pod);
+        assert!(second.deletes().is_empty(), "{:?}", second.deletes());
+    }
+
+    /// The kubeconfig changed as the pod was being created (#799 review): by
+    /// the time the host looks its context up to pin a client, the name
+    /// already means another cluster. The host checks by uid that the pod is
+    /// where that client reaches, and finding it is not, tells the user and
+    /// lets it be — rather than pinning a cluster whose 404 would read as
+    /// "already gone" while the privileged pod stays on its node.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_pod_made_as_the_kubeconfig_changed_is_reported_not_pinned_elsewhere() {
+        let first = Cluster::start(200, Exec::Hangs);
+        let second = Cluster::start(200, Exec::Hangs);
+        let cache = first.cache();
+        // The create lands on the first cluster, and the kubeconfig moves to
+        // the second the moment it returns.
+        let mut racing = srelens_kube::debug::node_debug_pod_capability(cache.clone());
+        let create = racing.handler.clone();
+        let moved = (cache.clone(), second.kubeconfig.path().join("config"));
+        racing.handler = Arc::new(move |input| {
+            let (create, (cache, moved)) = (create.clone(), moved.clone());
+            Box::pin(async move {
+                let out = create(input).await;
+                cache.set_paths(vec![moved]).await;
+                out
+            })
+        });
+        let mut registry = Registry::new();
+        registry.register(racing);
+        let (app, main, _) = Cluster::app_with(cache, registry);
+        let heard = notices(&app);
+
+        let pod = debug_pod_in(&app, &main).await;
+        on_window_event(&main, &WindowEvent::Destroyed);
+
+        eventually("the user was told", || !heard.lock().unwrap().is_empty()).await;
+        let notice = heard.lock().unwrap()[0].clone();
+        assert_eq!(notice["level"], "error");
+        assert!(notice["title"].as_str().unwrap().contains(&pod), "{notice}");
+        tokio::time::sleep(Duration::from_millis(200)).await;
         assert!(second.deletes().is_empty(), "{:?}", second.deletes());
     }
 

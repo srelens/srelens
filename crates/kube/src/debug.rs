@@ -208,6 +208,22 @@ pub enum DebugPodDeleted {
     Replaced,
 }
 
+/// The uid of pod `namespace`/`name` on the cluster `client` reaches, or
+/// `None` when it has no such pod. How the host checks it has pinned a debug
+/// pod to the cluster it is really on (#734).
+pub async fn node_debug_pod_uid(
+    client: kube::Client,
+    namespace: &str,
+    name: &str,
+) -> Result<Option<String>, String> {
+    let api: Api<Pod> = Api::namespaced(client, namespace);
+    match tokio::time::timeout(request_timeout(), api.get_opt(name)).await {
+        Err(_) => Err(format!("reading debug pod {namespace}/{name} timed out")),
+        Ok(Ok(pod)) => Ok(pod.and_then(|pod| pod.metadata.uid)),
+        Ok(Err(e)) => Err(e.to_string()),
+    }
+}
+
 /// Delete the node debug pod `namespace`/`name`, pinned to `uid` (#734).
 ///
 /// The uid is a precondition, so the API server deletes that one object and

@@ -11,7 +11,8 @@ use std::sync::{Arc, Mutex};
 use serde_json::{json, Value};
 use srelens_kube::client_cache::ClientCache;
 use srelens_kube::debug::{
-    delete_node_debug_pod, node_debug_pod_capability, node_debug_pod_spec, DebugPodDeleted,
+    delete_node_debug_pod, node_debug_pod_capability, node_debug_pod_spec, node_debug_pod_uid,
+    DebugPodDeleted,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -52,6 +53,7 @@ impl Api {
                     let (status, reply) = match method.as_str() {
                         "POST" => (201, created_pod()),
                         "DELETE" => (delete_status, delete_reply(delete_status)),
+                        "GET" if path.ends_with("/pods/srelens-node-debug-x1") => (200, created_pod()),
                         _ => (404, status_body(404, "NotFound", "no such thing")),
                     };
                     let reply = reply.to_string();
@@ -229,6 +231,23 @@ async fn a_pod_replaced_under_the_same_name_is_left_alone() {
         .unwrap();
     assert_eq!(deleted, DebugPodDeleted::Replaced);
     assert_eq!(api.deletes().len(), 1, "no second, unpinned delete");
+}
+
+/// The host checks that a pod it just recorded is on the cluster its client
+/// reaches, by uid: a kubeconfig that changed as the pod was being created
+/// can leave a context's name pointing somewhere else (#799 review).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_debug_pods_uid_is_read_back_from_the_cluster_it_is_on() {
+    let api = Api::start(200).await;
+    let client = api.client().await;
+    let uid = node_debug_pod_uid(client.clone(), "default", "srelens-node-debug-x1")
+        .await
+        .unwrap();
+    assert_eq!(uid.as_deref(), Some("uid-1"));
+    let absent = node_debug_pod_uid(client, "default", "srelens-node-debug-elsewhere")
+        .await
+        .unwrap();
+    assert_eq!(absent, None, "a pod not on this cluster has no uid here");
 }
 
 /// Anything else is a failure the caller must report, with the server's
