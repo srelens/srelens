@@ -1054,6 +1054,48 @@ describe("Table column resizing", () => {
     expect(colWidths(container)).toEqual(["100px", "100px"]);
   });
 
+  it("keeps the widths it measured on mount, rather than pinning a second set", () => {
+    // The two measurements #360's trace caught on mount: `name: 412`, then
+    // `403`. The column-set effect wiped the first, so the second was the one
+    // kept; a table measures once, and keeps what it measured.
+    let measured = 0;
+    vi.spyOn(HTMLTableCellElement.prototype, "getBoundingClientRect").mockImplementation(() => {
+      measured += 1;
+      return { width: measured <= columns.length ? 412 : 403 } as DOMRect;
+    });
+    stubResizeObserver();
+
+    const { container } = render(
+      <div style={{ overflowY: "auto" }}>
+        <Table columns={columns} data={data} getRowKey={(r) => r.name} />
+      </div>,
+    );
+
+    expect(colWidths(container)).toEqual(["412px", "412px"]);
+  });
+
+  it("reads the observer's first report, of the size it started at, as no change", () => {
+    // Every browser delivers one notification as soon as `observe` is called,
+    // carrying the size the box already has. Taken as a resize, it dropped the
+    // widths the table had just measured and measured them again.
+    vi.spyOn(Element.prototype, "clientWidth", "get").mockReturnValue(800);
+    let headerWidth = 200;
+    vi.spyOn(HTMLTableCellElement.prototype, "getBoundingClientRect").mockImplementation(
+      () => ({ width: headerWidth }) as DOMRect,
+    );
+    const { callbacks } = stubResizeObserver();
+    const { container } = render(
+      <div style={{ overflowY: "auto" }}>
+        <Table columns={columns} data={data} getRowKey={(r) => r.name} />
+      </div>,
+    );
+
+    headerWidth = 100;
+    act(() => callbacks.forEach((notify) => notify([], {} as ResizeObserver)));
+
+    expect(colWidths(container)).toEqual(["200px", "200px"]);
+  });
+
   it("leaves widths the reader dragged alone when the space around them changes", () => {
     let headerWidth = 200;
     vi.spyOn(HTMLTableCellElement.prototype, "getBoundingClientRect").mockImplementation(

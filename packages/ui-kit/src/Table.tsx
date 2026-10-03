@@ -401,7 +401,16 @@ export function Table<T>({
   const rootRef = useRef<HTMLDivElement>(null);
   const [metrics, setMetrics] = useState({ scrollTop: 0, viewportHeight: 0, rowHeight: 0 });
 
-  useEffect(() => setColumnWidths({}), [columnSignature]);
+  // A different set of columns needs measuring again, but only a CHANGE does.
+  // Run on mount as well, this wiped the widths the layout effect below had
+  // just measured, so every table measured itself twice before its first paint,
+  // and the two did not always agree: #360's trace has `412`, then `403`.
+  const measuredFor = useRef(columnSignature);
+  useEffect(() => {
+    if (measuredFor.current === columnSignature) return;
+    measuredFor.current = columnSignature;
+    setColumnWidths({});
+  }, [columnSignature]);
 
   const visibleData = useMemo(() => {
     if (!sort) return data;
@@ -690,6 +699,11 @@ export function Table<T>({
     const root = rootRef.current;
     const box = root ? scrollParentOf(root) : null;
     if (!box || typeof ResizeObserver === "undefined") return;
+    // The width the columns were just measured at. An observer reports once
+    // as soon as it starts watching, with the size the box already has, and
+    // against a starting value of 0 that first report read as a resize: every
+    // mount dropped its widths and measured them again. (#360)
+    containerWidth.current = box.clientWidth;
     const observer = new ResizeObserver(() => {
       if (box.clientWidth === containerWidth.current) return;
       containerWidth.current = box.clientWidth;
