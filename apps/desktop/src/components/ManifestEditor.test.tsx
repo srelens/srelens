@@ -93,9 +93,10 @@ beforeEach(() => {
 
 describe("ManifestEditor", () => {
   it("offers a Copy control only when the caller asks for one", async () => {
-    // This component does not know what is in the document — a Secret's values
-    // in the clear, on classic's drawer YAML path — so whether a one-click
-    // copy is safe to offer is the caller's to say. (#656 review)
+    // This component does not know what is in the document — whether a
+    // Secret's values in it were redacted, revealed through the gated read, or
+    // neither — so whether a one-click copy is safe to offer is the caller's
+    // to say. (#656 review)
     const { rerender } = render(<ManifestEditor context="c" yaml="kind: Pod" onYamlChange={() => {}} />);
     // The editor is lazy (CodeMirror is heavy), so it arrives a tick later.
     expect((await screen.findByLabelText("Manifest YAML")).dataset.copy).toBe("false");

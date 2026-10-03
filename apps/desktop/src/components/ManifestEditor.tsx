@@ -73,13 +73,12 @@ export function ManifestEditor({
    * Offer a Copy control over the editor, for the whole document in one click.
    *
    * The caller's to say, not this component's, because this component does not
-   * know what is in the document. Classic's drawer YAML view renders a
-   * Secret's values in the CLEAR — it reads `k8s.getManifest` directly and
-   * nothing redacts on the way in, unlike `loadEditableManifest` (which routes
-   * Secrets through the consent-gated `getSecret`) and unlike the new design's
-   * pane (which calls `redactSecretManifest`). A one-click copy of unredacted
-   * Secret material is not an affordance to add on top of that; see #656's
-   * review and the follow-up it raised. (#656)
+   * know what is in the document — in particular whether a Secret's values in
+   * it were redacted (`redactSecretManifest`), revealed through the
+   * consent-gated `getSecret` (`loadEditableManifest`), or neither. A
+   * one-click copy belongs only over the first two. The drawer's YAML view no
+   * longer brings a Secret here at all: it shows one redacted and read-only
+   * itself. (#656, #659)
    */
   copy?: boolean;
   /** Called with the applied object on success. */
