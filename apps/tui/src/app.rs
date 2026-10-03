@@ -1042,19 +1042,15 @@ impl App {
                 let cpu = it.get("cpu").cloned().unwrap_or(serde_json::Value::Null);
                 let memory = it.get("memory").cloned().unwrap_or(serde_json::Value::Null);
 
-                let status = if phase == "Succeeded" || phase == "Failed" {
-                    phase.to_string()
-                } else if !waiting_reason.is_empty() {
-                    waiting_reason.to_string()
-                } else if phase == "Running" {
-                    let (have, want) = parse_ready_ratio(ready);
-                    if have < want && restarts > 0 {
-                        "NotReady".to_string()
-                    } else {
-                        phase.to_string()
-                    }
-                } else {
-                    phase.to_string()
+                // kubectl's word, which the backend puts on every pod row as
+                // `status`: the word the Pods table shows for the same pod. A
+                // row without one falls back to a finished phase, else the
+                // waiting reason, else the phase.
+                let status = match it.get("status").and_then(|v| v.as_str()) {
+                    Some(word) if !word.is_empty() => word.to_string(),
+                    _ if phase == "Succeeded" || phase == "Failed" => phase.to_string(),
+                    _ if !waiting_reason.is_empty() => waiting_reason.to_string(),
+                    _ => phase.to_string(),
                 };
 
                 unified.push(serde_json::json!({
