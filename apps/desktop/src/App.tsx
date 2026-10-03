@@ -82,6 +82,7 @@ import { startMcpHttp } from "@srelens/core";
 import { checkForUpdateAndNotify } from "@srelens/core";
 import { currentWindowLabel } from "@srelens/core";
 import { notify } from "@srelens/core";
+import { listenForHostNotices } from "@srelens/core";
 import { describeError } from "@srelens/core";
 import { isTauri, isWeb } from "@srelens/core/platform";
 import type { SettingsSection } from "./components/SettingsView";
@@ -483,6 +484,13 @@ export function App() {
     return () => {
       void unlistenPromise.then((unlisten) => unlisten());
     };
+  }, []);
+
+  // A helm operation outlives the window that started it, and the host
+  // reports how it ended to every window as a toast (#735).
+  useEffect(() => {
+    if (!("__TAURI_INTERNALS__" in window)) return;
+    return listenForHostNotices();
   }, []);
 
   // The master-password gate (issue #208) mounts as a blocking overlay via

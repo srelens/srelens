@@ -48,6 +48,8 @@ vi.mock("@srelens/core/lib/updater", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@srelens/core/lib/updater")>()),
   checkForUpdate: checkForUpdateMock,
 }));
+const hostNotices = vi.hoisted(() => ({ listen: vi.fn(() => () => {}) }));
+vi.mock("@srelens/core/lib/hostNotices", () => ({ listenForHostNotices: hostNotices.listen }));
 vi.mock("@srelens/core/lib/notify", () => ({
   notify: { success: vi.fn(), error: vi.fn(), info: vi.fn(), updateAvailable: notifyUpdateAvailableMock },
 }));
@@ -846,4 +848,21 @@ it("retains each classic app tab namespace across tab switches",()=>{
  expect(screen.getByTestId("app-namespace").textContent).toBe("");
  fireEvent.click(screen.getByRole("tab",{name:/kustomizations · kind-dev/}));
  expect(screen.getByTestId("app-namespace").textContent).toBe("flux-system");
+});
+
+// #735: a helm operation outlives the window that started it, and the desktop
+// host broadcasts how it ended to every window. Classic listens for that from
+// the moment it mounts, and lets go when it unmounts.
+it("shows what the desktop host reports, and lets it go on unmount", () => {
+  const release = vi.fn();
+  hostNotices.listen.mockReset().mockReturnValue(release);
+  (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__ = {};
+  try {
+    const { unmount } = render(<App />);
+    expect(hostNotices.listen).toHaveBeenCalledTimes(1);
+    unmount();
+    expect(release).toHaveBeenCalledTimes(1);
+  } finally {
+    delete (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__;
+  }
 });

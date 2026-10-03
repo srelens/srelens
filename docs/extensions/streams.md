@@ -86,7 +86,16 @@ another's streams.
   stream was opening"), with no frame. Another window's streams — the same
   app, the same page — are untouched. The desktop's built-in resource watches
   and pod exec sessions end the same way; a shell's task is aborted, which
-  drops its connection to the cluster.
+  drops its connection to the cluster. So do its log streams, port-forwards
+  and local terminals ([#735](https://github.com/srelens/srelens/issues/735)):
+  a forward's listener is dropped, so its local port is free again, and a
+  terminal's shell is killed. A **helm operation is never killed** with its
+  window: install, upgrade, rollback and uninstall change the cluster, and
+  killing helm partway can leave a release `pending-*`. The window lets go of
+  it, helm runs to the end, and the host reports how it ended — to the app
+  log, and to every open window as a `host-notice` toast — since the page
+  that would have said so is gone. Quitting srelens while one runs is not
+  covered by this.
 - **Only the window that opened a stream may end it or hear it**
   ([#733](https://github.com/srelens/srelens/issues/733)). Cancelling a
   stream another window opened, or one no window opened, is refused ("Stream
@@ -95,7 +104,12 @@ another's streams.
   whose view ids happen to match cannot end each other's. The built-in
   watches and exec sessions are held the same way: another window's
   `stop_watch`, `exec_input`, `exec_resize` or `exec_close` is refused, since
-  a shell's session id alone must not let a window type into it. Frames never
+  a shell's session id alone must not let a window type into it. So is its
+  `stop_log_stream`, `terminal_input`, `terminal_resize`, `terminal_close` or
+  `helm_op_close` (#735): a terminal is a shell on this machine, and helm
+  aborted partway leaves a release half-applied. A port-forward is the one
+  exception: every window's Forwards screen lists every forward, so any window
+  may stop one, and the window that opened it then no longer holds it. Frames never
   go out as events every window hears. Each command that opens a stream is
   passed `onEvent`, a `tauri::ipc::Channel` of that open's own, and the host
   sends the stream's frames on it as `{ event, payload }`. Tauri answers a

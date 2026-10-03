@@ -82,6 +82,28 @@ describe("tauriTransport window stream reset", () => {
     expect(invoke.mock.calls.filter(([c]) => c === "window_streams_reset")).toHaveLength(1);
   });
 
+  // #735: the window owns these too, so each waits for the reset as well. Their
+  // output is broadcast on events, not sent on a channel of their own, so they
+  // are passed none.
+  it.each(["start_log_stream", "start_port_forward", "start_terminal", "start_helm_op"])(
+    "holds %s until the window's old streams have ended, and passes it no channel",
+    async (command) => {
+      const { invoke, transport } = await fresh();
+      let finishReset: () => void = () => {};
+      invoke.mockImplementation((c: string) =>
+        c === "window_streams_reset"
+          ? new Promise((resolve) => { finishReset = () => resolve(undefined); })
+          : Promise.resolve(7),
+      );
+      const open = transport.invokeCommand(command, { channel: "ch:1" });
+      await Promise.resolve();
+      expect(invoke.mock.calls.map(([c]) => c)).toEqual(["window_streams_reset"]);
+      finishReset();
+      await expect(open).resolves.toBe(7);
+      expect(invoke.mock.calls).toEqual([["window_streams_reset"], [command, { channel: "ch:1" }]]);
+    },
+  );
+
   it("does not hold up a command that opens nothing", async () => {
     const { invoke, transport } = await fresh();
     invoke.mockResolvedValue(undefined);

@@ -13,7 +13,7 @@ use tauri::ipc::Channel;
 use tauri::{Runtime, State, Window};
 
 use crate::sink::ChannelSink;
-use crate::window_streams::WindowStreams;
+use crate::window_streams::{Stream, WindowStreams};
 
 /// Open an interactive shell into a pod. Returns the session id; stdout streams
 /// on `exec:out:<channel>` and an `exec:exit:<channel>` event fires (with an
@@ -60,7 +60,10 @@ pub async fn start_pod_exec<R: Runtime>(
             },
         )
         .await?;
-    owned.keep_exec(&manager, window.label(), epoch, session)
+    owned.keep(window.label(), epoch, Stream::Exec(session), || {
+        manager.close(session)
+    })?;
+    Ok(session)
 }
 
 /// Forward a keystroke / input string to an exec session's stdin. Only the
@@ -74,7 +77,7 @@ pub async fn exec_input<R: Runtime>(
     manager: State<'_, ExecManager>,
     owned: State<'_, WindowStreams>,
 ) -> Result<(), String> {
-    if owned.check_exec(window.label(), session)? {
+    if owned.check(window.label(), &Stream::Exec(session))? {
         manager.input(session, data).await;
     }
     Ok(())
@@ -90,7 +93,7 @@ pub async fn exec_resize<R: Runtime>(
     manager: State<'_, ExecManager>,
     owned: State<'_, WindowStreams>,
 ) -> Result<(), String> {
-    if owned.check_exec(window.label(), session)? {
+    if owned.check(window.label(), &Stream::Exec(session))? {
         manager.resize(session, cols, rows).await;
     }
     Ok(())
@@ -104,9 +107,10 @@ pub async fn exec_close<R: Runtime>(
     manager: State<'_, ExecManager>,
     owned: State<'_, WindowStreams>,
 ) -> Result<(), String> {
-    if owned.check_exec(window.label(), session)? {
+    let stream = Stream::Exec(session);
+    if owned.check(window.label(), &stream)? {
         manager.close(session);
-        owned.disown_exec(window.label(), session);
+        owned.disown(window.label(), &stream);
     }
     Ok(())
 }
