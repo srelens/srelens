@@ -23,9 +23,18 @@ describe("Gallery", () => {
     // decide what is visible), so asking for 79 names one at a time cost
     // 7,347 style computations where one query costs 277. That is what timed
     // this test out on busy CI runners, at 5s and again at 15s. (#361)
-    const drawn = new Set(
-      screen.getAllByRole("heading", { level: 2 }).map((heading) => heading.textContent?.trim()),
-    );
+    //
+    // Names are collected as the query computes them, so a heading is matched
+    // on the name assistive technology announces, not its text: one that reads
+    // "Badge" but is labelled otherwise does not count. (#794 review)
+    const drawn = new Set<string>();
+    screen.getAllByRole("heading", {
+      level: 2,
+      name: (accessibleName) => {
+        drawn.add(accessibleName);
+        return true;
+      },
+    });
     expect(
       components.filter((name) => !drawn.has(name)),
       "exported but not in the gallery",
