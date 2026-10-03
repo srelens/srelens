@@ -4044,6 +4044,11 @@ mod tests {
             gpu_requests_count: 1,
             gpu_memory_total_mib: Some(15360),
             gpu_memory_requests_mib: 7168,
+            is_virtual_gpu: false,
+            physical_gpu_count: 1,
+            physical_gpu_memory_total_mib: Some(15360),
+            virtual_gpu_count: None,
+            virtual_gpu_memory_total_mib: None,
             conditions: vec![NodeConditionInfo {
                 type_: "Ready".to_string(),
                 status: "True".to_string(),
@@ -4313,6 +4318,11 @@ mod tests {
             gpu_requests_count: 0,
             gpu_memory_total_mib: None,
             gpu_memory_requests_mib: 0,
+            is_virtual_gpu: false,
+            physical_gpu_count: 0,
+            physical_gpu_memory_total_mib: None,
+            virtual_gpu_count: None,
+            virtual_gpu_memory_total_mib: None,
             conditions: vec![],
             taints: vec![],
             pods: mock_pods,
@@ -5353,6 +5363,11 @@ mod tests {
             gpu_requests_count: 0,
             gpu_memory_total_mib: None,
             gpu_memory_requests_mib: 0,
+            is_virtual_gpu: false,
+            physical_gpu_count: 0,
+            physical_gpu_memory_total_mib: None,
+            virtual_gpu_count: None,
+            virtual_gpu_memory_total_mib: None,
             conditions: vec![],
             taints: vec![],
             pods: vec![NodePodItem {
@@ -5577,6 +5592,11 @@ mod tests {
             gpu_requests_count: 0,
             gpu_memory_total_mib: None,
             gpu_memory_requests_mib: 0,
+            is_virtual_gpu: false,
+            physical_gpu_count: 0,
+            physical_gpu_memory_total_mib: None,
+            virtual_gpu_count: None,
+            virtual_gpu_memory_total_mib: None,
             conditions: vec![],
             taints: vec![],
             pods: vec![NodePodItem {
@@ -7306,6 +7326,9 @@ mod tests {
             vram_capacity_total_mib: Some(655360),
             vram_requests_total_mib: 163840,
             pods: vec![pod_alpha],
+            is_virtual_gpu: false,
+            physical_gpu_count: 8,
+            physical_vram_total_mib: Some(655360),
         };
 
         let pod_beta = GpuPodItem {
@@ -7336,6 +7359,9 @@ mod tests {
             vram_capacity_total_mib: Some(15360),
             vram_requests_total_mib: 15360,
             pods: vec![pod_beta],
+            is_virtual_gpu: false,
+            physical_gpu_count: 1,
+            physical_vram_total_mib: Some(15360),
         };
 
         let info = GpuClusterInfo {
