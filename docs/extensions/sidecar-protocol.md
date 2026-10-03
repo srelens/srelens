@@ -11,7 +11,7 @@ host, and the data directory), part of [#521](https://github.com/srelens/srelens
 The code is `crates/plugin-host/src/sidecar/`. The SDKs
 ([#576](https://github.com/srelens/srelens/issues/576)) wrap what this page specifies.
 
-**Status.** An app of kind `executable` (API 0.6,
+**Status.** An app of kind `executable` (API 0.6, a preview,
 [#574](https://github.com/srelens/srelens/issues/574)) names its sidecar's binaries and the
 operations it answers ([manifest.md](manifest.md#executable-apps)). srelens starts the
 sidecar under this supervisor the first time one of those operations is called in a
@@ -22,6 +22,11 @@ Inspector ([#575](https://github.com/srelens/srelens/issues/575)). Each operatio
 MCP tool, `plugin/<id>/<operation>` ([MCP.md](../MCP.md#installed-apps-tools)). The
 registry's side is `crates/registry/src/extensions/sidecars.rs`. What is not built is
 listed under [Not yet](#not-yet).
+
+Executable apps are a preview. They run out of the box on Windows. On Linux they are not out of the box:
+they need the launcher `srelens-sandbox-launch`, Landlock and a delegated cgroup v2
+directory, set up by hand ([what is needed](manifest.md#where-executable-apps-run)). On macOS they do not run yet. srelens refuses to start any sidecar until its memory and CPU watchdog has
+been checked with Seatbelt on a macOS 27 Mac. The [sandbox](#sandbox) section has the detail.
 
 ## The wire
 
@@ -578,5 +583,5 @@ uninstalled; locking it down while the app is installed is left for the escape r
 | An operation that answers with a stream: the protocol has streams, and nothing opens one on an app's behalf yet | — |
 | Shipping `srelens-sandbox-launch` in the desktop bundles, and finding a delegated cgroup on a systemd desktop; until then Linux names them with `SRELENS_SANDBOX_LAUNCHER` and `SRELENS_SANDBOX_CGROUP_ROOT` | — |
 | A "Clear data" action for an app refused for its data directory (`DataDir::clear` is there; the Inspector, #575, is where a person would find it) | not filed yet |
-| Checking macOS's watchdog on a macOS 27 Mac, and then running sidecars there | [#713](https://github.com/srelens/srelens/issues/713) |
+| Checking macOS's watchdog on a macOS 27 Mac, and then running sidecars there | [#713](https://github.com/srelens/srelens/issues/713), closed: the watchdog is built, the check is not done |
 | The escape-hardening review of the supervisor and its backends, which the ADR assigned to #572 | [#744](https://github.com/srelens/srelens/issues/744) |
