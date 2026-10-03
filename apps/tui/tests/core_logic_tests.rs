@@ -961,6 +961,34 @@ fn status_style_maps_every_status_family_to_its_colour() {
     assert_eq!(status_style(""), Style::default().fg(Theme::FG));
 }
 
+/// The words kubectl's STATUS column uses for a pod (`PodSummary::status`)
+/// that say neither "error" nor "backoff" yet name a failure, and the ones
+/// that name a pod still on its way up. Each used to fall through to plain
+/// text.
+#[test]
+fn status_style_colours_kubectls_pod_status_words() {
+    let _theme = common::theme::lock();
+    for s in [
+        "OOMKilled",
+        "ErrImagePull",
+        "ErrImageNeverPull",
+        "InvalidImageName",
+        "ExitCode:1",
+        "Signal:9",
+        "Evicted",
+        "DeadlineExceeded",
+        "Init:OOMKilled",
+        "Init:ExitCode:2",
+        "Init:CrashLoopBackOff",
+        "Init:Error",
+    ] {
+        assert_eq!(status_style(s), Theme::status_error(), "{s}");
+    }
+    for s in ["Init:0/2", "Init:1/2", "PodInitializing", "SchedulingGated"] {
+        assert_eq!(status_style(s), Theme::status_warn(), "{s}");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // ai_skills.rs
 // ---------------------------------------------------------------------------

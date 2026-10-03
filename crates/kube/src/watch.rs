@@ -1424,6 +1424,7 @@ mod tests {
             created_at: String::new(),
             image: "nginx:1.27".into(),
             waiting_reason: String::new(),
+            status: phase.into(),
             pod_ip: "10.244.0.1".into(),
             cpu_req_millicores: 0,
             cpu_lim_millicores: 0,
