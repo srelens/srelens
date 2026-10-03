@@ -21,6 +21,7 @@ mod external;
 mod files;
 mod forward;
 mod helm;
+mod host_notice;
 mod logs;
 mod mcp;
 mod mcp_confirm;
@@ -480,6 +481,9 @@ pub fn run() {
         .manage(LogStreamManager::new(cache))
         .manage(TerminalManager::new())
         .manage(HelmManager::new())
+        // Which helm operations are still running, so one whose window goes
+        // runs on and is reported rather than killed (#735).
+        .manage(helm::HelmOps::default())
         .invoke_handler(tauri::generate_handler![
             deep_link::take_pending_deep_links,
             assistant::agent_list,

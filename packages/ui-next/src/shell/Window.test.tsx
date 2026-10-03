@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor, act, within } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, act, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { fireEvent } from "@testing-library/react";
+import type { HostNotice } from "@srelens/core";
 
 // `vi.hoisted` because `vi.mock` is hoisted above every declaration in the
 // file, and the tabsPersist factory reads these the moment `./Window` imports
@@ -16,6 +17,7 @@ const {
   listCrds,
   getForwards,
   rehydrateForwards,
+  listenForHostNotices,
   subscribeForwards,
   isApplePlatform,
   isTauri,
@@ -41,6 +43,7 @@ const {
   listCrds: vi.fn(),
   getForwards: vi.fn(() => []),
   rehydrateForwards: vi.fn(async () => {}),
+  listenForHostNotices: vi.fn((_show?: (notice: HostNotice) => void) => () => {}),
   subscribeForwards: vi.fn(() => () => {}),
   isApplePlatform: vi.fn(() => true),
   isTauri: vi.fn(() => true),
@@ -82,6 +85,7 @@ vi.mock("@srelens/core", async (importOriginal) => {
     listCrds: (...a: unknown[]) => listCrds(...a),
     getForwards: () => getForwards(),
     rehydrateForwards: () => rehydrateForwards(),
+    listenForHostNotices: (show?: (notice: HostNotice) => void) => listenForHostNotices(show),
     subscribeForwards: (...a: Parameters<typeof subscribeForwards>) => subscribeForwards(...a),
     isApplePlatform: () => isApplePlatform(),
     isTauri: () => isTauri(),
@@ -233,6 +237,7 @@ beforeEach(() => {
   connectCluster.mockReset().mockImplementation(async (name: string) => ({ context: name, reachable: false }));
   listCrds.mockReset().mockResolvedValue({ crds: [] });
   getForwards.mockReset().mockReturnValue([]);
+  listenForHostNotices.mockReset().mockReturnValue(() => {});
   subscribeForwards.mockReset().mockReturnValue(() => {});
   isApplePlatform.mockReset().mockReturnValue(true);
   isTauri.mockReset().mockReturnValue(true);
@@ -945,6 +950,58 @@ describe("Window — what boot has to ask for", () => {
     // proxies still answer. Boot is the only place that runs regardless.
     await booted();
     await waitFor(() => expect(rehydrateForwards).toHaveBeenCalled());
+  });
+
+  // #735: a helm operation outlives the window that started it, and the
+  // desktop host broadcasts how it ended. Every window shows that, on any
+  // route, so boot is where it is listened for — once, and let go on unmount.
+  // The web host broadcasts no such notice.
+  it("shows what the desktop host reports, and lets it go on unmount", async () => {
+    const release = vi.fn();
+    listenForHostNotices.mockReturnValue(release);
+    await booted();
+    await waitFor(() => expect(listenForHostNotices).toHaveBeenCalledTimes(1));
+    cleanup();
+    expect(release).toHaveBeenCalledTimes(1);
+
+    listenForHostNotices.mockClear();
+    isTauri.mockReturnValue(false);
+    await booted();
+    expect(listenForHostNotices).not.toHaveBeenCalled();
+  });
+
+  // This design mounts no `notify` sink, so a notice handed to one is drawn
+  // nowhere: the window draws them itself. One at a time, oldest first, each
+  // until the reader dismisses it — a failed release is not something to let
+  // fade on a timer.
+  it("draws each notice the host reports, one at a time, until it is dismissed", async () => {
+    let show: (notice: HostNotice) => void = () => {};
+    listenForHostNotices.mockImplementation((given) => {
+      if (given) show = given;
+      return () => {};
+    });
+    await booted();
+    act(() => {
+      show({
+        level: "error",
+        title: "helm upgrade web failed",
+        detail: "helm exited with code 1. On prod, after its window reloaded.",
+      });
+      show({ level: "info", title: "helm upgrade api finished", detail: "On prod, after its window closed." });
+    });
+
+    const failed = screen.getByRole("alert");
+    expect(failed.textContent).toContain("helm upgrade web failed");
+    expect(failed.textContent).toContain("helm exited with code 1");
+    expect(screen.queryByText("helm upgrade api finished")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss notice" }));
+    expect(screen.queryByText("helm upgrade web failed")).toBeNull();
+    const finished = screen.getByText("helm upgrade api finished");
+    expect(finished.closest('[data-slot="toast-frame"]')).not.toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss notice" }));
+    expect(screen.queryByText("helm upgrade api finished")).toBeNull();
   });
 });
 

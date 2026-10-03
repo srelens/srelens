@@ -5,26 +5,35 @@
 use std::sync::Arc;
 
 use srelens_streams::terminal::TerminalManager;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Runtime, State, Window};
 
 use crate::sink::TauriSink;
+use crate::window_streams::{Stream, WindowStreams};
 
 /// Start a local shell scoped to `context`. Returns the session id; output
 /// streams on `term:out:<channel>` and a `term:exit:<channel>` event fires
 /// when it ends, where `channel` is the caller-supplied subscription token.
+///
+/// The shell belongs to the calling window and is killed when it closes or
+/// reloads (#735). One whose window reloaded while it was starting is killed
+/// at once and refused.
 #[tauri::command]
-pub async fn start_terminal(
+#[allow(clippy::too_many_arguments)]
+pub async fn start_terminal<R: Runtime>(
     context: String,
     extra_kubeconfigs: Vec<String>,
     channel: String,
     cols: Option<u16>,
     rows: Option<u16>,
-    app: AppHandle,
+    app: AppHandle<R>,
+    window: Window<R>,
     manager: State<'_, TerminalManager>,
+    owned: State<'_, WindowStreams>,
 ) -> Result<u64, String> {
+    let epoch = owned.epoch(window.label());
     let mut paths = crate::capabilities::all_kubeconfig_paths();
     paths.extend(extra_kubeconfigs.iter().map(std::path::PathBuf::from));
-    manager
+    let session = manager
         .start(
             Arc::new(TauriSink(app)),
             context,
@@ -33,7 +42,11 @@ pub async fn start_terminal(
             cols,
             rows,
         )
-        .await
+        .await?;
+    owned.keep(window.label(), epoch, Stream::Terminal(session), || {
+        manager.close(session)
+    })?;
+    Ok(session)
 }
 
 /// Forward keystrokes / pasted input to a terminal's stdin.
@@ -61,10 +74,13 @@ pub async fn terminal_resize(
 
 /// Close a terminal: kill the shell and drop the session.
 #[tauri::command]
-pub async fn terminal_close(
+pub async fn terminal_close<R: Runtime>(
     session: u64,
+    window: Window<R>,
     manager: State<'_, TerminalManager>,
+    owned: State<'_, WindowStreams>,
 ) -> Result<(), String> {
     manager.close(session);
+    owned.disown(window.label(), &Stream::Terminal(session));
     Ok(())
 }
