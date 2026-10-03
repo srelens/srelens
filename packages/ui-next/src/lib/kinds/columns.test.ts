@@ -225,28 +225,25 @@ describe("pod columns", () => {
     expect(pill.props.kind).toBe("danger");
   });
 
-  it("keeps flagging that same pod in the instant it is BETWEEN restarts", () => {
-    // The second moment of the very pod above, and the one no fixture in this
-    // repo used to hold: the container is briefly up, so the kubelet reports
-    // no waiting reason at all and the phase is still "Running". The row used
-    // to lose its dot for that instant and get it back a moment later — on a
-    // real cluster, two of four consecutive screenshots.
-    //
-    // Only `waitingReason` differs from the row above. The ready ratio and the
-    // restart count do not move between the two moments, which is exactly why
-    // the verdict is now derived from them.
-    const between = { name: "checkout-api-7d", namespace: "d", phase: "Running", ready: "0/1", restarts: 7, node: "n", age: "1d", image: "acme/checkout-api:4f2a1c", waitingReason: "" };
-    expect(podFlagged(between)).toBe(true);
+  it("reads that same pod BETWEEN restarts the way kubectl does", () => {
+    // The other moments of the very pod above, with no waiting reason and the
+    // phase still "Running". The row carries kubectl's word as `status`.
     const phase = podColumns.find((c) => c.key === "phase")!;
-    const pill = phase.render!(between) as { props: { status: string; kind: string } };
-    expect(pill.props.status).toBe("NotReady");
-    expect(pill.props.kind).toBe("danger");
-    // The dot and the tone are what must not move; the word legitimately does,
-    // because between restarts there is no reason for the kubelet to name.
-    const backingOff = { ...between, waitingReason: "CrashLoopBackOff" };
-    expect(podFlagged(backingOff)).toBe(podFlagged(between));
-    const other = phase.render!(backingOff) as { props: { status: string; kind: string } };
-    expect(other.props.kind).toBe(pill.props.kind);
+    const pillOf = (row: PodRow) => (phase.render!(row) as { props: { status: string; kind: string } }).props;
+    const between = { name: "checkout-api-7d", namespace: "d", phase: "Running", ready: "0/1", restarts: 7, node: "n", age: "1d", image: "acme/checkout-api:4f2a1c", waitingReason: "" };
+
+    // Exited and not yet backed off: kubectl says `Error`, and it stays red
+    // with its dot, as it was while backing off.
+    const exited = { ...between, status: "Error" };
+    expect(podFlagged(exited)).toBe(true);
+    expect(pillOf(exited)).toEqual({ status: "Error", kind: "danger" });
+
+    // Up again for a moment: kubectl says `Running`, and so does the row,
+    // green and without a dot. Matching kubectl was chosen over the earlier
+    // `NotReady` rule that held the dot through this moment.
+    const up = { ...between, status: "Running" };
+    expect(podFlagged(up)).toBe(false);
+    expect(pillOf(up)).toEqual({ status: "Running", kind: "success" });
   });
 
   it("does not flag a pod that is merely starting up, restarts or no ready containers yet", () => {

@@ -27,6 +27,15 @@ export interface PodSummary {
    * Optional only for the sake of fixtures: `k8s.listPods` always sends it.
    */
   waitingReason?: string;
+  /**
+   * The word `kubectl get pods` prints in its STATUS column for this pod —
+   * "CrashLoopBackOff", "OOMKilled", "Init:0/2", "Terminating", "Completed" —
+   * and the phase only when nothing more specific applies. The backend's
+   * `kubectl_status` derives it; read it through `podStatus`, which tones it.
+   *
+   * Optional only for the sake of fixtures: `k8s.listPods` always sends it.
+   */
+  status?: string;
 }
 
 export interface NamespacesOutcome {

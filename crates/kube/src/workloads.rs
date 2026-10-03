@@ -74,8 +74,8 @@ pub struct PodSummary {
     /// are a failure and which are a pod on its way up — is decided once, in
     /// `podStatus` in `@srelens/core`, not here and not twice.
     ///
-    /// The first waiting reason across the pod's containers, or `""` when none
-    /// is waiting.
+    /// The first non-empty waiting reason across the pod's containers, or `""`
+    /// when none is waiting.
     #[serde(rename = "waitingReason")]
     pub waiting_reason: String,
     /// The pod's STATUS as `kubectl get pods` prints it: `CrashLoopBackOff`,
@@ -350,11 +350,19 @@ pub fn summarise_pod(pod: Pod) -> PodSummary {
 
     // Reported raw, in container order, exactly as `image` is: the first
     // container with something to say. Init containers are excluded for the
-    // same reason they are excluded there.
+    // same reason they are excluded there. An empty reason says nothing, and
+    // kubectl skips it too, so `status` and this name the same container.
     let waiting_reason = statuses
         .and_then(|cs| {
-            cs.iter()
-                .find_map(|c| c.state.as_ref()?.waiting.as_ref()?.reason.clone())
+            cs.iter().find_map(|c| {
+                c.state
+                    .as_ref()?
+                    .waiting
+                    .as_ref()?
+                    .reason
+                    .clone()
+                    .filter(|r| !r.is_empty())
+            })
         })
         .unwrap_or_default();
 
@@ -1124,6 +1132,44 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(summarise_pod(pod).waiting_reason, "ImagePullBackOff");
+    }
+
+    #[test]
+    fn skips_a_waiting_container_with_an_empty_reason() {
+        // kubectl skips it too, so `status` names the later container's reason;
+        // a `waitingReason` that stopped at the empty one disagreed with it, and
+        // the desktop's row toned the same pod differently from its header.
+        let waiting = |name: &str, reason: &str| ContainerStatus {
+            name: name.into(),
+            ready: false,
+            restart_count: 0,
+            state: Some(ContainerState {
+                waiting: Some(ContainerStateWaiting {
+                    reason: Some(reason.into()),
+                    message: None,
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let pod = Pod {
+            metadata: kube::core::ObjectMeta {
+                name: Some("web-1".into()),
+                ..Default::default()
+            },
+            status: Some(PodStatus {
+                phase: Some("Running".into()),
+                container_statuses: Some(vec![
+                    waiting("init-shim", ""),
+                    waiting("api", "CrashLoopBackOff"),
+                ]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let s = summarise_pod(pod);
+        assert_eq!(s.waiting_reason, "CrashLoopBackOff");
+        assert_eq!(s.status, "CrashLoopBackOff");
     }
 
     #[test]
