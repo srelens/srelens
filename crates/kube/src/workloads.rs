@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use k8s_openapi::api::core::v1::{Namespace, Pod};
+use k8s_openapi::api::core::v1::{ContainerStateTerminated, Namespace, Pod};
 use kube::api::ListParams;
 use kube::Api;
 use schemars::JsonSchema;
@@ -78,6 +78,15 @@ pub struct PodSummary {
     /// is waiting.
     #[serde(rename = "waitingReason")]
     pub waiting_reason: String,
+    /// The pod's STATUS as `kubectl get pods` prints it: `CrashLoopBackOff`,
+    /// `Init:0/2`, `OOMKilled`, `Terminating`, `Completed`, and the phase only
+    /// when nothing more specific applies.
+    ///
+    /// Unlike `waitingReason` this reads init containers, terminated
+    /// containers and the deletion timestamp, the same way kubectl does (see
+    /// `kubectl_status`). It is kubectl's word, not a verdict: which words
+    /// are failures is still the reader's call.
+    pub status: String,
     /// Pod IP address from `status.podIP`.
     #[serde(rename = "podIp", default)]
     pub pod_ip: String,
@@ -158,8 +167,148 @@ pub fn list_namespaces_capability(cache: Arc<ClientCache>) -> Capability {
     )
 }
 
+/// The STATUS `kubectl get pods` prints for `pod`: kubectl's `printPod`
+/// (`pkg/printers/internalversion/printers.go`), rule for rule, so a row says
+/// what a terminal beside it says.
+///
+/// In kubectl's order, each later rule overriding an earlier one:
+///
+/// 1. The pod's own `status.reason` (`Evicted`), else `phase`. A pod held by a
+///    scheduling gate is `SchedulingGated`.
+/// 2. The first init container that has not finished: `Init:<reason>` when it
+///    failed or is stuck, `Init:<finished>/<total>` while it works. A started
+///    native sidecar (`restartPolicy: Always`) counts as finished here, since it
+///    runs for the pod's whole life.
+/// 3. Unless an init container spoke and the pod is not yet `Initialized`, the
+///    first regular container that is waiting or terminated, by its reason
+///    (`ExitCode:<n>`/`Signal:<n>` when it gives none). A `Completed` word does
+///    not always stand: beside a running container it is `Running` when the
+///    pod is Ready; otherwise it is the first container's failure that exited
+///    non-zero, if any, else `NotReady` when a container still runs.
+/// 4. A pod being deleted is `Terminating`, or `Unknown` when its node was
+///    lost, unless it had already finished.
+fn kubectl_status(pod: &Pod, phase: &str) -> String {
+    let status = pod.status.as_ref();
+    let conditions = status
+        .and_then(|s| s.conditions.as_deref())
+        .unwrap_or_default();
+    let condition_true = |type_: &str| {
+        conditions
+            .iter()
+            .any(|c| c.type_ == type_ && c.status == "True")
+    };
+    let pod_reason = status.and_then(|s| s.reason.as_deref()).unwrap_or_default();
+
+    let mut reason = if pod_reason.is_empty() {
+        phase.to_string()
+    } else {
+        pod_reason.to_string()
+    };
+    if conditions
+        .iter()
+        .any(|c| c.type_ == "PodScheduled" && c.reason.as_deref() == Some("SchedulingGated"))
+    {
+        reason = "SchedulingGated".to_string();
+    }
+
+    let init_specs = pod
+        .spec
+        .as_ref()
+        .and_then(|s| s.init_containers.as_deref())
+        .unwrap_or_default();
+    let is_sidecar = |name: &str| {
+        init_specs
+            .iter()
+            .any(|c| c.name == name && c.restart_policy.as_deref() == Some("Always"))
+    };
+    let init_statuses = status
+        .and_then(|s| s.init_container_statuses.as_deref())
+        .unwrap_or_default();
+    let mut initializing = false;
+    for (i, c) in init_statuses.iter().enumerate() {
+        let state = c.state.as_ref();
+        let terminated = state.and_then(|s| s.terminated.as_ref());
+        if terminated.is_some_and(|t| t.exit_code == 0)
+            || (is_sidecar(&c.name) && c.started == Some(true))
+        {
+            continue;
+        }
+        let waiting = state
+            .and_then(|s| s.waiting.as_ref())
+            .and_then(|w| w.reason.as_deref())
+            .filter(|r| !r.is_empty() && *r != "PodInitializing");
+        reason = match (terminated, waiting) {
+            (Some(t), _) => format!("Init:{}", terminated_word(t)),
+            (None, Some(w)) => format!("Init:{w}"),
+            (None, None) => format!("Init:{i}/{}", init_specs.len()),
+        };
+        initializing = true;
+        break;
+    }
+
+    if !initializing || condition_true("Initialized") {
+        let container_statuses = status
+            .and_then(|s| s.container_statuses.as_deref())
+            .unwrap_or_default();
+        let mut has_running = false;
+        let mut error_reason = None;
+        // Last to first, overwriting, so the first container with something
+        // to say has the last word.
+        for c in container_statuses.iter().rev() {
+            let state = c.state.as_ref();
+            let waiting = state
+                .and_then(|s| s.waiting.as_ref())
+                .and_then(|w| w.reason.as_deref())
+                .filter(|r| !r.is_empty());
+            if let Some(w) = waiting {
+                reason = w.to_string();
+            } else if let Some(t) = state.and_then(|s| s.terminated.as_ref()) {
+                reason = terminated_word(t);
+                if t.exit_code != 0 {
+                    error_reason = Some(reason.clone());
+                }
+            } else if c.ready && state.is_some_and(|s| s.running.is_some()) {
+                has_running = true;
+            }
+        }
+        if reason == "Completed" {
+            if has_running && condition_true("Ready") {
+                reason = "Running".to_string();
+            } else if let Some(e) = error_reason {
+                reason = e;
+            } else if has_running {
+                reason = "NotReady".to_string();
+            }
+        }
+    }
+
+    if pod.metadata.deletion_timestamp.is_some() {
+        if pod_reason == "NodeLost" {
+            reason = "Unknown".to_string();
+        } else if phase != "Succeeded" && phase != "Failed" {
+            reason = "Terminating".to_string();
+        }
+    }
+    reason
+}
+
+/// A terminated container in kubectl's words: its reason, else the signal
+/// that killed it, else its exit code.
+fn terminated_word(t: &ContainerStateTerminated) -> String {
+    match t.reason.as_deref().filter(|r| !r.is_empty()) {
+        Some(r) => r.to_string(),
+        None => match t.signal.filter(|s| *s != 0) {
+            Some(s) => format!("Signal:{s}"),
+            None => format!("ExitCode:{}", t.exit_code),
+        },
+    }
+}
+
 /// Summarise a pod's ready count, total restarts, and phase.
-pub(crate) fn summarise_pod(pod: Pod) -> PodSummary {
+///
+/// Public so tests outside this crate can build the exact row the pods watch
+/// emits from a pod as the API server returns it.
+pub fn summarise_pod(pod: Pod) -> PodSummary {
     let name = pod.metadata.name.clone().unwrap_or_default();
     let namespace = pod.metadata.namespace.clone().unwrap_or_default();
     let node = pod
@@ -209,6 +358,8 @@ pub(crate) fn summarise_pod(pod: Pod) -> PodSummary {
         })
         .unwrap_or_default();
 
+    let status = kubectl_status(&pod, &phase);
+
     let pod_ip = pod
         .status
         .as_ref()
@@ -251,6 +402,7 @@ pub(crate) fn summarise_pod(pod: Pod) -> PodSummary {
         created_at: crate::creation_timestamp_iso(pod.metadata.creation_timestamp.as_ref()),
         image,
         waiting_reason,
+        status,
         pod_ip,
         cpu_req_millicores: req_cpu,
         cpu_lim_millicores: lim_cpu,
