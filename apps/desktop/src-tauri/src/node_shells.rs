@@ -28,6 +28,7 @@ use serde_json::Value;
 use srelens_kube::client_cache::ClientCache;
 use srelens_kube::debug::{delete_node_debug_pod, DebugPodDeleted};
 use srelens_streams::EventSink;
+use tauri::async_runtime::JoinHandle;
 use tauri::{AppHandle, Manager, Runtime};
 
 use crate::host_notice::{self, Level};
@@ -59,22 +60,33 @@ impl DebugPod {
     }
 }
 
-/// The debug pod each node shell runs in, by exec session.
+/// The debug pod each node shell runs in, by exec session, and the deletes
+/// under way.
 #[derive(Default)]
-pub struct NodeShells(Mutex<HashMap<u64, DebugPod>>);
+pub struct NodeShells {
+    shells: Mutex<HashMap<u64, DebugPod>>,
+    /// Deletes started and not yet awaited: quitting waits for these too.
+    deleting: Mutex<Vec<JoinHandle<()>>>,
+}
 
 impl NodeShells {
     pub fn attach(&self, session: u64, pod: DebugPod) {
-        self.0.lock().unwrap().insert(session, pod);
+        self.shells.lock().unwrap().insert(session, pod);
     }
 
     /// Take the pod `session` ran in, if it was a node shell.
     pub fn release(&self, session: u64) -> Option<DebugPod> {
-        self.0.lock().unwrap().remove(&session)
+        self.shells.lock().unwrap().remove(&session)
     }
 
     fn release_all(&self) -> Vec<DebugPod> {
-        self.0.lock().unwrap().drain().map(|(_, pod)| pod).collect()
+        self.shells.lock().unwrap().drain().map(|(_, pod)| pod).collect()
+    }
+
+    fn deleting(&self, delete: JoinHandle<()>) {
+        let mut deleting = self.deleting.lock().unwrap();
+        deleting.retain(|d| !d.inner().is_finished());
+        deleting.push(delete);
     }
 }
 
@@ -99,10 +111,13 @@ pub fn adopt<R: Runtime>(
     })
 }
 
-/// Delete `pod` in the background.
+/// Delete `pod` in the background. Quitting waits for it.
 pub fn delete_soon<R: Runtime>(app: &AppHandle<R>, pod: DebugPod) {
-    let app = app.clone();
-    tauri::async_runtime::spawn(async move { delete(&app, pod).await });
+    let handle = app.clone();
+    let delete = tauri::async_runtime::spawn(async move { delete(&handle, pod).await });
+    if let Some(shells) = app.try_state::<NodeShells>() {
+        shells.deleting(delete);
+    }
 }
 
 /// Delete `pod`, pinned to its uid, and say how that went.
@@ -145,17 +160,24 @@ async fn delete<R: Runtime>(app: &AppHandle<R>, pod: DebugPod) {
     }
 }
 
-/// Delete every debug pod still on a node: srelens is quitting.
+/// Delete every debug pod still on a node, and finish the deletes already
+/// under way — the last window closing starts its own as srelens quits.
 pub async fn delete_all<R: Runtime>(app: &AppHandle<R>) {
-    let mut pods = app
-        .try_state::<NodeShells>()
-        .map(|shells| shells.release_all())
-        .unwrap_or_default();
+    let (mut pods, under_way) = match app.try_state::<NodeShells>() {
+        Some(shells) => (
+            shells.release_all(),
+            std::mem::take(&mut *shells.deleting.lock().unwrap()),
+        ),
+        None => Default::default(),
+    };
     if let Some(owned) = app.try_state::<WindowStreams>() {
         pods.extend(owned.take_debug_pods());
     }
     for pod in pods {
         delete(app, pod).await;
+    }
+    for delete in under_way {
+        let _ = delete.await;
     }
 }
 
@@ -256,18 +278,26 @@ mod tests {
     struct Cluster {
         kubeconfig: tempfile::TempDir,
         deletes: Arc<Mutex<Vec<Delete>>>,
+        answered: Arc<AtomicUsize>,
     }
 
     impl Cluster {
         fn start(delete_status: u16, exec: Exec) -> Self {
+            Self::start_slow(delete_status, exec, Duration::ZERO)
+        }
+
+        /// As [`Cluster::start`], answering each delete only after `delete_delay`.
+        fn start_slow(delete_status: u16, exec: Exec, delete_delay: Duration) -> Self {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             let port = listener.local_addr().unwrap().port();
             let deletes = Arc::new(Mutex::new(Vec::new()));
+            let answered = Arc::new(AtomicUsize::new(0));
             let created = Arc::new(AtomicUsize::new(0));
-            let record = deletes.clone();
+            let (record, answers) = (deletes.clone(), answered.clone());
             std::thread::spawn(move || {
                 for mut conn in listener.incoming().flatten() {
-                    let (record, created) = (record.clone(), created.clone());
+                    let (record, created, answered) =
+                        (record.clone(), created.clone(), answers.clone());
                     std::thread::spawn(move || {
                         let Some((method, path, body)) = read_request(&mut conn) else {
                             return;
@@ -310,7 +340,16 @@ mod tests {
                                 409 => failure(409, "Conflict", "Precondition failed: UID in precondition: uid-1, UID in object meta: uid-9"),
                                 code => failure(code, "Forbidden", "pods is forbidden: user cannot delete pods"),
                             };
-                            (delete_status, reply)
+                            std::thread::sleep(delete_delay);
+                            let reply = reply.to_string();
+                            let _ = write!(
+                                conn,
+                                "HTTP/1.1 {delete_status} X\r\nContent-Type: application/json\r\n\
+                                 Content-Length: {}\r\nConnection: close\r\n\r\n{reply}",
+                                reply.len()
+                            );
+                            answered.fetch_add(1, Ordering::SeqCst);
+                            return;
                         } else {
                             (404, failure(404, "NotFound", "not found"))
                         };
@@ -335,11 +374,20 @@ mod tests {
                 ),
             )
             .unwrap();
-            Self { kubeconfig, deletes }
+            Self {
+                kubeconfig,
+                deletes,
+                answered,
+            }
         }
 
         fn deletes(&self) -> Vec<Delete> {
             self.deletes.lock().unwrap().clone()
+        }
+
+        /// How many deletes the server has finished answering.
+        fn answered(&self) -> usize {
+            self.answered.load(Ordering::SeqCst)
         }
 
         /// A MockRuntime app holding what a node shell touches, reaching this
@@ -590,6 +638,26 @@ mod tests {
         assert!(title.contains(&pod), "{title}");
         let detail = notice["detail"].as_str().unwrap();
         assert!(detail.contains("forbidden"), "{detail}");
+    }
+
+    /// Quitting as the last window closes: that window's delete is already
+    /// under way, and srelens must not exit before it has finished — against a
+    /// slow cluster, exiting first leaves the privileged pod on the node.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn quitting_waits_for_a_delete_already_under_way() {
+        let cluster = Cluster::start_slow(200, Exec::Hangs, Duration::from_millis(500));
+        let (app, main, _) = cluster.app();
+        let pod = debug_pod_in(&app, &main).await;
+        shell_in(&app, &main, &pod).await;
+
+        on_window_event(&main, &WindowEvent::Destroyed);
+        delete_all(app.handle()).await;
+
+        assert_eq!(
+            cluster.answered(),
+            1,
+            "the window's delete finished before quitting returned"
+        );
     }
 
     /// srelens quitting is the last chance: every debug pod still on a node —
