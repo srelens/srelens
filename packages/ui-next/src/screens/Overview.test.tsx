@@ -806,13 +806,12 @@ describe("Overview — the not-ready list", () => {
 
   it("holds a crash-looping pod in the list through the instant it is not backing off", async () => {
     // The flicker, at the screen it was observed on. `aa-worker-0` is the same
-    // pod as in the fixture above with one field changed — the waiting reason
-    // the kubelet stops reporting while the container is briefly up. Nothing
-    // else about the pod moves: still 0/1 ready, still 41 restarts, still
-    // phase "Running". Two of four consecutive screenshots of this list caught
-    // it and two did not.
+    // pod as in the fixture above, caught after its container exited and
+    // before the kubelet backs it off: no waiting reason, and kubectl's word
+    // is the container's `Error`, which is what the backend sends as
+    // `status`. That word is red, so the pod holds its place.
     const between = SICK_PODS.map((p) =>
-      p.name === "aa-worker-0" ? { ...p, waitingReason: "", restarts: 41 } : p,
+      p.name === "aa-worker-0" ? { ...p, waitingReason: "", status: "Error", restarts: 41 } : p,
     );
     core.listDeployments.mockResolvedValue({ deployments: SICK_DEPLOYMENTS });
     core.listStatefulSets.mockResolvedValue({ statefulsets: SICK_STATEFULSETS });
@@ -833,7 +832,7 @@ describe("Overview — the not-ready list", () => {
     ]);
     const row = notReadyRow("aa-worker-0")!;
     expect(row.querySelector(".status")?.getAttribute("data-kind")).toBe("danger");
-    expect(row.querySelector(".status")?.textContent).toBe("NotReady");
+    expect(row.querySelector(".status")?.textContent).toBe("Error");
 
     // And the two pods that must NOT be dragged in with it, both of which are
     // also short of ready: one finished, one never started.
@@ -844,9 +843,10 @@ describe("Overview — the not-ready list", () => {
   it("counts that pod in the pods tile too, at the same severity", async () => {
     // The tile reads `podFlagged` over the same list, so a pod that fell out
     // of the rows fell out of the count and its colour with it — "4 not ready"
-    // one second and "3 not ready" the next, on an unchanged cluster.
+    // one second and "3 not ready" the next, on an unchanged cluster. The
+    // exited moment carries kubectl's red `Error`, so it stays counted.
     const between = SICK_PODS.map((p) =>
-      p.name === "aa-worker-0" ? { ...p, waitingReason: "", restarts: 41 } : p,
+      p.name === "aa-worker-0" ? { ...p, waitingReason: "", status: "Error", restarts: 41 } : p,
     );
     core.podOverview.mockResolvedValue({ pods: anOverview(between) });
     core.listDeployments.mockResolvedValue({ deployments: SICK_DEPLOYMENTS });
