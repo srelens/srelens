@@ -29,17 +29,22 @@ pub fn find_executable(program: &str, path_var: impl AsRef<OsStr>) -> Option<Pat
     )
 }
 
-/// Whether `path` is a file this platform would run. On Unix that takes an
-/// execute bit, as `which` requires: a data file that happens to be named
-/// `kubectl` earlier on `PATH` would otherwise be reported as the install.
-/// Windows decides by extension, which the candidate names already carry.
+/// Whether `path` is a file this user could run. On Unix that is the
+/// question `which` asks `access(2)`: whether THIS user may execute it. A
+/// data file named `kubectl` earlier on `PATH` would otherwise be reported as
+/// the install, and so would a file only other users may execute, which an
+/// execute bit somewhere in the mode does not rule out. Windows decides by
+/// extension, which the candidate names already carry.
 fn is_executable(path: &Path) -> bool {
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::metadata(path)
-            .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-            .unwrap_or(false)
+        use std::os::unix::ffi::OsStrExt;
+        let Ok(c_path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+            return false;
+        };
+        // `is_file` first: `access` grants X_OK on a searchable directory.
+        // SAFETY: `c_path` is a NUL-terminated string that outlives the call.
+        path.is_file() && unsafe { libc::access(c_path.as_ptr(), libc::X_OK) } == 0
     }
     #[cfg(not(unix))]
     {
@@ -52,12 +57,13 @@ fn is_executable(path: &Path) -> bool {
 /// beats extension order, as it does for the Windows shell.
 ///
 /// `pathext` is `None` off Windows, where a program is its bare name. On
-/// Windows it is `PATHEXT`, and the bare name is never a candidate: Windows
-/// cannot run an extensionless file, and npm installs exactly that, a POSIX
-/// shell script, beside the `.cmd` shim Windows does run. A name that already
-/// carries an extension is tried as written first, then with each extension
-/// appended, which is how Go's `exec.LookPath` (and so client-go's exec
-/// plugins) resolves a command.
+/// Windows it is `PATHEXT`, and only names ending in an extension a process
+/// can be started from are candidates. The bare name never is: Windows cannot
+/// run an extensionless file, and npm installs exactly that, a POSIX shell
+/// script, beside the `.cmd` shim Windows does run. A name that already
+/// carries such an extension is tried as written first, then with each
+/// extension appended, which is how Go's `exec.LookPath` (and so client-go's
+/// exec plugins) resolves a command.
 ///
 /// Everything is passed in, so this is unit-testable on any host, Windows
 /// rules included, without touching the disk.
@@ -72,22 +78,35 @@ pub fn resolve_on_path(
         .find_map(|dir| names.iter().map(|name| dir.join(name)).find(|c| is_file(c)))
 }
 
+/// The extensions a process can be started from directly, which is how every
+/// caller here runs what it finds, and how client-go runs an exec plugin.
+/// Windows' own default `PATHEXT` also lists scripts (`.VBS`, `.JS`, …) that
+/// only the shell knows to hand to an interpreter.
+const STARTABLE: [&str; 4] = [".com", ".exe", ".bat", ".cmd"];
+
+fn startable(extension: &str) -> bool {
+    STARTABLE
+        .iter()
+        .any(|startable| startable.eq_ignore_ascii_case(extension))
+}
+
 /// The file names `program` may have in one directory, in the order tried.
 fn candidates(program: &str, pathext: Option<&str>) -> Vec<String> {
     let Some(pathext) = pathext else {
         return vec![program.to_string()];
     };
     let mut names = Vec::new();
-    if Path::new(program).extension().is_some() {
+    let written = Path::new(program).extension();
+    if written.is_some_and(|ext| startable(&format!(".{}", ext.to_string_lossy()))) {
         names.push(program.to_string());
     }
     names.extend(
         pathext
             .split(';')
             .map(str::trim)
-            // A trailing `;` read as an empty extension would put the bare
-            // name back.
-            .filter(|ext| !ext.is_empty())
+            // Only what can be started. That also drops an empty entry, which
+            // a trailing `;` makes and which would put the bare name back.
+            .filter(|ext| startable(ext))
             // `PATHEXT` spells them `.EXE` and the files are `kubectl.exe`.
             // Windows matches either; the lower-case one is what people see.
             .map(|ext| format!("{program}{}", ext.to_ascii_lowercase())),
@@ -222,6 +241,37 @@ mod tests {
         assert_eq!(found, Some(file("/bin", "tool.v2.exe")));
     }
 
+    /// Windows' own default PATHEXT also names scripts (`.VBS`, `.JS`, …), and
+    /// people add `.PS1`. The shell hands those to an interpreter, but a
+    /// process started directly, as every caller here starts one, can only
+    /// be a `.com`, `.exe`, `.bat` or `.cmd`. A script earlier on PATH must
+    /// not hide a program later on it.
+    #[test]
+    fn a_script_windows_cannot_start_does_not_hide_a_later_program() {
+        let found = resolve_on_path(
+            "helm",
+            &path_var(&["/first", "/second"]),
+            Some(".COM;.EXE;.BAT;.CMD;.VBS;.JS;.PS1"),
+            fs(&[
+                file("/first", "helm.js"),
+                file("/first", "helm.ps1"),
+                file("/second", "helm.exe"),
+            ]),
+        );
+        assert_eq!(found, Some(file("/second", "helm.exe")));
+    }
+
+    #[test]
+    fn a_name_written_with_an_extension_windows_cannot_start_is_not_a_program() {
+        let found = resolve_on_path(
+            "tool.v2",
+            &path_var(&["/bin"]),
+            WINDOWS,
+            fs(&[file("/bin", "tool.v2")]),
+        );
+        assert_eq!(found, None);
+    }
+
     #[test]
     fn an_empty_pathext_entry_does_not_bring_back_the_bare_name() {
         // A trailing `;` is an easy edit to make by hand. Read as an empty
@@ -255,6 +305,35 @@ mod tests {
         std::fs::set_permissions(
             first.path().join("kubectl"),
             std::fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
+        let real = second.path().join("kubectl");
+        std::fs::write(&real, "").unwrap();
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = std::env::join_paths([first.path(), second.path()]).unwrap();
+
+        assert_eq!(find_executable("kubectl", &path), Some(real));
+    }
+
+    /// An execute bit is not the same as "this user may execute it": a file
+    /// mode `001` owned by the user has one, and its owner still cannot run
+    /// it. `which` asks `access(2)`, so must we.
+    #[cfg(unix)]
+    #[test]
+    fn a_file_this_user_may_not_execute_is_not_a_program() {
+        use std::os::unix::fs::PermissionsExt;
+        // Root may execute anything with any execute bit set, so the case
+        // does not arise for it; CI runs these as an ordinary user.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        // Executable by "others" only, and owned by us: not by us.
+        std::fs::write(first.path().join("kubectl"), "").unwrap();
+        std::fs::set_permissions(
+            first.path().join("kubectl"),
+            std::fs::Permissions::from_mode(0o001),
         )
         .unwrap();
         let real = second.path().join("kubectl");
