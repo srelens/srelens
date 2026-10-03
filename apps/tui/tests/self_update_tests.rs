@@ -1127,6 +1127,93 @@ fn a_binary_a_package_manager_owns_is_refused_before_anything_is_downloaded() {
     }
 }
 
+/// Add one entry to `dir`'s ACL with `icacls`, so the check reads a real
+/// Windows ACL rather than a model of one. Principals are given by SID
+/// (`*S-1-1-0` is Everyone), which no display language can rename.
+#[cfg(windows)]
+fn grant(dir: &Path, entry: &str) {
+    let out = std::process::Command::new("icacls")
+        .arg(dir)
+        .args(["/grant", entry])
+        .output()
+        .expect("icacls runs");
+    assert!(
+        out.status.success(),
+        "icacls /grant {entry}: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+/// The Windows half of the unsafe-directory refusal (#450). A directory whose
+/// ACL lets everyone with an account put a file at a name, or take the
+/// directory over, is refused before anything is downloaded, as a
+/// world-writable one is on Unix. Adding a file is enough on its own: the
+/// update renames the running binary aside before renaming the new one in,
+/// and between the two the name is free for anyone who can create it.
+#[cfg(windows)]
+#[test]
+fn a_windows_directory_anyone_can_write_to_is_refused_before_anything_is_downloaded() {
+    for entry in [
+        // Everyone: Modify.
+        "*S-1-1-0:(M)",
+        // Authenticated Users: create files, and nothing else.
+        "*S-1-5-11:(WD)",
+        // BUILTIN\Users: rewrite the ACL, and so grant itself the rest.
+        "*S-1-5-32-545:(WDAC)",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let (plan, _) = staged(dir.path(), b"unused");
+        grant(dir.path(), entry);
+        let fetch = |_: &str| -> Result<Vec<u8>, UpdateError> {
+            panic!("{entry}: nothing should be downloaded into a directory anyone can write to")
+        };
+
+        match apply(&plan, &fetch) {
+            Err(UpdateError::UnsafeDirectory { path }) => assert_eq!(path, dir.path(), "{entry}"),
+            other => panic!("{entry}: expected UnsafeDirectory, got {other:?}"),
+        }
+    }
+}
+
+/// The ordinary places, and the entries Windows puts on them, are not
+/// refused: a refusal there would stop people updating without protecting
+/// anyone.
+#[cfg(windows)]
+#[test]
+fn the_ordinary_windows_install_directories_are_not_refused() {
+    for entry in [
+        // As fresh from %TEMP%: the user, SYSTEM and Administrators.
+        None,
+        // `C:\`'s own entry: Authenticated Users may create FOLDERS there.
+        // A folder planted at the binary's name breaks the update but
+        // cannot be run.
+        Some("*S-1-5-11:(AD)"),
+        // Also `C:\`'s: Modify for Authenticated Users, but only on what is
+        // created inside later (inherit-only), not on the directory itself.
+        Some("*S-1-5-11:(OI)(CI)(IO)(M)"),
+        // A named group someone chose to trust, the counterpart of a
+        // group-writable directory on Unix: Backup Operators.
+        Some("*S-1-5-32-551:(M)"),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let (plan, _) = staged(dir.path(), b"unused");
+        if let Some(entry) = entry {
+            grant(dir.path(), entry);
+        }
+        // Reaching the download is the proof the directory was accepted.
+        let fetch = |_: &str| -> Result<Vec<u8>, UpdateError> {
+            Err(UpdateError::Download(
+                "stopped at the first download".into(),
+            ))
+        };
+
+        match apply(&plan, &fetch) {
+            Err(UpdateError::Download(_)) => {}
+            other => panic!("{entry:?}: expected to reach the download, got {other:?}"),
+        }
+    }
+}
+
 #[test]
 fn replacing_the_binary_is_atomic_from_the_readers_point_of_view() {
     let dir = tempfile::tempdir().unwrap();
