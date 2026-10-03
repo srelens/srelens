@@ -86,13 +86,8 @@ pub fn env_var_for_provider(kind: AiProvider) -> &'static str {
 }
 
 pub fn find_cursor_binary() -> Option<String> {
-    if let Ok(output) = std::process::Command::new("which").arg("cursor-agent").output() {
-        if output.status.success() {
-            let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !s.is_empty() {
-                return Some(s);
-            }
-        }
+    if let Some(path) = srelens_kube::path_lookup::find_on_path("cursor-agent") {
+        return Some(path.display().to_string());
     }
     let home = std::env::var("HOME").unwrap_or_default();
     let candidates = [
