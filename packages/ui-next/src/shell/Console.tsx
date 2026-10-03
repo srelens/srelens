@@ -26,6 +26,7 @@ import { useContextLabel } from "../lib/contextLabel";
 import { askContextFor, runKeyFor } from "../lib/askContext";
 import { useNamespaces } from "../lib/workspace";
 import { readImageFile } from "../lib/pastedImages";
+import { useAgentInventoryVersion } from "../lib/agentInventory";
 import { isTauri, listAgents, type AgentInfo } from "@srelens/core";
 import { useActiveContext, useContexts } from "../lib/clusters";
 import { detailRoute } from "../lib/detailRoute";
@@ -154,6 +155,12 @@ export function Console({ fullView }: { fullView?: boolean }) {
    * on every screen, and choosing the agent is part of asking.
    */
   const [agents, setAgents] = useState<Read<AgentInfo[]>>(LOADING);
+  // Re-read whenever Settings changes what the inventory answers (#396). The
+  // dock outlives every tab switch, so a read taken once at mount went stale
+  // the moment a key was configured or cleared. Not reset to LOADING on a
+  // re-read: the list already on screen stays until the new one lands, and the
+  // effect's own `cancelled` drops a read a newer one has overtaken.
+  const inventoryVersion = useAgentInventoryVersion();
 
   useEffect(() => {
     let cancelled = false;
@@ -167,7 +174,7 @@ export function Console({ fullView }: { fullView?: boolean }) {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [inventoryVersion]);
 
   // `available && !gated` filtered before the picker sees the list: an agent
   // that is installed but gated must not be offered, and filtering inside the
