@@ -53,7 +53,9 @@ pub async fn start_log_stream<R: Runtime>(
     })
 }
 
-/// Stop a log-tail stream and abort all of its follow tasks.
+/// Stop a log-tail stream and abort all of its follow tasks. Only the window
+/// that started it may (#733, #735); one no window holds has ended, and this
+/// is a no-op.
 #[tauri::command]
 pub async fn stop_log_stream<R: Runtime>(
     channel: String,
@@ -61,8 +63,11 @@ pub async fn stop_log_stream<R: Runtime>(
     manager: State<'_, LogStreamManager>,
     owned: State<'_, WindowStreams>,
 ) -> Result<(), String> {
-    manager.stop(&channel);
-    owned.disown(window.label(), &Stream::Log(channel));
+    let stream = Stream::Log(channel.clone());
+    if owned.check(window.label(), &stream)? {
+        manager.stop(&channel);
+        owned.disown(window.label(), &stream);
+    }
     Ok(())
 }
 

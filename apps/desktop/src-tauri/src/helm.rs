@@ -64,7 +64,8 @@ enum OpState {
         window: String,
         reason: &'static str,
     },
-    Exited,
+    /// helm exited, with this outcome as `helm:exit` carries it.
+    Exited(Value),
 }
 
 impl HelmOp {
@@ -83,7 +84,30 @@ impl HelmOp {
     }
 
     fn has_exited(&self) -> bool {
-        matches!(*self.state.lock().unwrap(), OpState::Exited)
+        matches!(*self.state.lock().unwrap(), OpState::Exited(_))
+    }
+
+    /// The start was refused: `window` closed or reloaded while helm was being
+    /// started, so the page that asked is gone and never had the session.
+    /// Its outcome is the host's to report — now, if helm has already exited
+    /// in that race, or else when it does.
+    fn abandon<R: Runtime>(&self, app: &AppHandle<R>, window: &str) {
+        const REASON: &str = "closed or reloaded";
+        let mut state = self.state.lock().unwrap();
+        match &*state {
+            OpState::Watched => {
+                *state = OpState::LetGo {
+                    window: window.to_owned(),
+                    reason: REASON,
+                }
+            }
+            OpState::Exited(outcome) => {
+                let outcome = outcome.clone();
+                drop(state);
+                self.report(app, window, REASON, &outcome);
+            }
+            OpState::LetGo { .. } => {}
+        }
     }
 
     fn let_go(&self, window: &str, reason: &'static str) -> bool {
@@ -101,10 +125,18 @@ impl HelmOp {
     /// helm exited, with `outcome` as it is sent on `helm:exit`: `null` for
     /// success, else why it failed. Reported here when its window let go.
     fn exited<R: Runtime>(&self, app: &AppHandle<R>, outcome: &Value) {
-        let was = std::mem::replace(&mut *self.state.lock().unwrap(), OpState::Exited);
-        let OpState::LetGo { window, reason } = was else {
-            return;
-        };
+        let was = std::mem::replace(
+            &mut *self.state.lock().unwrap(),
+            OpState::Exited(outcome.clone()),
+        );
+        if let OpState::LetGo { window, reason } = was {
+            self.report(app, &window, reason, outcome);
+        }
+    }
+
+    /// Say how helm ended, after `window` went (`reason` says how): to the app
+    /// log, and to every open window.
+    fn report<R: Runtime>(&self, app: &AppHandle<R>, window: &str, reason: &str, outcome: &Value) {
         let (what, context) = (&self.what, &self.context);
         match outcome.as_str() {
             None => {
@@ -172,7 +204,7 @@ pub async fn start_helm_op<R: Runtime>(
     paths.extend(extra_kubeconfigs.iter().map(std::path::PathBuf::from));
     let op = Arc::new(HelmOp::new(&args, &context));
     let sink = OpSink {
-        app,
+        app: app.clone(),
         exit: format!("helm:exit:{channel}"),
         op: op.clone(),
     };
@@ -188,14 +220,18 @@ pub async fn start_helm_op<R: Runtime>(
             None,
         )
         .await?;
-    ops.watch(session, op);
+    ops.watch(session, op.clone());
     owned.keep(window.label(), epoch, Stream::Helm(session), || {
-        ops.let_go(session, window.label(), "closed or reloaded");
+        ops.forget(session);
+        op.abandon(&app, window.label());
     })?;
     Ok(session)
 }
 
-/// Abort a running helm operation (best-effort) and drop its session.
+/// Abort a running helm operation (best-effort) and drop its session. Only the
+/// window that started it may (#733, #735): aborting helm partway leaves the
+/// release half-applied. An operation no window holds has ended or been let
+/// go of, and this is a no-op.
 #[tauri::command]
 pub async fn helm_op_close<R: Runtime>(
     session: u64,
@@ -204,8 +240,66 @@ pub async fn helm_op_close<R: Runtime>(
     owned: State<'_, WindowStreams>,
     ops: State<'_, HelmOps>,
 ) -> Result<(), String> {
-    manager.close(session);
-    owned.disown(window.label(), &Stream::Helm(session));
-    ops.forget(session);
+    let stream = Stream::Helm(session);
+    if owned.check(window.label(), &stream)? {
+        manager.close(session);
+        owned.disown(window.label(), &stream);
+        ops.forget(session);
+    }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tauri::Listener;
+
+    fn notices(app: &tauri::App<tauri::test::MockRuntime>) -> Arc<Mutex<Vec<Value>>> {
+        let heard = Arc::new(Mutex::new(Vec::new()));
+        let record = heard.clone();
+        app.listen_any("host-notice", move |e| {
+            record
+                .lock()
+                .unwrap()
+                .push(serde_json::from_str(e.payload()).unwrap_or_default());
+        });
+        heard
+    }
+
+    fn upgrade() -> HelmOp {
+        HelmOp::new(&["upgrade".into(), "web".into(), "./chart".into()], "prod")
+    }
+
+    /// The late-start race: helm exited while its window was closing or
+    /// reloading, before the start's own ownership check refused it. The page
+    /// that asked is gone and never had the session, so it heard nothing — the
+    /// outcome is the host's to report, though helm has already exited.
+    #[test]
+    fn an_operation_that_ended_before_its_late_start_was_refused_is_still_reported() {
+        let app = tauri::test::mock_app();
+        let heard = notices(&app);
+        let op = upgrade();
+        op.exited(app.handle(), &Value::String("helm exited with code 1".into()));
+        assert!(heard.lock().unwrap().is_empty(), "its page might still be listening");
+
+        op.abandon(app.handle(), "main");
+
+        let heard = heard.lock().unwrap();
+        assert_eq!(heard.len(), 1, "{heard:?}");
+        assert_eq!(heard[0]["level"], "error");
+        assert_eq!(heard[0]["title"], "helm upgrade web failed");
+    }
+
+    /// An operation that ended while its page was there was heard by that
+    /// page, so a window that goes afterwards reports nothing about it.
+    #[test]
+    fn an_operation_its_page_saw_end_is_not_reported_again() {
+        let app = tauri::test::mock_app();
+        let heard = notices(&app);
+        let op = upgrade();
+        op.exited(app.handle(), &Value::Null);
+
+        assert!(!op.let_go("main", "closed"));
+        assert!(heard.lock().unwrap().is_empty());
+    }
 }

@@ -49,30 +49,42 @@ pub async fn start_terminal<R: Runtime>(
     Ok(session)
 }
 
-/// Forward keystrokes / pasted input to a terminal's stdin.
+/// Forward keystrokes / pasted input to a terminal's stdin. Only the window
+/// that opened the terminal may type into it (#733, #735): it is a shell on
+/// this machine. A terminal no window holds has ended, and this is a no-op.
 #[tauri::command]
-pub async fn terminal_input(
+pub async fn terminal_input<R: Runtime>(
     session: u64,
     data: String,
+    window: Window<R>,
     manager: State<'_, TerminalManager>,
+    owned: State<'_, WindowStreams>,
 ) -> Result<(), String> {
-    manager.input(session, &data);
+    if owned.check(window.label(), &Stream::Terminal(session))? {
+        manager.input(session, &data);
+    }
     Ok(())
 }
 
-/// Resize a terminal's PTY (columns/rows) to match the xterm viewport.
+/// Resize a terminal's PTY (columns/rows) to match the xterm viewport; as
+/// [`terminal_input`].
 #[tauri::command]
-pub async fn terminal_resize(
+pub async fn terminal_resize<R: Runtime>(
     session: u64,
     cols: u16,
     rows: u16,
+    window: Window<R>,
     manager: State<'_, TerminalManager>,
+    owned: State<'_, WindowStreams>,
 ) -> Result<(), String> {
-    manager.resize(session, cols, rows);
+    if owned.check(window.label(), &Stream::Terminal(session))? {
+        manager.resize(session, cols, rows);
+    }
     Ok(())
 }
 
-/// Close a terminal: kill the shell and drop the session.
+/// Close a terminal: kill the shell and drop the session; as
+/// [`terminal_input`].
 #[tauri::command]
 pub async fn terminal_close<R: Runtime>(
     session: u64,
@@ -80,7 +92,10 @@ pub async fn terminal_close<R: Runtime>(
     manager: State<'_, TerminalManager>,
     owned: State<'_, WindowStreams>,
 ) -> Result<(), String> {
-    manager.close(session);
-    owned.disown(window.label(), &Stream::Terminal(session));
+    let stream = Stream::Terminal(session);
+    if owned.check(window.label(), &stream)? {
+        manager.close(session);
+        owned.disown(window.label(), &stream);
+    }
     Ok(())
 }

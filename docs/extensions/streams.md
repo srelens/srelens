@@ -104,7 +104,12 @@ another's streams.
   whose view ids happen to match cannot end each other's. The built-in
   watches and exec sessions are held the same way: another window's
   `stop_watch`, `exec_input`, `exec_resize` or `exec_close` is refused, since
-  a shell's session id alone must not let a window type into it. Frames never
+  a shell's session id alone must not let a window type into it. So is its
+  `stop_log_stream`, `terminal_input`, `terminal_resize`, `terminal_close` or
+  `helm_op_close` (#735): a terminal is a shell on this machine, and helm
+  aborted partway leaves a release half-applied. A port-forward is the one
+  exception: every window's Forwards screen lists every forward, so any window
+  may stop one, and the window that opened it then no longer holds it. Frames never
   go out as events every window hears. Each command that opens a stream is
   passed `onEvent`, a `tauri::ipc::Channel` of that open's own, and the host
   sends the stream's frames on it as `{ event, payload }`. Tauri answers a
