@@ -181,9 +181,10 @@ pub fn list_namespaces_capability(cache: Arc<ClientCache>) -> Capability {
 ///    runs for the pod's whole life.
 /// 3. Unless an init container spoke and the pod is not yet `Initialized`, the
 ///    first regular container that is waiting or terminated, by its reason
-///    (`ExitCode:<n>`/`Signal:<n>` when it gives none). A `Completed` container
-///    beside a running one does not make the pod `Completed`: it is `Running`
-///    when the pod is Ready, else `NotReady`.
+///    (`ExitCode:<n>`/`Signal:<n>` when it gives none). A `Completed` word does
+///    not always stand: beside a running container it is `Running` when the
+///    pod is Ready; otherwise it is the first container's failure that exited
+///    non-zero, if any, else `NotReady` when a container still runs.
 /// 4. A pod being deleted is `Terminating`, or `Unknown` when its node was
 ///    lost, unless it had already finished.
 fn kubectl_status(pod: &Pod, phase: &str) -> String {
@@ -250,6 +251,7 @@ fn kubectl_status(pod: &Pod, phase: &str) -> String {
             .and_then(|s| s.container_statuses.as_deref())
             .unwrap_or_default();
         let mut has_running = false;
+        let mut error_reason = None;
         // Last to first, overwriting, so the first container with something
         // to say has the last word.
         for c in container_statuses.iter().rev() {
@@ -262,17 +264,21 @@ fn kubectl_status(pod: &Pod, phase: &str) -> String {
                 reason = w.to_string();
             } else if let Some(t) = state.and_then(|s| s.terminated.as_ref()) {
                 reason = terminated_word(t);
+                if t.exit_code != 0 {
+                    error_reason = Some(reason.clone());
+                }
             } else if c.ready && state.is_some_and(|s| s.running.is_some()) {
                 has_running = true;
             }
         }
-        if reason == "Completed" && has_running {
-            reason = if condition_true("Ready") {
-                "Running"
-            } else {
-                "NotReady"
+        if reason == "Completed" {
+            if has_running && condition_true("Ready") {
+                reason = "Running".to_string();
+            } else if let Some(e) = error_reason {
+                reason = e;
+            } else if has_running {
+                reason = "NotReady".to_string();
             }
-            .to_string();
         }
     }
 

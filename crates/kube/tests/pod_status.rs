@@ -121,6 +121,33 @@ fn a_completed_container_beside_a_running_one_reads_running_or_not_ready() {
 }
 
 #[test]
+fn a_completed_container_beside_a_failed_one_reads_the_failure() {
+    // kubectl remembers the reason of the first container that exited
+    // non-zero, and a pod that would otherwise read `Completed` reads that
+    // instead, unless a container is still serving and the pod is Ready.
+    let all_done = pod_json(
+        "Running",
+        vec![
+            container("setup", false, terminated(0, Some("Completed"))),
+            container("worker", false, terminated(1, Some("Error"))),
+            container("cache", false, terminated(137, Some("OOMKilled"))),
+        ],
+    );
+    assert_eq!(status_of(all_done), "Error");
+
+    let mut one_serving = pod_json(
+        "Running",
+        vec![
+            container("setup", false, terminated(0, Some("Completed"))),
+            container("server", true, running()),
+            container("worker", false, terminated(137, Some("OOMKilled"))),
+        ],
+    );
+    one_serving["status"]["conditions"] = json!([condition("Ready", "False")]);
+    assert_eq!(status_of(one_serving), "OOMKilled");
+}
+
+#[test]
 fn a_failing_init_container_speaks_first_with_an_init_prefix() {
     let with_init = |init_state: Value| {
         let mut pod = pod_json(
