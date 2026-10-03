@@ -309,6 +309,36 @@ describe("the session store", () => {
     expect(getSessions()).toEqual([]);
   });
 
+  it("closes the far end of a shell that died while it was still opening", async () => {
+    // #358: an exec that dies faster than its start resolves (the pod went
+    // during the connect, RBAC refused it, the container has no shell) fires
+    // its exit BEFORE the handle arrives. The handle that lands afterwards
+    // must be closed, not parked on a row that already reads as closed: the
+    // only path left that would close it is the reader ending a session that
+    // has already told them it is over.
+    const handle = { send: vi.fn(), resize: vi.fn(), close: vi.fn() };
+    startPodExec.mockImplementation(
+      async (
+        _context: string,
+        _namespace: string,
+        _pod: string,
+        _data: (c: string) => void,
+        exit: (e: string | null) => void,
+      ) => {
+        exit('exec: "sh": executable file not found in $PATH');
+        return handle;
+      },
+    );
+
+    const id = await startPodSession(pod);
+
+    expect(getSessions().find((s) => s.id === id)?.state).toBe("closed");
+    expect(handle.close).toHaveBeenCalledTimes(1);
+    // Nor is the emulator wired to it: what the reader types goes nowhere.
+    terminalFor(id)?.input("ls\r");
+    expect(handle.send).not.toHaveBeenCalled();
+  });
+
   it("removes a session the reader ended, and disposes its emulator", async () => {
     const backend = fakeBackend();
     const id = await startPodSession(pod);
