@@ -530,6 +530,14 @@ describe("podStatus — kubectl's words, toned", () => {
     }
   });
 
+  it("calls a back-off word red even when the row's waiting reason names another container", () => {
+    // kubectl skips a waiting container with an empty reason, so its word can
+    // come from a later container than the row's `waitingReason` does. A
+    // back-off is a failure wherever it came from.
+    expect(read("Running", "CrashLoopBackOff", "")).toEqual({ status: "CrashLoopBackOff", ...RED });
+    expect(read("Pending", "ImagePullBackOff", "ContainerCreating")).toEqual({ status: "ImagePullBackOff", ...RED });
+  });
+
   it("reads an init container's word by what follows the prefix", () => {
     expect(read("Pending", "Init:0/2")).toEqual({ status: "Init:0/2", ...AMBER });
     for (const word of ["Init:Error", "Init:ExitCode:2", "Init:OOMKilled", "Init:CrashLoopBackOff"]) {

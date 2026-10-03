@@ -225,6 +225,9 @@ function wordVerdict(word: string, phase: string, waitingReason: string): Verdic
   if (phase === "Failed") return BROKEN;
   if (word === "Running") return WELL;
   if (waitingReason !== "" && word === waitingReason) return waitingVerdict(word);
+  // A back-off is a failure whichever container it came from. kubectl's word
+  // can name a later container than the row's waiting reason does.
+  if (waitingKind(word) === "danger") return BROKEN;
   if (word.startsWith("Init:")) {
     const rest = word.slice("Init:".length);
     if (/^\d+\/\d+$/.test(rest)) return UNSETTLED;

@@ -16,6 +16,23 @@
     }
   },
   {
+    "name": "a waiting container with an empty reason says nothing",
+    "status": "CrashLoopBackOff",
+    "pod": {
+      "metadata": { "name": "web-1", "namespace": "default" },
+      "spec": { "containers": [{ "name": "shim" }, { "name": "api" }] },
+      "status": {
+        "phase": "Running",
+        "containerStatuses": [
+          { "name": "shim", "image": "shim:1", "imageID": "", "ready": false, "restartCount": 0,
+            "state": { "waiting": { "reason": "" } } },
+          { "name": "api", "image": "api:1", "imageID": "", "ready": false, "restartCount": 5,
+            "state": { "waiting": { "reason": "CrashLoopBackOff" } } }
+        ]
+      }
+    }
+  },
+  {
     "name": "a terminated container's reason beats the phase",
     "status": "OOMKilled",
     "pod": {
