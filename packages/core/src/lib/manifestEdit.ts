@@ -35,10 +35,15 @@ interface Deps {
 
 /**
  * Load a resource's manifest for the Edit tab. Most kinds come straight from
- * `k8s.getManifest`. Secrets are special: `getManifest` redacts their values,
- * so we fetch the real (base64) values through the gated `k8s.getSecret` and
- * inline them as decoded `stringData` — keeping the sensitive path intact while
- * making the Secret genuinely editable.
+ * `k8s.getManifest`. Secrets are special: the HOST blanks their values on
+ * `k8s.getManifest` (#661) — the frontend `getManifest` helper redacts nothing
+ * itself and passes that through — so we fetch the real (base64) values
+ * through the gated `k8s.getSecret` and inline them as decoded `stringData`,
+ * keeping the sensitive path intact while making the Secret's values editable.
+ *
+ * Only the values come back. The host blanks every annotation value on that
+ * same read, and `k8s.getSecret` returns `data` alone, so a Secret's
+ * annotations reach the editor blank — not as the cluster has them.
  */
 export async function loadEditableManifest(
   context: string,

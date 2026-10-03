@@ -61,7 +61,7 @@ on request, so a catalog app can be read before it is installed (see
 [permissions.md](permissions.md#declaring-and-granting)).
 
 A catalog change invalidates the selected checksum and requires a new review. Replacing
-an installed ID is explicit and keeps its settings. There are no automatic updates or
+an installed ID is explicit and keeps the settings the new release still declares. There are no automatic updates or
 downgrade decisions ([#563](https://github.com/srelens/srelens/issues/563)).
 
 ## Signed releases and publishers

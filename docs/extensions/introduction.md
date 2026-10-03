@@ -18,10 +18,24 @@ Tracking: [#163](https://github.com/srelens/srelens/issues/163). Architecture de
 - Follow the logs of, run a fixed command in, or forward a port to the pods of a
   workload it reads, or of a namespace a person granted
   ([Logs, exec and port-forwards](manifest.md#logs-exec-and-port-forwards)).
-- As an executable app, run a program it ships as a sandboxed sidecar that answers the
-  operations it declares ([Executable apps](manifest.md#executable-apps)).
+- As an executable app (a preview, API 0.6), run a program it ships as a sandboxed sidecar
+  that answers the operations it declares
+  ([Executable apps](manifest.md#executable-apps)).
 - Offer its readers, actions and operations to AI agents as MCP tools, under the same
   consent as the rest of srelens ([MCP.md](../MCP.md#installed-apps-tools)).
+
+Executable apps are a preview, and so is API 0.6, which adds them, until the API is frozen
+as 1.0 ([specification.md](specification.md#versioning)). Where they run:
+
+- **Windows:** out of the box.
+- **Linux:** not out of the box. It needs the launcher `srelens-sandbox-launch`, Landlock
+  and a delegated cgroup v2 directory, set up by hand
+  ([what is needed](manifest.md#where-executable-apps-run)).
+- **macOS:** not yet. srelens refuses to start any sidecar until its memory and CPU
+  watchdog has been checked with Seatbelt on a macOS 27 Mac.
+- **The web host:** it refuses to install an executable app: its extension policy does not
+  allow one ([WEB.md](../WEB.md#extension-policy)), and it keeps no files for an app's
+  package ([capabilities.md](capabilities.md#web-host)).
 
 ## What an app cannot do
 

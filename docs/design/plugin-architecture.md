@@ -22,8 +22,12 @@ to publishers, and an ID in a delegated namespace installs only with that publis
 signature; `org.srelens.` is delegated to the srelens publisher (see
 [the signed catalog decision](#decision-a-tuf-style-signed-catalog-not-sigstore-keyless)).
 See [Extensions](../EXTENSIONS.md) for installation, examples, supported fields and
-current limitations. The executable SDK, key rotation and revocation described below are
-future work, not shipped capabilities.
+current limitations. Executable apps shipped as a preview
+([#574](https://github.com/srelens/srelens/issues/574)), with a Rust and a Go SDK under
+`sdk/` ([#576](https://github.com/srelens/srelens/issues/576)), unpublished until the
+protocol is stable; where they run is in
+[Executable apps](../extensions/manifest.md#where-executable-apps-run). Key rotation and
+revocation, described below, are future work, not shipped capabilities.
 
 ## Data and lifecycle
 
@@ -60,13 +64,20 @@ no executable app: its capability route refuses every `plugin/…` id.
    model. Prove additions through the Flux and Argo CD reference extensions.
 2. Add resource workflows through explicit broker operations with inherited
    mutation annotations and confirmation; do not bypass host consent.
-3. Design a native SDK for supervised, sandboxed JSON-RPC sidecars. Require
-   quotas, cancellation and teardown. Refuse executable extensions wherever no
-   sandbox backend exists for isolation, which is the filesystem, network and process
-   restrictions. Windows, Linux and macOS each have one. Memory and CPU quotas are
-   kernel-enforced on Windows and Linux, and host-enforced by the supervisor on macOS,
-   a weaker guarantee accepted for macOS only (see
-   [the macOS decision](#decision-macos-limits-are-host-enforced)). No renderer bridge
+3. Run supervised, sandboxed JSON-RPC sidecars, with a native SDK. This shipped as a
+   preview ([#574](https://github.com/srelens/srelens/issues/574),
+   [#576](https://github.com/srelens/srelens/issues/576)): the Rust and Go SDKs are under
+   `sdk/`. It requires quotas, cancellation and teardown, and refuses executable
+   extensions wherever no sandbox backend exists for isolation, which is the filesystem,
+   network and process restrictions. Windows, Linux and macOS each have one. Memory and
+   CPU quotas are kernel-enforced on Windows and Linux, and host-enforced by the
+   supervisor on macOS, a weaker guarantee accepted for macOS only (see
+   [the macOS decision](#decision-macos-limits-are-host-enforced)). Sidecars run out of
+   the box on Windows. On Linux they are not out of the box: they need the launcher
+   `srelens-sandbox-launch`, Landlock and a delegated cgroup v2 directory, set up by hand
+   ([what is needed](../extensions/manifest.md#where-executable-apps-run)). On macOS they do
+   not run yet. srelens refuses to start any sidecar until its memory and CPU watchdog has
+   been checked with Seatbelt on a macOS 27 Mac. No renderer bridge
    is planned: contributions use host components. What each OS's sandbox can enforce
    is recorded under
    [Sandbox backends for executable extensions](#sandbox-backends-for-executable-extensions).
@@ -734,7 +745,8 @@ on a macOS 27 Mac (see [Follow-up work](#follow-up-work)).
 
 What the supervisor (#572) does until these are decided:
 
-- **A missing limit layer:** it refuses the app, and says which layer is missing.
+- **A missing limit layer:** it refuses to start the app's sidecar, and says which layer is
+  missing.
 - **AppContainer profiles:** one per app. Uninstalling an app tries to delete its profile,
   with its folder and its registry storage (#573). A profile that cannot be deleted is
   logged and stays. Nothing removes them when srelens itself is uninstalled.
