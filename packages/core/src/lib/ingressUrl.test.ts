@@ -58,6 +58,25 @@ describe("ingressRuleAddress", () => {
     });
   });
 
+  it("keeps a percent sign in a literal path as the character it is", () => {
+    // A rule's path is matched against the decoded request path, so the
+    // address must decode back to exactly the path as written. Set raw,
+    // `%2e%2e` is read as `..` and the link went to `/admin`. (#797 review)
+    expect(ingressRuleAddress("app.example.com", "/files/%2e%2e/admin", plain)).toEqual({
+      kind: "url",
+      url: "http://app.example.com/files/%252e%252e/admin",
+    });
+  });
+
+  it("gives back as text a DNS name that a URL parser refuses or reads as an IP", () => {
+    // Both pass DNS-1123 and the API server's host check, but a URL parser
+    // reads a numeric last label as IPv4: `app.123` it refuses outright,
+    // which threw out of the Rules section's render, and `123.123` it
+    // re-reads as 123.0.0.123. (#797 review)
+    expect(ingressRuleAddress("app.123", "/", plain)).toEqual({ kind: "host", host: "app.123" });
+    expect(ingressRuleAddress("123.123", "/", plain)).toEqual({ kind: "host", host: "123.123" });
+  });
+
   it("links a path that does not start with a slash to the host's root", () => {
     expect(ingressRuleAddress("app.example.com", "api", plain)).toEqual({ kind: "url", url: "http://app.example.com/" });
   });

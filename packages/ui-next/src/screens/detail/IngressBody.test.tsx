@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { openExternal, type K8sObject } from "@srelens/core";
 import { IngressDetailsBody } from "./IngressBody";
@@ -235,6 +235,34 @@ describe("IngressDetailsBody", () => {
       expect(screen.queryByRole("button", { name: /^https?:\/\// })).toBeNull();
       expect(screen.queryByRole("button", { name: /^Copy / })).toBeNull();
       expect(screen.getByText("—")).toBeDefined();
+    });
+
+    it("keeps a long address whole on one line, for the table's own scroll to carry", () => {
+      // Machine text stays on one line and scrolls in a bounded region
+      // (design.md): an ellipsis hid the end of a long path, the part a reader
+      // checks before opening it. jsdom lays nothing out, so the classes that
+      // decide it are what can be asserted. (#797 review)
+      const url = "http://checkout.internal.example.com/api/v2/orders/fulfilment/status";
+      render(
+        <IngressDetailsBody
+          object={ingress({
+            rules: [
+              rule("checkout.internal.example.com", "/api/v2/orders/fulfilment/status"),
+              rule("*.corp.example.com", "/"),
+            ],
+          })}
+        />,
+      );
+
+      for (const text of [
+        within(screen.getByRole("button", { name: url })).getByText(url),
+        screen.getAllByText("*.corp.example.com").find((el) => el.closest("td")?.querySelector("button"))!,
+      ]) {
+        expect(text.className).toContain("whitespace-nowrap");
+        for (let el: HTMLElement | null = text; el && el.tagName !== "TD"; el = el.parentElement) {
+          expect(el.className).not.toContain("truncate");
+        }
+      }
     });
 
     it("says so when the browser could not be opened", async () => {

@@ -47,8 +47,18 @@ export function ingressRuleAddress(
   if (!host) return null;
   if (host.length > 253 || !DNS_SUBDOMAIN.test(host)) return { kind: "host", host };
   const scheme = ingress.tlsHosts.some((tls) => tlsCovers(tls, host)) ? "https" : "http";
-  const url = new URL(`${scheme}://${host}`);
-  if (!ingress.regexPaths && path.startsWith("/") && !PATTERN.test(path)) url.pathname = path;
+  let url: URL;
+  try {
+    // A DNS name can still be no URL host: a numeric last label is read as
+    // IPv4, so `app.123` is refused outright. (#797 review)
+    url = new URL(`${scheme}://${host}`);
+  } catch {
+    return { kind: "host", host };
+  }
+  // `%` encoded first, so the address decodes back to the path exactly as
+  // written: set raw, `%2e%2e` is read as `..` and normalised away. (#797
+  // review)
+  if (!ingress.regexPaths && path.startsWith("/") && !PATTERN.test(path)) url.pathname = path.replaceAll("%", "%25");
   // Belt and braces: what comes back out of `URL` must be the host that went
   // in, with nothing added around it.
   if (url.hostname !== host || url.port || url.username || url.password) return { kind: "host", host };

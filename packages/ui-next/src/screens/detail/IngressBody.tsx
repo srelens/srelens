@@ -53,23 +53,23 @@ function ruleColumns(open: (url: string) => void): Column<IngressPathRow>[] {
  * A `Button` rather than an anchor, for the reason Forwards' address is one:
  * `<a target="_blank">` opens nothing inside the Tauri WebView (#348). Its
  * accessible name is the address it shows, as a link's would be.
+ *
+ * Shown whole, on one line: machine text scrolls in a bounded region rather
+ * than clipping (design.md), and here the region is the table's own scroll.
+ * An ellipsis hid the end of a long path, the part a reader checks before
+ * opening it. (#797 review)
  */
 function RuleAddress({ address, open }: { address: IngressRuleAddress | null; open: (url: string) => void }) {
   if (!address) return <span className="text-muted">—</span>;
   const copied = address.kind === "url" ? address.url : address.host;
   return (
-    <span className="flex min-w-0 items-center gap-1">
+    <span className="flex items-center gap-1">
       {address.kind === "url" ? (
-        <Button
-          variant="ghost"
-          size="xs"
-          className="-mx-1 min-w-0 max-w-full text-accent"
-          onClick={() => open(address.url)}
-        >
-          <span className="min-w-0 truncate font-mono">{address.url}</span>
+        <Button variant="ghost" size="xs" className="-mx-1 text-accent" onClick={() => open(address.url)}>
+          <span className="whitespace-nowrap font-mono">{address.url}</span>
         </Button>
       ) : (
-        <span className="min-w-0 truncate font-mono">{address.host}</span>
+        <span className="whitespace-nowrap font-mono">{address.host}</span>
       )}
       <CopyButton text={copied} label={`Copy ${copied}`} iconOnly />
     </span>
