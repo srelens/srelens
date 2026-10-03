@@ -54,7 +54,9 @@ pub async fn start_port_forward<R: Runtime>(
     Ok(info)
 }
 
-/// Stop a port-forward and abort its task.
+/// Stop a port-forward and abort its task. Any window may: each window's
+/// Forwards screen lists every forward ([`list_forwards`]) and offers to stop
+/// it. The window that started it then no longer holds it.
 #[tauri::command]
 pub async fn stop_port_forward<R: Runtime>(
     id: u64,
@@ -62,8 +64,9 @@ pub async fn stop_port_forward<R: Runtime>(
     manager: State<'_, ForwardManager>,
     owned: State<'_, WindowStreams>,
 ) -> Result<(), String> {
+    let _ = window;
     manager.stop(id);
-    owned.disown(window.label(), &Stream::Forward(id));
+    owned.disown_everywhere(&Stream::Forward(id));
     Ok(())
 }
 

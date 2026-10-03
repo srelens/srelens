@@ -159,6 +159,13 @@ impl WindowStreams {
         }
     }
 
+    /// Forget `stream` for whichever window holds it: one any window may stop.
+    pub fn disown_everywhere(&self, stream: &Stream) {
+        for owned in self.windows.lock().unwrap().values_mut() {
+            owned.streams.remove(stream);
+        }
+    }
+
     /// A stream that started for `window` at `epoch`: recorded as the
     /// window's, or — the window ended while it started — ended with `stop`,
     /// and refused. The start commands end with this.
@@ -910,6 +917,78 @@ pub(crate) mod tests {
                 .watches,
             1,
             "and is the window's to end"
+        );
+    }
+
+    /// The #735 kinds are held the way #733 holds watches and shells: another
+    /// window cannot stop a log stream, type into, resize or close a local
+    /// terminal — a shell on this machine — or abort a helm operation, which
+    /// killed partway leaves a release half-applied. Each is refused by name
+    /// and runs on. A port-forward is the exception: every window's Forwards
+    /// screen lists every forward (`list_forwards`), so any window may stop one
+    /// — and the window that opened it then no longer counts it as its own.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_window_cannot_stop_another_windows_log_stream_terminal_or_helm_operation() {
+        a_local_shell();
+        let server = Silent::start();
+        let (app, main, other) = server.app();
+        let bin = tempfile::tempdir().unwrap();
+        app.manage(HelmManager::with_helm(slow_helm(bin.path())));
+        let heard = heard(&app, &["term:exit:t-main", "helm:exit:h-main"]);
+        logs_in(&app, &main, "logs:main").await;
+        let terminal = terminal_in(&app, &main, &server, "t-main").await;
+        let helm = helm_in(&app, &main, &server, "web", "h-main").await;
+        let forward = forward_in(&app, &main, None).await;
+        eventually("the log stream and the forward reached the cluster", || {
+            server.open() >= 2
+        })
+        .await;
+
+        let refusals = [
+            crate::logs::stop_log_stream("logs:main".into(), other.clone(), app.state(), app.state())
+                .await,
+            crate::terminal::terminal_input(
+                terminal,
+                "exit\r\n".into(),
+                other.clone(),
+                app.state(),
+                app.state(),
+            )
+            .await,
+            crate::terminal::terminal_resize(terminal, 1, 1, other.clone(), app.state(), app.state())
+                .await,
+            crate::terminal::terminal_close(terminal, other.clone(), app.state(), app.state()).await,
+            crate::helm::helm_op_close(helm, other.clone(), app.state(), app.state(), app.state())
+                .await,
+        ];
+        for refused in refusals {
+            let refused = refused.unwrap_err();
+            assert!(refused.contains("not opened by this window"), "{refused}");
+        }
+        eventually("helm ran to its end, never aborted", || {
+            names(&heard).iter().any(|n| n == "helm:exit:h-main")
+        })
+        .await;
+        assert!(
+            !names(&heard).iter().any(|n| n == "term:exit:t-main"),
+            "the shell runs on"
+        );
+        assert!(server.open() >= 2, "the log stream follows on");
+
+        crate::forward::stop_port_forward(forward.id, other.clone(), app.state(), app.state())
+            .await
+            .unwrap();
+        eventually("the forward's port came free", || {
+            port_is_free(forward.local_port)
+        })
+        .await;
+        let ended = window_streams_reset(main, app.handle().clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            (ended.log_streams, ended.terminals, ended.forwards),
+            (1, 1, 0),
+            "main ends its own, and not the forward another window stopped"
         );
     }
 
