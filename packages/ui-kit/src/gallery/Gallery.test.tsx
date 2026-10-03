@@ -24,17 +24,21 @@ describe("Gallery", () => {
     // 7,347 style computations where one query costs 277. That is what timed
     // this test out on busy CI runners, at 5s and again at 15s. (#361)
     //
-    // Names are collected as the query computes them, so a heading is matched
-    // on the name assistive technology announces, not its text: one that reads
-    // "Badge" but is labelled otherwise does not count. (#794 review)
-    const drawn = new Set<string>();
-    screen.getAllByRole("heading", {
+    // Names are taken as the query computes them, so a heading is matched on
+    // the name assistive technology announces, not its text: one that reads
+    // "Badge" but is labelled otherwise does not count. And only the headings
+    // the query RETURNS count: it computes names before it drops what is
+    // hidden, so a heading in a hidden section is named but not returned.
+    // (#794 review)
+    const names = new Map<Element, string>();
+    const headings = screen.getAllByRole("heading", {
       level: 2,
-      name: (accessibleName) => {
-        drawn.add(accessibleName);
+      name: (accessibleName, element) => {
+        names.set(element, accessibleName);
         return true;
       },
     });
+    const drawn = new Set(headings.map((heading) => names.get(heading)));
     expect(
       components.filter((name) => !drawn.has(name)),
       "exported but not in the gallery",
