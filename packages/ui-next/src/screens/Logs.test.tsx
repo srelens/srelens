@@ -323,31 +323,36 @@ function push(...lines: { source: string; text: string; truncated?: true }[]) {
 }
 
 /**
- * The log region, after the screen has settled.
+ * The log region, once the stream behind it is listening.
  *
- * `findByRole` alone returns the element as soon as one appears, which is
- * before `resolveLogSubject` has settled — and when it does settle, React can
- * replace that node. Tests then held a DETACHED element: `querySelectorAll`
- * answers nothing, and a `clientHeight` defined on it is lost, so the window
- * sees a zero-height viewport and draws no rows at all. That surfaced as four
- * different tests in this file failing about one run in six, each passing
- * alone, and it is why the flakes moved around rather than sitting still.
+ * `findByRole` returns on the commit that mounts the stream, and that commit
+ * lands outside `act`: it comes from `resolveLogSubject`'s promise. So its
+ * passive effects, the stream hook's `useSyncExternalStore` subscription among
+ * them, run when React's scheduler gets round to them, not before the test's
+ * next line. A test that pushed lines or a restart through `notify()` in that
+ * gap reached no subscriber, and the screen went on drawing what it mounted
+ * with: an empty rail, no restart notice. Testing Library's own drain is a
+ * `setTimeout(0)` and the scheduler's is a `setImmediate`; which runs first is
+ * up to the machine, which is why these failed about one run in six under
+ * full-suite load and passed alone. (#361)
  *
- * Flushing pending promises first, then re-querying, hands back the node the
- * screen actually settled on.
+ * The barrier is the subscription itself. An empty `act` stood here before,
+ * and it usually gave the scheduler enough time: with the scheduler's tasks
+ * held back 60ms, 28 of this file's tests failed on every run, the dismiss,
+ * Sources-row and stripped-message failures CI had seen among them.
  *
  * **The ONLY barrier in this file, and the only `findByRole("log")` in it.**
  * The helper existed for thirty-five tests and was used by twenty-eight of
- * them; the other thirty-five sites still awaited `findByRole` raw, which is
- * the same unsettled node under a different name. #375 is one of those:
- * "draws a Sources row per pod" took the unsettled node, pushed lines into the
- * buffer, and the rail tallied an empty one — a failure that reached CI twice,
- * on #373 and again on #380. A raw `findByRole("log")` added back here is that
- * flake returning, so there is exactly one left and it is the line below.
+ * them; the other thirty-five sites still awaited `findByRole` raw, with no
+ * barrier at all. #375 is one of those: "draws a Sources row per pod" pushed
+ * lines before the stream had subscribed, and the rail tallied an empty
+ * buffer — a failure that reached CI twice, on #373 and again on #380. A raw
+ * `findByRole("log")` added back here is that flake returning, so there is
+ * exactly one left and it is the line below.
  */
 const body = async () => {
   await screen.findByRole("log", { name: /logs/i });
-  await act(async () => {});
+  await waitFor(() => expect(h.listeners.size).toBeGreaterThan(0));
   return screen.getByRole("log", { name: /logs/i });
 };
 
