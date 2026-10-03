@@ -2085,6 +2085,40 @@ it("says nothing about a policy on a host that has none", async () => {
   expect(screen.queryByRole("region", { name: "Server policy" })).toBeNull();
   expect(screen.queryByText("Required by this server")).toBeNull();
 });
+/** The unsigned-apps hint says where executable apps run, which depends on the host (#677, #788). */
+const unsignedHint = async () => (await screen.findByText(/^Off by default\./)).textContent ?? "";
+it("says on the desktop where executable apps run, and not that the host cannot run them", async () => {
+  vi.mocked(listExtensions).mockResolvedValue({ schemaVersion: 1, nextRevision: 2, plugins: [plugin] } as any);
+  render(<ExtensionManager />);
+  const hint = await unsignedHint();
+  expect(hint).toContain(
+    "Executable apps run sandboxed on Windows; on Linux only once the sandbox launcher and a delegated cgroup are set up by hand; not yet on macOS.",
+  );
+  expect(hint).not.toContain("not supported by this host");
+  expect(hint).not.toContain("This server does not run executable apps");
+  // The rest of the hint is unchanged.
+  expect(hint).toContain(
+    "Off by default. Read-only declarative apps need only their permission grants. Turning this off disables affected apps and keeps their settings. Turning it on does not re-enable them.",
+  );
+});
+it("says on a web server that it does not run executable apps", async () => {
+  host.tauri = false;
+  try {
+    vi.mocked(listExtensions).mockResolvedValue({
+      schemaVersion: 1, nextRevision: 2, plugins: [plugin], policy: serverPolicy,
+    } as any);
+    render(<ExtensionManager />);
+    const hint = await unsignedHint();
+    expect(hint).toContain("This server does not run executable apps.");
+    expect(hint).not.toContain("not supported by this host");
+    expect(hint).not.toContain("Executable apps run sandboxed on Windows");
+    expect(hint).toContain(
+      "Off by default. Read-only declarative apps need only their permission grants. Turning this off disables affected apps and keeps their settings. Turning it on does not re-enable them.",
+    );
+  } finally {
+    host.tauri = true;
+  }
+});
 /** A required app the user turned off before it was required can be turned back on. */
 it("lets a required app that is off be enabled", async () => {
   vi.mocked(listExtensions).mockResolvedValue({
