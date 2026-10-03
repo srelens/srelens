@@ -265,7 +265,7 @@ export function ExtensionManager() {
   /** Where executable apps run (#788). Only the web server reports a policy, and it never allows them; the desktop runs them per OS. */
   const executableAppsHint = state.policy
     ? "This server does not run executable apps."
-    : "Executable apps run sandboxed on Windows; on Linux only once the sandbox launcher and a delegated cgroup are set up by hand; not yet on macOS.";
+    : "Executable apps run sandboxed on Windows; on Linux only once the sandbox launcher and a delegated cgroup are set up by hand and the kernel has Landlock enabled; not yet on macOS.";
   return (
     <div className="extension-manager">
       <div className="extension-toolbar">

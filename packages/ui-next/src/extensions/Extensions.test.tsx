@@ -2092,7 +2092,7 @@ it("says on the desktop where executable apps run, and not that the host cannot 
   render(<ExtensionManager />);
   const hint = await unsignedHint();
   expect(hint).toContain(
-    "Executable apps run sandboxed on Windows; on Linux only once the sandbox launcher and a delegated cgroup are set up by hand; not yet on macOS.",
+    "Executable apps run sandboxed on Windows; on Linux only once the sandbox launcher and a delegated cgroup are set up by hand and the kernel has Landlock enabled; not yet on macOS.",
   );
   expect(hint).not.toContain("not supported by this host");
   expect(hint).not.toContain("This server does not run executable apps");
