@@ -4,12 +4,9 @@ An executable app runs as a sidecar that speaks JSON-RPC to srelens over its std
 stdout ([protocol](../docs/extensions/sidecar-protocol.md)). What is here helps a third
 party write one.
 
-Executable apps are a preview. They run out of the box on Windows. On Linux they need the
-sandbox launcher `srelens-sandbox-launch`, a cgroup v2 directory delegated to srelens and a
-kernel with Landlock enabled. The bundles do not ship the launcher, so set up the launcher
-and the cgroup by hand, naming them with `SRELENS_SANDBOX_LAUNCHER` and
-`SRELENS_SANDBOX_CGROUP_ROOT` ([recipe](../docs/DEVELOPMENT.md#everyday-commands)). On macOS they do not
-run yet. srelens refuses to start any sidecar until its memory and CPU watchdog has
+Executable apps are a preview. They run out of the box on Windows. On Linux they are not out of the box:
+they need the launcher `srelens-sandbox-launch`, Landlock and a delegated cgroup v2
+directory, set up by hand ([what is needed](../docs/extensions/manifest.md#where-executable-apps-run)). On macOS they do not run yet. srelens refuses to start any sidecar until its memory and CPU watchdog has
 been checked with Seatbelt on a macOS 27 Mac.
 
 | Path | What | Status |

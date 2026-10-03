@@ -28,15 +28,14 @@ Executable apps are a preview, and so is API 0.6, which adds them, until the API
 as 1.0 ([specification.md](specification.md#versioning)). Where they run:
 
 - **Windows:** out of the box.
-- **Linux:** needs the sandbox launcher `srelens-sandbox-launch`, a cgroup v2 directory
-  delegated to srelens and a kernel with Landlock enabled. The bundles do not ship the
-  launcher, so set up the launcher and the cgroup by hand, naming them with
-  `SRELENS_SANDBOX_LAUNCHER` and `SRELENS_SANDBOX_CGROUP_ROOT`;
-  [DEVELOPMENT.md](../DEVELOPMENT.md#everyday-commands) has the recipe.
+- **Linux:** not out of the box. It needs the launcher `srelens-sandbox-launch`, Landlock
+  and a delegated cgroup v2 directory, set up by hand
+  ([what is needed](manifest.md#where-executable-apps-run)).
 - **macOS:** not yet. srelens refuses to start any sidecar until its memory and CPU
   watchdog has been checked with Seatbelt on a macOS 27 Mac.
-- **The web host:** nowhere. It keeps no files for its apps, so it runs no sidecar
-  ([capabilities.md](capabilities.md#web-host)).
+- **The web host:** it refuses to install an executable app: its extension policy does not
+  allow one ([WEB.md](../WEB.md#extension-policy)), and it keeps no files for an app's
+  package ([capabilities.md](capabilities.md#web-host)).
 
 ## What an app cannot do
 

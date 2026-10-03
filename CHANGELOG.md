@@ -33,14 +33,14 @@ the API they need, API 0.6, until it is frozen as 1.0 (srelens/srelens#582). Whe
 run:
 
 - Windows: out of the box.
-- Linux: needs the sandbox launcher `srelens-sandbox-launch`, a cgroup v2 directory
-  delegated to srelens and a kernel with Landlock enabled. The bundles do not ship the
-  launcher, so set up the launcher and the cgroup by hand, naming them with
-  `SRELENS_SANDBOX_LAUNCHER` and `SRELENS_SANDBOX_CGROUP_ROOT`;
-  [DEVELOPMENT.md](docs/DEVELOPMENT.md#everyday-commands) has the recipe. Without them the
-  app installs, but srelens refuses to start its sidecar and says what is missing.
+- Linux: not out of the box. It needs the launcher `srelens-sandbox-launch`, which the
+  bundles do not ship, Landlock and a cgroup v2 directory delegated to the user, set up by
+  hand; `SRELENS_SANDBOX_LAUNCHER` and `SRELENS_SANDBOX_CGROUP_ROOT` name them
+  ([what is needed](docs/extensions/manifest.md#where-executable-apps-run)). Without them
+  the app installs, but srelens refuses to start its sidecar and says what is missing.
 - macOS: not yet. srelens refuses to start any sidecar until its memory and CPU watchdog has
   been checked with Seatbelt on a macOS 27 Mac.
+- The web host: it refuses to install an executable app.
 
 An executable app also needs a verified publisher, or the off-by-default setting **Allow
 unsigned apps to modify clusters and run code**. What the platform does not yet protect is

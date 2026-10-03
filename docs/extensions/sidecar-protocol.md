@@ -23,12 +23,9 @@ MCP tool, `plugin/<id>/<operation>` ([MCP.md](../MCP.md#installed-apps-tools)). 
 registry's side is `crates/registry/src/extensions/sidecars.rs`. What is not built is
 listed under [Not yet](#not-yet).
 
-Executable apps are a preview. They run out of the box on Windows. On Linux they need the
-sandbox launcher `srelens-sandbox-launch`, a cgroup v2 directory delegated to srelens and a
-kernel with Landlock enabled. The bundles do not ship the launcher, so set up the launcher
-and the cgroup by hand, naming them with `SRELENS_SANDBOX_LAUNCHER` and
-`SRELENS_SANDBOX_CGROUP_ROOT` ([recipe](../DEVELOPMENT.md#everyday-commands)). On macOS they do not
-run yet. srelens refuses to start any sidecar until its memory and CPU watchdog has
+Executable apps are a preview. They run out of the box on Windows. On Linux they are not out of the box:
+they need the launcher `srelens-sandbox-launch`, Landlock and a delegated cgroup v2
+directory, set up by hand ([what is needed](manifest.md#where-executable-apps-run)). On macOS they do not run yet. srelens refuses to start any sidecar until its memory and CPU watchdog has
 been checked with Seatbelt on a macOS 27 Mac. The [sandbox](#sandbox) section has the detail.
 
 ## The wire

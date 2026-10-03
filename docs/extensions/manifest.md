@@ -1136,17 +1136,30 @@ Executable apps are a preview, and so is API 0.6, until the API is frozen as 1.0
 ([specification.md](specification.md#versioning)).
 
 - **Windows:** out of the box.
-- **Linux:** needs the sandbox launcher `srelens-sandbox-launch`, a cgroup v2 directory
-  delegated to srelens and a kernel with Landlock enabled. The bundles do not ship the
-  launcher, so set up the launcher and the cgroup by hand, naming them with
-  `SRELENS_SANDBOX_LAUNCHER` and `SRELENS_SANDBOX_CGROUP_ROOT`;
-  [DEVELOPMENT.md](../DEVELOPMENT.md#everyday-commands) has the recipe.
+- **Linux:** not out of the box in this release. It needs all of these:
+  - the launcher `srelens-sandbox-launch`, which the bundles do not ship. Build it with
+    `cargo build --release -p srelens-plugin-host --bin srelens-sandbox-launch`. srelens
+    finds it beside its own binary, or at the path in `SRELENS_SANDBOX_LAUNCHER`;
+  - a kernel with Landlock enabled;
+  - a cgroup v2 directory delegated to the user, with the `memory` and `cpu` controllers
+    enabled for its children, named in `SRELENS_SANDBOX_CGROUP_ROOT`, and srelens itself
+    running in a leaf of it. A process can move another only between cgroups under one it
+    may write, and each sidecar's launcher moves itself into a new sibling of that leaf.
+
+  There is no tested desktop procedure for the cgroup yet. The `sandbox-conformance` job in
+  [ci.yml](../../.github/workflows/ci.yml) shows the exact steps on a runner. Its "Delegate
+  a cgroup" step makes a subtree the runner's user owns and enables `memory` and `cpu` at
+  the root. Its Linux "Conformance" step moves the shell into a leaf of the subtree, enables
+  `+memory +cpu` for the subtree's children, and sets `SRELENS_SANDBOX_CGROUP_ROOT`.
 - **macOS:** not yet. srelens refuses to start any sidecar until its memory and CPU
   watchdog has been checked with Seatbelt on a macOS 27 Mac.
-- **The web host:** nowhere. It keeps no files for its apps, so it runs no sidecar.
+- **The web host:** it refuses to install an executable app. Its extension policy does not
+  allow one: `allowExecutableApps` must stay `false`, and an app that fails a policy rule
+  is refused as a whole ([the policy table](../WEB.md#extension-policy)). It also keeps no
+  files for an app's package.
 
-Where one cannot run, srelens refuses to start its sidecar and says what is missing; it
-never starts a sidecar unconfined.
+On a desktop OS where a sidecar cannot run, the app installs, and srelens refuses to start
+its sidecar and says what is missing; it never starts a sidecar unconfined.
 
 ### What the host holds a sidecar to
 
