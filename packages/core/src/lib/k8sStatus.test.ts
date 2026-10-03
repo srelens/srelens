@@ -167,7 +167,8 @@ describe("resourceStatusLine — Pod", () => {
       containerStatuses: [container("runner", { terminated: { reason: "Completed", exitCode: 0 } }, false)],
     });
     const line = resourceStatusLine("Pod", succeeded);
-    expect(line?.status).toBe("Succeeded");
+    // kubectl's word for a finished pod is its container's: `Completed`.
+    expect(line?.status).toBe("Completed");
     expect(line?.health).toBe("success");
     expect(line?.flagged).toBe(false);
   });
@@ -178,9 +179,52 @@ describe("resourceStatusLine — Pod", () => {
       containerStatuses: [container("runner", { terminated: { reason: "Error", exitCode: 1 } }, false)],
     });
     expect(resourceStatusLine("Pod", failed)).toEqual({
-      status: "Failed",
+      status: "Error",
       health: "danger",
       readyText: "0/1 ready",
+      flagged: true,
+    });
+  });
+
+  it("names a container killed for memory, as kubectl does, and tones it danger", () => {
+    const oom = pod({
+      phase: "Running",
+      containerStatuses: [container("api", { terminated: { reason: "OOMKilled", exitCode: 137 } }, false, 3)],
+    });
+    expect(resourceStatusLine("Pod", oom)).toEqual({
+      status: "OOMKilled",
+      health: "danger",
+      readyText: "0/1 ready",
+      flagged: true,
+    });
+  });
+
+  it("reads a pod still in its init containers as progress, warning-toned", () => {
+    const initializing = pod(
+      {
+        phase: "Pending",
+        initContainerStatuses: [container("fetch", { running: {} }, false)],
+        containerStatuses: [container("app", { waiting: { reason: "PodInitializing" } }, false)],
+      },
+      { initContainers: [{ name: "fetch" }, { name: "migrate" }] },
+    );
+    expect(resourceStatusLine("Pod", initializing)).toEqual({
+      status: "Init:0/2",
+      health: "warning",
+      readyText: "0/1 ready",
+      flagged: true,
+    });
+  });
+
+  it("reads a pod being deleted as Terminating, warning-toned", () => {
+    const deleting: K8sObject = {
+      ...pod({ phase: "Running", containerStatuses: [container("api", { running: {} }, true)] }),
+      metadata: { name: "cart-session-store-0", namespace: "checkout", deletionTimestamp: "2026-10-03T10:05:00Z" },
+    };
+    expect(resourceStatusLine("Pod", deleting)).toEqual({
+      status: "Terminating",
+      health: "warning",
+      readyText: "1/1 ready",
       flagged: true,
     });
   });
@@ -213,15 +257,18 @@ describe("resourceStatusLine — Pod", () => {
     });
   });
 
-  it("ignores a waiting container once the pod has reached a terminal phase", () => {
+  it("never flags a finished pod, whatever its containers report", () => {
     // A Succeeded pod's containers are terminated; a stray waiting entry must
-    // not drag a finished pod back to "not ready" and re-earn it a dot.
+    // not re-earn a finished pod a dot. The word is still kubectl's, which
+    // reads the containers whatever the phase.
     const done = pod({
       phase: "Succeeded",
       containerStatuses: [container("api", { waiting: { reason: "CrashLoopBackOff" } }, false)],
     });
-    expect(resourceStatusLine("Pod", done)?.status).toBe("Succeeded");
-    expect(resourceStatusLine("Pod", done)?.flagged).toBe(false);
+    const line = resourceStatusLine("Pod", done);
+    expect(line?.status).toBe("CrashLoopBackOff");
+    expect(line?.health).toBe("success");
+    expect(line?.flagged).toBe(false);
   });
 
   it("counts the ready containers across a multi-container pod", () => {
@@ -562,6 +609,51 @@ describe("podStatus — a crash-looper reads kubectl's word at every moment", ()
     expect(podStatus(UP_BETWEEN_RESTARTS)).toEqual({ status: "Running", health: "success", flagged: false });
   });
 
+  /** The live pod at each moment, as the detail header fetches it. */
+  const live = (state: Record<string, unknown>): K8sObject => ({
+    kind: "Pod",
+    status: {
+      phase: "Running",
+      containerStatuses: [{ name: "adapter", ready: false, restartCount: 1123, state }],
+    },
+  });
+
+  it("gives the header the same verdict as the row, at every moment", () => {
+    // The two readings that must never disagree: the pods list row and the
+    // detail header, on the same pod at the same moment.
+    const verdictOf = (object: K8sObject) => {
+      const { readyText, ...verdict } = resourceStatusLine("Pod", object)!;
+      expect(readyText).toBe("0/1 ready");
+      return verdict;
+    };
+    expect(verdictOf(live({ waiting: { reason: "CrashLoopBackOff" } }))).toEqual(podStatus(BACKING_OFF));
+    expect(verdictOf(live({ terminated: { exitCode: 1, reason: "Error", finishedAt: "2026-08-24T13:28:18Z" } }))).toEqual(
+      podStatus(EXITED),
+    );
+    expect(verdictOf(live({ running: { startedAt: "2026-08-24T13:28:18Z" } }))).toEqual(
+      podStatus(UP_BETWEEN_RESTARTS),
+    );
+  });
+
+  it("reads a sidecar pod with one unready container as kubectl does: Running", () => {
+    const object: K8sObject = {
+      kind: "Pod",
+      status: {
+        phase: "Running",
+        containerStatuses: [
+          { name: "app", ready: true, restartCount: 0, state: { running: {} } },
+          { name: "envoy", ready: false, restartCount: 12, state: { running: {} } },
+        ],
+      },
+    };
+    expect(resourceStatusLine("Pod", object)).toEqual({
+      status: "Running",
+      health: "success",
+      flagged: false,
+      readyText: "1/2 ready",
+    });
+  });
+
   it("leaves a pod the kubelet has not reported containers for alone", () => {
     // No container statuses at all: no ratio to show, and nothing that says
     // the pod is unready — only that nobody has looked yet.
@@ -606,6 +698,10 @@ describe("the tone and the dot are paired structurally", () => {
       // A word nothing knows, neither kubectl's table nor the phase table —
       // the only producer of UNREADABLE.
       ["Pod", pod({ phase: "Mystery" })],
+      // kubectl's words that no phase carries: a container killed for
+      // memory, and a pod still in its init containers.
+      ["Pod", pod({ phase: "Running", containerStatuses: [container("a", { terminated: { reason: "OOMKilled", exitCode: 137 } }, false)] })],
+      ["Pod", pod({ phase: "Pending", initContainerStatuses: [container("i", { running: {} }, false)] }, { initContainers: [{ name: "i" }] })],
       ["Deployment", deployment({ replicas: 3 }, { readyReplicas: 3 })],
       ["Deployment", deployment({ replicas: 3 }, { readyReplicas: 1 })],
       ["Deployment", deployment({ replicas: 0 }, {})],

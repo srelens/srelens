@@ -17,6 +17,7 @@
  */
 import { phaseKind, waitingKind, type HealthKind } from "./k8sHealth";
 import { asArray, asRecord, str } from "./k8sRaw";
+import { kubectlPodStatus } from "./kubectlPodStatus";
 import type { K8sObject } from "./manifest";
 
 /** A status word with the tone and the dot that go with it. */
@@ -260,10 +261,10 @@ export function podStatus(pod: PodVitals): StatusVerdict {
 }
 
 /**
- * The same reading, off a fetched Pod: pull the phase, the first waiting
- * reason, the ready ratio and the restart total out of the object — the four
- * fields `summarise_pod` puts on a `PodSummary` — and hand them to
- * `podStatus`, then add the ready phrase only a detail header shows.
+ * The same reading, off a fetched Pod: the phase, the first waiting reason and
+ * kubectl's word, which `kubectlPodStatus` derives from the object by the rules
+ * the backend's `kubectl_status` puts on a `PodSummary` as `status`. They go
+ * to `podStatus`, and the ready phrase only a detail header shows is added.
  */
 function podStatusLine(object: K8sObject): ResourceStatusLine {
   const status = asRecord(object.status);
@@ -277,7 +278,7 @@ function podStatusLine(object: K8sObject): ResourceStatusLine {
   const waitingReason = statuses
     .map((c) => str(asRecord(asRecord(c.state).waiting).reason))
     .find((reason) => reason !== "");
-  const vitals: PodVitals = { phase: str(status.phase), waitingReason };
+  const vitals: PodVitals = { phase: str(status.phase), waitingReason, status: kubectlPodStatus(object) };
   return { ...podStatus(vitals), readyText };
 }
 
