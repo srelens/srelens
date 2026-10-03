@@ -470,13 +470,13 @@ export function useDetailPaneState({
   // this is looked up here rather than threaded in from a descriptor.
   const builtIn = isBuiltInKind(kind);
   // The Details pane keeps a Secret's values out of the DOM until the reader
-  // reveals them; `k8s.getManifest` returns them in the clear (only
-  // `k8s.getObject` redacts — see `crates/kube/src/manifest.rs`), so without
-  // this the reveal gate is worth nothing to anyone who clicks one tab over.
-  // The redaction goes here, on the result, rather than inside `getManifest`:
-  // classic calls that same function and deliberately shows the manifest
-  // unredacted, and classic is frozen. Divergence from classic here is the
-  // point, not an oversight.
+  // reveals them, and `k8s.getManifest` is an ungated read. The host blanks a
+  // Secret's values on it (#661, `crates/kube/src/manifest.rs`); this redacts
+  // again on arrival rather than trust that alone, because without it the
+  // reveal gate is worth nothing to anyone who clicks one tab over. The
+  // redaction goes here, on the result, rather than inside `getManifest`,
+  // because other callers of that function handle a Secret their own way.
+  // Classic's drawer YAML view does exactly this too (#659).
   const isSecret = kind === "Secret";
   const yamlState = useLoad<string>(openedPanes.has(PANE_YAML), target, async () => {
     let crd: DynamicGvk | undefined;
