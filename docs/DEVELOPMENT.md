@@ -476,6 +476,24 @@ unrevoked. A rotation that updates the secret but not the table — or the
 reverse — fails the release rather than publishing signatures the instructions
 tell users to reject.
 
+**Rotate in two releases, for `srelens-tui update`.** The TUI's self-update
+trusts the keys `KEYS` held when that binary was built, compiled in, and
+nothing else (#448). A binary already installed never learns a key added
+later. So a new key has to ship before it signs:
+
+1. Add the new key to `KEYS` as in step 4, but leave `GPG_PRIVATE_KEY` and the
+   `**current**` row on the old key. Cut a stable release. Every binary from
+   then on trusts both keys.
+2. In a later release, switch `GPG_PRIVATE_KEY` to the new key and move the
+   `**current**` marker to its row.
+
+A binary older than step 1 cannot verify anything the new key signs, so its
+users must install by hand once. Two more things follow from compiling the keys
+in. Extending a key's expiry also reaches only binaries built after `KEYS`
+carries the extension, so extend at least one release before the old expiry.
+And revoking a key in `KEYS` protects only binaries built after the
+revocation. That is why a lost key also needs the new key in place quickly.
+
 **5. Verify the next release.** After the following release completes, download
 one asset and its `.asc` and confirm `gpg --verify` succeeds following only the
 public instructions — the signing job failing loudly is not proof the signature

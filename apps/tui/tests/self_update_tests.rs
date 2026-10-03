@@ -9,10 +9,12 @@
 use std::path::{Path, PathBuf};
 
 use srelens_tui::self_update::{
-    apply, asset_name, asset_url, checksum_for, extract_binary, is_newer, package_manager_for,
-    parse_latest_version, parse_newest_version, plan, replace_running_binary, sums_name,
-    triple_for, verify_sha256, Channel, Check, Plan, UpdateError, LATEST_RELEASE_URL, RELEASES_URL,
+    apply, apply_with_keys, asset_name, asset_url, checksum_for, extract_binary, is_newer,
+    package_manager_for, parse_latest_version, parse_newest_version, plan, replace_running_binary,
+    sums_name, sums_signature_name, triple_for, verify_sha256, Channel, Check, Plan, UpdateError,
+    LATEST_RELEASE_URL, RELEASES_URL,
 };
+use srelens_tui::update_signature::SignatureProblem;
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -61,9 +63,20 @@ fn here() -> &'static str {
     .expect("this platform has a release target")
 }
 
-/// The two asset names a release must carry for `version` to be installable
-/// here, as the GitHub API would list them.
+/// The asset names a release must carry for `version` to be installable
+/// here, as the GitHub API would list them: the archive, the checksum file,
+/// and the checksum file's signature.
 fn assets_for(version: &str) -> String {
+    format!(
+        r#"[{{"name":"{}"}},{{"name":"{}"}},{{"name":"{}"}}]"#,
+        asset_name(version, here()),
+        sums_name(version),
+        sums_signature_name(version)
+    )
+}
+
+/// The same release before signing reached it: archive and checksums only.
+fn unsigned_assets_for(version: &str) -> String {
     format!(
         r#"[{{"name":"{}"}},{{"name":"{}"}}]"#,
         asset_name(version, here()),
@@ -606,6 +619,43 @@ fn a_release_missing_only_the_checksum_file_is_also_passed_over() {
     ));
 }
 
+/// Dev pre-releases are public before `sign-artifacts` runs, and signing
+/// them is best-effort, so an unsigned one is expected rather than suspicious.
+/// It is passed over, as an incomplete one is, for the newest that IS signed:
+/// the dev channel installs signed builds only.
+#[test]
+fn the_dev_channel_passes_over_a_release_whose_checksums_are_not_signed() {
+    let body = format!(
+        r#"[
+        {{"tag_name":"srelens-v0.8.1-152","prerelease":true,"assets":{}}},
+        {{"tag_name":"srelens-v0.8.1-150","prerelease":true,"assets":{}}}
+    ]"#,
+        unsigned_assets_for("0.8.1-152"),
+        assets_for("0.8.1-150")
+    );
+    assert_eq!(
+        parse_newest_version(body.as_bytes(), here()).unwrap(),
+        "0.8.1-150"
+    );
+}
+
+/// A stable release is published only after signing succeeds, so one without
+/// a signature is not a release to wait out. It is refused, by name.
+#[test]
+fn a_stable_release_whose_checksums_are_not_signed_is_refused_by_name() {
+    let body = format!(
+        r#"{{"tag_name":"srelens-v0.9.0","prerelease":false,"assets":{}}}"#,
+        unsigned_assets_for("0.9.0")
+    );
+    match parse_latest_version(body.as_bytes(), here()) {
+        Err(UpdateError::BadRelease(why)) => {
+            assert!(why.contains("srelens-v0.9.0"), "{why}");
+            assert!(why.contains("signature"), "{why}");
+        }
+        other => panic!("expected the unsigned release to be refused, got {other:?}"),
+    }
+}
+
 /// On stable there is nothing to fall back to, so the same situation is
 /// reported instead of skipped — a named reason now beats a 404 later.
 #[test]
@@ -1024,12 +1074,105 @@ fn a_failed_release_lookup_is_reported_rather_than_swallowed() {
 // Applying — the part no release can exercise yet
 // ---------------------------------------------------------------------------
 
-/// Build a plan whose target is a real file in `dir`, plus a fetch that serves
-/// a matching archive and checksum file.
-fn staged(
-    dir: &Path,
-    body: &'static [u8],
-) -> (Plan, impl Fn(&str) -> Result<Vec<u8>, UpdateError>) {
+/// A signing key made for one test, standing in for the release key, which
+/// no test can sign with.
+struct TestKey(pgp::composed::SignedSecretKey);
+
+impl TestKey {
+    fn new() -> Self {
+        let mut params = pgp::composed::SecretKeyParamsBuilder::default();
+        params
+            .key_type(pgp::composed::KeyType::Ed25519Legacy)
+            .can_sign(true)
+            .can_certify(true)
+            .primary_user_id("srelens update test key <test@test.invalid>".into());
+        let key = params
+            .build()
+            .expect("key parameters")
+            .generate(rand::thread_rng())
+            .expect("a test key");
+        Self(key)
+    }
+
+    /// The public half, armored the way `KEYS` holds it.
+    fn public(&self) -> String {
+        self.0
+            .to_public_key()
+            .to_armored_string(Default::default())
+            .expect("armor the public key")
+    }
+
+    fn fingerprint(&self) -> String {
+        use pgp::types::KeyDetails;
+        format!("{:X}", self.0.fingerprint())
+    }
+
+    /// A detached binary signature over `data`, armored, as `sign-artifacts`
+    /// writes it with `gpg --armor --detach-sign`.
+    fn sign(&self, data: &[u8]) -> Vec<u8> {
+        pgp::composed::DetachedSignature::sign_binary_data(
+            rand::thread_rng(),
+            &self.0.primary_key,
+            &pgp::types::Password::empty(),
+            pgp::crypto::hash::HashAlgorithm::Sha256,
+            data,
+        )
+        .expect("sign")
+        .to_armored_bytes(Default::default())
+        .expect("armor the signature")
+    }
+}
+
+/// A release an update can be applied from, served without the network: the
+/// archive, its checksum file, and that file's signature by `key`.
+struct Release {
+    plan: Plan,
+    archive: Vec<u8>,
+    sums: Vec<u8>,
+    signature: Vec<u8>,
+    key: TestKey,
+    /// Every URL the update asked for, in order.
+    asked: std::cell::RefCell<Vec<String>>,
+}
+
+impl Release {
+    /// The fetch an update makes, answered from this release.
+    fn fetch(&self, url: &str) -> Result<Vec<u8>, UpdateError> {
+        self.asked.borrow_mut().push(url.to_string());
+        if url == self.plan.sums_url {
+            Ok(self.sums.clone())
+        } else if url == self.plan.sums_signature_url {
+            Ok(self.signature.clone())
+        } else if url == self.plan.archive_url {
+            Ok(self.archive.clone())
+        } else {
+            Err(UpdateError::Download(format!("404 Not Found for {url}")))
+        }
+    }
+
+    fn asked_for(&self, url: &str) -> bool {
+        self.asked.borrow().iter().any(|asked| asked == url)
+    }
+
+    /// The keys a build trusts when the key that signed this release is the
+    /// release key.
+    fn trusted_keys(&self) -> String {
+        self.key.public()
+    }
+
+    /// Replace the checksum file, signed by the same key, as a release that
+    /// really published it would be.
+    fn with_signed_sums(mut self, sums: Vec<u8>) -> Self {
+        self.signature = self.key.sign(&sums);
+        self.sums = sums;
+        self
+    }
+}
+
+/// Build a release whose plan targets a real file in `dir`, carrying an
+/// archive of `body`, a checksum file that matches it, and that file's
+/// signature.
+fn staged(dir: &Path, body: &'static [u8]) -> Release {
     let triple = triple_for(
         std::env::consts::OS,
         std::env::consts::ARCH,
@@ -1041,33 +1184,45 @@ fn staged(
     std::fs::write(&target, b"the old binary").expect("seed the installed binary");
 
     let archive = archive_for(&asset, body);
-    let sums = format!("{}  {}\n", sha256_hex(&archive), asset);
+    let sums = format!("{}  {}\n", sha256_hex(&archive), asset).into_bytes();
+    let key = TestKey::new();
     let plan = Plan {
         current: "1.0.0".into(),
         latest: "2.0.0".into(),
         archive_url: asset_url("2.0.0", &asset),
         sums_url: asset_url("2.0.0", &sums_name("2.0.0")),
+        sums_signature_url: asset_url("2.0.0", &sums_signature_name("2.0.0")),
         asset,
         target,
     };
-    let sums_url = plan.sums_url.clone();
-    let fetch = move |url: &str| -> Result<Vec<u8>, UpdateError> {
-        if url == sums_url {
-            Ok(sums.clone().into_bytes())
-        } else {
-            Ok(archive.clone())
-        }
-    };
-    (plan, fetch)
+    Release {
+        plan,
+        archive,
+        signature: key.sign(&sums),
+        sums,
+        key,
+        asked: Default::default(),
+    }
 }
 
 #[test]
 fn a_verified_download_replaces_the_installed_binary() {
     let dir = tempfile::tempdir().unwrap();
-    let (plan, fetch) = staged(dir.path(), b"the new binary");
+    let release = staged(dir.path(), b"the new binary");
 
-    apply(&plan, &fetch).expect("the update applies");
+    let signer = apply_with_keys(
+        &release.plan,
+        &|url: &str| release.fetch(url),
+        &release.trusted_keys(),
+    )
+    .expect("the update applies");
 
+    assert_eq!(
+        signer,
+        release.key.fingerprint(),
+        "it says which key vouched for the release"
+    );
+    let plan = &release.plan;
     assert_eq!(
         std::fs::read(&plan.target).unwrap(),
         b"the new binary",
@@ -1088,40 +1243,110 @@ fn a_verified_download_replaces_the_installed_binary() {
 #[test]
 fn a_download_that_fails_verification_leaves_the_old_binary_in_place() {
     let dir = tempfile::tempdir().unwrap();
-    let (plan, _) = staged(dir.path(), b"unused");
-    let asset = plan.asset.clone();
-    let sums_url = plan.sums_url.clone();
-    // The checksum file names a hash the archive does not have — what a
-    // substituted or truncated download looks like.
-    let fetch = move |url: &str| -> Result<Vec<u8>, UpdateError> {
-        if url == sums_url {
-            Ok(format!("{}  {}\n", "a".repeat(64), asset).into_bytes())
-        } else {
-            Ok(archive_for(&asset, b"tampered"))
-        }
-    };
+    let release = staged(dir.path(), b"unused");
+    // A signed checksum file naming a hash the archive does not have: what a
+    // truncated or corrupted download looks like.
+    let sums = format!("{}  {}\n", "a".repeat(64), release.plan.asset).into_bytes();
+    let release = release.with_signed_sums(sums);
 
-    match apply(&plan, &fetch) {
+    match apply_with_keys(
+        &release.plan,
+        &|url: &str| release.fetch(url),
+        &release.trusted_keys(),
+    ) {
         Err(UpdateError::ChecksumMismatch { .. }) => {}
         other => panic!("expected a checksum mismatch, got {other:?}"),
     }
     assert_eq!(
-        std::fs::read(&plan.target).unwrap(),
+        std::fs::read(&release.plan.target).unwrap(),
         b"the old binary",
         "the installed binary must be untouched"
+    );
+}
+
+/// The case the checksum alone could not catch (#448): someone able to
+/// replace release assets replaces the archive AND the checksum file, so the
+/// two agree. Only the signature over the checksum file tells them apart.
+#[test]
+fn a_checksum_file_changed_after_it_was_signed_is_refused_before_the_archive_is_fetched() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut release = staged(dir.path(), b"the genuine binary");
+    let substitute = archive_for(&release.plan.asset, b"someone else's binary");
+    release.sums = format!("{}  {}\n", sha256_hex(&substitute), release.plan.asset).into_bytes();
+    release.archive = substitute;
+
+    match apply_with_keys(
+        &release.plan,
+        &|url: &str| release.fetch(url),
+        &release.trusted_keys(),
+    ) {
+        Err(UpdateError::Unverified { why, .. }) => assert_eq!(why, SignatureProblem::Mismatch),
+        other => panic!("expected the checksums to fail their signature, got {other:?}"),
+    }
+    assert!(
+        !release.asked_for(&release.plan.archive_url),
+        "nothing past the checksums is downloaded once they fail"
+    );
+    assert_eq!(
+        std::fs::read(&release.plan.target).unwrap(),
+        b"the old binary"
+    );
+}
+
+/// A signature is only as good as the key behind it: one this build does not
+/// trust is no better than none.
+#[test]
+fn checksums_signed_by_a_key_this_build_does_not_trust_are_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let release = staged(dir.path(), b"unused");
+    let someone_else = TestKey::new();
+
+    match apply_with_keys(
+        &release.plan,
+        &|url: &str| release.fetch(url),
+        &someone_else.public(),
+    ) {
+        Err(UpdateError::Unverified { why, .. }) => {
+            assert_eq!(why, SignatureProblem::UnknownSigner)
+        }
+        other => panic!("expected an untrusted signer, got {other:?}"),
+    }
+    assert!(!release.asked_for(&release.plan.archive_url));
+    assert_eq!(
+        std::fs::read(&release.plan.target).unwrap(),
+        b"the old binary"
+    );
+}
+
+/// `apply` is what the command runs, so it must trust the keys compiled in
+/// from `KEYS` and nothing else, not whatever key a test or a release offers.
+#[test]
+fn a_plain_apply_trusts_only_the_keys_compiled_in() {
+    let dir = tempfile::tempdir().unwrap();
+    let release = staged(dir.path(), b"unused");
+
+    match apply(&release.plan, &|url: &str| release.fetch(url)) {
+        Err(UpdateError::Unverified { why, .. }) => {
+            assert_eq!(why, SignatureProblem::UnknownSigner)
+        }
+        other => panic!("expected the test key to be untrusted, got {other:?}"),
+    }
+    assert_eq!(
+        std::fs::read(&release.plan.target).unwrap(),
+        b"the old binary"
     );
 }
 
 #[test]
 fn a_binary_a_package_manager_owns_is_refused_before_anything_is_downloaded() {
     let dir = tempfile::tempdir().unwrap();
-    let (mut plan, _) = staged(dir.path(), b"unused");
-    plan.target = PathBuf::from("/opt/homebrew/bin").join(bin_name());
+    let mut release = staged(dir.path(), b"unused");
+    release.plan.target = PathBuf::from("/opt/homebrew/bin").join(bin_name());
     let fetch = |_: &str| -> Result<Vec<u8>, UpdateError> {
         panic!("nothing should be downloaded for a package-managed binary")
     };
 
-    match apply(&plan, &fetch) {
+    match apply(&release.plan, &fetch) {
         Err(UpdateError::PackageManaged { manager, .. }) => assert_eq!(manager, "Homebrew"),
         other => panic!("expected PackageManaged, got {other:?}"),
     }
@@ -1153,4 +1378,19 @@ fn the_installed_binary_is_executable() {
     replace_running_binary(&target, b"new").expect("replace");
     let mode = std::fs::metadata(&target).unwrap().permissions().mode();
     assert_eq!(mode & 0o111, 0o111, "mode was {mode:o} — not executable");
+}
+
+/// What `update` guarantees has to be stated where someone running it sees
+/// it, not only in the install guide (#448): `update --help`.
+#[test]
+fn update_help_says_what_is_verified_before_installing() {
+    use clap::CommandFactory;
+    let mut cli = srelens_tui::Cli::command();
+    let help = cli
+        .find_subcommand_mut("update")
+        .expect("an update subcommand")
+        .render_long_help()
+        .to_string();
+    assert!(help.contains("signed"), "{help}");
+    assert!(help.contains("KEYS"), "{help}");
 }

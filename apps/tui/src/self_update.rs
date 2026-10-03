@@ -10,9 +10,10 @@
 //! Two rules the code is built around, both of them about not leaving someone
 //! worse off than before they ran it:
 //!
-//! - Nothing is written until the download's SHA-256 matches the checksum the
-//!   release publishes. A corrupt or substituted archive never reaches the
-//!   path the user runs.
+//! - Nothing is written until the release's checksum file carries a good
+//!   signature by a release key compiled into this binary (#448), and the
+//!   download's SHA-256 matches the checksum in it. A corrupt or substituted
+//!   archive never reaches the path the user runs.
 //! - The final step is always a rename, never a copy into place, so an
 //!   interrupted update cannot produce a half-written binary.
 
@@ -91,6 +92,11 @@ pub enum UpdateError {
     ChecksumMissing { asset: String },
     /// The archive's hash is not the published one.
     ChecksumMismatch { expected: String, actual: String },
+    /// A file the update relies on is not signed by a srelens release key.
+    Unverified {
+        file: String,
+        why: crate::update_signature::SignatureProblem,
+    },
     /// The archive did not contain the binary.
     BinaryMissing { asset: String },
     /// A download failed; retrying may work.
@@ -140,6 +146,10 @@ impl fmt::Display for UpdateError {
             Self::ChecksumMismatch { expected, actual } => write!(
                 f,
                 "the download does not match its published checksum (expected {expected}, got {actual}) — nothing was changed"
+            ),
+            Self::Unverified { file, why } => write!(
+                f,
+                "{file} is not signed by a srelens release key: {why}. Nothing was changed. Do not install this release by hand either — report it at https://github.com/srelens/srelens/issues"
             ),
             Self::BinaryMissing { asset } => {
                 write!(f, "{asset} does not contain {BIN}")
@@ -237,6 +247,11 @@ pub fn sums_name(version: &str) -> String {
     format!("srelens-tui-{version}-SHA256SUMS.txt")
 }
 
+/// The detached signature `sign-artifacts` publishes for the checksum file.
+pub fn sums_signature_name(version: &str) -> String {
+    format!("{}.asc", sums_name(version))
+}
+
 /// A release asset's download URL.
 pub fn asset_url(version: &str, file: &str) -> String {
     format!("{DOWNLOAD_BASE}/srelens-v{version}/{file}")
@@ -276,6 +291,20 @@ fn release_carries_this_platform(release: &serde_json::Value, version: &str, tri
     names.contains(&archive.as_str()) && names.contains(&sums.as_str())
 }
 
+/// Whether a release publishes the signature over its checksum file, which
+/// is what lets an update trust the checksums at all (#448).
+fn release_is_signed(release: &serde_json::Value, version: &str) -> bool {
+    let signature = sums_signature_name(version);
+    release
+        .get("assets")
+        .and_then(|a| a.as_array())
+        .is_some_and(|assets| {
+            assets
+                .iter()
+                .any(|a| a.get("name").and_then(|n| n.as_str()) == Some(signature.as_str()))
+        })
+}
+
 /// The version of the latest stable release, from the API's JSON.
 ///
 /// Tags are `srelens-v<version>`; the prefix is stripped so the rest of the
@@ -295,6 +324,14 @@ pub fn parse_latest_version(body: &[u8], triple: &str) -> Result<String, UpdateE
     if !release_carries_this_platform(&value, &version, triple) {
         return Err(UpdateError::BadRelease(format!(
             "release {tag} carries no srelens-tui build for {triple}"
+        )));
+    }
+    // A stable release goes public only once signing has succeeded, so a
+    // missing signature is not something to wait out, and nothing on it can
+    // be trusted.
+    if !release_is_signed(&value, &version) {
+        return Err(UpdateError::BadRelease(format!(
+            "release {tag} publishes no signature for its checksums, so its downloads cannot be verified — nothing was changed"
         )));
     }
     Ok(version)
@@ -340,6 +377,13 @@ pub fn parse_newest_version(body: &[u8], triple: &str) -> Result<String, UpdateE
             continue;
         };
         if !release_carries_this_platform(&release, &version, triple) {
+            continue;
+        }
+        // Dev pre-releases are public before signing runs, and signing them
+        // is best-effort, so an unsigned one is expected rather than
+        // suspicious. It is passed over all the same: the dev channel
+        // installs signed builds only, the newest there is.
+        if !release_is_signed(&release, &version) {
             continue;
         }
         return Ok(version);
@@ -536,6 +580,7 @@ pub struct Plan {
     pub asset: String,
     pub archive_url: String,
     pub sums_url: String,
+    pub sums_signature_url: String,
     pub target: PathBuf,
 }
 
@@ -601,6 +646,7 @@ pub fn plan(
         current: current.to_string(),
         archive_url: asset_url(&latest, &asset),
         sums_url: asset_url(&latest, &sums_name(&latest)),
+        sums_signature_url: asset_url(&latest, &sums_signature_name(&latest)),
         asset,
         latest,
         target,
@@ -646,14 +692,32 @@ pub fn resolve_owner(path: &Path) -> (PathBuf, Option<&'static str>) {
     (resolved, manager)
 }
 
-/// Download, verify, and install the binary a [`Plan`] names.
+/// Download, verify, and install the binary a [`Plan`] names, trusting the
+/// release keys compiled into this binary. Returns the fingerprint of the key
+/// that signed the release.
 ///
 /// Verification happens before anything is written, so a mismatched download
 /// leaves the installed binary untouched.
 pub fn apply(
     plan: &Plan,
     fetch: &impl Fn(&str) -> Result<Vec<u8>, UpdateError>,
-) -> Result<(), UpdateError> {
+) -> Result<String, UpdateError> {
+    apply_with_keys(plan, fetch, crate::update_signature::RELEASE_KEYS)
+}
+
+/// [`apply`], trusting the armored public keys in `keys` instead. Tests sign
+/// with keys of their own; nothing else should call this.
+///
+/// The checksum file's signature is checked before any checksum in it is
+/// believed. The checksums then vouch for the archive, and because they name
+/// each archive with its version, an older signed archive cannot be passed
+/// off under a newer name, which a signature over the archive alone would
+/// allow.
+pub fn apply_with_keys(
+    plan: &Plan,
+    fetch: &impl Fn(&str) -> Result<Vec<u8>, UpdateError>,
+    keys: &str,
+) -> Result<String, UpdateError> {
     let (real, owner) = resolve_owner(&plan.target);
     if let Some(manager) = owner {
         return Err(UpdateError::PackageManaged {
@@ -674,6 +738,17 @@ pub fn apply(
     }
 
     let sums = fetch(&plan.sums_url)?;
+    let signature = fetch(&plan.sums_signature_url)?;
+    let signer = crate::update_signature::verify_release_signature(
+        &sums,
+        &signature,
+        keys,
+        std::time::SystemTime::now(),
+    )
+    .map_err(|why| UpdateError::Unverified {
+        file: sums_name(&plan.latest),
+        why,
+    })?;
     let sums = String::from_utf8(sums)
         .map_err(|_| UpdateError::BadRelease("the checksum file is not text".into()))?;
     let expected = checksum_for(&sums, &plan.asset)?;
@@ -682,7 +757,8 @@ pub fn apply(
     verify_sha256(&archive, &expected)?;
 
     let binary = extract_binary(&archive, &plan.asset)?;
-    replace_running_binary(&plan.target, &binary)
+    replace_running_binary(&plan.target, &binary)?;
+    Ok(signer)
 }
 
 /// Create a file in `dir` that did not exist a moment ago, and hand back
