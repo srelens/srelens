@@ -401,7 +401,16 @@ export function Table<T>({
   const rootRef = useRef<HTMLDivElement>(null);
   const [metrics, setMetrics] = useState({ scrollTop: 0, viewportHeight: 0, rowHeight: 0 });
 
-  useEffect(() => setColumnWidths({}), [columnSignature]);
+  // A different set of columns needs measuring again, but only a CHANGE does.
+  // Run on mount as well, this wiped the widths the layout effect below had
+  // just measured, so every table measured itself twice before its first paint,
+  // and the two did not always agree: #360's trace has `412`, then `403`.
+  const measuredFor = useRef(columnSignature);
+  useEffect(() => {
+    if (measuredFor.current === columnSignature) return;
+    measuredFor.current = columnSignature;
+    setColumnWidths({});
+  }, [columnSignature]);
 
   const visibleData = useMemo(() => {
     if (!sort) return data;
@@ -663,12 +672,20 @@ export function Table<T>({
   // way is both uniform and simpler.
   useLayoutEffect(() => {
     if (isEmpty || Object.keys(columnWidths).length > 0) return;
-    const table = rootRef.current?.querySelector("table");
+    const root = rootRef.current;
+    const table = root?.querySelector("table");
     // Nothing to measure until a real row exists: a table showing only the
     // "no matching items" placeholder would freeze the placeholder's widths.
-    if (!table?.querySelector("tbody tr.tbl-row")) return;
+    if (!root || !table?.querySelector("tbody tr.tbl-row")) return;
     setColumnWidths(measureColumns(table));
     autoSized.current = true;
+    // The space these widths fit, for the observer below to compare against.
+    // Its first report — every browser sends one as soon as it starts watching
+    // — carries the same size, so it no longer reads as a resize and measures
+    // the table a second time. (#360) Taken here rather than when the observer
+    // starts: a table that empties out keeps its widths but stops watching, and
+    // if its space changes meanwhile, that first report is the only word of it.
+    containerWidth.current = scrollParentOf(root)?.clientWidth ?? 0;
     // measureColumns reads `columns`/`selection`, which `columnSignature` tracks.
   }, [isEmpty, visibleData.length, columnWidths, columnSignature]);
 
