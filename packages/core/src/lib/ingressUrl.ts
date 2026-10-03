@@ -35,7 +35,9 @@ const PATTERN = /[()[\]{}*+?|^$\\]/;
  * `null` when the rule has no host, since there is nothing to name. A wildcard
  * host comes back as itself. A path that is a pattern (by its own characters,
  * or because the controller treats every path as one) links to the host's
- * root, the one address the rule certainly serves.
+ * root, as #774 specifies: a pattern names no single address. The root need
+ * not be routed by this rule; the Path column beside the link shows the
+ * pattern as written, so the reader can tell the two apart.
  */
 export function ingressRuleAddress(
   host: string,
