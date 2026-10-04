@@ -7,8 +7,8 @@ and [flux.json](../../examples/extensions/flux.json).
 
 ## JSON Schema
 
-The schema for API 0.6 is committed at
-[`schemas/extension-manifest.v0.6.json`](../../schemas/extension-manifest.v0.6.json).
+The schema for API 0.7 is committed at
+[`schemas/extension-manifest.v0.7.json`](../../schemas/extension-manifest.v0.7.json).
 Point your editor at it by naming it in the manifest:
 
 ```json
@@ -19,11 +19,12 @@ Point your editor at it by naming it in the manifest:
 ```
 
 The file is generated from the host's `Manifest` type, and `cargo test` fails when the
-two differ. [`schemas/extension-manifest.v0.5.json`](../../schemas/extension-manifest.v0.5.json),
+two differ. [`schemas/extension-manifest.v0.6.json`](../../schemas/extension-manifest.v0.6.json),
+[`schemas/extension-manifest.v0.5.json`](../../schemas/extension-manifest.v0.5.json),
 [`schemas/extension-manifest.v0.4.json`](../../schemas/extension-manifest.v0.4.json)
 and [`schemas/extension-manifest.v0.3.json`](../../schemas/extension-manifest.v0.3.json)
-are the API 0.5, 0.4 and 0.3 contracts, each kept as it was when the next line was cut,
-for manifests that still require `^0.5`, `^0.4` or `^0.3`; name the one your range
+are the API 0.6, 0.5, 0.4 and 0.3 contracts, each kept as it was when the next line was cut,
+for manifests that still require `^0.6`, `^0.5`, `^0.4` or `^0.3`; name the one your range
 negotiates to.
 After changing a manifest field, regenerate the newest file with:
 
@@ -44,7 +45,7 @@ before publishing.
 | `id` | Yes | Reverse-domain identifier. See [Identifiers](specification.md#identifiers). |
 | `name` | Yes | Display name, 1–120 characters, with no control characters and no bidirectional or invisible format characters. See [Identifiers](specification.md#identifiers). |
 | `version` | Yes | The app's own SemVer version. |
-| `srelensApiVersion` | Yes | A SemVer range of extension API versions, for example `^0.5`. The fields marked **API 0.4** on this page need a range that admits only 0.4 or later, those marked **API 0.5** one that admits only 0.5 or later, and those marked **API 0.6** one that admits only 0.6 or later; see [Versioning](specification.md#versioning). |
+| `srelensApiVersion` | Yes | A SemVer range of extension API versions, for example `^0.7`. Each field or value form marked **API 0.x** needs a range that admits only that version or later; see [Versioning](specification.md#versioning). |
 | `kind` | Yes | `declarative`, or (**API 0.6**) `executable` for an app that also runs a sidecar; see [Executable apps](#executable-apps). |
 | `permissions` | Yes | The exact host capability IDs the bindings use. `network.http` is written `{ "capability": "network.http", "hosts": [...] }` (API 0.4); see [Network requests](#network-requests). A pod capability may be written `{ "capability": "k8s.streamLogs", "namespaces": [...] }` (API 0.5); see [Logs, exec and port-forwards](#logs-exec-and-port-forwards). |
 | `capabilities` | Yes | 1–32 bindings, below; 0–32 for an executable app, which may do all its work in its sidecar. |
@@ -541,6 +542,13 @@ shows on the app's list. A `countByStatus` card over a reader whose kind has no
 at install at `contributions.dashboardCards[i].type`. It never counts by
 `statusColumns`.
 
+From **API 0.7**, `within` may be the whole value
+`${settings.expiryWindow}`, naming a declared `select` setting with a default.
+Every option must be a positive duration under the same bounded grammar.
+The host uses the saved choice, or the default, for both the count and its
+linked page's filter. Invalid stored values show an error, never a zero count.
+Only this duration is settable: the card's source, path and target remain fixed.
+
 ### `commands`
 
 Entries in the new design's command palette (#544). The host shows each as
@@ -819,6 +827,9 @@ The same check (`PluginHost::interpolate`) runs three times:
 The access review lists the declaration of each setting an action or reader
 interpolates, so an update that lets a setting write another value shows as changed
 access.
+
+API 0.7 also permits a duration `select` in a dashboard predicate's `within`,
+under the narrower rules in [Dashboard cards](#dashboard-cards).
 
 ### Secret settings
 

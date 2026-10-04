@@ -91,10 +91,11 @@ permission grants, action confirmation, cluster scoping, or manifest validation.
    `0.MINOR` version. A `0.MINOR.PATCH` bump is for clarifications that do not change
    which manifests validate. From 1.0: MAJOR for breaking changes, MINOR for
    additive ones, PATCH for fixes.
-5. **Current supported lines.** This host implements **API 0.3, API 0.4, API 0.5 and
-   API 0.6**. A `^0.3` manifest is served under 0.3 and may use only what 0.3 has; a
+5. **Current supported lines.** This host implements **API 0.3, API 0.4, API 0.5,
+   API 0.6 and API 0.7**. A `^0.3` manifest is served under 0.3 and may use only what 0.3 has; a
    `^0.4` one may also use what [0.4 added](#040), a `^0.5` one what [0.5 added](#050),
-   and a `^0.6` one what [0.6 added](#060). API 0.1 and API 0.2 are not supported. Existing
+   a `^0.6` one what [0.6 added](#060),
+   and a `^0.7` one what [0.7 added](#070). API 0.1 and API 0.2 are not supported. Existing
    installations targeting a retired line are quarantined until replaced by a
    compatible manifest. Official manifests must receive a new version and publisher
    signature; editing an installed signed manifest invalidates its proof. Before 1.0 a
@@ -102,7 +103,7 @@ permission grants, action confirmation, cluster scoping, or manifest validation.
    two were.
 6. **API 1.0.** The API is frozen as 1.0 when the cert-manager declarative milestone
    ([#582](https://github.com/srelens/srelens/issues/582)) passes. Until then the newest
-   line, API 0.6, is a preview. After that, the 1.x line only grows additively, and a line
+   line, API 0.7, is a preview. After that, the 1.x line only grows additively, and a line
    is retired only after the window in [Deprecation](#deprecation).
 
 ## Compatibility rules
@@ -309,6 +310,16 @@ list, and the [developer harness](testing.md#developer-harness) prints one per l
   [#563](https://github.com/srelens/srelens/issues/563).
 
 ## API changelog
+
+### 0.7.0
+
+Dashboard predicates may use a whole-value settings reference in `within` (#582).
+It must name a declared `select` with a default, whose every option is a positive,
+bounded duration. Counts and their linked resource lists resolve the same saved
+choice. The reference changes only the duration, not the reader, path or target.
+A manifest using this form must admit only API 0.7 or later; literal durations
+retain their existing meaning on older lines. The schema for this line is
+`schemas/extension-manifest.v0.7.json`; the 0.6 schema remains frozen.
 
 ### 0.6.0
 

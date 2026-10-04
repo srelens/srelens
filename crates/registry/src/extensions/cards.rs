@@ -435,6 +435,9 @@ fn at_version(
         .find(|declared| declared.id == card.id)
         .cloned()
         .ok_or_else(|| CapabilityError::Handler("The card is no longer declared".into()))?;
+    let card = card
+        .with_settings(&manifest, &plugin.settings)
+        .map_err(CapabilityError::Handler)?;
     Ok((manifest, card))
 }
 
@@ -932,6 +935,14 @@ mod tests {
     /// The example app with a count, a list and a status card over its reader,
     /// installed against a kubeconfig whose one context `mock` is `port`.
     fn installed(port: u16, core: Arc<Registry>) -> (tempfile::TempDir, Registry, u64) {
+        installed_with(port, core, |_| {})
+    }
+
+    fn installed_with(
+        port: u16,
+        core: Arc<Registry>,
+        customize: impl FnOnce(&mut Value),
+    ) -> (tempfile::TempDir, Registry, u64) {
         let dir = tempfile::tempdir().unwrap();
         let kubeconfig = dir.path().join("config");
         std::fs::write(
@@ -956,6 +967,7 @@ mod tests {
                 {"when":[],"status":"unknown","label":"Unknown"}
             ]
         }]);
+        customize(&mut manifest);
         let path = dir.path().join("extensions.json");
         let revision = mutate(
             &path,
@@ -983,6 +995,91 @@ mod tests {
 
     fn cards_payload(revision: u64, namespaces: Value) -> Value {
         json!({"id":"org.example.argocd","revision":revision,"context":"mock","namespaces":namespaces})
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_saved_duration_changes_the_count_and_its_target_page_together() {
+        let objects: Vec<Value> = [
+            ("team", "soon", 10),
+            ("team", "later", 20),
+            ("team", "far", 40),
+            ("other", "noise", 10),
+        ]
+        .into_iter()
+        .map(|(namespace, name, days)| {
+            let mut object = application(namespace, name, "Healthy");
+            object["status"]["notAfter"] =
+                json!(chrono::DateTime::from_timestamp(now() + days * 86400, 0)
+                    .unwrap()
+                    .to_rfc3339());
+            object
+        })
+        .collect();
+        let (port, paths) = api_server(200, application_list(objects));
+        let mut core = (*super::super::tests::fake_core()).clone();
+        let mut list = core.get("k8s.listCustomResource").unwrap().clone();
+        list.handler = Arc::new(|_| {
+            Box::pin(async {
+                Ok(json!({"items":[
+                    {"name":"soon","namespace":"team","age":"1d","columns":[]},
+                    {"name":"later","namespace":"team","age":"1d","columns":[]},
+                    {"name":"far","namespace":"team","age":"1d","columns":[]},
+                    {"name":"noise","namespace":"other","age":"1d","columns":[]}
+                ]}))
+            })
+        });
+        core.register(list);
+        let (_dir, registry, revision) = installed_with(port, Arc::new(core), |manifest| {
+            manifest["srelensApiVersion"] = json!("^0.7");
+            manifest["settings"] = json!([{
+                "id":"expiryWindow","title":"Warn before expiry","type":"select","default":"14d",
+                "options":[{"value":"7d","label":"7 days"},{"value":"14d","label":"14 days"},{"value":"30d","label":"30 days"}]
+            }]);
+            manifest["contributions"]["dashboardCards"] = json!([{
+                "id":"expiring","title":"Expiring soon","size":"s","type":"count","source":"applications",
+                "predicate":{"jsonPath":".status.notAfter","within":"${settings.expiryWindow}"},
+                "target":{"page":"applications"}
+            }]);
+        });
+        for (setting, expected) in [
+            (None, vec!["soon"]),
+            (Some("30d"), vec!["soon", "later"]),
+            (Some("7d"), vec![]),
+        ] {
+            if let Some(setting) = setting {
+                registry.invoke("extensions.configure", json!({
+                    "action":"settings","id":"org.example.argocd","settings":{"expiryWindow":setting}
+                })).await.unwrap();
+            }
+            let cards = registry
+                .invoke(
+                    "extensions.resolveCards",
+                    cards_payload(revision, json!(["team"])),
+                )
+                .await
+                .unwrap();
+            assert_eq!(cards["cards"][0]["state"], "count", "{cards}");
+            assert_eq!(cards["cards"][0]["count"], expected.len(), "{cards}");
+            let rows = registry
+                .invoke(
+                    "extensions.read",
+                    json!({
+                        "id":"org.example.argocd","revision":revision,"capability":"applications",
+                        "context":"mock","namespace":"team","card":"expiring"
+                    }),
+                )
+                .await
+                .unwrap();
+            let names: Vec<_> = rows["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| row["name"].as_str().unwrap())
+                .collect();
+            assert_eq!(names, expected, "{rows}");
+        }
+        // Changing settings reuses the same reader snapshot and only changes the predicate.
+        assert_eq!(paths.lock().unwrap().len(), 1);
     }
 
     #[tokio::test(flavor = "multi_thread")]
