@@ -1654,6 +1654,23 @@ describe("Console — header details", () => {
       expect(screen.queryByText(/agents could not be listed/i)).toBeNull();
     });
 
+    it("says a retry is under way, and offers no second Retry while it reads (PR #792 review)", async () => {
+      const user = userEvent.setup();
+      listAgents.mockRejectedValue(new Error("agent_list failed"));
+      setup();
+      await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
+      await user.click(await screen.findByRole("button", { name: "Retry" }));
+
+      listAgents.mockReturnValue(new Promise(() => {}));
+      // The click above started the read with the rejecting mock; hold the
+      // NEXT one open and retry again, as a reader would on a slow machine.
+      expect(await screen.findByText(/agents could not be listed/i)).toBeTruthy();
+      await user.click(screen.getByRole("button", { name: "Retry" }));
+
+      expect(await screen.findByText(/listing agents again/i)).toBeTruthy();
+      expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+    });
+
     it("drops the list when the re-read fails, rather than offering what it can no longer vouch for", async () => {
       const user = userEvent.setup();
       setup();

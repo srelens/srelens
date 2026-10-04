@@ -161,15 +161,24 @@ export function Console({ fullView }: { fullView?: boolean }) {
   // re-read: the list already on screen stays until the new one lands, and the
   // effect's own `cancelled` drops a read a newer one has overtaken.
   const inventoryVersion = useAgentInventoryVersion();
+  /** A Retry the reader pressed is reading. Said on screen, and no second
+   *  Retry is offered meanwhile: the old failure and an active button over a
+   *  slow read looked like nothing had happened, and invited overlapping
+   *  reads (PR #792 review). */
+  const [retrying, setRetrying] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
     listAgents()
       .then((v) => {
-        if (!cancelled) setAgents({ kind: "ready", value: v });
+        if (cancelled) return;
+        setAgents({ kind: "ready", value: v });
+        setRetrying(false);
       })
       .catch((e: unknown) => {
-        if (!cancelled) setAgents({ kind: "error", error: e });
+        if (cancelled) return;
+        setAgents({ kind: "error", error: e });
+        setRetrying(false);
       });
     return () => {
       cancelled = true;
@@ -736,14 +745,26 @@ export function Console({ fullView }: { fullView?: boolean }) {
           {/* A failed read said nothing: no picker, exactly as for nothing
               installed. Said here, with its cause, and retried through the
               same signal Settings uses, so there is one way a re-read starts. */}
-          {agents.kind === "error" && (
-            <span className="chip" style={{ color: "var(--sev)" }}>
-              <span>Agents could not be listed: {describeError(agents.error).detail}</span>
-              <button type="button" className="text-btn" onClick={() => invalidateAgentInventory()}>
-                Retry
-              </button>
-            </span>
-          )}
+          {agents.kind === "error" &&
+            (retrying ? (
+              <span className="chip">
+                <span>Listing agents again…</span>
+              </span>
+            ) : (
+              <span className="chip" style={{ color: "var(--sev)" }}>
+                <span>Agents could not be listed: {describeError(agents.error).detail}</span>
+                <button
+                  type="button"
+                  className="text-btn"
+                  onClick={() => {
+                    setRetrying(true);
+                    invalidateAgentInventory();
+                  }}
+                >
+                  Retry
+                </button>
+              </span>
+            ))}
           {askPaused && (
             <span className="chip">
               <span>Reconnect {askCluster} to send a question</span>
