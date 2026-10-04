@@ -1157,6 +1157,14 @@ describe("the run store", () => {
       expect(saved.title).toBe("Why is it restarting?");
     });
 
+    it("saves the run's calls and answering time with it (#386)", async () => {
+      sendChat.mockResolvedValue(null);
+      await askAgent("why is it restarting?", POD);
+      const last = saveSession.mock.calls.at(-1)?.[0] as { calls?: number; durationMs?: number };
+      expect(last.calls).toBe(0);
+      expect(typeof last.durationMs).toBe("number");
+    });
+
     it("saves again once the answer has landed", async () => {
       sendChat.mockResolvedValue("cli-conversation-id");
       await askAgent("q", POD);

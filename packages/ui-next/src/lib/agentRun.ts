@@ -20,6 +20,7 @@ import { runKeyFor, runLabelFor, type AskContext } from "./askContext";
 import { newId } from "./tabs";
 import { titleFromQuestion } from "./runTitle";
 import { stripDataUri } from "./pastedImages";
+import { runFigures } from "./runFigures";
 
 /**
  * The one agent run this window is holding — every turn asked and answered,
@@ -545,6 +546,11 @@ export type RunSummary = {
   /** Set when this row is a conversation on disk that is not loaded yet — the
    *  rail opens it with {@link openSavedRun} rather than {@link selectRun}. */
   savedId?: string;
+  /** Tool calls made, and time spent answering in ms (#386) — counted from the
+   *  turns for a live row, read from the index for a saved one. Absent, or
+   *  `null` for the duration, when srelens does not know. */
+  calls?: number;
+  answeringMs?: number | null;
 };
 
 export function getRunSummaries(): RunSummary[] {
@@ -571,6 +577,10 @@ export function getRunSummaries(): RunSummary[] {
     turns: s.run.turns.filter((t) => t.role === "user").length,
     busy: s.run.busy,
     savedId: undefined,
+    ...(() => {
+      const f = runFigures(s.run.turns, s.run.busy);
+      return { calls: f.calls, answeringMs: f.answeringMs };
+    })(),
   }));
   // Conversations on disk that this window has not opened yet. Listed so a
   // restart does not look like a fresh install, and marked with `savedId` so
@@ -593,6 +603,9 @@ export function getRunSummaries(): RunSummary[] {
       turns: 0,
       busy: false,
       savedId: m.id,
+      // Whatever the file kept — nothing, for classic's and older ones.
+      calls: m.calls,
+      answeringMs: m.durationMs,
     }));
   return [...live.sort((a, b) => b.order - a.order), ...onDisk.sort((a, b) => b.at - a.at)];
 }
@@ -1737,6 +1750,11 @@ function persistRun(key: string): void {
     agentKind: state.run.agentKind,
     messages: [envelope],
   };
+  // The figures a rail row draws, into the index beside the title, so listing
+  // conversations never means loading their transcripts (#386).
+  const figures = runFigures(state.run.turns, state.run.busy);
+  session.calls = figures.calls;
+  if (figures.answeringMs !== null) session.durationMs = figures.answeringMs;
   state.saving = state.saving.then(() => saveSession(session)).catch(() => {});
 }
 

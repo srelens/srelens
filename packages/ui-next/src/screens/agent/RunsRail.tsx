@@ -9,8 +9,10 @@ import {
   setSkillActive,
   useAgentRun,
   useRunSummaries,
+  type RunSummary,
 } from "../../lib/agentRun";
 import { LOADING, type Read } from "../../lib/read";
+import { formatAnswering } from "../../lib/runFigures";
 
 /** §5's rail width, and this screen's alone — see `SideRail`'s note on why the
  *  width is a number per screen rather than a scale. */
@@ -60,6 +62,23 @@ function clockStamp(at: number, now: number): string {
     minute: "2-digit",
     ...(sameDay ? {} : { month: "short", day: "numeric" }),
   });
+}
+
+/**
+ * A row's second line: what it is about, where it stands, and its figures —
+ * each only when known (#386). A saved row with no figures says `saved`, as it
+ * always did; one with them lets them speak instead.
+ */
+function rowFacts(r: RunSummary, now: number): string {
+  const facts: string[] = [];
+  if (r.subject !== undefined) facts.push(r.subject);
+  if (r.busy) facts.push("answering…");
+  else if (r.savedId === undefined) facts.push(`${r.turns} question${r.turns === 1 ? "" : "s"}`);
+  else if (!r.calls && r.answeringMs == null) facts.push("saved");
+  if (r.calls) facts.push(`${r.calls} call${r.calls === 1 ? "" : "s"}`);
+  if (r.answeringMs != null) facts.push(formatAnswering(r.answeringMs));
+  facts.push(clockStamp(r.at, now), relativeTime(r.at, now));
+  return facts.join(" · ");
 }
 
 export function RunsRail() {
@@ -176,15 +195,7 @@ export function RunsRail() {
                     always say what it was about. Both rows read the same way
                     whether the conversation is live or on disk. */}
                 <span className="min-w-0 truncate text-sm">{r.label}</span>
-                <span className="min-w-0 truncate text-xs text-muted">
-                  {r.subject !== undefined && `${r.subject} · `}
-                  {r.busy
-                    ? "answering…"
-                    : r.savedId !== undefined
-                      ? "saved"
-                      : `${r.turns} question${r.turns === 1 ? "" : "s"}`}{" "}
-                  · {clockStamp(r.at, now)} · {relativeTime(r.at, now)}
-                </span>
+                <span className="min-w-0 truncate text-xs text-muted">{rowFacts(r, now)}</span>
               </button>
             ))}
           </div>

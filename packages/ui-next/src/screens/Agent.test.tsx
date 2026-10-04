@@ -382,6 +382,20 @@ describe("the agent screen", () => {
     expect(await screen.findByText(/3 calls/)).toBeTruthy();
   });
 
+  it("heads the pane with how long srelens spent answering (#386)", async () => {
+    useAgentRun.mockReturnValue(
+      runState({
+        turns: [
+          { id: 1, role: "user", text: "q", calls: [], at: 1_000 },
+          { id: 2, role: "agent", text: "a", calls: [{ id: "c1", tool: "k8s.listPods", args: {}, status: "ok" }], at: 15_500 },
+        ],
+      }),
+    );
+    renderAgent();
+    const head = await screen.findByText(/^started /);
+    expect(head.textContent).toMatch(/1 call · 14\.5s$/);
+  });
+
   it("shows no call count for a run with turns but no tool calls yet — an absent reading renders no reading", async () => {
     useAgentRun.mockReturnValue(
       runState({ turns: [{ id: 1, role: "user", text: "checkout-api is throwing 5xx", calls: [], at: 1 }] }),
