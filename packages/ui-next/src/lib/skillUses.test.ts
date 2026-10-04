@@ -57,6 +57,20 @@ describe("skill uses (#387)", () => {
     expect(parseSkillUses('{"a":-1,"b":1.5,"c":2,"d":"3"}')).toEqual({ c: 2 });
   });
 
+  it("counts a skill whose name every object already answers to (PR #803 review)", () => {
+    const storage = fakeStorage();
+    loadSkillUses(storage);
+    expect(getSkillUses()["constructor"]).toBeUndefined();
+
+    recordSkillUses(["constructor", "__proto__"], storage);
+    expect(getSkillUses()["constructor"]).toBe(1);
+    expect(Object.getOwnPropertyDescriptor(getSkillUses(), "__proto__")?.value).toBe(1);
+
+    loadSkillUses(storage);
+    expect(getSkillUses()["constructor"]).toBe(1);
+    expect(Object.getOwnPropertyDescriptor(getSkillUses(), "__proto__")?.value).toBe(1);
+  });
+
   it("still counts in memory when storage refuses, and never throws out", () => {
     const storage = refusingStorage();
     expect(() => loadSkillUses(storage)).not.toThrow();

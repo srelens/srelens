@@ -18,18 +18,25 @@ import type { Storage } from "./tabsPersist";
  */
 export const SKILL_USES_KEY = "srelens.next.skillUses";
 
+/** A count map with no prototype (PR #803 review). Keyed by skill name, and
+ *  `constructor` or `__proto__` is a name a skill may have: on a plain object
+ *  the first reads `Object`'s constructor and the second sets the prototype. */
+function noCounts(): Record<string, number> {
+  return Object.create(null) as Record<string, number>;
+}
+
 /** Anything but a map of whole, non-negative counts reads as no counts; one
  *  count this build cannot read is dropped on its own. */
 export function parseSkillUses(raw: string | null): Record<string, number> {
-  if (!raw) return {};
+  if (!raw) return noCounts();
   let doc: unknown;
   try {
     doc = JSON.parse(raw);
   } catch {
-    return {};
+    return noCounts();
   }
-  if (typeof doc !== "object" || doc === null || Array.isArray(doc)) return {};
-  const out: Record<string, number> = {};
+  if (typeof doc !== "object" || doc === null || Array.isArray(doc)) return noCounts();
+  const out = noCounts();
   for (const [name, count] of Object.entries(doc)) {
     if (typeof count === "number" && Number.isSafeInteger(count) && count >= 0) out[name] = count;
   }
@@ -57,7 +64,7 @@ function readUses(storage: Storage): Record<string, number> {
     return parseSkillUses(storage.getItem(SKILL_USES_KEY));
   } catch (error) {
     console.error("could not read how often skills were used", error);
-    return {};
+    return noCounts();
   }
 }
 
@@ -73,7 +80,7 @@ export function loadSkillUses(storage: Storage = settingsStorage): void {
 export function recordSkillUses(names: readonly string[], storage: Storage = settingsStorage): void {
   if (names.length === 0) return;
   if (uses === null) uses = readUses(storage);
-  const next = { ...uses };
+  const next = Object.assign(noCounts(), uses);
   for (const name of new Set(names)) next[name] = (next[name] ?? 0) + 1;
   uses = next;
   emit();
