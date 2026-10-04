@@ -1,6 +1,18 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { describeError } from "@srelens/core";
 import { runKeyFor } from "./askContext";
+import { getSkillUses, loadSkillUses } from "./skillUses";
+import { runFigures } from "./runFigures";
+
+/** A `Map`-backed storage, so a test's skill-use counts start from nothing. */
+function memoryStorage() {
+  const m = new Map<string, string>();
+  return {
+    getItem: (k: string) => m.get(k) ?? null,
+    setItem: (k: string, v: string) => void m.set(k, v),
+    removeItem: (k: string) => void m.delete(k),
+  };
+}
 import {
   askAgent,
   chooseAgent,
@@ -19,6 +31,7 @@ import {
   getRunSubject,
   selectRun,
   forgetRun,
+  type Turn,
 } from "./agentRun";
 
 const { startChat, sendChat, listAgents, cancelChat, loadSkill, listSessions, loadSession, saveSession, deleteSession } =
@@ -161,6 +174,48 @@ describe("the run store", () => {
     await untilSendChatCalledTimes(1);
     noteGate({ id: "external", tool: "k8s.deletePod", args: {}, outcome: "pending" }, null);
     expect(getAgentRun().gates).toEqual([]);
+  });
+
+  it("counts a skill as used when a question is really sent with it active (#387)", async () => {
+    loadSkillUses(memoryStorage());
+    loadSkill.mockResolvedValue({ name: "triage", description: "d", body: "Look at events first." });
+    setSkillActive("triage", true);
+    sendChat.mockResolvedValue(null);
+    await askAgent("q");
+    expect(getSkillUses()).toEqual({ triage: 1 });
+  });
+
+  it("does not count a skill for a question that never reached the agent (PR #803 review)", async () => {
+    loadSkillUses(memoryStorage());
+    loadSkill.mockResolvedValue({ name: "triage", description: "d", body: "Look at events first." });
+    setSkillActive("triage", true);
+    // `sendChat` listens for the turn's events before it invokes `chat_send`;
+    // a refused subscription rejects with nothing sent.
+    sendChat.mockRejectedValue(new Error("could not listen for chat events"));
+    await askAgent("q");
+    expect(getSkillUses()).toEqual({});
+  });
+
+  it("counts a skill for a question the agent began answering, even if the turn then failed", async () => {
+    loadSkillUses(memoryStorage());
+    loadSkill.mockResolvedValue({ name: "triage", description: "d", body: "Look at events first." });
+    setSkillActive("triage", true);
+    sendChat.mockImplementation(async (_s: string, _p: string, _a: string, onEvent: (e: unknown) => void) => {
+      onEvent({ type: "textDelta", text: "Looking" });
+      throw new Error("the agent exited");
+    });
+    await askAgent("q");
+    expect(getSkillUses()).toEqual({ triage: 1 });
+  });
+
+  it("does not count a question refused because another run is answering (#387)", async () => {
+    loadSkillUses(memoryStorage());
+    sendChat.mockImplementation(() => new Promise<string | null>(() => {}));
+    void askAgent("first", { about: { cluster: "a" }, route: "/overview" });
+    await untilSendChatCalledTimes(1);
+    setSkillActive("triage", true);
+    await askAgent("second", { about: { cluster: "b" }, route: "/overview" });
+    expect(getSkillUses()).toEqual({});
   });
 
   it("chooseAgent switches which agent the next question goes to, without touching the conversation", () => {
@@ -1164,6 +1219,14 @@ describe("the run store", () => {
       expect(saved.title).toBe("Why is it restarting?");
     });
 
+    it("saves the run's calls and answering time with it (#386)", async () => {
+      sendChat.mockResolvedValue(null);
+      await askAgent("why is it restarting?", POD);
+      const last = saveSession.mock.calls.at(-1)?.[0] as { calls?: number; durationMs?: number };
+      expect(last.calls).toBe(0);
+      expect(typeof last.durationMs).toBe("number");
+    });
+
     it("saves again once the answer has landed", async () => {
       sendChat.mockResolvedValue("cli-conversation-id");
       await askAgent("q", POD);
@@ -1789,41 +1852,35 @@ describe("the run store", () => {
     });
 
     /**
-     * Codex P2, round 6: `getRunSummaries` hides a persisted file only while
-     * its id belongs to a live run, so rotating the live id on clear while
-     * `saved` still held the old one made the conversation the reader just
-     * cleared reappear immediately as a saved row.
+     * #395: New question used to delete the conversation, so this pinned that
+     * it did not linger as a saved row (Codex P2, round 6). It is kept now —
+     * so it is listed, and listed ONCE: the meta the clear adds and the same
+     * file on the index are one conversation, not two rows.
      */
-    it("does not list a cleared conversation as one still on disk", async () => {
+    it("lists a cleared conversation once, as saved, under its question", async () => {
       sendChat.mockResolvedValue(null);
       await askAgent("something to clear", { about: { cluster: "prod-eu" }, route: "/k/pods" });
-      // The file this window wrote is now on the index, as it is after a
-      // restart or any other `listSessions`.
-      const id = getRunSummaries()[0]?.key;
-      expect(id).toBeDefined();
-      listSessions.mockResolvedValue([
-        { id: (await saveSession.mock.calls.at(-1)?.[0])?.id ?? "", title: "t", createdAt: 1, updatedAt: 2 },
-      ]);
+      const fileId = (await saveSession.mock.calls.at(-1)?.[0])?.id ?? "";
+      listSessions.mockResolvedValue([{ id: fileId, title: "Something to clear", createdAt: 1, updatedAt: 2 }]);
       await restoreRuns();
 
       clearAgentRun();
 
-      // Gone, not moved to the saved list under its dead id.
-      expect(getRunSummaries()).toEqual([]);
+      const rows = getRunSummaries();
+      expect(rows).toHaveLength(1);
+      expect(rows[0].savedId).toBe(fileId);
+      expect(rows[0].label).toBe("Something to clear");
     });
 
     /**
-     * Codex P2, round 8: `listSessions` can be issued BEFORE a clear and
-     * answered after it, so assigning the response wholesale put the cleared
-     * conversation back as a saved row — which then opened with a load error
-     * once the delete landed.
+     * Codex P2, round 8, restated for #395: a listing issued BEFORE a clear and
+     * answered after it names the file the clear kept — still one row.
      */
-    it("does not let a listing in flight reinstate a conversation just cleared", async () => {
+    it("lists a conversation just cleared once, even when a listing was in flight", async () => {
       sendChat.mockResolvedValue(null);
       await askAgent("something to clear", { about: { cluster: "prod-eu" }, route: "/k/pods" });
       const fileId = (await saveSession.mock.calls.at(-1)?.[0])?.id ?? "";
 
-      // A listing issued now, answered later — with the file still in it.
       let release: ((v: unknown) => void) | undefined;
       listSessions.mockImplementationOnce(() => new Promise((res) => (release = res)));
       const listing = restoreRuns();
@@ -1833,11 +1890,12 @@ describe("the run store", () => {
 
       clearAgentRun();
 
-      release?.([{ id: fileId, title: "t", createdAt: 1, updatedAt: 2 }]);
+      release?.([{ id: fileId, title: "Something to clear", createdAt: 1, updatedAt: 2 }]);
       await listing;
 
-      // Still gone. The response named a file this window had already deleted.
-      expect(getRunSummaries()).toEqual([]);
+      const rows = getRunSummaries();
+      expect(rows).toHaveLength(1);
+      expect(rows[0].savedId).toBe(fileId);
     });
 
     it("does not list a forgotten conversation as one still on disk either", async () => {
@@ -1872,20 +1930,95 @@ describe("the run store", () => {
       expect(sendChat.mock.calls.at(-1)?.[7]).toBe("cli-1");
     });
 
-    it("deletes the file when the reader clears the conversation, after the write drains", async () => {
+    it("keeps the conversation when the reader starts a new question, and lists it as saved (#395)", async () => {
       sendChat.mockResolvedValue(null);
-      await askAgent("q", POD);
+      await askAgent("what is mongodb using?", POD);
       const id = (saveSession.mock.calls.at(-1)?.[0] as { id: string }).id;
 
       clearAgentRun();
-      await vi.waitFor(() => expect(deleteSession).toHaveBeenCalledWith(id));
+      await Promise.resolve();
+
+      expect(deleteSession).not.toHaveBeenCalled();
+      const row = getRunSummaries().find((r) => r.savedId === id);
+      expect(row?.label).toBe("What is mongodb using?");
+    });
+
+    it("keeps what was on screen when New question interrupts an answer (PR #803 review)", async () => {
+      sendChat.mockImplementation((_s: string, _p: string, _a: string, onEvent: (e: unknown) => void) => {
+        onEvent({ type: "textDelta", text: "checkout-api is failing" });
+        onEvent({ type: "toolCallStart", id: "t1", tool: "k8s.listPods", args: {} });
+        return new Promise<string | null>(() => {});
+      });
+      void askAgent("why is checkout failing?", POD);
+      await untilSendChatCalledTimes(1);
+      const id = (saveSession.mock.calls.at(-1)?.[0] as { id: string }).id;
+
+      clearAgentRun();
+
+      await vi.waitFor(() => {
+        const kept = saveSession.mock.calls
+          .map(([s]) => s as { id: string; messages: unknown[] })
+          .filter((s) => s.id === id)
+          .at(-1);
+        expect(JSON.stringify(kept?.messages)).toContain("checkout-api is failing");
+        expect(JSON.stringify(kept?.messages)).toContain("k8s.listPods");
+      });
+    });
+
+    it("does not time an answer that was still arriving when its file was written", async () => {
+      sendChat.mockImplementation((_s: string, _p: string, _a: string, onEvent: (e: unknown) => void) => {
+        onEvent({ type: "textDelta", text: "checkout-api is failing" });
+        return new Promise<string | null>(() => {});
+      });
+      void askAgent("why is checkout failing?", POD);
+      await untilSendChatCalledTimes(1);
+      const id = (saveSession.mock.calls.at(-1)?.[0] as { id: string }).id;
+
+      clearAgentRun();
+
+      await vi.waitFor(() => {
+        const kept = saveSession.mock.calls
+          .map(([s]) => s as { id: string; durationMs?: number; messages: { turns: Turn[] }[] })
+          .filter((s) => s.id === id)
+          .at(-1);
+        expect(JSON.stringify(kept?.messages)).toContain("checkout-api is failing");
+        // Reopened, the run is no longer busy: its figures come from the file
+        // alone, and must say what the row said, not "answered in 0.0s".
+        expect(runFigures(kept?.messages[0].turns ?? [], false).answeringMs).toBeNull();
+        expect(kept?.durationMs).toBeUndefined();
+      });
+    });
+
+    it("opens a kept conversation only once its file is written (PR #803 review)", async () => {
+      let finishWrite!: () => void;
+      saveSession
+        .mockImplementationOnce(() => new Promise<void>((resolve) => { finishWrite = () => resolve(); }))
+        .mockResolvedValue(undefined);
+      sendChat.mockResolvedValue(null);
+      await askAgent("what is mongodb using?", POD);
+      const id = (saveSession.mock.calls[0]?.[0] as { id: string }).id;
+      clearAgentRun();
+      loadSession.mockResolvedValue({
+        id, title: "t", createdAt: 1, updatedAt: 2, contexts: [], skills: [],
+        cliSessionId: null, agentKind: "claude",
+        messages: [{ v: 1, key: "prod-eu|Pod|ns|mongodb-0", label: "Pod/mongodb-0", turns: [], gates: [] }],
+      });
+
+      const opening = openSavedRun(id);
+      for (let i = 0; i < 10; i++) await Promise.resolve();
+      // The write the rail's row stands for has not landed: nothing to load yet.
+      expect(loadSession).not.toHaveBeenCalled();
+
+      finishWrite();
+      await opening;
+      expect(loadSession).toHaveBeenCalledWith(id);
     });
 
     it("does not delete a file while a write to it is still in flight", async () => {
       // Classic's own lesson, in its `persistChainRef` comment: a save still
       // flushing when the delete lands recreates the file and its index entry,
-      // so the reader's clear silently un-deletes itself. One chain per run is
-      // what orders them.
+      // so the delete silently undoes itself. One chain per run is what orders
+      // them — on the one path that deletes now, the rail's close (#395).
       let finishWrite!: () => void;
       // ONLY the first write hangs. Every later one resolves, or the chain
       // would be waiting on write #2 and this test would pass for the wrong
@@ -1894,10 +2027,10 @@ describe("the run store", () => {
         .mockImplementationOnce(() => new Promise<void>((resolve) => { finishWrite = () => resolve(); }))
         .mockResolvedValue(undefined);
       sendChat.mockResolvedValue(null);
-      void askAgent("q", POD);
-      await vi.waitFor(() => expect(saveSession).toHaveBeenCalled());
+      await askAgent("q", POD);
+      const key = getActiveRunKey() ?? "";
 
-      clearAgentRun();
+      forgetRun(key);
       // The write has not landed, so neither may the delete.
       await Promise.resolve();
       expect(deleteSession).not.toHaveBeenCalled();
@@ -1906,18 +2039,23 @@ describe("the run store", () => {
       await vi.waitFor(() => expect(deleteSession).toHaveBeenCalled());
     });
 
-    it("does not lose a later conversation to an earlier delete", async () => {
+    it("writes the next question to a new file, leaving the kept one alone (#395)", async () => {
       sendChat.mockResolvedValue(null);
       await askAgent("first", POD);
       const first = (saveSession.mock.calls.at(-1)?.[0] as { id: string }).id;
       clearAgentRun();
-      await vi.waitFor(() => expect(deleteSession).toHaveBeenCalledWith(first));
 
-      // A new question in the same run writes a NEW file, not the one just
-      // removed — otherwise the delete and the save race for the same path.
+      // A new question in the same run writes a NEW file, not the one kept —
+      // otherwise it would overwrite the conversation New question kept.
       await askAgent("second", POD);
-      const second = (saveSession.mock.calls.at(-1)?.[0] as { id: string }).id;
+      // The save that carries the second question — writes run on the run's
+      // own chain, so the newest call recorded may still be the first's.
+      const carrying = (q: string) =>
+        saveSession.mock.calls.find(([s]) => JSON.stringify((s as { messages: unknown[] }).messages).includes(q));
+      await vi.waitFor(() => expect(carrying("second")).toBeDefined());
+      const second = (carrying("second")?.[0] as { id: string }).id;
       expect(second).not.toBe(first);
+      expect(deleteSession).not.toHaveBeenCalled();
     });
   });
 
