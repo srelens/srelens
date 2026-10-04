@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { listReplicaSets, type ReplicaSetSummary } from "@srelens/core";
-import { Select } from "@srelens/ui-kit";
+import { Combobox } from "@srelens/ui-kit";
 import { FailureLine } from "../lib/errorCopy";
 
 /** One revision as a reader tells it from the others (#389): its number, the
@@ -20,10 +20,15 @@ type Revisions =
 
 /**
  * The revisions a Deployment can be rolled back to, read when the dialog
- * opens (#389). Newest first — the backend's order — the newest being the one
- * the Deployment runs now: shown, never offered, because rolling back to it is
- * a no-op the capability refuses. The one before it is chosen to start with,
- * which is `kubectl rollout undo`'s own default.
+ * opens (#389). Newest first — the backend's order. The one whose template the
+ * Deployment runs (`currentTemplate`, judged by the backend against the
+ * Deployment itself, not by number — PR #810 review) is shown, never offered:
+ * rolling back to it is a no-op the capability refuses. The newest of the rest
+ * is chosen to start with, which is `kubectl rollout undo`'s own default. When
+ * none is current — a template change the controller has not caught up with —
+ * every revision is offered.
+ *
+ * A searchable `Combobox`, as every cluster-supplied list is (AGENTS.md).
  *
  * Read on the cluster the dialog was opened ON (`context` is the pinned one,
  * not the live rail), like every other name in the dialog.
@@ -51,7 +56,9 @@ export function RevisionPicker({
         return;
       }
       // A ReplicaSet with no revision annotation is no revision to go back to.
-      const [current, ...earlier] = (out.replicasets ?? []).filter((rs) => rs.revision !== "");
+      const rows = (out.replicasets ?? []).filter((rs) => rs.revision !== "");
+      const current = rows.find((rs) => rs.currentTemplate);
+      const earlier = rows.filter((rs) => !rs.currentTemplate);
       setRevisions({ status: "ready", current, earlier });
       if (earlier[0]) onChange(earlier[0].revision);
     });
@@ -72,11 +79,12 @@ export function RevisionPicker({
       {revisions.earlier.length === 0 ? (
         <p>This Deployment has no earlier revision to roll back to.</p>
       ) : (
-        <Select
+        <Combobox
           value={value}
           onValueChange={onChange}
           options={revisions.earlier.map((rs) => ({ value: rs.revision, label: revisionLabel(rs) }))}
-          aria-label="Revision"
+          ariaLabel="Revision"
+          searchPlaceholder="Search revisions…"
         />
       )}
     </>

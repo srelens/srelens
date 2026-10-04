@@ -8,8 +8,38 @@ import userEvent from "@testing-library/user-event";
 // demand — the dialog's error path is the whole point of half these tests.
 type ActionResult = { ok?: boolean; error?: string };
 
+/**
+ * The Roll back dialog's revision picker is the kit's `Combobox`, which opens a
+ * Radix popover (positioned with a ResizeObserver) over a cmdk list (which
+ * scrolls the highlighted row into view). jsdom implements neither, so both are
+ * stubbed here, as the kit's own `Combobox.test.tsx` does, rather than
+ * globally: a global stub would hide from the next component that it needs one.
+ */
+if (!("ResizeObserver" in window)) {
+  (window as unknown as { ResizeObserver: unknown }).ResizeObserver = class {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  };
+}
+{
+  const proto = window.HTMLElement.prototype as unknown as Record<string, unknown>;
+  proto.scrollIntoView ??= () => {};
+  proto.hasPointerCapture ??= () => false;
+}
+
 /** One `k8s.listReplicaSets` row, as far as the rollback dialog reads it. */
-type Revision = { name: string; revision: string; desired: number; ready: number; current: number; age: string; images?: string[]; changeCause?: string };
+type Revision = {
+  name: string;
+  revision: string;
+  desired: number;
+  ready: number;
+  current: number;
+  age: string;
+  images?: string[];
+  changeCause?: string;
+  currentTemplate?: boolean;
+};
 
 const {
   deleteResource,
@@ -518,15 +548,19 @@ describe("useRowMenu", () => {
  */
 describe("useRowMenu — Roll back (#389)", () => {
   const ROLLBACK_ARGS: UseRowMenuArgs = { context: "prod", kind: "Deployment", actions: { restart: true, rollback: true } };
-  const REV3: Revision = { name: "web-c", revision: "3", desired: 2, ready: 2, current: 2, age: "2d", images: ["api:3"] };
+  const REV3: Revision = { name: "web-c", revision: "3", desired: 2, ready: 2, current: 2, age: "2d", images: ["api:3"], currentTemplate: true };
   const REV2: Revision = { name: "web-b", revision: "2", desired: 0, ready: 0, current: 0, age: "2d", images: ["api:2"], changeCause: "bump api" };
   const REV1: Revision = { name: "web-a", revision: "1", desired: 0, ready: 0, current: 0, age: "2d", images: ["api:1"] };
+  const REV2_LABEL = "rev 2 · api:2 · 2d ago · “bump api”";
 
   async function openRollback() {
     render(<Harness args={ROLLBACK_ARGS} row={DEPLOY_ROW} />);
     await userEvent.click(screen.getByRole("button", { name: "Roll back" }));
     return within(await screen.findByRole("dialog"));
   }
+
+  /** The revision picker — a searchable `Combobox`, whose trigger reads the choice. */
+  const picker = (dialog: ReturnType<typeof within>) => dialog.getByRole("combobox", { name: "Revision" });
 
   it("offers Roll back on a Deployment, and not on a kind without revision history", () => {
     const labels = (args: UseRowMenuArgs, row: ListRow) =>
@@ -540,22 +574,39 @@ describe("useRowMenu — Roll back (#389)", () => {
     listReplicaSets.mockResolvedValueOnce({ replicasets: [REV3, REV2, REV1] });
     const dialog = await openRollback();
     expect(await dialog.findByText("rev 3 · api:3 · 2d ago")).toBeDefined();
-    await waitFor(() => expect((dialog.getByLabelText("Revision") as HTMLSelectElement).value).toBe("2"));
-    expect(dialog.getByRole("option", { name: "rev 2 · api:2 · 2d ago · “bump api”" })).toBeDefined();
-    // The current revision is shown, never offered.
-    expect(dialog.queryByRole("option", { name: /^rev 3/ })).toBeNull();
+    await waitFor(() => expect(picker(dialog).textContent).toContain(REV2_LABEL));
     expect(dialog.getByText("kubectl rollout undo deployments/web --to-revision=2 -n default --context prod")).toBeDefined();
+    // The revision the Deployment runs is shown, never offered.
+    await userEvent.click(picker(dialog));
+    expect(screen.getByRole("option", { name: REV2_LABEL })).toBeDefined();
+    expect(screen.queryByRole("option", { name: /^rev 3/ })).toBeNull();
+    // Cluster-supplied, so searchable (AGENTS.md, PR #810 review).
+    await userEvent.type(screen.getByPlaceholderText("Search revisions…"), "bump");
+    expect(screen.getByRole("option", { name: REV2_LABEL })).toBeDefined();
+    expect(screen.queryByRole("option", { name: /^rev 1/ })).toBeNull();
     expect(listReplicaSets).toHaveBeenCalledWith("prod", "default", "web");
   });
 
   it("rolls back to the revision chosen", async () => {
     listReplicaSets.mockResolvedValueOnce({ replicasets: [REV3, REV2, REV1] });
     const dialog = await openRollback();
-    await waitFor(() => expect((dialog.getByLabelText("Revision") as HTMLSelectElement).value).toBe("2"));
-    await userEvent.selectOptions(dialog.getByLabelText("Revision"), "1");
+    await waitFor(() => expect(picker(dialog).textContent).toContain(REV2_LABEL));
+    await userEvent.click(picker(dialog));
+    await userEvent.click(screen.getByRole("option", { name: "rev 1 · api:1 · 2d ago" }));
     expect(dialog.getByText("kubectl rollout undo deployments/web --to-revision=1 -n default --context prod")).toBeDefined();
     await userEvent.click(dialog.getByRole("button", { name: "Roll back" }));
     await waitFor(() => expect(rolloutUndo).toHaveBeenCalledWith("prod", "default", "web", 1));
+  });
+
+  it("offers every revision, newest first, when none is the template the Deployment runs yet (PR #810 review)", async () => {
+    // Right after a template change the newest ReplicaSet can still be the
+    // previous template: nothing is "current", and it is a real target.
+    listReplicaSets.mockResolvedValueOnce({ replicasets: [{ ...REV3, currentTemplate: false }, REV2, REV1] });
+    const dialog = await openRollback();
+    await waitFor(() => expect(picker(dialog).textContent).toContain("rev 3 · api:3 · 2d ago"));
+    expect(dialog.queryByText(/^Current:/)).toBeNull();
+    await userEvent.click(picker(dialog));
+    expect(screen.getByRole("option", { name: "rev 3 · api:3 · 2d ago" })).toBeDefined();
   });
 
   it("says so when there is no earlier revision, and writes nothing", async () => {
@@ -571,7 +622,7 @@ describe("useRowMenu — Roll back (#389)", () => {
     listReplicaSets.mockResolvedValueOnce({ replicasets: [REV3, REV2] });
     rolloutUndo.mockResolvedValueOnce({ error: "Deployment default/web already runs revision 2" });
     const dialog = await openRollback();
-    await waitFor(() => expect((dialog.getByLabelText("Revision") as HTMLSelectElement).value).toBe("2"));
+    await waitFor(() => expect(picker(dialog).textContent).toContain(REV2_LABEL));
     await userEvent.click(dialog.getByRole("button", { name: "Roll back" }));
     await waitFor(() => expect(screen.getByText(/already runs revision 2/)).toBeDefined());
     expect(screen.getByRole("dialog")).toBeDefined();
