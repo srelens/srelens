@@ -103,10 +103,12 @@ fn mcp_result_text(item: &serde_json::Value, failed: bool) -> String {
         let text: Vec<&str> = parts.iter().filter_map(|p| p.get("text").and_then(|t| t.as_str())).collect();
         (!text.is_empty()).then(|| text.join("\n"))
     });
+    // An error with no text says nothing, and must not hide content that does.
     let error = match item.get("error") {
         Some(serde_json::Value::Null) | None => None,
         Some(e) => Some(e.get("message").and_then(|m| m.as_str()).map(str::to_string).unwrap_or_else(|| e.to_string())),
-    };
+    }
+    .filter(|s| !s.trim().is_empty());
     let (first, then) = if failed { (error, content) } else { (content, error) };
     first.or(then).unwrap_or_default()
 }
@@ -186,6 +188,15 @@ mod tests {
             r#"{"type":"item.completed","item":{"id":"item_1","type":"mcp_tool_call","server":"everything","tool":"echo","arguments":{},"result":{"content":[{"type":"text","text":"partial output"}]},"error":{"message":"boom"},"status":"failed"}}"#,
         );
         assert_eq!(out, vec![AgentEvent::ToolResult { id: "item_1".into(), status: ToolStatus::Error, summary: Some("boom".into()) }]);
+    }
+
+    /// PR #806 review: an error with no text says nothing, so the content does.
+    #[test]
+    fn a_failed_mcp_tool_call_with_an_empty_error_is_summarised_by_its_content() {
+        let out = parse_line(
+            r#"{"type":"item.completed","item":{"id":"item_1","type":"mcp_tool_call","server":"everything","tool":"echo","arguments":{},"result":{"content":[{"type":"text","text":"partial output"}]},"error":{"message":""},"status":"failed"}}"#,
+        );
+        assert_eq!(out, vec![AgentEvent::ToolResult { id: "item_1".into(), status: ToolStatus::Error, summary: Some("partial output".into()) }]);
     }
 
     #[test]

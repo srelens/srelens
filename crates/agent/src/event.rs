@@ -93,38 +93,53 @@ fn mask_credentials(line: &str) -> String {
     if line.contains("PRIVATE KEY") {
         return REDACTED.to_string();
     }
+    // Pairs are cut wherever one can end — any whitespace, and the `,` `;` `&`
+    // `?` that join pairs in env lines, cookies and URL queries (PR #806
+    // review) — and every separator is kept, so the line reads as it did.
+    let is_separator = |c: char| c.is_whitespace() || matches!(c, ',' | ';' | '&' | '?');
+    let mut out = String::with_capacity(line.len());
     let mut mask_next = false;
-    let mut out: Vec<String> = Vec::new();
-    for word in line.split(' ') {
-        let lower = word.to_ascii_lowercase();
-        let is_scheme = lower == "bearer" || lower == "basic";
-        if mask_next && !word.is_empty() && !is_scheme {
-            out.push(REDACTED.to_string());
-            mask_next = false;
-            continue;
-        }
-        if is_scheme {
-            out.push(word.to_string());
-            mask_next = true;
-            continue;
-        }
-        if let Some(at) = word.find(['=', ':']) {
-            let key = lower[..at].trim_matches(|c: char| !c.is_ascii_alphanumeric());
-            if !key.is_empty() && CREDENTIAL_KEYS.iter().any(|k| key.contains(k)) {
-                let value = &word[at + 1..];
-                if value.trim_matches(|c| c == '"' || c == '\'').is_empty() {
-                    // `password: hunter2` — the value is the next word.
-                    out.push(word.to_string());
-                    mask_next = true;
-                } else {
-                    out.push(format!("{}{REDACTED}", &word[..=at]));
-                }
-                continue;
-            }
-        }
-        out.push(if looks_like_a_token(word) { REDACTED.to_string() } else { word.to_string() });
+    let mut rest = line;
+    while !rest.is_empty() {
+        let end = rest.find(is_separator).unwrap_or(rest.len());
+        let (piece, tail) = rest.split_at(end);
+        out.push_str(&mask_piece(piece, &mut mask_next));
+        let gap = tail.find(|c: char| !is_separator(c)).unwrap_or(tail.len());
+        out.push_str(&tail[..gap]);
+        rest = &tail[gap..];
     }
-    out.join(" ")
+    out
+}
+
+/// One `key=value`, `key:value` or bare word of a line. `mask_next` carries
+/// over a value that is the next piece: `password: hunter2`, `Bearer abc`.
+fn mask_piece(piece: &str, mask_next: &mut bool) -> String {
+    if piece.is_empty() {
+        return String::new();
+    }
+    let is_scheme = |w: &str| w.eq_ignore_ascii_case("bearer") || w.eq_ignore_ascii_case("basic");
+    if is_scheme(piece) {
+        *mask_next = true;
+        return piece.to_string();
+    }
+    if *mask_next {
+        *mask_next = false;
+        return REDACTED.to_string();
+    }
+    if let Some(at) = piece.find(['=', ':']) {
+        let lower = piece[..at].to_ascii_lowercase();
+        let key = lower.trim_matches(|c: char| !c.is_ascii_alphanumeric());
+        if !key.is_empty() && CREDENTIAL_KEYS.iter().any(|k| key.contains(k)) {
+            let value = piece[at + 1..].trim_matches(|c| c == '"' || c == '\'');
+            if value.is_empty() || is_scheme(value) {
+                // The value is the next piece, or a scheme whose value is.
+                *mask_next = true;
+                return piece.to_string();
+            }
+            return format!("{}{REDACTED}", &piece[..=at]);
+        }
+    }
+    if looks_like_a_token(piece) { REDACTED.to_string() } else { piece.to_string() }
 }
 
 /// A word in the shape of a well-known token: GitHub (`ghp_` …), OpenAI and
@@ -313,6 +328,23 @@ mod tests {
         // Ordinary results are left exactly as they were.
         for line in ["5 pods running", "handler error: failed to load current context: no-such-context"] {
             assert_eq!(summarize_result(line, false).as_deref(), Some(line));
+        }
+    }
+
+    /// PR #806 review: a credential is masked wherever its pair sits — after a
+    /// tab, after another pair in the same word, or in a URL's query. (A tab is
+    /// a control character, so the bounded summary drops it after masking.)
+    #[test]
+    fn a_credential_is_masked_whatever_separates_it() {
+        let cases = [
+            ("Bearer\tsecret-value-123", "Bearer[redacted]"),
+            ("user=bob,password=hunter2", "user=bob,password=[redacted]"),
+            ("user=bob;secret=abc", "user=bob;secret=[redacted]"),
+            ("callback https://x.test/cb?token=abc123&state=1", "callback https://x.test/cb?token=[redacted]&state=1"),
+            ("Authorization:Bearer abc123", "Authorization:Bearer [redacted]"),
+        ];
+        for (line, want) in cases {
+            assert_eq!(summarize_result(line, false).as_deref(), Some(want), "for {line:?}");
         }
     }
 

@@ -155,12 +155,13 @@ fn result_text(inner: &serde_json::Value, failed: bool) -> String {
         let text: Vec<&str> = parts.iter().filter_map(|p| p.get("text").and_then(|t| t.as_str())).collect();
         (!text.is_empty()).then(|| text.join("\n"))
     });
+    // A field with no text says nothing, and must not hide one that does.
     let pick = |path: &[&str]| -> Option<String> {
         let mut v = result;
         for key in path {
             v = v.get(*key)?;
         }
-        v.as_str().map(str::to_string)
+        v.as_str().filter(|s| !s.trim().is_empty()).map(str::to_string)
     };
     let error = || {
         pick(&["error", "errorMessage"])
@@ -320,6 +321,15 @@ mod tests {
             r#"{"type":"tool_call","subtype":"completed","call_id":"c3","tool_call":{"readToolCall":{"result":{"content":[{"type":"text","text":"partial"}],"error":{"errorMessage":"Permission denied"}}}}}"#,
         );
         assert_eq!(out, vec![AgentEvent::ToolResult { id: "c3".into(), status: ToolStatus::Error, summary: Some("Permission denied".into()) }]);
+    }
+
+    /// PR #806 review: an error with no text says nothing, so the content does.
+    #[test]
+    fn a_failed_tool_call_with_an_empty_error_is_summarised_by_its_content() {
+        let out = parse_line(
+            r#"{"type":"tool_call","subtype":"completed","call_id":"c4","tool_call":{"readToolCall":{"result":{"content":[{"type":"text","text":"partial"}],"error":{"errorMessage":""}}}}}"#,
+        );
+        assert_eq!(out, vec![AgentEvent::ToolResult { id: "c4".into(), status: ToolStatus::Error, summary: Some("partial".into()) }]);
     }
 
     #[test]
