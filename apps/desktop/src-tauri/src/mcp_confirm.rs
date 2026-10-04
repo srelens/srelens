@@ -455,6 +455,7 @@ mod tests {
             kind: ConsentKind::Destructive,
             impact: annotations.impact,
             confirm_text: annotations.confirm_text(&args),
+            caller: None,
         }
     }
 

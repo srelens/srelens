@@ -382,6 +382,8 @@ impl McpServer {
             kind,
             impact: annotations.impact,
             confirm_text: annotations.confirm_text(args),
+            // The transport fills this in; the registry cannot know it.
+            caller: None,
         })
     }
 }
