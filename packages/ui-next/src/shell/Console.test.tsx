@@ -1612,10 +1612,46 @@ describe("Console — header details", () => {
       await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
       expect(await screen.findByRole("button", { name: /claude code/i })).toBeTruthy();
 
+      const readsBefore = listAgents.mock.calls.length;
       listAgents.mockReturnValue(new Promise(() => {}));
       act(() => invalidateAgentInventory());
 
+      // The re-read must actually have started — otherwise a dock that ignored
+      // the invalidation entirely would keep its picker and pass this test.
+      await waitFor(() => expect(listAgents).toHaveBeenCalledTimes(readsBefore + 1));
       expect(screen.getByRole("button", { name: /claude code/i })).toBeTruthy();
+    });
+
+    it("points the picker at the agent the next question will go to, once the chosen one is no longer offered", async () => {
+      // `askAgent` falls back to the first agent offered when the chosen one
+      // is not, so a picker left on "Agent" with nothing selected hid where a
+      // question would actually go (PR #792 review).
+      const user = userEvent.setup();
+      useRun.mockReturnValue({ ...runState(), agentKind: "srelens" });
+      listAgents.mockResolvedValue([CLAUDE, NATIVE_KEYED]);
+      setup();
+      await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
+      expect(await screen.findByRole("button", { name: /^srelens/i })).toBeTruthy();
+
+      listAgents.mockResolvedValue([CLAUDE, NATIVE_UNKEYED]);
+      act(() => invalidateAgentInventory());
+
+      expect(await screen.findByRole("button", { name: /claude code/i })).toBeTruthy();
+    });
+
+    it("says the agent list could not be read, rather than looking like nothing is installed, and reads it again on Retry", async () => {
+      const user = userEvent.setup();
+      listAgents.mockRejectedValue(new Error("agent_list failed: PATH unreadable"));
+      setup();
+      await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
+      expect(await screen.findByText(/agents could not be listed/i)).toBeTruthy();
+      expect(screen.getByText(/PATH unreadable/)).toBeTruthy();
+
+      listAgents.mockResolvedValue([CLAUDE]);
+      await user.click(screen.getByRole("button", { name: "Retry" }));
+
+      expect(await screen.findByRole("button", { name: /claude code/i })).toBeTruthy();
+      expect(screen.queryByText(/agents could not be listed/i)).toBeNull();
     });
 
     it("drops the list when the re-read fails, rather than offering what it can no longer vouch for", async () => {

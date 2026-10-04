@@ -26,8 +26,8 @@ import { useContextLabel } from "../lib/contextLabel";
 import { askContextFor, runKeyFor } from "../lib/askContext";
 import { useNamespaces } from "../lib/workspace";
 import { readImageFile } from "../lib/pastedImages";
-import { useAgentInventoryVersion } from "../lib/agentInventory";
-import { isTauri, listAgents, type AgentInfo } from "@srelens/core";
+import { invalidateAgentInventory, useAgentInventoryVersion } from "../lib/agentInventory";
+import { describeError, isTauri, listAgents, type AgentInfo } from "@srelens/core";
 import { useActiveContext, useContexts } from "../lib/clusters";
 import { detailRoute } from "../lib/detailRoute";
 import { hint } from "../lib/shortcuts";
@@ -259,6 +259,12 @@ export function Console({ fullView }: { fullView?: boolean }) {
     [route, activeKey, about],
   );
   const { turns, gates, busy, error, agentKind } = useRun(runKey);
+  // The agent the next question will ACTUALLY go to. `askAgent` falls back to
+  // the first agent offered when the chosen one is not — after a re-read drops
+  // it, say — and a picker still naming the dropped one (or nothing, "Agent")
+  // hid that until the answer came from somewhere else. Shown here, not
+  // chosen: the choice is recorded by `askAgent` when it really happens.
+  const pickerKind = offered.some((a) => a.kind === agentKind) ? agentKind : (offered[0]?.kind ?? agentKind);
   /*
     What the conversation on screen is ABOUT — only in the full view, where the
     dock shows whichever run is selected rather than the one for its own route.
@@ -655,7 +661,7 @@ export function Console({ fullView }: { fullView?: boolean }) {
         offered.length > 0 ? (
           <AgentPicker
             agents={offered}
-            selectedKind={agentKind}
+            selectedKind={pickerKind}
             // The run this picker is SHOWING. The dock is keyed by its own
             // route, which off `/agent` need not be the active run — so
             // without this, picking the agent a restored conversation is not
@@ -725,6 +731,17 @@ export function Console({ fullView }: { fullView?: boolean }) {
           {noCluster && (
             <span className="chip" style={{ color: "var(--sev)" }}>
               <span>No cluster is active — connect one before asking</span>
+            </span>
+          )}
+          {/* A failed read said nothing: no picker, exactly as for nothing
+              installed. Said here, with its cause, and retried through the
+              same signal Settings uses, so there is one way a re-read starts. */}
+          {agents.kind === "error" && (
+            <span className="chip" style={{ color: "var(--sev)" }}>
+              <span>Agents could not be listed: {describeError(agents.error).detail}</span>
+              <button type="button" className="text-btn" onClick={() => invalidateAgentInventory()}>
+                Retry
+              </button>
             </span>
           )}
           {askPaused && (
