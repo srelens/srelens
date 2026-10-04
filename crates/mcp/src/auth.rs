@@ -1,7 +1,9 @@
 //! Bearer-token auth for the HTTP transport. stdio needs none: the client
 //! spawned the process and already holds the user's privileges.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use subtle::ConstantTimeEq;
 
@@ -44,6 +46,80 @@ impl Token {
 impl std::fmt::Debug for Token {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Token(<redacted>)")
+    }
+}
+
+/// Bearer tokens srelens mints for its own agent, one per chat turn (#393).
+///
+/// The Settings token authenticates a client and says nothing about which
+/// one: srelens's own CLI agents and any external client used to present the
+/// same token. A token minted here is written only into the MCP config of the
+/// CLI srelens launches for one chat turn, so presenting it is the proof that
+/// a call is that chat's — not a claim the caller makes about itself.
+#[derive(Clone, Default)]
+pub struct CallerTokens {
+    live: Arc<Mutex<LiveTokens>>,
+}
+
+#[derive(Default)]
+struct LiveTokens {
+    next: u64,
+    tokens: HashMap<u64, (Token, String)>,
+}
+
+impl CallerTokens {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// A fresh token for `session`, accepted until the guard is dropped.
+    pub fn mint(&self, session: &str) -> CallerTokenGuard {
+        let token = Token::generate();
+        let mut live = self.live.lock().unwrap_or_else(|e| e.into_inner());
+        live.next += 1;
+        let id = live.next;
+        live.tokens.insert(id, (token.clone(), session.to_string()));
+        CallerTokenGuard { live: self.live.clone(), id, token }
+    }
+
+    /// The chat `presented` was minted for, while it is live. Every live token
+    /// is compared, in constant time, without stopping at a match: timing
+    /// says nothing about which token, if any, came close.
+    pub fn caller_for(&self, presented: &str) -> Option<crate::policy::Caller> {
+        let live = self.live.lock().unwrap_or_else(|e| e.into_inner());
+        let mut found = None;
+        for (token, session) in live.tokens.values() {
+            if token.matches(presented) {
+                found = Some(session.clone());
+            }
+        }
+        found.map(crate::policy::Caller::Chat)
+    }
+}
+
+/// One live chat token. Dropping it revokes the token.
+pub struct CallerTokenGuard {
+    live: Arc<Mutex<LiveTokens>>,
+    id: u64,
+    token: Token,
+}
+
+impl CallerTokenGuard {
+    pub fn token(&self) -> &str {
+        self.token.as_str()
+    }
+}
+
+impl Drop for CallerTokenGuard {
+    fn drop(&mut self) {
+        self.live.lock().unwrap_or_else(|e| e.into_inner()).tokens.remove(&self.id);
+    }
+}
+
+/// As opaque as [`Token`]'s: a token must never reach a log line by accident.
+impl std::fmt::Debug for CallerTokenGuard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "CallerTokenGuard(<redacted>)")
     }
 }
 
@@ -182,5 +258,30 @@ mod tests {
         store.save(&Token::generate()).unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600, "save must tighten loose permissions to 0600");
+    }
+
+    /// #393: a token srelens minted for one chat names that chat, and only
+    /// while it is live — a turn's token dies with the turn.
+    #[test]
+    fn a_minted_token_names_its_chat_until_it_is_dropped() {
+        use crate::policy::Caller;
+        let tokens = CallerTokens::new();
+        let guard = tokens.mint("sess-7");
+        assert_eq!(tokens.caller_for(guard.token()), Some(Caller::Chat("sess-7".into())));
+        let presented = guard.token().to_string();
+        drop(guard);
+        assert_eq!(tokens.caller_for(&presented), None, "a revoked token names nobody");
+    }
+
+    #[test]
+    fn two_chats_tokens_name_their_own_chat() {
+        use crate::policy::Caller;
+        let tokens = CallerTokens::new();
+        let a = tokens.mint("sess-a");
+        let b = tokens.mint("sess-b");
+        assert_ne!(a.token(), b.token());
+        assert_eq!(tokens.caller_for(a.token()), Some(Caller::Chat("sess-a".into())));
+        assert_eq!(tokens.caller_for(b.token()), Some(Caller::Chat("sess-b".into())));
+        assert_eq!(tokens.caller_for(&"0".repeat(64)), None);
     }
 }
