@@ -29,22 +29,23 @@ only() {
     printf '%s\n' "$found"
 }
 
-# listed LISTING NAME PACKAGE: the listing's line for NAME must exist and
-# start -rwxr-xr-x.
+# listed LISTING PACKAGE: the listing's line for $path must exist and start
+# -rwxr-xr-x. A listing names it usr/bin/…, ./usr/bin/… (dpkg-deb --build) or
+# /usr/bin/… (rpm); tauri's deb uses the first.
 listed() {
-    line="$(printf '%s\n' "$1" | awk -v p="$2" '$NF == p')"
-    [ -n "$line" ] || fail "$3 does not ship /$path"
+    line="$(printf '%s\n' "$1" | awk -v p="$path" '{ n = $NF; sub(/^\.?\//, "", n) } n == p')"
+    [ -n "$line" ] || fail "$2 does not ship /$path"
     case "$line" in
         -rwxr-xr-x*) ;;
-        *) fail "$3 ships /$path as ${line%% *}, not -rwxr-xr-x" ;;
+        *) fail "$2 ships /$path as ${line%% *}, not -rwxr-xr-x" ;;
     esac
 }
 
 deb="$(only 'deb/*.deb')"
-listed "$(dpkg-deb -c "$deb")" "./$path" "$deb"
+listed "$(dpkg-deb -c "$deb")" "$deb"
 
 rpm="$(only 'rpm/*.rpm')"
-listed "$(rpm -qlpv "$rpm" 2> /dev/null)" "/$path" "$rpm"
+listed "$(rpm -qlpv "$rpm" 2> /dev/null)" "$rpm"
 
 appimage="$(only 'appimage/*.AppImage')"
 case "$appimage" in

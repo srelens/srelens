@@ -3,7 +3,7 @@
 #
 #   sh packaging/linux/test.sh
 #
-# Needs dpkg-deb, rpm and rpmbuild (on Ubuntu: apt-get install rpm). Each case
+# Needs dpkg-deb, ar, rpm and rpmbuild (on Ubuntu: apt-get install rpm). Each case
 # builds a deb, an rpm and a stand-in AppImage, as tauri leaves them under
 # target/release/bundle, and runs the check over them.
 set -eu
@@ -15,6 +15,8 @@ check="$here/check-launcher.sh"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 failures=0
+# How bundle builds its deb: as tauri does, or (dpkg) with dpkg-deb --build.
+deb_style=tauri
 
 # A stand-in launcher: run with no arguments, the real one says this and
 # exits 125. $1 is the exit status it gives instead.
@@ -37,7 +39,19 @@ bundle() {
         launcher 125 > "$root/usr/bin/srelens-sandbox-launch"
         chmod "$2" "$root/usr/bin/srelens-sandbox-launch"
     fi
-    dpkg-deb --root-owner-group --build "$root" "$dir/deb/srelens_1.0.0_amd64.deb" > /dev/null
+    deb="$dir/deb/srelens_1.0.0_amd64.deb"
+    if [ "$deb_style" = dpkg ]; then
+        # dpkg-deb names each path with a leading "./".
+        dpkg-deb --root-owner-group --build "$root" "$deb" > /dev/null
+    else
+        # As tauri builds it: an ar archive whose data.tar.gz names its paths
+        # without the "./".
+        printf '2.0\n' > "$work/debian-binary"
+        tar -C "$root/DEBIAN" -czf "$work/control.tar.gz" control
+        tar -C "$root" --owner=0 --group=0 -czf "$work/data.tar.gz" usr
+        rm -f "$deb"
+        (cd "$work" && ar rc "$deb" debian-binary control.tar.gz data.tar.gz)
+    fi
 
     top="$work/rpmtop"
     rm -rf "$top"
@@ -95,6 +109,10 @@ case_ the-deb-copy-is-0644 1 "srelens_1.0.0_amd64.deb ships /usr/bin/srelens-san
 case_ the-rpm-lacks-it 1 "srelens-1.0.0-1.x86_64.rpm does not ship /usr/bin/srelens-sandbox-launch" 755 none 125
 case_ the-rpm-copy-is-0644 1 "srelens-1.0.0-1.x86_64.rpm ships /usr/bin/srelens-sandbox-launch as -rw-r--r--, not -rwxr-xr-x" 755 644 125
 case_ the-appimage-copy-is-not-the-launcher 1 "exited 0, not 125" 755 755 0
+deb_style=dpkg
+case_ a-deb-that-names-its-paths-with-dot-slash 0 "OK: the deb, rpm and AppImage ship" 755 755 125
+case_ a-dot-slash-deb-copy-is-0644 1 "not -rwxr-xr-x" 644 755 125
+deb_style=tauri
 
 rm "$work/all-three-ship-it/appimage/"*.AppImage
 expect no-appimage 1 "no appimage/*.AppImage under" "$work/all-three-ship-it"
