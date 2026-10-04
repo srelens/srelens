@@ -1793,6 +1793,81 @@ describe("the run store", () => {
     });
 
     /**
+     * Reported from use: ask, restart, reopen the conversation from Recent
+     * runs, ask a follow-up — and the follow-up's answer and tool calls landed
+     * in the FIRST answer, which read "Done.Done.", while the new question sat
+     * unanswered. The restored turns kept the ids written to disk and
+     * `turnSeq` started again at 0, so the follow-up's turns took ids 1 and 2
+     * as well, and every update matched the old turn first.
+     */
+    it("answers a follow-up in its own turn after the conversation is reopened", async () => {
+      listSessions.mockResolvedValue([{ id: "s1", title: "is checkout healthy?", createdAt: 1, updatedAt: 2 }]);
+      loadSession.mockResolvedValue({
+        id: "s1", title: "is checkout healthy?", createdAt: 1, updatedAt: 2, contexts: [], skills: [],
+        cliSessionId: "cli-1", agentKind: "claude",
+        messages: [{ v: 1, key: "prod-eu|/k/pods", label: "pods", turns: [
+          { id: 1, role: "user", text: "is checkout healthy?", calls: [], at: 1 },
+          { id: 2, role: "agent", text: "Done.", at: 2, calls: [
+            { id: "c1", tool: "k8s.listPods", args: {}, status: "ok", ms: 5 },
+          ] },
+        ], gates: [] }],
+      });
+      await restoreRuns();
+      await openSavedRun("s1");
+
+      sendChat.mockImplementation(async (_s, _p, _a, onEvent) => {
+        onEvent({ type: "textDelta", text: "Done." });
+        onEvent({ type: "toolCallStart", id: "c2", tool: "k8s.getEvents", args: {} });
+        onEvent({ type: "toolResult", id: "c2", status: "ok" });
+        onEvent({ type: "turnDone" });
+        return null;
+      });
+      await askAgent("and the events?", { about: { cluster: "prod-eu" }, route: "/k/pods" });
+
+      const turns = getAgentRun().turns;
+      expect(turns.map((t) => [t.role, t.text])).toEqual([
+        ["user", "is checkout healthy?"],
+        ["agent", "Done."],
+        ["user", "and the events?"],
+        ["agent", "Done."],
+      ]);
+      expect(turns[3].calls.map((c) => c.tool)).toEqual(["k8s.getEvents"]);
+      // The earlier answer exactly as it was saved: its own text, its one call,
+      // and its own time — not re-stamped when the follow-up settled.
+      expect(turns[1]).toEqual({
+        id: expect.any(Number), role: "agent", text: "Done.", at: 2, calls: [
+          { id: "c1", tool: "k8s.listPods", args: {}, status: "ok", ms: 5 },
+        ],
+      });
+    });
+
+    /**
+     * The same defect, already on disk: a conversation the earlier build saved
+     * after a follow-up holds two turns with id 1 and two with id 2. The
+     * transcript keys each turn by its id, so reopening one must not hand it
+     * duplicates.
+     */
+    it("gives every turn of a reopened conversation its own id", async () => {
+      listSessions.mockResolvedValue([{ id: "s1", title: "t", createdAt: 1, updatedAt: 4 }]);
+      loadSession.mockResolvedValue({
+        id: "s1", title: "t", createdAt: 1, updatedAt: 4, contexts: [], skills: [],
+        cliSessionId: null, agentKind: "claude",
+        messages: [{ v: 1, key: "prod-eu|/k/pods", label: "pods", turns: [
+          { id: 1, role: "user", text: "first", calls: [], at: 1 },
+          { id: 2, role: "agent", text: "Done.Done.", calls: [], at: 4 },
+          { id: 1, role: "user", text: "second", calls: [], at: 3 },
+          { id: 2, role: "agent", text: "", calls: [], at: 4 },
+        ], gates: [] }],
+      });
+      await restoreRuns();
+      await openSavedRun("s1");
+
+      const ids = getAgentRun().turns.map((t) => t.id);
+      expect(ids).toHaveLength(4);
+      expect(new Set(ids).size).toBe(4);
+    });
+
+    /**
      * Codex P2, round 4: `openSeq` was only ever advanced by another saved-row
      * click, so selecting an already-loaded conversation while a load was in
      * flight left that load free to switch the transcript back when it landed.
