@@ -121,6 +121,9 @@ export type Turn = {
    * one knows when it was last touched and not when each turn happened. The
    * clock is withheld rather than printing the same borrowed stamp under every
    * turn, which would be srelens claiming a time it was never told.
+   *
+   * Also false on an answer written to disk while it was still arriving: its
+   * `at` is when it began, not when it settled, and it never will settle.
    */
   atRecorded?: boolean;
 };
@@ -1764,11 +1767,20 @@ function persistRun(key: string): void {
   // Nothing worth a file until something was actually asked.
   const asked = state.run.turns.find((t) => t.role === "user");
   if (!asked) return;
+  // An answer still arriving is written without a time of its own (PR #803
+  // review). This write may be the last — New question, or a window closed
+  // mid-answer — and reopened, a stamp from when it began would time it as
+  // answered in an instant.
+  const last = state.run.turns.at(-1);
+  const turns =
+    state.run.busy && last?.role === "agent"
+      ? [...state.run.turns.slice(0, -1), { ...last, atRecorded: false }]
+      : state.run.turns;
   const envelope: SavedRun = {
     v: 1,
     key,
     label: state.label,
-    turns: state.run.turns,
+    turns,
     gates: state.run.gates,
     ...(state.subject ? { subject: state.subject } : {}),
   };

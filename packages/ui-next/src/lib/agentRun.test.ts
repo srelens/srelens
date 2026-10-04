@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { describeError } from "@srelens/core";
 import { runKeyFor } from "./askContext";
 import { getSkillUses, loadSkillUses } from "./skillUses";
+import { runFigures } from "./runFigures";
 
 /** A `Map`-backed storage, so a test's skill-use counts start from nothing. */
 function memoryStorage() {
@@ -30,6 +31,7 @@ import {
   getRunSubject,
   selectRun,
   forgetRun,
+  type Turn,
 } from "./agentRun";
 
 const { startChat, sendChat, listAgents, cancelChat, loadSkill, listSessions, loadSession, saveSession, deleteSession } =
@@ -1915,6 +1917,30 @@ describe("the run store", () => {
           .at(-1);
         expect(JSON.stringify(kept?.messages)).toContain("checkout-api is failing");
         expect(JSON.stringify(kept?.messages)).toContain("k8s.listPods");
+      });
+    });
+
+    it("does not time an answer that was still arriving when its file was written", async () => {
+      sendChat.mockImplementation((_s: string, _p: string, _a: string, onEvent: (e: unknown) => void) => {
+        onEvent({ type: "textDelta", text: "checkout-api is failing" });
+        return new Promise<string | null>(() => {});
+      });
+      void askAgent("why is checkout failing?", POD);
+      await untilSendChatCalledTimes(1);
+      const id = (saveSession.mock.calls.at(-1)?.[0] as { id: string }).id;
+
+      clearAgentRun();
+
+      await vi.waitFor(() => {
+        const kept = saveSession.mock.calls
+          .map(([s]) => s as { id: string; durationMs?: number; messages: { turns: Turn[] }[] })
+          .filter((s) => s.id === id)
+          .at(-1);
+        expect(JSON.stringify(kept?.messages)).toContain("checkout-api is failing");
+        // Reopened, the run is no longer busy: its figures come from the file
+        // alone, and must say what the row said, not "answered in 0.0s".
+        expect(runFigures(kept?.messages[0].turns ?? [], false).answeringMs).toBeNull();
+        expect(kept?.durationMs).toBeUndefined();
       });
     });
 
