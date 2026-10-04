@@ -428,6 +428,42 @@ mod tests {
         assert!(matches!(seen[1].last(), Some(Turn::ToolResults(o)) if o[0].is_error));
     }
 
+    /// An invoker that cannot reach the MCP server at all.
+    struct UnreachableInvoker;
+
+    #[async_trait]
+    impl ToolInvoker for UnreachableInvoker {
+        async fn list_tools(&self) -> Result<Vec<ToolDef>, LlmError> {
+            Ok(vec![ToolDef { name: "k8s_scale".into(), description: "scale".into(), input_schema: json!({ "type": "object" }), read_only: false }])
+        }
+
+        async fn call_tool(&self, _name: &str, _args: &Value) -> Result<ToolCallResult, LlmError> {
+            Err(LlmError::Http("connection refused".into()))
+        }
+    }
+
+    /// PR #806 review: a call that never reached the server is an error whose
+    /// summary is the transport's own message.
+    #[test]
+    fn an_unreachable_tool_is_an_error_summarised_by_the_transport_failure() {
+        let provider = ScriptedProvider::new(vec![
+            vec![
+                StreamItem::ToolCall(ToolCall { id: "c1".into(), name: "k8s_scale".into(), arguments: json!({}), thought_signature: None }),
+                StreamItem::Done(StopReason::ToolUse),
+            ],
+            vec![StreamItem::Text("could not reach it".into()), StreamItem::Done(StopReason::EndTurn)],
+        ]);
+        let events = drive(&provider, &UnreachableInvoker, "scale it");
+        assert!(
+            events.contains(&AgentEvent::ToolResult {
+                id: "c1".into(),
+                status: ToolStatus::Error,
+                summary: Some("network error: connection refused".into()),
+            }),
+            "events: {events:?}"
+        );
+    }
+
     #[test]
     fn a_provider_error_surfaces_before_turn_done() {
         let provider = ScriptedProvider::new(vec![vec![StreamItem::Error("Overloaded".into())]]);

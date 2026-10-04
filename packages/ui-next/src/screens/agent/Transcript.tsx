@@ -81,10 +81,15 @@ function ToolCallRow({ call }: { call: ToolCallRecord }) {
   const args = summarizeArgs(call.args);
   const capability = call.status === "error" ? "text-sev" : call.status === "denied" ? "text-warn" : "text-accent";
   const result = call.status === "error" ? "text-sev" : call.status === "denied" ? "text-warn" : "text-faint";
+  // The tone says it, and so does a word (design.md §5, PR #806 review): a
+  // failed `0 pods` and a successful one differ by more than colour. A call
+  // that succeeded carries no status tone, and its duration says it finished.
+  const outcome = call.status === "error" ? "Failed" : call.status === "denied" ? "Denied" : undefined;
   return (
     <div className="tool-call flex min-w-0 items-center gap-2">
       <span className={cx("shrink-0", capability)}>{call.tool}</span>
       {args !== "" && <span className="min-w-0 flex-1 truncate text-faint">{args}</span>}
+      {outcome !== undefined && <span className={cx("shrink-0", result)}>{outcome}</span>}
       {call.summary !== undefined && <span className={cx("min-w-0 shrink truncate", result)}>{call.summary}</span>}
       {call.ms !== undefined && <span className="ml-auto shrink-0 text-faint">{Math.round(call.ms)}ms</span>}
     </div>

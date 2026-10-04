@@ -23,7 +23,8 @@ pub const DENIED_PREFIX: &str = "consent denied: ";
 /// an object's kind and name, or the first line of plain text or of an error.
 /// Any other structured result gets no summary rather than a JSON fragment.
 pub fn summarize_result(text: &str, is_error: bool) -> Option<String> {
-    let first_line = || text.lines().map(str::trim).find(|l| !l.is_empty()).map(bound);
+    let first_line =
+        || text.lines().map(str::trim).find(|l| !l.is_empty()).map(|l| bound(&mask_credentials(l)));
     if is_error {
         return first_line();
     }
@@ -32,16 +33,19 @@ pub fn summarize_result(text: &str, is_error: bool) -> Option<String> {
         Ok(serde_json::Value::Object(map)) => {
             let arrays: Vec<(&String, usize)> =
                 map.iter().filter_map(|(k, v)| v.as_array().map(|a| (k, a.len()))).collect();
-            // One list, however many views of it the object holds: arrays all
-            // of one length (`k8s.listNamespaces` returns its namespaces as
-            // names and as rows, PR #806 review). Named by the first field by
-            // name, so the reading does not depend on the map's order.
-            if let Some(&(_, n)) = arrays.first() {
-                if arrays.iter().all(|&(_, len)| len == n) {
-                    let field = arrays.iter().map(|&(k, _)| k).min().expect("not empty");
-                    let noun = if n == 1 { singular(field) } else { field.clone() };
-                    return Some(bound(&format!("{n} {noun}")));
-                }
+            // One list, counted once even when a known second view of it sits
+            // beside it (`VIEW_FIELDS`, PR #806 review). Arrays that merely
+            // share a length are not one list, and say nothing.
+            let (views, lists): (Vec<_>, Vec<_>) =
+                arrays.iter().partition(|(k, _)| VIEW_FIELDS.contains(&k.as_str()));
+            let counted = match (lists.as_slice(), views.as_slice()) {
+                ([list], views) if views.iter().all(|(_, len)| *len == list.1) => Some(*list),
+                ([], [only]) => Some(*only),
+                _ => None,
+            };
+            if let Some((field, n)) = counted {
+                let noun = if n == 1 { singular(field) } else { field.to_string() };
+                return Some(bound(&format!("{n} {noun}")));
             }
             let kind = map.get("kind").and_then(|k| k.as_str());
             let name = map.get("metadata").and_then(|m| m.get("name")).and_then(|n| n.as_str());
@@ -65,6 +69,77 @@ fn bound(s: &str) -> String {
         cut.push('…');
         cut
     }
+}
+
+/// Array fields that are a second view of the list beside them, not a list of
+/// their own: `k8s.listNamespaces` returns its namespaces as names and again
+/// as `summaries` rows.
+const VIEW_FIELDS: &[&str] = &["summaries"];
+
+const REDACTED: &str = "[redacted]";
+
+/// Words that, as the key of a `key=value` or `key: value`, name a credential.
+/// Matched inside the key, so `DB_PASSWORD` and `x-api-key` count.
+const CREDENTIAL_KEYS: &[&str] =
+    &["password", "passwd", "secret", "token", "apikey", "api_key", "api-key", "access_key", "private_key", "credential", "authorization"];
+
+/// Credentials in well-known shapes, masked in a line of free text before it
+/// becomes a summary (PR #806 review): a summary is written into the saved
+/// conversation, and a first line can be a shell's `env` or a log line. Best
+/// effort by design — it catches the shapes credentials usually take (a
+/// credential-named key's value, a `Bearer`/`Basic` value, GitHub/OpenAI/Slack
+/// /AWS token prefixes, a JWT, a PEM private key), not every secret there is.
+fn mask_credentials(line: &str) -> String {
+    if line.contains("PRIVATE KEY") {
+        return REDACTED.to_string();
+    }
+    let mut mask_next = false;
+    let mut out: Vec<String> = Vec::new();
+    for word in line.split(' ') {
+        let lower = word.to_ascii_lowercase();
+        let is_scheme = lower == "bearer" || lower == "basic";
+        if mask_next && !word.is_empty() && !is_scheme {
+            out.push(REDACTED.to_string());
+            mask_next = false;
+            continue;
+        }
+        if is_scheme {
+            out.push(word.to_string());
+            mask_next = true;
+            continue;
+        }
+        if let Some(at) = word.find(['=', ':']) {
+            let key = lower[..at].trim_matches(|c: char| !c.is_ascii_alphanumeric());
+            if !key.is_empty() && CREDENTIAL_KEYS.iter().any(|k| key.contains(k)) {
+                let value = &word[at + 1..];
+                if value.trim_matches(|c| c == '"' || c == '\'').is_empty() {
+                    // `password: hunter2` — the value is the next word.
+                    out.push(word.to_string());
+                    mask_next = true;
+                } else {
+                    out.push(format!("{}{REDACTED}", &word[..=at]));
+                }
+                continue;
+            }
+        }
+        out.push(if looks_like_a_token(word) { REDACTED.to_string() } else { word.to_string() });
+    }
+    out.join(" ")
+}
+
+/// A word in the shape of a well-known token: GitHub (`ghp_` …), OpenAI and
+/// Anthropic (`sk-`), Slack (`xox?-`), an AWS access key id, or a JWT.
+fn looks_like_a_token(word: &str) -> bool {
+    let w = word.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '-');
+    let prefixed = ["ghp_", "gho_", "ghs_", "ghu_", "ghr_", "github_pat_", "xoxb-", "xoxp-", "xoxa-"]
+        .iter()
+        .any(|p| w.starts_with(p) && w.len() > p.len() + 8);
+    let openai = w.starts_with("sk-") && w.len() >= 20;
+    let aws = w.len() == 20
+        && w.starts_with("AKIA")
+        && w.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit());
+    let jwt = w.starts_with("eyJ") && w.matches('.').count() == 2;
+    prefixed || openai || aws || jwt
 }
 
 /// The singular a plural field name really has (PR #806 review):
@@ -202,16 +277,43 @@ mod tests {
     }
 
     /// PR #806 review: `k8s.listNamespaces` returns its namespaces twice, as
-    /// names and as rows. Arrays of one length are one list, counted once and
-    /// named the same whatever order the object holds them in; arrays of
-    /// different lengths still say nothing short and honest.
+    /// names and as `summaries` rows; that one list is counted once, whatever
+    /// order the object holds them in. Arrays that merely share a length are
+    /// not one list — a graph's nodes and edges, a list beside its errors —
+    /// and say nothing short and honest.
     #[test]
-    fn two_views_of_one_list_are_counted_once() {
+    fn only_known_views_of_one_list_are_counted_once() {
         let names_first = r#"{"namespaces":["a","b"],"summaries":[{},{}]}"#;
         let rows_first = r#"{"summaries":[{},{}],"namespaces":["a","b"]}"#;
         assert_eq!(summarize_result(names_first, false).as_deref(), Some("2 namespaces"));
         assert_eq!(summarize_result(rows_first, false).as_deref(), Some("2 namespaces"));
+        assert_eq!(summarize_result(r#"{"namespaces":["a"],"summaries":[{},{}]}"#, false), None);
+        assert_eq!(summarize_result(r#"{"edges":[1,2],"nodes":[1,2]}"#, false), None);
+        assert_eq!(summarize_result(r#"{"errors":["failed"],"pods":["api-0"]}"#, false), None);
         assert_eq!(summarize_result(r#"{"pods":[1,2],"warnings":[1]}"#, false), None);
+    }
+
+    /// PR #806 review: a summary is written into the saved conversation, and
+    /// a first line of free text can be anything — a shell's `env`, a log line.
+    /// Credentials in well-known shapes are masked before it is made.
+    #[test]
+    fn a_credential_in_a_first_line_is_masked() {
+        let cases = [
+            ("API_KEY=sk-abcdef0123456789abcdef", "API_KEY=[redacted]"),
+            ("db password: hunter2 for admin", "db password: [redacted] for admin"),
+            ("Authorization: Bearer eyJhbGciOi.eyJzdWIiOi.c2ln", "Authorization: Bearer [redacted]"),
+            ("pushed with ghp_abcdefghijklmnopqrstuvwxyz0123456789", "pushed with [redacted]"),
+            ("aws key AKIAIOSFODNN7EXAMPLE in use", "aws key [redacted] in use"),
+            ("-----BEGIN RSA PRIVATE KEY-----", "[redacted]"),
+        ];
+        for (line, want) in cases {
+            assert_eq!(summarize_result(line, false).as_deref(), Some(want), "for {line:?}");
+            assert_eq!(summarize_result(line, true).as_deref(), Some(want), "error {line:?}");
+        }
+        // Ordinary results are left exactly as they were.
+        for line in ["5 pods running", "handler error: failed to load current context: no-such-context"] {
+            assert_eq!(summarize_result(line, false).as_deref(), Some(line));
+        }
     }
 
     #[test]

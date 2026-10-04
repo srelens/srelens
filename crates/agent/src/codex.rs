@@ -78,7 +78,8 @@ fn item_completed(item: &serde_json::Value) -> Vec<AgentEvent> {
             } else {
                 ToolStatus::Error
             };
-            let summary = crate::event::summarize_result(&mcp_result_text(item), status != ToolStatus::Ok);
+            let failed = status != ToolStatus::Ok;
+            let summary = crate::event::summarize_result(&mcp_result_text(item, failed), failed);
             vec![AgentEvent::ToolResult { id: str_field(item, "id").to_string(), status, summary }]
         }
         Some("command_execution") => {
@@ -94,18 +95,20 @@ fn item_completed(item: &serde_json::Value) -> Vec<AgentEvent> {
 }
 
 /// An `mcp_tool_call`'s result as text, for its summary (#385): the result's
-/// text parts, else the error's message, else the error itself.
-fn mcp_result_text(item: &serde_json::Value) -> String {
-    if let Some(parts) = item.get("result").and_then(|r| r.get("content")).and_then(|c| c.as_array()) {
+/// text parts, or the error's message (else the error itself). A failed call
+/// reads its error first — the error is what decided its status — and its
+/// content only when there is no error to read (PR #806 review).
+fn mcp_result_text(item: &serde_json::Value, failed: bool) -> String {
+    let content = item.get("result").and_then(|r| r.get("content")).and_then(|c| c.as_array()).and_then(|parts| {
         let text: Vec<&str> = parts.iter().filter_map(|p| p.get("text").and_then(|t| t.as_str())).collect();
-        if !text.is_empty() {
-            return text.join("\n");
-        }
-    }
-    match item.get("error") {
-        Some(serde_json::Value::Null) | None => String::new(),
-        Some(e) => e.get("message").and_then(|m| m.as_str()).map(str::to_string).unwrap_or_else(|| e.to_string()),
-    }
+        (!text.is_empty()).then(|| text.join("\n"))
+    });
+    let error = match item.get("error") {
+        Some(serde_json::Value::Null) | None => None,
+        Some(e) => Some(e.get("message").and_then(|m| m.as_str()).map(str::to_string).unwrap_or_else(|| e.to_string())),
+    };
+    let (first, then) = if failed { (error, content) } else { (content, error) };
+    first.or(then).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -173,6 +176,16 @@ mod tests {
             r#"{"type":"item.completed","item":{"id":"item_1","type":"mcp_tool_call","server":"everything","tool":"echo","arguments":{"message":"srelens-mcp-probe"},"result":{"content":[{"type":"text","text":"Echo: srelens-mcp-probe"}],"structured_content":null},"error":null,"status":"completed"}}"#,
         );
         assert_eq!(out, vec![AgentEvent::ToolResult { id: "item_1".into(), status: ToolStatus::Ok, summary: Some("Echo: srelens-mcp-probe".into()) }]);
+    }
+
+    /// PR #806 review: a failed call is summarised by the error that decided
+    /// its status, not by whatever partial content came with it.
+    #[test]
+    fn a_failed_mcp_tool_call_is_summarised_by_its_error_not_its_partial_content() {
+        let out = parse_line(
+            r#"{"type":"item.completed","item":{"id":"item_1","type":"mcp_tool_call","server":"everything","tool":"echo","arguments":{},"result":{"content":[{"type":"text","text":"partial output"}]},"error":{"message":"boom"},"status":"failed"}}"#,
+        );
+        assert_eq!(out, vec![AgentEvent::ToolResult { id: "item_1".into(), status: ToolStatus::Error, summary: Some("boom".into()) }]);
     }
 
     #[test]
