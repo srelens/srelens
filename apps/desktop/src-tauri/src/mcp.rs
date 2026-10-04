@@ -17,8 +17,9 @@ struct Running {
     addr: SocketAddr,
     shutdown: Option<oneshot::Sender<()>>,
     handle: JoinHandle<()>,
-    // Read via `McpHttpManager::session_token`, which the assistant's
-    // `chat_send` uses to authenticate the agent CLI against this server.
+    // The Settings token: what an external MCP client presents. The
+    // assistant's own CLIs present a per-turn token instead (#393, see
+    // `McpHttpManager::mint_turn_token`).
     token: srelens_mcp::auth::Token,
 }
 
@@ -34,6 +35,10 @@ pub struct McpHttpManager {
     /// then both bind the same port, or the later one could overwrite a live
     /// `Running` and orphan a task still holding the listener.
     lifecycle: tokio::sync::Mutex<()>,
+    /// The per-chat tokens every server this manager builds accepts (#393):
+    /// one set for the process, so a token `chat_send` mints is recognised by
+    /// the HTTP server whatever restarts it has had, and by nothing else.
+    caller_tokens: srelens_mcp::auth::CallerTokens,
 }
 
 impl McpHttpManager {
@@ -42,7 +47,22 @@ impl McpHttpManager {
             cache,
             running: Mutex::new(None),
             lifecycle: tokio::sync::Mutex::new(()),
+            caller_tokens: srelens_mcp::auth::CallerTokens::new(),
         }
+    }
+
+    pub fn caller_tokens(&self) -> &srelens_mcp::auth::CallerTokens {
+        &self.caller_tokens
+    }
+
+    /// A bearer token for one chat turn (#393): accepted by the running
+    /// server as that chat's, and revoked when the guard is dropped. The
+    /// Settings token is never handed to a CLI — it authenticates a client
+    /// without saying which one.
+    pub fn mint_turn_token(&self, session: &str) -> Result<srelens_mcp::auth::CallerTokenGuard, String> {
+        self.session_token()
+            .ok_or("Start the MCP server in Settings → MCP before using the assistant.")?;
+        Ok(self.caller_tokens.mint(session))
     }
 
     /// Take the lifecycle lock for the duration of a start/stop/rotate. The
@@ -52,9 +72,10 @@ impl McpHttpManager {
         self.lifecycle.lock().await
     }
 
-    /// The bearer token the running loopback MCP server accepts, as hex, or
-    /// `None` if no server is running. The assistant uses this to authenticate;
-    /// it grants only the loopback MCP surface, never cluster credentials.
+    /// The Settings bearer token the running loopback MCP server accepts, as
+    /// hex, or `None` if no server is running. It grants only the loopback MCP
+    /// surface, never cluster credentials. The assistant does not hand it to
+    /// its CLIs any more — see [`mint_turn_token`](Self::mint_turn_token).
     pub fn session_token(&self) -> Option<String> {
         let running = self.running.lock().unwrap();
         running
@@ -149,6 +170,7 @@ impl McpHttpManager {
         };
         server
             .with_policy(prompt)
+            .with_caller_tokens(self.caller_tokens.clone())
             .with_audit(audit)
             .with_prompts(srelens_mcp::prompts::PromptLibrary::new(Some(prompts_dir.to_path_buf())))
             .with_kind_resolver(srelens_registry::kind_resolver())
@@ -1055,5 +1077,46 @@ mod tests {
 
         let body = std::fs::read_to_string(&path).expect("a trail, not silence");
         assert!(body.contains("k8s.nope"), "unexpected line: {body}");
+    }
+
+    /// #393: the server every agent reaches is built over the manager's own
+    /// caller tokens, so a token `chat_send` mints is one that server accepts.
+    #[tokio::test]
+    async fn a_server_it_builds_recognises_the_tokens_it_mints() {
+        let app = tauri::test::mock_app();
+        let mgr = McpHttpManager::new(ClientCache::new(std::path::PathBuf::from("/dev/null")));
+        let pending = Arc::new(crate::mcp_confirm::Pending::default());
+        let dir = std::env::temp_dir();
+        let server = mgr.build_server(app.handle(), &pending, &dir.join("srelens-test-audit.jsonl"), &dir);
+        let guard = mgr.caller_tokens().mint("sess-7");
+        assert_eq!(
+            server.caller_tokens().caller_for(guard.token()),
+            Some(srelens_mcp::policy::Caller::Chat("sess-7".into()))
+        );
+    }
+
+    /// A turn is handed a token of its own, never the Settings token, and only
+    /// while the server it would talk to is running.
+    #[tokio::test]
+    async fn a_turn_token_is_its_chat_s_and_not_the_settings_token() {
+        let mgr = McpHttpManager::new(ClientCache::new(std::path::PathBuf::from("/dev/null")));
+        assert!(mgr.mint_turn_token("sess-7").is_err(), "no server, no token");
+
+        let listener = tokio::net::TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = oneshot::channel::<()>();
+        let handle = tokio::spawn(async move {
+            let _ = rx.await;
+            drop(listener);
+        });
+        let settings = srelens_mcp::auth::Token::generate();
+        *mgr.running.lock().unwrap() = Some(Running { addr, shutdown: Some(tx), handle, token: settings.clone() });
+
+        let guard = mgr.mint_turn_token("sess-7").expect("server running");
+        assert_ne!(guard.token(), settings.as_str());
+        assert_eq!(
+            mgr.caller_tokens().caller_for(guard.token()),
+            Some(srelens_mcp::policy::Caller::Chat("sess-7".into()))
+        );
     }
 }
