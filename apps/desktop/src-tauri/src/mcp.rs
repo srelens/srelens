@@ -51,6 +51,9 @@ impl McpHttpManager {
         }
     }
 
+    /// For tests to mint against the same set the server is built over;
+    /// production code mints through [`mint_turn_token`](Self::mint_turn_token).
+    #[cfg(test)]
     pub fn caller_tokens(&self) -> &srelens_mcp::auth::CallerTokens {
         &self.caller_tokens
     }
