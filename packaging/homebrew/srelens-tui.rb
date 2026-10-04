@@ -58,30 +58,44 @@ class SrelensTui < Formula
   # srelens deliberately does not bundle a toolchain — it drives the kubectl
   # and helm already on the machine, including kubeconfig exec-auth plugins —
   # so these are genuinely optional rather than dependencies.
-  def caveats
+    def caveats
     <<~EOS
-      srelens-tui uses the kubectl and helm already on your PATH, if any.
-      Neither is required to browse a cluster; `srelens-tui toolbox` reports
+      srectl is the command. srelens-tui still runs it, and prints a one-line
+      reminder.
+
+      srectl uses the kubectl and helm already on your PATH, if any.
+      Neither is required to browse a cluster; `srectl toolbox` reports
       what it found.
 
-      Homebrew owns this copy, so `srelens-tui update` will decline to replace
+      Homebrew owns this copy, so `srectl update` will decline to replace
       it and point you back here. Use `brew upgrade srelens-tui` instead.
     EOS
   end
 
   def install
-    # The archive holds the binary and LICENSE at its root.
-    bin.install "srelens-tui"
+    # The archive still holds the binary as `srelens-tui`. Install it under
+    # the new command name, and leave the old name as a wrapper so existing
+    # scripts keep working.
+    bin.install "srelens-tui" => "srectl"
+    (bin/"srelens-tui").write <<~SH
+      #!/bin/sh
+      echo "srelens-tui is now srectl" >&2
+      exec "#{bin}/srectl" "$@"
+    SH
+    chmod 0755, bin/"srelens-tui"
   end
 
   test do
     # Asserts the binary runs AND that the formula's version matches what was
     # actually packaged — a mismatch means the render step and the release
     # disagree, which is worth failing on.
-    assert_match version.to_s, shell_output("#{bin}/srelens-tui --version")
+    assert_match version.to_s, shell_output("#{bin}/srectl --version")
+
+    # The old command name runs the same binary.
+    assert_match version.to_s, shell_output("#{bin}/srelens-tui --version 2>&1")
 
     # A command that needs no cluster, to prove the binary is not merely
     # loadable. With no kubeconfig it reports zero contexts rather than failing.
-    assert_match "SRElens Kubernetes TUI", shell_output("#{bin}/srelens-tui info")
+    assert_match "SRElens Kubernetes TUI", shell_output("#{bin}/srectl info")
   end
 end

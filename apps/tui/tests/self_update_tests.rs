@@ -115,9 +115,9 @@ fn release_json(tag: &str) -> Vec<u8> {
 /// The binary name inside an archive for the platform under test.
 fn bin_name() -> &'static str {
     if cfg!(windows) {
-        "srelens-tui.exe"
+        "srectl.exe"
     } else {
-        "srelens-tui"
+        "srectl"
     }
 }
 
@@ -207,18 +207,18 @@ fn a_musl_binary_updates_to_a_musl_archive() {
 fn asset_names_match_what_the_release_workflow_publishes() {
     assert_eq!(
         asset_name("1.2.3", "x86_64-unknown-linux-gnu"),
-        "srelens-tui-1.2.3-x86_64-unknown-linux-gnu.tar.gz"
+        "srectl-1.2.3-x86_64-unknown-linux-gnu.tar.gz"
     );
     // Windows is a zip, never a bare exe — size-baseline.mjs treats any .exe
     // as a desktop installer.
     assert_eq!(
         asset_name("1.2.3", "x86_64-pc-windows-msvc"),
-        "srelens-tui-1.2.3-x86_64-pc-windows-msvc.zip"
+        "srectl-1.2.3-x86_64-pc-windows-msvc.zip"
     );
-    assert_eq!(sums_name("1.2.3"), "srelens-tui-1.2.3-SHA256SUMS.txt");
+    assert_eq!(sums_name("1.2.3"), "srectl-1.2.3-SHA256SUMS.txt");
     assert_eq!(
-        asset_url("1.2.3", "srelens-tui-1.2.3-SHA256SUMS.txt"),
-        "https://github.com/srelens/srelens/releases/download/srelens-v1.2.3/srelens-tui-1.2.3-SHA256SUMS.txt"
+        asset_url("1.2.3", "srectl-1.2.3-SHA256SUMS.txt"),
+        "https://github.com/srelens/srelens/releases/download/srelens-v1.2.3/srectl-1.2.3-SHA256SUMS.txt"
     );
 }
 
@@ -679,7 +679,7 @@ fn a_stable_release_without_a_build_for_this_platform_says_so() {
 #[test]
 fn a_checksum_is_found_in_either_sha256sum_format() {
     let hash = "a".repeat(64);
-    let asset = "srelens-tui-1.2.3-x86_64-unknown-linux-gnu.tar.gz";
+    let asset = "srectl-1.2.3-x86_64-unknown-linux-gnu.tar.gz";
     let gnu = format!("{hash}  {asset}\n{}  other.tar.gz\n", "b".repeat(64));
     let binary_mode = format!("{hash} *{asset}\n");
 
@@ -691,7 +691,7 @@ fn a_checksum_is_found_in_either_sha256sum_format() {
 fn a_checksum_file_that_does_not_list_the_asset_is_refused() {
     let sums = format!("{}  some-other-file.tar.gz\n", "a".repeat(64));
     assert!(matches!(
-        checksum_for(&sums, "srelens-tui-1.2.3-x86_64-apple-darwin.tar.gz"),
+        checksum_for(&sums, "srectl-1.2.3-x86_64-apple-darwin.tar.gz"),
         Err(UpdateError::ChecksumMissing { .. })
     ));
     // A line for the right asset carrying something that is not a hash is the
@@ -724,25 +724,22 @@ fn verification_accepts_the_published_hash_and_rejects_any_other() {
 
 #[test]
 fn the_binary_is_pulled_out_of_a_tarball_stored_at_the_root() {
-    let archive = targz("srelens-tui", b"ELF-ish");
-    let got = extract_binary(
-        &archive,
-        "srelens-tui-1.2.3-x86_64-unknown-linux-gnu.tar.gz",
-    );
+    let archive = targz("srectl", b"ELF-ish");
+    let got = extract_binary(&archive, "srectl-1.2.3-x86_64-unknown-linux-gnu.tar.gz");
     assert_eq!(got.unwrap(), b"ELF-ish");
 }
 
 #[test]
 fn the_binary_is_pulled_out_of_a_zip() {
-    let archive = zip_with("srelens-tui.exe", b"MZ-ish");
-    let got = extract_binary(&archive, "srelens-tui-1.2.3-x86_64-pc-windows-msvc.zip");
+    let archive = zip_with("srectl.exe", b"MZ-ish");
+    let got = extract_binary(&archive, "srectl-1.2.3-x86_64-pc-windows-msvc.zip");
     assert_eq!(got.unwrap(), b"MZ-ish");
 }
 
 #[test]
 fn an_archive_without_the_binary_is_an_error_naming_the_asset() {
     let archive = targz("README", b"nope");
-    let asset = "srelens-tui-1.2.3-x86_64-unknown-linux-gnu.tar.gz";
+    let asset = "srectl-1.2.3-x86_64-unknown-linux-gnu.tar.gz";
     match extract_binary(&archive, asset) {
         Err(UpdateError::BinaryMissing { asset: named }) => assert_eq!(named, asset),
         other => panic!("expected BinaryMissing, got {other:?}"),
@@ -1047,10 +1044,55 @@ fn a_newer_release_plans_urls_under_its_own_tag() {
         plan.archive_url
     );
     assert!(
-        plan.sums_url.ends_with("srelens-tui-2.0.0-SHA256SUMS.txt"),
+        plan.sums_url.ends_with("srectl-2.0.0-SHA256SUMS.txt"),
         "{}",
         plan.sums_url
     );
+}
+
+/// The bridge release is still published as `srelens-tui`. Checking for an
+/// update from that same version finds no `srectl` archive and is not a
+/// failure: there is nothing newer to install.
+#[test]
+fn a_release_that_still_publishes_srelens_tui_is_current() {
+    let fetch = |_: &str| -> Result<Vec<u8>, UpdateError> {
+        Ok(br#"{"tag_name":"srelens-v1.2.0","prerelease":false,"assets":[{"name":"srelens-tui-1.2.0-SHA256SUMS.txt"}]}"#.to_vec())
+    };
+    assert_eq!(
+        plan(
+            "1.2.0",
+            Channel::Stable,
+            false,
+            PathBuf::from("/tmp/srelens-tui"),
+            &fetch
+        )
+        .unwrap(),
+        Check::UpToDate {
+            channel: Channel::Stable,
+            latest: "1.2.0".into()
+        }
+    );
+}
+
+/// A newer tag that also lacks a `srectl` archive is a release we could not
+/// take, not a claim that this build is the latest.
+#[test]
+fn a_newer_release_without_srectl_is_still_an_error() {
+    let fetch = |_: &str| -> Result<Vec<u8>, UpdateError> {
+        Ok(br#"{"tag_name":"srelens-v2.0.0","prerelease":false,"assets":[{"name":"srelens-tui-2.0.0-SHA256SUMS.txt"}]}"#.to_vec())
+    };
+    let err = plan(
+        "1.2.0",
+        Channel::Stable,
+        false,
+        PathBuf::from("/tmp/srelens-tui"),
+        &fetch,
+    )
+    .unwrap_err();
+    let UpdateError::BadRelease(message) = err else {
+        panic!("expected the missing build to be reported, got {err:?}");
+    };
+    assert!(message.contains("carries no srectl build"), "{message}");
 }
 
 #[test]
