@@ -371,6 +371,20 @@ pub fn mcp_token_get(store: State<'_, Arc<dyn srelens_mcp::auth::TokenStore>>) -
     store.load().map(|t| t.as_str().to_string())
 }
 
+/// The persisting half of a rotation: a fresh Settings token, saved, and every
+/// live turn token ended with the old one (PR #802 review). Rotating is a
+/// reader saying "these credentials may be out", and a turn's token is one of
+/// them.
+fn rotate_settings_token(
+    store: &dyn srelens_mcp::auth::TokenStore,
+    manager: &McpHttpManager,
+) -> Result<srelens_mcp::auth::Token, String> {
+    let t = srelens_mcp::auth::Token::generate();
+    store.save(&t).map_err(|e| e.to_string())?;
+    manager.caller_tokens.revoke_all();
+    Ok(t)
+}
+
 /// Generate and persist a fresh MCP bearer token, replacing any existing one.
 /// If the HTTP server is currently running, restarts it on the same port so
 /// the new token takes effect immediately — the previously running listener
@@ -392,8 +406,7 @@ pub async fn mcp_token_rotate(
     // showing a live token for a server that was deliberately switched off.
     let lifecycle = manager.lifecycle().await;
 
-    let t = srelens_mcp::auth::Token::generate();
-    store.save(&t).map_err(|e| e.to_string())?;
+    let t = rotate_settings_token(store.inner().as_ref(), &manager)?;
 
     let running_port = manager.running.lock().unwrap().as_ref().map(|r| r.addr.port());
     if let Some(port) = running_port {
@@ -437,6 +450,9 @@ pub async fn mcp_token_revoke(
     // back up on a value that has just been revoked.
     let lifecycle = manager.lifecycle().await;
     store.clear().map_err(|e| e.to_string())?;
+    // The turn tokens are MCP credentials too (#393): a revocation that left
+    // them live would let a copy of one in on the next server started.
+    manager.caller_tokens.revoke_all();
     stop_running(&manager, &pending, &lifecycle).await;
     Ok(())
 }
@@ -1096,6 +1112,46 @@ mod tests {
             server.caller_tokens().caller_for(guard.token()),
             Some(srelens_mcp::policy::Caller::Chat("sess-7".into()))
         );
+    }
+
+    /// PR #802 review: revoking the MCP credentials ends the turn tokens too.
+    /// Otherwise a turn token minted before the revocation would authenticate
+    /// against the next server started, despite the reader revoking access.
+    #[tokio::test]
+    async fn revoking_mcp_credentials_ends_every_live_turn_token() {
+        let app = tauri::test::mock_app();
+        let dir = std::env::temp_dir().join(format!("srelens-revoke-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store: Arc<dyn srelens_mcp::auth::TokenStore> =
+            Arc::new(srelens_mcp::auth::FileTokenStore::new(dir.join("token")));
+        app.manage(store);
+        app.manage(McpHttpManager::new(ClientCache::new(std::path::PathBuf::from("/dev/null"))));
+        app.manage(Arc::new(crate::mcp_confirm::Pending::default()));
+        let guard = app.state::<McpHttpManager>().caller_tokens().mint("sess-7");
+
+        mcp_token_revoke(app.state(), app.state(), app.state()).await.expect("revoke");
+
+        assert_eq!(app.state::<McpHttpManager>().caller_tokens().caller_for(guard.token()), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Rotating is the other deliberate "these credentials may be out": the
+    /// new Settings token is saved, and every live turn token ends with the
+    /// old one.
+    #[test]
+    fn rotating_the_settings_token_ends_every_live_turn_token() {
+        use srelens_mcp::auth::TokenStore as _;
+        let dir = std::env::temp_dir().join(format!("srelens-rotate-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = srelens_mcp::auth::FileTokenStore::new(dir.join("token"));
+        let mgr = McpHttpManager::new(ClientCache::new(std::path::PathBuf::from("/dev/null")));
+        let guard = mgr.caller_tokens().mint("sess-7");
+
+        let fresh = rotate_settings_token(&store, &mgr).expect("rotate");
+
+        assert_eq!(store.load().map(|t| t.as_str().to_string()), Some(fresh.as_str().to_string()));
+        assert_eq!(mgr.caller_tokens().caller_for(guard.token()), None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A turn is handed a token of its own, never the Settings token, and only

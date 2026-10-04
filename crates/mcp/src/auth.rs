@@ -82,6 +82,13 @@ impl CallerTokens {
         CallerTokenGuard { live: self.live.clone(), id, token }
     }
 
+    /// End every live token at once — for a reader revoking or rotating the
+    /// MCP credentials, which a turn's token must not outlive. Guards dropped
+    /// afterwards remove nothing.
+    pub fn revoke_all(&self) {
+        self.live.lock().unwrap_or_else(|e| e.into_inner()).tokens.clear();
+    }
+
     /// The chat `presented` was minted for, while it is live. Every live token
     /// is compared, in constant time, without stopping at a match: timing
     /// says nothing about which token, if any, came close.
@@ -271,6 +278,22 @@ mod tests {
         let presented = guard.token().to_string();
         drop(guard);
         assert_eq!(tokens.caller_for(&presented), None, "a revoked token names nobody");
+    }
+
+    /// PR #802 review: revoking the MCP credentials must end the per-turn
+    /// tokens too, or a copy of one outlives the revocation on the next
+    /// server. A guard dropped afterwards removes nothing and must not panic.
+    #[test]
+    fn revoke_all_ends_every_live_token() {
+        let tokens = CallerTokens::new();
+        let a = tokens.mint("sess-a");
+        let b = tokens.mint("sess-b");
+        tokens.revoke_all();
+        assert_eq!(tokens.caller_for(a.token()), None);
+        assert_eq!(tokens.caller_for(b.token()), None);
+        drop(a);
+        let c = tokens.mint("sess-c");
+        assert_eq!(tokens.caller_for(c.token()), Some(crate::policy::Caller::Chat("sess-c".into())));
     }
 
     #[test]

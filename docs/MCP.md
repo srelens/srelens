@@ -148,7 +148,7 @@ limits do.
 - **The assistant's own agents are told apart from other clients.** When the
   assistant launches Claude, Codex or Cursor for a turn, it hands that CLI a
   token minted for the turn — not the token from Settings — and revokes it
-  when the turn ends. A confirmation raised under that token is recorded in
+  when the turn ends, or as soon as you revoke or rotate the Settings token. A confirmation raised under that token is recorded in
   that conversation's transcript. One raised with the Settings token, by any
   other MCP client, is still put to you, and is recorded in no conversation.
 - **Headless use** (`--mcp-stdio` / `--mcp-http` with no GUI to show a
