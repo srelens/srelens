@@ -64,8 +64,13 @@ function summarizeArgs(args: unknown): string {
 }
 
 /** One tool call — capability in accent (recolored to `sev`/`warn` once it
- * has actually failed or been refused), args faint, and the round trip
- * srelens itself measured, right-aligned.
+ * has actually failed or been refused), args faint, what the result said, and
+ * the round trip srelens itself measured, right-aligned.
+ *
+ * **The result is the backend's reading of the call's own output** (#385):
+ * a count, a kind and name, or a first line — never a summary srelens wrote
+ * for a call it did not see. Drawn in the row's tone when the call failed or
+ * was refused, since then it is the reason.
  *
  * **`ms` is rendered only when it exists.** `ToolCallRecord.ms` is absent
  * until `toolResult` lands (see its doc in `lib/agentRun.ts`) — a call still
@@ -75,10 +80,17 @@ function summarizeArgs(args: unknown): string {
 function ToolCallRow({ call }: { call: ToolCallRecord }) {
   const args = summarizeArgs(call.args);
   const capability = call.status === "error" ? "text-sev" : call.status === "denied" ? "text-warn" : "text-accent";
+  const result = call.status === "error" ? "text-sev" : call.status === "denied" ? "text-warn" : "text-faint";
+  // The tone says it, and so does a word (design.md §5, PR #806 review): a
+  // failed `0 pods` and a successful one differ by more than colour. A call
+  // that succeeded carries no status tone, and its duration says it finished.
+  const outcome = call.status === "error" ? "Failed" : call.status === "denied" ? "Denied" : undefined;
   return (
     <div className="tool-call flex min-w-0 items-center gap-2">
       <span className={cx("shrink-0", capability)}>{call.tool}</span>
       {args !== "" && <span className="min-w-0 flex-1 truncate text-faint">{args}</span>}
+      {outcome !== undefined && <span className={cx("shrink-0", result)}>{outcome}</span>}
+      {call.summary !== undefined && <span className={cx("min-w-0 shrink truncate", result)}>{call.summary}</span>}
       {call.ms !== undefined && <span className="ml-auto shrink-0 text-faint">{Math.round(call.ms)}ms</span>}
     </div>
   );

@@ -80,6 +80,37 @@ describe("a run's transcript", () => {
     expect(screen.queryByText(/ms/)).toBeNull();
   });
 
+  it("draws what the call returned, before its duration (#385)", () => {
+    render(
+      <Transcript
+        turns={[turn({ calls: [{ id: "t", tool: "k8s.listPods", args: {}, status: "ok", ms: 41, summary: "12 pods" }] })]}
+        gates={[]}
+      />,
+    );
+    expect(screen.getByText("12 pods")).toBeTruthy();
+  });
+
+  it("says in words that a call failed or was denied, not by colour alone (PR #806 review)", () => {
+    render(
+      <Transcript
+        turns={[
+          turn({
+            calls: [
+              { id: "a", tool: "k8s.listPods", args: {}, status: "ok", ms: 41, summary: "0 pods" },
+              { id: "b", tool: "k8s.listPods", args: {}, status: "error", ms: 9, summary: "0 pods" },
+              { id: "c", tool: "k8s.scale", args: {}, status: "denied", ms: 3, summary: "consent denied" },
+            ],
+          }),
+        ]}
+        gates={[]}
+      />,
+    );
+    const rows = [...document.querySelectorAll(".tool-call")].map((r) => r.textContent ?? "");
+    expect(rows[0]).not.toMatch(/Failed|Denied/);
+    expect(rows[1]).toContain("Failed");
+    expect(rows[2]).toContain("Denied");
+  });
+
   it("draws the duration srelens measured when it has one", () => {
     render(
       <Transcript

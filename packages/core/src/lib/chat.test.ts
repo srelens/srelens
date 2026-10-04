@@ -66,4 +66,34 @@ describe("parseAgentEvent", () => {
   it("rejects an unknown type as null", () => {
     expect(parseAgentEvent({ type: "wat" })).toBeNull();
   });
+
+  /** #385: what a tool's result said, as the backend read it — kept only as
+   *  a string, and bounded again on this side of the process boundary. */
+  it("keeps a tool result's summary, and only as bounded text", () => {
+    expect(parseAgentEvent({ type: "toolResult", id: "t", status: "ok", summary: "12 pods" })).toEqual({
+      type: "toolResult",
+      id: "t",
+      status: "ok",
+      summary: "12 pods",
+    });
+    expect(parseAgentEvent({ type: "toolResult", id: "t", status: "ok", summary: 7 })).toEqual({
+      type: "toolResult",
+      id: "t",
+      status: "ok",
+    });
+    const long = parseAgentEvent({ type: "toolResult", id: "t", status: "ok", summary: "x".repeat(200) });
+    expect(long?.type === "toolResult" && long.summary?.length).toBe(80);
+  });
+
+  it("bounds a summary by characters, as the backend does, never splitting one (PR #806 review)", () => {
+    const summary = `${"a".repeat(79)}😀`;
+    expect(parseAgentEvent({ type: "toolResult", id: "t", status: "ok", summary })).toEqual({
+      type: "toolResult",
+      id: "t",
+      status: "ok",
+      summary,
+    });
+    const long = parseAgentEvent({ type: "toolResult", id: "t", status: "ok", summary: "😀".repeat(100) });
+    expect(long?.type === "toolResult" && long.summary).toBe("😀".repeat(80));
+  });
 });
