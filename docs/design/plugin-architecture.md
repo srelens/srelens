@@ -73,9 +73,9 @@ no executable app: its capability route refuses every `plugin/…` id.
    CPU quotas are kernel-enforced on Windows and Linux, and host-enforced by the
    supervisor on macOS, a weaker guarantee accepted for macOS only (see
    [the macOS decision](#decision-macos-limits-are-host-enforced)). Sidecars run out of
-   the box on Windows. On Linux they are not out of the box: they need the launcher
-   `srelens-sandbox-launch`, Landlock and a delegated cgroup v2 directory, set up by hand
-   ([what is needed](../extensions/manifest.md#where-executable-apps-run)). On macOS they do
+   the box on Windows. On Linux they run out of the box on a systemd desktop with Landlock:
+   the bundles ship `srelens-sandbox-launch`, and srelens asks the systemd user manager for
+   a delegated scope ([what is needed](../extensions/manifest.md#where-executable-apps-run)). On macOS they do
    not run yet. srelens refuses to start any sidecar until its memory and CPU watchdog has
    been checked with Seatbelt on a macOS 27 Mac. No renderer bridge
    is planned: contributions use host components. What each OS's sandbox can enforce
@@ -615,7 +615,8 @@ OS. The protocol, the limits and the restart backoff are in
 `sandbox/`:
 
 - **Linux:** the host creates the sidecar's cgroup under a root delegated to srelens
-  (`sandbox/linux.rs`). It starts `srelens-sandbox-launch` (`src/bin/`, over
+  (`sandbox/linux.rs`): the scope it asks the systemd user manager for
+  (`sandbox/systemd.rs`), or a directory named in `SRELENS_SANDBOX_CGROUP_ROOT`. It starts `srelens-sandbox-launch` (`src/bin/`, over
   `sandbox/launch.rs`), which joins the cgroup, applies Landlock and the seccomp filter to
   itself, and runs the sidecar. All three layers are required.
 - **Windows:** the spike's AppContainer and Job Object (`sandbox/windows.rs`).
@@ -661,6 +662,15 @@ on a macOS 27 Mac (see [Follow-up work](#follow-up-work)).
   (for example a `systemd-run --user --scope` unit). Which controllers are delegated,
   and whether `cpu` is among them on the distributions srelens supports, was not
   checked.
+
+  Since checked. A running srelens asks its user manager for a transient scope holding
+  itself, with `Delegate=yes` (`sandbox/systemd.rs`), moves into the scope's `host/` leaf
+  and enables `memory` and `cpu` for its children. The conformance suite passes that way
+  as an ordinary user on WSL Ubuntu 26.04 (systemd 259, kernel 6.6, Landlock ABI 3), and
+  CI runs it on ubuntu-24.04. Upstream systemd delegates `memory` and `cpu` to
+  `user@.service` from 252. Earlier versions, and CentOS Stream 9 and so the RHEL 9
+  family, delegate `pids memory` only; there srelens refuses and names the drop-in that
+  adds `cpu`.
 - **Landlock TCP rules** (ABI 4, kernel 6.7 and later) were exercised on arm64 only, in
   Docker Desktop's `linuxkit` kernel (ABI 8). Docker Desktop's WSL2 kernel, the x86-64
   run, has ABI 3.
@@ -714,16 +724,19 @@ on a macOS 27 Mac (see [Follow-up work](#follow-up-work)).
   whether it can be started other than as srelens's child. Re-signing a third-party
   binary also replaces its publisher's signature.
 - **Linux on a desktop.** Run the checks as an ordinary user on current Ubuntu and
-  Fedora with a kernel of 6.7 or later. Cover the Landlock TCP rules, a
-  systemd-delegated cgroup and unprivileged user namespaces (for bubblewrap).
+  Fedora with a kernel of 6.7 or later. Cover the Landlock TCP rules and unprivileged
+  user namespaces (for bubblewrap). The systemd-delegated cgroup is covered: see
+  [What the spike did not establish](#what-the-spike-did-not-establish).
 - **Windows.** Run on Windows 10 (the job-list attribute needs Windows 10 or later), on
   Arm64, and under enterprise policy.
 
 ### Open questions
 
-- On Windows or Linux, should a missing limit layer refuse the extension or allow it with
-  a warning? An example is a Linux desktop with no delegated cgroup. The macOS case is
-  decided above; this one is not.
+- ~~On Windows or Linux, should a missing limit layer refuse the extension or allow it
+  with a warning? An example is a Linux desktop with no delegated cgroup. The macOS case
+  is decided above; this one is not.~~ Answered for Linux: a missing limit layer refuses
+  the extension, a session without the `cpu` controller delegated included, and the
+  refusal names the fix.
 - One AppContainer profile per extension, or one per install? Where is the profile
   deleted if srelens is uninstalled with extensions still installed?
 - ~~Can the host-side broker callbacks (#573) stay on stdio, so that no backend has to

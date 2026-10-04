@@ -1136,21 +1136,28 @@ Executable apps are a preview, and so is API 0.6, until the API is frozen as 1.0
 ([specification.md](specification.md#versioning)).
 
 - **Windows:** out of the box.
-- **Linux:** not out of the box in this release. It needs all of these:
-  - the launcher `srelens-sandbox-launch`, which the bundles do not ship. Build it with
-    `cargo build --release -p srelens-plugin-host --bin srelens-sandbox-launch`. srelens
-    finds it beside its own binary, or at the path in `SRELENS_SANDBOX_LAUNCHER`;
-  - a kernel with Landlock enabled;
-  - a cgroup v2 directory delegated to the user, with the `memory` and `cpu` controllers
-    enabled for its children, named in `SRELENS_SANDBOX_CGROUP_ROOT`, and srelens itself
-    running in a leaf of it. A process can move another only between cgroups under one it
-    may write, and each sidecar's launcher moves itself into a new sibling of that leaf.
+- **Linux:** out of the box on a systemd desktop whose kernel has Landlock. The deb, rpm,
+  AppImage and AUR packages ship the launcher `srelens-sandbox-launch` beside `srelens`. At
+  its first sidecar start, srelens asks your systemd user manager for a delegated scope,
+  `app-srelens-<pid>.scope`, moves itself into the scope's `host/` leaf, and gives each
+  sidecar a cgroup beside it with its memory and CPU limits. That needs the `memory` and
+  `cpu` controllers delegated to your session. systemd 252 and later delegate both, but
+  systemd before 252 (Ubuntu 22.04) and the RHEL 9 family leave out `cpu`. There, add it:
 
-  There is no tested desktop procedure for the cgroup yet. The `sandbox-conformance` job in
-  [ci.yml](../../.github/workflows/ci.yml) shows the exact steps on a runner. Its "Delegate
-  a cgroup" step makes a subtree the runner's user owns and enables `memory` and `cpu` at
-  the root. Its Linux "Conformance" step moves the shell into a leaf of the subtree, enables
-  `+memory +cpu` for the subtree's children, and sets `SRELENS_SANDBOX_CGROUP_ROOT`.
+  ```sh
+  sudo mkdir -p /etc/systemd/system/user@.service.d
+  printf '[Service]\nDelegate=pids memory cpu\n' | sudo tee /etc/systemd/system/user@.service.d/delegate.conf
+  sudo systemctl daemon-reload
+  ```
+
+  then log out and in again. Without systemd, or in a container, name both pieces yourself:
+  `SRELENS_SANDBOX_LAUNCHER` for a launcher built with
+  `cargo build --release -p srelens-plugin-host --bin srelens-sandbox-launch`, and
+  `SRELENS_SANDBOX_CGROUP_ROOT` for a cgroup v2 directory delegated to you, with `memory`
+  and `cpu` enabled for its children and srelens running in a leaf of it. A process can
+  move another only between cgroups under one it may write, and each sidecar's launcher
+  moves itself into a new sibling of that leaf. The `sandbox-conformance` job in
+  [ci.yml](../../.github/workflows/ci.yml) runs both setups on a runner.
 - **macOS:** not yet. srelens refuses to start any sidecar until its memory and CPU
   watchdog has been checked with Seatbelt on a macOS 27 Mac.
 - **The web host:** it refuses to install an executable app. Its extension policy does not
@@ -1182,9 +1189,9 @@ its sidecar and says what is missing; it never starts a sidecar unconfined.
 - **It runs only in a sandbox.** Linux and Windows run sidecars in the backends
   [sidecar-protocol.md](sidecar-protocol.md#sandbox) describes. On Linux the sandbox
   launcher is found beside the srelens binary or at `SRELENS_SANDBOX_LAUNCHER`, and the
-  cgroup delegated to srelens is named by `SRELENS_SANDBOX_CGROUP_ROOT`; without them
-  srelens refuses to start its sidecar and says what is missing, and the bundles do not
-  ship the launcher.
+  cgroup is the scope srelens asks systemd for, or the directory
+  `SRELENS_SANDBOX_CGROUP_ROOT` names; without them srelens refuses to start its sidecar
+  and says what is missing and how to add it.
   On macOS srelens refuses to start any sidecar until its memory and CPU watchdog has
   been checked with Seatbelt on a macOS 27 Mac
   ([#713](https://github.com/srelens/srelens/issues/713)).
