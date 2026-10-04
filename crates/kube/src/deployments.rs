@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use srelens_capability::{Annotations, Capability, CapabilityError};
 use k8s_openapi::api::apps::v1::{Deployment, ReplicaSet};
+use k8s_openapi::api::core::v1::PodTemplateSpec;
 use kube::api::ListParams;
 use kube::Api;
 use schemars::JsonSchema;
@@ -172,6 +173,92 @@ pub(crate) fn summarise_rs(rs: ReplicaSet) -> ReplicaSetSummary {
     }
 }
 
+const REVISION_ANNOTATION: &str = "deployment.kubernetes.io/revision";
+
+/// The annotations `kubectl rollout undo` keeps from the Deployment rather
+/// than taking from the target revision's ReplicaSet: bookkeeping, not intent.
+pub(crate) const ROLLBACK_SKIPPED_ANNOTATIONS: &[&str] = &[
+    "kubectl.kubernetes.io/last-applied-configuration",
+    REVISION_ANNOTATION,
+    "deployment.kubernetes.io/revision-history",
+    "deployment.kubernetes.io/desired-replicas",
+    "deployment.kubernetes.io/max-replicas",
+    "deprecated.deployment.rollback.to",
+];
+
+/// The revision a ReplicaSet was rolled out as, when it says and says a number.
+pub(crate) fn revision_of(rs: &ReplicaSet) -> Option<i64> {
+    rs.metadata.annotations.as_ref()?.get(REVISION_ANNOTATION)?.parse().ok()
+}
+
+/// The ReplicaSet carrying `revision` (#389), or the refusal naming the
+/// revisions there are, newest first — the list the caller should pick from.
+pub(crate) fn pick_revision<'a>(
+    rss: &'a [ReplicaSet],
+    namespace: &str,
+    name: &str,
+    revision: i64,
+) -> Result<&'a ReplicaSet, String> {
+    if let Some(rs) = rss.iter().find(|rs| revision_of(rs) == Some(revision)) {
+        return Ok(rs);
+    }
+    let mut have: Vec<i64> = rss.iter().filter_map(revision_of).collect();
+    have.sort_unstable_by(|a, b| b.cmp(a));
+    let listed = if have.is_empty() {
+        "it has no revisions".to_string()
+    } else {
+        format!("revisions: {}", have.iter().map(i64::to_string).collect::<Vec<_>>().join(", "))
+    };
+    Err(format!("Deployment {namespace}/{name} has no revision {revision} ({listed})"))
+}
+
+/// A revision's pod template as its Deployment would hold it: without the
+/// `pod-template-hash` label the controller adds to the ReplicaSet's copy.
+pub(crate) fn template_of(rs: &ReplicaSet) -> PodTemplateSpec {
+    let mut template = rs.spec.as_ref().and_then(|s| s.template.clone()).unwrap_or_default();
+    if let Some(labels) = template.metadata.as_mut().and_then(|m| m.labels.as_mut()) {
+        labels.remove("pod-template-hash");
+    }
+    template
+}
+
+/// Why a rollback to `revision` must not be written, if it must not: a paused
+/// Deployment would take the template and roll nothing out (kubectl refuses
+/// it too), and one already running that template would be told it was
+/// rolled back when nothing changed.
+pub(crate) fn undo_refusal(dep: &Deployment, target: &ReplicaSet, revision: i64) -> Option<String> {
+    let namespace = dep.metadata.namespace.as_deref().unwrap_or_default();
+    let name = dep.metadata.name.as_deref().unwrap_or_default();
+    let spec = dep.spec.as_ref()?;
+    if spec.paused == Some(true) {
+        return Some(format!("Deployment {namespace}/{name} is paused; resume it before rolling back"));
+    }
+    if spec.template == template_of(target) {
+        return Some(format!("Deployment {namespace}/{name} already runs revision {revision}"));
+    }
+    None
+}
+
+/// The Deployment as the rollback leaves it — exactly `kubectl rollout undo`:
+/// the revision's template, the Deployment's own values for the bookkeeping
+/// annotations, and every other annotation taken from the revision (so the
+/// new rollout carries that revision's change-cause).
+pub(crate) fn rolled_back(mut dep: Deployment, target: &ReplicaSet) -> Deployment {
+    if let Some(spec) = dep.spec.as_mut() {
+        spec.template = template_of(target);
+    }
+    let skipped = |k: &String| ROLLBACK_SKIPPED_ANNOTATIONS.contains(&k.as_str());
+    let mut annotations = std::collections::BTreeMap::new();
+    for (k, v) in dep.metadata.annotations.iter().flatten().filter(|(k, _)| skipped(k)) {
+        annotations.insert(k.clone(), v.clone());
+    }
+    for (k, v) in target.metadata.annotations.iter().flatten().filter(|(k, _)| !skipped(k)) {
+        annotations.insert(k.clone(), v.clone());
+    }
+    dep.metadata.annotations = Some(annotations);
+    dep
+}
+
 /// `k8s.listReplicaSets` — ReplicaSets owned by a Deployment, newest revision
 /// first. Powers the "Deploy Revisions" section of the deployment detail.
 pub fn list_replicasets_capability(cache: Arc<ClientCache>) -> Capability {
@@ -318,6 +405,101 @@ mod tests {
         assert_eq!(plain.change_cause, None);
         let json = serde_json::to_value(&plain).unwrap();
         assert!(json.get("changeCause").is_none(), "an unset change-cause is omitted: {json}");
+    }
+
+    fn annotations(pairs: &[(&str, &str)]) -> Option<std::collections::BTreeMap<String, String>> {
+        Some(pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect())
+    }
+
+    fn template(image: &str, hash: Option<&str>) -> PodTemplateSpec {
+        let mut labels = std::collections::BTreeMap::from([("app".to_string(), "web".to_string())]);
+        if let Some(hash) = hash {
+            labels.insert("pod-template-hash".into(), hash.into());
+        }
+        PodTemplateSpec {
+            metadata: Some(kube::core::ObjectMeta { labels: Some(labels), ..Default::default() }),
+            spec: Some(PodSpec {
+                containers: vec![Container { name: "api".into(), image: Some(image.into()), ..Default::default() }],
+                ..Default::default()
+            }),
+        }
+    }
+
+    /// The Deployment `shop/web`, running `image`.
+    fn deploy_at(image: &str, notes: &[(&str, &str)]) -> Deployment {
+        Deployment {
+            metadata: kube::core::ObjectMeta {
+                name: Some("web".into()),
+                namespace: Some("shop".into()),
+                annotations: annotations(notes),
+                ..Default::default()
+            },
+            spec: Some(DeploymentSpec { template: template(image, None), ..Default::default() }),
+            status: None,
+        }
+    }
+
+    /// `web`'s ReplicaSet for `revision`, whose template runs `image`.
+    fn rs_at(revision: i64, image: &str, notes: &[(&str, &str)]) -> ReplicaSet {
+        let mut rs = replicaset(&format!("web-h{revision}"), "web", &revision.to_string());
+        let ann = rs.metadata.annotations.get_or_insert_with(Default::default);
+        for (k, v) in notes {
+            ann.insert(k.to_string(), v.to_string());
+        }
+        rs.spec.as_mut().unwrap().template = Some(template(image, Some(&format!("h{revision}"))));
+        rs
+    }
+
+    #[test]
+    fn picks_the_replicaset_carrying_the_revision_or_names_the_ones_there_are() {
+        let rss = vec![rs_at(3, "api:3", &[]), rs_at(2, "api:2", &[]), rs_at(1, "api:1", &[])];
+        assert_eq!(pick_revision(&rss, "shop", "web", 2).unwrap().metadata.name.as_deref(), Some("web-h2"));
+        assert_eq!(
+            pick_revision(&rss, "shop", "web", 7).unwrap_err(),
+            "Deployment shop/web has no revision 7 (revisions: 3, 2, 1)"
+        );
+        assert_eq!(
+            pick_revision(&[], "shop", "web", 1).unwrap_err(),
+            "Deployment shop/web has no revision 1 (it has no revisions)"
+        );
+    }
+
+    #[test]
+    fn a_revisions_template_is_its_deployments_without_the_hash_label() {
+        let t = template_of(&rs_at(2, "api:2", &[]));
+        let labels = t.metadata.unwrap().labels.unwrap();
+        assert!(!labels.contains_key("pod-template-hash"));
+        assert_eq!(labels.get("app").map(String::as_str), Some("web"));
+    }
+
+    #[test]
+    fn refuses_a_paused_deployment_and_one_already_running_the_revision() {
+        let target = rs_at(2, "api:2", &[]);
+        let mut paused = deploy_at("api:3", &[]);
+        paused.spec.as_mut().unwrap().paused = Some(true);
+        assert_eq!(
+            undo_refusal(&paused, &target, 2).as_deref(),
+            Some("Deployment shop/web is paused; resume it before rolling back")
+        );
+        assert_eq!(
+            undo_refusal(&deploy_at("api:2", &[]), &target, 2).as_deref(),
+            Some("Deployment shop/web already runs revision 2")
+        );
+        assert_eq!(undo_refusal(&deploy_at("api:3", &[]), &target, 2), None);
+    }
+
+    #[test]
+    fn a_rollback_takes_the_revisions_template_and_annotations_as_kubectl_does() {
+        let dep = deploy_at("api:3", &[("deployment.kubernetes.io/revision", "3"), ("team", "a")]);
+        let target = rs_at(2, "api:2", &[("kubernetes.io/change-cause", "bump api")]);
+        let next = rolled_back(dep, &target);
+
+        assert_eq!(next.spec.as_ref().unwrap().template, template("api:2", None));
+        let ann = next.metadata.annotations.unwrap();
+        // Bookkeeping stays the Deployment's own; intent comes from the revision.
+        assert_eq!(ann.get("deployment.kubernetes.io/revision").map(String::as_str), Some("3"));
+        assert_eq!(ann.get("kubernetes.io/change-cause").map(String::as_str), Some("bump api"));
+        assert!(!ann.contains_key("team"), "the Deployment's own non-bookkeeping annotation is replaced: {ann:?}");
     }
 
     #[test]
