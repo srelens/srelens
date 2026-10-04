@@ -2059,6 +2059,76 @@ async fn run_suite() {
         .await;
     assert_eq!(out["ok"], true);
 
+    // #389: roll the restart back. Wait for the restart's ReplicaSet (revision
+    // 2) first: rolled back before the controller made it, the original
+    // template would be re-adopted as revision 2, not 3.
+    let dl = deadline(120);
+    let original = loop {
+        let out = h
+            .ok(
+                "k8s.listReplicaSets",
+                json!({ "context": ctx, "namespace": NS, "ownerName": DEPLOY }),
+            )
+            .await;
+        let rows = out["replicasets"].as_array().cloned().unwrap_or_default();
+        let named = |rev: &str| {
+            rows.iter()
+                .find(|r| r["revision"] == rev)
+                .and_then(|r| r["name"].as_str())
+                .map(str::to_string)
+        };
+        if let (Some(first), Some(_)) = (named("1"), named("2")) {
+            break first;
+        }
+        if Instant::now() > dl {
+            panic!("timed out waiting for {DEPLOY}'s second revision: {out}");
+        }
+        poll_sleep().await;
+    };
+    let refused = h
+        .err(
+            "k8s.rolloutUndo",
+            json!({ "context": ctx, "namespace": NS, "name": DEPLOY, "revision": 99 }),
+        )
+        .await;
+    assert!(refused.contains("has no revision 99"), "{refused}");
+    let out = h
+        .ok(
+            "k8s.rolloutUndo",
+            json!({ "context": ctx, "namespace": NS, "name": DEPLOY, "revision": 1 }),
+        )
+        .await;
+    assert_eq!(out["revision"], 1);
+    let dl = deadline(120);
+    loop {
+        let out = h
+            .ok(
+                "k8s.listReplicaSets",
+                json!({ "context": ctx, "namespace": NS, "ownerName": DEPLOY }),
+            )
+            .await;
+        if out["replicasets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["name"] == original.as_str() && r["revision"] == "3")
+        {
+            break;
+        }
+        if Instant::now() > dl {
+            panic!("timed out waiting for {original} to come back as revision 3: {out}");
+        }
+        poll_sleep().await;
+    }
+    let refused = h
+        .err(
+            "k8s.rolloutUndo",
+            json!({ "context": ctx, "namespace": NS, "name": DEPLOY, "revision": 3 }),
+        )
+        .await;
+    assert!(refused.contains("already runs revision 3"), "{refused}");
+    println!("{DEPLOY}: rolled back to revision 1 (now revision 3)");
+
     // Review afresh only if a controller races this live fixture's pinned write.
     let (out, reviewed) = h
         .reviewed_request(
