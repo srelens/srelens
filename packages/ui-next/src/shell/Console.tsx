@@ -752,7 +752,7 @@ export function Console({ fullView }: { fullView?: boolean }) {
               </span>
             ) : (
               <span className="chip" style={{ color: "var(--sev)" }}>
-                <span>Agents could not be listed: {describeError(agents.error).detail}</span>
+                <span>Agents could not be listed: {describeError(agents.error, { domain: "local" }).detail}</span>
                 <button
                   type="button"
                   className="text-btn"

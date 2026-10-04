@@ -1654,6 +1654,16 @@ describe("Console — header details", () => {
       expect(screen.queryByText(/agents could not be listed/i)).toBeNull();
     });
 
+    it("describes a timed-out agent list as a local failure, not the cluster's (PR #792 review)", async () => {
+      const user = userEvent.setup();
+      listAgents.mockRejectedValue(new Error("agent_list timed out"));
+      setup();
+      await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
+
+      expect(await screen.findByText(/local operation didn't finish in time/i)).toBeTruthy();
+      expect(screen.queryByText(/Kubernetes API server/i)).toBeNull();
+    });
+
     it("says a retry is under way, and offers no second Retry while it reads (PR #792 review)", async () => {
       const user = userEvent.setup();
       listAgents.mockRejectedValue(new Error("agent_list failed"));
