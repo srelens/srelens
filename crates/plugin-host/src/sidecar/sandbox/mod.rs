@@ -30,6 +30,8 @@ use super::Limits;
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(target_os = "linux")]
+mod systemd;
 #[cfg(windows)]
 mod windows;
 
