@@ -2127,6 +2127,12 @@ fn tui_config_file_paths_clamping_and_round_trip() {
     assert_eq!(loaded_legacy.command_popup_max_visible, 12);
     assert!(!new_fallback.exists());
 
+    // A present file that cannot be read must not use the old fallback.
+    // Invalid UTF-8 makes read_to_string fail on every platform; a directory
+    // does not.
+    std::fs::write(&new_fallback, [0xff_u8]).unwrap();
+    assert_eq!(TuiConfig::load(), TuiConfig::default());
+
     // 4. Clamping out-of-range values
     let mut clamped = TuiConfig {
         command_popup_max_width: 500,

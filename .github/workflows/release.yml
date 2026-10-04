@@ -140,9 +140,9 @@ jobs:
             // Every crate inherits [workspace.package].version from the root
             // Cargo.toml (src-tauri included), so ONE Cargo bump versions the
             // whole workspace — the server binary, the MCP serverInfo, all of
-            // it — and the lock updates every srelens-* member to match.
+            // it — and the lock updates every srelens-* member, and srectl, to match.
             sub("Cargo.toml",/^version = "[^"]+"/m,`version = "${v}"`);
-            sub("Cargo.lock",/(name = "srelens-[a-z-]+"\r?\nversion = ")[^"]+(")/g,`$1${v}$2`);
+            sub("Cargo.lock",/(name = "(?:srelens-[a-z-]+|srectl)"\r?\nversion = ")[^"]+(")/g,`$1${v}$2`);
           ' "$NEW"
           # Grouped changelog for the release body. The Conventional Commit type
           # is dropped (the section heading already says Features / Fixes) but
@@ -305,7 +305,7 @@ jobs:
             const fs=require("fs");const v=process.argv[1];
             const sub=(p,re,to)=>{const s=fs.readFileSync(p,"utf8");if(!re.test(s))throw new Error("no version field in "+p);fs.writeFileSync(p,s.replace(re,to))};
             sub("Cargo.toml",/^version = "[^"]+"/m,`version = "${v}"`);
-            sub("Cargo.lock",/(name = "srelens-[a-z-]+"\r?\nversion = ")[^"]+(")/g,`$1${v}$2`);
+            sub("Cargo.lock",/(name = "(?:srelens-[a-z-]+|srectl)"\r?\nversion = ")[^"]+(")/g,`$1${v}$2`);
           ' "$V"
           echo "Docker build version: $V"
       - name: Set up Buildx
@@ -529,7 +529,7 @@ jobs:
             const sub=(p,re,to)=>{const s=fs.readFileSync(p,"utf8");if(!re.test(s))throw new Error("no version field in "+p);fs.writeFileSync(p,s.replace(re,to))};
             sub("apps/desktop/src-tauri/tauri.conf.json",/("version":\s*)"[^"]+"/,`$1"${v}"`);
             sub("Cargo.toml",/^version = "[^"]+"/m,`version = "${v}"`);
-            sub("Cargo.lock",/(name = "srelens-[a-z-]+"\r?\nversion = ")[^"]+(")/g,`$1${v}$2`);
+            sub("Cargo.lock",/(name = "(?:srelens-[a-z-]+|srectl)"\r?\nversion = ")[^"]+(")/g,`$1${v}$2`);
           ' "$V"
           echo "Built version: $V"
 
@@ -720,7 +720,7 @@ jobs:
             const fs=require("fs");const v=process.argv[1];
             const sub=(p,re,to)=>{const s=fs.readFileSync(p,"utf8");if(!re.test(s))throw new Error("no version field in "+p);fs.writeFileSync(p,s.replace(re,to))};
             sub("Cargo.toml",/^version = "[^"]+"/m,`version = "${v}"`);
-            sub("Cargo.lock",/(name = "srelens-[a-z-]+"\r?\nversion = ")[^"]+(")/g,`$1${v}$2`);
+            sub("Cargo.lock",/(name = "(?:srelens-[a-z-]+|srectl)"\r?\nversion = ")[^"]+(")/g,`$1${v}$2`);
           ' "$V"
           echo "TUI build version: $V"
 

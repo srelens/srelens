@@ -364,7 +364,7 @@ impl TuiConfig {
         }
         if let Ok(custom_dir) = std::env::var("SRELENS_CONFIG_DIR") {
             if !custom_dir.trim().is_empty() {
-                return PathBuf::from(custom_dir.trim()).join("tui.json");
+                return PathBuf::from(custom_dir).join("tui.json");
             }
         }
         dirs::config_dir()
@@ -376,11 +376,13 @@ impl TuiConfig {
         let path = Self::config_file_path();
         match std::fs::read_to_string(&path) {
             Ok(content) => parse_config(&content).unwrap_or_default(),
-            Err(_) => {
+            Err(error) => {
                 // The no-config-dir fallback used to be `.srelens-tui.json`.
-                // Read it when the new file is absent. A present but unreadable
-                // file stays a default, rather than substituting the old one.
-                if path.file_name().and_then(|n| n.to_str()) == Some(".srectl.json") {
+                // Read it only when the new file is absent. A present file
+                // that cannot be read stays a default.
+                if error.kind() == std::io::ErrorKind::NotFound
+                    && path.file_name().and_then(|n| n.to_str()) == Some(".srectl.json")
+                {
                     let legacy = path.with_file_name(".srelens-tui.json");
                     if let Ok(content) = std::fs::read_to_string(&legacy) {
                         if let Some(config) = parse_config(&content) {
@@ -409,11 +411,12 @@ impl TuiConfig {
 
 fn env_config_path(key: &str) -> Option<PathBuf> {
     let custom = std::env::var(key).ok()?;
-    let trimmed = custom.trim();
-    if trimmed.is_empty() {
+    // Trim only to decide emptiness. A nonempty value is the path as written,
+    // including any leading or trailing space the caller actually set.
+    if custom.trim().is_empty() {
         None
     } else {
-        Some(PathBuf::from(trimmed))
+        Some(PathBuf::from(custom))
     }
 }
 

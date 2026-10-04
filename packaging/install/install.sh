@@ -136,9 +136,19 @@ main() {
 
     archive="$BIN-$version-$target.tar.gz"
     base="https://github.com/$REPO/releases/download/srelens-v$version"
+    sums="$BIN-$version-SHA256SUMS.txt"
 
-    download "$base/$archive" "$tmp/$archive"
-    download "$base/$BIN-$version-SHA256SUMS.txt" "$tmp/SHA256SUMS.txt"
+    # Releases cut before the rename only publish srelens-tui assets. Until
+    # one exists under the new name, take that archive and install its
+    # binary as srectl. A published srectl asset is used as-is.
+    if ! curl -fsSL --proto '=https' --tlsv1.2 -o "$tmp/$archive" "$base/$archive" 2>/dev/null; then
+        rm -f "$tmp/$archive"
+        archive="srelens-tui-$version-$target.tar.gz"
+        sums="srelens-tui-$version-SHA256SUMS.txt"
+        download "$base/$archive" "$tmp/$archive"
+        say "Note: this release still publishes srelens-tui. It will be installed as $BIN."
+    fi
+    download "$base/$sums" "$tmp/SHA256SUMS.txt"
     verify_checksum "$tmp" "$archive"
 
     # Into a subdirectory, never into $tmp itself. The archive contains a
@@ -152,6 +162,9 @@ main() {
     # through it whatever the archive claims about its own directory.
     mkdir "$tmp/unpack" || die "cannot prepare a private directory to unpack into"
     tar -xzf "$tmp/$archive" -C "$tmp/unpack"
+    if [ ! -f "$tmp/unpack/$BIN" ] && [ -f "$tmp/unpack/srelens-tui" ]; then
+        mv "$tmp/unpack/srelens-tui" "$tmp/unpack/$BIN"
+    fi
     [ -f "$tmp/unpack/$BIN" ] || die "the archive did not contain $BIN"
     chmod 0755 "$tmp/unpack/$BIN"
 
@@ -195,9 +208,10 @@ main() {
         #
         # The whole token, not a substring. `1.2.30` contains `1.2.3`, so a
         # match on containment accepts precisely the stale build this is
-        # meant to catch. The output is `srectl <version>`; the second
-        # field is compared, so the program renaming itself would not quietly
-        # turn this check off either.
+        # meant to catch. The second field is the version. A binary published
+        # under the previous name still prints that name first; comparing
+        # the field keeps the check, instead of treating the name as part of
+        # the version.
         reported="$(printf %s "$installed_version" | awk '{print $2}')"
         if [ "$reported" != "$version" ]; then
             problem="reports \"$installed_version\", not the $version that was asked for"

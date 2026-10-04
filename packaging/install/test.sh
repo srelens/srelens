@@ -291,8 +291,42 @@ version="${version#srelens-v}"
 archive="srectl-$version-$host_target.tar.gz"
 base="https://github.com/srelens/srelens/releases/download/srelens-v$version"
 mkdir -p "$work/fixtures"
-curl -fsSL -o "$work/fixtures/$archive" "$base/$archive"
-curl -fsSL -o "$work/fixtures/SHA256SUMS.txt" "$base/srectl-$version-SHA256SUMS.txt"
+if curl -fsSL -o "$work/fixtures/$archive" "$base/$archive" 2>/dev/null \
+    && curl -fsSL -o "$work/fixtures/SHA256SUMS.txt" "$base/srectl-$version-SHA256SUMS.txt" 2>/dev/null; then
+    :
+else
+    # The latest stable release still publishes the previous asset name.
+    # Repack that binary as srectl and hash it here, so the checksum cases
+    # run before a renamed release exists. install.sh does the same fallback
+    # when it talks to GitHub directly.
+    rm -f "$work/fixtures/$archive" "$work/fixtures/SHA256SUMS.txt"
+    old_archive="srelens-tui-$version-$host_target.tar.gz"
+    curl -fsSL -o "$work/fixtures/$old_archive" "$base/$old_archive"
+    curl -fsSL -o "$work/fixtures/old-SHA256SUMS.txt" "$base/srelens-tui-$version-SHA256SUMS.txt"
+    expected="$(grep "  ${old_archive}\$" "$work/fixtures/old-SHA256SUMS.txt" | head -n 1 | cut -d' ' -f1)"
+    [ -n "$expected" ] || { echo "old checksum file does not list $old_archive" >&2; exit 1; }
+    if command -v sha256sum >/dev/null 2>&1; then
+        actual="$(cd "$work/fixtures" && sha256sum "$old_archive" | cut -d' ' -f1)"
+    else
+        actual="$(cd "$work/fixtures" && shasum -a 256 "$old_archive" | cut -d' ' -f1)"
+    fi
+    [ "$expected" = "$actual" ] || { echo "old archive checksum mismatch" >&2; exit 1; }
+    mkdir -p "$work/fixtures/unpack" "$work/fixtures/repack"
+    tar -xzf "$work/fixtures/$old_archive" -C "$work/fixtures/unpack"
+    member="$(find "$work/fixtures/unpack" -type f -name srelens-tui | head -n 1)"
+    [ -n "$member" ] || { echo "old archive did not contain srelens-tui" >&2; exit 1; }
+    cp "$member" "$work/fixtures/repack/srectl"
+    chmod 0755 "$work/fixtures/repack/srectl"
+    tar -czf "$work/fixtures/$archive" -C "$work/fixtures/repack" srectl
+    (
+        cd "$work/fixtures"
+        if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$archive"
+        else
+            shasum -a 256 "$archive"
+        fi
+    ) > "$work/fixtures/SHA256SUMS.txt"
+fi
 cp "$work/fixtures/$archive" "$work/fixtures/good.tar.gz"
 printf 'X' | dd of="$work/fixtures/$archive" bs=1 seek=5000 conv=notrunc status=none
 
