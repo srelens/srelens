@@ -123,6 +123,9 @@ pub struct McpServer {
     prompts: crate::prompts::PromptLibrary,
     kind_resolver: std::sync::Arc<dyn crate::resources::KindResolver>,
     watcher: std::sync::Arc<dyn crate::resources::ObjectWatcher>,
+    /// The per-chat tokens the HTTP transport accepts beside the Settings
+    /// token, each naming the chat it was minted for (#393).
+    caller_tokens: crate::auth::CallerTokens,
 }
 
 impl McpServer {
@@ -141,7 +144,21 @@ impl McpServer {
             // Fail closed: refuse subscriptions rather than accept ones that
             // will never fire.
             watcher: std::sync::Arc::new(crate::resources::NoWatcher),
+            // None live until a host mints one for a chat it launches.
+            caller_tokens: crate::auth::CallerTokens::default(),
         }
+    }
+
+    /// Accept tokens from `tokens` as the chats they were minted for (#393).
+    /// A host shares one set between the server and whatever launches its
+    /// agents, so a token minted for a turn is one this server recognises.
+    pub fn with_caller_tokens(mut self, tokens: crate::auth::CallerTokens) -> Self {
+        self.caller_tokens = tokens;
+        self
+    }
+
+    pub fn caller_tokens(&self) -> &crate::auth::CallerTokens {
+        &self.caller_tokens
     }
 
     /// Serve installed apps' tools beside the host's own (#574), and tell
@@ -382,6 +399,8 @@ impl McpServer {
             kind,
             impact: annotations.impact,
             confirm_text: annotations.confirm_text(args),
+            // The transport fills this in; the registry cannot know it.
+            caller: None,
         })
     }
 }

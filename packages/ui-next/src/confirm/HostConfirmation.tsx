@@ -47,8 +47,10 @@ import { commandArgument, escapeFormatCharacters, plainText } from "../extension
  * app's UI.
  */
 
-/** What the level is called in front of a reader. Never a colour alone. */
-const IMPACT_LABEL: Record<CapabilityImpact, string> = {
+/** What the level is called in front of a reader. Never a colour alone.
+ *  Shared with the transcript's gate card, so the question and its record
+ *  name a level in the same words. */
+export const IMPACT_LABEL: Record<CapabilityImpact, string> = {
   low: "Low impact",
   medium: "Medium impact",
   high: "High impact",

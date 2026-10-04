@@ -49,6 +49,10 @@ async function untilSendChatCalledTimes(n: number): Promise<void> {
   }
 }
 
+/** The chat a gate names when srelens's own agent raised it (#393) — the
+ *  session `startChat` resolves to below. */
+const OURS = { chatSession: "sess-1" };
+
 beforeEach(() => {
   resetAgentRun();
   // Full reset, not just a clear: each test's own `mock.calls.length` — the
@@ -142,17 +146,20 @@ describe("the run store", () => {
     void askAgent("q", { about: { cluster: "prod-eu" }, route: "/overview" });
     await untilSendChatCalledTimes(1);
 
-    noteGate({ id: "g1", tool: "k8s.scale", args: { replicas: 3 }, outcome: "pending" });
-    noteGate({ id: "g1", tool: "k8s.scale", args: { replicas: 3 }, outcome: "approved" });
+    noteGate({ id: "g1", tool: "k8s.scale", args: { replicas: 3 }, outcome: "pending" }, OURS);
+    noteGate({ id: "g1", tool: "k8s.scale", args: { replicas: 3 }, outcome: "approved" }, OURS);
     const gates = getAgentRun().gates;
     expect(gates).toHaveLength(1);
     expect(gates[0].outcome).toBe("approved");
   });
 
-  it("records no gate when no run has a turn in flight — an external client's confirm", () => {
-    // The #393 case, now structural rather than a heuristic: with no busy run
-    // there is no conversation to attribute a mutation to.
-    noteGate({ id: "external", tool: "k8s.deletePod", args: {}, outcome: "pending" });
+  it("records no gate for a confirm no srelens chat raised — an external client's", async () => {
+    // #393: ownership is the request's caller, so a turn being in flight is
+    // not enough to claim a gate.
+    sendChat.mockImplementation(() => new Promise<string | null>(() => {}));
+    void askAgent("q", { about: { cluster: "prod-eu" }, route: "/overview" });
+    await untilSendChatCalledTimes(1);
+    noteGate({ id: "external", tool: "k8s.deletePod", args: {}, outcome: "pending" }, null);
     expect(getAgentRun().gates).toEqual([]);
   });
 
@@ -174,7 +181,7 @@ describe("the run store", () => {
   it("clears the conversation and its gates, but keeps the chosen agent", async () => {
     sendChat.mockImplementation(async () => null);
     await askAgent("q");
-    noteGate({ id: "g1", tool: "k8s.scale", args: {}, outcome: "pending" });
+    noteGate({ id: "g1", tool: "k8s.scale", args: {}, outcome: "pending" }, OURS);
     chooseAgent("codex");
     setSkillActive("rollout", true);
 
@@ -1504,6 +1511,44 @@ describe("the run store", () => {
       await openSavedRun("good");
       expect(getAgentRun().turns.map((t) => t.text)).toEqual(["q", "a"]);
       expect(getAgentRun().gates).toHaveLength(1);
+    });
+
+    it("keeps a saved gate's sentence and level, and still loads one saved without them (#388)", async () => {
+      listSessions.mockResolvedValue([{ id: "g2", title: "t", createdAt: 1, updatedAt: 2 }]);
+      loadSession.mockResolvedValue({
+        id: "g2", title: "t", createdAt: 1, updatedAt: 2, contexts: [], skills: [],
+        cliSessionId: null, agentKind: "claude",
+        messages: [{
+          v: 1, key: "prod-eu|/k/pods", label: "pods",
+          turns: [{ id: 1, role: "user", text: "q", calls: [], at: 1 }],
+          gates: [
+            { id: "g", tool: "k8s.scale", args: {}, outcome: "approved", prompt: "Change the replica count?", impact: "medium" },
+            { id: "h", tool: "k8s.scale", args: {}, outcome: "approved" },
+          ],
+        }],
+      });
+      await restoreRuns();
+      await openSavedRun("g2");
+      expect(getAgentRun().gates.map((g) => [g.prompt, g.impact])).toEqual([
+        ["Change the replica count?", "medium"],
+        [undefined, undefined],
+      ]);
+    });
+
+    it("refuses a saved gate with a level the host never sends", async () => {
+      listSessions.mockResolvedValue([{ id: "g3", title: "t", createdAt: 1, updatedAt: 2 }]);
+      loadSession.mockResolvedValue({
+        id: "g3", title: "t", createdAt: 1, updatedAt: 2, contexts: [], skills: [],
+        cliSessionId: null, agentKind: "claude",
+        messages: [{
+          v: 1, key: "prod-eu|/k/pods", label: "pods",
+          turns: [{ id: 1, role: "user", text: "q", calls: [], at: 1 }],
+          gates: [{ id: "g", tool: "k8s.scale", impact: "catastrophic" }],
+        }],
+      });
+      await restoreRuns();
+      await openSavedRun("g3");
+      expect(getAgentRun().gates).toEqual([]);
     });
 
     it("drops a stored tool call it cannot name, keeping the ones it can", async () => {

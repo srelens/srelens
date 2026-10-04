@@ -88,6 +88,16 @@ export interface ConfirmRequest {
    * requester line.
    */
   requester?: { id: string; revision: number } | null;
+  /**
+   * Which of srelens's own chats raised this call (#393), as the host
+   * authenticated it — never as the call's arguments say. `null` when nobody
+   * can be named: an external MCP client, a headless caller, or an app's
+   * sidecar (which {@link requester} names instead).
+   *
+   * Optional for the same reason `impact` is: it crosses a process boundary
+   * and consumers narrow rather than cast.
+   */
+  caller?: { chatSession: string } | null;
 }
 
 /**

@@ -1,5 +1,6 @@
 import { useCallback, useSyncExternalStore } from "react";
 import {
+  CAPABILITY_IMPACT_ORDER,
   cancelChat,
   describeError,
   listAgents,
@@ -11,6 +12,7 @@ import {
   sendChat,
   startChat,
   type AgentEvent,
+  type CapabilityImpact,
   type Session,
   type SessionMeta,
   type Skill,
@@ -84,6 +86,14 @@ export type GateRecord = {
    * resolved.
    */
   at?: number;
+  /**
+   * The host's own sentence for the call — the question the reader actually
+   * answered (#388) — and how much it disturbs. Copied from the request when
+   * it is shown; absent when the host rendered none, and on gates saved before
+   * they were kept.
+   */
+  prompt?: string;
+  impact?: CapabilityImpact;
 };
 
 /** One turn of the conversation — the reader's question, or the agent's
@@ -855,11 +865,11 @@ export async function askAgent(
   // Still ONE turn at a time, and across EVERY run rather than per run — see
   // ruling AB. Per-run sessions would make the backend safe for concurrency
   // (`children` is keyed by session, so runs no longer replace each other's
-  // child), but gate attribution is what forbids it: `ConfirmRequest` carries
-  // no caller (#393), so `AgentConsent` decides ownership from "exactly one
-  // run has a turn in flight". Two busy runs and that has nothing to choose
-  // between them, and a gate drawn against the wrong conversation is the
-  // defect the whole gate design exists to prevent.
+  // child), and gate attribution no longer forbids it either: a confirm names
+  // the chat that raised it (#393), so two busy runs would each get their own
+  // gates. One turn at a time is now a product rule, kept until concurrent
+  // runs have a design of their own — two agents answering at once is a
+  // different screen to read, with two Stops.
   //
   // Said out loud rather than swallowed, and said in the run the reader is
   // ASKING from, which is the one they are looking at.
@@ -1370,17 +1380,19 @@ export function setSkillActive(name: string, active: boolean): void {
 /** Record one MCP confirm request's outcome — merged by id, so a request
  *  moving from `pending` to `approved` or `denied` replaces its entry rather
  *  than sitting beside it. */
-export function noteGate(record: GateRecord): void {
-  // The BUSY run owns the gate, not the visible one. A confirm arrives because
-  // some agent called a tool, and that agent is the one with a turn in flight —
-  // which the reader may well have navigated away from. Attributing by what is
-  // on screen would draw another conversation's mutation into this one, which
-  // is the defect the gate design exists to prevent.
+export function noteGate(record: GateRecord, caller: { chatSession: string } | null | undefined): void {
+  // The run whose backend chat RAISED the call, as the host authenticated it
+  // (#393) — not the busy run, and not the visible one. Attributing by what is
+  // on screen would draw another conversation's mutation into this one, and
+  // attributing by "the run with a turn in flight" drew an external client's
+  // mutation into whichever conversation happened to be answering.
   //
-  // Exactly one run is ever busy (ruling AB), so this is unambiguous. No busy
-  // run means srelens's own agent did not cause it — an external MCP client
-  // did — and nothing is recorded, which is the #393 case.
-  const entry = [...runs.entries()].find(([, st]) => st.run.busy);
+  // With no caller the call is an external client's or an app's, and it
+  // belongs in no srelens conversation: `AgentConsent` still shows and
+  // answers it. A chat no run holds any more (cleared, or the agent switched)
+  // is the same: there is no conversation left to put it in.
+  if (!caller) return;
+  const entry = [...runs.entries()].find(([, st]) => st.session === caller.chatSession);
   if (!entry) return;
   const [key, state] = entry;
   const idx = state.run.gates.findIndex((g) => g.id === record.id);
@@ -1521,8 +1533,15 @@ function isSavedTurn(value: unknown): boolean {
 /** One recorded gate. `gates` is optional; a present one must be usable. */
 function isSavedGate(value: unknown): boolean {
   if (typeof value !== "object" || value === null) return false;
-  const g = value as { id?: unknown; tool?: unknown };
-  return typeof g.id === "string" && typeof g.tool === "string";
+  const g = value as { id?: unknown; tool?: unknown; prompt?: unknown; impact?: unknown };
+  return (
+    typeof g.id === "string" &&
+    typeof g.tool === "string" &&
+    // Drawn as text and as a badge keyed by level, so each is checked to the
+    // depth it is used: a level the host never sends has no badge to draw.
+    (g.prompt === undefined || typeof g.prompt === "string") &&
+    (g.impact === undefined || CAPABILITY_IMPACT_ORDER.includes(g.impact as CapabilityImpact))
+  );
 }
 
 /**
