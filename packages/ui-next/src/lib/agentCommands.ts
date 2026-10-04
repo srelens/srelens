@@ -35,12 +35,10 @@
  * take it. `Follow logs` keeps the resource's name because `logsRoute` bakes
  * the identity into the URL itself — that promise the navigation does keep.
  *
- * **No Roll back.** Core has no rollout-undo capability for a Deployment's
- * revision history — `rolloutRestart`, `scale`, `evict`, `deletePod`,
- * `cordonNode`, `drainNode` and Helm's own `helmRollback` exist, but nothing
- * walks a Deployment's revision history back. A command that refuses the
- * moment it is run is worse than a command that was never drawn, so this
- * module draws none.
+ * **Roll back (#389).** A Deployment's `rollback` action opens it like
+ * Restart and Scale do: the revision to go back to is chosen in the dialog
+ * its own menu opens (`useRowMenu`'s `Roll back`, over `k8s.rolloutUndo`),
+ * because a rollback with no revision named is not one anyone can confirm.
  *
  * **A destructive command navigates; it does not open a second dialog over
  * the dock.** `openAction` is the hand-off: Task 6 wires it to the exact
@@ -105,7 +103,7 @@ export interface CommandDeps {
     namespace: string;
     name: string;
     context: string;
-    action: "scale" | "restart";
+    action: "scale" | "restart" | "rollback";
   }) => void;
   /**
    * Opens `Follow logs` / `Open shell` / `Port forward` on a resource, with
@@ -200,6 +198,17 @@ function resourceCommands(deps: CommandDeps): Command[] {
       label: `Open ${kind}/${name} to scale it`,
       hint: "replica count lives on the resource",
       run: () => deps.openAction({ kind, namespace: ns, name, context, action: "scale" }),
+    });
+  }
+  if (actions.rollback) {
+    commands.push({
+      id: "rollback",
+      group: "Action",
+      // A navigation, like Restart and Scale: the revision is chosen in the
+      // dialog the Deployment's own menu opens, which is where the confirm is.
+      label: `Open ${kind}/${name} to roll it back`,
+      hint: "rollout undo lives on the resource",
+      run: () => deps.openAction({ kind, namespace: ns, name, context, action: "rollback" }),
     });
   }
 
