@@ -55,5 +55,15 @@ regex = "1"
 libc = "0.2"
 shlex = "1"
 
+# `update` reads the install directory's ACL to refuse one anyone can write to
+# (#450), the Windows counterpart of the Unix permission-mode check.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_SystemServices",
+] }
+
 [dev-dependencies]
 tempfile = "3"

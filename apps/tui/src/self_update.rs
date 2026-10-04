@@ -662,7 +662,7 @@ pub fn apply(
         });
     }
     let dir = plan.target.parent().unwrap_or_else(|| Path::new("."));
-    if world_writable_without_sticky(dir) {
+    if others_can_replace_entries(dir) {
         return Err(UpdateError::UnsafeDirectory {
             path: dir.to_path_buf(),
         });
@@ -764,7 +764,7 @@ fn writable_dir(dir: &Path) -> bool {
 /// so beats pretending the update was safe. The sticky bit is what makes
 /// `/tmp` acceptable: entries there can only be removed by their owner.
 #[cfg(unix)]
-fn world_writable_without_sticky(dir: &Path) -> bool {
+fn others_can_replace_entries(dir: &Path) -> bool {
     use std::os::unix::fs::MetadataExt;
     use std::os::unix::fs::PermissionsExt;
     match std::fs::metadata(dir) {
@@ -789,15 +789,215 @@ fn world_writable_without_sticky(dir: &Path) -> bool {
     }
 }
 
-/// Windows has no equivalent this cheap: its ACLs need the security
-/// descriptor read and every ACE walked, which is a new dependency and a
-/// judgement about which principals count as trusted — and getting that wrong
-/// fails in the direction that stops people updating. Tracked in #450. The
-/// staged handle's share mode and the read-back before the rename narrow the
-/// window there; they do not close it.
-#[cfg(not(unix))]
-fn world_writable_without_sticky(_dir: &Path) -> bool {
-    false
+/// The Windows check (#450): the directory's ACL, judged by
+/// [`broad_group_can_replace_entries`].
+///
+/// Windows has no mode bits to read, so the same question is asked of the
+/// directory's DACL. An ACL that cannot be read is not evidence of a problem,
+/// the answer the Unix check gives unreadable metadata; the write probe
+/// below fails on its own if the directory is unusable.
+#[cfg(windows)]
+fn others_can_replace_entries(dir: &Path) -> bool {
+    match read_allow_entries(dir) {
+        Some(dacl) => broad_group_can_replace_entries(dacl.as_deref()),
+        None => false,
+    }
+}
+
+/// One entry of a directory's ACL that grants access, in the terms the
+/// Windows check judges it by.
+#[cfg_attr(not(windows), allow(dead_code))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AllowAce {
+    /// The principal, as a string SID: `S-1-1-0` is Everyone.
+    sid: String,
+    /// The rights granted.
+    mask: u32,
+    /// Whether it applies only to what is created inside the directory
+    /// later, and so not to the directory itself.
+    inherit_only: bool,
+    /// Whether files created inside the directory inherit it, as the staged
+    /// and the installed binary do.
+    object_inherit: bool,
+}
+
+/// The rights that let someone put their own file at a name in a directory,
+/// or take the directory over: add a file, delete an entry, delete or rename
+/// the directory, rewrite its ACL, take ownership, and the generic rights
+/// that map onto those.
+///
+/// Adding a file is enough on its own, which is where Windows differs from
+/// `/tmp`. Windows cannot rename over a running image, so the update moves
+/// the running binary aside and then renames the new one in, and between
+/// those two renames the name is free for anyone who can create a file.
+/// Creating FOLDERS is not in the list, though `C:\` grants it to every
+/// account: a folder at that name makes the update fail, but cannot be run.
+#[cfg_attr(not(windows), allow(dead_code))]
+const REPLACE_RIGHTS: u32 = 0x0000_0002 // FILE_ADD_FILE
+    | 0x0000_0040 // FILE_DELETE_CHILD
+    | 0x0001_0000 // DELETE
+    | 0x0004_0000 // WRITE_DAC
+    | 0x0008_0000 // WRITE_OWNER
+    | 0x1000_0000 // GENERIC_ALL
+    | 0x4000_0000; // GENERIC_WRITE
+
+/// Whether `sid` stands for everyone with an account on the machine, the
+/// Windows counterpart of "world" in the Unix check. A named group does not:
+/// giving one write access is a trust decision someone already made, like a
+/// group-writable directory on Unix.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn is_broad_group(sid: &str) -> bool {
+    matches!(
+        sid,
+        "S-1-1-0" // Everyone
+            | "S-1-5-7" // Anonymous
+            | "S-1-5-4" // INTERACTIVE
+            | "S-1-5-11" // Authenticated Users
+            | "S-1-5-32-545" // BUILTIN\Users
+            | "S-1-5-32-546" // BUILTIN\Guests
+    )
+    // Domain Users. Off a domain the same relative ID is "None", the group
+    // every local account is in.
+    || (sid.starts_with("S-1-5-21-") && sid.ends_with("-513"))
+}
+
+/// The rights that let someone change a FILE: write or append to it, delete
+/// it, rewrite its ACL, take ownership, and the generic rights that map onto
+/// those. A file's own ACL comes from its directory's file-inheritable
+/// entries, and the staged and the installed binary are files created there.
+#[cfg_attr(not(windows), allow(dead_code))]
+const FILE_CHANGE_RIGHTS: u32 = 0x0000_0002 // FILE_WRITE_DATA
+    | 0x0000_0004 // FILE_APPEND_DATA
+    | 0x0001_0000 // DELETE
+    | 0x0004_0000 // WRITE_DAC
+    | 0x0008_0000 // WRITE_OWNER
+    | 0x1000_0000 // GENERIC_ALL
+    | 0x4000_0000; // GENERIC_WRITE
+
+/// Whether a directory whose DACL holds `dacl` lets everyone with an account
+/// replace its entries, or change the files the update creates in it.
+///
+/// Two kinds of entry count. An entry that applies to the directory itself
+/// counts if it grants a replace right. An entry that files created inside
+/// inherit counts if it grants the right to change a file. The staged binary
+/// inherits that entry, so anyone could rewrite it between its read-back and
+/// the rename, and could rewrite the installed binary at any time after.
+///
+/// `None` is a directory with no DACL at all, which Windows reads as full
+/// access for everyone. An empty one is the opposite: nobody is granted
+/// anything.
+///
+/// Deny entries are not consulted. Without them this can only say "unsafe"
+/// where a deny for the same group would have made a directory safe, so it
+/// errs toward refusing, and an install directory that grants Everyone write
+/// access only to deny it again is not something people have.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn broad_group_can_replace_entries(dacl: Option<&[AllowAce]>) -> bool {
+    let Some(entries) = dacl else {
+        return true;
+    };
+    entries.iter().any(|entry| {
+        let on_the_directory = !entry.inherit_only && entry.mask & REPLACE_RIGHTS != 0;
+        let on_its_files = entry.object_inherit && entry.mask & FILE_CHANGE_RIGHTS != 0;
+        (on_the_directory || on_its_files) && is_broad_group(&entry.sid)
+    })
+}
+
+/// The allow entries of `dir`'s DACL: `Some(None)` when it has no DACL at
+/// all, `None` when it could not be read.
+#[cfg(windows)]
+fn read_allow_entries(dir: &Path) -> Option<Option<Vec<AllowAce>>> {
+    use std::os::windows::ffi::OsStrExt;
+    use std::ptr::null_mut;
+    use windows_sys::Win32::Foundation::{LocalFree, ERROR_SUCCESS};
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertSidToStringSidW, GetNamedSecurityInfoW, SE_FILE_OBJECT,
+    };
+    use windows_sys::Win32::Security::{
+        GetAce, ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, DACL_SECURITY_INFORMATION, INHERIT_ONLY_ACE,
+        OBJECT_INHERIT_ACE, PSECURITY_DESCRIPTOR,
+    };
+    use windows_sys::Win32::System::SystemServices::{
+        ACCESS_ALLOWED_ACE_TYPE, ACCESS_ALLOWED_CALLBACK_ACE_TYPE,
+    };
+
+    /// Memory Windows allocated on our behalf, freed on every way out.
+    struct Local(*mut core::ffi::c_void);
+    impl Drop for Local {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                // SAFETY: only ever holds a pointer Windows allocated with
+                // LocalAlloc and handed to us to free.
+                unsafe { LocalFree(self.0) };
+            }
+        }
+    }
+
+    let name: Vec<u16> = dir.as_os_str().encode_wide().chain([0]).collect();
+    let mut dacl: *mut ACL = null_mut();
+    let mut descriptor: PSECURITY_DESCRIPTOR = null_mut();
+    // SAFETY: `name` is NUL-terminated and outlives the call, and every out
+    // pointer is valid. `dacl` points into `descriptor`, which is held until
+    // this function returns.
+    let status = unsafe {
+        GetNamedSecurityInfoW(
+            name.as_ptr(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            null_mut(),
+            null_mut(),
+            &mut dacl,
+            null_mut(),
+            &mut descriptor,
+        )
+    };
+    if status != ERROR_SUCCESS {
+        return None;
+    }
+    let _descriptor = Local(descriptor);
+    if dacl.is_null() {
+        return Some(None);
+    }
+
+    // SAFETY: a non-null DACL from a successful call starts with its header.
+    let count = unsafe { (*dacl).AceCount };
+    let mut entries = Vec::new();
+    for index in 0..u32::from(count) {
+        let mut entry: *mut core::ffi::c_void = null_mut();
+        // SAFETY: `index` is below the ACL's own entry count.
+        if unsafe { GetAce(dacl, index, &mut entry) } == 0 {
+            return None;
+        }
+        // SAFETY: every ACE starts with an ACE_HEADER.
+        let header = unsafe { &*(entry as *const ACE_HEADER) };
+        let kind = u32::from(header.AceType);
+        if kind != ACCESS_ALLOWED_ACE_TYPE && kind != ACCESS_ALLOWED_CALLBACK_ACE_TYPE {
+            continue;
+        }
+        // SAFETY: both allow types begin as ACCESS_ALLOWED_ACE does: the
+        // header, the mask, then the SID.
+        let allowed = unsafe { &*(entry as *const ACCESS_ALLOWED_ACE) };
+        let sid = std::ptr::addr_of!(allowed.SidStart) as *mut core::ffi::c_void;
+        let mut text: *mut u16 = null_mut();
+        // SAFETY: `sid` is the SID inside a valid ACE. On success `text` is
+        // a NUL-terminated string that `Local` frees.
+        if unsafe { ConvertSidToStringSidW(sid, &mut text) } == 0 {
+            return None;
+        }
+        let owned = Local(text.cast());
+        let text = owned.0 as *const u16;
+        // SAFETY: NUL-terminated, from ConvertSidToStringSidW.
+        let len = (0..).take_while(|&i| unsafe { *text.add(i) } != 0).count();
+        // SAFETY: `len` code units precede the terminator.
+        let sid = String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(text, len) });
+        entries.push(AllowAce {
+            sid,
+            mask: allowed.Mask,
+            inherit_only: u32::from(header.AceFlags) & INHERIT_ONLY_ACE != 0,
+            object_inherit: u32::from(header.AceFlags) & OBJECT_INHERIT_ACE != 0,
+        });
+    }
+    Some(Some(entries))
 }
 
 /// Put a binary back after an update was interrupted between the two
@@ -1043,6 +1243,167 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
+    /// An allow entry that applies to the directory itself.
+    fn ace(sid: &str, mask: u32) -> super::AllowAce {
+        super::AllowAce {
+            sid: sid.into(),
+            mask,
+            inherit_only: false,
+            object_inherit: false,
+        }
+    }
+
+    const MODIFY: u32 = 0x0013_01BF;
+    const FULL: u32 = 0x001F_01FF;
+    const READ_EXECUTE: u32 = 0x0012_00A9;
+
+    /// What a directory in a user's profile carries: the user, SYSTEM and
+    /// Administrators, nobody else.
+    fn owners_only() -> Vec<super::AllowAce> {
+        vec![
+            ace("S-1-5-21-1-2-3-1001", FULL),
+            ace("S-1-5-18", FULL),
+            ace("S-1-5-32-544", FULL),
+        ]
+    }
+
+    /// The Windows refusal's policy (#450), over ACL entries written out by
+    /// hand, so it runs and is pinned on every platform CI uses.
+    #[test]
+    fn a_broad_group_that_may_change_a_directory_makes_it_unsafe() {
+        use super::broad_group_can_replace_entries;
+
+        assert!(
+            !broad_group_can_replace_entries(Some(&owners_only())),
+            "the user, SYSTEM and Administrators"
+        );
+        for broad in [
+            "S-1-1-0",            // Everyone
+            "S-1-5-7",            // Anonymous
+            "S-1-5-4",            // INTERACTIVE
+            "S-1-5-11",           // Authenticated Users
+            "S-1-5-32-545",       // BUILTIN\Users
+            "S-1-5-32-546",       // BUILTIN\Guests
+            "S-1-5-21-1-2-3-513", // Domain Users, or "None" off a domain
+        ] {
+            let mut aces = owners_only();
+            aces.push(ace(broad, MODIFY));
+            assert!(
+                broad_group_can_replace_entries(Some(&aces)),
+                "{broad} with Modify"
+            );
+
+            let mut aces = owners_only();
+            aces.push(ace(broad, READ_EXECUTE));
+            assert!(
+                !broad_group_can_replace_entries(Some(&aces)),
+                "{broad} may only read"
+            );
+        }
+    }
+
+    #[test]
+    fn each_right_that_lets_someone_replace_an_entry_counts_on_its_own() {
+        use super::broad_group_can_replace_entries;
+
+        for (right, what) in [
+            (0x0000_0002, "add a file"),
+            (0x0000_0040, "delete a child"),
+            (0x0001_0000, "delete the directory"),
+            (0x0004_0000, "rewrite the ACL"),
+            (0x0008_0000, "take ownership"),
+            (0x1000_0000, "GENERIC_ALL"),
+            (0x4000_0000, "GENERIC_WRITE"),
+        ] {
+            assert!(
+                broad_group_can_replace_entries(Some(&[ace("S-1-1-0", right)])),
+                "{what}"
+            );
+        }
+        // Creating folders is not one. A folder at the binary's name makes
+        // the update fail; it cannot be run. `C:\` grants exactly this.
+        assert!(!broad_group_can_replace_entries(Some(&[ace(
+            "S-1-5-11",
+            0x0010_0004
+        )])));
+    }
+
+    /// What the FILES created inside inherit counts too. The staged binary,
+    /// and after the rename the installed one, take their ACL from the
+    /// directory's file-inheritable entries. Modify for every account there
+    /// lets anyone rewrite the staged file between its read-back and the
+    /// rename, and the installed one at any time after. `C:\` carries exactly
+    /// this, as (OI)(CI)(IO) Modify for Authenticated Users.
+    #[test]
+    fn a_broad_group_that_may_change_the_files_created_inside_makes_it_unsafe() {
+        use super::{broad_group_can_replace_entries, AllowAce};
+
+        for (right, what) in [
+            (MODIFY, "Modify"),
+            (0x0000_0002, "write data"),
+            (0x0000_0004, "append data"),
+            (0x0001_0000, "delete"),
+            (0x0004_0000, "rewrite the ACL"),
+            (0x0008_0000, "take ownership"),
+            (0x1000_0000, "GENERIC_ALL"),
+            (0x4000_0000, "GENERIC_WRITE"),
+        ] {
+            let files_inherit = AllowAce {
+                sid: "S-1-5-11".into(),
+                mask: right,
+                inherit_only: true,
+                object_inherit: true,
+            };
+            assert!(
+                broad_group_can_replace_entries(Some(&[files_inherit])),
+                "{what}, inherited by the files"
+            );
+        }
+        // Reading and running what is inside is fine: `C:\Program Files`
+        // gives BUILTIN\Users exactly that, as (OI)(CI)(IO)(GR,GE).
+        let read_and_run = AllowAce {
+            sid: "S-1-5-32-545".into(),
+            mask: 0xA000_0000,
+            inherit_only: true,
+            object_inherit: true,
+        };
+        assert!(!broad_group_can_replace_entries(Some(&[read_and_run])));
+    }
+
+    #[test]
+    fn entries_for_children_only_or_for_a_named_group_do_not_count() {
+        use super::{broad_group_can_replace_entries, AllowAce};
+
+        // Modify for Authenticated Users on the FOLDERS created inside later,
+        // (CI)(IO): it applies neither to this directory nor to the files the
+        // update creates in it.
+        let folders_only = AllowAce {
+            sid: "S-1-5-11".into(),
+            mask: MODIFY,
+            inherit_only: true,
+            object_inherit: false,
+        };
+        assert!(!broad_group_can_replace_entries(Some(&[folders_only])));
+        // A group someone chose to trust, like a group-writable directory on
+        // Unix: Backup Operators.
+        assert!(!broad_group_can_replace_entries(Some(&[ace(
+            "S-1-5-32-551",
+            MODIFY
+        )])));
+        // A relative ID that merely ends in 513 is some other account.
+        assert!(!broad_group_can_replace_entries(Some(&[ace(
+            "S-1-5-21-1-2-3-1513",
+            MODIFY
+        )])));
+    }
+
+    /// No DACL at all is not an empty one: Windows reads it as full access
+    /// for everyone.
+    #[test]
+    fn a_directory_with_no_dacl_is_open_to_everyone() {
+        assert!(super::broad_group_can_replace_entries(None));
+    }
+
     /// The staged file must be private to its owner from the instant it
     /// exists, not from the moment its mode is corrected.
     ///
@@ -1116,7 +1477,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn only_a_directory_anyone_can_write_to_is_refused() {
-        use super::world_writable_without_sticky;
+        use super::others_can_replace_entries;
         use std::os::unix::fs::PermissionsExt;
 
         let _guard = file_test_lock();
@@ -1127,17 +1488,17 @@ mod tests {
         };
 
         set(0o755);
-        assert!(!world_writable_without_sticky(dir.path()), "0755 is fine");
+        assert!(!others_can_replace_entries(dir.path()), "0755 is fine");
 
         set(0o775);
         assert!(
-            !world_writable_without_sticky(dir.path()),
+            !others_can_replace_entries(dir.path()),
             "group-writable is an ordinary configuration, not a refusal"
         );
 
         set(0o777);
         assert!(
-            world_writable_without_sticky(dir.path()),
+            others_can_replace_entries(dir.path()),
             "world-writable without the sticky bit must be refused"
         );
 
@@ -1146,7 +1507,7 @@ mod tests {
         // happen.
         set(0o1777);
         assert!(
-            !world_writable_without_sticky(dir.path()),
+            !others_can_replace_entries(dir.path()),
             "sticky world-writable is how /tmp is set up"
         );
 
@@ -1225,7 +1586,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_sticky_directory_is_only_safe_when_its_owner_is() {
-        use super::world_writable_without_sticky;
+        use super::others_can_replace_entries;
         use std::os::unix::fs::PermissionsExt;
 
         let _guard = file_test_lock();
@@ -1237,15 +1598,15 @@ mod tests {
 
         // Owned by us: sticky makes it acceptable, exactly as /tmp is.
         set(0o1777);
-        assert!(!world_writable_without_sticky(dir.path()));
+        assert!(!others_can_replace_entries(dir.path()));
 
         // Without the bit it is refused whoever owns it.
         set(0o777);
-        assert!(world_writable_without_sticky(dir.path()));
+        assert!(others_can_replace_entries(dir.path()));
 
         // And a directory nobody else can write to never needed either.
         set(0o755);
-        assert!(!world_writable_without_sticky(dir.path()));
+        assert!(!others_can_replace_entries(dir.path()));
         set(0o755);
     }
 
