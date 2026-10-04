@@ -114,6 +114,12 @@ pub struct ReplicaSetSummary {
     /// age live at render time. Empty when the resource carries none.
     #[serde(rename = "createdAt")]
     pub created_at: String,
+    /// The pod template's container images, in order (#389): what tells two
+    /// revisions apart when choosing one to roll back to.
+    pub images: Vec<String>,
+    /// `kubernetes.io/change-cause`, when the revision was recorded with one.
+    #[serde(rename = "changeCause", skip_serializing_if = "Option::is_none")]
+    pub change_cause: Option<String>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -140,6 +146,18 @@ pub(crate) fn summarise_rs(rs: ReplicaSet) -> ReplicaSetSummary {
     let status = rs.status.as_ref();
     let ready = status.and_then(|s| s.ready_replicas).unwrap_or(0);
     let current = status.map(|s| s.replicas).unwrap_or(0);
+    let images = rs
+        .spec
+        .as_ref()
+        .and_then(|s| s.template.as_ref())
+        .and_then(|t| t.spec.as_ref())
+        .map(|p| p.containers.iter().filter_map(|c| c.image.clone()).collect())
+        .unwrap_or_default();
+    let change_cause = rs
+        .metadata
+        .annotations
+        .as_ref()
+        .and_then(|a| a.get("kubernetes.io/change-cause").cloned());
     ReplicaSetSummary {
         name: rs.metadata.name.clone().unwrap_or_default(),
         revision,
@@ -149,6 +167,8 @@ pub(crate) fn summarise_rs(rs: ReplicaSet) -> ReplicaSetSummary {
         created: crate::creation_rfc3339(rs.metadata.creation_timestamp.as_ref()),
         age: crate::humanize_age(rs.metadata.creation_timestamp.as_ref()),
         created_at: crate::creation_timestamp_iso(rs.metadata.creation_timestamp.as_ref()),
+        images,
+        change_cause,
     }
 }
 
@@ -195,6 +215,7 @@ mod tests {
     use k8s_openapi::api::apps::v1::{
         DeploymentSpec, DeploymentStatus, ReplicaSetSpec, ReplicaSetStatus,
     };
+    use k8s_openapi::api::core::v1::{Container, PodSpec, PodTemplateSpec};
     use std::path::PathBuf;
 
     #[test]
@@ -268,6 +289,35 @@ mod tests {
         let rs = replicaset("web-abc", "web", "3");
         assert!(owned_by(&rs, "web"));
         assert!(!owned_by(&rs, "other"));
+    }
+
+    #[test]
+    fn summarises_a_revisions_images_and_change_cause() {
+        let mut rs = replicaset("web-abc", "web", "5");
+        rs.metadata
+            .annotations
+            .as_mut()
+            .unwrap()
+            .insert("kubernetes.io/change-cause".into(), "bump api".into());
+        rs.spec.as_mut().unwrap().template = Some(PodTemplateSpec {
+            spec: Some(PodSpec {
+                containers: vec![
+                    Container { name: "api".into(), image: Some("api:1.4.2".into()), ..Default::default() },
+                    Container { name: "proxy".into(), image: Some("envoy:1.30".into()), ..Default::default() },
+                ],
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        let s = summarise_rs(rs);
+        assert_eq!(s.images, vec!["api:1.4.2".to_string(), "envoy:1.30".to_string()]);
+        assert_eq!(s.change_cause.as_deref(), Some("bump api"));
+
+        let plain = summarise_rs(replicaset("web-def", "web", "6"));
+        assert!(plain.images.is_empty());
+        assert_eq!(plain.change_cause, None);
+        let json = serde_json::to_value(&plain).unwrap();
+        assert!(json.get("changeCause").is_none(), "an unset change-cause is omitted: {json}");
     }
 
     #[test]
