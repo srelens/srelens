@@ -130,6 +130,7 @@ vi.mock("./components/ResourceBrowser", () => ({
     onOpenEdit,
     onOpenNew,
     onNamespaceChange,
+    onOpenTerminal,
     initialNamespace,
   }: {
     context: string;
@@ -140,6 +141,12 @@ vi.mock("./components/ResourceBrowser", () => ({
     onOpenEdit?: (kind: string, namespace: string | null, name: string) => void;
     onOpenNew?: (initialKind?: string) => void;
     onNamespaceChange?: (namespace: string) => void;
+    onOpenTerminal?: (s: {
+      context: string;
+      namespace: string;
+      pod: string;
+      deleteOnClose?: { context: string; namespace: string; pod: string };
+    }) => void;
     initialNamespace?: string;
   }) => (
     <div data-testid="browser">
@@ -156,6 +163,18 @@ vi.mock("./components/ResourceBrowser", () => ({
       <button onClick={() => onOpenNew?.("Secret")}>new-secret</button>
       <button onClick={() => onNamespaceChange?.("team-a")}>use-team-a</button>
       <button onClick={() => onOpenNew?.("ConfigMap")}>new-config-map</button>
+      <button
+        onClick={() =>
+          onOpenTerminal?.({
+            context,
+            namespace: "default",
+            pod: "srelens-node-debug-x1",
+            deleteOnClose: { context, namespace: "default", pod: "srelens-node-debug-x1" },
+          })
+        }
+      >
+        open-node-shell
+      </button>
     </div>
   ),
 }));
@@ -165,9 +184,27 @@ vi.mock("./components/SettingsView", () => ({
 // The dock hosts xterm, which is dynamically imported and has no place in
 // jsdom; these tests only care about whether it is mounted and with what.
 vi.mock("./components/Dock", () => ({
-  Dock: ({ sessions }: { sessions: Array<{ kind: string; context: string }> }) => (
-    <div data-testid="dock">{sessions.map((s) => `${s.kind}:${s.context}`).join(",")}</div>
+  Dock: ({
+    sessions,
+    onCloseTab,
+  }: {
+    sessions: Array<{ id: number; kind: string; context: string }>;
+    onCloseTab?: (id: number) => void;
+  }) => (
+    <>
+      <div data-testid="dock">{sessions.map((s) => `${s.kind}:${s.context}`).join(",")}</div>
+      {sessions.map((s) => (
+        <button key={s.id} onClick={() => onCloseTab?.(s.id)}>
+          close-dock-{s.id}
+        </button>
+      ))}
+    </>
   ),
+}));
+const { deletePodMock } = vi.hoisted(() => ({ deletePodMock: vi.fn(async () => ({})) }));
+vi.mock("@srelens/core/lib/workloads", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@srelens/core/lib/workloads")>()),
+  deletePod: deletePodMock,
 }));
 // The host shell is desktop-only, and `isWeb` is decided once at import time,
 // so it has to be replaced rather than set up per test. `isTauri` is left real:
@@ -865,4 +902,35 @@ it("shows what the desktop host reports, and lets it go on unmount", () => {
   } finally {
     delete (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__;
   }
+});
+
+// #734: a node shell's debug pod is privileged, and on desktop the host now
+// deletes it — when its shell ends, its window closes or reloads, or srelens
+// quits — so the page must not delete it as well. The web host has no such
+// cleanup, so there the page still does.
+describe("closing a node shell's dock tab", () => {
+  beforeEach(() => deletePodMock.mockClear());
+
+  function openAndCloseANodeShell() {
+    render(<App />);
+    fireEvent.click(screen.getByText("open-kind-dev"));
+    fireEvent.click(screen.getByText("nav-services"));
+    fireEvent.click(screen.getByText("open-node-shell"));
+    fireEvent.click(screen.getByText(/^close-dock-/));
+  }
+
+  it("leaves the debug pod to the desktop host", () => {
+    (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__ = {};
+    try {
+      openAndCloseANodeShell();
+      expect(deletePodMock).not.toHaveBeenCalled();
+    } finally {
+      delete (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__;
+    }
+  });
+
+  it("still deletes it on the web, where no host does", () => {
+    openAndCloseANodeShell();
+    expect(deletePodMock).toHaveBeenCalledWith("kind-dev", "default", "srelens-node-debug-x1");
+  });
 });
