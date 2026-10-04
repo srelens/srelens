@@ -134,21 +134,22 @@ async fn invoke_one(
             } else {
                 ToolStatus::Ok
             };
-            on_event(AgentEvent::ToolResult { id: call.id.clone(), status, summary: None });
             // A denied call is fed back as an error so the model can adapt.
-            ToolOutcome {
-                id: call.id.clone(),
-                name: call.name.clone(),
-                content: if res.denied && res.content.is_empty() {
-                    "the user declined this tool call".to_string()
-                } else {
-                    res.content
-                },
-                is_error: res.is_error || res.denied,
-            }
+            let content = if res.denied && res.content.is_empty() {
+                "the user declined this tool call".to_string()
+            } else {
+                res.content
+            };
+            let is_error = res.is_error || res.denied;
+            // The row's summary reads the same text the model is given (#385),
+            // so the two never tell different stories about one call.
+            let summary = srelens_agent::event::summarize_result(&content, is_error);
+            on_event(AgentEvent::ToolResult { id: call.id.clone(), status, summary });
+            ToolOutcome { id: call.id.clone(), name: call.name.clone(), content, is_error }
         }
         Err(e) => {
-            on_event(AgentEvent::ToolResult { id: call.id.clone(), status: ToolStatus::Error, summary: None });
+            let summary = srelens_agent::event::summarize_result(&e.to_string(), true);
+            on_event(AgentEvent::ToolResult { id: call.id.clone(), status: ToolStatus::Error, summary });
             ToolOutcome { id: call.id.clone(), name: call.name.clone(), content: e.to_string(), is_error: true }
         }
     }
@@ -395,7 +396,7 @@ mod tests {
                     tool: "k8s_scale".into(),
                     args: json!({ "replicas": 3 }),
                 },
-                AgentEvent::ToolResult { id: "c1".into(), status: ToolStatus::Ok, summary: None },
+                AgentEvent::ToolResult { id: "c1".into(), status: ToolStatus::Ok, summary: Some("ok".into()) },
                 AgentEvent::TextDelta { text: "scaled to 3".into() },
                 AgentEvent::TurnDone,
             ]
@@ -422,7 +423,7 @@ mod tests {
             calls: Mutex::new(Vec::new()),
         };
         let events = drive(&provider, &invoker, "scale it");
-        assert!(events.contains(&AgentEvent::ToolResult { id: "c1".into(), status: ToolStatus::Denied, summary: None }));
+        assert!(events.contains(&AgentEvent::ToolResult { id: "c1".into(), status: ToolStatus::Denied, summary: Some("the user declined this tool call".into()) }));
         let seen = provider.seen_turns.lock().unwrap();
         assert!(matches!(seen[1].last(), Some(Turn::ToolResults(o)) if o[0].is_error));
     }

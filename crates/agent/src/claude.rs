@@ -104,7 +104,7 @@ fn tool_result(block: &serde_json::Value) -> Option<AgentEvent> {
     Some(AgentEvent::ToolResult {
         id: block.get("tool_use_id").and_then(|i| i.as_str()).unwrap_or("").to_string(),
         status,
-        summary: None,
+        summary: crate::event::summarize_result(&result_text(block), is_error),
     })
 }
 
@@ -203,18 +203,30 @@ mod tests {
         assert_eq!(err, vec![AgentEvent::ToolResult { id: "t1".into(), status: ToolStatus::Error, summary: None }]);
     }
 
+    /// #385: the row says what the result says.
+    #[test]
+    fn a_tool_result_carries_a_summary_of_its_content() {
+        let out = parse_line(
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t3","is_error":false,"content":[{"type":"text","text":"{\"pods\":[1,2]}"}]}]}}"#,
+        );
+        assert_eq!(
+            out,
+            vec![AgentEvent::ToolResult { id: "t3".into(), status: ToolStatus::Ok, summary: Some("2 pods".into()) }]
+        );
+    }
+
     #[test]
     fn a_consent_refusal_maps_to_denied_not_error() {
         // Both content shapes Claude Code uses: an array of text blocks…
         let blocks = parse_line(
             r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","is_error":true,"content":[{"type":"text","text":"consent denied: user declined `k8s.deletePod`"}]}]}}"#,
         );
-        assert_eq!(blocks, vec![AgentEvent::ToolResult { id: "t1".into(), status: ToolStatus::Denied, summary: None }]);
+        assert_eq!(blocks, vec![AgentEvent::ToolResult { id: "t1".into(), status: ToolStatus::Denied, summary: Some("consent denied: user declined `k8s.deletePod`".into()) }]);
         // …and a bare string.
         let bare = parse_line(
             r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t2","is_error":true,"content":"consent denied: user declined `k8s.scale`"}]}}"#,
         );
-        assert_eq!(bare, vec![AgentEvent::ToolResult { id: "t2".into(), status: ToolStatus::Denied, summary: None }]);
+        assert_eq!(bare, vec![AgentEvent::ToolResult { id: "t2".into(), status: ToolStatus::Denied, summary: Some("consent denied: user declined `k8s.scale`".into()) }]);
     }
 
     #[test]

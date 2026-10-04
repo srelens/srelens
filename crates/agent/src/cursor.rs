@@ -108,7 +108,11 @@ fn tool_call(v: &serde_json::Value) -> Vec<AgentEvent> {
             tool: tool_name(key),
             args: inner.get("args").cloned().unwrap_or(serde_json::Value::Null),
         }],
-        Some("completed") => vec![AgentEvent::ToolResult { id, status: completion_status(inner), summary: None }],
+        Some("completed") => {
+            let status = completion_status(inner);
+            let summary = crate::event::summarize_result(&result_text(inner), status != ToolStatus::Ok);
+            vec![AgentEvent::ToolResult { id, status, summary }]
+        }
         _ => Vec::new(),
     }
 }
@@ -136,6 +140,32 @@ fn completion_status(inner: &serde_json::Value) -> ToolStatus {
         return ToolStatus::Denied;
     }
     ToolStatus::Error
+}
+
+/// A completed tool call's result as text, for its summary (#385). Cursor's
+/// payloads differ by tool: an MCP call's `content[].text`, a built-in tool's
+/// `success.content`, an `error.errorMessage` / `error.message`, or the
+/// sandbox's `permissionDenied.error`.
+fn result_text(inner: &serde_json::Value) -> String {
+    let result = inner.get("result").unwrap_or(inner);
+    if let Some(parts) = result.get("content").and_then(|c| c.as_array()) {
+        let text: Vec<&str> = parts.iter().filter_map(|p| p.get("text").and_then(|t| t.as_str())).collect();
+        if !text.is_empty() {
+            return text.join("\n");
+        }
+    }
+    let pick = |path: &[&str]| -> Option<String> {
+        let mut v = result;
+        for key in path {
+            v = v.get(*key)?;
+        }
+        v.as_str().map(str::to_string)
+    };
+    pick(&["success", "content"])
+        .or_else(|| pick(&["error", "errorMessage"]))
+        .or_else(|| pick(&["error", "message"]))
+        .or_else(|| pick(&["permissionDenied", "error"]))
+        .unwrap_or_default()
 }
 
 fn is_truthy(v: &serde_json::Value) -> bool {
@@ -272,7 +302,7 @@ mod tests {
         let out = parse_line(
             r#"{"type":"tool_call","subtype":"completed","call_id":"call-1\nfc_2","tool_call":{"readToolCall":{"result":{"error":{"errorMessage":"Permission denied"}}}}}"#,
         );
-        assert_eq!(out, vec![AgentEvent::ToolResult { id: "call-1\nfc_2".into(), status: ToolStatus::Error, summary: None }]);
+        assert_eq!(out, vec![AgentEvent::ToolResult { id: "call-1\nfc_2".into(), status: ToolStatus::Error, summary: Some("Permission denied".into()) }]);
     }
 
     #[test]
@@ -282,7 +312,7 @@ mod tests {
         let out = parse_line(
             r#"{"type":"tool_call","subtype":"completed","call_id":"c2","tool_call":{"mcpToolCall":{"result":{"isError":true,"content":[{"type":"text","text":"consent denied: user declined `k8s.deletePod`"}]}}}}"#,
         );
-        assert_eq!(out, vec![AgentEvent::ToolResult { id: "c2".into(), status: ToolStatus::Denied, summary: None }]);
+        assert_eq!(out, vec![AgentEvent::ToolResult { id: "c2".into(), status: ToolStatus::Denied, summary: Some("consent denied: user declined `k8s.deletePod`".into()) }]);
     }
 
     #[test]
@@ -381,7 +411,7 @@ mod tests {
                 "toolCallId": mcp_call_id,
             }),
         }));
-        assert!(events.contains(&AgentEvent::ToolResult { id: mcp_call_id.into(), status: ToolStatus::Ok, summary: None }));
+        assert!(events.contains(&AgentEvent::ToolResult { id: mcp_call_id.into(), status: ToolStatus::Ok, summary: Some("0 matches".into()) }));
 
         // The blocked local read: the completed line's call_id must match its
         // started line's call_id verbatim, embedded `\n` and all.
@@ -393,6 +423,6 @@ mod tests {
             args: serde_json::json!({ "path": "/etc/hosts" }),
         }));
         assert!(events
-            .contains(&AgentEvent::ToolResult { id: read_call_id.into(), status: ToolStatus::Error, summary: None }));
+            .contains(&AgentEvent::ToolResult { id: read_call_id.into(), status: ToolStatus::Error, summary: Some("Permission denied".into()) }));
     }
 }

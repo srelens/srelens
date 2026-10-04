@@ -78,17 +78,33 @@ fn item_completed(item: &serde_json::Value) -> Vec<AgentEvent> {
             } else {
                 ToolStatus::Error
             };
-            vec![AgentEvent::ToolResult { id: str_field(item, "id").to_string(), status, summary: None }]
+            let summary = crate::event::summarize_result(&mcp_result_text(item), status != ToolStatus::Ok);
+            vec![AgentEvent::ToolResult { id: str_field(item, "id").to_string(), status, summary }]
         }
         Some("command_execution") => {
             let ok = item.get("exit_code").and_then(|c| c.as_i64()) == Some(0);
             vec![AgentEvent::ToolResult {
                 id: str_field(item, "id").to_string(),
                 status: if ok { ToolStatus::Ok } else { ToolStatus::Error },
-                summary: None,
+                summary: crate::event::summarize_result(str_field(item, "aggregated_output"), !ok),
             }]
         }
         _ => Vec::new(),
+    }
+}
+
+/// An `mcp_tool_call`'s result as text, for its summary (#385): the result's
+/// text parts, else the error's message, else the error itself.
+fn mcp_result_text(item: &serde_json::Value) -> String {
+    if let Some(parts) = item.get("result").and_then(|r| r.get("content")).and_then(|c| c.as_array()) {
+        let text: Vec<&str> = parts.iter().filter_map(|p| p.get("text").and_then(|t| t.as_str())).collect();
+        if !text.is_empty() {
+            return text.join("\n");
+        }
+    }
+    match item.get("error") {
+        Some(serde_json::Value::Null) | None => String::new(),
+        Some(e) => e.get("message").and_then(|m| m.as_str()).map(str::to_string).unwrap_or_else(|| e.to_string()),
     }
 }
 
@@ -156,7 +172,7 @@ mod tests {
         let out = parse_line(
             r#"{"type":"item.completed","item":{"id":"item_1","type":"mcp_tool_call","server":"everything","tool":"echo","arguments":{"message":"srelens-mcp-probe"},"result":{"content":[{"type":"text","text":"Echo: srelens-mcp-probe"}],"structured_content":null},"error":null,"status":"completed"}}"#,
         );
-        assert_eq!(out, vec![AgentEvent::ToolResult { id: "item_1".into(), status: ToolStatus::Ok, summary: None }]);
+        assert_eq!(out, vec![AgentEvent::ToolResult { id: "item_1".into(), status: ToolStatus::Ok, summary: Some("Echo: srelens-mcp-probe".into()) }]);
     }
 
     #[test]
@@ -164,7 +180,7 @@ mod tests {
         let out = parse_line(
             r#"{"type":"item.completed","item":{"id":"item_1","type":"mcp_tool_call","server":"everything","tool":"echo","arguments":{},"result":null,"error":{"message":"boom"},"status":"completed"}}"#,
         );
-        assert_eq!(out, vec![AgentEvent::ToolResult { id: "item_1".into(), status: ToolStatus::Error, summary: None }]);
+        assert_eq!(out, vec![AgentEvent::ToolResult { id: "item_1".into(), status: ToolStatus::Error, summary: Some("boom".into()) }]);
     }
 
     #[test]
@@ -172,7 +188,7 @@ mod tests {
         let out = parse_line(
             r#"{"type":"item.completed","item":{"id":"item_1","type":"mcp_tool_call","server":"srelens","tool":"k8s_deletePod","arguments":{},"result":null,"error":{"message":"consent denied: user declined `k8s.deletePod`"},"status":"completed"}}"#,
         );
-        assert_eq!(out, vec![AgentEvent::ToolResult { id: "item_1".into(), status: ToolStatus::Denied, summary: None }]);
+        assert_eq!(out, vec![AgentEvent::ToolResult { id: "item_1".into(), status: ToolStatus::Denied, summary: Some("consent denied: user declined `k8s.deletePod`".into()) }]);
     }
 
     #[test]
@@ -203,7 +219,7 @@ mod tests {
         let out = parse_line(
             r#"{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"/bin/zsh -lc 'echo srelens-probe'","aggregated_output":"srelens-probe\n","exit_code":0,"status":"completed"}}"#,
         );
-        assert_eq!(out, vec![AgentEvent::ToolResult { id: "item_1".into(), status: ToolStatus::Ok, summary: None }]);
+        assert_eq!(out, vec![AgentEvent::ToolResult { id: "item_1".into(), status: ToolStatus::Ok, summary: Some("srelens-probe".into()) }]);
     }
 
     #[test]
@@ -245,7 +261,7 @@ mod tests {
             events.iter().filter(|e| matches!(e, AgentEvent::ToolCallStart { .. })).count(),
             1
         );
-        assert!(events.contains(&AgentEvent::ToolResult { id: "item_1".into(), status: ToolStatus::Ok, summary: None }));
+        assert!(events.contains(&AgentEvent::ToolResult { id: "item_1".into(), status: ToolStatus::Ok, summary: Some("Echo: srelens-mcp-probe".into()) }));
         assert_eq!(
             events.iter().filter(|e| matches!(e, AgentEvent::TextDelta { .. })).count(),
             2
@@ -264,7 +280,7 @@ mod tests {
             tool: "shell".into(),
             args: serde_json::json!({ "command": "/bin/zsh -lc 'echo srelens-probe'" }),
         }));
-        assert!(events.contains(&AgentEvent::ToolResult { id: "item_1".into(), status: ToolStatus::Ok, summary: None }));
+        assert!(events.contains(&AgentEvent::ToolResult { id: "item_1".into(), status: ToolStatus::Ok, summary: Some("srelens-probe".into()) }));
         assert!(events.contains(&AgentEvent::TurnDone));
     }
 }
