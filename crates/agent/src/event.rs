@@ -93,53 +93,75 @@ fn mask_credentials(line: &str) -> String {
     if line.contains("PRIVATE KEY") {
         return REDACTED.to_string();
     }
-    // Pairs are cut wherever one can end — any whitespace, and the `,` `;` `&`
-    // `?` that join pairs in env lines, cookies and URL queries (PR #806
-    // review) — and every separator is kept, so the line reads as it did.
-    let is_separator = |c: char| c.is_whitespace() || matches!(c, ',' | ';' | '&' | '?');
+    // Words are cut at any whitespace (PR #806 review: a tab too), and every
+    // separator is kept, so the line reads as it did.
     let mut out = String::with_capacity(line.len());
     let mut mask_next = false;
     let mut rest = line;
     while !rest.is_empty() {
-        let end = rest.find(is_separator).unwrap_or(rest.len());
-        let (piece, tail) = rest.split_at(end);
-        out.push_str(&mask_piece(piece, &mut mask_next));
-        let gap = tail.find(|c: char| !is_separator(c)).unwrap_or(tail.len());
+        let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        let (word, tail) = rest.split_at(end);
+        out.push_str(&mask_word(word, &mut mask_next));
+        let gap = tail.find(|c: char| !c.is_whitespace()).unwrap_or(tail.len());
         out.push_str(&tail[..gap]);
         rest = &tail[gap..];
     }
     out
 }
 
-/// One `key=value`, `key:value` or bare word of a line. `mask_next` carries
-/// over a value that is the next piece: `password: hunter2`, `Bearer abc`.
-fn mask_piece(piece: &str, mask_next: &mut bool) -> String {
-    if piece.is_empty() {
+fn is_scheme(word: &str) -> bool {
+    word.eq_ignore_ascii_case("bearer") || word.eq_ignore_ascii_case("basic")
+}
+
+/// One whitespace-separated word. Its pairs — joined by the `,` `;` `&` `?` of
+/// env lines, cookies and URL queries — are read left to right, so a
+/// credential after an ordinary pair is found (PR #806 review). A credential's
+/// value runs to the end of the word: a value with a comma in it is masked
+/// whole, never shown in part, at the price of masking what follows it there.
+/// `mask_next` carries a value that is the next word: `password: hunter2`,
+/// `Bearer abc`.
+fn mask_word(word: &str, mask_next: &mut bool) -> String {
+    if word.is_empty() {
         return String::new();
     }
-    let is_scheme = |w: &str| w.eq_ignore_ascii_case("bearer") || w.eq_ignore_ascii_case("basic");
-    if is_scheme(piece) {
+    if is_scheme(word) {
         *mask_next = true;
-        return piece.to_string();
+        return word.to_string();
     }
     if *mask_next {
         *mask_next = false;
         return REDACTED.to_string();
     }
-    if let Some(at) = piece.find(['=', ':']) {
-        let lower = piece[..at].to_ascii_lowercase();
-        let key = lower.trim_matches(|c: char| !c.is_ascii_alphanumeric());
-        if !key.is_empty() && CREDENTIAL_KEYS.iter().any(|k| key.contains(k)) {
-            let value = piece[at + 1..].trim_matches(|c| c == '"' || c == '\'');
-            if value.is_empty() || is_scheme(value) {
-                // The value is the next piece, or a scheme whose value is.
-                *mask_next = true;
-                return piece.to_string();
+    let is_joiner = |c: char| matches!(c, ',' | ';' | '&' | '?');
+    let mut out = String::with_capacity(word.len());
+    let mut rest = word;
+    loop {
+        let end = rest.find(is_joiner).unwrap_or(rest.len());
+        let (piece, tail) = rest.split_at(end);
+        if let Some(at) = piece.find(['=', ':']) {
+            let lower = piece[..at].to_ascii_lowercase();
+            let key = lower.trim_matches(|c: char| !c.is_ascii_alphanumeric());
+            if !key.is_empty() && CREDENTIAL_KEYS.iter().any(|k| key.contains(k)) {
+                let value = piece[at + 1..].trim_matches(|c| c == '"' || c == '\'');
+                if tail.is_empty() && (value.is_empty() || is_scheme(value)) {
+                    // The value is the next word, or a scheme whose value is.
+                    out.push_str(piece);
+                    *mask_next = true;
+                    return out;
+                }
+                out.push_str(&piece[..=at]);
+                out.push_str(REDACTED);
+                return out;
             }
-            return format!("{}{REDACTED}", &piece[..=at]);
+        }
+        out.push_str(if looks_like_a_token(piece) { REDACTED } else { piece });
+        let gap = tail.find(|c: char| !is_joiner(c)).unwrap_or(tail.len());
+        out.push_str(&tail[..gap]);
+        rest = &tail[gap..];
+        if rest.is_empty() {
+            return out;
         }
     }
-    if looks_like_a_token(piece) { REDACTED.to_string() } else { piece.to_string() }
 }
 
 /// A word in the shape of a well-known token: GitHub (`ghp_` …), OpenAI and
@@ -332,15 +354,18 @@ mod tests {
     }
 
     /// PR #806 review: a credential is masked wherever its pair sits — after a
-    /// tab, after another pair in the same word, or in a URL's query. (A tab is
-    /// a control character, so the bounded summary drops it after masking.)
+    /// tab, after another pair in the same word, or in a URL's query — and its
+    /// value is masked whole, to the end of its word: a value with a comma in
+    /// it must not show its tail. Over-masking what follows in that word is the
+    /// price. (A tab is a control character, so the bounded summary drops it.)
     #[test]
     fn a_credential_is_masked_whatever_separates_it() {
         let cases = [
             ("Bearer\tsecret-value-123", "Bearer[redacted]"),
             ("user=bob,password=hunter2", "user=bob,password=[redacted]"),
             ("user=bob;secret=abc", "user=bob;secret=[redacted]"),
-            ("callback https://x.test/cb?token=abc123&state=1", "callback https://x.test/cb?token=[redacted]&state=1"),
+            ("password=abc,def is set", "password=[redacted] is set"),
+            ("callback https://x.test/cb?token=abc123&state=1", "callback https://x.test/cb?token=[redacted]"),
             ("Authorization:Bearer abc123", "Authorization:Bearer [redacted]"),
         ];
         for (line, want) in cases {
