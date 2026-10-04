@@ -164,6 +164,7 @@ pub mod node_inspector;
 pub mod node_ssh;
 pub mod nodes;
 pub mod oidc_detect;
+pub mod path_lookup;
 pub mod persistentvolumes;
 pub mod pod_count;
 pub mod pod_overview;

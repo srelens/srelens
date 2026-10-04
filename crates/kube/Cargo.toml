@@ -42,6 +42,11 @@ tar = "0.4"
 # `test-support`: the fake API server other crates' tests drive a capability against.
 tower = { version = "0.5", features = ["util"], optional = true }
 
+# `path_lookup` asks `access(2)` whether THIS user may execute a file, which
+# is the question `which` answers and the mode bits alone do not.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [features]
 # Exposes `srelens_kube::test_support` and `ClientCache::preload` to other crates' tests
 # (#728). Test support, not an API.
