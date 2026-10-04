@@ -26,7 +26,8 @@ import { useContextLabel } from "../lib/contextLabel";
 import { askContextFor, runKeyFor } from "../lib/askContext";
 import { useNamespaces } from "../lib/workspace";
 import { readImageFile } from "../lib/pastedImages";
-import { isTauri, listAgents, type AgentInfo } from "@srelens/core";
+import { invalidateAgentInventory, useAgentInventoryVersion } from "../lib/agentInventory";
+import { describeError, isTauri, listAgents, type AgentInfo } from "@srelens/core";
 import { useActiveContext, useContexts } from "../lib/clusters";
 import { detailRoute } from "../lib/detailRoute";
 import { hint } from "../lib/shortcuts";
@@ -154,20 +155,35 @@ export function Console({ fullView }: { fullView?: boolean }) {
    * on every screen, and choosing the agent is part of asking.
    */
   const [agents, setAgents] = useState<Read<AgentInfo[]>>(LOADING);
+  // Re-read whenever Settings changes what the inventory answers (#396). The
+  // dock outlives every tab switch, so a read taken once at mount went stale
+  // the moment a key was configured or cleared. Not reset to LOADING on a
+  // re-read: the list already on screen stays until the new one lands, and the
+  // effect's own `cancelled` drops a read a newer one has overtaken.
+  const inventoryVersion = useAgentInventoryVersion();
+  /** A Retry the reader pressed is reading. Said on screen, and no second
+   *  Retry is offered meanwhile: the old failure and an active button over a
+   *  slow read looked like nothing had happened, and invited overlapping
+   *  reads (PR #792 review). */
+  const [retrying, setRetrying] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
     listAgents()
       .then((v) => {
-        if (!cancelled) setAgents({ kind: "ready", value: v });
+        if (cancelled) return;
+        setAgents({ kind: "ready", value: v });
+        setRetrying(false);
       })
       .catch((e: unknown) => {
-        if (!cancelled) setAgents({ kind: "error", error: e });
+        if (cancelled) return;
+        setAgents({ kind: "error", error: e });
+        setRetrying(false);
       });
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [inventoryVersion]);
 
   // `available && !gated` filtered before the picker sees the list: an agent
   // that is installed but gated must not be offered, and filtering inside the
@@ -252,6 +268,12 @@ export function Console({ fullView }: { fullView?: boolean }) {
     [route, activeKey, about],
   );
   const { turns, gates, busy, error, agentKind } = useRun(runKey);
+  // The agent the next question will ACTUALLY go to. `askAgent` falls back to
+  // the first agent offered when the chosen one is not — after a re-read drops
+  // it, say — and a picker still naming the dropped one (or nothing, "Agent")
+  // hid that until the answer came from somewhere else. Shown here, not
+  // chosen: the choice is recorded by `askAgent` when it really happens.
+  const pickerKind = offered.some((a) => a.kind === agentKind) ? agentKind : (offered[0]?.kind ?? agentKind);
   /*
     What the conversation on screen is ABOUT — only in the full view, where the
     dock shows whichever run is selected rather than the one for its own route.
@@ -648,7 +670,7 @@ export function Console({ fullView }: { fullView?: boolean }) {
         offered.length > 0 ? (
           <AgentPicker
             agents={offered}
-            selectedKind={agentKind}
+            selectedKind={pickerKind}
             // The run this picker is SHOWING. The dock is keyed by its own
             // route, which off `/agent` need not be the active run — so
             // without this, picking the agent a restored conversation is not
@@ -720,6 +742,29 @@ export function Console({ fullView }: { fullView?: boolean }) {
               <span>No cluster is active — connect one before asking</span>
             </span>
           )}
+          {/* A failed read said nothing: no picker, exactly as for nothing
+              installed. Said here, with its cause, and retried through the
+              same signal Settings uses, so there is one way a re-read starts. */}
+          {agents.kind === "error" &&
+            (retrying ? (
+              <span className="chip">
+                <span>Listing agents again…</span>
+              </span>
+            ) : (
+              <span className="chip" style={{ color: "var(--sev)" }}>
+                <span>Agents could not be listed: {describeError(agents.error, { domain: "local" }).detail}</span>
+                <button
+                  type="button"
+                  className="text-btn"
+                  onClick={() => {
+                    setRetrying(true);
+                    invalidateAgentInventory();
+                  }}
+                >
+                  Retry
+                </button>
+              </span>
+            ))}
           {askPaused && (
             <span className="chip">
               <span>Reconnect {askCluster} to send a question</span>
