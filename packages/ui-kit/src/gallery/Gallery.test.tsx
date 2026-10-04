@@ -18,12 +18,31 @@ describe("Gallery", () => {
     const components = Object.keys(kit).filter((name) => /^[A-Z]/.test(name) && !invisible.has(name));
     expect(components.length).toBeGreaterThan(0);
     render(<Gallery />);
-    for (const name of components) {
-      expect(
-        screen.getByRole("heading", { name, level: 2 }),
-        `${name} is exported but not in the gallery`,
-      ).toBeDefined();
-    }
+    // One pass over the headings, not one query per name. Every role query
+    // walks the whole catalogue (about 1,900 elements, computing styles to
+    // decide what is visible), so asking for 79 names one at a time cost
+    // 7,347 style computations where one query costs 277. That is what timed
+    // this test out on busy CI runners, at 5s and again at 15s. (#361)
+    //
+    // Names are taken as the query computes them, so a heading is matched on
+    // the name assistive technology announces, not its text: one that reads
+    // "Badge" but is labelled otherwise does not count. And only the headings
+    // the query RETURNS count: it computes names before it drops what is
+    // hidden, so a heading in a hidden section is named but not returned.
+    // (#794 review)
+    const names = new Map<Element, string>();
+    const headings = screen.getAllByRole("heading", {
+      level: 2,
+      name: (accessibleName, element) => {
+        names.set(element, accessibleName);
+        return true;
+      },
+    });
+    const drawn = new Set(headings.map((heading) => names.get(heading)));
+    expect(
+      components.filter((name) => !drawn.has(name)),
+      "exported but not in the gallery",
+    ).toEqual([]);
   });
 
   it("writes a header fact the way the kit says to write one", () => {

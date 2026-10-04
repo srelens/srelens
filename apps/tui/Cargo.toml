@@ -35,6 +35,11 @@ tar = "0.4"
 zip = { version = "4", default-features = false, features = ["deflate"] }
 sha2 = "0.10"
 semver = "1"
+# `update` (#448): verify the release's signed checksums against the keys in
+# the repository's KEYS before trusting them. Pure Rust, so verifying needs no
+# `gpg` on the user's PATH; default features off, since only verification is
+# used and the default pulls in bzip2 for compressed messages.
+pgp = { version = "0.21", default-features = false }
 # Named explicitly because reqwest is built with `rustls-no-provider`, which
 # does NOT resolve one on its own: the first client panics without an installed
 # provider. `ring` to match kube-rs, so the binary links one provider, not two.
@@ -55,5 +60,18 @@ regex = "1"
 libc = "0.2"
 shlex = "1"
 
+# `update` reads the install directory's ACL to refuse one anyone can write to
+# (#450), the Windows counterpart of the Unix permission-mode check.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_SystemServices",
+] }
+
 [dev-dependencies]
 tempfile = "3"
+# Signs the checksum files the update tests build, with a key made per test.
+# 0.8 because that is the `rand` pgp's signing takes.
+rand = "0.8"

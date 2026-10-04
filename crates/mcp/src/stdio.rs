@@ -138,12 +138,27 @@ pub fn subscription_notification(uri: &str) -> Value {
     })
 }
 
-/// Handle a single JSON-RPC request. Returns `None` for notifications (no id),
-/// which must not produce a response.
+/// [`handle_request_as`] for a request nobody can be named for: the stdio
+/// transport, an in-process call with no chat behind it, and tests.
 pub async fn handle_request(
     server: &McpServer,
     req: &Value,
     transport: Transport,
+) -> Option<Value> {
+    handle_request_as(server, req, transport, None).await
+}
+
+/// Handle a single JSON-RPC request. Returns `None` for notifications (no id),
+/// which must not produce a response.
+///
+/// `caller` is who the transport authenticated the request as (#393) — never
+/// anything read from the request itself — and it reaches the consent policy
+/// with a gated call.
+pub async fn handle_request_as(
+    server: &McpServer,
+    req: &Value,
+    transport: Transport,
+    caller: Option<crate::policy::Caller>,
 ) -> Option<Value> {
     let method = req.get("method").and_then(Value::as_str).unwrap_or("");
     let id = req.get("id").cloned();
@@ -249,6 +264,8 @@ pub async fn handle_request(
             let mut decision = "auto";
 
             if let Some(mut request) = McpServer::consent_request_in(&registry, name, &raw_args) {
+                // From the transport, never the arguments (#393).
+                request.caller = caller.clone();
                 if name == "extensions.configure"
                     && matches!(
                         args["action"].as_str(),
@@ -3363,5 +3380,44 @@ mod tests {
         assert_eq!(seen[0].outcome, crate::audit::OUTCOME_OK);
         assert_eq!(seen[0].args, json!({"uri": "k8s://c/ns/Pod/web-0"}));
         assert!(seen[0].error.is_none(), "an unsubscribe carries no error");
+    }
+
+    /// #393: the policy is told which of srelens's own chats raised a gated
+    /// call, from what the transport authenticated, never from the call's own
+    /// arguments, which here try to claim a caller and must be ignored.
+    #[tokio::test]
+    async fn the_policy_is_told_which_chat_raised_the_call() {
+        use std::sync::Mutex;
+        struct Saw(Arc<Mutex<Option<crate::policy::ConsentRequest>>>);
+        #[async_trait::async_trait]
+        impl crate::policy::ConfirmPolicy for Saw {
+            async fn confirm(&self, request: &crate::policy::ConsentRequest) -> crate::policy::Decision {
+                *self.0.lock().unwrap() = Some(request.clone());
+                crate::policy::Decision::Approved
+            }
+        }
+        let saw: Arc<Mutex<Option<crate::policy::ConsentRequest>>> = Arc::new(Mutex::new(None));
+        let mut reg = Registry::new();
+        let mut cap = Capability::read_only("danger", "destructive", |_| async { Ok(json!({})) });
+        cap.annotations = srelens_capability::Annotations::MUTATING;
+        reg.register(cap);
+        let server = McpServer::new(Arc::new(reg)).with_policy(Arc::new(Saw(saw.clone())));
+        let call = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "danger", "arguments": {"caller": "chat:forged"}}});
+
+        handle_request_as(&server, &call, Transport::Http, Some(crate::policy::Caller::Chat("sess-7".into())))
+            .await
+            .expect("response");
+        assert_eq!(
+            saw.lock().unwrap().as_ref().expect("policy asked").caller,
+            Some(crate::policy::Caller::Chat("sess-7".into()))
+        );
+
+        handle_request(&server, &call, Transport::Http).await.expect("response");
+        assert_eq!(
+            saw.lock().unwrap().as_ref().expect("policy asked").caller,
+            None,
+            "a call nobody vouched for has no caller, whatever its arguments say"
+        );
     }
 }

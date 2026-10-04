@@ -251,21 +251,28 @@ srelens-tui update --check   # what is available, without changing anything
 srelens-tui update           # download it and replace this binary
 ```
 
-It only ever replaces the binary you ran it from. Before writing anything it
-checks the download against the SHA-256 the release published, so a corrupted
-or truncated archive is refused and the copy you already have is left alone.
-The last step is a rename, so an interrupted update cannot leave a
-half-written binary on your `PATH`.
+It only ever replaces the binary you ran it from. It writes nothing until two
+checks pass:
 
-> **What that check does and does not prove.** It proves the file arrived
-> intact. It does not prove who built it: the checksum file lives on the same
-> release as the archive, so anyone able to replace one could replace both.
-> Verifying the GPG signature against a pinned key would close that, and is
-> tracked in [#448]. If that distinction matters to you, install by hand and
-> check the signature as described under
-> [Verifying a download](#verifying-a-download).
+1. **The checksum file is signed by a srelens release key.** The release's
+   `srelens-tui-<version>-SHA256SUMS.txt.asc` must be a good signature by a key
+   from [`KEYS`](../KEYS), compiled into the binary you are running. The key
+   must be neither revoked nor expired. That is the same key the table under
+   [Verifying a download](#verifying-a-download) lists. It proves who built
+   the release, which a checksum alone cannot: anyone able to replace an
+   archive could replace the checksum file next to it, but not sign it.
+2. **The download matches that checksum file.** A corrupted or truncated
+   archive is refused.
 
-[#448]: https://github.com/srelens/srelens/issues/448
+If either fails, the copy you already have is left alone. When the update
+succeeds, it prints the fingerprint of the key that signed the release. The
+last step is a rename, so an interrupted update cannot leave a half-written
+binary on your `PATH`.
+
+The keys are the ones in `KEYS` when your binary was built. A binary older than
+a key rotation cannot verify releases signed by the new key and will refuse
+them. Install by hand once, checking the signature as described under
+[Verifying a download](#verifying-a-download).
 
 **Channels.** The same two the desktop app offers under Settings → Updates:
 
@@ -279,6 +286,12 @@ pre-release version means a dev build, anything else means stable — so
 updating never moves you between channels by accident. Pass the flag to
 switch; the choice is not remembered, so the next plain `update` goes back to
 following the binary you are then running.
+
+The dev channel installs signed builds only. Dev pre-releases go public before
+they are signed, and signing them is best-effort, so the newest one may not be
+signed yet. `update` passes over it for the newest pre-release that is signed.
+A stable release goes public only once it is signed, so a stable release
+without a signature is refused outright.
 
 Two cases where it declines rather than acting, both on purpose:
 

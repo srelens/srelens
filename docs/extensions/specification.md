@@ -97,10 +97,13 @@ permission grants, action confirmation, cluster scoping, or manifest validation.
    and a `^0.6` one what [0.6 added](#060). API 0.1 and API 0.2 are not supported. Existing
    installations targeting a retired line are quarantined until replaced by a
    compatible manifest. Official manifests must receive a new version and publisher
-   signature; editing an installed signed manifest invalidates its proof.
+   signature; editing an installed signed manifest invalidates its proof. Before 1.0 a
+   line can be retired sooner than the window in [Deprecation](#deprecation), as these
+   two were.
 6. **API 1.0.** The API is frozen as 1.0 when the cert-manager declarative milestone
-   ([#582](https://github.com/srelens/srelens/issues/582)) passes. After that, the 1.x
-   line only grows additively.
+   ([#582](https://github.com/srelens/srelens/issues/582)) passes. Until then the newest
+   line, API 0.6, is a preview. After that, the 1.x line only grows additively, and a line
+   is retired only after the window in [Deprecation](#deprecation).
 
 ## Compatibility rules
 
@@ -111,7 +114,7 @@ accepted and still means the same thing. Anything else is **breaking**.
 |---|---|
 | New optional manifest field or new contribution type | Additive. Needs a new API minor; manifests that use it must require that minor. |
 | New host capability allowed as a binding target | Additive. Needs a new API minor. |
-| New host behaviour for existing manifests, with no manifest change (for example host-rendered resource inspection) | Additive. No API bump, but it must be recorded in the changelog and must not reject or reinterpret any accepted manifest. |
+| New host behaviour for existing manifests, with no manifest change (for example host-rendered resource inspection) | Additive. No API bump, but it must be recorded in the [API changelog](#api-changelog) and must not reject or reinterpret any accepted manifest. |
 | New optional field in a capability's output | Additive. |
 | Removing or renaming a field, making an optional field required, or narrowing accepted values | Breaking. |
 | Changing what an existing field means | Breaking. |
@@ -182,14 +185,15 @@ instead of offering them.
 
 ## Deprecation
 
-- A deprecated field or contribution is listed in the changelog with its replacement
+- A deprecated field or contribution is listed in the [API changelog](#api-changelog) with its replacement
   and the earliest API version that may remove it.
 - It keeps working unchanged in every API version that supports it. Once structured
   validation errors exist ([#533](https://github.com/srelens/srelens/issues/533)),
   using it produces a warning.
-- It is removed only in a new API line, and only after the retirement window in
-  [Versioning](#versioning): at least two srelens minor releases, and never before its
-  replacement has shipped.
+- It is removed only in a new API line, and never before its replacement has shipped.
+  From API 1.0, it is also removed only after a retirement window of at least two
+  srelens minor releases. Before 1.0 there is no such window: a line can be retired
+  sooner, as API 0.1 and API 0.2 were ([Versioning](#versioning)).
 
 Deprecated or planned:
 
@@ -308,7 +312,9 @@ list, and the [developer harness](testing.md#developer-harness) prints one per l
 
 ### 0.6.0
 
-New in this line ([#574](https://github.com/srelens/srelens/issues/574)):
+New in this line ([#574](https://github.com/srelens/srelens/issues/574)). API 0.6 is a
+preview until API 1.0, and so are executable apps
+([where they run](manifest.md#where-executable-apps-run)):
 
 - **Executable apps.** `kind` may be `executable`, for an app that also runs a
   **sidecar**: `sidecar.binaries` names the binary for each platform it ships for, a file

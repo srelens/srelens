@@ -13,7 +13,7 @@ use tauri::ipc::Channel;
 use tauri::{Runtime, State, Window};
 
 use crate::sink::ChannelSink;
-use crate::window_streams::WindowStreams;
+use crate::window_streams::{Stream, WindowStreams};
 
 /// Start watching a watchable resource kind in a namespace, emitting each full
 /// sorted snapshot on the caller-provided `channel`. The WebView subscribes to
@@ -51,7 +51,10 @@ pub async fn start_resource_watch<R: Runtime>(
                 .collect(),
         )
         .await?;
-    owned.keep_watch(&manager, window.label(), epoch, channel)
+    owned.keep(window.label(), epoch, Stream::Watch(channel.clone()), || {
+        manager.stop(&channel)
+    })?;
+    Ok(channel)
 }
 
 /// Stop a running watch by its channel. Only the window that started it may
@@ -63,9 +66,10 @@ pub async fn stop_watch<R: Runtime>(
     manager: State<'_, WatchManager>,
     owned: State<'_, WindowStreams>,
 ) -> Result<(), String> {
-    if owned.check_watch(window.label(), &channel)? {
+    let stream = Stream::Watch(channel.clone());
+    if owned.check(window.label(), &stream)? {
         manager.stop(&channel);
-        owned.disown_watch(window.label(), &channel);
+        owned.disown(window.label(), &stream);
     }
     Ok(())
 }

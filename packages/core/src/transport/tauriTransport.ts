@@ -21,13 +21,26 @@ export async function invokeCapability<T>(id: string, input: unknown = null): Pr
 }
 
 /**
- * The commands that open a stream the calling window owns (#700). The host
- * ends a window's streams when it closes; a reload keeps the window and loses
- * the page, so the new page asks the host to end what the old one held — and
- * none of these may run before that, or the reset would end the new page's
- * stream as well.
+ * The commands that open a stream on a channel of the page's own (#733): each
+ * is passed `onEvent`, and the host sends the stream's frames on it.
  */
-const OPENS_A_STREAM = new Set(["start_resource_watch", "start_pod_exec", "extension_stream_open"]);
+const STREAMS_ON_A_CHANNEL = new Set(["start_resource_watch", "start_pod_exec", "extension_stream_open"]);
+
+/**
+ * The commands that open something the calling window owns (#700, #735). The
+ * host ends a window's streams when it closes; a reload keeps the window and
+ * loses the page, so the new page asks the host to end what the old one held —
+ * and none of these may run before that, or the reset would end the new page's
+ * stream as well. Log streams, port-forwards, terminals and helm operations
+ * broadcast their output on events instead, so they wait without a channel.
+ */
+const OPENS_A_STREAM = new Set([
+  ...STREAMS_ON_A_CHANNEL,
+  "start_log_stream",
+  "start_port_forward",
+  "start_terminal",
+  "start_helm_op",
+]);
 
 let windowReset: Promise<void> | null = null;
 
@@ -103,7 +116,9 @@ export async function invokeCommand<T>(command: string, args?: Record<string, un
         `Not opened: srelens could not end this window's streams from before the reload (${reason}). Try again.`,
       );
     }
-    return invoke<T>(command, { ...args, onEvent: new Channel<StreamFrame>(deliver) });
+    if (STREAMS_ON_A_CHANNEL.has(command)) {
+      return invoke<T>(command, { ...args, onEvent: new Channel<StreamFrame>(deliver) });
+    }
   }
   return invoke<T>(command, args);
 }

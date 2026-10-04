@@ -5,6 +5,7 @@ const startPodExec = vi.fn();
 const startLocalTerminal = vi.fn();
 const deletePod = vi.fn();
 const notifyError = vi.fn();
+const isTauri = vi.fn(() => false);
 
 vi.mock("@srelens/core", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@srelens/core")>();
@@ -13,6 +14,7 @@ vi.mock("@srelens/core", async (importOriginal) => {
     startPodExec: (...args: unknown[]) => startPodExec(...args),
     startLocalTerminal: (...args: unknown[]) => startLocalTerminal(...args),
     deletePod: (...args: unknown[]) => deletePod(...args),
+    isTauri: () => isTauri(),
     notify: { ...actual.notify, error: notifyError },
   };
 });
@@ -114,6 +116,8 @@ beforeEach(() => {
   deletePod.mockReset();
   deletePod.mockResolvedValue({ deleted: true });
   notifyError.mockReset();
+  // The web, unless a case says otherwise: there the store deletes the pod.
+  isTauri.mockReset().mockReturnValue(false);
   __resetSessionsForTests();
 });
 
@@ -309,6 +313,36 @@ describe("the session store", () => {
     expect(getSessions()).toEqual([]);
   });
 
+  it("closes the far end of a shell that died while it was still opening", async () => {
+    // #358: an exec that dies faster than its start resolves (the pod went
+    // during the connect, RBAC refused it, the container has no shell) fires
+    // its exit BEFORE the handle arrives. The handle that lands afterwards
+    // must be closed, not parked on a row that already reads as closed: the
+    // only path left that would close it is the reader ending a session that
+    // has already told them it is over.
+    const handle = { send: vi.fn(), resize: vi.fn(), close: vi.fn() };
+    startPodExec.mockImplementation(
+      async (
+        _context: string,
+        _namespace: string,
+        _pod: string,
+        _data: (c: string) => void,
+        exit: (e: string | null) => void,
+      ) => {
+        exit('exec: "sh": executable file not found in $PATH');
+        return handle;
+      },
+    );
+
+    const id = await startPodSession(pod);
+
+    expect(getSessions().find((s) => s.id === id)?.state).toBe("closed");
+    expect(handle.close).toHaveBeenCalledTimes(1);
+    // Nor is the emulator wired to it: what the reader types goes nowhere.
+    terminalFor(id)?.input("ls\r");
+    expect(handle.send).not.toHaveBeenCalled();
+  });
+
   it("removes a session the reader ended, and disposes its emulator", async () => {
     const backend = fakeBackend();
     const id = await startPodSession(pod);
@@ -377,6 +411,26 @@ describe("the session store", () => {
 });
 
 describe("a node session's debug pod", () => {
+  // #734: on desktop the host deletes the debug pod itself, however the shell
+  // ends — and when its window closes or reloads, which this store never hears
+  // of. A delete from here as well would race the host's, and report the pod
+  // it had already deleted as a failure.
+  it("leaves the debug pod to the desktop host, however the session ends", async () => {
+    isTauri.mockReturnValue(true);
+    const backend = fakeBackend();
+    const exited = await startPodSession(nodeDebugPod);
+    backend.exit(null);
+    const dismissed = await startPodSession(nodeDebugPod);
+
+    endSession(dismissed);
+    endSession(exited);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(deletePod).not.toHaveBeenCalled();
+    expect(getSessions()).toEqual([]);
+  });
+
   it("deletes the debug pod when the session ends", async () => {
     fakeBackend();
     const id = await startPodSession(nodeDebugPod);

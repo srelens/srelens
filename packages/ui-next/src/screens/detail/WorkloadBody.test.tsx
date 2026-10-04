@@ -544,12 +544,13 @@ describe("WorkloadDetailsBody", () => {
     });
 
     it("keeps that same pod condemned in the table between its restarts", async () => {
-      // Same pod, one moment later: the container is up, so there is no
-      // waiting reason to print, and the table used to fall back to a green
-      // "Running" — in a table the reader opened BECAUSE the Deployment above
-      // it was degraded, which is the worst place to lose the fact.
+      // Same pod, one moment later: the container has exited and is not yet
+      // backed off, so there is no waiting reason to print. kubectl's word is
+      // the container's `Error`, which the backend sends as `status`, and it
+      // keeps the pod red in a table the reader opened BECAUSE the Deployment
+      // above it was degraded.
       podsForSelector.mockResolvedValue({
-        pods: [{ ...POD_A, ready: "0/1", restarts: 7, waitingReason: "" }],
+        pods: [{ ...POD_A, ready: "0/1", restarts: 7, waitingReason: "", status: "Error" }],
       });
       render(
         <WorkloadDetailsBody
@@ -557,7 +558,7 @@ describe("WorkloadDetailsBody", () => {
           context="ctx"
         />,
       );
-      await waitFor(() => expect(screen.getByText("NotReady")).toBeDefined());
+      await waitFor(() => expect(screen.getByText("Error")).toBeDefined());
       expect(screen.queryByText("Running")).toBeNull();
     });
 

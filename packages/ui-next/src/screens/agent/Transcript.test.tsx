@@ -222,6 +222,26 @@ describe("a run's transcript", () => {
       expect(screen.getByText("destructive")).toBeTruthy();
     });
 
+    it("leads with the host's own sentence and names the impact, as the reader was asked them (#388)", () => {
+      render(
+        <Transcript
+          turns={[turn()]}
+          gates={[{
+            id: "g", tool: "k8s.rolloutRestart", args: {}, outcome: "approved", at: 1,
+            prompt: "Roll every pod of Deployment shop/checkout-api in cluster prod-eu?",
+            impact: "medium",
+          }]}
+        />,
+      );
+      expect(screen.getByText("Roll every pod of Deployment shop/checkout-api in cluster prod-eu?")).toBeTruthy();
+      expect(screen.getByText("Medium impact")).toBeTruthy();
+    });
+
+    it("draws no sentence and no level for a gate recorded without them", () => {
+      render(<Transcript turns={[turn()]} gates={[{ id: "g", tool: "k8s.scale", args: {}, outcome: "pending" }]} />);
+      expect(screen.queryByText(/impact$/i)).toBeNull();
+    });
+
     it("does not mark one that is not", () => {
       render(
         <Transcript turns={[turn()]} gates={[{ id: "g", tool: "k8s.scale", args: {}, outcome: "pending" }]} />,
@@ -237,8 +257,9 @@ describe("a run's transcript", () => {
       // here: `AgentConsent` is the only thing that answers, and a second set
       // rebuilds exactly the stale-prompt bug that decision 1 removed.
       expect(screen.queryByRole("button", { name: /review and run|deny|ask first/i })).toBeNull();
-      // And no effect paragraph: `ConfirmRequest` is `{ id, tool, args }`
-      // (#388), so any sentence about what the call would do is invented.
+      // And no invented consequence: the card draws only the host's own
+      // sentence when it has one (#388), never a claim about recovery time or
+      // reversibility that srelens does not know.
       expect(screen.queryByText(/restores|recreates|expected full recovery/i)).toBeNull();
     });
   });

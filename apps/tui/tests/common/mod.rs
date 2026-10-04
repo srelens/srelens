@@ -12,6 +12,7 @@ pub mod theme;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::backend::TestBackend;
+use ratatui::buffer::Buffer;
 use ratatui::{Frame, Terminal};
 use srelens_tui::app::App;
 use srelens_tui::event::AppEvent;
@@ -88,10 +89,24 @@ pub fn render_lines<F>(width: u16, height: u16, draw: F) -> Vec<String>
 where
     F: FnOnce(&mut Frame),
 {
+    buffer_lines(&render_buffer(width, height, draw))
+}
+
+/// Render one frame at the given size and return the raw buffer, for a test
+/// that asserts on a cell's style (the colour a status was drawn in) as well
+/// as its text.
+pub fn render_buffer<F>(width: u16, height: u16, draw: F) -> Buffer
+where
+    F: FnOnce(&mut Frame),
+{
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).expect("test terminal");
     terminal.draw(draw).expect("draw");
-    let buffer = terminal.backend().buffer();
+    terminal.backend().buffer().clone()
+}
+
+/// A buffer as text, one `String` per row, trailing spaces trimmed.
+pub fn buffer_lines(buffer: &Buffer) -> Vec<String> {
     (0..buffer.area.height)
         .map(|y| {
             let mut line = String::new();
@@ -114,6 +129,11 @@ where
 /// Render the whole app at the given size and return the screen text.
 pub fn render_app(app: &mut App, width: u16, height: u16) -> String {
     render_text(width, height, |f| app.render(f))
+}
+
+/// Render the whole app at the given size and return the raw buffer.
+pub fn render_app_buffer(app: &mut App, width: u16, height: u16) -> Buffer {
+    render_buffer(width, height, |f| app.render(f))
 }
 
 /// Drain every event the app has emitted so far.

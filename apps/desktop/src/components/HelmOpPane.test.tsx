@@ -44,4 +44,47 @@ describe("HelmOpPane", () => {
 
     expect(close).toHaveBeenCalled();
   });
+
+  // #734 review: closing a handle once helm has exited is how a page tells the
+  // desktop host it showed the outcome, so the host does not report it again
+  // when the window goes. It kills nothing: the process is already gone.
+  it("closes its handle once helm has exited, while still on screen", async () => {
+    const close = vi.fn();
+    let exit!: (err: string | null) => void;
+    (startHelmOp as unknown as Mock).mockImplementationOnce(
+      async (_ctx: string, _args: string[], _onData: unknown, onExit: (err: string | null) => void) => {
+        exit = onExit;
+        return { close };
+      },
+    );
+    render(
+      <HelmOpPane
+        session={{ id: 3, kind: "helm", context: "ctx", namespace: "apps", helm: { args: ["upgrade", "web", "c"], title: "t" } }}
+      />,
+    );
+    await waitFor(() => expect(exit).toBeDefined());
+    await Promise.resolve();
+    expect(close).not.toHaveBeenCalled();
+
+    exit("helm exited with code 1");
+
+    await waitFor(() => expect(close).toHaveBeenCalledTimes(1));
+  });
+
+  it("closes a handle that arrives after helm has already exited", async () => {
+    const close = vi.fn();
+    (startHelmOp as unknown as Mock).mockImplementationOnce(
+      async (_ctx: string, _args: string[], _onData: unknown, onExit: (err: string | null) => void) => {
+        onExit(null);
+        return { close };
+      },
+    );
+    render(
+      <HelmOpPane
+        session={{ id: 4, kind: "helm", context: "ctx", namespace: "apps", helm: { args: ["upgrade", "web", "c"], title: "t" } }}
+      />,
+    );
+
+    await waitFor(() => expect(close).toHaveBeenCalledTimes(1));
+  });
 });

@@ -2,9 +2,10 @@ import { useEffect } from "react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import fluxManifest from "../../../../examples/extensions/flux.json";
 import { takeExtensionAction } from "../extensions/actionRequests";
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Console } from "./Console";
+import { invalidateAgentInventory } from "../lib/agentInventory";
 import { ConsoleProvider, useConsole } from "../console";
 import { pinContextKey, resetContexts, setContexts } from "../lib/clusters";
 import { defaultState } from "../lib/tabs";
@@ -1561,6 +1562,135 @@ describe("Console — header details", () => {
       setup();
       await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
       expect(screen.queryByRole("button", { name: /codex/i })).toBeNull();
+    });
+  });
+
+  /**
+   * #396. The picker read `listAgents` once, at mount, and the dock stays
+   * mounted across every tab — so a key configured in Settings › Agent & MCP
+   * never reached it. The native agent stayed missing from a dock that was
+   * already open, and one whose key was cleared stayed offered.
+   */
+  describe("when the agent inventory changes after the dock mounted (#396)", () => {
+    const CLAUDE = { kind: "claude", label: "Claude Code", available: true, gated: false, path: "/c", version: "1", installUrl: "" };
+    const NATIVE_KEYED = { kind: "srelens", label: "srelens", available: true, gated: false, path: null, version: null, installUrl: "" };
+    const NATIVE_UNKEYED = { ...NATIVE_KEYED, available: false };
+
+    it("offers the native agent once its key is configured", async () => {
+      const user = userEvent.setup();
+      listAgents.mockResolvedValue([CLAUDE, NATIVE_UNKEYED]);
+      setup();
+      await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
+      await user.click(await screen.findByRole("button", { name: /claude code/i }));
+      expect(screen.queryByRole("option", { name: /srelens/i })).toBeNull();
+      await user.keyboard("{Escape}");
+
+      listAgents.mockResolvedValue([CLAUDE, NATIVE_KEYED]);
+      act(() => invalidateAgentInventory());
+
+      await user.click(await screen.findByRole("button", { name: /claude code/i }));
+      expect(await screen.findByRole("option", { name: /srelens/i })).toBeTruthy();
+    });
+
+    it("stops offering the native agent once its key is cleared", async () => {
+      const user = userEvent.setup();
+      useRun.mockReturnValue({ ...runState(), agentKind: "srelens" });
+      listAgents.mockResolvedValue([NATIVE_KEYED]);
+      setup();
+      await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
+      expect(await screen.findByRole("button", { name: /srelens/i })).toBeTruthy();
+
+      listAgents.mockResolvedValue([NATIVE_UNKEYED]);
+      act(() => invalidateAgentInventory());
+
+      await waitFor(() => expect(screen.queryByRole("button", { name: /srelens/i })).toBeNull());
+    });
+
+    it("keeps the list it has while the re-read is in flight, rather than flickering the picker away", async () => {
+      const user = userEvent.setup();
+      setup();
+      await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
+      expect(await screen.findByRole("button", { name: /claude code/i })).toBeTruthy();
+
+      const readsBefore = listAgents.mock.calls.length;
+      listAgents.mockReturnValue(new Promise(() => {}));
+      act(() => invalidateAgentInventory());
+
+      // The re-read must actually have started — otherwise a dock that ignored
+      // the invalidation entirely would keep its picker and pass this test.
+      await waitFor(() => expect(listAgents).toHaveBeenCalledTimes(readsBefore + 1));
+      expect(screen.getByRole("button", { name: /claude code/i })).toBeTruthy();
+    });
+
+    it("points the picker at the agent the next question will go to, once the chosen one is no longer offered", async () => {
+      // `askAgent` falls back to the first agent offered when the chosen one
+      // is not, so a picker left on "Agent" with nothing selected hid where a
+      // question would actually go (PR #792 review).
+      const user = userEvent.setup();
+      useRun.mockReturnValue({ ...runState(), agentKind: "srelens" });
+      listAgents.mockResolvedValue([CLAUDE, NATIVE_KEYED]);
+      setup();
+      await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
+      expect(await screen.findByRole("button", { name: /^srelens/i })).toBeTruthy();
+
+      listAgents.mockResolvedValue([CLAUDE, NATIVE_UNKEYED]);
+      act(() => invalidateAgentInventory());
+
+      expect(await screen.findByRole("button", { name: /claude code/i })).toBeTruthy();
+    });
+
+    it("says the agent list could not be read, rather than looking like nothing is installed, and reads it again on Retry", async () => {
+      const user = userEvent.setup();
+      listAgents.mockRejectedValue(new Error("agent_list failed: PATH unreadable"));
+      setup();
+      await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
+      expect(await screen.findByText(/agents could not be listed/i)).toBeTruthy();
+      expect(screen.getByText(/PATH unreadable/)).toBeTruthy();
+
+      listAgents.mockResolvedValue([CLAUDE]);
+      await user.click(screen.getByRole("button", { name: "Retry" }));
+
+      expect(await screen.findByRole("button", { name: /claude code/i })).toBeTruthy();
+      expect(screen.queryByText(/agents could not be listed/i)).toBeNull();
+    });
+
+    it("describes a timed-out agent list as a local failure, not the cluster's (PR #792 review)", async () => {
+      const user = userEvent.setup();
+      listAgents.mockRejectedValue(new Error("agent_list timed out"));
+      setup();
+      await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
+
+      expect(await screen.findByText(/local operation didn't finish in time/i)).toBeTruthy();
+      expect(screen.queryByText(/Kubernetes API server/i)).toBeNull();
+    });
+
+    it("says a retry is under way, and offers no second Retry while it reads (PR #792 review)", async () => {
+      const user = userEvent.setup();
+      listAgents.mockRejectedValue(new Error("agent_list failed"));
+      setup();
+      await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
+      await user.click(await screen.findByRole("button", { name: "Retry" }));
+
+      listAgents.mockReturnValue(new Promise(() => {}));
+      // The click above started the read with the rejecting mock; hold the
+      // NEXT one open and retry again, as a reader would on a slow machine.
+      expect(await screen.findByText(/agents could not be listed/i)).toBeTruthy();
+      await user.click(screen.getByRole("button", { name: "Retry" }));
+
+      expect(await screen.findByText(/listing agents again/i)).toBeTruthy();
+      expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+    });
+
+    it("drops the list when the re-read fails, rather than offering what it can no longer vouch for", async () => {
+      const user = userEvent.setup();
+      setup();
+      await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
+      expect(await screen.findByRole("button", { name: /claude code/i })).toBeTruthy();
+
+      listAgents.mockRejectedValue(new Error("agent_list failed"));
+      act(() => invalidateAgentInventory());
+
+      await waitFor(() => expect(screen.queryByRole("button", { name: /claude code/i })).toBeNull());
     });
   });
 });

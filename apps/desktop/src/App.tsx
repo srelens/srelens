@@ -82,6 +82,7 @@ import { startMcpHttp } from "@srelens/core";
 import { checkForUpdateAndNotify } from "@srelens/core";
 import { currentWindowLabel } from "@srelens/core";
 import { notify } from "@srelens/core";
+import { listenForHostNotices } from "@srelens/core";
 import { describeError } from "@srelens/core";
 import { isTauri, isWeb } from "@srelens/core/platform";
 import type { SettingsSection } from "./components/SettingsView";
@@ -483,6 +484,13 @@ export function App() {
     return () => {
       void unlistenPromise.then((unlisten) => unlisten());
     };
+  }, []);
+
+  // A helm operation outlives the window that started it, and the host
+  // reports how it ended to every window as a toast (#735).
+  useEffect(() => {
+    if (!("__TAURI_INTERNALS__" in window)) return;
+    return listenForHostNotices();
   }, []);
 
   // The master-password gate (issue #208) mounts as a blocking overlay via
@@ -1061,8 +1069,13 @@ export function App() {
     setDockSessions((t) => [...t, { id, kind, ...s }]);
     setActiveDock(id);
   }
-  /** Tear down any pod tied to a closing dock session (e.g. node debug shell). */
+  /**
+   * Tear down any pod tied to a closing dock session (e.g. node debug shell).
+   * On desktop the host deletes a node shell's debug pod itself, however the
+   * shell ends (#734), so only the web page still does it.
+   */
   function teardownDock(sessions: DockSession[]) {
+    if (isTauri()) return;
     for (const s of sessions) {
       if (s.deleteOnClose) {
         void deletePod(s.deleteOnClose.context, s.deleteOnClose.namespace, s.deleteOnClose.pod);

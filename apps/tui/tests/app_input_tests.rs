@@ -4820,14 +4820,16 @@ async fn the_workloads_view_watches_every_constituent_kind_and_rebuilds_from_the
         "watch:test-cluster:default:deployments".into(),
         json!([{ "name": "web", "namespace": "default", "ready": "1/2", "age": "5m" }]),
     );
+    // A pod row as the backend sends it: `status` is kubectl's word for a
+    // container that has exited and is not yet backed off.
     app.handle_stream_event(
         "watch:test-cluster:default:pods".into(),
-        json!([{ "name": "web-1", "namespace": "default", "phase": "Running", "ready": "0/1", "restarts": 3 }]),
+        json!([{ "name": "web-1", "namespace": "default", "phase": "Running", "ready": "0/1", "restarts": 3, "waitingReason": "", "status": "Error" }]),
     );
     assert!(!table(&app).is_loading);
     assert_eq!(table(&app).raw_items.len(), 2);
     assert_eq!(table(&app).raw_items[0]["status"], "Degraded");
-    assert_eq!(table(&app).raw_items[1]["status"], "NotReady");
+    assert_eq!(table(&app).raw_items[1]["status"], "Error");
 
     app.restart_active_watch().await;
     assert_eq!(

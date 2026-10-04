@@ -1088,10 +1088,11 @@ describe("ResourceDetailView", () => {
 
   describe("the Secret YAML pane's redaction", () => {
     // The Details pane gates a Secret's values behind an explicit reveal.
-    // The YAML pane sits one tab over and, left alone, hands the very same
-    // values over with no gate at all — `k8s.getManifest` does not redact
-    // (only `k8s.getObject` does). This is a deliberate divergence from
-    // classic, which shows the manifest unredacted.
+    // The YAML pane sits one tab over and, left alone, would hand the very
+    // same values over with no gate at all whenever `k8s.getManifest` carries
+    // them — the host blanks them now (#661), and the pane redacts again on
+    // arrival rather than trust that alone. Classic's drawer YAML view does
+    // the same (#659).
     it("keeps a Secret's values out of the document entirely", async () => {
       getObject.mockResolvedValue({ object: SECRET });
       getManifest.mockResolvedValue({

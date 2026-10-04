@@ -9,8 +9,11 @@ import {
   setSkillActive,
   useAgentRun,
   useRunSummaries,
+  type RunSummary,
 } from "../../lib/agentRun";
 import { LOADING, type Read } from "../../lib/read";
+import { formatAnswering } from "../../lib/runFigures";
+import { useSkillUses } from "../../lib/skillUses";
 
 /** §5's rail width, and this screen's alone — see `SideRail`'s note on why the
  *  width is a number per screen rather than a scale. */
@@ -18,19 +21,20 @@ export const AGENT_RAIL_WIDTH = 312;
 
 /**
  * `/agent`'s right rail (§5): what else there is to look at beside this run —
- * with two of the mock's three sections drawn honestly short of what it
- * shows, rather than faked.
+ * each section drawn only as far as srelens actually knows it.
  *
- * **`Recent runs` draws a title and when it was last touched, and nothing
- * else.** §5 draws `<cluster> · <started> · <n> calls` and a duration
- * alongside each one; `listSessions` answers `SessionMeta { id, title,
- * createdAt, updatedAt }` — no cluster, no call count, no duration (#386).
- * Rendering a placeholder or a fabricated `0 calls` in their place would tell
- * the reader srelens counted something it never did.
+ * **`Recent runs` draws the question, the subject, and the run's own figures
+ * — calls made and time spent answering (#386) — when it knows them.** A live
+ * run counts them from its turns (`lib/runFigures.ts`); a saved one reads them
+ * from the session index, where `persistRun` writes them. A conversation saved
+ * before they were kept, or by classic, says `saved` and nothing more:
+ * rendering a placeholder or a fabricated `0 calls` would tell the reader
+ * srelens counted something it never did.
  *
- * **`Skills` draws a name and a description, and a switch for THIS run — no
- * usage count.** §5's `used <n>×` has no counter behind it anywhere in
- * srelens (#387). The switch reads and writes `lib/agentRun.ts`'s
+ * **`Skills` draws a name, a description, how often it has been used, and a
+ * switch for THIS run.** A use is a question actually sent with the skill
+ * active (`lib/skillUses.ts`, #387); a skill never used draws no count rather
+ * than `used 0×`. The switch reads and writes `lib/agentRun.ts`'s
  * `activeSkills` through `setSkillActive` — the SAME set the composer's own
  * `/` menu writes to — so flipping a skill on here and picking the same
  * skill from the composer are two doors onto one fact, never two copies of
@@ -60,6 +64,23 @@ function clockStamp(at: number, now: number): string {
     minute: "2-digit",
     ...(sameDay ? {} : { month: "short", day: "numeric" }),
   });
+}
+
+/**
+ * A row's second line: what it is about, where it stands, and its figures —
+ * each only when known (#386). A saved row with no figures says `saved`, as it
+ * always did; one with them lets them speak instead.
+ */
+function rowFacts(r: RunSummary, now: number): string {
+  const facts: string[] = [];
+  if (r.subject !== undefined) facts.push(r.subject);
+  if (r.busy) facts.push("answering…");
+  else if (r.savedId === undefined) facts.push(`${r.turns} question${r.turns === 1 ? "" : "s"}`);
+  else if (!r.calls && r.answeringMs == null) facts.push("saved");
+  if (r.calls) facts.push(`${r.calls} call${r.calls === 1 ? "" : "s"}`);
+  if (r.answeringMs != null) facts.push(formatAnswering(r.answeringMs));
+  facts.push(clockStamp(r.at, now), relativeTime(r.at, now));
+  return facts.join(" · ");
 }
 
 export function RunsRail() {
@@ -94,6 +115,9 @@ export function RunsRail() {
   // never copied into local state, so the two controls cannot disagree about
   // which skills are active for this run.
   const { activeSkills } = useAgentRun();
+  // Questions actually sent with each skill active (#387). A skill never used
+  // draws nothing rather than "used 0×".
+  const uses = useSkillUses();
 
   useEffect(() => {
     listSkills()
@@ -106,20 +130,17 @@ export function RunsRail() {
   return (
     <>
       {/*
-        This lists the conversations THIS window is holding, and every entry
-        opens. It used to list `listSessions()` — the sessions CLASSIC wrote to
-        disk — which was wrong three ways at once, all three reported from use:
-        the entries were 14 to 22 days old and from a different UI; nothing in
-        the new design persists, so a reader's actual conversations were never
-        in it (#395); and the rows were plain `<div>`s with no handler, so
-        clicking one did nothing.
+        This lists the conversations THIS window is holding, then the ones on
+        disk it has not opened yet — the new design's own (every turn is
+        written as it happens, and New question keeps the conversation it
+        leaves, #395) and classic's. Every entry opens: a live one by
+        switching to it, a saved one by `openSavedRun` hydrating its
+        transcript.
 
-        A list you cannot open, of conversations you did not have, under a
-        heading that says they are recent, is worse than no list.
-
-        Classic's saved sessions are a real thing and worth offering — but
-        offering them means `loadSession` hydrating a transcript, which is
-        #395's work. Until then they are not shown rather than shown and inert.
+        It once listed `listSessions()` alone as plain `<div>`s that did
+        nothing on click, which was reported from use. A list you cannot open,
+        of conversations you did not have, under a heading that says they are
+        recent, is worse than no list.
       */}
       <Section title="Recent runs" smallCaps padded={false}>
         {historyError !== null && (
@@ -176,15 +197,7 @@ export function RunsRail() {
                     always say what it was about. Both rows read the same way
                     whether the conversation is live or on disk. */}
                 <span className="min-w-0 truncate text-sm">{r.label}</span>
-                <span className="min-w-0 truncate text-xs text-muted">
-                  {r.subject !== undefined && `${r.subject} · `}
-                  {r.busy
-                    ? "answering…"
-                    : r.savedId !== undefined
-                      ? "saved"
-                      : `${r.turns} question${r.turns === 1 ? "" : "s"}`}{" "}
-                  · {clockStamp(r.at, now)} · {relativeTime(r.at, now)}
-                </span>
+                <span className="min-w-0 truncate text-xs text-muted">{rowFacts(r, now)}</span>
               </button>
             ))}
           </div>
@@ -207,6 +220,9 @@ export function RunsRail() {
                 <div className="min-w-0 flex-1">
                   <p className="min-w-0 truncate text-sm font-medium">{s.name}</p>
                   <p className="min-w-0 break-words text-xs text-muted">{s.description}</p>
+                  {(uses[s.name] ?? 0) > 0 && (
+                    <p className="min-w-0 text-xs text-faint">used {uses[s.name]}×</p>
+                  )}
                 </div>
                 <Switch
                   on={activeSkills.includes(s.name)}

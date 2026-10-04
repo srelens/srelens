@@ -207,5 +207,7 @@ docker build .                     # and the Rust half, much longer
 
 Three suites fail on Windows only and are unrelated to your change:
 `SmallPanes.test.tsx` (ShortcutsPane) and `tailwind-sources.test.ts` (two
-cases). `crates/kube/src/toolbox.rs` has a Unix-symlink test that will not
-compile there. Do not "fix" them by changing what they assert; CI runs Linux.
+cases), and in `srelens-kube`,
+`context_resolve::tests::a_pinned_id_finds_its_own_context_whatever_it_is_displayed_as`,
+whose context IDs carry a `\` path there. Do not "fix" them by changing what
+they assert; CI runs Linux.

@@ -1,5 +1,6 @@
 import { useCallback, useSyncExternalStore } from "react";
 import {
+  CAPABILITY_IMPACT_ORDER,
   cancelChat,
   describeError,
   listAgents,
@@ -11,6 +12,7 @@ import {
   sendChat,
   startChat,
   type AgentEvent,
+  type CapabilityImpact,
   type Session,
   type SessionMeta,
   type Skill,
@@ -20,6 +22,8 @@ import { runKeyFor, runLabelFor, type AskContext } from "./askContext";
 import { newId } from "./tabs";
 import { titleFromQuestion } from "./runTitle";
 import { stripDataUri } from "./pastedImages";
+import { runFigures } from "./runFigures";
+import { recordSkillUses } from "./skillUses";
 
 /**
  * The one agent run this window is holding — every turn asked and answered,
@@ -84,6 +88,14 @@ export type GateRecord = {
    * resolved.
    */
   at?: number;
+  /**
+   * The host's own sentence for the call — the question the reader actually
+   * answered (#388) — and how much it disturbs. Copied from the request when
+   * it is shown; absent when the host rendered none, and on gates saved before
+   * they were kept.
+   */
+  prompt?: string;
+  impact?: CapabilityImpact;
 };
 
 /** One turn of the conversation — the reader's question, or the agent's
@@ -119,6 +131,9 @@ export type Turn = {
    * one knows when it was last touched and not when each turn happened. The
    * clock is withheld rather than printing the same borrowed stamp under every
    * turn, which would be srelens claiming a time it was never told.
+   *
+   * Also false on an answer written to disk while it was still arriving: its
+   * `at` is when it began, not when it settled, and it never will settle.
    */
   atRecorded?: boolean;
 };
@@ -545,6 +560,11 @@ export type RunSummary = {
   /** Set when this row is a conversation on disk that is not loaded yet — the
    *  rail opens it with {@link openSavedRun} rather than {@link selectRun}. */
   savedId?: string;
+  /** Tool calls made, and time spent answering in ms (#386) — counted from the
+   *  turns for a live row, read from the index for a saved one. Absent, or
+   *  `null` for the duration, when srelens does not know. */
+  calls?: number;
+  answeringMs?: number | null;
 };
 
 export function getRunSummaries(): RunSummary[] {
@@ -571,6 +591,10 @@ export function getRunSummaries(): RunSummary[] {
     turns: s.run.turns.filter((t) => t.role === "user").length,
     busy: s.run.busy,
     savedId: undefined,
+    ...(() => {
+      const f = runFigures(s.run.turns, s.run.busy);
+      return { calls: f.calls, answeringMs: f.answeringMs };
+    })(),
   }));
   // Conversations on disk that this window has not opened yet. Listed so a
   // restart does not look like a fresh install, and marked with `savedId` so
@@ -593,6 +617,9 @@ export function getRunSummaries(): RunSummary[] {
       turns: 0,
       busy: false,
       savedId: m.id,
+      // Whatever the file kept — nothing, for classic's and older ones.
+      calls: m.calls,
+      answeringMs: m.durationMs,
     }));
   return [...live.sort((a, b) => b.order - a.order), ...onDisk.sort((a, b) => b.at - a.at)];
 }
@@ -855,11 +882,11 @@ export async function askAgent(
   // Still ONE turn at a time, and across EVERY run rather than per run — see
   // ruling AB. Per-run sessions would make the backend safe for concurrency
   // (`children` is keyed by session, so runs no longer replace each other's
-  // child), but gate attribution is what forbids it: `ConfirmRequest` carries
-  // no caller (#393), so `AgentConsent` decides ownership from "exactly one
-  // run has a turn in flight". Two busy runs and that has nothing to choose
-  // between them, and a gate drawn against the wrong conversation is the
-  // defect the whole gate design exists to prevent.
+  // child), and gate attribution no longer forbids it either: a confirm names
+  // the chat that raised it (#393), so two busy runs would each get their own
+  // gates. One turn at a time is now a product rule, kept until concurrent
+  // runs have a design of their own — two agents answering at once is a
+  // different screen to read, with two Stops.
   //
   // Said out loud rather than swallowed, and said in the run the reader is
   // ASKING from, which is the one they are looking at.
@@ -1046,11 +1073,25 @@ export async function askAgent(
     // Last thing before the question actually leaves. Every await above is a
     // window in which the reader can abandon this turn.
     if (abandoned(state, myGeneration)) return true;
+    // Counted once the question has visibly reached the agent: its first event,
+    // or `sendChat` returning. A refusal or an abandoned send never got here
+    // (#387), and neither counts a send that failed before it left —
+    // `sendChat` listens for the turn's events before it invokes `chat_send`,
+    // and a refused subscription sends nothing (PR #803 review).
+    let counted = skills.length === 0;
+    const countUse = () => {
+      if (counted) return;
+      counted = true;
+      recordSkillUses(skills);
+    };
     const result = await sendChat(
       started,
       `${preface}${guidance}${question}`,
       agentPath,
-      onEvent,
+      (e) => {
+        countUse();
+        onEvent(e);
+      },
       // Raw base64, not the data URIs the turn records: `chat_send` passes
       // these to `decode_base64_image`, which is `STANDARD.decode` and fails on
       // a `data:` prefix. Stripped here, at the send, so every caller can hold
@@ -1060,6 +1101,7 @@ export async function askAgent(
       myGeneration,
       state.resume,
     );
+    countUse();
     // A later question already moved this conversation on; this answer no
     // longer says anything about where its resume token stands.
     if (state.run.generation === myGeneration) state.resume = result;
@@ -1181,11 +1223,12 @@ export function stopAgentRun(): void {
 }
 
 /** Start a fresh conversation: the reader is done with this one, not just
- *  looking away from it. Drops every turn, and the CLI session and resume
- *  token with them, so the next question opens a new session rather than
- *  quietly resuming the one just cleared. A turn still in flight is asked to
- *  stop, best-effort — its own answer, if one still lands, is stale and the
- *  generation check in `askAgent` drops it.
+ *  looking away from it. Drops every turn from the run, and the CLI session
+ *  and resume token with them, so the next question opens a new session rather
+ *  than quietly resuming the one just cleared. The conversation itself is KEPT
+ *  — on disk, and in the rail as a saved row (#395); only `forgetRun` deletes.
+ *  A turn still in flight is asked to stop, best-effort — its own answer, if
+ *  one still lands, is stale and the generation check in `askAgent` drops it.
  *
  *  Drops `gates` too. A gate is a row in THIS conversation's transcript, not
  *  a fact independent of it — `Transcript` renders whatever is in `gates`
@@ -1205,6 +1248,12 @@ export function clearAgentRun(target?: string | null): void {
   if (key === null) return;
   const state = runs.get(key);
   if (!state) return;
+  // What is on screen goes into the kept file first (PR #803 review). A turn
+  // still streaming has only its question written, and the generation bump
+  // below fails the guard on its end-of-turn save, so the conversation would
+  // reopen without the answer the reader was reading. Before `resume` is
+  // dropped, too: the kept file must still resume its CLI conversation.
+  persistRun(key);
   // Cancel with the generation the in-flight turn was SENT with, before the
   // bump below moves it — the backend matches a Stop against that.
   if (state.run.busy && state.session) {
@@ -1223,8 +1272,35 @@ export function clearAgentRun(target?: string | null): void {
   // Also recorded as a stop, for the window where the discarded turn has no
   // session yet and so was never handed to `cancelChat` at all.
   if (state.run.busy) state.stoppedGeneration = state.run.generation;
+  // The conversation is over, but not gone (#395). Its file stays — already up
+  // to date, since `persistRun` writes at every turn boundary, and any write
+  // still on the chain lands — and the rail lists it as a saved row the reader
+  // can reopen. Only the rail's own close (`forgetRun`) deletes. "New question"
+  // used to delete it, which made the one button for starting over also the
+  // one that lost the conversation.
+  //
+  // A fresh id, so the next question here writes a new file rather than
+  // overwriting the one kept — rotated BEFORE the kept one joins `saved`,
+  // because `getRunSummaries` hides a saved row while a live run holds its id.
+  const dead = state.id;
+  const before = state.run.turns;
+  state.id = newRunId();
+  const firstQuestion = before.find((t) => t.role === "user");
+  if (firstQuestion) {
+    const f = runFigures(before, state.run.busy);
+    const kept: SessionMeta = {
+      id: dead,
+      title: titleFromQuestion(firstQuestion.text) || firstQuestion.text.slice(0, 120),
+      createdAt: before[0]?.at ?? state.at,
+      updatedAt: state.at,
+      calls: f.calls,
+      ...(f.answeringMs !== null ? { durationMs: f.answeringMs } : {}),
+    };
+    saved = [kept, ...saved.filter((m) => m.id !== dead)];
+  }
   // A no-op — clearing a run that is already idle and empty — is left to
-  // `commitTo`'s own guard rather than special-cased here.
+  // `commitTo`'s own guard rather than special-cased here. Its emit also
+  // carries the row just added to `saved`.
   commitTo(key, {
     ...state.run,
     turns: [],
@@ -1233,23 +1309,6 @@ export function clearAgentRun(target?: string | null): void {
     error: undefined,
     generation: state.run.busy ? state.run.generation + 1 : state.run.generation,
   });
-  // The conversation is over, so its file goes with it — AFTER whatever write
-  // is still in flight. Classic's own comment on this: a save still flushing
-  // when the delete lands recreates the file and its index entry, and the
-  // reader's "New question" quietly un-deletes what they just cleared.
-  //
-  // A fresh id, so the next question in this run writes a new file rather than
-  // reusing the one just removed.
-  const dead = state.id;
-  // Off the not-yet-loaded list BEFORE the id rotates. `getRunSummaries` hides
-  // a persisted file only while its id belongs to a live run, so rotating the
-  // live id while `saved` still held the old one made the conversation the
-  // reader just cleared reappear immediately as a saved row — openable until
-  // the delete landed, and a load error afterwards.
-  saved = saved.filter((m) => m.id !== dead);
-  deleted.add(dead);
-  state.saving = state.saving.then(() => deleteSession(dead)).catch(() => {});
-  state.id = newRunId();
 }
 
 /**
@@ -1370,17 +1429,19 @@ export function setSkillActive(name: string, active: boolean): void {
 /** Record one MCP confirm request's outcome — merged by id, so a request
  *  moving from `pending` to `approved` or `denied` replaces its entry rather
  *  than sitting beside it. */
-export function noteGate(record: GateRecord): void {
-  // The BUSY run owns the gate, not the visible one. A confirm arrives because
-  // some agent called a tool, and that agent is the one with a turn in flight —
-  // which the reader may well have navigated away from. Attributing by what is
-  // on screen would draw another conversation's mutation into this one, which
-  // is the defect the gate design exists to prevent.
+export function noteGate(record: GateRecord, caller: { chatSession: string } | null | undefined): void {
+  // The run whose backend chat RAISED the call, as the host authenticated it
+  // (#393) — not the busy run, and not the visible one. Attributing by what is
+  // on screen would draw another conversation's mutation into this one, and
+  // attributing by "the run with a turn in flight" drew an external client's
+  // mutation into whichever conversation happened to be answering.
   //
-  // Exactly one run is ever busy (ruling AB), so this is unambiguous. No busy
-  // run means srelens's own agent did not cause it — an external MCP client
-  // did — and nothing is recorded, which is the #393 case.
-  const entry = [...runs.entries()].find(([, st]) => st.run.busy);
+  // With no caller the call is an external client's or an app's, and it
+  // belongs in no srelens conversation: `AgentConsent` still shows and
+  // answers it. A chat no run holds any more (cleared, or the agent switched)
+  // is the same: there is no conversation left to put it in.
+  if (!caller) return;
+  const entry = [...runs.entries()].find(([, st]) => st.session === caller.chatSession);
   if (!entry) return;
   const [key, state] = entry;
   const idx = state.run.gates.findIndex((g) => g.id === record.id);
@@ -1521,8 +1582,15 @@ function isSavedTurn(value: unknown): boolean {
 /** One recorded gate. `gates` is optional; a present one must be usable. */
 function isSavedGate(value: unknown): boolean {
   if (typeof value !== "object" || value === null) return false;
-  const g = value as { id?: unknown; tool?: unknown };
-  return typeof g.id === "string" && typeof g.tool === "string";
+  const g = value as { id?: unknown; tool?: unknown; prompt?: unknown; impact?: unknown };
+  return (
+    typeof g.id === "string" &&
+    typeof g.tool === "string" &&
+    // Drawn as text and as a badge keyed by level, so each is checked to the
+    // depth it is used: a level the host never sends has no badge to draw.
+    (g.prompt === undefined || typeof g.prompt === "string") &&
+    (g.impact === undefined || CAPABILITY_IMPACT_ORDER.includes(g.impact as CapabilityImpact))
+  );
 }
 
 /**
@@ -1698,6 +1766,11 @@ function abandoned(state: RunState, generation: number): boolean {
  *  when they open it. */
 let saved: SessionMeta[] = [];
 
+/** The write still in flight to each file, by id, so opening one waits for it
+ *  (PR #803 review): a row New question just kept can be clicked before its
+ *  file is on disk. An entry goes once its write settles. */
+const writing = new Map<string, Promise<void>>();
+
 /**
  * Write one run to disk, behind its own chain.
  *
@@ -1713,11 +1786,20 @@ function persistRun(key: string): void {
   // Nothing worth a file until something was actually asked.
   const asked = state.run.turns.find((t) => t.role === "user");
   if (!asked) return;
+  // An answer still arriving is written without a time of its own (PR #803
+  // review). This write may be the last — New question, or a window closed
+  // mid-answer — and reopened, a stamp from when it began would time it as
+  // answered in an instant.
+  const last = state.run.turns.at(-1);
+  const turns =
+    state.run.busy && last?.role === "agent"
+      ? [...state.run.turns.slice(0, -1), { ...last, atRecorded: false }]
+      : state.run.turns;
   const envelope: SavedRun = {
     v: 1,
     key,
     label: state.label,
-    turns: state.run.turns,
+    turns,
     gates: state.run.gates,
     ...(state.subject ? { subject: state.subject } : {}),
   };
@@ -1737,7 +1819,17 @@ function persistRun(key: string): void {
     agentKind: state.run.agentKind,
     messages: [envelope],
   };
-  state.saving = state.saving.then(() => saveSession(session)).catch(() => {});
+  // The figures a rail row draws, into the index beside the title, so listing
+  // conversations never means loading their transcripts (#386).
+  const figures = runFigures(state.run.turns, state.run.busy);
+  session.calls = figures.calls;
+  if (figures.answeringMs !== null) session.durationMs = figures.answeringMs;
+  const write = state.saving.then(() => saveSession(session)).catch(() => {});
+  state.saving = write;
+  writing.set(session.id, write);
+  void write.then(() => {
+    if (writing.get(session.id) === write) writing.delete(session.id);
+  });
 }
 
 /**
@@ -1762,6 +1854,8 @@ export async function restoreRuns(): Promise<void> {
  *  own subject key, and show it. */
 export async function openSavedRun(id: string): Promise<void> {
   const mine = ++openSeq;
+  // A conversation New question just kept may still be on its way to disk.
+  await writing.get(id);
   const meta = saved.find((m) => m.id === id);
   const session = await loadSession(id);
   // A later click has taken over. Nothing is applied — not the run, not
@@ -1868,6 +1962,7 @@ export function resetAgentRun(): void {
   agentKind = "claude";
   activeSkills = [];
   saved = [];
+  writing.clear();
   touchSeq = 0;
   summaryStamp = -1;
   emptyRun = { ...EMPTY_RUN };
