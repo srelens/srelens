@@ -104,6 +104,7 @@ fn tool_result(block: &serde_json::Value) -> Option<AgentEvent> {
     Some(AgentEvent::ToolResult {
         id: block.get("tool_use_id").and_then(|i| i.as_str()).unwrap_or("").to_string(),
         status,
+        summary: None,
     })
 }
 
@@ -195,11 +196,11 @@ mod tests {
         let ok = parse_line(
             r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","is_error":false}]}}"#,
         );
-        assert_eq!(ok, vec![AgentEvent::ToolResult { id: "t1".into(), status: ToolStatus::Ok }]);
+        assert_eq!(ok, vec![AgentEvent::ToolResult { id: "t1".into(), status: ToolStatus::Ok, summary: None }]);
         let err = parse_line(
             r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","is_error":true}]}}"#,
         );
-        assert_eq!(err, vec![AgentEvent::ToolResult { id: "t1".into(), status: ToolStatus::Error }]);
+        assert_eq!(err, vec![AgentEvent::ToolResult { id: "t1".into(), status: ToolStatus::Error, summary: None }]);
     }
 
     #[test]
@@ -208,12 +209,12 @@ mod tests {
         let blocks = parse_line(
             r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","is_error":true,"content":[{"type":"text","text":"consent denied: user declined `k8s.deletePod`"}]}]}}"#,
         );
-        assert_eq!(blocks, vec![AgentEvent::ToolResult { id: "t1".into(), status: ToolStatus::Denied }]);
+        assert_eq!(blocks, vec![AgentEvent::ToolResult { id: "t1".into(), status: ToolStatus::Denied, summary: None }]);
         // …and a bare string.
         let bare = parse_line(
             r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t2","is_error":true,"content":"consent denied: user declined `k8s.scale`"}]}}"#,
         );
-        assert_eq!(bare, vec![AgentEvent::ToolResult { id: "t2".into(), status: ToolStatus::Denied }]);
+        assert_eq!(bare, vec![AgentEvent::ToolResult { id: "t2".into(), status: ToolStatus::Denied, summary: None }]);
     }
 
     #[test]

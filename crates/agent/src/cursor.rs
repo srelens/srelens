@@ -108,7 +108,7 @@ fn tool_call(v: &serde_json::Value) -> Vec<AgentEvent> {
             tool: tool_name(key),
             args: inner.get("args").cloned().unwrap_or(serde_json::Value::Null),
         }],
-        Some("completed") => vec![AgentEvent::ToolResult { id, status: completion_status(inner) }],
+        Some("completed") => vec![AgentEvent::ToolResult { id, status: completion_status(inner), summary: None }],
         _ => Vec::new(),
     }
 }
@@ -264,7 +264,7 @@ mod tests {
         let out = parse_line(
             r#"{"type":"tool_call","subtype":"completed","call_id":"call-1\nfc_2","tool_call":{"getMcpToolsToolCall":{"args":{"pattern":"echo"},"result":{"success":{"content":"{}"}}}}}"#,
         );
-        assert_eq!(out, vec![AgentEvent::ToolResult { id: "call-1\nfc_2".into(), status: ToolStatus::Ok }]);
+        assert_eq!(out, vec![AgentEvent::ToolResult { id: "call-1\nfc_2".into(), status: ToolStatus::Ok, summary: None }]);
     }
 
     #[test]
@@ -272,7 +272,7 @@ mod tests {
         let out = parse_line(
             r#"{"type":"tool_call","subtype":"completed","call_id":"call-1\nfc_2","tool_call":{"readToolCall":{"result":{"error":{"errorMessage":"Permission denied"}}}}}"#,
         );
-        assert_eq!(out, vec![AgentEvent::ToolResult { id: "call-1\nfc_2".into(), status: ToolStatus::Error }]);
+        assert_eq!(out, vec![AgentEvent::ToolResult { id: "call-1\nfc_2".into(), status: ToolStatus::Error, summary: None }]);
     }
 
     #[test]
@@ -282,7 +282,7 @@ mod tests {
         let out = parse_line(
             r#"{"type":"tool_call","subtype":"completed","call_id":"c2","tool_call":{"mcpToolCall":{"result":{"isError":true,"content":[{"type":"text","text":"consent denied: user declined `k8s.deletePod`"}]}}}}"#,
         );
-        assert_eq!(out, vec![AgentEvent::ToolResult { id: "c2".into(), status: ToolStatus::Denied }]);
+        assert_eq!(out, vec![AgentEvent::ToolResult { id: "c2".into(), status: ToolStatus::Denied, summary: None }]);
     }
 
     #[test]
@@ -293,7 +293,7 @@ mod tests {
         let out = parse_line(
             r#"{"type":"tool_call","subtype":"completed","call_id":"c1","tool_call":{"shellToolCall":{"result":{"permissionDenied":{"command":"cat /etc/hosts"}}}}}"#,
         );
-        assert_eq!(out, vec![AgentEvent::ToolResult { id: "c1".into(), status: ToolStatus::Denied }]);
+        assert_eq!(out, vec![AgentEvent::ToolResult { id: "c1".into(), status: ToolStatus::Denied, summary: None }]);
     }
 
     #[test]
@@ -381,7 +381,7 @@ mod tests {
                 "toolCallId": mcp_call_id,
             }),
         }));
-        assert!(events.contains(&AgentEvent::ToolResult { id: mcp_call_id.into(), status: ToolStatus::Ok }));
+        assert!(events.contains(&AgentEvent::ToolResult { id: mcp_call_id.into(), status: ToolStatus::Ok, summary: None }));
 
         // The blocked local read: the completed line's call_id must match its
         // started line's call_id verbatim, embedded `\n` and all.
@@ -393,6 +393,6 @@ mod tests {
             args: serde_json::json!({ "path": "/etc/hosts" }),
         }));
         assert!(events
-            .contains(&AgentEvent::ToolResult { id: read_call_id.into(), status: ToolStatus::Error }));
+            .contains(&AgentEvent::ToolResult { id: read_call_id.into(), status: ToolStatus::Error, summary: None }));
     }
 }

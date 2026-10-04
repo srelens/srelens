@@ -134,7 +134,7 @@ async fn invoke_one(
             } else {
                 ToolStatus::Ok
             };
-            on_event(AgentEvent::ToolResult { id: call.id.clone(), status });
+            on_event(AgentEvent::ToolResult { id: call.id.clone(), status, summary: None });
             // A denied call is fed back as an error so the model can adapt.
             ToolOutcome {
                 id: call.id.clone(),
@@ -148,7 +148,7 @@ async fn invoke_one(
             }
         }
         Err(e) => {
-            on_event(AgentEvent::ToolResult { id: call.id.clone(), status: ToolStatus::Error });
+            on_event(AgentEvent::ToolResult { id: call.id.clone(), status: ToolStatus::Error, summary: None });
             ToolOutcome { id: call.id.clone(), name: call.name.clone(), content: e.to_string(), is_error: true }
         }
     }
@@ -395,7 +395,7 @@ mod tests {
                     tool: "k8s_scale".into(),
                     args: json!({ "replicas": 3 }),
                 },
-                AgentEvent::ToolResult { id: "c1".into(), status: ToolStatus::Ok },
+                AgentEvent::ToolResult { id: "c1".into(), status: ToolStatus::Ok, summary: None },
                 AgentEvent::TextDelta { text: "scaled to 3".into() },
                 AgentEvent::TurnDone,
             ]
@@ -422,7 +422,7 @@ mod tests {
             calls: Mutex::new(Vec::new()),
         };
         let events = drive(&provider, &invoker, "scale it");
-        assert!(events.contains(&AgentEvent::ToolResult { id: "c1".into(), status: ToolStatus::Denied }));
+        assert!(events.contains(&AgentEvent::ToolResult { id: "c1".into(), status: ToolStatus::Denied, summary: None }));
         let seen = provider.seen_turns.lock().unwrap();
         assert!(matches!(seen[1].last(), Some(Turn::ToolResults(o)) if o[0].is_error));
     }

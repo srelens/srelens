@@ -78,13 +78,14 @@ fn item_completed(item: &serde_json::Value) -> Vec<AgentEvent> {
             } else {
                 ToolStatus::Error
             };
-            vec![AgentEvent::ToolResult { id: str_field(item, "id").to_string(), status }]
+            vec![AgentEvent::ToolResult { id: str_field(item, "id").to_string(), status, summary: None }]
         }
         Some("command_execution") => {
             let ok = item.get("exit_code").and_then(|c| c.as_i64()) == Some(0);
             vec![AgentEvent::ToolResult {
                 id: str_field(item, "id").to_string(),
                 status: if ok { ToolStatus::Ok } else { ToolStatus::Error },
+                summary: None,
             }]
         }
         _ => Vec::new(),
@@ -155,7 +156,7 @@ mod tests {
         let out = parse_line(
             r#"{"type":"item.completed","item":{"id":"item_1","type":"mcp_tool_call","server":"everything","tool":"echo","arguments":{"message":"srelens-mcp-probe"},"result":{"content":[{"type":"text","text":"Echo: srelens-mcp-probe"}],"structured_content":null},"error":null,"status":"completed"}}"#,
         );
-        assert_eq!(out, vec![AgentEvent::ToolResult { id: "item_1".into(), status: ToolStatus::Ok }]);
+        assert_eq!(out, vec![AgentEvent::ToolResult { id: "item_1".into(), status: ToolStatus::Ok, summary: None }]);
     }
 
     #[test]
@@ -163,7 +164,7 @@ mod tests {
         let out = parse_line(
             r#"{"type":"item.completed","item":{"id":"item_1","type":"mcp_tool_call","server":"everything","tool":"echo","arguments":{},"result":null,"error":{"message":"boom"},"status":"completed"}}"#,
         );
-        assert_eq!(out, vec![AgentEvent::ToolResult { id: "item_1".into(), status: ToolStatus::Error }]);
+        assert_eq!(out, vec![AgentEvent::ToolResult { id: "item_1".into(), status: ToolStatus::Error, summary: None }]);
     }
 
     #[test]
@@ -171,7 +172,7 @@ mod tests {
         let out = parse_line(
             r#"{"type":"item.completed","item":{"id":"item_1","type":"mcp_tool_call","server":"srelens","tool":"k8s_deletePod","arguments":{},"result":null,"error":{"message":"consent denied: user declined `k8s.deletePod`"},"status":"completed"}}"#,
         );
-        assert_eq!(out, vec![AgentEvent::ToolResult { id: "item_1".into(), status: ToolStatus::Denied }]);
+        assert_eq!(out, vec![AgentEvent::ToolResult { id: "item_1".into(), status: ToolStatus::Denied, summary: None }]);
     }
 
     #[test]
@@ -179,7 +180,7 @@ mod tests {
         let out = parse_line(
             r#"{"type":"item.completed","item":{"id":"item_1","type":"mcp_tool_call","server":"everything","tool":"echo","arguments":{},"result":null,"error":null,"status":"failed"}}"#,
         );
-        assert_eq!(out, vec![AgentEvent::ToolResult { id: "item_1".into(), status: ToolStatus::Error }]);
+        assert_eq!(out, vec![AgentEvent::ToolResult { id: "item_1".into(), status: ToolStatus::Error, summary: None }]);
     }
 
     #[test]
@@ -202,7 +203,7 @@ mod tests {
         let out = parse_line(
             r#"{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"/bin/zsh -lc 'echo srelens-probe'","aggregated_output":"srelens-probe\n","exit_code":0,"status":"completed"}}"#,
         );
-        assert_eq!(out, vec![AgentEvent::ToolResult { id: "item_1".into(), status: ToolStatus::Ok }]);
+        assert_eq!(out, vec![AgentEvent::ToolResult { id: "item_1".into(), status: ToolStatus::Ok, summary: None }]);
     }
 
     #[test]
@@ -210,7 +211,7 @@ mod tests {
         let out = parse_line(
             r#"{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"false","aggregated_output":"","exit_code":1,"status":"completed"}}"#,
         );
-        assert_eq!(out, vec![AgentEvent::ToolResult { id: "item_1".into(), status: ToolStatus::Error }]);
+        assert_eq!(out, vec![AgentEvent::ToolResult { id: "item_1".into(), status: ToolStatus::Error, summary: None }]);
     }
 
     #[test]
@@ -244,7 +245,7 @@ mod tests {
             events.iter().filter(|e| matches!(e, AgentEvent::ToolCallStart { .. })).count(),
             1
         );
-        assert!(events.contains(&AgentEvent::ToolResult { id: "item_1".into(), status: ToolStatus::Ok }));
+        assert!(events.contains(&AgentEvent::ToolResult { id: "item_1".into(), status: ToolStatus::Ok, summary: None }));
         assert_eq!(
             events.iter().filter(|e| matches!(e, AgentEvent::TextDelta { .. })).count(),
             2
@@ -263,7 +264,7 @@ mod tests {
             tool: "shell".into(),
             args: serde_json::json!({ "command": "/bin/zsh -lc 'echo srelens-probe'" }),
         }));
-        assert!(events.contains(&AgentEvent::ToolResult { id: "item_1".into(), status: ToolStatus::Ok }));
+        assert!(events.contains(&AgentEvent::ToolResult { id: "item_1".into(), status: ToolStatus::Ok, summary: None }));
         assert!(events.contains(&AgentEvent::TurnDone));
     }
 }
