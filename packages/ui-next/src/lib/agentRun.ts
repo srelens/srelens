@@ -1060,14 +1060,25 @@ export async function askAgent(
     // Last thing before the question actually leaves. Every await above is a
     // window in which the reader can abandon this turn.
     if (abandoned(state, myGeneration)) return true;
-    // Counted only now: the question is really leaving. A refusal or an
-    // abandoned send never got here (#387).
-    if (skills.length > 0) recordSkillUses(skills);
+    // Counted once the question has visibly reached the agent: its first event,
+    // or `sendChat` returning. A refusal or an abandoned send never got here
+    // (#387), and neither counts a send that failed before it left —
+    // `sendChat` listens for the turn's events before it invokes `chat_send`,
+    // and a refused subscription sends nothing (PR #803 review).
+    let counted = skills.length === 0;
+    const countUse = () => {
+      if (counted) return;
+      counted = true;
+      recordSkillUses(skills);
+    };
     const result = await sendChat(
       started,
       `${preface}${guidance}${question}`,
       agentPath,
-      onEvent,
+      (e) => {
+        countUse();
+        onEvent(e);
+      },
       // Raw base64, not the data URIs the turn records: `chat_send` passes
       // these to `decode_base64_image`, which is `STANDARD.decode` and fails on
       // a `data:` prefix. Stripped here, at the send, so every caller can hold
@@ -1077,6 +1088,7 @@ export async function askAgent(
       myGeneration,
       state.resume,
     );
+    countUse();
     // A later question already moved this conversation on; this answer no
     // longer says anything about where its resume token stands.
     if (state.run.generation === myGeneration) state.resume = result;
@@ -1223,6 +1235,12 @@ export function clearAgentRun(target?: string | null): void {
   if (key === null) return;
   const state = runs.get(key);
   if (!state) return;
+  // What is on screen goes into the kept file first (PR #803 review). A turn
+  // still streaming has only its question written, and the generation bump
+  // below fails the guard on its end-of-turn save, so the conversation would
+  // reopen without the answer the reader was reading. Before `resume` is
+  // dropped, too: the kept file must still resume its CLI conversation.
+  persistRun(key);
   // Cancel with the generation the in-flight turn was SENT with, before the
   // bump below moves it — the backend matches a Stop against that.
   if (state.run.busy && state.session) {
@@ -1726,6 +1744,11 @@ function abandoned(state: RunState, generation: number): boolean {
  *  when they open it. */
 let saved: SessionMeta[] = [];
 
+/** The write still in flight to each file, by id, so opening one waits for it
+ *  (PR #803 review): a row New question just kept can be clicked before its
+ *  file is on disk. An entry goes once its write settles. */
+const writing = new Map<string, Promise<void>>();
+
 /**
  * Write one run to disk, behind its own chain.
  *
@@ -1770,7 +1793,12 @@ function persistRun(key: string): void {
   const figures = runFigures(state.run.turns, state.run.busy);
   session.calls = figures.calls;
   if (figures.answeringMs !== null) session.durationMs = figures.answeringMs;
-  state.saving = state.saving.then(() => saveSession(session)).catch(() => {});
+  const write = state.saving.then(() => saveSession(session)).catch(() => {});
+  state.saving = write;
+  writing.set(session.id, write);
+  void write.then(() => {
+    if (writing.get(session.id) === write) writing.delete(session.id);
+  });
 }
 
 /**
@@ -1795,6 +1823,8 @@ export async function restoreRuns(): Promise<void> {
  *  own subject key, and show it. */
 export async function openSavedRun(id: string): Promise<void> {
   const mine = ++openSeq;
+  // A conversation New question just kept may still be on its way to disk.
+  await writing.get(id);
   const meta = saved.find((m) => m.id === id);
   const session = await loadSession(id);
   // A later click has taken over. Nothing is applied — not the run, not
@@ -1901,6 +1931,7 @@ export function resetAgentRun(): void {
   agentKind = "claude";
   activeSkills = [];
   saved = [];
+  writing.clear();
   touchSeq = 0;
   summaryStamp = -1;
   emptyRun = { ...EMPTY_RUN };

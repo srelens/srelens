@@ -176,6 +176,29 @@ describe("the run store", () => {
     expect(getSkillUses()).toEqual({ triage: 1 });
   });
 
+  it("does not count a skill for a question that never reached the agent (PR #803 review)", async () => {
+    loadSkillUses(memoryStorage());
+    loadSkill.mockResolvedValue({ name: "triage", description: "d", body: "Look at events first." });
+    setSkillActive("triage", true);
+    // `sendChat` listens for the turn's events before it invokes `chat_send`;
+    // a refused subscription rejects with nothing sent.
+    sendChat.mockRejectedValue(new Error("could not listen for chat events"));
+    await askAgent("q");
+    expect(getSkillUses()).toEqual({});
+  });
+
+  it("counts a skill for a question the agent began answering, even if the turn then failed", async () => {
+    loadSkillUses(memoryStorage());
+    loadSkill.mockResolvedValue({ name: "triage", description: "d", body: "Look at events first." });
+    setSkillActive("triage", true);
+    sendChat.mockImplementation(async (_s: string, _p: string, _a: string, onEvent: (e: unknown) => void) => {
+      onEvent({ type: "textDelta", text: "Looking" });
+      throw new Error("the agent exited");
+    });
+    await askAgent("q");
+    expect(getSkillUses()).toEqual({ triage: 1 });
+  });
+
   it("does not count a question refused because another run is answering (#387)", async () => {
     loadSkillUses(memoryStorage());
     sendChat.mockImplementation(() => new Promise<string | null>(() => {}));
@@ -1871,6 +1894,53 @@ describe("the run store", () => {
       expect(deleteSession).not.toHaveBeenCalled();
       const row = getRunSummaries().find((r) => r.savedId === id);
       expect(row?.label).toBe("What is mongodb using?");
+    });
+
+    it("keeps what was on screen when New question interrupts an answer (PR #803 review)", async () => {
+      sendChat.mockImplementation((_s: string, _p: string, _a: string, onEvent: (e: unknown) => void) => {
+        onEvent({ type: "textDelta", text: "checkout-api is failing" });
+        onEvent({ type: "toolCallStart", id: "t1", tool: "k8s.listPods", args: {} });
+        return new Promise<string | null>(() => {});
+      });
+      void askAgent("why is checkout failing?", POD);
+      await untilSendChatCalledTimes(1);
+      const id = (saveSession.mock.calls.at(-1)?.[0] as { id: string }).id;
+
+      clearAgentRun();
+
+      await vi.waitFor(() => {
+        const kept = saveSession.mock.calls
+          .map(([s]) => s as { id: string; messages: unknown[] })
+          .filter((s) => s.id === id)
+          .at(-1);
+        expect(JSON.stringify(kept?.messages)).toContain("checkout-api is failing");
+        expect(JSON.stringify(kept?.messages)).toContain("k8s.listPods");
+      });
+    });
+
+    it("opens a kept conversation only once its file is written (PR #803 review)", async () => {
+      let finishWrite!: () => void;
+      saveSession
+        .mockImplementationOnce(() => new Promise<void>((resolve) => { finishWrite = () => resolve(); }))
+        .mockResolvedValue(undefined);
+      sendChat.mockResolvedValue(null);
+      await askAgent("what is mongodb using?", POD);
+      const id = (saveSession.mock.calls[0]?.[0] as { id: string }).id;
+      clearAgentRun();
+      loadSession.mockResolvedValue({
+        id, title: "t", createdAt: 1, updatedAt: 2, contexts: [], skills: [],
+        cliSessionId: null, agentKind: "claude",
+        messages: [{ v: 1, key: "prod-eu|Pod|ns|mongodb-0", label: "Pod/mongodb-0", turns: [], gates: [] }],
+      });
+
+      const opening = openSavedRun(id);
+      for (let i = 0; i < 10; i++) await Promise.resolve();
+      // The write the rail's row stands for has not landed: nothing to load yet.
+      expect(loadSession).not.toHaveBeenCalled();
+
+      finishWrite();
+      await opening;
+      expect(loadSession).toHaveBeenCalledWith(id);
     });
 
     it("does not delete a file while a write to it is still in flight", async () => {
