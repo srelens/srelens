@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { listReplicaSets, type ReplicaSetSummary } from "@srelens/core";
-import { Combobox } from "@srelens/ui-kit";
+import { Button, Combobox } from "@srelens/ui-kit";
 import { FailureLine } from "../lib/errorCopy";
 
 /** One revision as a reader tells it from the others (#389): its number, the
@@ -47,28 +47,45 @@ export function RevisionPicker({
   onChange: (revision: string) => void;
 }) {
   const [revisions, setRevisions] = useState<Revisions>({ status: "loading" });
+  /** Bumped by Retry, to read the revisions again (PR #810 review). */
+  const [attempt, setAttempt] = useState(0);
   useEffect(() => {
     let live = true;
-    void listReplicaSets(context, namespace, name).then((out) => {
-      if (!live) return;
-      if (out.error) {
-        setRevisions({ status: "error", error: out.error });
-        return;
-      }
-      // A ReplicaSet with no revision annotation is no revision to go back to.
-      const rows = (out.replicasets ?? []).filter((rs) => rs.revision !== "");
-      const current = rows.find((rs) => rs.currentTemplate);
-      const earlier = rows.filter((rs) => !rs.currentTemplate);
-      setRevisions({ status: "ready", current, earlier });
-      if (earlier[0]) onChange(earlier[0].revision);
-    });
+    setRevisions({ status: "loading" });
+    listReplicaSets(context, namespace, name)
+      .then((out) => {
+        if (!live) return;
+        if (out.error) {
+          setRevisions({ status: "error", error: out.error });
+          return;
+        }
+        // A ReplicaSet with no revision annotation is no revision to go back to.
+        const rows = (out.replicasets ?? []).filter((rs) => rs.revision !== "");
+        const current = rows.find((rs) => rs.currentTemplate);
+        const earlier = rows.filter((rs) => !rs.currentTemplate);
+        setRevisions({ status: "ready", current, earlier });
+        if (earlier[0]) onChange(earlier[0].revision);
+      })
+      // A read that rejects is a failure to say, not a load that never ends.
+      .catch((error: unknown) => {
+        if (live) setRevisions({ status: "error", error: String(error) });
+      });
     return () => {
       live = false;
     };
-  }, [context, namespace, name, onChange]);
+  }, [context, namespace, name, onChange, attempt]);
 
   if (revisions.status === "loading") return <p className="text-faint">Reading revisions…</p>;
-  if (revisions.status === "error") return <FailureLine error={revisions.error} className="text-sev" />;
+  if (revisions.status === "error") {
+    return (
+      <>
+        <FailureLine error={revisions.error} className="text-sev" />
+        <Button variant="secondary" size="sm" onClick={() => setAttempt((n) => n + 1)}>
+          Retry
+        </Button>
+      </>
+    );
+  }
   return (
     <>
       {revisions.current && (

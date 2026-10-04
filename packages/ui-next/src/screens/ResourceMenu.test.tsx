@@ -628,6 +628,24 @@ describe("useRowMenu — Roll back (#389)", () => {
     expect(screen.getByRole("dialog")).toBeDefined();
   });
 
+  it("offers Retry when the revisions could not be read, and reads them again (PR #810 review)", async () => {
+    listReplicaSets
+      .mockResolvedValueOnce({ error: "forbidden: cannot list replicasets" })
+      .mockResolvedValueOnce({ replicasets: [REV3, REV2] });
+    const dialog = await openRollback();
+    expect(await dialog.findByText(/forbidden/)).toBeDefined();
+    await userEvent.click(dialog.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(picker(dialog).textContent).toContain(REV2_LABEL));
+    expect(listReplicaSets).toHaveBeenCalledTimes(2);
+  });
+
+  it("says why when reading the revisions rejects, rather than reading forever", async () => {
+    listReplicaSets.mockRejectedValueOnce(new Error("socket closed"));
+    const dialog = await openRollback();
+    expect(await dialog.findByText(/socket closed/)).toBeDefined();
+    expect(dialog.queryByText("Reading revisions…")).toBeNull();
+  });
+
   it("says why the revisions could not be listed, and writes nothing", async () => {
     listReplicaSets.mockResolvedValueOnce({ error: "forbidden: cannot list replicasets" });
     const dialog = await openRollback();
