@@ -121,6 +121,13 @@ pub struct ReplicaSetSummary {
     /// `kubernetes.io/change-cause`, when the revision was recorded with one.
     #[serde(rename = "changeCause", skip_serializing_if = "Option::is_none")]
     pub change_cause: Option<String>,
+    /// Whether this revision's pod template is the one the Deployment runs now
+    /// (PR #810 review) — the revision `k8s.rolloutUndo` refuses as already
+    /// running. The numbering alone does not say: right after a template
+    /// change the newest ReplicaSet can still be the previous template. False
+    /// for every row when the Deployment itself could not be read.
+    #[serde(rename = "currentTemplate")]
+    pub current_template: bool,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -170,7 +177,49 @@ pub(crate) fn summarise_rs(rs: ReplicaSet) -> ReplicaSetSummary {
         created_at: crate::creation_timestamp_iso(rs.metadata.creation_timestamp.as_ref()),
         images,
         change_cause,
+        current_template: false,
     }
+}
+
+/// Whether `rs` is one of `dep`'s revisions — by its owner's name and, when
+/// the Deployment was read with one, its UID (PR #810 review). A Deployment
+/// deleted and recreated under the same name leaves the old one's ReplicaSets
+/// until they are collected, and a revision 1 of those is not this one's.
+pub(crate) fn owned_by_deployment(rs: &ReplicaSet, dep: &Deployment) -> bool {
+    let name = dep.metadata.name.as_deref().unwrap_or_default();
+    let uid = dep.metadata.uid.as_deref();
+    rs.metadata
+        .owner_references
+        .iter()
+        .flatten()
+        .any(|o| o.kind == "Deployment" && o.name == name && uid.is_none_or(|uid| o.uid == uid))
+}
+
+/// A Deployment's revisions, newest first, as `k8s.listReplicaSets` lists
+/// them. With the Deployment read (`owner`), only its own ReplicaSets, and the
+/// one whose template it runs marked `current_template`; without it, by name,
+/// none marked.
+pub(crate) fn revision_rows(owner: Option<&Deployment>, owner_name: &str, rss: Vec<ReplicaSet>) -> Vec<ReplicaSetSummary> {
+    let running = owner.and_then(|dep| dep.spec.as_ref()).map(|spec| &spec.template);
+    let mut rows: Vec<ReplicaSetSummary> = rss
+        .into_iter()
+        .filter(|rs| match owner {
+            Some(dep) => owned_by_deployment(rs, dep),
+            None => owned_by(rs, owner_name),
+        })
+        .map(|rs| {
+            let current = running.is_some_and(|template| *template == template_of(&rs));
+            let mut row = summarise_rs(rs);
+            row.current_template = current;
+            row
+        })
+        .collect();
+    rows.sort_by(|a, b| {
+        let pa = a.revision.parse::<i64>().unwrap_or(0);
+        let pb = b.revision.parse::<i64>().unwrap_or(0);
+        pb.cmp(&pa)
+    });
+    rows
 }
 
 const REVISION_ANNOTATION: &str = "deployment.kubernetes.io/revision";
@@ -319,7 +368,7 @@ pub fn rollout_undo_capability(cache: Arc<ClientCache>) -> Capability {
                         .map_err(|_| timed_out("listed its revisions"))?
                         .map_err(|e| CapabilityError::Handler(e.to_string()))?;
                     let owned: Vec<ReplicaSet> =
-                        list.items.into_iter().filter(|rs| owned_by(rs, &input.name)).collect();
+                        list.items.into_iter().filter(|rs| owned_by_deployment(rs, &dep)).collect();
                     let target = pick_revision(&owned, &input.namespace, &input.name, input.revision)
                         .map_err(CapabilityError::Handler)?;
                     if let Some(refusal) = undo_refusal(&dep, target, input.revision) {
@@ -358,24 +407,22 @@ pub fn list_replicasets_capability(cache: Arc<ClientCache>) -> Capability {
                     .get(&input.context)
                     .await
                     .map_err(CapabilityError::Handler)?;
+                let deployments: Api<Deployment> = crate::scoped_api(client.clone(), &input.namespace);
                 let api: Api<ReplicaSet> = crate::scoped_api(client, &input.namespace);
                 let list = tokio::time::timeout(request_timeout(), api.list(&ListParams::default()))
                     .await
                     .map_err(|_| CapabilityError::Handler("list replicasets timed out".into()))?
                     .map_err(|e| CapabilityError::Handler(e.to_string()))?;
-                let mut replicasets: Vec<ReplicaSetSummary> = list
-                    .items
-                    .into_iter()
-                    .filter(|rs| owned_by(rs, &input.owner_name))
-                    .map(summarise_rs)
-                    .collect();
-                // Newest revision first (numeric where possible).
-                replicasets.sort_by(|a, b| {
-                    let pa = a.revision.parse::<i64>().unwrap_or(0);
-                    let pb = b.revision.parse::<i64>().unwrap_or(0);
-                    pb.cmp(&pa)
-                });
-                Ok(ListReplicaSetsOut { replicasets })
+                // The owner itself, best effort: it is what scopes the list to
+                // this Deployment's UID and says which revision it runs
+                // (PR #810 review). Unreadable, the list is by name and marks
+                // none current — still the revisions, never an error.
+                let owner = tokio::time::timeout(request_timeout(), deployments.get_opt(&input.owner_name))
+                    .await
+                    .ok()
+                    .and_then(Result::ok)
+                    .flatten();
+                Ok(ListReplicaSetsOut { replicasets: revision_rows(owner.as_ref(), &input.owner_name, list.items) })
             }
         },
     )
@@ -533,6 +580,56 @@ mod tests {
         }
         rs.spec.as_mut().unwrap().template = Some(template(image, Some(&format!("h{revision}"))));
         rs
+    }
+
+    fn with_owner_uid(mut rs: ReplicaSet, uid: &str) -> ReplicaSet {
+        rs.metadata.owner_references.as_mut().unwrap()[0].uid = uid.into();
+        rs
+    }
+
+    fn deploy_with_uid(image: &str, uid: &str) -> Deployment {
+        let mut dep = deploy_at(image, &[]);
+        dep.metadata.uid = Some(uid.into());
+        dep
+    }
+
+    /// PR #810 review: a Deployment deleted and recreated under the same name
+    /// leaves the old one's ReplicaSets until they are collected — revisions
+    /// that are not this Deployment's.
+    #[test]
+    fn a_deployments_revisions_are_its_own_not_a_deleted_namesakes() {
+        let dep = deploy_with_uid("api:3", "u-new");
+        assert!(owned_by_deployment(&with_owner_uid(rs_at(1, "api:1", &[]), "u-new"), &dep));
+        assert!(!owned_by_deployment(&with_owner_uid(rs_at(1, "api:0", &[]), "u-old"), &dep));
+        // Read without a uid, a Deployment falls back to its name.
+        assert!(owned_by_deployment(&rs_at(1, "api:1", &[]), &deploy_at("api:3", &[])));
+    }
+
+    /// PR #810 review: the newest ReplicaSet is not always the template the
+    /// Deployment runs — right after a template change it can still be the
+    /// previous one — so the row that runs it says so, by template.
+    #[test]
+    fn revision_rows_mark_the_template_the_deployment_runs_and_drop_a_namesakes() {
+        let dep = deploy_with_uid("api:2", "u-new");
+        let rows = revision_rows(
+            Some(&dep),
+            "web",
+            vec![
+                with_owner_uid(rs_at(1, "api:1", &[]), "u-new"),
+                with_owner_uid(rs_at(3, "api:3", &[]), "u-new"),
+                with_owner_uid(rs_at(2, "api:2", &[]), "u-new"),
+                with_owner_uid(rs_at(9, "api:9", &[]), "u-old"),
+            ],
+        );
+        let seen: Vec<(&str, bool)> = rows.iter().map(|r| (r.revision.as_str(), r.current_template)).collect();
+        assert_eq!(seen, vec![("3", false), ("2", true), ("1", false)]);
+    }
+
+    #[test]
+    fn revision_rows_without_the_deployment_fall_back_to_its_name_and_mark_none() {
+        let rows = revision_rows(None, "web", vec![rs_at(1, "api:1", &[]), rs_at(2, "api:2", &[])]);
+        let seen: Vec<(&str, bool)> = rows.iter().map(|r| (r.revision.as_str(), r.current_template)).collect();
+        assert_eq!(seen, vec![("2", false), ("1", false)]);
     }
 
     #[test]
