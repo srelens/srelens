@@ -547,6 +547,27 @@ jobs:
               sh /tmp/install/test.sh
             '
 
+  # The check release.yml runs over the Linux bundles before it publishes them
+  # (packaging/linux/check-launcher.sh): its own tests, over fixture packages,
+  # since nothing builds the bundles before a release.
+  linux-bundle-check:
+    name: linux bundle check
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install rpm
+        run: |
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.* \
+                     /etc/apt/sources.list.d/microsoft-prod.*
+          sudo apt-get update
+          sudo apt-get install -y rpm
+      - name: Lint
+        run: shellcheck -s sh packaging/linux/check-launcher.sh packaging/linux/test.sh
+      - name: Test
+        run: sh packaging/linux/test.sh
+
   docker:
     name: docker image
     runs-on: ubuntu-22.04
