@@ -62,7 +62,12 @@ impl McpHttpManager {
     /// server as that chat's, and revoked when the guard is dropped. The
     /// Settings token is never handed to a CLI — it authenticates a client
     /// without saying which one.
-    pub fn mint_turn_token(&self, session: &str) -> Result<srelens_mcp::auth::CallerTokenGuard, String> {
+    ///
+    /// Under the lifecycle lock (PR #802 review): a revoke or rotate clears
+    /// the turn tokens while holding it, so a mint that checked the server
+    /// before the clear and inserted after it would outlive the revocation.
+    pub async fn mint_turn_token(&self, session: &str) -> Result<srelens_mcp::auth::CallerTokenGuard, String> {
+        let _lifecycle = self.lifecycle().await;
         self.session_token()
             .ok_or("Start the MCP server in Settings → MCP before using the assistant.")?;
         Ok(self.caller_tokens.mint(session))
@@ -1154,13 +1159,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A turn is handed a token of its own, never the Settings token, and only
-    /// while the server it would talk to is running.
-    #[tokio::test]
-    async fn a_turn_token_is_its_chat_s_and_not_the_settings_token() {
-        let mgr = McpHttpManager::new(ClientCache::new(std::path::PathBuf::from("/dev/null")));
-        assert!(mgr.mint_turn_token("sess-7").is_err(), "no server, no token");
-
+    /// A listener standing in for the MCP server, recorded as running under a
+    /// fresh Settings token, which is returned.
+    async fn a_running_server(mgr: &McpHttpManager) -> srelens_mcp::auth::Token {
         let listener = tokio::net::TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).await.unwrap();
         let addr = listener.local_addr().unwrap();
         let (tx, rx) = oneshot::channel::<()>();
@@ -1170,12 +1171,79 @@ mod tests {
         });
         let settings = srelens_mcp::auth::Token::generate();
         *mgr.running.lock().unwrap() = Some(Running { addr, shutdown: Some(tx), handle, token: settings.clone() });
+        settings
+    }
 
-        let guard = mgr.mint_turn_token("sess-7").expect("server running");
+    /// A turn is handed a token of its own, never the Settings token, and only
+    /// while the server it would talk to is running.
+    #[tokio::test]
+    async fn a_turn_token_is_its_chat_s_and_not_the_settings_token() {
+        let mgr = McpHttpManager::new(ClientCache::new(std::path::PathBuf::from("/dev/null")));
+        assert!(mgr.mint_turn_token("sess-7").await.is_err(), "no server, no token");
+
+        let settings = a_running_server(&mgr).await;
+
+        let guard = mgr.mint_turn_token("sess-7").await.expect("server running");
         assert_ne!(guard.token(), settings.as_str());
         assert_eq!(
             mgr.caller_tokens().caller_for(guard.token()),
             Some(srelens_mcp::policy::Caller::Chat("sess-7".into()))
         );
+    }
+
+    /// PR #802 review: a mint that races a revocation waits for it. Checking
+    /// the server and inserting the token outside the lifecycle lock let a
+    /// token land just after `revoke_all`, live for the next server started.
+    #[tokio::test]
+    async fn a_turn_token_minted_during_a_revocation_does_not_outlive_it() {
+        let mgr = Arc::new(McpHttpManager::new(ClientCache::new(std::path::PathBuf::from("/dev/null"))));
+        let pending = crate::mcp_confirm::Pending::default();
+        a_running_server(&mgr).await;
+        // A revocation under way: the lock held, the turn tokens just cleared.
+        let lifecycle = mgr.lifecycle().await;
+        mgr.caller_tokens.revoke_all();
+
+        let minting = tokio::spawn({
+            let mgr = mgr.clone();
+            async move { mgr.mint_turn_token("sess-7").await }
+        });
+        tokio::task::yield_now().await;
+        stop_running(&mgr, &pending, &lifecycle).await;
+        drop(lifecycle);
+
+        let minted = minting.await.unwrap();
+        assert!(
+            minted.as_ref().map_or(true, |g| mgr.caller_tokens().caller_for(g.token()).is_none()),
+            "a token minted during the revocation outlived it"
+        );
+    }
+
+    /// The same race against a rotation: no token is issued while the old
+    /// credentials are being retired, so none minted against them survives
+    /// into the server that replaces them.
+    #[tokio::test]
+    async fn no_turn_token_is_issued_while_a_rotation_is_under_way() {
+        let dir = std::env::temp_dir().join(format!("srelens-rotate-race-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = srelens_mcp::auth::FileTokenStore::new(dir.join("token"));
+        let mgr = Arc::new(McpHttpManager::new(ClientCache::new(std::path::PathBuf::from("/dev/null"))));
+        a_running_server(&mgr).await;
+        let lifecycle = mgr.lifecycle().await;
+        rotate_settings_token(&store, &mgr).expect("rotate");
+
+        let minting = tokio::spawn({
+            let mgr = mgr.clone();
+            async move { mgr.mint_turn_token("sess-7").await }
+        });
+        tokio::task::yield_now().await;
+        assert!(!minting.is_finished(), "a token was issued mid-rotation");
+
+        drop(lifecycle);
+        let guard = minting.await.unwrap().expect("the server is still running");
+        assert_eq!(
+            mgr.caller_tokens().caller_for(guard.token()),
+            Some(srelens_mcp::policy::Caller::Chat("sess-7".into()))
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

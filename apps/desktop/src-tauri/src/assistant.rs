@@ -513,7 +513,7 @@ pub async fn chat_send(
     // it dies with the turn: a gate the CLI raises is recorded in THIS chat,
     // and an external client presenting the Settings token is never mistaken
     // for it.
-    let turn_token = mcp.mint_turn_token(&session)?;
+    let turn_token = mcp.mint_turn_token(&session).await?;
     let token = turn_token.token().to_string();
     let url = mcp.status_url().ok_or("MCP server URL unavailable")?;
 
