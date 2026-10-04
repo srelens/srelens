@@ -19,8 +19,8 @@ use srelens_capability::audit::AuditSink;
 use srelens_capability::{CapabilityError, Registry};
 use srelens_plugin_host::sidecar::data::DataDir;
 use srelens_plugin_host::sidecar::{
-    AppIdentity, Broker, CapabilityBroker, Consent, Enforcement, LaunchError, Launched, Launcher,
-    Limits, NoBroker, OsSandbox, Policy, SandboxConfig, SidecarCommand, SidecarConfig,
+    AppIdentity, Broker, CapabilityBroker, CgroupRoot, Consent, Enforcement, LaunchError, Launched,
+    Launcher, Limits, NoBroker, OsSandbox, Policy, SandboxConfig, SidecarCommand, SidecarConfig,
     SidecarStatus, Supervisor,
 };
 use std::collections::HashMap;
@@ -56,13 +56,12 @@ fn sandbox_config() -> SandboxConfig {
                 .with_file_name("srelens-sandbox-launch");
             beside.is_file().then_some(beside)
         });
-    let cgroup_root = std::env::var_os(CGROUP_ENV)
+    let cgroup = std::env::var_os(CGROUP_ENV)
         .filter(|path| !path.is_empty())
-        .map(PathBuf::from);
-    SandboxConfig {
-        launcher,
-        cgroup_root,
-    }
+        .map_or(CgroupRoot::Missing, |root| {
+            CgroupRoot::Delegated(root.into())
+        });
+    SandboxConfig { launcher, cgroup }
 }
 
 /// Starts a sidecar through `inner` only after checking its binary against the digest

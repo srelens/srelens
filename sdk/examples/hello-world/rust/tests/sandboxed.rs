@@ -17,7 +17,7 @@
 
 mod common;
 
-use srelens_plugin_host::sidecar::{Limits, OsSandbox, SandboxConfig};
+use srelens_plugin_host::sidecar::{CgroupRoot, Limits, OsSandbox, SandboxConfig};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -31,7 +31,10 @@ fn sandbox() -> Arc<OsSandbox> {
     }
     Arc::new(OsSandbox::new(SandboxConfig {
         launcher,
-        cgroup_root: std::env::var_os("SRELENS_SANDBOX_CGROUP_ROOT").map(PathBuf::from),
+        cgroup: std::env::var_os("SRELENS_SANDBOX_CGROUP_ROOT")
+            .map_or(CgroupRoot::Missing, |root| {
+                CgroupRoot::Delegated(root.into())
+            }),
     }))
 }
 

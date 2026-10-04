@@ -36,7 +36,7 @@
 use serde_json::{json, Value};
 use srelens_plugin_host::sidecar::data::DataDir;
 use srelens_plugin_host::sidecar::{
-    Enforcement, LaunchError, Launched, Launcher, Limits, NoBroker, OsSandbox, Policy,
+    CgroupRoot, Enforcement, LaunchError, Launched, Launcher, Limits, NoBroker, OsSandbox, Policy,
     RequestError, SandboxConfig, SidecarCommand, SidecarConfig, SidecarStatus, Supervisor,
 };
 use std::net::{TcpListener, TcpStream, ToSocketAddrs};
@@ -128,7 +128,10 @@ impl Fixture {
 fn sandbox() -> OsSandbox {
     OsSandbox::new(SandboxConfig {
         launcher: Some(LAUNCHER.into()),
-        cgroup_root: std::env::var_os("SRELENS_SANDBOX_CGROUP_ROOT").map(PathBuf::from),
+        cgroup: std::env::var_os("SRELENS_SANDBOX_CGROUP_ROOT")
+            .map_or(CgroupRoot::Missing, |root| {
+                CgroupRoot::Delegated(root.into())
+            }),
     })
 }
 

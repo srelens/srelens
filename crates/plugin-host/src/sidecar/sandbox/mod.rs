@@ -337,11 +337,22 @@ pub struct SandboxConfig {
     /// `srelens-sandbox-launch`, the trusted launcher that applies the Linux
     /// layers and starts Seatbelt on macOS. Linux and macOS only.
     pub launcher: Option<PathBuf>,
-    /// A cgroup v2 directory delegated to srelens, with the `memory` and `cpu`
-    /// controllers enabled for its children. Linux only. Finding one on a
-    /// systemd desktop is not settled (ADR, "What the spike did not
-    /// establish"), so the caller names it.
-    pub cgroup_root: Option<PathBuf>,
+    /// Where each sidecar's cgroup is made. Linux only.
+    pub cgroup: CgroupRoot,
+}
+
+/// Where a Linux sidecar's cgroup is made: under a cgroup v2 directory
+/// delegated to srelens, with the `memory` and `cpu` controllers enabled for
+/// its children, and srelens itself in a leaf of it. cgroup v2 lets a process
+/// move another only between cgroups under one it may write, and each
+/// sidecar's launcher moves itself from srelens's leaf into its own.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum CgroupRoot {
+    /// Nowhere: every sidecar is refused.
+    #[default]
+    Missing,
+    /// A directory set up by hand, as `SRELENS_SANDBOX_CGROUP_ROOT` names one.
+    Delegated(PathBuf),
 }
 
 /// The sandbox backend for the OS srelens runs on.
