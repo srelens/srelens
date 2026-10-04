@@ -172,6 +172,10 @@ export interface ReplicaSetSummary {
    *  the backend renders once and which freezes (#405). */
   created?: string | null;
   age: string;
+  /** The pod template's container images, in order (#389). */
+  images?: string[];
+  /** `kubernetes.io/change-cause`, when the revision was recorded with one (#389). */
+  changeCause?: string;
 }
 
 export interface PodMetric {

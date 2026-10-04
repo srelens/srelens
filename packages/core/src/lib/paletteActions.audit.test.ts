@@ -21,6 +21,7 @@ const EXCLUDED: Record<string, string> = {
   "extension.secretStore": "an app's secret is typed into its own write-only field in Settings → Apps, never passed through a palette command",
   "k8s.applyManifest": "reached via the manifest editor, not a one-click palette action",
   "k8s.updateConfigData": "ConfigMap/Secret data edits happen in the ResourceOverview drawer, which needs a key/value patch beyond a bare resource ref",
+  "k8s.rolloutUndo": "needs a revision chosen from the Deployment's history; surfaced through ui-next's Roll back dialog, not a one-shot palette action",
   "k8s.deleteContext": "kubeconfig management lives in Settings",
   "k8s.helmInstall": "surfaced via HelmOpDialog from HelmReleasesView, not a resource-targeted palette action",
   "k8s.helmUpgrade": "surfaced via HelmOpDialog from HelmReleasesView, not a resource-targeted palette action",
