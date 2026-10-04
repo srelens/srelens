@@ -1391,13 +1391,13 @@ fn a_windows_directory_anyone_can_write_to_is_refused_before_anything_is_downloa
         "*S-1-5-11:(OI)(CI)(IO)(M)",
     ] {
         let dir = tempfile::tempdir().unwrap();
-        let (plan, _) = staged(dir.path(), b"unused");
+        let release = staged(dir.path(), b"unused");
         grant(dir.path(), entry);
         let fetch = |_: &str| -> Result<Vec<u8>, UpdateError> {
             panic!("{entry}: nothing should be downloaded into a directory anyone can write to")
         };
 
-        match apply(&plan, &fetch) {
+        match apply(&release.plan, &fetch) {
             Err(UpdateError::UnsafeDirectory { path }) => assert_eq!(path, dir.path(), "{entry}"),
             other => panic!("{entry}: expected UnsafeDirectory, got {other:?}"),
         }
@@ -1426,7 +1426,7 @@ fn the_ordinary_windows_install_directories_are_not_refused() {
         Some("*S-1-5-32-551:(M)"),
     ] {
         let dir = tempfile::tempdir().unwrap();
-        let (plan, _) = staged(dir.path(), b"unused");
+        let release = staged(dir.path(), b"unused");
         if let Some(entry) = entry {
             grant(dir.path(), entry);
         }
@@ -1437,7 +1437,7 @@ fn the_ordinary_windows_install_directories_are_not_refused() {
             ))
         };
 
-        match apply(&plan, &fetch) {
+        match apply(&release.plan, &fetch) {
             Err(UpdateError::Download(_)) => {}
             other => panic!("{entry:?}: expected to reach the download, got {other:?}"),
         }
