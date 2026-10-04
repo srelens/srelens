@@ -1942,7 +1942,14 @@ export async function openSavedRun(id: string): Promise<void> {
   if (envelope) {
     state.run = {
       ...state.run,
-      turns: envelope.turns,
+      // Fresh ids, as `turnsFromClassic` takes: the ones on disk were issued by
+      // the window that wrote the file, and `turnSeq` starts again at 0 in this
+      // one. Kept, they collided with the follow-up's own turns — `updateTurnIn`
+      // matched the OLD answer first, so the new answer and its tool calls were
+      // appended to it ("Done.Done.") and the new question showed none. A file
+      // written while that was happening holds duplicate ids, which this
+      // repairs, since the transcript keys each turn by its id.
+      turns: envelope.turns.map((t) => ({ ...t, id: ++turnSeq })),
       gates: envelope.gates ?? [],
       agentKind: session.agentKind ?? state.run.agentKind,
     };
