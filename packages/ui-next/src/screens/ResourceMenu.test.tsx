@@ -8,11 +8,26 @@ import userEvent from "@testing-library/user-event";
 // demand — the dialog's error path is the whole point of half these tests.
 type ActionResult = { ok?: boolean; error?: string };
 
-const { deleteResource, scaleResource, rolloutRestart, evictPod, cronjobSetSuspend, cronjobTriggerNow, getObject } =
+/** One `k8s.listReplicaSets` row, as far as the rollback dialog reads it. */
+type Revision = { name: string; revision: string; desired: number; ready: number; current: number; age: string; images?: string[]; changeCause?: string };
+
+const {
+  deleteResource,
+  scaleResource,
+  rolloutRestart,
+  rolloutUndo,
+  listReplicaSets,
+  evictPod,
+  cronjobSetSuspend,
+  cronjobTriggerNow,
+  getObject,
+} =
   vi.hoisted(() => ({
     deleteResource: vi.fn(async (): Promise<ActionResult> => ({ ok: true })),
     scaleResource: vi.fn(async (): Promise<ActionResult> => ({ ok: true })),
     rolloutRestart: vi.fn(async (): Promise<ActionResult> => ({ ok: true })),
+    rolloutUndo: vi.fn(async (): Promise<ActionResult> => ({ ok: true })),
+    listReplicaSets: vi.fn(async (): Promise<{ replicasets?: Revision[]; error?: string }> => ({ replicasets: [] })),
     evictPod: vi.fn(async (): Promise<ActionResult> => ({ ok: true })),
     cronjobSetSuspend: vi.fn(async (): Promise<ActionResult> => ({ ok: true })),
     cronjobTriggerNow: vi.fn(async (): Promise<{ jobName?: string; error?: string }> => ({
@@ -55,6 +70,8 @@ vi.mock("@srelens/core", async (importOriginal) => ({
   deleteResource,
   scaleResource,
   rolloutRestart,
+  rolloutUndo,
+  listReplicaSets,
   evictPod,
   cronjobSetSuspend,
   cronjobTriggerNow,
@@ -499,6 +516,76 @@ describe("useRowMenu", () => {
  * one click (Scale takes one number, and it is kept), so asking again costs
  * the reader a tick.
  */
+describe("useRowMenu — Roll back (#389)", () => {
+  const ROLLBACK_ARGS: UseRowMenuArgs = { context: "prod", kind: "Deployment", actions: { restart: true, rollback: true } };
+  const REV3: Revision = { name: "web-c", revision: "3", desired: 2, ready: 2, current: 2, age: "2d", images: ["api:3"] };
+  const REV2: Revision = { name: "web-b", revision: "2", desired: 0, ready: 0, current: 0, age: "2d", images: ["api:2"], changeCause: "bump api" };
+  const REV1: Revision = { name: "web-a", revision: "1", desired: 0, ready: 0, current: 0, age: "2d", images: ["api:1"] };
+
+  async function openRollback() {
+    render(<Harness args={ROLLBACK_ARGS} row={DEPLOY_ROW} />);
+    await userEvent.click(screen.getByRole("button", { name: "Roll back" }));
+    return within(await screen.findByRole("dialog"));
+  }
+
+  it("offers Roll back on a Deployment, and not on a kind without revision history", () => {
+    const labels = (args: UseRowMenuArgs, row: ListRow) =>
+      menuItems(args, row).map((i) => (i.kind === "sep" ? "—" : i.label));
+    expect(labels(ROLLBACK_ARGS, DEPLOY_ROW)).toContain("Roll back");
+    expect(labels(DEPLOY_ARGS, DEPLOY_ROW)).not.toContain("Roll back");
+    expect(labels(POD_ARGS, POD_ROW)).not.toContain("Roll back");
+  });
+
+  it("lists the earlier revisions, starts on the one before current, and shows the kubectl it will run", async () => {
+    listReplicaSets.mockResolvedValueOnce({ replicasets: [REV3, REV2, REV1] });
+    const dialog = await openRollback();
+    expect(await dialog.findByText("rev 3 · api:3 · 2d ago")).toBeDefined();
+    await waitFor(() => expect((dialog.getByLabelText("Revision") as HTMLSelectElement).value).toBe("2"));
+    expect(dialog.getByRole("option", { name: "rev 2 · api:2 · 2d ago · “bump api”" })).toBeDefined();
+    // The current revision is shown, never offered.
+    expect(dialog.queryByRole("option", { name: /^rev 3/ })).toBeNull();
+    expect(dialog.getByText("kubectl rollout undo deployments/web --to-revision=2 -n default --context prod")).toBeDefined();
+    expect(listReplicaSets).toHaveBeenCalledWith("prod", "default", "web");
+  });
+
+  it("rolls back to the revision chosen", async () => {
+    listReplicaSets.mockResolvedValueOnce({ replicasets: [REV3, REV2, REV1] });
+    const dialog = await openRollback();
+    await waitFor(() => expect((dialog.getByLabelText("Revision") as HTMLSelectElement).value).toBe("2"));
+    await userEvent.selectOptions(dialog.getByLabelText("Revision"), "1");
+    expect(dialog.getByText("kubectl rollout undo deployments/web --to-revision=1 -n default --context prod")).toBeDefined();
+    await userEvent.click(dialog.getByRole("button", { name: "Roll back" }));
+    await waitFor(() => expect(rolloutUndo).toHaveBeenCalledWith("prod", "default", "web", 1));
+  });
+
+  it("says so when there is no earlier revision, and writes nothing", async () => {
+    listReplicaSets.mockResolvedValueOnce({ replicasets: [REV3] });
+    const dialog = await openRollback();
+    expect(await dialog.findByText("This Deployment has no earlier revision to roll back to.")).toBeDefined();
+    await userEvent.click(dialog.getByRole("button", { name: "Roll back" }));
+    expect(await dialog.findByText("Choose an earlier revision to roll back to.")).toBeDefined();
+    expect(rolloutUndo).not.toHaveBeenCalled();
+  });
+
+  it("keeps the dialog open with the refusal when the rollback is refused", async () => {
+    listReplicaSets.mockResolvedValueOnce({ replicasets: [REV3, REV2] });
+    rolloutUndo.mockResolvedValueOnce({ error: "Deployment default/web already runs revision 2" });
+    const dialog = await openRollback();
+    await waitFor(() => expect((dialog.getByLabelText("Revision") as HTMLSelectElement).value).toBe("2"));
+    await userEvent.click(dialog.getByRole("button", { name: "Roll back" }));
+    await waitFor(() => expect(screen.getByText(/already runs revision 2/)).toBeDefined());
+    expect(screen.getByRole("dialog")).toBeDefined();
+  });
+
+  it("says why the revisions could not be listed, and writes nothing", async () => {
+    listReplicaSets.mockResolvedValueOnce({ error: "forbidden: cannot list replicasets" });
+    const dialog = await openRollback();
+    expect(await dialog.findByText(/forbidden/)).toBeDefined();
+    await userEvent.click(dialog.getByRole("button", { name: "Roll back" }));
+    expect(rolloutUndo).not.toHaveBeenCalled();
+  });
+});
+
 describe("useRowMenu — the cluster the row was picked on", () => {
   const PINNED = "prod-eu";
   const MOVED = "stage-eu";

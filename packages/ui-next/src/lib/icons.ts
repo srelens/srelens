@@ -19,6 +19,7 @@ import {
   Gauge,
   GitBranch,
   HardDrive,
+  History,
   KeyRound,
   Layers,
   LayoutDashboard,
@@ -201,6 +202,8 @@ export const Icons = {
   revert: RotateCcw,
   scale: Scaling,
   restart: RotateCw,
+  /** Return a Deployment to an earlier revision (#389). */
+  rollback: History,
   evict: LogOut,
   /** Stop new pods being scheduled to a node — the design's crossed circle. */
   cordon: Ban,
