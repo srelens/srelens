@@ -5,7 +5,7 @@ use std::sync::Arc;
 use srelens_capability::{Annotations, Capability, CapabilityError};
 use k8s_openapi::api::apps::v1::{Deployment, ReplicaSet};
 use k8s_openapi::api::core::v1::PodTemplateSpec;
-use kube::api::ListParams;
+use kube::api::{ListParams, PostParams};
 use kube::Api;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -259,6 +259,91 @@ pub(crate) fn rolled_back(mut dep: Deployment, target: &ReplicaSet) -> Deploymen
     dep
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct RolloutUndoIn {
+    pub context: String,
+    pub namespace: String,
+    /// The Deployment to roll back.
+    pub name: String,
+    /// The revision to roll back to — `deployment.kubernetes.io/revision` of
+    /// one of its ReplicaSets, as `k8s.listReplicaSets` lists them. Required:
+    /// the confirmation shows which revision the cluster is about to run.
+    pub revision: i64,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct RolloutUndoOut {
+    pub name: String,
+    /// The revision the Deployment was rolled back to.
+    pub revision: i64,
+}
+
+/// How many times a rollback re-reads and writes again on a 409 before it
+/// gives up.
+const UNDO_ATTEMPTS: usize = 5;
+
+/// `k8s.rolloutUndo` — roll a Deployment back to an earlier revision (#389),
+/// the `kubectl rollout undo --to-revision` mechanism. Requires confirmation.
+pub fn rollout_undo_capability(cache: Arc<ClientCache>) -> Capability {
+    Capability::typed::<RolloutUndoIn, RolloutUndoOut, _, _>(
+        "k8s.rolloutUndo",
+        "roll a Deployment back to an earlier revision (kubectl rollout undo --to-revision)",
+        Annotations::MUTATING
+            .with_confirm("Roll back Deployment[ {namespace}/{name}][ in cluster {cluster}] to an earlier revision?"),
+        move |input: RolloutUndoIn| {
+            let cache = cache.clone();
+            async move {
+                if input.revision < 1 {
+                    return Err(CapabilityError::Handler(format!(
+                        "revision must be 1 or more, not {}",
+                        input.revision
+                    )));
+                }
+                let client = cache.get(&input.context).await.map_err(CapabilityError::Handler)?;
+                let deployments: Api<Deployment> = crate::scoped_api(client.clone(), &input.namespace);
+                let replicasets: Api<ReplicaSet> = crate::scoped_api(client, &input.namespace);
+                let timed_out = |what: &str| CapabilityError::Handler(format!("rollback timed out while it {what}"));
+                // The controller writes the Deployment's status throughout a
+                // rollout — exactly when a rollback is wanted — so a replace
+                // on a stale read conflicts. Read, check and write again, as
+                // client-go's RetryOnConflict does: the change is the target
+                // revision's, so writing it again is the same write, and the
+                // refusals are checked against the fresh read every time.
+                for attempt in 1..=UNDO_ATTEMPTS {
+                    let dep = tokio::time::timeout(request_timeout(), deployments.get(&input.name))
+                        .await
+                        .map_err(|_| timed_out("read the Deployment"))?
+                        .map_err(|e| CapabilityError::Handler(e.to_string()))?;
+                    let list = tokio::time::timeout(request_timeout(), replicasets.list(&ListParams::default()))
+                        .await
+                        .map_err(|_| timed_out("listed its revisions"))?
+                        .map_err(|e| CapabilityError::Handler(e.to_string()))?;
+                    let owned: Vec<ReplicaSet> =
+                        list.items.into_iter().filter(|rs| owned_by(rs, &input.name)).collect();
+                    let target = pick_revision(&owned, &input.namespace, &input.name, input.revision)
+                        .map_err(CapabilityError::Handler)?;
+                    if let Some(refusal) = undo_refusal(&dep, target, input.revision) {
+                        return Err(CapabilityError::Handler(refusal));
+                    }
+                    let next = rolled_back(dep, target);
+                    match tokio::time::timeout(
+                        request_timeout(),
+                        deployments.replace(&input.name, &PostParams::default(), &next),
+                    )
+                    .await
+                    {
+                        Err(_) => return Err(timed_out("wrote the Deployment")),
+                        Ok(Ok(_)) => return Ok(RolloutUndoOut { name: input.name.clone(), revision: input.revision }),
+                        Ok(Err(kube::Error::Api(status))) if status.code == 409 && attempt < UNDO_ATTEMPTS => continue,
+                        Ok(Err(e)) => return Err(CapabilityError::Handler(e.to_string())),
+                    }
+                }
+                unreachable!("the last attempt returns its result")
+            }
+        },
+    )
+}
+
 /// `k8s.listReplicaSets` — ReplicaSets owned by a Deployment, newest revision
 /// first. Powers the "Deploy Revisions" section of the deployment detail.
 pub fn list_replicasets_capability(cache: Arc<ClientCache>) -> Capability {
@@ -500,6 +585,30 @@ mod tests {
         assert_eq!(ann.get("deployment.kubernetes.io/revision").map(String::as_str), Some("3"));
         assert_eq!(ann.get("kubernetes.io/change-cause").map(String::as_str), Some("bump api"));
         assert!(!ann.contains_key("team"), "the Deployment's own non-bookkeeping annotation is replaced: {ann:?}");
+    }
+
+    #[test]
+    fn rollout_undo_is_a_gated_write_that_names_its_deployment() {
+        let cap = rollout_undo_capability(ClientCache::new(PathBuf::from("/x")));
+        assert_eq!(cap.id, "k8s.rolloutUndo");
+        assert!(cap.annotations.requires_confirm);
+        assert!(!cap.annotations.read_only);
+        assert!(!cap.annotations.destructive);
+        assert_eq!(
+            cap.annotations
+                .confirm_text(&serde_json::json!({"context": "prod", "namespace": "shop", "name": "web", "revision": 2}))
+                .as_deref(),
+            Some("Roll back Deployment shop/web in cluster prod to an earlier revision?")
+        );
+    }
+
+    #[tokio::test]
+    async fn rollout_undo_refuses_a_revision_below_one_before_any_request() {
+        let cap = rollout_undo_capability(ClientCache::new(PathBuf::from("/nowhere")));
+        let err = (cap.handler)(serde_json::json!({"context": "c", "namespace": "shop", "name": "web", "revision": 0}))
+            .await
+            .unwrap_err();
+        assert!(format!("{err:?}").contains("revision must be 1 or more, not 0"), "{err:?}");
     }
 
     #[test]

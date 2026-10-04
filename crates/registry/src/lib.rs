@@ -561,6 +561,9 @@ fn build_with(
     reg.register(srelens_kube::actions::rollout_restart_capability(
         cache.clone(),
     ));
+    reg.register(srelens_kube::deployments::rollout_undo_capability(
+        cache.clone(),
+    ));
     reg.register(srelens_kube::actions::update_config_data_capability(
         cache.clone(),
     ));

@@ -7,7 +7,7 @@ Everything this server exposes over MCP, generated from the live registry so it 
 
 ## Tools
 
-125 tools, grouped by area and then by how a call is gated. Argument schemas are not reproduced here — call `tools/list` for those, which cannot go stale.
+126 tools, grouped by area and then by how a call is gated. Argument schemas are not reproduced here — call `tools/list` for those, which cannot go stale.
 
 **Impact** is how much a successful call disturbs — `low`, `medium` or `high` — and is a different question from the section heading, which is how the call is gated. A capability that accepts several named operations carries the highest level any of them reaches; the per-operation level travels with the resource.
 
@@ -84,7 +84,7 @@ Everything this server exposes over MCP, generated from the live registry so it 
 | `k8s.podConnections` | medium | read the established TCP connections of pods, from their own /proc/net/tcp |
 | `k8s.topologyProbe` | medium | the topology graph, plus each pod's open connections read over pods/exec (one exec per pod) |
 
-### Kubernetes — needs confirmation (13)
+### Kubernetes — needs confirmation (14)
 
 | Tool | Impact | Summary |
 | --- | --- | --- |
@@ -97,6 +97,7 @@ Everything this server exposes over MCP, generated from the live registry so it 
 | `k8s.requestCordonNode` | medium | Request cordon or uncordon of the reviewed Node without eviction; requires confirmation |
 | `k8s.requestRolloutRestart` | high | Request a rolling restart of the reviewed built-in workload; requires confirmation |
 | `k8s.rolloutRestart` | medium | trigger a rolling restart of a workload |
+| `k8s.rolloutUndo` | medium | roll a Deployment back to an earlier revision (kubectl rollout undo --to-revision) |
 | `k8s.scale` | medium | set the replica count of a workload (Deployment/StatefulSet/ReplicaSet) |
 | `k8s.setFields` | medium | Set fixed spec fields on the reviewed resource, as an app's action declares them; requires confirmation |
 | `k8s.setStatusCondition` | medium | Write one status condition on the reviewed resource through the status subresource, as an app's action declares it; requires confirmation |
