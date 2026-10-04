@@ -1,4 +1,4 @@
-//! Headless Model Context Protocol (MCP) server for `srelens-tui`.
+//! Headless Model Context Protocol (MCP) server for `srectl`.
 //!
 //! Exposes all SRElens capabilities over standard input/output (the MCP stdio transport),
 //! enabling external AI coding agents (Antigravity/AGY, Claude Code, Cursor, Codex) to

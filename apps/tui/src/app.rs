@@ -1380,11 +1380,11 @@ impl App {
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
                 let channel = crate::self_update::Channel::of_version(&current_version);
                 let exe = std::env::current_exe()
-                    .unwrap_or_else(|_| std::path::PathBuf::from("srelens-tui"));
+                    .unwrap_or_else(|_| std::path::PathBuf::from("srectl"));
                 let target = crate::self_update::installed_path(&exe);
 
                 let client = match reqwest::blocking::Client::builder()
-                    .user_agent(format!("srelens-tui/{}", current_version))
+                    .user_agent(format!("srectl/{}", current_version))
                     .timeout(std::time::Duration::from_secs(5))
                     .build()
                 {
@@ -1431,7 +1431,7 @@ impl App {
             *update_available = Some(version.to_string());
         }
         self.set_toast(
-            format!("▲ Update available: {} (run 'srelens-tui update')", version),
+            format!("▲ Update available: {} (run 'srectl update')", version),
             Theme::status_warn(),
         );
     }
@@ -2291,7 +2291,7 @@ impl App {
                             if let Some(ref ver) = self.tui_config.update_available {
                                 self.set_toast(
                                     format!(
-                                        "▲ Update available: {} — run 'srelens-tui update' in your terminal to install",
+                                        "▲ Update available: {} — run 'srectl update' in your terminal to install",
                                         ver
                                     ),
                                     Theme::status_warn(),
@@ -8658,7 +8658,7 @@ impl App {
             CommandTarget::Update => {
                 if let Some(ref ver) = self.tui_config.update_available {
                     self.set_toast(
-                        format!("▲ Update available: {} — run 'srelens-tui update' in your terminal to install", ver),
+                        format!("▲ Update available: {} — run 'srectl update' in your terminal to install", ver),
                         Theme::status_warn(),
                     );
                 } else {

@@ -10,8 +10,8 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::backend::TestBackend;
 use ratatui::{Frame, Terminal};
-use srelens_tui::app::App;
-use srelens_tui::event::AppEvent;
+use srectl::app::App;
+use srectl::event::AppEvent;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
 
 /// An `App` with no kubeconfig, no cluster, and the given context/namespace,
@@ -29,7 +29,7 @@ pub async fn app_with(context: &str, namespace: &str) -> (App, UnboundedReceiver
     )
     .await
     .expect("App::new never needs a cluster");
-    srelens_tui::theme::Theme::set_theme_by_index(0);
+    srectl::theme::Theme::set_theme_by_index(0);
     (app, rx)
 }
 

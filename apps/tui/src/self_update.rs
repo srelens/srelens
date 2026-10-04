@@ -1,4 +1,4 @@
-//! `srelens-tui update` — move this binary to the latest stable release.
+//! `srectl update` — move this binary to the latest stable release.
 //!
 //! The desktop app updates itself from Settings; the TUI is a loose binary on
 //! someone's `PATH`, so it has to do the same job by hand. The shape here is
@@ -76,9 +76,9 @@ impl Channel {
 
 /// The name of the binary inside every archive, and on disk.
 const BIN: &str = if cfg!(windows) {
-    "srelens-tui.exe"
+    "srectl.exe"
 } else {
-    "srelens-tui"
+    "srectl"
 };
 
 #[derive(Debug, PartialEq, Eq)]
@@ -127,7 +127,7 @@ impl fmt::Display for UpdateError {
         match self {
             Self::UnsupportedPlatform { os, arch } => write!(
                 f,
-                "no srelens-tui release is built for {os}/{arch} — build from source with `cargo build --release -p srelens-tui`"
+                "no srectl release is built for {os}/{arch} — build from source with `cargo build --release -p srectl`"
             ),
             // No prefix: these messages are whole sentences, and a "could not
             // read" preamble was actively wrong for the common case, where the
@@ -155,12 +155,12 @@ impl fmt::Display for UpdateError {
             ),
             Self::NotWritable { path } => write!(
                 f,
-                "cannot write to {} — re-run with the rights to change it, or install srelens-tui somewhere you own",
+                "cannot write to {} — re-run with the rights to change it, or install srectl somewhere you own",
                 path.display()
             ),
             Self::UnsafeDirectory { path } => write!(
                 f,
-                "anyone on this machine can create files in {}, so an update there cannot be made safe — move srelens-tui somewhere only you can write, then update",
+                "anyone on this machine can create files in {}, so an update there cannot be made safe — move srectl somewhere only you can write, then update",
                 path.display()
             ),
             Self::StagedChanged => write!(
@@ -229,12 +229,12 @@ pub fn asset_name(version: &str, triple: &str) -> String {
     } else {
         "tar.gz"
     };
-    format!("srelens-tui-{version}-{triple}.{ext}")
+    format!("srectl-{version}-{triple}.{ext}")
 }
 
 /// The checksum file published beside the archives.
 pub fn sums_name(version: &str) -> String {
-    format!("srelens-tui-{version}-SHA256SUMS.txt")
+    format!("srectl-{version}-SHA256SUMS.txt")
 }
 
 /// A release asset's download URL.
@@ -294,7 +294,7 @@ pub fn parse_latest_version(body: &[u8], triple: &str) -> Result<String, UpdateE
     // now beats promising an update and 404ing on the download.
     if !release_carries_this_platform(&value, &version, triple) {
         return Err(UpdateError::BadRelease(format!(
-            "release {tag} carries no srelens-tui build for {triple}"
+            "release {tag} carries no srectl build for {triple}"
         )));
     }
     Ok(version)
@@ -349,7 +349,7 @@ pub fn parse_newest_version(body: &[u8], triple: &str) -> Result<String, UpdateE
     // usual cause is a release whose build for THIS target failed while the
     // others published.
     Err(UpdateError::BadRelease(format!(
-        "no dev release carries a srelens-tui build for {triple}"
+        "no dev release carries a srectl build for {triple}"
     )))
 }
 
@@ -420,7 +420,7 @@ fn extract_from_targz(archive: &[u8], asset: &str) -> Result<Vec<u8>, UpdateErro
         // or `name` depending on how they were added.
         if path
             .file_name()
-            .map(|n| n == "srelens-tui")
+            .map(|n| n == "srectl")
             .unwrap_or(false)
         {
             let mut bytes = Vec::new();
@@ -449,7 +449,7 @@ fn extract_from_zip(archive: &[u8], asset: &str) -> Result<Vec<u8>, UpdateError>
             .next()
             .unwrap_or_default()
             .to_string();
-        if name == "srelens-tui.exe" {
+        if name == "srectl.exe" {
             let mut bytes = Vec::new();
             file.read_to_end(&mut bytes)
                 .map_err(|e| UpdateError::Archive(e.to_string()))?;
@@ -486,7 +486,7 @@ pub fn package_manager_for(path: &Path) -> Option<&'static str> {
     let text = path.to_string_lossy().replace('\\', "/");
 
     // Roots a package manager owns, matched as PREFIXES. Matching them
-    // anywhere was wrong: `/home/me/rootfs/usr/bin/srelens-tui` is a file its
+    // anywhere was wrong: `/home/me/rootfs/usr/bin/srectl` is a file its
     // owner controls, and calling it distribution-managed refused to update
     // it. Compared case-sensitively, because `/usr/bin` and `/USR/BIN` are
     // different directories on Unix.
@@ -624,7 +624,7 @@ pub fn plan(
 pub fn resolve_owner(path: &Path) -> (PathBuf, Option<&'static str>) {
     // The LINK'S OWN LOCATION is checked first, because it can carry ownership
     // that its target does not. A distribution package may install
-    // `/usr/bin/srelens-tui` pointing into `/usr/lib/srelens/`, and following
+    // `/usr/bin/srectl` pointing into `/usr/lib/srelens/`, and following
     // the link throws away the `/usr/bin/` that said who owns it — leaving the
     // updater to report a permissions problem, or to overwrite a packaged
     // symlink when re-run with enough privilege.
@@ -737,7 +737,7 @@ fn create_new_file(dir: &Path, prefix: &str) -> Result<(PathBuf, std::fs::File),
 /// permission bits do not account for ownership, ACLs or a read-only mount,
 /// and a wrong guess here turns into a confusing failure halfway through.
 fn writable_dir(dir: &Path) -> bool {
-    match create_new_file(dir, ".srelens-tui-write-test-") {
+    match create_new_file(dir, ".srectl-write-test-") {
         Ok((probe, file)) => {
             drop(file);
             let _ = std::fs::remove_file(&probe);
@@ -918,7 +918,7 @@ pub fn replace_running_binary(target: &Path, bytes: &[u8]) -> Result<(), UpdateE
     // Named after the file being replaced rather than after the compiled-in
     // name. Someone who renames the binary to `lens` gets `.lens.srelens-update.old` and
     // `.lens.new-…`, so an interrupted update recovers the command they
-    // actually had — the fixed name restored `srelens-tui` and left `lens`
+    // actually had — the fixed name restored `srectl` and left `lens`
     // missing.
     let name = target
         .file_name()
@@ -1169,7 +1169,7 @@ mod tests {
         use super::resolve_owner;
         use std::path::Path;
 
-        let packaged = Path::new("/usr/bin/srelens-tui");
+        let packaged = Path::new("/usr/bin/srectl");
         let (from, owner) = resolve_owner(packaged);
         assert_eq!(owner, Some("your distribution's package manager"));
         assert_eq!(from, packaged, "the deciding path is the one that matched");
@@ -1188,14 +1188,14 @@ mod tests {
 
         let _guard = file_test_lock();
         let dir = tempfile::tempdir().expect("temp dir");
-        let cellar = dir.path().join("Cellar/srelens-tui/1.2.3/bin");
+        let cellar = dir.path().join("Cellar/srectl/1.2.3/bin");
         std::fs::create_dir_all(&cellar).expect("cellar");
-        let installed = cellar.join("srelens-tui");
+        let installed = cellar.join("srectl");
         std::fs::write(&installed, b"the real binary").expect("write");
 
         let bin = dir.path().join("bin");
         std::fs::create_dir_all(&bin).expect("bin");
-        let linked = bin.join("srelens-tui");
+        let linked = bin.join("srectl");
         std::os::unix::fs::symlink(&installed, &linked).expect("symlink");
 
         let (resolved, _) = resolve_owner(&linked);
@@ -1273,12 +1273,12 @@ mod tests {
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .collect();
         assert!(
-            names.iter().all(|n| !n.contains("srelens-tui")),
+            names.iter().all(|n| !n.contains("srectl")),
             "displaced under the wrong name: {names:?}"
         );
 
         // And the displaced file, where Windows leaves one, maps back to the
-        // invoked name rather than to srelens-tui.
+        // invoked name rather than to srectl.
         if cfg!(windows) {
             let displaced = dir.path().join(".lens.exe.srelens-update.old");
             if displaced.exists() {

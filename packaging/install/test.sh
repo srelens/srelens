@@ -88,7 +88,7 @@ no() {
 # An isolated HOME, before anything reads it.
 #
 # The unprivileged branch of the destination choice is $HOME/.local/bin, and
-# these cases install for real: they replace whatever srelens-tui is there,
+# these cases install for real: they replace whatever srectl is there,
 # and reset_dest deletes it afterwards. Pointed at a developer's own home,
 # running the tests would uninstall their copy. Pointed here, the same cases
 # run against a directory that goes away with $work.
@@ -152,7 +152,7 @@ default_dest="$(sh "$script" --version 0.0.1 2>&1 |
 # Running as root means installing into the real /usr/local/bin and, for
 # the destination cases, bending it: world-writable, foreign-owned, ACL'd,
 # replaced by a symlink. An interrupt between shaping and restoring would
-# leave it that way, and any srelens-tui already there gets overwritten.
+# leave it that way, and any srectl already there gets overwritten.
 #
 # Fine in a container, not fine on somebody's machine. Refuse rather than
 # do it quietly -- CI runs this inside a container, which is why the root
@@ -164,7 +164,7 @@ if [ "$(id -u)" = "0" ] && [ "$default_dest" = "/usr/local/bin" ]; then
         echo "" >&2
         echo "These cases install into /usr/local/bin and reshape it -- they make it" >&2
         echo "world-writable, foreign-owned, ACL-bearing, even a symlink -- and an" >&2
-        echo "interrupt would leave it that way. Any srelens-tui already there would" >&2
+        echo "interrupt would leave it that way. Any srectl already there would" >&2
         echo "be overwritten too." >&2
         echo "" >&2
         echo "Run them in a container:" >&2
@@ -196,7 +196,7 @@ reset_dest() {
         # The home branch: nothing to chown, but the mode and any leftover
         # binary still carry into the next case.
         chmod 0755 "$default_dest" 2>/dev/null || true
-        rm -rf "$default_dest/srelens-tui"
+        rm -rf "$default_dest/srectl"
         return 0
     fi
     # A case may have moved the directory aside to put a symlink there.
@@ -210,7 +210,7 @@ reset_dest() {
     [ -z "$orig_group" ] || chgrp "$orig_group" /usr/local/bin 2>/dev/null || true
     [ -z "$orig_mode" ] || chmod "$orig_mode" /usr/local/bin 2>/dev/null || true
     [ -z "$orig_owner" ] || chown "$orig_owner" /usr/local 2>/dev/null || true
-    rm -rf /usr/local/bin/srelens-tui
+    rm -rf /usr/local/bin/srectl
 }
 
 # A case that bends the real destination only means something as root; an
@@ -227,7 +227,7 @@ echo "arguments"
 
 out="$(sh "$script" --help 2>&1)" && rc=0 || rc=$?
 check "--help explains itself and points macOS at Homebrew" \
-    "brew install srelens/tap/srelens-tui" "$out" "$rc" 0
+    "brew install srelens/tap/srectl" "$out" "$rc" 0
 
 out="$(sh "$script" --nope 2>&1)" && rc=0 || rc=$?
 check "an unknown flag is refused, not ignored" "unknown option" "$out" "$rc" 1
@@ -263,7 +263,7 @@ chmod +x "$work/fake/uname"
 
 out="$(FAKE_OS=Darwin PATH="$work/fake:$PATH" sh "$script" 2>&1)" && rc=0 || rc=$?
 check "macOS is sent to Homebrew rather than served a Linux binary" \
-    "brew install srelens/tap/srelens-tui" "$out" "$rc" 1
+    "brew install srelens/tap/srectl" "$out" "$rc" 1
 
 out="$(FAKE_ARCH=riscv64 PATH="$work/fake:$PATH" sh "$script" 2>&1)" && rc=0 || rc=$?
 check "an architecture with no published build is named" \
@@ -288,11 +288,11 @@ version="$(
 version="${version#srelens-v}"
 [ -n "$version" ] || { echo "could not resolve the latest version" >&2; exit 1; }
 
-archive="srelens-tui-$version-$host_target.tar.gz"
+archive="srectl-$version-$host_target.tar.gz"
 base="https://github.com/srelens/srelens/releases/download/srelens-v$version"
 mkdir -p "$work/fixtures"
 curl -fsSL -o "$work/fixtures/$archive" "$base/$archive"
-curl -fsSL -o "$work/fixtures/SHA256SUMS.txt" "$base/srelens-tui-$version-SHA256SUMS.txt"
+curl -fsSL -o "$work/fixtures/SHA256SUMS.txt" "$base/srectl-$version-SHA256SUMS.txt"
 cp "$work/fixtures/$archive" "$work/fixtures/good.tar.gz"
 printf 'X' | dd of="$work/fixtures/$archive" bs=1 seek=5000 conv=notrunc status=none
 
@@ -323,7 +323,7 @@ chmod +x "$work/fake/curl"
 dest="$default_dest"
 out="$(PATH="$work/fake:$PATH" sh "$script" 2>&1)" && rc=0 || rc=$?
 check "a corrupted archive is refused" "checksum mismatch" "$out" "$rc" 1
-if [ -e "$dest/srelens-tui" ]; then
+if [ -e "$dest/srectl" ]; then
     no "nothing is installed when the checksum fails"
 else
     ok "nothing is installed when the checksum fails"
@@ -336,18 +336,18 @@ echo "latest-version resolution"
 # call per run on a shared runner IP.
 dest="$default_dest"
 out="$(SERVE_GOOD=1 PATH="$work/fake:$PATH" sh "$script" 2>&1)" && rc=0 || rc=$?
-check "the newest release is resolved from the API" "srelens-tui $version" "$out" "$rc" 0
-check "and installed" "Installed: $dest/srelens-tui" "$out" "$rc" 0
+check "the newest release is resolved from the API" "srectl $version" "$out" "$rc" 0
+check "and installed" "Installed: $dest/srectl" "$out" "$rc" 0
 
 echo "install"
 
 dest="$default_dest"
 out="$(sh "$script" --version "$version" 2>&1)" && rc=0 || rc=$?
-check "the release installs" "Installed: $dest/srelens-tui" "$out" "$rc" 0
+check "the release installs" "Installed: $dest/srectl" "$out" "$rc" 0
 check "the checksum is reported, not assumed" "Checksum verified:" "$out" "$rc" 0
 
-if [ -x "$dest/srelens-tui" ] && "$dest/srelens-tui" --version >/dev/null 2>&1; then
-    ok "the installed binary runs: $("$dest/srelens-tui" --version)"
+if [ -x "$dest/srectl" ] && "$dest/srectl" --version >/dev/null 2>&1; then
+    ok "the installed binary runs: $("$dest/srectl" --version)"
 else
     no "the installed binary does not run"
 fi
@@ -356,7 +356,7 @@ fi
 # ETXTBSY or leave the staging file behind.
 out="$(sh "$script" --version "$version" 2>&1)" && rc=0 || rc=$?
 check "installing over an existing copy succeeds" "Installed:" "$out" "$rc" 0
-if [ -z "$(find "$dest" -name '.srelens-tui.install.*' -o -name '.srelens-tui.backup.*' 2>/dev/null)" ]; then
+if [ -z "$(find "$dest" -name '.srectl.install.*' -o -name '.srectl.backup.*' 2>/dev/null)" ]; then
     ok "no staging or backup file is left behind"
 else
     no "a staging or backup file was left in $dest"
@@ -407,7 +407,7 @@ dest="$default_dest"
 # the script arrives on stdin rather than as a path.
 # shellcheck disable=SC2002
 out="$(cat "$script" | sh -s -- --version "$version" 2>&1)" && rc=0 || rc=$?
-check "options survive sh -s --" "Installed: $dest/srelens-tui" "$out" "$rc" 0
+check "options survive sh -s --" "Installed: $dest/srectl" "$out" "$rc" 0
 
 echo "staging file"
 
@@ -417,7 +417,7 @@ echo "staging file"
 # be aimed at, and a symlink sitting in the directory is left alone.
 dest="$default_dest"
 echo "do not touch me" > "$work/canary"
-ln -sf "$work/canary" "$dest/.srelens-tui.install.99999"
+ln -sf "$work/canary" "$dest/.srectl.install.99999"
 out="$(sh "$script" --version "$version" 2>&1)" && rc=0 || rc=$?
 check "installs alongside a planted symlink" "Installed:" "$out" "$rc" 0
 if [ "$(cat "$work/canary")" = "do not touch me" ]; then
@@ -473,7 +473,7 @@ if [ "$made_user" = "tester" ]; then
     home="$work/homes/plain"
     new_home "$home"
     out="$(install_into "$home")" && rc=0 || rc=$?
-    check "an ordinary home installs" "Installed: $home/.local/bin/srelens-tui" "$out" "$rc" 0
+    check "an ordinary home installs" "Installed: $home/.local/bin/srectl" "$out" "$rc" 0
 
     # A relative HOME makes a relative fallback, and the walk up to its
     # nearest existing ancestor has nowhere to stop: `${x%/*}` of a name
@@ -498,14 +498,14 @@ if [ "$made_user" = "tester" ]; then
     chmod 0777 "$home/.local/bin"
     out="$(install_into "$home")" && rc=0 || rc=$?
     check "a world-writable destination is refused" "writable by other users" "$out" "$rc" 1
-    if [ -e "$home/.local/bin/srelens-tui" ]; then
+    if [ -e "$home/.local/bin/srectl" ]; then
         no "it installed into the world-writable directory anyway"
     else
         ok "nothing was installed there"
     fi
 
     # Sticky does NOT rescue the destination. It stops another user removing
-    # our files; it does not stop them creating srelens-tui there first and
+    # our files; it does not stop them creating srectl there first and
     # owning it -- after which its mode is read and copied onto the rollback
     # (a planted 4755 becoming a root-owned setuid file), and it can be
     # swapped for a symlink to a directory so the mv lands underneath it.
@@ -514,7 +514,7 @@ if [ "$made_user" = "tester" ]; then
     chmod 1777 "$home/.local/bin"
     out="$(install_into "$home")" && rc=0 || rc=$?
     check "a world-writable destination is refused even with sticky" "writable by other users" "$out" "$rc" 1
-    if [ -e "$home/.local/bin/srelens-tui" ]; then
+    if [ -e "$home/.local/bin/srectl" ]; then
         no "it installed into the sticky world-writable directory anyway"
     else
         ok "nothing was installed there"
@@ -536,7 +536,7 @@ if [ "$made_user" = "tester" ]; then
     home="$sticky_parent/new-home"
     rm -rf "$home"
     out="$(install_into "$home")" && rc=0 || rc=$?
-    check "a fallback created beneath a sticky ancestor is still fine" "Installed: $home/.local/bin/srelens-tui" "$out" "$rc" 0
+    check "a fallback created beneath a sticky ancestor is still fine" "Installed: $home/.local/bin/srectl" "$out" "$rc" 0
 
     # A directory belonging to somebody else: they can arrange the swap at
     # leisure and get a file written by the installing account out of it.
@@ -550,7 +550,7 @@ if [ "$made_user" = "tester" ]; then
         chmod 0770 "$home/.local/bin"
         out="$(install_into "$home")" && rc=0 || rc=$?
         check "a directory owned by another user is refused" "belongs to $other_user" "$out" "$rc" 1
-        if [ -e "$home/.local/bin/srelens-tui" ]; then
+        if [ -e "$home/.local/bin/srectl" ]; then
             no "it installed into the other user's directory anyway"
         else
             ok "nothing was installed there either"
@@ -573,7 +573,7 @@ if [ "$made_user" = "tester" ]; then
         chown "$other_user" "$home/.local" 2>/dev/null || true
         out="$(install_into "$home")" && rc=0 || rc=$?
         check "a directory under a foreign ancestor is refused" "belongs to $other_user" "$out" "$rc" 1
-        if [ -e "$home/.local/bin/srelens-tui" ]; then
+        if [ -e "$home/.local/bin/srectl" ]; then
             no "it installed under the replaceable ancestor anyway"
         else
             ok "nothing was installed under the replaceable ancestor"
@@ -613,7 +613,7 @@ if [ "$made_user" = "tester" ]; then
     ln -sfn "$target" "$home/.local/bin"
     out="$(install_into "$home")" && rc=0 || rc=$?
     check "a symlink to an unsafe directory is refused" "writable by other users" "$out" "$rc" 1
-    if [ -e "$target/srelens-tui" ]; then
+    if [ -e "$target/srectl" ]; then
         no "it installed through the symlink anyway"
     else
         ok "nothing was installed through the symlink"
@@ -633,8 +633,8 @@ if [ "$made_user" = "tester" ]; then
     ln -sfn "$target" "$home/.local/bin"
     chown -h tester "$home/.local/bin" 2>/dev/null || true
     out="$(install_into "$home")" && rc=0 || rc=$?
-    check "a safe symlink installs into its target" "Installed: $target/srelens-tui" "$out" "$rc" 0
-    if [ -x "$target/srelens-tui" ]; then
+    check "a safe symlink installs into its target" "Installed: $target/srectl" "$out" "$rc" 0
+    if [ -x "$target/srectl" ]; then
         ok "the binary landed in the resolved directory"
     else
         no "nothing landed in the resolved directory"
@@ -646,8 +646,8 @@ if [ "$made_user" = "tester" ]; then
     if command -v mkfifo >/dev/null 2>&1; then
         home="$work/homes/fifo-dest"
         new_home "$home"
-        mkfifo "$home/.local/bin/srelens-tui" 2>/dev/null || true
-        if [ -p "$home/.local/bin/srelens-tui" ]; then
+        mkfifo "$home/.local/bin/srectl" 2>/dev/null || true
+        if [ -p "$home/.local/bin/srectl" ]; then
             out="$(install_into "$home")" && rc=0 || rc=$?
             check "a FIFO where the binary goes is refused" "not a regular file" "$out" "$rc" 1
         else
@@ -662,10 +662,10 @@ if [ "$made_user" = "tester" ]; then
     # regular file where a link had been.
     home="$work/homes/link-dest"
     new_home "$home"
-    ln -sfn /bin/true "$home/.local/bin/srelens-tui"
+    ln -sfn /bin/true "$home/.local/bin/srectl"
     out="$(install_into "$home")" && rc=0 || rc=$?
     check "a symlink where the binary goes is refused" "is a symlink" "$out" "$rc" 1
-    if [ -L "$home/.local/bin/srelens-tui" ]; then
+    if [ -L "$home/.local/bin/srectl" ]; then
         ok "the symlink is left as it was"
     else
         no "the symlink was replaced"
@@ -676,14 +676,14 @@ if [ "$made_user" = "tester" ]; then
     # splits them.
     home="$work/homes/hardlinked"
     new_home "$home"
-    printf '#!/bin/sh\necho OLD COPY\n' > "$home/.local/bin/srelens-tui"
-    chmod 0755 "$home/.local/bin/srelens-tui"
-    ln "$home/.local/bin/srelens-tui" "$home/.local/bin/srelens-tui.other"
-    chown tester "$home/.local/bin/srelens-tui" 2>/dev/null || true
+    printf '#!/bin/sh\necho OLD COPY\n' > "$home/.local/bin/srectl"
+    chmod 0755 "$home/.local/bin/srectl"
+    ln "$home/.local/bin/srectl" "$home/.local/bin/srectl.other"
+    chown tester "$home/.local/bin/srectl" 2>/dev/null || true
     out="$(install_into "$home")" && rc=0 || rc=$?
     check "a hard-linked binary is refused" "hard links" "$out" "$rc" 1
-    if grep -q "OLD COPY" "$home/.local/bin/srelens-tui" 2>/dev/null &&
-        [ "$(stat -c %h "$home/.local/bin/srelens-tui" 2>/dev/null)" = "2" ]; then
+    if grep -q "OLD COPY" "$home/.local/bin/srectl" 2>/dev/null &&
+        [ "$(stat -c %h "$home/.local/bin/srectl" 2>/dev/null)" = "2" ]; then
         ok "and both names still share the old inode"
     else
         no "the hard-linked binary was touched"
@@ -695,7 +695,7 @@ if [ "$made_user" = "tester" ]; then
     # command substitution, so the install printed Installed and exited 0.
     home="$work/homes/dir-dest"
     new_home "$home"
-    mkdir -p "$home/.local/bin/srelens-tui"
+    mkdir -p "$home/.local/bin/srectl"
     out="$(install_into "$home")" && rc=0 || rc=$?
     check "a directory where the binary goes is refused" "is a directory" "$out" "$rc" 1
     case "$out" in
@@ -718,7 +718,7 @@ if [ "$made_user" = "tester" ] && can_shape_dest; then
     home="$work/homes/fallback"
     new_home "$home"
     out="$(install_into "$home")" && rc=0 || rc=$?
-    check "an unsafe /usr/local/bin falls back rather than refusing" "Installed: $home/.local/bin/srelens-tui" "$out" "$rc" 0
+    check "an unsafe /usr/local/bin falls back rather than refusing" "Installed: $home/.local/bin/srectl" "$out" "$rc" 0
     reset_dest
 else
     echo "  skip  not root in a container: cannot make /usr/local/bin unsafe"
@@ -736,7 +736,7 @@ if [ "$made_user" = "tester" ]; then
     chmod 0775 "$home/.local/bin"
     out="$(install_into "$home")" && rc=0 || rc=$?
     check "a group-writable destination is refused" "group-writable" "$out" "$rc" 1
-    if [ -e "$home/.local/bin/srelens-tui" ]; then
+    if [ -e "$home/.local/bin/srectl" ]; then
         no "it installed into the group-writable directory anyway"
     else
         ok "nothing was installed there"
@@ -837,7 +837,7 @@ EOF
         chmod -R a+rx "$blind"
         out="$(install_into "$home" "PATH=$blind")" && rc=0 || rc=$?
         check "an ls that cannot report ACLs refuses rather than guessing" "cannot tell whether" "$out" "$rc" 1
-        if [ -e "$home/.local/bin/srelens-tui" ]; then
+        if [ -e "$home/.local/bin/srectl" ]; then
             no "it installed without being able to see the ACLs"
         else
             ok "nothing was installed while ACLs were unreadable"
@@ -856,10 +856,10 @@ dest="$default_dest"
 bad="$work/untrusted-tmp"
 mkdir -p "$bad"
 chmod 0777 "$bad"
-rm -f "$dest/srelens-tui"
+rm -f "$dest/srectl"
 out="$(TMPDIR="$bad" sh "$script" --version "$version" 2>&1)" && rc=0 || rc=$?
 check "an untrusted TMPDIR is refused" "writable by other users" "$out" "$rc" 1
-if [ -e "$dest/srelens-tui" ]; then
+if [ -e "$dest/srectl" ]; then
     no "it installed with the working tree in an untrusted place"
 else
     ok "nothing was installed from an untrusted working tree"
@@ -895,12 +895,12 @@ if [ "$(id -u)" = "0" ] && command -v mount >/dev/null 2>&1; then
         # 4700, not 0700: the rollback must put back the permissions and
         # drop the set-ID bit, never reproduce it on a file this script
         # did not write.
-        chmod 4700 "$dest/srelens-tui" 2>/dev/null || true
+        chmod 4700 "$dest/srectl" 2>/dev/null || true
         bad="$work/bad"
         mkdir -p "$bad"
-        printf 'this is not a binary\n' > "$bad/srelens-tui"
+        printf 'this is not a binary\n' > "$bad/srectl"
         printf 'nothing here either\n' > "$bad/LICENSE"
-        badarchive="srelens-tui-$version-$host_target.tar.gz"
+        badarchive="srectl-$version-$host_target.tar.gz"
         (cd "$bad" && tar -czf "$work/fixtures/$badarchive.bad" .)
         badsum="$(sha256sum "$work/fixtures/$badarchive.bad" | cut -d" " -f1)"
         printf '%s  %s\n' "$badsum" "$badarchive" > "$work/fixtures/BADSUMS.txt"
@@ -926,12 +926,12 @@ EOF
         out="$(TMPDIR="$noexec" PATH="$work/fake:$PATH" sh "$script" --version "$version" 2>&1)" && rc=0 || rc=$?
         check "a binary that will not run is rejected after install" "does not run" "$out" "$rc" 1
         check "and the previous copy is put back" "put back" "$out" "$rc" 1
-        if [ -x "$dest/srelens-tui" ] && "$dest/srelens-tui" --version >/dev/null 2>&1; then
+        if [ -x "$dest/srectl" ] && "$dest/srectl" --version >/dev/null 2>&1; then
             ok "the working copy survived a failed update"
         else
             no "the working copy was lost"
         fi
-        restored_mode="$(stat -c %a "$dest/srelens-tui" 2>/dev/null)" || restored_mode="?"
+        restored_mode="$(stat -c %a "$dest/srectl" 2>/dev/null)" || restored_mode="?"
         if [ "$restored_mode" = "700" ]; then
             ok "and came back 700: permissions kept, set-ID bit dropped"
         else
@@ -972,10 +972,10 @@ if [ "$made_user" = "tester" ]; then
     wrong="$work/wrong"
     rm -rf "$wrong"
     mkdir -p "$wrong"
-    printf '#!/bin/sh\necho "srelens-tui 9.9.9"\n' > "$wrong/srelens-tui"
-    chmod 0755 "$wrong/srelens-tui"
+    printf '#!/bin/sh\necho "srectl 9.9.9"\n' > "$wrong/srectl"
+    chmod 0755 "$wrong/srectl"
     printf 'nothing\n' > "$wrong/LICENSE"
-    wrongarchive="srelens-tui-$version-$host_target.tar.gz"
+    wrongarchive="srectl-$version-$host_target.tar.gz"
     (cd "$wrong" && tar -czf "$work/fixtures/$wrongarchive.wrong" .)
     wrongsum="$(sha256sum "$work/fixtures/$wrongarchive.wrong" | cut -d' ' -f1)"
     printf '%s  %s\n' "$wrongsum" "$wrongarchive" > "$work/fixtures/WRONGSUMS.txt"
@@ -1001,7 +1001,7 @@ EOF
     new_home "$home"
     out="$(install_into "$home" "PATH=$work/fake:$PATH")" && rc=0 || rc=$?
     check "a binary reporting another version is refused" "not the $version that was asked for" "$out" "$rc" 1
-    if [ -e "$home/.local/bin/srelens-tui" ]; then
+    if [ -e "$home/.local/bin/srectl" ]; then
         no "the wrong-version binary was left installed"
     else
         ok "and it is not left behind"
@@ -1011,7 +1011,7 @@ EOF
     # so a substring match accepts precisely the stale build this is for.
     # %s so the version really expands: inside single quotes it would not,
     # and the case would pass for the wrong reason.
-    printf '#!/bin/sh\necho "srelens-tui %s0"\n' "$version" > "$wrong/srelens-tui"
+    printf '#!/bin/sh\necho "srectl %s0"\n' "$version" > "$wrong/srectl"
     (cd "$wrong" && tar -czf "$work/fixtures/$wrongarchive.wrong" .)
     wrongsum="$(sha256sum "$work/fixtures/$wrongarchive.wrong" | cut -d' ' -f1)"
     printf '%s  %s\n' "$wrongsum" "$wrongarchive" > "$work/fixtures/WRONGSUMS.txt"
@@ -1027,20 +1027,20 @@ EOF
     cat > "$work/fake/mv" <<EOF
 #!/bin/sh
 for a in \$@; do
-  case "\$a" in *.srelens-tui.backup.*) exit 1 ;; esac
+  case "\$a" in *.srectl.backup.*) exit 1 ;; esac
 done
 exec /bin/mv "\$@"
 EOF
     chmod +x "$work/fake/mv"
     home="$work/homes/rollback-fails"
     new_home "$home"
-    printf '#!/bin/sh\necho OLD COPY\n' > "$home/.local/bin/srelens-tui"
-    chmod 0755 "$home/.local/bin/srelens-tui"
-    chown tester "$home/.local/bin/srelens-tui" 2>/dev/null || true
+    printf '#!/bin/sh\necho OLD COPY\n' > "$home/.local/bin/srectl"
+    chmod 0755 "$home/.local/bin/srectl"
+    chown tester "$home/.local/bin/srectl" 2>/dev/null || true
     out="$(install_into "$home" "PATH=$work/fake:$PATH")" && rc=0 || rc=$?
     check "a rollback that fails says so" "could NOT be put back" "$out" "$rc" 1
-    check "and names where the copy still is" ".srelens-tui.backup." "$out" "$rc" 1
-    if [ -n "$(find "$home/.local/bin" -name '.srelens-tui.backup.*' 2>/dev/null)" ]; then
+    check "and names where the copy still is" ".srectl.backup." "$out" "$rc" 1
+    if [ -n "$(find "$home/.local/bin" -name '.srectl.backup.*' 2>/dev/null)" ]; then
         ok "the only copy of the previous binary is kept"
     else
         no "the previous binary was destroyed by a failed rollback"
@@ -1057,7 +1057,7 @@ EOF
     cat > "$work/fake/rm" <<EOF
 #!/bin/sh
 for a in \$@; do
-  case "\$a" in */srelens-tui) exit 1 ;; esac
+  case "\$a" in */srectl) exit 1 ;; esac
 done
 exec /bin/rm "\$@"
 EOF
@@ -1066,7 +1066,7 @@ EOF
     new_home "$home"
     out="$(install_into "$home" "PATH=$work/fake:$PATH")" && rc=0 || rc=$?
     check "a rejected first install that cannot be removed says so" "could NOT be removed" "$out" "$rc" 1
-    check "and names where it is still installed" "$home/.local/bin/srelens-tui" "$out" "$rc" 1
+    check "and names where it is still installed" "$home/.local/bin/srectl" "$out" "$rc" 1
     rm -f "$work/fake/rm"
 
     # Metadata the rollback cannot carry. The copy takes bytes, mode, owner
@@ -1075,9 +1075,9 @@ EOF
     if command -v setcap >/dev/null 2>&1; then
         home="$work/homes/capped"
         new_home "$home"
-        cp /bin/true "$home/.local/bin/srelens-tui"
-        chown tester "$home/.local/bin/srelens-tui" 2>/dev/null || true
-        if setcap cap_net_raw+ep "$home/.local/bin/srelens-tui" 2>/dev/null; then
+        cp /bin/true "$home/.local/bin/srectl"
+        chown tester "$home/.local/bin/srectl" 2>/dev/null || true
+        if setcap cap_net_raw+ep "$home/.local/bin/srectl" 2>/dev/null; then
             out="$(install_into "$home")" && rc=0 || rc=$?
             check "a binary with a file capability is not silently replaced" "security.capability" "$out" "$rc" 1
         else
@@ -1134,12 +1134,12 @@ EOF
         chmod -R a+rx "$blind_bad"
         home="$work/homes/blind-attr-rollback"
         new_home "$home"
-        printf '#!/bin/sh\necho OLD COPY\n' > "$home/.local/bin/srelens-tui"
-        chmod 0755 "$home/.local/bin/srelens-tui"
-        chown tester "$home/.local/bin/srelens-tui" 2>/dev/null || true
+        printf '#!/bin/sh\necho OLD COPY\n' > "$home/.local/bin/srectl"
+        chmod 0755 "$home/.local/bin/srectl"
+        chown tester "$home/.local/bin/srectl" 2>/dev/null || true
         out="$(install_into "$home" "PATH=$blind_bad")" && rc=0 || rc=$?
         check "a rolled-back update without getfattr does not claim the attributes came back" "put back -- without any extended attributes" "$out" "$rc" 1
-        if grep -q "OLD COPY" "$home/.local/bin/srelens-tui" 2>/dev/null; then
+        if grep -q "OLD COPY" "$home/.local/bin/srectl" 2>/dev/null; then
             ok "and the previous copy itself is back"
         else
             no "the previous copy did not come back"
@@ -1150,8 +1150,8 @@ EOF
             mkdir -p "$root_home/.local/bin"
             printf '#!/bin/sh
 echo OLD
-' > "$root_home/.local/bin/srelens-tui"
-            chmod 0755 "$root_home/.local/bin/srelens-tui"
+' > "$root_home/.local/bin/srectl"
+            chmod 0755 "$root_home/.local/bin/srectl"
             out="$(PATH="$blind_attr" HOME="$root_home" sh "$script" --version "$version" 2>&1)" && rc=0 || rc=$?
             check "a ROOT update refuses when it cannot check for xattrs" "getfattr is not installed" "$out" "$rc" 1
         else
@@ -1177,29 +1177,29 @@ echo "interrupted mid-update"
 if [ "$made_user" = "tester" ]; then
     home="$work/homes/interrupted"
     new_home "$home"
-    printf '#!/bin/sh\necho OLD COPY\n' > "$home/.local/bin/srelens-tui"
-    chmod 0755 "$home/.local/bin/srelens-tui"
-    chown tester "$home/.local/bin/srelens-tui" 2>/dev/null || true
+    printf '#!/bin/sh\necho OLD COPY\n' > "$home/.local/bin/srectl"
+    chmod 0755 "$home/.local/bin/srectl"
+    chown tester "$home/.local/bin/srectl" 2>/dev/null || true
     chmod 0711 "$work" 2>/dev/null || true
     chmod 0644 "$script" 2>/dev/null || true
     su tester -c "HOME='$home' sh '$script' --version '$version'" >"$work/int.log" 2>&1 &
     kill_pid=$!
     tries=0
     while [ "$tries" -lt 300 ]; do
-        grep -q "Installing srelens-tui" "$work/int.log" 2>/dev/null && break
+        grep -q "Installing srectl" "$work/int.log" 2>/dev/null && break
         tries=$((tries + 1))
         sleep 0.05
     done
     kill -TERM "$kill_pid" 2>/dev/null || true
     wait "$kill_pid" 2>/dev/null || true
-    if grep -q "OLD COPY" "$home/.local/bin/srelens-tui" 2>/dev/null; then
+    if grep -q "OLD COPY" "$home/.local/bin/srectl" 2>/dev/null; then
         ok "an interrupted update leaves the previous binary in place"
-    elif [ -x "$home/.local/bin/srelens-tui" ]; then
+    elif [ -x "$home/.local/bin/srectl" ]; then
         ok "the update completed before the signal landed, nothing to undo"
     else
         no "an interrupted update left no binary at all"
     fi
-    if [ -z "$(find "$home/.local/bin" -name '.srelens-tui.*' 2>/dev/null)" ]; then
+    if [ -z "$(find "$home/.local/bin" -name '.srectl.*' 2>/dev/null)" ]; then
         ok "and nothing hidden behind it"
     else
         no "an interrupted update left hidden files in the install directory"
@@ -1211,9 +1211,9 @@ if [ "$made_user" = "tester" ]; then
     # is not relied on to relay HUP.
     home="$work/homes/interrupted-hup"
     new_home "$home"
-    printf '#!/bin/sh\necho OLD COPY\n' > "$home/.local/bin/srelens-tui"
-    chmod 0755 "$home/.local/bin/srelens-tui"
-    chown tester "$home/.local/bin/srelens-tui" 2>/dev/null || true
+    printf '#!/bin/sh\necho OLD COPY\n' > "$home/.local/bin/srectl"
+    chmod 0755 "$home/.local/bin/srectl"
+    chown tester "$home/.local/bin/srectl" 2>/dev/null || true
     pidfile="$work/hup.pid"
     : > "$pidfile"
     chown tester "$pidfile" 2>/dev/null || true
@@ -1221,21 +1221,21 @@ if [ "$made_user" = "tester" ]; then
     kill_pid=$!
     tries=0
     while [ "$tries" -lt 300 ]; do
-        grep -q "Installing srelens-tui" "$work/hup.log" 2>/dev/null && break
+        grep -q "Installing srectl" "$work/hup.log" 2>/dev/null && break
         tries=$((tries + 1))
         sleep 0.05
     done
     hup_pid="$(cat "$pidfile" 2>/dev/null)"
     kill -HUP "${hup_pid:-$kill_pid}" 2>/dev/null || true
     wait "$kill_pid" 2>/dev/null || true
-    if grep -q "OLD COPY" "$home/.local/bin/srelens-tui" 2>/dev/null; then
+    if grep -q "OLD COPY" "$home/.local/bin/srectl" 2>/dev/null; then
         ok "a hung-up update leaves the previous binary in place"
-    elif [ -x "$home/.local/bin/srelens-tui" ]; then
+    elif [ -x "$home/.local/bin/srectl" ]; then
         ok "the update completed before the hangup landed, nothing to undo"
     else
         no "a hung-up update left no binary at all"
     fi
-    if [ -z "$(find "$home/.local/bin" -name '.srelens-tui.*' 2>/dev/null)" ]; then
+    if [ -z "$(find "$home/.local/bin" -name '.srectl.*' 2>/dev/null)" ]; then
         ok "and nothing hidden behind it"
     else
         no "a hung-up update left hidden files in the install directory"
@@ -1251,14 +1251,14 @@ if [ "$made_user" = "tester" ]; then
     kill_pid=$!
     tries=0
     while [ "$tries" -lt 300 ]; do
-        grep -q "Installing srelens-tui" "$work/int2.log" 2>/dev/null && break
+        grep -q "Installing srectl" "$work/int2.log" 2>/dev/null && break
         tries=$((tries + 1))
         sleep 0.05
     done
     kill -TERM "$kill_pid" 2>/dev/null || true
     wait "$kill_pid" 2>/dev/null || true
-    if [ -e "$home/.local/bin/srelens-tui" ]; then
-        if "$home/.local/bin/srelens-tui" --version >/dev/null 2>&1; then
+    if [ -e "$home/.local/bin/srectl" ]; then
+        if "$home/.local/bin/srectl" --version >/dev/null 2>&1; then
             ok "the first install completed before the signal landed"
         else
             no "an interrupted first install left an unvalidated binary behind"
@@ -1305,7 +1305,7 @@ if command -v shasum >/dev/null 2>&1; then
         dest="$default_dest"
         out="$(PATH="$limited" sh "$script" --version "$version" 2>&1)" && rc=0 || rc=$?
         check "shasum computes SHA-256, not SHA-1" "Checksum verified:" "$out" "$rc" 0
-        if [ -x "$dest/srelens-tui" ]; then
+        if [ -x "$dest/srectl" ]; then
             ok "the binary installs with only shasum available"
         else
             no "nothing was installed with only shasum available"

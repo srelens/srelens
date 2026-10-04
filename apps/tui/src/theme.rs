@@ -511,7 +511,7 @@ pub static ALL_THEMES: &[ThemePalette] = &[
 
 static ACTIVE_THEME_IDX: AtomicUsize = AtomicUsize::new(0);
 
-/// SRElens TUI Theme palette and dynamic styling engine
+/// srectl theme palette and dynamic styling engine
 pub struct Theme;
 
 impl Theme {

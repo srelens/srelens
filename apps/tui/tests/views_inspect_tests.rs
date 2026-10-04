@@ -17,16 +17,16 @@ use ratatui::{Frame, Terminal};
 use srelens_kube::node_inspector::{
     NodeConditionInfo, NodeInspectorDetails, NodePodItem, NodeTaintInfo,
 };
-use srelens_tui::ai_config::{AiProvider, AiSettings};
-use srelens_tui::theme::Theme;
-use srelens_tui::views::node_inspector_view::{render_node_inspector_view, NodeInspectorState};
-use srelens_tui::views::overview_view::{
+use srectl::ai_config::{AiProvider, AiSettings};
+use srectl::theme::Theme;
+use srectl::views::node_inspector_view::{render_node_inspector_view, NodeInspectorState};
+use srectl::views::overview_view::{
     render_overview_view, ClusterOverviewData, OverviewViewState,
 };
-use srelens_tui::views::settings_view::{render_settings_view, SettingField, SettingsViewState};
-use srelens_tui::views::tui_config_view::{render_tui_config_view, TuiConfigViewState};
-use srelens_tui::views::yaml_view::{render_yaml_view, YamlViewState};
-use srelens_tui::{CommandPopupDensity, TuiConfig};
+use srectl::views::settings_view::{render_settings_view, SettingField, SettingsViewState};
+use srectl::views::tui_config_view::{render_tui_config_view, TuiConfigViewState};
+use srectl::views::yaml_view::{render_yaml_view, YamlViewState};
+use srectl::{CommandPopupDensity, TuiConfig};
 
 /// Render one frame and hand back the raw buffer, for the few assertions that
 /// need a cell's style rather than its text.
@@ -2363,7 +2363,7 @@ fn tui_config_view_renders_cards_and_live_preview_at_wide_and_narrow() {
         "shows banner preview title"
     );
     assert!(
-        banner_full.contains("Welcome to SRElens"),
+        banner_full.contains("Welcome to srectl"),
         "shows banner contents in preview"
     );
 

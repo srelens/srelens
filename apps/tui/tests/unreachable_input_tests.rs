@@ -4,7 +4,7 @@ mod common;
 use std::time::Duration;
 
 use crossterm::event::KeyCode;
-use srelens_tui::{app::App, event::AppEvent, ui::Modal};
+use srectl::{app::App, event::AppEvent, ui::Modal};
 
 async fn recovery_controls_remain_responsive(stalled: bool) {
     // Dropping the listener models a deleted cluster. Keeping it open without

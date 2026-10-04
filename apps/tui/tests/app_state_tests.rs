@@ -15,27 +15,27 @@ use srelens_kube::metrics::MetricSample;
 use srelens_kube::node_inspector::{
     NodeConditionInfo, NodeInspectorDetails, NodePodItem, NodeTaintInfo,
 };
-use srelens_tui::ai_skills::CavemanLevel;
-use srelens_tui::app::{
+use srectl::ai_skills::CavemanLevel;
+use srectl::app::{
     extract_tool_call_completed_info, extract_tool_call_start_info, format_event_summary,
     get_clipboard_text, parse_involved_object, parse_ready_ratio, ActiveView, App, SuspendAction,
 };
-use srelens_tui::commands::{CommandTarget, CrdMeta, PrinterColumn, ResourceKind};
-use srelens_tui::event::AppEvent;
-use srelens_tui::ui::dialogs::{QuickActionId, QuickActionItem};
-use srelens_tui::ui::{ContainerAction, InputMode, Modal};
-use srelens_tui::views::describe_view::DescribeViewState;
-use srelens_tui::views::helm_view::{HelmReleaseItem, HelmViewState};
-use srelens_tui::views::logs_view::LogsViewState;
-use srelens_tui::views::metrics_panel_view::MetricsPanelState;
-use srelens_tui::views::node_inspector_view::NodeInspectorState;
-use srelens_tui::views::overview_view::{ClusterOverviewData, OverviewViewState};
-use srelens_tui::views::port_forward_view::{PortForwardEntry, PortForwardViewState};
-use srelens_tui::views::resource_table::ResourceTableState;
-use srelens_tui::views::toolbox_view::{ToolStatusItem, ToolboxViewState};
-use srelens_tui::views::tree_view::TreeViewState;
-use srelens_tui::views::yaml_view::YamlViewState;
-use srelens_tui::{AiProvider, AiSettings, DeepLink};
+use srectl::commands::{CommandTarget, CrdMeta, PrinterColumn, ResourceKind};
+use srectl::event::AppEvent;
+use srectl::ui::dialogs::{QuickActionId, QuickActionItem};
+use srectl::ui::{ContainerAction, InputMode, Modal};
+use srectl::views::describe_view::DescribeViewState;
+use srectl::views::helm_view::{HelmReleaseItem, HelmViewState};
+use srectl::views::logs_view::LogsViewState;
+use srectl::views::metrics_panel_view::MetricsPanelState;
+use srectl::views::node_inspector_view::NodeInspectorState;
+use srectl::views::overview_view::{ClusterOverviewData, OverviewViewState};
+use srectl::views::port_forward_view::{PortForwardEntry, PortForwardViewState};
+use srectl::views::resource_table::ResourceTableState;
+use srectl::views::toolbox_view::{ToolStatusItem, ToolboxViewState};
+use srectl::views::tree_view::TreeViewState;
+use srectl::views::yaml_view::YamlViewState;
+use srectl::{AiProvider, AiSettings, DeepLink};
 use tokio::sync::mpsc::UnboundedReceiver;
 
 // ---------------------------------------------------------------------------
@@ -1080,7 +1080,7 @@ async fn every_modal_variant_renders_over_the_view() {
         json!({ "reason": "Pulled", "type": "Normal" }),
     ];
     app.modal = Some(Modal::ReasonRail {
-        tallies: srelens_tui::views::reason_rail::tally_event_reasons(&events),
+        tallies: srectl::views::reason_rail::tally_event_reasons(&events),
         selected_idx: 0,
         active_filter: Some("BackOff".into()),
     });
@@ -2194,7 +2194,7 @@ async fn settings_keys_navigate_toggle_edit_and_save() {
     app.handle_key_event(common::ch('q')).await;
     assert!(matches!(app.active_view, ActiveView::Table(_)));
     app.active_view =
-        ActiveView::Settings(srelens_tui::views::settings_view::SettingsViewState::new());
+        ActiveView::Settings(srectl::views::settings_view::SettingsViewState::new());
     app.nav_stack.clear();
     app.handle_key_event(common::key(KeyCode::Esc)).await;
     assert!(matches!(&app.active_view, ActiveView::Table(t) if t.kind == ResourceKind::Pods));
@@ -2498,7 +2498,7 @@ async fn pasted_text_lands_in_the_active_input() {
     app.handle_paste("multi\nline".into());
     assert_eq!(app.assistant_state.input, "multi line");
 
-    let mut settings = srelens_tui::views::settings_view::SettingsViewState::new();
+    let mut settings = srectl::views::settings_view::SettingsViewState::new();
     settings.is_editing = true;
     app.active_view = ActiveView::Settings(settings);
     app.handle_paste("sk-\nabc".into());

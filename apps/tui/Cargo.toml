@@ -1,16 +1,16 @@
 [package]
-name = "srelens-tui"
+name = "srectl"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "srelens Kubernetes terminal user interface and CLI"
+description = "srectl Kubernetes terminal user interface and CLI"
 
 [lib]
-name = "srelens_tui"
+name = "srectl"
 path = "src/lib.rs"
 
 [[bin]]
-name = "srelens-tui"
+name = "srectl"
 path = "src/main.rs"
 
 [dependencies]

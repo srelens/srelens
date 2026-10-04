@@ -1,4 +1,4 @@
-//! In-process autonomous SRE agent for SRElens TUI.
+//! In-process autonomous SRE agent for srectl.
 //!
 //! Drives srelens's MCP tools directly in-process via `srelens_mcp::stdio::handle_request`
 //! and runs the multi-turn agentic loop (`srelens_llm::agent_loop::run`), emitting streaming

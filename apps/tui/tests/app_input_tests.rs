@@ -14,19 +14,19 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
 
 use srelens_kube::contexts::ContextDto;
-use srelens_tui::app::{ActiveView, App, SuspendAction};
-use srelens_tui::commands::{
+use srectl::app::{ActiveView, App, SuspendAction};
+use srectl::commands::{
     command_suggestions_with_crds, CommandTarget, CrdMeta, PrinterColumn, ResourceKind,
 };
-use srelens_tui::event::AppEvent;
-use srelens_tui::ui::{ContainerAction, InputMode, Modal};
-use srelens_tui::views::metrics_panel_view::MetricsTimeRange;
-use srelens_tui::views::overview_view::ClusterOverviewData;
-use srelens_tui::views::resource_table::WorkloadSegment;
-use srelens_tui::views::{
+use srectl::event::AppEvent;
+use srectl::ui::{ContainerAction, InputMode, Modal};
+use srectl::views::metrics_panel_view::MetricsTimeRange;
+use srectl::views::overview_view::ClusterOverviewData;
+use srectl::views::resource_table::WorkloadSegment;
+use srectl::views::{
     DescribeViewState, LogsViewState, NodeInspectorState, ResourceTableState, YamlViewState,
 };
-use srelens_tui::CommandPopupDensity;
+use srectl::CommandPopupDensity;
 
 use common::{ch, ctrl, key, shift, type_str};
 
@@ -378,7 +378,7 @@ async fn tick_schedules_metric_refreshes_for_pod_and_node_views_and_modals() {
 
     app.active_view = ActiveView::Assistant;
     app.modal = Some(Modal::MetricsTimeline(
-        srelens_tui::views::MetricsPanelState::new(
+        srectl::views::MetricsPanelState::new(
             "Pod".into(),
             "pod-a".into(),
             Some("default".into()),
@@ -392,7 +392,7 @@ async fn tick_schedules_metric_refreshes_for_pod_and_node_views_and_modals() {
     );
 
     app.modal = Some(Modal::MetricsTimeline(
-        srelens_tui::views::MetricsPanelState::new("Node".into(), "node-1".into(), None, vec![]),
+        srectl::views::MetricsPanelState::new("Node".into(), "node-1".into(), None, vec![]),
     ));
     app.handle_tick();
     assert_eq!(app.node_metrics_tick_counter, 3);
@@ -410,8 +410,8 @@ async fn tick_schedules_metric_refreshes_for_pod_and_node_views_and_modals() {
 async fn tick_schedules_helm_refreshes_and_keys_trigger_manual_refresh() {
     let (mut app, _rx) = common::app().await;
 
-    let mut helm_state = srelens_tui::views::helm_view::HelmViewState::new();
-    let release_1 = srelens_tui::views::helm_view::HelmReleaseItem {
+    let mut helm_state = srectl::views::helm_view::HelmViewState::new();
+    let release_1 = srectl::views::helm_view::HelmReleaseItem {
         name: "nginx".into(),
         namespace: "default".into(),
         revision: 1,
@@ -497,7 +497,7 @@ async fn tick_schedules_helm_refreshes_and_keys_trigger_manual_refresh() {
     );
 
     // 5. Manual refresh keys: 'R' (Shift+R) and Ctrl+r trigger immediate refresh with toast
-    app.active_view = ActiveView::Helm(srelens_tui::views::helm_view::HelmViewState::new());
+    app.active_view = ActiveView::Helm(srectl::views::helm_view::HelmViewState::new());
     app.handle_key_event(common::ch('R')).await;
     assert!(app.helm_refreshing);
     assert!(app
@@ -536,7 +536,7 @@ async fn tick_schedules_helm_refreshes_and_keys_trigger_manual_refresh() {
 #[tokio::test]
 async fn failed_helm_refresh_keeps_rows_stale_and_blocks_rollback_until_success() {
     let (mut app, _rx) = common::app().await;
-    app.active_view = ActiveView::Helm(srelens_tui::views::helm_view::HelmViewState::new());
+    app.active_view = ActiveView::Helm(srectl::views::helm_view::HelmViewState::new());
     let release = srelens_kube::helm::HelmReleaseSummary {
         name: "web".into(),
         namespace: "default".into(),
@@ -581,7 +581,7 @@ async fn failed_helm_refresh_keeps_rows_stale_and_blocks_rollback_until_success(
 #[tokio::test]
 async fn helm_refresh_in_flight_survives_namespace_switch_and_refetches_new_target() {
     let (mut app, _rx) = common::app().await;
-    app.active_view = ActiveView::Helm(srelens_tui::views::helm_view::HelmViewState::new());
+    app.active_view = ActiveView::Helm(srectl::views::helm_view::HelmViewState::new());
     app.active_context = "test-cluster".into();
     app.active_namespace = "default".into();
 
@@ -652,7 +652,7 @@ async fn pod_metrics_update_fills_the_table_the_cache_and_an_open_timeline() {
         pods(&["pod-a"]),
     );
     app.modal = Some(Modal::MetricsTimeline(
-        srelens_tui::views::MetricsPanelState::new(
+        srectl::views::MetricsPanelState::new(
             "Pod".into(),
             "pod-a".into(),
             Some("default".into()),
@@ -760,7 +760,7 @@ async fn node_metrics_update_feeds_the_node_inspector_and_an_open_timeline() {
 
     app.active_view = ActiveView::Assistant;
     app.modal = Some(Modal::MetricsTimeline(
-        srelens_tui::views::MetricsPanelState::new("Node".into(), "node-1".into(), None, vec![]),
+        srectl::views::MetricsPanelState::new("Node".into(), "node-1".into(), None, vec![]),
     ));
     app.handle_node_metrics_update(&payload);
     match &app.modal {
@@ -1919,7 +1919,7 @@ async fn switch_context_while_in_logs_stops_stream() {
 #[tokio::test]
 async fn switch_context_while_in_argo_view_handles_stale_results_and_refreshes() {
     let (mut app, _rx) = common::app().await;
-    let argo_state = srelens_tui::views::argo_view::ArgoViewState::new();
+    let argo_state = srectl::views::argo_view::ArgoViewState::new();
     app.active_view = ActiveView::Argo(argo_state);
     app.active_context = "cluster-1".to_string();
     app.argo_refreshing = true; // In-flight refresh for cluster-1
@@ -2053,7 +2053,7 @@ async fn argo_view_prioritizes_local_argocd_when_installed_even_if_hub_context_i
     app.active_context = "cluster-local".to_string();
     app.tui_config.argo_hub_context = Some("tools-hub".to_string());
 
-    let argo_state = srelens_tui::views::argo_view::ArgoViewState::new();
+    let argo_state = srectl::views::argo_view::ArgoViewState::new();
     app.active_view = ActiveView::Argo(argo_state);
 
     let local_app = srelens_kube::argo::ArgoApplication {
@@ -2191,7 +2191,7 @@ async fn argo_view_prioritizes_local_argocd_when_installed_even_if_hub_context_i
 async fn test_argo_app_handlers_and_interactions() {
     let (mut app, _rx) = common::app().await;
     app.active_context = "test-cluster".to_string();
-    app.active_view = ActiveView::Argo(srelens_tui::views::argo_view::ArgoViewState::new());
+    app.active_view = ActiveView::Argo(srectl::views::argo_view::ArgoViewState::new());
 
     // 1. Handle applications error result
     app.handle_argo_applications_result(
@@ -2292,7 +2292,7 @@ async fn test_argo_app_handlers_and_interactions() {
     if let ActiveView::ArgoDetail(ref detail) = app.active_view {
         assert_eq!(
             detail.active_tab,
-            srelens_tui::views::argo_detail_view::ArgoDetailTab::ManagedResources
+            srectl::views::argo_detail_view::ArgoDetailTab::ManagedResources
         );
     }
 
@@ -2300,7 +2300,7 @@ async fn test_argo_app_handlers_and_interactions() {
     if let ActiveView::ArgoDetail(ref detail) = app.active_view {
         assert_eq!(
             detail.active_tab,
-            srelens_tui::views::argo_detail_view::ArgoDetailTab::Drift
+            srectl::views::argo_detail_view::ArgoDetailTab::Drift
         );
     }
 
@@ -4076,7 +4076,7 @@ async fn non_pod_and_custom_resources_reject_pod_actions() {
 async fn helm_detail_manifest_search_and_navigation_input_flow() {
     let (mut app, _rx) = common::app().await;
     let mut detail_state =
-        srelens_tui::views::HelmDetailViewState::new("my-release".into(), "default".into());
+        srectl::views::HelmDetailViewState::new("my-release".into(), "default".into());
     detail_state.set_detail(srelens_kube::helm::HelmReleaseDetail {
         name: "my-release".into(),
         namespace: "default".into(),
@@ -4093,14 +4093,14 @@ async fn helm_detail_manifest_search_and_navigation_input_flow() {
         notes: "".into(),
         history: vec![],
     });
-    detail_state.set_tab(srelens_tui::views::HelmDetailTab::Manifest);
-    app.active_view = srelens_tui::app::ActiveView::HelmDetail(detail_state);
+    detail_state.set_tab(srectl::views::HelmDetailTab::Manifest);
+    app.active_view = srectl::app::ActiveView::HelmDetail(detail_state);
 
     // 1. Press '/' to enter search mode
     press(&mut app, ch('/')).await;
     assert_eq!(
         app.input_mode,
-        srelens_tui::ui::statusbar::InputMode::Filter
+        srectl::ui::statusbar::InputMode::Filter
     );
 
     // 2. Type "token"
@@ -4108,7 +4108,7 @@ async fn helm_detail_manifest_search_and_navigation_input_flow() {
         press(&mut app, ch(c)).await;
     }
     assert_eq!(app.filter_buffer, "token");
-    if let srelens_tui::app::ActiveView::HelmDetail(ref detail) = app.active_view {
+    if let srectl::app::ActiveView::HelmDetail(ref detail) = app.active_view {
         assert_eq!(detail.search_query, "token");
         assert_eq!(detail.search_matches.len(), 2);
         assert_eq!(detail.current_match_idx, Some(0));
@@ -4121,13 +4121,13 @@ async fn helm_detail_manifest_search_and_navigation_input_flow() {
     press(&mut app, key(KeyCode::Enter)).await;
     assert_eq!(
         app.input_mode,
-        srelens_tui::ui::statusbar::InputMode::Normal
+        srectl::ui::statusbar::InputMode::Normal
     );
     assert_eq!(app.filter_buffer, "token");
 
     // 4. Press 'n' to go to next match
     press(&mut app, ch('n')).await;
-    if let srelens_tui::app::ActiveView::HelmDetail(ref detail) = app.active_view {
+    if let srectl::app::ActiveView::HelmDetail(ref detail) = app.active_view {
         assert_eq!(detail.current_match_idx, Some(1));
         assert_eq!(detail.scroll_offset, detail.search_matches[1]);
     } else {
@@ -4136,7 +4136,7 @@ async fn helm_detail_manifest_search_and_navigation_input_flow() {
 
     // 5. Press 'N' to go to previous match
     press(&mut app, ch('N')).await;
-    if let srelens_tui::app::ActiveView::HelmDetail(ref detail) = app.active_view {
+    if let srectl::app::ActiveView::HelmDetail(ref detail) = app.active_view {
         assert_eq!(detail.current_match_idx, Some(0));
         assert_eq!(detail.scroll_offset, detail.search_matches[0]);
     } else {
@@ -4146,7 +4146,7 @@ async fn helm_detail_manifest_search_and_navigation_input_flow() {
     // 6. Press Esc to clear filter
     press(&mut app, key(KeyCode::Esc)).await;
     assert!(app.filter_buffer.is_empty());
-    if let srelens_tui::app::ActiveView::HelmDetail(ref detail) = app.active_view {
+    if let srectl::app::ActiveView::HelmDetail(ref detail) = app.active_view {
         assert!(detail.search_query.is_empty());
         assert!(detail.search_matches.is_empty());
         assert!(detail.current_match_idx.is_none());
@@ -4160,7 +4160,7 @@ async fn config_command_opens_tui_config_view_and_keys_adjust_values() {
     let _config_guard = TUI_CONFIG_ENV_LOCK.lock().await;
     let temp = tempfile::tempdir().unwrap();
     let config_path = temp.path().join("tui.json");
-    std::env::set_var("SRELENS_TUI_CONFIG_PATH", &config_path);
+    std::env::set_var("SRECTL_CONFIG_PATH", &config_path);
 
     let (tx, _rx) = unbounded_channel();
     let mut app = App::new(
@@ -4282,7 +4282,7 @@ async fn config_command_opens_tui_config_view_and_keys_adjust_values() {
     press(&mut app, key(KeyCode::Esc)).await;
     assert!(matches!(app.active_view, ActiveView::Table(_)));
 
-    std::env::remove_var("SRELENS_TUI_CONFIG_PATH");
+    std::env::remove_var("SRECTL_CONFIG_PATH");
 }
 
 #[tokio::test]
@@ -4290,7 +4290,7 @@ async fn feature_banner_modal_interactive_navigation_toggle_and_jump() {
     let _config_guard = TUI_CONFIG_ENV_LOCK.lock().await;
     let tmp = tempfile::tempdir().unwrap();
     let config_file = tmp.path().join("tui.json");
-    std::env::set_var("SRELENS_TUI_CONFIG_PATH", &config_file);
+    std::env::set_var("SRECTL_CONFIG_PATH", &config_file);
 
     let (mut app, _rx) = common::app_with("fake-cluster", "default").await;
 
@@ -4378,7 +4378,7 @@ async fn feature_banner_modal_interactive_navigation_toggle_and_jump() {
         .unwrap()
         .0
         .contains("Update available: 0.99.0"));
-    assert!(app.toast.as_ref().unwrap().0.contains("srelens-tui update"));
+    assert!(app.toast.as_ref().unwrap().0.contains("srectl update"));
 
     // Press '9' keeps banner open and shows a toast
     press(&mut app, ch('9')).await;
@@ -4412,7 +4412,7 @@ async fn feature_banner_modal_interactive_navigation_toggle_and_jump() {
     press(&mut app, ch('i')).await;
     assert!(matches!(app.modal, Some(Modal::AddCluster { .. })));
 
-    std::env::remove_var("SRELENS_TUI_CONFIG_PATH");
+    std::env::remove_var("SRECTL_CONFIG_PATH");
 }
 
 #[tokio::test]
@@ -4627,7 +4627,7 @@ async fn node_inspector_press_b_jumps_to_bgp_dashboard() {
 async fn tui_config_hub_dialog_left_right_cursor_and_paste() {
     let tmp = tempfile::tempdir().unwrap();
     let cfg_path = tmp.path().join("tui.json");
-    std::env::set_var("SRELENS_TUI_CONFIG_PATH", cfg_path.to_str().unwrap());
+    std::env::set_var("SRECTL_CONFIG_PATH", cfg_path.to_str().unwrap());
 
     let (mut app, _rx) = common::app_with("fake-cluster", "default").await;
 
@@ -4702,14 +4702,14 @@ async fn tui_config_hub_dialog_left_right_cursor_and_paste() {
     }
     assert!(app.tui_config.argo_hub_context.is_some());
 
-    std::env::remove_var("SRELENS_TUI_CONFIG_PATH");
+    std::env::remove_var("SRECTL_CONFIG_PATH");
 }
 
 #[tokio::test]
 async fn argo_detail_view_managed_resources_enter_opens_describe_and_esc_returns() {
     let (mut app, _rx) = common::app_with("fake-cluster", "default").await;
 
-    let mut state = srelens_tui::views::argo_detail_view::ArgoDetailViewState::new(
+    let mut state = srectl::views::argo_detail_view::ArgoDetailViewState::new(
         "my-app".to_string(),
         "argocd".to_string(),
         None,
@@ -4743,7 +4743,7 @@ async fn argo_detail_view_managed_resources_enter_opens_describe_and_esc_returns
         },
     ];
     state.set_application(app_data);
-    state.active_tab = srelens_tui::views::argo_detail_view::ArgoDetailTab::ManagedResources;
+    state.active_tab = srectl::views::argo_detail_view::ArgoDetailTab::ManagedResources;
 
     // Verify selected_resource helper
     assert_eq!(state.selected_resource().unwrap().name, "data-cards-ui-app");
@@ -4807,7 +4807,7 @@ async fn argo_detail_view_managed_resources_enter_opens_describe_and_esc_returns
 
 #[tokio::test]
 async fn argo_detail_revision_history_renders_long_path_without_truncation() {
-    let mut state = srelens_tui::views::argo_detail_view::ArgoDetailViewState::new(
+    let mut state = srectl::views::argo_detail_view::ArgoDetailViewState::new(
         "my-app".to_string(),
         "argocd".to_string(),
         None,
@@ -4825,10 +4825,10 @@ async fn argo_detail_revision_history_renders_long_path_without_truncation() {
         path: long_path.to_string(),
     }];
     state.set_application(app_data);
-    state.active_tab = srelens_tui::views::argo_detail_view::ArgoDetailTab::RevisionHistory;
+    state.active_tab = srectl::views::argo_detail_view::ArgoDetailTab::RevisionHistory;
 
     let text = common::render_text(180, 25, |f| {
-        srelens_tui::views::argo_detail_view::render_argo_detail_view(f, f.area(), &state);
+        srectl::views::argo_detail_view::render_argo_detail_view(f, f.area(), &state);
     });
 
     assert!(
@@ -4842,7 +4842,7 @@ async fn argo_detail_revision_history_renders_long_path_without_truncation() {
 
 #[tokio::test]
 async fn argo_detail_managed_resources_renders_long_kind_without_truncation() {
-    let mut state = srelens_tui::views::argo_detail_view::ArgoDetailViewState::new(
+    let mut state = srectl::views::argo_detail_view::ArgoDetailViewState::new(
         "my-app".to_string(),
         "argocd".to_string(),
         None,
@@ -4863,10 +4863,10 @@ async fn argo_detail_managed_resources_renders_long_kind_without_truncation() {
         hook: None,
     }];
     state.set_application(app_data);
-    state.active_tab = srelens_tui::views::argo_detail_view::ArgoDetailTab::ManagedResources;
+    state.active_tab = srectl::views::argo_detail_view::ArgoDetailTab::ManagedResources;
 
     let text = common::render_text(180, 25, |f| {
-        srelens_tui::views::argo_detail_view::render_argo_detail_view(f, f.area(), &state);
+        srectl::views::argo_detail_view::render_argo_detail_view(f, f.area(), &state);
     });
 
     assert!(
@@ -4890,7 +4890,7 @@ async fn argo_detail_managed_resources_renders_long_kind_without_truncation() {
 async fn argo_view_x_opens_action_palette_with_ai_diagnose_and_actions() {
     let (mut app, _rx) = common::app_with("fake-cluster", "default").await;
 
-    let mut argo_state = srelens_tui::views::argo_view::ArgoViewState::new();
+    let mut argo_state = srectl::views::argo_view::ArgoViewState::new();
     let app_json = serde_json::json!({
         "metadata": {
             "name": "payment-processor",
@@ -4964,13 +4964,13 @@ async fn argo_view_x_opens_action_palette_with_ai_diagnose_and_actions() {
 
             // Check actions
             let action_ids: Vec<_> = actions.iter().map(|a| a.id).collect();
-            assert!(action_ids.contains(&srelens_tui::ui::dialogs::QuickActionId::AskAi));
+            assert!(action_ids.contains(&srectl::ui::dialogs::QuickActionId::AskAi));
             assert!(action_ids
-                .contains(&srelens_tui::ui::dialogs::QuickActionId::PlaybookArgoProgressing));
-            assert!(action_ids.contains(&srelens_tui::ui::dialogs::QuickActionId::ArgoDetails));
-            assert!(action_ids.contains(&srelens_tui::ui::dialogs::QuickActionId::ArgoSync));
-            assert!(action_ids.contains(&srelens_tui::ui::dialogs::QuickActionId::ArgoRefresh));
-            assert!(action_ids.contains(&srelens_tui::ui::dialogs::QuickActionId::ArgoOpenGit));
+                .contains(&srectl::ui::dialogs::QuickActionId::PlaybookArgoProgressing));
+            assert!(action_ids.contains(&srectl::ui::dialogs::QuickActionId::ArgoDetails));
+            assert!(action_ids.contains(&srectl::ui::dialogs::QuickActionId::ArgoSync));
+            assert!(action_ids.contains(&srectl::ui::dialogs::QuickActionId::ArgoRefresh));
+            assert!(action_ids.contains(&srectl::ui::dialogs::QuickActionId::ArgoOpenGit));
         }
         other => panic!("expected ActionPalette modal, got {:?}", other),
     }
@@ -5009,7 +5009,7 @@ async fn argo_view_x_opens_action_palette_with_ai_diagnose_and_actions() {
 async fn argo_view_x_playbook_argo_progressing_seeds_assistant() {
     let (mut app, _rx) = common::app_with("fake-cluster", "default").await;
 
-    let mut argo_state = srelens_tui::views::argo_view::ArgoViewState::new();
+    let mut argo_state = srectl::views::argo_view::ArgoViewState::new();
     let app_json = serde_json::json!({
         "metadata": {
             "name": "cart-checkout",
@@ -5068,7 +5068,7 @@ async fn argo_view_x_playbook_argo_progressing_seeds_assistant() {
 async fn argo_detail_view_x_opens_action_palette_for_resource_and_app() {
     let (mut app, _rx) = common::app_with("fake-cluster", "default").await;
 
-    let mut state = srelens_tui::views::argo_detail_view::ArgoDetailViewState::new(
+    let mut state = srectl::views::argo_detail_view::ArgoDetailViewState::new(
         "auth-service".to_string(),
         "argocd".to_string(),
         None,
@@ -5089,7 +5089,7 @@ async fn argo_detail_view_x_opens_action_palette_for_resource_and_app() {
         hook: None,
     }];
     state.set_application(app_data);
-    state.active_tab = srelens_tui::views::argo_detail_view::ArgoDetailTab::ManagedResources;
+    state.active_tab = srectl::views::argo_detail_view::ArgoDetailTab::ManagedResources;
 
     app.active_view = ActiveView::ArgoDetail(state);
 
@@ -5141,7 +5141,7 @@ async fn argo_detail_view_x_opens_action_palette_for_resource_and_app() {
 
 #[tokio::test]
 async fn argo_view_column_prioritization_and_no_clipping() {
-    let mut argo_state = srelens_tui::views::argo_view::ArgoViewState::new();
+    let mut argo_state = srectl::views::argo_view::ArgoViewState::new();
     argo_state.is_remote_hub = true;
 
     let app_json = serde_json::json!({
@@ -5178,7 +5178,7 @@ async fn argo_view_column_prioritization_and_no_clipping() {
 
     // Render in a 180-column terminal (constrained width for these long strings: 152 primary vs 185 all)
     let text = common::render_text(180, 25, |f| {
-        srelens_tui::views::argo_view::render_argo_view(f, f.area(), &argo_state);
+        srectl::views::argo_view::render_argo_view(f, f.area(), &argo_state);
     });
 
     // Primary identifying columns MUST NOT be clipped!
@@ -5226,7 +5226,7 @@ async fn argo_view_key_bindings_and_actions() {
         }
     }));
 
-    let mut argo_state = srelens_tui::views::argo_view::ArgoViewState::new();
+    let mut argo_state = srectl::views::argo_view::ArgoViewState::new();
     argo_state.set_applications(
         vec![app1.clone(), app2.clone()],
         vec![app1.clone(), app2.clone()],
@@ -5318,7 +5318,7 @@ async fn argo_view_key_bindings_and_actions() {
 async fn argo_detail_view_key_navigation_and_actions() {
     let (mut app, _rx) = common::app_with("fake-cluster", "default").await;
 
-    let mut state = srelens_tui::views::argo_detail_view::ArgoDetailViewState::new(
+    let mut state = srectl::views::argo_detail_view::ArgoDetailViewState::new(
         "payment-service".to_string(),
         "argocd".to_string(),
         Some("hub-ctx".to_string()),
@@ -5367,28 +5367,28 @@ async fn argo_detail_view_key_navigation_and_actions() {
     if let ActiveView::ArgoDetail(ref d) = app.active_view {
         assert_eq!(
             d.active_tab,
-            srelens_tui::views::argo_detail_view::ArgoDetailTab::ManagedResources
+            srectl::views::argo_detail_view::ArgoDetailTab::ManagedResources
         );
     }
     press(&mut app, ch('3')).await;
     if let ActiveView::ArgoDetail(ref d) = app.active_view {
         assert_eq!(
             d.active_tab,
-            srelens_tui::views::argo_detail_view::ArgoDetailTab::Drift
+            srectl::views::argo_detail_view::ArgoDetailTab::Drift
         );
     }
     press(&mut app, ch('4')).await;
     if let ActiveView::ArgoDetail(ref d) = app.active_view {
         assert_eq!(
             d.active_tab,
-            srelens_tui::views::argo_detail_view::ArgoDetailTab::RevisionHistory
+            srectl::views::argo_detail_view::ArgoDetailTab::RevisionHistory
         );
     }
     press(&mut app, ch('1')).await;
     if let ActiveView::ArgoDetail(ref d) = app.active_view {
         assert_eq!(
             d.active_tab,
-            srelens_tui::views::argo_detail_view::ArgoDetailTab::Overview
+            srectl::views::argo_detail_view::ArgoDetailTab::Overview
         );
     }
 
@@ -5397,28 +5397,28 @@ async fn argo_detail_view_key_navigation_and_actions() {
     if let ActiveView::ArgoDetail(ref d) = app.active_view {
         assert_eq!(
             d.active_tab,
-            srelens_tui::views::argo_detail_view::ArgoDetailTab::ManagedResources
+            srectl::views::argo_detail_view::ArgoDetailTab::ManagedResources
         );
     }
     press(&mut app, key(KeyCode::BackTab)).await;
     if let ActiveView::ArgoDetail(ref d) = app.active_view {
         assert_eq!(
             d.active_tab,
-            srelens_tui::views::argo_detail_view::ArgoDetailTab::Overview
+            srectl::views::argo_detail_view::ArgoDetailTab::Overview
         );
     }
     press(&mut app, ch('l')).await;
     if let ActiveView::ArgoDetail(ref d) = app.active_view {
         assert_eq!(
             d.active_tab,
-            srelens_tui::views::argo_detail_view::ArgoDetailTab::ManagedResources
+            srectl::views::argo_detail_view::ArgoDetailTab::ManagedResources
         );
     }
     press(&mut app, ch('h')).await;
     if let ActiveView::ArgoDetail(ref d) = app.active_view {
         assert_eq!(
             d.active_tab,
-            srelens_tui::views::argo_detail_view::ArgoDetailTab::Overview
+            srectl::views::argo_detail_view::ArgoDetailTab::Overview
         );
     }
 
@@ -5530,7 +5530,7 @@ fn argo_view_with_reviewed_app(namespace: &str, name: &str) -> ActiveView {
         "spec": {"project": "default", "destination": {"name": "in-cluster"}},
         "status": {"sync": {"status": "OutOfSync"}, "health": {"status": "Healthy"}}
     }));
-    let mut state = srelens_tui::views::argo_view::ArgoViewState::new();
+    let mut state = srectl::views::argo_view::ArgoViewState::new();
     state.set_applications(vec![listed.clone()], vec![listed], false, None);
     ActiveView::Argo(state)
 }
@@ -5586,7 +5586,7 @@ async fn argo_confirmations_carry_the_listed_applications_uid_and_resource_versi
     {
         *selected_idx = actions
             .iter()
-            .position(|a| a.id == srelens_tui::ui::dialogs::QuickActionId::ArgoSync)
+            .position(|a| a.id == srectl::ui::dialogs::QuickActionId::ArgoSync)
             .expect("the palette offers Sync");
     } else {
         panic!("expected the action palette, got {:?}", app.modal);
@@ -5611,7 +5611,7 @@ async fn palette_sync_of_an_application_no_longer_listed_is_refused() {
     {
         *selected_idx = actions
             .iter()
-            .position(|a| a.id == srelens_tui::ui::dialogs::QuickActionId::ArgoSync)
+            .position(|a| a.id == srectl::ui::dialogs::QuickActionId::ArgoSync)
             .unwrap();
     }
     // The list refreshed while the palette was open and the Application went.
@@ -5777,9 +5777,9 @@ async fn node_ssh_modal_keys_and_submit() {
 #[tokio::test]
 async fn tui_config_view_key_interactions() {
     let (mut app, _rx) = common::app_with("fake-cluster", "default").await;
-    app.tui_config = srelens_tui::tui_config::TuiConfig::default();
+    app.tui_config = srectl::tui_config::TuiConfig::default();
 
-    let cfg = srelens_tui::views::TuiConfigViewState::new();
+    let cfg = srectl::views::TuiConfigViewState::new();
     app.active_view = ActiveView::TuiConfig(cfg);
 
     // 1. Field navigation

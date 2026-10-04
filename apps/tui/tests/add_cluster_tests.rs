@@ -1,6 +1,6 @@
-use srelens_tui::app::App;
-use srelens_tui::event::AppEvent;
-use srelens_tui::ui::dialogs::Modal;
+use srectl::app::App;
+use srectl::event::AppEvent;
+use srectl::ui::dialogs::Modal;
 use tokio::sync::mpsc::unbounded_channel;
 
 mod common;
@@ -269,7 +269,7 @@ fn test_render_add_cluster_modal() {
     };
 
     let rendered = common::render_text(100, 30, |f| {
-        srelens_tui::ui::dialogs::render_modal(f, f.area(), &modal);
+        srectl::ui::dialogs::render_modal(f, f.area(), &modal);
     });
 
     assert!(rendered.contains("Import Cluster / Kubeconfig"));
@@ -288,7 +288,7 @@ fn test_render_add_cluster_modal_with_error() {
     };
 
     let rendered = common::render_text(100, 30, |f| {
-        srelens_tui::ui::dialogs::render_modal(f, f.area(), &modal);
+        srectl::ui::dialogs::render_modal(f, f.area(), &modal);
     });
 
     assert!(rendered.contains("Import Cluster / Kubeconfig"));
@@ -312,8 +312,8 @@ fn test_resolve_import_command_and_aliases() {
 
     for cmd in cases {
         assert_eq!(
-            srelens_tui::commands::resolve_command(cmd),
-            Some(srelens_tui::commands::CommandTarget::AddCluster),
+            srectl::commands::resolve_command(cmd),
+            Some(srectl::commands::CommandTarget::AddCluster),
             "command '{}' must resolve to CommandTarget::AddCluster",
             cmd
         );
@@ -322,8 +322,8 @@ fn test_resolve_import_command_and_aliases() {
 
 #[test]
 fn test_import_deep_link_parse_and_to_url() {
-    use srelens_tui::commands::CommandTarget;
-    use srelens_tui::deep_link::DeepLink;
+    use srectl::commands::CommandTarget;
+    use srectl::deep_link::DeepLink;
 
     // 1. Parsing standard view deep link
     let parsed = DeepLink::parse("srelens://view/_/_/import").unwrap();
