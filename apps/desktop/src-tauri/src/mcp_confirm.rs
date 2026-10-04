@@ -73,6 +73,18 @@ pub struct PendingRequest {
     /// inventory, so nothing on this wire names or vouches for an app.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub requester: Option<Requester>,
+    /// Which of srelens's own chats raised the call (#393), as the transport
+    /// authenticated it. `null` for an external client, a headless caller or
+    /// an app's sidecar (which `requester` names instead) — always present,
+    /// for the same reason `prompt` and `impact` live on this value.
+    pub caller: Option<CallerWire>,
+}
+
+/// One of srelens's own chats, as the window matches it against its runs.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CallerWire {
+    pub chat_session: String,
 }
 
 /// Which installed app asked, as the host that started its sidecar knows it.
@@ -172,6 +184,9 @@ impl PendingRequest {
                 kind: field("kind"),
             },
             requester: None,
+            caller: request.caller.as_ref().map(|caller| match caller {
+                srelens_mcp::policy::Caller::Chat(session) => CallerWire { chat_session: session.clone() },
+            }),
         }
     }
 
@@ -198,6 +213,8 @@ impl PendingRequest {
                 id: request.app.id.clone(),
                 revision: request.app.revision,
             }),
+            // An app's provenance is `requester`, never a chat.
+            caller: None,
         }
     }
 }
@@ -437,6 +454,7 @@ mod tests {
                 ..ConfirmTarget::default()
             },
             requester: None,
+            caller: None,
         }
     }
 
@@ -528,6 +546,36 @@ mod tests {
         // And the arguments still travel: the sentence says what, the payload
         // still says exactly which call.
         assert_eq!(got.args["name"], json!("node-7"));
+    }
+
+    /// #393: the window is told which of srelens's chats raised the call, so
+    /// the transcript records it in that conversation and no other.
+    #[test]
+    fn a_call_from_one_of_srelens_s_chats_names_it_on_the_wire() {
+        let mut req = consent("k8s.scale", Annotations::MUTATING, json!({ "name": "api" }));
+        req.caller = Some(srelens_mcp::policy::Caller::Chat("sess-7".into()));
+        let payload =
+            serde_json::to_value(PendingRequest::from_consent_checked("id".into(), &req, &|_, _| false)).unwrap();
+        assert_eq!(payload["caller"], json!({ "chatSession": "sess-7" }));
+    }
+
+    /// Always on the wire, `null` when nobody can be named: the live event and
+    /// the replayed snapshot are one type, and a field one of them omits is
+    /// the drift `PendingRequest` exists to prevent.
+    #[test]
+    fn a_call_nobody_vouched_for_carries_a_null_caller() {
+        let req = consent("k8s.scale", Annotations::MUTATING, json!({ "name": "api" }));
+        let payload =
+            serde_json::to_value(PendingRequest::from_consent_checked("id".into(), &req, &|_, _| false)).unwrap();
+        assert!(payload.get("caller").is_some_and(serde_json::Value::is_null), "got {payload}");
+    }
+
+    /// A sidecar's provenance is `requester`, never a chat.
+    #[test]
+    fn a_sidecar_s_call_names_no_chat() {
+        let payload =
+            serde_json::to_value(PendingRequest::from_sidecar("id".into(), &sidecar_request(json!({})))).unwrap();
+        assert!(payload.get("caller").is_some_and(serde_json::Value::is_null), "got {payload}");
     }
 
     /// #543. An agent asking to keep an app's secret sends the value in its
