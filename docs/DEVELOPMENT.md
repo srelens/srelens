@@ -146,7 +146,7 @@ Four invariants are enforced by tests rather than by review, so "everything is e
 
 Watches, pod exec, log tails, terminals, helm operations, and port-forwards don't fit request/response. Their logic lives in `crates/streams`, one manager per stream kind, each emitting into an `EventSink`:
 
-- **Desktop** implements `EventSink` over Tauri events (`apps/desktop/src-tauri/src/sink.rs`); the streams are started by dedicated Tauri commands (`start_resource_watch`, `start_pod_exec`, `start_log_stream`, `start_port_forward`, plus matching stop/input commands). Watches, pod exec sessions, app streams, log streams, port-forwards and local terminals belong to the window whose call opened them, and end when it closes or reloads (`apps/desktop/src-tauri/src/window_streams.rs`, [#700](https://github.com/srelens/srelens/issues/700), [#735](https://github.com/srelens/srelens/issues/735)). A helm operation is let go of instead of killed: it runs to the end and the host reports the outcome to every window (`apps/desktop/src-tauri/src/helm.rs`).
+- **Desktop** implements `EventSink` over Tauri events (`apps/desktop/src-tauri/src/sink.rs`); the streams are started by dedicated Tauri commands (`start_resource_watch`, `start_pod_exec`, `start_log_stream`, `start_port_forward`, plus matching stop/input commands). Watches, pod exec sessions, app streams, log streams, port-forwards and local terminals belong to the window whose call opened them, and end when it closes or reloads (`apps/desktop/src-tauri/src/window_streams.rs`, [#700](https://github.com/srelens/srelens/issues/700), [#735](https://github.com/srelens/srelens/issues/735)). A helm operation is let go of instead of killed: it runs to the end and the host reports the outcome to every window (`apps/desktop/src-tauri/src/helm.rs`). A node shell's privileged debug pod is the host's to delete ([#734](https://github.com/srelens/srelens/issues/734), `apps/desktop/src-tauri/src/node_shells.rs`): the capability bridge records each one a window creates, by uid, and the host deletes it — pinned to that uid — when its shell ends however it ends, when its window closes or reloads, or when srelens quits. The web page still deletes its own.
 - **Web** implements it over WebSocket frames (`crates/server/src/ws/`, `crates/server/src/streams.rs`), started through `/api/command/*`.
 
 The frontend side is identical in both cases and lives in `@srelens/core` (`packages/core/src/lib/`: `watch.ts`, `exec.ts`, `logsStream.ts`, `forward.ts`).
@@ -475,6 +475,24 @@ fingerprint in the row marked `**current**` and that key appears in `KEYS`,
 unrevoked. A rotation that updates the secret but not the table — or the
 reverse — fails the release rather than publishing signatures the instructions
 tell users to reject.
+
+**Rotate in two releases, for `srectl update`.** The TUI's self-update
+trusts the keys `KEYS` held when that binary was built, compiled in, and
+nothing else (#448). A binary already installed never learns a key added
+later. So a new key has to ship before it signs:
+
+1. Add the new key to `KEYS` as in step 4, but leave `GPG_PRIVATE_KEY` and the
+   `**current**` row on the old key. Cut a stable release. Every binary from
+   then on trusts both keys.
+2. In a later release, switch `GPG_PRIVATE_KEY` to the new key and move the
+   `**current**` marker to its row.
+
+A binary older than step 1 cannot verify anything the new key signs, so its
+users must install by hand once. Two more things follow from compiling the keys
+in. Extending a key's expiry also reaches only binaries built after `KEYS`
+carries the extension, so extend at least one release before the old expiry.
+And revoking a key in `KEYS` protects only binaries built after the
+revocation. That is why a lost key also needs the new key in place quickly.
 
 **5. Verify the next release.** After the following release completes, download
 one asset and its `.asc` and confirm `gpg --verify` succeeds following only the

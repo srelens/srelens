@@ -884,10 +884,14 @@ fn update_off_the_runtime(check_only: bool, channel: Option<String>) -> Result<(
         plan.latest,
         channel.as_str()
     );
-    if let Err(error) = self_update::apply(&plan, &fetch) {
-        fail(error);
-    }
+    let signer = match self_update::apply(&plan, &fetch) {
+        Ok(signer) => signer,
+        Err(error) => fail(error),
+    };
     println!("Installed {} to {}", plan.latest, exe.display());
+    // What was proved, in the terms the install guide uses to check a
+    // download by hand: the key's full fingerprint.
+    println!("Verified: its checksums are signed by srelens release key {signer}.");
     Ok(())
 }
 

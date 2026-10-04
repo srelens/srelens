@@ -61,6 +61,12 @@ pub enum CliCommand {
     /// Print version information
     Version,
     /// Update srectl to the latest release
+    ///
+    /// A release is installed only if its checksum file is signed by a
+    /// srelens release key compiled into this binary, from the repository's
+    /// KEYS, and the download matches those checksums. Nothing is written
+    /// until both hold. The dev channel installs signed builds only, so it
+    /// passes over a pre-release that signing has not reached.
     Update {
         /// Report what an update would do, without changing anything
         #[arg(long)]

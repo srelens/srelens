@@ -1123,6 +1123,12 @@ jobs:
     # tui-publish included so the TUI archives are already attached to the tag
     # when this runs. Without it the two race, and whether the TUI downloads
     # carry a .asc comes down to which job finished first.
+    #
+    # `srectl update` depends on one of these signatures: it installs a
+    # release only once srectl-<version>-SHA256SUMS.txt.asc verifies
+    # against the keys in KEYS (#448). Skipping .txt files here would leave
+    # every TUI unable to update. A stable release without it is refused, and
+    # the dev channel passes over a pre-release without it.
     needs: [version, build, updater-manifest, tui-publish]
     if: ${{ always() && needs.build.result == 'success' && needs.updater-manifest.result == 'success' && needs.tui-publish.result == 'success' && (github.ref_name != 'main' || needs.version.outputs.release == 'true') }}
     runs-on: ubuntu-22.04

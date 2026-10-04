@@ -2,6 +2,7 @@ import { Terminal } from "@xterm/xterm";
 import {
   deletePod,
   describeError,
+  isTauri,
   notify,
   startLocalTerminal,
   startPodExec,
@@ -37,10 +38,10 @@ import {
  */
 
 /** What kind of shell a session is. `node` is a pod exec into the privileged
- *  debug pod srelens created for a node — the store deletes that pod as soon
- *  as the session is over, whether the far end went on its own or the reader
- *  dismissed the row (see {@link takeDebugPod}), which is the cleanup a pod
- *  exec and a local shell have nothing to do. */
+ *  debug pod srelens created for a node — on the web the store deletes that
+ *  pod as soon as the session is over, whether the far end went on its own or
+ *  the reader dismissed the row (see {@link takeDebugPod}); on desktop the
+ *  host does (#734). A pod exec and a local shell have nothing to clean up. */
 export type SessionKind = "pod" | "node" | "local";
 
 /**
@@ -192,10 +193,14 @@ export async function startPodSession(req: PodSessionRequest): Promise<number> {
     namespace: req.namespace,
   });
   // `req.pod` for a node session IS the debug pod: `k8s.createNodeDebugPod`
-  // made it, this exec runs `nsenter` inside it, and nothing else knows its
-  // name. Recorded before the connect, same as the row itself, so a session
-  // the reader ends while it is still opening (see `connect`) still cleans up.
-  if (kind === "node") {
+  // made it, and this exec runs `nsenter` inside it. Recorded before the
+  // connect, same as the row itself, so a session the reader ends while it is
+  // still opening (see `connect`) still cleans up.
+  //
+  // On the web only. The desktop host deletes it itself (#734) — however the
+  // shell ends, and when its window closes or reloads, which this store never
+  // hears of — and a delete from here as well would race it.
+  if (kind === "node" && !isTauri()) {
     nodeDebugPods.set(id, { context: req.context, namespace: req.namespace, pod: req.pod });
   }
   await connect(id, (onData, onExit, size) =>
