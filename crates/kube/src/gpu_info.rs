@@ -615,10 +615,30 @@ pub fn parse_hami_register_annotation(ann: &str) -> Option<HamiRegisterInfo> {
     // treat registered `devmem` as unscaled hardware physical VRAM. Obtain hardware memory
     // strictly from an unscaled hardware source (well-known GPU model specs), or leave it
     // unknown (`None`) when only scaled registration memory is available.
-    let physical_vram_total_mib = model
-        .as_deref()
-        .and_then(hardware_vram_for_model)
-        .map(|per_gpu| per_gpu * physical_gpu_count);
+    //
+    // For nodes with mixed GPU models (e.g. 1x T4 and 1x A100), iterate over every healthy device
+    // and sum their respective hardware VRAMs rather than multiplying the first device's specs.
+    let mut total_physical_vram = 0i64;
+    let mut all_models_known = true;
+    for d in &healthy_devices {
+        let dev_model = d.device_type.as_deref().map(|t| {
+            t.trim_start_matches("NVIDIA-")
+                .trim_start_matches("NVIDIA ")
+                .replace('-', " ")
+        });
+        if let Some(mem) = dev_model.as_deref().and_then(hardware_vram_for_model) {
+            total_physical_vram += mem;
+        } else {
+            all_models_known = false;
+            break;
+        }
+    }
+
+    let physical_vram_total_mib = if all_models_known && !healthy_devices.is_empty() {
+        Some(total_physical_vram)
+    } else {
+        None
+    };
 
     Some(HamiRegisterInfo {
         physical_gpu_count,
@@ -637,8 +657,11 @@ pub fn hardware_vram_for_model(model: &str) -> Option<i64> {
     } else if m.contains("a100") {
         if m.contains("40gb") || m.contains("40g") {
             Some(40960) // 40 GiB
-        } else {
+        } else if m.contains("80gb") || m.contains("80g") {
             Some(81920) // 80 GiB
+        } else {
+            // Unqualified A100 could be 40 GiB or 80 GiB; do not guess to avoid inflating capacity or masking saturation
+            None
         }
     } else if m.contains("h100") {
         Some(81920) // 80 GiB
@@ -655,8 +678,11 @@ pub fn hardware_vram_for_model(model: &str) -> Option<i64> {
     } else if m.contains("v100") {
         if m.contains("32gb") || m.contains("32g") {
             Some(32768)
-        } else {
+        } else if m.contains("16gb") || m.contains("16g") {
             Some(16384) // 16 GiB
+        } else {
+            // Unqualified V100 could be 16 GiB or 32 GiB; do not guess
+            None
         }
     } else if m.contains("rtx 4090") || m.contains("rtx 3090") {
         Some(24576) // 24 GiB
@@ -982,6 +1008,44 @@ mod tests {
         assert_eq!(info.physical_vram_total_mib, None);
         assert_eq!(info.virtual_gpu_count, 8);
         assert_eq!(info.virtual_vram_total_mib, 20480);
+    }
+
+    #[test]
+    fn test_parse_hami_register_annotation_mixed_gpu_models() {
+        // Mixed GPU node with 1x Tesla T4 (15360 MiB) and 1x NVIDIA A100 80GB (81920 MiB).
+        // Physical VRAM must be the sum of each device (97280 MiB), NOT 2x the first device's memory.
+        let ann = r#"[
+            {"id":"GPU-1","count":10,"devmem":15360,"devcore":100,"type":"NVIDIA-Tesla T4","health":true},
+            {"id":"GPU-2","count":10,"devmem":81920,"devcore":100,"type":"NVIDIA-A100-SXM4-80GB","health":true}
+        ]"#;
+
+        let info = parse_hami_register_annotation(ann).expect("should parse");
+        assert_eq!(info.physical_gpu_count, 2);
+        assert_eq!(info.physical_vram_total_mib, Some(15360 + 81920));
+        assert_eq!(info.virtual_gpu_count, 20);
+        assert_eq!(info.virtual_vram_total_mib, 15360 + 81920);
+    }
+
+    #[test]
+    fn test_hardware_vram_for_model_unqualified_a100_and_v100() {
+        // Unqualified A100 has ambiguous capacity (40 GiB vs 80 GiB); must return None rather than guessing.
+        assert_eq!(hardware_vram_for_model("A100"), None);
+        assert_eq!(hardware_vram_for_model("NVIDIA A100"), None);
+        assert_eq!(hardware_vram_for_model("A100-40GB"), Some(40960));
+        assert_eq!(
+            hardware_vram_for_model("NVIDIA A100-SXM4-40GB"),
+            Some(40960)
+        );
+        assert_eq!(hardware_vram_for_model("A100-80GB"), Some(81920));
+        assert_eq!(
+            hardware_vram_for_model("NVIDIA A100-SXM4-80GB"),
+            Some(81920)
+        );
+
+        // Unqualified V100 has ambiguous capacity (16 GiB vs 32 GiB); must return None rather than guessing.
+        assert_eq!(hardware_vram_for_model("Tesla V100"), None);
+        assert_eq!(hardware_vram_for_model("V100-PCIE-16GB"), Some(16384));
+        assert_eq!(hardware_vram_for_model("V100-SXM2-32GB"), Some(32768));
     }
 
     #[test]

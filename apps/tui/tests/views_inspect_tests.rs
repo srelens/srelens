@@ -565,6 +565,33 @@ fn node_inspector_renders_multi_gpu_physical_multiplier_for_hami_nodes() {
 }
 
 #[test]
+fn node_inspector_renders_unspecified_physical_gpu_count_without_guessing_multiplier() {
+    let _theme = common::theme::lock();
+    let mut details = node_details("unknown-phys-gpu-node");
+    details.has_gpu = true;
+    details.is_virtual_gpu = true;
+    details.gpu_model = Some("Tesla T4".to_string());
+    details.physical_gpu_count = 0; // Not reported / unknown
+    details.physical_gpu_memory_total_mib = None;
+    details.gpu_capacity_count = 10;
+    details.gpu_allocatable_count = 10;
+    details.virtual_gpu_count = Some(10);
+    details.virtual_gpu_memory_total_mib = Some(15360);
+    details.gpu_requests_count = 2;
+    details.gpu_memory_total_mib = Some(15360);
+    details.gpu_memory_requests_mib = 3072;
+    let state = node_state(details);
+    let text_wide = render_node(260, 40, &state);
+
+    // Inspector badge must not guess "1x":
+    assert!(
+        text_wide.contains("Tesla T4 (HAMi 10 vGPUs)"),
+        "{text_wide}"
+    );
+    assert!(!text_wide.contains("1x Tesla T4"), "{text_wide}");
+}
+
+#[test]
 fn node_inspector_gpu_gauge_counts_slices_when_more_than_one_gpu_is_allocatable() {
     let _theme = common::theme::lock();
     let mut details = node_details("gpu-node");
@@ -2808,6 +2835,47 @@ fn gpu_view_renders_hami_virtual_gpus_with_dual_reality() {
 
     // Legend on bottom border:
     assert!(text.contains("v: Virtual GPUs detected (HAMi)"), "{text}");
+}
+
+#[test]
+fn gpu_view_renders_unspecified_physical_gpu_count_without_guessing_multiplier() {
+    let _theme = common::theme::lock();
+    let node = srelens_kube::gpu_info::GpuNodeInfo {
+        name: "gpu-node-unspecified-phys".to_string(),
+        status: "Ready".to_string(),
+        unschedulable: false,
+        roles: "worker".to_string(),
+        instance_type: "g4dn.xlarge".to_string(),
+        gpu_model: Some("Tesla T4".to_string()),
+        gpu_driver_version: Some("535.129.03".to_string()),
+        gpu_cuda_version: Some("12.2".to_string()),
+        gpu_capacity: 10,
+        gpu_allocatable: 10,
+        gpu_requests: 0,
+        vram_per_gpu_mib: Some(15360),
+        vram_capacity_total_mib: Some(15360),
+        vram_requests_total_mib: 0,
+        pods: vec![],
+        is_virtual_gpu: true,
+        physical_gpu_count: 0, // Unreported physical GPU count
+        physical_vram_total_mib: None,
+    };
+    let info = srelens_kube::gpu_info::GpuClusterInfo {
+        nodes: vec![node],
+        total_gpu_nodes: 1,
+        total_gpus: 10,
+        total_allocated_gpus: 0,
+        total_vram_mib: 15360,
+        total_allocated_vram_mib: 0,
+        total_gpu_pods: 0,
+    };
+    let mut state = srelens_tui::views::gpu_view::GpuViewState::new();
+    state.set_info(info);
+
+    let text = render_gpu(160, 40, &state);
+    // Header must not guess "1x":
+    assert!(text.contains("Model: Tesla T4 (HAMi 10 vGPUs)"), "{text}");
+    assert!(!text.contains("1x Tesla T4"), "{text}");
 }
 
 #[test]

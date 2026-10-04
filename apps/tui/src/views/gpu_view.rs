@@ -492,10 +492,14 @@ fn render_node_gpu_summary(f: &mut Frame, area: Rect, node: &GpuNodeInfo) {
     let raw_model = node.gpu_model.as_deref().unwrap_or("Unknown GPU");
     let model = crate::views::sanitize_span_text(raw_model);
     let model_display = if node.is_virtual_gpu {
-        let phys_count = node.physical_gpu_count.max(1);
+        let phys_prefix = if node.physical_gpu_count > 0 {
+            format!("{}x ", node.physical_gpu_count)
+        } else {
+            String::new()
+        };
         format!(
-            "{}x {} (HAMi {} vGPUs)",
-            phys_count, model, node.gpu_capacity
+            "{}{} (HAMi {} vGPUs)",
+            phys_prefix, model, node.gpu_capacity
         )
     } else {
         model

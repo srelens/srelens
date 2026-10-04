@@ -522,16 +522,20 @@ fn node_header_lines(d: &NodeInspectorDetails) -> Vec<Line<'_>> {
         let raw_model = d.gpu_model.as_deref().unwrap_or("GPU Accelerator");
         let model = crate::views::sanitize_span_text(raw_model);
         let badge_text = if d.is_virtual_gpu && d.gpu_allocatable_count > 1 {
-            let phys_count = d.physical_gpu_count.max(1);
+            let phys_prefix = if d.physical_gpu_count > 0 {
+                format!("{}x ", d.physical_gpu_count)
+            } else {
+                String::new()
+            };
             if d.virtual_gpu_count.is_some() {
                 format!(
-                    "[⚡ {}x {} (HAMi {} vGPUs)] ",
-                    phys_count, model, d.gpu_allocatable_count
+                    "[⚡ {}{} (HAMi {} vGPUs)] ",
+                    phys_prefix, model, d.gpu_allocatable_count
                 )
             } else {
                 format!(
-                    "[⚡ {}x {} ({} vGPUs)] ",
-                    phys_count, model, d.gpu_allocatable_count
+                    "[⚡ {}{} ({} vGPUs)] ",
+                    phys_prefix, model, d.gpu_allocatable_count
                 )
             }
         } else {
