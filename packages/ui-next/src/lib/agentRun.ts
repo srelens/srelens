@@ -55,6 +55,12 @@ export type ToolCallRecord = {
    * instantly when it has not finished at all.
    */
   ms?: number;
+  /**
+   * What the result said, as the backend read it (#385) — `12 pods`, `Pod
+   * api-0`, or an error's first line. Absent when the result says nothing
+   * short and honest, and until `toolResult` lands.
+   */
+  summary?: string;
 };
 
 /** One MCP confirm request, as `AgentConsent` reports it. */
@@ -950,7 +956,9 @@ export async function askAgent(
         const ms = startedAt === undefined ? undefined : performance.now() - startedAt;
         updateTurnIn(key, agentTurnId, (t) => ({
           ...t,
-          calls: t.calls.map((c) => (c.id === e.id ? { ...c, status: e.status, ms } : c)),
+          calls: t.calls.map((c) =>
+            c.id === e.id ? { ...c, status: e.status, ms, ...(e.summary ? { summary: e.summary } : {}) } : c,
+          ),
         }));
         return;
       }
@@ -1470,8 +1478,9 @@ type SavedRun = {
 /** One recorded tool call, checked before the transcript reads it. */
 function isSavedCall(value: unknown): boolean {
   if (typeof value !== "object" || value === null) return false;
-  const c = value as { id?: unknown; tool?: unknown };
-  return typeof c.id === "string" && typeof c.tool === "string";
+  const c = value as { id?: unknown; tool?: unknown; summary?: unknown };
+  // `summary` is drawn as text (#385), so a present one must be text.
+  return typeof c.id === "string" && typeof c.tool === "string" && (c.summary === undefined || typeof c.summary === "string");
 }
 
 /** A list of strings, or absent. `undefined` and a real list are both fine;

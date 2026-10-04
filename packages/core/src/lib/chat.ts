@@ -6,7 +6,10 @@ export type AgentEvent =
   | { type: "textDelta"; text: string }
   | { type: "thinking"; text: string }
   | { type: "toolCallStart"; id: string; tool: string; args: unknown }
-  | { type: "toolResult"; id: string; status: ToolStatus }
+  /** `summary`: what the result said, as the backend read it — a count, a
+   *  kind and name, or a first line (#385). Absent when it says nothing short
+   *  and honest. */
+  | { type: "toolResult"; id: string; status: ToolStatus; summary?: string }
   | { type: "turnDone" }
   | { type: "error"; message: string };
 
@@ -34,10 +37,18 @@ export function parseAgentEvent(raw: unknown): AgentEvent | null {
   if (typeof raw !== "object" || raw === null) return null;
   const t = (raw as { type?: unknown }).type;
   switch (t) {
+    case "toolResult": {
+      // Kept only as text, and bounded again on this side of the process
+      // boundary: the row truncates visually, but a summary is no place for
+      // whatever a malformed payload carries.
+      const { summary, ...rest } = raw as Record<string, unknown>;
+      return (
+        typeof summary === "string" && summary !== "" ? { ...rest, summary: summary.slice(0, 80) } : rest
+      ) as AgentEvent;
+    }
     case "textDelta":
     case "thinking":
     case "toolCallStart":
-    case "toolResult":
     case "turnDone":
     case "error":
       return raw as AgentEvent;

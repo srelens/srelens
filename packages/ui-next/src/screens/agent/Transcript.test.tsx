@@ -80,6 +80,16 @@ describe("a run's transcript", () => {
     expect(screen.queryByText(/ms/)).toBeNull();
   });
 
+  it("draws what the call returned, before its duration (#385)", () => {
+    render(
+      <Transcript
+        turns={[turn({ calls: [{ id: "t", tool: "k8s.listPods", args: {}, status: "ok", ms: 41, summary: "12 pods" }] })]}
+        gates={[]}
+      />,
+    );
+    expect(screen.getByText("12 pods")).toBeTruthy();
+  });
+
   it("draws the duration srelens measured when it has one", () => {
     render(
       <Transcript

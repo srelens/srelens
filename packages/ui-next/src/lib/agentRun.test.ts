@@ -84,6 +84,17 @@ describe("the run store", () => {
     expect(turns[0].text).toBe("why is checkout-api 5xx?");
   });
 
+  it("keeps what a tool call's result said on the call (#385)", async () => {
+    sendChat.mockImplementation(async (_s: string, _p: string, _a: string, onEvent: (e: unknown) => void) => {
+      onEvent({ type: "toolCallStart", id: "t1", tool: "k8s.listPods", args: {} });
+      onEvent({ type: "toolResult", id: "t1", status: "ok", summary: "2 pods" });
+      onEvent({ type: "turnDone" });
+      return null;
+    });
+    await askAgent("q");
+    expect(getAgentRun().turns.at(-1)?.calls[0].summary).toBe("2 pods");
+  });
+
   it("times a tool call from its start to its result, and reports nothing until then", async () => {
     let emit: (e: unknown) => void = () => {};
     sendChat.mockImplementation(async (_s: string, _p: string, _a: string, onEvent: (e: unknown) => void) => {
@@ -1504,6 +1515,33 @@ describe("the run store", () => {
       await openSavedRun("good");
       expect(getAgentRun().turns.map((t) => t.text)).toEqual(["q", "a"]);
       expect(getAgentRun().gates).toHaveLength(1);
+    });
+
+    it("keeps a saved call's summary, and refuses one that is not text (#385)", async () => {
+      const envelope = (summary: unknown) => ({
+        id: "sx", title: "t", createdAt: 1, updatedAt: 2, contexts: [], skills: [],
+        cliSessionId: null, agentKind: "claude",
+        messages: [{
+          v: 1, key: "prod-eu|/k/pods", label: "pods",
+          turns: [
+            { id: 1, role: "user", text: "q", calls: [], at: 1 },
+            { id: 2, role: "agent", text: "a", calls: [{ id: "c", tool: "k8s.listPods", summary }], at: 2 },
+          ],
+          gates: [],
+        }],
+      });
+      listSessions.mockResolvedValue([{ id: "sx", title: "t", createdAt: 1, updatedAt: 2 }]);
+
+      loadSession.mockResolvedValue(envelope("1 pod"));
+      await restoreRuns();
+      await openSavedRun("sx");
+      expect(getAgentRun().turns.at(-1)?.calls[0].summary).toBe("1 pod");
+
+      resetAgentRun();
+      loadSession.mockResolvedValue(envelope(5));
+      await restoreRuns();
+      await openSavedRun("sx");
+      expect(getAgentRun().turns.map((t) => t.text)).not.toContain("a");
     });
 
     it("drops a stored tool call it cannot name, keeping the ones it can", async () => {
