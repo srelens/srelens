@@ -84,4 +84,16 @@ describe("parseAgentEvent", () => {
     const long = parseAgentEvent({ type: "toolResult", id: "t", status: "ok", summary: "x".repeat(200) });
     expect(long?.type === "toolResult" && long.summary?.length).toBe(80);
   });
+
+  it("bounds a summary by characters, as the backend does, never splitting one (PR #806 review)", () => {
+    const summary = `${"a".repeat(79)}😀`;
+    expect(parseAgentEvent({ type: "toolResult", id: "t", status: "ok", summary })).toEqual({
+      type: "toolResult",
+      id: "t",
+      status: "ok",
+      summary,
+    });
+    const long = parseAgentEvent({ type: "toolResult", id: "t", status: "ok", summary: "😀".repeat(100) });
+    expect(long?.type === "toolResult" && long.summary).toBe("😀".repeat(80));
+  });
 });

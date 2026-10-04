@@ -18,11 +18,6 @@ pub enum ToolStatus {
 /// only signal that survives an agent CLI's transcript.
 pub const DENIED_PREFIX: &str = "consent denied: ";
 
-/// Whether a failed tool result's text is a consent refusal rather than an
-/// execution error. `contains`, not `starts_with`: a CLI may wrap the tool
-/// text (e.g. "Error: …"), and result text only ever comes from our own MCP
-/// server, so a false positive would require the server itself to emit the
-/// marker mid-output.
 /// What a tool's own result says, in a few words, for the transcript's row
 /// (#385). Only what the text supports: a count where the result is one list,
 /// an object's kind and name, or the first line of plain text or of an error.
@@ -37,9 +32,16 @@ pub fn summarize_result(text: &str, is_error: bool) -> Option<String> {
         Ok(serde_json::Value::Object(map)) => {
             let arrays: Vec<(&String, usize)> =
                 map.iter().filter_map(|(k, v)| v.as_array().map(|a| (k, a.len()))).collect();
-            if let [(field, n)] = arrays.as_slice() {
-                let noun = if *n == 1 { field.strip_suffix('s').unwrap_or(field) } else { field.as_str() };
-                return Some(bound(&format!("{n} {noun}")));
+            // One list, however many views of it the object holds: arrays all
+            // of one length (`k8s.listNamespaces` returns its namespaces as
+            // names and as rows, PR #806 review). Named by the first field by
+            // name, so the reading does not depend on the map's order.
+            if let Some(&(_, n)) = arrays.first() {
+                if arrays.iter().all(|&(_, len)| len == n) {
+                    let field = arrays.iter().map(|&(k, _)| k).min().expect("not empty");
+                    let noun = if n == 1 { singular(field) } else { field.clone() };
+                    return Some(bound(&format!("{n} {noun}")));
+                }
             }
             let kind = map.get("kind").and_then(|k| k.as_str());
             let name = map.get("metadata").and_then(|m| m.get("name")).and_then(|n| n.as_str());
@@ -65,6 +67,24 @@ fn bound(s: &str) -> String {
     }
 }
 
+/// The singular a plural field name really has (PR #806 review):
+/// `networkpolicies` → `networkpolicy`, `ingresses` → `ingress`, `matches` →
+/// `match`, `pods` → `pod`. Cutting the last letter wrote `networkpolicie`.
+fn singular(plural: &str) -> String {
+    if let Some(stem) = plural.strip_suffix("ies") {
+        return format!("{stem}y");
+    }
+    if ["sses", "ches", "shes", "xes"].iter().any(|ending| plural.ends_with(ending)) {
+        return plural[..plural.len() - 2].to_string();
+    }
+    plural.strip_suffix('s').unwrap_or(plural).to_string()
+}
+
+/// Whether a failed tool result's text is a consent refusal rather than an
+/// execution error. `contains`, not `starts_with`: a CLI may wrap the tool
+/// text (e.g. "Error: …"), and result text only ever comes from our own MCP
+/// server, so a false positive would require the server itself to emit the
+/// marker mid-output.
 pub fn is_denial_text(text: &str) -> bool {
     text.contains(DENIED_PREFIX)
 }
@@ -153,7 +173,7 @@ mod tests {
             (r#"{"replicasets":[{"name":"a"}]}"#, false, Some("1 replicaset")),
             (r#"[1,2]"#, false, Some("2 items")),
             (r#"{"kind":"Pod","metadata":{"name":"api-0"}}"#, false, Some("Pod api-0")),
-            (r#"{"a":1,"b":[1],"c":[2]}"#, false, None),
+            (r#"{"a":1,"b":[1],"c":[2,3]}"#, false, None),
             ("first line\nsecond", false, Some("first line")),
             ("\n\n  spaced  \n", false, Some("spaced")),
             ("consent denied: user declined `k8s.scale`\nmore", true, Some("consent denied: user declined `k8s.scale`")),
@@ -162,6 +182,36 @@ mod tests {
         for (text, is_error, want) in cases {
             assert_eq!(summarize_result(text, *is_error).as_deref(), *want, "for {text:?}");
         }
+    }
+
+    /// PR #806 review: one of something reads in the singular the word really
+    /// has, not the plural with its last letter cut off.
+    #[test]
+    fn a_single_result_is_named_in_its_real_singular() {
+        for (field, want) in [
+            ("networkpolicies", "1 networkpolicy"),
+            ("ingresses", "1 ingress"),
+            ("storageclasses", "1 storageclass"),
+            ("matches", "1 match"),
+            ("pods", "1 pod"),
+            ("releases", "1 release"),
+        ] {
+            let text = format!(r#"{{"{field}":[{{}}]}}"#);
+            assert_eq!(summarize_result(&text, false).as_deref(), Some(want), "for {field}");
+        }
+    }
+
+    /// PR #806 review: `k8s.listNamespaces` returns its namespaces twice, as
+    /// names and as rows. Arrays of one length are one list, counted once and
+    /// named the same whatever order the object holds them in; arrays of
+    /// different lengths still say nothing short and honest.
+    #[test]
+    fn two_views_of_one_list_are_counted_once() {
+        let names_first = r#"{"namespaces":["a","b"],"summaries":[{},{}]}"#;
+        let rows_first = r#"{"summaries":[{},{}],"namespaces":["a","b"]}"#;
+        assert_eq!(summarize_result(names_first, false).as_deref(), Some("2 namespaces"));
+        assert_eq!(summarize_result(rows_first, false).as_deref(), Some("2 namespaces"));
+        assert_eq!(summarize_result(r#"{"pods":[1,2],"warnings":[1]}"#, false), None);
     }
 
     #[test]

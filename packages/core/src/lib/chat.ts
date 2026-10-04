@@ -40,10 +40,14 @@ export function parseAgentEvent(raw: unknown): AgentEvent | null {
     case "toolResult": {
       // Kept only as text, and bounded again on this side of the process
       // boundary: the row truncates visually, but a summary is no place for
-      // whatever a malformed payload carries.
+      // whatever a malformed payload carries. Bounded in characters, as the
+      // backend bounds it — `slice` counts UTF-16 units and could cut an emoji
+      // in half (PR #806 review).
       const { summary, ...rest } = raw as Record<string, unknown>;
       return (
-        typeof summary === "string" && summary !== "" ? { ...rest, summary: summary.slice(0, 80) } : rest
+        typeof summary === "string" && summary !== ""
+          ? { ...rest, summary: Array.from(summary).slice(0, 80).join("") }
+          : rest
       ) as AgentEvent;
     }
     case "textDelta":
