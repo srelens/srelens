@@ -1198,11 +1198,12 @@ export function stopAgentRun(): void {
 }
 
 /** Start a fresh conversation: the reader is done with this one, not just
- *  looking away from it. Drops every turn, and the CLI session and resume
- *  token with them, so the next question opens a new session rather than
- *  quietly resuming the one just cleared. A turn still in flight is asked to
- *  stop, best-effort — its own answer, if one still lands, is stale and the
- *  generation check in `askAgent` drops it.
+ *  looking away from it. Drops every turn from the run, and the CLI session
+ *  and resume token with them, so the next question opens a new session rather
+ *  than quietly resuming the one just cleared. The conversation itself is KEPT
+ *  — on disk, and in the rail as a saved row (#395); only `forgetRun` deletes.
+ *  A turn still in flight is asked to stop, best-effort — its own answer, if
+ *  one still lands, is stale and the generation check in `askAgent` drops it.
  *
  *  Drops `gates` too. A gate is a row in THIS conversation's transcript, not
  *  a fact independent of it — `Transcript` renders whatever is in `gates`
@@ -1240,8 +1241,35 @@ export function clearAgentRun(target?: string | null): void {
   // Also recorded as a stop, for the window where the discarded turn has no
   // session yet and so was never handed to `cancelChat` at all.
   if (state.run.busy) state.stoppedGeneration = state.run.generation;
+  // The conversation is over, but not gone (#395). Its file stays — already up
+  // to date, since `persistRun` writes at every turn boundary, and any write
+  // still on the chain lands — and the rail lists it as a saved row the reader
+  // can reopen. Only the rail's own close (`forgetRun`) deletes. "New question"
+  // used to delete it, which made the one button for starting over also the
+  // one that lost the conversation.
+  //
+  // A fresh id, so the next question here writes a new file rather than
+  // overwriting the one kept — rotated BEFORE the kept one joins `saved`,
+  // because `getRunSummaries` hides a saved row while a live run holds its id.
+  const dead = state.id;
+  const before = state.run.turns;
+  state.id = newRunId();
+  const firstQuestion = before.find((t) => t.role === "user");
+  if (firstQuestion) {
+    const f = runFigures(before, state.run.busy);
+    const kept: SessionMeta = {
+      id: dead,
+      title: titleFromQuestion(firstQuestion.text) || firstQuestion.text.slice(0, 120),
+      createdAt: before[0]?.at ?? state.at,
+      updatedAt: state.at,
+      calls: f.calls,
+      ...(f.answeringMs !== null ? { durationMs: f.answeringMs } : {}),
+    };
+    saved = [kept, ...saved.filter((m) => m.id !== dead)];
+  }
   // A no-op — clearing a run that is already idle and empty — is left to
-  // `commitTo`'s own guard rather than special-cased here.
+  // `commitTo`'s own guard rather than special-cased here. Its emit also
+  // carries the row just added to `saved`.
   commitTo(key, {
     ...state.run,
     turns: [],
@@ -1250,23 +1278,6 @@ export function clearAgentRun(target?: string | null): void {
     error: undefined,
     generation: state.run.busy ? state.run.generation + 1 : state.run.generation,
   });
-  // The conversation is over, so its file goes with it — AFTER whatever write
-  // is still in flight. Classic's own comment on this: a save still flushing
-  // when the delete lands recreates the file and its index entry, and the
-  // reader's "New question" quietly un-deletes what they just cleared.
-  //
-  // A fresh id, so the next question in this run writes a new file rather than
-  // reusing the one just removed.
-  const dead = state.id;
-  // Off the not-yet-loaded list BEFORE the id rotates. `getRunSummaries` hides
-  // a persisted file only while its id belongs to a live run, so rotating the
-  // live id while `saved` still held the old one made the conversation the
-  // reader just cleared reappear immediately as a saved row — openable until
-  // the delete landed, and a load error afterwards.
-  saved = saved.filter((m) => m.id !== dead);
-  deleted.add(dead);
-  state.saving = state.saving.then(() => deleteSession(dead)).catch(() => {});
-  state.id = newRunId();
 }
 
 /**

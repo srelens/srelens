@@ -130,20 +130,17 @@ export function RunsRail() {
   return (
     <>
       {/*
-        This lists the conversations THIS window is holding, and every entry
-        opens. It used to list `listSessions()` — the sessions CLASSIC wrote to
-        disk — which was wrong three ways at once, all three reported from use:
-        the entries were 14 to 22 days old and from a different UI; nothing in
-        the new design persists, so a reader's actual conversations were never
-        in it (#395); and the rows were plain `<div>`s with no handler, so
-        clicking one did nothing.
+        This lists the conversations THIS window is holding, then the ones on
+        disk it has not opened yet — the new design's own (every turn is
+        written as it happens, and New question keeps the conversation it
+        leaves, #395) and classic's. Every entry opens: a live one by
+        switching to it, a saved one by `openSavedRun` hydrating its
+        transcript.
 
-        A list you cannot open, of conversations you did not have, under a
-        heading that says they are recent, is worse than no list.
-
-        Classic's saved sessions are a real thing and worth offering — but
-        offering them means `loadSession` hydrating a transcript, which is
-        #395's work. Until then they are not shown rather than shown and inert.
+        It once listed `listSessions()` alone as plain `<div>`s that did
+        nothing on click, which was reported from use. A list you cannot open,
+        of conversations you did not have, under a heading that says they are
+        recent, is worse than no list.
       */}
       <Section title="Recent runs" smallCaps padded={false}>
         {historyError !== null && (
