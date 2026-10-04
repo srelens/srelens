@@ -125,7 +125,8 @@ pub struct ReplicaSetSummary {
     /// (PR #810 review) — the revision `k8s.rolloutUndo` refuses as already
     /// running. The numbering alone does not say: right after a template
     /// change the newest ReplicaSet can still be the previous template. False
-    /// for every row when the Deployment itself could not be read.
+    /// for every row when the Deployment is gone (a failed read of it fails
+    /// the listing instead — see `owner_read`).
     #[serde(rename = "currentTemplate")]
     pub current_template: bool,
 }
@@ -193,6 +194,19 @@ pub(crate) fn owned_by_deployment(rs: &ReplicaSet, dep: &Deployment) -> bool {
         .iter()
         .flatten()
         .any(|o| o.kind == "Deployment" && o.name == name && uid.is_none_or(|uid| o.uid == uid))
+}
+
+/// The owner Deployment as `k8s.listReplicaSets` takes it, from its read
+/// (`None` when the read timed out): the Deployment, or `None` when it is gone
+/// — both answers — or the failure, which is the listing's failure too (PR #810
+/// review). A list quietly fallen back to names would mark no revision as the
+/// one the Deployment runs, and present a failed call as a fact about it.
+pub(crate) fn owner_read(read: Option<Result<Option<Deployment>, kube::Error>>) -> Result<Option<Deployment>, String> {
+    match read {
+        None => Err("reading the Deployment timed out".into()),
+        Some(Err(e)) => Err(e.to_string()),
+        Some(Ok(owner)) => Ok(owner),
+    }
 }
 
 /// A Deployment's revisions, newest first, as `k8s.listReplicaSets` lists
@@ -413,15 +427,14 @@ pub fn list_replicasets_capability(cache: Arc<ClientCache>) -> Capability {
                     .await
                     .map_err(|_| CapabilityError::Handler("list replicasets timed out".into()))?
                     .map_err(|e| CapabilityError::Handler(e.to_string()))?;
-                // The owner itself, best effort: it is what scopes the list to
-                // this Deployment's UID and says which revision it runs
-                // (PR #810 review). Unreadable, the list is by name and marks
-                // none current — still the revisions, never an error.
-                let owner = tokio::time::timeout(request_timeout(), deployments.get_opt(&input.owner_name))
+                // The owner itself: it is what scopes the list to this
+                // Deployment's UID and says which revision it runs (PR #810
+                // review). Gone, the list is by name and marks none; a failed
+                // read is the listing's failure — see `owner_read`.
+                let read = tokio::time::timeout(request_timeout(), deployments.get_opt(&input.owner_name))
                     .await
-                    .ok()
-                    .and_then(Result::ok)
-                    .flatten();
+                    .ok();
+                let owner = owner_read(read).map_err(CapabilityError::Handler)?;
                 Ok(ListReplicaSetsOut { replicasets: revision_rows(owner.as_ref(), &input.owner_name, list.items) })
             }
         },
@@ -623,6 +636,22 @@ mod tests {
         );
         let seen: Vec<(&str, bool)> = rows.iter().map(|r| (r.revision.as_str(), r.current_template)).collect();
         assert_eq!(seen, vec![("3", false), ("2", true), ("1", false)]);
+    }
+
+    /// PR #810 review: a failed read of the owner is the listing's failure. A
+    /// list quietly fallen back to names would mark no revision current and
+    /// present that as a fact about the cluster; only a Deployment that is
+    /// really gone (`None`, an answer) lists by name.
+    #[test]
+    fn a_failed_owner_read_fails_the_listing_and_only_a_missing_owner_falls_back() {
+        assert!(owner_read(Some(Ok(Some(deploy_at("api:1", &[]))))).unwrap().is_some());
+        assert!(owner_read(Some(Ok(None))).unwrap().is_none());
+        let forbidden = kube::Error::Api(Box::new(
+            kube::core::Status::failure("deployments.apps \"web\" is forbidden", "Forbidden").with_code(403),
+        ));
+        let refused = owner_read(Some(Err(forbidden))).unwrap_err();
+        assert!(refused.to_lowercase().contains("forbidden"), "{refused}");
+        assert!(owner_read(None).unwrap_err().contains("timed out"));
     }
 
     #[test]
