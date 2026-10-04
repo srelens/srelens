@@ -94,7 +94,7 @@ mod ui;
 mod quick_rca;
 mod views;
 
-use srelens_tui::self_update;
+use srectl::self_update;
 
 use app::{App, SuspendAction};
 use cli::{Cli, CliCommand};
@@ -113,14 +113,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // exactly what someone whose binary vanished is likely to type first.
     //
     // An update interrupted between its two renames leaves this binary at
-    // `.srelens-tui.exe.srelens-update.old` with nothing at the real name — and no
+    // `.srectl.exe.srelens-update.old` with nothing at the real name — and no
     // run `update` to repair it, since there is nothing left to run. If
     // this process IS that displaced file, put it back. A no-op anywhere
     // else, and off Windows entirely.
     if let Ok(exe) = std::env::current_exe() {
-        match srelens_tui::self_update::recover_interrupted_update(&exe) {
+        match srectl::self_update::recover_interrupted_update(&exe) {
             Ok(Some(restored)) => eprintln!(
-                "srelens-tui: an interrupted update left this binary beside its own name; restored it to {}",
+                "srectl: an interrupted update left this binary beside its own name; restored it to {}",
                 restored.display()
             ),
             Ok(None) => {}
@@ -128,7 +128,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // The command path is still missing, so say so rather than
             // letting someone rediscover it later.
             Err(why) => eprintln!(
-                "srelens-tui: an interrupted update left this binary at {}, and it could not be moved back: {why}. Rename it yourself to restore the command.",
+                "srectl: an interrupted update left this binary at {}, and it could not be moved back: {why}. Rename it yourself to restore the command.",
                 exe.display()
             ),
         }
@@ -173,11 +173,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 return Ok(());
             }
             CliCommand::Version => {
-                println!("srelens-tui v{}", env!("CARGO_PKG_VERSION"));
+                println!("srectl v{}", env!("CARGO_PKG_VERSION"));
                 return Ok(());
             }
             CliCommand::Info => {
-                println!("SRElens Kubernetes TUI (srelens-tui)");
+                println!("srectl");
                 let contexts = srelens_kube::context_resolve::resolve_contexts(&kubeconfig_paths);
                 println!("Found {} contexts across kubeconfigs:", contexts.len());
                 for ctx in contexts {
@@ -748,7 +748,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// `srelens-tui update` — see `self_update` for why each step is where it is.
+/// `srectl update` — see `self_update` for why each step is where it is.
 ///
 /// Written as a plain synchronous function: it runs before the terminal is
 /// touched and exits, so there is nothing to interleave with.
@@ -774,7 +774,7 @@ fn run_update(
 }
 
 fn update_off_the_runtime(check_only: bool, channel: Option<String>) -> Result<(), String> {
-    use srelens_tui::self_update::{self, Channel, Check, UpdateError};
+    use srectl::self_update::{self, Channel, Check, UpdateError};
 
     // reqwest is built with `rustls-no-provider`, which does NOT pick a
     // provider on its own: building a client without one panics inside
@@ -806,7 +806,7 @@ fn update_off_the_runtime(check_only: bool, channel: Option<String>) -> Result<(
 
     let fetch = |url: &str| -> Result<Vec<u8>, UpdateError> {
         let client = reqwest::blocking::Client::builder()
-            .user_agent(concat!("srelens-tui/", env!("CARGO_PKG_VERSION")))
+            .user_agent(concat!("srectl/", env!("CARGO_PKG_VERSION")))
             .timeout(std::time::Duration::from_secs(120))
             .build()
             .map_err(|e| UpdateError::Download(e.to_string()))?;
@@ -835,7 +835,7 @@ fn update_off_the_runtime(check_only: bool, channel: Option<String>) -> Result<(
         Ok(Check::Available(plan)) => *plan,
         Ok(Check::UpToDate { channel, .. }) => {
             println!(
-                "srelens-tui {current} is the latest {} release.",
+                "srectl {current} is the latest {} release.",
                 channel.as_str()
             );
             return Ok(());
@@ -844,12 +844,12 @@ fn update_off_the_runtime(check_only: bool, channel: Option<String>) -> Result<(
             // Only this channel was consulted, so that is all that can be
             // claimed. Naming the other one turns a dead end into a next step.
             print!(
-                "srelens-tui {current} is ahead of the latest {} release ({latest}); there is no {} update to install.",
+                "srectl {current} is ahead of the latest {} release ({latest}); there is no {} update to install.",
                 channel.as_str(),
                 channel.as_str()
             );
             match channel {
-                Channel::Stable => println!(" Try `srelens-tui update --channel dev`."),
+                Channel::Stable => println!(" Try `srectl update --channel dev`."),
                 Channel::Dev => println!(),
             }
             return Ok(());
@@ -867,7 +867,7 @@ fn update_off_the_runtime(check_only: bool, channel: Option<String>) -> Result<(
             format!(" --channel {}", channel.as_str())
         };
         println!(
-            "srelens-tui {} is available (you have {}).\n  {}\nRun `srelens-tui update{}` to install it.",
+            "srectl {} is available (you have {}).\n  {}\nRun `srectl update{}` to install it.",
             plan.latest, plan.current, plan.archive_url, flag
         );
         return Ok(());
@@ -879,7 +879,7 @@ fn update_off_the_runtime(check_only: bool, channel: Option<String>) -> Result<(
         "Switching"
     };
     println!(
-        "{verb} srelens-tui {} -> {} ({} channel)…",
+        "{verb} srectl {} -> {} ({} channel)…",
         plan.current,
         plan.latest,
         channel.as_str()
@@ -894,7 +894,7 @@ fn update_off_the_runtime(check_only: bool, channel: Option<String>) -> Result<(
 /// Report an update failure the way a command-line tool should: the sentence
 /// the error carries, on stderr, and a non-zero status so a script wrapping
 /// this can tell.
-fn fail(error: srelens_tui::self_update::UpdateError) -> ! {
-    eprintln!("srelens-tui: {error}");
+fn fail(error: srectl::self_update::UpdateError) -> ! {
+    eprintln!("srectl: {error}");
     std::process::exit(1);
 }

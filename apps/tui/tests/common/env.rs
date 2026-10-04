@@ -75,7 +75,7 @@ pub fn isolate_settings() -> SettingsGuard {
         "SRELENS_AI_SETTINGS_PATH",
         dir.path().join("ai_settings.json"),
     );
-    env.set("SRELENS_TUI_CONFIG_PATH", dir.path().join("tui.json"));
+    env.set("SRECTL_CONFIG_PATH", dir.path().join("tui.json"));
     SettingsGuard {
         _env: env,
         _dir: dir,

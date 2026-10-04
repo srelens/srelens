@@ -709,7 +709,7 @@ jobs:
 
       # Every crate inherits [workspace.package].version, so without this the
       # binary reports the committed placeholder: on dev the pre-release
-      # version is never committed at all, and `srelens-tui --version` would
+      # version is never committed at all, and `srectl --version` would
       # disagree with the release it was downloaded from. The smoke step below
       # asserts they match, so a drift here fails the leg rather than shipping.
       - name: Set build version
@@ -738,7 +738,7 @@ jobs:
         # matching Cargo.lock entries together; if it ever stops doing that,
         # failing here is better than resolving a different dependency set into
         # a release binary.
-        run: cargo build --release --locked -p srelens-tui --target ${{ matrix.target }}
+        run: cargo build --release --locked -p srectl --target ${{ matrix.target }}
 
       # A stable release REQUIRES signing; only dev may fall open. This
       # mirrors sign-artifacts, which refuses to cut a stable release without a
@@ -779,7 +779,7 @@ jobs:
           APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
         run: |
           set -euo pipefail
-          BIN="target/${{ matrix.target }}/release/srelens-tui"
+          BIN="target/${{ matrix.target }}/release/srectl"
 
           # A dedicated keychain, deleted at the end of the step: importing into
           # the login keychain would leave the certificate on a runner image
@@ -839,7 +839,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          BIN="target/${{ matrix.target }}/release/srelens-tui"
+          BIN="target/${{ matrix.target }}/release/srectl"
           [ "${{ runner.os }}" = "Windows" ] && BIN="$BIN.exe"
           OUT="$("$BIN" --version)"
           echo "$OUT"
@@ -862,7 +862,7 @@ jobs:
       - name: Assert the musl build is static
         if: ${{ endsWith(matrix.target, '-musl') }}
         run: |
-          BIN="target/${{ matrix.target }}/release/srelens-tui"
+          BIN="target/${{ matrix.target }}/release/srectl"
           if file "$BIN" | grep -q "dynamically linked"; then
             echo "::error::the musl build is dynamically linked, which defeats the target"
             file "$BIN"
@@ -870,7 +870,7 @@ jobs:
           fi
           file "$BIN"
 
-      # Files sit at the archive root, so `tar xzf` drops `srelens-tui` straight
+      # Files sit at the archive root, so `tar xzf` drops `srectl` straight
       # into the working directory and the user can move it onto PATH without
       # navigating a wrapper folder.
       - name: Package (unix)
@@ -878,9 +878,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          NAME="srelens-tui-${{ needs.version.outputs.version }}-${{ matrix.target }}"
+          NAME="srectl-${{ needs.version.outputs.version }}-${{ matrix.target }}"
           mkdir -p "dist/$NAME"
-          cp "target/${{ matrix.target }}/release/srelens-tui" "dist/$NAME/"
+          cp "target/${{ matrix.target }}/release/srectl" "dist/$NAME/"
           cp LICENSE "dist/$NAME/"
           tar -czf "dist/$NAME.tar.gz" -C "dist/$NAME" .
           rm -rf "dist/$NAME"
@@ -894,9 +894,9 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $name = "srelens-tui-${{ needs.version.outputs.version }}-${{ matrix.target }}"
+          $name = "srectl-${{ needs.version.outputs.version }}-${{ matrix.target }}"
           New-Item -ItemType Directory -Force -Path "dist/$name" | Out-Null
-          Copy-Item "target/${{ matrix.target }}/release/srelens-tui.exe" "dist/$name/"
+          Copy-Item "target/${{ matrix.target }}/release/srectl.exe" "dist/$name/"
           Copy-Item LICENSE "dist/$name/"
           Compress-Archive -Path "dist/$name/*" -DestinationPath "dist/$name.zip"
           Remove-Item -Recurse -Force "dist/$name"
@@ -933,12 +933,12 @@ jobs:
         run: |
           set -euo pipefail
           TAG="srelens-v${{ needs.version.outputs.version }}"
-          SUMS="srelens-tui-${{ needs.version.outputs.version }}-SHA256SUMS.txt"
+          SUMS="srectl-${{ needs.version.outputs.version }}-SHA256SUMS.txt"
           cd dist
           # Every leg is required, so count the archives rather than trusting
           # that six jobs each uploaded one: a silently missing target is the
           # failure this is here to catch.
-          count=$(ls -1 srelens-tui-*.tar.gz srelens-tui-*.zip 2>/dev/null | wc -l)
+          count=$(ls -1 srectl-*.tar.gz srectl-*.zip 2>/dev/null | wc -l)
           if [ "$count" -ne 7 ]; then
             echo "::error::expected 7 TUI archives, found $count"
             ls -l
@@ -946,10 +946,10 @@ jobs:
           fi
           # Named for the release so it cannot collide with a checksum file for
           # the desktop installers if one is ever added to the same tag.
-          sha256sum srelens-tui-*.tar.gz srelens-tui-*.zip > "$SUMS"
+          sha256sum srectl-*.tar.gz srectl-*.zip > "$SUMS"
           cat "$SUMS"
           gh release upload "$TAG" --repo "${{ github.repository }}" \
-            srelens-tui-*.tar.gz srelens-tui-*.zip "$SUMS" --clobber
+            srectl-*.tar.gz srectl-*.zip "$SUMS" --clobber
 
   # Dev only: fill the pre-release body with a recent-commit list and keep the
   # Releases page tidy. Stable (main) notes come from the version job.

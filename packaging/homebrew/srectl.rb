@@ -1,11 +1,11 @@
-# srelens-tui — the terminal UI, installed from the prebuilt release archive.
+# srectl — the terminal UI, installed from the prebuilt release archive.
 #
 # A formula rather than a cask: this is a command-line binary. The desktop app
 # is a `.dmg` and wants `brew install --cask` (see #225), which is a separate
 # piece of work published a different way.
 #
 # It installs the archive the release already publishes instead of compiling
-# from source. Building srelens-tui pulls in the whole workspace — kube-rs,
+# from source. Building srectl pulls in the whole workspace — kube-rs,
 # reqwest, ratatui, tokio — for a binary CI has already produced, signed and
 # notarized for exactly these four targets. `brew install` should not take
 # minutes to do again, worse, what a download does in seconds.
@@ -14,7 +14,7 @@
 # renders them from that release's own SHA256SUMS and pushes the result to the
 # tap; see packaging/homebrew/README.md. The committed file is the template,
 # which is why it names a version that does not exist.
-class SrelensTui < Formula
+class Srectl < Formula
   desc "Kubernetes control room in your terminal, built in Rust with k9s navigation"
   homepage "https://github.com/srelens/srelens"
   version "0.0.0"
@@ -22,11 +22,11 @@ class SrelensTui < Formula
 
   on_macos do
     on_arm do
-      url "https://github.com/srelens/srelens/releases/download/srelens-v0.0.0/srelens-tui-0.0.0-aarch64-apple-darwin.tar.gz"
+      url "https://github.com/srelens/srelens/releases/download/srelens-v0.0.0/srectl-0.0.0-aarch64-apple-darwin.tar.gz"
       sha256 "0000000000000000000000000000000000000000000000000000000000000000"
     end
     on_intel do
-      url "https://github.com/srelens/srelens/releases/download/srelens-v0.0.0/srelens-tui-0.0.0-x86_64-apple-darwin.tar.gz"
+      url "https://github.com/srelens/srelens/releases/download/srelens-v0.0.0/srectl-0.0.0-x86_64-apple-darwin.tar.gz"
       sha256 "0000000000000000000000000000000000000000000000000000000000000000"
     end
   end
@@ -46,11 +46,11 @@ class SrelensTui < Formula
   # client that spends its time waiting on an API server.
   on_linux do
     on_arm do
-      url "https://github.com/srelens/srelens/releases/download/srelens-v0.0.0/srelens-tui-0.0.0-aarch64-unknown-linux-musl.tar.gz"
+      url "https://github.com/srelens/srelens/releases/download/srelens-v0.0.0/srectl-0.0.0-aarch64-unknown-linux-musl.tar.gz"
       sha256 "0000000000000000000000000000000000000000000000000000000000000000"
     end
     on_intel do
-      url "https://github.com/srelens/srelens/releases/download/srelens-v0.0.0/srelens-tui-0.0.0-x86_64-unknown-linux-musl.tar.gz"
+      url "https://github.com/srelens/srelens/releases/download/srelens-v0.0.0/srectl-0.0.0-x86_64-unknown-linux-musl.tar.gz"
       sha256 "0000000000000000000000000000000000000000000000000000000000000000"
     end
   end
@@ -60,28 +60,28 @@ class SrelensTui < Formula
   # so these are genuinely optional rather than dependencies.
   def caveats
     <<~EOS
-      srelens-tui uses the kubectl and helm already on your PATH, if any.
-      Neither is required to browse a cluster; `srelens-tui toolbox` reports
+      srectl uses the kubectl and helm already on your PATH, if any.
+      Neither is required to browse a cluster; `srectl toolbox` reports
       what it found.
 
-      Homebrew owns this copy, so `srelens-tui update` will decline to replace
-      it and point you back here. Use `brew upgrade srelens-tui` instead.
+      Homebrew owns this copy, so `srectl update` will decline to replace
+      it and point you back here. Use `brew upgrade srectl` instead.
     EOS
   end
 
   def install
     # The archive holds the binary and LICENSE at its root.
-    bin.install "srelens-tui"
+    bin.install "srectl"
   end
 
   test do
     # Asserts the binary runs AND that the formula's version matches what was
     # actually packaged — a mismatch means the render step and the release
     # disagree, which is worth failing on.
-    assert_match version.to_s, shell_output("#{bin}/srelens-tui --version")
+    assert_match version.to_s, shell_output("#{bin}/srectl --version")
 
     # A command that needs no cluster, to prove the binary is not merely
     # loadable. With no kubeconfig it reports zero contexts rather than failing.
-    assert_match "SRElens Kubernetes TUI", shell_output("#{bin}/srelens-tui info")
+    assert_match "srectl", shell_output("#{bin}/srectl info")
   end
 end

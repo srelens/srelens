@@ -6569,6 +6569,46 @@ dependencies = [
 ]
 
 [[package]]
+name = "srectl"
+version = "0.15.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "clap",
+ "crossterm 0.28.1",
+ "dirs",
+ "flate2",
+ "futures",
+ "libc",
+ "log",
+ "ratatui",
+ "regex",
+ "reqwest 0.13.4",
+ "rustls",
+ "semver",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2 0.10.9",
+ "shlex 1.3.0",
+ "similar",
+ "srelens-agent",
+ "srelens-capability",
+ "srelens-kube",
+ "srelens-llm",
+ "srelens-mcp",
+ "srelens-registry",
+ "srelens-streams",
+ "tar",
+ "tempfile",
+ "tokio",
+ "unicode-width",
+ "uuid",
+ "windows-sys 0.61.2",
+ "zip",
+]
+
+[[package]]
 name = "srelens-agent"
 version = "0.15.0"
 dependencies = [
@@ -6835,46 +6875,6 @@ dependencies = [
  "srelens-kube",
  "tempfile",
  "tokio",
-]
-
-[[package]]
-name = "srelens-tui"
-version = "0.15.0"
-dependencies = [
- "async-trait",
- "chrono",
- "clap",
- "crossterm 0.28.1",
- "dirs",
- "flate2",
- "futures",
- "libc",
- "log",
- "ratatui",
- "regex",
- "reqwest 0.13.4",
- "rustls",
- "semver",
- "serde",
- "serde_json",
- "serde_yaml",
- "sha2 0.10.9",
- "shlex 1.3.0",
- "similar",
- "srelens-agent",
- "srelens-capability",
- "srelens-kube",
- "srelens-llm",
- "srelens-mcp",
- "srelens-registry",
- "srelens-streams",
- "tar",
- "tempfile",
- "tokio",
- "unicode-width",
- "uuid",
- "windows-sys 0.61.2",
- "zip",
 ]
 
 [[package]]

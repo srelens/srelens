@@ -17,16 +17,16 @@ use ratatui::{Frame, Terminal};
 use srelens_kube::node_inspector::{
     NodeConditionInfo, NodeInspectorDetails, NodePodItem, NodeTaintInfo,
 };
-use srelens_tui::ai_config::{AiProvider, AiSettings};
-use srelens_tui::theme::Theme;
-use srelens_tui::views::node_inspector_view::{render_node_inspector_view, NodeInspectorState};
-use srelens_tui::views::overview_view::{
+use srectl::ai_config::{AiProvider, AiSettings};
+use srectl::theme::Theme;
+use srectl::views::node_inspector_view::{render_node_inspector_view, NodeInspectorState};
+use srectl::views::overview_view::{
     render_overview_view, ClusterOverviewData, OverviewViewState,
 };
-use srelens_tui::views::settings_view::{render_settings_view, SettingField, SettingsViewState};
-use srelens_tui::views::tui_config_view::{render_tui_config_view, TuiConfigViewState};
-use srelens_tui::views::yaml_view::{render_yaml_view, YamlViewState};
-use srelens_tui::{CommandPopupDensity, TuiConfig};
+use srectl::views::settings_view::{render_settings_view, SettingField, SettingsViewState};
+use srectl::views::tui_config_view::{render_tui_config_view, TuiConfigViewState};
+use srectl::views::yaml_view::{render_yaml_view, YamlViewState};
+use srectl::{CommandPopupDensity, TuiConfig};
 
 /// Render one frame and hand back the raw buffer, for the few assertions that
 /// need a cell's style rather than its text.
@@ -2526,13 +2526,13 @@ fn tui_config_view_renders_cards_and_live_preview_at_wide_and_narrow() {
         "shows banner preview title"
     );
     assert!(
-        banner_full.contains("Welcome to SRElens"),
+        banner_full.contains("Welcome to srectl"),
         "shows banner contents in preview"
     );
 
     // Startup update check preview when selected_field == 4
     let mut update_state = TuiConfigViewState::new();
-    update_state.selected_field = srelens_tui::views::tui_config_view::FIELD_STARTUP_UPDATES;
+    update_state.selected_field = srectl::views::tui_config_view::FIELD_STARTUP_UPDATES;
     let update_lines = common::render_lines(120, 30, |f| {
         render_tui_config_view(f, f.area(), &update_state, &config)
     });
@@ -2548,7 +2548,7 @@ fn tui_config_view_renders_cards_and_live_preview_at_wide_and_narrow() {
 
     // Changed Guide preview when selected_field == FIELD_CHANGED_GUIDE
     let mut guide_state = TuiConfigViewState::new();
-    guide_state.selected_field = srelens_tui::views::tui_config_view::FIELD_CHANGED_GUIDE;
+    guide_state.selected_field = srectl::views::tui_config_view::FIELD_CHANGED_GUIDE;
     let guide_lines = common::render_lines(120, 30, |f| {
         render_tui_config_view(f, f.area(), &guide_state, &config)
     });
@@ -2564,7 +2564,7 @@ fn tui_config_view_renders_cards_and_live_preview_at_wide_and_narrow() {
 
     // ArgoCD GitOps Live Preview when selected_field == FIELD_ARGO_HUB_CONTEXT
     let mut argo_state = TuiConfigViewState::new();
-    argo_state.selected_field = srelens_tui::views::tui_config_view::FIELD_ARGO_HUB_CONTEXT;
+    argo_state.selected_field = srectl::views::tui_config_view::FIELD_ARGO_HUB_CONTEXT;
     argo_state.available_contexts = vec!["ctx-mgmt".to_string(), "ctx-worker".to_string()];
     let argo_lines = common::render_lines(120, 30, |f| {
         render_tui_config_view(f, f.area(), &argo_state, &config)
@@ -2582,7 +2582,7 @@ fn tui_config_view_renders_cards_and_live_preview_at_wide_and_narrow() {
 
     // Edit modal dialog when is_editing == true
     let mut edit_state = TuiConfigViewState::new();
-    edit_state.selected_field = srelens_tui::views::tui_config_view::FIELD_ARGO_HUB_CONTEXT;
+    edit_state.selected_field = srectl::views::tui_config_view::FIELD_ARGO_HUB_CONTEXT;
     edit_state.is_editing = true;
     edit_state.edit_buffer = "my-argo-hub".to_string();
     edit_state.edit_cursor = "my-argo-hub".chars().count();
@@ -2620,7 +2620,7 @@ fn config_render(state: &TuiConfigViewState, config: &TuiConfig) -> String {
 #[test]
 fn tui_config_argo_box_shows_each_setting_and_marks_the_selected_one() {
     let _settings = common::env::isolate_settings();
-    use srelens_tui::views::tui_config_view::{FIELD_ARGO_TIMEOUT, FIELD_ARGO_UI_URL};
+    use srectl::views::tui_config_view::{FIELD_ARGO_TIMEOUT, FIELD_ARGO_UI_URL};
     let config = TuiConfig {
         argo_hub_context: Some("hub-prod".to_string()),
         argo_ui_url: Some("https://argocd.example.com".to_string()),
@@ -2674,7 +2674,7 @@ fn tui_config_argo_box_shows_each_setting_and_marks_the_selected_one() {
 #[test]
 fn tui_config_argo_ui_url_is_validated_before_it_is_saved() {
     let _settings = common::env::isolate_settings();
-    use srelens_tui::views::tui_config_view::FIELD_ARGO_UI_URL;
+    use srectl::views::tui_config_view::FIELD_ARGO_UI_URL;
     let mut config = TuiConfig::default();
     let mut state = TuiConfigViewState::new();
     state.selected_field = FIELD_ARGO_UI_URL;
@@ -2716,7 +2716,7 @@ fn tui_config_argo_ui_url_is_validated_before_it_is_saved() {
 #[test]
 fn tui_config_argo_timeout_steps_and_applies_to_argo_reads() {
     let _settings = common::env::isolate_settings();
-    use srelens_tui::views::tui_config_view::FIELD_ARGO_TIMEOUT;
+    use srectl::views::tui_config_view::FIELD_ARGO_TIMEOUT;
     let mut config = TuiConfig::default();
     let mut state = TuiConfigViewState::new();
     state.selected_field = FIELD_ARGO_TIMEOUT;
@@ -2752,10 +2752,10 @@ fn tui_config_argo_timeout_steps_and_applies_to_argo_reads() {
 fn render_gpu(
     width: u16,
     height: u16,
-    state: &srelens_tui::views::gpu_view::GpuViewState,
+    state: &srectl::views::gpu_view::GpuViewState,
 ) -> String {
     common::render_text(width, height, |f| {
-        srelens_tui::views::gpu_view::render(f, f.area(), state)
+        srectl::views::gpu_view::render(f, f.area(), state)
     })
 }
 
@@ -2803,7 +2803,7 @@ fn gpu_view_renders_hami_virtual_gpus_with_dual_reality() {
         total_gpu_pods: 1,
     };
 
-    let mut state = srelens_tui::views::gpu_view::GpuViewState::new();
+    let mut state = srectl::views::gpu_view::GpuViewState::new();
     state.set_info(info);
 
     let text = render_gpu(160, 40, &state);
@@ -2869,7 +2869,7 @@ fn gpu_view_renders_unspecified_physical_gpu_count_without_guessing_multiplier()
         total_allocated_vram_mib: 0,
         total_gpu_pods: 0,
     };
-    let mut state = srelens_tui::views::gpu_view::GpuViewState::new();
+    let mut state = srectl::views::gpu_view::GpuViewState::new();
     state.set_info(info);
 
     let text = render_gpu(160, 40, &state);
@@ -2912,7 +2912,7 @@ fn gpu_view_renders_hami_empty_node_free_message() {
         total_gpu_pods: 0,
     };
 
-    let mut state = srelens_tui::views::gpu_view::GpuViewState::new();
+    let mut state = srectl::views::gpu_view::GpuViewState::new();
     state.set_info(info);
 
     let text = render_gpu(160, 40, &state);
@@ -2956,7 +2956,7 @@ fn gpu_view_renders_compact_vram_gauge_on_narrow_terminal() {
         total_gpu_pods: 0,
     };
 
-    let mut state = srelens_tui::views::gpu_view::GpuViewState::new();
+    let mut state = srectl::views::gpu_view::GpuViewState::new();
     state.set_info(info);
 
     // Terminal width 85: right pane will be around 41 cols (< 50)
@@ -2968,7 +2968,7 @@ fn gpu_view_renders_compact_vram_gauge_on_narrow_terminal() {
 
     // Verify small request (e.g. 512 MiB = 0.5 GiB) is not rounded down to 0G:
     node.vram_requests_total_mib = 512;
-    let mut small_state = srelens_tui::views::gpu_view::GpuViewState::new();
+    let mut small_state = srectl::views::gpu_view::GpuViewState::new();
     small_state.set_info(srelens_kube::gpu_info::GpuClusterInfo {
         nodes: vec![node.clone()],
         total_gpu_nodes: 1,
@@ -2986,7 +2986,7 @@ fn gpu_view_renders_compact_vram_gauge_on_narrow_terminal() {
 
     // Verify fractional request >= 10 GiB (e.g. 10752 MiB = 10.5 GiB) preserves .5 decimal precision:
     node.vram_requests_total_mib = 10752;
-    let mut frac_state = srelens_tui::views::gpu_view::GpuViewState::new();
+    let mut frac_state = srectl::views::gpu_view::GpuViewState::new();
     frac_state.set_info(srelens_kube::gpu_info::GpuClusterInfo {
         nodes: vec![node.clone()],
         total_gpu_nodes: 1,
@@ -3004,7 +3004,7 @@ fn gpu_view_renders_compact_vram_gauge_on_narrow_terminal() {
 
     // Verify sub-0.1 GiB request (e.g. 51 MiB) renders as 0.05G without rounding to 0G:
     node.vram_requests_total_mib = 51;
-    let mut tiny_state = srelens_tui::views::gpu_view::GpuViewState::new();
+    let mut tiny_state = srectl::views::gpu_view::GpuViewState::new();
     tiny_state.set_info(srelens_kube::gpu_info::GpuClusterInfo {
         nodes: vec![node.clone()],
         total_gpu_nodes: 1,
@@ -3022,7 +3022,7 @@ fn gpu_view_renders_compact_vram_gauge_on_narrow_terminal() {
 
     // Verify near-1 GiB fractional request (1000 MiB) renders as 1.0G without rounding to integer 1G:
     node.vram_requests_total_mib = 1000;
-    let mut near_one_state = srelens_tui::views::gpu_view::GpuViewState::new();
+    let mut near_one_state = srectl::views::gpu_view::GpuViewState::new();
     near_one_state.set_info(srelens_kube::gpu_info::GpuClusterInfo {
         nodes: vec![node],
         total_gpu_nodes: 1,

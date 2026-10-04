@@ -8,8 +8,8 @@ mod common;
 
 use std::path::{Path, PathBuf};
 
-use srelens_tui::ai_config::find_cursor_binary;
-use srelens_tui::views::toolbox_view::ToolboxViewState;
+use srectl::ai_config::find_cursor_binary;
+use srectl::views::toolbox_view::ToolboxViewState;
 
 /// Put `file` in `dir` as an executable: runnable on Unix, and named however
 /// the caller names it.

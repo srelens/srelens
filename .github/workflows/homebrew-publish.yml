@@ -1,6 +1,6 @@
 name: Publish Homebrew
 
-# Pushes the srelens-tui formula to the tap. Called by the release workflow
+# Pushes the srectl formula to the tap. Called by the release workflow
 # after a stable release goes public, and runnable BY HAND for any already
 # published version.
 #
@@ -35,7 +35,7 @@ concurrency:
 
 jobs:
   publish:
-    name: publish Homebrew (srelens-tui)
+    name: publish Homebrew (srectl)
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -112,7 +112,7 @@ jobs:
             exit 1
           fi
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "Publishing srelens-tui ${VERSION}"
+          echo "Publishing srectl ${VERSION}"
 
       # Rendering reads the release's own SHA256SUMS, so a release that is
       # missing the TUI archives fails here with that said plainly, rather than
@@ -126,9 +126,9 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p _tap/Formula
-          node packaging/homebrew/render.mjs "$VERSION" --out _tap/Formula/srelens-tui.rb
+          node packaging/homebrew/render.mjs "$VERSION" --out _tap/Formula/srectl.rb
           echo "--- rendered formula ---"
-          cat _tap/Formula/srelens-tui.rb
+          cat _tap/Formula/srectl.rb
 
       - name: Push to the tap
         if: steps.gate.outputs.publish == 'true'
@@ -152,29 +152,37 @@ jobs:
 
           git clone --depth 1 "https://github.com/${TAP_REPO}.git" tap
           mkdir -p tap/Formula
-          cp _tap/Formula/srelens-tui.rb tap/Formula/srelens-tui.rb
+          cp _tap/Formula/srectl.rb tap/Formula/srectl.rb
           cd tap
+
+          # The formula used to be Formula/srelens-tui.rb. Drop it in the same
+          # commit that publishes srectl, so the tap does not keep serving the
+          # old name. Missing is fine: a tap that never had it, or already
+          # dropped it, has nothing to remove.
+          if [ -f Formula/srelens-tui.rb ]; then
+            git rm -f Formula/srelens-tui.rb
+          fi
 
           # Staged BEFORE the comparison, and compared against the index.
           # `git diff` only looks at tracked files, so on the very first publish
-          # — when the tap has no Formula/srelens-tui.rb yet — the freshly
+          # — when the tap has no Formula/srectl.rb yet — the freshly
           # copied file is untracked, the diff is empty, and this would report
           # "already carries" and exit without publishing anything. That is the
           # one run where being wrong matters most: the install command has just
           # been advertised and nothing is behind it.
-          git add Formula/srelens-tui.rb
+          git add Formula/srectl.rb
 
           # Nothing to do is a success, not a failure: re-running the publish
           # for a version already on the tap should be a no-op rather than an
           # empty commit or a red run.
           if git diff --cached --quiet; then
-            echo "The tap already carries srelens-tui ${VERSION} — nothing to push."
+            echo "The tap already carries srectl ${VERSION} — nothing to push."
             exit 0
           fi
 
-          git commit -m "srelens-tui ${VERSION}"
+          git commit -m "srectl ${VERSION}"
           git push
-          echo "Pushed srelens-tui ${VERSION} to ${TAP_REPO}."
+          echo "Pushed srectl ${VERSION} to ${TAP_REPO}."
 
       - name: Clean up credentials
         if: always()
