@@ -112,7 +112,7 @@ const IMPACTS: readonly string[] = CAPABILITY_IMPACT_ORDER;
  */
 export function asConfirmRequest(payload: unknown): ConfirmRequest | null {
   if (typeof payload !== "object" || payload === null) return null;
-  const { id, tool, args, prompt, impact, target, requester } = payload as Partial<ConfirmRequest>;
+  const { id, tool, args, prompt, impact, target, requester, caller } = payload as Partial<ConfirmRequest>;
   if (typeof id !== "string" || id === "" || typeof tool !== "string") return null;
   return {
     id,
@@ -122,7 +122,19 @@ export function asConfirmRequest(payload: unknown): ConfirmRequest | null {
     prompt: typeof prompt === "string" && prompt !== "" ? prompt : null,
     impact: IMPACTS.includes(impact as CapabilityImpact) ? (impact as CapabilityImpact) : undefined,
     requester: asRequester(requester),
+    caller: asCaller(caller),
   };
+}
+
+/**
+ * The chat a request came from (#393), narrowed. Anything but an object with a
+ * non-empty string `chatSession` is not a chat this window can match a run
+ * against, and reads as no caller — the same as an external client's.
+ */
+function asCaller(payload: unknown): { chatSession: string } | null {
+  if (typeof payload !== "object" || payload === null) return null;
+  const { chatSession } = payload as { chatSession?: unknown };
+  return typeof chatSession === "string" && chatSession !== "" ? { chatSession } : null;
 }
 
 /**

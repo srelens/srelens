@@ -1069,8 +1069,13 @@ export function App() {
     setDockSessions((t) => [...t, { id, kind, ...s }]);
     setActiveDock(id);
   }
-  /** Tear down any pod tied to a closing dock session (e.g. node debug shell). */
+  /**
+   * Tear down any pod tied to a closing dock session (e.g. node debug shell).
+   * On desktop the host deletes a node shell's debug pod itself, however the
+   * shell ends (#734), so only the web page still does it.
+   */
   function teardownDock(sessions: DockSession[]) {
+    if (isTauri()) return;
     for (const s of sessions) {
       if (s.deleteOnClose) {
         void deletePod(s.deleteOnClose.context, s.deleteOnClose.namespace, s.deleteOnClose.pod);

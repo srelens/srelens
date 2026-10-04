@@ -1,7 +1,8 @@
-import { parseAssistantMarkdown, type MdBlock, type NoteSpan } from "@srelens/core";
+import { parseAssistantMarkdown, type CapabilityImpact, type MdBlock, type NoteSpan } from "@srelens/core";
 import { AgentMark, Badge, CopyButton, cx, toneWash, type Tone } from "@srelens/ui-kit";
 import type { GateRecord, ToolCallRecord, Turn } from "../../lib/agentRun";
 import { CAPABILITY_CATALOG } from "@srelens/core";
+import { IMPACT_LABEL } from "../../confirm/HostConfirmation";
 import { pad2 } from "../../lib/numbers";
 
 /**
@@ -44,6 +45,10 @@ const GATE_WORD: Record<GateRecord["outcome"], string> = {
   // guessing at a fact it was never told.
   settled: "No longer waiting",
 };
+
+/** The confirmation's own colours for a level (`hostConfirmation.css`): the
+ *  default ink for low, warn for medium, sev for high. */
+const IMPACT_TONE: Record<CapabilityImpact, Tone> = { low: "muted", medium: "warn", high: "sev" };
 
 /** A one-line summary of a call/gate's args, or `""` for `null`/`{}` — the
  * same "nothing worth a line" rule `apps/desktop`'s `summarizeArgs` uses, so
@@ -132,11 +137,16 @@ function prettyArgs(args: unknown): string {
  *   is the whole reason `mcp://confirm-resolved` had to be invented. A second
  *   set here would rebuild exactly that.
  * - **The effect paragraph** ("Restores DB_POOL_MAX=40 and recreates 12
- *   pods…"). `ConfirmRequest` is `{ id, tool, args }` (#388). srelens does not
- *   know what a call will do, and a sentence saying it would be invented.
+ *   pods… Expected full recovery in ~90 s. Reversible…"). What the card shows
+ *   instead is the host's own sentence for the call — "Roll every pod of
+ *   Deployment shop/checkout-api in cluster prod-eu?" — and its impact level
+ *   (#388): the question the reader actually answered, rendered by the host
+ *   from the capability's template, never by this component. Recovery time
+ *   and reversibility are not things srelens knows, so they stay out.
  *
- * The badge IS honest: `destructive` is a real field on the capability
- * registry, so this reads it rather than guessing from the tool's name.
+ * The badges ARE honest: `destructive` is a real field on the capability
+ * registry, so this reads it rather than guessing from the tool's name, and
+ * the impact is the host's, named in the confirmation's own words.
  */
 function GateRow({ gate }: { gate: GateRecord }) {
   const facts = CAPABILITY_CATALOG.find((c) => c.id === gate.tool);
@@ -149,12 +159,16 @@ function GateRow({ gate }: { gate: GateRecord }) {
       >
         <div className="min-w-0">
           <p className="min-w-0 break-words font-mono text-[0.8125rem] font-medium text-ink">{gate.tool}</p>
+          {gate.prompt !== undefined && (
+            <p className="mt-0.5 min-w-0 break-words text-sm text-ink">{gate.prompt}</p>
+          )}
           {/* The TIME only. `gateLabel` is word-plus-time, and the badge
               already carries the word — printing both put "Applied" on the
               card twice. */}
           {gate.at !== undefined && <TurnClock at={gate.at} className="mt-0.5 block" />}
         </div>
         <div className="flex shrink-0 items-center gap-1.5">
+          {gate.impact !== undefined && <Badge tone={IMPACT_TONE[gate.impact]}>{IMPACT_LABEL[gate.impact]}</Badge>}
           {facts?.destructive === true && <Badge tone="sev">destructive</Badge>}
           <Badge tone={GATE_TONE[gate.outcome]}>{GATE_WORD[gate.outcome]}</Badge>
         </div>

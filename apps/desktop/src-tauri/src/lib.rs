@@ -22,6 +22,7 @@ mod files;
 mod forward;
 mod helm;
 mod host_notice;
+mod node_shells;
 mod logs;
 mod mcp;
 mod mcp_confirm;
@@ -468,6 +469,8 @@ pub fn run() {
         // Which window opened each stream, so a window that closes or reloads
         // ends exactly its own (#700).
         .manage(window_streams::WindowStreams::default())
+        // The debug pod each node shell runs in, which the host deletes (#734).
+        .manage(node_shells::NodeShells::default())
         .on_window_event(window_streams::on_window_event)
         // The cache itself, for commands that need the live kubeconfig paths
         // (overview_snapshot resolves context → cluster identity from them).
@@ -575,8 +578,26 @@ pub fn run() {
             cluster_oidc_cmd::list_clusters,
             window::open_context_window,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while running tauri application")
+        .run(|app, event| {
+            // srelens is quitting: the last chance to delete the node debug
+            // pods still on a node (#734). Bounded, so a cluster that does not
+            // answer cannot hold the app open; what is left is in the log.
+            if let tauri::RunEvent::Exit = event {
+                let (done, finished) = std::sync::mpsc::channel();
+                let app = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    node_shells::delete_all(&app).await;
+                    let _ = done.send(());
+                });
+                let deadline =
+                    node_shells::quit_deadline(srelens_kube::connect::request_timeout());
+                if finished.recv_timeout(deadline).is_err() {
+                    log::warn!("quit before every node debug pod was deleted");
+                }
+            }
+        });
 }
 
 /// The store apps' secret settings are kept in (#543), shared by every
