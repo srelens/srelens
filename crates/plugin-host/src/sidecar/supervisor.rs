@@ -469,6 +469,9 @@ async fn supervise(
         let reason = match start(&shared, &config, &*launcher, &broker).await {
             Started::Running(running) => {
                 let started_at = Instant::now();
+                // The session before the status: a caller waiting for the sidecar
+                // to leave `Starting` calls it at once.
+                shared.set_connection(Some(running.connection.clone()));
                 shared.running(Some(&running.process));
                 shared.set(SidecarStatus::Running {
                     api_version: running.api_version.clone(),
@@ -793,7 +796,6 @@ async fn run(
         mut reader,
         ..
     } = running;
-    shared.set_connection(Some(connection.clone()));
     let policy = &config.policy;
     let kill = process.killer();
     let mut health = tokio::time::interval_at(
