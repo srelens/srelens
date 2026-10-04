@@ -833,6 +833,21 @@ describe("AgentConsent", () => {
       expect(getAgentRun().gates.find((g) => g.id === "r1")?.args).toEqual({ replicas: 7 });
     });
 
+    it("records the host's sentence and level with the gate, and keeps them once answered (#388)", async () => {
+      await mount();
+      await startTurn();
+      emit(REQUEST, {
+        id: "r9", tool: "k8s.scale", args: { replicas: 2 },
+        prompt: "Change the replica count of Deployment shop/api in cluster prod?", impact: "medium",
+        caller: OURS,
+      });
+      await userEvent.click(await screen.findByRole("button", { name: /approve/i }));
+      await waitFor(() => expect(getAgentRun().gates.find((g) => g.id === "r9")?.outcome).toBe("approved"));
+      const gate = getAgentRun().gates.find((g) => g.id === "r9");
+      expect(gate?.prompt).toBe("Change the replica count of Deployment shop/api in cluster prod?");
+      expect(gate?.impact).toBe("medium");
+    });
+
     it("records a denial as a denial", async () => {
       // `outcome` carries three states and a denial is not the absence of an
       // approval. Without this, a field that only ever writes "approved"

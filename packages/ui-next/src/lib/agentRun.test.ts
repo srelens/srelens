@@ -1513,6 +1513,44 @@ describe("the run store", () => {
       expect(getAgentRun().gates).toHaveLength(1);
     });
 
+    it("keeps a saved gate's sentence and level, and still loads one saved without them (#388)", async () => {
+      listSessions.mockResolvedValue([{ id: "g2", title: "t", createdAt: 1, updatedAt: 2 }]);
+      loadSession.mockResolvedValue({
+        id: "g2", title: "t", createdAt: 1, updatedAt: 2, contexts: [], skills: [],
+        cliSessionId: null, agentKind: "claude",
+        messages: [{
+          v: 1, key: "prod-eu|/k/pods", label: "pods",
+          turns: [{ id: 1, role: "user", text: "q", calls: [], at: 1 }],
+          gates: [
+            { id: "g", tool: "k8s.scale", args: {}, outcome: "approved", prompt: "Change the replica count?", impact: "medium" },
+            { id: "h", tool: "k8s.scale", args: {}, outcome: "approved" },
+          ],
+        }],
+      });
+      await restoreRuns();
+      await openSavedRun("g2");
+      expect(getAgentRun().gates.map((g) => [g.prompt, g.impact])).toEqual([
+        ["Change the replica count?", "medium"],
+        [undefined, undefined],
+      ]);
+    });
+
+    it("refuses a saved gate with a level the host never sends", async () => {
+      listSessions.mockResolvedValue([{ id: "g3", title: "t", createdAt: 1, updatedAt: 2 }]);
+      loadSession.mockResolvedValue({
+        id: "g3", title: "t", createdAt: 1, updatedAt: 2, contexts: [], skills: [],
+        cliSessionId: null, agentKind: "claude",
+        messages: [{
+          v: 1, key: "prod-eu|/k/pods", label: "pods",
+          turns: [{ id: 1, role: "user", text: "q", calls: [], at: 1 }],
+          gates: [{ id: "g", tool: "k8s.scale", impact: "catastrophic" }],
+        }],
+      });
+      await restoreRuns();
+      await openSavedRun("g3");
+      expect(getAgentRun().gates).toEqual([]);
+    });
+
     it("drops a stored tool call it cannot name, keeping the ones it can", async () => {
       listSessions.mockResolvedValue([{ id: "old", title: "t", createdAt: 1, updatedAt: 5 }]);
       loadSession.mockResolvedValue({

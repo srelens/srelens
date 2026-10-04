@@ -6,7 +6,7 @@ import {
   subscribe,
   type ConfirmRequest,
 } from "@srelens/core";
-import { getRun, noteGate, noteGateIn, runKeyHoldingGate } from "../lib/agentRun";
+import { getRun, noteGate, noteGateIn, runKeyHoldingGate, type GateRecord } from "../lib/agentRun";
 import { Alert, ConfirmDialog } from "@srelens/ui-kit";
 import { FailureLine } from "../lib/errorCopy";
 import { useWorkspaceSealed } from "./LockGate";
@@ -248,6 +248,18 @@ function mergeById(queue: ConfirmRequest[], incoming: ConfirmRequest[]): Confirm
   return fresh.length === 0 ? queue : [...queue, ...fresh];
 }
 
+/**
+ * What the host said about the call — its sentence and its level — for the
+ * gate the transcript keeps (#388). Only what was sent: a request with no
+ * sentence records none, rather than an empty one the card would draw.
+ */
+function hostWords(request: ConfirmRequest): Pick<GateRecord, "prompt" | "impact"> {
+  return {
+    ...(request.prompt ? { prompt: request.prompt } : {}),
+    ...(request.impact ? { impact: request.impact } : {}),
+  };
+}
+
 export function AgentConsent() {
   const [queue, setQueue] = useState<ConfirmRequest[]>([]);
   const [busy, setBusy] = useState(false);
@@ -413,7 +425,10 @@ export function AgentConsent() {
     // NOTHING when there is none. "Which conversation owns this mutation" is
     // the store's question to answer — this component only knows a request
     // was shown, and who the host says raised it.
-    noteGate({ id: current.id, tool: current.tool, args: current.args, outcome: "pending" }, current.caller);
+    noteGate(
+      { id: current.id, tool: current.tool, args: current.args, outcome: "pending", ...hostWords(current) },
+      current.caller,
+    );
   }, [covered, current]);
 
   async function answer(approved: boolean): Promise<void> {
@@ -450,6 +465,7 @@ export function AgentConsent() {
           id,
           tool: current.tool,
           args: current.args,
+          ...hostWords(current),
           outcome: approved ? "approved" : "denied",
           at: Date.now(),
         });

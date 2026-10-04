@@ -1,5 +1,6 @@
 import { useCallback, useSyncExternalStore } from "react";
 import {
+  CAPABILITY_IMPACT_ORDER,
   cancelChat,
   describeError,
   listAgents,
@@ -11,6 +12,7 @@ import {
   sendChat,
   startChat,
   type AgentEvent,
+  type CapabilityImpact,
   type Session,
   type SessionMeta,
   type Skill,
@@ -84,6 +86,14 @@ export type GateRecord = {
    * resolved.
    */
   at?: number;
+  /**
+   * The host's own sentence for the call — the question the reader actually
+   * answered (#388) — and how much it disturbs. Copied from the request when
+   * it is shown; absent when the host rendered none, and on gates saved before
+   * they were kept.
+   */
+  prompt?: string;
+  impact?: CapabilityImpact;
 };
 
 /** One turn of the conversation — the reader's question, or the agent's
@@ -1523,8 +1533,15 @@ function isSavedTurn(value: unknown): boolean {
 /** One recorded gate. `gates` is optional; a present one must be usable. */
 function isSavedGate(value: unknown): boolean {
   if (typeof value !== "object" || value === null) return false;
-  const g = value as { id?: unknown; tool?: unknown };
-  return typeof g.id === "string" && typeof g.tool === "string";
+  const g = value as { id?: unknown; tool?: unknown; prompt?: unknown; impact?: unknown };
+  return (
+    typeof g.id === "string" &&
+    typeof g.tool === "string" &&
+    // Drawn as text and as a badge keyed by level, so each is checked to the
+    // depth it is used: a level the host never sends has no badge to draw.
+    (g.prompt === undefined || typeof g.prompt === "string") &&
+    (g.impact === undefined || CAPABILITY_IMPACT_ORDER.includes(g.impact as CapabilityImpact))
+  );
 }
 
 /**
