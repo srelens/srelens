@@ -41,6 +41,10 @@ libc = "0.2"
 [target.'cfg(target_os = "linux")'.dependencies]
 landlock = "0.4"
 seccompiler = "0.5"
+# Asks the systemd user manager for the delegated scope Linux sidecars' cgroups
+# go in (`sandbox/systemd.rs`): the blocking API, default features. Already in
+# the lockfile through the desktop's Tauri plugins.
+zbus = "5"
 
 # The Windows backend the spike chose: an AppContainer inside a Job Object.
 # The version the spike ran against, already in the lockfile.

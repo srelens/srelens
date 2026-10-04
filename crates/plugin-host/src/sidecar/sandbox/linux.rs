@@ -2,7 +2,9 @@
 //! the #571 spike recommended (`landlock+seccomp+cgroup`, 11 of 11 checks).
 //!
 //! The host creates the sidecar's cgroup, with its memory and CPU limits,
-//! under a delegated root, and starts `srelens-sandbox-launch`, which joins
+//! under a delegated root — one set up by hand (`SRELENS_SANDBOX_CGROUP_ROOT`),
+//! or the scope srelens asks systemd for (`systemd.rs`) — and starts
+//! `srelens-sandbox-launch`, which joins
 //! it, applies Landlock and the filter to itself, and `exec`s the sidecar
 //! (`launch.rs`). Every layer is required: the ADR's rule to refuse where no
 //! sandbox exists applies to each layer, not only the first, so a kernel
@@ -50,6 +52,9 @@ pub(super) fn launch(
     let root = match &config.cgroup {
         CgroupRoot::Missing => return Err(LaunchError::Unavailable(NO_CGROUP.into())),
         CgroupRoot::Delegated(root) => root.clone(),
+        CgroupRoot::SystemdScope => {
+            super::systemd::scope_root().map_err(LaunchError::Unavailable)?
+        }
     };
     let cgroup = cgroup_in(&root, limits).map_err(|e| LaunchError::Unavailable(e.to_string()))?;
     let mut cmd = tokio::process::Command::new(launcher);

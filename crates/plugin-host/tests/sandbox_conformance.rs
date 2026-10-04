@@ -6,12 +6,13 @@
 //! link inside it reaches nothing outside, and that its size limit holds.
 //!
 //! Every test is `#[ignore]`: each needs an OS sandbox, network access for
-//! its positive controls, and on Linux a delegated cgroup. The
+//! its positive controls, and on Linux a delegated cgroup: the scope srelens
+//! asks the systemd user manager for, as the desktop does, or, where there is
+//! no user session, the directory `SRELENS_SANDBOX_CGROUP_ROOT` names. The
 //! `sandbox-conformance` CI job runs them on Linux and Windows:
 //!
 //! ```text
-//! SRELENS_SANDBOX_CGROUP_ROOT=/sys/fs/cgroup/<delegated> \
-//!   cargo test -p srelens-plugin-host --test sandbox_conformance -- --ignored --test-threads=1
+//! cargo test -p srelens-plugin-host --test sandbox_conformance -- --ignored --test-threads=1
 //! ```
 //!
 //! A "must be denied" check passes only when, as in the spike:
@@ -129,7 +130,7 @@ fn sandbox() -> OsSandbox {
     OsSandbox::new(SandboxConfig {
         launcher: Some(LAUNCHER.into()),
         cgroup: std::env::var_os("SRELENS_SANDBOX_CGROUP_ROOT")
-            .map_or(CgroupRoot::Missing, |root| {
+            .map_or(CgroupRoot::SystemdScope, |root| {
                 CgroupRoot::Delegated(root.into())
             }),
     })

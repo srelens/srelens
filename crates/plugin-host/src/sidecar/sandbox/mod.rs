@@ -355,6 +355,9 @@ pub enum CgroupRoot {
     Missing,
     /// A directory set up by hand, as `SRELENS_SANDBOX_CGROUP_ROOT` names one.
     Delegated(PathBuf),
+    /// A delegated scope srelens asks the systemd user manager for at its
+    /// first sidecar start (`systemd.rs`).
+    SystemdScope,
 }
 
 /// The sandbox backend for the OS srelens runs on.

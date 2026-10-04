@@ -9,11 +9,11 @@
 //! `sandbox-conformance` CI job builds by hand. Where it cannot, the sidecar is
 //! refused with the reason and the way out; it is never started without
 //! limits.
-// Until `linux::launch` asks for the scope.
-#![cfg_attr(not(test), allow(dead_code))]
 
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, PoisonError};
+use std::time::Duration;
 
 /// The controllers a sidecar's limits need, as `cgroup.controllers` names them.
 const CONTROLLERS: [&str; 2] = ["memory", "cpu"];
@@ -22,6 +22,115 @@ const CONTROLLERS: [&str; 2] = ["memory", "cpu"];
 const LEAF: &str = "host";
 
 const NOT_UNIFIED: &str = "srelens needs the unified cgroup v2 hierarchy to limit an app's memory and CPU, so it does not run executable apps on this system";
+
+const NESTED: &str = "srelens runs in a PID namespace of its own, as in a container, where it cannot ask systemd for a cgroup, so it does not run executable apps. Name a delegated cgroup v2 directory in SRELENS_SANDBOX_CGROUP_ROOT";
+
+/// The scope srelens's sidecars' cgroups go in, made at the first call in this
+/// process. Later calls answer with the first success. A failure is not kept:
+/// the next start tries again, which is safe because every step can be
+/// repeated.
+pub(super) fn scope_root() -> Result<PathBuf, String> {
+    static ROOT: Mutex<Option<PathBuf>> = Mutex::new(None);
+    let mut root = ROOT.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(root) = root.as_ref() {
+        return Ok(root.clone());
+    }
+    // A thread of its own: the D-Bus call blocks, and the caller is a tokio task.
+    let made = std::thread::spawn(adopt).join().unwrap_or_else(|_| {
+        Err(
+            "srelens failed while setting up a cgroup for executable apps, so it does not run them"
+                .into(),
+        )
+    })?;
+    *root = Some(made.clone());
+    Ok(made)
+}
+
+/// Every step, from wherever this process is now.
+fn adopt() -> Result<PathBuf, String> {
+    let status = std::fs::read_to_string("/proc/self/status").map_err(|e| {
+        format!("srelens cannot read /proc/self/status ({e}), so it does not run executable apps")
+    })?;
+    if in_nested_pid_namespace(&status) {
+        return Err(NESTED.into());
+    }
+    let pid = std::process::id();
+    let unit = unit_name(pid);
+    let now = own_cgroup()?;
+    let scope = match scope_of_leaf(&now, &unit) {
+        Some(scope) => scope.to_owned(),
+        None => {
+            start_scope(&unit, pid)?;
+            wait_for(&unit)?
+        }
+    };
+    let dir = Path::new("/sys/fs/cgroup").join(scope.trim_start_matches('/'));
+    prepare(&dir, |path, value| std::fs::write(path, value))?;
+    Ok(dir)
+}
+
+/// This process's cgroup path.
+fn own_cgroup() -> Result<String, String> {
+    let text = std::fs::read_to_string("/proc/self/cgroup").map_err(|e| {
+        format!("srelens cannot read /proc/self/cgroup ({e}), so it does not run executable apps")
+    })?;
+    unified_path(&text).map(str::to_owned)
+}
+
+/// Ask the user manager for `unit`, a scope holding this process, delegated.
+fn start_scope(unit: &str, pid: u32) -> Result<(), String> {
+    use zbus::zvariant::Value;
+    let connection = zbus::blocking::connection::Builder::session()
+        .and_then(|builder| builder.method_timeout(Duration::from_secs(10)).build())
+        .map_err(|e| no_user_manager(&e.to_string()))?;
+    let properties: Vec<(&str, Value)> = vec![
+        ("PIDs", Value::from(vec![pid])),
+        ("Delegate", Value::from(true)),
+        ("Description", Value::from("srelens executable apps")),
+    ];
+    let auxiliary: Vec<(&str, Vec<(&str, Value)>)> = Vec::new();
+    connection
+        .call_method(
+            Some("org.freedesktop.systemd1"),
+            "/org/freedesktop/systemd1",
+            Some("org.freedesktop.systemd1.Manager"),
+            "StartTransientUnit",
+            &(unit, "fail", properties, auxiliary),
+        )
+        .map(drop)
+        .map_err(|e| match &e {
+            zbus::Error::MethodError(name, ..)
+                if name.as_str() == "org.freedesktop.DBus.Error.ServiceUnknown" =>
+            {
+                no_user_manager(&e.to_string())
+            }
+            _ => format!(
+                "The systemd user manager did not make srelens's scope {unit} ({e}), so srelens does not run executable apps"
+            ),
+        })
+}
+
+/// Wait for systemd to move this process into `unit`, which its job does just
+/// after the call returns: every 10 ms, for at most 2 s.
+fn wait_for(unit: &str) -> Result<String, String> {
+    for _ in 0..200 {
+        let now = own_cgroup()?;
+        if now.rsplit('/').next() == Some(unit) {
+            return Ok(now);
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    Err(format!(
+        "systemd did not move srelens into its scope {unit} within 2 seconds, so srelens does not run executable apps"
+    ))
+}
+
+/// The refusal where no systemd user manager answers.
+fn no_user_manager(error: &str) -> String {
+    format!(
+        "srelens could not ask the systemd user manager for a cgroup ({error}), so it does not run executable apps. They need a systemd desktop session, or a delegated cgroup v2 directory named in SRELENS_SANDBOX_CGROUP_ROOT"
+    )
+}
 
 /// The scope srelens asks for, named by the XDG convention for an app's scope.
 fn unit_name(pid: u32) -> String {
@@ -132,7 +241,6 @@ fn missing_controllers(missing: &[&str]) -> String {
 mod tests {
     use super::*;
     use std::cell::RefCell;
-    use std::path::PathBuf;
 
     #[test]
     fn the_unit_is_named_for_the_app_and_the_process() {
@@ -280,6 +388,43 @@ mod tests {
         let dir = scope("pids\n", "");
         let why = prepare(dir.path(), |_, _| Ok(())).expect_err("refused");
         assert!(why.contains("memory and cpu controllers"), "{why}");
+    }
+
+    #[test]
+    fn without_a_user_manager_the_refusal_names_the_way_out() {
+        let why = no_user_manager("No such file or directory");
+        assert!(why.contains("No such file or directory"), "{why}");
+        assert!(why.contains("SRELENS_SANDBOX_CGROUP_ROOT"), "{why}");
+        assert!(why.contains("does not run executable apps"), "{why}");
+    }
+
+    /// The real user manager: the test process ends up in its own scope's
+    /// leaf, with the controllers handed down. CI runs it in the
+    /// `sandbox-conformance` job, which starts the runner's user manager.
+    #[test]
+    #[ignore = "needs a systemd user session; run by the sandbox-conformance CI job"]
+    fn a_running_process_gets_a_delegated_scope() {
+        let root = scope_root().expect("a delegated scope");
+        let unit = unit_name(std::process::id());
+        assert!(root.ends_with(&unit), "{}", root.display());
+        let now = own_cgroup().expect("in the unified hierarchy");
+        assert_eq!(
+            scope_of_leaf(&now, &unit),
+            root.to_str().unwrap().strip_prefix("/sys/fs/cgroup"),
+            "{now}"
+        );
+        let enabled = std::fs::read_to_string(root.join("cgroup.subtree_control")).unwrap();
+        for controller in ["memory", "cpu"] {
+            assert!(
+                enabled.split_whitespace().any(|c| c == controller),
+                "{enabled}"
+            );
+        }
+        assert_eq!(
+            scope_root().expect("the same scope"),
+            root,
+            "a second call answers with the first"
+        );
     }
 
     #[test]
