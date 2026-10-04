@@ -5877,6 +5877,12 @@ mod tests {
                 json!({ "name": "pod-crashloop", "namespace": "default", "phase": "Running", "ready": "0/1", "restarts": 5, "waitingReason": "CrashLoopBackOff", "image": "api:v1", "createdAt": "2024-01-01T00:00:00Z" }),
                 json!({ "name": "pod-notready", "namespace": "default", "phase": "Running", "ready": "0/1", "restarts": 1, "waitingReason": "", "image": "worker:v1", "createdAt": "2024-01-01T00:00:00Z" }),
                 json!({ "name": "pod-completed", "namespace": "default", "phase": "Succeeded", "ready": "0/1", "restarts": 0, "waitingReason": "", "image": "job:v1", "createdAt": "2024-01-01T00:00:00Z" }),
+                // Rows as the backend sends them since #786: `status` is the
+                // word `kubectl get pods` prints, and the view shows it.
+                json!({ "name": "pod-oom", "namespace": "default", "phase": "Running", "ready": "0/1", "restarts": 2, "waitingReason": "", "status": "OOMKilled", "image": "cache:v1", "createdAt": "2024-01-01T00:00:00Z" }),
+                json!({ "name": "pod-exited", "namespace": "default", "phase": "Running", "ready": "0/1", "restarts": 7, "waitingReason": "", "status": "Error", "image": "api:v1", "createdAt": "2024-01-01T00:00:00Z" }),
+                json!({ "name": "pod-finished", "namespace": "default", "phase": "Succeeded", "ready": "0/1", "restarts": 0, "waitingReason": "", "status": "Completed", "image": "job:v1", "createdAt": "2024-01-01T00:00:00Z" }),
+                json!({ "name": "pod-init", "namespace": "default", "phase": "Pending", "ready": "0/1", "restarts": 0, "waitingReason": "PodInitializing", "status": "Init:0/1", "image": "app:v1", "createdAt": "2024-01-01T00:00:00Z" }),
             ],
         );
 
@@ -5959,7 +5965,7 @@ mod tests {
             _ => panic!("Expected ActiveView::Table"),
         };
 
-        assert_eq!(table.raw_items.len(), 14);
+        assert_eq!(table.raw_items.len(), 18);
 
         let find_item = |name: &str| -> &serde_json::Value {
             table
@@ -5987,10 +5993,19 @@ mod tests {
         assert_eq!(find_item("ds-not-scheduled")["status"], "Not scheduled");
         assert_eq!(find_item("ds-not-scheduled")["ready"], "0/0");
 
-        // Check Pods
+        // Check Pods: kubectl's word from the row's `status`, the same one the
+        // Pods table shows for the same pod.
+        assert_eq!(find_item("pod-oom")["status"], "OOMKilled");
+        assert_eq!(find_item("pod-exited")["status"], "Error");
+        assert_eq!(find_item("pod-finished")["status"], "Completed");
+        assert_eq!(find_item("pod-init")["status"], "Init:0/1");
+        // A row without `status` (none from the backend since #786) falls back
+        // to a finished phase, else the waiting reason, else the phase. No
+        // `NotReady` from the ready ratio: kubectl says `Running` for an up
+        // container that is not ready, and so does this view.
         assert_eq!(find_item("pod-running")["status"], "Running");
         assert_eq!(find_item("pod-crashloop")["status"], "CrashLoopBackOff");
-        assert_eq!(find_item("pod-notready")["status"], "NotReady");
+        assert_eq!(find_item("pod-notready")["status"], "Running");
         assert_eq!(find_item("pod-completed")["status"], "Succeeded");
 
         // Check CronJobs
