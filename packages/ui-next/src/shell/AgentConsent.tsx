@@ -398,29 +398,22 @@ export function AgentConsent() {
   // the transcript that nobody was ever asked to make. The reader would read
   // their own name on a call they never saw.
   //
-  // **Ownership is decided ONCE, here, at presentation.** `ConfirmRequest` is
-  // `{ id, tool, args }` — it carries no client identity, so this component
-  // cannot know whose call raised it. The confirm channel is app-wide by
-  // design: an external MCP client (the loopback HTTP server, bearer-token
-  // authenticated) raises the exact same `mcp://confirm-request` srelens's own
-  // agent does. The honest predicate is "does THIS store have a turn actually
-  // in flight right now" — that is the only moment srelens's own agent could
-  // be the caller. A confirm presented while the store is idle is recorded as
-  // nothing: it is still shown and still answered below, just not attributed
-  // to a conversation it may have no part in.
-  //
-  // Known limit, stated rather than hidden: a confirm raised by ANOTHER
-  // client WHILE srelens's own agent happens to be mid-turn is still
-  // misattributed — this predicate cannot tell the two apart without client
-  // identity in the payload, which `ConfirmRequest` does not carry. Fixing
-  // that needs a payload change on the backend side; filed separately.
+  // **Ownership is decided ONCE, here, at presentation, by the request's own
+  // `caller`.** The confirm channel is app-wide by design: an external MCP
+  // client (the loopback HTTP server, bearer-token authenticated) raises the
+  // exact same `mcp://confirm-request` srelens's own agent does. What tells
+  // them apart is the host (#393): srelens's own CLIs present a token minted
+  // for their chat turn, the native agent names its chat in-process, and the
+  // request carries that chat as `caller`. Anybody else's request has none —
+  // it is still shown and still answered below, just not attributed to a
+  // conversation it has no part in.
   useEffect(() => {
     if (covered || !current) return;
-    // `noteGate` records into whichever run has a turn in flight, and records
-    // NOTHING when none does. Since runs are keyed by subject, "which
-    // conversation owns this mutation" is the store's question to answer, not
-    // this component's — it only knows a request was shown.
-    noteGate({ id: current.id, tool: current.tool, args: current.args, outcome: "pending" });
+    // `noteGate` records into the run holding the request's chat, and records
+    // NOTHING when there is none. "Which conversation owns this mutation" is
+    // the store's question to answer — this component only knows a request
+    // was shown, and who the host says raised it.
+    noteGate({ id: current.id, tool: current.tool, args: current.args, outcome: "pending" }, current.caller);
   }, [covered, current]);
 
   async function answer(approved: boolean): Promise<void> {
@@ -448,9 +441,9 @@ export function AgentConsent() {
       // presentation but before the click). Looking the id up is the only
       // check that agrees with the presentation-time decision either way.
       // By the run that HOLDS the gate, not by whichever is busy: the run
-      // that owned it has very likely finished by the time the reader clicks,
-      // and `noteGate` only ever writes into a busy one. Looking the id up is
-      // what lets a finished conversation still receive its own outcome.
+      // that owned it has very likely finished by the time the reader clicks.
+      // Looking the id up is what lets a finished conversation still receive
+      // its own outcome.
       const owner = runKeyHoldingGate(id);
       if (owner !== null) {
         noteGateIn(owner, {
