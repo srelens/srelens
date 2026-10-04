@@ -1,6 +1,17 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { describeError } from "@srelens/core";
 import { runKeyFor } from "./askContext";
+import { getSkillUses, loadSkillUses } from "./skillUses";
+
+/** A `Map`-backed storage, so a test's skill-use counts start from nothing. */
+function memoryStorage() {
+  const m = new Map<string, string>();
+  return {
+    getItem: (k: string) => m.get(k) ?? null,
+    setItem: (k: string, v: string) => void m.set(k, v),
+    removeItem: (k: string) => void m.delete(k),
+  };
+}
 import {
   askAgent,
   chooseAgent,
@@ -154,6 +165,25 @@ describe("the run store", () => {
     // there is no conversation to attribute a mutation to.
     noteGate({ id: "external", tool: "k8s.deletePod", args: {}, outcome: "pending" });
     expect(getAgentRun().gates).toEqual([]);
+  });
+
+  it("counts a skill as used when a question is really sent with it active (#387)", async () => {
+    loadSkillUses(memoryStorage());
+    loadSkill.mockResolvedValue({ name: "triage", description: "d", body: "Look at events first." });
+    setSkillActive("triage", true);
+    sendChat.mockResolvedValue(null);
+    await askAgent("q");
+    expect(getSkillUses()).toEqual({ triage: 1 });
+  });
+
+  it("does not count a question refused because another run is answering (#387)", async () => {
+    loadSkillUses(memoryStorage());
+    sendChat.mockImplementation(() => new Promise<string | null>(() => {}));
+    void askAgent("first", { about: { cluster: "a" }, route: "/overview" });
+    await untilSendChatCalledTimes(1);
+    setSkillActive("triage", true);
+    await askAgent("second", { about: { cluster: "b" }, route: "/overview" });
+    expect(getSkillUses()).toEqual({});
   });
 
   it("chooseAgent switches which agent the next question goes to, without touching the conversation", () => {

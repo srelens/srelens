@@ -21,6 +21,7 @@ import { newId } from "./tabs";
 import { titleFromQuestion } from "./runTitle";
 import { stripDataUri } from "./pastedImages";
 import { runFigures } from "./runFigures";
+import { recordSkillUses } from "./skillUses";
 
 /**
  * The one agent run this window is holding — every turn asked and answered,
@@ -1059,6 +1060,9 @@ export async function askAgent(
     // Last thing before the question actually leaves. Every await above is a
     // window in which the reader can abandon this turn.
     if (abandoned(state, myGeneration)) return true;
+    // Counted only now: the question is really leaving. A refusal or an
+    // abandoned send never got here (#387).
+    if (skills.length > 0) recordSkillUses(skills);
     const result = await sendChat(
       started,
       `${preface}${guidance}${question}`,
