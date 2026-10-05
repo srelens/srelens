@@ -4,7 +4,7 @@ import { ErrorNotice } from "../extensions/ExtensionResults";
 import { NO_PINNED_ID_MESSAGE, SHARED_CONTEXT_ID_MESSAGE } from "../extensions/contextIds";
 import { plainText } from "../extensions/displayText";
 import { ExtensionResourceNavigation } from "../extensions/resourceNavigation";
-import { extensionEnabledFor, extensionClusterRoute as extensionRoute, extensionClusterResourceRoute as extensionResourceRoute, listContexts, parseExtensionRoute } from "@srelens/core";
+import { extensionCardRoute, extensionEnabledFor, extensionClusterRoute as extensionRoute, extensionClusterResourceRoute as extensionResourceRoute, listContexts, parseExtensionRoute } from "@srelens/core";
 import { Button, Screen } from "@srelens/ui-kit";
 import { useExtensions } from "../extensions/Extensions";
 import { ExtensionWorkspace } from "../extensions/ExtensionWorkspace";
@@ -130,6 +130,7 @@ export function ExtensionPage({ route }: RoutedScreenProps) {
             }
             plugin={plugin}
             page={page}
+            onCard={(id, namespace, card) => openTab(extensionCardRoute(contextKey, target.id, id, namespace, card, namespace ? [namespace] : []), {clusterName:cluster?.name})}
             onPage={(id, namespace) =>
               openTab(
                 extensionRoute(contextKey, target.id, id, namespace),

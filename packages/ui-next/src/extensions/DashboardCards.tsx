@@ -17,6 +17,7 @@ import { openTab } from "../lib/tabsStore";
 import { useResource } from "../lib/useResource";
 import { useNamespaces, useSetNamespaces } from "../lib/workspace";
 import { NamespaceErrorAlert, NamespacePicker } from "../screens/resourceShell";
+import { ExtensionResults } from "./ExtensionResults";
 import { NO_PINNED_ID_MESSAGE } from "./contextIds";
 import { plainText } from "./displayText";
 import { extensionLabel, useExtensions } from "./inventoryStore";
@@ -117,8 +118,9 @@ function CardsBand({ context, apps }: { context: ClusterContext; apps: Installed
             namespaces === null ? (
               <PendingAppCards key={plugin.manifest.id} plugin={plugin} />
             ) : (
-              <AppCards key={plugin.manifest.id} plugin={plugin} context={context} host={host} selection={effective}
-                refresh={refresh} pulse={pulses[plugin.manifest.id] ?? 0} />
+              <AppCards key={plugin.manifest.id} plugin={plugin} host={host} selection={effective}
+                refresh={refresh} pulse={pulses[plugin.manifest.id] ?? 0}
+                onOpen={(card) => openTab(extensionCardRoute(context.key, plugin.manifest.id, card.target!.page, effective.length === 1 ? effective[0] : "", card.id, effective), { clusterName: context.name })} />
             ),
           )}
         </div>
@@ -140,22 +142,26 @@ function PendingAppCards({ plugin }: { plugin: InstalledExtension }) {
 }
 
 /** One app's cards: one host call answers all of them. */
-function AppCards({
+export function AppCards({
   plugin,
-  context,
   host,
   selection,
   refresh,
-  pulse,
+  pulse = 0,
+  cards = plugin.manifest.contributions.dashboardCards ?? [],
+  onOpen,
+  previewLists = false,
 }: {
   plugin: InstalledExtension;
-  context: ClusterContext;
   /** The context's pinned ID, which the host is asked by. */
   host: string;
   selection: string[];
   refresh: number;
   /** Bumped when a watch saw one of this app's card readers change. */
-  pulse: number;
+  pulse?: number;
+  cards?: ExtensionDashboardCard[];
+  onOpen(card: ExtensionDashboardCard): void;
+  previewLists?: boolean;
 }) {
   const { id } = plugin.manifest;
   const answers = useResource(
@@ -167,11 +173,9 @@ function AppCards({
   // Redrawn in place: a figure that flashed back to a spinner on every change would be unreadable.
   useEffect(() => { if (pulse) reread(); }, [pulse, reread]);
   const appName = extensionLabel(plugin);
-  // The target page reads the one namespace in its path, or all of them narrowed to the selection.
-  const namespace = selection.length === 1 ? selection[0] : "";
   return (
     <>
-      {(plugin.manifest.contributions.dashboardCards ?? []).map((card) => {
+      {cards.map((card) => {
         const answer: ResolvedDashboardCard | undefined =
           answers.status === "error"
             ? { id: card.id, state: "error", reason: answers.error ?? "" }
@@ -183,21 +187,25 @@ function AppCards({
                   reason: "srelens returned no answer for this card; refresh the view",
                 });
         const target = card.target;
+        if (previewLists && card.type === "list" && answer?.state === "list" && answer.total > 0) {
+          return <section key={card.id} className="extension-overview-list" aria-label={plainText(card.title)}>
+            <header className="extension-toolbar"><h3>{plainText(card.title)}</h3>{target && <Button variant="ghost" onClick={()=>onOpen(card)}>View all matching</Button>}</header>
+            <ExtensionResults plugin={plugin} capability={card.source} context={host} namespace={selection.length === 1 ? selection[0] : ""} refresh={refresh} hideToolbar card={card.id} cardNamespaces={selection.length > 1 ? selection : undefined} previewRows={answer.rows}/>
+          </section>;
+        }
+        const windowSetting = /^\$\{settings\.([^}]+)\}$/.exec(card.predicate?.within ?? "")?.[1];
+        const setting = plugin.manifest.settings?.find(setting=>setting.id===windowSetting);
+        const windowValue = windowSetting ? plugin.settings?.[windowSetting] ?? setting?.default : card.predicate?.within;
+        const windowLabel = typeof windowValue === "string" ? setting?.options?.find(option=>option.value===windowValue)?.label ?? windowValue : undefined;
         return (
           <DashboardCard
             key={card.id}
             card={card}
             appName={appName}
+            windowLabel={windowLabel}
             answer={answer}
             retry={answers.reload}
-            open={
-              target
-                ? () =>
-                    openTab(extensionCardRoute(context.key, id, target.page, namespace, card.id, selection), {
-                      clusterName: context.name,
-                    })
-                : undefined
-            }
+            open={target ? () => onOpen(card) : undefined}
           />
         );
       })}
@@ -232,17 +240,19 @@ function DashboardCard({
   answer,
   retry,
   open,
+  windowLabel,
 }: {
   card: ExtensionDashboardCard;
   appName: string;
   answer: ResolvedDashboardCard | undefined;
   retry: () => void;
   open?: () => void;
+  windowLabel?: string;
 }) {
   const title = plainText(card.title);
   const state = stateOf(answer);
   return (
-    <section className="dashboard-card" aria-label={title} data-state={state} data-size={card.size}>
+    <section className="dashboard-card" aria-label={title} data-state={state} data-size={state === "zero" ? "s" : card.size}>
       <header className="dashboard-card-head">
         <span className="dashboard-card-app">{plainText(appName)}</span>
         {open ? (
@@ -254,6 +264,7 @@ function DashboardCard({
         )}
       </header>
       <CardBody card={card} title={title} answer={answer} retry={retry} />
+      {windowLabel && <p className="dashboard-card-caption">Window: {plainText(windowLabel)}</p>}
     </section>
   );
 }
