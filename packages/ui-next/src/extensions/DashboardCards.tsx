@@ -252,7 +252,7 @@ function DashboardCard({
   const title = plainText(card.title);
   const state = stateOf(answer);
   return (
-    <section className="dashboard-card" aria-label={title} data-state={state} data-size={card.size}>
+    <section className="dashboard-card" aria-label={title} data-state={state} data-size={state === "zero" ? "s" : card.size}>
       <header className="dashboard-card-head">
         <span className="dashboard-card-app">{plainText(appName)}</span>
         {open ? (
