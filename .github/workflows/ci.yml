@@ -351,6 +351,10 @@ jobs:
           uname -r
           systemctl --version | head -1
           dpkg -s dbus-user-session > /dev/null 2>&1 || {
+            # The runner image's own repos, dropped as in `backend`: an outage
+            # in one fails `apt-get update`, and this uses neither.
+            sudo rm -f /etc/apt/sources.list.d/google-chrome.* \
+                       /etc/apt/sources.list.d/microsoft-prod.*
             sudo apt-get update && sudo apt-get install -y dbus-user-session
           }
           uid="$(id -u)"
@@ -360,6 +364,7 @@ jobs:
             sleep 0.2
           done
           systemctl is-active "user@$uid.service"
+          test -S "/run/user/$uid/bus" || { echo "::error::no session bus at /run/user/$uid/bus"; exit 1; }
           cat "/sys/fs/cgroup/user.slice/user-$uid.slice/user@$uid.service/cgroup.controllers"
           echo "XDG_RUNTIME_DIR=/run/user/$uid" >> "$GITHUB_ENV"
           echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$uid/bus" >> "$GITHUB_ENV"

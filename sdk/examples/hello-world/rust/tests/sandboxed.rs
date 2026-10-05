@@ -10,6 +10,7 @@
 //! cargo build -p srelens-plugin-host --bin srelens-sandbox-launch
 //! go build -C sdk/examples/hello-world/go -o "$PWD/target/hello-world-go" .
 //! SRELENS_SANDBOX_LAUNCHER="$PWD/target/debug/srelens-sandbox-launch" \
+//! SRELENS_SANDBOX_CGROUP_ROOT=/sys/fs/cgroup/<delegated> \
 //! SRELENS_HELLO_WORLD_GO="$PWD/target/hello-world-go" \
 //!   cargo test -p srelens-sidecar-hello-world --test sandboxed --test supervised -- --ignored --test-threads=1
 //! ```

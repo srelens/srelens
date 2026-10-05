@@ -624,8 +624,10 @@ jobs:
           echo "OK: no $APPIMAGE_EXCLUDED_LIBS in the AppImage"
 
       # Executable apps on Linux need the sandbox launcher beside srelens
-      # (tauri.linux.conf.json). Fail before anything is published if a bundle
-      # lacks it, ships it without its execute bit, or ships something else.
+      # (tauri.linux.conf.json). Fail if a bundle lacks it, ships it without its
+      # execute bit, or ships something else: on main before the draft is
+      # published; on dev the pre-release's assets are already up, and this
+      # flags them.
       - name: Assert the Linux bundles ship the sandbox launcher
         if: runner.os == 'Linux'
         run: |
