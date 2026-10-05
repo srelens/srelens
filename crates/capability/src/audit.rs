@@ -248,7 +248,7 @@ pub fn redact(args: &Value, sensitive: bool) -> Value {
     /// `k8s.applyManifest` and `manifest` on `extensions.configure` (opaque
     /// strings holding whole manifests), `package` on `extensions.configure`
     /// and `extensions.packageManifest` (a whole app package as base64, up to
-    /// 16 MiB of it, #562), and
+    /// 512 MiB of it, #562), and
     /// `values` on the helm install/upgrade/template capabilities (user YAML
     /// that routinely holds registry credentials and database passwords).
     ///
@@ -1265,7 +1265,7 @@ mod tests {
         assert!(!out.to_string().contains("hunter2"));
     }
 
-    /// A package is a whole app as base64 (#562): opaque, and up to 16 MiB, so
+    /// A package is a whole app as base64 (#562): opaque, and up to 512 MiB, so
     /// neither its bytes nor an error that could quote its files is kept.
     #[test]
     fn redacts_a_package_and_the_errors_its_install_can_raise() {

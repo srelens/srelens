@@ -25,6 +25,60 @@ pub struct AppRegistry(pub Registry);
 /// costs the trail, never the operation.
 pub struct AppAudit(pub Arc<dyn AuditSink>);
 
+/// Package bytes use raw IPC: a 512 MiB package's base64 cannot fit a V8 string.
+/// Encoding stays in Rust; verification, grants and auditing stay in the registry.
+fn package_invocation(
+    body: &tauri::ipc::InvokeBody,
+    metadata: Option<&str>,
+) -> Result<(String, Value), String> {
+    use base64::Engine as _;
+    let tauri::ipc::InvokeBody::Raw(bytes) = body else {
+        return Err("A package upload must contain raw bytes".into());
+    };
+    if bytes.len() > srelens_registry::extension_package::MAX_PACKAGE_BYTES {
+        return Err("The package exceeds 512 MiB".into());
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Metadata {
+        id: String,
+        input: serde_json::Map<String, Value>,
+    }
+    let mut metadata: Metadata =
+        serde_json::from_str(metadata.ok_or("The package upload has no metadata")?)
+            .map_err(|e| format!("Invalid package upload metadata: {e}"))?;
+    if metadata.id != "extensions.packageManifest"
+        && !(metadata.id == "extensions.configure"
+            && metadata.input.get("action").and_then(Value::as_str) == Some("installPackage"))
+    {
+        return Err("Raw package uploads only review or install a package".into());
+    }
+    metadata.input.insert(
+        "package".into(),
+        Value::String(base64::engine::general_purpose::STANDARD.encode(bytes)),
+    );
+    Ok((metadata.id, Value::Object(metadata.input)))
+}
+
+#[tauri::command]
+pub async fn invoke_package_capability<R: Runtime>(
+    request: tauri::ipc::Request<'_>,
+    window: Window<R>,
+    app: AppHandle<R>,
+    registry: State<'_, AppRegistry>,
+    audit: State<'_, AppAudit>,
+    owned: State<'_, WindowStreams>,
+) -> Result<Value, String> {
+    let (id, input) = package_invocation(
+        request.body(),
+        request
+            .headers()
+            .get("x-srelens-package-input")
+            .and_then(|h| h.to_str().ok()),
+    )?;
+    invoke_capability(id, input, window, app, registry, audit, owned).await
+}
+
 /// Invoke a backend capability by id. The WebView calls this via
 /// `invoke('invoke_capability', { id, input })`.
 ///
@@ -86,6 +140,68 @@ mod tests {
     use std::sync::Mutex;
     use tauri::Manager;
 
+    #[test]
+    fn raw_package_bytes_reach_the_existing_review_and_install_capabilities() {
+        for (id, input) in [
+            ("extensions.packageManifest", json!({})),
+            (
+                "extensions.configure",
+                json!({"action": "installPackage", "grants": ["k8s.listCustomResource"], "reviewedRevision": 7}),
+            ),
+        ] {
+            let metadata = json!({"id": id, "input": input}).to_string();
+            let (got_id, got) = package_invocation(
+                &tauri::ipc::InvokeBody::Raw(vec![0x1f, 0x8b, 0x08, 0, 0xff]),
+                Some(&metadata),
+            )
+            .unwrap();
+            let mut expected = input;
+            expected["package"] = json!("H4sIAP8=");
+            assert_eq!(got_id, id);
+            assert_eq!(got, expected);
+        }
+    }
+
+    #[test]
+    fn raw_package_transport_refuses_other_capabilities_actions_and_json_bodies() {
+        let raw = tauri::ipc::InvokeBody::Raw(vec![]);
+        for metadata in [
+            json!({"id": "k8s.listPods", "input": {}}),
+            json!({"id": "extensions.configure", "input": {"action": "unsignedApps", "allowUnsignedApps": true}}),
+            json!({"id": "extensions.configure", "input": {"action": "install"}}),
+            json!({"id": "extensions.packageManifest", "input": null}),
+        ] {
+            assert!(package_invocation(&raw, Some(&metadata.to_string())).is_err());
+        }
+        assert!(package_invocation(&raw, None).is_err());
+        assert!(package_invocation(&raw, Some("not JSON")).is_err());
+        assert!(package_invocation(
+            &tauri::ipc::InvokeBody::Json(json!({})),
+            Some(r#"{"id":"extensions.packageManifest","input":{}}"#)
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn raw_package_transport_checks_the_limit_before_encoding() {
+        let at_limit = tauri::ipc::InvokeBody::Raw(vec![0; 512 * 1024 * 1024]);
+        let (_, input) = package_invocation(
+            &at_limit,
+            Some(r#"{"id":"extensions.packageManifest","input":{}}"#),
+        )
+        .unwrap();
+        assert_eq!(input["package"].as_str().unwrap().len(), 715_827_884);
+        drop(input);
+        drop(at_limit);
+        let body = tauri::ipc::InvokeBody::Raw(vec![0; 512 * 1024 * 1024 + 1]);
+        let reason = package_invocation(
+            &body,
+            Some(r#"{"id":"extensions.packageManifest","input":{}}"#),
+        )
+        .unwrap_err();
+        assert!(reason.contains("512 MiB"), "{reason}");
+    }
+
     #[derive(Default)]
     struct Spy(Mutex<Vec<AuditRecord>>);
 
@@ -99,6 +215,55 @@ mod tests {
         fn seen(&self) -> Vec<AuditRecord> {
             self.0.lock().unwrap().clone()
         }
+    }
+
+    #[test]
+    fn raw_ipc_dispatches_the_package_command_and_audits_the_install() {
+        let mut registry = Registry::new();
+        registry.register(mutating("extensions.configure"));
+        let audit = Arc::new(Spy::default());
+        let app = tauri::test::mock_builder()
+            .invoke_handler(tauri::generate_handler![invoke_package_capability])
+            .manage(AppRegistry(registry))
+            .manage(AppAudit(audit.clone()))
+            .manage(WindowStreams::default())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+            .build()
+            .unwrap();
+        let metadata = r#"{"id":"extensions.configure","input":{"action":"installPackage","grants":["k8s.listCustomResource"],"reviewedRevision":7}}"#;
+        // HeaderMap's type comes from the request, keeping the test on Tauri's wire.
+        let mut request = tauri::webview::InvokeRequest {
+            cmd: "invoke_package_capability".into(),
+            callback: tauri::ipc::CallbackFn(0),
+            error: tauri::ipc::CallbackFn(1),
+            url: if cfg!(windows) {
+                "http://tauri.localhost"
+            } else {
+                "tauri://localhost"
+            }
+            .parse()
+            .unwrap(),
+            body: tauri::ipc::InvokeBody::Raw(vec![0x1f, 0x8b, 0x08, 0, 0xff]),
+            headers: Default::default(),
+            invoke_key: tauri::test::INVOKE_KEY.to_string(),
+        };
+        request
+            .headers
+            .insert("x-srelens-package-input", metadata.parse().unwrap());
+        let response = tauri::test::get_ipc_response(&webview, request).unwrap();
+        assert_eq!(
+            response.deserialize::<Value>().unwrap(),
+            json!({"ok": true})
+        );
+        let records = audit.seen();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].tool, "extensions.configure");
+        assert_eq!(records[0].source, Source::Ui);
+        assert!(!serde_json::to_string(&records[0].args)
+            .unwrap()
+            .contains("H4sIAP8="));
     }
 
     /// `invoke_capability` as the `main` window calls it.

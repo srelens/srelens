@@ -38,7 +38,7 @@ pub use extensions::{
 /// Making `.srelens-extension` packages (#562): what a publisher runs before a release, and
 /// what `cargo run -p srelens-registry --example pack-extension` wraps.
 pub mod extension_package {
-    pub use crate::extensions::package::{digest_list, pack};
+    pub use crate::extensions::package::{digest_list, pack, MAX_PACKAGE_BYTES};
 }
 pub use settings::default_settings_path;
 /// The secret store a host supplies for apps' secret settings (#543), so a

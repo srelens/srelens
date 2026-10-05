@@ -9,6 +9,14 @@ import { parseClusterLoginRequired, requestClusterLogin } from "../lib/clusterLo
 /** Request/response to a backend capability. */
 export async function invokeCapability<T>(id: string, input: unknown = null): Promise<T> {
   try {
+    if ((id === "extensions.packageManifest" || id === "extensions.configure")
+      && input !== null && typeof input === "object" && "package" in input
+      && input.package instanceof Uint8Array) {
+      const { package: packageBytes, ...metadata } = input;
+      return await invoke<T>("invoke_package_capability", packageBytes, {
+        headers: { "x-srelens-package-input": JSON.stringify({ id, input: metadata }) },
+      });
+    }
     return await invoke<T>("invoke_capability", { id, input });
   } catch (e) {
     const login = parseClusterLoginRequired(e);
@@ -286,4 +294,3 @@ export function currentWindowLabel(): string {
     return "main";
   }
 }
-

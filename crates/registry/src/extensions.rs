@@ -513,7 +513,7 @@ enum Configure {
     /// are the caller's consent, as for `install`.
     #[serde(rename = "installPackage")]
     InstallPackage {
-        /// The `.srelens-extension` file as base64: at most 16 MiB once decoded.
+        /// The `.srelens-extension` file as base64: at most 512 MiB once decoded.
         #[serde(deserialize_with = "limits::package")]
         #[schemars(with = "String")]
         package: Vec<u8>,
@@ -2018,7 +2018,7 @@ struct ValidateIn {
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct PackageIn {
-    /// The `.srelens-extension` file as base64: at most 16 MiB once decoded.
+    /// The `.srelens-extension` file as base64: at most 512 MiB once decoded.
     #[serde(deserialize_with = "limits::package")]
     #[schemars(with = "String")]
     package: Vec<u8>,

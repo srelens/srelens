@@ -25,8 +25,8 @@ listed under [Not yet](#not-yet).
 
 Executable apps are a preview. They run out of the box on Windows, and on a systemd Linux
 desktop with Landlock, where systemd before 252 and the RHEL 9 family need the `cpu`
-controller delegated first ([what is needed](manifest.md#where-executable-apps-run)). On macOS they do not run yet. srelens refuses to start any sidecar until its memory and CPU watchdog has
-been checked with Seatbelt on a macOS 27 Mac. The [sandbox](#sandbox) section has the detail.
+controller delegated first ([what is needed](manifest.md#where-executable-apps-run)). On macOS they run under Seatbelt with host-enforced memory and CPU limits: the
+watchdog bounds sustained use, but a burst between readings can exceed a limit. The [sandbox](#sandbox) section has the detail.
 
 ## The wire
 
@@ -429,13 +429,13 @@ in `crates/plugin-host/src/sidecar/sandbox/`:
 |---|---|---|
 | Linux | Landlock and a seccomp filter, applied by `srelens-sandbox-launch` before it runs the sidecar | a cgroup v2 directory under the scope srelens asks systemd for, or under a root delegated by hand |
 | Windows | an AppContainer with no capabilities, one profile per app | the Job Object the process starts in |
-| macOS | Seatbelt through `/usr/bin/sandbox-exec` | a host-side watchdog ([#713](https://github.com/srelens/srelens/issues/713)), weaker than the kernel's: **every sidecar is still refused** until it has been checked with Seatbelt on a macOS 27 Mac |
+| macOS | Seatbelt through `/usr/bin/sandbox-exec` | a host-side watchdog ([#713](https://github.com/srelens/srelens/issues/713)), weaker than the kernel's: sustained use is bounded, but a burst between readings can exceed a limit |
 | any other OS | — | — |
 
 A sidecar is **refused, never started unconfined**:
 
 - on an OS with no backend;
-- on macOS, until its watchdog has been checked with Seatbelt on a macOS 27 Mac (#713);
+- on macOS without the launcher or `/usr/bin/sandbox-exec`;
 - on Linux without Landlock, without the launcher, or without a delegated cgroup: no
   systemd user session, a container, or a session without the `memory` and `cpu`
   controllers;
@@ -585,5 +585,4 @@ uninstalled; locking it down while the app is installed is left for the escape r
 |---|---|
 | An operation that answers with a stream: the protocol has streams, and nothing opens one on an app's behalf yet | — |
 | A "Clear data" action for an app refused for its data directory (`DataDir::clear` is there; the Inspector, #575, is where a person would find it) | not filed yet |
-| Checking macOS's watchdog on a macOS 27 Mac, and then running sidecars there | [#713](https://github.com/srelens/srelens/issues/713), closed: the watchdog is built, the check is not done |
 | The escape-hardening review of the supervisor and its backends, which the ADR assigned to #572 | [#744](https://github.com/srelens/srelens/issues/744) |

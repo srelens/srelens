@@ -75,9 +75,8 @@ no executable app: its capability route refuses every `plugin/…` id.
    [the macOS decision](#decision-macos-limits-are-host-enforced)). Sidecars run out of
    the box on Windows. On Linux they run out of the box on a systemd desktop with Landlock:
    the bundles ship `srelens-sandbox-launch`, and srelens asks the systemd user manager for
-   a delegated scope ([what is needed](../extensions/manifest.md#where-executable-apps-run)). On macOS they do
-   not run yet. srelens refuses to start any sidecar until its memory and CPU watchdog has
-   been checked with Seatbelt on a macOS 27 Mac. No renderer bridge
+   a delegated scope ([what is needed](../extensions/manifest.md#where-executable-apps-run)). On macOS they run with Seatbelt and host-enforced memory and CPU limits,
+   checked on macOS 27.0.1 arm64 ([measurements](../extensions/testing.md#macos-conformance)). No renderer bridge
    is planned: contributions use host components. What each OS's sandbox can enforce
    is recorded under
    [Sandbox backends for executable extensions](#sandbox-backends-for-executable-extensions).
@@ -413,7 +412,7 @@ The second run, at `02190671`, used `SEATBELT_TRACE=1` and exited 0:
 | **Linux** bubblewrap, all namespaces unshared | Enforced (paths not mounted, `ENOENT`) | Enforced | Enforced (network namespace) | Not provided | Not provided | Not provided | Works |
 | **Linux** Landlock with TCP rules (ABI ≥ 4, kernel ≥ 6.7). Run on arm64 only (ABI 8) | Enforced (`EACCES`) | Enforced | TCP enforced (`EACCES`, loopback and internet). DNS not provided: UDP needs ABI 10 | Not provided | Not provided | Not provided | Works |
 | **macOS** `seatbelt`: `sandbox-exec` (deprecated) with `src/seatbelt.sb`, plus rlimits. Verified on macOS 27.0 arm64 only | Enforced (`EPERM`) | Enforced (`EPERM` outside, allowed inside) | Enforced: TCP `EPERM`, DNS resolver failure (the mDNSResponder socket is denied) | Enforced (`EPERM`) | **Not provided by the kernel (observed):** `setrlimit` refuses `RLIMIT_DATA` and `RLIMIT_AS` with `EINVAL`, and 512 MiB was allocated against a 128 MiB limit. Host-enforced by the watchdog (next row) | **Not provided by the kernel (observed):** 1.99 CPUs against 0.25. `RLIMIT_CPU` is accepted, but it is a lifetime budget, not a rate. Host-enforced by the watchdog (next row) | Works |
-| **macOS** supervisor watchdog ([#713](https://github.com/srelens/srelens/issues/713), built; not yet checked with Seatbelt on a macOS 27 Mac) | — | — | — | — | Host-enforced, weaker than the kernel: a `SIGKILL` once a reading, every 50 ms, shows the physical footprint over the limit. Bounds sustained use; a burst between readings can exceed it, by roughly the allocation rate × (50 ms + scheduling delay). Measured on GitHub's macOS 26.6.2 arm64 runner without Seatbelt (`tests/macos_watchdog.rs`): a 512 MiB hold against a 128 MiB limit was stopped at a measured 131 MiB. That was a debug-built probe touching about 55 MiB/s, so the overshoot was a few MiB; a fast allocator can pass the limit by hundreds of MiB before it is seen. Not yet measured with a release-built probe, or on macOS 27 with Seatbelt | Host-enforced, weaker than the kernel: paused with `SIGSTOP` until its average is back at the limit, then resumed with `SIGCONT`, as a cgroup's `cpu.max` would. Measured as the memory is: two busy threads were held to 0.25 CPUs against a 0.25 limit | — |
+| **macOS** supervisor watchdog ([#713](https://github.com/srelens/srelens/issues/713), enabled; checked with Seatbelt on macOS 27.0.1 arm64) | — | — | — | — | Host-enforced, weaker than the kernel: a `SIGKILL` once a reading, every 50 ms, shows the physical footprint over the limit. Bounds sustained use; a burst between readings can exceed it, by roughly the allocation rate × (50 ms + scheduling delay). Measured on GitHub's macOS 26.6.2 arm64 runner without Seatbelt (`tests/macos_watchdog.rs`): a 512 MiB hold against a 128 MiB limit was stopped at a measured 131 MiB. That was a debug-built probe touching about 55 MiB/s, so the overshoot was a few MiB; a fast allocator can pass the limit by hundreds of MiB before it is seen. A release-built probe on macOS 27.0.1 arm64 with Seatbelt was stopped at a measured 514 MiB against 128 MiB ([measurements](../extensions/testing.md#macos-conformance)); this is a sampled reading, not a peak or maximum overshoot | Host-enforced, weaker than the kernel: paused with `SIGSTOP` until its average is back at the limit, then resumed with `SIGCONT`, as a cgroup's `cpu.max` would. With Seatbelt on macOS 27.0.1 arm64, two busy threads were held to 0.25 CPUs against a 0.25 limit | — |
 | **macOS** `seatbelt` on Intel, or on macOS before 27 | Unverified | Unverified | Unverified | Unverified | Unverified | Unverified | Unverified |
 | **macOS** App Sandbox helper | Not built (follow-up) | Not built | Not built | Not built | Not provided (research) | Not provided (research) | Not built |
 
@@ -562,9 +561,10 @@ Status: **Accepted**, 2026-09-24, by the maintainer
 the memory and CPU limits with a host-side watchdog, documented as a weaker guarantee
 than the kernel enforcement on Windows and Linux. The watchdog is
 [#713](https://github.com/srelens/srelens/issues/713), a sub-issue of #521 that depends
-on #572. It is built (`crates/plugin-host/src/sidecar/sandbox/watchdog.rs`). macOS
-still refuses sidecars until it has been checked with Seatbelt on a macOS 27 Mac: the
-conformance suite's checks 5 and 6, release-built, with the worst overshoot recorded.
+on #572. It is built and enabled (`crates/plugin-host/src/sidecar/sandbox/watchdog.rs`).
+The release-built conformance suite passed with Seatbelt on macOS 27.0.1 arm64;
+[testing.md](../extensions/testing.md#macos-conformance) records the measured memory
+overshoot and CPU usage.
 
 **Why:**
 
@@ -596,8 +596,8 @@ conformance suite's checks 5 and 6, release-built, with the worst overshoot reco
 - **How it differs.** On Windows and Linux the kernel refuses or kills at the limit
   itself.
 - **Exit criterion.** #521's "Runs under CPU and memory limits" is met on macOS in this
-  weaker sense in design, and the product documentation must say so. macOS still
-  refuses sidecars until the watchdog has been checked with Seatbelt on a macOS 27 Mac.
+  weaker sense, and the product documentation says so. The release-built conformance
+  suite passed with Seatbelt on macOS 27.0.1 arm64.
 
 Considered and not chosen:
 
@@ -622,8 +622,8 @@ OS. The protocol, the limits and the restart backoff are in
 - **Windows:** the spike's AppContainer and Job Object (`sandbox/windows.rs`).
 - **macOS:** the spike's Seatbelt profile (`sandbox/seatbelt.sb`), started through the
   same launcher. `launch` puts the sidecar under the #713 watchdog
-  (`sandbox/watchdog.rs`). Every sidecar is still refused until the watchdog has been
-  checked on a macOS 27 Mac with Seatbelt.
+  (`sandbox/watchdog.rs`), with `Enforcement::Host`. The release-built conformance
+  suite passed with Seatbelt on macOS 27.0.1 arm64.
 - **Any other OS:** refused.
 
 Where it departs from the spike:
@@ -652,8 +652,8 @@ and `windows-latest`.
 
 On macOS 27.0 (26A428), arm64, the suite's isolation checks were run by hand and all
 seven passed: 1 to 4, 7, the environment and the Unix socket. The CPU and memory checks
-run on macOS too, against the watchdog, but have not yet been run by hand with Seatbelt
-on a macOS 27 Mac (see [Follow-up work](#follow-up-work)).
+also passed with Seatbelt on macOS 27.0.1 (26A434), arm64, release-built, along with
+all 14 conformance checks ([measurements](../extensions/testing.md#macos-conformance)).
 
 ### What the spike did not establish
 
@@ -710,13 +710,11 @@ on a macOS 27 Mac (see [Follow-up work](#follow-up-work)).
   macOS versions before 27, which have not been run. Try narrowing the global
   metadata-read rule. Decide whether `sandbox_init_with_parameters` (private) is
   acceptable in place of the deprecated `sandbox-exec`.
-- **macOS: check the host-side watchdog** ([#713](https://github.com/srelens/srelens/issues/713)).
-  It is built, and runs in CI on a real process without Seatbelt. Run the conformance
-  suite's checks 5 and 6 with Seatbelt on a macOS 27 Mac, release-built
-  (`cargo test --release`, as the suite's header gives it), and record how far a burst
-  overshoots between readings with that release-built probe: CI's debug-built probe
-  allocates too slowly to show it. Then document that bound for users, and let macOS
-  run sidecars (`Enforcement::Host`).
+- **macOS: watch resource-limit regressions** ([#713](https://github.com/srelens/srelens/issues/713)).
+  The watchdog is enabled and checked with Seatbelt on macOS 27.0.1 arm64. Re-run the
+  release-built conformance suite when changing the watchdog or profile and record its
+  memory reading and CPU usage ([measurements](../extensions/testing.md#macos-conformance)).
+  A sampled overshoot is not a maximum bound.
 - **macOS: an App Sandbox helper variant.** Not built: it needs code signing with
   entitlements. An ad-hoc signature (`codesign -s - --entitlements …`, no developer
   account) may be enough for a local test. It would still have to answer whether an

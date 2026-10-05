@@ -48,8 +48,8 @@ prompt, naming the app, or `NoConsent` headless. See
 
 Executable apps are a preview. They run out of the box on Windows, and on a systemd Linux
 desktop with Landlock, where systemd before 252 and the RHEL 9 family need the `cpu`
-controller delegated first ([what is needed](manifest.md#where-executable-apps-run)). On macOS they do not run yet. srelens refuses to start any sidecar until its memory and CPU watchdog has
-been checked with Seatbelt on a macOS 27 Mac.
+controller delegated first ([what is needed](manifest.md#where-executable-apps-run)). On macOS they run under Seatbelt with host-enforced memory and CPU limits: the
+watchdog bounds sustained use, but a burst between readings can exceed a limit.
 
 ## App lifecycle
 

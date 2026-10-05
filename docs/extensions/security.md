@@ -112,7 +112,4 @@ The platform does not claim these protections yet:
 - signing key rotation ([#560](https://github.com/srelens/srelens/issues/560))
 - revocation and a kill switch ([#561](https://github.com/srelens/srelens/issues/561))
 - executable apps' sandbox, against a sidecar that tries to break out: the
-  escape-hardening review ([#744](https://github.com/srelens/srelens/issues/744)), and
-  memory and CPU limits on macOS: its watchdog is built but not yet checked with
-  Seatbelt on a macOS 27 Mac, and macOS refuses every sidecar until it is
-  ([#713](https://github.com/srelens/srelens/issues/713))
+  escape-hardening review ([#744](https://github.com/srelens/srelens/issues/744))

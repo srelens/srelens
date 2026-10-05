@@ -48,7 +48,7 @@ permission review. What it downloads depends on the release and the host:
   capability rules. The exact verified bytes then go through the permission review, and
   the install action sends those bytes.
 - **A release with a package** (`release.package`) on a host that installs packages: the
-  package, at most 16 MiB. Its SHA-256 must match `release.package.sha256`, it is verified
+  package, at most 512 MiB. Its SHA-256 must match `release.package.sha256`, it is verified
   whole ([packages.md](packages.md#what-the-host-refuses)), and its `extension.json` must be
   the release's manifest: its SHA-256 is the release's `sha256`. The ID, version, API range
   and capability checks above then apply to that manifest. The install action sends no

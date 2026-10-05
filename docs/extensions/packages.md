@@ -9,6 +9,11 @@ one JSON file cannot hold: the app's logo, and an executable app's per-platform 
 
 The reader, installer and packer are in `crates/registry/src/extensions/package.rs`.
 
+Local package files use Tauri's raw binary IPC for review and installation. The desktop
+bridge encodes them in Rust before calling the same audited registry capabilities;
+the existing base64 capability contract still works. This avoids the browser's string
+ceiling, since 512 MiB of package bytes needs about 683 MiB of base64 text.
+
 ## Layout
 
 A package is a gzip-compressed POSIX tar archive:
@@ -85,8 +90,8 @@ A package is taken whole or not at all:
 
 | Rule | Limit |
 |---|---|
-| Package file, compressed | 16 MiB |
-| Every file together, uncompressed | 64 MiB |
+| Package file, compressed | 512 MiB |
+| Every file together, uncompressed | 512 MiB |
 | Entries (files and directories) | 256 |
 | `digests.json` | 64 KiB |
 | `extension.json` | 256 KiB, as any manifest |
