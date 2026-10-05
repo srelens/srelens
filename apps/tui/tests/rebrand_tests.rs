@@ -95,6 +95,14 @@ fn an_untrusted_or_invalid_existing_srectl_is_refused() {
         std::fs::set_permissions(&next, std::fs::Permissions::from_mode(0o644)).unwrap();
         let err = apply_rebrand(&legacy).unwrap_err();
         assert!(err.contains("not executable"), "{err}");
+
+        // If other-execute is set (0o641) but owner execute is missing, it is still refused:
+        let my_uid = unsafe { libc::getuid() };
+        if my_uid != 0 {
+            std::fs::set_permissions(&next, std::fs::Permissions::from_mode(0o641)).unwrap();
+            let err = apply_rebrand(&legacy).unwrap_err();
+            assert!(err.contains("not executable"), "{err}");
+        }
     }
 }
 

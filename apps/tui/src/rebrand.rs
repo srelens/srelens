@@ -109,7 +109,13 @@ pub fn is_trusted_existing_command(current: &Path, next: &Path) -> Result<bool, 
             next.display()
         ));
     }
-    if (next_meta.permissions().mode() & 0o111) == 0 {
+    let mode = next_meta.permissions().mode();
+    let is_executable = if current_meta.uid() == 0 {
+        (mode & 0o111) != 0
+    } else {
+        (mode & 0o100) != 0
+    };
+    if !is_executable {
         return Err(format!(
             "existing {} is not executable; refusing to rebrand",
             next.display()
