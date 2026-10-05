@@ -744,6 +744,23 @@ fn a_reason_echoing_a_part_of_the_url_has_it_scrubbed() {
 }
 
 #[test]
+fn a_path_segment_echoed_decoded_is_scrubbed_too() {
+    // `ab+cd/ef=` written into a path is sent percent-encoded, and a server echoes
+    // what it decoded.
+    let url = Url::parse("https://hooks.example.com/hook/tok%2Fab%2Bcd%3D9f2e").unwrap();
+    let reason = refusal_reason(
+        reqwest::StatusCode::NOT_FOUND,
+        Some("text/plain"),
+        b"no hook tok/ab+cd=9f2e, and none named tok%2Fab%2Bcd%3D9f2e",
+        &Scrub::new(&HeaderMap::new(), &url, &[]),
+    );
+    assert_eq!(
+        reason,
+        "The server answered HTTP 404 Not Found: no hook [url], and none named [url]"
+    );
+}
+
+#[test]
 fn a_refusals_quoted_reason_carries_no_secret_and_no_url() {
     let url = Url::parse("https://prometheus.example.com:9090/api/v1/query_range").unwrap();
     let secret = stand_in_secret("token");

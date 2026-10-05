@@ -189,9 +189,10 @@ pub(super) fn refusal_reason(
 
 /// What a server's own words are scrubbed of before the host repeats them: every
 /// sensitive header value the request carried, whole and word by word; the URL and
-/// its host; and each of the URL's own path segments and query values, which a
-/// binding or a person's `url` setting wrote and may hold a token. A server may
-/// echo any of it.
+/// its host; and each of the URL's own path segments (as sent and decoded) and query
+/// values of [`MIN_URL_PART`] characters or more, which a binding or a person's `url`
+/// setting wrote and may hold a token. A server may echo any of it. Shorter parts,
+/// and the query parameters the host sets, are repeated as the server wrote them.
 #[derive(Debug, Clone, Default)]
 pub(super) struct Scrub {
     secrets: Vec<String>,
@@ -231,7 +232,11 @@ impl Scrub {
             .path_segments()
             .into_iter()
             .flatten()
-            .map(str::to_owned)
+            // As sent, and as a server that decoded it would echo it.
+            .flat_map(|segment| {
+                let decoded = percent_encoding::percent_decode_str(segment).decode_utf8_lossy();
+                [segment.to_owned(), decoded.into_owned()]
+            })
             .chain(
                 url.query_pairs()
                     .filter(|(key, _)| !host_set.contains(&key.as_ref()))
