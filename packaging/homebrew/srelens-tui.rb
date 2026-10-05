@@ -91,8 +91,11 @@ class SrelensTui < Formula
     # disagree, which is worth failing on.
     assert_match version.to_s, shell_output("#{bin}/srectl --version")
 
-    # The old command name runs the same binary.
-    assert_match version.to_s, shell_output("#{bin}/srelens-tui --version 2>&1")
+    # The old command name runs the same binary. When stderr is redirected,
+    # the wrapper suppresses the reminder so output parsing is not broken.
+    version_output = shell_output("#{bin}/srelens-tui --version 2>&1")
+    assert_match version.to_s, version_output
+    refute_match "srelens-tui is now srectl", version_output
 
     # A command that needs no cluster, to prove the binary is not merely
     # loadable. With no kubeconfig it reports zero contexts rather than failing.

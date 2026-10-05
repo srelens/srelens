@@ -82,7 +82,7 @@ pub fn wrapper_script(next: &Path) -> Result<String, String> {
 }
 
 #[cfg(unix)]
-fn is_trusted_existing_command(current: &Path, next: &Path) -> Result<bool, String> {
+pub fn is_trusted_existing_command(current: &Path, next: &Path) -> Result<bool, String> {
     use std::os::unix::fs::MetadataExt;
     use std::os::unix::fs::PermissionsExt;
     let next_meta = match std::fs::symlink_metadata(next) {
@@ -121,7 +121,7 @@ fn is_trusted_existing_command(current: &Path, next: &Path) -> Result<bool, Stri
 }
 
 #[cfg(not(unix))]
-fn is_trusted_existing_command(_current: &Path, next: &Path) -> Result<bool, String> {
+pub fn is_trusted_existing_command(_current: &Path, next: &Path) -> Result<bool, String> {
     match std::fs::metadata(next) {
         Ok(m) if m.is_file() => Ok(true),
         Ok(_) => Err(format!(

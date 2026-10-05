@@ -97,3 +97,44 @@ fn an_untrusted_or_invalid_existing_srectl_is_refused() {
         assert!(err.contains("not executable"), "{err}");
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn an_existing_srectl_with_different_uid_is_refused() {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::MetadataExt;
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let legacy = dir.path().join(legacy_file_name());
+    std::fs::write(&legacy, b"bridge-bytes").unwrap();
+    let next = next_command_path(&legacy);
+    std::fs::write(&next, b"other-user-srectl").unwrap();
+    std::fs::set_permissions(&next, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let my_uid = unsafe { libc::getuid() };
+    let different_uid = if my_uid == 0 { 1000 } else { 0 };
+
+    // 1. If running as root / CAP_CHOWN (e.g. in containerized CI), test apply_rebrand directly:
+    if let Ok(c_path) = CString::new(next.as_os_str().as_bytes()) {
+        if unsafe { libc::chown(c_path.as_ptr(), different_uid, libc::gid_t::MAX) } == 0 {
+            let err = apply_rebrand(&legacy).unwrap_err();
+            assert!(err.contains("owned by uid"), "{err}");
+        }
+    }
+
+    // 2. Integration check exercising UID rejection on a system binary with different UID:
+    for candidate in &["/usr/bin/true", "/bin/sh", "/usr/bin/whoami"] {
+        let candidate_path = Path::new(candidate);
+        if let Ok(meta) = std::fs::metadata(candidate_path) {
+            if meta.uid() != my_uid {
+                let err =
+                    srelens_tui::rebrand::is_trusted_existing_command(&legacy, candidate_path)
+                        .unwrap_err();
+                assert!(err.contains("owned by uid"), "{err}");
+                break;
+            }
+        }
+    }
+}
