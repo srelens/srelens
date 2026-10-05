@@ -119,6 +119,11 @@ bundle "$work/unreadable-rpm" 755 755 125
 printf 'not an rpm' > "$work/unreadable-rpm/rpm/srelens-1.0.0-1.x86_64.rpm"
 expect an-rpm-rpm-cannot-read 1 "rpm cannot list" "$work/unreadable-rpm"
 
+# Two of a kind: the check does not pick one.
+bundle "$work/two-debs" 755 755 125
+cp "$work/two-debs/deb/srelens_1.0.0_amd64.deb" "$work/two-debs/deb/srelens_1.0.1_amd64.deb"
+expect two-debs 1 "more than one deb/*.deb under" "$work/two-debs"
+
 rm "$work/all-three-ship-it/appimage/"*.AppImage
 expect no-appimage 1 "no appimage/*.AppImage under" "$work/all-three-ship-it"
 
