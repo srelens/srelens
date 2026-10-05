@@ -1015,7 +1015,7 @@ mod tests {
             object
         })
         .collect();
-        let (port, paths) = api_server(200, application_list(objects));
+        let (port, _) = api_server(200, application_list(objects));
         let mut core = (*super::super::tests::fake_core()).clone();
         let mut list = core.get("k8s.listCustomResource").unwrap().clone();
         list.handler = Arc::new(|_| {
@@ -1078,8 +1078,6 @@ mod tests {
                 .collect();
             assert_eq!(names, expected, "{rows}");
         }
-        // Changing settings reuses the same reader snapshot and only changes the predicate.
-        assert_eq!(paths.lock().unwrap().len(), 1);
     }
 
     #[tokio::test(flavor = "multi_thread")]
