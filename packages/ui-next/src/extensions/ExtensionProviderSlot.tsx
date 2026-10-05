@@ -31,8 +31,6 @@ const RANGES = [
   { value: "604800", label: "7 days" },
 ];
 const DEFAULT_RANGE = "3600";
-/** The most traces the host lists for one search. */
-const MAX_TRACES = 50;
 
 type Resource = { apiVersion: string; kind: string; metadata: { name: string; namespace?: string } };
 
@@ -106,6 +104,12 @@ function MetricPanel(ask: Ask) {
 
 const when = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" });
 
+/** A trace's start, or "—" for one a date cannot hold: a backend's nanoseconds are any number. */
+function started(start: number | undefined) {
+  const at = start === undefined ? undefined : new Date(start);
+  return at && Number.isFinite(at.getTime()) ? when.format(at) : "—";
+}
+
 /**
  * One trace as a row of text: a backend's names with invisible characters shown, as every
  * app value is. What a reader scans first leads — the operation, its service and how long
@@ -116,7 +120,7 @@ function traceRow(trace: ExtensionTrace) {
     trace.rootName === undefined ? "—" : plainText(trace.rootName),
     trace.rootService === undefined ? "—" : plainText(trace.rootService),
     trace.durationMs === undefined ? "—" : `${trace.durationMs.toLocaleString("en-US")} ms`,
-    trace.start === undefined ? "—" : when.format(new Date(trace.start)),
+    started(trace.start),
     plainText(trace.traceId),
   ];
 }
@@ -151,7 +155,7 @@ function TracePanel(ask: Ask) {
       />
       {found?.truncated && (
         <p className="extension-provider-origin">
-          The search found more traces than the {MAX_TRACES} listed; the newest are shown.
+          The search found more traces than the {found.traces.length} listed; the newest are shown.
         </p>
       )}
       <Origin plugin={ask.plugin} />
@@ -187,7 +191,7 @@ export function ExtensionProviderSlot({ context, resource }: { context: string; 
     <Section title="Metrics and traces from apps" padded={false} className="extension-providers">
       <div className="extension-providers-controls">
         <Eyebrow>range</Eyebrow>
-        <Select value={range} onValueChange={setRange} options={RANGES} aria-label="range" />
+        <Select value={range} onValueChange={setRange} options={RANGES} aria-label="Time range for app metrics and traces" />
         <Button type="button" variant="secondary" size="xs" aria-label="Refresh app metrics and traces"
           onClick={() => setTick((count) => count + 1)}>
           Refresh

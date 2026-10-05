@@ -113,14 +113,23 @@ describe("provider panels on an overview (#569)", () => {
     // What a provider answered is data: a root span called `<script>` is its name, shown.
     expect(within(panel).getByText("<script>alert(1)</script>")).toBeTruthy();
     expect(container.querySelector("script")).toBeNull();
-    expect(panel.textContent).toContain("The search found more traces than the 50 listed");
+    expect(panel.textContent).toContain("The search found more traces than the 2 listed");
+  });
+
+  it("shows a start no date can hold as unknown, rather than failing the panel", async () => {
+    answer({ cpu: chart, traces: { kind: "traces", truncated: false, traces: [{ traceId: "far", rootName: "GET /", start: 1e20 }] } });
+    render(<ExtensionProviderSlot context="prod-eu" resource={deployment} />);
+    const panel = await screen.findByRole("region", { name: "Recent traces from Observability" });
+    const row = (await within(panel).findByText("GET /")).closest("tr")!;
+    expect(within(row).getByText("far")).toBeTruthy();
+    expect(row.textContent).toContain("—");
   });
 
   it("asks again over the range the reader picks, and on Refresh", async () => {
     answer({ cpu: chart, traces });
     render(<ExtensionProviderSlot context="prod-eu" resource={deployment} />);
     await waitFor(() => expect(queryExtensionProvider).toHaveBeenCalledTimes(2));
-    fireEvent.change(screen.getByRole("combobox", { name: "range" }), { target: { value: "21600" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "Time range for app metrics and traces" }), { target: { value: "21600" } });
     await waitFor(() => expect(queryExtensionProvider).toHaveBeenCalledTimes(4));
     expect(vi.mocked(queryExtensionProvider).mock.calls.slice(2).map(([query]) => query.rangeSeconds)).toEqual([21600, 21600]);
     fireEvent.click(screen.getByRole("button", { name: "Refresh app metrics and traces" }));

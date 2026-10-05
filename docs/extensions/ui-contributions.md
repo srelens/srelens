@@ -224,8 +224,11 @@ places, in the new design:
   view of its own that closes when the source changes or the screen closes. The
   **Previous instance** control is the cluster's and is not drawn for a provider. A
   provider's stream that ended says how, as an ending or a failure, with **Follow
-  again**; a provider the inventory no longer offers says so, and the view follows
-  Kubernetes.
+  again**, and is not drawn as followed. A provider the inventory no longer offers
+  says so, and the view follows Kubernetes and stays there if the app comes back. An
+  inventory read that fails says so too, but is not taken for a removal: the view
+  goes on following the provider. "all" in **since** reaches back 7 days for a
+  provider, and says so.
 
 The classic design does not draw providers. On the web, metric and trace panels answer
 only under the operator's network ceiling, as every `network.http` request there does,

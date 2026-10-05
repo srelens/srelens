@@ -58,6 +58,8 @@ const h = vi.hoisted(() => {
     }[],
     /** The installed apps the log view may take a source from (#569). */
     plugins: [] as unknown[],
+    /** Why the inventory could not be read, when a test says it could not. */
+    inventoryError: undefined as string | undefined,
     /** Every app view a provider source opened, with its streams. */
     views: [] as { app: string; label: string; close: ReturnType<typeof vi.fn>; opened: { request: unknown; handlers: { onEnd?: (end: unknown) => void } }[] }[],
     resolve: vi.fn(),
@@ -150,7 +152,10 @@ vi.mock("@srelens/core", async (orig) => ({
 
 vi.mock("../extensions/inventoryStore", async (orig) => ({
   ...(await orig<typeof import("../extensions/inventoryStore")>()),
-  useExtensions: () => ({ status: "ready", data: { schemaVersion: 1, nextRevision: 9, plugins: h.plugins }, reload: () => {} }),
+  useExtensions: () =>
+    h.inventoryError
+      ? { status: "error", error: h.inventoryError, reload: () => {} }
+      : { status: "ready", data: { schemaVersion: 1, nextRevision: 9, plugins: h.plugins }, reload: () => {} },
 }));
 
 if (!("ResizeObserver" in globalThis)) {
@@ -262,6 +267,7 @@ beforeEach(() => {
   h.version = 0;
   h.seen = [];
   h.plugins = [];
+  h.inventoryError = undefined;
   h.views = [];
   h.state = {
     lines: [],
@@ -1846,13 +1852,13 @@ describe("log sources (#569)", () => {
   it("offers no source picker while no installed app provides logs", async () => {
     draw();
     await screen.findByRole("log");
-    expect(screen.queryByRole("combobox", { name: "Log source" })).toBeNull();
+    expect(screen.queryByRole("combobox", { name: "Logs from" })).toBeNull();
   });
 
   it("offers Kubernetes first, then each installed log provider for the subject's kind", async () => {
     h.plugins = [observability()];
     draw();
-    const picker = await screen.findByRole("combobox", { name: "Log source" });
+    const picker = await screen.findByRole("combobox", { name: "Logs from" });
     expect(within(picker).getAllByRole("option").map((o) => o.textContent)).toEqual([
       "Kubernetes",
       "Loki · Observability",
@@ -1863,7 +1869,7 @@ describe("log sources (#569)", () => {
   it("follows the chosen provider through the view's own stream, without the Kubernetes-only controls", async () => {
     h.plugins = [observability()];
     draw();
-    const picker = await screen.findByRole("combobox", { name: "Log source" });
+    const picker = await screen.findByRole("combobox", { name: "Logs from" });
     expect(screen.getByRole("button", { name: /Previous instance/ })).toBeTruthy();
     fireEvent.change(picker, { target: { value: "org.example.observability/loki" } });
     await waitFor(() => expect(h.seen.at(-1)?.options.source?.key).toContain("org.example.observability/loki"));
@@ -1891,7 +1897,7 @@ describe("log sources (#569)", () => {
   it("does not call a change of source a cleared scrollback: the new source sends its own history", async () => {
     h.plugins = [observability()];
     draw();
-    const picker = await screen.findByRole("combobox", { name: "Log source" });
+    const picker = await screen.findByRole("combobox", { name: "Logs from" });
     const restart = (count: number) =>
       act(() => {
         h.state.restarts = count;
@@ -1917,7 +1923,7 @@ describe("log sources (#569)", () => {
   it("says how a provider's stream ended, as a failure, and follows it again", async () => {
     h.plugins = [observability()];
     draw();
-    fireEvent.change(await screen.findByRole("combobox", { name: "Log source" }), {
+    fireEvent.change(await screen.findByRole("combobox", { name: "Logs from" }), {
       target: { value: "org.example.observability/loki" },
     });
     await waitFor(() => expect(h.seen.at(-1)?.options.source).toBeDefined());
@@ -1935,5 +1941,72 @@ describe("log sources (#569)", () => {
     fireEvent.click(screen.getByRole("button", { name: "Follow again" }));
     await waitFor(() => expect(h.seen.at(-1)?.options.source?.key).not.toBe(first.key));
     expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  /** Pick the workloads' Loki and wait for its stream to be asked for. */
+  async function followLoki() {
+    fireEvent.change(await screen.findByRole("combobox", { name: "Logs from" }), {
+      target: { value: "org.example.observability/loki" },
+    });
+    await waitFor(() => expect(h.seen.at(-1)?.options.source).toBeDefined());
+  }
+  /** The inventory as the next read answers it. */
+  function inventoryReads(plugins: unknown[], error?: string) {
+    act(() => {
+      h.plugins = plugins;
+      h.inventoryError = error;
+      notify();
+    });
+  }
+
+  it("keeps following a provider through an inventory read that fails, and says the list may be out of date", async () => {
+    h.plugins = [observability()];
+    draw();
+    await followLoki();
+    const followed = h.seen.at(-1)!.options.source!.key;
+    inventoryReads([observability()], "The inventory could not be read");
+    expect(h.seen.at(-1)?.options.source?.key).toBe(followed);
+    expect(document.body.textContent).toContain("Could not check which apps provide logs here");
+    expect(document.body.textContent).not.toContain("is no longer offered");
+    expect(h.views[0].close).not.toHaveBeenCalled();
+  });
+
+  it("lets go of a provider no longer offered, so it does not come back unasked", async () => {
+    h.plugins = [observability()];
+    draw();
+    await followLoki();
+    inventoryReads([]);
+    await waitFor(() => expect(h.seen.at(-1)?.options.source).toBeUndefined());
+    expect(h.seen.at(-1)!.targets).toEqual(TARGETS);
+    expect(document.body.textContent).toContain("Loki · Observability is no longer offered for this Deployment");
+    // Kubernetes again: its own controls are back, and its own tail is not a cleared scrollback.
+    act(() => {
+      h.state.restarts = 1;
+      notify();
+    });
+    expect(screen.queryByText("Scrollback cleared")).toBeNull();
+    expect(screen.getByRole("button", { name: /Previous instance/ })).toBeTruthy();
+    // The app is back: the reader is told nothing new and nothing reopens behind them.
+    inventoryReads([observability()]);
+    const picker = await screen.findByRole("combobox", { name: "Logs from" });
+    expect((picker as HTMLSelectElement).value).toBe("kubernetes");
+    expect(h.seen.at(-1)?.options.source).toBeUndefined();
+    expect(h.views).toHaveLength(1);
+  });
+
+  it("says what a provider has sent, and that an ended stream is not followed", async () => {
+    h.plugins = [observability()];
+    draw();
+    await followLoki();
+    expect(document.body.textContent).toContain(
+      "srelens is following checkout-api through Loki · Observability; it has sent no line in the last 7 days.",
+    );
+    expect(screen.getByRole("button", { name: /Pause/ })).toBeTruthy();
+    await h.seen.at(-1)!.options.source!.open(...([[], () => {}, () => {}, {}] as never[]));
+    act(() => h.views[0].opened[0].handlers.onEnd?.({ type: "close", reason: "completed" }));
+    await screen.findByRole("button", { name: "Follow again" });
+    expect(document.body.textContent).toContain("Loki · Observability sent no line in the last 7 days before its stream ended.");
+    const follow = screen.getByRole("button", { name: /^Follow$/ }) as HTMLButtonElement;
+    expect(follow.disabled).toBe(true);
   });
 });

@@ -55,6 +55,15 @@ beforeEach(async () => {
   vi.mocked(openExtensionView).mockReset();
 });
 
+/** The hook rendered once the cluster listing it subscribed to has answered. */
+async function listed<T, P>(hook: (props: P) => T) {
+  const rendered = renderHook(hook);
+  await act(async () => {
+    await refreshContextIds();
+  });
+  return rendered;
+}
+
 describe("the log providers the log view offers (#569)", () => {
   it("lists each enabled app's log providers for the view's kind, by title and app", async () => {
     inventory([
@@ -64,31 +73,48 @@ describe("the log providers the log view offers (#569)", () => {
       app("org.example.blocked", [loki("b")], { policyBlocked: "no" }),
       app("org.example.elsewhere", [loki("e")], { contexts: ["staging"] }),
     ]);
-    const { result } = renderHook(() => useLogProviders("prod-eu", "/Pod"));
-    await act(async () => {
-      await refreshContextIds();
-    });
-    expect(result.current.map((choice) => [choice.key, choice.label])).toEqual([
+    const { result } = await listed(() => useLogProviders("prod-eu", "/Pod"));
+    expect(result.current.status).toBe("ready");
+    expect(result.current.choices.map((choice) => [choice.key, choice.label])).toEqual([
       ["org.example.loki/loki", "Loki · Loki logs"],
       ["org.example.loki/audit", "audit · Loki logs"],
     ]);
-    expect(result.current[0]).toMatchObject({ appId: "org.example.loki", revision: 4, provider: "loki" });
+    expect(result.current.choices[0]).toMatchObject({ appId: "org.example.loki", revision: 4, provider: "loki" });
   });
 
-  it("offers none on the web, which runs no app streams yet", () => {
+  it("offers none on the web, which runs no app streams yet", async () => {
     inventory([app("org.example.loki", [loki("loki")])]);
     vi.mocked(isTauri).mockReturnValue(false);
-    expect(renderHook(() => useLogProviders("prod-eu", "/Pod")).result.current).toEqual([]);
+    expect(renderHook(() => useLogProviders("prod-eu", "/Pod")).result.current).toEqual({ status: "ready", choices: [] });
     vi.mocked(isTauri).mockReturnValue(true);
-    expect(renderHook(() => useLogProviders("prod-eu", "/Pod")).result.current).toHaveLength(1);
+    expect((await listed(() => useLogProviders("prod-eu", "/Pod"))).result.current.choices).toHaveLength(1);
   });
 
-  it("offers none for a kind no provider is for, or before the inventory has loaded", () => {
+  it("offers none for a kind no provider is for, or before the inventory has loaded", async () => {
     inventory([app("org.example.loki", [loki("loki")])]);
-    expect(renderHook(() => useLogProviders("prod-eu", "batch/Job")).result.current).toEqual([]);
-    expect(renderHook(() => useLogProviders("prod-eu", undefined)).result.current).toEqual([]);
+    expect((await listed(() => useLogProviders("prod-eu", "batch/Job"))).result.current).toEqual({ status: "ready", choices: [] });
+    expect(renderHook(() => useLogProviders("prod-eu", undefined)).result.current).toEqual({ status: "ready", choices: [] });
     vi.mocked(useExtensions).mockReturnValue({ status: "loading", reload: vi.fn() } as never);
-    expect(renderHook(() => useLogProviders("prod-eu", "/Pod")).result.current).toEqual([]);
+    expect(renderHook(() => useLogProviders("prod-eu", "/Pod")).result.current).toEqual({ status: "loading", choices: [] });
+  });
+
+  it("keeps the last list through a refresh that fails or is still loading, and says which", async () => {
+    inventory([app("org.example.loki", [loki("loki")])]);
+    const { result, rerender } = await listed(() => useLogProviders("prod-eu", "/Pod"));
+    expect(result.current.choices.map((choice) => choice.key)).toEqual(["org.example.loki/loki"]);
+    // A failed refresh is not every app removed: the list stays, marked as not current.
+    vi.mocked(useExtensions).mockReturnValue({ status: "error", error: "The inventory could not be read", reload: vi.fn() } as never);
+    rerender();
+    expect(result.current).toMatchObject({ status: "error", error: "The inventory could not be read" });
+    expect(result.current.choices.map((choice) => choice.key)).toEqual(["org.example.loki/loki"]);
+    vi.mocked(useExtensions).mockReturnValue({ status: "loading", reload: vi.fn() } as never);
+    rerender();
+    expect(result.current.status).toBe("loading");
+    expect(result.current.choices).toHaveLength(1);
+    // An answer is current again, even an empty one.
+    inventory([]);
+    rerender();
+    expect(result.current).toEqual({ status: "ready", choices: [] });
   });
 });
 
@@ -127,6 +153,36 @@ describe("following a log provider (#569)", () => {
     act(() => result.current.retry());
     expect(result.current.end).toBeNull();
     expect(result.current.source!.key).not.toBe(key);
+  });
+
+  it("does not take an earlier open's ending for the current stream's", async () => {
+    const fake = fakeView();
+    vi.mocked(openExtensionView).mockReturnValue(fake.view);
+    const { result } = renderHook(() => useLogProviderSource(choice, subject));
+    // A change of window: the log view stops the first stream and opens a second.
+    await result.current.source!.open([], vi.fn(), vi.fn(), { sinceSeconds: 600 });
+    await result.current.source!.open([], vi.fn(), vi.fn(), { sinceSeconds: 300 });
+    // The host ends the first only after the second is open.
+    act(() => fake.opened[0].handlers.onEnd?.({ type: "close", reason: "cancelled" }));
+    expect(result.current.end).toBeNull();
+    act(() => fake.opened[1].handlers.onEnd?.({ type: "close", reason: "completed" }));
+    expect(result.current.end).toEqual({ type: "close", reason: "completed" });
+  });
+
+  it("does not carry a closed view's ending to the provider chosen again", async () => {
+    const first = fakeView();
+    const second = fakeView();
+    vi.mocked(openExtensionView).mockReturnValueOnce(first.view).mockReturnValueOnce(second.view);
+    const { result, rerender } = renderHook(({ picked }) => useLogProviderSource(picked, subject), {
+      initialProps: { picked: choice as LogProviderChoice | undefined },
+    });
+    await result.current.source!.open([], vi.fn(), vi.fn(), {});
+    // Kubernetes, then Loki again: the first view closes, and the host says so late.
+    rerender({ picked: undefined });
+    act(() => first.opened[0].handlers.onEnd?.({ type: "close", reason: "viewClosed" }));
+    rerender({ picked: choice });
+    expect(result.current.end).toBeNull();
+    expect(result.current.source).toBeDefined();
   });
 
   it("closes its view when the source changes or the screen goes", () => {

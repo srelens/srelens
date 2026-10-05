@@ -803,27 +803,28 @@ function LogsStream({
    * the container filter read them as they read the cluster's.
    */
   const resourceKind = providerKind(kind);
-  const providers = useLogProviders(context, resourceKind);
+  const offered = useLogProviders(context, resourceKind);
+  const providers = offered.choices;
   const [picked, setPicked] = useState<{ key: string; label: string } | null>(null);
+  /** The provider that stopped being offered while followed, named until the next choice. */
+  const [lost, setLost] = useState<string | null>(null);
   const chosen = picked ? providers.find((p) => p.key === picked.key) : undefined;
+  // Only a current list says a provider is gone; until one answers, the last list is
+  // followed. A gone provider is let go of, so it does not come back unasked.
+  if (picked && !chosen && offered.status === "ready") {
+    setPicked(null);
+    setLost(picked.label);
+  }
   const provider = useLogProviderSource(chosen, { context, namespace, resourceKind: resourceKind ?? "", name });
-  /**
-   * The restarts the "Scrollback cleared" notice is not about. That notice says a
-   * change of window reopened the stream and nothing already sent comes back; after a
-   * change of source, or Follow again, the new stream sends its own history, so it
-   * would be false. The next restart is marked as seen when either is asked for.
-   */
-  const restarts = useRef(0);
-  const expectRestart = useCallback(() => setSeenRestart(restarts.current + 1), []);
   const chooseSource = useCallback(
     (key: string) => {
       const next = providers.find((p) => p.key === key);
       setPicked(next ? { key: next.key, label: next.label } : null);
-      expectRestart();
+      setLost(null);
       // A previous instance is the cluster's to hand back, never a provider's.
       if (next) setPrevious(false);
     },
-    [providers, expectRestart],
+    [providers],
   );
 
   const sinceSeconds = SINCE.find((s) => s.value === since)?.seconds;
@@ -835,7 +836,18 @@ function LogsStream({
     tailLines: TAIL_LINES,
     source: provider.source,
   });
-  restarts.current = stream.restartCount;
+  /**
+   * The restarts the "Scrollback cleared" notice is not about. That notice says a
+   * change of window reopened the stream and nothing already sent comes back. A change
+   * of source (a choice, a provider no longer offered, Follow again) reopens it with
+   * the new source's own history, so the restart it causes is marked as seen.
+   */
+  const sourceKey = provider.source?.key;
+  const [sourceSeen, setSourceSeen] = useState(sourceKey);
+  if (sourceSeen !== sourceKey) {
+    setSourceSeen(sourceKey);
+    setSeenRestart(stream.restartCount + 1);
+  }
 
   const byLabel = useMemo(() => indexTargets(targets), [targets]);
   const liveRows = useMemo(
@@ -1094,13 +1106,10 @@ function LogsStream({
     : connectionSignal(stream.status, stream.paused);
   /** Whether new lines are arriving in THIS pane. A snapshot is not followed,
    *  however healthy the connection underneath it is. */
-  const following = !previous && !stream.paused;
+  const following = !previous && !stream.paused && !ended;
   // A provider sends its history again on every restart, so none of its restarts
   // cleared anything; the notice is about the cluster's own stream alone.
   const restarted = !chosen && stream.restartCount > seenRestart;
-  useEffect(() => {
-    if (chosen) setSeenRestart(stream.restartCount);
-  }, [chosen, stream.restartCount]);
   const window_ = computeLogWindow({
     total: filtered.length,
     scrollTop: metrics.scrollTop,
@@ -1111,7 +1120,7 @@ function LogsStream({
   const drawn = window_.virtualized
     ? filtered.slice(window_.start, window_.end)
     : filtered;
-  const windowLabel = since === "all" ? "" : ` in the last ${since}`;
+  const windowLabel = since !== "all" ? ` in the last ${since}` : chosen ? " in the last 7 days" : "";
 
   /** A corpse that refused, while others answered — a banner over lines that
    *  are still there, rather than a card in place of them. */
@@ -1189,7 +1198,8 @@ function LogsStream({
             variant="secondary"
             size="sm"
             onClick={stream.togglePause}
-            disabled={previous}
+            // An ended stream has nothing to pause; Follow again, by its notice, opens it.
+            disabled={previous || ended !== null}
             aria-label={previous ? `Follow — ${NO_FOLLOWING.toLowerCase()}` : undefined}
           >
             {following ? (
@@ -1246,7 +1256,7 @@ function LogsStream({
                 // The snapshot of a terminated container is the cluster's; a
                 // provider is a source of the live tail.
                 disabled={previous}
-                aria-label="Log source"
+                aria-label="Logs from"
               />
             </div>
           )}
@@ -1341,12 +1351,23 @@ function LogsStream({
           )}
         </FilterBar>
 
-        {picked && !chosen && (
+        {offered.status === "error" && (
+          // The list the picker is drawn from could not be read again: what it
+          // offers may be out of date, and an app that stopped providing logs
+          // is not known to have.
+          <FailureAlert
+            title="Could not check which apps provide logs here"
+            error={offered.error}
+            domain="local"
+            className="mx-3 mt-3"
+          />
+        )}
+        {lost && !chosen && (
           // The choice was made from a list that has since changed: say so
           // rather than quietly draw the cluster's lines under the old name.
           <Alert
             tone="warn"
-            title={`${picked.label} is no longer offered for this ${kind}`}
+            title={`${lost} is no longer offered for this ${kind}`}
             className="mx-3 mt-3"
           >
             The app that provides it was disabled or removed, or is no longer
@@ -1364,10 +1385,7 @@ function LogsStream({
             <Button
               variant="secondary"
               size="xs"
-              onClick={() => {
-                expectRestart();
-                provider.retry();
-              }}
+              onClick={provider.retry}
             >
               Follow again
             </Button>
@@ -1453,7 +1471,13 @@ function LogsStream({
               // and under the rail on a real cluster.
               className="whitespace-normal"
               title="Nothing has been logged yet"
-              hint={`srelens is following ${targets.length} container${targets.length === 1 ? "" : "s"} across ${podCount(targets)}; none of them has written a line${windowLabel}.`}
+              hint={
+                chosen && ended
+                  ? `${chosen.label} sent no line${windowLabel} before its stream ended.`
+                  : chosen
+                    ? `srelens is following ${name} through ${chosen.label}; it has sent no line${windowLabel}.`
+                    : `srelens is following ${targets.length} container${targets.length === 1 ? "" : "s"} across ${podCount(targets)}; none of them has written a line${windowLabel}.`
+              }
             />
           ) : filtered.length === 0 ? (
             // Deliberately not the sentence above it. "Nothing yet" and "nothing
