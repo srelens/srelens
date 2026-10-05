@@ -167,19 +167,23 @@ Node.js.
    Only public keys enter the document. For `--root` and `--catalog`, a public key file
    (SPKI PEM) works as well as the private one.
 
-4. **The srelens delegation**, with the key the Flux and Argo CD releases are signed with,
-   and the file the build ships:
+4. **The srelens delegation**, with the srelens release keys, and the file the build ships:
 
    ```bash
    node scripts/extensions/trust.mjs publisher --id srelens --name srelens \
      --key crates/registry/tests/fixtures/trust/srelens-apps.pub \
-     --namespace org.srelens --sign catalog.pem > srelens.json
+     --key crates/registry/tests/fixtures/trust/srelens-publisher.pub \
+     --namespace org.srelens --version 2 --sign catalog.pem > srelens.json
    node scripts/extensions/trust.mjs bundle srelens.json \
      > crates/registry/src/extensions/trust/publishers.json
    ```
 
-   `srelens-apps.pub` is the published release key's 32 raw bytes (the public half of
-   `APP_SIGNING_PRIVATE_KEY`; it matches `signing-public.pem` in the app repositories).
+   Each `.pub` is a release key's 32 raw bytes. `srelens-apps.pub` signed every Flux and
+   Argo CD release so far and matches their repositories' `signing-public.pem`; its private
+   half survives only as those repositories' `APP_SIGNING_PRIVATE_KEY` secret.
+   `srelens-publisher.pub` replaced it in version 2 (#582): its private half is the
+   organization's `APP_SIGNING_PRIVATE_KEY` secret, and it matches `signing-public.pem` in
+   every app repository that signs with it. Version 1 held `srelens-apps.pub` alone.
 
 5. **Check and commit.** `the_pinned_root_verifies_and_delegates_org_srelens_to_the_release_key`
    in `crates/registry/src/extensions/trust.rs` checks the pinned documents. Run it and the
