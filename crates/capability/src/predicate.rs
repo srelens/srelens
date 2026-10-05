@@ -434,7 +434,11 @@ pub struct CardPredicate {
     pub absent: Option<bool>,
     /// The value at `jsonPath` is an RFC 3339 timestamp within this duration
     /// of now: `14d` is from now until fourteen days ahead, `-1h` the last
-    /// hour. Units s, m, h, d and w.
+    /// hour. Units s, m, h, d and w. Extension dashboard cards on API 0.7 or
+    /// later also accept `${settings.<id>}` referencing a declared select
+    /// setting with a default; every option must be a positive duration of
+    /// at most 3650 days. The host resolves the setting before evaluating
+    /// this predicate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub within: Option<String>,
     /// The value at `jsonPath` is an RFC 3339 timestamp earlier than now plus

@@ -13,7 +13,7 @@ Point your editor at it by naming it in the manifest:
 
 ```json
 {
-  "$schema": "https://raw.githubusercontent.com/srelens/srelens/main/schemas/extension-manifest.v0.6.json",
+  "$schema": "https://raw.githubusercontent.com/srelens/srelens/main/schemas/extension-manifest.v0.7.json",
   "id": "io.example.cert-manager"
 }
 ```
@@ -543,7 +543,8 @@ at install at `contributions.dashboardCards[i].type`. It never counts by
 `statusColumns`.
 
 From **API 0.7**, `within` may be the whole value
-`${settings.expiryWindow}`, naming a declared `select` setting with a default.
+`${settings.<id>}` (for example `${settings.expiryWindow}`), naming a declared
+`select` setting with a default.
 Every option must be a positive duration under the same bounded grammar.
 The host uses the saved choice, or the default, for both the count and its
 linked page's filter. Invalid stored values show an error, never a zero count.
