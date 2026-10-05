@@ -441,9 +441,10 @@ A sidecar is **refused, never started unconfined**:
   controllers;
 - anywhere the backend cannot set a limit.
 
-In every case the refusal names what is missing. Whether a Linux or Windows machine that
-lacks only a limit layer should instead run the sidecar with a warning is still open (ADR,
-"Open questions"). Until that is decided, the supervisor refuses.
+In every case the refusal names what is missing. On Linux a machine that lacks only a limit
+layer is refused, a session without the `cpu` controller delegated included; that is
+decided (ADR, "Open questions"). Whether a Windows machine that lacks one should instead run
+the sidecar with a warning is still open. Until that is decided, the supervisor refuses.
 
 What the sidecar gets:
 
