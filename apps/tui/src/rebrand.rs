@@ -105,10 +105,8 @@ pub fn is_trusted_existing_command(current: &Path, next: &Path) -> Result<bool, 
         .map_err(|e| format!("could not inspect {}: {e}", current.display()))?;
     if next_meta.uid() != current_meta.uid() {
         return Err(format!(
-            "existing {} is owned by uid {}, expected uid {}; refusing to rebrand",
-            next.display(),
-            next_meta.uid(),
-            current_meta.uid()
+            "existing {} is owned by a different user; refusing to rebrand",
+            next.display()
         ));
     }
     if (next_meta.permissions().mode() & 0o111) == 0 {

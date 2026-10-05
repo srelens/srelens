@@ -120,7 +120,7 @@ fn an_existing_srectl_with_different_uid_is_refused() {
     if let Ok(c_path) = CString::new(next.as_os_str().as_bytes()) {
         if unsafe { libc::chown(c_path.as_ptr(), different_uid, libc::gid_t::MAX) } == 0 {
             let err = apply_rebrand(&legacy).unwrap_err();
-            assert!(err.contains("owned by uid"), "{err}");
+            assert!(err.contains("owned by a different user"), "{err}");
         }
     }
 
@@ -132,7 +132,7 @@ fn an_existing_srectl_with_different_uid_is_refused() {
                 let err =
                     srelens_tui::rebrand::is_trusted_existing_command(&legacy, candidate_path)
                         .unwrap_err();
-                assert!(err.contains("owned by uid"), "{err}");
+                assert!(err.contains("owned by a different user"), "{err}");
                 break;
             }
         }
