@@ -404,18 +404,24 @@ default 200) and `sinceSeconds` (1 s to 7 days, default an hour) shape the histo
 It sends the frames `logs` does: `lines`, each line tagged `pod/container` from the Loki
 stream's labels (else its pod, else the provider's id) and prefixed with its RFC 3339
 time when `timestamps` is set; and `status`, tagged with the provider's id. The source
-asks for the history — the newest `tailLines` lines of the window — and says `live`;
-then it asks every **5 seconds**, the host's interval and not the app's, for what is newer
-than the last line it sent (from that line's instant, since lines can share one, and
-never the same line twice), and after a query that answered a whole page of 1,000 lines
-asks again a second later. Every query goes through the provider's `network.http`
-binding with the app's settings at that moment. A query nothing answered — the
-connection failed or timed out, or the server answered 5xx or 429 — sends
-`reconnecting` with why, and the next one that is answered sends `live` again. A query
-the host or the server refused — the allowlist, a 4xx, an answer too large or not
-Loki's — ends the stream with `error: source` and the reason. It asks nothing more once
-the stream has ended: its view closed, its window closed or reloaded, or the app was
-disabled, updated or removed.
+asks for the history — the newest `tailLines` lines of the window — until a query
+answers it, and says `live` once one has; then it asks every **5 seconds**, the host's
+interval and not the app's, for what is newer than the last line it sent: from that
+line's instant, since lines can share one, and never the same line twice (two identical
+lines at one instant are both sent, once). After a query that answered a whole page of
+1,000 lines it asks again a second later; a whole page all at one instant, already
+sent, is followed past that instant, and the rest of it is not sent. Every query stops
+**2 seconds** short of now, because log agents push in batches and Loki takes lines
+with older timestamps, as Loki's own tail waits (`delay_for`); a line that reaches Loki
+later than that, for an instant the follow has passed, is not shown. An answer past the
+4 MiB limit is asked again for half as many lines, down to 10. Every query goes through
+the provider's `network.http` binding with the app's settings at that moment. A query
+nothing answered — the connection failed or timed out, or the server answered 5xx, 408
+or 429 — sends `reconnecting` with why, and the next one that is answered sends `live`
+again. A query the host or the server refused — the allowlist, a 4xx, an answer too
+large even at 10 lines, or not Loki's — ends the stream with `error: source` and the
+reason. It asks nothing more once the stream has ended: its view closed, its window
+closed or reloaded, or the app was disabled, updated or removed.
 
 ## Opening a stream
 

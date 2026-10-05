@@ -329,7 +329,8 @@ Also new in this line ([#569](https://github.com/srelens/srelens/issues/569)):
   declare a PromQL, LogQL or TraceQL template that one of the app's `network.http`
   bindings sends, for the workload and pod kinds in `forKinds`. The host binds
   `${cluster}`, `${namespace}`, `${workload}` and `${pod}` — each only inside a
-  double-quoted string, with `\` and `"` escaped, and `${name:regex}` quoting RE2
+  double-quoted string, with `\` and `"` escaped and the value held to a name's
+  characters, and in a regex matcher only as `${name:regex}`, which quotes RE2
   metacharacters first — and a metric provider's `${range}` and `${step}`, and sets the
   query and time range as the language's HTTP parameters, which the binding may not.
   It reads a Prometheus range query into the timeseries chart (at most 8 series), a

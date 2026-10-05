@@ -453,27 +453,113 @@ fn a_cluster_name_cannot_close_its_string_or_add_to_the_query() {
         QueryLanguage::Traceql,
         "{ resource.k8s.cluster.name = \"${cluster}\" }",
     );
-    for cluster in [
+    let bound = |cluster: &str| {
+        template.render(&QueryValues {
+            cluster: cluster.into(),
+            ..on_workload("web")
+        })
+    };
+    for hostile in [
         "prod\" } || { true",
         "prod\\\" } || { true",
         "prod\\",
         "a\"b\"c",
         "} or vector(1) #",
+        "*/ || { true } /*",
+        "{{ __line__ }}",
+        "prod staging",
     ] {
-        let values = QueryValues {
-            cluster: cluster.into(),
-            ..on_workload("web")
-        };
-        let rendered = template.render(&values).unwrap();
+        let refused = bound(hostile).unwrap_err();
+        assert!(!refused.contains(hostile), "{refused}");
+    }
+    // The names kubeconfigs really carry reach the query whole, inside its string.
+    for real in [
+        "kind-dev",
+        "arn:aws:eks:eu-west-1:123456789012:cluster/prod",
+        "gke_my-project_europe-west1_prod",
+        "default/api-crc-testing:6443/kubeadmin",
+        "admin@prod.example.com",
+    ] {
+        let rendered = bound(real).unwrap();
         assert_eq!(
             tokens(&rendered),
             [
                 Token::Outside("{ resource.k8s.cluster.name = ".into()),
-                Token::Quoted(cluster.into()),
+                Token::Quoted(real.into()),
                 Token::Outside(" }".into()),
             ],
-            "{cluster:?} rendered as {rendered}"
+            "{real:?} rendered as {rendered}"
         );
+    }
+}
+
+#[test]
+fn a_comment_the_language_would_skip_is_refused() {
+    // LogQL's and TraceQL's lexers skip `/* */` and `//`: a quote inside one is no
+    // string to them, so a value placed there would be read as query syntax.
+    for (language, query) in [
+        (
+            QueryLanguage::Logql,
+            "{pod=\"${pod}\"} /* \"${cluster}\" */",
+        ),
+        (
+            QueryLanguage::Traceql,
+            "{ span.x = \"a\" } /* \"${cluster}\" */",
+        ),
+        (
+            QueryLanguage::Traceql,
+            "{ span.x = \"a\" } // \"${cluster}\"",
+        ),
+        (QueryLanguage::Promql, "up /* \"${cluster}\" */"),
+    ] {
+        let refused = QueryTemplate::parse(language, query).unwrap_err();
+        assert!(refused.contains("comment"), "{query}: {refused}");
+    }
+    // Inside a string they are only text.
+    template(
+        QueryLanguage::Logql,
+        "{pod=\"${pod}\"} |= \"/* not a comment */\"",
+    );
+}
+
+#[test]
+fn a_name_in_a_regex_matcher_is_written_as_a_regex() {
+    // Bare, `.*` or `prod|staging` as a cluster's name would match every cluster.
+    for (language, query) in [
+        (QueryLanguage::Promql, "up{cluster=~\"${cluster}\"}"),
+        (QueryLanguage::Promql, "up{pod!~\"${workload}-.+\"}"),
+        (
+            QueryLanguage::Logql,
+            "{namespace=\"${namespace}\"} |~ \"${pod}\"",
+        ),
+        (
+            QueryLanguage::Traceql,
+            "{ resource.service.name =~ \"${workload}\" }",
+        ),
+    ] {
+        let refused = QueryTemplate::parse(language, query).unwrap_err();
+        assert!(refused.contains(":regex"), "{query}: {refused}");
+    }
+    template(
+        QueryLanguage::Logql,
+        "{namespace=\"${namespace}\"} |~ \"${pod:regex}\"",
+    );
+    template(
+        QueryLanguage::Traceql,
+        "{ resource.service.name =~ \"${workload:regex}\" }",
+    );
+    // And quoted for a regex where the string is matched literally, it would carry
+    // backslashes into an exact match.
+    let refused =
+        QueryTemplate::parse(QueryLanguage::Promql, "up{pod=\"${pod:regex}\"}").unwrap_err();
+    assert!(refused.contains("=~"), "{refused}");
+}
+
+#[test]
+fn a_line_or_paragraph_separator_is_refused_in_a_template() {
+    for separator in ['\u{2028}', '\u{2029}'] {
+        let query = format!("up{{job=\"a{separator}b\"}}");
+        assert!(QueryTemplate::parse(QueryLanguage::Promql, &query).is_err());
     }
 }
 
@@ -536,19 +622,29 @@ fn template_with_cluster() -> QueryTemplate {
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(512))]
 
-    /// Whatever the context is called, the query outside its string is the template's.
+    /// Whatever the context is called, it is refused or it is the text of one string:
+    /// the query outside that string is the template's.
     #[test]
-    fn no_cluster_name_changes_the_query_outside_its_string(cluster in "[^\\p{Cc}\\p{Cf}]{1,64}") {
+    fn no_cluster_name_changes_the_query_outside_its_string(cluster in "\\PC{1,64}") {
         let template = template_with_cluster();
         let values = QueryValues { cluster: cluster.clone(), ..on_workload("web") };
-        let rendered = template.render(&values).unwrap();
-        prop_assert_eq!(
-            tokens(&rendered),
-            vec![
-                Token::Outside("up{cluster=".into()),
-                Token::Quoted(cluster),
-                Token::Outside("}".into()),
-            ]
-        );
+        if let Ok(rendered) = template.render(&values) {
+            prop_assert_eq!(
+                tokens(&rendered),
+                vec![
+                    Token::Outside("up{cluster=".into()),
+                    Token::Quoted(cluster),
+                    Token::Outside("}".into()),
+                ]
+            );
+        }
+    }
+
+    /// And a name made of what a context name may hold is always carried.
+    #[test]
+    fn a_name_of_the_allowed_characters_is_always_carried(cluster in "[A-Za-z0-9._:/@+-]{1,64}") {
+        let template = template_with_cluster();
+        let values = QueryValues { cluster: cluster.clone(), ..on_workload("web") };
+        prop_assert!(template.render(&values).is_ok());
     }
 }

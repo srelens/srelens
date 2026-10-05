@@ -16,6 +16,8 @@ pub(super) enum Reply {
     Json(Value),
     Text(&'static str),
     Status(u16, &'static str),
+    /// A status with a body of `content_type`, as a server explains a refusal.
+    Refusal(u16, &'static str, &'static str, String),
     Redirect(String),
     /// A body of `len` bytes; with `length`, announced in `Content-Length`,
     /// else streamed until the connection closes.
@@ -144,6 +146,10 @@ pub(super) async fn server(answer: impl Fn(&str) -> Reply + Send + Sync + 'stati
                     Reply::Status(code, reason) => (
                         format!("HTTP/1.1 {code} {reason}\r\nContent-Length: 0\r\n"),
                         Vec::new(),
+                    ),
+                    Reply::Refusal(code, reason, content_type, body) => (
+                        format!("HTTP/1.1 {code} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n", body.len()),
+                        body.into_bytes(),
                     ),
                     Reply::Redirect(location) => (
                         format!("HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\n"),

@@ -131,16 +131,72 @@ pub(super) enum RequestError {
     /// too large or unreadable as what it says it is. Asking again gets the same.
     Refused(String),
     /// Nothing answered it: the connection failed, it timed out, or the server
-    /// said it is unavailable (5xx, 429). Asking again later may.
+    /// said it is unavailable (5xx, 408, 429). Asking again later may.
     Unanswered(String),
+    /// The answer is larger than the limit. Refused as it is; asked for less
+    /// (fewer log lines, #569), it may fit.
+    TooLarge(String),
 }
 
 impl RequestError {
     /// What went wrong, in the host's words.
     pub fn message(&self) -> &str {
         match self {
-            Self::Refused(why) | Self::Unanswered(why) => why,
+            Self::Refused(why) | Self::Unanswered(why) | Self::TooLarge(why) => why,
         }
+    }
+}
+
+/// The most of a refusal's body read, in bytes, and quoted, in characters.
+const MAX_REASON_BODY: usize = 4096;
+const MAX_REASON: usize = 300;
+
+/// What a server answered with a status outside 2xx, in the host's words, with
+/// the server's own reason after them when it gave one: a JSON body's `error`, as
+/// Prometheus writes a bad query's, or the text Loki and Tempo send. Cut, with
+/// invisible characters shown, and scrubbed of every sensitive header value and
+/// of the URL and its host, since a server may echo what it was sent.
+pub(super) fn refusal_reason(
+    status: reqwest::StatusCode,
+    content_type: Option<&str>,
+    raw: &[u8],
+    headers: &HeaderMap,
+    url: &Url,
+) -> String {
+    let lead = format!("The server answered HTTP {status}");
+    let json = content_type
+        .and_then(|value| value.split(';').next())
+        .is_some_and(|essence| essence.trim().eq_ignore_ascii_case("application/json"));
+    let said = if json {
+        serde_json::from_slice::<Value>(raw)
+            .ok()
+            .and_then(|body| body.get("error").and_then(Value::as_str).map(str::to_owned))
+            .unwrap_or_default()
+    } else {
+        String::from_utf8_lossy(raw).into_owned()
+    };
+    let mut said = said.split_whitespace().collect::<Vec<_>>().join(" ");
+    let secrets = headers
+        .values()
+        .filter(|value| value.is_sensitive())
+        .filter_map(|value| value.to_str().ok());
+    for secret in secrets {
+        for part in std::iter::once(secret).chain(secret.split_whitespace()) {
+            if part.len() >= 4 {
+                said = said.replace(part, "[secret]");
+            }
+        }
+    }
+    for spelling in [Some(url.as_str()), url.host_str()].into_iter().flatten() {
+        if !spelling.is_empty() {
+            said = said.replace(spelling, "the server");
+        }
+    }
+    let said: String = said.chars().take(MAX_REASON).collect();
+    if said.is_empty() {
+        lead
+    } else {
+        format!("{lead}: {}", srelens_capability::escape_invisible(&said))
     }
 }
 
@@ -223,11 +279,25 @@ fn request_url_with(input: &HttpIn, extra: &[(&str, String)]) -> Result<Url, Str
     }) {
         return Err("A query parameter has a name, and no control characters".into());
     }
-    if !input.query.is_empty() || !extra.is_empty() {
+    if !input.query.is_empty() {
         let mut pairs = url.query_pairs_mut();
         for (key, value) in &input.query {
             pairs.append_pair(key, value);
         }
+    }
+    // A parameter the host sets is never also the binding's own, in `query` or
+    // written into the URL (a saved setting may carry a query string): a server
+    // reads the first of two, which would be the binding's.
+    if let Some((key, _)) = extra
+        .iter()
+        .find(|(key, _)| url.query_pairs().any(|(set, _)| set == *key))
+    {
+        return Err(format!(
+            "The host sets `{key}` on this request, and the binding's URL or query sets it too"
+        ));
+    }
+    if !extra.is_empty() {
+        let mut pairs = url.query_pairs_mut();
         for (key, value) in extra {
             pairs.append_pair(key, value);
         }
@@ -473,12 +543,6 @@ pub(super) async fn request(
     check_arguments(&arguments).map_err(failed)?;
     let input: HttpIn = serde_json::from_value(Value::Object(arguments))
         .map_err(|e| failed(format!("network.http arguments: {e}")))?;
-    // A parameter the host sets is never also the binding's own.
-    if let Some((key, _)) = extra.iter().find(|(key, _)| input.query.contains_key(*key)) {
-        return Err(failed(format!(
-            "The host sets `{key}` on this request, and the binding sets it too"
-        )));
-    }
     let url = request_url_with(&input, extra).map_err(failed)?;
     let policy = Policy {
         allowlist: manifest.network_allowlist(&plugin.settings),
@@ -567,6 +631,8 @@ async fn exchange(
     }
     let client = builder.build().map_err(|e| Refused(describe(e, &url)))?;
     let reported = url.clone();
+    // What was sent, so a refusal that echoes a secret header has it scrubbed.
+    let sent = headers.clone();
     let exchange = async move {
         let mut response = client
             .get(url)
@@ -576,9 +642,26 @@ async fn exchange(
             .map_err(|e| classify(e, &reported))?;
         let status = response.status();
         if !status.is_success() {
-            let why = format!("The server answered HTTP {status}");
+            let content_type = response
+                .headers()
+                .get(CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned);
+            // Only the start of the body: enough for a reason, and no more.
+            let mut raw = Vec::new();
+            while raw.len() < MAX_REASON_BODY {
+                match response.chunk().await {
+                    Ok(Some(chunk)) => raw.extend_from_slice(&chunk),
+                    _ => break,
+                }
+            }
+            raw.truncate(MAX_REASON_BODY);
+            let why = refusal_reason(status, content_type.as_deref(), &raw, &sent, &reported);
             return Err(
-                if status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                if status.is_server_error()
+                    || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+                    || status == reqwest::StatusCode::REQUEST_TIMEOUT
+                {
                     Unanswered(why)
                 } else {
                     Refused(why)
@@ -593,7 +676,7 @@ async fn exchange(
         let raw = http_policy::read_limited(&mut response, limits.body)
             .await
             .map_err(|error| match error {
-                BodyError::TooLarge(why) => Refused(why),
+                BodyError::TooLarge(why) => RequestError::TooLarge(why),
                 BodyError::Read(error) => Unanswered(describe(error, &reported)),
             })?;
         Ok(HttpOut {

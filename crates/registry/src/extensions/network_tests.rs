@@ -690,3 +690,35 @@ fn the_access_review_shows_each_host_and_what_a_request_sends() {
         .any(|item| item.starts_with("Read network.http with")
             && item.contains("\"secret\":\"token\"")));
 }
+
+#[test]
+fn a_refusals_quoted_reason_carries_no_secret_and_no_url() {
+    let url = Url::parse("https://prometheus.example.com:9090/api/v1/query_range").unwrap();
+    let secret = stand_in_secret("token");
+    let mut headers = HeaderMap::new();
+    let mut value = HeaderValue::from_str(&format!("Bearer {secret}")).unwrap();
+    value.set_sensitive(true);
+    headers.insert("authorization", value);
+    // A server that echoes what it was sent in its refusal.
+    let body = format!(
+        r#"{{"status":"error","error":"bad query from {url} with Bearer {secret}"}}"#
+    );
+    let reason = refusal_reason(
+        reqwest::StatusCode::BAD_REQUEST,
+        Some("application/json"),
+        body.as_bytes(),
+        &headers,
+        &url,
+    );
+    let leaked = reason.contains(&secret);
+    assert!(!leaked, "the reason holds the secret");
+    assert!(!reason.contains("prometheus.example.com"), "{reason}");
+    assert!(reason.starts_with("The server answered HTTP 400 Bad Request: bad query from"), "{reason}");
+    // Text is quoted as text, cut, and a body with nothing to say adds nothing.
+    let text = refusal_reason(reqwest::StatusCode::BAD_REQUEST, Some("text/plain"), &[b'x'; 5000], &HeaderMap::new(), &url);
+    assert!(text.chars().count() < 400, "{text}");
+    assert_eq!(
+        refusal_reason(reqwest::StatusCode::NOT_FOUND, None, b"", &HeaderMap::new(), &url),
+        "The server answered HTTP 404 Not Found"
+    );
+}

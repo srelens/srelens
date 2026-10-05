@@ -13,10 +13,14 @@
 //! a namespace, a workload, a pod. [`QueryTemplate::parse`] reads the template
 //! the way each language reads its strings, and admits one of those variables
 //! only inside a double-quoted string, where the host escapes `\` and `"` — the
-//! two escapes PromQL, LogQL and TraceQL all have (TraceQL has no others). A
-//! value with a character none of them can carry (a control or format
-//! character) is refused rather than passed on. So a kubeconfig context named
-//! `prod" } || { true` is the text of one string, and never query syntax. The
+//! two escapes PromQL, LogQL and TraceQL all document (Tempo's TraceQL docs list no
+//! others). It refuses `/* */` and `//` comments outside strings, which LogQL's and
+//! TraceQL's lexers skip, and a name in a regex matcher (`=~`, `!~`, `|~`) must be
+//! `${name:regex}`. The values are held to what they can be: Kubernetes names, and
+//! a context name of letters, digits and `._:/@+-`. One that is not is refused
+//! rather than passed on, so a kubeconfig context named `prod" } || { true` never
+//! reaches a query, and no value can end a string, open a comment or start a Go
+//! template inside one. The escaping stays, so that holds whatever the value. The
 //! durations `${range}` and `${step}` are the host's own numbers and stand
 //! outside strings, where a duration is written.
 use super::{identifier, is_format_character, label, namespace_name, unique, Manifest};
@@ -381,10 +385,9 @@ impl QueryTemplate {
         if template.is_empty() || template.chars().count() > MAX_QUERY {
             return Err(format!("A query is 1–{MAX_QUERY} characters"));
         }
-        if template
-            .chars()
-            .any(|c| c.is_control() || is_format_character(c))
-        {
+        if template.chars().any(|c| {
+            c.is_control() || is_format_character(c) || matches!(c, '\u{2028}' | '\u{2029}')
+        }) {
             return Err(
                 "A query is one line with no control or invisible format characters".into(),
             );
@@ -392,6 +395,10 @@ impl QueryTemplate {
         let mut pieces = Vec::new();
         let mut text = String::new();
         let mut at = At::Outside;
+        // The last two characters outside a string, spaces aside: `=~`, `!~` or `|~`
+        // before a string makes it a regex.
+        let mut before = [' ', ' '];
+        let mut regex_string = false;
         let mut chars = template.chars().peekable();
         while let Some(c) = chars.next() {
             if c == '$' && chars.peek() == Some(&'{') {
@@ -411,7 +418,7 @@ impl QueryTemplate {
                         }
                     }
                 }
-                let piece = variable_piece(&written, at)?;
+                let piece = variable_piece(&written, at, regex_string)?;
                 if !text.is_empty() {
                     pieces.push(Piece::Text(std::mem::take(&mut text)));
                 }
@@ -421,7 +428,10 @@ impl QueryTemplate {
             text.push(c);
             match at {
                 At::Outside => match c {
-                    '"' => at = At::Double,
+                    '"' => {
+                        at = At::Double;
+                        regex_string = matches!(before, ['=' | '!' | '|', '~']);
+                    }
                     '`' if language != QueryLanguage::Traceql => at = At::Raw,
                     '\'' if language == QueryLanguage::Promql => at = At::Single,
                     '`' | '\'' => {
@@ -439,6 +449,15 @@ impl QueryTemplate {
                             "A query has no comments: `#` outside a string is refused".into()
                         )
                     }
+                    // LogQL's and TraceQL's lexers skip these, quotes and all, so a
+                    // string this reader sees there would be none to them.
+                    '/' if matches!(chars.peek(), Some('*' | '/')) => {
+                        return Err(
+                            "A query has no comments: `/*` or `//` outside a string is refused"
+                                .into(),
+                        )
+                    }
+                    c if !c.is_whitespace() => before = [before[1], c],
                     _ => {}
                 },
                 At::Double | At::Single => match c {
@@ -446,7 +465,10 @@ impl QueryTemplate {
                         Some(escaped) => text.push(escaped),
                         None => return Err("A string in the query is not closed".into()),
                     },
-                    '"' if at == At::Double => at = At::Outside,
+                    '"' if at == At::Double => {
+                        at = At::Outside;
+                        before = [before[1], '"'];
+                    }
                     '\'' if at == At::Single => at = At::Outside,
                     _ => {}
                 },
@@ -516,8 +538,10 @@ impl QueryTemplate {
     }
 }
 
-/// The piece `${written}` makes at `at`, or why it cannot stand there.
-fn variable_piece(written: &str, at: At) -> Result<Piece, String> {
+/// The piece `${written}` makes at `at`, or why it cannot stand there. A name in a
+/// regex matcher's string is written `${name:regex}`, so its value matches only
+/// itself, and only there.
+fn variable_piece(written: &str, at: At, regex_string: bool) -> Result<Piece, String> {
     if written.starts_with("settings.") {
         return Err(format!(
             "A setting never reaches a query: ${{{written}}} is refused; a provider binds only the view's cluster, namespace, workload, pod and time range"
@@ -542,6 +566,12 @@ fn variable_piece(written: &str, at: At) -> Result<Piece, String> {
         }
     };
     match (variable.is_name(), at) {
+        (true, At::Double) if regex_string && !regex => Err(format!(
+            "${{{written}}} stands in a regex matcher: write ${{{name}:regex}}, so the value matches only itself"
+        )),
+        (true, At::Double) if !regex_string && regex => Err(format!(
+            "${{{written}}} quotes a value for a regex matcher (=~, !~ or |~); this string is matched as written, so write ${{{name}}}"
+        )),
         (true, At::Double) => Ok(Piece::Name { variable, regex }),
         (true, _) => Err(format!(
             "${{{written}}} stands only inside a double-quoted string, where the host escapes it, e.g. namespace=\"${{{written}}}\""
@@ -591,15 +621,18 @@ impl QueryValues {
             )
         };
         let (value, ok, what) = match variable {
+            // A context name is free text. The characters real ones carry, and no
+            // quote, backslash, brace, star or space, so it cannot end a string, open
+            // a comment or a Go template (LogQL's `line_format`), whatever surrounds it.
             Variable::Cluster => (
                 self.cluster.as_str(),
                 !self.cluster.is_empty()
-                    && self.cluster.chars().count() <= MAX_CLUSTER
-                    && !self
+                    && self.cluster.len() <= MAX_CLUSTER
+                    && self
                         .cluster
                         .chars()
-                        .any(|c| c.is_control() || is_format_character(c)),
-                "The cluster's name holds a character a query cannot carry, or is empty or longer than 1024 characters",
+                        .all(|c| c.is_ascii_alphanumeric() || "._:/@+-".contains(c)),
+                "The cluster's name holds a character a query is not given (letters, digits and . _ : / @ + - only), or is empty or longer than 1024 characters",
             ),
             Variable::Namespace => (
                 self.namespace.as_str(),

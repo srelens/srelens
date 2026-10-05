@@ -1048,25 +1048,30 @@ A variable must be known on every kind in `forKinds`, so `${pod}` needs `forKind
 
 **Where a variable may stand.** The host reads the template the way the language reads
 its strings, and a name — `cluster`, `namespace`, `workload`, `pod` — may stand only
-inside a double-quoted string: `namespace="${namespace}"`. There the host escapes `\` and
-`"` in the value, the two escapes PromQL, LogQL and TraceQL all have, so a value is the
-text of one string and never query syntax, whatever it holds: a context named
-`prod"} or vector(1) #` is bound as `"prod\"} or vector(1) #"`. A value with a control or
-invisible format character, which not every language can carry, is refused rather than
-sent. `${name:regex}` escapes the value's RE2 metacharacters first, so
-`pod=~"${workload:regex}-.+"` matches a workload named `api.v2` literally. `${range}` and
-`${step}` are the host's own durations and stand outside strings: `[${range}]`.
+inside a double-quoted string: `namespace="${namespace}"`. In a regex matcher's string
+(after `=~`, `!~` or `|~`) it is written `${name:regex}`, which escapes the value's RE2
+metacharacters first, so `pod=~"${workload:regex}-.+"` matches a workload named `api.v2`
+literally and a cluster named `.*` matches only that name; `${name:regex}` anywhere else
+is refused. The host escapes `\` and `"` in every value, the two escapes PromQL, LogQL
+and TraceQL all document, and holds each value to what it can be: a namespace, workload
+or pod is a Kubernetes name, and a cluster's name is 1–1024 letters, digits and
+`._:/@+-` — what kubeconfig context names carry, from `kind-dev` to an EKS ARN. A value
+outside that is refused rather than sent, so no value can end its string, start a
+comment or open a template inside one (LogQL's `line_format`): a context named
+`prod"} or vector(1) #` never reaches a query. `${range}` and `${step}` are the host's
+own durations and stand outside strings: `[${range}]`.
 
 Refused at install, at `contributions.<list>[i].query`: a name outside a double-quoted
 string (bare, in a raw string between backticks, or in a PromQL single-quoted string); a
-duration inside a string; an unknown variable or format; `#`, which would start a
-comment that hides the rest of the line; a control character; an unclosed string; a
+duration inside a string; an unknown variable or format; a name in a regex matcher
+without `:regex`, or `:regex` outside one; a comment — `#`, or `/* */` and `//`, which
+LogQL's and TraceQL's lexers skip, quotes and all; a control character or a line or
+paragraph separator; an unclosed string; a
 string delimiter the language lacks (LogQL has no single-quoted string, and TraceQL
 strings are double-quoted only); and `${settings.…}`, since a setting never reaches a
 query.
 
-The values themselves are checked on every query: a namespace, workload or pod must be a
-Kubernetes name, and the cluster's name 1–1024 characters.
+The values are checked on every query, as above.
 
 ### What the host sends and reads
 
@@ -1078,17 +1083,23 @@ The host adds these parameters after the binding's own, which may not set them:
 | LogQL | Loki `query_range` | `query`, `start`, `end` (nanoseconds), `limit`, `direction` | Log lines, oldest first, each tagged `pod/container` from its stream's labels. |
 | TraceQL | Tempo `search` | `q`, `start`, `end` (seconds), `limit` | Traces, newest first: ID, root service, root operation, start and duration. |
 
-- **Metrics.** A range of 5 minutes to 7 days, ending at the last whole step; the step is
-  at least 15 seconds and makes at most 251 points. At most 8 series: more is refused
+- **Metrics.** A range of 5 minutes to 7 days, rounded up to whole steps and ending at
+  the last whole step, so both ends are on it; the step is at least 15 seconds and makes
+  at most 251 points. A sample lands on the step nearest it, within half a step, so a
+  query frontend that evaluates a little off the asked start still draws. At most 8 series: more is refused
   with a request to aggregate them, never cut. A sample that is not a finite number
   (`NaN`, `+Inf`) is a gap. A query that matches nothing is a chart that says no data
   was reported.
-- **Logs.** At most 1,000 lines a query, and a line past 16 KiB is cut and marked.
-- **Traces.** At most 50; a search that finds more says so.
-- **Failures.** An answer that is not the language's (a login page, a metric query's
-  matrix where lines were expected) is refused with why, and so is one Prometheus or Loki
-  answers with `"status": "error"`, quoting its reason. The 4 MiB limit, timeouts and
-  status rules are `network.http`'s.
+- **Logs.** At most 1,000 lines a query, or a follow's history of up to 5,000 (its
+  `tailLines`), and a line past 16 KiB is cut and marked. An answer past the 4 MiB limit
+  is asked again for half as many lines, down to 10.
+- **Traces.** At most 50; the host asks for 51, so a search that finds more says so.
+- **Failures.** A status outside 2xx is refused with the server's own reason quoted —
+  a JSON body's `error`, as Prometheus explains a bad query, or the text Loki and Tempo
+  send — cut to 300 characters and scrubbed of the URL, its host and any secret header's
+  value. An answer that is not the language's (a login page, a metric query's matrix
+  where lines were expected) is refused with why. The 4 MiB limit, timeouts and status
+  rules are `network.http`'s; a 408, 429 or 5xx is one nothing answered.
 
 `extensions.queryProvider` runs one query of a metric, log or trace provider for a
 resource; see [capabilities.md](capabilities.md). On the web host it answers only under

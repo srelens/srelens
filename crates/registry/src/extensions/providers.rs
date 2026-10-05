@@ -29,7 +29,7 @@ use srelens_plugin_host::{
     namespace_name, object_name, MetricUnit, ProviderKind, QueryLanguage, QueryTemplate,
     QueryValues, SecretStore, Variable, PROVIDER_KINDS,
 };
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -47,6 +47,8 @@ pub const MAX_SERIES: usize = 8;
 pub const MAX_TRACES: usize = 50;
 /// Most log lines one query answers.
 pub const MAX_LOG_LINES: usize = 1000;
+/// The fewest lines a log query is asked for when answers are too large.
+pub const MIN_LOG_PAGE: usize = 10;
 /// Most lines of history a log follow starts with.
 pub const MAX_HISTORY: i64 = 5000;
 /// Lines of history a log follow starts with when the view names none.
@@ -63,6 +65,10 @@ pub struct ProviderTiming {
     pub poll: Duration,
     /// After a query that answered a whole page: there is more to catch up on.
     pub full_page: Duration,
+    /// How far behind now a query stops: log agents push in batches, and Loki takes
+    /// a line written with an older timestamp, so the newest instants are still
+    /// filling in. Loki's own tail API waits the same way (`delay_for`).
+    pub lag: Duration,
 }
 
 impl Default for ProviderTiming {
@@ -70,6 +76,7 @@ impl Default for ProviderTiming {
         Self {
             poll: Duration::from_secs(5),
             full_page: Duration::from_secs(1),
+            lag: Duration::from_secs(2),
         }
     }
 }
@@ -210,12 +217,14 @@ pub(super) struct Grid {
 }
 
 impl Grid {
-    /// The range ending at the last whole step before `now`.
+    /// The range ending at the last whole step before `now`, and rounded up to
+    /// whole steps, so both ends are on the step: some query frontends snap the
+    /// start to it, and the grid is then the one they answer on.
     fn ending(now: i64, range: u64) -> Self {
         let step = MIN_STEP.max(range.div_ceil(MAX_POINTS)) as i64;
         let end = now - now.rem_euclid(step);
         Self {
-            start: end - range as i64,
+            start: end - range.div_ceil(step as u64) as i64 * step,
             end,
             step,
         }
@@ -369,9 +378,10 @@ impl Ask {
         Ok(answer.body)
     }
 
-    /// Log lines between `start` and `end` (nanoseconds, both inclusive), at most
-    /// `limit`, the newest when `backward`, the oldest otherwise: oldest first,
-    /// and whether the query answered a whole page.
+    /// Log lines from `start` (nanoseconds, inclusive) to `end`, at most `limit`,
+    /// the newest when `backward`, the oldest otherwise: oldest first, and whether
+    /// the query answered a whole page. An answer too large is asked again for half
+    /// as many lines, down to [`MIN_LOG_PAGE`].
     pub async fn logs(
         &self,
         bound: &Bound,
@@ -380,20 +390,29 @@ impl Ask {
         limit: usize,
         backward: bool,
     ) -> Result<(Vec<Entry>, bool), RequestError> {
-        let body = self
-            .send(
-                bound,
-                vec![
-                    ("start", start.to_string()),
-                    ("end", end.to_string()),
-                    ("limit", limit.to_string()),
-                    (
-                        "direction",
-                        if backward { "backward" } else { "forward" }.into(),
-                    ),
-                ],
-            )
-            .await?;
+        let mut limit = limit;
+        let body = loop {
+            let asked = self
+                .send(
+                    bound,
+                    vec![
+                        ("start", start.to_string()),
+                        ("end", end.to_string()),
+                        ("limit", limit.to_string()),
+                        (
+                            "direction",
+                            if backward { "backward" } else { "forward" }.into(),
+                        ),
+                    ],
+                )
+                .await;
+            match asked {
+                Err(RequestError::TooLarge(_)) if limit > MIN_LOG_PAGE => {
+                    limit = (limit / 2).max(MIN_LOG_PAGE);
+                }
+                asked => break asked?,
+            }
+        };
         let mut entries = read_streams(&body, &bound.id).map_err(RequestError::Refused)?;
         let full = entries.len() >= limit;
         entries.sort_by_key(|entry| entry.nanos);
@@ -490,7 +509,8 @@ async fn query(ask: Ask, range: Option<u64>) -> Result<QueryOut, String> {
                     vec![
                         ("start", (now - range as i64).to_string()),
                         ("end", now.to_string()),
-                        ("limit", MAX_TRACES.to_string()),
+                        // One more than is listed, so a search with more says so.
+                        ("limit", (MAX_TRACES + 1).to_string()),
                     ],
                 )
                 .await
@@ -576,11 +596,17 @@ fn read_matrix(body: &Value, bound: &Bound, grid: Grid) -> Result<Chart, String>
         .take_while(|time| *time <= grid.end)
         .map(|time| time * 1000)
         .collect();
-    let index: HashMap<i64, usize> = times
-        .iter()
-        .enumerate()
-        .map(|(position, time)| (*time, position))
-        .collect();
+    // A sample lands on the step nearest it, within half a step: a frontend that
+    // evaluates a little off the asked start still answers every step.
+    let step_ms = grid.step * 1000;
+    let place = |at: i64| {
+        let offset = at - grid.start * 1000;
+        let position = (offset + step_ms / 2).div_euclid(step_ms);
+        usize::try_from(position)
+            .ok()
+            .filter(|position| *position < times.len())
+            .filter(|position| (at - times[*position]).abs() <= step_ms / 2)
+    };
     let mut names: Vec<String> = Vec::new();
     let mut series = Vec::new();
     for entry in result {
@@ -631,9 +657,8 @@ fn read_matrix(body: &Value, bound: &Bound, grid: Grid) -> Result<Chart, String>
                     "The server's answer holds a sample that is not [time, \"value\"]".into(),
                 );
             };
-            let at = (time * 1000.0).round() as i64;
-            if let Some(position) = index.get(&at) {
-                values[*position] = value.parse::<f64>().ok().filter(|value| value.is_finite());
+            if let Some(position) = place((time * 1000.0).round() as i64) {
+                values[position] = value.parse::<f64>().ok().filter(|value| value.is_finite());
             }
         }
         series.push(Series { name, values });

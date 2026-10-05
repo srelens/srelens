@@ -98,6 +98,7 @@ async fn harness_for(context: &str, manifest: Value, settings: Value) -> Harness
     streams.set_provider_timing(ProviderTiming {
         poll: Duration::from_millis(50),
         full_page: Duration::from_millis(10),
+        lag: Duration::ZERO,
     });
     let installed = reg
         .invoke(
@@ -307,16 +308,26 @@ async fn a_series_name_shows_an_invisible_character_as_an_escape() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_cluster_name_reaches_the_query_as_one_escaped_string() {
+async fn a_cluster_name_reaches_the_query_whole_or_not_at_all() {
     // A kubeconfig context name is free text, and here it tries to end the string.
     let context = "prod\"} or vector(1) #";
     let prometheus = server(|target| matrix(target, 1)).await;
     let h = harness(&prometheus, context).await;
-    h.query(json!({"provider":"clusterUp","context":context}))
+    let refused = h
+        .query(json!({"provider":"clusterUp","context":context}))
+        .await
+        .unwrap_err();
+    assert!(refused.contains("cluster's name"), "{refused}");
+    assert!(prometheus.seen().is_empty(), "nothing was sent");
+    // A real one, an EKS ARN, reaches the query as the text of its string.
+    let arn = "arn:aws:eks:eu-west-1:123456789012:cluster/prod";
+    let prometheus = server(|target| matrix(target, 1)).await;
+    let h = harness(&prometheus, arn).await;
+    h.query(json!({"provider":"clusterUp","context":arn}))
         .await
         .unwrap();
     let asked = params(&prometheus.seen()[0].target);
-    assert_eq!(asked["query"], "up{cluster=\"prod\\\"} or vector(1) #\"}");
+    assert_eq!(asked["query"], format!("up{{cluster=\"{arn}\"}}"));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -453,7 +464,8 @@ async fn a_trace_search_is_listed_newest_first_and_cut_at_the_limit() {
         asked["q"],
         "{ resource.k8s.namespace.name = \"team\" && resource.k8s.deployment.name = \"web\" }"
     );
-    assert_eq!(asked["limit"], MAX_TRACES.to_string());
+    // One more than it lists, so a search with more says so.
+    assert_eq!(asked["limit"], (MAX_TRACES + 1).to_string());
     assert_eq!(number(&asked, "end") - number(&asked, "start"), 3600);
     assert_eq!(answer["kind"], "traces");
     assert_eq!(answer["truncated"], true);
@@ -611,7 +623,8 @@ async fn an_unanswered_poll_reconnects_and_a_refusal_ends_the_follow() {
             return streams(&[(10, "one")]);
         }
         match counted.fetch_add(1, Ordering::SeqCst) {
-            0 => Reply::Status(503, "Service Unavailable"),
+            // A request timeout is the server's, and asked again like a 5xx.
+            0 => Reply::Status(408, "Request Timeout"),
             1 => streams(&[(20, "two")]),
             _ => Reply::Status(403, "Forbidden"),
         }
@@ -784,4 +797,273 @@ async fn the_loki_reference_follows_a_pod_and_reads_a_workloads_lines() {
     })
     .await;
     assert_eq!(h.streams.close_view("view-1"), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refusal_quotes_the_servers_reason() {
+    // Prometheus explains a bad query in a 400's JSON body, Loki in its text.
+    let prometheus = server(|_| {
+        Reply::Refusal(
+            400,
+            "Bad Request",
+            "application/json",
+            json!({"status":"error",
+            "errorType":"bad_data","error":"1:5: parse error: unexpected right brace"})
+            .to_string(),
+        )
+    })
+    .await;
+    let h = harness(&prometheus, "kind-dev").await;
+    let refused = h.query(json!({"provider":"cpu"})).await.unwrap_err();
+    assert!(
+        refused.contains("HTTP 400") && refused.contains("parse error: unexpected right brace"),
+        "{refused}"
+    );
+    let loki = server(|_| {
+        Reply::Refusal(
+            400,
+            "Bad Request",
+            "text/plain; charset=utf-8",
+            "parse error at line 1, col 2: syntax error\n".into(),
+        )
+    })
+    .await;
+    let h = harness(&loki, "kind-dev").await;
+    let refused = h
+        .query(json!({"provider":"loki","resourceKind":"/Pod","name":"web-1"}))
+        .await
+        .unwrap_err();
+    assert!(refused.contains("syntax error"), "{refused}");
+    // And the reason never repeats where the request went.
+    assert!(!refused.contains(&loki.addr.to_string()), "{refused}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_query_string_in_the_binding_url_cannot_set_what_the_host_sets() {
+    let prometheus = server(|target| matrix(target, 1)).await;
+    let h = harness(&prometheus, "kind-dev").await;
+    h.reg
+        .invoke(
+            "extensions.configure",
+            json!({"action":"settings","id":APP,"settings":{
+                "prometheusUrl":format!("http://{}/?query=up&limit=100000", prometheus.addr),
+                "lokiUrl":format!("http://{}", prometheus.addr),
+                "tempoUrl":format!("http://{}", prometheus.addr)}}),
+        )
+        .await
+        .unwrap();
+    let refused = h.query(json!({"provider":"cpu"})).await.unwrap_err();
+    assert!(refused.contains("`query`"), "{refused}");
+    assert!(prometheus.seen().is_empty(), "nothing was sent");
+}
+
+#[test]
+fn a_chart_grid_is_aligned_to_its_step_at_both_ends() {
+    for range in [MIN_RANGE, 3600, 21_600, 86_400, MAX_RANGE, 1000] {
+        let grid = Grid::ending(1_700_000_123, range);
+        assert_eq!(grid.end % grid.step, 0, "{range}");
+        assert_eq!(grid.start % grid.step, 0, "{range}");
+        assert!(grid.end - grid.start >= range as i64, "{range}");
+        assert!((grid.end - grid.start) / grid.step < 252, "{range}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_sample_a_frontend_put_off_the_grid_lands_on_its_step() {
+    // A query frontend that evaluates a few seconds off the asked start still answers
+    // every step, and the chart is drawn rather than left empty.
+    let prometheus = server(|target| {
+        let asked = params(target);
+        let (start, step) = (number(&asked, "start"), number(&asked, "step"));
+        Reply::Json(
+            json!({"status":"success","data":{"resultType":"matrix","result":[
+            {"metric":{"pod":"web-1"},"values":[[start + 3, "1"],[start + step - 4, "2"]]}]}}),
+        )
+    })
+    .await;
+    let h = harness(&prometheus, "kind-dev").await;
+    let answer = h.query(json!({"provider":"cpu"})).await.unwrap();
+    let values = answer["chart"]["series"][0]["values"].as_array().unwrap();
+    assert_eq!(&values[..2], &[json!(1.0), json!(2.0)]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_history_nothing_answered_is_asked_again_as_a_history() {
+    let asked = Arc::new(AtomicUsize::new(0));
+    let count = asked.clone();
+    let loki = server(move |target| {
+        if params(target)["direction"] != "backward" {
+            return streams(&[]);
+        }
+        match count.fetch_add(1, Ordering::SeqCst) {
+            0 => Reply::Status(503, "Service Unavailable"),
+            _ => streams(&[(20, "two"), (10, "one")]),
+        }
+    })
+    .await;
+    let h = harness(&loki, "kind-dev").await;
+    let sink = Arc::new(TestSink::default());
+    h.streams
+        .open(sink.clone(), follow(&h, "extstream:h"))
+        .await
+        .unwrap();
+    eventually("the history after the retry", || {
+        data(&sink, "extstream:h")
+            .iter()
+            .any(|frame| frame.to_string().contains(" two"))
+    })
+    .await;
+    // Asked as a history twice — the newest lines of the window — never as a replay of
+    // the window from its oldest line.
+    let seen = loki.seen();
+    assert_eq!(params(&seen[0].target)["direction"], "backward");
+    assert_eq!(params(&seen[1].target)["direction"], "backward");
+    let statuses: Vec<String> = data(&sink, "extstream:h")
+        .iter()
+        .filter(|frame| frame["event"] == "status")
+        .map(|frame| frame["status"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(&statuses[..2], ["reconnecting", "live"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_poll_stops_short_of_now_by_the_lag() {
+    let loki = server(|_| streams(&[])).await;
+    let h = harness(&loki, "kind-dev").await;
+    h.streams.set_provider_timing(ProviderTiming {
+        poll: Duration::from_millis(50),
+        full_page: Duration::from_millis(10),
+        lag: Duration::from_secs(2),
+    });
+    let sink = Arc::new(TestSink::default());
+    h.streams
+        .open(sink.clone(), follow(&h, "extstream:lag"))
+        .await
+        .unwrap();
+    eventually("a poll", || loki.seen().len() >= 2).await;
+    // Lines reach Loki late: a query that asked up to now would pass them for good.
+    // Every request was sent in the last moments, so its end is the lag behind now.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos() as i128;
+    for seen in loki.seen() {
+        let end: i128 = params(&seen.target)["end"].parse().unwrap();
+        assert!(
+            now - end >= 1_900_000_000,
+            "end is {} ms before now",
+            (now - end) / 1_000_000
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_full_page_at_one_instant_does_not_stall_the_follow() {
+    let instant: Vec<(u64, String)> = (0..MAX_LOG_LINES).map(|n| (20, format!("x{n}"))).collect();
+    let loki = server(move |target| {
+        let asked = params(target);
+        if asked["direction"] == "backward" {
+            return streams(&[(10, "one")]);
+        }
+        let entries: Vec<(u64, &str)> = if number(&asked, "start") <= 20 {
+            instant
+                .iter()
+                .map(|(ns, line)| (*ns, line.as_str()))
+                .collect()
+        } else {
+            vec![(30, "after")]
+        };
+        streams(&entries)
+    })
+    .await;
+    let h = harness(&loki, "kind-dev").await;
+    let sink = Arc::new(TestSink::default());
+    h.streams
+        .open(sink.clone(), follow(&h, "extstream:full"))
+        .await
+        .unwrap();
+    eventually("the line after the instant", || {
+        data(&sink, "extstream:full")
+            .iter()
+            .any(|frame| frame.to_string().contains(" after"))
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_answer_too_large_is_asked_again_for_fewer_lines() {
+    let loki = server(|target| {
+        let asked = params(target);
+        if asked["direction"] == "backward" && number(&asked, "limit") > 25 {
+            return Reply::Large {
+                len: network::MAX_RESPONSE + 1,
+                length: true,
+            };
+        }
+        streams(&[(10, "one")])
+    })
+    .await;
+    let h = harness(&loki, "kind-dev").await;
+    let sink = Arc::new(TestSink::default());
+    h.streams
+        .open(sink.clone(), follow(&h, "extstream:big"))
+        .await
+        .unwrap();
+    eventually("the history", || {
+        data(&sink, "extstream:big")
+            .iter()
+            .any(|frame| frame.to_string().contains(" one"))
+    })
+    .await;
+    let limits: Vec<i64> = loki
+        .seen()
+        .iter()
+        .map(|seen| params(&seen.target))
+        .filter(|asked| asked["direction"] == "backward")
+        .map(|asked| number(&asked, "limit"))
+        .collect();
+    assert_eq!(limits, [100, 50, 25]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn two_identical_lines_at_one_instant_are_both_sent_once() {
+    let polls = Arc::new(AtomicUsize::new(0));
+    let counted = polls.clone();
+    let loki = server(move |target| {
+        if params(target)["direction"] == "backward" {
+            return streams(&[(10, "same"), (10, "same")]);
+        }
+        match counted.fetch_add(1, Ordering::SeqCst) {
+            0 => streams(&[(10, "same"), (10, "same"), (20, "new")]),
+            _ => streams(&[]),
+        }
+    })
+    .await;
+    let h = harness(&loki, "kind-dev").await;
+    let sink = Arc::new(TestSink::default());
+    h.streams
+        .open(sink.clone(), follow(&h, "extstream:same"))
+        .await
+        .unwrap();
+    eventually("the new line", || {
+        data(&sink, "extstream:same")
+            .iter()
+            .any(|frame| frame.to_string().contains(" new"))
+    })
+    .await;
+    let lines: Vec<String> = data(&sink, "extstream:same")
+        .iter()
+        .filter(|frame| frame["event"] == "lines")
+        .flat_map(|frame| frame["lines"].as_array().unwrap().clone())
+        .map(|line| {
+            line["line"]
+                .as_str()
+                .unwrap()
+                .rsplit(' ')
+                .next()
+                .unwrap()
+                .to_owned()
+        })
+        .collect();
+    assert_eq!(lines, ["same", "same", "new"]);
 }

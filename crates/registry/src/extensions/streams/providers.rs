@@ -22,7 +22,9 @@ use srelens_kube::logs::Line;
 use srelens_plugin_host::ProviderKind;
 use srelens_streams::app::{StreamEmitter, StreamOwner, StreamWindow};
 use srelens_streams::EventSink;
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 /// The history a follow starts with when the view names no `sinceSeconds`.
 const DEFAULT_SINCE: i64 = 3600;
@@ -84,7 +86,7 @@ impl ExtensionStreams {
             timestamps: *timestamps,
             timing: *self.provider_timing.lock().unwrap(),
             cursor: None,
-            at_cursor: Vec::new(),
+            at_cursor: HashMap::new(),
         };
         let owner = StreamOwner {
             app: input.id.clone(),
@@ -126,11 +128,13 @@ struct Follow {
     since: i128,
     timestamps: bool,
     timing: ProviderTiming,
-    /// The time of the newest line sent, in nanoseconds: the next query starts
-    /// there, inclusive, since lines may share a timestamp.
+    /// The time of the newest line sent, in nanoseconds; `None` until the history
+    /// is answered. The next query starts there, inclusive, since lines may share a
+    /// timestamp.
     cursor: Option<i128>,
-    /// The lines sent at `cursor`, which the next query answers again.
-    at_cursor: Vec<(String, String)>,
+    /// How many of each line were sent at `cursor`, which the next query answers
+    /// again: counted, so two identical lines at one instant are both sent, once.
+    at_cursor: HashMap<(String, String), usize>,
 }
 
 impl Follow {
@@ -142,100 +146,111 @@ impl Follow {
         frame
     }
 
-    /// Sends the entries newer than the cursor, in frames, and moves it.
-    fn deliver(&mut self, tx: &StreamEmitter, entries: Vec<Entry>) -> Result<(), Ended> {
+    /// Sends the entries (oldest first) not sent yet, in frames, moves the cursor,
+    /// and says how many it sent.
+    fn deliver(&mut self, tx: &StreamEmitter, entries: Vec<Entry>) -> Result<usize, Ended> {
         let mut pending = Pending::default();
+        // How many of each line this answer holds at the cursor so far.
+        let mut seen: HashMap<(String, String), usize> = HashMap::new();
+        let mut sent = 0;
         for entry in entries {
             let key = (entry.source.clone(), entry.line.clone());
             match self.cursor {
                 Some(cursor) if entry.nanos < cursor => continue,
-                Some(cursor) if entry.nanos == cursor && self.at_cursor.contains(&key) => continue,
-                Some(cursor) if entry.nanos == cursor => self.at_cursor.push(key),
+                Some(cursor) if entry.nanos == cursor => {
+                    let count = seen.entry(key.clone()).or_default();
+                    *count += 1;
+                    if *count <= self.at_cursor.get(&key).copied().unwrap_or(0) {
+                        continue;
+                    }
+                    *self.at_cursor.entry(key).or_default() += 1;
+                }
                 _ => {
                     self.cursor = Some(entry.nanos);
-                    self.at_cursor = vec![key];
+                    self.at_cursor.clear();
+                    seen.clear();
+                    seen.insert(key.clone(), 1);
+                    self.at_cursor.insert(key, 1);
                 }
             }
             pending.push(line_frame(
                 &entry.source,
                 Line::whole(entry.text(self.timestamps)),
             ));
+            sent += 1;
         }
         while let Some(frame) = pending.frame() {
             send(tx, frame)?;
         }
-        Ok(())
+        Ok(sent)
     }
 
     async fn run(mut self, tx: StreamEmitter) -> Result<(), String> {
         // Whether the last query was answered, which is what `live` says.
         let mut live = false;
-        let end = now_nanos();
-        let bound = self.ask.bind(Some(ProviderKind::Logs), None).await?;
-        let history = if self.tail == 0 {
-            Ok((Vec::new(), false))
-        } else {
-            self.ask
-                .logs(&bound, end - self.since, end, self.tail, true)
-                .await
-        };
-        match history {
-            Ok((entries, _)) => {
-                if self.deliver(&tx, entries).is_err() {
-                    return Ok(());
-                }
-                self.cursor.get_or_insert(end);
-                live = true;
-                if send(&tx, self.status("live", None)).is_err() {
-                    return Ok(());
-                }
-            }
-            Err(RequestError::Refused(why)) => return Err(why),
-            Err(RequestError::Unanswered(why)) => {
-                // Nothing was sent: the next query starts where the history would have.
-                self.cursor = Some(end - self.since);
-                if send(&tx, self.status("reconnecting", Some(&why))).is_err() {
-                    return Ok(());
-                }
-            }
-        }
-        let mut wait = self.timing.poll;
+        let mut wait = Duration::ZERO;
         loop {
             tokio::time::sleep(wait).await;
             if tx.is_ended() {
                 return Ok(());
             }
+            wait = self.timing.poll;
             let bound = self.ask.bind(Some(ProviderKind::Logs), None).await?;
-            let start = self.cursor.unwrap_or(end);
-            match self
-                .ask
-                .logs(&bound, start, now_nanos(), MAX_LOG_LINES, false)
-                .await
-            {
+            // Short of now: the newest instants are still filling in.
+            let end = now_nanos() - self.timing.lag.as_nanos() as i128;
+            let history = self.cursor.is_none();
+            let asked = match self.cursor {
+                // No history asked for: follow from here, and say `live` only once a
+                // query has been answered.
+                None if self.tail == 0 => {
+                    self.cursor = Some(end);
+                    continue;
+                }
+                // The newest lines of the window, asked again until one answers.
+                None => {
+                    self.ask
+                        .logs(&bound, end - self.since, end, self.tail, true)
+                        .await
+                }
+                Some(start) if start >= end => continue,
+                Some(start) => {
+                    self.ask
+                        .logs(&bound, start, end, MAX_LOG_LINES, false)
+                        .await
+                }
+            };
+            match asked {
                 Ok((entries, full)) => {
+                    let Ok(sent) = self.deliver(&tx, entries) else {
+                        return Ok(());
+                    };
+                    if history {
+                        self.cursor.get_or_insert(end);
+                    } else if full {
+                        if sent == 0 {
+                            // A whole page of lines already sent, all at the cursor:
+                            // more than a page share that instant. Move past it, or
+                            // every query would answer the same page.
+                            self.cursor = self.cursor.map(|cursor| cursor + 1);
+                            self.at_cursor.clear();
+                        }
+                        wait = self.timing.full_page;
+                    }
                     if !live {
                         live = true;
                         if send(&tx, self.status("live", None)).is_err() {
                             return Ok(());
                         }
                     }
-                    if self.deliver(&tx, entries).is_err() {
-                        return Ok(());
-                    }
-                    wait = if full {
-                        self.timing.full_page
-                    } else {
-                        self.timing.poll
-                    };
                 }
-                Err(RequestError::Refused(why)) => return Err(why),
                 Err(RequestError::Unanswered(why)) => {
                     live = false;
-                    wait = self.timing.poll;
                     if send(&tx, self.status("reconnecting", Some(&why))).is_err() {
                         return Ok(());
                     }
                 }
+                // Even the fewest lines were too large, or the request may not go.
+                Err(RequestError::Refused(why) | RequestError::TooLarge(why)) => return Err(why),
             }
         }
     }
