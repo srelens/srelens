@@ -7168,6 +7168,7 @@ dependencies = [
  "tokio",
  "url",
  "windows-sys 0.59.0",
+ "zbus 5.18.0",
 ]
 
 [[package]]

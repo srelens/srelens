@@ -23,9 +23,9 @@ MCP tool, `plugin/<id>/<operation>` ([MCP.md](../MCP.md#installed-apps-tools)). 
 registry's side is `crates/registry/src/extensions/sidecars.rs`. What is not built is
 listed under [Not yet](#not-yet).
 
-Executable apps are a preview. They run out of the box on Windows. On Linux they are not out of the box:
-they need the launcher `srelens-sandbox-launch`, Landlock and a delegated cgroup v2
-directory, set up by hand ([what is needed](manifest.md#where-executable-apps-run)). On macOS they do not run yet. srelens refuses to start any sidecar until its memory and CPU watchdog has
+Executable apps are a preview. They run out of the box on Windows, and on a systemd Linux
+desktop with Landlock, where systemd before 252 and the RHEL 9 family need the `cpu`
+controller delegated first ([what is needed](manifest.md#where-executable-apps-run)). On macOS they do not run yet. srelens refuses to start any sidecar until its memory and CPU watchdog has
 been checked with Seatbelt on a macOS 27 Mac. The [sandbox](#sandbox) section has the detail.
 
 ## The wire
@@ -427,7 +427,7 @@ in `crates/plugin-host/src/sidecar/sandbox/`:
 
 | OS | Isolation | Memory and CPU |
 |---|---|---|
-| Linux | Landlock and a seccomp filter, applied by `srelens-sandbox-launch` before it runs the sidecar | a cgroup v2 directory under a root delegated to srelens |
+| Linux | Landlock and a seccomp filter, applied by `srelens-sandbox-launch` before it runs the sidecar | a cgroup v2 directory under the scope srelens asks systemd for, or under a root delegated by hand |
 | Windows | an AppContainer with no capabilities, one profile per app | the Job Object the process starts in |
 | macOS | Seatbelt through `/usr/bin/sandbox-exec` | a host-side watchdog ([#713](https://github.com/srelens/srelens/issues/713)), weaker than the kernel's: **every sidecar is still refused** until it has been checked with Seatbelt on a macOS 27 Mac |
 | any other OS | — | — |
@@ -436,12 +436,15 @@ A sidecar is **refused, never started unconfined**:
 
 - on an OS with no backend;
 - on macOS, until its watchdog has been checked with Seatbelt on a macOS 27 Mac (#713);
-- on Linux without Landlock, without the launcher, or without a delegated cgroup;
+- on Linux without Landlock, without the launcher, or without a delegated cgroup: no
+  systemd user session, a container, or a session without the `memory` and `cpu`
+  controllers;
 - anywhere the backend cannot set a limit.
 
-In every case the refusal names what is missing. Whether a Linux or Windows machine that
-lacks only a limit layer should instead run the sidecar with a warning is still open (ADR,
-"Open questions"). Until that is decided, the supervisor refuses.
+In every case the refusal names what is missing. On Linux a machine that lacks only a limit
+layer is refused, a session without the `cpu` controller delegated included; that is
+decided (ADR, "Open questions"). Whether a Windows machine that lacks one should instead run
+the sidecar with a warning is still open. Until that is decided, the supervisor refuses.
 
 What the sidecar gets:
 
@@ -581,7 +584,6 @@ uninstalled; locking it down while the app is installed is left for the escape r
 | What | Where |
 |---|---|
 | An operation that answers with a stream: the protocol has streams, and nothing opens one on an app's behalf yet | — |
-| Shipping `srelens-sandbox-launch` in the desktop bundles, and finding a delegated cgroup on a systemd desktop; until then Linux names them with `SRELENS_SANDBOX_LAUNCHER` and `SRELENS_SANDBOX_CGROUP_ROOT` | — |
 | A "Clear data" action for an app refused for its data directory (`DataDir::clear` is there; the Inspector, #575, is where a person would find it) | not filed yet |
 | Checking macOS's watchdog on a macOS 27 Mac, and then running sidecars there | [#713](https://github.com/srelens/srelens/issues/713), closed: the watchdog is built, the check is not done |
 | The escape-hardening review of the supervisor and its backends, which the ADR assigned to #572 | [#744](https://github.com/srelens/srelens/issues/744) |

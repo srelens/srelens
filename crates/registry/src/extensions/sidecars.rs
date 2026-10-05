@@ -19,11 +19,12 @@ use srelens_capability::audit::AuditSink;
 use srelens_capability::{CapabilityError, Registry};
 use srelens_plugin_host::sidecar::data::DataDir;
 use srelens_plugin_host::sidecar::{
-    AppIdentity, Broker, CapabilityBroker, Consent, Enforcement, LaunchError, Launched, Launcher,
-    Limits, NoBroker, OsSandbox, Policy, SandboxConfig, SidecarCommand, SidecarConfig,
+    AppIdentity, Broker, CapabilityBroker, CgroupRoot, Consent, Enforcement, LaunchError, Launched,
+    Launcher, Limits, NoBroker, OsSandbox, Policy, SandboxConfig, SidecarCommand, SidecarConfig,
     SidecarStatus, Supervisor,
 };
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -40,29 +41,32 @@ const START_WAIT: Duration = Duration::from_secs(90);
 /// Names the trusted launcher, `srelens-sandbox-launch`, when it is not beside the
 /// srelens binary (Linux and macOS).
 const LAUNCHER_ENV: &str = "SRELENS_SANDBOX_LAUNCHER";
-/// Names the cgroup v2 directory delegated to srelens for its sidecars (Linux), as the
-/// sandbox conformance suite reads it. Finding one on a systemd desktop is not settled
-/// (ADR, "What the spike did not establish").
+/// Names the cgroup v2 directory delegated to srelens for its sidecars (Linux), set up
+/// by hand where there is no systemd user session. Without it srelens asks the systemd
+/// user manager for a delegated scope (`CgroupRoot::SystemdScope`).
 const CGROUP_ENV: &str = "SRELENS_SANDBOX_CGROUP_ROOT";
 
 /// Where the sandbox finds what it needs on this machine.
 fn sandbox_config() -> SandboxConfig {
-    let launcher = std::env::var_os(LAUNCHER_ENV)
-        .filter(|path| !path.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| {
-            let beside = std::env::current_exe()
-                .ok()?
-                .with_file_name("srelens-sandbox-launch");
-            beside.is_file().then_some(beside)
-        });
-    let cgroup_root = std::env::var_os(CGROUP_ENV)
-        .filter(|path| !path.is_empty())
-        .map(PathBuf::from);
-    SandboxConfig {
-        launcher,
-        cgroup_root,
-    }
+    sandbox_config_from(|name| std::env::var_os(name), std::env::current_exe().ok())
+}
+
+/// [`sandbox_config`], from a variable lookup and srelens's own binary.
+fn sandbox_config_from(
+    var: impl Fn(&str) -> Option<OsString>,
+    exe: Option<PathBuf>,
+) -> SandboxConfig {
+    let named = |name: &str| {
+        var(name)
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+    };
+    let launcher = named(LAUNCHER_ENV).or_else(|| {
+        let beside = exe?.with_file_name("srelens-sandbox-launch");
+        beside.is_file().then_some(beside)
+    });
+    let cgroup = named(CGROUP_ENV).map_or(CgroupRoot::SystemdScope, CgroupRoot::Delegated);
+    SandboxConfig { launcher, cgroup }
 }
 
 /// Starts a sidecar through `inner` only after checking its binary against the digest
@@ -559,6 +563,44 @@ mod tests {
     use super::fake::FakeSidecar;
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn without_a_named_cgroup_srelens_asks_systemd_for_one() {
+        let unset = |_: &str| None;
+        assert_eq!(
+            sandbox_config_from(unset, None).cgroup,
+            CgroupRoot::SystemdScope
+        );
+        let empty = |name: &str| (name == CGROUP_ENV).then(OsString::new);
+        assert_eq!(
+            sandbox_config_from(empty, None).cgroup,
+            CgroupRoot::SystemdScope
+        );
+        let named = |name: &str| (name == CGROUP_ENV).then(|| OsString::from("/sys/fs/cgroup/x"));
+        assert_eq!(
+            sandbox_config_from(named, None).cgroup,
+            CgroupRoot::Delegated("/sys/fs/cgroup/x".into())
+        );
+    }
+
+    #[test]
+    fn the_launcher_is_the_named_one_or_the_one_beside_srelens() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("srelens");
+        let unset = |_: &str| None;
+        assert_eq!(sandbox_config_from(unset, Some(exe.clone())).launcher, None);
+        let beside = dir.path().join("srelens-sandbox-launch");
+        std::fs::write(&beside, "").unwrap();
+        assert_eq!(
+            sandbox_config_from(unset, Some(exe.clone())).launcher,
+            Some(beside)
+        );
+        let named = |name: &str| (name == LAUNCHER_ENV).then(|| OsString::from("/opt/launcher"));
+        assert_eq!(
+            sandbox_config_from(named, Some(exe)).launcher,
+            Some(PathBuf::from("/opt/launcher"))
+        );
+    }
 
     fn sidecars(path: &Path, fake: &FakeSidecar) -> AppSidecars {
         let sidecars = AppSidecars::new(

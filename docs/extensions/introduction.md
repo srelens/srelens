@@ -28,8 +28,8 @@ Executable apps are a preview, and so is API 0.6, which adds them, until the API
 as 1.0 ([specification.md](specification.md#versioning)). Where they run:
 
 - **Windows:** out of the box.
-- **Linux:** not out of the box. It needs the launcher `srelens-sandbox-launch`, Landlock
-  and a delegated cgroup v2 directory, set up by hand
+- **Linux:** out of the box on a systemd desktop with Landlock. On systemd before 252 and
+  the RHEL 9 family, delegate the `cpu` controller first
   ([what is needed](manifest.md#where-executable-apps-run)).
 - **macOS:** not yet. srelens refuses to start any sidecar until its memory and CPU
   watchdog has been checked with Seatbelt on a macOS 27 Mac.
