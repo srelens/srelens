@@ -2,17 +2,20 @@ import { ExtensionLogo } from "./ExtensionLogo";
 import { ExtensionRequirements } from "./ExtensionRequirements";
 import { AgeCell } from "../lib/ageCell";
 import { useNamespaceOptions } from "@srelens/core/react";
-import { useContext, useEffect, useState } from "react";
+import { Fragment, useContext, useEffect, useState } from "react";
 import {
   loadKubeconfigFiles,
   onExtensionResourceChanged,
   readExtension,
   itemStatuses,
+  type ExtensionDashboardCard,
   type ExtensionPage,
   type InstalledExtension,
   type EventSummary,
   type NormalizedStatus,
 } from "@srelens/core";
+import { AppCards } from "./DashboardCards";
+import { plainText } from "./displayText";
 import { STATUS_WORD } from "./StatusBadge";
 import { ExtensionControls } from "./ExtensionControls";
 import { ErrorNotice, ExtensionResults } from "./ExtensionResults";
@@ -164,7 +167,7 @@ function Summary({
       ) : data.status === "loading" ? (
         <p role="status">Loading…</p>
       ) : (
-        <>
+        <div className="extension-summary-body">
           <div
             className="extension-donut"
             style={{ background: ring }}
@@ -180,7 +183,7 @@ function Summary({
               </li>
             ))}
           </ul>
-        </>
+        </div>
       )}
     </section>
   );
@@ -309,6 +312,23 @@ function Events({
   );
 }
 
+/** The same host-resolved figures as the cluster overview, following this page's readers. */
+function OverviewCards({plugin,context,namespace,refresh,onOpen}: {
+  plugin: InstalledExtension; context: string; namespace: string; refresh: number;
+  onOpen(card: ExtensionDashboardCard): void;
+}) {
+  const [pulse,setPulse] = useState(0);
+  const cards = plugin.manifest.contributions.dashboardCards ?? [];
+  const live = useLiveReaders({plugin,context,namespace,capabilities:cards.map(card=>card.source),label:"overview:cards",onChange:()=>setPulse(n=>n+1)});
+  useEffect(()=>onExtensionResourceChanged(changed=>{
+    if (changed.id===plugin.manifest.id && changed.context===context && cards.some(card=>card.source===changed.capability) && (!namespace || changed.namespace===namespace)) setPulse(n=>n+1);
+  }),[plugin.manifest.id,context,namespace,cards.map(card=>card.source).join("\u0000")]);
+  return <>
+    <div className="extension-overview-live"><LiveStatus live={live}/><LiveNotice live={live} what="figures"/></div>
+    <AppCards plugin={plugin} host={context} selection={namespace?[namespace]:[]} refresh={refresh} pulse={pulse} cards={cards} onOpen={onOpen} previewLists/>
+  </>;
+}
+
 /** The picker value standing for a card target's own namespaces; never a namespace name. */
 const CARD_SCOPE = "\u0000card";
 
@@ -319,8 +339,9 @@ export function ExtensionWorkspace({
   context,
   namespace: initialNamespace = "",
   onPage,
+  onCard,
   onNamespace,
-  card,
+  card: routeCard,
   cardNamespaces,
   onLeaveCard,
 }: {
@@ -329,6 +350,7 @@ export function ExtensionWorkspace({
   context: string;
   namespace?: string;
   onPage?(id: string, namespace: string): void;
+  onCard?(id: string, namespace: string, card: string): void;
   onNamespace?(namespace: string): void;
   /** A dashboard card whose rows the page shows (#540); the whole list when absent. */
   card?: string;
@@ -339,6 +361,8 @@ export function ExtensionWorkspace({
 }) {
   const { Button, Combobox } = useContext(ExtensionControls);
   const [localPage, setLocalPage] = useState(page.id);
+  const [localCard,setLocalCard] = useState<{id:string;namespace:string}>();
+  const card = routeCard ?? localCard?.id;
   const [selectedNamespace, setNamespace] = useState(initialNamespace);
   const [search, setSearch] = useState("");
   const [refresh, setRefresh] = useState(0);
@@ -348,20 +372,28 @@ export function ExtensionWorkspace({
   // route, not a restricted credential's one namespace or the picker, says what
   // the page shows. A credential that cannot read them gets the host's refusal
   // for the card's scope, never quietly another namespace's rows.
-  const namespace = card ? initialNamespace : scope || selectedNamespace;
+  const namespace = routeCard ? initialNamespace : localCard ? localCard.namespace : scope || selectedNamespace;
   // What the picker shows on a card's target: the card's scope, whatever it is.
   const cardScope = card
-    ? initialNamespace || (cardNamespaces?.length ? cardNamespaces.join(", ") : "All namespaces")
+    ? namespace || (cardNamespaces?.length ? cardNamespaces.join(", ") : "All namespaces")
     : "";
-  const current = onPage
+  const current = onPage && !localCard
     ? page
     : (plugin.manifest.contributions.pages.find((p) => p.id === localPage) ??
       page);
   const navigate = (id: string) => {
     setSearch("");
+    setLocalCard(undefined);
     if (onPage) onPage(id, namespace);
     else setLocalPage(id);
   };
+  const openCard = (card: ExtensionDashboardCard) => {
+    if (!card.target) return;
+    setSearch("");
+    if (onCard) onCard(card.target.page,namespace,card.id);
+    else {setLocalPage(card.target.page);setLocalCard({id:card.id,namespace});}
+  };
+  const cards = plugin.manifest.contributions.dashboardCards ?? [];
   const pages = plugin.manifest.contributions.pages;
   const groups = [...new Set(pages.map((p) => p.group ?? p.title))];
   if (!context)
@@ -423,6 +455,7 @@ export function ExtensionWorkspace({
             // Another namespace is another page: leave the card's route for it,
             // and keep this one showing what its route says.
             if (card && onLeaveCard) { onLeaveCard(value); return; }
+            if (localCard) { setLocalCard(undefined); onPage?.(current.id,value); }
             setNamespace(value); onNamespace?.(value);
           }}
           options={[
@@ -441,7 +474,7 @@ export function ExtensionWorkspace({
               : "Namespace"
           }
         />}
-        <input
+        {(!current.dashboard || current.dashboard.events) && <input
           className="extension-search"
           aria-label="Search app resources"
           placeholder={
@@ -449,7 +482,7 @@ export function ExtensionWorkspace({
           }
           value={search}
           onChange={(e) => setSearch(e.target.value)}
-        />
+        />}
         <Button variant="secondary" onClick={() => setRefresh((v) => v + 1)}>
           Refresh
         </Button>
@@ -463,22 +496,13 @@ export function ExtensionWorkspace({
       )}
       {namespaces === null ? <p role="status" className="extension-message">Loading namespaces…</p> : current.dashboard ? (
         <>
-          <div className="extension-summaries">
-            {current.dashboard.pages.map((id) => {
-              const p = pages.find((p) => p.id === id);
-              return (
-                p && (
-                  <Summary
-                    key={id}
-                    plugin={plugin}
-                    page={p}
-                    context={context}
-                    namespace={namespace}
-                    refresh={refresh}
-                    onPage={navigate}
-                  />
-                )
-              );
+          <div className={cards.length ? "extension-overview" : "extension-summaries"}>
+            {current.dashboard.pages.map((id,index) => {
+              const p = pages.find(p => p.id === id);
+              return p && <Fragment key={id}>
+                <Summary plugin={plugin} page={p} context={context} namespace={namespace} refresh={refresh} onPage={navigate}/>
+                {index === 0 && cards.length > 0 && <OverviewCards plugin={plugin} context={context} namespace={namespace} refresh={refresh} onOpen={openCard}/>}
+              </Fragment>;
             })}
           </div>
           {current.dashboard.events && (
