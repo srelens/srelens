@@ -121,6 +121,7 @@
 
 .extension-workspace {
   min-width: 0;
+  container-type: inline-size;
 }
 .extension-workspace nav [aria-pressed="true"] {
   color: var(--accent, var(--fl-color-accent));
@@ -1056,7 +1057,7 @@
 @container (max-width: 48rem) {
   .extension-overview .extension-summary-body { flex-wrap: wrap; gap: 12px; }
 }
-@media (max-width: 900px) {
+@container (max-width: 900px) {
   .extension-overview { grid-template-columns: minmax(0,1fr); }
   .extension-overview > .extension-summary:first-child, .extension-overview > .dashboard-card[data-size] { grid-column: 1; }
   .extension-overview .extension-summary-body { flex-wrap: nowrap; }
