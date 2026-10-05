@@ -466,7 +466,7 @@ async fn supervise(
     let mut failures = 0usize;
     loop {
         shared.set(SidecarStatus::Starting);
-        let reason = match start(&shared, &config, &*launcher, &broker).await {
+        let reason = match start(&shared, &config, &launcher, &broker).await {
             Started::Running(running) => {
                 let started_at = Instant::now();
                 // The session before the status: a caller waiting for the sidecar
@@ -603,7 +603,7 @@ async fn wait_for_restart(
 async fn start(
     shared: &Arc<Shared>,
     config: &SidecarConfig,
-    launcher: &dyn Launcher,
+    launcher: &Arc<dyn Launcher>,
     broker: &Arc<dyn Broker>,
 ) -> Started {
     if let Enforcement::Missing(why) = launcher.enforcement() {
@@ -612,7 +612,21 @@ async fn start(
     if let Err(why) = check_data(config).await {
         return Started::Refused(format!("{why}, so srelens did not start it"));
     }
-    let launched = match launcher.launch(&config.command, &config.limits) {
+    // A backend blocks while it launches (systemd's scope, an AppContainer's
+    // ACLs), so not on a runtime thread.
+    let launch = {
+        let (launcher, command, limits) = (
+            launcher.clone(),
+            config.command.clone(),
+            config.limits.clone(),
+        );
+        tokio::task::spawn_blocking(move || launcher.launch(&command, &limits))
+    };
+    let launched = match launch.await.unwrap_or_else(|e| {
+        Err(LaunchError::Failed(format!(
+            "srelens could not start the extension: {e}"
+        )))
+    }) {
         Ok(launched) => {
             shared.recorder().launches += 1;
             launched

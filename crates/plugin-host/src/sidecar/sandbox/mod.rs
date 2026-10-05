@@ -122,7 +122,8 @@ pub trait Launcher: Send + Sync + 'static {
     /// Who enforces the memory and CPU limits of what this starts.
     fn enforcement(&self) -> Enforcement;
 
-    /// Start `command` under `limits`. Called from within the tokio runtime.
+    /// Start `command` under `limits`. Called on one of the tokio runtime's
+    /// blocking threads, so it may block, and may spawn tasks.
     fn launch(&self, command: &SidecarCommand, limits: &Limits) -> Result<Launched, LaunchError>;
 }
 

@@ -28,20 +28,15 @@ const NESTED: &str = "srelens runs in a PID namespace of its own, as in a contai
 /// The scope srelens's sidecars' cgroups go in, made at the first call in this
 /// process. Later calls answer with the first success. A failure is not kept:
 /// the next start tries again, which is safe because every step can be
-/// repeated.
+/// repeated. It blocks on systemd, as a launch may (`Launcher::launch`); the
+/// lock makes concurrent first starts wait for one answer.
 pub(super) fn scope_root() -> Result<PathBuf, String> {
     static ROOT: Mutex<Option<PathBuf>> = Mutex::new(None);
     let mut root = ROOT.lock().unwrap_or_else(PoisonError::into_inner);
     if let Some(root) = root.as_ref() {
         return Ok(root.clone());
     }
-    // A thread of its own: the D-Bus call blocks, and the caller is a tokio task.
-    let made = std::thread::spawn(adopt).join().unwrap_or_else(|_| {
-        Err(
-            "srelens failed while setting up a cgroup for executable apps, so it does not run them"
-                .into(),
-        )
-    })?;
+    let made = adopt()?;
     *root = Some(made.clone());
     Ok(made)
 }
