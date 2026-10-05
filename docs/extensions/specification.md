@@ -46,11 +46,13 @@ Settings → Apps stores **Allow unsigned apps to modify clusters and run code**
   `developerMode: true` does not grant the new permission. Legacy disabled entries
   remain disabled. The next atomic save persists the policy; transient denial reasons
   are recomputed, never trusted from disk.
-- All executable apps without a verified publisher require the same policy even if
-  they declare no writes. **This host does not yet support executable apps**: its
-  manifest parser rejects executable kinds regardless of this setting. A future
-  runtime must extend the exhaustive kind classifier and enforce this gate before
-  admitting code; enabling this setting does not enable an SDK or runtime today.
+- Every executable app ([API 0.6](#060)) without a verified publisher requires the same
+  setting, even if it declares no writes: it runs code on this computer, sandboxed or
+  not. The host decides which apps need it by an exhaustive match on the manifest
+  kind (`needs_unsigned_policy` in `crates/registry/src/extensions.rs`), so a new kind
+  cannot be added without deciding. Validation reports the setting at `kind`. The
+  setting never admits code on its own: an executable app still installs only from a
+  package, and its sidecar still runs only in the OS sandbox.
 
 The configuration payload is
 `{"action":"unsignedApps","allowUnsignedApps":true}` through the existing
@@ -89,15 +91,20 @@ permission grants, action confirmation, cluster scoping, or manifest validation.
    `0.MINOR` version. A `0.MINOR.PATCH` bump is for clarifications that do not change
    which manifests validate. From 1.0: MAJOR for breaking changes, MINOR for
    additive ones, PATCH for fixes.
-5. **Current supported lines.** This host implements **API 0.3, API 0.4, API 0.5 and API 0.6**.
-   A `^0.3` manifest is served under 0.3 and may use only what 0.3 has; a `^0.4` one may
-   also use what [0.4 added](#040), a `^0.5` one what [0.5 added](#050), and a `^0.6` one what [0.6 added](#060). API 0.1 and API 0.2 are not supported. Existing
+5. **Current supported lines.** This host implements **API 0.3, API 0.4, API 0.5,
+   API 0.6 and API 0.7**. A `^0.3` manifest is served under 0.3 and may use only what 0.3 has; a
+   `^0.4` one may also use what [0.4 added](#040), a `^0.5` one what [0.5 added](#050),
+   a `^0.6` one what [0.6 added](#060),
+   and a `^0.7` one what [0.7 added](#070). API 0.1 and API 0.2 are not supported. Existing
    installations targeting a retired line are quarantined until replaced by a
    compatible manifest. Official manifests must receive a new version and publisher
-   signature; editing an installed signed manifest invalidates its proof.
+   signature; editing an installed signed manifest invalidates its proof. Before 1.0 a
+   line can be retired sooner than the window in [Deprecation](#deprecation), as these
+   two were.
 6. **API 1.0.** The API is frozen as 1.0 when the cert-manager declarative milestone
-   ([#582](https://github.com/srelens/srelens/issues/582)) passes. After that, the 1.x
-   line only grows additively.
+   ([#582](https://github.com/srelens/srelens/issues/582)) passes. Until then the newest
+   line, API 0.7, is a preview. After that, the 1.x line only grows additively, and a line
+   is retired only after the window in [Deprecation](#deprecation).
 
 ## Compatibility rules
 
@@ -108,7 +115,7 @@ accepted and still means the same thing. Anything else is **breaking**.
 |---|---|
 | New optional manifest field or new contribution type | Additive. Needs a new API minor; manifests that use it must require that minor. |
 | New host capability allowed as a binding target | Additive. Needs a new API minor. |
-| New host behaviour for existing manifests, with no manifest change (for example host-rendered resource inspection) | Additive. No API bump, but it must be recorded in the changelog and must not reject or reinterpret any accepted manifest. |
+| New host behaviour for existing manifests, with no manifest change (for example host-rendered resource inspection) | Additive. No API bump, but it must be recorded in the [API changelog](#api-changelog) and must not reject or reinterpret any accepted manifest. |
 | New optional field in a capability's output | Additive. |
 | Removing or renaming a field, making an optional field required, or narrowing accepted values | Breaking. |
 | Changing what an existing field means | Breaking. |
@@ -135,9 +142,9 @@ pre-releases `0.15.1-186` and `0.15.1-187`, with `network.http`, #568, the last 
 added to it), so what [#728](https://github.com/srelens/srelens/issues/728) added to
 resource links, and the logs, exec and port-forwards of
 [#567](https://github.com/srelens/srelens/issues/567), are [API 0.5](#050), not additions
-to 0.4 in place. Builds implementing API 0.5 were published in turn (the pre-release
-`0.15.1-188`), so the metric, log and trace providers of
-[#569](https://github.com/srelens/srelens/issues/569) are [API 0.6](#060).
+to 0.4 in place. Builds implementing API 0.6 were published in turn (the pre-releases
+`0.15.1-192` and later), so the metric, log and trace providers of
+[#569](https://github.com/srelens/srelens/issues/569) are [API 0.7](#070).
 
 The host enforces this. `API_FIELDS` in `crates/plugin-host/src/manifest.rs` lists every
 field whose availability differs across supported API lines, and every *form* of value
@@ -181,14 +188,15 @@ instead of offering them.
 
 ## Deprecation
 
-- A deprecated field or contribution is listed in the changelog with its replacement
+- A deprecated field or contribution is listed in the [API changelog](#api-changelog) with its replacement
   and the earliest API version that may remove it.
 - It keeps working unchanged in every API version that supports it. Once structured
   validation errors exist ([#533](https://github.com/srelens/srelens/issues/533)),
   using it produces a warning.
-- It is removed only in a new API line, and only after the retirement window in
-  [Versioning](#versioning): at least two srelens minor releases, and never before its
-  replacement has shipped.
+- It is removed only in a new API line, and never before its replacement has shipped.
+  From API 1.0, it is also removed only after a retirement window of at least two
+  srelens minor releases. Before 1.0 there is no such window: a line can be retired
+  sooner, as API 0.1 and API 0.2 were ([Versioning](#versioning)).
 
 Deprecated or planned:
 
@@ -256,7 +264,7 @@ list, and the [developer harness](testing.md#developer-harness) prints one per l
 | `EXTENSION_INVALID_BINDING` | A binding's arguments or inputs break its target's rules. |
 | `EXTENSION_UNRESOLVED_CAPABILITY` | A contribution or dashboard names a capability the manifest does not declare. |
 | `EXTENSION_UNRESOLVED_PAGE` | A dashboard names a page the manifest does not declare. |
-| `EXTENSION_INVALID_KIND` | The manifest `kind` is not `declarative`, or a `forKinds` entry is not a qualified Kubernetes kind. |
+| `EXTENSION_INVALID_KIND` | The manifest `kind` is not `declarative` or `executable`, `kind` and `sidecar` disagree, an executable app is installed without the package that carries its binaries, or a `forKinds` entry is not a qualified Kubernetes kind. |
 | `EXTENSION_POLICY_REFUSED` | The host's administrator policy does not allow the app: its ID, its publisher or lack of a signature, a capability it requests, or its write actions. Only a host with a policy reports it, such as a web server whose operator set one ([WEB.md](../WEB.md#extension-policy)). |
 
 ## Identifiers
@@ -275,7 +283,8 @@ list, and the [developer harness](testing.md#developer-harness) prints one per l
   already installed is an explicit replacement after permission review. It keeps the
   app's settings and assigns a new revision.
 - **Names inside a manifest.** Capability `name`s are unique, and an action's `name`
-  shares that space, since both become `plugin/<id>/<name>`. Contribution `id`s are
+  and a sidecar operation's share that space, since all three become
+  `plugin/<id>/<name>`. Contribution `id`s are
   unique across `pages`, `detailTabs` and `detailLinks`. Both use `A–Z`, `a–z`, `0–9`
   and `-`, up to 64 characters.
 - **Names, titles and groups.** The app `name`, every `title` and a page `group` are
@@ -304,9 +313,17 @@ list, and the [developer harness](testing.md#developer-harness) prints one per l
 
 ## API changelog
 
-### 0.6.0
+### 0.7.0
 
-New in this line ([#569](https://github.com/srelens/srelens/issues/569)):
+Dashboard predicates may use a whole-value settings reference in `within` (#582).
+It must name a declared `select` with a default, whose every option is a positive,
+bounded duration. Counts and their linked resource lists resolve the same saved
+choice. The reference changes only the duration, not the reader, path or target.
+A manifest using this form must admit only API 0.7 or later; literal durations
+retain their existing meaning on older lines. The schema for this line is
+`schemas/extension-manifest.v0.7.json`; the 0.6 schema remains frozen.
+
+Also new in this line ([#569](https://github.com/srelens/srelens/issues/569)):
 
 - **Providers.** `contributions.metricProviders`, `logProviders` and `traceProviders`
   declare a PromQL, LogQL or TraceQL template that one of the app's `network.http`
@@ -317,20 +334,54 @@ New in this line ([#569](https://github.com/srelens/srelens/issues/569)):
   query and time range as the language's HTTP parameters, which the binding may not.
   It reads a Prometheus range query into the timeseries chart (at most 8 series), a
   Loki range query into log lines, and a Tempo search into a list of traces (at most
-  50). Each list is gated in `API_FIELDS`, so a `^0.5` manifest that declares a
-  provider is told it requires API 0.6. The new read-only capability
+  50). Each list is gated in `API_FIELDS`, so a `^0.6` manifest that declares a
+  provider is told it requires API 0.7. The new read-only capability
   `extensions.queryProvider` runs one query; the `logProvider` stream source follows a
   log provider, asking again every 5 seconds while its view is open. See
   [Metric, log and trace providers](manifest.md#metric-log-and-trace-providers).
 - The reference providers are `examples/extensions/prometheus.json` and `loki.json`,
-  0.1.0 on `^0.6`. Publishing them is a separate signed release and catalog update.
-- The host supports API 0.3, 0.4, 0.5 and 0.6, and `extensions.catalog` reports all four
-  in `hostApiVersions`. A host on the 0.5 line lists a `^0.6` release as incompatible
-  rather than offering it.
+  0.1.0 on `^0.7`. Publishing them is a separate signed release and catalog update.
+
+### 0.6.0
+
+New in this line ([#574](https://github.com/srelens/srelens/issues/574)). API 0.6 is a
+preview until API 1.0, and so are executable apps
+([where they run](manifest.md#where-executable-apps-run)):
+
+- **Executable apps.** `kind` may be `executable`, for an app that also runs a
+  **sidecar**: `sidecar.binaries` names the binary for each platform it ships for, a file
+  directly under `bin/<platform>/` in its package, and `sidecar.operations` declares
+  each request the sidecar answers, with typed inputs (`string`, `integer`, `number`,
+  `boolean`) and, for a string, a `maxLength`. `sidecar` is present exactly when the
+  kind is `executable`. An executable app may declare no capabilities at all. See
+  [Executable apps](manifest.md#executable-apps).
+- An operation's name shares the `plugin/<id>/<name>` space with capabilities and
+  actions, and may not be one of the sidecar protocol's own methods.
+- `API_FIELDS` gates both: the kind as a form of `kind`, a field every line has, and
+  `sidecar` as a field. A `^0.5` manifest of kind `executable` is refused with
+  `EXTENSION_API_INCOMPATIBLE`, "the executable kind in `kind` requires API 0.6.0". The
+  kind is a line of its own rather than an addition to 0.5, so no host that implements
+  0.5 meets it as a kind it cannot parse.
+- An executable app installs only from a package carrying exactly the binaries it names,
+  needs a verified publisher or the unsigned-app setting even without writes, and runs
+  its sidecar only in the OS sandbox, starting on its first operation call. Its sidecar
+  reaches the host only through the broker (#573): an operation of an app that declares
+  no action is read-only and not gated, and one of an app that declares actions is gated
+  as the strongest of them, each write it asks for confirmed again, naming the app. See
+  [What the host holds a sidecar to](manifest.md#what-the-host-holds-a-sidecar-to).
+- The host supports API 0.3, 0.4, 0.5 and 0.6, and `extensions.catalog` reports all
+  four in `hostApiVersions`.
 - The manifest JSON Schema for this line is `schemas/extension-manifest.v0.6.json`.
-  `schemas/extension-manifest.v0.5.json` is the 0.5 contract, without these fields,
-  frozen as it was when 0.6 was cut. The Flux example uses nothing 0.6 added and stays
-  on `^0.5`.
+  `schemas/extension-manifest.v0.5.json` is the 0.5 contract, frozen as it was when 0.6
+  was cut.
+
+For existing manifests, with no manifest change (additive host behaviour):
+
+- Every installed app's readers and declared actions are MCP tools,
+  `plugin/<id>/<name>`, beside its sidecar operations, and a server with them sends
+  `notifications/tools/list_changed` as apps are installed, changed or removed. They
+  run through the same broker paths as `extensions.read` and `extensions.action`. See
+  [Installed apps' tools](../MCP.md#installed-apps-tools).
 
 ### 0.5.0
 

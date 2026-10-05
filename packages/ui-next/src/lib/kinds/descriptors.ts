@@ -139,7 +139,7 @@ const TYPED: Partial<Record<ResourceKind, KindDescriptor<ListRow>>> = {
     columns: deploymentColumns as Column<ListRow>[],
     source: "watch",
     scope: "namespaced",
-    actions: { logs: true, scale: true, restart: true },
+    actions: { logs: true, scale: true, restart: true, rollback: true },
     flagged: deploymentFlagged as (row: ListRow) => boolean,
   },
   statefulsets: {

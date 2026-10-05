@@ -6,16 +6,28 @@ import {
   isTauri,
   listContexts,
   loadKubeconfigFiles,
+  listenForHostNotices,
   loadMcpSettings,
   rehydrateForwards,
   startMcpHttp,
   vaultLock,
   type ClusterContext,
   type ContextProfiles,
+  type HostNotice,
   flushSettingsWrites,
   onWindowCloseRequested,
 } from "@srelens/core";
-import { Button, Checkbox, Drawer, LoadingState, TabStrip, TextInput, type ContextMenuItem, type StripTab } from "@srelens/ui-kit";
+import {
+  Button,
+  Checkbox,
+  Drawer,
+  LoadingState,
+  SurfaceToast,
+  TabStrip,
+  TextInput,
+  type ContextMenuItem,
+  type StripTab,
+} from "@srelens/ui-kit";
 import { contextLabelFor } from "../lib/agentSuggestions";
 import {
   pinContextKey,
@@ -199,6 +211,18 @@ export function Window({
   useEffect(() => {
     setScope(contextLabelFor(activeTabRoute, scopeLabel));
   }, [activeTabRoute, scopeLabel, setScope]);
+
+  // What the desktop host reports after the page that would have heard it is
+  // gone: a helm operation outlives the window that started it, and how it
+  // ended reaches every window (#735). The web host sends none.
+  const [hostNotices, setHostNotices] = useState<HostNotice[]>([]);
+  useEffect(
+    () =>
+      isTauri()
+        ? listenForHostNotices((notice) => setHostNotices((shown) => [...shown, notice]))
+        : undefined,
+    [],
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -894,6 +918,17 @@ export function Window({
         prompts and automatic denials while those windows are covered/booting.
       */}
       {windowLabel === "main" && <AgentConsent />}
+      {/* What the host reports after the page that would have heard it is
+        gone (#735). This design mounts no `notify` sink, so the window draws
+        it: the oldest first, each until it is dismissed. */}
+      <SurfaceToast
+        anchor="window"
+        title={hostNotices[0]?.title}
+        hint={hostNotices[0]?.detail}
+        tone={hostNotices[0]?.level === "error" ? "sev" : "info"}
+        onClose={() => setHostNotices((shown) => shown.slice(1))}
+        dismissLabel="Dismiss notice"
+      />
     </>
   );
 }

@@ -4,8 +4,8 @@ A `.srelens-extension` package carries an app's manifest together with its logo 
 files, under one publisher signature ([#562](https://github.com/srelens/srelens/issues/562)).
 A single-file release, one `manifest.json` with its detached `manifest.json.sig`, is still
 valid and still installs everywhere ([distribution.md](distribution.md)). A package adds what
-one JSON file cannot hold: the app's logo today, and per-platform binaries once executable
-apps exist ([#521](https://github.com/srelens/srelens/issues/521)).
+one JSON file cannot hold: the app's logo, and an executable app's per-platform binaries
+([#574](https://github.com/srelens/srelens/issues/574)).
 
 The reader, installer and packer are in `crates/registry/src/extensions/package.rs`.
 
@@ -108,10 +108,13 @@ A package is taken whole or not at all:
   this one never checked.
 - **Logos.** `icons/icon.svg` must be UTF-8 holding an `<svg>`, and `icons/icon.png` must
   start with the PNG signature.
-- **Binaries.** This host runs declarative apps only, so it refuses to install a package
-  that carries anything under `bin/`. The format already has a place for binaries so that
-  executable apps ([#521](https://github.com/srelens/srelens/issues/521)) do not need a new
-  one.
+- **Binaries.** Only an executable app's package carries anything under `bin/`
+  ([Executable apps](manifest.md#executable-apps)), and it carries exactly the binaries
+  its manifest's `sidecar.binaries` names: an extra binary, or one the manifest names and
+  the package lacks, is refused. A declarative app's package that carries a binary is
+  refused, as before. Binaries are unpacked runnable by their owner only (`0700`), and
+  every other file stays `0600`; nothing else in a package is ever run. Before a sidecar
+  starts, its binary is checked again against the digest list it was unpacked with.
 
 ## Installing
 

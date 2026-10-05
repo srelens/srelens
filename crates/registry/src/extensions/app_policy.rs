@@ -66,8 +66,9 @@ pub struct AppPolicy {
     /// both this and the app allow. Empty: `network.http` reaches no host.
     #[serde(rename = "networkCeiling")]
     network_ceiling: Vec<String>,
-    /// Always `false`: no host runs executable apps until they have a per-user sidecar
-    /// identity (#521).
+    /// Always `false`. A policy is a shared host's, and executable apps (#574) do not run
+    /// on one until they have a per-user sidecar identity (#521). The desktop, which has
+    /// no policy, runs them.
     #[serde(rename = "allowExecutableApps")]
     allow_executable_apps: bool,
     /// Apps every user keeps: one they have installed cannot be removed or disabled. The
@@ -251,10 +252,16 @@ impl AppPolicy {
     pub(super) fn refusal(&self, manifest: &Manifest, publisher: Option<&str>) -> Option<Refusal> {
         let id = manifest.id.as_str();
         let refuse = |path, reason: String| Some(Refusal { path, reason });
-        // Exhaustive on purpose: an executable kind is refused here until it runs with a
-        // per-user sidecar identity (#521), whatever the rest of the policy says.
+        // Exhaustive on purpose: an executable app (#574) is refused here until it runs
+        // with a per-user sidecar identity (#521), whatever the rest of the policy says.
         match manifest.kind {
             ManifestKind::Declarative => {}
+            ManifestKind::Executable => {
+                return refuse(
+                    "kind",
+                    "The administrator's policy does not allow executable apps".into(),
+                )
+            }
         }
         if self.blocked_apps.contains(id) {
             return refuse("id", format!("The administrator's policy blocks {id}"));

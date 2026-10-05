@@ -19,13 +19,8 @@ export type HealthKind = "neutral" | "success" | "warning" | "danger" | "info";
  *
  * `Ready`/`NotReady` are here because a Node reports readiness where a Pod
  * reports a phase, and both go through this one table; a Node never reports
- * `Running`.
- *
- * `NotReady` is no longer a Node's word alone. `podStatus` reaches for it for
- * a pod that is up and short of ready — a crash-looper caught between
- * restarts, which the API gives no phase and no waiting reason for — because
- * the fact is the same fact, and a second word for it would be a second
- * entry in this table to keep in step with the first.
+ * `Running`. kubectl also prints `NotReady` for a pod in one case, and
+ * `podStatus` tones that word through this same entry.
  */
 export function phaseKind(phase: string): HealthKind {
   switch (phase) {

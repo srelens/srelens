@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import type {
   K8sObject,
   LabelSelectorRequirement,
@@ -544,12 +544,13 @@ describe("WorkloadDetailsBody", () => {
     });
 
     it("keeps that same pod condemned in the table between its restarts", async () => {
-      // Same pod, one moment later: the container is up, so there is no
-      // waiting reason to print, and the table used to fall back to a green
-      // "Running" — in a table the reader opened BECAUSE the Deployment above
-      // it was degraded, which is the worst place to lose the fact.
+      // Same pod, one moment later: the container has exited and is not yet
+      // backed off, so there is no waiting reason to print. kubectl's word is
+      // the container's `Error`, which the backend sends as `status`, and it
+      // keeps the pod red in a table the reader opened BECAUSE the Deployment
+      // above it was degraded.
       podsForSelector.mockResolvedValue({
-        pods: [{ ...POD_A, ready: "0/1", restarts: 7, waitingReason: "" }],
+        pods: [{ ...POD_A, ready: "0/1", restarts: 7, waitingReason: "", status: "Error" }],
       });
       render(
         <WorkloadDetailsBody
@@ -557,7 +558,7 @@ describe("WorkloadDetailsBody", () => {
           context="ctx"
         />,
       );
-      await waitFor(() => expect(screen.getByText("NotReady")).toBeDefined());
+      await waitFor(() => expect(screen.getByText("Error")).toBeDefined());
       expect(screen.queryByText("Running")).toBeNull();
     });
 
@@ -761,6 +762,24 @@ describe("WorkloadDetailsBody", () => {
       expect(screen.getByText("web-abc123")).toBeDefined();
       expect(screen.getByText("0/0")).toBeDefined();
       expect(screen.getByText("2d")).toBeDefined();
+    });
+
+    it("shows what each revision ran and why, and a dash where it was not recorded (#389)", async () => {
+      listReplicaSets.mockResolvedValue({
+        replicasets: [
+          { ...REVISION_119, images: ["checkout-api:1.4.2", "envoy:1.30"], changeCause: "bump api" },
+          REVISION_1,
+        ],
+      });
+      render(<WorkloadDetailsBody object={CHECKOUT_API} context="ctx" />);
+      await waitFor(() => expect(screen.getByText("checkout-api-7d9f")).toBeDefined());
+      // A header is its sort button, which `Table` labels by the column.
+      expect(screen.getByRole("button", { name: "Sort by Image" })).toBeDefined();
+      expect(screen.getByRole("button", { name: "Sort by Change cause" })).toBeDefined();
+      expect(screen.getByText("checkout-api:1.4.2, envoy:1.30")).toBeDefined();
+      expect(screen.getByText("bump api")).toBeDefined();
+      const bare = screen.getByText("web-abc123").closest("tr");
+      expect(within(bare as HTMLElement).getAllByText("—")).toHaveLength(2);
     });
 
     it("shows No revisions when the Deployment has none yet", async () => {

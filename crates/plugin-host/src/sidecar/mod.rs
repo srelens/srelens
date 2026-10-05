@@ -17,8 +17,8 @@
 //! - [`Inspect`]: what the Inspector reads from a supervisor (#575), and
 //!   [`AppLog`], the app's log it writes to.
 //!
-//! No manifest kind runs a sidecar yet (#574); the macOS memory and CPU
-//! watchdog is #713.
+//! Executable apps start sidecars through `AppSidecars` in srelens-registry
+//! (#574). The macOS memory and CPU watchdog is `sandbox/watchdog.rs` (#713).
 
 mod broker;
 mod connection;
@@ -36,7 +36,7 @@ pub use limits::{Limits, Policy};
 pub use metrics::{Inspect, Latency, RequestMetrics, SidecarMetrics, LATENCY_SAMPLES};
 pub use protocol::SIDECAR_API_VERSIONS;
 pub use sandbox::{
-    Enforcement, Exit, LaunchError, Launched, Launcher, MemoryProbe, OsSandbox, Process,
-    SandboxConfig, SidecarCommand,
+    CgroupRoot, Enforcement, Exit, LaunchError, Launched, Launcher, MemoryProbe, OsSandbox,
+    Process, SandboxConfig, SidecarCommand,
 };
 pub use supervisor::{Action, SidecarConfig, SidecarStatus, Supervisor, UNEXPECTED_EXIT};

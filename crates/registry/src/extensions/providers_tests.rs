@@ -26,7 +26,7 @@ const WRAPPER_PAYLOAD: &str =
 /// computer's loopback.
 fn observability() -> Value {
     json!({
-        "id":APP, "name":"Observability", "version":"0.1.0", "srelensApiVersion":"^0.6",
+        "id":APP, "name":"Observability", "version":"0.1.0", "srelensApiVersion":"^0.7",
         "kind":"declarative",
         "permissions":[{"capability":"network.http",
             "hosts":["${settings.prometheusUrl}","${settings.lokiUrl}","${settings.tempoUrl}"]}],

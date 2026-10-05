@@ -497,6 +497,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 AppEvent::HelmDetailResult { context, namespace, name, revision, result } => {
                     app.handle_helm_detail_result(&context, &namespace, &name, revision, result);
                 }
+                AppEvent::ArgoApplicationsChunk { context, is_remote_hub, hub_context, chunk } => {
+                    app.handle_argo_applications_chunk(&context, is_remote_hub, hub_context, chunk);
+                }
+                AppEvent::ArgoDiskSnapshot { context, result, written_at, hub_context } => {
+                    app.handle_argo_disk_snapshot(&context, result, written_at, hub_context);
+                }
                 AppEvent::ArgoApplicationsResult { context, is_remote_hub, hub_context, result } => {
                     app.handle_argo_applications_result(&context, is_remote_hub, hub_context, result);
                 }
@@ -515,6 +521,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 AppEvent::ChangedQuickRcaResult { key, result } => {
                     app.handle_changed_quick_rca_result(&key, result);
                 }
+                AppEvent::ChangedCauseResult { key, result } => {
+                    app.handle_changed_cause_result(&key, result);
+                }
             }
 
             if !app.is_running {
@@ -529,6 +538,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             current_event = events.try_recv().ok();
         }
     }
+
+        // The selected `:changed` row's GitHub cause, asked once per rollout.
+        app.ensure_changed_cause();
 
         // Handle external tool suspend actions ($EDITOR, Pod shell, etc.)
         // Refuse an edit with nothing to edit before leaving the screen, so a
@@ -872,10 +884,14 @@ fn update_off_the_runtime(check_only: bool, channel: Option<String>) -> Result<(
         plan.latest,
         channel.as_str()
     );
-    if let Err(error) = self_update::apply(&plan, &fetch) {
-        fail(error);
-    }
+    let signer = match self_update::apply(&plan, &fetch) {
+        Ok(signer) => signer,
+        Err(error) => fail(error),
+    };
     println!("Installed {} to {}", plan.latest, exe.display());
+    // What was proved, in the terms the install guide uses to check a
+    // download by hand: the key's full fingerprint.
+    println!("Verified: its checksums are signed by srelens release key {signer}.");
     Ok(())
 }
 

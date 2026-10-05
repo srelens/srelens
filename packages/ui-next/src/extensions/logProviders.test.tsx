@@ -20,7 +20,7 @@ import { useLogProviders, useLogProviderSource, type LogProviderChoice } from ".
 function app(id: string, providers: unknown[], extra: Partial<InstalledExtension> = {}): InstalledExtension {
   return {
     manifest: {
-      id, name: id === "org.example.loki" ? "Loki logs" : "Other", version: "1.0.0", srelensApiVersion: "^0.6",
+      id, name: id === "org.example.loki" ? "Loki logs" : "Other", version: "1.0.0", srelensApiVersion: "^0.7",
       kind: "declarative", permissions: [], capabilities: [],
       contributions: { pages: [], detailTabs: [], detailLinks: [], logProviders: providers },
     },

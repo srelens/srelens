@@ -75,7 +75,11 @@ Within that, some tool arguments have limits of their own, checked while the
 arguments are decoded and refused as invalid input naming the field and its
 limit. On `extensions.validate` and `extensions.configure`, a `signature` must
 be exactly 64 bytes, a `manifest` at most 256 KiB, and a `settings` object at
-most 64 KiB as compact JSON.
+most 64 KiB as compact JSON. An [installed app's tool](#installed-apps-tools)
+takes strings of at most 1,024 bytes for a reader or an action, and a sidecar
+operation's inputs are held to what it declares: a string to its `maxLength`
+(1,024 bytes unless it says otherwise, 64 KiB at most), and the whole call to
+256 KiB.
 
 The desktop app's own WebView calls capabilities through a Tauri command, not
 through MCP, so the 4 MiB transport limit does not apply there; the per-field
@@ -141,6 +145,12 @@ limits do.
   approve or deny the dialog that pops up. Letting it time out, dismissing
   it, or having no srelens window open at all count as **deny**. Confirmation
   requests from concurrent calls queue rather than colliding.
+- **The assistant's own agents are told apart from other clients.** When the
+  assistant launches Claude, Codex or Cursor for a turn, it hands that CLI a
+  token minted for the turn — not the token from Settings — and revokes it
+  when the turn ends, or as soon as you revoke or rotate the Settings token. A confirmation raised under that token is recorded in
+  that conversation's transcript. One raised with the Settings token, by any
+  other MCP client, is still put to you, and is recorded in no conversation.
 - **Headless use** (`--mcp-stdio` / `--mcp-http` with no GUI to show a
   dialog) needs an explicit opt-in instead: a process-level flag *and*
   `"_confirm": true` on the individual tool call. Neither alone is enough —
@@ -340,6 +350,70 @@ and can only be raised above it. `k8s.mergePatch` is `high` because it is the
 one that can express an Argo CD sync, and `k8s.requestRolloutRestart` is
 `high` because it replaces a workload's running pods; the other four are
 `medium`.
+
+## Installed apps' tools
+
+Each app installed in the desktop app, and on, adds its operations as tools named
+`plugin/<app id>/<operation>` ([#574](https://github.com/srelens/srelens/issues/574)):
+
+- each **reader** binding, which takes `context` and, when the binding takes one,
+  `namespace`;
+- each **declared action**, which takes `context`, `namespace`, `name`, `uid` and
+  `resourceVersion` — the object and the version of it that was reviewed;
+- for an [executable app](extensions/manifest.md#executable-apps), each **operation**
+  its sidecar answers, which takes the typed inputs it declares.
+
+A pod binding (logs, exec, a port-forward) is a session an app's view opens, not a
+call, and is not a tool. Every srelens MCP server over the desktop's apps serves
+them: the in-app server, the assistant's, and headless `--mcp-stdio` and
+`--mcp-http`. The web host runs no MCP server, and its capability route refuses a
+`plugin/…` id outright.
+
+**Discovery.** Which tools there are depends on what is installed, so a server with
+app tools says `"tools": {"listChanged": true}` in its `initialize` answer and sends
+`notifications/tools/list_changed` — on stdio, and on the HTTP transport's `GET /mcp`
+stream — whenever an app is installed, updated, rolled back, enabled, disabled,
+blocked by policy, quarantined or removed. A change made in the same process is sent
+at once, after the answer to the request that made it. One made by another srelens
+process (the GUI, while a client holds a headless `--mcp-stdio` open) is found the
+next time the tools are listed or called, or by a push session's poll, every two
+seconds. A client on POST-only HTTP gets no notifications and lists the tools again
+when it wants to know.
+
+**The host's schema and gate, never the app's.** A reader or an action runs under its
+host capability's row through the same rule every binding does, so it can be raised
+above that row and never lowered: a reader is read-only and ungated, and an action
+is gated at its primitive's impact, in its primitive's own confirmation sentence. The
+[catalog](mcp-catalog.md#app-tools) lists which row each kind inherits. A sidecar
+has no kubeconfig, no network and no path but its own data directory, and reaches the
+host only through the broker ([#573](https://github.com/srelens/srelens/issues/573)):
+what its app's readers read, and its app's declared actions. So an operation of an
+app that declares no action is read-only and not gated; one of an app that declares
+actions is gated as the strongest of them, in the host's own sentence for an
+operation. Either way it is **sensitive**: its arguments are the app's own
+vocabulary, so the audit log redacts them whole.
+
+**A sidecar's writes are asked about again, naming the app.** Every write a sidecar
+asks the broker for is put to a person before it runs. In the app that is the same
+host confirmation an agent's gated call gets (#552), with "Requested by app …" read
+from the app's own inventory, since the host started that process and knows which app
+asked. Headless (`--mcp-stdio`, `--mcp-http`) nobody can be asked, so a sidecar's
+writes are refused there, whatever flags the process was started with; the refusal is
+recorded in the audit log.
+
+**The same checks as the app's own screens.** A reader runs through
+`extensions.read`'s path and an action through `extensions.action`'s: the app still
+installed and on at the revision the tool was listed for, the cluster one it is
+enabled for, the kind one the cluster serves, the app's settings as saved now. A
+gated app tool goes through the same consent as every other gated tool: the host
+confirmation in the app, or the matching flag plus `"_confirm": true` headlessly,
+and denied where there is nobody to ask.
+
+**Withdrawn when the app changes.** A call is decided and run against one snapshot of
+the app tools. When the apps change, the snapshot it came from is revoked: a caller
+that listed the tools earlier, or a call whose confirmation was still open when the
+app was updated or disabled, is refused with "This tool was withdrawn…" rather than
+run as a version of the tool nobody was asked about.
 
 ## Client configuration
 

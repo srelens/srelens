@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # ---- Stage 1: build the frontend bundle -------------------------------------
-FROM node:26-slim@sha256:14bf3eac4bf209d906d3c41256597d3ab1f926b2e93a79e9bdfe1efd32454239 AS frontend
+FROM node:26-slim@sha256:ec7758ee051e457b468b32bde57b0879010b325bb9862718e9615225ce4aaae1 AS frontend
 WORKDIR /src
 # package.json alone, ahead of the lockfile: it names the pnpm version, and
 # copying it by itself keeps the pnpm install layer cached when only the
@@ -34,7 +34,7 @@ COPY apps/desktop apps/desktop
 RUN pnpm --filter @srelens/desktop build
 
 # ---- Stage 2: build the headless server binary ------------------------------
-FROM rust:1-slim-bookworm@sha256:ebd900bae66fd508b466cef82d64a83a5fb34682e4c8b2797a42908bddc95a57 AS backend
+FROM rust:1-slim-bookworm@sha256:ff521445a372125ed4f76e1453a1f8098f2d05332d1601d30db1c1f62757e730 AS backend
 WORKDIR /src
 # Only C toolchain + perl are needed (no GTK/webkit — this binary isn't Tauri).
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -49,13 +49,18 @@ COPY apps/desktop/src-tauri apps/desktop/src-tauri
 # this the server build stops at "failed to load manifest for workspace
 # member /src/apps/tui".
 COPY apps/tui apps/tui
+# The sidecar protocol crate (#576) is a workspace member and a dependency of
+# srelens-plugin-host, so the build needs it as well as the whole workspace.
+COPY sdk/protocol sdk/protocol
+COPY sdk/rust sdk/rust
+COPY sdk/examples/hello-world/rust sdk/examples/hello-world/rust
 # rust-embed reads apps/desktop/dist at compile time; copy the built bundle in.
 COPY --from=frontend /src/apps/desktop/dist apps/desktop/dist
 RUN cargo build --release -p srelens-server --bin srelens-server
 RUN strip target/release/srelens-server
 
 # ---- Stage 3: slim runtime --------------------------------------------------
-FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171 AS runtime
+FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251 AS runtime
 ARG KUBECTL_VERSION=v1.36.3
 # Helm is pinned to the 3.x line on purpose: Helm 4 has breaking CLI/behavior
 # changes the helm capabilities aren't validated against yet.

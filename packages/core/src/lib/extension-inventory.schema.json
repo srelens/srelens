@@ -53,7 +53,7 @@
       "description": "What an administrator allows a host's apps to be and do. [`AppPolicy::default`] allows what a host with no policy does, except that `network.http` reaches no host, and no policy lets an app use plain HTTP to loopback.",
       "properties": {
         "allowExecutableApps": {
-          "description": "Always `false`: no host runs executable apps until they have a per-user sidecar identity (#521).",
+          "description": "Always `false`. A policy is a shared host's, and executable apps (#574) do not run on one until they have a per-user sidecar identity (#521). The desktop, which has no policy, runs them.",
           "type": "boolean"
         },
         "allowUnsignedApps": {
@@ -305,7 +305,7 @@
           "type": "string"
         },
         "within": {
-          "description": "The value at `jsonPath` is an RFC 3339 timestamp within this duration of now: `14d` is from now until fourteen days ahead, `-1h` the last hour. Units s, m, h, d and w.",
+          "description": "The value at `jsonPath` is an RFC 3339 timestamp within this duration of now: `14d` is from now until fourteen days ahead, `-1h` the last hour. Units s, m, h, d and w. Extension dashboard cards on API 0.7 or later also accept `\"${settings.<id>}\"` referencing a declared select setting with a default; every option must be a positive duration of at most 3650 days. The host resolves the setting before evaluating this predicate.",
           "type": [
             "string",
             "null"
@@ -907,6 +907,15 @@
       ],
       "type": "object"
     },
+    "InputType": {
+      "enum": [
+        "string",
+        "integer",
+        "number",
+        "boolean"
+      ],
+      "type": "string"
+    },
     "Installed": {
       "additionalProperties": false,
       "properties": {
@@ -1239,6 +1248,17 @@
           },
           "type": "array"
         },
+        "sidecar": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Sidecar"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The sidecar an app of kind `executable` runs, and the operations it answers (#574). Absent from a declarative manifest."
+        },
         "srelensApiVersion": {
           "type": "string"
         },
@@ -1259,9 +1279,10 @@
       "type": "object"
     },
     "ManifestKind": {
-      "description": "Only data is executable in this first host. Code-bearing manifests must go through the future sandboxed runtime, never through a permissive fallback.",
+      "description": "What an app is made of. A declarative app is data the host interprets; an executable one (#574) also runs a sidecar, under the supervisor (#572) in the OS sandbox and never through a permissive fallback.",
       "enum": [
-        "declarative"
+        "declarative",
+        "executable"
       ],
       "type": "string"
     },
@@ -1344,6 +1365,65 @@
         "unknown"
       ],
       "type": "string"
+    },
+    "Operation": {
+      "additionalProperties": false,
+      "description": "One request a sidecar answers, and the inputs it takes.",
+      "properties": {
+        "inputs": {
+          "description": "What a caller passes, each checked by the host before the sidecar is asked. An operation that takes nothing leaves this out.",
+          "items": {
+            "$ref": "#/definitions/OperationInput"
+          },
+          "type": "array"
+        },
+        "name": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "title"
+      ],
+      "type": "object"
+    },
+    "OperationInput": {
+      "additionalProperties": false,
+      "description": "One input an operation takes.",
+      "properties": {
+        "maxLength": {
+          "description": "For a string: the most bytes it may hold, 1–65536. Default 1024.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "type": {
+          "$ref": "#/definitions/InputType"
+        }
+      },
+      "required": [
+        "name",
+        "type"
+      ],
+      "type": "object"
     },
     "Page": {
       "additionalProperties": false,
@@ -1772,6 +1852,31 @@
           "type": "string"
         }
       ]
+    },
+    "Sidecar": {
+      "additionalProperties": false,
+      "description": "The sidecar an executable app runs.",
+      "properties": {
+        "binaries": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "The binary the host runs on each platform, by platform: a file directly under `bin/<platform>/` in the app's package, such as `\"linux-amd64\": \"bin/linux-amd64/scanner\"`. A platform left out does not run the app.",
+          "type": "object"
+        },
+        "operations": {
+          "description": "Every operation the sidecar answers. Each is a request of that name, with the checked input as its params.",
+          "items": {
+            "$ref": "#/definitions/Operation"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "binaries",
+        "operations"
+      ],
+      "type": "object"
     },
     "SignatureProof": {
       "additionalProperties": false,

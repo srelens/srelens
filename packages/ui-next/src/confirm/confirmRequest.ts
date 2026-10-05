@@ -112,7 +112,7 @@ const IMPACTS: readonly string[] = CAPABILITY_IMPACT_ORDER;
  */
 export function asConfirmRequest(payload: unknown): ConfirmRequest | null {
   if (typeof payload !== "object" || payload === null) return null;
-  const { id, tool, args, prompt, impact, target } = payload as Partial<ConfirmRequest>;
+  const { id, tool, args, prompt, impact, target, requester, caller } = payload as Partial<ConfirmRequest>;
   if (typeof id !== "string" || id === "" || typeof tool !== "string") return null;
   return {
     id,
@@ -121,7 +121,33 @@ export function asConfirmRequest(payload: unknown): ConfirmRequest | null {
     target: asConfirmTarget(target),
     prompt: typeof prompt === "string" && prompt !== "" ? prompt : null,
     impact: IMPACTS.includes(impact as CapabilityImpact) ? (impact as CapabilityImpact) : undefined,
+    requester: asRequester(requester),
+    caller: asCaller(caller),
   };
+}
+
+/**
+ * The chat a request came from (#393), narrowed. Anything but an object with a
+ * non-empty string `chatSession` is not a chat this window can match a run
+ * against, and reads as no caller — the same as an external client's.
+ */
+function asCaller(payload: unknown): { chatSession: string } | null {
+  if (typeof payload !== "object" || payload === null) return null;
+  const { chatSession } = payload as { chatSession?: unknown };
+  return typeof chatSession === "string" && chatSession !== "" ? { chatSession } : null;
+}
+
+/**
+ * The app a sidecar's call came from (#573), as the host names it: an ID and a
+ * revision, narrowed. Anything else — a name, a publisher, a revision that is
+ * not a whole number — is not an app reference, and draws no requester line.
+ */
+function asRequester(payload: unknown): { id: string; revision: number } | null {
+  if (typeof payload !== "object" || payload === null) return null;
+  const { id, revision } = payload as { id?: unknown; revision?: unknown };
+  if (typeof id !== "string" || id === "") return null;
+  if (typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 0) return null;
+  return { id, revision };
 }
 
 /**

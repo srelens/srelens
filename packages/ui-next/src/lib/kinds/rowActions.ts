@@ -31,6 +31,7 @@ export const ROW_ACTION_LABEL = {
   trigger: "Run now",
   scale: "Scale",
   restart: "Restart rollout",
+  rollback: "Roll back",
   evict: "Evict",
   delete: "Delete",
 } as const;

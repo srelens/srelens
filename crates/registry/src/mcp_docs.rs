@@ -416,6 +416,104 @@ pub fn render_tools(reg: &srelens_capability::Registry) -> String {
     out
 }
 
+/// The host readers an app's reader binding may target, in the order the page lists
+/// them: `validate_app`'s set in `extensions.rs`, which a test holds this to.
+const APP_READER_TARGETS: &[&str] = &[
+    "k8s.listCustomResource",
+    "k8s.listEvents",
+    "k8s.listDeployments",
+    "k8s.listStatefulSets",
+    "k8s.listDaemonSets",
+    "k8s.listNodes",
+    srelens_plugin_host::NETWORK_HTTP,
+];
+
+/// The tools installed apps add (#574). Which ones there are depends on what a person
+/// installed, so the page gives the rules instead, and the row each kind of tool
+/// inherits, rendered from the live host rows so it cannot drift from them.
+pub fn render_app_tools(reg: &srelens_capability::Registry) -> String {
+    let mut out = String::from("## App tools\n\n");
+    out.push_str(
+        "Every installed app that is on adds its operations as tools named \
+         `plugin/<app id>/<operation>`: each reader binding, each declared action and, \
+         for an executable app, each operation its sidecar answers. A pod binding (logs, \
+         exec, a port-forward) is a session an app's view opens, not a tool. Which tools \
+         there are depends on what is installed, so `tools/list` is the list: a server \
+         with app tools advertises `tools.listChanged`, and sends \
+         `notifications/tools/list_changed` whenever an app is installed, updated, rolled \
+         back, enabled, disabled, blocked or removed. A change another srelens process \
+         made is noticed the next time the tools are listed or called, or by a session \
+         that can be pushed to within a few seconds.\n\n\
+         A tool's schema and its gate are the host's, never the app's. A reader takes \
+         `context` and, when it takes one, `namespace`; an action takes `context`, \
+         `namespace`, `name`, `uid` and `resourceVersion`; a sidecar operation takes the \
+         typed inputs it declares, each held to its type and length before the sidecar \
+         sees it. Readers and actions run through the same broker paths as \
+         `extensions.read` and `extensions.action`, and a gated tool asks the same \
+         consent as any other gated tool. When an app changes, the tools it had are \
+         withdrawn: a caller still holding them is refused.\n\n",
+    );
+    out.push_str(
+        "| An app's | Host capability behind it | Gated as | Impact |\n| --- | --- | --- | --- |\n",
+    );
+    let network = crate::extensions::network::capability();
+    let mut row = |kind: &str, target: &str, host: Annotations| {
+        let tool = Annotations::for_binding(host, Annotations::WEAKEST);
+        out.push_str(&format!(
+            "| {kind} | {target} | {} | {} |\n",
+            classify(&tool).label(),
+            tool.impact.as_str()
+        ));
+    };
+    for target in APP_READER_TARGETS {
+        let host = if *target == srelens_plugin_host::NETWORK_HTTP {
+            network.annotations
+        } else {
+            reg.get(target)
+                .unwrap_or_else(|| panic!("{target} is not a host capability"))
+                .annotations
+        };
+        row("reader", &format!("`{target}`"), host);
+    }
+    for primitive in srelens_kube::action_primitives::PRIMITIVES {
+        let host = reg
+            .get(primitive)
+            .unwrap_or_else(|| panic!("{primitive} is not a host capability"))
+            .annotations;
+        row("declared action", &format!("`{primitive}`"), host);
+    }
+    let reads = srelens_plugin_host::SIDECAR_OPERATION;
+    out.push_str(&format!(
+        "| sidecar operation, of an app that declares no action | its app's readers, through the broker | {} | {} |\n",
+        classify(&reads).label(),
+        reads.impact.as_str()
+    ));
+    // The weakest primitive gives the floor; the row is at least that, and at least
+    // the level of whichever action the app declares.
+    let writes = srelens_plugin_host::sidecar_operation_annotations(
+        srelens_kube::action_primitives::PRIMITIVES
+            .iter()
+            .filter_map(|primitive| reg.get(primitive).map(|c| c.annotations))
+            .min_by_key(|annotations| annotations.impact),
+    );
+    out.push_str(&format!(
+        "| sidecar operation, of an app that declares actions | its app's readers and declared actions, through the broker | {} | at least {}, and at least its highest action's |\n\n",
+        classify(&writes).label(),
+        writes.impact.as_str()
+    ));
+    out.push_str(
+        "An executable app's sidecar reaches the host only through the broker \
+         ([#573](https://github.com/srelens/srelens/issues/573)): what its app's readers read, \
+         and its app's declared actions. So an operation of an app that declares none is not \
+         gated: it can change nothing outside its sandbox. One of an app that declares actions \
+         is gated as the strongest of them, and each write the sidecar then asks for is put to \
+         a person again, naming the app; where nobody can be asked, headless, it is refused. \
+         Either way an operation's arguments are the app's own vocabulary, so the audit log \
+         redacts them whole.\n\n",
+    );
+    out
+}
+
 /// The whole generated page.
 pub fn render_catalog() -> String {
     let mut out = String::from(
@@ -426,7 +524,9 @@ pub fn render_catalog() -> String {
          registry so it cannot drift. Written for someone wiring an agent to \
          srelens; the narrative reference is [MCP.md](MCP.md).\n\n",
     );
-    out.push_str(&render_tools(&crate::build_registry()));
+    let reg = crate::build_registry();
+    out.push_str(&render_tools(&reg));
+    out.push_str(&render_app_tools(&reg));
     out.push_str(&render_prompts());
     out.push_str(&render_resources());
     out.push_str(&render_client_configs());
@@ -1047,12 +1147,60 @@ mod tests {
         }
     }
 
+    /// Every reader target the page lists is one an app may bind, and every one an app
+    /// may bind is listed: the page's table is `validate_app`'s set.
+    #[test]
+    fn the_app_tools_table_lists_exactly_the_readers_an_app_may_bind() {
+        let core = crate::extensions::tests::fake_core();
+        let accepted = |target: &str| {
+            let permission = if target == srelens_plugin_host::NETWORK_HTTP {
+                serde_json::json!({"capability": target, "hosts": ["api.github.com"]})
+            } else {
+                serde_json::json!(target)
+            };
+            let arguments = match target {
+                "k8s.listCustomResource" => serde_json::json!({"group":"argoproj.io",
+                    "version":"v1alpha1","plural":"applications","kind":"Application","namespaced":true}),
+                "network.http" => serde_json::json!({"url":"https://api.github.com","path":"/"}),
+                _ => serde_json::json!({}),
+            };
+            let inputs: Vec<&str> = match target {
+                "network.http" => vec![],
+                "k8s.listNodes" => vec!["context"],
+                _ => vec!["context", "namespace"],
+            };
+            let manifest = serde_json::json!({
+                "id":"org.example.reader","name":"Reader","version":"0.1.0","srelensApiVersion":"^0.5",
+                "kind":"declarative","permissions":[permission],
+                "capabilities":[{"name":"read","title":"Read","target":target,
+                    "arguments":arguments,"inputs":inputs}],
+                "contributions":{"pages":[],"detailTabs":[],"detailLinks":[]}
+            });
+            let manifest = srelens_plugin_host::Manifest::parse(&manifest.to_string()).unwrap();
+            crate::extensions::validate_app_for_tests(&manifest, core.clone())
+        };
+        for target in APP_READER_TARGETS {
+            if let Err(why) = accepted(target) {
+                panic!("{target} is listed but an app may not bind it: {why}");
+            }
+        }
+        for id in core.ids() {
+            if !APP_READER_TARGETS.contains(&id)
+                && core.get(id).is_some_and(|c| c.annotations.read_only)
+                && !srelens_plugin_host::is_pod_target(id)
+            {
+                assert!(accepted(id).is_err(), "{id} is a reader an app may bind, and the page omits it");
+            }
+        }
+    }
+
     #[test]
     fn the_page_opens_with_a_do_not_edit_header_and_carries_every_section() {
         let md = render_catalog();
         assert!(md.starts_with("<!-- GENERATED FILE"), "got:\n{}", &md[..200.min(md.len())]);
         assert!(md.contains("UPDATE_CATALOG=1"), "the header must name the fix command");
         assert!(md.contains("\n## Tools\n"));
+        assert!(md.contains("\n## App tools\n"));
         assert!(md.contains("\n## Prompts\n"));
         assert!(md.contains("\n## Resources\n"));
         assert!(md.contains("\n## Client configuration\n"));

@@ -1,5 +1,16 @@
-import { asArray, asRecord, str, type K8sObject } from "@srelens/core";
-import { KV, Table, type Column } from "@srelens/ui-kit";
+import { useState } from "react";
+import {
+  asArray,
+  asRecord,
+  ingressRuleAddress,
+  ingressUsesRegexPaths,
+  openExternal,
+  str,
+  type IngressRuleAddress,
+  type K8sObject,
+} from "@srelens/core";
+import { Button, CopyButton, KV, Table, type Column } from "@srelens/ui-kit";
+import { FailureAlert } from "../../lib/errorCopy";
 import { Section } from "./Section";
 import { StringList } from "./sections";
 
@@ -8,21 +19,62 @@ interface IngressPathRow {
   host: string;
   path: string;
   backend: string;
+  /** Where the rule sends a reader; `null` for a rule with no host. */
+  address: IngressRuleAddress | null;
 }
 
-const RULE_COLUMNS: Column<IngressPathRow>[] = [
-  { key: "host", header: "Host", render: (r) => <span className="font-mono">{r.host}</span> },
-  { key: "path", header: "Path", render: (r) => <span className="font-mono">{r.path}</span> },
-  {
-    key: "backend",
-    header: "Backend",
-    // Classic's cell is a `ResourceLink` to the Service; here the label
-    // renders as inert text — service backends stay `name:port`, resource
-    // backends `kind/name`. See the task report for the full inert-value
-    // list.
-    render: (r) => <span className="font-mono">{r.backend}</span>,
-  },
-];
+function ruleColumns(open: (url: string) => void): Column<IngressPathRow>[] {
+  return [
+    { key: "host", header: "Host", render: (r) => <span className="font-mono">{r.host}</span> },
+    { key: "path", header: "Path", render: (r) => <span className="font-mono">{r.path}</span> },
+    {
+      key: "address",
+      header: "URL",
+      getValue: (r) => (r.address?.kind === "url" ? r.address.url : (r.address?.host ?? "")),
+      render: (r) => <RuleAddress address={r.address} open={open} />,
+    },
+    {
+      key: "backend",
+      header: "Backend",
+      // Classic's cell is a `ResourceLink` to the Service; here the label
+      // renders as inert text — service backends stay `name:port`, resource
+      // backends `kind/name`. See the task report for the full inert-value
+      // list.
+      render: (r) => <span className="font-mono">{r.backend}</span>,
+    },
+  ];
+}
+
+/**
+ * A rule's address: a link that opens the system browser, with a copy beside
+ * it — or, for a wildcard host, the host as text with the copy alone, since
+ * there is no one address to open.
+ *
+ * A `Button` rather than an anchor, for the reason Forwards' address is one:
+ * `<a target="_blank">` opens nothing inside the Tauri WebView (#348). Its
+ * accessible name is the address it shows, as a link's would be.
+ *
+ * Shown whole, on one line: machine text scrolls in a bounded region rather
+ * than clipping (design.md), and here the region is the table's own scroll.
+ * An ellipsis hid the end of a long path, the part a reader checks before
+ * opening it. (#797 review)
+ */
+function RuleAddress({ address, open }: { address: IngressRuleAddress | null; open: (url: string) => void }) {
+  if (!address) return <span className="text-muted">—</span>;
+  const copied = address.kind === "url" ? address.url : address.host;
+  return (
+    <span className="flex items-center gap-1">
+      {address.kind === "url" ? (
+        <Button variant="ghost" size="xs" className="-mx-1 text-accent" onClick={() => open(address.url)}>
+          <span className="whitespace-nowrap font-mono">{address.url}</span>
+        </Button>
+      ) : (
+        <span className="whitespace-nowrap font-mono">{address.host}</span>
+      )}
+      <CopyButton text={copied} label={`Copy ${copied}`} iconOnly />
+    </span>
+  );
+}
 
 /**
  * Class and TLS — classic's "Ingress" section, ported fact-for-fact.
@@ -80,26 +132,47 @@ function backendLabel(backend: Record<string, unknown>): string {
  * classic would list either).
  */
 function RulesSection({ object }: { object: K8sObject }) {
+  const [failure, setFailure] = useState<{ url: string; error: unknown } | null>(null);
   const spec = asRecord(object.spec);
+  const ingress = {
+    tlsHosts: asArray(spec.tls).flatMap((t) => asArray(asRecord(t).hosts).map(str)),
+    regexPaths: ingressUsesRegexPaths(asRecord(asRecord(object.metadata).annotations)),
+  };
   const rows: IngressPathRow[] = [];
   asArray(spec.rules).forEach((r, ri) => {
     const rr = asRecord(r);
-    const host = str(rr.host) || "*";
+    const host = str(rr.host);
     asArray(asRecord(rr.http).paths).forEach((p, pi) => {
       const pp = asRecord(p);
+      const path = str(pp.path) || "/";
       rows.push({
         key: `${ri}-${pi}`,
-        host,
-        path: str(pp.path) || "/",
+        host: host || "*",
+        path,
         backend: backendLabel(asRecord(pp.backend)),
+        address: ingressRuleAddress(host, path, ingress),
       });
     });
   });
   if (rows.length === 0) return null;
 
+  // Said here, beside the link that failed, rather than in a toast: a toast
+  // reaches nobody in this design (#374).
+  async function open(url: string) {
+    setFailure(null);
+    try {
+      await openExternal(url);
+    } catch (error) {
+      setFailure({ url, error });
+    }
+  }
+
   return (
     <Section title="Rules">
-      <Table columns={RULE_COLUMNS} data={rows} getRowKey={(r) => r.key} />
+      {failure && (
+        <FailureAlert title={`Could not open ${failure.url}`} error={failure.error} className="mb-2" />
+      )}
+      <Table columns={ruleColumns((url) => void open(url))} data={rows} getRowKey={(r) => r.key} />
     </Section>
   );
 }

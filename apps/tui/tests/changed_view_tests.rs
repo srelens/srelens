@@ -5,13 +5,16 @@ mod common;
 use ratatui::backend::TestBackend;
 use ratatui::{Frame, Terminal};
 use srelens_kube::changed::{
-    AppDeploymentChange, ChangedTriageReport, FailureCategory, GitOpsReleaseInfo, IncidentStatus,
-    InfraChangeItem, PodIncidentDetail, RolloutStatus, TriageSummary,
+    AppDeploymentChange, ArgoCoverage, ArgoCoverageState, ArgoRollout, ChangedTriageReport,
+    FailureCategory, GitOpsReleaseInfo, IncidentStatus, InfraChangeItem, PodIncidentDetail,
+    RolloutStatus, TriageSummary,
 };
 use srelens_kube::events::EventSummary;
+use srelens_registry::github::{CausePull, RolloutCause};
 use srelens_tui::commands::{resolve_command, CommandTarget, ResourceKind};
 use srelens_tui::views::changed_view::{
-    render_changed_view, ChangedTab, ChangedViewState, IncidentFilter, QuickRca, QuickRcaStatus,
+    render_changed_view, wrap_message_text, CauseLookup, ChangedTab, ChangedViewState,
+    IncidentFilter, QuickRca, QuickRcaStatus,
 };
 
 fn render_lines<F>(width: u16, height: u16, draw: F) -> Vec<String>
@@ -42,6 +45,7 @@ fn sample_report() -> ChangedTriageReport {
             oom_count: 0,
             error_count: 0,
             pending_count: 1,
+            probe_failure_count: 0,
             rolling_count: 0,
             healthy_count: 1,
             headline_message: "CRITICAL: checkout-api: 1 pod(s) in CrashLoopBackOff".to_string(),
@@ -63,6 +67,7 @@ fn sample_report() -> ChangedTriageReport {
                     sync_revision: "7b89abc".to_string(),
                     sync_age: "12m".to_string(),
                     sync_message: None,
+                    ..Default::default()
                 }),
                 error_log_snippet: Some(vec![
                     "2026-09-23T10:00:01Z [ERROR] Failed to connect to Redis cache: connection refused"
@@ -94,6 +99,8 @@ fn sample_report() -> ChangedTriageReport {
                 }],
                 failing_pod_names: vec!["checkout-api-7b89-abcd".to_string()],
                 argo_rollout_in_window: Some("rev 7b89abc synced 12m ago".to_string()),
+                gitops_unresolved: None,
+                local_cause: None,
                 error_log_pod: Some("checkout-api-7b89-abcd".to_string()),
                 error_log_container: Some("api".to_string()),
                 change_kind: srelens_kube::changed::ChangeKind::Rollout,
@@ -150,6 +157,8 @@ fn sample_report() -> ChangedTriageReport {
                 }],
                 failing_pod_names: vec!["payment-worker-9988-xyz".to_string()],
                 argo_rollout_in_window: None,
+                gitops_unresolved: None,
+                local_cause: None,
                 error_log_pod: None,
                 error_log_container: None,
                 change_kind: srelens_kube::changed::ChangeKind::Rollout,
@@ -173,6 +182,7 @@ fn sample_report() -> ChangedTriageReport {
                     sync_revision: "a1b2c3d".to_string(),
                     sync_age: "27m".to_string(),
                     sync_message: None,
+                    ..Default::default()
                 }),
                 error_log_snippet: None,
                 deployed_at: Some("2026-09-23T09:45:00Z".to_string()),
@@ -196,6 +206,8 @@ fn sample_report() -> ChangedTriageReport {
                 pod_symptoms: vec![],
                 failing_pod_names: vec![],
                 argo_rollout_in_window: None,
+                gitops_unresolved: None,
+                local_cause: None,
                 error_log_pod: None,
                 error_log_container: None,
                 change_kind: srelens_kube::changed::ChangeKind::Rollout,
@@ -230,6 +242,7 @@ fn sample_report() -> ChangedTriageReport {
         ],
         includes_failing: false,
         includes_scaled: false,
+        argo: Default::default(),
     }
 }
 
@@ -316,13 +329,12 @@ fn changed_view_state_navigation_and_filters() {
     assert_eq!(state.filtered_deployments()[0].app_name, "payment-worker");
 
     state.cycle_filter();
-    assert_eq!(state.incident_filter, IncidentFilter::RollingOnly);
+    assert_eq!(state.incident_filter, IncidentFilter::ProbeOnly);
     assert_eq!(state.filtered_deployments().len(), 0);
 
     state.cycle_filter();
-    assert_eq!(state.incident_filter, IncidentFilter::HealthyOnly);
-    assert_eq!(state.filtered_deployments().len(), 1);
-    assert_eq!(state.filtered_deployments()[0].app_name, "frontend");
+    assert_eq!(state.incident_filter, IncidentFilter::RollingOnly);
+    assert_eq!(state.filtered_deployments().len(), 0);
 
     state.cycle_filter();
     assert_eq!(state.incident_filter, IncidentFilter::All);
@@ -357,12 +369,12 @@ fn renders_changed_view_wide_with_diagnostic_card() {
     let rendered = lines.join("\n");
 
     // Banner checks
-    assert!(rendered.contains("POST-PAGE INCIDENT INVESTIGATOR"));
+    assert!(rendered.contains("SRE INCIDENT INVESTIGATOR & CHANGE TRIAGE"));
     assert!(rendered.contains("CRASH: 1"));
     assert!(rendered.contains("OOM: 0"));
     assert!(rendered.contains("ERROR: 0"));
     assert!(rendered.contains("PENDING: 1"));
-    assert!(rendered.contains("HEALTHY: 1"));
+    assert!(!rendered.contains("HEALTHY:"));
     assert!(!rendered.contains("Headline:"));
 
     // Table checks
@@ -392,7 +404,6 @@ fn renders_changed_view_wide_with_diagnostic_card() {
     assert!(rendered.contains(
         "[Enter/d] Describe   [l] Logs   [y] YAML   [s] Quick AI RCA   [a] Assistant   [r] Refresh"
     ));
-    assert!(rendered.contains("Scope: [CHANGED]"));
     assert!(!rendered.contains("[j/k] Navigate"));
     assert!(!rendered.contains("[r] Rollout Restart"));
     assert!(rendered.contains("[y] YAML"));
@@ -403,11 +414,43 @@ fn renders_changed_view_wide_with_diagnostic_card() {
 }
 
 #[test]
+fn wrap_message_text_splits_on_words_and_long_tokens() {
+    // Normal sentence wrapping
+    let text = "Error updating load balancer with new hosts in target pool";
+    let wrapped = wrap_message_text(text, 25);
+    assert!(wrapped.len() >= 2);
+    assert_eq!(wrapped.join(" "), text);
+
+    // Huge token that exceeds column width
+    let huge_token = "gke-search-backend-p-amd64spot-cc-0-d-141c084a-gl6z";
+    let wrapped_token = wrap_message_text(huge_token, 20);
+    assert!(wrapped_token.len() >= 2);
+    assert_eq!(wrapped_token.concat(), huge_token);
+
+    // Empty and single words
+    assert_eq!(wrap_message_text("", 30), vec![""]);
+    assert_eq!(wrap_message_text("Ready", 30), vec!["Ready"]);
+}
+
+#[test]
 fn renders_changed_view_infra_tab() {
     let _settings = common::env::isolate_settings();
 
+    let mut report = sample_report();
+    report.infra_changes.push(InfraChangeItem {
+        age: "22s".to_string(),
+        last_ts: None,
+        kind: "Service".to_string(),
+        name: "thanos-query-cluster-ingress".to_string(),
+        namespace: "monitoring".to_string(),
+        reason: "UpdateLoadBalancer".to_string(),
+        message: "Error updating load balancer with new hosts [gke-search-backend-p-amd64spot-cc-0-d-141c084a-gl6z gke-search-backend-p-amd64spot-cc-0-d-141c084a-gl6z]".to_string(),
+        count: 1,
+        is_warning: true,
+    });
+
     let mut state = ChangedViewState::new();
-    state.set_report(sample_report());
+    state.set_report(report);
     state.active_tab = ChangedTab::Infra;
 
     let lines = render_lines(120, 28, |f| {
@@ -420,6 +463,9 @@ fn renders_changed_view_infra_tab() {
     assert!(rendered.contains("app-config"));
     assert!(rendered.contains("api-ingress"));
     assert!(rendered.contains("Backend TLS certificate expired"));
+    // Multi-line wrapped parts both rendered
+    assert!(rendered.contains("Error updating load balancer"));
+    assert!(rendered.contains("gke-search-backend-p-amd64spot"));
 
     // When filter matches nothing, it tells the user the filter hid them
     state.filter_query = "nonexistent".to_string();
@@ -640,21 +686,28 @@ fn an_unchanged_row_says_why_it_is_shown() {
 
     let rendered = render_card(&state);
 
-    assert!(
-        rendered.contains("checkout-api (unchanged)"),
-        "a word, not only colour"
-    );
-    assert!(rendered
-        .contains("Not changed in the last 1h; shown because it is failing now (u to hide)."));
-    assert!(rendered.contains("Scope: [CHANGED + FAILING]"));
-    assert!(rendered.contains("[u] Hide unchanged"));
+    assert!(!rendered.contains("checkout-api (unchanged)"));
+    assert!(rendered.contains("Not changed in the last 1h; actively failing in this window."));
     // Rows that did change carry no marker.
     assert!(!rendered.contains("payment-worker (unchanged)"));
+
+    // A healthy workload shown under include_failing due to historical warnings in window
+    state.selected_idx = 2;
+    state.report.as_mut().unwrap().deployments[2].change_kind =
+        srelens_kube::changed::ChangeKind::FailingOnly;
+    let rendered_healthy = render_card(&state);
+    assert!(rendered_healthy
+        .contains("Not changed in the last 1h; warning events occurred in this window."));
 }
 
 fn footer_line(width: u16, height: u16, state: &ChangedViewState) -> String {
     let lines = render_lines(width, height, |f| render_changed_view(f, f.area(), state));
-    lines.last().unwrap().trim_end().to_string()
+    lines
+        .into_iter()
+        .rev()
+        .map(|l| l.trim_end().to_string())
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or_default()
 }
 
 #[test]
@@ -667,8 +720,14 @@ fn footer_leaves_the_cards_keys_to_the_card() {
     let footer = footer_line(200, 44, &state);
     assert_eq!(
         footer,
-        "[[/]] Window (1h)  [f] Filter  [u] Include failing  [S] Include scaled  [Tab] Toggle Infra  [/] Search"
+        "[[/]] Window (1h)  [f] Filter  [Tab] Toggle Infra  [b] Hide guide  [/] Search"
     );
+
+    // When guide banner is hidden, footer reflects "Show guide"
+    state.show_guide_banner = false;
+    let footer_hidden = footer_line(200, 44, &state);
+    assert!(footer_hidden.contains("[b] Show guide"), "{footer_hidden}");
+    state.show_guide_banner = true;
 
     // Too short for a card: its keys move to the footer.
     let short = footer_line(200, 24, &state);
@@ -696,32 +755,20 @@ fn an_empty_list_says_why_it_is_empty() {
     report.deployments.clear();
     let mut state = ChangedViewState::new();
     state.set_report(report.clone());
-    let strict = render_card(&state);
-    // The message wraps; judge it on one line.
-    let strict_flat = strict
-        .replace('│', " ")
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
+    let rendered = render_card(&state);
+
     assert!(
-        strict_flat.contains("No workloads changed within the last 1h."),
-        "{strict_flat}"
+        rendered.contains("Timeline: Recent Rollouts [1h]"),
+        "{rendered}"
     );
     assert!(
-        strict_flat.contains("S to include scaled workloads"),
-        "{strict_flat}"
+        rendered.contains("0 Rollouts in the last 1h. No workloads deployed in this window."),
+        "{rendered}"
     );
-    assert!(strict_flat.contains("u to include workloads failing without a change"));
-
-    state.include_failing = true;
-    let wide = render_card(&state);
-    assert!(wide.contains("Workloads Changed or Failing in Window"));
-    assert!(wide.contains("No workloads changed or failing within the last 1h."));
-
-    state.include_failing = false;
-    state.include_scaled = true;
-    let scaled_only = render_card(&state);
-    assert!(scaled_only.contains("No workloads changed or scaled within the last 1h."));
+    assert!(
+        rendered.contains("Workload Incidents: 0 Active"),
+        "{rendered}"
+    );
 
     // Rows exist, but the incident filter hides them: say so, not "none".
     let mut state = ChangedViewState::new();
@@ -730,8 +777,7 @@ fn an_empty_list_says_why_it_is_empty() {
         state.cycle_filter(); // ALL -> CRASH -> OOM
     }
     let filtered = render_card(&state);
-    assert!(filtered.contains("No workloads in the window match the OOM filter."));
-    assert!(!filtered.contains("No workloads changed"));
+    assert!(filtered.contains("No rollouts in the window match the OOM filter."));
 }
 
 #[test]
@@ -751,34 +797,33 @@ fn a_scaled_row_shows_when_it_scaled_and_says_so() {
 
     let rendered = render_card(&state);
 
-    assert!(rendered.contains("checkout-api (scaled)"), "{rendered}");
+    assert!(rendered.contains("checkout-api"), "{rendered}");
+    assert!(!rendered.contains("checkout-api (scaled)"), "{rendered}");
     let row = rendered
         .lines()
-        .find(|l| l.contains("checkout-api (scaled)"))
+        .find(|l| l.contains("checkout-api"))
         .unwrap();
+    assert!(row.contains("66d"), "DEPLOYED is rollout time: {row}");
     assert!(
-        row.trim_end()
-            .trim_end_matches('│')
-            .trim_end()
-            .ends_with("5m"),
-        "CHANGED is the scale time: {row}"
+        row.contains("Scaled 3→4"),
+        "RECENT CHANGE is scale event: {row}"
     );
-    assert!(rendered.contains("CHANGED"), "column header");
-    assert!(rendered.contains("Scaled 3→4 5m ago; last rollout 66d ago (S to hide)."));
-    assert!(rendered.contains("Scope: [CHANGED + SCALED]"));
-    assert!(rendered.contains("[S] Hide scaled"));
+    assert!(row.contains("5m"), "RECENT CHANGE age: {row}");
+    assert!(rendered.contains("DEPLOYED"), "column header");
+    assert!(rendered.contains("RECENT CHANGE"), "column header");
+    assert!(rendered.contains("Scaled 3→4 5m ago; last rollout 66d ago."));
 }
 
 #[test]
 fn scope_label_names_every_combination() {
     let mut state = ChangedViewState::new();
-    assert_eq!(state.scope_label(), "[CHANGED]");
-    state.include_scaled = true;
-    assert_eq!(state.scope_label(), "[CHANGED + SCALED]");
-    state.include_failing = true;
-    assert_eq!(state.scope_label(), "[CHANGED + SCALED + FAILING]");
-    state.include_scaled = false;
     assert_eq!(state.scope_label(), "[CHANGED + FAILING]");
+    state.include_scaled = true;
+    assert_eq!(state.scope_label(), "[CHANGED + SCALED + FAILING]");
+    state.include_failing = false;
+    assert_eq!(state.scope_label(), "[CHANGED + SCALED]");
+    state.include_scaled = false;
+    assert_eq!(state.scope_label(), "[CHANGED]");
 }
 
 /// The card's rows, from its "Workload:" line to "Actions:", border-trimmed.
@@ -885,6 +930,29 @@ fn table_columns_fit_their_longest_namespace_and_workload() {
 }
 
 #[test]
+fn recent_change_and_diagnostic_columns_render_without_truncation() {
+    let _settings = common::env::isolate_settings();
+    let mut state = ChangedViewState::new();
+    let mut report = sample_report();
+    report.deployments[0].change_kind = srelens_kube::changed::ChangeKind::Scaled;
+    report.deployments[0].change_detail = Some("Scaled 16→14".to_string());
+    report.deployments[0].changed_age = "25m".to_string();
+    state.set_report(report);
+
+    let rendered = render_lines(160, 36, |f| render_changed_view(f, f.area(), &state)).join("\n");
+
+    // Ensure REVISION / GITOPS header is fully visible without truncated 'S'
+    assert!(rendered.contains("REVISION / GITOPS"), "{rendered}");
+    // Ensure full recent change string and age are present
+    assert!(rendered.contains("Scaled 16→14 (25m)"), "{rendered}");
+    // Ensure root cause diagnostic is present
+    assert!(
+        rendered.contains("[APP] checkout-api-7b89-abcd"),
+        "{rendered}"
+    );
+}
+
+#[test]
 fn clamp_selection_clamps_both_deployments_and_infra() {
     let _settings = common::env::isolate_settings();
     let mut state = ChangedViewState::new();
@@ -944,4 +1012,521 @@ fn narrow_terminal_allocates_multiline_footer() {
     let footer_text = last_three.join(" ");
     assert!(footer_text.contains("Filter"), "{footer_text}");
     assert!(footer_text.contains("Search"), "{footer_text}");
+}
+
+const SYNCED: &str = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
+const PREVIOUS: &str = "9f8e7d6c5b4a39281706f5e4d3c2b1a098765432";
+
+fn sync_rollout() -> ArgoRollout {
+    ArgoRollout {
+        history_id: 17,
+        revision: SYNCED.to_string(),
+        previous_revision: Some(PREVIOUS.to_string()),
+        deployed_at: "2026-09-23T10:00:00Z".to_string(),
+        initiated_by: Some("alice".to_string()),
+        repo_url: "https://github.com/org/checkout.git".to_string(),
+        path: "apps/checkout".to_string(),
+        is_chart: false,
+        approximate: false,
+    }
+}
+
+/// The sample report with its first row (checkout-api) changed by `edit`.
+fn why_state(edit: impl FnOnce(&mut AppDeploymentChange)) -> ChangedViewState {
+    let mut report = sample_report();
+    edit(&mut report.deployments[0]);
+    let mut state = ChangedViewState::new();
+    state.set_report(report);
+    state
+}
+
+fn with_sync(d: &mut AppDeploymentChange) {
+    let g = d.gitops.as_mut().unwrap();
+    g.matched_by = "trackingId".to_string();
+    g.rollout = Some(sync_rollout());
+}
+
+fn answer(state: &mut ChangedViewState, lookup: CauseLookup) {
+    let ask = state.next_cause_ask().expect("a GitHub question");
+    state.causes.insert(ask.key, lookup);
+}
+
+fn pr(number: u64, title: &str, user: &str, is_bot: bool) -> CausePull {
+    CausePull {
+        number,
+        title: title.to_string(),
+        user: user.to_string(),
+        is_bot,
+        ..Default::default()
+    }
+}
+
+#[test]
+fn the_card_says_which_sync_and_which_prs_caused_the_rollout() {
+    let _settings = common::env::isolate_settings();
+    let mut state = why_state(with_sync);
+    answer(
+        &mut state,
+        CauseLookup::Ready(RolloutCause {
+            revision: SYNCED.to_string(),
+            previous_revision: Some(PREVIOUS.to_string()),
+            path: "apps/checkout".to_string(),
+            pulls: vec![
+                pr(1842, "fix: bump checkout timeout", "bob", false),
+                pr(1843, "chore(deps): bump checkout", "renovate[bot]", true),
+            ],
+            other_commits: 2,
+            ..Default::default()
+        }),
+    );
+    let rendered = render_card(&state);
+    assert!(
+        rendered.contains("Why: Argo sync #17 to a1b2c3d from 9f8e7d6, by alice"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("[via tracking id]"), "{rendered}");
+    assert!(
+        rendered.contains("PR #1842 \"fix: bump checkout timeout\" by bob"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("Bot PR #1843"), "{rendered}");
+    assert!(
+        rendered.contains("(image v2.0.0 ➔ v2.1.0)"),
+        "the bump names its image: {rendered}"
+    );
+    assert!(
+        rendered.contains("2 other commits in this range changed other paths"),
+        "{rendered}"
+    );
+    assert!(
+        !rendered.contains("ArgoCD Rollout:"),
+        "the Why line names the sync once: {rendered}"
+    );
+}
+
+#[test]
+fn github_is_asked_once_per_rollout_and_a_failure_is_retried_on_refresh() {
+    let _settings = common::env::isolate_settings();
+    let mut state = why_state(with_sync);
+    assert!(render_card(&state).contains("GitHub: looking up the pull requests"));
+
+    let ask = state.next_cause_ask().unwrap();
+    assert_eq!(ask.revision, SYNCED);
+    assert_eq!(ask.previous.as_deref(), Some(PREVIOUS));
+    assert_eq!(ask.path, "apps/checkout");
+    state.causes.insert(ask.key.clone(), CauseLookup::Loading);
+    assert_eq!(state.next_cause_ask(), None, "in flight: not asked again");
+
+    state.causes.insert(
+        ask.key.clone(),
+        CauseLookup::Failed(
+            "not found on GitHub, or the repository is private and no GITHUB_TOKEN is set"
+                .to_string(),
+        ),
+    );
+    let rendered = render_card(&state);
+    assert!(
+        rendered.contains("private and no GITHUB_TOKEN is set"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("[r] to retry"), "{rendered}");
+    assert_eq!(
+        state.next_cause_ask(),
+        None,
+        "a failure waits for a refresh"
+    );
+
+    let report = state.report.clone().unwrap();
+    state.set_report(report);
+    assert_eq!(state.next_cause_ask().map(|a| a.key), Some(ask.key));
+
+    state.active_tab = ChangedTab::Infra;
+    assert_eq!(state.next_cause_ask(), None, "only for the Deployments tab");
+}
+
+#[test]
+fn a_sync_github_cannot_explain_says_why_and_asks_nothing() {
+    let _settings = common::env::isolate_settings();
+    let chart = why_state(|d| {
+        with_sync(d);
+        let r = d.gitops.as_mut().unwrap().rollout.as_mut().unwrap();
+        r.is_chart = true;
+        r.revision = "1.4.3".to_string();
+        r.previous_revision = Some("1.4.2".to_string());
+    });
+    let rendered = render_card(&chart);
+    assert!(
+        rendered.contains("Argo sync #17 to 1.4.3 from 1.4.2"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("chart source, chart version 1.4.3"),
+        "{rendered}"
+    );
+    assert_eq!(chart.next_cause_ask(), None);
+
+    let gitlab = why_state(|d| {
+        with_sync(d);
+        d.gitops
+            .as_mut()
+            .unwrap()
+            .rollout
+            .as_mut()
+            .unwrap()
+            .repo_url = "https://gitlab.com/org/checkout.git".to_string();
+    });
+    assert!(render_card(&gitlab).contains("not a github.com repository"));
+    assert_eq!(gitlab.next_cause_ask(), None);
+}
+
+#[test]
+fn what_could_not_be_found_out_is_said_as_such() {
+    let _settings = common::env::isolate_settings();
+    let unresolved = why_state(|d| {
+        d.gitops = None;
+        d.gitops_unresolved = Some(
+            "tracking id names Argo app checkout-prod; Argo unavailable: list timed out"
+                .to_string(),
+        );
+    });
+    assert!(render_card(&unresolved)
+        .contains("Why: tracking id names Argo app checkout-prod; Argo unavailable"));
+
+    // What the report puts on a row with no app while Argo cannot be read.
+    let argo_down = why_state(|d| {
+        d.gitops = None;
+        d.gitops_unresolved = Some(
+            "Argo unavailable: Failed to list ArgoCD Applications: 403; ownership not known"
+                .to_string(),
+        );
+    });
+    assert!(render_card(&argo_down)
+        .contains("Why: Argo unavailable: Failed to list ArgoCD Applications: 403"));
+
+    let restarted = why_state(|d| {
+        with_sync(d);
+        d.local_cause = Some("rollout restart at 2026-09-23T10:00:00Z".to_string());
+    });
+    let rendered = render_card(&restarted);
+    assert!(
+        rendered.contains("Why: rollout restart at 2026-09-23T10:00:00Z"),
+        "{rendered}"
+    );
+    assert!(
+        !rendered.contains("GitHub:"),
+        "a restart brought no commits: {rendered}"
+    );
+
+    let unmatched = why_state(|d| {
+        d.gitops.as_mut().unwrap().rollout_unmatched =
+            Some("no Argo sync around this rollout: a change made outside Argo".to_string());
+    });
+    assert!(render_card(&unmatched).contains("Why: no Argo sync around this rollout"));
+
+    let unmanaged = why_state(|d| d.gitops = None);
+    assert!(
+        !render_card(&unmanaged).contains("Why:"),
+        "no Argo, nothing to say"
+    );
+}
+
+#[test]
+fn g_opens_a_persons_pr_before_a_bots_else_a_commit_else_the_compare_view() {
+    let _settings = common::env::isolate_settings();
+    let mut state = why_state(with_sync);
+    assert_eq!(
+        state.cause_link(),
+        Err("Still looking up the pull requests on GitHub".to_string())
+    );
+    assert!(!render_card(&state).contains("[g] Open PR"));
+
+    let url = |n| format!("https://github.com/org/checkout/pull/{n}");
+    let with_url = |mut p: CausePull| {
+        p.html_url = url(p.number);
+        p
+    };
+    answer(
+        &mut state,
+        CauseLookup::Ready(RolloutCause {
+            pulls: vec![
+                with_url(pr(1843, "chore(deps): bump", "renovate[bot]", true)),
+                with_url(pr(1842, "fix: timeout", "bob", false)),
+            ],
+            compare_url: Some("https://github.com/org/checkout/compare/a...b".to_string()),
+            ..Default::default()
+        }),
+    );
+    assert_eq!(
+        state.cause_link(),
+        Ok((url(1842), "PR #1842 (1 of 2 in this sync)".to_string()))
+    );
+    assert!(render_card(&state).contains("[g] Open PR"));
+
+    let key = state.causes.keys().next().unwrap().clone();
+    let commit = srelens_registry::github::CauseCommit {
+        sha: SYNCED.to_string(),
+        html_url: "https://github.com/org/checkout/commit/a1b2c3d".to_string(),
+        ..Default::default()
+    };
+    state.causes.insert(
+        key.clone(),
+        CauseLookup::Ready(RolloutCause {
+            commits: vec![commit],
+            direct_commits: vec![SYNCED.to_string()],
+            ..Default::default()
+        }),
+    );
+    assert_eq!(
+        state.cause_link().map(|(_, what)| what),
+        Ok("commit a1b2c3d".to_string())
+    );
+
+    state.causes.insert(
+        key,
+        CauseLookup::Ready(RolloutCause {
+            compare_url: Some("https://github.com/org/checkout/compare/a...b".to_string()),
+            ..Default::default()
+        }),
+    );
+    assert_eq!(
+        state.cause_link().map(|(_, what)| what),
+        Ok("the sync's compare view".to_string())
+    );
+
+    let chart = why_state(|d| {
+        with_sync(d);
+        d.gitops
+            .as_mut()
+            .unwrap()
+            .rollout
+            .as_mut()
+            .unwrap()
+            .is_chart = true;
+    });
+    assert!(chart.cause_link().unwrap_err().starts_with("chart source"));
+    assert!(!render_card(&chart).contains("[g] Open PR"));
+}
+
+fn card_with_argo(argo: ArgoCoverage) -> String {
+    let mut report = sample_report();
+    report.argo = argo;
+    let mut state = ChangedViewState::new();
+    state.set_report(report);
+    render_card(&state)
+}
+
+#[test]
+fn the_card_says_how_much_of_argo_its_gitops_fields_were_matched_against() {
+    let _settings = common::env::isolate_settings();
+    let hub = || Some("tools".to_string());
+
+    let none = card_with_argo(ArgoCoverage::default());
+    assert!(
+        !none.contains("Argo: "),
+        "no Argo, nothing to qualify: {none}"
+    );
+
+    let complete = card_with_argo(ArgoCoverage {
+        state: ArgoCoverageState::Complete,
+        apps_loaded: 171,
+        hub: hub(),
+        fetched_at: Some(srelens_kube::k8s_openapi::jiff::Timestamp::now().to_string()),
+        error: None,
+    });
+    assert!(
+        complete.contains("Argo: 171 apps from hub tools, as of 0s ago"),
+        "{complete}"
+    );
+
+    let loading = card_with_argo(ArgoCoverage {
+        state: ArgoCoverageState::Partial,
+        apps_loaded: 12,
+        hub: hub(),
+        ..Default::default()
+    });
+    assert!(
+        loading.contains("Argo: loading from hub tools (12 apps for this cluster so far)"),
+        "{loading}"
+    );
+
+    let stale = card_with_argo(ArgoCoverage {
+        state: ArgoCoverageState::Stale,
+        apps_loaded: 171,
+        hub: hub(),
+        fetched_at: Some("2026-09-01T10:00:00Z".to_string()),
+        error: Some("hub unreachable".to_string()),
+    });
+    assert!(
+        stale.contains("Argo: 171 apps from hub tools, as of"),
+        "{stale}"
+    );
+    assert!(stale.contains("last refresh: hub unreachable"), "{stale}");
+
+    let stale_no_err = card_with_argo(ArgoCoverage {
+        state: ArgoCoverageState::Stale,
+        apps_loaded: 171,
+        hub: hub(),
+        fetched_at: Some("2026-09-01T10:00:00Z".to_string()),
+        error: None,
+    });
+    assert!(
+        stale_no_err.contains("Argo: 171 apps from hub tools, as of"),
+        "{stale_no_err}"
+    );
+    assert!(
+        !stale_no_err.contains("refreshing"),
+        "stale with no active refresh must not say refreshing: {stale_no_err}"
+    );
+
+    let down = card_with_argo(ArgoCoverage {
+        state: ArgoCoverageState::Unavailable,
+        error: Some("Argo lookup timed out after 20s".to_string()),
+        ..Default::default()
+    });
+    assert!(
+        down.contains("Argo: unavailable: Argo lookup timed out after 20s"),
+        "{down}"
+    );
+}
+
+#[test]
+fn a_range_with_nothing_under_the_app_path_says_so() {
+    let _settings = common::env::isolate_settings();
+    let mut state = why_state(with_sync);
+    answer(
+        &mut state,
+        CauseLookup::Ready(RolloutCause {
+            revision: SYNCED.to_string(),
+            previous_revision: Some(PREVIOUS.to_string()),
+            path: "apps/checkout".to_string(),
+            other_commits: 3,
+            ..Default::default()
+        }),
+    );
+    let rendered = render_card(&state);
+    assert!(
+        rendered.contains("GitHub: no commits under apps/checkout between 9f8e7d6 and a1b2c3d"),
+        "{rendered}"
+    );
+}
+
+#[test]
+fn card_does_not_render_successful_sync_as_sync_error() {
+    let _settings = common::env::isolate_settings();
+    let mut report = sample_report();
+    report.deployments[0].gitops.as_mut().unwrap().sync_message =
+        Some("successfully synced (all tasks run)".into());
+    let mut state = ChangedViewState::new();
+    state.set_report(report);
+    let card = render_card(&state);
+    assert!(
+        !card.contains("Sync Error:"),
+        "must not render Sync Error for successful sync: {card}"
+    );
+}
+
+#[test]
+fn card_labels_health_message_as_health_not_sync_error_even_when_out_of_sync() {
+    let _settings = common::env::isolate_settings();
+    let mut report = sample_report();
+    let mut gitops = report.deployments[0].gitops.clone().unwrap();
+    gitops.sync_status = "OutOfSync".into();
+    gitops.health_status = "Degraded".into();
+    gitops.sync_message = Some("Deployment has 0/2 ready pods".into());
+    gitops.is_health_message = true;
+    report.deployments[0].gitops = Some(gitops);
+
+    let mut state = ChangedViewState::new();
+    state.set_report(report);
+    let card = render_card(&state);
+    assert!(
+        card.contains("Health: Deployment has 0/2 ready pods"),
+        "{card}"
+    );
+    assert!(
+        !card.contains("Sync Error:"),
+        "must not say Sync Error for health message: {card}"
+    );
+}
+
+#[test]
+fn changed_view_renders_sre_guide_banner_and_respects_toggle_and_height() {
+    let _settings = common::env::isolate_settings();
+    let mut state = ChangedViewState::new();
+    state.set_report(sample_report());
+
+    // 1. Tall screen (height >= 28) with guide banner enabled
+    let lines = render_lines(140, 35, |f| render_changed_view(f, f.area(), &state));
+    let full = lines.join("\n");
+    assert!(full.contains("SRE Scope & Triage Guide"), "{full}");
+    assert!(full.contains("[t] Focus:"), "{full}");
+    assert!(full.contains("[w] Window: 1h"), "{full}");
+    assert!(full.contains("[f] Filter: ALL"), "{full}");
+    assert!(full.contains("[Tab] Infra:"), "{full}");
+    assert!(full.contains("non-deployment warning(s)"), "{full}");
+    assert!(!full.contains("[S] Scaled:"), "{full}");
+    assert!(!full.contains("[u] Failing:"), "{full}");
+    assert!(!full.contains("CNI, Ingress"), "{full}");
+    assert!(!full.contains("Quick RCA  [a] Assistant"), "{full}");
+
+    // 2. Guide banner toggled off
+    state.show_guide_banner = false;
+    let lines_off = render_lines(140, 35, |f| render_changed_view(f, f.area(), &state));
+    let full_off = lines_off.join("\n");
+    assert!(!full_off.contains("SRE Scope & Triage Guide"), "{full_off}");
+
+    // 3. Short screen (height < 28) suppresses guide banner even when enabled
+    state.show_guide_banner = true;
+    let lines_short = render_lines(140, 25, |f| render_changed_view(f, f.area(), &state));
+    let full_short = lines_short.join("\n");
+    assert!(
+        !full_short.contains("SRE Scope & Triage Guide"),
+        "{full_short}"
+    );
+}
+
+#[test]
+fn changed_view_renders_live_refresh_status_and_condensed_diagnostic() {
+    let _settings = common::env::isolate_settings();
+    let mut state = ChangedViewState::new();
+    let mut report = sample_report();
+
+    // Set a verbose scheduling failure on the deployment
+    let verbose_sched = "0/20 nodes are available: 2 Insufficient cpu, 2 Too many pods, 3 node(s) had untolerated taint(s), 7 node(s) didn't match Pod's node affinity/selector, 9 Insufficient memory. no new claims to deallocate, preemption: 0/20 nodes are available: 10 No preemption victims found for incoming pod, 10 Preemption is not helpful for scheduling.";
+    report.deployments[0].failure_category = srelens_kube::changed::FailureCategory::Compute;
+    report.deployments[0].failure_detail = verbose_sched.to_string();
+    report.deployments[0].incident_status = srelens_kube::changed::IncidentStatus::Pending;
+    state.set_report(report);
+
+    // 1. Idle state shows live refresh indicator
+    let lines = render_lines(180, 35, |f| render_changed_view(f, f.area(), &state));
+    let full = lines.join("\n");
+    assert!(full.contains("⟳ Live (5s)"), "{full}");
+
+    // Table row contains condensed diagnostic and no preemption boilerplate
+    let row_line = lines.iter().find(|l| l.contains("checkout-api")).unwrap();
+    assert!(
+        row_line.contains("[COMPUTE] 0/20 nodes: 2 CPU, 2 PodLimit, 3 Taint, 7 Affinity, 9 Memory"),
+        "{row_line}"
+    );
+    assert!(
+        !row_line.contains("No preemption victims found"),
+        "table row should not contain preemption boilerplate: {row_line}"
+    );
+
+    // Bottom card retains the full diagnostic
+    let card = render_card(&state);
+    assert!(
+        card.contains("0/20 nodes are available: 2 Insufficient cpu"),
+        "card must keep full diagnostic: {card}"
+    );
+
+    // 2. Active refreshing state shows Refreshing...
+    state.is_refreshing = true;
+    let lines_refreshing = render_lines(160, 35, |f| render_changed_view(f, f.area(), &state));
+    let full_refreshing = lines_refreshing.join("\n");
+    assert!(
+        full_refreshing.contains("⟳ Refreshing..."),
+        "{full_refreshing}"
+    );
 }

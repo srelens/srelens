@@ -316,7 +316,8 @@ export interface ExtensionManifest {
   name: string;
   version: string;
   srelensApiVersion: string;
-  kind: "declarative";
+  /** `executable` (API 0.6, #574) also runs the `sidecar` it declares. */
+  kind: "declarative" | "executable";
   /**
    * The host capabilities the bindings target; `network.http` with its hosts (#568),
    * and a pod capability with the namespaces it grants, if any (#567).
@@ -368,6 +369,8 @@ export interface ExtensionManifest {
   }>;
   /** Typed settings (#542), drawn by the host as a form in Settings → Apps. */
   settings?: ExtensionSetting[];
+  /** The sidecar an executable app runs, and the operations it answers (#574). */
+  sidecar?: ExtensionSidecar;
   contributions: {
     pages: ExtensionPage[];
     detailTabs: ExtensionDetailTab[];
@@ -387,6 +390,28 @@ export interface ExtensionManifest {
     /** TraceQL searches listed on workload and pod overviews (#569). */
     traceProviders?: ExtensionTraceProvider[];
   };
+}
+/**
+ * An executable app's sidecar (#574): the binary it runs on each platform, a file under
+ * `bin/<platform>/` in its package, and the operations it answers. Each operation is the
+ * MCP tool `plugin/<id>/<operation>`, whose input schema the host builds from `inputs`.
+ */
+export interface ExtensionSidecar {
+  binaries: Record<string, string>;
+  operations: ExtensionOperation[];
+}
+export interface ExtensionOperation {
+  name: string;
+  title: string;
+  inputs?: ExtensionOperationInput[];
+}
+export interface ExtensionOperationInput {
+  name: string;
+  title?: string;
+  type: "string" | "integer" | "number" | "boolean";
+  required?: boolean;
+  /** For a string: the most bytes it may hold, 1–65536. Default 1024. */
+  maxLength?: number;
 }
 /** Where a version came from: `catalog` is the exact bytes of a cached catalog release. */
 export type ExtensionSource = "local" | "catalog";

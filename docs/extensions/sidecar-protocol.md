@@ -11,13 +11,22 @@ host, and the data directory), part of [#521](https://github.com/srelens/srelens
 The code is `crates/plugin-host/src/sidecar/`. The SDKs
 ([#576](https://github.com/srelens/srelens/issues/576)) wrap what this page specifies.
 
-**Status: nothing starts a sidecar yet.** The manifest has no executable kind: it still
-accepts only `declarative`, and the unsigned-app policy for executables is to be
-enforced when the kind is added ([specification.md](specification.md#unsigned-app-policy)).
-Registering a sidecar's operations and wiring it into the app is
-[#574](https://github.com/srelens/srelens/issues/574); the broker a sidecar calls back into
-and its data directory are built and tested, and wait for it. What is not built is listed
-under [Not yet](#not-yet).
+**Status.** An app of kind `executable` (API 0.6, a preview,
+[#574](https://github.com/srelens/srelens/issues/574)) names its sidecar's binaries and the
+operations it answers ([manifest.md](manifest.md#executable-apps)). srelens starts the
+sidecar under this supervisor the first time one of those operations is called in a
+process, and stops it when the app is disabled, updated or removed. It calls back into
+srelens only through the [broker](#calls-from-the-sidecar), and writes only its
+[data directory](#data-directory). Its log and its process show in the app's
+Inspector ([#575](https://github.com/srelens/srelens/issues/575)). Each operation is an
+MCP tool, `plugin/<id>/<operation>` ([MCP.md](../MCP.md#installed-apps-tools)). The
+registry's side is `crates/registry/src/extensions/sidecars.rs`. What is not built is
+listed under [Not yet](#not-yet).
+
+Executable apps are a preview. They run out of the box on Windows, and on a systemd Linux
+desktop with Landlock, where systemd before 252 and the RHEL 9 family need the `cpu`
+controller delegated first ([what is needed](manifest.md#where-executable-apps-run)). On macOS they do not run yet. srelens refuses to start any sidecar until its memory and CPU watchdog has
+been checked with Seatbelt on a macOS 27 Mac. The [sandbox](#sandbox) section has the detail.
 
 ## The wire
 
@@ -30,6 +39,31 @@ JSON-RPC 2.0, one message per line.
 - **Ids.** srelens numbers its requests 1, 2, 3 and so on. A sidecar may use any string or
   number as the id of a call it makes to srelens.
 - **Params** are an object or an array, or absent.
+
+The same contract in machine-readable form is
+[`schemas/sidecar-protocol.v0.1.json`](../../schemas/sidecar-protocol.v0.1.json), one
+file per sidecar API line. It is generated from the `srelens-sidecar-protocol` crate
+(`sdk/protocol/`), whose types srelens itself builds its messages from, and which the SDKs
+share. It has:
+
+- a definition for every method's params and result;
+- `HostMessage` and `SidecarMessage`, every line each side writes;
+- in `x-srelens-methods`, every method with its direction, kind, params and result.
+
+The SDKs are [`sdk/rust`](../../sdk/rust) and [`sdk/go`](../../sdk/go).
+
+A sidecar may validate what it writes against it. srelens holds the `host/*` calls to
+exactly the shapes the schema states; a test in `crates/plugin-host/src/sidecar/broker.rs`
+holds the two to each other. A call of the right shape can still be refused by the
+capability, the cluster or the person asked. JSON Schema counts characters where srelens
+counts bytes, so for `clusterId` and a string call id, check the byte length yourself.
+`clusterId`'s pattern lists every Unicode white-space character rather than using `\S`,
+which regex engines read differently, so any validator tells a blank `clusterId` as
+srelens does.
+
+The file uses `x-srelens-*` keywords, which draft-07 allows. A validator in strict mode,
+such as Ajv 8 by default, needs `strict: false`, or the keywords registered
+(`ajv.addVocabulary([...])`).
 
 ## Lifecycle
 
@@ -62,9 +96,10 @@ that is how it learns srelens has gone.
 ### Version negotiation
 
 The sidecar API has its own versions, listed in `SIDECAR_API_VERSIONS`
-(`crates/plugin-host/src/sidecar/protocol.rs`). Today there is one, `0.1.0`. It is not
-the extension API version (`SUPPORTED_API_VERSIONS`), because no manifest kind runs a
-sidecar yet. Whether the two merge when the executable kind lands is open (#574).
+(`sdk/protocol/src/lib.rs`). Today there is one, `0.1.0`. It is not
+the extension API version (`SUPPORTED_API_VERSIONS`), and the executable kind (#574) kept
+the two apart: a manifest names the extension API it is written for, and its sidecar
+negotiates this one at `initialize`, so each can move without the other.
 
 `initialize` offers every version srelens speaks, and the sidecar answers with the one it
 chose:
@@ -80,8 +115,12 @@ supervisor does not retry (see [States](#states)).
 
 ## Requests
 
-An app's request to its sidecar is an ordinary JSON-RPC request. The limits are host
-policy (`Limits` in `crates/plugin-host/src/sidecar/limits.rs`):
+An app's request to its sidecar is an ordinary JSON-RPC request. Today srelens sends one
+kind: a call of one of the operations the manifest declares, as a request named after the
+operation, whose `params` is the call's input after srelens has held it to the
+operation's declared inputs. A sidecar answers with any JSON result, which is what the
+caller gets. The limits are host policy (`Limits` in
+`crates/plugin-host/src/sidecar/limits.rs`):
 
 | Limit | Default | When it is reached |
 |---|---|---|
@@ -181,6 +220,10 @@ A call without `context`, or with one that is not exactly that shape, is refused
 `-32602` before anything runs: "Every call names its cluster: … srelens has no current
 cluster to assume".
 
+A `context` that is not an object is refused as "`context` must be {…}, not a string" (or
+a number, an array, …). One of the right type with a wrong field names that field, in
+serde's words.
+
 ### What srelens checks
 
 On every call, in this order:
@@ -188,7 +231,8 @@ On every call, in this order:
 1. **Who is asking.** The app's ID and revision come from the supervisor that started the
    process, never from the sidecar. An app that was updated, disabled, removed or
    blocked by the unsigned-app policy is refused ("Extension was disabled, removed or
-   updated"). Starting the new revision's sidecar in its place is #574's.
+   updated"). The next operation call starts the new revision's sidecar in its place, and
+   an announced inventory write stops the old one.
 2. **Grants.** The binding must be one the app declares, and every permission it needs
    must be granted: the facade runs the install check (`validate_app`) again on each
    call, so an inventory edited by hand gains nothing. An undeclared binding is refused
@@ -205,7 +249,10 @@ On every call, in this order:
    action `delete` for `applications`"). Declined, or with no one to ask, it never runs:
    `-32002`, with the reason. This is the single host
    confirmation ([#552](https://github.com/srelens/srelens/issues/552)); the broker asks it
-   through the `Consent` trait, and a host that provides none refuses every gated call.
+   through the `Consent` trait. The desktop app's MCP server provides one, its own
+   confirmation prompt, which names the app from the window's inventory. Headless
+   `--mcp-stdio` and `--mcp-http` provide `NoConsent`, so every gated call is refused
+   there.
 5. **Cluster RBAC.** The call reaches the cluster with the user's own credentials, so the
    cluster answers for itself. A refusal from it is `-32003`, with its words.
 
@@ -380,21 +427,24 @@ in `crates/plugin-host/src/sidecar/sandbox/`:
 
 | OS | Isolation | Memory and CPU |
 |---|---|---|
-| Linux | Landlock and a seccomp filter, applied by `srelens-sandbox-launch` before it runs the sidecar | a cgroup v2 directory under a root delegated to srelens |
+| Linux | Landlock and a seccomp filter, applied by `srelens-sandbox-launch` before it runs the sidecar | a cgroup v2 directory under the scope srelens asks systemd for, or under a root delegated by hand |
 | Windows | an AppContainer with no capabilities, one profile per app | the Job Object the process starts in |
-| macOS | Seatbelt through `/usr/bin/sandbox-exec` | **none yet: every sidecar is refused** until the host-side watchdog ([#713](https://github.com/srelens/srelens/issues/713)) exists |
+| macOS | Seatbelt through `/usr/bin/sandbox-exec` | a host-side watchdog ([#713](https://github.com/srelens/srelens/issues/713)), weaker than the kernel's: **every sidecar is still refused** until it has been checked with Seatbelt on a macOS 27 Mac |
 | any other OS | — | — |
 
 A sidecar is **refused, never started unconfined**:
 
 - on an OS with no backend;
-- on macOS, until #713;
-- on Linux without Landlock, without the launcher, or without a delegated cgroup;
+- on macOS, until its watchdog has been checked with Seatbelt on a macOS 27 Mac (#713);
+- on Linux without Landlock, without the launcher, or without a delegated cgroup: no
+  systemd user session, a container, or a session without the `memory` and `cpu`
+  controllers;
 - anywhere the backend cannot set a limit.
 
-In every case the refusal names what is missing. Whether a Linux or Windows machine that
-lacks only a limit layer should instead run the sidecar with a warning is still open (ADR,
-"Open questions"). Until that is decided, the supervisor refuses.
+In every case the refusal names what is missing. On Linux a machine that lacks only a limit
+layer is refused, a session without the `cpu` controller delegated included; that is
+decided (ADR, "Open questions"). Whether a Windows machine that lacks one should instead run
+the sidecar with a warning is still open. Until that is decided, the supervisor refuses.
 
 What the sidecar gets:
 
@@ -533,10 +583,7 @@ uninstalled; locking it down while the app is installed is left for the escape r
 
 | What | Where |
 |---|---|
-| A manifest kind that runs a sidecar, and registering its operations as capabilities and MCP tools | [#574](https://github.com/srelens/srelens/issues/574) |
-| Starting a sidecar for an installed app, its data directory under `Apps::data_root`, and the desktop's `Consent`: the host confirmation of [#552](https://github.com/srelens/srelens/issues/552) | [#574](https://github.com/srelens/srelens/issues/574) |
+| An operation that answers with a stream: the protocol has streams, and nothing opens one on an app's behalf yet | — |
 | A "Clear data" action for an app refused for its data directory (`DataDir::clear` is there; the Inspector, #575, is where a person would find it) | not filed yet |
-| Per-app logs, the Inspector, runtime metrics | [#575](https://github.com/srelens/srelens/issues/575) |
-| JSON Schema for these messages, and the Rust and Go SDKs | [#576](https://github.com/srelens/srelens/issues/576) |
-| Memory and CPU limits on macOS | [#713](https://github.com/srelens/srelens/issues/713) |
+| Checking macOS's watchdog on a macOS 27 Mac, and then running sidecars there | [#713](https://github.com/srelens/srelens/issues/713), closed: the watchdog is built, the check is not done |
 | The escape-hardening review of the supervisor and its backends, which the ADR assigned to #572 | [#744](https://github.com/srelens/srelens/issues/744) |

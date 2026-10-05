@@ -39,6 +39,7 @@ use std::ptr::{null, null_mut};
 use std::sync::Arc;
 use windows_sys::Win32::Foundation::{
     CloseHandle, GetLastError, LocalFree, SetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT,
+    WAIT_TIMEOUT,
 };
 use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
 use windows_sys::Win32::Security::Isolation::{
@@ -55,6 +56,9 @@ use windows_sys::Win32::System::JobObjects::{
     JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOB_OBJECT_LIMIT_PROCESS_MEMORY,
 };
 use windows_sys::Win32::System::Pipes::CreatePipe;
+use windows_sys::Win32::System::ProcessStatus::{
+    K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX,
+};
 use windows_sys::Win32::System::Threading::{
     CreateProcessW, DeleteProcThreadAttributeList, GetExitCodeProcess,
     InitializeProcThreadAttributeList, UpdateProcThreadAttribute, WaitForSingleObject,
@@ -425,6 +429,28 @@ fn command_line(program: &Path, args: &[OsString]) -> Vec<u16> {
     line
 }
 
+/// A process's committed private memory now, in bytes, for the Inspector
+/// (#753): the memory the job's `ProcessMemoryLimit` caps, so the reading
+/// and the limit are the same measure. `None` once the process has ended,
+/// or when Windows will not say.
+fn private_bytes(process: HANDLE) -> Option<u64> {
+    // SAFETY: plain Win32 calls on a process handle the caller keeps open,
+    // and an out-structure of the size passed.
+    unsafe {
+        if WaitForSingleObject(process, 0) != WAIT_TIMEOUT {
+            return None;
+        }
+        let mut counters: PROCESS_MEMORY_COUNTERS_EX = std::mem::zeroed();
+        counters.cb = std::mem::size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32;
+        let read = K32GetProcessMemoryInfo(
+            process,
+            &mut counters as *mut PROCESS_MEMORY_COUNTERS_EX as *mut PROCESS_MEMORY_COUNTERS,
+            counters.cb,
+        );
+        (read != 0).then_some(counters.PrivateUsage as u64)
+    }
+}
+
 /// The started process and the job it is in.
 struct Contained {
     process: OwnedHandle,
@@ -600,17 +626,40 @@ pub(super) fn launch(command: &SidecarCommand, limits: &Limits) -> Result<Launch
         })
     };
     let file = |handle: OwnedHandle| tokio::fs::File::from_std(File::from(handle));
+    // The reader keeps the process handle open, so it stays valid to wait on
+    // and to query for as long as the Inspector holds the reader.
+    let measured = killer.0.clone();
     Ok(Launched {
         stdin: Box::new(file(stdin_parent)),
         stdout: Box::new(file(stdout_parent)),
         stderr: Box::new(file(stderr_parent)),
-        process: Process::new(Some(pid), exit, move || killer.kill()),
+        process: Process::new(Some(pid), exit, move || killer.kill())
+            .with_memory(move || private_bytes(measured.process.as_raw_handle() as HANDLE)),
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The Inspector's memory reading (#753): a running process's committed
+    /// private memory, and nothing once it has exited.
+    #[test]
+    fn memory_is_read_while_the_process_runs_and_not_after_it_exits() {
+        let mut child = std::process::Command::new("cmd")
+            .args(["/c", "ping -n 30 127.0.0.1 >nul"])
+            .spawn()
+            .expect("a child process");
+        let handle = child.as_raw_handle() as HANDLE;
+        let running = private_bytes(handle);
+        assert!(
+            matches!(running, Some(n) if n > 0),
+            "while it runs: {running:?}"
+        );
+        child.kill().expect("the child stops");
+        child.wait().expect("the child is reaped");
+        assert_eq!(private_bytes(handle), None, "after it exits");
+    }
 
     /// Uninstalling an app deletes its profile whether or not it ever ran a
     /// sidecar, and most apps never do (#573).

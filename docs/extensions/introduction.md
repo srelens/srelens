@@ -21,12 +21,33 @@ Tracking: [#163](https://github.com/srelens/srelens/issues/163). Architecture de
 - Chart Prometheus metrics and list Tempo traces on workload and pod overviews, and
   offer Loki as a source of the log view, from query templates the host binds and
   sends ([Metric, log and trace providers](manifest.md#metric-log-and-trace-providers)).
+- As an executable app (a preview, API 0.6), run a program it ships as a sandboxed sidecar
+  that answers the operations it declares
+  ([Executable apps](manifest.md#executable-apps)).
+- Offer its readers, actions and operations to AI agents as MCP tools, under the same
+  consent as the rest of srelens ([MCP.md](../MCP.md#installed-apps-tools)).
+
+Executable apps are a preview, and so is API 0.6, which adds them, until the API is frozen
+as 1.0 ([specification.md](specification.md#versioning)). Where they run:
+
+- **Windows:** out of the box.
+- **Linux:** out of the box on a systemd desktop with Landlock. On systemd before 252 and
+  the RHEL 9 family, delegate the `cpu` controller first
+  ([what is needed](manifest.md#where-executable-apps-run)).
+- **macOS:** not yet. srelens refuses to start any sidecar until its memory and CPU
+  watchdog has been checked with Seatbelt on a macOS 27 Mac.
+- **The web host:** it refuses to install an executable app: its extension policy does not
+  allow one ([WEB.md](../WEB.md#extension-policy)), and it keeps no files for an app's
+  package ([capabilities.md](capabilities.md#web-host)).
 
 ## What an app cannot do
 
-- Run code on this computer. No JavaScript, subprocess, iframe, npm install or
-  lifecycle script is executed. An exec binding runs one command the manifest fixes,
-  inside a pod, never a shell, and only after a person confirms that exact command.
+- Run code on this computer outside the OS sandbox. A declarative app runs no code: no
+  JavaScript, subprocess, iframe, npm install or lifecycle script is executed. An
+  executable app's program runs only as a sidecar in the sandbox, with no kubeconfig,
+  no network and no files but its own directory, and nowhere without one. An exec
+  binding runs one command the manifest fixes, inside a pod, never a shell, and only
+  after a person confirms that exact command.
 - Read kubeconfig, tokens or files. Every read goes through the host, under the
   selected cluster's RBAC.
 - Open a network connection. An app granted `network.http` asks the host to send a

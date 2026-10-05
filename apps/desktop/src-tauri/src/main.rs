@@ -29,6 +29,12 @@ fn main() {
     // stdio, and MCP HTTP — honors it (the GUI can adjust it further at runtime).
     srelens_kube::connect::init_timeout_from_env();
 
+    // A release build has no console (`windows_subsystem` above), in every run
+    // mode, so on Windows each exec plugin kube-rs starts (`aws eks get-token`)
+    // would open a console window of its own (#775). Still single-threaded.
+    #[cfg(not(debug_assertions))]
+    srelens_desktop_lib::hide_exec_plugin_windows();
+
     // Running from a Linux AppImage, keep the bundled GLib from scanning the
     // host's GIO modules (its gvfs modules use symbols the bundled GLib lacks,
     // spamming "undefined symbol" on startup). Must happen before anything
@@ -259,8 +265,9 @@ fn run_mcp_http(
         let cache = srelens_kube::client_cache::ClientCache::new_many(
             srelens_registry::all_kubeconfig_paths(),
         );
-        // Apps' secrets (#543) in the vault this process already opened.
-        let registry = srelens_desktop_lib::registry_for(
+        // Apps' secrets (#543) in the vault this process already opened, and
+        // installed apps' tools (#574).
+        let (registry, app_tools) = srelens_desktop_lib::mcp_registry_for(
             cache.clone(),
             srelens_registry::default_kubeconfig_paths(),
             srelens_desktop_lib::default_settings_path(),
@@ -268,12 +275,26 @@ fn run_mcp_http(
                 vault.clone(),
             )),
         );
-        let server = srelens_mcp::McpServer::new(Arc::new(registry))
+        let audit: Arc<dyn srelens_capability::audit::AuditSink> = Arc::new(
+            srelens_mcp::audit::JsonlAuditLog::new(mcp_audit_path(), MCP_AUDIT_CAP_BYTES),
+        );
+        let registry = Arc::new(registry);
+        let server = srelens_mcp::McpServer::new(registry.clone());
+        let server = match app_tools {
+            Some(tools) => {
+                // Headless: nobody to ask, so a sidecar's writes are all refused (#573).
+                tools.serve_sidecars(srelens_registry::SidecarHost {
+                    registry,
+                    consent: Arc::new(srelens_registry::NoConsent),
+                    audit: audit.clone(),
+                });
+                server.with_app_tools(tools)
+            }
+            None => server,
+        };
+        let server = server
             .with_policy(policy)
-            .with_audit(Arc::new(srelens_mcp::audit::JsonlAuditLog::new(
-                mcp_audit_path(),
-                MCP_AUDIT_CAP_BYTES,
-            )))
+            .with_audit(audit)
             .with_prompts(srelens_mcp::prompts::PromptLibrary::new(Some(
                 mcp_prompts_dir(),
             )))
@@ -360,8 +381,11 @@ fn run_mcp_stdio(allow_destructive: bool, allow_sensitive_reads: bool) {
         // Apps' secrets (#543) in the same vault as the GUI, opened only to
         // keep a secret or to delete one from a vault that exists: listing
         // apps reports the vault as not open yet rather than opening it, so a
-        // run that stores no secret never touches the keychain.
-        let registry = srelens_desktop_lib::registry_for(
+        // run that stores no secret never touches the keychain. Installed
+        // apps' tools (#574) follow the inventory the GUI writes too: a
+        // change it makes is found within a poll and sent as
+        // `tools/list_changed`.
+        let (registry, app_tools) = srelens_desktop_lib::mcp_registry_for(
             cache.clone(),
             srelens_registry::default_kubeconfig_paths(),
             srelens_desktop_lib::default_settings_path(),
@@ -369,12 +393,26 @@ fn run_mcp_stdio(allow_destructive: bool, allow_sensitive_reads: bool) {
                 mcp_dir(),
             )),
         );
-        let server = srelens_mcp::McpServer::new(Arc::new(registry))
+        let audit: Arc<dyn srelens_capability::audit::AuditSink> = Arc::new(
+            srelens_mcp::audit::JsonlAuditLog::new(mcp_audit_path(), MCP_AUDIT_CAP_BYTES),
+        );
+        let registry = Arc::new(registry);
+        let server = srelens_mcp::McpServer::new(registry.clone());
+        let server = match app_tools {
+            Some(tools) => {
+                // Headless: nobody to ask, so a sidecar's writes are all refused (#573).
+                tools.serve_sidecars(srelens_registry::SidecarHost {
+                    registry,
+                    consent: Arc::new(srelens_registry::NoConsent),
+                    audit: audit.clone(),
+                });
+                server.with_app_tools(tools)
+            }
+            None => server,
+        };
+        let server = server
             .with_policy(policy)
-            .with_audit(Arc::new(srelens_mcp::audit::JsonlAuditLog::new(
-                mcp_audit_path(),
-                MCP_AUDIT_CAP_BYTES,
-            )))
+            .with_audit(audit)
             .with_prompts(srelens_mcp::prompts::PromptLibrary::new(Some(
                 mcp_prompts_dir(),
             )))

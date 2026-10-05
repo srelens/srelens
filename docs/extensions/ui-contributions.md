@@ -201,7 +201,7 @@ the web the section says that app streams run in the desktop app.
 
 ## Metrics, logs and traces from providers
 
-API 0.6 ([#569](https://github.com/srelens/srelens/issues/569)). An app's providers
+API 0.7 ([#569](https://github.com/srelens/srelens/issues/569)). An app's providers
 ([manifest.md](manifest.md#metric-log-and-trace-providers)) are drawn by the host in two
 places, in the new design:
 

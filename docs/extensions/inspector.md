@@ -20,7 +20,7 @@ manifest, grants, source, settings and previous versions of
 | ID, version, extension API version, revision, source and signature, grants | the inventory (`extensions.list`) |
 | Active contributions and registered capabilities | the manifest; active only while the app is enabled, not quarantined and not blocked by policy |
 | Process: state, reason, PID, negotiated sidecar API version, launches, unexpected exits | `extensions.inspect` → the supervisor's `SidecarStatus` |
-| Memory, and who enforces its limit | the sandbox backend: the cgroup's `memory.current` on Linux; not measured yet on Windows; macOS samples it with its watchdog ([#713](https://github.com/srelens/srelens/issues/713)) |
+| Memory, and who enforces its limit | the sandbox backend: the cgroup's `memory.current` on Linux; the process's committed private memory on Windows, the measure its Job Object's limit caps; the physical footprint on macOS, its watchdog's latest reading, which it takes every 50 ms and not while it holds the sidecar paused for its CPU limit (a stopped process allocates nothing) ([#713](https://github.com/srelens/srelens/issues/713)) |
 | Requests: answered, failed, timed out, refused, in flight; latency p50, p95, max | the supervisor, over its last 256 answers |
 | Open streams and watches | the app streams its views opened ([streams.md](streams.md#metrics)), watches apart from the rest, and the sidecar's own streams |
 | Recent errors | the app's log: its last 20 errors, kept apart from the rest |
@@ -36,13 +36,13 @@ with the last exit's reason and the supervisor's actions:
 
 - **View logs** opens the Logs tab.
 - **Disable** turns the app off.
-- **Restart** is not offered yet. No host capability restarts a sidecar until
-  executable apps are wired to the registry ([#574](https://github.com/srelens/srelens/issues/574)).
+- **Restart** is not offered yet: no host capability restarts a sidecar.
 
-No app runs a process today: the manifest has no executable kind yet (#574).
-When #574 starts a sidecar it asks `AppRuntime::log(id)` for the app's log,
-passes that log to `Supervisor::start_with_log`, and shows the process with
-`AppRuntime::attach(id, supervisor)`. The Inspector reads the supervisor only
+The registry starts an executable app's process on its first operation call
+(`crates/registry/src/extensions/sidecars.rs`,
+[#574](https://github.com/srelens/srelens/issues/574)). It asks `AppRuntime::log(id)` for
+the app's log, passes that log to `Supervisor::start_with_log`, and shows the process
+with `AppRuntime::attach(id, supervisor)`. The Inspector reads the supervisor only
 through `Inspect::metrics`.
 
 ## Logs

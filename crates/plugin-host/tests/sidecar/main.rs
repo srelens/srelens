@@ -8,9 +8,9 @@ use fake::{FakeLauncher, Reply};
 use serde_json::{json, Value};
 use srelens_plugin_host::sidecar::data::DataDir;
 use srelens_plugin_host::sidecar::{
-    Action, AppLog, Enforcement, Limits, LogLevel, LogSource, NoBroker, Policy, RequestError,
-    RequestMetrics, SidecarCommand, SidecarConfig, SidecarStatus, StreamEvent, Supervisor,
-    SIDECAR_API_VERSIONS, UNEXPECTED_EXIT,
+    Action, AppLog, Enforcement, LaunchError, Launched, Launcher, Limits, LogLevel, LogSource,
+    NoBroker, Policy, RequestError, RequestMetrics, SidecarCommand, SidecarConfig, SidecarStatus,
+    StreamEvent, Supervisor, SIDECAR_API_VERSIONS, UNEXPECTED_EXIT,
 };
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -76,6 +76,46 @@ async fn next(stream: &mut srelens_plugin_host::sidecar::SidecarStream) -> Optio
 
 fn secs(n: u64) -> Duration {
     Duration::from_secs(n)
+}
+
+/// A backend that takes its time to launch, as Linux's does while systemd
+/// sets up its scope (`sandbox/systemd.rs`), and then refuses.
+struct Slow;
+
+impl Launcher for Slow {
+    fn enforcement(&self) -> Enforcement {
+        Enforcement::Kernel
+    }
+
+    fn launch(&self, _: &SidecarCommand, _: &Limits) -> Result<Launched, LaunchError> {
+        std::thread::sleep(Duration::from_millis(300));
+        Err(LaunchError::Unavailable("slow".into()))
+    }
+}
+
+/// A launch blocks a thread for as long as its backend takes, so it runs off
+/// the runtime's own threads: on a single-threaded runtime nothing else would
+/// run meanwhile. On the real clock, since the launch sleeps on it.
+#[tokio::test]
+async fn a_slow_launch_does_not_stop_the_runtime() {
+    let ticks = Arc::new(AtomicUsize::new(0));
+    let ticking = tokio::spawn({
+        let ticks = ticks.clone();
+        async move {
+            loop {
+                sleep(Duration::from_millis(10)).await;
+                ticks.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    });
+    let supervisor = Supervisor::start(config(), Arc::new(Slow), Arc::new(NoBroker));
+    until(&supervisor, |s| matches!(s, SidecarStatus::Refused { .. })).await;
+    ticking.abort();
+    let ticks = ticks.load(Ordering::SeqCst);
+    assert!(
+        ticks >= 10,
+        "the runtime ran {ticks} 10 ms ticks during a 300 ms launch"
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -528,7 +568,8 @@ async fn a_sandbox_this_machine_cannot_provide_is_refused_without_retrying() {
 #[tokio::test(start_paused = true)]
 async fn a_backend_that_enforces_no_limits_is_refused_before_anything_starts() {
     let launcher = FakeLauncher::well_behaved().enforcing(Enforcement::Missing(
-        "macOS has no memory limit yet (#713)".into(),
+        "srelens's memory and CPU watchdog for macOS has not yet been checked with Seatbelt on a macOS 27 Mac (#713)"
+            .into(),
     ));
     let supervisor = start(&launcher);
     let SidecarStatus::Refused { reason } =
@@ -656,7 +697,10 @@ async fn a_sidecar_that_fills_its_data_directory_past_the_limit_is_stopped_and_n
     let started = Instant::now();
     supervisor.request("fill", json!({})).await.unwrap();
     let reason = refused(&supervisor).await;
-    assert!(reason.contains("holds 3 MiB, over its 2 MiB limit"), "{reason}");
+    assert!(
+        reason.contains("holds 3 MiB, over its 2 MiB limit"),
+        "{reason}"
+    );
     assert!(reason.contains("so srelens stopped it"), "{reason}");
     assert!(
         started.elapsed() <= Policy::default().data_check_interval,
@@ -1084,4 +1128,89 @@ async fn the_hosts_log_outlives_the_supervisor_that_wrote_to_it() {
         .filter(|l| l.text == "The extension is running")
         .count();
     assert_eq!(running_lines, 2);
+}
+
+/// Everything srelens writes to a sidecar is a message the protocol schema
+/// (`schemas/sidecar-protocol.v0.1.json`) allows: the handshake, an app
+/// request, a stream opened and cancelled, a request cancelled, the stop. So
+/// an SDK that validates what it reads against the schema accepts all of it.
+#[tokio::test(start_paused = true)]
+async fn everything_srelens_writes_is_a_host_message_in_the_protocol_schema() {
+    let root = srelens_sidecar_protocol::schema();
+    let host_message = jsonschema::draft7::new(&json!({
+        "definitions": root["definitions"],
+        "allOf": [{"$ref": "#/definitions/HostMessage"}],
+    }))
+    .expect("the schema compiles");
+    let launcher = FakeLauncher::new(|call| match call.method {
+        "slow" => Some(Reply::Silent),
+        "echo" => {
+            // The sidecar calls the host too; the supervisor runs with
+            // NoBroker, so srelens answers both with an error, which is
+            // still a HostMessage.
+            call.call_host(
+                "c-1",
+                "host/read",
+                json!({"context": {"clusterId": "kind-dev", "namespace": null}, "capability": "applications"}),
+            );
+            call.call_host("c-2", "k8s.getSecret", json!({}));
+            None
+        }
+        _ => None,
+    });
+    let supervisor = start(&launcher);
+    running(&supervisor).await;
+    supervisor
+        .request("echo", json!({"n": 1}))
+        .await
+        .expect("answered");
+    let stream = supervisor
+        .open_stream("watch", json!({}))
+        .await
+        .expect("opens");
+    drop(stream);
+    // Times out, and is cancelled at the sidecar.
+    let _ = supervisor.request("slow", json!({})).await;
+    supervisor.stop().await;
+    sleep(Duration::from_millis(1)).await;
+
+    let methods = launcher.methods();
+    for expected in [
+        "initialize",
+        "activate",
+        "echo",
+        "stream/open",
+        "stream/cancel",
+        "slow",
+        "$/cancelRequest",
+        "deactivate",
+        "shutdown",
+    ] {
+        assert!(
+            methods.iter().any(|m| m == expected),
+            "srelens never wrote {expected}: {methods:?}"
+        );
+    }
+    let received = launcher.received();
+    for (_, message) in &received {
+        let errors: Vec<String> = host_message
+            .iter_errors(message)
+            .map(|e| e.to_string())
+            .collect();
+        assert!(errors.is_empty(), "{message}: {errors:?}");
+    }
+    assert!(
+        received.iter().any(|(_, m)| m.get("method").is_none()),
+        "srelens wrote no answer to a sidecar call"
+    );
+    // Guards the guard: the validator refuses what the schema does not allow.
+    let mut broken = received[0].1.clone();
+    broken["params"]
+        .as_object_mut()
+        .unwrap()
+        .remove("apiVersions");
+    assert!(
+        !host_message.is_valid(&broken),
+        "the validator took an initialize without apiVersions"
+    );
 }

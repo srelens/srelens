@@ -18,3 +18,12 @@ crates/registry/tests/fixtures/flux-0.4.0-manifest.json -text
 # and the signed one's list carries a signature, so no byte may change on checkout.
 crates/registry/tests/fixtures/packages/** -text
 crates/registry/tests/fixtures/trust/example-release.json -text
+
+# OpenPGP-signed files for `srelens-tui update` (#448). A signature covers the
+# exact bytes, so a checkout that converts line endings fails every check.
+apps/tui/tests/fixtures/release-signing/** -text
+
+# Go source is LF, as gofmt writes it. The generator's output is compared with
+# the committed file byte for byte, and gofmt -l lists a CRLF file as
+# unformatted.
+*.go text eol=lf

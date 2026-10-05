@@ -15,12 +15,22 @@ mod catalog;
 mod durable;
 pub use catalog::{catalog_of, CatalogEntry};
 mod extensions;
+pub mod github;
 mod settings;
 /// The extension readers' fuzz entry points, for the targets in `fuzz/`. Not an API.
 #[cfg(feature = "fuzzing")]
 #[doc(hidden)]
 pub use extensions::fuzzing;
 pub use extensions::streams::{ExtensionStreams, OpenStreamOut, INVENTORY_CHANNEL};
+/// Installed apps' operations as MCP tools (#574), from [`ExtensionStreams::app_tools`],
+/// and what their sidecars' calls are answered with ([`AppTools::serve_sidecars`]).
+pub use extensions::sidecars::SidecarHost;
+pub use extensions::tools::AppTools;
+/// Who confirms a sidecar's gated call (#573): a host's own, or `NoConsent`.
+pub use srelens_plugin_host::sidecar::{
+    AppIdentity as SidecarApp, Consent as SidecarConsent, ConsentRequest as SidecarConsentRequest,
+    NoConsent,
+};
 pub use extensions::{
     AppPolicy, Apps, InventoryKey, InventoryLock, InventoryStore, SharedCatalog, SharedPolicy,
     TrustRoot, MAX_POLICY_BYTES,
@@ -520,6 +530,7 @@ fn build_with(
     reg.register(srelens_kube::ingresses::list_ingresses_capability(
         cache.clone(),
     ));
+    reg.register(srelens_kube::endpoints::list_endpoints_capability(cache.clone()));
     reg.register(srelens_kube::endpointslices::list_endpointslices_capability(cache.clone()));
     reg.register(srelens_kube::networkpolicies::list_networkpolicies_capability(cache.clone()));
     reg.register(srelens_kube::pvcs::list_pvcs_capability(cache.clone()));
@@ -550,6 +561,9 @@ fn build_with(
     reg.register(srelens_kube::actions::rollout_restart_capability(
         cache.clone(),
     ));
+    reg.register(srelens_kube::deployments::rollout_undo_capability(
+        cache.clone(),
+    ));
     reg.register(srelens_kube::actions::update_config_data_capability(
         cache.clone(),
     ));
@@ -563,6 +577,13 @@ fn build_with(
     reg.register(srelens_kube::changed::list_changes_capability(
         cache.clone(),
     ));
+    // Why a `k8s.listChanges` rollout happened: its Argo sync's GitHub PRs.
+    // Desktop only, like `network.http` (#568): on the web host the request
+    // would leave from the shared server, with the server's GITHUB_TOKEN,
+    // for whichever user asked.
+    if network == BrokeredNetwork::Desktop {
+        reg.register(github::rollout_cause_capability());
+    }
     reg.register(srelens_kube::metrics::node_metrics_capability(
         cache.clone(),
     ));
@@ -763,6 +784,144 @@ mod tests {
         let server = McpServer::new(Arc::new(reg.clone()));
         assert_eq!(assert_every_capability_has_a_tool(&reg, &server), Ok(()));
         srelens_mcp::completeness::assert_mutating_capabilities_are_gated(&reg);
+    }
+
+    /// #574: every installed app's reader, declared action and sidecar operation is
+    /// an MCP tool — and a pod binding, a session a view opens, is not — and the app
+    /// tools meet every rule the host's own capabilities do: listed, gated when they
+    /// mutate, at an impact that agrees with the gate, and with a renderable host
+    /// sentence wherever they are gated.
+    #[tokio::test]
+    async fn every_installed_apps_operation_is_mcp_exposed() {
+        use base64::Engine as _;
+        let dir = tempfile::tempdir().unwrap();
+        let (reg, streams) = build_registry_and_app_streams(
+            ClientCache::new_many(vec![]),
+            vec![],
+            Some(dir.path().join("settings.json")),
+        );
+        let configure = |input: serde_json::Value| reg.invoke("extensions.configure", input);
+        configure(json!({"action": "unsignedApps", "allowUnsignedApps": true}))
+            .await
+            .unwrap();
+        let mut sources: Vec<serde_json::Value> = [
+            include_str!("../../../examples/extensions/argocd.json"),
+            include_str!("../../../examples/extensions/flux.json"),
+        ]
+        .iter()
+        .map(|source| {
+            let mut value: serde_json::Value = serde_json::from_str(source).unwrap();
+            let id = value["id"].as_str().unwrap().replace("org.srelens.", "org.example.");
+            value["id"] = json!(id);
+            value
+        })
+        .collect();
+        sources.push(json!({
+            "id": "org.example.releases", "name": "Releases", "version": "0.1.0",
+            "srelensApiVersion": "^0.5", "kind": "declarative",
+            "permissions": [{"capability": "network.http", "hosts": ["api.github.com"]},
+                "k8s.listDeployments", {"capability": "k8s.streamLogs", "namespaces": ["web"]}],
+            "capabilities": [
+                {"name": "latest", "title": "Latest release", "target": "network.http",
+                 "arguments": {"url": "https://api.github.com", "path": "/repos/srelens/srelens/releases/latest"},
+                 "inputs": []},
+                {"name": "deployments", "title": "Deployments", "target": "k8s.listDeployments",
+                 "arguments": {}, "inputs": ["context", "namespace"]},
+                {"name": "logs", "title": "Logs", "target": "k8s.streamLogs",
+                 "arguments": {}, "inputs": []}],
+            "contributions": {"pages": [], "detailTabs": [], "detailLinks": []}
+        }));
+        for source in &sources {
+            let grants: Vec<String> = source["permissions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|p| p.as_str().or(p["capability"].as_str()).unwrap().to_owned())
+                .collect();
+            configure(json!({"action": "install", "manifest": source.to_string(), "grants": grants}))
+                .await
+                .unwrap_or_else(|e| panic!("{}: {e}", source["id"]));
+        }
+        // An executable app, from a package carrying a binary for every platform.
+        let package = tempfile::tempdir().unwrap();
+        let binaries: serde_json::Map<String, serde_json::Value> =
+            srelens_plugin_host::SIDECAR_PLATFORMS
+                .iter()
+                .map(|platform| {
+                    let path = format!("bin/{platform}/scanner");
+                    let file = package.path().join(&path);
+                    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+                    std::fs::write(file, b"#!/bin/false\n").unwrap();
+                    (platform.to_string(), json!(path))
+                })
+                .collect();
+        let scanner = json!({
+            "id": "org.example.scanner", "name": "Scanner", "version": "1.0.0",
+            "srelensApiVersion": "^0.6", "kind": "executable", "permissions": [], "capabilities": [],
+            "sidecar": {"binaries": binaries, "operations": [
+                {"name": "scan", "title": "Scan an image",
+                 "inputs": [{"name": "image", "type": "string", "required": true}]}]},
+            "contributions": {"pages": [], "detailTabs": [], "detailLinks": []}
+        });
+        std::fs::write(package.path().join("extension.json"), scanner.to_string()).unwrap();
+        std::fs::write(
+            package.path().join("digests.json"),
+            extension_package::digest_list(package.path()).unwrap(),
+        )
+        .unwrap();
+        let archive = extension_package::pack(package.path()).unwrap();
+        configure(json!({"action": "installPackage", "grants": [],
+            "package": base64::engine::general_purpose::STANDARD.encode(archive)}))
+        .await
+        .unwrap();
+
+        let tools = streams.unwrap().app_tools();
+        let server = McpServer::new(Arc::new(reg.clone())).with_app_tools(tools.clone());
+        let snapshot = srelens_mcp::ToolSource::tools(&*tools).await;
+        let listed = reg.invoke("extensions.list", json!({})).await.unwrap();
+        let mut operations = Vec::new();
+        let mut sessions = Vec::new();
+        for app in listed["plugins"].as_array().unwrap() {
+            let manifest = &app["manifest"];
+            let id = manifest["id"].as_str().unwrap();
+            let named = |item: &serde_json::Value| format!("plugin/{id}/{}", item["name"].as_str().unwrap());
+            for binding in manifest["capabilities"].as_array().unwrap() {
+                if srelens_plugin_host::is_pod_target(binding["target"].as_str().unwrap()) {
+                    sessions.push(named(binding));
+                } else {
+                    operations.push(named(binding));
+                }
+            }
+            for item in manifest["actions"].as_array().into_iter().flatten() {
+                operations.push(named(item));
+            }
+            for item in manifest["sidecar"]["operations"].as_array().into_iter().flatten() {
+                operations.push(named(item));
+            }
+        }
+        assert_eq!(listed["plugins"].as_array().unwrap().len(), 4);
+        assert!(operations.len() > 40, "{operations:?}");
+        assert_eq!(sessions, ["plugin/org.example.releases/logs"]);
+        assert_eq!(
+            srelens_mcp::completeness::assert_every_app_operation_has_a_tool(&operations, &server),
+            Ok(())
+        );
+        let tool_names: Vec<String> = server.list_tools().into_iter().map(|t| t.name).collect();
+        assert!(sessions.iter().all(|session| !tool_names.contains(session)));
+        assert_eq!(assert_every_capability_has_a_tool(&snapshot, &server), Ok(()));
+        srelens_mcp::completeness::assert_mutating_capabilities_are_gated(&snapshot);
+        srelens_mcp::completeness::assert_impact_matches_the_gate(&snapshot);
+        srelens_mcp::completeness::assert_confirm_templates_are_renderable(&snapshot);
+        let silent: Vec<&str> = snapshot
+            .ids()
+            .into_iter()
+            .filter(|id| {
+                snapshot.get(id).is_some_and(|c| {
+                    c.annotations.requires_confirm && c.annotations.confirm.is_none()
+                })
+            })
+            .collect();
+        assert!(silent.is_empty(), "gated with no confirmation text: {silent:?}");
     }
 
     /// An app's logs and runtime metrics are local (#575): srelens's own UI
@@ -1125,10 +1284,16 @@ mod tests {
         let desktop_reg = build_registry();
         let desktop: std::collections::BTreeSet<&str> = desktop_reg.ids().into_iter().collect();
         let host_only: Vec<&str> = desktop.difference(&web).copied().collect();
-        // No secret store on the web yet (#522), so no way to hand one a secret.
+        // No secret store on the web yet (#522), so no way to hand one a secret;
+        // no GitHub reads made from the shared server with its token.
         assert_eq!(
             host_only,
-            ["extension.secretStore", "settings.get", "settings.set"]
+            [
+                "extension.secretStore",
+                "github.rolloutCause",
+                "settings.get",
+                "settings.set"
+            ]
         );
         assert!(web.is_subset(&desktop));
 
@@ -1377,7 +1542,10 @@ mod tests {
             std::fs::write(path, &want).unwrap();
             return;
         }
-        let got = std::fs::read_to_string(path).unwrap_or_default();
+        // LF in the index but CRLF in a `core.autocrlf=true` checkout; `want` is LF.
+        let got = std::fs::read_to_string(path)
+            .unwrap_or_default()
+            .replace("\r\n", "\n");
         assert_eq!(got, want, "capability-catalog.json is stale — run UPDATE_CATALOG=1 cargo test -p srelens-registry");
     }
 
@@ -1392,7 +1560,10 @@ mod tests {
             std::fs::write(path, &want).unwrap();
             return;
         }
-        let got = std::fs::read_to_string(path).unwrap_or_default();
+        // LF in the index but CRLF in a `core.autocrlf=true` checkout; `want` is LF.
+        let got = std::fs::read_to_string(path)
+            .unwrap_or_default()
+            .replace("\r\n", "\n");
         assert_eq!(
             got, want,
             "docs/mcp-catalog.md is stale — run `UPDATE_CATALOG=1 cargo test -p srelens-registry`"
@@ -1500,6 +1671,10 @@ mod tests {
         let mut out = String::new();
         walk(&root.join("crates"), &mut out);
         walk(&root.join("apps/desktop/src-tauri/src"), &mut out);
+        // The sidecar SDKs and their examples are workspace members too, and
+        // DEVELOPMENT.md documents the variables their tests read
+        // (`SRELENS_HELLO_WORLD_GO`).
+        walk(&root.join("sdk"), &mut out);
         assert!(!out.is_empty(), "found no Rust sources to scan");
         out
     }

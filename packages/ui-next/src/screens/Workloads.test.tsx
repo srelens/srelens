@@ -203,14 +203,15 @@ describe("Workloads", () => {
   });
 
   it("keeps that same pod flagged in the instant it is between restarts", async () => {
-    // The moment the row above never modelled: no waiting reason, phase still
-    // "Running", ready still 0/1. The row used to drop its dot and read a
-    // plain green "Running" until the container failed again.
+    // The moment the row above never modelled: the container has exited and
+    // is not yet backed off, so there is no waiting reason and the phase is
+    // still "Running". kubectl's word there is the container's `Error`, which
+    // the backend sends as `status`, and it is red.
     watchResource.mockImplementation(
       async (_c: string, _n: string, kind: string, onRows: (rows: unknown[]) => void) => {
         onRows(
           kind === "pods"
-            ? [{ name: "web-1", namespace: "default", phase: "Running", ready: "0/1", restarts: 7, node: "n1", age: "2d", image: "acme/web:1", waitingReason: "" }]
+            ? [{ name: "web-1", namespace: "default", phase: "Running", ready: "0/1", restarts: 7, node: "n1", age: "2d", image: "acme/web:1", waitingReason: "", status: "Error" }]
             : [],
         );
         return { stop };
@@ -221,7 +222,7 @@ describe("Workloads", () => {
     await waitFor(() => expect(rowNames()).toEqual(["Needs attentionweb-1"]));
     const row = screen.getByText("web-1").closest("tr")!;
     expect(within(row).getByText("Needs attention")).toBeTruthy();
-    expect(within(row).getByText("NotReady")).toBeTruthy();
+    expect(within(row).getByText("Error")).toBeTruthy();
     expect(within(row).queryByText("Running")).toBeNull();
   });
 

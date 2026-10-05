@@ -10,11 +10,13 @@ use std::time::Duration;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
 use ratatui::layout::Rect;
 use serde_json::{json, Value};
+use srelens_kube::k8s_openapi::api::core::v1::Pod;
 use srelens_kube::lineage::{LineageNode, LineageRelation};
 use srelens_kube::metrics::MetricSample;
 use srelens_kube::node_inspector::{
     NodeConditionInfo, NodeInspectorDetails, NodePodItem, NodeTaintInfo,
 };
+use srelens_kube::workloads::summarise_pod;
 use srelens_tui::ai_skills::CavemanLevel;
 use srelens_tui::app::{
     extract_tool_call_completed_info, extract_tool_call_start_info, format_event_summary,
@@ -22,6 +24,7 @@ use srelens_tui::app::{
 };
 use srelens_tui::commands::{CommandTarget, CrdMeta, PrinterColumn, ResourceKind};
 use srelens_tui::event::AppEvent;
+use srelens_tui::theme::Theme;
 use srelens_tui::ui::dialogs::{QuickActionId, QuickActionItem};
 use srelens_tui::ui::{ContainerAction, InputMode, Modal};
 use srelens_tui::views::describe_view::DescribeViewState;
@@ -288,6 +291,11 @@ fn node_details(name: &str, unschedulable: bool) -> NodeInspectorDetails {
         gpu_requests_count: 0,
         gpu_memory_total_mib: Some(24_576),
         gpu_memory_requests_mib: 0,
+        is_virtual_gpu: false,
+        physical_gpu_count: 0,
+        physical_gpu_memory_total_mib: None,
+        virtual_gpu_count: None,
+        virtual_gpu_memory_total_mib: None,
         conditions: vec![NodeConditionInfo {
             type_: "Ready".into(),
             status: "True".into(),
@@ -622,6 +630,86 @@ async fn a_pods_watch_for_the_current_channel_keeps_previous_metrics_and_fills_t
     assert_eq!(t.raw_items[0]["cpu"], json!("5m"));
     assert_eq!(t.raw_items[0]["memory"], json!("64Mi"));
     assert!(t.raw_items[1].get("cpu").is_none());
+}
+
+/// A crash-looping pod as the API server returns it (`kubectl get pod -o
+/// json`, trimmed): its only container has exited 1 six times and sits in
+/// `CrashLoopBackOff`, and the phase still says `Running`.
+fn crash_looping_pod() -> Value {
+    json!({
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "metadata": {
+            "name": "crasher-6d8f9b7c4-x2x9k",
+            "namespace": "default",
+            "creationTimestamp": "2026-10-03T10:00:00Z"
+        },
+        "spec": {
+            "nodeName": "kind-control-plane",
+            "containers": [{ "name": "crasher", "image": "busybox:1.36" }]
+        },
+        "status": {
+            "phase": "Running",
+            "conditions": [
+                { "type": "Ready", "status": "False", "reason": "ContainersNotReady" },
+                { "type": "ContainersReady", "status": "False", "reason": "ContainersNotReady" }
+            ],
+            "containerStatuses": [{
+                "name": "crasher",
+                "image": "docker.io/library/busybox:1.36",
+                "imageID": "",
+                "ready": false,
+                "started": false,
+                "restartCount": 6,
+                "state": { "waiting": {
+                    "reason": "CrashLoopBackOff",
+                    "message": "back-off 2m40s restarting failed container=crasher"
+                } },
+                "lastState": { "terminated": {
+                    "exitCode": 1,
+                    "reason": "Error",
+                    "startedAt": "2026-10-03T10:04:00Z",
+                    "finishedAt": "2026-10-03T10:04:01Z"
+                } }
+            }]
+        }
+    })
+}
+
+#[tokio::test]
+async fn a_crash_looping_pod_reads_crash_loop_back_off_in_red_not_running_in_green() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app().await;
+    app.active_view = ActiveView::Table(table_with(ResourceKind::Pods, vec![]));
+    let channel = "watch:test-cluster:default:pods".to_string();
+    app.current_watch_channel = Some(channel.clone());
+
+    // Exactly what the pods watch emits: the pod through the backend's own
+    // summariser, serialised.
+    let pod: Pod = serde_json::from_value(crash_looping_pod()).expect("a valid Pod");
+    let summary = serde_json::to_value(summarise_pod(pod)).expect("a summary serialises");
+    app.handle_stream_event(channel, json!([summary]));
+
+    let _theme = common::theme::lock();
+    let buf = common::render_app_buffer(&mut app, WIDE.0, WIDE.1);
+    let lines = common::buffer_lines(&buf);
+    let (y, row) = lines
+        .iter()
+        .enumerate()
+        .find(|(_, l)| l.contains("crasher-6d8f9b7c4-x2x9k"))
+        .unwrap_or_else(|| panic!("the pod's row is on screen:\n{}", lines.join("\n")));
+    assert!(
+        row.contains("CrashLoopBackOff"),
+        "STATUS shows what kubectl shows, not the phase: {row}"
+    );
+    assert!(!row.contains("Running"), "the phase does not show: {row}");
+    let byte = row.find("CrashLoopBackOff").unwrap();
+    let x = row[..byte].chars().count() as u16;
+    assert_eq!(
+        buf[(x, y as u16)].style().fg,
+        Theme::status_error().fg,
+        "a crash loop is drawn in the error colour, not the healthy green: {row}"
+    );
 }
 
 #[tokio::test]
@@ -1945,12 +2033,13 @@ async fn assistant_history_and_slash_suggestions_drive_the_arrow_keys() {
 }
 
 #[tokio::test]
-async fn assistant_busy_turn_can_be_cancelled_with_esc_or_ctrl_c() {
+async fn assistant_busy_turn_survives_esc_and_is_cancelled_with_ctrl_c() {
     let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
-    app.active_view = ActiveView::Assistant;
+    let previous = std::mem::replace(&mut app.active_view, ActiveView::Assistant);
+    app.nav_stack.push(previous);
 
-    // 1. Cancel via Esc
+    // 1. Esc leaves the Assistant; the turn keeps running in the background.
     app.assistant_state.is_busy = true;
     let task1 = tokio::spawn(async {
         tokio::time::sleep(std::time::Duration::from_secs(60)).await;
@@ -1959,28 +2048,16 @@ async fn assistant_busy_turn_can_be_cancelled_with_esc_or_ctrl_c() {
 
     app.handle_key_event(common::key(KeyCode::Esc)).await;
     assert!(
-        !app.assistant_state.is_busy,
-        "Esc cancels busy assistant state"
+        !matches!(app.active_view, ActiveView::Assistant),
+        "Esc goes back"
     );
-    assert!(
-        app.assistant_state.task.is_none(),
-        "assistant task handle was taken"
-    );
-    assert_eq!(toast(&app), "✓ Assistant generation cancelled");
-    assert!(app
-        .assistant_state
-        .messages
-        .last()
-        .unwrap()
-        .content
-        .contains("[Cancelled by user]"));
-    let res1 = tokio::time::timeout(std::time::Duration::from_millis(500), task1).await;
-    assert!(
-        res1.is_ok() && res1.unwrap().unwrap_err().is_cancelled(),
-        "task1 was aborted"
-    );
+    assert!(app.assistant_state.is_busy, "Esc does not cancel the turn");
+    assert!(app.assistant_state.task.is_some(), "the task is kept");
+    assert!(!task1.is_finished(), "task1 is still running");
+    task1.abort();
 
     // 2. Cancel via Ctrl+c when busy and no selection, and verify running tool call is closed
+    app.active_view = ActiveView::Assistant;
     app.assistant_state.is_busy = true;
     let task2 = tokio::spawn(async {
         tokio::time::sleep(std::time::Duration::from_secs(60)).await;

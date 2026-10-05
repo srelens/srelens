@@ -13,6 +13,7 @@ export interface KubectlInput {
     | "delete"
     | "scale"
     | "rollout-restart"
+    | "rollout-undo"
     | "cordon"
     | "uncordon"
     | "drain"
@@ -28,6 +29,8 @@ export interface KubectlInput {
   output?: string;
   /** For scale: target replica count. */
   replicas?: number;
+  /** For rollout-undo: the revision to roll back to (#389). */
+  revision?: number;
   /** For port-forward: the local machine's port. */
   localPort?: number;
   /** For port-forward: the port on the target pod/service. */
@@ -121,7 +124,7 @@ function shellQuote(value: string, what: string, windows: boolean): string {
  * `KubectlPreview`'s `note` prop).
  */
 export function toKubectl(input: KubectlInput, windows: boolean = IS_WINDOWS): string {
-  const { action, kind, name, context, namespace, output, replicas, localPort, remotePort } = input;
+  const { action, kind, name, context, namespace, output, replicas, revision, localPort, remotePort } = input;
   // Prefer the authoritative kind→resource table (mirrors the backend's own
   // GVR mapping) over a bare lowercase, which drifts for kinds whose plural
   // isn't just "+s" (Ingress → ingresses). Falls back to lowercasing for
@@ -171,6 +174,10 @@ export function toKubectl(input: KubectlInput, windows: boolean = IS_WINDOWS): s
 
     case "rollout-restart":
       parts.push("rollout", "restart", `${kindLower}/${qName}`);
+      break;
+
+    case "rollout-undo":
+      parts.push("rollout", "undo", `${kindLower}/${qName}`, `--to-revision=${revision}`);
       break;
 
     case "cordon":

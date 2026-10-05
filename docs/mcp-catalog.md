@@ -7,11 +7,11 @@ Everything this server exposes over MCP, generated from the live registry so it 
 
 ## Tools
 
-124 tools, grouped by area and then by how a call is gated. Argument schemas are not reproduced here — call `tools/list` for those, which cannot go stale.
+127 tools, grouped by area and then by how a call is gated. Argument schemas are not reproduced here — call `tools/list` for those, which cannot go stale.
 
 **Impact** is how much a successful call disturbs — `low`, `medium` or `high` — and is a different question from the section heading, which is how the call is gated. A capability that accepts several named operations carries the highest level any of them reaches; the per-operation level travels with the resource.
 
-### Kubernetes — read-only (56)
+### Kubernetes — read-only (57)
 
 | Tool | Impact | Summary |
 | --- | --- | --- |
@@ -34,6 +34,7 @@ Everything this server exposes over MCP, generated from the live registry so it 
 | `k8s.listDaemonSets` | low | list DaemonSets in a namespace of a connected kube context |
 | `k8s.listDeployments` | low | list deployments in a namespace of a connected kube context |
 | `k8s.listEndpointSlices` | low | list EndpointSlices in a namespace of a connected kube context |
+| `k8s.listEndpoints` | low | list Endpoints in a namespace of a connected kube context |
 | `k8s.listEvents` | low | list events in a connected kube context |
 | `k8s.listIngresses` | low | list Ingresses in a namespace of a connected kube context |
 | `k8s.listJobs` | low | list Jobs in a namespace of a connected kube context |
@@ -83,7 +84,7 @@ Everything this server exposes over MCP, generated from the live registry so it 
 | `k8s.podConnections` | medium | read the established TCP connections of pods, from their own /proc/net/tcp |
 | `k8s.topologyProbe` | medium | the topology graph, plus each pod's open connections read over pods/exec (one exec per pod) |
 
-### Kubernetes — needs confirmation (13)
+### Kubernetes — needs confirmation (14)
 
 | Tool | Impact | Summary |
 | --- | --- | --- |
@@ -96,6 +97,7 @@ Everything this server exposes over MCP, generated from the live registry so it 
 | `k8s.requestCordonNode` | medium | Request cordon or uncordon of the reviewed Node without eviction; requires confirmation |
 | `k8s.requestRolloutRestart` | high | Request a rolling restart of the reviewed built-in workload; requires confirmation |
 | `k8s.rolloutRestart` | medium | trigger a rolling restart of a workload |
+| `k8s.rolloutUndo` | medium | roll a Deployment back to an earlier revision (kubectl rollout undo --to-revision) |
 | `k8s.scale` | medium | set the replica count of a workload (Deployment/StatefulSet/ReplicaSet) |
 | `k8s.setFields` | medium | Set fixed spec fields on the reviewed resource, as an app's action declares them; requires confirmation |
 | `k8s.setStatusCondition` | medium | Write one status condition on the reviewed resource through the status subresource, as an app's action declares it; requires confirmation |
@@ -159,7 +161,7 @@ Everything this server exposes over MCP, generated from the live registry so it 
 | `toolbox.removePlugin` | medium | remove an installed krew plugin |
 | `toolbox.upgradePlugin` | medium | upgrade an installed krew plugin |
 
-### Server — read-only (17)
+### Server — read-only (18)
 
 | Tool | Impact | Summary |
 | --- | --- | --- |
@@ -178,6 +180,7 @@ Everything this server exposes over MCP, generated from the live registry so it 
 | `extensions.resource` | low | Inspect the selected resource of an enabled app |
 | `extensions.streams` | low | Report the open app streams in this process and the traffic each app has sent |
 | `extensions.validate` | low | Check a declarative extension manifest exactly as installing it would and return every problem; does not install it |
+| `github.rolloutCause` | low | why an Argo sync rolled out: the github.com commits between the previous and the synced revision that touched the app's path, and the pull requests they came from |
 | `ping` | low | health check; echoes the input back as { pong: <input> } |
 | `settings.get` | low | read durable desktop settings; omit key to return the complete map |
 
@@ -189,6 +192,32 @@ Everything this server exposes over MCP, generated from the live registry so it 
 | `extensions.action` | high | Run a declared action on an app resource; requires explicit confirmation |
 | `extensions.configure` | medium | Install, enable, remove or configure local extensions; requires approval |
 | `settings.set` | medium | atomically write or remove durable desktop settings |
+
+## App tools
+
+Every installed app that is on adds its operations as tools named `plugin/<app id>/<operation>`: each reader binding, each declared action and, for an executable app, each operation its sidecar answers. A pod binding (logs, exec, a port-forward) is a session an app's view opens, not a tool. Which tools there are depends on what is installed, so `tools/list` is the list: a server with app tools advertises `tools.listChanged`, and sends `notifications/tools/list_changed` whenever an app is installed, updated, rolled back, enabled, disabled, blocked or removed. A change another srelens process made is noticed the next time the tools are listed or called, or by a session that can be pushed to within a few seconds.
+
+A tool's schema and its gate are the host's, never the app's. A reader takes `context` and, when it takes one, `namespace`; an action takes `context`, `namespace`, `name`, `uid` and `resourceVersion`; a sidecar operation takes the typed inputs it declares, each held to its type and length before the sidecar sees it. Readers and actions run through the same broker paths as `extensions.read` and `extensions.action`, and a gated tool asks the same consent as any other gated tool. When an app changes, the tools it had are withdrawn: a caller still holding them is refused.
+
+| An app's | Host capability behind it | Gated as | Impact |
+| --- | --- | --- | --- |
+| reader | `k8s.listCustomResource` | read-only | low |
+| reader | `k8s.listEvents` | read-only | low |
+| reader | `k8s.listDeployments` | read-only | low |
+| reader | `k8s.listStatefulSets` | read-only | low |
+| reader | `k8s.listDaemonSets` | read-only | low |
+| reader | `k8s.listNodes` | read-only | low |
+| reader | `network.http` | read-only | low |
+| declared action | `k8s.annotate` | needs confirmation | medium |
+| declared action | `k8s.setFields` | needs confirmation | medium |
+| declared action | `k8s.setStatusCondition` | needs confirmation | medium |
+| declared action | `k8s.mergePatch` | needs confirmation | high |
+| declared action | `k8s.requestRolloutRestart` | needs confirmation | high |
+| declared action | `k8s.requestCordonNode` | needs confirmation | medium |
+| sidecar operation, of an app that declares no action | its app's readers, through the broker | read-only | low |
+| sidecar operation, of an app that declares actions | its app's readers and declared actions, through the broker | needs confirmation | at least medium, and at least its highest action's |
+
+An executable app's sidecar reaches the host only through the broker ([#573](https://github.com/srelens/srelens/issues/573)): what its app's readers read, and its app's declared actions. So an operation of an app that declares none is not gated: it can change nothing outside its sandbox. One of an app that declares actions is gated as the strongest of them, and each write the sidecar then asks for is put to a person again, naming the app; where nobody can be asked, headless, it is refused. Either way an operation's arguments are the app's own vocabulary, so the audit log redacts them whole.
 
 ## Prompts
 

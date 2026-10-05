@@ -175,21 +175,31 @@ function broadcast(channel: string, payload: unknown): boolean {
   return true;
 }
 
-const ask = (id: string, tool: string, args: Record<string, unknown> = {}) =>
-  emit(REQUEST, { id, tool, args });
+/** srelens's own chat, as `startChat` names it in this file's mock. */
+const OURS = { chatSession: "sess-1" };
+
+/** A confirm as the backend raises it. `caller` is who the host authenticated
+ *  the call as (#393): srelens's own chat, or `null` for anybody else. */
+const ask = (
+  id: string,
+  tool: string,
+  args: Record<string, unknown> = {},
+  caller: { chatSession: string } | null = null,
+) => emit(REQUEST, { id, tool, args, caller });
 
 /**
- * Put the run store into `busy` — the only state `AgentConsent` can use to
- * decide a confirm is srelens's own agent's doing (C1). `askAgent` commits
- * `busy: true` synchronously, before its first `await`, so this is true the
- * instant the call is made — no need to await anything here. `sendChat` is
- * left hanging (never resolves) so the run STAYS busy for the rest of the
- * test; `resetAgentRun()` in the next `beforeEach` is what cleans it up, not
+ * Put the run store into `busy`, AND wait until the run holds its backend
+ * chat — the session a gate names (#393). A CLI cannot raise a confirm before
+ * `chat_send`, which runs after `startChat` resolved, so a test that asks
+ * sooner is asking about a state the app never reaches. `sendChat` is left
+ * hanging (never resolves) so the run STAYS busy for the rest of the test;
+ * `resetAgentRun()` in the next `beforeEach` is what cleans it up, not
  * anything this helper does.
  */
-function startTurn(): void {
+async function startTurn(): Promise<void> {
   core.sendChat.mockImplementation(() => new Promise(() => {}));
   void askAgent("investigate checkout-api");
+  await waitFor(() => expect(core.sendChat).toHaveBeenCalled());
 }
 
 beforeEach(() => {
@@ -783,8 +793,8 @@ describe("AgentConsent", () => {
   describe("the record it leaves in the run", () => {
     it("still answers exactly once, with the transcript only recording it", async () => {
       await mount();
-      startTurn();
-      ask("r1", "k8s_scale", { name: "api" });
+      await startTurn();
+      ask("r1", "k8s_scale", { name: "api" }, OURS);
       await userEvent.click(await screen.findByRole("button", { name: /approve/i }));
       await waitFor(() => expect(core.respondToConfirm).toHaveBeenCalledWith("r1", true));
       expect(core.respondToConfirm.mock.calls.filter(([id]) => id === "r1")).toHaveLength(1);
@@ -792,8 +802,8 @@ describe("AgentConsent", () => {
 
     it("puts the request in the run as pending, before anyone has answered it, while srelens's own agent has a turn in flight", async () => {
       await mount();
-      startTurn();
-      ask("r1", "k8s_scale", { replicas: 3 });
+      await startTurn();
+      ask("r1", "k8s_scale", { replicas: 3 }, OURS);
       await screen.findByRole("dialog");
       // Recorded at presentation — this is what the transcript draws as
       // pending, and it must exist while the answer is still the reader's to
@@ -810,8 +820,8 @@ describe("AgentConsent", () => {
 
     it("records the outcome in the run without owning the answer", async () => {
       await mount();
-      startTurn();
-      ask("r1", "k8s_scale", { replicas: 7 });
+      await startTurn();
+      ask("r1", "k8s_scale", { replicas: 7 }, OURS);
       await userEvent.click(await screen.findByRole("button", { name: /approve/i }));
       await waitFor(() => expect(getAgentRun().gates.find((g) => g.id === "r1")?.outcome).toBe("approved"));
       // One row, not two: `noteGate` merges by id, so the pending record is
@@ -823,13 +833,28 @@ describe("AgentConsent", () => {
       expect(getAgentRun().gates.find((g) => g.id === "r1")?.args).toEqual({ replicas: 7 });
     });
 
+    it("records the host's sentence and level with the gate, and keeps them once answered (#388)", async () => {
+      await mount();
+      await startTurn();
+      emit(REQUEST, {
+        id: "r9", tool: "k8s.scale", args: { replicas: 2 },
+        prompt: "Change the replica count of Deployment shop/api in cluster prod?", impact: "medium",
+        caller: OURS,
+      });
+      await userEvent.click(await screen.findByRole("button", { name: /approve/i }));
+      await waitFor(() => expect(getAgentRun().gates.find((g) => g.id === "r9")?.outcome).toBe("approved"));
+      const gate = getAgentRun().gates.find((g) => g.id === "r9");
+      expect(gate?.prompt).toBe("Change the replica count of Deployment shop/api in cluster prod?");
+      expect(gate?.impact).toBe("medium");
+    });
+
     it("records a denial as a denial", async () => {
       // `outcome` carries three states and a denial is not the absence of an
       // approval. Without this, a field that only ever writes "approved"
       // passes the test above forever.
       await mount();
-      startTurn();
-      ask("r2", "k8s_deletePod", {});
+      await startTurn();
+      ask("r2", "k8s_deletePod", {}, OURS);
       await userEvent.click(await screen.findByRole("button", { name: /deny/i }));
       await waitFor(() => expect(getAgentRun().gates.find((g) => g.id === "r2")?.outcome).toBe("denied"));
     });
@@ -840,9 +865,9 @@ describe("AgentConsent", () => {
       // backend never accepted — and this component already keeps the prompt
       // up for exactly that reason.
       await mount();
-      startTurn();
+      await startTurn();
       core.respondToConfirm.mockRejectedValueOnce(new Error("already settled"));
-      ask("r4", "k8s_rolloutRestart", {});
+      ask("r4", "k8s_rolloutRestart", {}, OURS);
       await userEvent.click(await screen.findByRole("button", { name: /approve/i }));
       await screen.findByRole("alert");
       expect(getAgentRun().gates.find((g) => g.id === "r4")?.outcome).toBe("pending");
@@ -856,9 +881,9 @@ describe("AgentConsent", () => {
       // already by answering over a sealed vault; this is the next change to
       // touch it.
       await mount();
-      startTurn();
+      await startTurn();
       act(() => lockWorkspace());
-      ask("r3", "k8s_drainNode");
+      ask("r3", "k8s_drainNode", {}, OURS);
       await waitFor(() => expect(core.respondToConfirm).toHaveBeenCalledWith("r3", false));
       expect(getAgentRun().gates.find((g) => g.id === "r3")).toBeUndefined();
     });
@@ -876,8 +901,8 @@ describe("AgentConsent", () => {
      */
     it("settles a pending gate when the backend says the request resolved elsewhere", async () => {
       await mount();
-      startTurn();
-      ask("r8", "k8s_scale", { replicas: 3 });
+      await startTurn();
+      ask("r8", "k8s_scale", { replicas: 3 }, OURS);
       await screen.findByRole("dialog");
       await waitFor(() => expect(getAgentRun().gates.find((g) => g.id === "r8")?.outcome).toBe("pending"));
 
@@ -894,8 +919,8 @@ describe("AgentConsent", () => {
       // an unguarded settle would replace "approved" with a vaguer word a
       // moment after they approved it.
       await mount();
-      startTurn();
-      ask("r9", "k8s_deletePod", {});
+      await startTurn();
+      ask("r9", "k8s_deletePod", {}, OURS);
       await userEvent.click(await screen.findByRole("button", { name: /approve/i }));
       await waitFor(() => expect(getAgentRun().gates.find((g) => g.id === "r9")?.outcome).toBe("approved"));
 
@@ -927,8 +952,8 @@ describe("AgentConsent", () => {
      */
     it("leaves a gate the reader saw but never answered as pending", async () => {
       await mount();
-      startTurn();
-      ask("r5", "k8s_deletePod", {});
+      await startTurn();
+      ask("r5", "k8s_deletePod", {}, OURS);
       await screen.findByRole("dialog");
       await act(async () => {
         lockWorkspace();
@@ -937,16 +962,14 @@ describe("AgentConsent", () => {
       expect(getAgentRun().gates.find((g) => g.id === "r5")?.outcome).toBe("pending");
     });
 
-    // ---- Ownership at presentation (C1) ---------------------------------
+    // ---- Ownership at presentation (C1, #393) ---------------------------
     //
-    // `ConfirmRequest` carries no client identity. The confirm channel is
-    // app-wide by design — an external MCP client (the loopback HTTP server)
-    // raises the exact same event srelens's own agent does — so the only
-    // honest signal this component has is whether the run store has a turn
-    // actually in flight AT PRESENTATION. Every test above now runs with
-    // `startTurn()` so it is testing the busy case on purpose, not by
-    // accident; the two tests below are the idle case those tests deliberately
-    // exclude.
+    // The confirm channel is app-wide by design — an external MCP client (the
+    // loopback HTTP server) raises the exact same event srelens's own agent
+    // does. A request now names the chat that raised it, as the host
+    // authenticated it, and that is what decides ownership: the run holding
+    // that chat. Every test above passes `OURS` during a turn on purpose; the
+    // tests below are the requests that belong to no conversation.
 
     it("does not record a gate for a confirm raised while no srelens turn is in flight, but still presents and answers it", async () => {
       // No `startTurn()`: the store is idle, as it is for a confirm an
@@ -971,6 +994,30 @@ describe("AgentConsent", () => {
       expect(getAgentRun().gates.find((g) => g.id === "ext2")).toBeUndefined();
     });
 
+    it("does not record an external client's confirm in the conversation that happens to be mid-turn (#393)", async () => {
+      // The defect: the busy run used to be taken as the caller. An external
+      // MCP client raising a confirm while srelens's own agent is answering
+      // had its mutation recorded in a conversation that did not cause it.
+      await mount();
+      await startTurn();
+      ask("ext9", "k8s_scale", { replicas: 9 }, null);
+      await screen.findByRole("dialog");
+      expect(getAgentRun().gates.find((g) => g.id === "ext9")).toBeUndefined();
+      await userEvent.click(screen.getByRole("button", { name: /approve/i }));
+      await waitFor(() => expect(core.respondToConfirm).toHaveBeenCalledWith("ext9", true));
+      expect(getAgentRun().gates.find((g) => g.id === "ext9")).toBeUndefined();
+    });
+
+    it("does not record a confirm whose chat is not one this window holds", async () => {
+      // Matched by session, not by "some caller is set": a chat this window
+      // has no run for is not the busy one's.
+      await mount();
+      await startTurn();
+      ask("other1", "k8s_scale", { replicas: 1 }, { chatSession: "sess-elsewhere" });
+      await screen.findByRole("dialog");
+      expect(getAgentRun().gates.find((g) => g.id === "other1")).toBeUndefined();
+    });
+
     /**
      * The mutation the brief calls out by name: re-testing `busy` in
      * `answer()` instead of looking up the record already made at
@@ -987,7 +1034,8 @@ describe("AgentConsent", () => {
         () => new Promise<string | null>((resolve) => { resolveSendChat = resolve; }),
       );
       void askAgent("investigate checkout-api");
-      ask("r6", "k8s_scale", { replicas: 4 });
+      await waitFor(() => expect(core.sendChat).toHaveBeenCalled());
+      ask("r6", "k8s_scale", { replicas: 4 }, OURS);
       await waitFor(() => expect(getAgentRun().gates.find((g) => g.id === "r6")?.outcome).toBe("pending"));
 
       // The run finishes — `busy` goes back to false — before the reader answers.
@@ -1188,5 +1236,69 @@ describe("the host's own words", () => {
     await waitFor(() => expect(core.listExtensions).not.toHaveBeenCalled());
     expect(screen.queryByTestId("host-confirm-requester")).toBeNull();
     expect(screen.getByRole("dialog").textContent).not.toContain("Flux Tools");
+  });
+
+  /**
+   * **A sidecar's call names the app the host started it for** (#573). The
+   * supervisor knows which app's process asked, so the backend sends that
+   * reference; the name and publisher still come from this window's inventory,
+   * and a revision it does not hold names nobody.
+   */
+  it("names the app a sidecar's call came from, from the window's own inventory", async () => {
+    const flux = {
+      manifest: {
+        id: "org.example.flux",
+        name: "Flux Tools",
+        version: "1.0.0",
+        srelensApiVersion: "^0.6",
+        kind: "executable",
+        permissions: [],
+        capabilities: [],
+        contributions: { pages: [], detailTabs: [], detailLinks: [] },
+      },
+      enabled: true,
+      revision: 2,
+      grants: [],
+      settings: {},
+      source: "local",
+      installedAt: 0,
+      history: [],
+    };
+    core.listExtensions.mockResolvedValue({ schemaVersion: 1, nextRevision: 3, plugins: [flux] } as never);
+    await mount();
+    askWith({
+      id: "s1",
+      tool: "extensions.action",
+      args: { resource: { id: "org.example.flux", revision: 2 }, action: "suspend" },
+      prompt: "Run the declared action (suspend) on team/api in cluster prod?",
+      impact: "high",
+      target: { cluster: "prod", namespace: "team", name: "api" },
+      requester: { id: "org.example.flux", revision: 2, name: "Not the name the host knows" },
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId("host-confirm-requester").textContent).toBe(
+        "Requested by app Flux Tools (unsigned)",
+      ),
+    );
+    expect(screen.getByRole("dialog").textContent).not.toContain("Not the name the host knows");
+  });
+
+  it("names nobody for a sidecar's call at a revision the window does not hold", async () => {
+    core.listExtensions.mockResolvedValue({ schemaVersion: 1, nextRevision: 1, plugins: [] } as never);
+    await mount();
+    askWith({
+      id: "s2",
+      tool: "extensions.action",
+      args: {},
+      prompt: "Run the declared action?",
+      impact: "high",
+      target: {},
+      requester: { id: "org.example.flux", revision: 9 },
+    });
+    expect((await screen.findByTestId("host-confirm-question")).textContent).toBe(
+      "Run the declared action?",
+    );
+    await waitFor(() => expect(core.listExtensions).toHaveBeenCalled());
+    expect(screen.queryByTestId("host-confirm-requester")).toBeNull();
   });
 });

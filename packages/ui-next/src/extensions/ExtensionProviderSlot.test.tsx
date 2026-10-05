@@ -25,7 +25,7 @@ import { ExtensionProviderSlot } from "./ExtensionProviderSlot";
 
 const plugin = {
   manifest: {
-    id: "org.example.observability", name: "Observability", version: "1.0.0", srelensApiVersion: "^0.6",
+    id: "org.example.observability", name: "Observability", version: "1.0.0", srelensApiVersion: "^0.7",
     kind: "declarative", permissions: [], capabilities: [],
     contributions: {
       pages: [], detailTabs: [], detailLinks: [],

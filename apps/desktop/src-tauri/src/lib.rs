@@ -9,6 +9,7 @@ mod bridge;
 pub mod bundle;
 mod bundle_cmd;
 pub mod capabilities;
+mod exec_plugin_console;
 pub mod extension_secrets;
 mod cluster_oidc;
 mod cluster_oidc_cmd;
@@ -20,6 +21,8 @@ mod external;
 mod files;
 mod forward;
 mod helm;
+mod host_notice;
+mod node_shells;
 mod logs;
 mod mcp;
 mod mcp_confirm;
@@ -67,6 +70,7 @@ use updater::{update_check, update_install};
 use watch::{start_resource_watch, stop_watch};
 
 pub use appimage::gio_module_dir_for_appimage;
+pub use exec_plugin_console::hide_exec_plugin_windows;
 pub use capabilities::{
     build_registry, build_registry_for_user, build_registry_with_paths,
     build_registry_with_paths_and_settings, default_settings_path,
@@ -465,6 +469,8 @@ pub fn run() {
         // Which window opened each stream, so a window that closes or reloads
         // ends exactly its own (#700).
         .manage(window_streams::WindowStreams::default())
+        // The debug pod each node shell runs in, which the host deletes (#734).
+        .manage(node_shells::NodeShells::default())
         .on_window_event(window_streams::on_window_event)
         // The cache itself, for commands that need the live kubeconfig paths
         // (overview_snapshot resolves context → cluster identity from them).
@@ -478,6 +484,9 @@ pub fn run() {
         .manage(LogStreamManager::new(cache))
         .manage(TerminalManager::new())
         .manage(HelmManager::new())
+        // Which helm operations are still running, so one whose window goes
+        // runs on and is reported rather than killed (#735).
+        .manage(helm::HelmOps::default())
         .invoke_handler(tauri::generate_handler![
             deep_link::take_pending_deep_links,
             assistant::agent_list,
@@ -569,8 +578,26 @@ pub fn run() {
             cluster_oidc_cmd::list_clusters,
             window::open_context_window,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while running tauri application")
+        .run(|app, event| {
+            // srelens is quitting: the last chance to delete the node debug
+            // pods still on a node (#734). Bounded, so a cluster that does not
+            // answer cannot hold the app open; what is left is in the log.
+            if let tauri::RunEvent::Exit = event {
+                let (done, finished) = std::sync::mpsc::channel();
+                let app = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    node_shells::delete_all(&app).await;
+                    let _ = done.send(());
+                });
+                let deadline =
+                    node_shells::quit_deadline(srelens_kube::connect::request_timeout());
+                if finished.recv_timeout(deadline).is_err() {
+                    log::warn!("quit before every node debug pod was deleted");
+                }
+            }
+        });
 }
 
 /// The store apps' secret settings are kept in (#543), shared by every
@@ -596,6 +623,23 @@ pub fn registry_for(
     secrets: std::sync::Arc<extension_secrets::VaultSecretStore>,
 ) -> srelens_capability::Registry {
     registry_and_app_streams_for(cache, kubeconfig_paths, settings_path, secrets).0
+}
+
+/// [`registry_for`], for an MCP server: the registry, and installed apps' operations as
+/// tools (#574) to serve beside it with `McpServer::with_app_tools`. `None` when there is
+/// no settings path, so no apps either.
+pub fn mcp_registry_for(
+    cache: std::sync::Arc<ClientCache>,
+    kubeconfig_paths: Vec<std::path::PathBuf>,
+    settings_path: Option<std::path::PathBuf>,
+    secrets: std::sync::Arc<extension_secrets::VaultSecretStore>,
+) -> (
+    srelens_capability::Registry,
+    Option<std::sync::Arc<srelens_registry::AppTools>>,
+) {
+    let (registry, streams) =
+        registry_and_app_streams_for(cache, kubeconfig_paths, settings_path, secrets);
+    (registry, streams.map(|streams| streams.app_tools()))
 }
 
 /// [`registry_for`], plus the app streams (#565) the GUI opens streams through.

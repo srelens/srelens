@@ -7,6 +7,8 @@ use super::{identifier, label, unique, Manifest};
 use crate::{ValidationCode as Code, ValidationErrors};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
+use srelens_capability::settings::{self, SettingType};
 use srelens_capability::{check_path, CardPredicate};
 
 /// Most dashboard cards one manifest may declare.
@@ -121,6 +123,63 @@ pub enum CardOrder {
     Desc,
 }
 
+impl DashboardCard {
+    /// Resolve API 0.7's bounded duration setting for both the card and its target list.
+    /// The source and paths stay fixed. Errors name the setting, never its saved value.
+    pub fn with_settings(
+        &self,
+        manifest: &Manifest,
+        saved: &Map<String, Value>,
+    ) -> Result<Self, String> {
+        let mut card = self.clone();
+        let Some(predicate) = &mut card.predicate else {
+            return Ok(card);
+        };
+        let raw = predicate
+            .within
+            .as_ref()
+            .map(|text| Value::String(text.clone()));
+        let Some(reference) = raw.as_ref().and_then(settings::reference) else {
+            predicate.check()?;
+            return Ok(card);
+        };
+        let id = reference?;
+        let setting = manifest
+            .setting(id)
+            .ok_or_else(|| format!("No setting \"{id}\" is declared"))?;
+        if setting.setting_type != SettingType::Select || setting.default.is_none() {
+            return Err(format!(
+                "Setting \"{id}\" must be a select with a default duration"
+            ));
+        }
+        // Check every option: the default alone cannot vouch for a later choice.
+        for option in &setting.options {
+            predicate.within = Some(option.value.clone());
+            if option.value.starts_with('-') || predicate.check().is_err() {
+                return Err(format!(
+                    "Setting \"{id}\" must offer only positive bounded durations"
+                ));
+            }
+        }
+        let value = setting
+            .effective(saved.get(id))
+            .ok_or_else(|| format!("Setting \"{id}\" has no duration"))?;
+        setting
+            .check_value(value)
+            .map_err(|why| format!("Setting \"{id}\": {why}"))?;
+        predicate.within = Some(
+            value
+                .as_str()
+                .ok_or_else(|| format!("Setting \"{id}\" must be text"))?
+                .to_owned(),
+        );
+        predicate
+            .check()
+            .map_err(|_| format!("Setting \"{id}\" has an invalid duration"))?;
+        Ok(card)
+    }
+}
+
 /// Every rule a manifest's cards break, at the field that has to change.
 pub(super) fn card_problems(manifest: &Manifest, problems: &mut ValidationErrors) {
     const LABEL: &str =
@@ -192,7 +251,7 @@ pub(super) fn card_problems(manifest: &Manifest, problems: &mut ValidationErrors
                 },
             );
         }
-        if let Some(Err(why)) = card.predicate.as_ref().map(CardPredicate::check) {
+        if let Err(why) = card.with_settings(manifest, &Map::new()) {
             problems.push(Code::InvalidBinding, format!("{at}.predicate"), why);
         }
         if let Some(target) = &card.target {

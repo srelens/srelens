@@ -25,7 +25,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde_json::{json, Value};
 
-use crate::stdio::{handle_request, handle_subscription, subscription_notification};
+use crate::stdio::{handle_request_as, handle_subscription, subscription_notification};
 use crate::subscriptions::SubscriptionRegistry;
 use crate::McpServer;
 
@@ -127,6 +127,8 @@ struct StreamGuard {
     subs: Arc<SubscriptionRegistry>,
     session: String,
     id: u64,
+    /// Follows the app tools for this stream (#574); ends with it.
+    tools: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl Drop for StreamGuard {
@@ -149,6 +151,9 @@ impl Drop for StreamGuard {
             }
         }
         self.subs.abort_all();
+        if let Some(tools) = &self.tools {
+            tools.abort();
+        }
     }
 }
 
@@ -167,7 +172,9 @@ struct PushStream {
     /// because live watches hold wake-sender clones (see `PushChannels`).
     closed: tokio::sync::oneshot::Receiver<()>,
     dirty: Arc<Mutex<BTreeSet<String>>>,
-    pending: VecDeque<String>,
+    /// Set when the app tools changed since this stream last said so (#574).
+    tools_changed: Arc<std::sync::atomic::AtomicBool>,
+    pending: VecDeque<Value>,
     _guard: StreamGuard,
 }
 
@@ -187,19 +194,25 @@ impl futures_core::Stream for PushStream {
             if std::future::Future::poll(Pin::new(&mut this.closed), cx).is_ready() {
                 return Poll::Ready(None);
             }
-            if let Some(uri) = this.pending.pop_front() {
-                let msg = subscription_notification(&uri);
+            if let Some(msg) = this.pending.pop_front() {
                 return Poll::Ready(Some(Ok(Event::default().data(msg.to_string()))));
             }
             match this.wake.poll_recv(cx) {
                 Poll::Ready(Some(())) => {
+                    // However often the tools changed while unread, the client
+                    // is told once: it lists them again either way.
+                    if this.tools_changed.swap(false, Ordering::SeqCst) {
+                        this.pending
+                            .push_back(crate::tools_list_changed_notification());
+                    }
                     let uris = {
                         let mut guard = this.dirty.lock().unwrap_or_else(|e| e.into_inner());
                         std::mem::take(&mut *guard)
                     };
-                    // Loop: emit the first drained URI, or wait again on a
+                    // Loop: emit the first drained message, or wait again on a
                     // spurious wake that raced an earlier drain.
-                    this.pending.extend(uris);
+                    this.pending
+                        .extend(uris.iter().map(|uri| subscription_notification(uri)));
                 }
                 Poll::Ready(None) => return Poll::Ready(None),
                 Poll::Pending => return Poll::Pending,
@@ -273,6 +286,13 @@ async fn sse(State(st): State<AppState>, headers: axum::http::HeaderMap) -> Resp
     let session = presented_session(&headers).unwrap_or_else(|| DEFAULT_SESSION.to_string());
     let (wake_tx, wake_rx) = tokio::sync::mpsc::channel(1);
     let (close_tx, close_rx) = tokio::sync::oneshot::channel();
+    let tools_changed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // Subscribed here, not in the task: a change made before the task first runs
+    // must still count as one this stream has not told its client about.
+    let tools = st.server.app_tools().cloned().map(|source| {
+        let changes = source.changes();
+        tokio::spawn(follow_app_tools(source, changes, tools_changed.clone(), wake_tx.clone()))
+    });
     let chans = PushChannels {
         id: st.push.next_id.fetch_add(1, Ordering::Relaxed),
         subs: Arc::new(SubscriptionRegistry::new()),
@@ -284,12 +304,14 @@ async fn sse(State(st): State<AppState>, headers: axum::http::HeaderMap) -> Resp
         wake: wake_rx,
         closed: close_rx,
         dirty: chans.dirty.clone(),
+        tools_changed,
         pending: VecDeque::new(),
         _guard: StreamGuard {
             push: st.push.clone(),
             subs: chans.subs.clone(),
             session: session.clone(),
             id: chans.id,
+            tools,
         },
     };
     // Install as this session's stream (see `PushState::install` for
@@ -309,6 +331,35 @@ async fn sse(State(st): State<AppState>, headers: axum::http::HeaderMap) -> Resp
         ),
     )
         .into_response()
+}
+
+/// Follows the app tools for one stream (#574): marks the stream when they change and
+/// wakes it, and asks the source to catch up every poll interval, so a change another
+/// process made reaches this client too. Aborted when the stream ends.
+async fn follow_app_tools(
+    source: Arc<dyn crate::ToolSource>,
+    mut changes: tokio::sync::watch::Receiver<u64>,
+    changed: Arc<std::sync::atomic::AtomicBool>,
+    wake: tokio::sync::mpsc::Sender<()>,
+) {
+    let period = source.poll_interval();
+    let mut poll = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+    poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            result = changes.changed() => {
+                if result.is_err() {
+                    return;
+                }
+                changed.store(true, Ordering::SeqCst);
+                // A full channel already holds a wakeup, which will see the flag.
+                let _ = wake.try_send(());
+            }
+            _ = poll.tick() => {
+                source.tools().await;
+            }
+        }
+    }
 }
 
 /// The `Mcp-Session-Id` header name, surfaced on every `/mcp` response.
@@ -342,6 +393,8 @@ const DEFAULT_SESSION: &str = "default";
 async fn rpc(
     State(st): State<AppState>,
     headers: axum::http::HeaderMap,
+    // Put there by `token_guard` from the token it authenticated (#393).
+    caller: Option<axum::Extension<crate::policy::Caller>>,
     Json(req): Json<Value>,
 ) -> Response {
     let method = req.get("method").and_then(Value::as_str).unwrap_or("");
@@ -378,7 +431,8 @@ async fn rpc(
             }),
         }
     } else {
-        handle_request(&st.server, &req, crate::Transport::Http).await
+        let caller = caller.map(|axum::Extension(caller)| caller);
+        handle_request_as(&st.server, &req, crate::Transport::Http, caller).await
     };
     // Streamable-HTTP session id: `initialize` MINTS a fresh one (each client
     // then presents the id it was given, which is what keeps clients'
@@ -511,21 +565,33 @@ async fn host_guard(State(exposure): State<Exposure>, req: Request, next: Next) 
     next.run(req).await
 }
 
+/// What `/mcp` accepts: the Settings token, naming nobody, or a live token
+/// srelens minted for one of its own chats, naming that chat (#393).
+#[derive(Clone)]
+struct TokenAuth {
+    token: Option<crate::auth::Token>,
+    callers: crate::auth::CallerTokens,
+}
+
 /// Applied to `/mcp` only: `/healthz` is deliberately reachable without a
 /// token so a client can probe liveness before it has been configured.
-async fn token_guard(
-    State(token): State<Option<crate::auth::Token>>,
-    req: Request,
-    next: Next,
-) -> Response {
-    if let Some(expected) = token {
+///
+/// A chat token is how a gated call proves it is srelens's own agent's, so
+/// the caller is put on the request HERE, from what was authenticated, and
+/// nothing downstream reads one from the body.
+async fn token_guard(State(auth): State<TokenAuth>, mut req: Request, next: Next) -> Response {
+    if let Some(expected) = auth.token {
         let presented = req
             .headers()
             .get(axum::http::header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
             .and_then(strip_bearer_prefix)
             .unwrap_or("");
-        if !expected.matches(presented) {
+        if expected.matches(presented) {
+            // The Settings token: a client, and nobody srelens can name.
+        } else if let Some(caller) = auth.callers.caller_for(presented) {
+            req.extensions_mut().insert(caller);
+        } else {
             // No detail in the body: do not reveal whether a token is set.
             return (
                 StatusCode::UNAUTHORIZED,
@@ -570,6 +636,9 @@ fn router_inner_with_push(
     token: Option<crate::auth::Token>,
     exposure: Exposure,
 ) -> (Router, Arc<PushState>) {
+    // Read off the server before it moves into the state: the tokens a host
+    // mints for its chats are the ones the server it built was given.
+    let auth = TokenAuth { token, callers: server.caller_tokens().clone() };
     let push = Arc::new(PushState::default());
     let state = AppState { server: Arc::new(server), push: push.clone() };
     let router = Router::new()
@@ -577,7 +646,7 @@ fn router_inner_with_push(
         // covers the SSE stream exactly like the JSON-RPC endpoint — a
         // long-lived stream is established under the same bearer check.
         .route("/mcp", post(rpc).get(sse))
-        .route_layer(middleware::from_fn_with_state(token, token_guard))
+        .route_layer(middleware::from_fn_with_state(auth, token_guard))
         .route("/healthz", get(|| async { "ok" }))
         // Set rather than inherited from axum's default, so the documented
         // limit is the one in force: a larger body is refused with 413 before
@@ -1277,6 +1346,72 @@ mod tests {
             )
             .await
             .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// A server with one gated tool and a policy that records the caller it
+    /// was told about, and approves.
+    #[allow(clippy::type_complexity)]
+    fn gated_server_recording_caller() -> (McpServer, Arc<Mutex<Option<Option<crate::policy::Caller>>>>) {
+        struct Saw(Arc<Mutex<Option<Option<crate::policy::Caller>>>>);
+        #[async_trait::async_trait]
+        impl crate::policy::ConfirmPolicy for Saw {
+            async fn confirm(&self, request: &crate::policy::ConsentRequest) -> crate::policy::Decision {
+                *self.0.lock().unwrap() = Some(request.caller.clone());
+                crate::policy::Decision::Approved
+            }
+        }
+        let saw = Arc::new(Mutex::new(None));
+        let mut reg = Registry::new();
+        let mut cap = Capability::read_only("danger", "destructive", |_| async { Ok(json!({})) });
+        cap.annotations = srelens_capability::Annotations::MUTATING;
+        reg.register(cap);
+        (McpServer::new(Arc::new(reg)).with_policy(Arc::new(Saw(saw.clone()))), saw)
+    }
+
+    fn post_gated_call(bearer: &str) -> Request<Body> {
+        Request::post("/mcp")
+            .header("host", "127.0.0.1:8765")
+            .header("authorization", format!("Bearer {bearer}"))
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                    "params": {"name": "danger", "arguments": {}}}))
+                .unwrap(),
+            ))
+            .unwrap()
+    }
+
+    /// #393: a token srelens minted for one chat authenticates, and the call
+    /// it makes reaches the consent policy as that chat's.
+    #[tokio::test]
+    async fn a_minted_token_authenticates_as_its_chat() {
+        let (server, saw) = gated_server_recording_caller();
+        let guard = server.caller_tokens().mint("sess-7");
+        let app = router_with_auth(server, crate::auth::Token::generate(), Exposure::Loopback);
+        let resp = app.oneshot(post_gated_call(guard.token())).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(*saw.lock().unwrap(), Some(Some(crate::policy::Caller::Chat("sess-7".into()))));
+    }
+
+    /// The Settings token still authenticates — and names nobody.
+    #[tokio::test]
+    async fn the_settings_token_names_no_caller() {
+        let (server, saw) = gated_server_recording_caller();
+        let token = crate::auth::Token::generate();
+        let app = router_with_auth(server, token.clone(), Exposure::Loopback);
+        let resp = app.oneshot(post_gated_call(token.as_str())).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(*saw.lock().unwrap(), Some(None));
+    }
+
+    /// A turn's token dies with the turn.
+    #[tokio::test]
+    async fn a_revoked_chat_token_is_refused() {
+        let (server, _) = gated_server_recording_caller();
+        let presented = server.caller_tokens().mint("sess-7").token().to_string();
+        let app = router_with_auth(server, crate::auth::Token::generate(), Exposure::Loopback);
+        let resp = app.oneshot(post_gated_call(&presented)).await.unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 

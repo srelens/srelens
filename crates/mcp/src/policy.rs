@@ -42,6 +42,17 @@ impl ConsentKind {
     }
 }
 
+/// Who raised a gated call, when the host can vouch for it (#393).
+///
+/// Only ever derived from what the transport authenticated — a token srelens
+/// minted for one chat turn — and never from the call's arguments, so a client
+/// cannot claim to be srelens's own agent by saying so.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Caller {
+    /// srelens's own agent, answering in one chat session.
+    Chat(String),
+}
+
 /// One gated call, with everything a policy needs to decide and everything a
 /// human needs to be asked.
 ///
@@ -66,6 +77,9 @@ pub struct ConsentRequest {
     /// names something this call has no value for. A surface that gets `None`
     /// shows the tool summary; it does not show half a sentence.
     pub confirm_text: Option<String>,
+    /// Which of srelens's own chats raised the call, or `None` when nobody can
+    /// be named — an external MCP client, the stdio transport, a headless run.
+    pub caller: Option<Caller>,
 }
 
 impl ConsentRequest {
@@ -173,6 +187,7 @@ mod tests {
                 ConsentKind::SensitiveRead => Impact::Medium,
             },
             confirm_text: None,
+            caller: None,
         }
     }
 

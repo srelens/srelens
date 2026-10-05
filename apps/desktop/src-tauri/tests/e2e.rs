@@ -262,10 +262,22 @@ impl Harness {
 /// A capability registered later with no case here fails the coverage
 /// assertion at the end of `full_capability_suite`.
 const EXCLUDED: &[(&str, &str)] = &[
-    ("k8s.nodeJournalLogs", "requires SSH access to the node host; exercised via unit tests with mocked sessions"),
-    ("k8s.nodeRuntimeDiagnostics", "requires host-level runtime CLI (crictl/containerd) via SSH; exercised via unit tests"),
-    ("k8s.nodeServiceRestart", "requires node host systemd access via SSH; exercised via unit tests"),
-    ("k8s.nodeServiceStatus", "requires node host systemctl access via SSH; exercised via unit tests"),
+    (
+        "k8s.nodeJournalLogs",
+        "requires SSH access to the node host; exercised via unit tests with mocked sessions",
+    ),
+    (
+        "k8s.nodeRuntimeDiagnostics",
+        "requires host-level runtime CLI (crictl/containerd) via SSH; exercised via unit tests",
+    ),
+    (
+        "k8s.nodeServiceRestart",
+        "requires node host systemd access via SSH; exercised via unit tests",
+    ),
+    (
+        "k8s.nodeServiceStatus",
+        "requires node host systemctl access via SSH; exercised via unit tests",
+    ),
     (
         "toolbox.installKubectl",
         "downloads a real ~50MB binary from dl.k8s.io; kubectl is already provided by the \
@@ -275,6 +287,11 @@ const EXCLUDED: &[(&str, &str)] = &[
         "toolbox.installHelm",
         "downloads a real release tarball from get.helm.sh; helm is already provided by the CI \
          image, so this is covered by unit tests with an injected fetch rather than the network",
+    ),
+    (
+        "github.rolloutCause",
+        "calls api.github.com, not the cluster; covered by unit tests in \
+         crates/registry/src/github.rs against a local server",
     ),
     (
         "toolbox.upgradePlugin",
@@ -742,11 +759,8 @@ async fn run_suite() {
         json!({ "theme": "dark", "scale": 120 })
     );
     assert_eq!(loaded["localStorageMigrated"], true);
-    h.ok(
-        "settings.set",
-        json!({ "remove": ["e2e.roundTrip"] }),
-    )
-    .await;
+    h.ok("settings.set", json!({ "remove": ["e2e.roundTrip"] }))
+        .await;
 
     // === Fixtures: dogfood k8s.applyManifest to seed the namespace =========
     println!("=== fixtures ===");
@@ -863,7 +877,9 @@ async fn run_suite() {
 
     // The kind context authenticates with a client cert (no exec-auth), so it
     // has no external tool requirements — a healthy, empty diagnosis.
-    let out = h.ok("toolbox.diagnoseContext", json!({ "context": ctx })).await;
+    let out = h
+        .ok("toolbox.diagnoseContext", json!({ "context": ctx }))
+        .await;
     assert_eq!(out["context"], ctx);
     assert!(
         out["items"].as_array().unwrap().is_empty(),
@@ -876,8 +892,14 @@ async fn run_suite() {
     let tools = out["tools"].as_array().unwrap();
     assert_eq!(tools.len(), 3, "kubectl/krew/helm: {out}");
     let kubectl = tools.iter().find(|t| t["name"] == "kubectl").unwrap();
-    assert_eq!(kubectl["installed"], true, "kubectl must be on PATH here: {out}");
-    assert!(kubectl["version"].as_str().is_some(), "kubectl version should resolve: {out}");
+    assert_eq!(
+        kubectl["installed"], true,
+        "kubectl must be on PATH here: {out}"
+    );
+    assert!(
+        kubectl["version"].as_str().is_some(),
+        "kubectl version should resolve: {out}"
+    );
 
     toolbox_krew_lifecycle(&mut h).await;
 
@@ -918,7 +940,10 @@ async fn run_suite() {
     // Succeeded) and numerator (Running only) — matched here, not
     // re-derived, so the test fails if either capability's counting ever
     // drifts from what a plain list of the same pods shows.
-    let plain_still_running = all_pods.iter().filter(|p| p["phase"] != "Succeeded").count() as i64;
+    let plain_still_running = all_pods
+        .iter()
+        .filter(|p| p["phase"] != "Succeeded")
+        .count() as i64;
     let plain_running = all_pods.iter().filter(|p| p["phase"] == "Running").count() as i64;
 
     let pod_count_out = h.ok("k8s.podCount", json!({ "context": ctx })).await;
@@ -976,7 +1001,12 @@ async fn run_suite() {
         .as_array()
         .unwrap()
         .iter()
-        .map(|n| (n["node"].as_str().unwrap().to_string(), n["pods"].as_i64().unwrap()))
+        .map(|n| {
+            (
+                n["node"].as_str().unwrap().to_string(),
+                n["pods"].as_i64().unwrap(),
+            )
+        })
         .collect();
     assert_eq!(
         actual_by_node, expected_by_node,
@@ -985,7 +1015,9 @@ async fn run_suite() {
 
     let expected_unsettled: HashSet<(String, String)> = all_pods
         .iter()
-        .filter(|p| p["phase"] != "Running" || ready_cell_is_short(p["ready"].as_str().unwrap_or_default()))
+        .filter(|p| {
+            p["phase"] != "Running" || ready_cell_is_short(p["ready"].as_str().unwrap_or_default())
+        })
         .map(|p| {
             (
                 p["namespace"].as_str().unwrap_or_default().to_string(),
@@ -1011,7 +1043,10 @@ async fn run_suite() {
 
     // #17: attach an ephemeral debug container to a fixture pod. It can't be
     // removed once added, but the whole namespace is torn down after the suite.
-    let debug_pod = out["pods"].as_array().unwrap()[0]["name"].as_str().unwrap().to_string();
+    let debug_pod = out["pods"].as_array().unwrap()[0]["name"]
+        .as_str()
+        .unwrap()
+        .to_string();
     let dbg = h
         .ok(
             "k8s.debugPod",
@@ -1077,6 +1112,10 @@ async fn run_suite() {
         )
         .await;
     assert!(out["deployments"].is_array());
+    assert!(
+        out["argo"]["state"].is_string(),
+        "the report says how much of Argo it saw: {out}"
+    );
 
     let out = h
         .ok("k8s.listJobs", json!({ "context": ctx, "namespace": NS }))
@@ -1145,6 +1184,21 @@ async fn run_suite() {
             .iter()
             .any(|e| e["service"] == SVC),
         "expected an EndpointSlice for {SVC}: {out}"
+    );
+
+    let out = h
+        .ok(
+            "k8s.listEndpoints",
+            json!({ "context": ctx, "namespace": NS }),
+        )
+        .await;
+    assert!(
+        out["endpoints"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["name"] == SVC),
+        "expected an Endpoint for {SVC}: {out}"
     );
 
     let out = h
@@ -1236,7 +1290,10 @@ async fn run_suite() {
     assert!(!out["nodes"].as_array().unwrap().is_empty());
 
     // #17: create a privileged node debug pod, then tear it down immediately.
-    let node_name = out["nodes"].as_array().unwrap()[0]["name"].as_str().unwrap().to_string();
+    let node_name = out["nodes"].as_array().unwrap()[0]["name"]
+        .as_str()
+        .unwrap()
+        .to_string();
     let nd = h
         .ok(
             "k8s.createNodeDebugPod",
@@ -1245,7 +1302,10 @@ async fn run_suite() {
         .await;
     assert_eq!(nd["namespace"], NS);
     let node_debug_pod = nd["pod"].as_str().unwrap().to_string();
-    assert!(node_debug_pod.starts_with("srelens-node-debug-"), "generated name: {nd}");
+    assert!(
+        node_debug_pod.starts_with("srelens-node-debug-"),
+        "generated name: {nd}"
+    );
     h.ok(
         "k8s.deletePod",
         json!({ "context": ctx, "namespace": NS, "pod": node_debug_pod }),
@@ -1571,9 +1631,9 @@ async fn run_suite() {
     // Service -> workload, which is the selector subset test against labels a
     // real controller wrote.
     assert!(
-        edges
-            .iter()
-            .any(|e| e["from"] == json!(svc_id) && e["to"] == json!(deploy_id) && e["kind"] == json!("routes")),
+        edges.iter().any(|e| e["from"] == json!(svc_id)
+            && e["to"] == json!(deploy_id)
+            && e["kind"] == json!("routes")),
         "the Service must route to the Deployment it selects: {out}"
     );
     // Deployment -> ReplicaSet, from the ownerReference. The ReplicaSet's name
@@ -1583,7 +1643,9 @@ async fn run_suite() {
         edges.iter().any(|e| {
             e["from"] == json!(deploy_id)
                 && e["kind"] == json!("owns")
-                && e["to"].as_str().is_some_and(|to| to.starts_with(&node_id("ReplicaSet", DEPLOY)))
+                && e["to"]
+                    .as_str()
+                    .is_some_and(|to| to.starts_with(&node_id("ReplicaSet", DEPLOY)))
         }),
         "the Deployment must own a ReplicaSet: {out}"
     );
@@ -1598,11 +1660,21 @@ async fn run_suite() {
     // capability of its own so the consent layer can gate it. On the fixture
     // pods (busybox) it reads, and it always answers with its report.
     let out = h
-        .ok("k8s.topologyProbe", json!({ "context": ctx, "namespaces": [NS], "prometheus": [] }))
+        .ok(
+            "k8s.topologyProbe",
+            json!({ "context": ctx, "namespaces": [NS], "prometheus": [] }),
+        )
         .await;
-    assert!(out["probe"].is_object(), "the probe must report on itself: {out}");
     assert!(
-        out["nodes"].as_array().unwrap().iter().any(|n| n["id"] == json!(deploy_id)),
+        out["probe"].is_object(),
+        "the probe must report on itself: {out}"
+    );
+    assert!(
+        out["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| n["id"] == json!(deploy_id)),
         "{out}"
     );
 
@@ -1611,7 +1683,9 @@ async fn run_suite() {
     // the capability is written for: discovery answers an empty list, not an
     // error. Nothing the fixtures made looks like a query API, so it must not
     // be listed either.
-    let out = h.ok("k8s.prometheusDiscover", json!({ "context": ctx })).await;
+    let out = h
+        .ok("k8s.prometheusDiscover", json!({ "context": ctx }))
+        .await;
     let candidates = out["candidates"].as_array().unwrap();
     assert!(
         candidates.iter().all(|c| c["namespace"] != json!(NS)),
@@ -1644,7 +1718,9 @@ async fn run_suite() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|p| p["phase"] == "Running" && p["name"].as_str().is_some_and(|n| n.starts_with(DEPLOY)))
+        .find(|p| {
+            p["phase"] == "Running" && p["name"].as_str().is_some_and(|n| n.starts_with(DEPLOY))
+        })
         .map(|p| p["name"].as_str().unwrap().to_string())
         .expect("a running fixture pod");
     let out = h
@@ -1887,8 +1963,14 @@ async fn run_suite() {
     println!("=== cluster facts ===");
     let out = h.ok("k8s.clusterFacts", json!({ "context": ctx })).await;
     assert_eq!(out["context"], ctx);
-    assert!(out["provider"].is_string(), "provider must be reported, possibly empty: {out}");
-    assert!(out["region"].is_string(), "region must be reported, possibly empty: {out}");
+    assert!(
+        out["provider"].is_string(),
+        "provider must be reported, possibly empty: {out}"
+    );
+    assert!(
+        out["region"].is_string(),
+        "region must be reported, possibly empty: {out}"
+    );
     let state = out["metricsServer"]["state"].as_str().unwrap();
     assert!(
         ["present", "absent", "unknown"].contains(&state),
@@ -1900,7 +1982,10 @@ async fn run_suite() {
             "k8s.nodeMetrics served readings above, so clusterFacts must see metrics-server too: {out}"
         );
         assert!(
-            !out["metricsServer"]["version"].as_str().unwrap_or_default().is_empty(),
+            !out["metricsServer"]["version"]
+                .as_str()
+                .unwrap_or_default()
+                .is_empty(),
             "a present metrics-server must report a version: {out}"
         );
     } else {
@@ -1973,6 +2058,76 @@ async fn run_suite() {
         )
         .await;
     assert_eq!(out["ok"], true);
+
+    // #389: roll the restart back. Wait for the restart's ReplicaSet (revision
+    // 2) first: rolled back before the controller made it, the original
+    // template would be re-adopted as revision 2, not 3.
+    let dl = deadline(120);
+    let original = loop {
+        let out = h
+            .ok(
+                "k8s.listReplicaSets",
+                json!({ "context": ctx, "namespace": NS, "ownerName": DEPLOY }),
+            )
+            .await;
+        let rows = out["replicasets"].as_array().cloned().unwrap_or_default();
+        let named = |rev: &str| {
+            rows.iter()
+                .find(|r| r["revision"] == rev)
+                .and_then(|r| r["name"].as_str())
+                .map(str::to_string)
+        };
+        if let (Some(first), Some(_)) = (named("1"), named("2")) {
+            break first;
+        }
+        if Instant::now() > dl {
+            panic!("timed out waiting for {DEPLOY}'s second revision: {out}");
+        }
+        poll_sleep().await;
+    };
+    let refused = h
+        .err(
+            "k8s.rolloutUndo",
+            json!({ "context": ctx, "namespace": NS, "name": DEPLOY, "revision": 99 }),
+        )
+        .await;
+    assert!(refused.contains("has no revision 99"), "{refused}");
+    let out = h
+        .ok(
+            "k8s.rolloutUndo",
+            json!({ "context": ctx, "namespace": NS, "name": DEPLOY, "revision": 1 }),
+        )
+        .await;
+    assert_eq!(out["revision"], 1);
+    let dl = deadline(120);
+    loop {
+        let out = h
+            .ok(
+                "k8s.listReplicaSets",
+                json!({ "context": ctx, "namespace": NS, "ownerName": DEPLOY }),
+            )
+            .await;
+        if out["replicasets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["name"] == original.as_str() && r["revision"] == "3")
+        {
+            break;
+        }
+        if Instant::now() > dl {
+            panic!("timed out waiting for {original} to come back as revision 3: {out}");
+        }
+        poll_sleep().await;
+    }
+    let refused = h
+        .err(
+            "k8s.rolloutUndo",
+            json!({ "context": ctx, "namespace": NS, "name": DEPLOY, "revision": 3 }),
+        )
+        .await;
+    assert!(refused.contains("already runs revision 3"), "{refused}");
+    println!("{DEPLOY}: rolled back to revision 1 (now revision 3)");
 
     // Review afresh only if a controller races this live fixture's pinned write.
     let (out, reviewed) = h
@@ -2436,7 +2591,11 @@ async fn run_suite() {
     println!("=== testClusterConnection ===");
     let kube_yaml = kubeconfig_paths()
         .iter()
-        .find_map(|p| std::fs::read_to_string(p).ok().filter(|c| c.contains(ctx.as_str())))
+        .find_map(|p| {
+            std::fs::read_to_string(p)
+                .ok()
+                .filter(|c| c.contains(ctx.as_str()))
+        })
         .expect("no kubeconfig file declares the e2e context");
     let probe = h
         .ok(
@@ -2553,12 +2712,24 @@ async fn app_pod_streams(h: &mut Harness, ctx: &str, settings: &TempSettings) {
     })
     .to_string();
     // An exec binding runs code in the cluster, so an unsigned one needs the policy.
-    h.ok("extensions.configure", json!({"action":"unsignedApps","allowUnsignedApps":true})).await;
+    h.ok(
+        "extensions.configure",
+        json!({"action":"unsignedApps","allowUnsignedApps":true}),
+    )
+    .await;
     let grants = declared_permissions(&manifest);
-    let out = h.ok("extensions.validate", json!({"manifest": manifest, "grants": grants})).await;
+    let out = h
+        .ok(
+            "extensions.validate",
+            json!({"manifest": manifest, "grants": grants}),
+        )
+        .await;
     assert_eq!(out["errors"], json!([]), "must validate: {out}");
     let installed = h
-        .ok("extensions.configure", json!({"action": "install", "manifest": manifest, "grants": grants}))
+        .ok(
+            "extensions.configure",
+            json!({"action": "install", "manifest": manifest, "grants": grants}),
+        )
         .await;
     let revision = installed["plugins"]
         .as_array()
@@ -2597,27 +2768,36 @@ async fn app_pod_streams(h: &mut Harness, ctx: &str, settings: &TempSettings) {
     streams
         .open(
             sink.clone(),
-            request("e2e/pods#1", "extstream:e2e-logs", DEPLOY,
-                json!({"kind": "logs", "capability": "logs", "pod": web, "tailLines": 20})),
+            request(
+                "e2e/pods#1",
+                "extstream:e2e-logs",
+                DEPLOY,
+                json!({"kind": "logs", "capability": "logs", "pod": web, "tailLines": 20}),
+            ),
         )
         .await
         .expect("the logs stream opens");
     let saw_hello = |frames: &[Value]| {
         frames.iter().any(|f| {
             f["data"]["event"] == "lines"
-                && f["data"]["lines"].as_array().is_some_and(|l| l.iter().any(|l| l["line"] == "hello"))
+                && f["data"]["lines"]
+                    .as_array()
+                    .is_some_and(|l| l.iter().any(|l| l["line"] == "hello"))
         })
     };
     frames_until(&sink, "extstream:e2e-logs", "a hello line", &saw_hello).await;
     assert!(
-        data("extstream:e2e-logs").iter().any(|d| d["event"] == "status" && d["status"] == "live"),
+        data("extstream:e2e-logs")
+            .iter()
+            .any(|d| d["event"] == "status" && d["status"] == "live"),
         "{:?}",
         data("extstream:e2e-logs")
     );
 
     // Exec: refused unconfirmed, then run once confirmed.
     let echo = |confirmed: Option<Value>| {
-        let mut source = json!({"kind": "exec", "capability": "echo", "pod": web, "container": "app"});
+        let mut source =
+            json!({"kind": "exec", "capability": "echo", "pod": web, "container": "app"});
         if let Some(confirmed) = confirmed {
             source["confirmed"] = confirmed;
         }
@@ -2638,23 +2818,44 @@ async fn app_pod_streams(h: &mut Harness, ctx: &str, settings: &TempSettings) {
             sink.clone(),
             "e2e",
             trail.clone(),
-            request("e2e/pods#1", "extstream:e2e-exec", DEPLOY,
-                echo(Some(json!({"pod": web, "container": "app", "command": ["echo", "e2e-exec"]})))),
+            request(
+                "e2e/pods#1",
+                "extstream:e2e-exec",
+                DEPLOY,
+                echo(Some(
+                    json!({"pod": web, "container": "app", "command": ["echo", "e2e-exec"]}),
+                )),
+            ),
         )
         .await
         .expect("a confirmed exec opens");
-    let frames = frames_until(&sink, "extstream:e2e-exec", "the command's end", &|frames: &[Value]| {
-        frames.iter().any(|f| f["type"] == "close" || f["type"] == "error")
-    })
+    let frames = frames_until(
+        &sink,
+        "extstream:e2e-exec",
+        "the command's end",
+        &|frames: &[Value]| {
+            frames
+                .iter()
+                .any(|f| f["type"] == "close" || f["type"] == "error")
+        },
+    )
     .await;
     assert_eq!(frames.last().unwrap()["reason"], "completed", "{frames:?}");
     let exec = data("extstream:e2e-exec");
     assert!(
         exec.iter().any(|d| d["event"] == "output"
-            && d["chunks"].as_array().unwrap().iter().any(|c| c["text"].as_str().unwrap_or_default().contains("e2e-exec"))),
+            && d["chunks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|c| c["text"].as_str().unwrap_or_default().contains("e2e-exec"))),
         "{exec:?}"
     );
-    assert_eq!(exec.last().unwrap(), &json!({"event": "exit", "code": 0}), "{exec:?}");
+    assert_eq!(
+        exec.last().unwrap(),
+        &json!({"event": "exit", "code": 0}),
+        "{exec:?}"
+    );
 
     // A pod the Deployment does not select is refused, whoever confirmed it.
     let refused = streams
@@ -2676,14 +2877,21 @@ async fn app_pod_streams(h: &mut Harness, ctx: &str, settings: &TempSettings) {
             sink.clone(),
             "e2e",
             trail.clone(),
-            request("e2e/pods#2", "extstream:e2e-fwd", HTTP_DEPLOY,
-                json!({"kind": "portForward", "capability": "http", "pod": http})),
+            request(
+                "e2e/pods#2",
+                "extstream:e2e-fwd",
+                HTTP_DEPLOY,
+                json!({"kind": "portForward", "capability": "http", "pod": http}),
+            ),
         )
         .await
         .expect("the forward opens");
-    let frames = frames_until(&sink, "extstream:e2e-fwd", "ready", &|frames: &[Value]| {
-        frames.iter().any(|f| f["data"]["event"] == "ready")
-    })
+    let frames = frames_until(
+        &sink,
+        "extstream:e2e-fwd",
+        "ready",
+        &|frames: &[Value]| frames.iter().any(|f| f["data"]["event"] == "ready"),
+    )
     .await;
     let local = frames
         .iter()
@@ -2693,10 +2901,16 @@ async fn app_pod_streams(h: &mut Harness, ctx: &str, settings: &TempSettings) {
     let mut body = String::new();
     for attempt in 0.. {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let mut socket = tokio::net::TcpStream::connect(("127.0.0.1", local)).await.expect("the port listens");
-        socket.write_all(b"GET /index.html HTTP/1.0\r\nHost: e2e\r\n\r\n").await.unwrap();
+        let mut socket = tokio::net::TcpStream::connect(("127.0.0.1", local))
+            .await
+            .expect("the port listens");
+        socket
+            .write_all(b"GET /index.html HTTP/1.0\r\nHost: e2e\r\n\r\n")
+            .await
+            .unwrap();
         body.clear();
-        let _ = tokio::time::timeout(Duration::from_secs(10), socket.read_to_string(&mut body)).await;
+        let _ =
+            tokio::time::timeout(Duration::from_secs(10), socket.read_to_string(&mut body)).await;
         if body.contains("ok") || attempt >= 5 {
             break;
         }
@@ -2704,7 +2918,10 @@ async fn app_pod_streams(h: &mut Harness, ctx: &str, settings: &TempSettings) {
     }
     assert!(body.starts_with("HTTP/1.") && body.contains("ok"), "{body}");
     assert_eq!(streams.close_view("e2e/pods#2"), 1);
-    assert_eq!(sink.payloads_for("extstream:e2e-fwd").last().unwrap()["reason"], "viewClosed");
+    assert_eq!(
+        sink.payloads_for("extstream:e2e-fwd").last().unwrap()["reason"],
+        "viewClosed"
+    );
     let mut closed = false;
     for _ in 0..50 {
         if std::net::TcpStream::connect(("127.0.0.1", local)).is_err() {
@@ -2714,7 +2931,11 @@ async fn app_pod_streams(h: &mut Harness, ctx: &str, settings: &TempSettings) {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     assert!(closed, "the forward's port stops listening with its view");
-    assert_eq!(streams.close_view("e2e/pods#1"), 1, "the log stream was still open");
+    assert_eq!(
+        streams.close_view("e2e/pods#1"),
+        1,
+        "the log stream was still open"
+    );
     // Each exec and forward session was recorded, the refused ones with why.
     let recorded: Vec<(String, &str)> = trail
         .0
@@ -2734,7 +2955,11 @@ async fn app_pod_streams(h: &mut Harness, ctx: &str, settings: &TempSettings) {
         "{recorded:?}"
     );
 
-    h.ok("extensions.configure", json!({"action": "remove", "id": id})).await;
+    h.ok(
+        "extensions.configure",
+        json!({"action": "remove", "id": id}),
+    )
+    .await;
 }
 
 /// An audit sink that keeps what it is given, for the suite to read back.
@@ -2766,17 +2991,29 @@ async fn running_pod(
                        "context": ctx, "namespace": NS, "name": workload}),
             )
             .await;
-        assert_eq!(out["scope"], json!(format!("pods selected by Deployment {workload}")), "{out}");
+        assert_eq!(
+            out["scope"],
+            json!(format!("pods selected by Deployment {workload}")),
+            "{out}"
+        );
         let pods = out["pods"].as_array().cloned().unwrap_or_default();
         assert!(
-            pods.iter()
-                .all(|p| p["name"].as_str().unwrap_or_default().starts_with(&format!("{workload}-"))),
+            pods.iter().all(|p| p["name"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with(&format!("{workload}-"))),
             "only {workload}'s pods: {out}"
         );
-        if let Some(pod) = pods.iter().find(|p| p["phase"] == "Running" && p["ready"] == true) {
+        if let Some(pod) = pods
+            .iter()
+            .find(|p| p["phase"] == "Running" && p["ready"] == true)
+        {
             return pod["name"].as_str().unwrap().to_owned();
         }
-        assert!(Instant::now() < deadline, "no running {workload} pod: {out}");
+        assert!(
+            Instant::now() < deadline,
+            "no running {workload} pod: {out}"
+        );
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
 }
@@ -2865,14 +3102,21 @@ async fn app_stream(h: &mut Harness, ctx: &str, settings: &TempSettings, flux_re
         .expect("the stream opens");
     let mut data = None;
     for _ in 0..100 {
-        if let Some(frame) = sink.payloads_for(channel).into_iter().find(|f| f["type"] != "open") {
+        if let Some(frame) = sink
+            .payloads_for(channel)
+            .into_iter()
+            .find(|f| f["type"] != "open")
+        {
             data = Some(frame);
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
     let data = data.expect("a first frame within ten seconds");
-    assert_eq!(data["type"], "data", "the first tick must be data, not a failure: {data}");
+    assert_eq!(
+        data["type"], "data",
+        "the first tick must be data, not a failure: {data}"
+    );
     assert!(
         data["data"]["items"]
             .as_array()
@@ -2890,31 +3134,53 @@ async fn app_stream(h: &mut Harness, ctx: &str, settings: &TempSettings, flux_re
         .unwrap_or_else(|| panic!("the harness registry sees the stream: {metrics}"))
         .clone();
     assert_eq!(flux["openStreams"], 1, "{metrics}");
-    assert_eq!(flux["streams"][0]["stream"], json!(opened.stream), "{metrics}");
+    assert_eq!(
+        flux["streams"][0]["stream"],
+        json!(opened.stream),
+        "{metrics}"
+    );
 
     // The Inspector (#575) sees the live stream, and a declarative app has no
     // process and nothing in its log. The payloads are the ones
     // `inspectExtension` and `extensionLogs` send.
-    let inspected = h.ok("extensions.inspect", json!({"id": "org.example.flux"})).await;
+    let inspected = h
+        .ok("extensions.inspect", json!({"id": "org.example.flux"}))
+        .await;
     assert_eq!(inspected["runtime"], "declarative", "{inspected}");
     assert_eq!(inspected["process"], Value::Null, "{inspected}");
     let open = inspected["streams"]["open"].as_array().unwrap();
     assert!(
-        open.iter().any(|s| s["stream"] == json!(opened.stream) && s["source"] == "read"),
+        open.iter()
+            .any(|s| s["stream"] == json!(opened.stream) && s["source"] == "read"),
         "{inspected}"
     );
     assert_eq!(inspected["streams"]["watches"], json!([]), "{inspected}");
     assert_eq!(inspected["recentErrors"], json!([]), "{inspected}");
     let logs = h
-        .ok("extensions.logs", json!({"id": "org.example.flux", "after": 0, "minLevel": "trace"}))
+        .ok(
+            "extensions.logs",
+            json!({"id": "org.example.flux", "after": 0, "minLevel": "trace"}),
+        )
         .await;
-    assert_eq!(logs, json!({"runtime": "declarative", "lines": [], "capacity": 1000, "dropped": 0}));
+    assert_eq!(
+        logs,
+        json!({"runtime": "declarative", "lines": [], "capacity": 1000, "dropped": 0})
+    );
 
     assert_eq!(streams.close_view("e2e/page#1"), 1);
     let last = sink.payloads_for(channel).pop().unwrap();
-    assert_eq!(last, json!({"type": "close", "stream": opened.stream, "reason": "viewClosed"}));
-    let inspected = h.ok("extensions.inspect", json!({"id": "org.example.flux"})).await;
-    assert_eq!(inspected["streams"]["open"], json!([]), "a closed view's stream is gone: {inspected}");
+    assert_eq!(
+        last,
+        json!({"type": "close", "stream": opened.stream, "reason": "viewClosed"})
+    );
+    let inspected = h
+        .ok("extensions.inspect", json!({"id": "org.example.flux"}))
+        .await;
+    assert_eq!(
+        inspected["streams"]["open"],
+        json!([]),
+        "a closed view's stream is gone: {inspected}"
+    );
 }
 
 /// #566: a `watch` stream on the Flux app's Kustomization reader lists the
@@ -2957,30 +3223,48 @@ async fn app_watch_stream(ctx: &str, settings: &TempSettings, flux_revision: u64
                     return;
                 }
                 assert!(
-                    !sink.payloads_for(channel).iter().any(|f| f["type"] == "error"),
+                    !sink
+                        .payloads_for(channel)
+                        .iter()
+                        .any(|f| f["type"] == "error"),
                     "the watch failed: {:?}",
                     sink.payloads_for(channel)
                 );
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }
-            panic!("no {event} within twenty seconds: {:?}", sink.payloads_for(channel));
+            panic!(
+                "no {event} within twenty seconds: {:?}",
+                sink.payloads_for(channel)
+            );
         }
     };
     wait_for("synced", 1).await;
     let annotated = tokio::process::Command::new("kubectl")
         .args(["--context", ctx, "-n", NS, "annotate", "--overwrite"])
-        .arg(format!("kustomizations.kustomize.toolkit.fluxcd.io/{KUSTOMIZATION}"))
+        .arg(format!(
+            "kustomizations.kustomize.toolkit.fluxcd.io/{KUSTOMIZATION}"
+        ))
         .arg("srelens.io/e2e-watch=1")
         .output()
         .await
         .expect("run kubectl");
-    assert!(annotated.status.success(), "{}", String::from_utf8_lossy(&annotated.stderr));
+    assert!(
+        annotated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&annotated.stderr)
+    );
     wait_for("changed", 1).await;
     let wire = serde_json::to_string(&sink.payloads_for(channel)).unwrap();
-    assert!(!wire.contains(KUSTOMIZATION), "a watch frame names no object: {wire}");
+    assert!(
+        !wire.contains(KUSTOMIZATION),
+        "a watch frame names no object: {wire}"
+    );
     assert_eq!(streams.close_view("e2e/page#2"), 1);
     let last = sink.payloads_for(channel).pop().unwrap();
-    assert_eq!(last, json!({"type": "close", "stream": watch.stream, "reason": "viewClosed"}));
+    assert_eq!(
+        last,
+        json!({"type": "close", "stream": watch.stream, "reason": "viewClosed"})
+    );
 }
 
 async fn extensions_and_gitops(h: &mut Harness, ctx: &str, settings: &TempSettings) {
@@ -3009,7 +3293,11 @@ async fn extensions_and_gitops(h: &mut Harness, ctx: &str, settings: &TempSettin
     ];
     // The local examples declare writes, so permission grants also need the
     // explicit unsigned-app policy. Read-only apps do not need this setting.
-    h.ok("extensions.configure", json!({"action":"unsignedApps","allowUnsignedApps":true})).await;
+    h.ok(
+        "extensions.configure",
+        json!({"action":"unsignedApps","allowUnsignedApps":true}),
+    )
+    .await;
     for app in &apps {
         let out = h.ok("extensions.validate", app.clone()).await;
         assert_eq!(out["errors"], json!([]), "must validate: {out}");
@@ -3057,8 +3345,20 @@ async fn extensions_and_gitops(h: &mut Harness, ctx: &str, settings: &TempSettin
     // Authentic historical bytes still verify cryptographically, but API 0.1
     // cannot be installed on this API 0.3 host.
     let old = h.ok("extensions.validate", json!({"manifest":SIGNED_ARGOCD,"grants":declared_permissions(SIGNED_ARGOCD),"signature":SIGNED_ARGOCD_SIG})).await;
-    assert!(old["errors"].as_array().unwrap().iter().any(|e| e["code"] == "EXTENSION_API_INCOMPATIBLE"), "{old}");
-    let err = h.err("extensions.catalogManifest", json!({"id":"org.srelens.argocd","sha256":sha256})).await;
+    assert!(
+        old["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["code"] == "EXTENSION_API_INCOMPATIBLE"),
+        "{old}"
+    );
+    let err = h
+        .err(
+            "extensions.catalogManifest",
+            json!({"id":"org.srelens.argocd","sha256":sha256}),
+        )
+        .await;
     assert!(err.contains("different host API version"), "{err}");
 
     for app in &apps {
@@ -3090,7 +3390,10 @@ async fn extensions_and_gitops(h: &mut Harness, ctx: &str, settings: &TempSettin
     // anywhere else, and the refusal does not repeat the value.
     println!("=== extensions: secret store ===");
     let cleared = h
-        .ok("extension.secretStore", json!({"action": "clear", "id": "org.example.flux"}))
+        .ok(
+            "extension.secretStore",
+            json!({"action": "clear", "id": "org.example.flux"}),
+        )
         .await;
     assert_eq!(cleared, json!({"set": false}), "{cleared}");
     let err = h
@@ -3102,7 +3405,10 @@ async fn extensions_and_gitops(h: &mut Harness, ctx: &str, settings: &TempSettin
     // Absence first, with a message that prints nothing of the refusal; then
     // the cause, which the refusal may be printed for once the value is known
     // not to be in it.
-    assert!(!err.contains("e2e-secret-value"), "the refusal repeated the secret");
+    assert!(
+        !err.contains("e2e-secret-value"),
+        "the refusal repeated the secret"
+    );
     assert!(
         err.contains("declares no secret setting"),
         "refused for another reason than an undeclared secret setting: {err}"
@@ -3237,7 +3543,7 @@ async fn extensions_and_gitops(h: &mut Harness, ctx: &str, settings: &TempSettin
     });
     let observability = json!({
         "id": "org.example.observability", "name": "Observability", "version": "0.1.0",
-        "srelensApiVersion": "^0.6", "kind": "declarative",
+        "srelensApiVersion": "^0.7", "kind": "declarative",
         "permissions": [{"capability": "network.http", "hosts": ["${settings.prometheusUrl}"]}],
         "settings": [{"id": "prometheusUrl", "type": "url", "title": "Prometheus URL", "required": true}],
         "capabilities": [{"name": "prom", "title": "Prometheus range query", "target": "network.http",
@@ -3469,8 +3775,7 @@ async fn extensions_and_gitops(h: &mut Harness, ctx: &str, settings: &TempSettin
         "{panels}"
     );
     assert_eq!(
-        panels["panels"][0]["sections"][0]["fields"][0]["label"],
-        "Source reference",
+        panels["panels"][0]["sections"][0]["fields"][0]["label"], "Source reference",
         "{panels}"
     );
     // A Deployment Flux applied carries the Kustomization's name and
@@ -3530,7 +3835,11 @@ async fn extensions_and_gitops(h: &mut Harness, ctx: &str, settings: &TempSettin
     app_stream(h, ctx, settings, revision(&flux_app)).await;
     assert_eq!(
         detail["actions"],
-        json!(["kustomizations-suspend", "kustomizations-resume", "kustomizations-reconcile"]),
+        json!([
+            "kustomizations-suspend",
+            "kustomizations-resume",
+            "kustomizations-reconcile"
+        ]),
         "{detail}"
     );
     assert!(
@@ -3613,7 +3922,10 @@ async fn extensions_and_gitops(h: &mut Harness, ctx: &str, settings: &TempSettin
         "namespace": NS, "name": ARGO_APP
     });
     let before = h.ok("k8s.getCustomResource", argo_object.clone()).await;
-    assert!(before.get("actions").is_none(), "Ungated readers never invent actions: {before}");
+    assert!(
+        before.get("actions").is_none(),
+        "Ungated readers never invent actions: {before}"
+    );
     let argo_uid = before["resource"]["metadata"]["uid"]
         .as_str()
         .expect("uid")
@@ -3766,10 +4078,7 @@ async fn extensions_and_gitops(h: &mut Harness, ctx: &str, settings: &TempSettin
     .await;
     let err = h.err("extensions.resource", flux_selection).await;
     assert!(err.contains("disabled"), "{err}");
-    for id in [
-        "org.example.flux",
-        "org.example.argocd",
-    ] {
+    for id in ["org.example.flux", "org.example.argocd"] {
         h.ok(
             "extensions.configure",
             json!({ "action": "remove", "id": id }),
@@ -3796,24 +4105,46 @@ async fn toolbox_krew_lifecycle(h: &mut Harness) {
     // Real bootstrap: download krew and run `krew install krew` into ~/.krew.
     let out = h.ok("toolbox.installKrew", json!({})).await;
     assert_eq!(out["tool"], "krew");
-    assert!(out["version"].as_str().is_some(), "krew version should resolve: {out}");
-    assert!(krew_home.join("kubectl-krew").exists(), "krew shim should be installed");
+    assert!(
+        out["version"].as_str().is_some(),
+        "krew version should resolve: {out}"
+    );
+    assert!(
+        krew_home.join("kubectl-krew").exists(),
+        "krew shim should be installed"
+    );
 
     // The index lists `ns` (kubens) — a small, stable plugin.
-    let out = h.ok("toolbox.searchPlugins", json!({ "query": "ns" })).await;
+    let out = h
+        .ok("toolbox.searchPlugins", json!({ "query": "ns" }))
+        .await;
     assert!(
-        out["plugins"].as_array().unwrap().iter().any(|p| p["name"] == "ns"),
+        out["plugins"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["name"] == "ns"),
         "krew index should list ns: {out}",
     );
 
     // Install it (its binary lands in ~/.krew/bin), then remove it.
-    let out = h.ok("toolbox.installPlugin", json!({ "plugin": "ns" })).await;
+    let out = h
+        .ok("toolbox.installPlugin", json!({ "plugin": "ns" }))
+        .await;
     assert_eq!(out["plugin"], "ns");
-    assert!(krew_home.join("kubectl-ns").exists(), "kubectl-ns should be installed");
+    assert!(
+        krew_home.join("kubectl-ns").exists(),
+        "kubectl-ns should be installed"
+    );
 
-    let out = h.ok("toolbox.removePlugin", json!({ "plugin": "ns" })).await;
+    let out = h
+        .ok("toolbox.removePlugin", json!({ "plugin": "ns" }))
+        .await;
     assert_eq!(out["plugin"], "ns");
-    assert!(!krew_home.join("kubectl-ns").exists(), "kubectl-ns should be removed");
+    assert!(
+        !krew_home.join("kubectl-ns").exists(),
+        "kubectl-ns should be removed"
+    );
     println!("krew lifecycle OK");
 }
 
@@ -3947,8 +4278,8 @@ async fn mcp_resource_subscription(ctx: &str, pod: &str) {
             cache(),
         )));
 
-    let uri = srelens_mcp::resources::ResourceUri::parse(&format!("k8s://{ctx}/{NS}/Pod/{pod}"))
-        .unwrap();
+    let uri =
+        srelens_mcp::resources::ResourceUri::parse(&format!("k8s://{ctx}/{NS}/Pod/{pod}")).unwrap();
 
     let hits = Arc::new(std::sync::Mutex::new(0usize));
     let counter = hits.clone();
@@ -4150,7 +4481,10 @@ async fn mcp_prompts_name_only_real_capabilities() {
         .iter()
         .map(|p| p["name"].as_str().unwrap().to_string())
         .collect();
-    assert!(names.contains(&"pod-crashloop".to_string()), "got {names:?}");
+    assert!(
+        names.contains(&"pod-crashloop".to_string()),
+        "got {names:?}"
+    );
 
     for name in &names {
         for arguments in [

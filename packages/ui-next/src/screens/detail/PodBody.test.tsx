@@ -341,6 +341,12 @@ function factLabels(container: HTMLElement, heading?: string): string[] {
   return [...(block?.querySelectorAll(".kv-k") ?? [])].map((el) => el.textContent ?? "");
 }
 
+/** The text of the fact labelled `label`, or `undefined` when there is none. */
+function factValue(container: HTMLElement, label: string): string | undefined {
+  const row = [...container.querySelectorAll("dl.kv")].find((dl) => dl.querySelector(".kv-k")?.textContent === label);
+  return row?.querySelector(".kv-v")?.textContent ?? undefined;
+}
+
 /**
  * A pod's facts, drawn.
  *
@@ -477,11 +483,34 @@ describe("PodDetailsBody", () => {
       expect(screen.queryByText("Running")).toBeNull();
     });
 
-    it("keeps the header's word off the phase between restarts, when there is no reason to show", () => {
-      // The same pod a moment later: the container is genuinely running, so
-      // there is no waiting reason on the object at all — only `ready: false`
-      // and a restart count. The header used to read a plain "Running" here
-      // while the pod was still failing every few seconds.
+    it("reads the exited moment between restarts as kubectl does: Error", () => {
+      // The same pod after its container exited, before the kubelet backs it
+      // off: no waiting reason on the object, and kubectl prints the
+      // container's reason.
+      renderFacts(
+        pod(
+          { containers: [APP_CONTAINER] },
+          {
+            phase: "Running",
+            containerStatuses: [
+              {
+                name: "app",
+                ready: false,
+                restartCount: 7,
+                state: { terminated: { exitCode: 1, reason: "Error", finishedAt: "2026-08-24T13:28:18Z" } },
+              },
+            ],
+          },
+        ),
+      );
+      expect(screen.getByText("Error")).toBeDefined();
+      expect(screen.queryByText("Running")).toBeNull();
+    });
+
+    it("reads the moment the container is up again as kubectl does: Running", () => {
+      // Up again for a moment, not ready, restarted 7 times. kubectl says
+      // `Running` here, and the header matches it. The earlier `NotReady`
+      // rule for this moment was dropped in favour of kubectl's word.
       renderFacts(
         pod(
           { containers: [APP_CONTAINER] },
@@ -499,8 +528,8 @@ describe("PodDetailsBody", () => {
           },
         ),
       );
-      expect(screen.getByText("NotReady")).toBeDefined();
-      expect(screen.queryByText("Running")).toBeNull();
+      expect(screen.getByText("Running")).toBeDefined();
+      expect(screen.queryByText("NotReady")).toBeNull();
     });
 
     it("still reads a pod that has simply not become ready yet as Running", () => {
@@ -557,7 +586,10 @@ describe("PodDetailsBody", () => {
         ),
       );
       expect(factLabels(container).slice(0, 4)).toEqual(["Status", "Reason", "Message", "Node"]);
-      expect(screen.getByText("Evicted")).toBeDefined();
+      // kubectl's STATUS column and `kubectl describe`'s Reason line both say
+      // `Evicted`, and so do the two facts.
+      expect(factValue(container, "Status")).toContain("Evicted");
+      expect(factValue(container, "Reason")).toBe("Evicted");
       expect(screen.getByText(message)).toBeDefined();
     });
 

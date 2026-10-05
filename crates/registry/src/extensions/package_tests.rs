@@ -358,7 +358,7 @@ fn a_package_is_refused_whole_and_leaves_nothing_behind() {
         install_package(&path, &traversal).err().unwrap(),
         "leaves the package",
     );
-    // Binaries, on a host that runs declarative apps only.
+    // Binaries a declarative app does not run.
     let with_binary = {
         let dir = tempfile::tempdir().unwrap();
         for (path, source) in fixture_files("example") {
@@ -377,7 +377,7 @@ fn a_package_is_refused_whole_and_leaves_nothing_behind() {
     };
     nothing_installed(
         install_package(&path, &with_binary).err().unwrap(),
-        "declarative apps only",
+        "its manifest runs none",
     );
     // Grants that are not what the manifest asks for: refused before anything is unpacked.
     let reason = configure(

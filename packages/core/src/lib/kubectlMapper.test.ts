@@ -76,6 +76,14 @@ describe("kubectlMapper", () => {
     });
   });
 
+  describe("rollout undo (#389)", () => {
+    it("rolls a deployment back to a named revision", () => {
+      expect(
+        toKubectl({ action: "rollout-undo", kind: "Deployment", namespace: "default", name: "web", context: "prod", revision: 2 }),
+      ).toBe("kubectl rollout undo deployments/web --to-revision=2 -n default --context prod");
+    });
+  });
+
   describe("node operations", () => {
     it("cordon a node", () => {
       expect(

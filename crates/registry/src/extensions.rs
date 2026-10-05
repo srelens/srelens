@@ -9,6 +9,8 @@ mod cards;
 mod catalog;
 mod columns;
 pub(crate) mod crd;
+#[cfg(test)]
+mod executable_tests;
 #[cfg(any(test, feature = "fuzzing"))]
 pub mod fuzzing;
 mod http_policy;
@@ -37,9 +39,13 @@ mod secrets_tests;
 mod settings_tests;
 #[cfg(test)]
 mod sidecar_tests;
+pub mod sidecars;
 mod signing;
 mod store;
 pub mod streams;
+pub mod tools;
+#[cfg(test)]
+mod tools_tests;
 mod trust;
 #[cfg(test)]
 mod version_tests;
@@ -265,6 +271,11 @@ pub struct Installed {
 /// What the broker answers when an app is used on a cluster it is not enabled for.
 const NOT_ENABLED_FOR_CLUSTER: &str = "App is not enabled for this cluster";
 impl Installed {
+    /// Whether the app is in use: on, and neither blocked by policy nor quarantined.
+    fn runs(&self) -> bool {
+        self.enabled && self.policy_blocked.is_none() && self.quarantined.is_none()
+    }
+
     /// Refuses a limited app on a context outside its list. A context the host could not
     /// resolve is refused too, but with why: whether the app is enabled there is unknown.
     fn check_scope(
@@ -693,13 +704,14 @@ fn read_saved_under<S: InventoryStore + ?Sized>(
 
 const UNSIGNED_POLICY_REASON: &str = "Turn on \"Allow unsigned apps to modify clusters and run code\" in Settings → Apps to enable this app";
 
-/// This host accepts only declarative manifests. Keep the kind match exhaustive:
-/// any future executable kind must require verified signing or the policy even
-/// when it declares no write actions. Source labels and IDs grant no trust.
+/// Whether an unsigned app needs the unsigned-apps setting. Keep the kind match
+/// exhaustive: a new kind cannot be added without deciding. Source labels and IDs grant
+/// no trust.
 ///
 /// A declarative app needs it when it writes (declared actions) or runs code in
 /// the cluster (a `k8s.exec` binding, #567): a command can change whatever its
-/// container may.
+/// container may. An executable app (#574) always does, writes or not: it runs code
+/// on this computer, sandboxed or not.
 fn needs_unsigned_policy(manifest: &Manifest) -> bool {
     match manifest.kind {
         srelens_plugin_host::ManifestKind::Declarative => {
@@ -709,6 +721,7 @@ fn needs_unsigned_policy(manifest: &Manifest) -> bool {
                     .iter()
                     .any(|binding| binding.target == srelens_plugin_host::POD_EXEC)
         }
+        srelens_plugin_host::ManifestKind::Executable => true,
     }
 }
 fn check_unsigned_policy(manifest: &Manifest, verified: bool, allow: bool) -> Result<(), String> {
@@ -745,6 +758,10 @@ fn reverify(plugin: &Installed, trust: &TrustRoot) -> Result<Option<trust::Signe
     plugin.manifest.validate()?;
     crd::group_problems(&plugin.manifest).into_result()?;
     check_package_name(plugin.package.as_deref())?;
+    // Its binaries are in its package, and there is none to run them from (#574).
+    if plugin.manifest.sidecar.is_some() && plugin.package.is_none() {
+        return Err("Installed executable app has no package to run its sidecar from".into());
+    }
     plugin
         .signature_proof
         .as_ref()
@@ -1225,6 +1242,15 @@ fn validate_app(
     }
     problems.into_result()
 }
+/// [`validate_app`] with every permission granted, for the MCP catalog's own check that
+/// it lists every reader an app may bind.
+#[cfg(test)]
+pub(crate) fn validate_app_for_tests(
+    manifest: &Manifest,
+    core: Arc<Registry>,
+) -> Result<(), ValidationErrors> {
+    validate_app(manifest, &manifest.permission_names(), core)
+}
 /// Why an app under `id` cannot be trusted without a publisher signature, when it has none
 /// and `id` is in a namespace delegated to a publisher. Install refuses it; loading
 /// quarantines a stored one, which `enable` then refuses; rollback refuses to restore one.
@@ -1261,6 +1287,8 @@ fn check_install(
         .unwrap_or_default();
     // The rules a new install meets that an installed app is not re-held to.
     problems.0.extend(manifest.install_problems());
+    // An executable app's binaries come in its package (#574).
+    package::binary_problems(&manifest, digests, &mut problems);
     // With no root to verify against, which IDs are reserved for signed publishers is
     // unknown, so nothing is installed: an unsigned app could otherwise take a publisher's
     // ID and replace its signed installation.
@@ -1921,6 +1949,8 @@ fn configure(
     if let Some(root) = &apps.packages {
         package::prune(root, &kept_packages(&state));
     }
+    // Its sidecar first, so nothing still runs out of the directories below (#574).
+    streams::end_uninstalled_sidecars(&store.key(), &state);
     // And the data an uninstalled app's sidecar kept (#573). Best effort, as the
     // packages are: a directory that cannot be removed now is tried again with the
     // next change.
@@ -1935,8 +1965,9 @@ fn configure(
     }
     // And, on Windows, an uninstalled app's AppContainer profile (#573): its folder
     // and its registry storage, both of which its sidecar could write outside its
-    // data directory. Best effort, as the rest is. Nothing starts a sidecar yet
-    // (#574); when something does, it stops the app's sidecar before this runs.
+    // data directory. Best effort, as the rest is. The app's sidecar was ended above
+    // (#574); one a call still held may outlive this, and its profile goes with the
+    // next change.
     #[cfg(windows)]
     for id in uninstalled(&installed_before, &state) {
         if let Err(error) = srelens_plugin_host::sidecar::sandbox::delete_profile(id) {
@@ -2317,6 +2348,7 @@ fn register_apps(
         apps.packages.is_some(),
     );
     let packages = apps.packages.clone();
+    let runtime = apps.clone();
     resource::register(reg, path.clone(), core.clone(), cache.clone());
     // One snapshot of each granted reader, shared by table columns, dashboard
     // cards and a card's target page, so the three agree and list it once.
@@ -2387,8 +2419,9 @@ fn register_apps(
                 let (errors, permission_diff, signed_by) = match check_install(&input.manifest, &input.grants, signature, input.digests.as_deref(), &authority, &trust, c) {
                     Err(problems) => (problems.0, None, None),
                     Ok((manifest, signed)) => {
-                        // Reported where the app writes or runs code: its actions, else its exec bindings.
-                        let at = if manifest.actions.is_empty() { "capabilities" } else { "actions" };
+                        // Reported where the app writes or runs code: its kind for an executable
+                        // app, else its actions, else its exec bindings.
+                        let at = if manifest.sidecar.is_some() { "kind" } else if manifest.actions.is_empty() { "capabilities" } else { "actions" };
                         let mut errors = check_unsigned_policy(&manifest, input.signature.is_some(), state.allow_unsigned_apps)
                             .err().map(|reason| vec![ValidationError::new(Code::InvalidValue, at, reason)])
                             .unwrap_or_default();
@@ -2448,7 +2481,7 @@ fn register_apps(
         },
     ));
     providers::register(reg, path.clone(), core.clone(), cache.clone(), secrets.clone());
-    let streams = streams::register(reg, path.clone(), core, cache, snapshots, secrets);
+    let streams = streams::register(reg, &runtime, core, cache, snapshots, secrets);
     inspector::register(reg, path, streams.clone());
     streams
 }
@@ -2665,7 +2698,7 @@ async fn read_contribution(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use serde_json::json;
     use srelens_capability::Registry;
@@ -4210,7 +4243,7 @@ mod tests {
             .is_ok());
         assert_eq!(LISTED.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
-    pub(super) fn fake_core() -> Arc<Registry> {
+    pub(crate) fn fake_core() -> Arc<Registry> {
         let mut core = crate::build_registry_with_paths(
             srelens_kube::client_cache::ClientCache::new_many(vec![]),
             vec![],

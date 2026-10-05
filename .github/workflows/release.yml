@@ -623,6 +623,17 @@ jobs:
           fi
           echo "OK: no $APPIMAGE_EXCLUDED_LIBS in the AppImage"
 
+      # Executable apps on Linux need the sandbox launcher beside srelens
+      # (tauri.linux.conf.json). Fail if a bundle lacks it, ships it without its
+      # execute bit, or ships something else: on main before the draft is
+      # published; on dev the pre-release's assets are already up, and this
+      # flags them.
+      - name: Assert the Linux bundles ship the sandbox launcher
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get install -y rpm
+          sh packaging/linux/check-launcher.sh target/release/bundle
+
   # The terminal UI (#443). `apps/tui` shipped in #433 but nothing released it:
   # wanting the TUI meant cloning the repo and building it. It rides the SAME
   # release tag as the desktop installers, so there is one Releases page rather
@@ -1123,6 +1134,12 @@ jobs:
     # tui-publish included so the TUI archives are already attached to the tag
     # when this runs. Without it the two race, and whether the TUI downloads
     # carry a .asc comes down to which job finished first.
+    #
+    # `srelens-tui update` depends on one of these signatures: it installs a
+    # release only once srelens-tui-<version>-SHA256SUMS.txt.asc verifies
+    # against the keys in KEYS (#448). Skipping .txt files here would leave
+    # every TUI unable to update. A stable release without it is refused, and
+    # the dev channel passes over a pre-release without it.
     needs: [version, build, updater-manifest, tui-publish]
     if: ${{ always() && needs.build.result == 'success' && needs.updater-manifest.result == 'success' && needs.tui-publish.result == 'success' && (github.ref_name != 'main' || needs.version.outputs.release == 'true') }}
     runs-on: ubuntu-22.04

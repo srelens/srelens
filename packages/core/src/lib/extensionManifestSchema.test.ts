@@ -12,9 +12,9 @@ const repoFile = (path: string) => readFileSync(resolve(repoRoot, path), "utf8")
 /** The published URL of an API line's schema, which a manifest written for it names. */
 const schemaUrl = (line: string) =>
   `https://raw.githubusercontent.com/srelens/srelens/main/schemas/extension-manifest.v${line}.json`;
-const schema = JSON.parse(repoFile("schemas/extension-manifest.v0.6.json"));
+const schema = JSON.parse(repoFile("schemas/extension-manifest.v0.7.json"));
 const frozen0_4 = JSON.parse(repoFile("schemas/extension-manifest.v0.4.json"));
-const frozen0_5 = JSON.parse(repoFile("schemas/extension-manifest.v0.5.json"));
+const frozen0_6 = JSON.parse(repoFile("schemas/extension-manifest.v0.6.json"));
 // Every example, so a new one cannot skip validation.
 const examples = readdirSync(resolve(repoRoot, "examples/extensions"))
   .filter((name) => name.endsWith(".json"))
@@ -63,7 +63,7 @@ describe("frozen API 0.3 manifest schema", () => {
 
   it.each(examples)("refuses %s, which uses API 0.4 fields", (path) => {
     const manifest = JSON.parse(repoFile(path));
-    expect(manifest.srelensApiVersion).toMatch(/^\^0\.[456]$/);
+    expect(manifest.srelensApiVersion).toMatch(/^\^0\.[4-7]$/);
     expect(validate({ ...manifest, srelensApiVersion: "^0.3" })).toBe(false);
   });
 });
@@ -155,25 +155,19 @@ describe("pod permissions (#567)", () => {
   });
 });
 
-// API 0.5's file is kept as it was when 0.6 was cut (#569): srelens 0.15.1-188 implements
-// 0.5 without providers.
+// API 0.6's file is kept as it was when 0.7 was cut: srelens 0.15.1-192 and later
+// implement 0.6 without providers (#569).
 describe("metric, log and trace providers (#569)", () => {
   const validate = new Ajv({ allErrors: true }).compile(schema);
-  const frozen = new Ajv({ allErrors: true }).compile(frozen0_5);
-
-  it("keeps the published 0.5 examples valid on the frozen 0.5 schema", () => {
-    const flux = JSON.parse(repoFile("examples/extensions/flux.json"));
-    expect(flux.srelensApiVersion).toBe("^0.5");
-    expect(frozen(flux), JSON.stringify(frozen.errors)).toBe(true);
-  });
+  const frozen = new Ajv({ allErrors: true }).compile(frozen0_6);
 
   it.each(["examples/extensions/prometheus.json", "examples/extensions/loki.json"])(
-    "accepts the reference %s, which API 0.5's schema does not",
+    "accepts the reference %s, which API 0.6's schema does not",
     (path) => {
       const manifest = JSON.parse(repoFile(path));
-      expect(manifest.srelensApiVersion).toBe("^0.6");
+      expect(manifest.srelensApiVersion).toBe("^0.7");
       expect(validate(manifest), JSON.stringify(validate.errors)).toBe(true);
-      expect(frozen({ ...manifest, srelensApiVersion: "^0.5" })).toBe(false);
+      expect(frozen({ ...manifest, srelensApiVersion: "^0.6" })).toBe(false);
     },
   );
 

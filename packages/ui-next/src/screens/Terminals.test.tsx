@@ -318,10 +318,32 @@ describe("Terminals", () => {
     await user.click(screen.getByRole("button", { name: "Detach" }));
 
     expect(getSessions()).toHaveLength(0);
+    // Detach is `endSession`, not a row removal that happens to look like it:
+    // it closes the far end, and on desktop closing a node shell's exec is
+    // what has the host delete its privileged debug pod (#734). The page does
+    // not delete it as well.
     expect(far.close).toHaveBeenCalled();
     expect(terminalFor(id)).toBeUndefined();
-    // Detach is `endSession`, not a row removal that happens to look like it:
-    // the privileged debug pod a node shell left on the cluster goes with it.
+    expect(core.deletePod).not.toHaveBeenCalled();
+  });
+
+  it("Detach on the web deletes the debug pod itself, since no host does", async () => {
+    core.isTauri.mockReturnValue(false);
+    await act(() =>
+      startPodSession({
+        context: CTX.name,
+        namespace: "kube-system",
+        pod: "node-debug-abc",
+        container: "debug",
+        kind: "node",
+        title: "eu-w4-c3-standard-a1",
+      }),
+    );
+    const user = userEvent.setup();
+    draw();
+
+    await user.click(screen.getByRole("button", { name: "Detach" }));
+
     expect(core.deletePod).toHaveBeenCalledWith(CTX.name, "kube-system", "node-debug-abc");
   });
 

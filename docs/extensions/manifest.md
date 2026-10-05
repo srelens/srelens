@@ -9,22 +9,25 @@ and [flux.json](../../examples/extensions/flux.json), and the reference provider
 
 ## JSON Schema
 
-The schema for API 0.6 is committed at
-[`schemas/extension-manifest.v0.6.json`](../../schemas/extension-manifest.v0.6.json).
+The schema for API 0.7 is committed at
+[`schemas/extension-manifest.v0.7.json`](../../schemas/extension-manifest.v0.7.json).
 Point your editor at it by naming it in the manifest:
 
 ```json
 {
-  "$schema": "https://raw.githubusercontent.com/srelens/srelens/main/schemas/extension-manifest.v0.6.json",
+  "$schema": "https://raw.githubusercontent.com/srelens/srelens/main/schemas/extension-manifest.v0.7.json",
   "id": "io.example.cert-manager"
 }
 ```
 
 The file is generated from the host's `Manifest` type, and `cargo test` fails when the
-two differ. [`schemas/extension-manifest.v0.4.json`](../../schemas/extension-manifest.v0.4.json)
+two differ. [`schemas/extension-manifest.v0.6.json`](../../schemas/extension-manifest.v0.6.json),
+[`schemas/extension-manifest.v0.5.json`](../../schemas/extension-manifest.v0.5.json),
+[`schemas/extension-manifest.v0.4.json`](../../schemas/extension-manifest.v0.4.json)
 and [`schemas/extension-manifest.v0.3.json`](../../schemas/extension-manifest.v0.3.json)
-are the API 0.4 and 0.3 contracts, each kept as it was when the next line was cut, for
-manifests that still require `^0.4` or `^0.3`; name the one your range negotiates to.
+are the API 0.6, 0.5, 0.4 and 0.3 contracts, each kept as it was when the next line was cut,
+for manifests that still require `^0.6`, `^0.5`, `^0.4` or `^0.3`; name the one your range
+negotiates to.
 After changing a manifest field, regenerate the newest file with:
 
 ```sh
@@ -44,12 +47,13 @@ before publishing.
 | `id` | Yes | Reverse-domain identifier. See [Identifiers](specification.md#identifiers). |
 | `name` | Yes | Display name, 1–120 characters, with no control characters and no bidirectional or invisible format characters. See [Identifiers](specification.md#identifiers). |
 | `version` | Yes | The app's own SemVer version. |
-| `srelensApiVersion` | Yes | A SemVer range of extension API versions, for example `^0.5`. The fields marked **API 0.4** on this page need a range that admits only 0.4 or later, those marked **API 0.5** one that admits only 0.5 or later, and those marked **API 0.6** one that admits only 0.6 or later; see [Versioning](specification.md#versioning). |
-| `kind` | Yes | `declarative`. No other kind is accepted. |
+| `srelensApiVersion` | Yes | A SemVer range of extension API versions, for example `^0.7`. Each field or value form marked **API 0.x** needs a range that admits only that version or later; see [Versioning](specification.md#versioning). |
+| `kind` | Yes | `declarative`, or (**API 0.6**) `executable` for an app that also runs a sidecar; see [Executable apps](#executable-apps). |
 | `permissions` | Yes | The exact host capability IDs the bindings use. `network.http` is written `{ "capability": "network.http", "hosts": [...] }` (API 0.4); see [Network requests](#network-requests). A pod capability may be written `{ "capability": "k8s.streamLogs", "namespaces": [...] }` (API 0.5); see [Logs, exec and port-forwards](#logs-exec-and-port-forwards). |
-| `capabilities` | Yes | 1–32 bindings, below. |
+| `capabilities` | Yes | 1–32 bindings, below; 0–32 for an executable app, which may do all its work in its sidecar. |
 | `actions` | No | Up to 32 declared mutations, below. |
 | `settings` | No | **API 0.4.** Up to 32 typed settings, drawn as a host form. See [Settings](#settings). |
+| `sidecar` | For `executable` | **API 0.6.** The binaries an executable app runs and the operations they answer. Present exactly when `kind` is `executable`. See [Executable apps](#executable-apps). |
 | `contributions` | Yes | `pages`, `detailTabs`, `detailLinks`, and optional `joins`, `tableColumns`, `detailPanels`, `statusResolvers`, `badges`, `dashboardCards`, `commands` and `resourceLinks` (all **API 0.4**), below. |
 
 Unknown fields are errors at every level. A manifest is at most 256 KiB.
@@ -540,6 +544,14 @@ shows on the app's list. A `countByStatus` card over a reader whose kind has no
 at install at `contributions.dashboardCards[i].type`. It never counts by
 `statusColumns`.
 
+From **API 0.7**, `within` may be the whole value
+`"${settings.<id>}"` (for example `"${settings.expiryWindow}"`), naming a declared
+`select` setting with a default.
+Every option must be a positive duration under the same bounded grammar.
+The host uses the saved choice, or the default, for both the count and its
+linked page's filter. Invalid stored values show an error, never a zero count.
+Only this duration is settable: the card's source, path and target remain fixed.
+
 ### `commands`
 
 Entries in the new design's command palette (#544). The host shows each as
@@ -819,6 +831,9 @@ The access review lists the declaration of each setting an action or reader
 interpolates, so an update that lets a setting write another value shows as changed
 access.
 
+API 0.7 also permits a duration `select` in a dashboard predicate's `within`,
+under the narrower rules in [Dashboard cards](#dashboard-cards).
+
 ### Secret settings
 
 A `secret-reference` setting is kept by the host's secret store (#543). On the desktop
@@ -926,7 +941,7 @@ declared `url` setting. Problems are reported at `permissions[i].hosts[j]`.
 ### A request
 
 A `network.http` binding is one fixed GET. It takes no `inputs`: a
-[provider](#metric-log-and-trace-providers) (API 0.6) that sends its query through the
+[provider](#metric-log-and-trace-providers) (API 0.7) that sends its query through the
 binding adds only the query and time range the host binds, as parameters the host sets.
 
 | Argument | Meaning |
@@ -981,7 +996,7 @@ the app cannot set.
 
 ## Metric, log and trace providers
 
-API 0.6 ([#569](https://github.com/srelens/srelens/issues/569)). A provider is a query
+API 0.7 ([#569](https://github.com/srelens/srelens/issues/569)). A provider is a query
 template that one of the app's `network.http` bindings sends: a PromQL range query drawn
 as a chart on a workload's or a pod's overview, a LogQL query the log view can follow as
 a source beside Kubernetes, or a TraceQL search listed on an overview. The app writes the
@@ -1201,6 +1216,133 @@ the pod stops running, and one through a Service follows the Service to another 
 scope.
 
 The frames each source sends are in [streams.md](streams.md#logs).
+
+## Executable apps
+
+**API 0.6, preview** ([#574](https://github.com/srelens/srelens/issues/574)). An app of kind
+`executable` also runs a **sidecar**: a program it ships, which srelens starts in the
+operating system's sandbox and talks JSON-RPC to over stdio
+([sidecar-protocol.md](sidecar-protocol.md)). It has no kubeconfig, no network, no
+environment of srelens's and one writable directory. It reaches the host only through
+the broker ([#573](https://github.com/srelens/srelens/issues/573)): what the app's
+readers read, and the app's declared actions, each put to a person first. An
+executable app may declare everything a declarative one does as well. Executable apps are
+a preview: see [where they run](#where-executable-apps-run).
+
+```json
+{
+  "$schema": "https://raw.githubusercontent.com/srelens/srelens/main/schemas/extension-manifest.v0.6.json",
+  "id": "io.example.scanner",
+  "name": "Image scanner",
+  "version": "1.0.0",
+  "srelensApiVersion": "^0.6",
+  "kind": "executable",
+  "permissions": [],
+  "capabilities": [],
+  "sidecar": {
+    "binaries": {
+      "linux-amd64": "bin/linux-amd64/scanner",
+      "windows-amd64": "bin/windows-amd64/scanner.exe"
+    },
+    "operations": [
+      {
+        "name": "scan",
+        "title": "Scan an image",
+        "inputs": [
+          { "name": "image", "title": "Image reference", "type": "string", "required": true, "maxLength": 512 },
+          { "name": "fixable", "type": "boolean" }
+        ]
+      }
+    ]
+  },
+  "contributions": { "pages": [], "detailTabs": [], "detailLinks": [] }
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `binaries` | The binary run on each platform: `darwin-arm64`, `darwin-amd64`, `linux-amd64`, `linux-arm64` or `windows-amd64`, each a file directly under `bin/<platform>/` in the app's package. At least one. A platform left out does not run the app. |
+| `operations` | 1–32 requests the sidecar answers. |
+| `operations[].name` | Unique across `capabilities`, `actions` and `operations`, 1–64 letters, digits and `-`, and not one of the protocol's own methods (`initialize`, `activate`, `deactivate`, `health`, `shutdown`). Addressed as `plugin/<id>/<name>`. |
+| `operations[].title` | 1–120 characters, as every title. |
+| `operations[].inputs` | Up to 16 inputs, each `{ name, title?, type, required?, maxLength? }`. `type` is `string`, `integer`, `number` or `boolean`. `maxLength` is for a string: 1–65536 bytes, default 1024. |
+
+### Where executable apps run
+
+Executable apps are a preview, and so is API 0.6, until the API is frozen as 1.0
+([specification.md](specification.md#versioning)).
+
+- **Windows:** out of the box.
+- **Linux:** out of the box on a systemd desktop whose kernel has Landlock. The deb, rpm,
+  AppImage and AUR packages ship the launcher `srelens-sandbox-launch` beside `srelens`. At
+  its first sidecar start, srelens asks your systemd user manager for a delegated scope,
+  `app-srelens-<pid>.scope`, moves itself into the scope's `host/` leaf, and gives each
+  sidecar a cgroup beside it with its memory and CPU limits. That needs the `memory` and
+  `cpu` controllers delegated to your session. systemd 252 and later delegate both, but
+  systemd before 252 (Ubuntu 22.04) and the RHEL 9 family leave out `cpu`. There, add it:
+
+  ```sh
+  sudo mkdir -p /etc/systemd/system/user@.service.d
+  printf '[Service]\nDelegate=pids memory cpu\n' | sudo tee /etc/systemd/system/user@.service.d/delegate.conf
+  sudo systemctl daemon-reload
+  ```
+
+  then log out and in again. Without systemd, or in a container, name both pieces yourself:
+  `SRELENS_SANDBOX_LAUNCHER` for a launcher built with
+  `cargo build --release -p srelens-plugin-host --bin srelens-sandbox-launch`, and
+  `SRELENS_SANDBOX_CGROUP_ROOT` for a cgroup v2 directory delegated to you, with `memory`
+  and `cpu` enabled for its children and srelens running in a leaf of it. A process can
+  move another only between cgroups under one it may write, and each sidecar's launcher
+  moves itself into a new sibling of that leaf. The `sandbox-conformance` job in
+  [ci.yml](../../.github/workflows/ci.yml) runs both setups on a runner.
+- **macOS:** not yet. srelens refuses to start any sidecar until its memory and CPU
+  watchdog has been checked with Seatbelt on a macOS 27 Mac.
+- **The web host:** it refuses to install an executable app. Its extension policy does not
+  allow one: `allowExecutableApps` must stay `false`, and an app that fails a policy rule
+  is refused as a whole ([the policy table](../WEB.md#extension-policy)). It also keeps no
+  files for an app's package.
+
+On a desktop OS where a sidecar cannot run, the app installs, and srelens refuses to start
+its sidecar and says what is missing; it never starts a sidecar unconfined.
+
+### What the host holds a sidecar to
+
+- **It installs from a package.** An executable app installs only from a
+  `.srelens-extension` package ([packages.md](packages.md)) carrying exactly the
+  binaries its `binaries` names: a named binary missing from the package, or a binary
+  the package carries that the manifest does not name, is refused. A pasted or
+  single-file manifest of this kind is refused, and so is any install on a host that
+  keeps no files for its apps, such as the web host.
+- **It needs a publisher or the setting.** An unsigned executable app needs
+  **Allow unsigned apps to modify clusters and run code**, whether or not it writes
+  ([specification.md](specification.md#unsigned-app-policy)).
+- **It starts on first use.** The sidecar starts when one of its operations is first
+  called in a process, not at install. Before it starts, its binary is checked against
+  the digest list its package was unpacked with; one changed on disk since is refused,
+  not run. It stops when the app is disabled, updated, rolled back, blocked or removed,
+  and when srelens exits. Its one writable directory, its app's data directory under
+  `*.extensions.data/` beside the inventory, goes with the app when it is removed
+  ([sidecar-protocol.md](sidecar-protocol.md#data-directory)).
+- **It runs only in a sandbox.** Linux and Windows run sidecars in the backends
+  [sidecar-protocol.md](sidecar-protocol.md#sandbox) describes. On Linux the sandbox
+  launcher is found beside the srelens binary or at `SRELENS_SANDBOX_LAUNCHER`, and the
+  cgroup is the scope srelens asks systemd for, or the directory
+  `SRELENS_SANDBOX_CGROUP_ROOT` names; without them srelens refuses to start its sidecar
+  and says what is missing and how to add it.
+  On macOS srelens refuses to start any sidecar until its memory and CPU watchdog has
+  been checked with Seatbelt on a macOS 27 Mac
+  ([#713](https://github.com/srelens/srelens/issues/713)).
+- **Its input is the host's to check.** Every call is held to the operation's declared
+  inputs before the sidecar sees it: no field it does not declare, every required one
+  present, each of its type, each string within its `maxLength`, and the whole call
+  within 256 KiB. The sidecar receives the checked object as the request's `params`.
+
+Each operation is an MCP tool, `plugin/<id>/<name>`, alongside the app's readers and
+actions. For an app that declares no action it is read-only and not gated, since the
+sidecar can change nothing outside its sandbox. For one that declares actions it is
+gated as the strongest of them, because the sidecar may ask the broker to run them;
+each such write is then confirmed again, naming the app. Either way it is sensitive,
+so the audit log redacts its arguments whole ([MCP.md](../MCP.md#installed-apps-tools)).
 
 ## Rules the desktop app adds
 

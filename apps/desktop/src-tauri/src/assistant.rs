@@ -509,9 +509,12 @@ pub async fn chat_send(
         return Ok(resume);
     }
 
-    let token = mcp
-        .session_token()
-        .ok_or("Start the MCP server in Settings → MCP before using the assistant.")?;
+    // A token of this turn's own (#393), held to the end of this function so
+    // it dies with the turn: a gate the CLI raises is recorded in THIS chat,
+    // and an external client presenting the Settings token is never mistaken
+    // for it.
+    let turn_token = mcp.mint_turn_token(&session).await?;
+    let token = turn_token.token().to_string();
     let url = mcp.status_url().ok_or("MCP server URL unavailable")?;
 
     let dir = app.path().temp_dir().map_err(|e| e.to_string())?;

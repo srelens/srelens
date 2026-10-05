@@ -6,8 +6,15 @@ mitigation and the risk that remains.
 
 ## What holds today
 
-- **No third-party code runs.** No JavaScript, subprocess, iframe, npm install or
-  lifecycle script. Catalog downloads contain JSON data only.
+- **Third-party code runs only in a sandbox.** A declarative app runs no code: no
+  JavaScript, subprocess, iframe, npm install or lifecycle script. An executable app's
+  binary runs only as a sidecar in the OS sandbox, from the package it was installed
+  with and checked against it first, with no kubeconfig, no network, none of srelens's
+  environment and one directory of its own; it is refused wherever no sandbox exists,
+  and an unsigned one needs the unsigned-apps setting
+  ([manifest.md](manifest.md#executable-apps)). Executable apps are a preview: they run
+  out of the box on Windows only, and Linux and macOS are set out in
+  [where they run](manifest.md#where-executable-apps-run).
 - **No ambient access.** Apps never receive kubeconfig, tokens, files or network
   access. Every call goes through the broker with fixed arguments, under the selected
   cluster's RBAC ([permissions.md](permissions.md)).
@@ -28,9 +35,10 @@ mitigation and the risk that remains.
   the host confirmation names the pod, container and exact command; a forward listens
   on a local port the host picks and closes, with every connection, when its view does
   ([manifest.md](manifest.md#logs-exec-and-port-forwards)).
-- **Consent cannot be weakened.** Bindings inherit the host capability's annotations.
-  Mutating operations stay behind the MCP consent gate, and every UI action opens a
-  host-owned review.
+- **Consent cannot be weakened.** Bindings inherit the host capability's annotations,
+  and so do an app's MCP tools ([MCP.md](../MCP.md#installed-apps-tools)). Mutating
+  operations stay behind the MCP consent gate, and every UI action opens a host-owned
+  review.
 - **Reviews cannot go stale.** The review keeps the UID and resourceVersion the reader
   saw, and the backend's conditional PATCH rejects the write if the resource changed
   ([capabilities.md](capabilities.md#declared-gitops-actions)).
@@ -99,8 +107,12 @@ mitigation and the risk that remains.
 
 ## Not yet protected
 
-Declarative support does not claim these protections:
+The platform does not claim these protections yet:
 
 - signing key rotation ([#560](https://github.com/srelens/srelens/issues/560))
 - revocation and a kill switch ([#561](https://github.com/srelens/srelens/issues/561))
-- executable apps and OS sandboxing ([#521](https://github.com/srelens/srelens/issues/521))
+- executable apps' sandbox, against a sidecar that tries to break out: the
+  escape-hardening review ([#744](https://github.com/srelens/srelens/issues/744)), and
+  memory and CPU limits on macOS: its watchdog is built but not yet checked with
+  Seatbelt on a macOS 27 Mac, and macOS refuses every sidecar until it is
+  ([#713](https://github.com/srelens/srelens/issues/713))

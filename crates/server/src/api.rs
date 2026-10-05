@@ -71,7 +71,18 @@ pub const WEB_DENIED_CAPABILITIES: &[&str] = &[
     "toolbox.installPlugin",
     "toolbox.upgradePlugin",
     "toolbox.removePlugin",
+    // Uses the process-wide GitHub token (GITHUB_TOKEN / GH_TOKEN) on the host;
+    // unsafe on a multi-user shared web container.
+    "github.rolloutCause",
 ];
+
+/// Installed apps' operations, `plugin/<id>/<operation>` (#574), are MCP tools, and
+/// the web host runs no MCP server. A web user reaches their apps only through the
+/// `extensions.*` capabilities, whose writes stop at the host confirmation the app's
+/// screen shows. An app's tool that needs consent would have nobody to ask here
+/// (#374, #512), so it is never served, let alone approved; none is in a web user's
+/// registry, and this refuses one before dispatch should one ever be.
+pub const WEB_DENIED_PREFIX: &str = "plugin/";
 
 /// Invoke a capability by id. The request body is the capability's input JSON;
 /// an empty body means null input. Unknown id → 404, invalid input (or a body
@@ -91,7 +102,7 @@ pub async fn invoke_capability(
     headers: axum::http::HeaderMap,
     body: Bytes,
 ) -> Response {
-    if WEB_DENIED_CAPABILITIES.contains(&id.as_str()) {
+    if WEB_DENIED_CAPABILITIES.contains(&id.as_str()) || id.starts_with(WEB_DENIED_PREFIX) {
         return error_response(
             StatusCode::BAD_REQUEST,
             "capability not available in web mode",
@@ -460,6 +471,10 @@ pub(crate) mod tests {
         let (status, body) = post("/api/capability/k8s.deleteContext", Body::empty()).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(body["error"], json!("capability not available in web mode"));
+
+        let (status, body) = post("/api/capability/github.rolloutCause", Body::empty()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], json!("capability not available in web mode"));
     }
 
     /// Apps are per user on the web (#515), so none of their capabilities is
@@ -491,6 +506,46 @@ pub(crate) mod tests {
         ] {
             let (status, _) = post(&format!("/api/capability/{id}"), Body::from("{}")).await;
             assert_eq!(status, StatusCode::NOT_FOUND, "{id}");
+        }
+    }
+
+    /// An app's operations are MCP tools (#574), and the web host serves none: an
+    /// installed app adds no `plugin/…` capability to its user's registry, and one
+    /// named on this route, spelled as axum decodes it, is refused before dispatch.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_apps_operations_are_never_served_on_the_web() {
+        let state = apps_state().await;
+        let (alice_id, alice) = sign_in(&state, "alice").await;
+        let (status, _) = call(
+            &state,
+            &alice,
+            "extensions.configure",
+            json!({"action": "install", "manifest": local_app(),
+                "grants": ["k8s.listCustomResource"]}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        // The registry her calls are dispatched to, with the app installed in it.
+        let env = state
+            .user_envs
+            .env_for(&state.db, &state.master_key, alice_id)
+            .await
+            .unwrap();
+        let (status, listed) = call(&state, &alice, "extensions.list", json!({})).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(apps(&listed), ["org.example.argocd"]);
+        assert!(!env
+            .registry
+            .ids()
+            .iter()
+            .any(|id| id.starts_with(super::WEB_DENIED_PREFIX)));
+        for id in [
+            "plugin%2Forg.example.argocd%2Fapplications",
+            "plugin%2Forg.example.argocd%2Fsync",
+        ] {
+            let (status, body) = call(&state, &alice, id, json!({"context": "prod"})).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{id}");
+            assert_eq!(body["error"], json!("capability not available in web mode"));
         }
     }
 
@@ -700,7 +755,10 @@ pub(crate) mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert_eq!(refused["error"], json!("capability not available in web mode"));
+        assert_eq!(
+            refused["error"],
+            json!("capability not available in web mode")
+        );
 
         let reset = json!({"action": "settings", "id": "org.example.argocd", "settings": {}});
         let (status, saved) = call(&state, &erin, "extensions.configure", reset).await;
@@ -901,7 +959,11 @@ pub(crate) mod tests {
         ] {
             let (status, body) = post(&format!("/api/capability/{id}"), Body::empty()).await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "{id} must be denied");
-            assert_eq!(body["error"], json!("capability not available in web mode"), "{id}");
+            assert_eq!(
+                body["error"],
+                json!("capability not available in web mode"),
+                "{id}"
+            );
         }
     }
 
@@ -910,7 +972,11 @@ pub(crate) mod tests {
         for id in ["k8s.helmRepoAdd", "k8s.helmRepoUpdate"] {
             let (status, body) = post(&format!("/api/capability/{id}"), Body::empty()).await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "{id} must be denied");
-            assert_eq!(body["error"], json!("capability not available in web mode"), "{id}");
+            assert_eq!(
+                body["error"],
+                json!("capability not available in web mode"),
+                "{id}"
+            );
         }
     }
 
@@ -926,7 +992,11 @@ pub(crate) mod tests {
         ] {
             let (status, body) = post(&format!("/api/capability/{id}"), Body::empty()).await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "{id} must be denied");
-            assert_eq!(body["error"], json!("capability not available in web mode"), "{id}");
+            assert_eq!(
+                body["error"],
+                json!("capability not available in web mode"),
+                "{id}"
+            );
         }
     }
 

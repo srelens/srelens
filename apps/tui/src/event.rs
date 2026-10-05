@@ -52,6 +52,20 @@ pub enum AppEvent {
         revision: Option<i64>,
         result: Result<srelens_kube::helm::HelmReleaseDetail, String>,
     },
+    ArgoApplicationsChunk {
+        context: String,
+        is_remote_hub: bool,
+        hub_context: Option<String>,
+        chunk: srelens_kube::argo::ArgoApplicationsFetchResult,
+    },
+    /// The Argo disk cache for `context`, read off the UI thread, written
+    /// `written_at` (Unix seconds).
+    ArgoDiskSnapshot {
+        context: String,
+        result: srelens_kube::argo::ArgoApplicationsFetchResult,
+        written_at: u64,
+        hub_context: Option<String>,
+    },
     ArgoApplicationsResult {
         context: String,
         is_remote_hub: bool,
@@ -82,6 +96,11 @@ pub enum AppEvent {
     ChangedQuickRcaResult {
         key: String,
         result: Result<String, String>,
+    },
+    /// GitHub's answer to why the `:changed` rollout under `key` happened.
+    ChangedCauseResult {
+        key: String,
+        result: Result<srelens_registry::github::RolloutCause, String>,
     },
 }
 

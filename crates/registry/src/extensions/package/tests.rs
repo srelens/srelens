@@ -606,19 +606,47 @@ fn the_manifest_must_be_the_app_and_version_the_list_names() {
 }
 
 #[test]
-fn binaries_are_carried_but_not_installable_here() {
-    let mut files = files_of("example");
-    files.insert("bin/linux-amd64/tool".into(), b"\x7fELF".to_vec());
-    files.insert("bin/windows-amd64/tool.exe".into(), b"MZ".to_vec());
-    files.insert(
-        DIGESTS.into(),
-        digests_for(&files, "org.example.packaged", "1.0.0"),
+fn binaries_install_only_as_the_ones_an_executable_manifest_runs() {
+    let with = |manifest: Option<Value>| {
+        let mut files = files_of("example");
+        files.remove(DIGESTS);
+        files.insert("bin/linux-amd64/tool".into(), b"\x7fELF".to_vec());
+        files.insert("bin/windows-amd64/tool.exe".into(), b"MZ".to_vec());
+        if let Some(manifest) = manifest {
+            files.insert(MANIFEST.into(), serde_json::to_vec(&manifest).unwrap());
+        }
+        files.insert(
+            DIGESTS.into(),
+            digests_for(&files, "org.example.packaged", "1.0.0"),
+        );
+        read(&Raw::new().files(&files).gz(), &mut Discard, &shipped()).unwrap()
+    };
+    // A declarative app runs nothing.
+    let declarative = with(None);
+    assert!(declarative.carries_binaries());
+    let why = check_installable(&declarative).unwrap_err();
+    assert!(why.contains("its manifest runs none"), "{why}");
+    // An executable app ships only what its sidecar names.
+    let mut executable: Value =
+        serde_json::from_slice(&files_of("example")[MANIFEST]).unwrap();
+    executable["srelensApiVersion"] = json!("^0.6");
+    executable["kind"] = json!("executable");
+    executable["sidecar"] = json!({"binaries":{"linux-amd64":"bin/linux-amd64/tool"},
+        "operations":[{"name":"scan","title":"Scan"}]});
+    let why = check_installable(&with(Some(executable.clone()))).unwrap_err();
+    assert!(
+        why.contains("bin/windows-amd64/tool.exe, which its manifest does not run"),
+        "{why}"
     );
-    let package = read(&Raw::new().files(&files).gz(), &mut Discard, &shipped()).unwrap();
-    assert!(package.carries_binaries());
-    assert!(check_installable(&package)
-        .unwrap_err()
-        .contains("declarative apps only"));
+    executable["sidecar"]["binaries"]["windows-amd64"] = json!("bin/windows-amd64/tool.exe");
+    check_installable(&with(Some(executable.clone()))).unwrap();
+    // One that cannot be read is refused for that, not as running none.
+    let mut unreadable = executable;
+    unreadable["sidecar"]["entrypoint"] = json!("bin/linux-amd64/tool");
+    let why = check_installable(&with(Some(unreadable))).unwrap_err();
+    assert!(why.contains("its manifest cannot be read"), "{why}");
+    assert!(why.contains("unknown field `entrypoint`"), "{why}");
+    assert!(!why.contains("runs none"), "{why}");
 }
 
 fn entries(dir: &Path) -> Vec<String> {

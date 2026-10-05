@@ -141,8 +141,13 @@ mod tests {
         use std::sync::Mutex;
         use tauri::Listener;
         let dir = tempfile::tempdir().unwrap();
+        // A cluster that accepts and never answers, so the stream's first read
+        // waits and the stream is still open when this test cancels it. Against
+        // a context that does not exist, the read fails at once and ends the
+        // stream, racing the cancels below.
+        let server = crate::window_streams::tests::Silent::start();
         let (registry, streams) = srelens_registry::build_registry_and_app_streams(
-            ClientCache::new_many(vec![]),
+            server.cache(),
             vec![],
             Some(dir.path().join("settings.json")),
         );
@@ -183,10 +188,10 @@ mod tests {
             heard.lock().unwrap().push(e.payload().to_owned());
         });
 
-        let (on_event, got) = crate::sink::tests::recording();
+        let (on_event, frames) = crate::sink::tests::recording();
         let opened = extension_stream_open(
             json!({"id": "org.example.one", "revision": revision, "view": "page#1",
-                   "channel": "extstream:one", "context": "c", "namespace": "ns",
+                   "channel": "extstream:one", "context": "silent", "namespace": "ns",
                    "source": {"kind": "read", "capability": "workloads"}}),
             on_event,
             main.clone(),
@@ -196,7 +201,7 @@ mod tests {
         .await
         .unwrap();
 
-        let got = got.lock().unwrap().clone();
+        let got = frames.lock().unwrap().clone();
         assert_eq!(
             got.first(),
             Some(&json!({"event": "extstream:one",
@@ -207,9 +212,17 @@ mod tests {
             .await
             .unwrap_err();
         assert!(refused.contains("not opened by this window"), "{refused}");
-        assert!(extension_stream_cancel(opened.stream, main, app.state())
-            .await
-            .unwrap());
+        assert!(
+            extension_stream_cancel(opened.stream.clone(), main, app.state())
+                .await
+                .unwrap()
+        );
+        // The close frame is sent before the cancel returns, to the same window.
+        assert_eq!(
+            frames.lock().unwrap().last(),
+            Some(&json!({"event": "extstream:one",
+                         "payload": {"type": "close", "stream": opened.stream, "reason": "cancelled"}})),
+        );
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         assert_eq!(
             *broadcast.lock().unwrap(),

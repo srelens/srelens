@@ -622,7 +622,7 @@ async fn a_provider_query_under_a_policy_reaches_only_hosts_its_ceiling_allows()
         .unwrap();
     let allowed = format!("127.0.0.1:{}", closed.port());
     let mut metrics: Value = serde_json::from_str(&manifest()).unwrap();
-    metrics["srelensApiVersion"] = json!("^0.6");
+    metrics["srelensApiVersion"] = json!("^0.7");
     metrics["permissions"] = json!(["k8s.listCustomResource",
         {"capability":"network.http","hosts":[allowed, "metrics.example.invalid"]}]);
     for (name, url) in [
@@ -788,5 +788,35 @@ fn pod_capabilities_are_the_policys_to_allow_and_exec_is_not_a_write() {
         refused.reason.contains("does not allow k8s.exec"),
         "{}",
         refused.reason
+    );
+}
+
+/// An executable app (#574) is refused under any policy, whatever else it allows: a
+/// policy is a shared host's, and no sidecar runs there until it has a per-user identity
+/// (#521). One installed before the policy took effect is blocked on its next read, and
+/// offers no tools.
+#[test]
+fn an_executable_app_is_refused_under_any_policy() {
+    use super::executable_tests::{install_scanner, scanner_package, SCANNER};
+    use base64::Engine as _;
+    let dir = tempfile::tempdir().unwrap();
+    // Installed on this computer while nothing governed it.
+    install_scanner(&dir.path().join("extensions.json"));
+    let apps = governed(dir.path(), &SharedPolicy::default());
+    let state = read(&*apps.inventory).unwrap();
+    let app = state.plugins.iter().find(|app| app.manifest.id == SCANNER).unwrap();
+    assert!(!app.enabled);
+    assert_eq!(
+        app.policy_blocked.as_deref(),
+        Some("The administrator's policy does not allow executable apps")
+    );
+    let reinstall = change(
+        &apps,
+        json!({"action": "installPackage", "grants": [], "reviewedRevision": app.revision,
+            "package": base64::engine::general_purpose::STANDARD.encode(scanner_package())}),
+    );
+    assert_eq!(
+        refused(reinstall),
+        "The administrator's policy does not allow executable apps"
     );
 }

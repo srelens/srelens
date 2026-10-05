@@ -7,7 +7,10 @@ use serde_json::Value;
 use srelens_capability::audit::{AuditSink, Source};
 use srelens_capability::Registry;
 use std::sync::Arc;
-use tauri::State;
+use tauri::{AppHandle, Runtime, State, Window};
+
+use crate::node_shells;
+use crate::window_streams::WindowStreams;
 
 /// Tauri-managed state holding the capability registry.
 pub struct AppRegistry(pub Registry);
@@ -25,6 +28,9 @@ pub struct AppAudit(pub Arc<dyn AuditSink>);
 /// Invoke a backend capability by id. The WebView calls this via
 /// `invoke('invoke_capability', { id, input })`.
 ///
+/// A node debug pod this creates (`k8s.createNodeDebugPod`) becomes the
+/// calling window's, and the host deletes it (#734, `crate::node_shells`).
+///
 /// **Every mutating or sensitive call made here is audited** (#555). It used
 /// to call `Registry::invoke` straight through, so an Argo CD sync or a Flux
 /// reconcile clicked in the app left no record while the identical call from
@@ -41,13 +47,20 @@ pub struct AppAudit(pub Arc<dyn AuditSink>);
 /// reaches this command. #552 moves that gate into the host, and this is where
 /// its verdict will be passed in.
 #[tauri::command]
-pub async fn invoke_capability(
+pub async fn invoke_capability<R: Runtime>(
     id: String,
     input: Value,
+    window: Window<R>,
+    app: AppHandle<R>,
     registry: State<'_, AppRegistry>,
     audit: State<'_, AppAudit>,
+    owned: State<'_, WindowStreams>,
 ) -> Result<Value, String> {
-    registry
+    let epoch = owned.epoch(window.label());
+    // A node debug pod is the host's to delete (#734), so its creation is
+    // where the host learns of it: the call's own input names the context.
+    let adopts = (id == node_shells::NODE_DEBUG_CAPABILITY).then(|| input.clone());
+    let out = registry
         .0
         .invoke_audited(&id, input, audit.0.as_ref(), Source::Ui, "auto")
         .await
@@ -57,7 +70,11 @@ pub async fn invoke_capability(
             let message = e.to_string();
             log::warn!("capability '{id}' failed: {message}");
             message
-        })
+        })?;
+    if let Some(input) = adopts {
+        node_shells::adopt(&app, &owned, window.label(), epoch, &input, &out).await?;
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -82,6 +99,31 @@ mod tests {
         fn seen(&self) -> Vec<AuditRecord> {
             self.0.lock().unwrap().clone()
         }
+    }
+
+    /// `invoke_capability` as the `main` window calls it.
+    async fn call(
+        app: &tauri::App<tauri::test::MockRuntime>,
+        id: &str,
+        input: Value,
+    ) -> Result<Value, String> {
+        if app.try_state::<WindowStreams>().is_none() {
+            app.manage(WindowStreams::default());
+        }
+        let window = match app.get_webview_window("main") {
+            Some(webview) => webview.as_ref().window(),
+            None => crate::window_streams::tests::mock_window(app, "main"),
+        };
+        invoke_capability(
+            id.into(),
+            input,
+            window,
+            app.handle().clone(),
+            app.state(),
+            app.state(),
+            app.state(),
+        )
+        .await
     }
 
     fn mutating(id: &str) -> Capability {
@@ -117,19 +159,10 @@ mod tests {
         app.manage(AppRegistry(registry));
         app.manage(AppAudit(Arc::new(NoopAudit)));
 
-        let value = invoke_capability(
-            "test.echo".into(),
-            json!({"k": 1}),
-            app.state(),
-            app.state(),
-        )
-        .await
-        .unwrap();
+        let value = call(&app, "test.echo", json!({"k": 1})).await.unwrap();
         assert_eq!(value, json!({ "echoed": { "k": 1 } }));
 
-        let e = invoke_capability("test.missing".into(), json!({}), app.state(), app.state())
-            .await
-            .unwrap_err();
+        let e = call(&app, "test.missing", json!({})).await.unwrap_err();
         assert!(e.contains("test.missing"), "unexpected error: {e}");
     }
 
@@ -144,8 +177,9 @@ mod tests {
         app.manage(AppRegistry(registry));
         app.manage(AppAudit(spy.clone()));
 
-        invoke_capability(
-            "extensions.action".into(),
+        call(
+            &app,
+            "extensions.action",
             json!({
                 "action": "sync",
                 "resource": {
@@ -153,8 +187,6 @@ mod tests {
                     "context": "prod", "namespace": "team", "name": "web"
                 }
             }),
-            app.state(),
-            app.state(),
         )
         .await
         .unwrap();
@@ -186,14 +218,9 @@ mod tests {
         app.manage(AppRegistry(registry));
         app.manage(AppAudit(spy.clone()));
 
-        invoke_capability(
-            "k8s.listPods".into(),
-            json!({ "context": "prod" }),
-            app.state(),
-            app.state(),
-        )
-        .await
-        .unwrap();
+        call(&app, "k8s.listPods", json!({ "context": "prod" }))
+            .await
+            .unwrap();
 
         assert!(spy.seen().is_empty(), "a plain read is not an audit event");
     }
@@ -213,11 +240,10 @@ mod tests {
         app.manage(AppRegistry(registry));
         app.manage(AppAudit(spy.clone()));
 
-        invoke_capability(
-            "k8s.getSecret".into(),
+        call(
+            &app,
+            "k8s.getSecret",
             json!({ "context": "prod", "namespace": "team", "name": "db-creds" }),
-            app.state(),
-            app.state(),
         )
         .await
         .unwrap();
@@ -245,22 +271,10 @@ mod tests {
         app.manage(AppRegistry(registry));
         app.manage(AppAudit(spy.clone()));
 
-        let rejected = invoke_capability(
-            "extensions.action".into(),
-            json!({ "reject": true }),
-            app.state(),
-            app.state(),
-        )
-        .await;
+        let rejected = call(&app, "extensions.action", json!({ "reject": true })).await;
         assert!(rejected.is_err());
 
-        let failed = invoke_capability(
-            "extensions.action".into(),
-            json!({ "fail": true }),
-            app.state(),
-            app.state(),
-        )
-        .await;
+        let failed = call(&app, "extensions.action", json!({ "fail": true })).await;
         assert!(failed.is_err());
 
         let seen = spy.seen();

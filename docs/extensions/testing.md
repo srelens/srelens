@@ -29,7 +29,10 @@ codes are listed in [Validation errors](specification.md#validation-errors). It 
 the manifest's own rules; the desktop app's narrower rules are checked by
 `extensions.validate` and the install review in Settings → Apps.
 
-To expose only the manifest's operations to an MCP client, add `--mcp`. Supply
+To expose only the manifest's operations to an MCP client, add `--mcp`. This is the
+developer path: it binds the manifest straight to the host capabilities, with no
+inventory. The app itself serves installed apps' operations as MCP tools through the
+broker's own paths ([MCP.md](../MCP.md#installed-apps-tools)). Supply
 `context` on every call, and optionally `namespace`; omitting it lists across
 namespaces. For example:
 
@@ -45,16 +48,20 @@ handler's consent gate.
 
 | Suite | Covers |
 |---|---|
-| `cargo test -p srelens-plugin-host` | Manifest parsing and validation, API version negotiation, broker registration, revocation, consent, that `schemas/extension-manifest.v0.6.json` equals the generated schema, and that a field missing from the frozen 0.3, 0.4 and 0.5 schemas is gated in `API_FIELDS` |
+| `cargo test -p srelens-plugin-host` | Manifest parsing and validation, API version negotiation, broker registration, revocation, consent, that `schemas/extension-manifest.v0.7.json` equals the generated schema, and that a field missing from the frozen 0.3, 0.4, 0.5 and 0.6 schemas is gated in `API_FIELDS` |
+| `cargo test -p srelens-plugin-host --test executable --test tools` | Executable apps ([#574](https://github.com/srelens/srelens/issues/574)): the kind and its `sidecar`, the binaries, operation names and inputs; the host-built input schema and every call's checks; and `PluginHost::register_tools`, which gives each reader, action and operation the host's schema and annotations and withdraws them all at once |
 | `cargo test -p srelens-plugin-host --test sidecar` | The sidecar supervisor ([#572](https://github.com/srelens/srelens/issues/572)) against an in-process fake sidecar on a paused clock, so every wait is asserted to its exact length: the handshake and version negotiation, the request timeout and cancellation, the request and stream limits, the 1 s, 5 s and 30 s restart backoff and the disable after it, health checks, protocol violations, and stopping |
 | `cargo test -p srelens-plugin-host --test sidecar_process` | The same lifecycle against a real process, the probe (`src/bin/srelens-sidecar-probe.rs`), started without a sandbox: an abort mid-request leaves the host running and the sidecar restarted, one that dies at every start is disabled, a hung one is killed, and it gets only the environment srelens names |
 | `cargo test -p srelens-plugin-host --test sandbox_conformance -- --ignored --test-threads=1` | The #571 spike's sandbox checks and two more, through the production backend for this OS. Needs the OS sandbox, a network, and on Linux `SRELENS_SANDBOX_CGROUP_ROOT` naming a delegated cgroup. The `sandbox-conformance` CI job runs it on Linux and Windows ([sidecar-protocol.md](sidecar-protocol.md#sandbox)) |
+| `cargo test -p srelens-plugin-host --test macos_watchdog -- --test-threads=1 --nocapture` | macOS only. The macOS watchdog ([#713](https://github.com/srelens/srelens/issues/713)) on a real process, the probe, without Seatbelt: held to 128 MiB and 0.25 CPUs, with how far a hold overshot printed. The `macos-watchdog` CI job runs it on GitHub's macOS runner, which is older than macOS 27; with Seatbelt, the conformance suite's memory and CPU checks are run by hand on a macOS 27 Mac |
 | `cargo test -p srelens-plugin-host --lib fuzzing` | Manifest decoding, validation and parsing on arbitrary bytes and on edits of the example manifests: no panic, a value or a coded problem, the 256 KiB limit to the byte, and an accepted manifest re-serializes to an equal one |
 | `cargo test -p srelens-registry` | Inventory lifecycle, quarantine, catalog parsing and caching, signing, app capabilities |
+| `cargo test -p srelens-registry --lib -- tools_tests sidecars executable_tests` | Apps' MCP tools and sidecars (#574): an installed app's tools appear and the client is told; a disabled, updated or removed app's tools are withdrawn from every snapshot; a change another process made is found; actions stay behind the consent gate; an executable app installs only from its package, and its sidecar starts on first use from a verified binary, with no environment, and stops with its app; a sidecar reads through the broker, and each write it asks for is confirmed first, naming the app, or refused where nobody can be asked; its process shows in the Inspector. The sidecars are an in-process fake behind the `Launcher` trait |
+| `cargo test -p srelens-mcp --lib app_tools` | The transports' half: `tools.listChanged`, `notifications/tools/list_changed` on stdio and the HTTP stream, a change another process made found by the poll, and a call held to the snapshot it was asked about |
 | `cargo test -p srelens-registry --lib package` | The `.srelens-extension` format ([packages.md](packages.md)): tampered, missing and extra files, links, traversal and layout paths, oversized archives and bombs, trailing data, the digest list's exact form, a package signed outside its publisher's namespace, and a valid package that installs, reverifies, updates, rolls back and is pruned. The fixture packages' digest lists are regenerated, and the signed one re-signed with the test publisher's key, by `UPDATE_CATALOG=1 cargo test -p srelens-registry` |
 | `cargo test -p srelens-registry --lib fuzzing` | The same properties for catalog parsing, signed catalog and trust metadata verification, publisher signature verification, the package reader (on arbitrary bytes, on archives of arbitrary entries and on edits of the fixture packages) and the inventory reader with its legacy migration, starting from `crates/registry/tests/fixtures` |
 | `cargo test -p srelens-kube --lib gitops` | Resource inspection, events, GitOps action allowlist, guards and conditional PATCH |
-| `cargo test -p srelens-server` | Web-host denials |
+| `cargo test -p srelens-server` | Web-host denials, including every `plugin/…` id |
 | `packages/core/src/lib/extensionManifestSchema.test.ts` | Every example manifest validates against the committed schema and names it in `$schema` |
 | `packages/core/src/lib/extensionTypes.test.ts` | The TypeScript manifest and inventory types have the Rust field names and optionality, from `extension-inventory.schema.json` |
 | `packages/ui-next/src/extensions/*.test.tsx` | Settings → Apps, catalog, workspace, resource details |

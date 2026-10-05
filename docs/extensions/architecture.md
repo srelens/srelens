@@ -18,21 +18,38 @@ The broker:
 - derives the public input schema from the allowed inputs
 - inherits the host capability's consent annotations, which an app cannot weaken
 
-It registers operations under `plugin/<app-id>/<operation>` in the shared capability
-registry, where MCP discovers and gates them through its normal request path.
+Operations are addressed as `plugin/<app-id>/<operation>`. The app's own screens reach
+them through the `extensions.*` capabilities, which register them for one call at a time
+with the app's settings as saved then. MCP clients reach them as tools
+([#574](https://github.com/srelens/srelens/issues/574), `crates/registry/src/extensions/tools.rs`):
+one snapshot per inventory in a process, built by `PluginHost::register_tools` from the
+apps in use, whose readers and actions route through the same broker paths as
+`extensions.read` and `extensions.action`, and whose sidecar operations route to the
+app's sidecar. A pod binding is a stream a view opens, and never a tool.
 
-Registration is all-or-nothing. Unregistering removes operations from the mutable
-registry and revokes their handlers in older snapshots; calls already admitted may
-finish. A host must rebuild its MCP snapshot after a lifecycle change to refresh
-discovery. An older snapshot may still list a revoked tool but cannot execute it, so
-live tool-list updates are not advertised yet.
+Registration is all-or-nothing. Every announced inventory write rebuilds the MCP snapshot
+when the apps in use changed, and revokes the one it replaces: a caller still holding it
+may list a revoked tool but cannot execute it; calls already admitted may finish. The
+servers send `notifications/tools/list_changed` for each rebuild, and notice a change
+another process made within a poll ([MCP.md](../MCP.md#installed-apps-tools)).
 
 ## Sidecars
 
-Executable apps are to run out of process, as supervised sidecars in the OS sandbox,
-speaking JSON-RPC over stdio ([sidecar-protocol.md](sidecar-protocol.md)). The
-supervisor and its per-OS backends are in `crates/plugin-host/src/sidecar/`. No manifest
-kind starts one yet ([#574](https://github.com/srelens/srelens/issues/574)).
+Executable apps (API 0.6, [#574](https://github.com/srelens/srelens/issues/574)) run out
+of process, as supervised sidecars in the OS sandbox, speaking JSON-RPC over stdio
+([sidecar-protocol.md](sidecar-protocol.md)). The supervisor and its per-OS backends are
+in `crates/plugin-host/src/sidecar/`; the registry starts one per executable app in use,
+on its first operation call, and stops it when the app changes
+(`crates/registry/src/extensions/sidecars.rs`). Each is started with its app's data
+directory, a broker over the MCP host's registry, and its app's log, and shows in the
+Inspector. The broker's consent is the MCP host's: the desktop app's confirmation
+prompt, naming the app, or `NoConsent` headless. See
+[Executable apps](manifest.md#executable-apps).
+
+Executable apps are a preview. They run out of the box on Windows, and on a systemd Linux
+desktop with Landlock, where systemd before 252 and the RHEL 9 family need the `cpu`
+controller delegated first ([what is needed](manifest.md#where-executable-apps-run)). On macOS they do not run yet. srelens refuses to start any sidecar until its memory and CPU watchdog has
+been checked with Seatbelt on a macOS 27 Mac.
 
 ## App lifecycle
 
@@ -56,7 +73,7 @@ extension replaced by `extensions.json`, so `settings.extensions.json`.
   assigns a new revision. The app keeps up to
   the last three versions it replaced, fewer when they would take the inventory past
   1 MiB; restoring one grants its permissions again after
-  review, keeps settings and assigns a new revision
+  review, keeps the settings it declares and assigns a new revision
   (see [migration.md](migration.md#rolling-back)).
 - Each installed version records its source: `catalog` when its exact bytes are a
   release in the cached catalog, otherwise `local`. The host decides this, not the caller.

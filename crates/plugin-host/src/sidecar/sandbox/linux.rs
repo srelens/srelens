@@ -2,7 +2,9 @@
 //! the #571 spike recommended (`landlock+seccomp+cgroup`, 11 of 11 checks).
 //!
 //! The host creates the sidecar's cgroup, with its memory and CPU limits,
-//! under a delegated root, and starts `srelens-sandbox-launch`, which joins
+//! under a delegated root — one set up by hand (`SRELENS_SANDBOX_CGROUP_ROOT`),
+//! or the scope srelens asks systemd for (`systemd.rs`) — and starts
+//! `srelens-sandbox-launch`, which joins
 //! it, applies Landlock and the filter to itself, and `exec`s the sidecar
 //! (`launch.rs`). Every layer is required: the ADR's rule to refuse where no
 //! sandbox exists applies to each layer, not only the first, so a kernel
@@ -13,10 +15,22 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use super::{Exit, LaunchError, Launched, SandboxConfig, SidecarCommand};
+use super::{CgroupRoot, Exit, LaunchError, Launched, SandboxConfig, SidecarCommand};
 use crate::sidecar::Limits;
 
-const NO_LAUNCHER: &str = "srelens has no sandbox launcher (srelens-sandbox-launch) to start the app with, so it does not run executable apps";
+/// Why there is no launcher: where srelens looked for one.
+fn no_launcher() -> String {
+    let beside = std::env::current_exe()
+        .map(|exe| {
+            exe.with_file_name("srelens-sandbox-launch")
+                .display()
+                .to_string()
+        })
+        .unwrap_or_else(|_| "beside the srelens binary".into());
+    format!(
+        "srelens has no sandbox launcher to start the app with, so it does not run executable apps. It looks for srelens-sandbox-launch at {beside}, or at the path in SRELENS_SANDBOX_LAUNCHER"
+    )
+}
 
 const NO_CGROUP: &str = "srelens has no delegated cgroup v2 directory to limit an app's memory and CPU in, so it does not run executable apps. Executable apps need one with the memory and cpu controllers enabled for its children";
 
@@ -28,18 +42,21 @@ pub(super) fn launch(
     let launcher = config
         .launcher
         .as_ref()
-        .ok_or_else(|| LaunchError::Unavailable(NO_LAUNCHER.into()))?;
+        .ok_or_else(|| LaunchError::Unavailable(no_launcher()))?;
     let abi = landlock_abi();
     if abi < 1 {
         return Err(LaunchError::Unavailable(
             "Landlock is not enabled on this kernel, so srelens cannot confine an app's file access and does not run executable apps".into(),
         ));
     }
-    let root = config
-        .cgroup_root
-        .as_ref()
-        .ok_or_else(|| LaunchError::Unavailable(NO_CGROUP.into()))?;
-    let cgroup = cgroup_in(root, limits).map_err(|e| LaunchError::Unavailable(e.to_string()))?;
+    let root = match &config.cgroup {
+        CgroupRoot::Missing => return Err(LaunchError::Unavailable(NO_CGROUP.into())),
+        CgroupRoot::Delegated(root) => root.clone(),
+        CgroupRoot::SystemdScope => {
+            super::systemd::scope_root().map_err(LaunchError::Unavailable)?
+        }
+    };
+    let cgroup = cgroup_in(&root, limits).map_err(|e| LaunchError::Unavailable(e.to_string()))?;
     let mut cmd = tokio::process::Command::new(launcher);
     cmd.arg("--cgroup")
         .arg(cgroup.path())
@@ -331,27 +348,47 @@ mod tests {
         }
     }
 
-    #[test]
-    fn without_a_launcher_or_a_cgroup_root_the_app_is_refused() {
-        let command = SidecarCommand {
+    fn command() -> SidecarCommand {
+        SidecarCommand {
             app_id: "org.example.a".into(),
             program: "/bin/true".into(),
             args: Vec::new(),
             env: Vec::new(),
             data_dir: std::env::temp_dir(),
-        };
-        let refused = |config: SandboxConfig| match launch(&config, &command, &Limits::default()) {
+        }
+    }
+
+    /// Why `config` refuses to start a sidecar.
+    fn refused(config: SandboxConfig) -> String {
+        match launch(&config, &command(), &Limits::default()) {
             Err(LaunchError::Unavailable(why)) => why,
             Err(other) => panic!("{other:?}"),
             Ok(_) => panic!("launched"),
-        };
+        }
+    }
+
+    #[test]
+    fn without_a_launcher_or_a_cgroup_root_the_app_is_refused() {
         assert!(refused(SandboxConfig::default()).contains("sandbox launcher"));
         // With a launcher but no cgroup root: refused for the cgroup, or for
         // Landlock on a kernel without it. Never started unconfined.
         let why = refused(SandboxConfig {
             launcher: Some("/nonexistent/srelens-sandbox-launch".into()),
-            cgroup_root: None,
+            cgroup: CgroupRoot::Missing,
         });
         assert!(why.contains("cgroup") || why.contains("Landlock"), "{why}");
+    }
+
+    /// A bundle ships the launcher beside srelens; a build that does not is
+    /// refused with the path srelens looked at, and the variable that names
+    /// another.
+    #[test]
+    fn a_missing_launcher_is_refused_naming_where_srelens_looked() {
+        let why = refused(SandboxConfig::default());
+        let beside = std::env::current_exe()
+            .unwrap()
+            .with_file_name("srelens-sandbox-launch");
+        assert!(why.contains(&beside.display().to_string()), "{why}");
+        assert!(why.contains("SRELENS_SANDBOX_LAUNCHER"), "{why}");
     }
 }
