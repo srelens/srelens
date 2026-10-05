@@ -24,7 +24,7 @@ pub use versions::{MAX_BINDING_VERSIONS, MAX_PATH_OVERRIDES};
 /// Extension API versions this host implements, oldest first. A manifest is accepted when
 /// its `srelensApiVersion` range matches any of them. How versions are added and retired
 /// is specified in docs/extensions/specification.md.
-pub const SUPPORTED_API_VERSIONS: &[&str] = &["0.3.0", "0.4.0", "0.5.0", "0.6.0"];
+pub const SUPPORTED_API_VERSIONS: &[&str] = &["0.3.0", "0.4.0", "0.5.0", "0.6.0", "0.7.0"];
 
 /// The `format` values JSON Schema draft-07 defines.
 const STANDARD_FORMATS: &[&str] = &[
@@ -217,6 +217,16 @@ fn builtin_target(manifest: &Value, to: &str) -> bool {
 /// supported API version. A manifest may use one only when every version its range
 /// admits has it. A rename is a removal plus an addition.
 pub const API_FIELDS: &[ApiField] = &[
+    // A duration selected from declared options, without moving the card's reader (#582).
+    ApiField {
+        path: "contributions.dashboardCards[].predicate.within",
+        introduced: "0.7.0",
+        removed: None,
+        form: Some(ApiForm {
+            name: "a settings-backed duration",
+            matches: |_manifest, text| srelens_capability::settings::mentions_setting(text),
+        }),
+    },
     // Added to API 0.3 in place while the platform was being built, then moved to a line
     // of their own before a signed release used them (#709): a host that implements 0.3
     // without them is told "requires API 0.4" rather than meeting an unknown field.

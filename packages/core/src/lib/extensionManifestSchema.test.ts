@@ -12,7 +12,7 @@ const repoFile = (path: string) => readFileSync(resolve(repoRoot, path), "utf8")
 /** The published URL of an API line's schema, which a manifest written for it names. */
 const schemaUrl = (line: string) =>
   `https://raw.githubusercontent.com/srelens/srelens/main/schemas/extension-manifest.v${line}.json`;
-const schema = JSON.parse(repoFile("schemas/extension-manifest.v0.5.json"));
+const schema = JSON.parse(repoFile("schemas/extension-manifest.v0.7.json"));
 const frozen0_4 = JSON.parse(repoFile("schemas/extension-manifest.v0.4.json"));
 // Every example, so a new one cannot skip validation.
 const examples = readdirSync(resolve(repoRoot, "examples/extensions"))
