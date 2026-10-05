@@ -1049,7 +1049,8 @@ A variable must be known on every kind in `forKinds`, so `${pod}` needs `forKind
 **Where a variable may stand.** The host reads the template the way the language reads
 its strings, and a name — `cluster`, `namespace`, `workload`, `pod` — may stand only
 inside a double-quoted string: `namespace="${namespace}"`. In a regex matcher's string
-(after `=~`, `!~` or `|~`) it is written `${name:regex}`, which escapes the value's RE2
+(after `=~`, `!~` or `|~`, and an `or` alternative of a LogQL line filter such as
+`|~ "error" or "${pod:regex}"`) it is written `${name:regex}`, which escapes the value's RE2
 metacharacters first, so `pod=~"${workload:regex}-.+"` matches a workload named `api.v2`
 literally and a cluster named `.*` matches only that name; `${name:regex}` anywhere else
 is refused. The host escapes `\` and `"` in every value, the two escapes PromQL, LogQL
@@ -1094,15 +1095,22 @@ The host adds these parameters after the binding's own, which may not set them:
   `tailLines`), and a line past 16 KiB is cut and marked. An answer past the 4 MiB limit
   is asked again for half as many lines, down to 10.
 - **Traces.** At most 50; the host asks for 51, so a search that finds more says so.
+  An answer with an `error` is refused with it, and one with neither `traces` nor
+  Tempo's `metrics` is refused, never read as a search that found nothing.
 - **Failures.** A status outside 2xx is refused with the server's own reason quoted —
   a JSON body's `error`, as Prometheus explains a bad query, or the text Loki and Tempo
   send — cut to 300 characters and scrubbed of the URL, its host and any secret header's
-  value. An answer that is not the language's (a login page, a metric query's matrix
+  value. A reason that holds a secret too short to replace (under 4 characters) is left
+  out, and a 2xx answer's `status: "error"` text is scrubbed the same way. An answer
+  that is not the language's (a login page, a metric query's matrix
   where lines were expected) is refused with why. The 4 MiB limit, timeouts and status
   rules are `network.http`'s; a 408, 429 or 5xx is one nothing answered.
 
 `extensions.queryProvider` runs one query of a metric, log or trace provider for a
-resource; see [capabilities.md](capabilities.md). On the web host it answers only under
+resource; see [capabilities.md](capabilities.md). Its input is held to what each field
+can be before anything is looked up, and no refusal repeats it: an app ID, a provider
+ID of 1–64 letters, digits and `-`, a context name of at most 1,024 characters, and
+Kubernetes names. On the web host it answers only under
 the operator's network ceiling, as every `network.http` request there does, and a log
 provider's follow is an app stream, which the web host does not run yet.
 

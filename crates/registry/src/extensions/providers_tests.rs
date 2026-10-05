@@ -800,6 +800,78 @@ async fn the_loki_reference_follows_a_pod_and_reads_a_workloads_lines() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_trace_answer_that_is_not_a_search_is_never_an_empty_list() {
+    for (answer, says) in [
+        (
+            json!({"error": "query failed"}),
+            Some("Tempo refused the search: query failed"),
+        ),
+        (
+            json!({"message": "unauthorized"}),
+            Some("not a Tempo search result"),
+        ),
+        (json!({}), Some("not a Tempo search result")),
+        (json!({"metrics": {"inspectedTraces": 0}}), None),
+    ] {
+        let tempo = server(move |_| Reply::Json(answer.clone())).await;
+        let h = harness(&tempo, "kind-dev").await;
+        let asked = h.query(json!({"provider": "traces"})).await;
+        match says {
+            Some(says) => {
+                let refused = asked.unwrap_err();
+                assert!(refused.contains(says), "{refused}");
+            }
+            // A search that found nothing.
+            None => assert_eq!(asked.unwrap()["traces"], json!([])),
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_query_holds_its_ids_and_context_to_their_sizes_and_repeats_none() {
+    let prometheus = server(|target| matrix(target, 1)).await;
+    let h = harness(&prometheus, "kind-dev").await;
+    let long = "x".repeat(5000);
+    for (input, why) in [
+        (
+            json!({"provider": "cpu", "context": long}),
+            "at most 1024 characters",
+        ),
+        (json!({"provider": long}), "1–64 letters, digits and -"),
+        (json!({"provider": "cpu\\"}), "1–64 letters, digits and -"),
+        (
+            json!({"provider": "cpu", "id": format!("org.example.{long}")}),
+            "at most 128 characters",
+        ),
+        (
+            json!({"provider": "cpu", "resourceKind": long}),
+            "A provider answers for one of",
+        ),
+    ] {
+        let refused = h.query(input.clone()).await.unwrap_err();
+        assert!(refused.contains(why), "{input}: {refused}");
+        assert!(!refused.contains("xxxxxxxx"), "{input}: {refused}");
+    }
+    assert!(prometheus.seen().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_backend_error_in_a_2xx_is_scrubbed_as_a_refusal_is() {
+    // A frontend that answers a bad query with 200 and `status: "error"`, echoing
+    // where the request went.
+    let prometheus =
+        server(|_| Reply::Json(json!({"status":"error","error":"bad query sent to 127.0.0.1"})))
+            .await;
+    let h = harness(&prometheus, "kind-dev").await;
+    let refused = h.query(json!({"provider":"cpu"})).await.unwrap_err();
+    assert!(
+        refused.contains("Prometheus refused the query: bad query sent to the server"),
+        "{refused}"
+    );
+    assert!(!refused.contains("127.0.0.1"), "{refused}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_refusal_quotes_the_servers_reason() {
     // Prometheus explains a bad query in a 400's JSON body, Loki in its text.
     let prometheus = server(|_| {

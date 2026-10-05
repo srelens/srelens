@@ -294,7 +294,7 @@ reviews:
     - path: "crates/plugin-host/**"
       instructions: |
         Extension manifest parsing and validation. The manifest contract is the
-        newest supported line's schema, schemas/extension-manifest.v0.6.json
+        newest supported line's schema, schemas/extension-manifest.v0.7.json
         (regenerated with
         `UPDATE_CATALOG=1 cargo test -p srelens-plugin-host --test schema`); an
         older line's file is frozen and must not be regenerated. A field change

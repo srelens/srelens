@@ -51,6 +51,7 @@ function fakeView() {
 }
 
 beforeEach(async () => {
+  vi.mocked(isTauri).mockReturnValue(true);
   vi.mocked(listContexts).mockResolvedValue({ contexts: [{ name: "prod-eu", key: "prod" }] } as never);
   vi.mocked(openExtensionView).mockReset();
 });

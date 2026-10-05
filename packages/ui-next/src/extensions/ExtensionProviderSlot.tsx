@@ -11,7 +11,7 @@ import {
 } from "@srelens/core";
 import { NativeComponent } from "../native-components/NativeComponent";
 import { plainText } from "./displayText";
-import { useContextLookup } from "./contextIds";
+import { refreshContextIds, useContextLookup } from "./contextIds";
 import { extensionLabel, useExtensions } from "./inventoryStore";
 import { useResource } from "../lib/useResource";
 
@@ -173,9 +173,15 @@ export function ExtensionProviderSlot({ context, resource }: { context: string; 
   const group = resource.apiVersion.includes("/") ? resource.apiVersion.split("/")[0] : "";
   const kind = contributionKind(resource.kind, group);
   const contextKey = lookup.status === "found" ? lookup.id : undefined;
-  const plugins = (inventory.status === "ready" ? inventory.data?.plugins ?? [] : []).filter(
-    (plugin) => plugin.enabled && !plugin.quarantined && !plugin.policyBlocked && extensionEnabledFor(plugin, contextKey),
+  const offered = (inventory.status === "ready" ? inventory.data?.plugins ?? [] : []).filter(
+    (plugin) => plugin.enabled && !plugin.quarantined && !plugin.policyBlocked
+      && providersFor(plugin.manifest, "metrics", kind).length + providersFor(plugin.manifest, "traces", kind).length > 0,
   );
+  const plugins = offered.filter((plugin) => extensionEnabledFor(plugin, contextKey));
+  // An app enabled for some clusters only cannot be placed until the clusters are
+  // listed: a listing that failed is said, never drawn as no panels.
+  const limited = offered.some((plugin) => plugin.contexts && !extensionEnabledFor(plugin, contextKey));
+  const unplaced = limited && (lookup.status === "failed" || lookup.status === "loading");
   const base = {
     context,
     namespace: resource.metadata.namespace ?? "",
@@ -186,17 +192,24 @@ export function ExtensionProviderSlot({ context, resource }: { context: string; 
   };
   const metrics = plugins.flatMap((plugin) => providersFor(plugin.manifest, "metrics", kind).map((provider) => ({ ...base, plugin, provider })));
   const traces = plugins.flatMap((plugin) => providersFor(plugin.manifest, "traces", kind).map((provider) => ({ ...base, plugin, provider })));
-  if (metrics.length + traces.length === 0) return null;
+  if (metrics.length + traces.length === 0 && !unplaced) return null;
   return (
     <Section title="Metrics and traces from apps" padded={false} className="extension-providers">
-      <div className="extension-providers-controls">
+      {unplaced && (
+        <NativeComponent
+          label="app metrics and traces"
+          state={lookup.status === "failed" ? { status: "error", error: `Could not list clusters: ${lookup.error}` } : { status: "loading" }}
+          onRetry={() => void refreshContextIds()}
+        />
+      )}
+      {metrics.length + traces.length > 0 && <div className="extension-providers-controls">
         <Eyebrow>range</Eyebrow>
         <Select value={range} onValueChange={setRange} options={RANGES} aria-label="Time range for app metrics and traces" />
         <Button type="button" variant="secondary" size="xs" aria-label="Refresh app metrics and traces"
           onClick={() => setTick((count) => count + 1)}>
           Refresh
         </Button>
-      </div>
+      </div>}
       {metrics.map((ask) => <MetricPanel key={`${ask.plugin.manifest.id}/${ask.plugin.revision}/${ask.provider.id}`} {...ask} />)}
       {traces.map((ask) => <TracePanel key={`${ask.plugin.manifest.id}/${ask.plugin.revision}/${ask.provider.id}`} {...ask} />)}
     </Section>

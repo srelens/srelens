@@ -372,6 +372,28 @@ enum At {
     Raw,
 }
 
+/// How far the lexer is into `or` after a regex matcher's string.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Alternative {
+    None,
+    /// A regex matcher's string just closed.
+    AfterRegex,
+    /// Then `o`.
+    O,
+    /// Then `or`: the next string is another pattern of the same matcher.
+    Or,
+}
+
+impl Alternative {
+    fn after(regex_string: bool) -> Self {
+        if regex_string {
+            Self::AfterRegex
+        } else {
+            Self::None
+        }
+    }
+}
+
 impl QueryTemplate {
     /// Reads `template` as a `language` query, or says why it cannot stand as one.
     ///
@@ -399,6 +421,9 @@ impl QueryTemplate {
         // before a string makes it a regex.
         let mut before = [' ', ' '];
         let mut regex_string = false;
+        // Where a LogQL line filter's `or` alternative stands: the string after
+        // `|~ "a" or` is a pattern of the same filter, so a regex too.
+        let mut alternative = Alternative::None;
         let mut chars = template.chars().peekable();
         while let Some(c) = chars.next() {
             if c == '$' && chars.peek() == Some(&'{') {
@@ -428,11 +453,12 @@ impl QueryTemplate {
             text.push(c);
             match at {
                 At::Outside => match c {
-                    '"' => {
-                        at = At::Double;
-                        regex_string = matches!(before, ['=' | '!' | '|', '~']);
+                    '"' | '`' if c == '"' || language != QueryLanguage::Traceql => {
+                        at = if c == '"' { At::Double } else { At::Raw };
+                        regex_string = matches!(before, ['=' | '!' | '|', '~'])
+                            || alternative == Alternative::Or;
+                        alternative = Alternative::None;
                     }
-                    '`' if language != QueryLanguage::Traceql => at = At::Raw,
                     '\'' if language == QueryLanguage::Promql => at = At::Single,
                     '`' | '\'' => {
                         return Err(format!(
@@ -457,8 +483,19 @@ impl QueryTemplate {
                                 .into(),
                         )
                     }
-                    c if !c.is_whitespace() => before = [before[1], c],
-                    _ => {}
+                    c if !c.is_whitespace() => {
+                        before = [before[1], c];
+                        alternative = match (alternative, c) {
+                            (Alternative::AfterRegex, 'o') => Alternative::O,
+                            (Alternative::O, 'r') => Alternative::Or,
+                            _ => Alternative::None,
+                        };
+                    }
+                    _ => {
+                        if alternative == Alternative::O {
+                            alternative = Alternative::None;
+                        }
+                    }
                 },
                 At::Double | At::Single => match c {
                     '\\' => match chars.next() {
@@ -468,6 +505,7 @@ impl QueryTemplate {
                     '"' if at == At::Double => {
                         at = At::Outside;
                         before = [before[1], '"'];
+                        alternative = Alternative::after(regex_string);
                     }
                     '\'' if at == At::Single => at = At::Outside,
                     _ => {}
@@ -475,6 +513,8 @@ impl QueryTemplate {
                 At::Raw => {
                     if c == '`' {
                         at = At::Outside;
+                        before = [before[1], '`'];
+                        alternative = Alternative::after(regex_string);
                     }
                 }
             }

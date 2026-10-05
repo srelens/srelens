@@ -166,6 +166,18 @@ describe("provider panels on an overview (#569)", () => {
     expect(queryExtensionProvider).not.toHaveBeenCalled();
   });
 
+  it("says the clusters could not be listed, rather than drawing no panels, for an app enabled for some", async () => {
+    vi.mocked(listContexts).mockRejectedValue(new Error("kubeconfig unreadable"));
+    vi.mocked(useExtensions).mockReturnValue({
+      status: "ready", data: { schemaVersion: 1, nextRevision: 9, plugins: [{ ...plugin, contexts: ["prod"] }] }, reload: vi.fn(),
+    } as never);
+    render(<ExtensionProviderSlot context="prod-eu" resource={deployment} />);
+    await waitFor(() => expect(document.body.textContent).toContain("Could not list clusters: Error: kubeconfig unreadable"));
+    expect(document.body.textContent).toContain("Metrics and traces from apps");
+    expect(screen.getByRole("button", { name: /Retry/ })).toBeTruthy();
+    expect(queryExtensionProvider).not.toHaveBeenCalled();
+  });
+
   it("offers nothing from an app that is off, quarantined or not enabled for this cluster", async () => {
     vi.mocked(useExtensions).mockReturnValue({
       status: "ready",

@@ -2,8 +2,8 @@
 //! stands in for Prometheus, so the allowlist, every redirect, the limits and
 //! the loopback switch are exercised by the client the broker really uses.
 use super::*;
-use crate::extensions::tests::fake_core;
 use crate::extensions::http_test_support::{digest, server, stand_in_secret, Reply, Vault};
+use crate::extensions::tests::fake_core;
 use srelens_plugin_host::{secret_key, SECRET_STORE_PERMISSION};
 
 fn policy(rules: Vec<HostRule>, loopback_http: bool) -> Policy {
@@ -692,6 +692,35 @@ fn the_access_review_shows_each_host_and_what_a_request_sends() {
 }
 
 #[test]
+fn a_reason_holding_a_secret_too_short_to_replace_is_left_out() {
+    let url = Url::parse("https://loki.example.com/loki/api/v1/query_range").unwrap();
+    let mut headers = HeaderMap::new();
+    let mut value = HeaderValue::from_static("Bearer k9z");
+    value.set_sensitive(true);
+    headers.insert("authorization", value);
+    let echoed = refusal_reason(
+        reqwest::StatusCode::UNAUTHORIZED,
+        Some("text/plain"),
+        b"token k9z is not valid",
+        &headers,
+        &url,
+    );
+    assert_eq!(echoed, "The server answered HTTP 401 Unauthorized");
+    // A reason that does not hold it is still quoted.
+    let other = refusal_reason(
+        reqwest::StatusCode::UNAUTHORIZED,
+        Some("text/plain"),
+        b"no org id",
+        &headers,
+        &url,
+    );
+    assert_eq!(
+        other,
+        "The server answered HTTP 401 Unauthorized: no org id"
+    );
+}
+
+#[test]
 fn a_refusals_quoted_reason_carries_no_secret_and_no_url() {
     let url = Url::parse("https://prometheus.example.com:9090/api/v1/query_range").unwrap();
     let secret = stand_in_secret("token");
@@ -700,9 +729,8 @@ fn a_refusals_quoted_reason_carries_no_secret_and_no_url() {
     value.set_sensitive(true);
     headers.insert("authorization", value);
     // A server that echoes what it was sent in its refusal.
-    let body = format!(
-        r#"{{"status":"error","error":"bad query from {url} with Bearer {secret}"}}"#
-    );
+    let body =
+        format!(r#"{{"status":"error","error":"bad query from {url} with Bearer {secret}"}}"#);
     let reason = refusal_reason(
         reqwest::StatusCode::BAD_REQUEST,
         Some("application/json"),
@@ -713,12 +741,27 @@ fn a_refusals_quoted_reason_carries_no_secret_and_no_url() {
     let leaked = reason.contains(&secret);
     assert!(!leaked, "the reason holds the secret");
     assert!(!reason.contains("prometheus.example.com"), "{reason}");
-    assert!(reason.starts_with("The server answered HTTP 400 Bad Request: bad query from"), "{reason}");
+    assert!(
+        reason.starts_with("The server answered HTTP 400 Bad Request: bad query from"),
+        "{reason}"
+    );
     // Text is quoted as text, cut, and a body with nothing to say adds nothing.
-    let text = refusal_reason(reqwest::StatusCode::BAD_REQUEST, Some("text/plain"), &[b'x'; 5000], &HeaderMap::new(), &url);
+    let text = refusal_reason(
+        reqwest::StatusCode::BAD_REQUEST,
+        Some("text/plain"),
+        &[b'x'; 5000],
+        &HeaderMap::new(),
+        &url,
+    );
     assert!(text.chars().count() < 400, "{text}");
     assert_eq!(
-        refusal_reason(reqwest::StatusCode::NOT_FOUND, None, b"", &HeaderMap::new(), &url),
+        refusal_reason(
+            reqwest::StatusCode::NOT_FOUND,
+            None,
+            b"",
+            &HeaderMap::new(),
+            &url
+        ),
         "The server answered HTTP 404 Not Found"
     );
 }

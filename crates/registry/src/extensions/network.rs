@@ -154,8 +154,9 @@ const MAX_REASON: usize = 300;
 /// What a server answered with a status outside 2xx, in the host's words, with
 /// the server's own reason after them when it gave one: a JSON body's `error`, as
 /// Prometheus writes a bad query's, or the text Loki and Tempo send. Cut, with
-/// invisible characters shown, and scrubbed of every sensitive header value and
-/// of the URL and its host, since a server may echo what it was sent.
+/// invisible characters shown, and scrubbed ([`Scrub`]) of every sensitive header
+/// value and of the URL and its host, since a server may echo what it was sent; a
+/// reason that holds a secret too short to replace is left out.
 pub(super) fn refusal_reason(
     status: reqwest::StatusCode,
     content_type: Option<&str>,
@@ -175,28 +176,66 @@ pub(super) fn refusal_reason(
     } else {
         String::from_utf8_lossy(raw).into_owned()
     };
-    let mut said = said.split_whitespace().collect::<Vec<_>>().join(" ");
-    let secrets = headers
-        .values()
-        .filter(|value| value.is_sensitive())
-        .filter_map(|value| value.to_str().ok());
-    for secret in secrets {
-        for part in std::iter::once(secret).chain(secret.split_whitespace()) {
-            if part.len() >= 4 {
-                said = said.replace(part, "[secret]");
-            }
-        }
-    }
-    for spelling in [Some(url.as_str()), url.host_str()].into_iter().flatten() {
-        if !spelling.is_empty() {
-            said = said.replace(spelling, "the server");
-        }
-    }
+    let said = said.split_whitespace().collect::<Vec<_>>().join(" ");
+    let Some(said) = Scrub::new(headers, url).text(&said) else {
+        return lead;
+    };
     let said: String = said.chars().take(MAX_REASON).collect();
     if said.is_empty() {
         lead
     } else {
         format!("{lead}: {}", srelens_capability::escape_invisible(&said))
+    }
+}
+
+/// What a server's own words are scrubbed of before the host repeats them: every
+/// sensitive header value the request carried, whole and word by word, and the URL
+/// and its host, since a server may echo what it was sent.
+#[derive(Debug, Clone, Default)]
+pub(super) struct Scrub {
+    secrets: Vec<String>,
+    spellings: Vec<String>,
+}
+
+/// The shortest secret part replaced in a server's words. A shorter one cannot be
+/// replaced without garbling them, so words that hold it are not repeated at all.
+const MIN_SCRUBBED: usize = 4;
+
+impl Scrub {
+    pub(super) fn new(headers: &HeaderMap, url: &Url) -> Self {
+        let mut secrets: Vec<String> = headers
+            .values()
+            .filter(|value| value.is_sensitive())
+            .filter_map(|value| value.to_str().ok())
+            .flat_map(|secret| std::iter::once(secret).chain(secret.split_whitespace()))
+            .filter(|part| !part.is_empty())
+            .map(str::to_owned)
+            .collect();
+        // The longest first, so a whole value goes before the words it holds.
+        secrets.sort_by_key(|part| std::cmp::Reverse(part.len()));
+        let spellings = [Some(url.as_str()), url.host_str()]
+            .into_iter()
+            .flatten()
+            .filter(|spelling| !spelling.is_empty())
+            .map(str::to_owned)
+            .collect();
+        Self { secrets, spellings }
+    }
+
+    /// `said` scrubbed, or `None` when it holds a secret part too short to replace.
+    pub(super) fn text(&self, said: &str) -> Option<String> {
+        let mut said = said.to_owned();
+        for part in &self.secrets {
+            if part.chars().count() >= MIN_SCRUBBED {
+                said = said.replace(part.as_str(), "[secret]");
+            } else if said.contains(part.as_str()) {
+                return None;
+            }
+        }
+        for spelling in &self.spellings {
+            said = said.replace(spelling.as_str(), "the server");
+        }
+        Some(said)
     }
 }
 
@@ -500,7 +539,7 @@ async fn read_with(
     policy: Option<&AppPolicy>,
     limits: Limits,
 ) -> Result<Value, CapabilityError> {
-    let answer = request(core, secrets, plugin, name, &[], policy, limits)
+    let (answer, _) = request(core, secrets, plugin, name, &[], policy, limits)
         .await
         .map_err(|error| CapabilityError::Handler(error.message().to_owned()))?;
     serde_json::to_value(answer).map_err(|e| CapabilityError::Handler(e.to_string()))
@@ -510,6 +549,8 @@ async fn read_with(
 /// parameters after the binding's own: the one path a request takes, for a
 /// read and for a provider's query (#569) alike. Every rule is checked here, on
 /// every call, before anything is sent, `policy`'s ceiling (#578) among them.
+/// With the answer comes the [`Scrub`] for what was sent, for a caller that
+/// repeats any of the server's words.
 pub(super) async fn request(
     core: &Registry,
     secrets: &dyn SecretStore,
@@ -518,7 +559,7 @@ pub(super) async fn request(
     extra: &[(&str, String)],
     policy: Option<&AppPolicy>,
     limits: Limits,
-) -> Result<HttpOut, RequestError> {
+) -> Result<(HttpOut, Scrub), RequestError> {
     let failed = RequestError::Refused;
     let manifest = &plugin.manifest;
     let binding = manifest
@@ -581,7 +622,11 @@ pub(super) async fn request(
         headers.insert(name, value);
     }
     let carries_secret = !input.secret_headers.is_empty();
-    exchange(url, headers, carries_secret, policy).await
+    // For a caller that repeats what the server answered with a 2xx, such as a
+    // query backend's `status: "error"`, as a refusal here is.
+    let scrub = Scrub::new(&headers, &url);
+    let out = exchange(url, headers, carries_secret, policy).await?;
+    Ok((out, scrub))
 }
 
 /// GETs `url` under `policy`, and reads what comes back. Every reason is the

@@ -19,7 +19,7 @@
 //! stream source, `logProvider`, which the log view follows
 //! (`streams/providers.rs`): its history, then a query every
 //! [`ProviderTiming::poll`] for what is new, for as long as the view is open.
-use super::network::{self, Limits, RequestError};
+use super::network::{self, Limits, RequestError, Scrub};
 use super::{resolve_app, AppPolicy, Installed, Store};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -57,6 +57,9 @@ pub const DEFAULT_HISTORY: i64 = 200;
 const MAX_TEXT: usize = 256;
 /// The longest error text a query backend's answer is quoted with.
 const MAX_QUOTED: usize = 300;
+
+/// The longest context name a query is asked for, as the longest a template binds.
+const MAX_CONTEXT: usize = 1024;
 
 /// How often a log follow asks for what is new.
 #[derive(Clone, Copy, Debug)]
@@ -268,11 +271,29 @@ impl Ask {
         grid: Option<Grid>,
     ) -> Result<Bound, String> {
         let subject = &self.subject;
+        // Held to what each can be before any is looked up or repeated: a caller,
+        // MCP among them, may send anything.
+        if !srelens_plugin_host::is_app_id(&self.id) {
+            return Err("The app ID is not one: reverse-domain, at most 128 characters".into());
+        }
+        if self.provider.is_empty()
+            || self.provider.len() > 64
+            || !self
+                .provider
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || c == b'-')
+        {
+            return Err("A provider ID is 1–64 letters, digits and -".into());
+        }
+        if self.context.len() > MAX_CONTEXT {
+            return Err(format!(
+                "A cluster context's name is at most {MAX_CONTEXT} characters"
+            ));
+        }
         if !PROVIDER_KINDS.contains(&subject.resource_kind.as_str()) {
             return Err(format!(
-                "A provider answers for one of {}, not {}",
-                PROVIDER_KINDS.join(", "),
-                subject.resource_kind
+                "A provider answers for one of {}",
+                PROVIDER_KINDS.join(", ")
             ));
         }
         if !namespace_name(&subject.namespace) {
@@ -353,19 +374,20 @@ impl Ask {
     }
 
     /// Sends `bound`'s query with the host's `parameters` after it, through its
-    /// `network.http` binding, and answers the body.
+    /// `network.http` binding, and answers the body, and what any of its words the
+    /// host repeats are scrubbed of.
     pub async fn send(
         &self,
         bound: &Bound,
         parameters: Vec<(&'static str, String)>,
-    ) -> Result<Value, RequestError> {
+    ) -> Result<(Value, Scrub), RequestError> {
         let query_key = match bound.language {
             QueryLanguage::Traceql => "q",
             _ => "query",
         };
         let mut extra = vec![(query_key, bound.query.clone())];
         extra.extend(parameters);
-        let answer = network::request(
+        let (answer, scrub) = network::request(
             &self.core,
             self.secrets.as_ref(),
             &bound.plugin,
@@ -375,7 +397,7 @@ impl Ask {
             Limits::default(),
         )
         .await?;
-        Ok(answer.body)
+        Ok((answer.body, scrub))
     }
 
     /// Log lines from `start` (nanoseconds, inclusive) to `end`, at most `limit`,
@@ -391,7 +413,7 @@ impl Ask {
         backward: bool,
     ) -> Result<(Vec<Entry>, bool), RequestError> {
         let mut limit = limit;
-        let body = loop {
+        let (body, scrub) = loop {
             let asked = self
                 .send(
                     bound,
@@ -413,7 +435,8 @@ impl Ask {
                 asked => break asked?,
             }
         };
-        let mut entries = read_streams(&body, &bound.id).map_err(RequestError::Refused)?;
+        let mut entries = read_streams(&body, &bound.id)
+            .map_err(|why| RequestError::Refused(scrubbed(&scrub, &why)))?;
         let full = entries.len() >= limit;
         entries.sort_by_key(|entry| entry.nanos);
         if entries.len() > limit {
@@ -463,7 +486,7 @@ async fn query(ask: Ask, range: Option<u64>) -> Result<QueryOut, String> {
     let failed = |error: RequestError| error.message().to_owned();
     match bound.kind {
         ProviderKind::Metrics => {
-            let body = ask
+            let (body, scrub) = ask
                 .send(
                     &bound,
                     vec![
@@ -475,7 +498,7 @@ async fn query(ask: Ask, range: Option<u64>) -> Result<QueryOut, String> {
                 .await
                 .map_err(failed)?;
             Ok(QueryOut::Metrics {
-                chart: read_matrix(&body, &bound, grid)?,
+                chart: read_matrix(&body, &bound, grid).map_err(|why| scrubbed(&scrub, &why))?,
             })
         }
         ProviderKind::Logs => {
@@ -503,7 +526,7 @@ async fn query(ask: Ask, range: Option<u64>) -> Result<QueryOut, String> {
             })
         }
         ProviderKind::Traces => {
-            let body = ask
+            let (body, scrub) = ask
                 .send(
                     &bound,
                     vec![
@@ -515,10 +538,19 @@ async fn query(ask: Ask, range: Option<u64>) -> Result<QueryOut, String> {
                 )
                 .await
                 .map_err(failed)?;
-            let (traces, truncated) = read_traces(&body)?;
+            let (traces, truncated) = read_traces(&body).map_err(|why| scrubbed(&scrub, &why))?;
             Ok(QueryOut::Traces { traces, truncated })
         }
     }
+}
+
+/// Why an answer could not be read, scrubbed of what the request carried: the
+/// reasons quote the backend, which may echo a credential or the URL it was sent
+/// with a 2xx as it may with a refusal.
+fn scrubbed(scrub: &Scrub, why: &str) -> String {
+    scrub.text(why).unwrap_or_else(|| {
+        "The server's answer could not be read, and its reason is not repeated: it may hold the credential the request carried".into()
+    })
 }
 
 /// A query backend's own words for why it refused, cut and with invisible
@@ -741,10 +773,17 @@ fn read_streams(body: &Value, provider: &str) -> Result<Vec<Entry>, String> {
 /// [`MAX_TRACES`].
 fn read_traces(body: &Value) -> Result<(Vec<Trace>, bool), String> {
     const NOT_A_SEARCH: &str = "The server's answer is not a Tempo search result";
+    if let Some(why) = body.get("error").and_then(Value::as_str) {
+        return Err(format!("Tempo refused the search: {}", quoted(why)));
+    }
     let traces = match body.get("traces") {
         Some(Value::Array(traces)) => traces,
-        // Tempo leaves an empty list out.
-        None if body.is_object() => return Ok((Vec::new(), false)),
+        // An empty list may be left out of a search's answer, which still carries
+        // its `metrics`; any other object without `traces` is not an answer, and is
+        // never read as an empty one.
+        None if body.get("metrics").is_some_and(Value::is_object) => {
+            return Ok((Vec::new(), false))
+        }
         _ => return Err(NOT_A_SEARCH.into()),
     };
     let text = |trace: &Value, key: &str| {

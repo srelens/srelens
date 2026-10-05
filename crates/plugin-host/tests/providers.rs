@@ -536,10 +536,33 @@ fn a_name_in_a_regex_matcher_is_written_as_a_regex() {
             QueryLanguage::Traceql,
             "{ resource.service.name =~ \"${workload}\" }",
         ),
+        // A line filter's `or` alternatives are patterns of the same filter.
+        (
+            QueryLanguage::Logql,
+            "{namespace=\"${namespace}\"} |~ \"error\" or \"${pod}\"",
+        ),
+        (
+            QueryLanguage::Logql,
+            "{namespace=\"${namespace}\"} !~ `error` or\"${pod}\"",
+        ),
     ] {
         let refused = QueryTemplate::parse(language, query).unwrap_err();
         assert!(refused.contains(":regex"), "{query}: {refused}");
     }
+    template(
+        QueryLanguage::Logql,
+        "{namespace=\"${namespace}\"} |~ \"error\" or \"${pod:regex}\" or `panic`",
+    );
+    // An exact filter's alternatives are exact, and `or` between label filters
+    // starts a new one.
+    template(
+        QueryLanguage::Logql,
+        "{namespace=\"${namespace}\"} |= \"error\" or \"${pod}\"",
+    );
+    template(
+        QueryLanguage::Logql,
+        "{namespace=\"${namespace}\"} | level=~\"err|warn\" or pod=\"${pod}\"",
+    );
     template(
         QueryLanguage::Logql,
         "{namespace=\"${namespace}\"} |~ \"${pod:regex}\"",
