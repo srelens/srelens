@@ -353,6 +353,7 @@ pub fn parse_latest_version(body: &[u8], triple: &str) -> Result<String, UpdateE
 pub fn parse_newest_version(body: &[u8], triple: &str) -> Result<String, UpdateError> {
     let releases: Vec<serde_json::Value> = serde_json::from_slice(body)
         .map_err(|e| UpdateError::BadRelease(format!("the API did not return a list: {e}")))?;
+    let mut newest_skipped = None;
     for release in releases {
         let Some(tag) = release.get("tag_name").and_then(|t| t.as_str()) else {
             continue;
@@ -381,6 +382,11 @@ pub fn parse_newest_version(body: &[u8], triple: &str) -> Result<String, UpdateE
             continue;
         };
         if !release_carries_this_platform(&release, &version, triple) {
+            if newest_skipped.is_none() {
+                newest_skipped = Some(format!(
+                    "release {tag} carries no srectl build for {triple}"
+                ));
+            }
             continue;
         }
         // Dev pre-releases are public before signing runs, and signing them
@@ -388,9 +394,15 @@ pub fn parse_newest_version(body: &[u8], triple: &str) -> Result<String, UpdateE
         // suspicious. It is passed over all the same: the dev channel
         // installs signed builds only, the newest there is.
         if !release_is_signed(&release, &version) {
+            if newest_skipped.is_none() {
+                newest_skipped = Some(format!("release {tag} is not signed"));
+            }
             continue;
         }
         return Ok(version);
+    }
+    if let Some(reason) = newest_skipped {
+        return Err(UpdateError::BadRelease(reason));
     }
     // Accurate about which step came up empty: the list was read fine, it just
     // holds nothing installable here. Naming the platform matters because the
@@ -611,7 +623,7 @@ pub enum Check {
 /// archive. That is "nothing newer to install", unless the tag itself is
 /// newer — then the missing archive is a failed release and stays an error.
 fn current_until_srectl_ships(current: &str, channel: Channel, message: &str) -> Option<Check> {
-    if message.contains("carries no srectl build") {
+    if message.contains("carries no srectl build") || message.ends_with("is not signed") {
         let tag = message
             .strip_prefix("release ")
             .and_then(|rest| rest.split_whitespace().next())?;
@@ -636,12 +648,6 @@ fn current_until_srectl_ships(current: &str, channel: Channel, message: &str) ->
                 channel,
                 latest: version,
             }
-        });
-    }
-    if message.starts_with("no dev release carries a srectl build") {
-        return Some(Check::UpToDate {
-            channel,
-            latest: current.to_string(),
         });
     }
     None
@@ -828,7 +834,10 @@ pub fn apply_with_keys(
 /// directory another user can write to lets them pre-create the path as a
 /// link to a file the victim owns, which the update would then truncate.
 /// The name is random as well, so the attempt cannot be aimed.
-fn create_new_file(dir: &Path, prefix: &str) -> Result<(PathBuf, std::fs::File), UpdateError> {
+pub(crate) fn create_new_file(
+    dir: &Path,
+    prefix: &str,
+) -> Result<(PathBuf, std::fs::File), UpdateError> {
     let mut last = None;
     for _ in 0..8 {
         let path = dir.join(format!("{prefix}{}", uuid::Uuid::new_v4()));
@@ -1336,7 +1345,7 @@ pub fn replace_running_binary(target: &Path, bytes: &[u8]) -> Result<(), UpdateE
 ///
 /// The point is that no future early return can forget: a half-finished
 /// update leaves nothing behind whichever way it failed.
-struct Staged(PathBuf);
+pub(crate) struct Staged(pub PathBuf);
 
 impl Drop for Staged {
     fn drop(&mut self) {

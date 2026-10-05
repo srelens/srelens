@@ -138,7 +138,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if srelens_tui::rebrand::should_rebrand(&exe) {
             match srelens_tui::rebrand::apply_rebrand(&exe) {
                 Ok(next) => {
-                    eprintln!("{}", srelens_tui::rebrand::notice());
+                    use std::io::IsTerminal;
+                    if std::io::stderr().is_terminal() {
+                        eprintln!("{}", srelens_tui::rebrand::notice());
+                    }
                     let why = srelens_tui::rebrand::exec_next(&next);
                     eprintln!(
                         "srelens-tui: could not start {}: {why}",

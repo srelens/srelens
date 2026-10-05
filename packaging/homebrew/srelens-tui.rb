@@ -79,7 +79,7 @@ class SrelensTui < Formula
     bin.install "srelens-tui" => "srectl"
     (bin/"srelens-tui").write <<~SH
       #!/bin/sh
-      echo "srelens-tui is now srectl" >&2
+      [ -t 2 ] && echo "srelens-tui is now srectl" >&2
       exec "#{bin}/srectl" "$@"
     SH
     chmod 0755, bin/"srelens-tui"
@@ -97,5 +97,8 @@ class SrelensTui < Formula
     # A command that needs no cluster, to prove the binary is not merely
     # loadable. With no kubeconfig it reports zero contexts rather than failing.
     assert_match "SRElens Kubernetes TUI", shell_output("#{bin}/srectl info")
+
+    # The legacy wrapper also forwards subcommand arguments.
+    assert_match "SRElens Kubernetes TUI", shell_output("#{bin}/srelens-tui info")
   end
 end

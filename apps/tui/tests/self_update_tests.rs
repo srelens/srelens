@@ -1096,6 +1096,87 @@ fn a_newer_release_without_srectl_is_still_an_error() {
 }
 
 #[test]
+fn a_newer_dev_release_without_srectl_is_still_an_error() {
+    let fetch = |_: &str| -> Result<Vec<u8>, UpdateError> {
+        let body = format!(
+            r#"[
+            {{"tag_name":"srelens-v2.0.0-dev.1","prerelease":true,"assets":[{{"name":"srelens-tui-2.0.0-dev.1-SHA256SUMS.txt"}}]}}
+        ]"#
+        );
+        Ok(body.into_bytes())
+    };
+    let err = plan(
+        "1.2.0-dev.1",
+        Channel::Dev,
+        false,
+        PathBuf::from("/tmp/srelens-tui"),
+        &fetch,
+    )
+    .unwrap_err();
+    let UpdateError::BadRelease(message) = err else {
+        panic!("expected the missing build to be reported, got {err:?}");
+    };
+    assert!(
+        message.contains("release srelens-v2.0.0-dev.1 carries no srectl build"),
+        "{message}"
+    );
+}
+
+#[test]
+fn a_newer_dev_release_without_signature_is_still_an_error() {
+    let fetch = |_: &str| -> Result<Vec<u8>, UpdateError> {
+        let body = format!(
+            r#"[
+            {{"tag_name":"srelens-v2.0.0-dev.1","prerelease":true,"assets":{}}}
+        ]"#,
+            unsigned_assets_for("2.0.0-dev.1")
+        );
+        Ok(body.into_bytes())
+    };
+    let err = plan(
+        "1.2.0-dev.1",
+        Channel::Dev,
+        false,
+        PathBuf::from("/tmp/srelens-tui"),
+        &fetch,
+    )
+    .unwrap_err();
+    let UpdateError::BadRelease(message) = err else {
+        panic!("expected the missing signature to be reported, got {err:?}");
+    };
+    assert!(
+        message.contains("release srelens-v2.0.0-dev.1 is not signed"),
+        "{message}"
+    );
+}
+
+#[test]
+fn a_dev_release_that_still_publishes_srelens_tui_at_same_version_is_current() {
+    let fetch = |_: &str| -> Result<Vec<u8>, UpdateError> {
+        let body = format!(
+            r#"[
+            {{"tag_name":"srelens-v1.2.0-dev.1","prerelease":true,"assets":[{{"name":"srelens-tui-1.2.0-dev.1-SHA256SUMS.txt"}}]}}
+        ]"#
+        );
+        Ok(body.into_bytes())
+    };
+    assert_eq!(
+        plan(
+            "1.2.0-dev.1",
+            Channel::Dev,
+            false,
+            PathBuf::from("/tmp/srelens-tui"),
+            &fetch
+        )
+        .unwrap(),
+        Check::UpToDate {
+            channel: Channel::Dev,
+            latest: "1.2.0-dev.1".into()
+        }
+    );
+}
+
+#[test]
 fn a_failed_release_lookup_is_reported_rather_than_swallowed() {
     let fetch = |_: &str| -> Result<Vec<u8>, UpdateError> {
         Err(UpdateError::Download("503 Service Unavailable".into()))

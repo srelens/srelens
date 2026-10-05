@@ -47,8 +47,19 @@ fn file_name_is(path: &Path, name: &str) -> bool {
 }
 
 fn in_cargo_target(path: &Path) -> bool {
-    let text = path.to_string_lossy().replace('\\', "/");
-    text.contains("/target/debug/") || text.contains("/target/release/")
+    if let Ok(target_dir) = std::env::var("CARGO_TARGET_DIR") {
+        if !target_dir.is_empty() && path.starts_with(Path::new(&target_dir)) {
+            return true;
+        }
+    }
+    let components: Vec<_> = path.components().map(|c| c.as_os_str()).collect();
+    if let Some(target_idx) = components.iter().position(|&c| c == "target") {
+        components[target_idx..]
+            .iter()
+            .any(|&c| c == "debug" || c == "release")
+    } else {
+        false
+    }
 }
 
 /// Where the `srectl` command is installed, next to `legacy`.
@@ -57,22 +68,98 @@ pub fn next_command_path(legacy: &Path) -> PathBuf {
 }
 
 /// The Unix wrapper left at the old command name.
-pub fn wrapper_script(next: &Path) -> String {
-    let quoted = next.display().to_string().replace('\'', "'\\''");
-    format!("#!/bin/sh\necho '{NOTICE}' >&2\nexec '{quoted}' \"$@\"\n")
+pub fn wrapper_script(next: &Path) -> Result<String, String> {
+    let path_str = next.to_str().ok_or_else(|| {
+        format!(
+            "path {} is not valid UTF-8 and cannot be represented in a shell script",
+            next.display()
+        )
+    })?;
+    let quoted = path_str.replace('\'', "'\\''");
+    Ok(format!(
+        "#!/bin/sh\n[ -t 2 ] && echo '{NOTICE}' >&2\nexec '{quoted}' \"$@\"\n"
+    ))
+}
+
+#[cfg(unix)]
+fn is_trusted_existing_command(current: &Path, next: &Path) -> Result<bool, String> {
+    use std::os::unix::fs::MetadataExt;
+    use std::os::unix::fs::PermissionsExt;
+    let next_meta = match std::fs::symlink_metadata(next) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => {
+            return Err(format!(
+                "could not inspect existing {}: {e}",
+                next.display()
+            ))
+        }
+    };
+    if !next_meta.is_file() {
+        return Err(format!(
+            "existing {} is not a regular file; refusing to rebrand",
+            next.display()
+        ));
+    }
+    let current_meta = std::fs::metadata(current)
+        .map_err(|e| format!("could not inspect {}: {e}", current.display()))?;
+    if next_meta.uid() != current_meta.uid() {
+        return Err(format!(
+            "existing {} is owned by uid {}, expected uid {}; refusing to rebrand",
+            next.display(),
+            next_meta.uid(),
+            current_meta.uid()
+        ));
+    }
+    if (next_meta.permissions().mode() & 0o111) == 0 {
+        return Err(format!(
+            "existing {} is not executable; refusing to rebrand",
+            next.display()
+        ));
+    }
+    Ok(true)
+}
+
+#[cfg(not(unix))]
+fn is_trusted_existing_command(_current: &Path, next: &Path) -> Result<bool, String> {
+    match std::fs::metadata(next) {
+        Ok(m) if m.is_file() => Ok(true),
+        Ok(_) => Err(format!(
+            "existing {} is not a regular file; refusing to rebrand",
+            next.display()
+        )),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(format!(
+            "could not inspect existing {}: {e}",
+            next.display()
+        )),
+    }
 }
 
 /// Copy this binary to `srectl` when that command is not there yet, and on
 /// Unix replace the old name with the wrapper.
 ///
-/// An existing `srectl` is left alone: it may already be a newer release.
+/// An existing `srectl` is verified for safety before handoff.
 /// Returns the path the caller should re-exec.
 pub fn apply_rebrand(current: &Path) -> Result<PathBuf, String> {
     let next = next_command_path(current);
-    if !next.exists() {
-        std::fs::copy(current, &next)
-            .map_err(|e| format!("could not copy this command to {}: {e}", next.display()))?;
-        set_executable(&next)?;
+    if !is_trusted_existing_command(current, &next)? {
+        let dir = next.parent().unwrap_or_else(|| Path::new("."));
+        let (staged_path, mut file) = crate::self_update::create_new_file(dir, ".srectl.new-")
+            .map_err(|e| format!("could not create staging file for {}: {e}", next.display()))?;
+        let staged = crate::self_update::Staged(staged_path);
+
+        let mut reader = std::fs::File::open(current)
+            .map_err(|e| format!("could not read {}: {e}", current.display()))?;
+        std::io::copy(&mut reader, &mut file)
+            .map_err(|e| format!("could not copy to staging file: {e}"))?;
+        set_executable(&staged.0)?;
+        file.sync_all()
+            .map_err(|e| format!("could not sync staging file: {e}"))?;
+        drop(file);
+
+        std::fs::rename(&staged.0, &next)
+            .map_err(|e| format!("could not install {}: {e}", next.display()))?;
     }
     #[cfg(unix)]
     write_wrapper(current, &next)?;
@@ -97,13 +184,21 @@ fn set_executable(_path: &Path) -> Result<(), String> {
 
 #[cfg(unix)]
 fn write_wrapper(legacy: &Path, next: &Path) -> Result<(), String> {
+    use std::io::Write;
     let dir = legacy.parent().unwrap_or_else(|| Path::new("."));
-    let staged = dir.join(".srelens-tui.rebrand");
-    std::fs::write(&staged, wrapper_script(next))
+    let script = wrapper_script(next)?;
+    let (staged_path, mut file) = crate::self_update::create_new_file(dir, ".srelens-tui.wrapper-")
+        .map_err(|e| format!("could not create staging file for wrapper: {e}"))?;
+    let staged = crate::self_update::Staged(staged_path);
+
+    file.write_all(script.as_bytes())
         .map_err(|e| format!("could not write the srelens-tui wrapper: {e}"))?;
-    set_executable(&staged)?;
-    std::fs::rename(&staged, legacy).map_err(|e| {
-        let _ = std::fs::remove_file(&staged);
+    set_executable(&staged.0)?;
+    file.sync_all()
+        .map_err(|e| format!("could not sync the srelens-tui wrapper: {e}"))?;
+    drop(file);
+
+    std::fs::rename(&staged.0, legacy).map_err(|e| {
         format!(
             "could not replace {} with the wrapper: {e}",
             legacy.display()
