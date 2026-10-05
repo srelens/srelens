@@ -543,7 +543,7 @@ at install at `contributions.dashboardCards[i].type`. It never counts by
 `statusColumns`.
 
 From **API 0.7**, `within` may be the whole value
-`${settings.<id>}` (for example `${settings.expiryWindow}`), naming a declared
+`"${settings.<id>}"` (for example `"${settings.expiryWindow}"`), naming a declared
 `select` setting with a default.
 Every option must be a positive duration under the same bounded grammar.
 The host uses the saved choice, or the default, for both the count and its
