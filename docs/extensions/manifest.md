@@ -1100,7 +1100,7 @@ The host adds these parameters after the binding's own, which may not set them:
 - **Failures.** A status outside 2xx is refused with the server's own reason quoted —
   a JSON body's `error`, as Prometheus explains a bad query, or the text Loki and Tempo
   send — cut to 300 characters and scrubbed of the URL, its host, any secret header's
-  value, and each path segment (as sent and decoded) and query value of 8 or more
+  value, and each path segment and query value (as sent and decoded) of 8 or more
   characters the binding's URL carries (a `url` setting may hold a token there; the query and time range the host adds
   are kept, so a reason that quotes the query still reads). A reason that holds a secret too short to replace (under 4 characters) is left
   out, and a 2xx answer's `status: "error"` text is scrubbed the same way. An answer

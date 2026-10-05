@@ -744,6 +744,22 @@ fn a_reason_echoing_a_part_of_the_url_has_it_scrubbed() {
 }
 
 #[test]
+fn a_query_value_echoed_as_sent_is_scrubbed_too() {
+    // `tok/ab+91f3` is sent form-encoded, and a server may echo it either way.
+    let url = Url::parse("https://loki.example.com/q?key=tok%2Fab%2B91f3c2a8&query=up").unwrap();
+    let reason = refusal_reason(
+        reqwest::StatusCode::FORBIDDEN,
+        Some("text/plain"),
+        b"key=tok%2Fab%2B91f3c2a8 is revoked; so is tok/ab+91f3c2a8",
+        &Scrub::new(&HeaderMap::new(), &url, &["query"]),
+    );
+    assert_eq!(
+        reason,
+        "The server answered HTTP 403 Forbidden: key=[url] is revoked; so is [url]"
+    );
+}
+
+#[test]
 fn a_path_segment_echoed_decoded_is_scrubbed_too() {
     // `ab+cd/ef=` written into a path is sent percent-encoded, and a server echoes
     // what it decoded.

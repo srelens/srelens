@@ -189,8 +189,8 @@ pub(super) fn refusal_reason(
 
 /// What a server's own words are scrubbed of before the host repeats them: every
 /// sensitive header value the request carried, whole and word by word; the URL and
-/// its host; and each of the URL's own path segments (as sent and decoded) and query
-/// values of [`MIN_URL_PART`] characters or more, which a binding or a person's `url`
+/// its host; and each of the URL's own path segments and query values (as sent and
+/// decoded) of [`MIN_URL_PART`] characters or more, which a binding or a person's `url`
 /// setting wrote and may hold a token. A server may echo any of it. Shorter parts,
 /// and the query parameters the host sets, are repeated as the server wrote them.
 #[derive(Debug, Clone, Default)]
@@ -237,10 +237,18 @@ impl Scrub {
                 let decoded = percent_encoding::percent_decode_str(segment).decode_utf8_lossy();
                 [segment.to_owned(), decoded.into_owned()]
             })
+            // A query value too, as sent and decoded, unless the host set it.
             .chain(
-                url.query_pairs()
-                    .filter(|(key, _)| !host_set.contains(&key.as_ref()))
-                    .map(|(_, value)| value.into_owned()),
+                url.query()
+                    .into_iter()
+                    .flat_map(|query| query.split('&'))
+                    .filter_map(|pair| {
+                        let (key, value) = url::form_urlencoded::parse(pair.as_bytes()).next()?;
+                        let sent = pair.split_once('=').map_or("", |(_, sent)| sent);
+                        (!host_set.contains(&key.as_ref()))
+                            .then(|| [sent.to_owned(), value.into_owned()])
+                    })
+                    .flatten(),
             )
             .filter(|part| part.chars().count() >= MIN_URL_PART)
             .collect();
