@@ -114,6 +114,11 @@ case_ a-deb-that-names-its-paths-with-dot-slash 0 "OK: the deb, rpm and AppImage
 case_ a-dot-slash-deb-copy-is-0644 1 "not -rwxr-xr-x" 644 755 125
 deb_style=tauri
 
+# A package its tool cannot read is the tool's report, not "does not ship".
+bundle "$work/unreadable-rpm" 755 755 125
+printf 'not an rpm' > "$work/unreadable-rpm/rpm/srelens-1.0.0-1.x86_64.rpm"
+expect an-rpm-rpm-cannot-read 1 "rpm cannot list" "$work/unreadable-rpm"
+
 rm "$work/all-three-ship-it/appimage/"*.AppImage
 expect no-appimage 1 "no appimage/*.AppImage under" "$work/all-three-ship-it"
 

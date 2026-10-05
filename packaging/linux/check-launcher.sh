@@ -41,19 +41,26 @@ listed() {
     esac
 }
 
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT
+
+# A listing is taken on its own, so a tool that fails (missing, or a package
+# it cannot read) stops the check with its own error, not "does not ship".
 deb="$(only 'deb/*.deb')"
-listed "$(dpkg-deb -c "$deb")" "$deb"
+listing="$(dpkg-deb -c "$deb" 2> "$work/err")" ||
+    fail "dpkg-deb cannot list $deb: $(cat "$work/err")"
+listed "$listing" "$deb"
 
 rpm="$(only 'rpm/*.rpm')"
-listed "$(rpm -qlpv "$rpm" 2> /dev/null)" "$rpm"
+listing="$(rpm -qlpv "$rpm" 2> "$work/err")" ||
+    fail "rpm cannot list $rpm: $(cat "$work/err")"
+listed "$listing" "$rpm"
 
 appimage="$(only 'appimage/*.AppImage')"
 case "$appimage" in
     /*) ;;
     *) appimage="$PWD/$appimage" ;;
 esac
-work="$(mktemp -d)"
-trap 'rm -rf "$work"' EXIT
 (cd "$work" && "$appimage" --appimage-extract > /dev/null)
 copy="$work/squashfs-root/$path"
 [ -f "$copy" ] || fail "$appimage does not ship /$path"
