@@ -1040,3 +1040,31 @@
 .extension-log-level[data-level="warn"] { color: var(--warn, var(--fl-color-warning)); }
 .extension-log-level[data-level="trace"],
 .extension-log-level[data-level="debug"] { color: var(--ink-muted, var(--fl-color-text-muted)); }
+
+
+/* Overview hierarchy: primary resource health and expiry figures, full-width
+   upcoming resources, then supporting issuer/request health. No card gutters. */
+.extension-overview { flex: 0 0 auto; display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); min-width: 0; container-type: inline-size; }
+.extension-overview > .extension-summary { order: 4; border-bottom: 1px solid var(--rule, var(--fl-color-border)); }
+.extension-overview > .extension-summary:first-child { order: 0; grid-column: span 2; }
+.extension-overview > .dashboard-card { order: 1; padding: 20px 24px; }
+.extension-overview > .dashboard-card[data-size="l"] { grid-column: 1 / -1; order: 3; }
+.extension-overview > .dashboard-card[data-size="m"] { grid-column: span 2; }
+.extension-overview .extension-summary-body { display: flex; gap: 24px; align-items: center; justify-content: center; padding-top: 12px; }
+.extension-overview .extension-summary ul, .extension-overview .extension-donut { margin: 0; }
+.extension-overview .extension-summary:not(:first-child) .extension-donut { width: 64px; height: 64px; flex-shrink: 0; }
+.extension-overview .extension-summary:not(:first-child) .extension-donut > span { width: 54px; height: 54px; font-size: 18px; }
+.extension-overview .dashboard-card-figure { font-size: 48px; margin-top: 16px; }
+.extension-overview-live { order: 2; grid-column: 1 / -1; padding: 6px 12px; border-bottom: 1px solid var(--rule, var(--fl-color-border)); }
+.extension-overview-list { order: 3; grid-column: 1 / -1; min-width: 0; border-bottom: 1px solid var(--rule, var(--fl-color-border)); }
+.extension-overview-list > header { justify-content: space-between; }
+.extension-overview-list h3 { font-size: 13px; font-weight: 600; }
+.extension-overview-list .extension-results { min-height: 160px; max-height: 340px; }
+@container (max-width: 48rem) {
+  .extension-overview .extension-summary-body { flex-wrap: wrap; gap: 12px; }
+}
+@media (max-width: 900px) {
+  .extension-overview { grid-template-columns: minmax(0,1fr); }
+  .extension-overview > .extension-summary:first-child, .extension-overview > .dashboard-card[data-size] { grid-column: 1; }
+  .extension-overview .extension-summary-body { flex-wrap: nowrap; }
+}
