@@ -596,7 +596,7 @@
 
 /* Dashboard cards (#540). Flush tiles divided by hairlines, like the capacity
    strip's `.stat`s: no gap, no radius, no lifted surface. Each wrapped row
-   shares its space, even when a full-width list follows a lone figure. */
+   shares its space, with lists taking more room beside the figures. */
 .dashboard-cards-band { container-type: inline-size; }
 .dashboard-cards-toolbar {
   display: flex;
@@ -614,7 +614,7 @@
 }
 .dashboard-cards > .dashboard-card { flex: 1 1 14rem; }
 .dashboard-cards > .dashboard-card[data-size="m"] { flex: 2 1 28rem; }
-.dashboard-cards > .dashboard-card[data-size="l"] { flex-basis: 100%; }
+.dashboard-cards > .dashboard-card[data-size="l"] { flex: 4 1 28rem; }
 .dashboard-card {
   display: flex;
   flex-direction: column;
