@@ -57,7 +57,7 @@ fn adopt() -> Result<PathBuf, String> {
     let pid = std::process::id();
     let unit = unit_name(pid);
     let now = own_cgroup()?;
-    let scope = match scope_of_leaf(&now, &unit) {
+    let scope = match scope_of(&now, &unit) {
         Some(scope) => scope.to_owned(),
         None => {
             start_scope(&unit, pid)?;
@@ -87,6 +87,8 @@ fn start_scope(unit: &str, pid: u32) -> Result<(), String> {
         ("PIDs", Value::from(vec![pid])),
         ("Delegate", Value::from(true)),
         ("Description", Value::from("srelens executable apps")),
+        // A scope that failed is unloaded too, so the next start can ask again.
+        ("CollectMode", Value::from("inactive-or-failed")),
     ];
     let auxiliary: Vec<(&str, Vec<(&str, Value)>)> = Vec::new();
     connection
@@ -159,10 +161,13 @@ fn in_nested_pid_namespace(status: &str) -> bool {
         .is_some_and(|ids| ids.split_whitespace().count() > 1)
 }
 
-/// The scope's path when `path` is already its leaf: an earlier start made it,
-/// or failed after the move.
-fn scope_of_leaf<'a>(path: &'a str, unit: &str) -> Option<&'a str> {
-    let scope = path.strip_suffix(LEAF)?.strip_suffix('/')?;
+/// The scope's path when `path` is already in it, at its root or in its leaf:
+/// an earlier start made it, or failed after systemd moved srelens there.
+fn scope_of<'a>(path: &'a str, unit: &str) -> Option<&'a str> {
+    let scope = path
+        .strip_suffix(LEAF)
+        .and_then(|p| p.strip_suffix('/'))
+        .unwrap_or(path);
     scope
         .rsplit('/')
         .next()
@@ -274,19 +279,22 @@ mod tests {
         let unit = unit_name(7);
         let base = "/user.slice/user-1000.slice/user@1000.service/app.slice";
         assert_eq!(
-            scope_of_leaf(&format!("{base}/app-srelens-7.scope/host"), &unit),
+            scope_of(&format!("{base}/app-srelens-7.scope/host"), &unit),
+            Some(format!("{base}/app-srelens-7.scope").as_str())
+        );
+        // In the scope but not yet its leaf: systemd moved it, and a step after
+        // that refused (no cpu controller) or timed out. A retry carries on from
+        // here; asking for the scope again would be refused as UnitExists.
+        assert_eq!(
+            scope_of(&format!("{base}/app-srelens-7.scope"), &unit),
             Some(format!("{base}/app-srelens-7.scope").as_str())
         );
         assert_eq!(
-            scope_of_leaf(&format!("{base}/app-srelens-7.scope"), &unit),
+            scope_of(&format!("{base}/app-srelens-8.scope/host"), &unit),
             None
         );
         assert_eq!(
-            scope_of_leaf(&format!("{base}/app-srelens-8.scope/host"), &unit),
-            None
-        );
-        assert_eq!(
-            scope_of_leaf(&format!("{base}/app-gnome-srelens-7.scope/host"), &unit),
+            scope_of(&format!("{base}/app-gnome-srelens-7.scope/host"), &unit),
             None
         );
     }
@@ -409,7 +417,7 @@ mod tests {
         assert!(root.ends_with(&unit), "{}", root.display());
         let now = own_cgroup().expect("in the unified hierarchy");
         assert_eq!(
-            scope_of_leaf(&now, &unit),
+            scope_of(&now, &unit),
             root.to_str().unwrap().strip_prefix("/sys/fs/cgroup"),
             "{now}"
         );
