@@ -1035,6 +1035,12 @@
 .extension-log-level[data-level="trace"],
 .extension-log-level[data-level="debug"] { color: var(--ink-muted, var(--fl-color-text-muted)); }
 
+/* Metric and trace providers (#569): the kit's section, flush, its range and Refresh a
+   toolbar under the title, then a panel per provider that says which app asked for it. */
+.extension-providers-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 0 12px 6px; }
+.extension-provider { padding-block: 6px; border-top: 1px solid var(--rule, var(--fl-color-border)); }
+.extension-provider-title { margin: 0; padding: 0 12px 4px; font-size: inherit; font-weight: var(--weight-semibold); }
+.extension-provider-origin { margin: 0; padding: 4px 12px 0; font-size: 0.75rem; color: var(--ink-muted, var(--fl-color-text-muted)); }
 
 /* Overview hierarchy: primary resource health and expiry figures, full-width
    upcoming resources, then supporting issuer/request health. No card gutters. */

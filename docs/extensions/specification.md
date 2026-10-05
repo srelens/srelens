@@ -142,7 +142,9 @@ pre-releases `0.15.1-186` and `0.15.1-187`, with `network.http`, #568, the last 
 added to it), so what [#728](https://github.com/srelens/srelens/issues/728) added to
 resource links, and the logs, exec and port-forwards of
 [#567](https://github.com/srelens/srelens/issues/567), are [API 0.5](#050), not additions
-to 0.4 in place.
+to 0.4 in place. Builds implementing API 0.6 were published in turn (the pre-releases
+`0.15.1-192` and later), so the metric, log and trace providers of
+[#569](https://github.com/srelens/srelens/issues/569) are [API 0.7](#070).
 
 The host enforces this. `API_FIELDS` in `crates/plugin-host/src/manifest.rs` lists every
 field whose availability differs across supported API lines, and every *form* of value
@@ -320,6 +322,26 @@ choice. The reference changes only the duration, not the reader, path or target.
 A manifest using this form must admit only API 0.7 or later; literal durations
 retain their existing meaning on older lines. The schema for this line is
 `schemas/extension-manifest.v0.7.json`; the 0.6 schema remains frozen.
+
+Also new in this line ([#569](https://github.com/srelens/srelens/issues/569)):
+
+- **Providers.** `contributions.metricProviders`, `logProviders` and `traceProviders`
+  declare a PromQL, LogQL or TraceQL template that one of the app's `network.http`
+  bindings sends, for the workload and pod kinds in `forKinds`. The host binds
+  `${cluster}`, `${namespace}`, `${workload}` and `${pod}` — each only inside a
+  double-quoted string, with `\` and `"` escaped and the value held to a name's
+  characters, and in a regex matcher only as `${name:regex}`, which quotes RE2
+  metacharacters first — and a metric provider's `${range}` and `${step}`, and sets the
+  query and time range as the language's HTTP parameters, which the binding may not.
+  It reads a Prometheus range query into the timeseries chart (at most 8 series), a
+  Loki range query into log lines, and a Tempo search into a list of traces (at most
+  50). Each list is gated in `API_FIELDS`, so a `^0.6` manifest that declares a
+  provider is told it requires API 0.7. The new read-only capability
+  `extensions.queryProvider` runs one query; the `logProvider` stream source follows a
+  log provider, asking again every 5 seconds while its view is open. See
+  [Metric, log and trace providers](manifest.md#metric-log-and-trace-providers).
+- The reference providers are `examples/extensions/prometheus.json` and `loki.json`,
+  0.1.0 on `^0.7`. Publishing them is a separate signed release and catalog update.
 
 ### 0.6.0
 

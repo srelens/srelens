@@ -426,6 +426,28 @@ it("reviews network.http as the hosts it may reach and each request it sends (#5
   );
 });
 
+it("reviews each provider under the request it queries through, with its whole template (#569)", async () => {
+  const observed = metrics();
+  observed.srelensApiVersion = "^0.7";
+  observed.capabilities[0].arguments = { url: "${settings.prometheusUrl}", path: "/api/v1/query_range" } as never;
+  observed.contributions = {
+    pages: [], detailTabs: [], detailLinks: [],
+    metricProviders: [{ id: "cpu", title: "CPU", capability: "up", language: "promql", forKinds: ["apps/Deployment", "/Pod"],
+      unit: "cores", query: `sum(rate(x{namespace="\${namespace}",pod="\${pod}${RLO}"}[\${step}]))` }],
+    logProviders: [{ id: "loki", title: "Loki", capability: "up", language: "logql", forKinds: ["/Pod"], query: `{pod="\${pod}"}` }],
+  } as never;
+  const review = await reviewPasted(JSON.stringify(observed));
+  const up = within(review).getByRole("listitem", { name: "Binding up" });
+  const providers = within(up).getByRole("list", { name: "Providers that query through Targets up" });
+  const [cpu, loki] = within(providers).getAllByRole("listitem");
+  expect(cpu.textContent).toBe(
+    `Metric provider CPU, PromQL, for apps/Deployment, /Pod: sum(rate(x{namespace="\${namespace}",pod="\${pod}${escapes(0x202e)}"}[\${step}])). The host binds each \${…} for the view it is shown in, and sets query, start, end and step.`,
+  );
+  expect(loki.textContent).toBe(
+    `Log provider Loki, LogQL, for /Pod: {pod="\${pod}"}. The host binds each \${…} for the view it is shown in, and sets query, start, end, limit and direction; asked again every 5 s while a log view follows it.`,
+  );
+});
+
 it("draws a request's literal URL and headers as plain text", async () => {
   const literal = metrics();
   literal.permissions = [{ capability: "network.http", hosts: ["api.github.com"] }];

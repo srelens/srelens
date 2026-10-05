@@ -41,6 +41,9 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 # Brokered HTTP (#568) matches a URL's host against an app's allowlist. Already in the
 # workspace through reqwest and srelens-plugin-host.
 url = "2"
+# A server's refusal is scrubbed of a URL path segment as sent and as decoded (#569).
+# Already in the workspace through url, and srelens-mcp's own dependency.
+percent-encoding = "2"
 sha2 = "0.10"
 ring = "0.17"
 semver = "1"

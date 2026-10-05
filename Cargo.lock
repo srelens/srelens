@@ -7182,6 +7182,7 @@ dependencies = [
  "flate2",
  "libc",
  "log",
+ "percent-encoding",
  "proptest",
  "reqwest 0.13.4",
  "ring",

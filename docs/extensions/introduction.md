@@ -18,6 +18,9 @@ Tracking: [#163](https://github.com/srelens/srelens/issues/163). Architecture de
 - Follow the logs of, run a fixed command in, or forward a port to the pods of a
   workload it reads, or of a namespace a person granted
   ([Logs, exec and port-forwards](manifest.md#logs-exec-and-port-forwards)).
+- Chart Prometheus metrics and list Tempo traces on workload and pod overviews, and
+  offer Loki as a source of the log view, from query templates the host binds and
+  sends ([Metric, log and trace providers](manifest.md#metric-log-and-trace-providers)).
 - As an executable app (a preview, API 0.6), run a program it ships as a sandboxed sidecar
   that answers the operations it declares
   ([Executable apps](manifest.md#executable-apps)).

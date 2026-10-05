@@ -192,7 +192,7 @@ it("watches each reader of a dashboard page once, for the page, and re-reads its
     view: `${app}/${label}`,
     close,
     open: async (request, handlers) => {
-      opened.push({ capability: request.source.capability, onData: handlers.onData as never, onEnd: handlers.onEnd as never });
+      opened.push({ capability: "capability" in request.source ? request.source.capability : "", onData: handlers.onData as never, onEnd: handlers.onEnd as never });
       return { stream: `s-${opened.length}`, cancel: vi.fn(async () => {}) };
     },
   }));

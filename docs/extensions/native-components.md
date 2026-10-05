@@ -90,8 +90,9 @@ and table key/row consistency are additionally enforced by the runtime validator
 The chart primitive for metric data (#570). An app never ships chart code: it
 supplies samples, and the host draws them with its own theme, layout and
 accessibility. The shape is the one a metric provider (#569) fills from a range
-query; until providers exist, a host projection supplies it the same way the
-other components are supplied.
+query: the host reads a Prometheus `query_range` answer into it, one series per
+result on the query's own time grid, and draws it on a workload's or a pod's
+overview ([manifest.md](manifest.md#metric-log-and-trace-providers)).
 
 ```json
 {
