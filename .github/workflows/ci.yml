@@ -590,7 +590,11 @@ jobs:
     permissions:
       contents: read
     steps:
+      # It only runs the repository's scripts, so the token need not stay in
+      # .git/config while they run.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Install rpm
         run: |
           sudo rm -f /etc/apt/sources.list.d/google-chrome.* \
