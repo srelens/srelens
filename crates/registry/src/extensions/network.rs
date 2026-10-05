@@ -154,15 +154,14 @@ const MAX_REASON: usize = 300;
 /// What a server answered with a status outside 2xx, in the host's words, with
 /// the server's own reason after them when it gave one: a JSON body's `error`, as
 /// Prometheus writes a bad query's, or the text Loki and Tempo send. Cut, with
-/// invisible characters shown, and scrubbed ([`Scrub`]) of every sensitive header
-/// value and of the URL and its host, since a server may echo what it was sent; a
-/// reason that holds a secret too short to replace is left out.
+/// invisible characters shown, and scrubbed ([`Scrub`]) of what the request
+/// carried, since a server may echo what it was sent; a reason that holds a secret
+/// too short to replace is left out.
 pub(super) fn refusal_reason(
     status: reqwest::StatusCode,
     content_type: Option<&str>,
     raw: &[u8],
-    headers: &HeaderMap,
-    url: &Url,
+    scrub: &Scrub,
 ) -> String {
     let lead = format!("The server answered HTTP {status}");
     let json = content_type
@@ -177,7 +176,7 @@ pub(super) fn refusal_reason(
         String::from_utf8_lossy(raw).into_owned()
     };
     let said = said.split_whitespace().collect::<Vec<_>>().join(" ");
-    let Some(said) = Scrub::new(headers, url).text(&said) else {
+    let Some(said) = scrub.text(&said) else {
         return lead;
     };
     let said: String = said.chars().take(MAX_REASON).collect();
@@ -189,20 +188,29 @@ pub(super) fn refusal_reason(
 }
 
 /// What a server's own words are scrubbed of before the host repeats them: every
-/// sensitive header value the request carried, whole and word by word, and the URL
-/// and its host, since a server may echo what it was sent.
+/// sensitive header value the request carried, whole and word by word; the URL and
+/// its host; and each of the URL's own path segments and query values, which a
+/// binding or a person's `url` setting wrote and may hold a token. A server may
+/// echo any of it.
 #[derive(Debug, Clone, Default)]
 pub(super) struct Scrub {
     secrets: Vec<String>,
     spellings: Vec<String>,
+    parts: Vec<String>,
 }
 
 /// The shortest secret part replaced in a server's words. A shorter one cannot be
 /// replaced without garbling them, so words that hold it are not repeated at all.
 const MIN_SCRUBBED: usize = 4;
+/// The shortest URL path segment or query value replaced. Shorter ones are words
+/// such as `api`, `v1` or `logs`, and a token is longer than that.
+const MIN_URL_PART: usize = 8;
 
 impl Scrub {
-    pub(super) fn new(headers: &HeaderMap, url: &Url) -> Self {
+    /// For a request of `headers` to `url`, whose query parameters named in
+    /// `host_set` are the host's own (a provider's query and time range, #569): those
+    /// are not scrubbed, so a reason that quotes the query still reads.
+    pub(super) fn new(headers: &HeaderMap, url: &Url, host_set: &[&str]) -> Self {
         let mut secrets: Vec<String> = headers
             .values()
             .filter(|value| value.is_sensitive())
@@ -219,7 +227,24 @@ impl Scrub {
             .filter(|spelling| !spelling.is_empty())
             .map(str::to_owned)
             .collect();
-        Self { secrets, spellings }
+        let mut parts: Vec<String> = url
+            .path_segments()
+            .into_iter()
+            .flatten()
+            .map(str::to_owned)
+            .chain(
+                url.query_pairs()
+                    .filter(|(key, _)| !host_set.contains(&key.as_ref()))
+                    .map(|(_, value)| value.into_owned()),
+            )
+            .filter(|part| part.chars().count() >= MIN_URL_PART)
+            .collect();
+        parts.sort_by_key(|part| std::cmp::Reverse(part.len()));
+        Self {
+            secrets,
+            spellings,
+            parts,
+        }
     }
 
     /// `said` scrubbed, or `None` when it holds a secret part too short to replace.
@@ -234,6 +259,9 @@ impl Scrub {
         }
         for spelling in &self.spellings {
             said = said.replace(spelling.as_str(), "the server");
+        }
+        for part in &self.parts {
+            said = said.replace(part.as_str(), "[url]");
         }
         Some(said)
     }
@@ -622,10 +650,11 @@ pub(super) async fn request(
         headers.insert(name, value);
     }
     let carries_secret = !input.secret_headers.is_empty();
-    // For a caller that repeats what the server answered with a 2xx, such as a
-    // query backend's `status: "error"`, as a refusal here is.
-    let scrub = Scrub::new(&headers, &url);
-    let out = exchange(url, headers, carries_secret, policy).await?;
+    // Also for a caller that repeats what the server answered with a 2xx, such as
+    // a query backend's `status: "error"`.
+    let host_set: Vec<&str> = extra.iter().map(|(key, _)| *key).collect();
+    let scrub = Scrub::new(&headers, &url, &host_set);
+    let out = exchange(url, headers, carries_secret, policy, scrub.clone()).await?;
     Ok((out, scrub))
 }
 
@@ -640,7 +669,8 @@ pub(super) async fn send(
     carries_secret: bool,
     policy: Policy,
 ) -> Result<HttpOut, String> {
-    exchange(url, headers, carries_secret, policy)
+    let scrub = Scrub::new(&headers, &url, &[]);
+    exchange(url, headers, carries_secret, policy, scrub)
         .await
         .map_err(|error| error.message().to_owned())
 }
@@ -651,6 +681,7 @@ async fn exchange(
     headers: HeaderMap,
     carries_secret: bool,
     policy: Policy,
+    scrub: Scrub,
 ) -> Result<HttpOut, RequestError> {
     use RequestError::{Refused, Unanswered};
     policy.check(&url).map_err(|why| Refused(why.into()))?;
@@ -676,8 +707,6 @@ async fn exchange(
     }
     let client = builder.build().map_err(|e| Refused(describe(e, &url)))?;
     let reported = url.clone();
-    // What was sent, so a refusal that echoes a secret header has it scrubbed.
-    let sent = headers.clone();
     let exchange = async move {
         let mut response = client
             .get(url)
@@ -701,7 +730,7 @@ async fn exchange(
                 }
             }
             raw.truncate(MAX_REASON_BODY);
-            let why = refusal_reason(status, content_type.as_deref(), &raw, &sent, &reported);
+            let why = refusal_reason(status, content_type.as_deref(), &raw, &scrub);
             return Err(
                 if status.is_server_error()
                     || status == reqwest::StatusCode::TOO_MANY_REQUESTS

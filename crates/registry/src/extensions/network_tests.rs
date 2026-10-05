@@ -702,8 +702,7 @@ fn a_reason_holding_a_secret_too_short_to_replace_is_left_out() {
         reqwest::StatusCode::UNAUTHORIZED,
         Some("text/plain"),
         b"token k9z is not valid",
-        &headers,
-        &url,
+        &Scrub::new(&headers, &url, &[]),
     );
     assert_eq!(echoed, "The server answered HTTP 401 Unauthorized");
     // A reason that does not hold it is still quoted.
@@ -711,12 +710,36 @@ fn a_reason_holding_a_secret_too_short_to_replace_is_left_out() {
         reqwest::StatusCode::UNAUTHORIZED,
         Some("text/plain"),
         b"no org id",
-        &headers,
-        &url,
+        &Scrub::new(&headers, &url, &[]),
     );
     assert_eq!(
         other,
         "The server answered HTTP 401 Unauthorized: no org id"
+    );
+}
+
+#[test]
+fn a_reason_echoing_a_part_of_the_url_has_it_scrubbed() {
+    // A person's `url` setting may carry a token in its query or its path.
+    let url = Url::parse(
+        "https://hooks.example.com/api/v1/k2Jf8sQ0pLmZ/query_range?key=tok-91f3c2a8&query=up%7Bjob%3D%22node%22%7D",
+    )
+    .unwrap();
+    let scrub = Scrub::new(&HeaderMap::new(), &url, &["query"]);
+    let reason = refusal_reason(
+        reqwest::StatusCode::FORBIDDEN,
+        Some("text/plain"),
+        b"key tok-91f3c2a8 is revoked for project k2Jf8sQ0pLmZ; query up{job=\"node\"} denied",
+        &scrub,
+    );
+    assert!(!reason.contains("tok-91f3c2a8"), "{reason}");
+    assert!(!reason.contains("k2Jf8sQ0pLmZ"), "{reason}");
+    // What the host set is the host's own query, quoted as the server says it.
+    assert!(reason.contains("query up{job=\"node\"} denied"), "{reason}");
+    // Short path words are left alone.
+    assert!(
+        reason.starts_with("The server answered HTTP 403 Forbidden: key [url] is revoked"),
+        "{reason}"
     );
 }
 
@@ -735,8 +758,7 @@ fn a_refusals_quoted_reason_carries_no_secret_and_no_url() {
         reqwest::StatusCode::BAD_REQUEST,
         Some("application/json"),
         body.as_bytes(),
-        &headers,
-        &url,
+        &Scrub::new(&headers, &url, &[]),
     );
     let leaked = reason.contains(&secret);
     assert!(!leaked, "the reason holds the secret");
@@ -750,8 +772,7 @@ fn a_refusals_quoted_reason_carries_no_secret_and_no_url() {
         reqwest::StatusCode::BAD_REQUEST,
         Some("text/plain"),
         &[b'x'; 5000],
-        &HeaderMap::new(),
-        &url,
+        &Scrub::new(&HeaderMap::new(), &url, &[]),
     );
     assert!(text.chars().count() < 400, "{text}");
     assert_eq!(
@@ -759,8 +780,7 @@ fn a_refusals_quoted_reason_carries_no_secret_and_no_url() {
             reqwest::StatusCode::NOT_FOUND,
             None,
             b"",
-            &HeaderMap::new(),
-            &url
+            &Scrub::new(&HeaderMap::new(), &url, &[])
         ),
         "The server answered HTTP 404 Not Found"
     );
