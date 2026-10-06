@@ -389,7 +389,7 @@ fn config_for(
             env: Vec::new(),
             data_dir,
         },
-        limits: runtime_limits(&manifest.id),
+        limits: Limits::default(),
         policy: Policy::default(),
     };
     let binary = InstalledBinary {
@@ -399,17 +399,6 @@ fn config_for(
         path: binary.to_owned(),
     };
     Ok((config, binary))
-}
-
-/// Host policy for the verified production Trivy app. Its current DB alone is
-/// 1.38 GiB. This approved exception changes only disk space, never the sandbox,
-/// memory or CPU ceilings; similarly named apps keep the ordinary defaults.
-fn runtime_limits(id: &str) -> Limits {
-    let mut limits = Limits::default();
-    if id == "org.srelens.trivy" {
-        limits.data_bytes = 2 << 30;
-    }
-    limits
 }
 
 /// A sidecar that runs as a task in the test's runtime, behind the public `Launcher`
@@ -589,18 +578,30 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn only_trivy_gets_the_approved_two_gib_data_budget() {
-        let trivy = runtime_limits("org.srelens.trivy");
-        assert_eq!(trivy.data_bytes, 2 << 30);
-        assert_eq!(trivy.memory_bytes, Limits::default().memory_bytes);
-        assert_eq!(trivy.cpus, Limits::default().cpus);
-        for id in [
-            "org.srelens.cert-manager",
-            "org.srelens.trivy-preview",
-            "com.example.trivy",
-        ] {
-            assert_eq!(runtime_limits(id), Limits::default());
-        }
+    fn cluster_scanning_keeps_trivy_on_the_default_local_data_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("extensions.json");
+        install_scanner(&path);
+        let mut app = scanner(&path);
+        let packages = path.with_extension("packages");
+        let old = packages
+            .join(&app.manifest.id)
+            .join(app.package.as_ref().unwrap());
+        let mut list: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(old.join("digests.json")).unwrap()).unwrap();
+        list["id"] = json!("org.srelens.trivy");
+        let bytes = serde_json::to_vec(&list).unwrap();
+        use sha2::Digest;
+        let digest = format!("{:x}", sha2::Sha256::digest(&bytes));
+        let target = packages.join("org.srelens.trivy").join(&digest);
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::rename(old, &target).unwrap();
+        std::fs::write(target.join("digests.json"), bytes).unwrap();
+        app.manifest.id = "org.srelens.trivy".into();
+        app.package = Some(digest);
+        let (config, _) =
+            config_for(Some(&packages), Some(&path.with_extension("data")), &app).unwrap();
+        assert_eq!(config.limits, Limits::default());
     }
 
     #[test]
