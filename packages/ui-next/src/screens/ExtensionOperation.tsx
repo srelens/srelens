@@ -41,7 +41,9 @@ function OperationResult({ value, operations, current, onOpen }: { value: unknow
     {lists.length > 0 && <div className="border-b px-3 py-2" style={{ borderColor: "var(--rule)" }}><TextInput aria-label="Filter results" placeholder="Filter results…" value={filter} onValueChange={setFilter} /></div>}
     {lists.map(([key, values]) => {
       const rows = (values as unknown[]).map((value, index) => ({ index, data: object(value) ? value : { value } })).filter(({ data }) => JSON.stringify(data).toLowerCase().includes(filter.toLowerCase()));
-      const columns = [...new Set(rows.flatMap(({ data }) => Object.keys(data)))];
+      const columns = [...new Set(rows.flatMap(({ data }) => Object.keys(data)))].filter((key) =>
+        !metadata.some(([field, shared]) => field === key && scalar(shared) &&
+          (values as unknown[]).every((value) => object(value) && value[key] === shared)));
       const actions = (data: Record<string, unknown>) => operations.filter((op) => op.name !== current && !op.view?.stream && (op.inputs ?? []).some((input) => input.required && input.name !== "clusterId") && (op.inputs ?? []).every((input) => !input.required || input.name === "clusterId" || scalar(data[input.name])));
       return <section key={key} className="min-w-0">
         <h2 className="border-b px-3 py-2 text-[0.8125rem] font-medium" style={{ borderColor: "var(--rule)" }}>{label(key)} <span className="text-muted">{rows.length}{filter && ` of ${(values as unknown[]).length}`}</span></h2>

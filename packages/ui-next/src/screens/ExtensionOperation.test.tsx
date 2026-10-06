@@ -109,3 +109,32 @@ it("keeps report navigation in the first column and lets scope prose wrap", asyn
  expect(screen.getAllByRole("columnheader")[0].textContent).toBe("Details");
  expect(screen.getByText((host.answer as { scope: string }).scope).className).toContain("whitespace-normal");
 });
+
+it("shows shared cluster identity once above the table so container data stays visible", async () => {
+ const clusterId = "srelens-context:config#demo";
+ host.answer = { clusterId, items: [
+  { clusterId, container: "coredns", image: "registry.k8s.io/coredns/coredns:v1.14.6" },
+  { clusterId, container: "kube-proxy", image: "registry.k8s.io/kube-proxy:v1.37.0" },
+ ] };
+ open();
+ fireEvent.change(await screen.findByLabelText("Image"), { target: { value: "alpine:3.9" } });
+ fireEvent.click(screen.getByRole("button", { name: "Scan image" }));
+ expect(await screen.findByText("coredns")).toBeTruthy();
+ expect(screen.queryByRole("columnheader", { name: /Cluster Id/ })).toBeNull();
+ expect(screen.getAllByText(clusterId)).toHaveLength(1);
+ expect(screen.getByText("kube-proxy")).toBeTruthy();
+});
+
+it("keeps a row identity visible when it differs from the result metadata", async () => {
+ host.answer = { clusterId: "cluster-a", items: [
+  { clusterId: "cluster-a", container: "web" },
+  { clusterId: "cluster-b", container: "api" },
+ ] };
+ open();
+ fireEvent.change(await screen.findByLabelText("Image"), { target: { value: "alpine:3.9" } });
+ fireEvent.click(screen.getByRole("button", { name: "Scan image" }));
+ expect(await screen.findByText("api")).toBeTruthy();
+ expect(screen.getByRole("columnheader", { name: /Cluster Id/ })).toBeTruthy();
+ fireEvent.change(screen.getByRole("textbox", { name: "Filter results" }), { target: { value: "web" } });
+ expect(screen.getByRole("columnheader", { name: /Cluster Id/ })).toBeTruthy();
+});
