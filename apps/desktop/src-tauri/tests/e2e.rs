@@ -3679,6 +3679,9 @@ async fn extensions_and_gitops(h: &mut Harness, ctx: &str, settings: &TempSettin
     assert!(item_names(&out).contains(&KUSTOMIZATION), "{out}");
     let available = h.ok("extensions.bindingAvailability", json!({"id":"org.example.flux","revision":revision(&flux_app),"context":ctx,"namespace":NS,"bindings":["kustomizations"]})).await;
     assert_eq!(available["bindings"][0]["state"], "served", "{available}");
+    // A reader app cannot acquire container execution through the Job facade.
+    // Constrained Job lifecycle and cancellation are exercised by registry tests.
+    h.err("extensions.runJob", json!({"id":"org.example.flux","revision":revision(&flux_app),"context":ctx,"namespace":NS,"capability":"undeclared-job","inputs":{}})).await;
     h.err("extensions.callOperation", json!({"id":"org.example.flux","revision":revision(&flux_app),"context":ctx,"operation":"undeclared","params":{}})).await;
     let columns = h
         .ok(

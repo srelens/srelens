@@ -240,7 +240,7 @@ On every call, in this order:
    `-32003` ("permissions: k8s.annotate was not granted").
 3. **The cluster.** An app limited to some clusters is refused on any other ("App is not
    enabled for this cluster").
-4. **Confirmation.** A call the host gates, which is `host/action` today (`requires_confirm`
+4. **Confirmation.** A call the host gates, including `host/action` and `host/runJob` (`requires_confirm`
    or `destructive`, the same rule MCP's gate reads), is put to a person first, with the
    host's own sentence for it, its impact and the requesting app named. Before anyone is
    asked, the object is read through `extensions.resource`, which makes every check above
@@ -588,4 +588,35 @@ uninstalled; locking it down while the app is installed is left for the escape r
 
 ## Binding discovery in protocol 0.2.0
 
-The host and Go SDK negotiate `0.2.0` while continuing to offer `0.1.0` to older peers. `host/bindingAvailability` requires the new line. Its caller sends an explicit `context` (`clusterId`, optional `namespace`) and 1–16 unique declared `bindings`. The host checks the installed app session, grants and context scope before discovery. Each result is `served`, `absent` or `unknown`; discovery errors retain a bounded reason. Unknown never means the Operator is absent. This callback does not fetch report details or install CRDs.
+The host and Go SDK negotiate `0.2.0` while continuing to offer `0.1.0` to older peers. `host/bindingAvailability` requires the new line. Its caller sends an explicit `context` (`clusterId`, required but nullable `namespace`) and 1–16 unique declared `bindings`. The host checks the installed app session, grants and context scope before discovery. Each result is `served`, `absent` or `unknown`; discovery errors retain a bounded reason. Unknown never means the Operator is absent. This callback does not fetch report details or install CRDs.
+
+## Scoped Jobs in protocol 0.2.0
+
+`host/runJob` sends `context`, a declared Job `capability`, and `inputs`, a map
+of at most sixteen names to strings of 1–512 printable ASCII bytes. Context
+always names one namespace; null is refused. App identity and revision come
+from the supervisor, and the host rechecks the app's grants and scope before
+creating anything. The Job binding requires extension API 0.8 and an executable
+app. Older hosts that do not provide `k8s.runJob` refuse installation.
+
+```json
+{"context":{"clusterId":"pinned-cluster","namespace":"team"},
+ "capability":"scan-namespace","inputs":{"namespace":"team"}}
+```
+
+After confirmation, the host runs the fixed, digest-pinned container with
+declared namespace read rules. It grants no Secret, wildcard or write access.
+The worker uses UID 10001, a read-only root, no additional capabilities, one
+CPU, one GiB RAM and sixteen GiB ephemeral storage. A required readiness
+ConfigMap blocks startup until the Job-owned reader account and RBAC exist.
+Image workers without reader rules mount no service-account token.
+
+The Job has no retries, a twenty-minute deadline and a ten-minute cleanup TTL.
+Completion requires the original Job UID and its single successful worker.
+The host collects at most eight MiB into a new, private file in the app data
+root, then waits for foreground deletion. The reply contains `path`, `job`,
+`uid`, `namespace`, `image`, `bytes` and `finishedAt`; `path` is app-relative,
+and credentials or raw results never travel in that reply. The app removes
+the temporary file after normalization. Cancellation drops the runner and
+cleans up that UID; ordinary approved action writes retain their existing
+finish-after-cancellation behavior. One scan per app may run through cleanup.

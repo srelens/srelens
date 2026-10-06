@@ -100,6 +100,39 @@ func TestBindingAvailabilityNeedsNewProtocolAndPreservesPinnedContext(t *testing
 	}
 }
 
+func TestJobCallbackNamesItsNamespaceAndRejectsOldProtocol(t *testing.T) {
+	for _, version := range []string{"0.1.0", "0.2.0"} {
+		t.Run(version, func(t *testing.T) {
+			s := sidecar.New("t", "1")
+			sidecar.Operation(s, "scan", func(ctx context.Context, _ struct{}) (json.RawMessage, error) {
+				return sidecar.HostFrom(ctx).RunJob(ctx, prod(t), "scan-namespace", map[string]string{"namespace": "team"})
+			})
+			h := start(t, s)
+			h.answer(h.request("initialize", initializeParams([]string{version}, h.DataDir, defaultLimits())))
+			h.answer(h.request("activate", map[string]any{}))
+			id := h.request("scan", map[string]any{})
+			if version == "0.1.0" {
+				if h.answer(id)["error"] == nil {
+					t.Fatal("old protocol accepted Job callback")
+				}
+			} else {
+				call := h.call()
+				want := map[string]any{"context": map[string]any{"clusterId": "kind-dev", "namespace": "team"}, "capability": "scan-namespace", "inputs": map[string]any{"namespace": "team"}}
+				if call["method"] != "host/runJob" || !reflect.DeepEqual(call["params"], want) {
+					t.Fatalf("wrong Job call: %v", call)
+				}
+				h.reply(call["id"], map[string]any{"path": "job-result.json"}, nil)
+				if h.answer(id)["error"] != nil {
+					t.Fatal("Job response failed")
+				}
+			}
+			if err := h.finish(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 func TestTheHostsRefusalsBecomeErrorsByCode(t *testing.T) {
 	s := sidecar.New("t", "1")
 	var mu sync.Mutex

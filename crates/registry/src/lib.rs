@@ -726,6 +726,7 @@ enum BrokeredNetwork {
 /// the pod capabilities (#567), which run only as app streams.
 fn broker_only(cache: Arc<ClientCache>, network: BrokeredNetwork) -> Vec<Capability> {
     let mut capabilities = vec![extensions::crd::check_capability(cache)];
+    capabilities.push(extensions::jobs::capability());
     if network != BrokeredNetwork::Off {
         capabilities.push(extensions::network::capability());
     }

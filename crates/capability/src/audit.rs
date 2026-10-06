@@ -274,7 +274,9 @@ pub fn redact(args: &Value, sensitive: bool) -> Value {
     /// whole, since a denied call is audited before its arguments are checked
     /// against the schema. Matched exactly, like `PAYLOAD_FIELDS`, and no other
     /// capability takes a `settings` argument (`settings.set` takes `values`).
-    const KEYED_PAYLOAD_FIELDS: [&str; 1] = ["settings"];
+    // Job inputs are also app-defined: a name such as `credential` carries
+    // no reliable sensitivity hint, so their values never enter an audit.
+    const KEYED_PAYLOAD_FIELDS: [&str; 2] = ["settings", "inputs"];
     /// Fields that promise a URL, so a value that is not one is a value the
     /// parser cannot pick the password out of: blanked whole rather than
     /// guessed at. Matched exactly, like the two sets above.
@@ -1250,6 +1252,16 @@ mod tests {
             !line.contains("argo.example"),
             "a setting value leaked: {line}"
         );
+    }
+
+    #[test]
+    fn app_job_input_values_and_echoed_errors_are_redacted() {
+        let args = json!({"id":"org.example.app","context":"prod","namespace":"team","capability":"worker","inputs":{"credential":"private-value","image":"private/image:tag"}});
+        let redacted = redact(&args,false);
+        assert_eq!(redacted["namespace"],"team");
+        assert_eq!(redacted["inputs"]["credential"],REDACTED);
+        assert_eq!(redacted["inputs"]["image"],REDACTED);
+        assert!(!redact_error("worker rejected private-value for private/image:tag",&args,&redacted).contains("private-value"));
     }
 
     #[test]

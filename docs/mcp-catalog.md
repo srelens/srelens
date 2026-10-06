@@ -7,7 +7,7 @@ Everything this server exposes over MCP, generated from the live registry so it 
 
 ## Tools
 
-129 tools, grouped by area and then by how a call is gated. Argument schemas are not reproduced here — call `tools/list` for those, which cannot go stale.
+130 tools, grouped by area and then by how a call is gated. Argument schemas are not reproduced here — call `tools/list` for those, which cannot go stale.
 
 **Impact** is how much a successful call disturbs — `low`, `medium` or `high` — and is a different question from the section heading, which is how the call is gated. A capability that accepts several named operations carries the highest level any of them reaches; the per-operation level travels with the resource.
 
@@ -186,13 +186,14 @@ Everything this server exposes over MCP, generated from the live registry so it 
 | `ping` | low | health check; echoes the input back as { pong: <input> } |
 | `settings.get` | low | read durable desktop settings; omit key to return the complete map |
 
-### Server — needs confirmation (4)
+### Server — needs confirmation (5)
 
 | Tool | Impact | Summary |
 | --- | --- | --- |
 | `extension.secretStore` | medium | Set or clear a secret an app keeps in srelens's encrypted secrets vault; write-only, never returns a value; requires approval |
 | `extensions.action` | high | Run a declared action on an app resource; requires explicit confirmation |
 | `extensions.configure` | medium | Install, enable, remove or configure local extensions; requires approval |
+| `extensions.runJob` | medium | Run a scoped container Job for an installed app and collect its bounded result |
 | `settings.set` | medium | atomically write or remove durable desktop settings |
 
 ## App tools

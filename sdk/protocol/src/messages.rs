@@ -211,18 +211,87 @@ pub struct HostBindingAvailabilityParams {
     pub bindings: Vec<String>,
 }
 
+/// Run a declared, digest-pinned namespace Job after host confirmation (API 0.2).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields, remote = "Self")]
+#[cfg_attr(feature = "schema", schemars(rename = "HostRunJobParams"))]
+pub struct HostRunJobParams {
+    pub context: JobContext,
+    #[cfg_attr(feature = "schema", schemars(schema_with = "identifier"))]
+    pub capability: String,
+    #[serde(deserialize_with = "read_job_inputs")]
+    #[cfg_attr(feature = "schema", schemars(schema_with = "job_inputs"))]
+    pub inputs: std::collections::BTreeMap<String, String>,
+}
+
+/// Job execution always names one namespace; null never means a cluster scan.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields, remote = "Self")]
+#[cfg_attr(feature = "schema", schemars(rename = "JobContext"))]
+pub struct JobContext {
+    #[cfg_attr(feature = "schema", schemars(schema_with = "cluster_id"))]
+    pub cluster_id: String,
+    #[cfg_attr(feature = "schema", schemars(schema_with = "scoped_namespace"))]
+    pub namespace: String,
+}
+
+#[cfg(feature = "schema")]
+fn scoped_namespace(generator: &mut SchemaGenerator) -> Schema {
+    let mut value = serde_json::to_value(namespace(generator)).unwrap();
+    value["type"] = json!("string");
+    schema(value)
+}
+
+fn read_job_inputs<'de, D: Deserializer<'de>>(
+    d: D,
+) -> Result<std::collections::BTreeMap<String, String>, D::Error> {
+    let inputs = std::collections::BTreeMap::<String, String>::deserialize(d)?;
+    if inputs.len() > 16
+        || inputs.iter().any(|(name, value)| {
+            !crate::shape::is_identifier(name)
+                || value.is_empty()
+                || value.len() > 512
+                || !value.bytes().all(|b| (b' '..=b'~').contains(&b))
+        })
+    {
+        return Err(serde::de::Error::custom(
+            "Job inputs need at most sixteen declared names and 1–512 printable ASCII bytes each",
+        ));
+    }
+    Ok(inputs)
+}
+
+#[cfg(feature = "schema")]
+fn job_inputs(generator: &mut SchemaGenerator) -> Schema {
+    schema(
+        json!({"type":"object", "maxProperties":16, "propertyNames":identifier(generator),
+        "additionalProperties":{"type":"string","minLength":1,"maxLength":512,"pattern":"^[ -~]{1,512}$"}}),
+    )
+}
+
 fn read_binding_names<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
     let bindings = Vec::<String>::deserialize(d)?;
     let mut seen = std::collections::HashSet::new();
-    if bindings.is_empty() || bindings.len() > 16 || bindings.iter().any(|name| !crate::shape::is_identifier(name) || !seen.insert(name)) {
-        return Err(serde::de::Error::custom("Choose 1–16 unique declared binding names"));
+    if bindings.is_empty()
+        || bindings.len() > 16
+        || bindings
+            .iter()
+            .any(|name| !crate::shape::is_identifier(name) || !seen.insert(name))
+    {
+        return Err(serde::de::Error::custom(
+            "Choose 1–16 unique declared binding names",
+        ));
     }
     Ok(bindings)
 }
 
 #[cfg(feature = "schema")]
 fn binding_names(generator: &mut SchemaGenerator) -> Schema {
-    schema(json!({"type":"array", "minItems":1, "maxItems":16, "uniqueItems":true, "items": identifier(generator)}))
+    schema(
+        json!({"type":"array", "minItems":1, "maxItems":16, "uniqueItems":true, "items": identifier(generator)}),
+    )
 }
 
 /// `host/resource`'s params: inspect object `name` of a declared
@@ -355,7 +424,9 @@ object_only!(
     HostReadParams,
     HostResourceParams,
     HostActionParams,
-    HostBindingAvailabilityParams
+    HostBindingAvailabilityParams,
+    HostRunJobParams,
+    JobContext
 );
 
 /// A required field that may be null: absent is refused, null is `None`.

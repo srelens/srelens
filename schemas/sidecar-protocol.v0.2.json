@@ -354,7 +354,8 @@
                   "host/read",
                   "host/resource",
                   "host/action",
-                  "host/bindingAvailability"
+                  "host/bindingAvailability",
+                  "host/runJob"
                 ]
               },
               "pattern": "^[A-Za-z0-9-]{1,64}$",
@@ -462,6 +463,43 @@
       ],
       "type": "object"
     },
+    "HostRunJobParams": {
+      "additionalProperties": false,
+      "description": "Run a declared, digest-pinned namespace Job after host confirmation (API 0.2).",
+      "properties": {
+        "capability": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9-]{1,64}$",
+          "type": "string"
+        },
+        "context": {
+          "$ref": "#/definitions/JobContext"
+        },
+        "inputs": {
+          "additionalProperties": {
+            "maxLength": 512,
+            "minLength": 1,
+            "pattern": "^[ -~]{1,512}$",
+            "type": "string"
+          },
+          "maxProperties": 16,
+          "propertyNames": {
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9-]{1,64}$",
+            "type": "string"
+          },
+          "type": "object"
+        }
+      },
+      "required": [
+        "capability",
+        "context",
+        "inputs"
+      ],
+      "type": "object"
+    },
     "InitializeLimits": {
       "description": "The limits a sidecar runs under, so an SDK can hold itself to them.",
       "properties": {
@@ -560,6 +598,28 @@
       },
       "required": [
         "apiVersion"
+      ],
+      "type": "object"
+    },
+    "JobContext": {
+      "additionalProperties": false,
+      "description": "Job execution always names one namespace; null never means a cluster scan.",
+      "properties": {
+        "clusterId": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "pattern": "[^\t\n\u000b\f\r \u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]",
+          "type": "string"
+        },
+        "namespace": {
+          "maxLength": 63,
+          "pattern": "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "clusterId",
+        "namespace"
       ],
       "type": "object"
     },
@@ -800,6 +860,29 @@
           "type": "object"
         },
         {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/RequestId"
+            },
+            "jsonrpc": {
+              "const": "2.0"
+            },
+            "method": {
+              "const": "host/runJob"
+            },
+            "params": {
+              "$ref": "#/definitions/HostRunJobParams"
+            }
+          },
+          "required": [
+            "jsonrpc",
+            "id",
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
           "not": {
             "required": [
               "id"
@@ -826,7 +909,8 @@
                   "host/read",
                   "host/resource",
                   "host/action",
-                  "host/bindingAvailability"
+                  "host/bindingAvailability",
+                  "host/runJob"
                 ]
               },
               "type": "string"
@@ -1064,6 +1148,14 @@
       "kind": "request",
       "params": {
         "$ref": "#/definitions/HostResourceParams"
+      },
+      "result": true
+    },
+    "host/runJob": {
+      "direction": "sidecarToHost",
+      "kind": "request",
+      "params": {
+        "$ref": "#/definitions/HostRunJobParams"
       },
       "result": true
     },

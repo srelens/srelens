@@ -280,3 +280,12 @@ reports the request as accepted rather than as complete.
 ## Workload image inventory (API 0.8)
 
 A `k8s.listWorkloadImages` binding fixes `arguments.kind` to `Deployment`, `StatefulSet` or `DaemonSet` and accepts only explicit `context` and optional `namespace`. The reader returns workload UID/resourceVersion and each regular or init container's name, type and image reference. It omits environment variables, credentials and Secret references. Pagination is bounded; exceeding the inventory limit asks the caller to narrow its namespace rather than presenting a partial inventory as complete.
+
+An executable app may declare a `k8s.runJob` binding on API 0.8. Its arguments
+fix `image` (a SHA-256 digest), `command`, `args`, `inputNames` and optional
+`readRules`. Binding `inputs` stays empty: each `${inputs.name}` occupies a
+whole argument, and the scoped Job callback supplies its value. Reader rules
+name only allowed namespace resources with `get`, `list` or `watch`; Secrets,
+wildcards, token minting, exec and writes are refused. The binding is never
+exposed as a reader tool. See [scoped Jobs](sidecar-protocol.md#scoped-jobs-in-protocol-020)
+for confirmation, resource bounds, result files and cancellation.

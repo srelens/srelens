@@ -40,7 +40,7 @@ pub use schema::{schema, schema_file};
 
 pub use messages::{
     CallContext, CancelParams, ContextError, Empty, HostActionParams, HostReadParams,
-    HostResourceParams, HostBindingAvailabilityParams, InitializeLimits, InitializeParams, InitializeResult, Peer, RequestId,
+    HostResourceParams, HostBindingAvailabilityParams, HostRunJobParams, JobContext, InitializeLimits, InitializeParams, InitializeResult, Peer, RequestId,
     StreamCancelParams, StreamCloseParams, StreamDataParams, StreamErrorParams, StreamOpenParams,
     UnsupportedApiVersion,
 };
@@ -94,6 +94,7 @@ pub mod method {
     /// through `extensions.action`, once a person has confirmed it.
     pub const HOST_ACTION: &str = "host/action";
     pub const HOST_BINDING_AVAILABILITY: &str = "host/bindingAvailability";
+    pub const HOST_RUN_JOB: &str = "host/runJob";
 }
 
 /// Error codes. The first five are JSON-RPC 2.0's own.

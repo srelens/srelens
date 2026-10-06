@@ -58,6 +58,16 @@ func TestBoundedBindingNameArraysGenerateTypedStrings(t *testing.T) {
 	}
 }
 
+func TestBoundedJobInputsGenerateAStringMap(t *testing.T) {
+	code, err := generate(minimal(`"Job": {"type":"object","additionalProperties":false,"required":["inputs"],"properties":{"inputs":{"type":"object","maxProperties":16,"propertyNames":{"type":"string","minLength":1,"maxLength":64,"pattern":"^[A-Za-z0-9-]{1,64}$"},"additionalProperties":{"type":"string","minLength":1,"maxLength":512,"pattern":"^[ -~]{1,512}$"}}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(code, []byte("Inputs map[string]string")) {
+		t.Fatalf("no typed Job inputs: %s", code)
+	}
+}
+
 // A top-level key the committed schema does not have, such as a new
 // x-srelens-* table, would otherwise be ignored without a word.
 func TestARootKeyTheGeneratorDoesNotKnowIsRefusedNamingIt(t *testing.T) {

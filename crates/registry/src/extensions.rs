@@ -46,6 +46,7 @@ pub mod streams;
 pub mod tools;
 mod operations;
 mod availability;
+pub(crate) mod jobs;
 #[cfg(test)]
 mod tools_tests;
 mod trust;
@@ -914,6 +915,15 @@ fn validate_app(
                     format!("{at}.target"),
                     format!("This host does not provide {}", binding.target),
                 );
+            }
+            continue;
+        }
+        if binding.target == "k8s.runJob" {
+            if manifest.kind != srelens_plugin_host::ManifestKind::Executable || core.get(&binding.target).is_none() {
+                problems.push(Code::UnsupportedTarget,format!("{at}.target"),"Jobs require an executable app and a host that provides k8s.runJob");
+            }
+            if !binding.inputs.is_empty() || !binding.versions.is_empty() || !binding.json_path_overrides.is_empty() {
+                problems.push(Code::InvalidBinding,format!("{at}.inputs"),"Job bindings fix their template; caller values use declared inputNames");
             }
             continue;
         }
@@ -2140,6 +2150,10 @@ fn access_items(manifest: &Manifest, grants: &[String]) -> std::collections::BTr
             access.insert(item);
             continue;
         }
+        if binding.target == "k8s.runJob" {
+            access.insert(format!("Run a scoped container Job with {}", reads(binding)));
+            continue;
+        }
         access.insert(format!(
             "Read {} with {}{}",
             binding.target,
@@ -2360,6 +2374,7 @@ fn register_apps(
     let runtime = apps.clone();
     resource::register(reg, path.clone(), core.clone(), cache.clone());
     availability::register(reg, path.clone(), core.clone(), cache.clone());
+    jobs::register(reg, &apps, core.clone(), cache.clone());
     // One snapshot of each granted reader, shared by table columns, dashboard
     // cards and a card's target page, so the three agree and list it once.
     let snapshots = columns::JoinCache::default();
@@ -4265,6 +4280,7 @@ pub(crate) mod tests {
         serve_crds(&mut core, &["applications.argoproj.io/v1alpha1"]);
         // The broker's own, as `build_registry_and_app_streams` registers them (#568, #567).
         core.register(network::capability());
+        core.register(jobs::capability());
         for capability in pods::capabilities() {
             core.register(capability);
         }
@@ -4627,8 +4643,10 @@ pub(crate) mod tests {
         // it is secret material.
         let store = reg.get("extension.secretStore").unwrap().annotations;
         assert!(store.requires_confirm && store.sensitive && !store.read_only);
+        let job = reg.get("extensions.runJob").unwrap().annotations;
+        assert!(job.requires_confirm && !job.read_only && !job.sensitive);
         let mcp = srelens_mcp::McpServer::new(Arc::new(reg));
-        assert_eq!(mcp.list_tools().len(), 19);
+        assert_eq!(mcp.list_tools().len(), 20);
         assert!(mcp.list_tools().iter().any(|tool| tool.name == "extensions.bindingAvailability"));
         assert!(!mcp.list_tools().iter().any(|tool| tool.name == "extensions.callOperation"));
         use srelens_mcp::{stdio::handle_request, Transport};

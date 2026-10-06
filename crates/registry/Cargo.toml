@@ -9,6 +9,7 @@ srelens-capability = { path = "../capability" }
 srelens-kube = { path = "../kube" }
 # App streams (#565): the generic stream contract the extension broker drives.
 srelens-streams = { path = "../streams" }
+srelens-sidecar-protocol = { path = "../../sdk/protocol" }
 # `kind_resolver` returns `dyn srelens_mcp::resources::KindResolver`, so this is
 # real API surface, not test-only. `crates/mcp` also has `srelens-registry` as
 # a dev-dependency (for its own e2e prompt test), making this a dev-only cycle:
@@ -20,6 +21,7 @@ serde = { version = "1", features = ["derive"] }
 # The pod sources' cluster seam (#567), scripted by the tests. Already in the
 # workspace through srelens-kube and srelens-mcp.
 async-trait = "0.1"
+futures = "0.3"
 # float_roundtrip: the extension inventory is read, saved and read again; without it a
 # number in an app's settings or manifest moved a step on each save.
 serde_json = { version = "1", features = ["float_roundtrip"] }

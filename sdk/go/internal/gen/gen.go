@@ -34,7 +34,7 @@ var (
 	rootKeywords = set("$id", "$schema", "anyOf", "definitions", "description", "title",
 		"x-srelens-apiVersion", "x-srelens-errorCodes", "x-srelens-errorData", "x-srelens-maxMessageBytes", "x-srelens-methods")
 	definitionKeywords = set("type", "properties", "required", "additionalProperties", "description")
-	propertyKeywords   = set("type", "$ref", "anyOf", "items", "pattern", "minLength", "maxLength", "minimum", "minItems", "maxItems", "uniqueItems", "not", "description")
+	propertyKeywords   = set("type", "$ref", "anyOf", "items", "pattern", "minLength", "maxLength", "minimum", "minItems", "maxItems", "uniqueItems", "not", "description", "additionalProperties", "propertyNames", "maxProperties")
 	methodKeywords     = set("direction", "kind", "params", "result")
 )
 
@@ -462,6 +462,22 @@ func (g *generator) scalar(t string, p object, path string) (string, error) {
 			base = "*" + base
 		}
 		return "[]" + base, nil
+	case "object":
+		values, ok := p["additionalProperties"].(object)
+		if !ok || values["type"] != "string" {
+			return "", fmt.Errorf("%s: only string maps are supported", path)
+		}
+		if err := only(values, set("type", "minLength", "maxLength", "pattern"), path+".additionalProperties"); err != nil {
+			return "", err
+		}
+		names, ok := p["propertyNames"].(object)
+		if !ok || names["type"] != "string" {
+			return "", fmt.Errorf("%s: a string map needs bounded property names", path)
+		}
+		if err := only(names, set("type", "minLength", "maxLength", "pattern"), path+".propertyNames"); err != nil {
+			return "", err
+		}
+		return "map[string]string", nil
 	}
 	return "", fmt.Errorf("%s: type %q is not supported", path, t)
 }

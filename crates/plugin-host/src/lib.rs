@@ -520,7 +520,7 @@ impl PluginHost {
         // What the app's sidecar may ask the broker to run: its declared actions.
         let mut writes = Vec::new();
         for (index, binding) in manifest.capabilities.iter().enumerate() {
-            if is_pod_target(&binding.target) {
+            if is_pod_target(&binding.target) || binding.target == "k8s.runJob" {
                 continue;
             }
             if let Some(problem) = self.binding_problems(index, manifest, binding).first() {

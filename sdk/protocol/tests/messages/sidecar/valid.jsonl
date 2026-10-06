@@ -17,3 +17,6 @@
 {"jsonrpc":"2.0","method":"telemetry"}
 # Binding discovery uses an explicit caller context and declared names in protocol 0.2.0.
 {"jsonrpc":"2.0","id":"availability-1","method":"host/bindingAvailability","params":{"context":{"clusterId":"kind-dev","namespace":"team"},"bindings":["vulnerability-reports","sbom-reports"]}}
+
+# A scoped container Job uses only a declared binding and bounded scalar inputs.
+{"jsonrpc":"2.0","id":"scan-1","method":"host/runJob","params":{"context":{"clusterId":"kind-dev","namespace":"team"},"capability":"namespace-job","inputs":{"namespace":"team"}}}
