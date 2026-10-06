@@ -1,11 +1,11 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, expect, it, vi } from "vitest";
 const host = vi.hoisted(() => ({ calls: [] as any[], answer: {} as unknown, error: "", pending: undefined as Promise<unknown> | undefined }));
-const appState = vi.hoisted(() => ({ revision: 3, enabled: true, autoRun: false, stream: false }));
-const streamState = vi.hoisted(() => ({ handlers: undefined as any, request: undefined as any, closed: 0, cancelled: 0 }));
+const appState = vi.hoisted(() => ({ revision: 3, enabled: true, autoRun: false, stream: false, namespace: false }));
+const streamState = vi.hoisted(() => ({ handlers: undefined as any, request: undefined as any, closed: 0, cancelled: 0, pending: undefined as Promise<any> | undefined }));
 vi.mock("@srelens/core", async (original) => ({
   ...(await original<typeof import("@srelens/core")>()),
-  openExtensionView: () => ({ close: async () => { streamState.closed++; }, open: async (request: unknown, handlers: unknown) => { streamState.request = request; streamState.handlers = handlers; return { cancel: async () => { streamState.cancelled++; streamState.handlers.onEnd({ type: "close", reason: "cancelled" }); } }; } }),
+  openExtensionView: () => ({ close: async () => { streamState.closed++; }, open: async (request: unknown, handlers: unknown) => { streamState.request = request; streamState.handlers = handlers; if (streamState.pending) return await streamState.pending; return { cancel: async () => { streamState.cancelled++; streamState.handlers.onEnd({ type: "close", reason: "cancelled" }); } }; } }),
 }));
 vi.mock("@srelens/core/transport", async (original) => ({
   ...(await original<typeof import("@srelens/core/transport")>()),
@@ -16,6 +16,7 @@ vi.mock("@srelens/core/transport", async (original) => ({
     return host.pending ?? host.answer;
   },
 }));
+vi.mock("@srelens/core/react", () => ({ useNamespaceOptions: () => ({ namespaces: ["team", "default"], scope: null, error: "" }) }));
 vi.mock("../lib/clusters", () => ({
   useContexts: () => [{ name: "demo", stableId: "same-id", key: "config#demo", pinnedId: "srelens-context:config#demo" }],
   useContextsStatus: () => "loaded", useContextsError: () => "",
@@ -23,17 +24,21 @@ vi.mock("../lib/clusters", () => ({
 vi.mock("../extensions/inventoryStore", () => ({
   useExtensions: () => ({ status: "ready", data: { plugins: [{ ...appState,
     manifest: { id: "org.srelens.trivy", name: "Trivy", sidecar: { operations: [{ name: "scan", title: "Scan image", view: { autoRun: appState.autoRun, stream: appState.stream }, inputs: [
-      { name: "clusterId", type: "string", required: true }, { name: "image", title: "Image", type: "string", required: true, maxLength: 512 },
+      { name: "clusterId", type: "string", required: true }, ...(appState.namespace ? [{ name: "namespace", title: "Namespace", type: "string", required: true }] : []), { name: "image", title: "Image", type: "string", required: true, maxLength: 512 },
     ] }, { name: "findings", title: "Findings", view: { autoRun: true, hidden: true }, inputs: [{ name: "clusterId", type: "string", required: true }, { name: "reportId", type: "string", required: true }, { name: "cursor", type: "string" }] }] } },
   }] } }),
 }));
+if (!("ResizeObserver" in globalThis)) {
+ (globalThis as unknown as { ResizeObserver: unknown }).ResizeObserver = class { observe() {} unobserve() {} disconnect() {} };
+}
+HTMLElement.prototype.scrollIntoView ??= () => {};
 import { ExtensionOperation } from "./ExtensionOperation";
 import { screenFor } from "../lib/routes";
 const route = "/extension-operation-contexts/config%23demo/org.srelens.trivy/3/scan";
 const open = () => render(<ExtensionOperation route={route} ported={[]} onSwitchToClassic={() => {}} onLocked={() => {}} />);
 beforeEach(() => { host.calls = []; host.error = ""; host.pending = undefined; host.answer = { state: "completed", source: "app", findings: [
   { id: "CVE-2019-1549", severity: "HIGH", package: "libssl1.1", installedVersion: "1.1.1b-r1", fixedVersion: "1.1.1d-r0" },
-] }; appState.revision = 3; appState.enabled = true; appState.autoRun = false; appState.stream = false; streamState.closed = 0; streamState.cancelled = 0; });
+] }; appState.revision = 3; appState.enabled = true; appState.autoRun = false; appState.stream = false; appState.namespace = false; streamState.request = undefined; streamState.pending = undefined; streamState.closed = 0; streamState.cancelled = 0; });
 
 it("registers a native screen and renders the declared operation's real result", async () => {
   expect(screenFor(route)).toBe(ExtensionOperation);
@@ -177,4 +182,41 @@ it("keeps discovered API names visible beside their unknown or absent status", a
  expect(screen.getByRole("columnheader", { name: /Binding/ })).toBeTruthy();
  expect(binding.closest("details")).toBeNull();
  expect(screen.getByRole("table").textContent).toContain("Discovery permission denied");
+});
+
+
+it("offers a stream row action without starting a scan", async () => {
+ appState.stream = true;
+ host.answer = { items: [{ image: "alpine:3.10", reportId: "report-a" }] };
+ render(<ExtensionOperation route={"/extension-operation-contexts/config%23demo/org.srelens.trivy/3/findings/" + encodeURIComponent('{"reportId":"report-a"}')} ported={[]} onSwitchToClassic={() => {}} onLocked={() => {}} />);
+ expect(await screen.findByRole("button", { name: "Scan image" })).toBeTruthy();
+ expect(streamState.request).toBeUndefined();
+});
+
+it("shows prefilled scan inputs, requires one searchable namespace and waits for Run", async () => {
+ appState.stream = true; appState.namespace = true;
+ render(<ExtensionOperation route={route + "/" + encodeURIComponent('{"image":"alpine:3.10","namespace":"team"}')} ported={[]} onSwitchToClassic={() => {}} onLocked={() => {}} />);
+ expect((await screen.findByLabelText("Image") as HTMLInputElement).value).toBe("alpine:3.10");
+ const picker = screen.getByRole("combobox", { name: "Namespace" });
+ fireEvent.click(picker);
+ expect(screen.queryByText("All namespaces")).toBeNull();
+ expect(screen.getByPlaceholderText("Find a namespace…")).toBeTruthy();
+ expect(streamState.request).toBeUndefined();
+});
+
+it("can cancel while the host is still opening a scan stream", async () => {
+ appState.stream = true; streamState.pending = new Promise(() => {});
+ open();
+ fireEvent.change(await screen.findByLabelText("Image"), { target: { value: "alpine:3.10" } });
+ fireEvent.click(screen.getByRole("button", { name: "Scan image" }));
+ fireEvent.click(await screen.findByRole("button", { name: "Cancel" }));
+ expect((await screen.findByRole("alert")).textContent).toContain("cancelled");
+ expect(streamState.closed).toBe(1);
+});
+
+it("keeps partial report data visible with an actionable warning", async () => {
+ host.answer = { items: [{ reportId: "retained", image: "alpine:3.10" }], warnings: ["sbom-reports discovery failed: permission denied"] };
+ open();fireEvent.change(await screen.findByLabelText("Image"),{target:{value:"alpine:3.10"}});fireEvent.click(screen.getByRole("button",{name:"Scan image"}));
+ expect((await screen.findByRole("alert")).textContent).toContain("permission denied");
+ expect(screen.getByText("alpine:3.10")).toBeTruthy();
 });

@@ -35,13 +35,13 @@ function ResultDetails({ entries, title }: { entries: Array<[string, unknown]>; 
   return <details className="min-w-0 text-xs"><summary className="cursor-pointer py-1 text-muted">{title}</summary><dl className="space-y-2 py-2">{entries.map(([key, value]) => <div key={key}><dt className="text-xs text-muted">{label(key)}</dt><dd className="max-w-full overflow-auto whitespace-nowrap text-[0.8125rem]">{cell(value)}</dd></div>)}</dl></details>;
 }
 
-function NamespaceInput({ context, value, onChange }: { context: string; value: string; onChange: (value: string) => void }) {
+function NamespaceInput({ context, value, onChange, required }: { context: string; value: string; onChange: (value: string) => void; required?: boolean }) {
   const options = useNamespaceOptions(context, []);
   useEffect(() => { if (options.scope && !value) onChange(options.scope); }, [options.scope]);
   return <div className="min-w-0"><NamespaceErrorAlert error={options.error} />
     {options.namespaces === null ? <NamespaceChoice namespaces={null} value={value} onChange={onChange} />
       : <Combobox ariaLabel="Namespace" searchPlaceholder="Find a namespace…" value={value} onValueChange={onChange} options={[
-        ...(!options.scope ? [{ value: "", label: "All namespaces" }] : []), ...options.namespaces.map((value) => ({ value })),
+        ...(!options.scope && !required ? [{ value: "", label: "All namespaces" }] : []), ...options.namespaces.map((value) => ({ value })),
       ]} />}
   </div>;
 }
@@ -52,8 +52,10 @@ function OperationResult({ value, operations, current, onOpen }: { value: unknow
   const fields = object(value) ? Object.entries(value) : [["Result", value] as const];
   const metadata = fields.filter(([key, value]) => key !== "nextCursor" && !Array.isArray(value)).flatMap(([key, value]) => object(value) && key !== "summary" ? flatten(value) : [[key, value] as [string, unknown]]);
   const identity = metadata.filter(([key]) => technical(key) && key !== "scope");
-  const lists = fields.filter(([, value]) => Array.isArray(value));
+  const warnings = object(value) && Array.isArray(value.warnings) ? value.warnings.filter((warning): warning is string => typeof warning === "string") : [];
+  const lists = fields.filter(([key, value]) => key !== "warnings" && Array.isArray(value));
   return <div className="scroll min-h-0 min-w-0 flex-1">
+    {warnings.length > 0 && <div className="extension-message" role="alert">{warnings.map((warning, index) => <p key={index}>{plainText(warning)}</p>)}</div>}
     {metadata.length > 0 && <dl className="flex flex-wrap gap-x-6 gap-y-2 border-b px-3 py-2" style={{ borderColor: "var(--rule)" }}>
       {metadata.filter(([key]) => !technical(key) || key === "scope").map(([key, value]) => <div key={key} className="min-w-0 max-w-full"><dt className="text-xs text-muted">{label(key)}</dt><dd className={`text-[0.8125rem] ${prose(key) ? "whitespace-normal" : "overflow-auto whitespace-nowrap"}`}><ResultValue field={key} value={value} /></dd></div>)}
       {identity.length > 0 && <div className="min-w-0 basis-full"><ResultDetails entries={identity} title="Technical details" /></div>}
@@ -68,7 +70,7 @@ function OperationResult({ value, operations, current, onOpen }: { value: unknow
       const details = columns.filter((key) => technical(key) && key !== "clusterId");
       const secondary = (key: string): string | undefined => key === "name" && visible.includes("kind") ? "kind" : key === "container" && visible.includes("containerType") ? "containerType" : undefined;
       const combined = new Set(visible.map(secondary).filter(Boolean));
-      const actions = (data: Record<string, unknown>) => operations.filter((op) => op.name !== current && !op.view?.stream && (op.inputs ?? []).some((input) => input.required && input.name !== "clusterId") && (op.inputs ?? []).every((input) => !input.required || input.name === "clusterId" || scalar(data[input.name])));
+      const actions = (data: Record<string, unknown>) => operations.filter((op) => op.name !== current && (op.inputs ?? []).some((input) => input.required && input.name !== "clusterId") && (op.inputs ?? []).every((input) => !input.required || input.name === "clusterId" || scalar(data[input.name])));
       return <section key={key} className="min-w-0">
         <h2 className="border-b px-3 py-2 text-[0.8125rem] font-medium" style={{ borderColor: "var(--rule)" }}>{key === "items" ? `${rows.length} ${rows.length === 1 ? "result" : "results"}` : `${label(key)} (${rows.length})`}{filter && <span className="text-muted"> of {(values as unknown[]).length}</span>}</h2>
         <Table<(typeof rows)[number]> data={rows} getRowKey={(row) => String(row.index)} columns={[
@@ -93,7 +95,7 @@ function OperationForm({ id, revision, context, contextKey, operation, operation
   const completed = useRef(false);
   const generation = useRef(0);
   useEffect(() => () => { generation.current++; void view.current?.close(); }, []);
-  const inputs = (operation.inputs ?? []).filter((input) => input.name !== "clusterId" && initial[input.name] === undefined && input.name !== "cursor" && input.name !== "limit");
+  const inputs = (operation.inputs ?? []).filter((input) => input.name !== "clusterId" && (initial[input.name] === undefined || input.name === "image" || input.name === "namespace") && input.name !== "cursor" && input.name !== "limit");
   const run = async (page = "", replaceBusy = false) => {
     if (busy && !replaceBusy) return;
     const params: Record<string, unknown> = {};
@@ -116,10 +118,13 @@ function OperationForm({ id, revision, context, contextKey, operation, operation
     try {
       if (operation.view?.stream) {
         view.current ??= openExtensionView(id, operation.title);
-        stream.current = await view.current.open({ id, revision, context, namespace: String(params.namespace ?? ""), source: { kind: "operation", method: operation.name, params } }, {
+        stream.current = undefined;
+        const opened = await view.current.open({ id, revision, context, namespace: String(params.namespace ?? ""), source: { kind: "operation", method: operation.name, params } }, {
           onData: (value) => { if (mine === generation.current) { setResult(value); completed.current = object(value) && value.state === "completed"; } },
           onEnd: (end) => { if (mine === generation.current) { setBusy(false); if (end.type === "error" || end.reason !== "completed") setError(describeStreamEnd(end)); else if (!completed.current) setError("The operation ended before returning a completed result."); } },
         });
+        if (mine === generation.current) stream.current = opened;
+        else await opened.cancel();
         return;
       }
       const answer = await callExtensionOperation({ id, revision, context, operation: operation.name, params });
@@ -139,13 +144,17 @@ function OperationForm({ id, revision, context, contextKey, operation, operation
   const next = object(result) && typeof result.nextCursor === "string" ? result.nextCursor : "";
   return <>
     <form className="flex flex-wrap items-end gap-2 border-b px-3 py-2" style={{ borderColor: "var(--rule)" }} onSubmit={(event) => { event.preventDefault(); setHistory([]); void run(); }}>
-      {inputs.map((input) => input.name === "namespace" ? <NamespaceInput key={input.name} context={context} value={String(values.namespace ?? "")} onChange={(namespace) => { if (!busy || operation.view?.autoRun) setValues({ ...values, namespace }); }} /> : <label key={input.name} className="flex min-w-40 flex-col gap-1 text-xs text-muted">
+      {inputs.map((input) => input.name === "namespace" ? <NamespaceInput key={input.name} required={input.required} context={context} value={String(values.namespace ?? "")} onChange={(namespace) => { if (!busy || operation.view?.autoRun) setValues({ ...values, namespace }); }} /> : <label key={input.name} className="flex min-w-40 flex-col gap-1 text-xs text-muted">
         {input.title ?? label(input.name)}
         {input.type === "boolean" ? <input type="checkbox" checked={values[input.name] === true} disabled={busy} onChange={(event) => setValues({ ...values, [input.name]: event.target.checked })} />
           : <TextInput value={String(values[input.name] ?? "")} type={input.type === "string" ? "text" : "number"} disabled={busy} onValueChange={(value) => setValues({ ...values, [input.name]: value })} />}
       </label>)}
       <Button type="submit" variant={operation.view?.autoRun ? "secondary" : "primary"} disabled={busy}>{busy ? "Running…" : operation.view?.autoRun ? "Refresh" : operation.title}</Button>
-      {busy && operation.view?.stream && <Button type="button" variant="secondary" onClick={() => void stream.current?.cancel()}>Cancel</Button>}
+      {busy && operation.view?.stream && <Button type="button" variant="secondary" onClick={() => {
+        if (stream.current) { void stream.current.cancel(); return; }
+        generation.current++; setBusy(false); setError("The operation was cancelled.");
+        const owned = view.current; view.current = undefined; void owned?.close();
+      }}>Cancel</Button>}
     </form>
     {busy && <p className="extension-message" role="status">Running {operation.title.toLowerCase()}…</p>}
     {error && <div className="extension-message" role="alert">{error} <Button onClick={() => void run(cursor.current)}>Retry</Button></div>}
