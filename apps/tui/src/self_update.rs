@@ -75,11 +75,15 @@ impl Channel {
     }
 }
 
-/// The name of the binary inside every archive, and on disk.
+/// The name of the binary inside an update archive.
+///
+/// This build is still published as `srelens-tui`, so the copies already
+/// installed can download it. The release after this one publishes `srectl`,
+/// and that is what `update` installs.
 const BIN: &str = if cfg!(windows) {
-    "srelens-tui.exe"
+    "srectl.exe"
 } else {
-    "srelens-tui"
+    "srectl"
 };
 
 #[derive(Debug, PartialEq, Eq)]
@@ -133,7 +137,7 @@ impl fmt::Display for UpdateError {
         match self {
             Self::UnsupportedPlatform { os, arch } => write!(
                 f,
-                "no srelens-tui release is built for {os}/{arch} — build from source with `cargo build --release -p srelens-tui`"
+                "no srectl release is built for {os}/{arch} — build from source with `cargo build --release -p srelens-tui`"
             ),
             // No prefix: these messages are whole sentences, and a "could not
             // read" preamble was actively wrong for the common case, where the
@@ -239,12 +243,12 @@ pub fn asset_name(version: &str, triple: &str) -> String {
     } else {
         "tar.gz"
     };
-    format!("srelens-tui-{version}-{triple}.{ext}")
+    format!("srectl-{version}-{triple}.{ext}")
 }
 
 /// The checksum file published beside the archives.
 pub fn sums_name(version: &str) -> String {
-    format!("srelens-tui-{version}-SHA256SUMS.txt")
+    format!("srectl-{version}-SHA256SUMS.txt")
 }
 
 /// The detached signature `sign-artifacts` publishes for the checksum file.
@@ -323,7 +327,7 @@ pub fn parse_latest_version(body: &[u8], triple: &str) -> Result<String, UpdateE
     // now beats promising an update and 404ing on the download.
     if !release_carries_this_platform(&value, &version, triple) {
         return Err(UpdateError::BadRelease(format!(
-            "release {tag} carries no srelens-tui build for {triple}"
+            "release {tag} carries no srectl build for {triple}"
         )));
     }
     // A stable release goes public only once signing has succeeded, so a
@@ -349,6 +353,7 @@ pub fn parse_latest_version(body: &[u8], triple: &str) -> Result<String, UpdateE
 pub fn parse_newest_version(body: &[u8], triple: &str) -> Result<String, UpdateError> {
     let releases: Vec<serde_json::Value> = serde_json::from_slice(body)
         .map_err(|e| UpdateError::BadRelease(format!("the API did not return a list: {e}")))?;
+    let mut newest_skipped = None;
     for release in releases {
         let Some(tag) = release.get("tag_name").and_then(|t| t.as_str()) else {
             continue;
@@ -377,6 +382,11 @@ pub fn parse_newest_version(body: &[u8], triple: &str) -> Result<String, UpdateE
             continue;
         };
         if !release_carries_this_platform(&release, &version, triple) {
+            if newest_skipped.is_none() {
+                newest_skipped = Some(format!(
+                    "release {tag} carries no srectl build for {triple}"
+                ));
+            }
             continue;
         }
         // Dev pre-releases are public before signing runs, and signing them
@@ -384,16 +394,22 @@ pub fn parse_newest_version(body: &[u8], triple: &str) -> Result<String, UpdateE
         // suspicious. It is passed over all the same: the dev channel
         // installs signed builds only, the newest there is.
         if !release_is_signed(&release, &version) {
+            if newest_skipped.is_none() {
+                newest_skipped = Some(format!("release {tag} is not signed"));
+            }
             continue;
         }
         return Ok(version);
+    }
+    if let Some(reason) = newest_skipped {
+        return Err(UpdateError::BadRelease(reason));
     }
     // Accurate about which step came up empty: the list was read fine, it just
     // holds nothing installable here. Naming the platform matters because the
     // usual cause is a release whose build for THIS target failed while the
     // others published.
     Err(UpdateError::BadRelease(format!(
-        "no dev release carries a srelens-tui build for {triple}"
+        "no dev release carries a srectl build for {triple}"
     )))
 }
 
@@ -462,11 +478,7 @@ fn extract_from_targz(archive: &[u8], asset: &str) -> Result<Vec<u8>, UpdateErro
             .into_owned();
         // The archive stores files at its root, so entries arrive as `./name`
         // or `name` depending on how they were added.
-        if path
-            .file_name()
-            .map(|n| n == "srelens-tui")
-            .unwrap_or(false)
-        {
+        if path.file_name().map(|n| n == "srectl").unwrap_or(false) {
             let mut bytes = Vec::new();
             entry
                 .read_to_end(&mut bytes)
@@ -493,7 +505,7 @@ fn extract_from_zip(archive: &[u8], asset: &str) -> Result<Vec<u8>, UpdateError>
             .next()
             .unwrap_or_default()
             .to_string();
-        if name == "srelens-tui.exe" {
+        if name == "srectl.exe" {
             let mut bytes = Vec::new();
             file.read_to_end(&mut bytes)
                 .map_err(|e| UpdateError::Archive(e.to_string()))?;
@@ -604,6 +616,43 @@ pub enum Check {
     Available(Box<Plan>),
 }
 
+/// A channel that has not published `srectl` yet is not a newer install.
+///
+/// This build is the last one shipped as `srelens-tui`. Asking it to update
+/// before the following release exists finds that release and no `srectl`
+/// archive. That is "nothing newer to install", unless the tag itself is
+/// newer — then the missing archive is a failed release and stays an error.
+fn current_until_srectl_ships(current: &str, channel: Channel, message: &str) -> Option<Check> {
+    if message.contains("carries no srectl build") || message.ends_with("is not signed") {
+        let tag = message
+            .strip_prefix("release ")
+            .and_then(|rest| rest.split_whitespace().next())?;
+        let version = version_from_tag(tag)?;
+        if is_newer(current, &version) {
+            return None;
+        }
+        let ahead = matches!(
+            (
+                semver::Version::parse(current),
+                semver::Version::parse(&version)
+            ),
+            (Ok(current), Ok(latest)) if current > latest
+        );
+        return Some(if ahead {
+            Check::AheadOfChannel {
+                channel,
+                latest: version,
+            }
+        } else {
+            Check::UpToDate {
+                channel,
+                latest: version,
+            }
+        });
+    }
+    None
+}
+
 /// Resolve the latest stable release and decide whether it is worth
 /// downloading. Not finding an update is a normal outcome, not a failure.
 /// `requested` is whether the caller NAMED this channel rather than
@@ -621,8 +670,22 @@ pub fn plan(
     let triple = current_triple()?;
     let body = fetch(channel.url())?;
     let latest = match channel {
-        Channel::Stable => parse_latest_version(&body, triple)?,
-        Channel::Dev => parse_newest_version(&body, triple)?,
+        Channel::Stable => parse_latest_version(&body, triple),
+        Channel::Dev => parse_newest_version(&body, triple),
+    };
+    let latest = match latest {
+        Ok(version) => version,
+        // This build is still published under the old asset name. Until a
+        // release actually carries `srectl`, there is nothing newer to
+        // install. A newer tag that also lacks it stays an error: that is a
+        // release we could not take, not proof that nothing newer exists.
+        Err(UpdateError::BadRelease(message)) => {
+            if let Some(check) = current_until_srectl_ships(current, channel, &message) {
+                return Ok(check);
+            }
+            return Err(UpdateError::BadRelease(message));
+        }
+        Err(err) => return Err(err),
     };
     // Asking for a channel by name means asking to be ON it, even where
     // that means going backwards — the usual case, since any dev build
@@ -771,7 +834,10 @@ pub fn apply_with_keys(
 /// directory another user can write to lets them pre-create the path as a
 /// link to a file the victim owns, which the update would then truncate.
 /// The name is random as well, so the attempt cannot be aimed.
-fn create_new_file(dir: &Path, prefix: &str) -> Result<(PathBuf, std::fs::File), UpdateError> {
+pub(crate) fn create_new_file(
+    dir: &Path,
+    prefix: &str,
+) -> Result<(PathBuf, std::fs::File), UpdateError> {
     let mut last = None;
     for _ in 0..8 {
         let path = dir.join(format!("{prefix}{}", uuid::Uuid::new_v4()));
@@ -1279,7 +1345,7 @@ pub fn replace_running_binary(target: &Path, bytes: &[u8]) -> Result<(), UpdateE
 ///
 /// The point is that no future early return can forget: a half-finished
 /// update leaves nothing behind whichever way it failed.
-struct Staged(PathBuf);
+pub(crate) struct Staged(pub PathBuf);
 
 impl Drop for Staged {
     fn drop(&mut self) {
