@@ -389,7 +389,7 @@ fn config_for(
             env: Vec::new(),
             data_dir,
         },
-        limits: Limits::default(),
+        limits: runtime_limits(&manifest.id),
         policy: Policy::default(),
     };
     let binary = InstalledBinary {
@@ -399,6 +399,17 @@ fn config_for(
         path: binary.to_owned(),
     };
     Ok((config, binary))
+}
+
+/// Host policy for the verified production Trivy app. Its current DB alone is
+/// 1.38 GiB. This approved exception changes only disk space, never the sandbox,
+/// memory or CPU ceilings; similarly named apps keep the ordinary defaults.
+fn runtime_limits(id: &str) -> Limits {
+    let mut limits = Limits::default();
+    if id == "org.srelens.trivy" {
+        limits.data_bytes = 2 << 30;
+    }
+    limits
 }
 
 /// A sidecar that runs as a task in the test's runtime, behind the public `Launcher`
@@ -576,6 +587,21 @@ mod tests {
     use super::fake::FakeSidecar;
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn only_trivy_gets_the_approved_two_gib_data_budget() {
+        let trivy = runtime_limits("org.srelens.trivy");
+        assert_eq!(trivy.data_bytes, 2 << 30);
+        assert_eq!(trivy.memory_bytes, Limits::default().memory_bytes);
+        assert_eq!(trivy.cpus, Limits::default().cpus);
+        for id in [
+            "org.srelens.cert-manager",
+            "org.srelens.trivy-preview",
+            "com.example.trivy",
+        ] {
+            assert_eq!(runtime_limits(id), Limits::default());
+        }
+    }
 
     #[test]
     fn without_a_named_cgroup_srelens_asks_systemd_for_one() {
