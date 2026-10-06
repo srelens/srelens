@@ -220,3 +220,17 @@ it("keeps partial report data visible with an actionable warning", async () => {
  expect((await screen.findByRole("alert")).textContent).toContain("permission denied");
  expect(screen.getByText("alpine:3.10")).toBeTruthy();
 });
+
+it("keeps short coverage labels compact above the findings table", async () => {
+ host.answer={coverage:["image vulnerabilities","namespace configuration"],items:[{reportId:"saved",findings:17}]};
+ open();fireEvent.change(await screen.findByLabelText("Image"),{target:{value:"alpine:3.10"}});fireEvent.click(screen.getByRole("button",{name:"Scan image"}));
+ await screen.findByText("image vulnerabilities");expect(screen.getAllByRole("table")).toHaveLength(1);
+});
+
+it("renders nested report totals as badges and folds scanner provenance", async () => {
+ const scannerImage="aquasec/trivy@sha256:"+"a".repeat(64);
+ host.answer={metadata:{summary:{CRITICAL:1,HIGH:3},scannerImage},items:[{id:"CVE-one"}]};
+ open();fireEvent.change(await screen.findByLabelText("Image"),{target:{value:"alpine:3.10"}});fireEvent.click(screen.getByRole("button",{name:"Scan image"}));
+ expect(await screen.findByText(/Critical 1/i)).toBeTruthy();
+ expect(screen.getByText(scannerImage).closest("details")?.open).toBe(false);
+});

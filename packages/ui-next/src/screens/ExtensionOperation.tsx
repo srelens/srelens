@@ -16,12 +16,13 @@ const object = (value: unknown): value is Record<string, unknown> => value !== n
 const cell = (value: unknown) => value === undefined || value === null ? "—" : plainText(typeof value === "object" ? JSON.stringify(value) : String(value));
 type Scalar = string | number | boolean;
 const scalar = (value: unknown): value is Scalar => ["string", "number", "boolean"].includes(typeof value);
-const flatten = (value: Record<string, unknown>, prefix = ""): Array<[string, unknown]> => Object.entries(value).flatMap(([key, v]) => object(v) ? flatten(v, prefix + key + ".") : [[prefix + key, v]]);
-const technical = (key: string) => /(^|\.)(clusterId|uid|resourceUid|resourceVersion|reportId|imageDigest|databaseDigest|scope)$/i.test(key);
+const flatten = (value: Record<string, unknown>, prefix = ""): Array<[string, unknown]> => Object.entries(value).flatMap(([key, v]) => object(v) && key !== "summary" ? flatten(v, prefix + key + ".") : [[prefix + key, v]]);
+const technical = (key: string) => /(^|\.)(clusterId|uid|resourceUid|resourceVersion|reportId|imageDigest|databaseDigest|scannerImage|scope)$/i.test(key);
 const firstColumns = ["image", "id", "name", "namespace", "container", "kind", "binding", "severity", "package", "installedVersion", "fixedVersion", "title"];
 const severityTone: Record<string, BadgeTone> = { CRITICAL: "sev", HIGH: "sev", MEDIUM: "warn", LOW: "info", UNKNOWN: "muted" };
 
-function ResultValue({ field, value }: { field: string; value: unknown }) {
+function ResultValue({ field, value, compact = false }: { field: string; value: unknown; compact?: boolean }) {
+  if (compact && Array.isArray(value)) return <div className="flex flex-wrap gap-1">{value.map((item, index) => <Badge key={index}>{cell(item)}</Badge>)}</div>;
   if (field === "summary" && object(value)) return <div className="flex flex-wrap gap-1">{Object.entries(value).map(([name, count]) => <Badge key={name} tone={severityTone[name.toUpperCase()] ?? "muted"}>{label(name.toLowerCase())} {cell(count)}</Badge>)}</div>;
   if (["severity", "state", "freshness", "source"].includes(field) && typeof value === "string") {
     const tone = field === "severity" ? severityTone[value.toUpperCase()] ?? "muted" : ["unknown", "stale", "failed"].includes(value) ? "warn" : value === "served" || value === "completed" ? "ok" : "muted";
@@ -50,14 +51,15 @@ function NamespaceInput({ context, value, onChange, required }: { context: strin
 function OperationResult({ value, operations, current, onOpen }: { value: unknown; operations: Operation[]; current: string; onOpen: (operation: string, params: Record<string, Scalar>) => void }) {
   const [filter, setFilter] = useState("");
   const fields = object(value) ? Object.entries(value) : [["Result", value] as const];
-  const metadata = fields.filter(([key, value]) => key !== "nextCursor" && !Array.isArray(value)).flatMap(([key, value]) => object(value) && key !== "summary" ? flatten(value) : [[key, value] as [string, unknown]]);
+  const compactList = (key: string, value: unknown) => !["items", "findings", "bindings", "warnings"].includes(key) && Array.isArray(value) && value.length > 0 && value.length <= 8 && value.every(scalar);
+  const metadata = fields.filter(([key, value]) => key !== "nextCursor" && (!Array.isArray(value) || compactList(key, value))).flatMap(([key, value]) => object(value) && key !== "summary" ? flatten(value) : [[key, value] as [string, unknown]]);
   const identity = metadata.filter(([key]) => technical(key) && key !== "scope");
   const warnings = object(value) && Array.isArray(value.warnings) ? value.warnings.filter((warning): warning is string => typeof warning === "string") : [];
-  const lists = fields.filter(([key, value]) => key !== "warnings" && Array.isArray(value));
+  const lists = fields.filter(([key, value]) => key !== "warnings" && Array.isArray(value) && !compactList(key, value));
   return <div className="scroll min-h-0 min-w-0 flex-1">
     {warnings.length > 0 && <div className="extension-message" role="alert">{warnings.map((warning, index) => <p key={index}>{plainText(warning)}</p>)}</div>}
     {metadata.length > 0 && <dl className="flex flex-wrap gap-x-6 gap-y-2 border-b px-3 py-2" style={{ borderColor: "var(--rule)" }}>
-      {metadata.filter(([key]) => !technical(key) || key === "scope").map(([key, value]) => <div key={key} className="min-w-0 max-w-full"><dt className="text-xs text-muted">{label(key)}</dt><dd className={`text-[0.8125rem] ${prose(key) ? "whitespace-normal" : "overflow-auto whitespace-nowrap"}`}><ResultValue field={key} value={value} /></dd></div>)}
+      {metadata.filter(([key]) => !technical(key) || key === "scope").map(([key, value]) => <div key={key} className="min-w-0 max-w-full"><dt className="text-xs text-muted">{label(key)}</dt><dd className={`text-[0.8125rem] ${prose(key) ? "whitespace-normal" : "overflow-auto whitespace-nowrap"}`}><ResultValue field={key} value={value} compact={compactList(key, value)} /></dd></div>)}
       {identity.length > 0 && <div className="min-w-0 basis-full"><ResultDetails entries={identity} title="Technical details" /></div>}
     </dl>}
     {lists.length > 0 && <div className="border-b px-3 py-2" style={{ borderColor: "var(--rule)" }}><TextInput aria-label="Filter results" placeholder="Filter results…" value={filter} onValueChange={setFilter} /></div>}
