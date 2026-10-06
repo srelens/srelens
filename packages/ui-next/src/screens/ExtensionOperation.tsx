@@ -52,6 +52,8 @@ function ReportTable({ rows, operations, current, onOpen }: { rows: ResultRow[];
 }
 
 function ResultValue({ field, value, compact = false }: { field: string; value: unknown; compact?: boolean }) {
+  if (field === "image" && typeof value === "string") return <span className="app-image-reference" title={cell(value)}>{cell(value)}</span>;
+  if (["name", "namespace", "container"].includes(field) && typeof value === "string") return <span className="app-resource-reference" title={cell(value)}>{cell(value)}</span>;
   if (compact && Array.isArray(value)) return <div className="flex flex-wrap gap-1">{value.map((item, index) => <Badge key={index}>{cell(item)}</Badge>)}</div>;
   if (field === "summary" && object(value)) return <div className="flex flex-wrap gap-1">{Object.entries(value).sort(([a],[b])=>severityOrder(a)-severityOrder(b)).map(([name, count]) => <Badge key={name} tone={severityTone[severityName(name)] ?? "muted"}>{label((severityTone[severityName(name)] ? severityName(name) : name).toLowerCase())} {cell(count)}</Badge>)}</div>;
   if (["severity", "state", "freshness", "source"].includes(field) && typeof value === "string") {
@@ -110,7 +112,7 @@ function OperationResult({ value, operations, current, onOpen }: { value: unknow
         {reports && key==="items" ? <ReportTable rows={rows} operations={operations} current={current} onOpen={onOpen}/> : <Table<(typeof rows)[number]> data={rows} getRowKey={(row) => String(row.index)} columns={[
           ...visible.filter((key) => !combined.has(key)).map((key) => ({ key, header: key === "name" && secondary(key) ? "Resource" : label(key), getValue: ({ data }: (typeof rows)[number]) => data[key], render: ({ data }: (typeof rows)[number]) => <div><ResultValue field={key} value={data[key]} />{secondary(key) && <div className="text-xs text-muted"><ResultValue field={secondary(key)!} value={data[secondary(key)!]} /></div>}</div> })),
           ...(details.length > 0 ? [{ key: "identity", header: "Details", sortable: false, render: ({ data }: (typeof rows)[number]) => <ResultDetails title="Inspect" entries={details.map((key) => [key, data[key]])} /> }] : []),
-          ...(rows.some(({ data }) => actions(data).length) ? [{ key: "open", header: "Actions", sortable: false, sticky: "end" as const, render: ({ data }: (typeof rows)[number]) => <ActionBar label="Result actions" max={1} actions={actions(data).map(op=>({id:op.name,label:op.title,onSelect:()=>onOpen(op.name,rowParams(op,data))}))}/> }] : []),
+          ...(rows.some(({ data }) => actions(data).length) ? [{ key: "open", header: "Actions", sortable: false, sticky: "end" as const, render: ({ data }: (typeof rows)[number]) => <ActionBar className="app-row-actions" label="Result actions" max={1} actions={actions(data).map(op=>({id:op.name,label:op.title,onSelect:()=>onOpen(op.name,rowParams(op,data))}))}/> }] : []),
         ]} emptyText={filter ? "No results match this filter" : `No ${label(key).toLowerCase()} returned`} />}
       </section>;
     })}

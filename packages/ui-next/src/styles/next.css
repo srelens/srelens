@@ -13,6 +13,9 @@
 /* App result panes keep dense report evidence readable without stretching rows. */
 .app-results .tbl thead th { text-transform: none; letter-spacing: 0; font-size: 12px; padding-block: 9px; }
 .app-results .tbl td { height: 52px; padding-block: 8px; }
+.app-image-reference, .app-resource-reference { display: block; max-width: 340px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.app-resource-reference { max-width: 220px; }
+.app-results .app-row-actions { flex-wrap: nowrap; }
 .app-results .badge { text-transform: none; letter-spacing: 0; font-family: var(--font-sans); padding: 2px 6px; border-radius: 4px; }
 .app-report-intro { padding: 16px 16px 12px; border-bottom: 1px solid var(--rule); }
 .app-report-intro h2 { display: flex; align-items: center; gap: 8px; font-size: 17px; font-weight: 600; letter-spacing: -.02em; }
@@ -24,6 +27,7 @@
 .app-source-filters button[aria-pressed="true"] { background: var(--accent-wash); color: var(--accent); border-color: var(--accent-line); }
 .app-report-subject, .app-report-time, .app-report-source { display: flex; flex-direction: column; gap: 3px; }
 .app-report-subject strong { max-width: 260px; overflow: hidden; text-overflow: ellipsis; font-weight: 500; }
+.app-report-subject > span { max-width: 260px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .app-report-subject > span, .app-report-time > span:last-child { font-size: 11px; color: var(--ink-muted); }
 .app-report-source .badge { align-self: flex-start; }
 .app-report-findings { display: flex; align-items: center; gap: 10px; }
