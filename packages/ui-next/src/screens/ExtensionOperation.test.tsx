@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, expect, it, vi } from "vitest";
 const host = vi.hoisted(() => ({ calls: [] as any[], answer: {} as unknown, error: "", pending: undefined as Promise<unknown> | undefined }));
 const appState = vi.hoisted(() => ({ revision: 3, enabled: true, autoRun: false, stream: false }));
@@ -137,4 +137,44 @@ it("keeps a row identity visible when it differs from the result metadata", asyn
  expect(screen.getByRole("columnheader", { name: /Cluster Id/ })).toBeTruthy();
  fireEvent.change(screen.getByRole("textbox", { name: "Filter results" }), { target: { value: "web" } });
  expect(screen.getByRole("columnheader", { name: /Cluster Id/ })).toBeTruthy();
+});
+
+it("keeps technical inventory identity behind details and leads with the image", async () => {
+ host.answer = { clusterId: "srelens-context:config#demo", source: "workload templates", scope: "OS and supported language packages", items: [
+  { container: "ollama", containerType: "regular", image: "ollama/ollama:latest", kind: "Deployment", name: "ollama-gpu", namespace: "ai-services", resourceVersion: "2885780069", uid: "workload-uid", scope: "OS and supported language packages" },
+ ] };
+ open();
+ fireEvent.change(await screen.findByLabelText("Image"), { target: { value: "alpine:3.9" } });
+ fireEvent.click(screen.getByRole("button", { name: "Scan image" }));
+ expect(await screen.findByText("ollama/ollama:latest")).toBeTruthy();
+ expect(screen.queryByRole("columnheader", { name: /Resource Version/ })).toBeNull();
+ expect(screen.queryByRole("columnheader", { name: /Uid/ })).toBeNull();
+ expect(screen.getByText("workload-uid").closest("details")?.open).toBe(false);
+ expect(screen.getByText("srelens-context:config#demo").closest("details")?.open).toBe(false);
+ expect(screen.getAllByRole("columnheader")[0].textContent).toBe("Image");
+ expect(screen.queryByRole("columnheader", { name: /Container Type/ })).toBeNull();
+ expect(screen.queryByRole("columnheader", { name: /Kind/ })).toBeNull();
+ expect(screen.getByText("Deployment").closest("td")).toBe(screen.getByText("ollama-gpu").closest("td"));
+ expect(screen.getByText("regular").closest("td")).toBe(screen.getByText("ollama").closest("td"));
+});
+
+it("sorts the displayed images when the reader clicks the image column", async () => {
+ host.answer = { items: [{ image: "zebra:1" }, { image: "alpine:3" }] };
+ open();
+ fireEvent.change(await screen.findByLabelText("Image"), { target: { value: "alpine:3" } });
+ fireEvent.click(screen.getByRole("button", { name: "Scan image" }));
+ await screen.findByText("zebra:1");
+ fireEvent.click(within(screen.getByRole("columnheader", { name: /Image/ })).getByRole("button"));
+ expect(screen.getAllByRole("row")[1].textContent).toContain("alpine:3");
+});
+
+it("keeps discovered API names visible beside their unknown or absent status", async () => {
+ host.answer = { source: "unknown", bindings: [{ binding: "vulnerability-reports", state: "unknown", reason: "Discovery permission denied" }] };
+ open();
+ fireEvent.change(await screen.findByLabelText("Image"), { target: { value: "alpine:3" } });
+ fireEvent.click(screen.getByRole("button", { name: "Scan image" }));
+ const binding = await screen.findByText("vulnerability-reports");
+ expect(screen.getByRole("columnheader", { name: /Binding/ })).toBeTruthy();
+ expect(binding.closest("details")).toBeNull();
+ expect(screen.getByRole("table").textContent).toContain("Discovery permission denied");
 });

@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { callExtensionOperation, describeError, describeStreamEnd, extensionEnabledFor, extensionOperationRoute, openExtensionView, parseExtensionOperationRoute, type ExtensionOperation as Operation, type ExtensionView, type ExtensionStream } from "@srelens/core";
 import { useNamespaceOptions } from "@srelens/core/react";
-import { Button, Combobox, Screen, Table, TextInput } from "@srelens/ui-kit";
+import { Badge, Button, Combobox, Screen, Table, TextInput, type BadgeTone } from "@srelens/ui-kit";
+import { ExtensionLogo } from "../extensions/ExtensionLogo";
 import { useExtensions } from "../extensions/inventoryStore";
 import { plainText } from "../extensions/displayText";
 import { useContexts, useContextsError, useContextsStatus } from "../lib/clusters";
@@ -16,11 +17,28 @@ const cell = (value: unknown) => value === undefined || value === null ? "—" :
 type Scalar = string | number | boolean;
 const scalar = (value: unknown): value is Scalar => ["string", "number", "boolean"].includes(typeof value);
 const flatten = (value: Record<string, unknown>, prefix = ""): Array<[string, unknown]> => Object.entries(value).flatMap(([key, v]) => object(v) ? flatten(v, prefix + key + ".") : [[prefix + key, v]]);
+const technical = (key: string) => /(^|\.)(clusterId|uid|resourceUid|resourceVersion|reportId|imageDigest|databaseDigest|scope)$/i.test(key);
+const firstColumns = ["image", "id", "name", "namespace", "container", "kind", "binding", "severity", "package", "installedVersion", "fixedVersion", "title"];
+const severityTone: Record<string, BadgeTone> = { CRITICAL: "sev", HIGH: "sev", MEDIUM: "warn", LOW: "info", UNKNOWN: "muted" };
+
+function ResultValue({ field, value }: { field: string; value: unknown }) {
+  if (field === "summary" && object(value)) return <div className="flex flex-wrap gap-1">{Object.entries(value).map(([name, count]) => <Badge key={name} tone={severityTone[name.toUpperCase()] ?? "muted"}>{label(name.toLowerCase())} {cell(count)}</Badge>)}</div>;
+  if (["severity", "state", "freshness", "source"].includes(field) && typeof value === "string") {
+    const tone = field === "severity" ? severityTone[value.toUpperCase()] ?? "muted" : ["unknown", "stale", "failed"].includes(value) ? "warn" : value === "served" || value === "completed" ? "ok" : "muted";
+    return <Badge tone={tone}>{label(value)}</Badge>;
+  }
+  if (object(value) || Array.isArray(value)) return <details><summary className="cursor-pointer whitespace-nowrap">View details</summary><pre className="max-h-48 max-w-96 overflow-auto whitespace-pre text-xs">{plainText(JSON.stringify(value, null, 2))}</pre></details>;
+  return <span title={cell(value)} className={prose(field) ? "block min-w-48 max-w-96 whitespace-normal" : "whitespace-nowrap"}>{cell(value)}</span>;
+}
+
+function ResultDetails({ entries, title }: { entries: Array<[string, unknown]>; title: string }) {
+  return <details className="min-w-0 text-xs"><summary className="cursor-pointer py-1 text-muted">{title}</summary><dl className="space-y-2 py-2">{entries.map(([key, value]) => <div key={key}><dt className="text-xs text-muted">{label(key)}</dt><dd className="max-w-full overflow-auto whitespace-nowrap text-[0.8125rem]">{cell(value)}</dd></div>)}</dl></details>;
+}
 
 function NamespaceInput({ context, value, onChange }: { context: string; value: string; onChange: (value: string) => void }) {
   const options = useNamespaceOptions(context, []);
   useEffect(() => { if (options.scope && !value) onChange(options.scope); }, [options.scope]);
-  return <div className="min-w-44"><NamespaceErrorAlert error={options.error} />
+  return <div className="min-w-0"><NamespaceErrorAlert error={options.error} />
     {options.namespaces === null ? <NamespaceChoice namespaces={null} value={value} onChange={onChange} />
       : <Combobox ariaLabel="Namespace" searchPlaceholder="Find a namespace…" value={value} onValueChange={onChange} options={[
         ...(!options.scope ? [{ value: "", label: "All namespaces" }] : []), ...options.namespaces.map((value) => ({ value })),
@@ -32,11 +50,13 @@ function NamespaceInput({ context, value, onChange }: { context: string; value: 
 function OperationResult({ value, operations, current, onOpen }: { value: unknown; operations: Operation[]; current: string; onOpen: (operation: string, params: Record<string, Scalar>) => void }) {
   const [filter, setFilter] = useState("");
   const fields = object(value) ? Object.entries(value) : [["Result", value] as const];
-  const metadata = fields.filter(([key, value]) => key !== "nextCursor" && !Array.isArray(value)).flatMap(([key, value]) => object(value) ? flatten(value) : [[key, value] as [string, unknown]]);
+  const metadata = fields.filter(([key, value]) => key !== "nextCursor" && !Array.isArray(value)).flatMap(([key, value]) => object(value) && key !== "summary" ? flatten(value) : [[key, value] as [string, unknown]]);
+  const identity = metadata.filter(([key]) => technical(key) && key !== "scope");
   const lists = fields.filter(([, value]) => Array.isArray(value));
   return <div className="scroll min-h-0 min-w-0 flex-1">
     {metadata.length > 0 && <dl className="flex flex-wrap gap-x-6 gap-y-2 border-b px-3 py-2" style={{ borderColor: "var(--rule)" }}>
-      {metadata.map(([key, value]) => <div key={key} className="min-w-0 max-w-full"><dt className="text-xs text-muted">{label(key)}</dt><dd className={`text-[0.8125rem] ${prose(key) ? "whitespace-normal" : "overflow-auto whitespace-nowrap"}`}>{cell(value)}</dd></div>)}
+      {metadata.filter(([key]) => !technical(key) || key === "scope").map(([key, value]) => <div key={key} className="min-w-0 max-w-full"><dt className="text-xs text-muted">{label(key)}</dt><dd className={`text-[0.8125rem] ${prose(key) ? "whitespace-normal" : "overflow-auto whitespace-nowrap"}`}><ResultValue field={key} value={value} /></dd></div>)}
+      {identity.length > 0 && <div className="min-w-0 basis-full"><ResultDetails entries={identity} title="Technical details" /></div>}
     </dl>}
     {lists.length > 0 && <div className="border-b px-3 py-2" style={{ borderColor: "var(--rule)" }}><TextInput aria-label="Filter results" placeholder="Filter results…" value={filter} onValueChange={setFilter} /></div>}
     {lists.map(([key, values]) => {
@@ -44,12 +64,17 @@ function OperationResult({ value, operations, current, onOpen }: { value: unknow
       const columns = [...new Set(rows.flatMap(({ data }) => Object.keys(data)))].filter((key) =>
         !metadata.some(([field, shared]) => field === key && scalar(shared) &&
           (values as unknown[]).every((value) => object(value) && value[key] === shared)));
+      const visible = columns.filter((key) => !technical(key) || key === "clusterId").sort((a, b) => (firstColumns.indexOf(a) < 0 ? 100 : firstColumns.indexOf(a)) - (firstColumns.indexOf(b) < 0 ? 100 : firstColumns.indexOf(b)));
+      const details = columns.filter((key) => technical(key) && key !== "clusterId");
+      const secondary = (key: string): string | undefined => key === "name" && visible.includes("kind") ? "kind" : key === "container" && visible.includes("containerType") ? "containerType" : undefined;
+      const combined = new Set(visible.map(secondary).filter(Boolean));
       const actions = (data: Record<string, unknown>) => operations.filter((op) => op.name !== current && !op.view?.stream && (op.inputs ?? []).some((input) => input.required && input.name !== "clusterId") && (op.inputs ?? []).every((input) => !input.required || input.name === "clusterId" || scalar(data[input.name])));
       return <section key={key} className="min-w-0">
-        <h2 className="border-b px-3 py-2 text-[0.8125rem] font-medium" style={{ borderColor: "var(--rule)" }}>{label(key)} <span className="text-muted">{rows.length}{filter && ` of ${(values as unknown[]).length}`}</span></h2>
+        <h2 className="border-b px-3 py-2 text-[0.8125rem] font-medium" style={{ borderColor: "var(--rule)" }}>{key === "items" ? `${rows.length} ${rows.length === 1 ? "result" : "results"}` : `${label(key)} (${rows.length})`}{filter && <span className="text-muted"> of {(values as unknown[]).length}</span>}</h2>
         <Table<(typeof rows)[number]> data={rows} getRowKey={(row) => String(row.index)} columns={[
           ...(rows.some(({ data }) => actions(data).length) ? [{ key: "open", header: "Details", render: ({ data }: (typeof rows)[number]) => <div className="flex gap-2">{actions(data).map((op) => <Button key={op.name} variant="secondary" onClick={() => onOpen(op.name, Object.fromEntries((op.inputs ?? []).filter((input) => input.name !== "clusterId" && scalar(data[input.name])).map((input) => [input.name, data[input.name] as Scalar])))}>{op.title}</Button>)}</div> }] : []),
-          ...columns.map((key) => ({ key, header: label(key), render: ({ data }: (typeof rows)[number]) => object(data[key]) || Array.isArray(data[key]) ? <details><summary className="cursor-pointer whitespace-nowrap">View details</summary><pre className="max-h-48 max-w-96 overflow-auto whitespace-pre text-xs">{plainText(JSON.stringify(data[key], null, 2))}</pre></details> : <span title={cell(data[key])} className={prose(key) ? "block min-w-48 max-w-96 whitespace-normal" : "whitespace-nowrap"}>{key === "reportId" && String(data[key]).length > 20 ? `${String(data[key]).slice(0, 12)}…` : cell(data[key])}</span> })),
+          ...visible.filter((key) => !combined.has(key)).map((key) => ({ key, header: key === "name" && secondary(key) ? "Resource" : label(key), getValue: ({ data }: (typeof rows)[number]) => data[key], render: ({ data }: (typeof rows)[number]) => <div><ResultValue field={key} value={data[key]} />{secondary(key) && <div className="text-xs text-muted"><ResultValue field={secondary(key)!} value={data[secondary(key)!]} /></div>}</div> })),
+          ...(details.length > 0 ? [{ key: "identity", header: "Details", sortable: false, sticky: "end" as const, render: ({ data }: (typeof rows)[number]) => <ResultDetails title="Inspect" entries={details.map((key) => [key, data[key]])} /> }] : []),
         ]} emptyText={filter ? "No results match this filter" : `No ${label(key).toLowerCase()} returned`} />
       </section>;
     })}
@@ -119,7 +144,7 @@ function OperationForm({ id, revision, context, contextKey, operation, operation
         {input.type === "boolean" ? <input type="checkbox" checked={values[input.name] === true} disabled={busy} onChange={(event) => setValues({ ...values, [input.name]: event.target.checked })} />
           : <TextInput value={String(values[input.name] ?? "")} type={input.type === "string" ? "text" : "number"} disabled={busy} onValueChange={(value) => setValues({ ...values, [input.name]: value })} />}
       </label>)}
-      <Button type="submit" disabled={busy}>{busy ? "Running…" : operation.view?.autoRun ? "Refresh" : operation.title}</Button>
+      <Button type="submit" variant={operation.view?.autoRun ? "secondary" : "primary"} disabled={busy}>{busy ? "Running…" : operation.view?.autoRun ? "Refresh" : operation.title}</Button>
       {busy && operation.view?.stream && <Button type="button" variant="secondary" onClick={() => void stream.current?.cancel()}>Cancel</Button>}
     </form>
     {busy && <p className="extension-message" role="status">Running {operation.title.toLowerCase()}…</p>}
@@ -147,7 +172,7 @@ export function ExtensionOperation({ route }: RoutedScreenProps) {
     : !app?.enabled || !extensionEnabledFor(app, target.contextKey) ? "This app is not enabled for this cluster."
     : app.revision !== target.revision ? "This app was updated. Open its current screen from Apps."
     : !operation ? "This app does not declare this operation." : "";
-  return <Screen title={operation?.title ?? "App"} eyebrow={`${app?.manifest.name ?? target.id} · ${cluster?.name ?? target.contextKey}`} fill>
+  return <Screen title={<span className="flex min-w-0 items-center gap-2"><ExtensionLogo icon={app?.icon} name={app?.manifest.name ?? target.id} size={22} /><span className="text-muted">{app?.manifest.name ?? target.id}</span><span className="text-faint">/</span><span>{operation?.title ?? "App"}</span></span>} actions={<span className="block max-w-56 truncate text-xs text-muted" title={cluster?.name ?? target.contextKey}>{cluster?.name ?? target.contextKey}</span>} fill>
     <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
       {inventory.status === "loading" || status === "loading" ? <p className="extension-message" role="status">Loading app…</p>
         : error ? <p className="extension-message" role="alert">{error}</p>
