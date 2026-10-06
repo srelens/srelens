@@ -23,6 +23,20 @@ fn manifest() -> Value {
     })
 }
 
+#[test]
+fn native_operation_views_require_api_0_8_and_streams_never_auto_run() {
+    let mut source = manifest();
+    source["srelensApiVersion"] = json!("^0.8");
+    source["sidecar"]["operations"][0]["view"] = json!({"autoRun":true});
+    let parsed = Manifest::parse(&source.to_string()).expect("native operation view");
+    assert_eq!(serde_json::to_value(parsed).unwrap()["sidecar"]["operations"][0]["view"]["autoRun"], true);
+    source["srelensApiVersion"] = json!("^0.7");
+    assert!(Manifest::parse(&source.to_string()).is_err());
+    source["srelensApiVersion"] = json!("^0.8");
+    source["sidecar"]["operations"][0]["view"]["stream"] = json!(true);
+    assert!(Manifest::parse(&source.to_string()).is_err(), "stream scans require an explicit Run");
+}
+
 fn problems(value: &Value) -> Vec<(ValidationCode, String, String)> {
     Manifest::parse(&value.to_string())
         .expect_err("refused")

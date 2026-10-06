@@ -460,6 +460,7 @@ pub fn run() {
                 app.manage(app_audit(None));
             }
             app.manage(std::sync::Arc::new(mcp_confirm::Pending::default()));
+            extension_streams::serve_native_broker(app.handle());
 
             Ok(())
         })

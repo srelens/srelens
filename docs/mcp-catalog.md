@@ -7,11 +7,11 @@ Everything this server exposes over MCP, generated from the live registry so it 
 
 ## Tools
 
-127 tools, grouped by area and then by how a call is gated. Argument schemas are not reproduced here — call `tools/list` for those, which cannot go stale.
+129 tools, grouped by area and then by how a call is gated. Argument schemas are not reproduced here — call `tools/list` for those, which cannot go stale.
 
 **Impact** is how much a successful call disturbs — `low`, `medium` or `high` — and is a different question from the section heading, which is how the call is gated. A capability that accepts several named operations carries the highest level any of them reaches; the per-operation level travels with the resource.
 
-### Kubernetes — read-only (57)
+### Kubernetes — read-only (58)
 
 | Tool | Impact | Summary |
 | --- | --- | --- |
@@ -55,6 +55,7 @@ Everything this server exposes over MCP, generated from the live registry so it 
 | `k8s.listServices` | low | list services in a namespace of a connected kube context |
 | `k8s.listStatefulSets` | low | list StatefulSets in a namespace of a connected kube context |
 | `k8s.listStorageClasses` | low | list StorageClasses of a connected kube context (cluster-scoped) |
+| `k8s.listWorkloadImages` | low | List regular and init-container images from a fixed workload kind |
 | `k8s.nodeMetrics` | low | node CPU/memory usage (requires metrics-server) |
 | `k8s.openApiSchema` | low | fetch the OpenAPI schema for a resource kind (for field autocomplete) |
 | `k8s.podCount` | low | running vs total pod counts for a cluster, counted without listing pod bodies |
@@ -161,10 +162,11 @@ Everything this server exposes over MCP, generated from the live registry so it 
 | `toolbox.removePlugin` | medium | remove an installed krew plugin |
 | `toolbox.upgradePlugin` | medium | upgrade an installed krew plugin |
 
-### Server — read-only (18)
+### Server — read-only (19)
 
 | Tool | Impact | Summary |
 | --- | --- | --- |
+| `extensions.bindingAvailability` | low | Check which declared app bindings this cluster serves |
 | `extensions.catalog` | low | Browse the native extension catalog with a durable cache; never connects clusters |
 | `extensions.catalogManifest` | low | Download and checksum-verify a catalog manifest for permission review; does not install it |
 | `extensions.list` | low | List installed declarative extensions |
@@ -195,7 +197,7 @@ Everything this server exposes over MCP, generated from the live registry so it 
 
 ## App tools
 
-Every installed app that is on adds its operations as tools named `plugin/<app id>/<operation>`: each reader binding, each declared action and, for an executable app, each operation its sidecar answers. A pod binding (logs, exec, a port-forward) is a session an app's view opens, not a tool. Which tools there are depends on what is installed, so `tools/list` is the list: a server with app tools advertises `tools.listChanged`, and sends `notifications/tools/list_changed` whenever an app is installed, updated, rolled back, enabled, disabled, blocked or removed. A change another srelens process made is noticed the next time the tools are listed or called, or by a session that can be pushed to within a few seconds.
+Every installed app that is on adds its operations as tools named `plugin/<app id>/<operation>`: each reader binding, each declared action and, for an executable app, each ordinary operation its sidecar answers. Streaming operations use owned native streams and are not ordinary request tools. A pod binding (logs, exec, a port-forward) is a session an app's view opens, not a tool. Which tools there are depends on what is installed, so `tools/list` is the list: a server with app tools advertises `tools.listChanged`, and sends `notifications/tools/list_changed` whenever an app is installed, updated, rolled back, enabled, disabled, blocked or removed. A change another srelens process made is noticed the next time the tools are listed or called, or by a session that can be pushed to within a few seconds.
 
 A tool's schema and its gate are the host's, never the app's. A reader takes `context` and, when it takes one, `namespace`; an action takes `context`, `namespace`, `name`, `uid` and `resourceVersion`; a sidecar operation takes the typed inputs it declares, each held to its type and length before the sidecar sees it. Readers and actions run through the same broker paths as `extensions.read` and `extensions.action`, and a gated tool asks the same consent as any other gated tool. When an app changes, the tools it had are withdrawn: a caller still holding them is refused.
 
@@ -206,6 +208,7 @@ A tool's schema and its gate are the host's, never the app's. A reader takes `co
 | reader | `k8s.listDeployments` | read-only | low |
 | reader | `k8s.listStatefulSets` | read-only | low |
 | reader | `k8s.listDaemonSets` | read-only | low |
+| reader | `k8s.listWorkloadImages` | read-only | low |
 | reader | `k8s.listNodes` | read-only | low |
 | reader | `network.http` | read-only | low |
 | declared action | `k8s.annotate` | needs confirmation | medium |

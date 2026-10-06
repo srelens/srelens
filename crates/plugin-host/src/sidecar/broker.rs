@@ -295,6 +295,13 @@ impl CapabilityBroker {
             })
         };
         let args = match tool {
+            "extensions.bindingAvailability" => json!({
+                "id": self.app.id,
+                "revision": self.app.revision,
+                "context": context.cluster_id,
+                "namespace": namespace,
+                "bindings": given["bindings"],
+            }),
             "extensions.read" => selection(),
             "extensions.resource" => {
                 let mut selection = selection();
@@ -330,6 +337,22 @@ pub(crate) struct HostCall {
 /// the same codes and sentences as always. The committed protocol schema
 /// takes exactly what this takes (see the conformance test).
 pub(crate) fn host_call(name: &str, params: Value) -> Result<HostCall, RpcError> {
+    if name == method::HOST_BINDING_AVAILABILITY {
+        let input: srelens_sidecar_protocol::HostBindingAvailabilityParams =
+            serde_json::from_value(params).map_err(|error| invalid(error.to_string()))?;
+        input
+            .context
+            .validate()
+            .map_err(|error| invalid(error.to_string()))?;
+        return Ok(HostCall {
+            tool: "extensions.bindingAvailability",
+            context: input.context,
+            fields: json!({"bindings":input.bindings})
+                .as_object()
+                .unwrap()
+                .clone(),
+        });
+    }
     let (tool, fields): (&'static str, &[&str]) = match name {
         method::HOST_READ => ("extensions.read", &["capability"]),
         method::HOST_RESOURCE => ("extensions.resource", &["capability", "name"]),
@@ -596,6 +619,65 @@ mod tests {
 
     fn on(cluster: &str, namespace: Value) -> Value {
         json!({"clusterId": cluster, "namespace": namespace})
+    }
+
+    #[tokio::test]
+    async fn binding_discovery_is_dispatched_with_the_supervisors_identity() {
+        let seen = Seen::default();
+        let capture = seen.clone();
+        let mut registry = Registry::new();
+        registry.register(Capability::read_only(
+            "extensions.bindingAvailability",
+            "availability",
+            move |input| {
+                let capture = capture.clone();
+                async move {
+                    capture
+                        .lock()
+                        .unwrap()
+                        .push(("extensions.bindingAvailability".into(), input));
+                    Ok(json!({"bindings":[{"binding":"reports","state":"absent"}]}))
+                }
+            },
+        ));
+        let broker = CapabilityBroker::new(
+            Arc::new(registry),
+            app(),
+            Arc::new(Spy::default()),
+            Arc::new(NoConsent),
+        );
+        let answer = broker.call(method::HOST_BINDING_AVAILABILITY, json!({"context":{"clusterId":"pinned-cluster","namespace":"team"},"bindings":["reports"]})).await.unwrap();
+        assert_eq!(answer["bindings"][0]["state"], "absent");
+        assert_eq!(
+            seen.lock().unwrap()[0].1,
+            json!({"id":APP,"revision":7,"context":"pinned-cluster","namespace":"team","bindings":["reports"]})
+        );
+    }
+
+    #[test]
+    fn binding_discovery_callback_keeps_context_and_checks_declared_name_shapes() {
+        let params = json!({"context":{"clusterId":"pinned-cluster","namespace":null},"bindings":["vulnerability-reports","sbom-reports"]});
+        let call = host_call("host/bindingAvailability", params.clone()).unwrap();
+        assert_eq!(call.tool, "extensions.bindingAvailability");
+        assert_eq!(call.context.cluster_id, "pinned-cluster");
+        assert_eq!(call.fields["bindings"], params["bindings"]);
+        for bindings in [
+            json!([]),
+            json!(["bad/name"]),
+            json!(["reports", "reports"]),
+            json!(vec!["reports"; 17]),
+            json!("reports"),
+        ] {
+            let mut bad = params.clone();
+            bad["bindings"] = bindings;
+            assert!(host_call("host/bindingAvailability", bad).is_err());
+        }
+        let mut impersonation = params.clone();
+        impersonation["id"] = json!("another-app");
+        assert!(host_call("host/bindingAvailability", impersonation).is_err());
+        let mut wrong = params;
+        wrong["context"] = json!({"cluster_id":"pinned-cluster","namespace":null});
+        assert!(host_call("host/bindingAvailability", wrong).is_err());
     }
 
     impl Harness {

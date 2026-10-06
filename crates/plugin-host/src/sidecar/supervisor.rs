@@ -661,6 +661,7 @@ async fn start(
             .map_err(|e| Failure::of(method::INITIALIZE, e))?;
         let api_version = protocol::negotiated(SIDECAR_API_VERSIONS, &initialized)
             .map_err(Failure::Incompatible)?;
+        session.set_api_version(api_version.clone());
         session
             .call(method::ACTIVATE, &json!({}), timeout)
             .await

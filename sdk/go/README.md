@@ -108,4 +108,4 @@ The module is `github.com/srelens/srelens/sdk/go`, with Go 1.25 or later. It use
 
 ## Regenerating the protocol types
 
-`protocol/protocol_gen.go` is generated from [`schemas/sidecar-protocol.v0.1.json`](../../schemas/sidecar-protocol.v0.1.json). After the schema changes, run `go generate ./...` here. CI fails when the file is stale.
+`protocol/protocol_gen.go` is generated from [`schemas/sidecar-protocol.v0.2.json`](../../schemas/sidecar-protocol.v0.2.json). After the schema changes, run `go generate ./...` here. CI fails when the file is stale.

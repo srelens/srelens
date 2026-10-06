@@ -313,6 +313,10 @@ list, and the [developer harness](testing.md#developer-harness) prints one per l
 
 ## API changelog
 
+### 0.8.0
+
+Executable operations may declare native `view` metadata (`autoRun`, `stream`, `hidden`). The host provides pinned operation routes, tables, namespace selection, retry, pagination and owned cancellable streams. A stream cannot start automatically. The kind-bound `k8s.listWorkloadImages` reader returns regular/init-container images for Deployments, StatefulSets or DaemonSets. The schema for this line is `schemas/extension-manifest.v0.8.json`; older line schemas remain frozen. Binding availability is a separate sidecar protocol 0.2.0 callback.
+
 ### 0.7.0
 
 Dashboard predicates may use a whole-value settings reference in `within` (#582).

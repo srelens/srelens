@@ -44,6 +44,8 @@ mod signing;
 mod store;
 pub mod streams;
 pub mod tools;
+mod operations;
+mod availability;
 #[cfg(test)]
 mod tools_tests;
 mod trust;
@@ -919,7 +921,7 @@ fn validate_app(
         if builtin.is_none()
             && !matches!(
                 binding.target.as_str(),
-                "k8s.listCustomResource" | "k8s.listEvents"
+                "k8s.listCustomResource" | "k8s.listEvents" | "k8s.listWorkloadImages"
             )
         {
             problems.push(
@@ -959,6 +961,13 @@ fn validate_app(
             }
         }
         let accepts = |key: &str| binding.inputs.iter().any(|input| input == key);
+        if binding.target == "k8s.listWorkloadImages" {
+            if binding.arguments.len() != 1 || !matches!(binding.arguments.get("kind").and_then(Value::as_str), Some("Deployment" | "StatefulSet" | "DaemonSet"))
+                || !accepts("context") || !accepts("namespace") {
+                problems.push(Code::InvalidBinding, format!("{at}.arguments"), "A workload image reader fixes kind to Deployment, StatefulSet or DaemonSet and accepts context plus namespace only");
+            }
+            continue;
+        }
         if let Some(identity) = builtin {
             let namespaced = identity["namespaced"] == true;
             if !binding.arguments.is_empty()
@@ -2350,6 +2359,7 @@ fn register_apps(
     let packages = apps.packages.clone();
     let runtime = apps.clone();
     resource::register(reg, path.clone(), core.clone(), cache.clone());
+    availability::register(reg, path.clone(), core.clone(), cache.clone());
     // One snapshot of each granted reader, shared by table columns, dashboard
     // cards and a card's target page, so the three agree and list it once.
     let snapshots = columns::JoinCache::default();
@@ -2482,6 +2492,7 @@ fn register_apps(
     ));
     providers::register(reg, path.clone(), core.clone(), cache.clone(), secrets.clone());
     let streams = streams::register(reg, &runtime, core, cache, snapshots, secrets);
+    operations::register(reg, streams.clone());
     inspector::register(reg, path, streams.clone());
     streams
 }
@@ -4617,7 +4628,9 @@ pub(crate) mod tests {
         let store = reg.get("extension.secretStore").unwrap().annotations;
         assert!(store.requires_confirm && store.sensitive && !store.read_only);
         let mcp = srelens_mcp::McpServer::new(Arc::new(reg));
-        assert_eq!(mcp.list_tools().len(), 18);
+        assert_eq!(mcp.list_tools().len(), 19);
+        assert!(mcp.list_tools().iter().any(|tool| tool.name == "extensions.bindingAvailability"));
+        assert!(!mcp.list_tools().iter().any(|tool| tool.name == "extensions.callOperation"));
         use srelens_mcp::{stdio::handle_request, Transport};
         for args in [
             json!({"action":"install","manifest":manifest(),"grants":["k8s.listCustomResource"]}),

@@ -18,7 +18,7 @@ sidecar under this supervisor the first time one of those operations is called i
 process, and stops it when the app is disabled, updated or removed. It calls back into
 srelens only through the [broker](#calls-from-the-sidecar), and writes only its
 [data directory](#data-directory). Its log and its process show in the app's
-Inspector ([#575](https://github.com/srelens/srelens/issues/575)). Each operation is an
+Inspector ([#575](https://github.com/srelens/srelens/issues/575)). Each ordinary operation is an
 MCP tool, `plugin/<id>/<operation>` ([MCP.md](../MCP.md#installed-apps-tools)). The
 registry's side is `crates/registry/src/extensions/sidecars.rs`. What is not built is
 listed under [Not yet](#not-yet).
@@ -41,7 +41,7 @@ JSON-RPC 2.0, one message per line.
 - **Params** are an object or an array, or absent.
 
 The same contract in machine-readable form is
-[`schemas/sidecar-protocol.v0.1.json`](../../schemas/sidecar-protocol.v0.1.json), one
+[`schemas/sidecar-protocol.v0.2.json`](../../schemas/sidecar-protocol.v0.2.json), one
 file per sidecar API line. It is generated from the `srelens-sidecar-protocol` crate
 (`sdk/protocol/`), whose types srelens itself builds its messages from, and which the SDKs
 share. It has:
@@ -583,6 +583,9 @@ uninstalled; locking it down while the app is installed is left for the escape r
 
 | What | Where |
 |---|---|
-| An operation that answers with a stream: the protocol has streams, and nothing opens one on an app's behalf yet | — |
 | A "Clear data" action for an app refused for its data directory (`DataDir::clear` is there; the Inspector, #575, is where a person would find it) | not filed yet |
 | The escape-hardening review of the supervisor and its backends, which the ADR assigned to #572 | [#744](https://github.com/srelens/srelens/issues/744) |
+
+## Binding discovery in protocol 0.2.0
+
+The host and Go SDK negotiate `0.2.0` while continuing to offer `0.1.0` to older peers. `host/bindingAvailability` requires the new line. Its caller sends an explicit `context` (`clusterId`, optional `namespace`) and 1–16 unique declared `bindings`. The host checks the installed app session, grants and context scope before discovery. Each result is `served`, `absent` or `unknown`; discovery errors retain a bounded reason. Unknown never means the Operator is absent. This callback does not fetch report details or install CRDs.

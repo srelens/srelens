@@ -17,7 +17,7 @@ import (
 )
 
 // supportedVersions are the sidecar API versions this SDK speaks, oldest first.
-var supportedVersions = []string{protocol.APIVersion}
+var supportedVersions = []string{"0.1.0", protocol.APIVersion}
 
 // sessionKey is the context key for what initialize told the sidecar.
 type sessionKey struct{}

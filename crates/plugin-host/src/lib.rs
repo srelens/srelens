@@ -587,7 +587,9 @@ impl PluginHost {
             });
         }
         let operation_row = sidecar_operation_annotations(writes);
-        for operation in manifest.sidecar.iter().flat_map(|sidecar| &sidecar.operations) {
+        for operation in manifest.sidecar.iter().flat_map(|sidecar| &sidecar.operations)
+            .filter(|operation| !operation.view.as_ref().is_some_and(|view| view.stream))
+        {
             tools.push(Tool {
                 name: operation.name.clone(),
                 title: operation.title.clone(),

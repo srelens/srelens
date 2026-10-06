@@ -18,6 +18,25 @@
     "confirm": "Run the declared action[ ({action})][ on {resource}][ in cluster {cluster}]?"
   },
   {
+    "id": "extensions.bindingAvailability",
+    "readOnly": true,
+    "destructive": false,
+    "requiresConfirm": false,
+    "sensitive": false,
+    "impact": "low",
+    "confirm": null
+  },
+  {
+    "id": "extensions.callOperation",
+    "readOnly": true,
+    "destructive": false,
+    "requiresConfirm": false,
+    "sensitive": true,
+    "impact": "low",
+    "confirm": null,
+    "uiOnly": true
+  },
+  {
     "id": "extensions.catalog",
     "readOnly": true,
     "destructive": false,
@@ -759,6 +778,15 @@
   },
   {
     "id": "k8s.listStorageClasses",
+    "readOnly": true,
+    "destructive": false,
+    "requiresConfirm": false,
+    "sensitive": false,
+    "impact": "low",
+    "confirm": null
+  },
+  {
+    "id": "k8s.listWorkloadImages",
     "readOnly": true,
     "destructive": false,
     "requiresConfirm": false,

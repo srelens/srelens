@@ -276,3 +276,7 @@ reports the request as accepted rather than as complete.
   `@srelens/core` refuses a set on the web before the value leaves the page.
 - `k8s.getCustomResource` stays available: it is a read under the user's own
   kubeconfig and RBAC, like every other custom-resource read.
+
+## Workload image inventory (API 0.8)
+
+A `k8s.listWorkloadImages` binding fixes `arguments.kind` to `Deployment`, `StatefulSet` or `DaemonSet` and accepts only explicit `context` and optional `namespace`. The reader returns workload UID/resourceVersion and each regular or init container's name, type and image reference. It omits environment variables, credentials and Secret references. Pagination is bounded; exceeding the inventory limit asks the caller to narrow its namespace rather than presenting a partial inventory as complete.

@@ -1070,6 +1070,12 @@ async fn run_suite() {
         .iter()
         .any(|d| d["name"] == DEPLOY));
 
+    let images = h.ok("k8s.listWorkloadImages", json!({"context":ctx,"namespace":NS,"kind":"Deployment"})).await;
+    let workload = images["items"].as_array().unwrap().iter().find(|row| row["name"] == DEPLOY).expect("deployment image identity");
+    assert_eq!(workload["namespace"], NS);
+    assert!(workload["uid"].as_str().is_some_and(|uid| !uid.is_empty()));
+    assert!(workload["containers"].as_array().unwrap().iter().any(|row| row["type"] == "regular" && row["image"].as_str().is_some_and(|image| !image.is_empty())));
+
     let out = h
         .ok(
             "k8s.listStatefulSets",
@@ -3671,6 +3677,9 @@ async fn extensions_and_gitops(h: &mut Harness, ctx: &str, settings: &TempSettin
         )
         .await;
     assert!(item_names(&out).contains(&KUSTOMIZATION), "{out}");
+    let available = h.ok("extensions.bindingAvailability", json!({"id":"org.example.flux","revision":revision(&flux_app),"context":ctx,"namespace":NS,"bindings":["kustomizations"]})).await;
+    assert_eq!(available["bindings"][0]["state"], "served", "{available}");
+    h.err("extensions.callOperation", json!({"id":"org.example.flux","revision":revision(&flux_app),"context":ctx,"operation":"undeclared","params":{}})).await;
     let columns = h
         .ok(
             "extensions.resolveColumns",

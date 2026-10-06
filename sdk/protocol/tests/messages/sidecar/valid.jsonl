@@ -15,3 +15,5 @@
 # A notification from a newer SDK, which srelens ignores
 {"jsonrpc":"2.0","method":"$/progress","params":{"done":3}}
 {"jsonrpc":"2.0","method":"telemetry"}
+# Binding discovery uses an explicit caller context and declared names in protocol 0.2.0.
+{"jsonrpc":"2.0","id":"availability-1","method":"host/bindingAvailability","params":{"context":{"clusterId":"kind-dev","namespace":"team"},"bindings":["vulnerability-reports","sbom-reports"]}}

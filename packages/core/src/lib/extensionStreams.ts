@@ -39,6 +39,7 @@ export interface ExtensionExecConfirmation {
  * {@link ExtensionLogEvent}s `logs` sends.
  */
 export type ExtensionStreamSource =
+  | { kind: "operation"; method: string; params: Record<string, unknown> }
   | { kind: "read"; capability: string; intervalSeconds?: number }
   | { kind: "watch"; capability: string }
   | {
@@ -245,6 +246,8 @@ function defined<T extends Record<string, unknown>>(fields: T): Partial<T> {
  */
 function sourcePayload(asked: ExtensionStreamSource): ExtensionStreamSource {
   switch (asked.kind) {
+    case "operation":
+      return { kind: "operation", method: asked.method, params: { ...asked.params } };
     case "watch":
       return { kind: "watch", capability: asked.capability };
     case "logs":

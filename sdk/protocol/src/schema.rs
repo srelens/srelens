@@ -23,7 +23,7 @@ use schemars::JsonSchema;
 use serde_json::{json, Map, Value};
 
 use crate::messages::{
-    CancelParams, Empty, HostActionParams, HostReadParams, HostResourceParams, InitializeParams,
+    CancelParams, Empty, HostActionParams, HostReadParams, HostResourceParams, HostBindingAvailabilityParams, InitializeParams,
     InitializeResult, StreamCancelParams, StreamCloseParams, StreamDataParams, StreamErrorParams,
     StreamOpenParams,
 };
@@ -88,6 +88,7 @@ static METHOD_SCHEMAS: &[MethodSchema] = &[
     request_types(method::HOST_READ, of::<HostReadParams>, of::<Value>),
     request_types(method::HOST_RESOURCE, of::<HostResourceParams>, of::<Value>),
     request_types(method::HOST_ACTION, of::<HostActionParams>, of::<Value>),
+    request_types(method::HOST_BINDING_AVAILABILITY, of::<HostBindingAvailabilityParams>, of::<Value>),
 ];
 
 /// The newest sidecar API line, `0.1` for 0.1.0.

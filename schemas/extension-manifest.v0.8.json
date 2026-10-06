@@ -49,88 +49,6 @@
       ],
       "type": "object"
     },
-    "AppPolicy": {
-      "description": "What an administrator allows a host's apps to be and do. [`AppPolicy::default`] allows what a host with no policy does, except that `network.http` reaches no host, and no policy lets an app use plain HTTP to loopback.",
-      "properties": {
-        "allowExecutableApps": {
-          "description": "Always `false`. A policy is a shared host's, and executable apps (#574) do not run on one until they have a per-user sidecar identity (#521). The desktop, which has no policy, runs them.",
-          "type": "boolean"
-        },
-        "allowUnsignedApps": {
-          "description": "Whether apps with no publisher signature may be installed and used at all. Each user's own \"Allow unsigned apps to modify clusters\" still applies on top.",
-          "type": "boolean"
-        },
-        "allowWriteActions": {
-          "description": "Whether an app may declare write actions (the host action primitives). Running commands in pods is `k8s.exec`, allowed or not by `allowedCapabilities`.",
-          "type": "boolean"
-        },
-        "allowedApps": {
-          "description": "Only these app IDs may be installed and used; `null` allows any.",
-          "items": {
-            "type": "string"
-          },
-          "type": [
-            "array",
-            "null"
-          ],
-          "uniqueItems": true
-        },
-        "allowedCapabilities": {
-          "description": "The host capabilities an app may be granted; `null` allows every one the host offers apps.",
-          "items": {
-            "type": "string"
-          },
-          "type": [
-            "array",
-            "null"
-          ],
-          "uniqueItems": true
-        },
-        "allowedPublishers": {
-          "description": "Signed apps only from these publishers, each named by its delegation's ID (#559); `null` allows every publisher the host trusts. An unsigned app is governed by `allowUnsignedApps` instead.",
-          "items": {
-            "type": "string"
-          },
-          "type": [
-            "array",
-            "null"
-          ],
-          "uniqueItems": true
-        },
-        "blockedApps": {
-          "description": "These app IDs may not be installed or used, whatever else allows them.",
-          "items": {
-            "type": "string"
-          },
-          "type": "array",
-          "uniqueItems": true
-        },
-        "networkCeiling": {
-          "description": "The most `network.http` may reach, written as an app's hosts are: `name`, `name:port`, `*.example.com` or an IP address. A request goes only to a host both this and the app allow. Empty: `network.http` reaches no host.",
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "requiredApps": {
-          "description": "Apps every user keeps: one they have installed cannot be removed or disabled. The policy never installs an app for anyone.",
-          "items": {
-            "type": "string"
-          },
-          "type": "array",
-          "uniqueItems": true
-        }
-      },
-      "required": [
-        "allowExecutableApps",
-        "allowUnsignedApps",
-        "allowWriteActions",
-        "blockedApps",
-        "networkCeiling",
-        "requiredApps"
-      ],
-      "type": "object"
-    },
     "Badge": {
       "additionalProperties": false,
       "description": "A word on a built-in row. Without a `join`, the rules read the row's own `.metadata`; with one, they read the joined custom resource. The first rule that holds is the badge; when none does there is no badge.",
@@ -235,7 +153,6 @@
         },
         "limit": {
           "description": "How many rows to show, 1–10; by the card's size when absent.",
-          "format": "uint",
           "minimum": 0.0,
           "type": [
             "integer",
@@ -866,47 +783,6 @@
       ],
       "type": "object"
     },
-    "Envelope": {
-      "description": "A signed document: a DSSE envelope.",
-      "properties": {
-        "payload": {
-          "description": "The document's exact bytes, in base64.",
-          "type": "string"
-        },
-        "payloadType": {
-          "type": "string"
-        },
-        "signatures": {
-          "items": {
-            "$ref": "#/definitions/EnvelopeSignature"
-          },
-          "type": "array"
-        }
-      },
-      "required": [
-        "payload",
-        "payloadType",
-        "signatures"
-      ],
-      "type": "object"
-    },
-    "EnvelopeSignature": {
-      "properties": {
-        "keyid": {
-          "default": "",
-          "description": "Which key made it: DSSE's optional, unauthenticated hint. One that names a key narrows the search to that key; one left out, or empty, is tried against each of the role's keys. Either way a signature counts only when a key the role lists verifies it, and each key counts once.",
-          "type": "string"
-        },
-        "sig": {
-          "description": "The Ed25519 signature, in base64.",
-          "type": "string"
-        }
-      },
-      "required": [
-        "sig"
-      ],
-      "type": "object"
-    },
     "InputType": {
       "enum": [
         "string",
@@ -915,122 +791,6 @@
         "boolean"
       ],
       "type": "string"
-    },
-    "Installed": {
-      "additionalProperties": false,
-      "properties": {
-        "allowLoopbackHttp": {
-          "description": "Whether the app's `network.http` requests may use plain HTTP to this computer (loopback), such as a Prometheus behind `kubectl port-forward` (#568). Off until a person turns it on for this app; kept across updates, as `contexts` is.",
-          "type": "boolean"
-        },
-        "contexts": {
-          "description": "The keys of the kubeconfig contexts the app is enabled for (`ResolvedContext::key`: `{file}#{name}` with `#` and `%` encoded in each part, as `k8s.listContexts` reports under `key`); `None` is every cluster. A context's display name is not identity: it changes when another kubeconfig declares the same name (#265). A stable ID is not either: `a` + `b#c` and `a#b` + `c` share one (#623).",
-          "items": {
-            "type": "string"
-          },
-          "type": [
-            "array",
-            "null"
-          ]
-        },
-        "enabled": {
-          "type": "boolean"
-        },
-        "grants": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "history": {
-          "description": "The versions this one replaced, newest first, at most [`KEPT_VERSIONS`].",
-          "items": {
-            "$ref": "#/definitions/PreviousVersion"
-          },
-          "type": "array"
-        },
-        "icon": {
-          "description": "The package's logo as a `data:` URL, as `extensions.list` reports it: read from the package's files and checked against its digest list. Decoration only, never a sign of who published the app. Recomputed for every list, ignored when read from disk and never written there.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "installedAt": {
-          "description": "When this version was installed, in seconds since the Unix epoch.",
-          "format": "uint64",
-          "minimum": 0.0,
-          "type": "integer"
-        },
-        "manifest": {
-          "$ref": "#/definitions/Manifest"
-        },
-        "package": {
-          "description": "The SHA-256 of the digest list of the package this version was unpacked from (#562), which names its directory; absent for a single-file manifest.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "policyBlocked": {
-          "description": "Recomputed policy denial, distinct from a failed publisher verification.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "quarantined": {
-          "description": "Why this host refused to trust the stored entry when loading it. Recomputed on every read, reported to the UI, and never written to disk.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "revision": {
-          "format": "uint64",
-          "minimum": 0.0,
-          "type": "integer"
-        },
-        "settings": {
-          "additionalProperties": true,
-          "type": "object"
-        },
-        "signatureProof": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/SignatureProof"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "signedBy": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/Signer"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "Who signed the installed version, when its proof verified on this read: \"Signed by <name>\". Recomputed on every read, like `quarantined`, and never written to disk."
-        },
-        "source": {
-          "$ref": "#/definitions/Source"
-        }
-      },
-      "required": [
-        "enabled",
-        "grants",
-        "history",
-        "installedAt",
-        "manifest",
-        "revision",
-        "settings",
-        "source"
-      ],
-      "type": "object"
     },
     "Join": {
       "additionalProperties": false,
@@ -1199,85 +959,6 @@
       ],
       "type": "object"
     },
-    "Manifest": {
-      "additionalProperties": false,
-      "properties": {
-        "$schema": {
-          "description": "Editor metadata: the JSON Schema the manifest is written against. The host ignores it; it is the one key allowed that is not part of the contract.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "actions": {
-          "description": "Declared mutations (#549). Absent in a manifest that only reads, and left out of the serialized form when empty so a manifest stored and signed without it still round-trips to its own bytes.",
-          "items": {
-            "$ref": "#/definitions/ActionBinding"
-          },
-          "type": "array"
-        },
-        "capabilities": {
-          "items": {
-            "$ref": "#/definitions/Binding"
-          },
-          "type": "array"
-        },
-        "contributions": {
-          "$ref": "#/definitions/Contributions"
-        },
-        "id": {
-          "type": "string"
-        },
-        "kind": {
-          "$ref": "#/definitions/ManifestKind"
-        },
-        "name": {
-          "type": "string"
-        },
-        "permissions": {
-          "description": "The host capabilities the bindings target, each by id; `network.http` with the hosts it may reach (#568), and a pod capability with the namespaces it grants, if any (#567).",
-          "items": {
-            "$ref": "#/definitions/Permission"
-          },
-          "type": "array"
-        },
-        "settings": {
-          "description": "Typed settings (#542), drawn as a host form and held to these declarations on every save. Left out of the stored form when empty.",
-          "items": {
-            "$ref": "#/definitions/Setting"
-          },
-          "type": "array"
-        },
-        "sidecar": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/Sidecar"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "The sidecar an app of kind `executable` runs, and the operations it answers (#574). Absent from a declarative manifest."
-        },
-        "srelensApiVersion": {
-          "type": "string"
-        },
-        "version": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "capabilities",
-        "contributions",
-        "id",
-        "kind",
-        "name",
-        "permissions",
-        "srelensApiVersion",
-        "version"
-      ],
-      "type": "object"
-    },
     "ManifestKind": {
       "description": "What an app is made of. A declarative app is data the host interprets; an executable one (#574) also runs a sidecar, under the supervisor (#572) in the OS sandbox and never through a permissive fallback.",
       "enum": [
@@ -1406,7 +1087,6 @@
       "properties": {
         "maxLength": {
           "description": "For a string: the most bytes it may hold, 1–65536. Default 1024.",
-          "format": "uint32",
           "minimum": 0.0,
           "type": [
             "integer",
@@ -1581,59 +1261,6 @@
       ],
       "type": "object"
     },
-    "PreviousVersion": {
-      "additionalProperties": false,
-      "description": "A version an update replaced, kept so it can be restored.",
-      "properties": {
-        "grants": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "installedAt": {
-          "format": "uint64",
-          "minimum": 0.0,
-          "type": "integer"
-        },
-        "manifest": {
-          "$ref": "#/definitions/Manifest"
-        },
-        "package": {
-          "description": "The package it was unpacked from, as [`Installed`] names it.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "revision": {
-          "format": "uint64",
-          "minimum": 0.0,
-          "type": "integer"
-        },
-        "signatureProof": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/SignatureProof"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "source": {
-          "$ref": "#/definitions/Source"
-        }
-      },
-      "required": [
-        "grants",
-        "installedAt",
-        "manifest",
-        "revision",
-        "source"
-      ],
-      "type": "object"
-    },
     "ReferenceFormat": {
       "description": "A reference format the host knows how to check against the object that carries it (#541 review).\n\nA condition compares against literals, so it cannot say \"this annotation names the resource it is on\". An ownership claim needs exactly that — a copied annotation must not make a resource look owned — so the host implements the check for each format, exactly as the owning controller does, rather than offering a template language.",
       "oneOf": [
@@ -1704,25 +1331,6 @@
       ],
       "type": "object"
     },
-    "SecretStoreState": {
-      "description": "Whether the host can store a secret now, as `extensions.list` reports it.",
-      "properties": {
-        "available": {
-          "type": "boolean"
-        },
-        "reason": {
-          "description": "Why not, in the host's words, when it cannot.",
-          "type": [
-            "string",
-            "null"
-          ]
-        }
-      },
-      "required": [
-        "available"
-      ],
-      "type": "object"
-    },
     "Setting": {
       "additionalProperties": false,
       "description": "One setting an app declares. The host renders it as a form field and checks every value saved into it.",
@@ -1746,7 +1354,6 @@
         },
         "maxLength": {
           "description": "The most characters a `string` setting takes, 1–4096 (1024 when absent); refused on other types.",
-          "format": "uint32",
           "minimum": 0.0,
           "type": [
             "integer",
@@ -1904,74 +1511,10 @@
       ],
       "type": "object"
     },
-    "SignatureProof": {
-      "additionalProperties": false,
-      "properties": {
-        "delegation": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/Envelope"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "The signed publisher delegation that vouched for the signature (#559), so the app is verified again on every load with no catalog at hand. Absent when this build's shipped delegations vouch for it, as they do for every release signed before #559, which keeps those inventories readable by the hosts that wrote them."
-        },
-        "digests": {
-          "description": "For a package (#562): the exact digest list `signature` covers, which names `manifest` as the package's `extension.json`. Absent for a single-file manifest, whose signature covers `manifest` itself.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "manifest": {
-          "type": "string"
-        },
-        "signature": {
-          "items": {
-            "format": "uint8",
-            "minimum": 0.0,
-            "type": "integer"
-          },
-          "type": "array"
-        }
-      },
-      "required": [
-        "manifest",
-        "signature"
-      ],
-      "type": "object"
-    },
-    "Signer": {
-      "description": "Who signed an app, as the host reports it: \"Signed by <name>\".",
-      "properties": {
-        "id": {
-          "type": "string"
-        },
-        "name": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "id",
-        "name"
-      ],
-      "type": "object"
-    },
-    "Source": {
-      "description": "Where an installed version came from. The host decides: `catalog` means the exact bytes of a release listed in the cached catalog, whoever submitted them.",
-      "enum": [
-        "local",
-        "catalog"
-      ],
-      "type": "string"
-    },
     "StatusColumns": {
       "additionalProperties": false,
       "properties": {
         "progressing": {
-          "format": "uint",
           "minimum": 0.0,
           "type": [
             "integer",
@@ -1979,12 +1522,10 @@
           ]
         },
         "ready": {
-          "format": "uint",
           "minimum": 0.0,
           "type": "integer"
         },
         "suspended": {
-          "format": "uint",
           "minimum": 0.0,
           "type": [
             "integer",
@@ -2138,55 +1679,80 @@
     }
   },
   "properties": {
-    "allowUnsignedApps": {
-      "default": false,
-      "type": "boolean"
+    "$schema": {
+      "description": "Editor metadata: the JSON Schema the manifest is written against. The host ignores it; it is the one key allowed that is not part of the contract.",
+      "type": [
+        "string",
+        "null"
+      ]
     },
-    "nextRevision": {
-      "format": "uint64",
-      "minimum": 0.0,
-      "type": "integer"
-    },
-    "plugins": {
+    "actions": {
+      "description": "Declared mutations (#549). Absent in a manifest that only reads, and left out of the serialized form when empty so a manifest stored and signed without it still round-trips to its own bytes.",
       "items": {
-        "$ref": "#/definitions/Installed"
+        "$ref": "#/definitions/ActionBinding"
       },
       "type": "array"
     },
-    "policy": {
+    "capabilities": {
+      "items": {
+        "$ref": "#/definitions/Binding"
+      },
+      "type": "array"
+    },
+    "contributions": {
+      "$ref": "#/definitions/Contributions"
+    },
+    "id": {
+      "type": "string"
+    },
+    "kind": {
+      "$ref": "#/definitions/ManifestKind"
+    },
+    "name": {
+      "type": "string"
+    },
+    "permissions": {
+      "description": "The host capabilities the bindings target, each by id; `network.http` with the hosts it may reach (#568), and a pod capability with the namespaces it grants, if any (#567).",
+      "items": {
+        "$ref": "#/definitions/Permission"
+      },
+      "type": "array"
+    },
+    "settings": {
+      "description": "Typed settings (#542), drawn as a host form and held to these declarations on every save. Left out of the stored form when empty.",
+      "items": {
+        "$ref": "#/definitions/Setting"
+      },
+      "type": "array"
+    },
+    "sidecar": {
       "anyOf": [
         {
-          "$ref": "#/definitions/AppPolicy"
+          "$ref": "#/definitions/Sidecar"
         },
         {
           "type": "null"
         }
       ],
-      "description": "The administrator's policy this inventory is held to (#578), on a host that has one. Reported by every read, never read from disk and never written there.",
-      "readOnly": true
+      "description": "The sidecar an app of kind `executable` runs, and the operations it answers (#574). Absent from a declarative manifest."
     },
-    "schemaVersion": {
-      "format": "uint32",
-      "minimum": 0.0,
-      "type": "integer"
+    "srelensApiVersion": {
+      "type": "string"
     },
-    "secretStore": {
-      "anyOf": [
-        {
-          "$ref": "#/definitions/SecretStoreState"
-        },
-        {
-          "type": "null"
-        }
-      ],
-      "description": "Whether the host can store an app's secret now (#543), as `extensions.list` reports it. Recomputed for every answer, ignored when read from disk and never written there."
+    "version": {
+      "type": "string"
     }
   },
   "required": [
-    "nextRevision",
-    "plugins",
-    "schemaVersion"
+    "capabilities",
+    "contributions",
+    "id",
+    "kind",
+    "name",
+    "permissions",
+    "srelensApiVersion",
+    "version"
   ],
-  "title": "Inventory",
+  "title": "Manifest",
   "type": "object"
 }

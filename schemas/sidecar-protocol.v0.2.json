@@ -1,0 +1,1127 @@
+{
+  "$id": "https://raw.githubusercontent.com/srelens/srelens/main/schemas/sidecar-protocol.v0.2.json",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "anyOf": [
+    {
+      "$ref": "#/definitions/HostMessage"
+    },
+    {
+      "$ref": "#/definitions/SidecarMessage"
+    }
+  ],
+  "definitions": {
+    "CallContext": {
+      "additionalProperties": false,
+      "description": "The cluster and namespace one call names. Every call from a sidecar carries one: srelens has no current cluster to assume.",
+      "properties": {
+        "clusterId": {
+          "description": "A cluster as srelens names it: the `context` of the request the sidecar is serving, a kubeconfig context's stable ID, pinned ID or name. At most 4096 bytes as UTF-8, and not blank.",
+          "maxLength": 4096,
+          "minLength": 1,
+          "pattern": "[^\t\n\u000b\f\r \u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]",
+          "type": "string"
+        },
+        "namespace": {
+          "description": "A namespace, or null for every namespace or a cluster-scoped kind. Required, though it may be null: \"no namespace\" is said, not assumed.",
+          "maxLength": 63,
+          "pattern": "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "clusterId",
+        "namespace"
+      ],
+      "type": "object"
+    },
+    "CancelParams": {
+      "description": "`$/cancelRequest`'s params: stop working on request `id`.",
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "Empty": {
+      "description": "The params and result of `activate`, `health`, `deactivate` and `shutdown`: `{}`.",
+      "type": "object"
+    },
+    "HostActionParams": {
+      "additionalProperties": false,
+      "description": "`host/action`'s params: run one of the app's declared actions on object `name`, as read (`uid`, `resourceVersion`), once a person has confirmed it.",
+      "properties": {
+        "action": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9-]{1,64}$",
+          "type": "string"
+        },
+        "capability": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9-]{1,64}$",
+          "type": "string"
+        },
+        "context": {
+          "$ref": "#/definitions/CallContext"
+        },
+        "name": {
+          "maxLength": 253,
+          "minLength": 1,
+          "not": {
+            "enum": [
+              ".",
+              ".."
+            ]
+          },
+          "pattern": "^[A-Za-z0-9.-]{1,253}$",
+          "type": "string"
+        },
+        "resourceVersion": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[!-~]{1,128}$",
+          "type": "string"
+        },
+        "uid": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[!-~]{1,128}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "action",
+        "capability",
+        "context",
+        "name",
+        "resourceVersion",
+        "uid"
+      ],
+      "type": "object"
+    },
+    "HostBindingAvailabilityParams": {
+      "additionalProperties": false,
+      "description": "Discover only the resource bindings declared and granted to this app (API 0.2).",
+      "properties": {
+        "bindings": {
+          "items": {
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9-]{1,64}$",
+            "type": "string"
+          },
+          "maxItems": 16,
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "context": {
+          "$ref": "#/definitions/CallContext"
+        }
+      },
+      "required": [
+        "bindings",
+        "context"
+      ],
+      "type": "object"
+    },
+    "HostMessage": {
+      "description": "One line srelens writes to a sidecar's stdin.",
+      "oneOf": [
+        {
+          "properties": {
+            "id": {
+              "minimum": 1,
+              "type": "integer"
+            },
+            "jsonrpc": {
+              "const": "2.0"
+            },
+            "method": {
+              "const": "initialize"
+            },
+            "params": {
+              "$ref": "#/definitions/InitializeParams"
+            }
+          },
+          "required": [
+            "jsonrpc",
+            "id",
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "minimum": 1,
+              "type": "integer"
+            },
+            "jsonrpc": {
+              "const": "2.0"
+            },
+            "method": {
+              "const": "activate"
+            },
+            "params": {
+              "$ref": "#/definitions/Empty"
+            }
+          },
+          "required": [
+            "jsonrpc",
+            "id",
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "minimum": 1,
+              "type": "integer"
+            },
+            "jsonrpc": {
+              "const": "2.0"
+            },
+            "method": {
+              "const": "health"
+            },
+            "params": {
+              "$ref": "#/definitions/Empty"
+            }
+          },
+          "required": [
+            "jsonrpc",
+            "id",
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "minimum": 1,
+              "type": "integer"
+            },
+            "jsonrpc": {
+              "const": "2.0"
+            },
+            "method": {
+              "const": "deactivate"
+            },
+            "params": {
+              "$ref": "#/definitions/Empty"
+            }
+          },
+          "required": [
+            "jsonrpc",
+            "id",
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "minimum": 1,
+              "type": "integer"
+            },
+            "jsonrpc": {
+              "const": "2.0"
+            },
+            "method": {
+              "const": "shutdown"
+            },
+            "params": {
+              "$ref": "#/definitions/Empty"
+            }
+          },
+          "required": [
+            "jsonrpc",
+            "id",
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "minimum": 1,
+              "type": "integer"
+            },
+            "jsonrpc": {
+              "const": "2.0"
+            },
+            "method": {
+              "const": "stream/open"
+            },
+            "params": {
+              "$ref": "#/definitions/StreamOpenParams"
+            }
+          },
+          "required": [
+            "jsonrpc",
+            "id",
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "not": {
+            "required": [
+              "id"
+            ]
+          },
+          "properties": {
+            "jsonrpc": {
+              "const": "2.0"
+            },
+            "method": {
+              "const": "$/cancelRequest"
+            },
+            "params": {
+              "$ref": "#/definitions/CancelParams"
+            }
+          },
+          "required": [
+            "jsonrpc",
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "not": {
+            "required": [
+              "id"
+            ]
+          },
+          "properties": {
+            "jsonrpc": {
+              "const": "2.0"
+            },
+            "method": {
+              "const": "stream/cancel"
+            },
+            "params": {
+              "$ref": "#/definitions/StreamCancelParams"
+            }
+          },
+          "required": [
+            "jsonrpc",
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "minimum": 1,
+              "type": "integer"
+            },
+            "jsonrpc": {
+              "const": "2.0"
+            },
+            "method": {
+              "not": {
+                "enum": [
+                  "initialize",
+                  "activate",
+                  "health",
+                  "deactivate",
+                  "shutdown",
+                  "stream/open",
+                  "$/cancelRequest",
+                  "stream/cancel",
+                  "stream/data",
+                  "stream/close",
+                  "stream/error",
+                  "host/read",
+                  "host/resource",
+                  "host/action",
+                  "host/bindingAvailability"
+                ]
+              },
+              "pattern": "^[A-Za-z0-9-]{1,64}$",
+              "type": "string"
+            },
+            "params": {
+              "type": "object"
+            }
+          },
+          "required": [
+            "jsonrpc",
+            "id",
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "not": {
+            "required": [
+              "method"
+            ]
+          },
+          "oneOf": [
+            {
+              "required": [
+                "result"
+              ]
+            },
+            {
+              "required": [
+                "error"
+              ]
+            }
+          ],
+          "properties": {
+            "error": {
+              "$ref": "#/definitions/RpcError"
+            },
+            "id": {
+              "$ref": "#/definitions/RequestId"
+            },
+            "jsonrpc": {
+              "const": "2.0"
+            }
+          },
+          "required": [
+            "jsonrpc",
+            "id"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "HostReadParams": {
+      "additionalProperties": false,
+      "description": "`host/read`'s params: read one of the app's declared readers, or one of its `network.http` requests.",
+      "properties": {
+        "capability": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9-]{1,64}$",
+          "type": "string"
+        },
+        "context": {
+          "$ref": "#/definitions/CallContext"
+        }
+      },
+      "required": [
+        "capability",
+        "context"
+      ],
+      "type": "object"
+    },
+    "HostResourceParams": {
+      "additionalProperties": false,
+      "description": "`host/resource`'s params: inspect object `name` of a declared custom-resource reader.",
+      "properties": {
+        "capability": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9-]{1,64}$",
+          "type": "string"
+        },
+        "context": {
+          "$ref": "#/definitions/CallContext"
+        },
+        "name": {
+          "maxLength": 253,
+          "minLength": 1,
+          "not": {
+            "enum": [
+              ".",
+              ".."
+            ]
+          },
+          "pattern": "^[A-Za-z0-9.-]{1,253}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "capability",
+        "context",
+        "name"
+      ],
+      "type": "object"
+    },
+    "InitializeLimits": {
+      "description": "The limits a sidecar runs under, so an SDK can hold itself to them.",
+      "properties": {
+        "cpus": {
+          "description": "The CPU limit the sandbox enforces, in CPUs.",
+          "type": "number"
+        },
+        "dataBytes": {
+          "description": "The data directory's size limit, in bytes.",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "dataEntries": {
+          "description": "The data directory's limit on files, directories and links.",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "maxConcurrentRequests": {
+          "description": "Requests srelens has in flight at once; the next is refused, not queued.",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "maxStreams": {
+          "description": "Streams open at once.",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "memoryBytes": {
+          "description": "The memory limit the sandbox enforces, in bytes.",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "requestTimeoutMs": {
+          "description": "How long srelens waits for the answer to one request, in milliseconds.",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "cpus",
+        "dataBytes",
+        "dataEntries",
+        "maxConcurrentRequests",
+        "maxStreams",
+        "memoryBytes",
+        "requestTimeoutMs"
+      ],
+      "type": "object"
+    },
+    "InitializeParams": {
+      "description": "`initialize`'s params: every sidecar API version srelens speaks, the limits in force, and the one directory the sidecar may write.",
+      "properties": {
+        "apiVersions": {
+          "description": "Every sidecar API version srelens speaks, oldest first.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "dataDirectory": {
+          "description": "The data directory: the one path the sidecar may write, and its working directory.",
+          "type": "string"
+        },
+        "host": {
+          "$ref": "#/definitions/Peer"
+        },
+        "limits": {
+          "$ref": "#/definitions/InitializeLimits"
+        }
+      },
+      "required": [
+        "apiVersions",
+        "dataDirectory",
+        "host",
+        "limits"
+      ],
+      "type": "object"
+    },
+    "InitializeResult": {
+      "description": "A sidecar's answer to `initialize`.",
+      "properties": {
+        "apiVersion": {
+          "description": "The version it chose, one of those offered.",
+          "type": "string"
+        },
+        "sidecar": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Peer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "apiVersion"
+      ],
+      "type": "object"
+    },
+    "Peer": {
+      "description": "One end of the conversation: srelens, or the sidecar.",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "version"
+      ],
+      "type": "object"
+    },
+    "RequestId": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "maxLength": 256,
+          "type": "string"
+        }
+      ],
+      "description": "A request's id: a number, or a string of at most 256 bytes as UTF-8. srelens numbers its own requests from 1; `1` and `\"1\"` are different ids."
+    },
+    "RpcError": {
+      "description": "A JSON-RPC error object.",
+      "properties": {
+        "code": {
+          "type": "integer"
+        },
+        "data": true,
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "type": "object"
+    },
+    "SidecarMessage": {
+      "description": "One line a sidecar writes to its stdout.",
+      "oneOf": [
+        {
+          "not": {
+            "required": [
+              "id"
+            ]
+          },
+          "properties": {
+            "jsonrpc": {
+              "const": "2.0"
+            },
+            "method": {
+              "const": "$/cancelRequest"
+            },
+            "params": {
+              "$ref": "#/definitions/CancelParams"
+            }
+          },
+          "required": [
+            "jsonrpc",
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "not": {
+            "required": [
+              "id"
+            ]
+          },
+          "properties": {
+            "jsonrpc": {
+              "const": "2.0"
+            },
+            "method": {
+              "const": "stream/data"
+            },
+            "params": {
+              "$ref": "#/definitions/StreamDataParams"
+            }
+          },
+          "required": [
+            "jsonrpc",
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "not": {
+            "required": [
+              "id"
+            ]
+          },
+          "properties": {
+            "jsonrpc": {
+              "const": "2.0"
+            },
+            "method": {
+              "const": "stream/close"
+            },
+            "params": {
+              "$ref": "#/definitions/StreamCloseParams"
+            }
+          },
+          "required": [
+            "jsonrpc",
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "not": {
+            "required": [
+              "id"
+            ]
+          },
+          "properties": {
+            "jsonrpc": {
+              "const": "2.0"
+            },
+            "method": {
+              "const": "stream/error"
+            },
+            "params": {
+              "$ref": "#/definitions/StreamErrorParams"
+            }
+          },
+          "required": [
+            "jsonrpc",
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/RequestId"
+            },
+            "jsonrpc": {
+              "const": "2.0"
+            },
+            "method": {
+              "const": "host/read"
+            },
+            "params": {
+              "$ref": "#/definitions/HostReadParams"
+            }
+          },
+          "required": [
+            "jsonrpc",
+            "id",
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/RequestId"
+            },
+            "jsonrpc": {
+              "const": "2.0"
+            },
+            "method": {
+              "const": "host/resource"
+            },
+            "params": {
+              "$ref": "#/definitions/HostResourceParams"
+            }
+          },
+          "required": [
+            "jsonrpc",
+            "id",
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/RequestId"
+            },
+            "jsonrpc": {
+              "const": "2.0"
+            },
+            "method": {
+              "const": "host/action"
+            },
+            "params": {
+              "$ref": "#/definitions/HostActionParams"
+            }
+          },
+          "required": [
+            "jsonrpc",
+            "id",
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/RequestId"
+            },
+            "jsonrpc": {
+              "const": "2.0"
+            },
+            "method": {
+              "const": "host/bindingAvailability"
+            },
+            "params": {
+              "$ref": "#/definitions/HostBindingAvailabilityParams"
+            }
+          },
+          "required": [
+            "jsonrpc",
+            "id",
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "not": {
+            "required": [
+              "id"
+            ]
+          },
+          "properties": {
+            "jsonrpc": {
+              "const": "2.0"
+            },
+            "method": {
+              "not": {
+                "enum": [
+                  "initialize",
+                  "activate",
+                  "health",
+                  "deactivate",
+                  "shutdown",
+                  "stream/open",
+                  "$/cancelRequest",
+                  "stream/cancel",
+                  "stream/data",
+                  "stream/close",
+                  "stream/error",
+                  "host/read",
+                  "host/resource",
+                  "host/action",
+                  "host/bindingAvailability"
+                ]
+              },
+              "type": "string"
+            },
+            "params": {
+              "type": [
+                "object",
+                "array"
+              ]
+            }
+          },
+          "required": [
+            "jsonrpc",
+            "method"
+          ],
+          "type": "object"
+        },
+        {
+          "not": {
+            "required": [
+              "method"
+            ]
+          },
+          "oneOf": [
+            {
+              "required": [
+                "result"
+              ]
+            },
+            {
+              "required": [
+                "error"
+              ]
+            }
+          ],
+          "properties": {
+            "error": {
+              "$ref": "#/definitions/RpcError"
+            },
+            "id": {
+              "minimum": 1,
+              "type": "integer"
+            },
+            "jsonrpc": {
+              "const": "2.0"
+            }
+          },
+          "required": [
+            "jsonrpc",
+            "id"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "StreamCancelParams": {
+      "description": "`stream/cancel`'s params: stop sending stream `stream`.",
+      "properties": {
+        "stream": {
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "stream"
+      ],
+      "type": "object"
+    },
+    "StreamCloseParams": {
+      "description": "`stream/close`'s params: stream `stream` ended.",
+      "properties": {
+        "stream": {
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "stream"
+      ],
+      "type": "object"
+    },
+    "StreamDataParams": {
+      "description": "`stream/data`'s params: one frame of stream `stream`.",
+      "properties": {
+        "data": true,
+        "stream": {
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "data",
+        "stream"
+      ],
+      "type": "object"
+    },
+    "StreamErrorParams": {
+      "description": "`stream/error`'s params: stream `stream` failed.",
+      "properties": {
+        "message": {
+          "type": "string"
+        },
+        "stream": {
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "message",
+        "stream"
+      ],
+      "type": "object"
+    },
+    "StreamOpenParams": {
+      "description": "`stream/open`'s params: open stream `stream`, streaming `method`.",
+      "properties": {
+        "method": {
+          "type": "string"
+        },
+        "params": true,
+        "stream": {
+          "description": "The id srelens chose; every frame of the stream carries it.",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "method",
+        "params",
+        "stream"
+      ],
+      "type": "object"
+    },
+    "UnsupportedApiVersion": {
+      "description": "The `data` of error -32001, the answer to `initialize` from a sidecar that speaks none of the offered versions.",
+      "properties": {
+        "supported": {
+          "description": "The versions it does speak.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "supported"
+      ],
+      "type": "object"
+    }
+  },
+  "description": "JSON-RPC 2.0 between srelens and an executable extension's sidecar, one message per line on its stdin and stdout. The prose is docs/extensions/sidecar-protocol.md.",
+  "title": "srelens sidecar protocol",
+  "x-srelens-apiVersion": "0.2.0",
+  "x-srelens-errorCodes": {
+    "capabilityFailed": -32003,
+    "consentDenied": -32002,
+    "internalError": -32603,
+    "invalidParams": -32602,
+    "invalidRequest": -32600,
+    "methodNotFound": -32601,
+    "parseError": -32700,
+    "requestCancelled": -32800,
+    "unsupportedApiVersion": -32001
+  },
+  "x-srelens-errorData": {
+    "unsupportedApiVersion": {
+      "$ref": "#/definitions/UnsupportedApiVersion"
+    }
+  },
+  "x-srelens-maxMessageBytes": 4194304,
+  "x-srelens-methods": {
+    "$/cancelRequest": {
+      "direction": "both",
+      "kind": "notification",
+      "params": {
+        "$ref": "#/definitions/CancelParams"
+      }
+    },
+    "activate": {
+      "direction": "hostToSidecar",
+      "kind": "request",
+      "params": {
+        "$ref": "#/definitions/Empty"
+      },
+      "result": {
+        "$ref": "#/definitions/Empty"
+      }
+    },
+    "deactivate": {
+      "direction": "hostToSidecar",
+      "kind": "request",
+      "params": {
+        "$ref": "#/definitions/Empty"
+      },
+      "result": {
+        "$ref": "#/definitions/Empty"
+      }
+    },
+    "health": {
+      "direction": "hostToSidecar",
+      "kind": "request",
+      "params": {
+        "$ref": "#/definitions/Empty"
+      },
+      "result": {
+        "$ref": "#/definitions/Empty"
+      }
+    },
+    "host/action": {
+      "direction": "sidecarToHost",
+      "kind": "request",
+      "params": {
+        "$ref": "#/definitions/HostActionParams"
+      },
+      "result": true
+    },
+    "host/bindingAvailability": {
+      "direction": "sidecarToHost",
+      "kind": "request",
+      "params": {
+        "$ref": "#/definitions/HostBindingAvailabilityParams"
+      },
+      "result": true
+    },
+    "host/read": {
+      "direction": "sidecarToHost",
+      "kind": "request",
+      "params": {
+        "$ref": "#/definitions/HostReadParams"
+      },
+      "result": true
+    },
+    "host/resource": {
+      "direction": "sidecarToHost",
+      "kind": "request",
+      "params": {
+        "$ref": "#/definitions/HostResourceParams"
+      },
+      "result": true
+    },
+    "initialize": {
+      "direction": "hostToSidecar",
+      "kind": "request",
+      "params": {
+        "$ref": "#/definitions/InitializeParams"
+      },
+      "result": {
+        "$ref": "#/definitions/InitializeResult"
+      }
+    },
+    "shutdown": {
+      "direction": "hostToSidecar",
+      "kind": "request",
+      "params": {
+        "$ref": "#/definitions/Empty"
+      },
+      "result": {
+        "$ref": "#/definitions/Empty"
+      }
+    },
+    "stream/cancel": {
+      "direction": "hostToSidecar",
+      "kind": "notification",
+      "params": {
+        "$ref": "#/definitions/StreamCancelParams"
+      }
+    },
+    "stream/close": {
+      "direction": "sidecarToHost",
+      "kind": "notification",
+      "params": {
+        "$ref": "#/definitions/StreamCloseParams"
+      }
+    },
+    "stream/data": {
+      "direction": "sidecarToHost",
+      "kind": "notification",
+      "params": {
+        "$ref": "#/definitions/StreamDataParams"
+      }
+    },
+    "stream/error": {
+      "direction": "sidecarToHost",
+      "kind": "notification",
+      "params": {
+        "$ref": "#/definitions/StreamErrorParams"
+      }
+    },
+    "stream/open": {
+      "direction": "hostToSidecar",
+      "kind": "request",
+      "params": {
+        "$ref": "#/definitions/StreamOpenParams"
+      },
+      "result": true
+    }
+  }
+}

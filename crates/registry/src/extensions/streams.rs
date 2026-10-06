@@ -20,6 +20,7 @@
 
 mod pods;
 mod providers;
+mod operations;
 pub(super) use pods::MAX_LINE_BYTES;
 pub use pods::{ExecConfirmed, PodTiming};
 #[cfg(test)]
@@ -79,6 +80,8 @@ pub struct OpenStreamIn {
 #[derive(Debug, PartialEq, Eq, Deserialize)]
 #[serde(tag = "kind", deny_unknown_fields)]
 pub enum StreamSourceIn {
+    #[serde(rename = "operation")]
+    Operation { method: String, params: serde_json::Map<String, Value> },
     /// Re-run a declared reader every `intervalSeconds` (5–300, default 15).
     #[serde(rename = "read")]
     Read {
@@ -381,6 +384,7 @@ impl ExtensionStreams {
             ));
         }
         let (capability, interval_seconds) = match &input.source {
+            StreamSourceIn::Operation { .. } => return self.open_operation(sink, window, input).await,
             StreamSourceIn::Read {
                 capability,
                 interval_seconds,
@@ -1112,6 +1116,35 @@ mod tests {
             "context": "cluster/a", "namespace": "team",
             "source": {"kind": "read", "capability": "applications"},
         })
+    }
+
+    #[tokio::test]
+    async fn operation_streams_check_declared_method_inputs_and_pin_before_launch() {
+        use super::super::executable_tests::{install_scanner, install_package, package_with_binaries, scanner_manifest, SCANNER};
+        use super::super::sidecars::fake::FakeSidecar;
+        let dir = tempfile::tempdir().unwrap();
+        let (path, _, streams) = setup(dir.path());
+        install_scanner(&path);
+        let mut source = scanner_manifest();
+        source["srelensApiVersion"] = json!("^0.8");
+        source["sidecar"]["operations"][0]["view"] = json!({"stream":true});
+        let installed = install_package(&path, &package_with_binaries(&source)).unwrap();
+        let revision = installed.plugins.iter().find(|p| p.manifest.id == SCANNER).unwrap().revision;
+        let fake = FakeSidecar::default();
+        streams.app_tools().script_sidecars(Arc::new(fake.clone()));
+        let sink = Arc::new(TestSink::default());
+        let mut input = request(SCANNER, revision, "scan-view", "extstream:scan");
+        input["namespace"] = json!("");
+        input["source"] = json!({"kind":"operation","method":"scan","params":{"image":"alpine:3.9"}});
+        for changed in [json!({"method":"status","params":{}}),json!({"method":"scan","params":{"image":"alpine","unknown":true}}),json!({"method":"scan","params":{"image":"alpine","clusterId":"other"}})] {
+            let mut invalid = input.clone(); invalid["source"].as_object_mut().unwrap().extend(changed.as_object().unwrap().clone());
+            assert!(streams.open(sink.clone(), invalid).await.is_err());
+        }
+        assert_eq!(fake.launches(), 0);
+        let opened = streams.open(sink.clone(), input).await.expect("operation stream");
+        eventually("operation data", || types(&sink, "extstream:scan").contains(&"data".into())).await;
+        assert!(streams.cancel(&opened.stream));
+        assert_eq!(types(&sink, "extstream:scan").last().map(String::as_str), Some("close"));
     }
 
     async fn eventually(what: &str, check: impl Fn() -> bool) {

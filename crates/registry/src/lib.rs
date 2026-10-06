@@ -482,6 +482,7 @@ fn build_with(
         cache.clone(),
     ));
     reg.register(srelens_kube::workloads::list_pods_capability(cache.clone()));
+    reg.register(srelens_kube::workload_images::list_workload_images_capability(cache.clone()));
     reg.register(srelens_kube::workloads::pods_for_selector_capability(
         cache.clone(),
     ));
@@ -928,7 +929,8 @@ mod tests {
     /// reads them, and nothing sends them anywhere. The one path out of the
     /// registry to someone else is MCP, whose agent hands its context to an
     /// LLM provider; so they are not tools. Exactly these two are UI-only: a
-    /// third is a decision to make here, not a way around the rule above.
+    /// executable invocation also stays UI-only: MCP uses its existing per-app
+    /// operation tools, with their declared schemas and consent annotations.
     #[tokio::test]
     async fn app_logs_and_metrics_never_leave_through_mcp_or_the_audit_trail() {
         let reg = build_registry();
@@ -937,7 +939,7 @@ mod tests {
             .filter(|capability| capability.ui_only)
             .map(|capability| capability.id.as_str())
             .collect();
-        assert_eq!(ui_only, ["extensions.inspect", "extensions.logs"]);
+        assert_eq!(ui_only, ["extensions.callOperation", "extensions.inspect", "extensions.logs"]);
         for id in &ui_only {
             assert!(reg.get(id).unwrap().annotations.read_only, "{id}");
         }
@@ -968,7 +970,7 @@ mod tests {
             }
         }
         let spy = Spy::default();
-        for id in &ui_only {
+        for id in ["extensions.inspect", "extensions.logs"] {
             let _ = reg
                 .invoke_audited(
                     id,

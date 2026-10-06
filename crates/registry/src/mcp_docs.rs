@@ -424,6 +424,7 @@ const APP_READER_TARGETS: &[&str] = &[
     "k8s.listDeployments",
     "k8s.listStatefulSets",
     "k8s.listDaemonSets",
+    "k8s.listWorkloadImages",
     "k8s.listNodes",
     srelens_plugin_host::NETWORK_HTTP,
 ];
@@ -436,7 +437,8 @@ pub fn render_app_tools(reg: &srelens_capability::Registry) -> String {
     out.push_str(
         "Every installed app that is on adds its operations as tools named \
          `plugin/<app id>/<operation>`: each reader binding, each declared action and, \
-         for an executable app, each operation its sidecar answers. A pod binding (logs, \
+         for an executable app, each ordinary operation its sidecar answers. Streaming \
+         operations use owned native streams and are not ordinary request tools. A pod binding (logs, \
          exec, a port-forward) is a session an app's view opens, not a tool. Which tools \
          there are depends on what is installed, so `tools/list` is the list: a server \
          with app tools advertises `tools.listChanged`, and sends \
@@ -1162,6 +1164,7 @@ mod tests {
                 "k8s.listCustomResource" => serde_json::json!({"group":"argoproj.io",
                     "version":"v1alpha1","plural":"applications","kind":"Application","namespaced":true}),
                 "network.http" => serde_json::json!({"url":"https://api.github.com","path":"/"}),
+                "k8s.listWorkloadImages" => serde_json::json!({"kind":"Deployment"}),
                 _ => serde_json::json!({}),
             };
             let inputs: Vec<&str> = match target {
@@ -1169,8 +1172,9 @@ mod tests {
                 "k8s.listNodes" => vec!["context"],
                 _ => vec!["context", "namespace"],
             };
+            let api = if target == "k8s.listWorkloadImages" { "^0.8" } else { "^0.5" };
             let manifest = serde_json::json!({
-                "id":"org.example.reader","name":"Reader","version":"0.1.0","srelensApiVersion":"^0.5",
+                "id":"org.example.reader","name":"Reader","version":"0.1.0","srelensApiVersion":api,
                 "kind":"declarative","permissions":[permission],
                 "capabilities":[{"name":"read","title":"Read","target":target,
                     "arguments":arguments,"inputs":inputs}],

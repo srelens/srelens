@@ -64,6 +64,42 @@ func TestEachHostCallNamesItsContextAndGetsTheHostsAnswer(t *testing.T) {
 	}
 }
 
+func TestBindingAvailabilityNeedsNewProtocolAndPreservesPinnedContext(t *testing.T) {
+	for _, version := range []string{"0.1.0", "0.2.0"} {
+		t.Run(version, func(t *testing.T) {
+			s := sidecar.New("t", "1")
+			sidecar.Operation(s, "availability", func(ctx context.Context, _ struct{}) (json.RawMessage, error) {
+				return sidecar.HostFrom(ctx).BindingAvailability(ctx, prod(t), []string{"vulnerability-reports", "sbom-reports"})
+			})
+			h := start(t, s)
+			init := h.request("initialize", initializeParams([]string{version}, h.DataDir, defaultLimits()))
+			if h.answer(init)["error"] != nil {
+				t.Fatal("protocol not supported")
+			}
+			h.answer(h.request("activate", map[string]any{}))
+			id := h.request("availability", map[string]any{})
+			if version == "0.1.0" {
+				if h.answer(id)["error"] == nil {
+					t.Fatal("old host accepted new callback")
+				}
+			} else {
+				call := h.call()
+				want := map[string]any{"context": map[string]any{"clusterId": "kind-dev", "namespace": "team"}, "bindings": []any{"vulnerability-reports", "sbom-reports"}}
+				if call["method"] != "host/bindingAvailability" || !reflect.DeepEqual(call["params"], want) {
+					t.Fatalf("wrong discovery call: %v", call)
+				}
+				h.reply(call["id"], map[string]any{"bindings": []any{map[string]any{"binding": "vulnerability-reports", "state": "absent"}}}, nil)
+				if h.answer(id)["error"] != nil {
+					t.Fatal("discovery response failed")
+				}
+			}
+			if err := h.finish(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 func TestTheHostsRefusalsBecomeErrorsByCode(t *testing.T) {
 	s := sidecar.New("t", "1")
 	var mu sync.Mutex

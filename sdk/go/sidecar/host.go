@@ -124,6 +124,24 @@ func (h *Host) Read(ctx context.Context, cc CallContext, capability string) (jso
 	return h.call(ctx, protocol.MethodHostRead, protocol.HostReadParams{Context: cc, Capability: capability})
 }
 
+// BindingAvailability discovers only the app's declared resource readers.
+// An older protocol is incompatible, never evidence that the Operator is absent.
+func (h *Host) BindingAvailability(ctx context.Context, cc CallContext, bindings []string) (json.RawMessage, error) {
+	if h.absent {
+		return nil, ErrNoSession
+	}
+	if APIVersion(ctx) != "0.2.0" {
+		return nil, fmt.Errorf("%w: binding discovery requires sidecar API 0.2.0", ErrInvalidCall)
+	}
+	if err := check(cc); err != nil {
+		return nil, err
+	}
+	if !protocol.IsBindingNames(bindings) {
+		return nil, fmt.Errorf("%w: choose 1–16 unique declared bindings", ErrInvalidCall)
+	}
+	return h.call(ctx, protocol.MethodHostBindingAvailability, protocol.HostBindingAvailabilityParams{Context: cc, Bindings: bindings})
+}
+
 // Resource inspects object name of a declared custom-resource reader.
 func (h *Host) Resource(ctx context.Context, cc CallContext, capability, name string) (json.RawMessage, error) {
 	if err := check(cc,

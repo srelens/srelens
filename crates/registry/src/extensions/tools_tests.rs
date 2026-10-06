@@ -384,6 +384,87 @@ async fn a_policy_blocked_app_offers_no_tools() {
 #[derive(Default)]
 struct Spy(Mutex<Vec<srelens_mcp::audit::AuditRecord>>);
 
+#[tokio::test]
+async fn native_operations_check_revision_inputs_and_scope_before_running() {
+    let setup = setup(fake_core());
+    let fake = FakeSidecar::default();
+    setup.tools.script_sidecars(Arc::new(fake));
+    let revision = install_scanner(&setup.path);
+    let input = json!({"id":SCANNER,"revision":revision,"context":"demo","operation":"scan","params":{"image":"alpine:3.9"}});
+    let cap = setup.registry.get("extensions.callOperation").expect("native operation capability");
+    let answer = (cap.handler)(input.clone()).await.unwrap();
+    assert_eq!(answer["params"], json!({"image":"alpine:3.9"}));
+    for refused in [
+        json!({"revision":revision + 1}),
+        json!({"operation":"undeclared"}),
+        json!({"params":{"image":"a".repeat(513)}}),
+        json!({"params":{"image":"alpine","unknown":true}}),
+        json!({"params":{"image":"alpine","clusterId":"other"}}),
+        json!({"context":""}),
+    ] {
+        let mut request = input.clone();
+        request.as_object_mut().unwrap().extend(refused.as_object().unwrap().clone());
+        assert!((cap.handler)(request.clone()).await.is_err(), "accepted {request}");
+    }
+    configure(&setup.path, json!({"action":"enable","id":SCANNER,"enabled":false})).unwrap();
+    assert!((cap.handler)(input).await.is_err());
+}
+
+#[tokio::test]
+async fn streaming_operations_are_native_streams_not_broken_request_tools() {
+    let setup = setup(fake_core());
+    install_scanner(&setup.path);
+    let mut manifest = super::executable_tests::scanner_manifest();
+    manifest["srelensApiVersion"] = json!("^0.8");
+    manifest["sidecar"]["operations"][0]["view"] = json!({"stream":true});
+    install_package(&setup.path, &package_with_binaries(&manifest)).unwrap();
+    let tools = setup.tools.tools().await;
+    assert!(tools.get(SCAN).is_none());
+    assert!(tools.get("plugin/org.example.scanner/status").is_some());
+}
+
+#[tokio::test]
+async fn binding_availability_distinguishes_absence_from_failed_discovery() {
+    let mut core = (*fake_core()).clone();
+    core.register(Capability::read_only(super::crd::CHECK, "Discover report APIs", |input| async move {
+        match input["context"].as_str() {
+            Some("served") => Ok(json!("v1alpha1")),
+            Some("absent") => Ok(Value::Null),
+            _ => Err(CapabilityError::Handler("discovery forbidden".into())),
+        }
+    }));
+    let setup = setup(Arc::new(core));
+    let revision = install_reader(&setup.path);
+    for (context, expected) in [("served", "served"), ("absent", "absent"), ("failed", "unknown")] {
+        let out = setup.registry.invoke("extensions.bindingAvailability", json!({"id":"org.example.argocd","revision":revision,"context":context,"bindings":["applications"]})).await.unwrap();
+        assert_eq!(out["bindings"][0]["state"], expected);
+        if context == "failed" { assert!(out["bindings"][0]["reason"].as_str().unwrap().contains("forbidden")); }
+    }
+    for bindings in [json!([]), json!(["undeclared"]), json!(["applications", "applications"]), json!(vec!["applications"; 17])] {
+        assert!(setup.registry.invoke("extensions.bindingAvailability", json!({"id":"org.example.argocd","revision":revision,"context":"served","bindings":bindings})).await.is_err());
+    }
+}
+
+#[test]
+fn workload_image_bindings_fix_kind_and_expose_only_cluster_and_namespace() {
+    let core = fake_core();
+    let mut value: Value = serde_json::from_str(&manifest()).unwrap();
+    value["srelensApiVersion"] = json!("^0.8");
+    value["permissions"] = json!(["k8s.listWorkloadImages"]);
+    value["kind"] = json!("executable");
+    value["sidecar"] = super::executable_tests::scanner_manifest()["sidecar"].clone();
+    value["contributions"] = json!({"pages":[],"detailTabs":[],"detailLinks":[]});
+    value["capabilities"] = json!([{"name":"applications","title":"Images","target":"k8s.listWorkloadImages","inputs":["context","namespace"],"arguments":{"kind":"Deployment"}}]);
+    let parsed = Manifest::parse(&value.to_string()).unwrap();
+    let validation = validate_app(&parsed, &["k8s.listWorkloadImages".into()], core.clone());
+    assert!(validation.is_ok(), "{validation:?}");
+    for bad in [json!({"kind":"Pod"}), json!({"kind":"Deployment","manifest":true}), json!({})] {
+        value["capabilities"][0]["arguments"] = bad;
+        let parsed = Manifest::parse(&value.to_string()).unwrap();
+        assert!(validate_app(&parsed, &["k8s.listWorkloadImages".into()], core.clone()).is_err());
+    }
+}
+
 impl srelens_mcp::audit::AuditSink for Spy {
     fn record(&self, record: srelens_mcp::audit::AuditRecord) {
         self.0.lock().unwrap().push(record);

@@ -199,6 +199,32 @@ pub struct HostReadParams {
     pub capability: String,
 }
 
+/// Discover only the resource bindings declared and granted to this app (API 0.2).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields, remote = "Self")]
+#[cfg_attr(feature = "schema", schemars(rename = "HostBindingAvailabilityParams"))]
+pub struct HostBindingAvailabilityParams {
+    pub context: CallContext,
+    #[serde(deserialize_with = "read_binding_names")]
+    #[cfg_attr(feature = "schema", schemars(schema_with = "binding_names"))]
+    pub bindings: Vec<String>,
+}
+
+fn read_binding_names<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
+    let bindings = Vec::<String>::deserialize(d)?;
+    let mut seen = std::collections::HashSet::new();
+    if bindings.is_empty() || bindings.len() > 16 || bindings.iter().any(|name| !crate::shape::is_identifier(name) || !seen.insert(name)) {
+        return Err(serde::de::Error::custom("Choose 1–16 unique declared binding names"));
+    }
+    Ok(bindings)
+}
+
+#[cfg(feature = "schema")]
+fn binding_names(generator: &mut SchemaGenerator) -> Schema {
+    schema(json!({"type":"array", "minItems":1, "maxItems":16, "uniqueItems":true, "items": identifier(generator)}))
+}
+
 /// `host/resource`'s params: inspect object `name` of a declared
 /// custom-resource reader.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -328,7 +354,8 @@ object_only!(
     CallContext,
     HostReadParams,
     HostResourceParams,
-    HostActionParams
+    HostActionParams,
+    HostBindingAvailabilityParams
 );
 
 /// A required field that may be null: absent is refused, null is `None`.
