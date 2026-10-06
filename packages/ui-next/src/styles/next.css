@@ -10,6 +10,38 @@
 @source "../**/*.tsx";
 @source not "../**/*.test.tsx";
 
+/* App result panes keep dense report evidence readable without stretching rows. */
+.app-results .tbl thead th { text-transform: none; letter-spacing: 0; font-size: 12px; padding-block: 9px; }
+.app-results .tbl td { height: 52px; padding-block: 8px; }
+.app-results .badge { text-transform: none; letter-spacing: 0; font-family: var(--font-sans); padding: 2px 6px; border-radius: 4px; }
+.app-report-intro { padding: 16px 16px 12px; border-bottom: 1px solid var(--rule); }
+.app-report-intro h2 { display: flex; align-items: center; gap: 8px; font-size: 17px; font-weight: 600; letter-spacing: -.02em; }
+.app-report-intro h2 > span { font-size: 12px; font-weight: 500; padding: 2px 7px; background: var(--surface-sunk); border-radius: 4px; color: var(--ink-muted); }
+.app-report-intro p { margin-top: 4px; font-size: 12px; color: var(--ink-muted); }
+.app-result-filters { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; padding: 10px 12px; border-bottom: 1px solid var(--rule); }
+.app-result-filters > :first-child { max-width: 360px; flex: 1 1 240px; }
+.app-source-filters { display: flex; gap: 3px; margin-left: auto; }
+.app-source-filters button[aria-pressed="true"] { background: var(--accent-wash); color: var(--accent); border-color: var(--accent-line); }
+.app-report-subject, .app-report-time, .app-report-source { display: flex; flex-direction: column; gap: 3px; }
+.app-report-subject strong { max-width: 260px; overflow: hidden; text-overflow: ellipsis; font-weight: 500; }
+.app-report-subject > span, .app-report-time > span:last-child { font-size: 11px; color: var(--ink-muted); }
+.app-report-source .badge { align-self: flex-start; }
+.app-report-findings { display: flex; align-items: center; gap: 10px; }
+.app-report-findings > strong { min-width: 22px; font-size: 16px; font-weight: 600; }
+.app-report-findings .badge { font-size: 10px; }
+.app-report-findings > div { flex-wrap: nowrap; }
+.app-report-actions { display: flex; align-items: center; justify-content: flex-end; gap: 10px; }
+.app-report-actions .btn { font-size: 11px; padding: 4px 8px; }
+.app-report-more { display: block; padding: 3px 8px; color: var(--ink-muted); letter-spacing: 2px; }
+.app-report-menu-action { display: block; width: 100%; text-align: left; }
+.app-report-inspector { width: min(400px, 90vw); max-height: 65vh; overflow: auto; }
+.app-report-inspector dl > div { padding-block: 8px; border-bottom: 1px solid var(--rule); }
+.app-report-inspector dt { font-size: 11px; color: var(--ink-muted); margin-bottom: 3px; }
+.app-report-inspector dd { font-size: 12px; overflow: auto; }
+.app-operation-error { padding: 20px; border-bottom: 1px solid var(--rule); background: var(--surface); }
+.app-operation-error strong { display: block; font-size: 14px; color: var(--sev); }
+.app-operation-error p { max-width: 80ch; margin-block: 6px 12px; font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; color: var(--ink-muted); }
+
 /* Settings can be narrow even in a wide window, beside both navigation rails. */
 .context-management { container-type: inline-size; }
 .context-management-layout {

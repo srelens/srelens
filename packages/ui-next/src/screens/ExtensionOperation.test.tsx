@@ -25,7 +25,7 @@ vi.mock("../extensions/inventoryStore", () => ({
   useExtensions: () => ({ status: "ready", data: { plugins: [{ ...appState,
     manifest: { id: "org.srelens.trivy", name: "Trivy", sidecar: { operations: [{ name: "scan", title: "Scan image", view: { autoRun: appState.autoRun, stream: appState.stream }, inputs: [
       { name: "clusterId", type: "string", required: true }, ...(appState.namespace ? [{ name: "namespace", title: "Namespace", type: "string", required: true }] : []), { name: "image", title: "Image", type: "string", required: true, maxLength: 512 },
-    ] }, { name: "findings", title: "Findings", view: { autoRun: true, hidden: true }, inputs: [{ name: "clusterId", type: "string", required: true }, { name: "reportId", type: "string", required: true }, { name: "cursor", type: "string" }] }] } },
+    ] }, { name: "findings", title: "Findings", view: { autoRun: true, hidden: true }, inputs: [{ name: "clusterId", type: "string", required: true }, { name: "reportId", type: "string", required: true }, { name: "cursor", type: "string" }] }, {name:"scan-namespace",title:"Scan namespace",view:{stream:true},inputs:[{name:"clusterId",type:"string",required:true},{name:"namespace",type:"string",required:true}]}, {name:"list-images",title:"Images",view:{autoRun:true},inputs:[{name:"clusterId",type:"string",required:true},{name:"namespace",type:"string"},{name:"cursor",type:"string"}]}] } },
   }] } }),
 }));
 if (!("ResizeObserver" in globalThis)) {
@@ -105,13 +105,13 @@ it("loads a pinned report automatically, pages findings and opens report links",
   await waitFor(() => expect(host.calls[1].params.cursor).toBe("page-two"));
 });
 
-it("keeps report navigation in the first column and lets scope prose wrap", async () => {
+it("keeps report navigation available and lets scope prose wrap", async () => {
  host.answer = { scope: "Only workload templates are inventoried; vulnerability scanning has not completed.", items: [{ reportId: "a".repeat(64), image: "alpine:3.9" }] };
  open();
  fireEvent.change(await screen.findByLabelText("Image"), { target: { value: "alpine:3.9" } });
  fireEvent.click(screen.getByRole("button", { name: "Scan image" }));
  expect(await screen.findByRole("button", { name: "Findings" })).toBeTruthy();
- expect(screen.getAllByRole("columnheader")[0].textContent).toBe("Details");
+ expect(screen.getAllByRole("columnheader")[0].textContent).toBe("Image");
  expect(screen.getByText((host.answer as { scope: string }).scope).className).toContain("whitespace-normal");
 });
 
@@ -233,4 +233,89 @@ it("renders nested report totals as badges and folds scanner provenance", async 
  open();fireEvent.change(await screen.findByLabelText("Image"),{target:{value:"alpine:3.10"}});fireEvent.click(screen.getByRole("button",{name:"Scan image"}));
  expect(await screen.findByText(/Critical 1/i)).toBeTruthy();
  expect(screen.getByText(scannerImage).closest("details")?.open).toBe(false);
+});
+
+it("leads report rows with their subject, visible severity totals and readable scan times", async () => {
+ host.answer={totalReports:1,items:[{reportId:"report-a",subject:"payments",namespace:"production",category:"namespace",source:"app",freshness:"current",engineVersion:"0.75.0",reportedAt:"2026-10-06T10:04:53.061529Z",findings:31,summary:{CRITICAL:2,HIGH:5,LOW:24},image:""}]};
+ open();fireEvent.change(await screen.findByLabelText("Image"),{target:{value:"alpine:3.10"}});fireEvent.click(screen.getByRole("button",{name:"Scan image"}));
+ await screen.findByRole("table");
+ expect(screen.getAllByRole("columnheader")[0].textContent).toBe("Report");
+ expect(screen.queryByRole("columnheader",{name:/Engine Version/})).toBeNull();
+ expect(screen.queryByRole("columnheader",{name:/Category/})).toBeNull();
+ const row=screen.getAllByRole("row")[1];
+ expect(within(row).getByText(/Critical 2/i)).toBeTruthy();
+ expect(row.textContent).not.toContain("061529");
+ expect(within(row).getByRole("button",{name:"Findings"})).toBeTruthy();
+ expect(within(row).queryByRole("button",{name:"Scan image"})).toBeNull();
+});
+
+it("filters reports by source without combining retained scan severity counts", async () => {
+ host.answer={items:[{reportId:"saved-a",subject:"payments",category:"namespace",source:"app",findings:2,summary:{HIGH:2}},{reportId:"operator-b",subject:"web",category:"vulnerability",source:"operator",findings:7,summary:{HIGH:7}}]};
+ open();fireEvent.change(await screen.findByLabelText("Image"),{target:{value:"alpine:3.10"}});fireEvent.click(screen.getByRole("button",{name:"Scan image"}));
+ fireEvent.click(await screen.findByRole("button",{name:/Operator reports/}));
+ expect(screen.getAllByRole("row")).toHaveLength(2);
+ expect(screen.getByRole("table").textContent).toContain("web");
+ expect(screen.getByRole("table").textContent).not.toContain("payments");
+ expect(screen.queryByText(/High 9/i)).toBeNull();
+});
+
+it("keeps a completed scan's terminal status visible beside its report action", async () => {
+ host.answer={state:"completed",items:[{reportId:"scan-a",subject:"payments",category:"namespace",source:"app",findings:2,summary:{HIGH:2}}]};
+ open();fireEvent.change(await screen.findByLabelText("Image"),{target:{value:"alpine:3.10"}});fireEvent.click(screen.getByRole("button",{name:"Scan image"}));
+ expect(await screen.findByText("Completed")).toBeTruthy();
+ expect(screen.getByRole("button",{name:"Findings"})).toBeTruthy();
+});
+
+it("leads paged image inventories with image identity and the correct primary scan action", async () => {
+ host.answer={items:[{image:"alpine:3.10",namespace:"team",name:"web",kind:"Deployment"}],nextCursor:"page-two"};
+ render(<ExtensionOperation route="/extension-operation-contexts/config%23demo/org.srelens.trivy/3/list-images" ported={[]} onSwitchToClassic={()=>{}} onLocked={()=>{}}/>);
+ await screen.findByRole("table");
+ expect(screen.getAllByRole("columnheader")[0].textContent).toBe("Image");
+ expect(screen.getAllByRole("columnheader").at(-1)?.textContent).toBe("Actions");
+ const row=screen.getAllByRole("row")[1];
+ expect(within(row).getByRole("button",{name:"Scan image"})).toBeTruthy();
+ expect(within(row).queryByRole("button",{name:"Scan namespace"})).toBeNull();
+ fireEvent.click(screen.getByRole("button",{name:"Next page"}));
+ await waitFor(()=>expect(host.calls.at(-1).params.cursor).toBe("page-two"));
+});
+
+it("restarts paging cleanly after an expired page", async () => {
+ host.answer={items:[{image:"alpine:3.10"}],nextCursor:"page-two"};
+ render(<ExtensionOperation route="/extension-operation-contexts/config%23demo/org.srelens.trivy/3/list-images" ported={[]} onSwitchToClassic={()=>{}} onLocked={()=>{}}/>);
+ await screen.findByRole("table");host.error="Continuation expired; refresh Images";
+ fireEvent.click(screen.getByRole("button",{name:"Next page"}));
+ await screen.findByRole("alert");host.error="";
+ fireEvent.click(screen.getByRole("button",{name:"Start from first page"}));
+ await screen.findByRole("table");
+ expect(host.calls.at(-1).params.cursor).toBeUndefined();
+ expect((screen.getByRole("button",{name:"Previous page"}) as HTMLButtonElement).disabled).toBe(true);
+});
+
+it("retries the current page after a transient inventory failure", async () => {
+ host.answer={items:[{image:"alpine:3.10"}],nextCursor:"page-two"};
+ render(<ExtensionOperation route="/extension-operation-contexts/config%23demo/org.srelens.trivy/3/list-images" ported={[]} onSwitchToClassic={()=>{}} onLocked={()=>{}}/>);
+ await screen.findByRole("table");host.error="Connection timed out";
+ fireEvent.click(screen.getByRole("button",{name:"Next page"}));
+ await screen.findByRole("alert");host.error="";
+ fireEvent.click(screen.getByRole("button",{name:"Retry"}));
+ await screen.findByRole("table");
+ expect(host.calls.at(-1).params.cursor).toBe("page-two");
+ expect((screen.getByRole("button",{name:"Previous page"}) as HTMLButtonElement).disabled).toBe(false);
+});
+
+it("distinguishes Operator resources sharing an image and renders Operator severity keys", async () => {
+ host.answer={totalReports:2,items:["web","api"].map(subject=>({reportId:subject,subject,namespace:"team",category:"vulnerability",source:"operator",image:"alpine:3.10",findings:8,summary:{lowCount:1,criticalCount:2,unknownCount:1,highCount:4}}))};
+ open();fireEvent.change(await screen.findByLabelText("Image"),{target:{value:"alpine:3.10"}});fireEvent.click(screen.getByRole("button",{name:"Scan image"}));
+ await screen.findByRole("table");
+ const rows=screen.getAllByRole("row").slice(1);
+ expect(within(rows[0]).getByText("web")).toBeTruthy();
+ expect(within(rows[1]).getByText("api")).toBeTruthy();
+ for(const row of rows){
+  expect(within(row).getByText("alpine:3.10")).toBeTruthy();
+  const critical=within(row).getByText("Critical 2");
+  expect(critical.getAttribute("data-tone")).toBe("sev");
+  expect(row.textContent?.indexOf("Critical 2")).toBeLessThan(row.textContent?.indexOf("High 4") ?? 0);
+  expect(within(row).getByText("Low 1")).toBeTruthy();
+  expect(within(row).getByText("Unknown 1")).toBeTruthy();
+ }
 });
