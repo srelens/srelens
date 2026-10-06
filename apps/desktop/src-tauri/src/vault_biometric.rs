@@ -55,9 +55,21 @@ pub async fn vault_biometric_status(
     app: tauri::AppHandle,
     vault: tauri::State<'_, Arc<Vault>>,
 ) -> Result<VaultBiometricStatus, String> {
-    let available = app.biometry().status().map(|s| s.is_available).unwrap_or(false);
+    let biometry = app.biometry();
+    let available = biometric_available(biometry.status(), biometry.has_data(data_options()));
     let enabled = vault_dir(&app).map(|d| vault::biometric_marker_path(&d).exists()).unwrap_or(false);
     Ok(VaultBiometricStatus { available, enabled, unlocked: vault.current_key().is_some() })
+}
+
+/// Offer the gate only when the sensor works AND the biometric store answers
+/// a read (#819). A macOS build signed without an App ID entitlement has a
+/// working Touch ID sensor, but its store refuses every call with
+/// errSecMissingEntitlement (-34018), so the switch could only ever fail.
+fn biometric_available<E>(
+    sensor: Result<tauri_plugin_biometry::Status, E>,
+    store: Result<bool, E>,
+) -> bool {
+    sensor.map(|s| s.is_available).unwrap_or(false) && store.is_ok()
 }
 
 /// Turn the gate ON: move the cached master key into the biometric store.
@@ -213,4 +225,27 @@ pub async fn vault_biometric_unlock(
         format!("{e} — the stale biometric item was removed; later launches fall back to the password")
     })?;
     crate::vault_password::emit_vault_unlocked(&app)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tauri_plugin_biometry::{BiometryType, Status};
+
+    fn sensor(is_available: bool) -> Result<Status, ()> {
+        Ok(Status { is_available, biometry_type: BiometryType::TouchID, error: None, error_code: None })
+    }
+
+    #[test]
+    fn a_store_that_refuses_reads_hides_the_switch() {
+        // #819: an app signed without the keychain entitlement has a working
+        // Touch ID sensor, but every biometric-store call fails with -34018.
+        assert!(!biometric_available(sensor(true), Err(())));
+    }
+
+    #[test]
+    fn an_empty_store_still_offers_the_switch() {
+        // Nothing stored yet is the normal state before the first enable.
+        assert!(biometric_available(sensor(true), Ok(false)));
+    }
 }
