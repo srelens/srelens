@@ -33,6 +33,9 @@ struct RunIn {
 
 #[derive(Serialize, JsonSchema)]
 struct RunOut {
+    state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
     path: String,
     job: String,
     uid: String,
@@ -140,16 +143,13 @@ fn completed_worker(job: &Job, uid: &str, pods: &[Pod]) -> Result<Option<String>
         return Err("The scan Job was replaced or removed; its result cannot be used".into());
     }
     let status = job.status.as_ref();
-    if status
+    let failed = status
         .and_then(|s| s.conditions.as_ref())
         .is_some_and(|conditions| {
             conditions
                 .iter()
                 .any(|c| c.status == "True" && c.type_ == "Failed")
-        })
-    {
-        return Err("The scan Job failed; check its scheduling, container and registry access in Kubernetes".into());
-    }
+        });
     let complete = status
         .and_then(|s| s.conditions.as_ref())
         .is_some_and(|conditions| {
@@ -174,6 +174,9 @@ fn completed_worker(job: &Job, uid: &str, pods: &[Pod]) -> Result<Option<String>
         return Err("The scan Job has no single owned worker; its result cannot be used".into());
     }
     let Some(pod) = owned.first() else {
+        if failed {
+            return Err("The scan Job failed without a worker".into());
+        }
         return Ok(None);
     };
     let terminated = pod
@@ -199,6 +202,32 @@ fn completed_worker(job: &Job, uid: &str, pods: &[Pod]) -> Result<Option<String>
                 .map(Some)
                 .ok_or_else(|| "The completed scan worker has no name".into());
         }
+    }
+    if failed {
+        if let Some(condition) = pod
+            .status
+            .as_ref()
+            .and_then(|s| s.conditions.as_ref())
+            .and_then(|conditions| {
+                conditions
+                    .iter()
+                    .find(|c| c.type_ == "PodScheduled" && c.status == "False")
+            })
+        {
+            return Err(format!(
+                "The scan Job could not be scheduled: {}",
+                condition
+                    .message
+                    .as_deref()
+                    .unwrap_or("insufficient scheduling capacity")
+                    .chars()
+                    .take(2000)
+                    .collect::<String>()
+            ));
+        }
+        return Err(
+            "The scan Job failed or exceeded its deadline; no successful scan result exists".into(),
+        );
     }
     if complete {
         return Err("The scan Job completed without a successful worker exit".into());
@@ -358,7 +387,7 @@ async fn run_job(
         }
         let pods: Api<Pod> = Api::namespaced(client.clone(), namespace);
         let list = ListParams::default().labels(&format!("srelens.io/run={run}"));
-        let worker = loop {
+        let (worker, failure) = loop {
             let current = api
                 .get(&name)
                 .await
@@ -367,8 +396,51 @@ async fn run_job(
                 .list(&list)
                 .await
                 .map_err(|e| format!("Could not observe the scan worker: {e}"))?;
-            if let Some(worker) = completed_worker(&current, &uid, &workers.items)? {
-                break worker;
+            match completed_worker(&current, &uid, &workers.items) {
+                Ok(Some(worker)) => break (worker, None),
+                Ok(None) => {}
+                Err(reason) => {
+                    let owned: Vec<_> = workers
+                        .items
+                        .iter()
+                        .filter(|pod| {
+                            pod.metadata
+                                .owner_references
+                                .as_ref()
+                                .is_some_and(|owners| {
+                                    owners.iter().any(|owner| {
+                                        owner.uid == uid
+                                            && owner.kind == "Job"
+                                            && owner.controller == Some(true)
+                                    })
+                                })
+                        })
+                        .collect();
+                    if current.metadata.uid.as_deref() == Some(&uid)
+                        && owned.len() == 1
+                        && owned[0]
+                            .status
+                            .as_ref()
+                            .and_then(|s| s.container_statuses.as_ref())
+                            .is_some_and(|statuses| {
+                                statuses.iter().any(|s| {
+                                    s.name == "worker"
+                                        && s.state
+                                            .as_ref()
+                                            .and_then(|s| s.terminated.as_ref())
+                                            .is_some()
+                                })
+                            })
+                    {
+                        let name = owned[0]
+                            .metadata
+                            .name
+                            .clone()
+                            .ok_or_else(|| "The failed worker has no name".to_owned())?;
+                        break (name, Some(reason));
+                    }
+                    return Err(reason);
+                }
             }
             tokio::time::sleep(Duration::from_secs(1)).await;
         };
@@ -388,12 +460,24 @@ async fn run_job(
             &format!("{:x}", Sha256::digest(uid.as_bytes()))[..32]
         );
         let file = data.join(&path);
-        let bytes = write_result(&file, logs).await?;
+        let bytes = write_result(&file, logs)
+            .await
+            .map_err(|why| match &failure {
+                Some(reason) => format!("{reason}; {why}"),
+                None => why,
+            })?;
         cleanup.raw = Some(file);
         delete_owned(&api, &name, &uid).await?;
         cleanup.owned = None;
         cleanup.raw = None;
         Ok(RunOut {
+            state: if failure.is_some() {
+                "failed"
+            } else {
+                "completed"
+            }
+            .into(),
+            error: failure,
             path,
             job: name,
             uid,
@@ -874,6 +958,13 @@ mod tests {
             );
             assert_eq!(std::fs::read(&path).unwrap(), b"{}");
         }
+    }
+    #[test]
+    fn failed_unschedulable_job_retains_the_scheduling_reason() {
+        let job: Job = serde_json::from_value(json!({"metadata":{"uid":"j-1"},"status":{"conditions":[{"type":"Failed","status":"True"}]}})).unwrap();
+        let pod: Pod = serde_json::from_value(json!({"metadata":{"name":"worker","ownerReferences":[{"apiVersion":"batch/v1","kind":"Job","name":"scan","uid":"j-1","controller":true}]},"status":{"conditions":[{"type":"PodScheduled","status":"False","reason":"Unschedulable","message":"0/3 nodes available: Insufficient memory"}]}})).unwrap();
+        let why = completed_worker(&job, "j-1", &[pod]).unwrap_err();
+        assert!(why.contains("Insufficient memory"), "{why}");
     }
 }
 

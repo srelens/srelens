@@ -83,9 +83,18 @@ async fn server(scenario: Scenario) -> (Client, Requests, tokio::task::JoinHandl
                     };
                     json!({"metadata":{"name":"scan-1","uid":"j-1"},"status":status}).to_string()
                 } else if resource == "/api/v1/namespaces/team/pods" {
-                    json!({"kind":"PodList","apiVersion":"v1","metadata":{},"items":[{"metadata":{"name":"worker-1","uid":"p-1","ownerReferences":[{"apiVersion":"batch/v1","kind":"Job","name":"scan-1","uid":"j-1","controller":true}]},"spec":{"containers":[{"name":"worker"}]},"status":{"containerStatuses":[{"name":"worker","image":"trivy","imageID":"sha256:a","ready":false,"restartCount":0,"state":{"terminated":{"exitCode":0}}}]}}]}).to_string()
+                    let exit = if matches!(scenario, Scenario::Failed) {
+                        1
+                    } else {
+                        0
+                    };
+                    json!({"kind":"PodList","apiVersion":"v1","metadata":{},"items":[{"metadata":{"name":"worker-1","uid":"p-1","ownerReferences":[{"apiVersion":"batch/v1","kind":"Job","name":"scan-1","uid":"j-1","controller":true}]},"spec":{"containers":[{"name":"worker"}]},"status":{"containerStatuses":[{"name":"worker","image":"trivy","imageID":"sha256:a","ready":false,"restartCount":0,"state":{"terminated":{"exitCode":exit,"reason":"Error"}}}]}}]}).to_string()
                 } else if resource.ends_with("/log") {
-                    json!({"SchemaVersion":2,"Results":[]}).to_string()
+                    if matches!(scenario, Scenario::Failed) {
+                        "FATAL scan failed: registry UNAUTHORIZED token=private-value".to_owned()
+                    } else {
+                        json!({"SchemaVersion":2,"Results":[]}).to_string()
+                    }
                 } else {
                     input.to_string()
                 };
@@ -240,8 +249,8 @@ async fn successful_job_owns_reader_access_collects_json_and_waits_for_foregroun
 }
 
 #[tokio::test]
-async fn denied_reader_access_and_failed_jobs_never_publish_a_result_and_clean_up() {
-    for scenario in [Scenario::DeniedReader, Scenario::Failed] {
+async fn denied_reader_access_never_publishes_a_result_and_cleans_up() {
+    for scenario in [Scenario::DeniedReader] {
         let (client, seen, server) = server(scenario).await;
         let data = tempfile::tempdir().unwrap();
         let template = template();
@@ -344,6 +353,18 @@ async fn live_kind_namespace_scan_uses_the_constrained_runner() {
             {"apiGroups":["policy"],"resources":["poddisruptionbudgets"],"verbs":["get","list"]}
         ]
     })).unwrap();
+    let template = if let Ok(path) = std::env::var("TRIVY_JOB_MANIFEST") {
+        let manifest: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        let binding = manifest["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|b| b["name"] == "namespace-job")
+            .unwrap();
+        serde_json::from_value(binding["arguments"].clone()).unwrap()
+    } else {
+        template
+    };
     let run = run_id();
     let job = build_job(
         "org.example.job-proof",
@@ -379,4 +400,35 @@ async fn live_kind_namespace_scan_uses_the_constrained_runner() {
         .as_array()
         .expect("namespace resource results");
     assert!(resources.iter().any(|r| r["Name"] == "vulnerable-alpine"));
+}
+
+#[tokio::test]
+async fn failed_worker_keeps_bounded_private_diagnostics_before_cleanup() {
+    let (client, seen, server) = server(Scenario::Failed).await;
+    let data = tempfile::tempdir().unwrap();
+    let template = template();
+    let output = run_job(
+        client,
+        "team",
+        "run-1",
+        job(&template),
+        &template,
+        data.path(),
+        active(),
+    )
+    .await
+    .unwrap();
+    let metadata = serde_json::to_value(&output).unwrap();
+    assert_eq!(metadata["state"], "failed");
+    assert!(!metadata.to_string().contains("private-value"));
+    assert!(std::fs::read_to_string(data.path().join(&output.path))
+        .unwrap()
+        .contains("UNAUTHORIZED"));
+    assert!(seen
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|(method, path, _)| method == "DELETE"
+            && path.split('?').next().unwrap().ends_with("/jobs/scan-1")));
+    server.abort();
 }

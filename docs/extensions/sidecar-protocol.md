@@ -614,9 +614,9 @@ Image workers without reader rules mount no service-account token.
 The Job has no retries, a twenty-minute deadline and a ten-minute cleanup TTL.
 Completion requires the original Job UID and its single successful worker.
 The host collects at most eight MiB into a new, private file in the app data
-root, then waits for foreground deletion. The reply contains `path`, `job`,
+root, then waits for foreground deletion. The reply contains `state` (`completed` or `failed`), an optional safe `error`, `path`, `job`,
 `uid`, `namespace`, `image`, `bytes` and `finishedAt`; `path` is app-relative,
 and credentials or raw results never travel in that reply. The app removes
-the temporary file after normalization. Cancellation drops the runner and
+the temporary file after consumption. A failed worker's bounded diagnostic file remains private; the app classifies its cause without returning raw log lines, never saves it as a completed report, and removes it. Scheduling failures retain their scheduling reason. Cancellation drops the runner and
 cleans up that UID; ordinary approved action writes retain their existing
 finish-after-cancellation behavior. One scan per app may run through cleanup.
