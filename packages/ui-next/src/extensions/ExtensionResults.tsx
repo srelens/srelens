@@ -5,7 +5,7 @@ import { bulkResourceKey } from "./bulkActions";
 import { Checkbox, ResizeHandle } from "@srelens/ui-kit";
 import { clampPeekWidth, savePeekWidth, setPeekWidth, usePeekBounds, usePeekWidth } from "../lib/peekWidth";
 import { ExtensionResourceNavigation } from "./resourceNavigation";
-import { useContext, useEffect, useRef, useState } from "react";
+import { useContext, useMemo, useEffect, useRef, useState } from "react";
 import {
   describeError,
   onExtensionResourceChanged,
@@ -102,6 +102,7 @@ export function ExtensionResults({
   actionAvailability,
   card,
   cardNamespaces,
+  previewRows,
 }: {
   plugin: InstalledExtension;
   capability: string;
@@ -119,6 +120,8 @@ export function ExtensionResults({
   card?: string;
   /** With a card and no namespace: the several namespaces it counted in. */
   cardNamespaces?: string[];
+  /** A dashboard list preview: declared ordering and limit, without bulk selection. */
+  previewRows?: {name:string;namespace:string}[];
 }) {
   const { Button } = useContext(ExtensionControls);
   const openResource = useContext(ExtensionResourceNavigation);
@@ -128,6 +131,7 @@ export function ExtensionResults({
   // The card is part of what is on screen: the filtered and whole lists keep no rows of each other.
   const scope = JSON.stringify([plugin.manifest.id,plugin.revision,capability,context,namespace,card ?? "", cardNamespaces ?? []]);
   const [selected,setSelected] = useState<{scope:string;name:string;namespace:string}|null>(null);
+  const preview = previewRows !== undefined;
   const [columnSort, setColumnSort] = useState<{key:string;direction:"asc"|"desc"}|null>(null);
   useEffect(() => setColumnSort(null), [scope]);
   // The rows a bulk action would run against, by key. Cleared whenever the
@@ -196,7 +200,8 @@ export function ExtensionResults({
     (b) => b.name === capability,
   );
   if (data.data?.items) lastRows.current = data.data.items;
-  const sourceRows = data.data?.items ?? lastRows.current;
+  const allRows = data.data?.items ?? lastRows.current;
+  const sourceRows = useMemo(() => previewRows ? allRows.filter(row=>previewRows.some(wanted=>row.name===wanted.name && row.namespace===wanted.namespace)) : allRows, [allRows,previewRows]);
   const columnKind = contributionKind(
     typeof binding?.arguments.kind === "string" ? binding.arguments.kind : "",
     typeof binding?.arguments.group === "string" ? binding.arguments.group : "",
@@ -210,7 +215,7 @@ export function ExtensionResults({
   const appColumns = useResolvedColumns({
     plugins: [plugin], context, contextId, namespace, kind: columnKind, rows: sourceRows, refresh,
   });
-  const columns = data.data?.printerColumns ?? (Array.isArray(binding?.arguments.printerColumns)
+  const columns = preview ? [] : data.data?.printerColumns ?? (Array.isArray(binding?.arguments.printerColumns)
     ? (binding.arguments.printerColumns as Array<{ name: string }>)
     : []);
   // Bound how many matching rows enter the DOM; Load more reveals the next page
@@ -275,7 +280,7 @@ export function ExtensionResults({
         Loading app resources…
       </p>
     );
-  const rows = (data.data?.items ?? lastRows.current).filter((row) =>
+  const rows = sourceRows.filter((row) =>
     [row.name, row.namespace, ...row.columns, ...(resolvesStatus && row.status ? [row.status.label] : []),
       ...appColumns.columns.filter((column) => column.filterable === true).map((column) => column.getValue?.(row) ?? "")]
       .join(" ")
@@ -284,18 +289,18 @@ export function ExtensionResults({
   );
   const sortColumn = appColumns.columns.find((column) => column.key === columnSort?.key && column.sortable);
   const collator = new Intl.Collator(undefined, {numeric:true,sensitivity:"base"});
-  const ordered = sortColumn && columnSort ? [...rows].sort((left, right) => {
+  const ordered = previewRows ? previewRows.flatMap(wanted=>rows.filter(row=>row.name===wanted.name && row.namespace===wanted.namespace)) : sortColumn && columnSort ? [...rows].sort((left, right) => {
     const a = sortColumn.getSortValue?.(left) ?? sortColumn.getValue?.(left) ?? "";
     const b = sortColumn.getSortValue?.(right) ?? sortColumn.getValue?.(right) ?? "";
     const comparison = typeof a === "number" && typeof b === "number"
       ? a - b : collator.compare(String(a), String(b));
     return comparison * (columnSort.direction === "asc" ? 1 : -1);
   }) : rows;
-  const shown = ordered.slice(0, visible);
+  const shown = ordered.slice(0, preview ? ordered.length : visible);
   const hidden = Math.max(0, rows.length - shown.length);
   // Only a binding the host runs actions against gets a selection column:
   // checkboxes over a table with nothing to do on it are furniture.
-  const selectable = binding?.target === "k8s.listCustomResource";
+  const selectable = !preview && binding?.target === "k8s.listCustomResource";
   // Resolved back to rows, never counted out of the set: a key the current
   // filter no longer shows is a resource the bar cannot act on, and a count
   // that includes it would promise a write that never happens.
@@ -379,12 +384,12 @@ export function ExtensionResults({
                   <th key={i}>{c.name}</th>
                 ))}
                 {appColumns.columns.map((column) => <th key={column.key} aria-sort={columnSort?.key === column.key ? (columnSort.direction === "asc" ? "ascending" : "descending") : undefined}>
-                  {column.sortable ? <button type="button" className="extension-column-sort" aria-label={`Sort by ${column.header}`}
+                  {column.sortable && !preview ? <button type="button" className="extension-column-sort" aria-label={`Sort by ${column.header}`}
                     onClick={() => setColumnSort((current) => ({key:column.key,direction:current?.key === column.key && current.direction === "asc" ? "desc" : "asc"}))}>
                     {column.header}{columnSort?.key === column.key && <span aria-hidden="true"> {columnSort.direction === "asc" ? "↑" : "↓"}</span>}
                   </button> : column.header}
                 </th>)}
-                <th>Age</th>
+                {!preview && <th>Age</th>}
               </tr>
             </thead>
             <tbody>
@@ -421,12 +426,12 @@ export function ExtensionResults({
                     </td>
                   ))}
                   {appColumns.columns.map((column) => <td key={column.key}>{column.render?.(row)}</td>)}
-                  <td><AgeCell created={row.created} age={row.age} /></td>
+                  {!preview && <td><AgeCell created={row.created} age={row.age} /></td>}
                 </tr>
               ))}
             </tbody>
           </table>
-          {hidden > 0 && (
+          {!preview && hidden > 0 && (
             <p className="extension-message">
               <Button variant="secondary" onClick={() => setVisible((n) => n + PAGE)}>
                 Show {Math.min(PAGE, hidden).toLocaleString()} more

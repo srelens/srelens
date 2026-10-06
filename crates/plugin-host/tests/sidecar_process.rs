@@ -298,7 +298,7 @@ async fn dropping_the_supervisor_kills_a_real_sidecar() {
 async fn the_os_sandbox_refuses_to_run_sidecars_here_and_says_why() {
     let sandbox = OsSandbox::new(SandboxConfig {
         launcher: Some(env!("CARGO_BIN_EXE_srelens-sandbox-launch").into()),
-        cgroup_root: None,
+        cgroup: srelens_plugin_host::sidecar::CgroupRoot::Missing,
     });
     let supervisor = Supervisor::start(config(&[]), Arc::new(sandbox), Arc::new(NoBroker));
     let SidecarStatus::Refused { reason } =
@@ -321,7 +321,7 @@ async fn the_os_sandbox_refuses_to_run_sidecars_here_and_says_why() {
 async fn without_a_delegated_cgroup_linux_refuses_to_run_sidecars() {
     let sandbox = OsSandbox::new(SandboxConfig {
         launcher: Some(env!("CARGO_BIN_EXE_srelens-sandbox-launch").into()),
-        cgroup_root: None,
+        cgroup: srelens_plugin_host::sidecar::CgroupRoot::Missing,
     });
     let supervisor = Supervisor::start(config(&[]), Arc::new(sandbox), Arc::new(NoBroker));
     let SidecarStatus::Refused { reason } =

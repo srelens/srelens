@@ -2059,6 +2059,76 @@ async fn run_suite() {
         .await;
     assert_eq!(out["ok"], true);
 
+    // #389: roll the restart back. Wait for the restart's ReplicaSet (revision
+    // 2) first: rolled back before the controller made it, the original
+    // template would be re-adopted as revision 2, not 3.
+    let dl = deadline(120);
+    let original = loop {
+        let out = h
+            .ok(
+                "k8s.listReplicaSets",
+                json!({ "context": ctx, "namespace": NS, "ownerName": DEPLOY }),
+            )
+            .await;
+        let rows = out["replicasets"].as_array().cloned().unwrap_or_default();
+        let named = |rev: &str| {
+            rows.iter()
+                .find(|r| r["revision"] == rev)
+                .and_then(|r| r["name"].as_str())
+                .map(str::to_string)
+        };
+        if let (Some(first), Some(_)) = (named("1"), named("2")) {
+            break first;
+        }
+        if Instant::now() > dl {
+            panic!("timed out waiting for {DEPLOY}'s second revision: {out}");
+        }
+        poll_sleep().await;
+    };
+    let refused = h
+        .err(
+            "k8s.rolloutUndo",
+            json!({ "context": ctx, "namespace": NS, "name": DEPLOY, "revision": 99 }),
+        )
+        .await;
+    assert!(refused.contains("has no revision 99"), "{refused}");
+    let out = h
+        .ok(
+            "k8s.rolloutUndo",
+            json!({ "context": ctx, "namespace": NS, "name": DEPLOY, "revision": 1 }),
+        )
+        .await;
+    assert_eq!(out["revision"], 1);
+    let dl = deadline(120);
+    loop {
+        let out = h
+            .ok(
+                "k8s.listReplicaSets",
+                json!({ "context": ctx, "namespace": NS, "ownerName": DEPLOY }),
+            )
+            .await;
+        if out["replicasets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["name"] == original.as_str() && r["revision"] == "3")
+        {
+            break;
+        }
+        if Instant::now() > dl {
+            panic!("timed out waiting for {original} to come back as revision 3: {out}");
+        }
+        poll_sleep().await;
+    }
+    let refused = h
+        .err(
+            "k8s.rolloutUndo",
+            json!({ "context": ctx, "namespace": NS, "name": DEPLOY, "revision": 3 }),
+        )
+        .await;
+    assert!(refused.contains("already runs revision 3"), "{refused}");
+    println!("{DEPLOY}: rolled back to revision 1 (now revision 3)");
+
     // Review afresh only if a controller races this live fixture's pinned write.
     let (out, reviewed) = h
         .reviewed_request(
@@ -3431,6 +3501,104 @@ async fn extensions_and_gitops(h: &mut Harness, ctx: &str, settings: &TempSettin
     h.ok(
         "extensions.configure",
         json!({"action": "remove", "id": "org.example.metrics"}),
+    )
+    .await;
+
+    // #569. A metric provider's PromQL template, bound for a Deployment and sent
+    // through its network.http binding to a one-request Prometheus stand-in on
+    // loopback, with the payload `@srelens/core`'s wrapper sends; the answer is
+    // the chart the host draws.
+    println!("=== extensions: metric provider ===");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+    let port = listener.local_addr().unwrap().port();
+    let served = std::thread::spawn(move || {
+        use std::io::{BufRead, BufReader, Write};
+        let (stream, _) = listener.accept().expect("accept");
+        let mut reader = BufReader::new(stream);
+        let mut request_line = String::new();
+        reader.read_line(&mut request_line).unwrap();
+        loop {
+            let mut header = String::new();
+            if reader.read_line(&mut header).unwrap() == 0 || header.trim().is_empty() {
+                break;
+            }
+        }
+        // One sample at the first step of the range the host asked for.
+        let target = request_line.split(' ').nth(1).unwrap_or_default();
+        let start = target
+            .split(['?', '&'])
+            .find_map(|pair| pair.strip_prefix("start="))
+            .unwrap_or("0")
+            .to_owned();
+        let body = format!(
+            r#"{{"status":"success","data":{{"resultType":"matrix","result":[{{"metric":{{"pod":"web-1"}},"values":[[{start},"0.5"]]}}]}}}}"#
+        );
+        write!(
+            reader.get_mut(),
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+        request_line
+    });
+    let observability = json!({
+        "id": "org.example.observability", "name": "Observability", "version": "0.1.0",
+        "srelensApiVersion": "^0.7", "kind": "declarative",
+        "permissions": [{"capability": "network.http", "hosts": ["${settings.prometheusUrl}"]}],
+        "settings": [{"id": "prometheusUrl", "type": "url", "title": "Prometheus URL", "required": true}],
+        "capabilities": [{"name": "prom", "title": "Prometheus range query", "target": "network.http",
+            "inputs": [], "arguments": {"url": "${settings.prometheusUrl}", "path": "/api/v1/query_range"}}],
+        "contributions": {"pages": [], "detailTabs": [], "detailLinks": [],
+            "metricProviders": [{"id": "cpu", "title": "CPU", "capability": "prom", "language": "promql",
+                "forKinds": ["apps/Deployment"], "unit": "cores",
+                "query": "sum(rate(container_cpu_usage_seconds_total{namespace=\"${namespace}\",pod=~\"${workload:regex}-.*\"}[${step}]))"}]}
+    });
+    h.ok(
+        "extensions.configure",
+        json!({"action": "install", "manifest": observability.to_string(), "grants": ["network.http"]}),
+    )
+    .await;
+    h.ok(
+        "extensions.configure",
+        json!({"action": "settings", "id": "org.example.observability",
+               "settings": {"prometheusUrl": format!("http://127.0.0.1:{port}")}}),
+    )
+    .await;
+    h.ok(
+        "extensions.configure",
+        json!({"action": "loopbackHttp", "id": "org.example.observability", "allowLoopbackHttp": true}),
+    )
+    .await;
+    let listed = h.ok("extensions.list", json!({})).await;
+    let observability_revision = listed["plugins"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["manifest"]["id"] == "org.example.observability")
+        .and_then(|p| p["revision"].as_u64())
+        .unwrap_or_else(|| panic!("the observability app is installed: {listed}"));
+    let query = json!({"id": "org.example.observability", "revision": observability_revision,
+        "provider": "cpu", "context": ctx, "namespace": NS, "resourceKind": "apps/Deployment",
+        "name": "web", "rangeSeconds": 3600});
+    // The Rust spelling is refused: the wrapper's camelCase is the contract.
+    let mut snake = query.clone();
+    snake["resource_kind"] = snake["resourceKind"].take();
+    snake.as_object_mut().unwrap().remove("resourceKind");
+    let err = h.err("extensions.queryProvider", snake).await;
+    assert!(err.contains("resource_kind"), "{err}");
+    let answer = h.ok("extensions.queryProvider", query).await;
+    assert_eq!(answer["kind"], "metrics", "{answer}");
+    assert_eq!(answer["chart"]["unit"], "cores", "{answer}");
+    assert_eq!(answer["chart"]["series"][0]["name"], "pod=\"web-1\"", "{answer}");
+    assert_eq!(answer["chart"]["series"][0]["values"][0], json!(0.5), "{answer}");
+    let request_line = served.join().expect("the server thread");
+    assert!(
+        request_line.starts_with("GET /api/v1/query_range?query=sum%28rate%28container_cpu_usage_seconds_total%7Bnamespace%3D%22"),
+        "{request_line}"
+    );
+    h.ok(
+        "extensions.configure",
+        json!({"action": "remove", "id": "org.example.observability"}),
     )
     .await;
 

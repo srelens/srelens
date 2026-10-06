@@ -172,6 +172,14 @@ export interface ReplicaSetSummary {
    *  the backend renders once and which freezes (#405). */
   created?: string | null;
   age: string;
+  /** The pod template's container images, in order (#389). */
+  images?: string[];
+  /** `kubernetes.io/change-cause`, when the revision was recorded with one (#389). */
+  changeCause?: string;
+  /** This revision's pod template is the one the Deployment runs now — the
+   *  revision a rollback refuses as already running. Not the newest by number:
+   *  right after a template change the newest can still be the previous one. */
+  currentTemplate?: boolean;
 }
 
 export interface PodMetric {

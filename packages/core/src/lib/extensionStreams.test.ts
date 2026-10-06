@@ -33,6 +33,8 @@ import watchPayload from "./extension-stream-watch.json";
 import logsPayload from "./extension-stream-logs.json";
 import execPayload from "./extension-stream-exec.json";
 import forwardPayload from "./extension-stream-port-forward.json";
+// A log provider's follow (#569), which `providers_tests.rs` deserializes too.
+import logProviderPayload from "./extension-stream-log-provider.json";
 
 describe("watch events (#566)", () => {
   it("accepts exactly the three events a watch sends", () => {
@@ -105,6 +107,21 @@ describe("extensionStreamPayload", () => {
   it("sends a watch exactly as the host's OpenStreamIn accepts it (#566)", () => {
     const watch = { ...request, source: { kind: "watch" as const, capability: "applications" } };
     expect(extensionStreamPayload("org.example.argocd/page:applications#1", "extstream:2-a8f3k1", watch)).toEqual(watchPayload);
+  });
+
+  it("sends a log provider's follow exactly as the host's OpenStreamIn accepts it (#569)", () => {
+    const follow = extensionStreamPayload("org.example.observability/logs:loki#1", "extstream:1-k2j3h4", {
+      id: "org.example.observability",
+      revision: 3,
+      context: "kind-dev",
+      namespace: "team",
+      source: {
+        kind: "logProvider", provider: "loki", resourceKind: "/Pod", name: "web-1",
+        tailLines: 200, sinceSeconds: 3600, timestamps: true,
+      },
+    });
+    expect(follow).toEqual(logProviderPayload);
+    expect(JSON.stringify(follow)).not.toMatch(/resource_kind|tail_lines|since_seconds/);
   });
 
   it("sends the pod sources exactly as the host's OpenStreamIn accepts them (#567)", () => {
@@ -378,6 +395,33 @@ describe("startExtensionLogStream (#567)", () => {
     expect(onEnd).toHaveBeenCalledWith({ type: "error", code: "source", message: "forbidden" });
     stream.stop();
     expect(invokeCommandMock).not.toHaveBeenCalledWith("extension_stream_cancel", expect.anything());
+  });
+
+  it("follows a log provider's stream the same way, with the view's options (#569)", async () => {
+    const onLine = vi.fn();
+    const onStatus = vi.fn();
+    const view = openExtensionView("org.example.observability", "logs");
+    await startExtensionLogStream(
+      view,
+      {
+        id: "org.example.observability", revision: 3, context: "kind-dev", namespace: "team",
+        source: { kind: "logProvider", provider: "loki", resourceKind: "/Pod", name: "web-1" },
+      },
+      onLine,
+      onStatus,
+      {},
+      { tailLines: 500, sinceSeconds: 600, timestamps: true },
+    );
+    const opened = invokeCommandMock.mock.calls.find(([command]) => command === "extension_stream_open");
+    expect(opened?.[1].input.source).toEqual({
+      kind: "logProvider", provider: "loki", resourceKind: "/Pod", name: "web-1",
+      tailLines: 500, sinceSeconds: 600, timestamps: true,
+    });
+    const [channel] = [...channels.keys()].slice(-1);
+    emit(channel, { type: "data", stream: "s-1", seq: 1, data: { event: "lines", lines: [{ source: "web-1/app", line: "one" }] } });
+    emit(channel, { type: "data", stream: "s-1", seq: 2, data: { event: "status", source: "loki", status: "live" } });
+    expect(onLine).toHaveBeenCalledWith("web-1/app", "one", false);
+    expect(onStatus).toHaveBeenCalledWith("live", "loki");
   });
 
   it("stops by cancelling its stream while it runs", async () => {

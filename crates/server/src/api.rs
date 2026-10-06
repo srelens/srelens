@@ -502,6 +502,7 @@ pub(crate) mod tests {
             "extensions.pods",
             "extensions.inspect",
             "extensions.logs",
+            "extensions.queryProvider",
         ] {
             let (status, _) = post(&format!("/api/capability/{id}"), Body::from("{}")).await;
             assert_eq!(status, StatusCode::NOT_FOUND, "{id}");

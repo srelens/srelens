@@ -122,7 +122,7 @@ describe("live readers (#566)", () => {
       </LiveReaders>,
     );
     await settle();
-    expect(opened.map((o) => o.request.source.capability)).toEqual(["kustomizations", "helmreleases"]);
+    expect(opened.map((o) => ("capability" in o.request.source ? o.request.source.capability : undefined))).toEqual(["kustomizations", "helmreleases"]);
     expect(views.length).toBe(1);
     act(() => opened[0].handlers.onData({ event: "changed" }, 1));
     expect(onChange).toHaveBeenCalledTimes(2);

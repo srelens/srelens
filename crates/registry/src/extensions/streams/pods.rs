@@ -215,8 +215,8 @@ fn check_names(
 
 /// One log line as a frame entry, marked `truncated` when the reader cut it
 /// (#747) or when it is past [`MAX_LINE_BYTES`] still, and cut here, on a
-/// character boundary.
-fn line_frame(source: &str, line: Line) -> Value {
+/// character boundary. A log provider's lines (#569) come through here too.
+pub(super) fn line_frame(source: &str, line: Line) -> Value {
     let Line {
         text: mut line,
         mut truncated,
@@ -658,8 +658,8 @@ struct LogFollow {
 
 /// Lines waiting for the next frame, bounded by count and by bytes of text.
 #[derive(Default)]
-struct Pending {
-    lines: Vec<Value>,
+pub(super) struct Pending {
+    pub(super) lines: Vec<Value>,
     /// Bytes of line text in `lines`.
     bytes: usize,
     dropped: u64,
@@ -671,7 +671,7 @@ fn text_bytes(line: &Value) -> usize {
 }
 
 impl Pending {
-    fn push(&mut self, frame: Value) {
+    pub(super) fn push(&mut self, frame: Value) {
         let size = text_bytes(&frame);
         if self.lines.len() >= MAX_PENDING_LINES || self.bytes + size > MAX_PENDING_BYTES {
             self.dropped += 1;
@@ -683,7 +683,7 @@ impl Pending {
 
     /// One `lines` frame of at most [`MAX_LINES_PER_FRAME`] lines and
     /// [`MAX_FRAME_BYTES`] of text, or `None` when nothing is waiting.
-    fn frame(&mut self) -> Option<Value> {
+    pub(super) fn frame(&mut self) -> Option<Value> {
         if self.lines.is_empty() && self.dropped == 0 {
             return None;
         }

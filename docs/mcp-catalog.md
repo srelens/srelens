@@ -7,7 +7,7 @@ Everything this server exposes over MCP, generated from the live registry so it 
 
 ## Tools
 
-125 tools, grouped by area and then by how a call is gated. Argument schemas are not reproduced here — call `tools/list` for those, which cannot go stale.
+127 tools, grouped by area and then by how a call is gated. Argument schemas are not reproduced here — call `tools/list` for those, which cannot go stale.
 
 **Impact** is how much a successful call disturbs — `low`, `medium` or `high` — and is a different question from the section heading, which is how the call is gated. A capability that accepts several named operations carries the highest level any of them reaches; the per-operation level travels with the resource.
 
@@ -84,7 +84,7 @@ Everything this server exposes over MCP, generated from the live registry so it 
 | `k8s.podConnections` | medium | read the established TCP connections of pods, from their own /proc/net/tcp |
 | `k8s.topologyProbe` | medium | the topology graph, plus each pod's open connections read over pods/exec (one exec per pod) |
 
-### Kubernetes — needs confirmation (13)
+### Kubernetes — needs confirmation (14)
 
 | Tool | Impact | Summary |
 | --- | --- | --- |
@@ -97,6 +97,7 @@ Everything this server exposes over MCP, generated from the live registry so it 
 | `k8s.requestCordonNode` | medium | Request cordon or uncordon of the reviewed Node without eviction; requires confirmation |
 | `k8s.requestRolloutRestart` | high | Request a rolling restart of the reviewed built-in workload; requires confirmation |
 | `k8s.rolloutRestart` | medium | trigger a rolling restart of a workload |
+| `k8s.rolloutUndo` | medium | roll a Deployment back to an earlier revision (kubectl rollout undo --to-revision) |
 | `k8s.scale` | medium | set the replica count of a workload (Deployment/StatefulSet/ReplicaSet) |
 | `k8s.setFields` | medium | Set fixed spec fields on the reviewed resource, as an app's action declares them; requires confirmation |
 | `k8s.setStatusCondition` | medium | Write one status condition on the reviewed resource through the status subresource, as an app's action declares it; requires confirmation |
@@ -160,7 +161,7 @@ Everything this server exposes over MCP, generated from the live registry so it 
 | `toolbox.removePlugin` | medium | remove an installed krew plugin |
 | `toolbox.upgradePlugin` | medium | upgrade an installed krew plugin |
 
-### Server — read-only (17)
+### Server — read-only (18)
 
 | Tool | Impact | Summary |
 | --- | --- | --- |
@@ -169,6 +170,7 @@ Everything this server exposes over MCP, generated from the live registry so it 
 | `extensions.list` | low | List installed declarative extensions |
 | `extensions.packageManifest` | low | Verify an app package file (.srelens-extension) and return its manifest for permission review; does not install it |
 | `extensions.pods` | low | List the pods, and for a port-forward through a Service the Services, that one of an app's pod bindings may reach |
+| `extensions.queryProvider` | low | Run one of an enabled app's metric, log or trace provider queries for a workload or pod, through its network.http binding, and answer the data the host draws |
 | `extensions.read` | low | Read a declared custom-resource contribution, or send a declared network.http request, from an enabled extension |
 | `extensions.resolveCards` | low | Resolve the cluster dashboard cards an enabled extension declares, each to a figure or the reason it has none |
 | `extensions.resolveColumns` | low | Resolve native extension table columns and badges in one batch |

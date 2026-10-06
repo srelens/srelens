@@ -122,6 +122,20 @@ it("marks stale regions without fading their text, and only its own regions", as
 });
 
 describe("DashboardCards", () => {
+  it("keeps an empty large list compact and restores its size when rows arrive", async () => {
+    installed(app([card({ id: "upcoming", title: "Upcoming expirations", type: "list", size: "l" })]));
+    answer([{ id: "upcoming", state: "list", total: 0, rows: [] }]);
+    render(<DashboardCards context={CTX} />);
+    await waitFor(() => expect(cardRegion("Upcoming expirations").getAttribute("data-state")).toBe("zero"));
+    expect(cardRegion("Upcoming expirations").getAttribute("data-size")).toBe("s");
+    expect(cardRegion("Upcoming expirations").textContent).toMatch(/None match/);
+
+    answer([{ id: "upcoming", state: "list", total: 1, rows: [{ namespace: "team", name: "web" }] }]);
+    await userEvent.click(screen.getByRole("button", { name: "Refresh app cards" }));
+    await within(cardRegion("Upcoming expirations")).findByText("team/web");
+    expect(cardRegion("Upcoming expirations").getAttribute("data-size")).toBe("l");
+  });
+
   it("draws loading, couldn't read and zero as three different things", async () => {
     installed(app([
       card({ id: "loading", title: "Loading card" }),

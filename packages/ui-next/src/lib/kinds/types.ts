@@ -35,6 +35,8 @@ export interface KindActions {
   forward?: boolean;
   scale?: boolean;
   restart?: boolean;
+  /** Deployment only: offers Roll back to an earlier revision (#389). */
+  rollback?: boolean;
   evict?: boolean;
   /** CronJob only: offers Suspend/Resume, labelled from the row's own state. */
   suspend?: boolean;

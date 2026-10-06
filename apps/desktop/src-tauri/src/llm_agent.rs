@@ -83,15 +83,25 @@ fn trim_history(
 /// accept `[A-Za-z0-9_-]` in function names, so `list_tools` advertises a
 /// provider-safe alias for each tool and `call_tool` translates the alias back
 /// to the registry id before the JSON-RPC call.
+///
+/// It also carries the chat it answers for (#393). There is no bearer token
+/// in-process to authenticate, so the invoker names the caller itself, and a
+/// gated call it makes reaches the confirm prompt as that chat's.
 pub struct McpToolInvoker {
     server: Arc<McpServer>,
     /// Provider-safe alias → registry id, populated by `list_tools`.
     aliases: std::sync::Mutex<std::collections::HashMap<String, String>>,
+    caller: Option<srelens_mcp::policy::Caller>,
 }
 
 impl McpToolInvoker {
     pub fn new(server: Arc<McpServer>) -> Self {
-        Self { server, aliases: Default::default() }
+        Self { server, aliases: Default::default(), caller: None }
+    }
+
+    pub fn with_caller(mut self, caller: srelens_mcp::policy::Caller) -> Self {
+        self.caller = Some(caller);
+        self
     }
 }
 
@@ -148,9 +158,14 @@ impl ToolInvoker for McpToolInvoker {
             "method": "tools/call",
             "params": { "name": name, "arguments": args },
         });
-        let resp = srelens_mcp::stdio::handle_request(&self.server, &req, srelens_mcp::Transport::Http)
-            .await
-            .ok_or_else(|| LlmError::Api("tools/call returned no response".into()))?;
+        let resp = srelens_mcp::stdio::handle_request_as(
+            &self.server,
+            &req,
+            srelens_mcp::Transport::Http,
+            self.caller.clone(),
+        )
+        .await
+        .ok_or_else(|| LlmError::Api("tools/call returned no response".into()))?;
         // A JSON-RPC error (unknown tool / bad params) is fed back as a failed
         // result so the model can correct itself rather than aborting the turn.
         if let Some(err) = resp.get("error") {
@@ -273,7 +288,7 @@ pub async fn run_native_agent(
     let prompts = app.state::<crate::mcp::McpPromptsDir>();
     let mcp = app.state::<crate::mcp::McpHttpManager>();
     let server = Arc::new(mcp.build_server(&app, pending.inner(), &audit.0, &prompts.0));
-    let invoker = McpToolInvoker::new(server);
+    let invoker = McpToolInvoker::new(server).with_caller(srelens_mcp::policy::Caller::Chat(session.clone()));
     let provider = srelens_llm::HttpProvider::new(cfg);
 
     // Seed the turn with this session's prior conversation so follow-ups have
@@ -494,5 +509,32 @@ mod tests {
         use srelens_llm::types::Turn;
         let turns = vec![Turn::User("q".into())];
         assert_eq!(trim_history(turns.clone(), 40), turns);
+    }
+
+    /// #393: a native turn's gated call reaches the consent policy as its own
+    /// chat's — there is no token in-process, so the invoker says it.
+    #[tokio::test]
+    async fn a_native_turn_s_gated_call_is_its_own_chat_s() {
+        use std::sync::Mutex;
+        #[allow(clippy::type_complexity)]
+        struct Saw(Arc<Mutex<Option<Option<srelens_mcp::policy::Caller>>>>);
+        #[async_trait::async_trait]
+        impl srelens_mcp::policy::ConfirmPolicy for Saw {
+            async fn confirm(&self, request: &srelens_mcp::policy::ConsentRequest) -> srelens_mcp::policy::Decision {
+                *self.0.lock().unwrap() = Some(request.caller.clone());
+                srelens_mcp::policy::Decision::Approved
+            }
+        }
+        let saw = Arc::new(Mutex::new(None));
+        let mut reg = srelens_capability::Registry::new();
+        let mut cap = srelens_capability::Capability::read_only("danger", "destructive", |_| async { Ok(json!({})) });
+        cap.annotations = srelens_capability::Annotations::MUTATING;
+        reg.register(cap);
+        let server = McpServer::new(Arc::new(reg)).with_policy(Arc::new(Saw(saw.clone())));
+        let invoker = McpToolInvoker::new(Arc::new(server))
+            .with_caller(srelens_mcp::policy::Caller::Chat("sess-7".into()));
+
+        invoker.call_tool("danger", &json!({})).await.expect("call");
+        assert_eq!(*saw.lock().unwrap(), Some(Some(srelens_mcp::policy::Caller::Chat("sess-7".into()))));
     }
 }

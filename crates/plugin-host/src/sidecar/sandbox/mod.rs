@@ -30,6 +30,8 @@ use super::Limits;
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(target_os = "linux")]
+mod systemd;
 #[cfg(windows)]
 mod windows;
 
@@ -120,7 +122,8 @@ pub trait Launcher: Send + Sync + 'static {
     /// Who enforces the memory and CPU limits of what this starts.
     fn enforcement(&self) -> Enforcement;
 
-    /// Start `command` under `limits`. Called from within the tokio runtime.
+    /// Start `command` under `limits`. Called on one of the tokio runtime's
+    /// blocking threads, so it may block, and may spawn tasks.
     fn launch(&self, command: &SidecarCommand, limits: &Limits) -> Result<Launched, LaunchError>;
 }
 
@@ -337,11 +340,25 @@ pub struct SandboxConfig {
     /// `srelens-sandbox-launch`, the trusted launcher that applies the Linux
     /// layers and starts Seatbelt on macOS. Linux and macOS only.
     pub launcher: Option<PathBuf>,
-    /// A cgroup v2 directory delegated to srelens, with the `memory` and `cpu`
-    /// controllers enabled for its children. Linux only. Finding one on a
-    /// systemd desktop is not settled (ADR, "What the spike did not
-    /// establish"), so the caller names it.
-    pub cgroup_root: Option<PathBuf>,
+    /// Where each sidecar's cgroup is made. Linux only.
+    pub cgroup: CgroupRoot,
+}
+
+/// Where a Linux sidecar's cgroup is made: under a cgroup v2 directory
+/// delegated to srelens, with the `memory` and `cpu` controllers enabled for
+/// its children, and srelens itself in a leaf of it. cgroup v2 lets a process
+/// move another only between cgroups under one it may write, and each
+/// sidecar's launcher moves itself from srelens's leaf into its own.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum CgroupRoot {
+    /// Nowhere: every sidecar is refused.
+    #[default]
+    Missing,
+    /// A directory set up by hand, as `SRELENS_SANDBOX_CGROUP_ROOT` names one.
+    Delegated(PathBuf),
+    /// A delegated scope srelens asks the systemd user manager for at its
+    /// first sidecar start (`systemd.rs`).
+    SystemdScope,
 }
 
 /// The sandbox backend for the OS srelens runs on.

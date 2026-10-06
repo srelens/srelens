@@ -60,6 +60,9 @@ class Srectl < Formula
   # so these are genuinely optional rather than dependencies.
   def caveats
     <<~EOS
+      srectl is the command. srelens-tui still runs it, and prints a one-line
+      reminder.
+
       srectl uses the kubectl and helm already on your PATH, if any.
       Neither is required to browse a cluster; `srectl toolbox` reports
       what it found.
@@ -70,8 +73,15 @@ class Srectl < Formula
   end
 
   def install
-    # The archive holds the binary and LICENSE at its root.
+    # The archive holds the binary as `srectl`. Install it, and also
+    # leave `srelens-tui` as a wrapper so existing scripts and muscle memory work.
     bin.install "srectl"
+    (bin/"srelens-tui").write <<~SH
+      #!/bin/sh
+      [ -t 2 ] && echo "srelens-tui is now srectl" >&2
+      exec "#{bin}/srectl" "$@"
+    SH
+    chmod 0755, bin/"srelens-tui"
   end
 
   test do
@@ -80,8 +90,17 @@ class Srectl < Formula
     # disagree, which is worth failing on.
     assert_match version.to_s, shell_output("#{bin}/srectl --version")
 
+    # The old command name runs the same binary. When stderr is redirected,
+    # the wrapper suppresses the reminder so output parsing is not broken.
+    version_output = shell_output("#{bin}/srelens-tui --version 2>&1")
+    assert_match version.to_s, version_output
+    refute_match "srelens-tui is now srectl", version_output
+
     # A command that needs no cluster, to prove the binary is not merely
     # loadable. With no kubeconfig it reports zero contexts rather than failing.
     assert_match "srectl", shell_output("#{bin}/srectl info")
+
+    # The legacy wrapper also forwards subcommand arguments.
+    assert_match "srectl", shell_output("#{bin}/srelens-tui info")
   end
 end

@@ -14,6 +14,8 @@ mod executable_tests;
 #[cfg(any(test, feature = "fuzzing"))]
 pub mod fuzzing;
 mod http_policy;
+#[cfg(test)]
+mod http_test_support;
 pub mod inspector;
 mod limits;
 mod links;
@@ -23,6 +25,7 @@ pub(crate) mod package;
 mod package_tests;
 mod panels;
 pub mod pods;
+mod providers;
 #[cfg(test)]
 mod pods_tests;
 #[cfg(test)]
@@ -420,6 +423,29 @@ async fn resolver_app(
     revision: u64,
     context: String,
 ) -> Result<(Inventory, usize, String), CapabilityError> {
+    let app = resolve_app(inventory, core, client_cache, id, revision, context).await?;
+    Ok((app.state, app.index, app.context))
+}
+/// An installed app that may answer on a cluster, as [`resolve_app`] found it.
+struct ResolvedApp {
+    state: Inventory,
+    /// The app's position in `state.plugins`.
+    index: usize,
+    /// The context the request goes out under: its pinned ID when it resolved.
+    context: String,
+    /// The context as the host's kubeconfig files declare it, or why it did not
+    /// resolve. A provider binds its name as `${cluster}` (#569).
+    resolved: Result<srelens_kube::context_resolve::ResolvedContext, String>,
+}
+/// [`resolver_app`], keeping the resolved context.
+async fn resolve_app(
+    inventory: Store,
+    core: &Arc<Registry>,
+    client_cache: &Arc<srelens_kube::client_cache::ClientCache>,
+    id: &str,
+    revision: u64,
+    context: String,
+) -> Result<ResolvedApp, CapabilityError> {
     let resolved = request_context(client_cache, &context).await;
     let state = tokio::task::spawn_blocking(move || inventory.read())
         .await
@@ -443,10 +469,16 @@ async fn resolver_app(
     validate_app(&plugin.manifest, &plugin.grants, core.clone())
         .map_err(|errors| CapabilityError::Handler(errors.to_string()))?;
     let context = resolved
+        .as_ref()
         .ok()
         .and_then(|context| context.pinned_id())
         .unwrap_or(context);
-    Ok((state, index, context))
+    Ok(ResolvedApp {
+        state,
+        index,
+        context,
+        resolved,
+    })
 }
 #[derive(Deserialize, JsonSchema)]
 #[serde(tag = "action", deny_unknown_fields)]
@@ -2106,6 +2138,33 @@ fn access_items(manifest: &Manifest, grants: &[String]) -> std::collections::BTr
             setting_scope(manifest, &binding.arguments)
         ));
     }
+    // What each provider asks (#569): its whole template, the binding it goes
+    // through and where it is shown, so a changed query shows as changed access.
+    for provider in manifest.providers() {
+        let (verb, what) = match provider.kind {
+            srelens_plugin_host::ProviderKind::Metrics => ("Query", "metrics"),
+            srelens_plugin_host::ProviderKind::Logs => ("Follow", "logs"),
+            srelens_plugin_host::ProviderKind::Traces => ("Search", "traces"),
+        };
+        let mut kinds = provider.for_kinds.to_vec();
+        kinds.sort();
+        let polling: &str = if provider.kind == srelens_plugin_host::ProviderKind::Logs {
+            &format!(
+                ", asking again every {} s while a log view is open",
+                providers::ProviderTiming::default().poll.as_secs()
+            )
+        } else {
+            ""
+        };
+        access.insert(format!(
+            "{verb} {what} {} with {} {} through {} on [{}]{polling}",
+            provider.id,
+            provider.language.title(),
+            serde_json::to_string(provider.query).unwrap_or_default(),
+            provider.capability,
+            kinds.join(",")
+        ));
+    }
     for action in &manifest.actions {
         let reader = manifest
             .capabilities
@@ -2421,6 +2480,7 @@ fn register_apps(
             )
         },
     ));
+    providers::register(reg, path.clone(), core.clone(), cache.clone(), secrets.clone());
     let streams = streams::register(reg, &runtime, core, cache, snapshots, secrets);
     inspector::register(reg, path, streams.clone());
     streams
@@ -4548,6 +4608,7 @@ pub(crate) mod tests {
             "extensions.validate",
             "extensions.streams",
             "extensions.pods",
+            "extensions.queryProvider",
         ] {
             assert!(reg.get(id).unwrap().annotations.read_only);
         }
@@ -4556,7 +4617,7 @@ pub(crate) mod tests {
         let store = reg.get("extension.secretStore").unwrap().annotations;
         assert!(store.requires_confirm && store.sensitive && !store.read_only);
         let mcp = srelens_mcp::McpServer::new(Arc::new(reg));
-        assert_eq!(mcp.list_tools().len(), 17);
+        assert_eq!(mcp.list_tools().len(), 18);
         use srelens_mcp::{stdio::handle_request, Transport};
         for args in [
             json!({"action":"install","manifest":manifest(),"grants":["k8s.listCustomResource"]}),

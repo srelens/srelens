@@ -36,7 +36,7 @@ pub use limits::{Limits, Policy};
 pub use metrics::{Inspect, Latency, RequestMetrics, SidecarMetrics, LATENCY_SAMPLES};
 pub use protocol::SIDECAR_API_VERSIONS;
 pub use sandbox::{
-    Enforcement, Exit, LaunchError, Launched, Launcher, MemoryProbe, OsSandbox, Process,
-    SandboxConfig, SidecarCommand,
+    CgroupRoot, Enforcement, Exit, LaunchError, Launched, Launcher, MemoryProbe, OsSandbox,
+    Process, SandboxConfig, SidecarCommand,
 };
 pub use supervisor::{Action, SidecarConfig, SidecarStatus, Supervisor, UNEXPECTED_EXIT};

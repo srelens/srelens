@@ -22,7 +22,8 @@
 //! - under an administrator's policy (#578), a host and port its ceiling allows
 //!   too, and HTTPS only: the host's loopback is not one person's to open;
 //! - a request carrying a secret follows no redirect to another origin;
-//! - GET only, fixed in the manifest: no caller input (#569 adds templates);
+//! - GET only, fixed in the manifest: no caller input; a provider's query (#569)
+//!   adds only the parameters the host sets, after the binding's own;
 //! - [`Limits`]: connect and total timeouts and a response size limit.
 use super::http_policy::{self, BodyError, UrlRules};
 use super::{AppPolicy, Installed};
@@ -116,10 +117,167 @@ struct SecretHeader {
 /// when the server says it is JSON and as text otherwise.
 #[derive(Debug, Serialize, JsonSchema)]
 pub(super) struct HttpOut {
-    status: u16,
+    pub status: u16,
     #[serde(rename = "contentType", skip_serializing_if = "Option::is_none")]
-    content_type: Option<String>,
-    body: Value,
+    pub content_type: Option<String>,
+    pub body: Value,
+}
+
+/// Why a request came back with no answer to read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum RequestError {
+    /// It may not be sent, or what came back is not an answer to it: a rule of
+    /// the app's, the allowlist, a redirect, a status the server chose, a body
+    /// too large or unreadable as what it says it is. Asking again gets the same.
+    Refused(String),
+    /// Nothing answered it: the connection failed, it timed out, or the server
+    /// said it is unavailable (5xx, 408, 429). Asking again later may.
+    Unanswered(String),
+    /// The answer is larger than the limit. Refused as it is; asked for less
+    /// (fewer log lines, #569), it may fit.
+    TooLarge(String),
+}
+
+impl RequestError {
+    /// What went wrong, in the host's words.
+    pub fn message(&self) -> &str {
+        match self {
+            Self::Refused(why) | Self::Unanswered(why) | Self::TooLarge(why) => why,
+        }
+    }
+}
+
+/// The most of a refusal's body read, in bytes, and quoted, in characters.
+const MAX_REASON_BODY: usize = 4096;
+const MAX_REASON: usize = 300;
+
+/// What a server answered with a status outside 2xx, in the host's words, with
+/// the server's own reason after them when it gave one: a JSON body's `error`, as
+/// Prometheus writes a bad query's, or the text Loki and Tempo send. Cut, with
+/// invisible characters shown, and scrubbed ([`Scrub`]) of what the request
+/// carried, since a server may echo what it was sent; a reason that holds a secret
+/// too short to replace is left out.
+pub(super) fn refusal_reason(
+    status: reqwest::StatusCode,
+    content_type: Option<&str>,
+    raw: &[u8],
+    scrub: &Scrub,
+) -> String {
+    let lead = format!("The server answered HTTP {status}");
+    let json = content_type
+        .and_then(|value| value.split(';').next())
+        .is_some_and(|essence| essence.trim().eq_ignore_ascii_case("application/json"));
+    let said = if json {
+        serde_json::from_slice::<Value>(raw)
+            .ok()
+            .and_then(|body| body.get("error").and_then(Value::as_str).map(str::to_owned))
+            .unwrap_or_default()
+    } else {
+        String::from_utf8_lossy(raw).into_owned()
+    };
+    let said = said.split_whitespace().collect::<Vec<_>>().join(" ");
+    let Some(said) = scrub.text(&said) else {
+        return lead;
+    };
+    let said: String = said.chars().take(MAX_REASON).collect();
+    if said.is_empty() {
+        lead
+    } else {
+        format!("{lead}: {}", srelens_capability::escape_invisible(&said))
+    }
+}
+
+/// What a server's own words are scrubbed of before the host repeats them: every
+/// sensitive header value the request carried, whole and word by word; the URL and
+/// its host; and each of the URL's own path segments and query values (as sent and
+/// decoded) of [`MIN_URL_PART`] characters or more, which a binding or a person's `url`
+/// setting wrote and may hold a token. A server may echo any of it. Shorter parts,
+/// and the query parameters the host sets, are repeated as the server wrote them.
+#[derive(Debug, Clone, Default)]
+pub(super) struct Scrub {
+    secrets: Vec<String>,
+    spellings: Vec<String>,
+    parts: Vec<String>,
+}
+
+/// The shortest secret part replaced in a server's words. A shorter one cannot be
+/// replaced without garbling them, so words that hold it are not repeated at all.
+const MIN_SCRUBBED: usize = 4;
+/// The shortest URL path segment or query value replaced. Shorter ones are words
+/// such as `api`, `v1` or `logs`, and a token is longer than that.
+const MIN_URL_PART: usize = 8;
+
+impl Scrub {
+    /// For a request of `headers` to `url`, whose query parameters named in
+    /// `host_set` are the host's own (a provider's query and time range, #569): those
+    /// are not scrubbed, so a reason that quotes the query still reads.
+    pub(super) fn new(headers: &HeaderMap, url: &Url, host_set: &[&str]) -> Self {
+        let mut secrets: Vec<String> = headers
+            .values()
+            .filter(|value| value.is_sensitive())
+            .filter_map(|value| value.to_str().ok())
+            .flat_map(|secret| std::iter::once(secret).chain(secret.split_whitespace()))
+            .filter(|part| !part.is_empty())
+            .map(str::to_owned)
+            .collect();
+        // The longest first, so a whole value goes before the words it holds.
+        secrets.sort_by_key(|part| std::cmp::Reverse(part.len()));
+        let spellings = [Some(url.as_str()), url.host_str()]
+            .into_iter()
+            .flatten()
+            .filter(|spelling| !spelling.is_empty())
+            .map(str::to_owned)
+            .collect();
+        let mut parts: Vec<String> = url
+            .path_segments()
+            .into_iter()
+            .flatten()
+            // As sent, and as a server that decoded it would echo it.
+            .flat_map(|segment| {
+                let decoded = percent_encoding::percent_decode_str(segment).decode_utf8_lossy();
+                [segment.to_owned(), decoded.into_owned()]
+            })
+            // A query value too, as sent and decoded, unless the host set it.
+            .chain(
+                url.query()
+                    .into_iter()
+                    .flat_map(|query| query.split('&'))
+                    .filter_map(|pair| {
+                        let (key, value) = url::form_urlencoded::parse(pair.as_bytes()).next()?;
+                        let sent = pair.split_once('=').map_or("", |(_, sent)| sent);
+                        (!host_set.contains(&key.as_ref()))
+                            .then(|| [sent.to_owned(), value.into_owned()])
+                    })
+                    .flatten(),
+            )
+            .filter(|part| part.chars().count() >= MIN_URL_PART)
+            .collect();
+        parts.sort_by_key(|part| std::cmp::Reverse(part.len()));
+        Self {
+            secrets,
+            spellings,
+            parts,
+        }
+    }
+
+    /// `said` scrubbed, or `None` when it holds a secret part too short to replace.
+    pub(super) fn text(&self, said: &str) -> Option<String> {
+        let mut said = said.to_owned();
+        for part in &self.secrets {
+            if part.chars().count() >= MIN_SCRUBBED {
+                said = said.replace(part.as_str(), "[secret]");
+            } else if said.contains(part.as_str()) {
+                return None;
+            }
+        }
+        for spelling in &self.spellings {
+            said = said.replace(spelling.as_str(), "the server");
+        }
+        for part in &self.parts {
+            said = said.replace(part.as_str(), "[url]");
+        }
+        Some(said)
+    }
 }
 
 /// The declaration a `network.http` binding is checked against. Its handler
@@ -163,6 +321,12 @@ fn check_arguments(arguments: &Map<String, Value>) -> Result<(), String> {
 /// The URL a binding GETs: `url`, then `path` appended to its path, then
 /// `query` added to its query.
 fn request_url(input: &HttpIn) -> Result<Url, String> {
+    request_url_with(input, &[])
+}
+
+/// [`request_url`], then `extra` added after the binding's own query: the
+/// parameters the host sets for a provider (#569), which the binding may not.
+fn request_url_with(input: &HttpIn, extra: &[(&str, String)]) -> Result<Url, String> {
     let mut url = Url::parse(&input.url).map_err(|_| "`url` is not a URL")?;
     if !matches!(url.scheme(), "https" | "http") {
         return Err("`url` is an https URL".into());
@@ -198,6 +362,23 @@ fn request_url(input: &HttpIn) -> Result<Url, String> {
     if !input.query.is_empty() {
         let mut pairs = url.query_pairs_mut();
         for (key, value) in &input.query {
+            pairs.append_pair(key, value);
+        }
+    }
+    // A parameter the host sets is never also the binding's own, in `query` or
+    // written into the URL (a saved setting may carry a query string): a server
+    // reads the first of two, which would be the binding's.
+    if let Some((key, _)) = extra
+        .iter()
+        .find(|(key, _)| url.query_pairs().any(|(set, _)| set == *key))
+    {
+        return Err(format!(
+            "The host sets `{key}` on this request, and the binding's URL or query sets it too"
+        ));
+    }
+    if !extra.is_empty() {
+        let mut pairs = url.query_pairs_mut();
+        for (key, value) in extra {
             pairs.append_pair(key, value);
         }
     }
@@ -399,7 +580,28 @@ async fn read_with(
     policy: Option<&AppPolicy>,
     limits: Limits,
 ) -> Result<Value, CapabilityError> {
-    let failed = |why: String| CapabilityError::Handler(why);
+    let (answer, _) = request(core, secrets, plugin, name, &[], policy, limits)
+        .await
+        .map_err(|error| CapabilityError::Handler(error.message().to_owned()))?;
+    serde_json::to_value(answer).map_err(|e| CapabilityError::Handler(e.to_string()))
+}
+
+/// Sends the `network.http` binding `name` of `plugin`, with `extra` query
+/// parameters after the binding's own: the one path a request takes, for a
+/// read and for a provider's query (#569) alike. Every rule is checked here, on
+/// every call, before anything is sent, `policy`'s ceiling (#578) among them.
+/// With the answer comes the [`Scrub`] for what was sent, for a caller that
+/// repeats any of the server's words.
+pub(super) async fn request(
+    core: &Registry,
+    secrets: &dyn SecretStore,
+    plugin: &Installed,
+    name: &str,
+    extra: &[(&str, String)],
+    policy: Option<&AppPolicy>,
+    limits: Limits,
+) -> Result<(HttpOut, Scrub), RequestError> {
+    let failed = RequestError::Refused;
     let manifest = &plugin.manifest;
     let binding = manifest
         .capabilities
@@ -423,7 +625,7 @@ async fn read_with(
     check_arguments(&arguments).map_err(failed)?;
     let input: HttpIn = serde_json::from_value(Value::Object(arguments))
         .map_err(|e| failed(format!("network.http arguments: {e}")))?;
-    let url = request_url(&input).map_err(failed)?;
+    let url = request_url_with(&input, extra).map_err(failed)?;
     let policy = Policy {
         allowlist: manifest.network_allowlist(&plugin.settings),
         ceiling: policy.map(AppPolicy::ceiling),
@@ -461,22 +663,41 @@ async fn read_with(
         headers.insert(name, value);
     }
     let carries_secret = !input.secret_headers.is_empty();
-    let answer = send(url, headers, carries_secret, policy)
-        .await
-        .map_err(failed)?;
-    serde_json::to_value(answer).map_err(|e| failed(e.to_string()))
+    // Also for a caller that repeats what the server answered with a 2xx, such as
+    // a query backend's `status: "error"`.
+    let host_set: Vec<&str> = extra.iter().map(|(key, _)| *key).collect();
+    let scrub = Scrub::new(&headers, &url, &host_set);
+    let out = exchange(url, headers, carries_secret, policy, scrub.clone()).await?;
+    Ok((out, scrub))
 }
 
 /// GETs `url` under `policy`, and reads what comes back. Every reason is the
 /// host's own words, with the URL and its host scrubbed out of whatever the
-/// connection reported.
+/// connection reported. The tests' door to [`exchange`]; the broker sends
+/// through [`request`].
+#[cfg(test)]
 pub(super) async fn send(
     url: Url,
     headers: HeaderMap,
     carries_secret: bool,
     policy: Policy,
 ) -> Result<HttpOut, String> {
-    policy.check(&url)?;
+    let scrub = Scrub::new(&headers, &url, &[]);
+    exchange(url, headers, carries_secret, policy, scrub)
+        .await
+        .map_err(|error| error.message().to_owned())
+}
+
+/// [`send`], saying whether asking again could get an answer.
+async fn exchange(
+    url: Url,
+    headers: HeaderMap,
+    carries_secret: bool,
+    policy: Policy,
+    scrub: Scrub,
+) -> Result<HttpOut, RequestError> {
+    use RequestError::{Refused, Unanswered};
+    policy.check(&url).map_err(|why| Refused(why.into()))?;
     http_policy::install_crypto_provider();
     let limits = policy.limits;
     let origin = url.origin();
@@ -497,7 +718,7 @@ pub(super) async fn send(
     if http_policy::is_loopback(&url) {
         builder = builder.no_proxy();
     }
-    let client = builder.build().map_err(|e| describe(e, &url))?;
+    let client = builder.build().map_err(|e| Refused(describe(e, &url)))?;
     let reported = url.clone();
     let exchange = async move {
         let mut response = client
@@ -505,10 +726,34 @@ pub(super) async fn send(
             .headers(headers)
             .send()
             .await
-            .map_err(|e| describe(e, &reported))?;
+            .map_err(|e| classify(e, &reported))?;
         let status = response.status();
         if !status.is_success() {
-            return Err(format!("The server answered HTTP {status}"));
+            let content_type = response
+                .headers()
+                .get(CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned);
+            // Only the start of the body: enough for a reason, and no more.
+            let mut raw = Vec::new();
+            while raw.len() < MAX_REASON_BODY {
+                match response.chunk().await {
+                    Ok(Some(chunk)) => raw.extend_from_slice(&chunk),
+                    _ => break,
+                }
+            }
+            raw.truncate(MAX_REASON_BODY);
+            let why = refusal_reason(status, content_type.as_deref(), &raw, &scrub);
+            return Err(
+                if status.is_server_error()
+                    || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+                    || status == reqwest::StatusCode::REQUEST_TIMEOUT
+                {
+                    Unanswered(why)
+                } else {
+                    Refused(why)
+                },
+            );
         }
         let content_type = response
             .headers()
@@ -518,18 +763,30 @@ pub(super) async fn send(
         let raw = http_policy::read_limited(&mut response, limits.body)
             .await
             .map_err(|error| match error {
-                BodyError::TooLarge(why) => why,
-                BodyError::Read(error) => describe(error, &reported),
+                BodyError::TooLarge(why) => RequestError::TooLarge(why),
+                BodyError::Read(error) => Unanswered(describe(error, &reported)),
             })?;
         Ok(HttpOut {
             status: status.as_u16(),
-            body: decode(content_type.as_deref(), &raw)?,
+            body: decode(content_type.as_deref(), &raw).map_err(Refused)?,
             content_type,
         })
     };
     tokio::time::timeout(limits.total, exchange)
         .await
-        .map_err(|_| timed_out(limits.total))?
+        .map_err(|_| Unanswered(timed_out(limits.total)))?
+}
+
+/// [`describe`], and whether it could answer another time: a refused redirect
+/// will be refused again; a connection that failed or timed out may not be.
+fn classify(error: reqwest::Error, url: &Url) -> RequestError {
+    let refused = http_policy::redirect_refusal(&error).is_some();
+    let why = describe(error, url);
+    if refused {
+        RequestError::Refused(why)
+    } else {
+        RequestError::Unanswered(why)
+    }
 }
 
 fn timed_out(total: Duration) -> String {

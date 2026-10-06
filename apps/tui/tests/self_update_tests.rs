@@ -725,10 +725,7 @@ fn verification_accepts_the_published_hash_and_rejects_any_other() {
 #[test]
 fn the_binary_is_pulled_out_of_a_tarball_stored_at_the_root() {
     let archive = targz("srectl", b"ELF-ish");
-    let got = extract_binary(
-        &archive,
-        "srectl-1.2.3-x86_64-unknown-linux-gnu.tar.gz",
-    );
+    let got = extract_binary(&archive, "srectl-1.2.3-x86_64-unknown-linux-gnu.tar.gz");
     assert_eq!(got.unwrap(), b"ELF-ish");
 }
 
@@ -1050,6 +1047,132 @@ fn a_newer_release_plans_urls_under_its_own_tag() {
         plan.sums_url.ends_with("srectl-2.0.0-SHA256SUMS.txt"),
         "{}",
         plan.sums_url
+    );
+}
+
+/// The bridge release is still published as `srelens-tui`. Checking for an
+/// update from that same version finds no `srectl` archive and is not a
+/// failure: there is nothing newer to install.
+#[test]
+fn a_release_that_still_publishes_srelens_tui_is_current() {
+    let fetch = |_: &str| -> Result<Vec<u8>, UpdateError> {
+        Ok(br#"{"tag_name":"srelens-v1.2.0","prerelease":false,"assets":[{"name":"srelens-tui-1.2.0-SHA256SUMS.txt"}]}"#.to_vec())
+    };
+    assert_eq!(
+        plan(
+            "1.2.0",
+            Channel::Stable,
+            false,
+            PathBuf::from("/tmp/srelens-tui"),
+            &fetch
+        )
+        .unwrap(),
+        Check::UpToDate {
+            channel: Channel::Stable,
+            latest: "1.2.0".into()
+        }
+    );
+}
+
+/// A newer tag that also lacks a `srectl` archive is a release we could not
+/// take, not a claim that this build is the latest.
+#[test]
+fn a_newer_release_without_srectl_is_still_an_error() {
+    let fetch = |_: &str| -> Result<Vec<u8>, UpdateError> {
+        Ok(br#"{"tag_name":"srelens-v2.0.0","prerelease":false,"assets":[{"name":"srelens-tui-2.0.0-SHA256SUMS.txt"}]}"#.to_vec())
+    };
+    let err = plan(
+        "1.2.0",
+        Channel::Stable,
+        false,
+        PathBuf::from("/tmp/srelens-tui"),
+        &fetch,
+    )
+    .unwrap_err();
+    let UpdateError::BadRelease(message) = err else {
+        panic!("expected the missing build to be reported, got {err:?}");
+    };
+    assert!(message.contains("carries no srectl build"), "{message}");
+}
+
+#[test]
+fn a_newer_dev_release_without_srectl_is_still_an_error() {
+    let fetch = |_: &str| -> Result<Vec<u8>, UpdateError> {
+        let body = format!(
+            r#"[
+            {{"tag_name":"srelens-v2.0.0-dev.1","prerelease":true,"assets":[{{"name":"srelens-tui-2.0.0-dev.1-SHA256SUMS.txt"}}]}}
+        ]"#
+        );
+        Ok(body.into_bytes())
+    };
+    let err = plan(
+        "1.2.0-dev.1",
+        Channel::Dev,
+        false,
+        PathBuf::from("/tmp/srelens-tui"),
+        &fetch,
+    )
+    .unwrap_err();
+    let UpdateError::BadRelease(message) = err else {
+        panic!("expected the missing build to be reported, got {err:?}");
+    };
+    assert!(
+        message.contains("release srelens-v2.0.0-dev.1 carries no srectl build"),
+        "{message}"
+    );
+}
+
+#[test]
+fn a_newer_dev_release_without_signature_is_still_an_error() {
+    let fetch = |_: &str| -> Result<Vec<u8>, UpdateError> {
+        let body = format!(
+            r#"[
+            {{"tag_name":"srelens-v2.0.0-dev.1","prerelease":true,"assets":{}}}
+        ]"#,
+            unsigned_assets_for("2.0.0-dev.1")
+        );
+        Ok(body.into_bytes())
+    };
+    let err = plan(
+        "1.2.0-dev.1",
+        Channel::Dev,
+        false,
+        PathBuf::from("/tmp/srelens-tui"),
+        &fetch,
+    )
+    .unwrap_err();
+    let UpdateError::BadRelease(message) = err else {
+        panic!("expected the missing signature to be reported, got {err:?}");
+    };
+    assert!(
+        message.contains("release srelens-v2.0.0-dev.1 is not signed"),
+        "{message}"
+    );
+}
+
+#[test]
+fn a_dev_release_that_still_publishes_srelens_tui_at_same_version_is_current() {
+    let fetch = |_: &str| -> Result<Vec<u8>, UpdateError> {
+        let body = format!(
+            r#"[
+            {{"tag_name":"srelens-v1.2.0-dev.1","prerelease":true,"assets":[{{"name":"srelens-tui-1.2.0-dev.1-SHA256SUMS.txt"}}]}}
+        ]"#
+        );
+        Ok(body.into_bytes())
+    };
+    assert_eq!(
+        plan(
+            "1.2.0-dev.1",
+            Channel::Dev,
+            false,
+            PathBuf::from("/tmp/srelens-tui"),
+            &fetch
+        )
+        .unwrap(),
+        Check::UpToDate {
+            channel: Channel::Dev,
+            latest: "1.2.0-dev.1".into()
+        }
     );
 }
 
@@ -1391,13 +1514,13 @@ fn a_windows_directory_anyone_can_write_to_is_refused_before_anything_is_downloa
         "*S-1-5-11:(OI)(CI)(IO)(M)",
     ] {
         let dir = tempfile::tempdir().unwrap();
-        let (plan, _) = staged(dir.path(), b"unused");
+        let release = staged(dir.path(), b"unused");
         grant(dir.path(), entry);
         let fetch = |_: &str| -> Result<Vec<u8>, UpdateError> {
             panic!("{entry}: nothing should be downloaded into a directory anyone can write to")
         };
 
-        match apply(&plan, &fetch) {
+        match apply(&release.plan, &fetch) {
             Err(UpdateError::UnsafeDirectory { path }) => assert_eq!(path, dir.path(), "{entry}"),
             other => panic!("{entry}: expected UnsafeDirectory, got {other:?}"),
         }
@@ -1426,7 +1549,7 @@ fn the_ordinary_windows_install_directories_are_not_refused() {
         Some("*S-1-5-32-551:(M)"),
     ] {
         let dir = tempfile::tempdir().unwrap();
-        let (plan, _) = staged(dir.path(), b"unused");
+        let release = staged(dir.path(), b"unused");
         if let Some(entry) = entry {
             grant(dir.path(), entry);
         }
@@ -1437,7 +1560,7 @@ fn the_ordinary_windows_install_directories_are_not_refused() {
             ))
         };
 
-        match apply(&plan, &fetch) {
+        match apply(&release.plan, &fetch) {
             Err(UpdateError::Download(_)) => {}
             other => panic!("{entry:?}: expected to reach the download, got {other:?}"),
         }

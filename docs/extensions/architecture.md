@@ -46,9 +46,9 @@ Inspector. The broker's consent is the MCP host's: the desktop app's confirmatio
 prompt, naming the app, or `NoConsent` headless. See
 [Executable apps](manifest.md#executable-apps).
 
-Executable apps are a preview. They run out of the box on Windows. On Linux they are not out of the box:
-they need the launcher `srelens-sandbox-launch`, Landlock and a delegated cgroup v2
-directory, set up by hand ([what is needed](manifest.md#where-executable-apps-run)). On macOS they do not run yet. srelens refuses to start any sidecar until its memory and CPU watchdog has
+Executable apps are a preview. They run out of the box on Windows, and on a systemd Linux
+desktop with Landlock, where systemd before 252 and the RHEL 9 family need the `cpu`
+controller delegated first ([what is needed](manifest.md#where-executable-apps-run)). On macOS they do not run yet. srelens refuses to start any sidecar until its memory and CPU watchdog has
 been checked with Seatbelt on a macOS 27 Mac.
 
 ## App lifecycle

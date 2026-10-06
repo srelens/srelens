@@ -12,8 +12,9 @@ const repoFile = (path: string) => readFileSync(resolve(repoRoot, path), "utf8")
 /** The published URL of an API line's schema, which a manifest written for it names. */
 const schemaUrl = (line: string) =>
   `https://raw.githubusercontent.com/srelens/srelens/main/schemas/extension-manifest.v${line}.json`;
-const schema = JSON.parse(repoFile("schemas/extension-manifest.v0.5.json"));
+const schema = JSON.parse(repoFile("schemas/extension-manifest.v0.7.json"));
 const frozen0_4 = JSON.parse(repoFile("schemas/extension-manifest.v0.4.json"));
+const frozen0_6 = JSON.parse(repoFile("schemas/extension-manifest.v0.6.json"));
 // Every example, so a new one cannot skip validation.
 const examples = readdirSync(resolve(repoRoot, "examples/extensions"))
   .filter((name) => name.endsWith(".json"))
@@ -62,7 +63,7 @@ describe("frozen API 0.3 manifest schema", () => {
 
   it.each(examples)("refuses %s, which uses API 0.4 fields", (path) => {
     const manifest = JSON.parse(repoFile(path));
-    expect(manifest.srelensApiVersion).toMatch(/^\^0\.[45]$/);
+    expect(manifest.srelensApiVersion).toMatch(/^\^0\.[4-7]$/);
     expect(validate({ ...manifest, srelensApiVersion: "^0.3" })).toBe(false);
   });
 });
@@ -151,5 +152,35 @@ describe("pod permissions (#567)", () => {
     const single = granted();
     single.permissions.at(-1).namespaces = "argocd";
     expect(validate(single)).toBe(false);
+  });
+});
+
+// API 0.6's file is kept as it was when 0.7 was cut: srelens 0.15.1-192 and later
+// implement 0.6 without providers (#569).
+describe("metric, log and trace providers (#569)", () => {
+  const validate = new Ajv({ allErrors: true }).compile(schema);
+  const frozen = new Ajv({ allErrors: true }).compile(frozen0_6);
+
+  it.each(["examples/extensions/prometheus.json", "examples/extensions/loki.json"])(
+    "accepts the reference %s, which API 0.6's schema does not",
+    (path) => {
+      const manifest = JSON.parse(repoFile(path));
+      expect(manifest.srelensApiVersion).toBe("^0.7");
+      expect(validate(manifest), JSON.stringify(validate.errors)).toBe(true);
+      expect(frozen({ ...manifest, srelensApiVersion: "^0.6" })).toBe(false);
+    },
+  );
+
+  it("holds each list to its own language and a metric provider to a unit the chart formats", () => {
+    const prometheus = JSON.parse(repoFile("examples/extensions/prometheus.json"));
+    const inLogql = structuredClone(prometheus);
+    inLogql.contributions.metricProviders[0].language = "logql";
+    expect(validate(inLogql)).toBe(false);
+    const inPounds = structuredClone(prometheus);
+    inPounds.contributions.metricProviders[0].unit = "pounds";
+    expect(validate(inPounds)).toBe(false);
+    const extra = structuredClone(prometheus);
+    extra.contributions.metricProviders[0].html = "<b>CPU</b>";
+    expect(validate(extra)).toBe(false);
   });
 });

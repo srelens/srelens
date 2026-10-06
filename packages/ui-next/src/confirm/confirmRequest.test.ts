@@ -126,3 +126,19 @@ describe("the app a sidecar's request names", () => {
     expect(asConfirmRequest(base)?.requester).toBeNull();
   });
 });
+
+describe("the chat a request came from (#393)", () => {
+  const base = { id: "r1", tool: "k8s.scale", args: {} };
+
+  it("keeps the chat session the host named, and nothing else", () => {
+    expect(asConfirmRequest({ ...base, caller: { chatSession: "sess-7", extra: 1 } })?.caller).toEqual({
+      chatSession: "sess-7",
+    });
+  });
+
+  it("reads anything else as no caller — the same as an external client", () => {
+    for (const caller of [undefined, null, "sess-7", {}, { chatSession: "" }, { chatSession: 7 }]) {
+      expect(asConfirmRequest({ ...base, caller })?.caller, JSON.stringify(caller)).toBeNull();
+    }
+  });
+});

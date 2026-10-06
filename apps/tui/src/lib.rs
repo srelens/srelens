@@ -16,6 +16,7 @@ pub mod tui_config;
 pub mod ui;
 pub mod update_signature;
 pub mod quick_rca;
+pub mod rebrand;
 pub mod views;
 
 pub use ai_config::{AiProvider, AiSettings};

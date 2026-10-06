@@ -12,6 +12,7 @@ import {
   notify,
   podContainerChoices,
   rolloutRestart,
+  rolloutUndo,
   scaleResource,
   toKubectl,
   type ContainerChoice,
@@ -29,6 +30,7 @@ import { openTab } from "../lib/tabsStore";
 import { isContextPaused, useDismissOnPause } from "../lib/pausedContext";
 import { NewForwardDialog } from "./forwards/NewForwardDialog";
 import { logsRoute } from "./Logs";
+import { RevisionPicker } from "./RevisionPicker";
 
 export interface UseRowMenuArgs {
   /** The kubeconfig context name — what every core action call is scoped to. */
@@ -46,6 +48,8 @@ type Ask =
   | { type: "delete"; row: ListRow }
   | { type: "scale"; row: ListRow }
   | { type: "restart"; row: ListRow }
+  /** A Deployment, back to a revision chosen in the dialog (#389). */
+  | { type: "rollback"; row: ListRow }
   | { type: "evict"; row: ListRow }
   /** `suspend: true` sets the CronJob suspended; `false` resumes it. */
   | { type: "suspend"; row: ListRow; suspend: boolean };
@@ -76,6 +80,7 @@ type Pending = Ask & { context: string };
 function verbOf(pending: Pending | null): string {
   if (!pending) return "act";
   if (pending.type === "suspend") return pending.suspend ? "suspend" : "resume";
+  if (pending.type === "rollback") return "roll back";
   return pending.type;
 }
 
@@ -174,6 +179,9 @@ export function useRowMenu({ context, kind, actions, group }: UseRowMenuArgs): {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [replicas, setReplicas] = useState("");
+  /** The revision a rollback goes back to — `RevisionPicker` starts it on the
+   *  one before current once the revisions are read; empty until then. */
+  const [revision, setRevision] = useState("");
 
   /**
    * The divergence banner, its acknowledgement and the refusal behind it.
@@ -208,6 +216,7 @@ export function useRowMenu({ context, kind, actions, group }: UseRowMenuArgs): {
     setError("");
     gate.reset();
     if (next.type === "scale") setReplicas("");
+    if (next.type === "rollback") setRevision("");
     // The cluster the reader picked this ON, read once, here. Everything the
     // confirm does below belongs to it.
     setPending({ ...next, context });
@@ -317,6 +326,12 @@ export function useRowMenu({ context, kind, actions, group }: UseRowMenuArgs): {
         return;
       }
     }
+    // Nothing chosen: the revisions are still being read, could not be, or
+    // there is no earlier one. Each of those says so in the dialog already.
+    if (pending.type === "rollback" && revision === "") {
+      setError("Choose an earlier revision to roll back to.");
+      return;
+    }
 
     setBusy(true);
     setError("");
@@ -330,6 +345,8 @@ export function useRowMenu({ context, kind, actions, group }: UseRowMenuArgs): {
           return scaleResource(target, kind, ns, row.name, Number(replicas));
         case "restart":
           return rolloutRestart(target, kind, ns, row.name);
+        case "rollback":
+          return rolloutUndo(target, ns, row.name, Number(revision));
         case "evict":
           return evictPod(target, ns, row.name);
         case "suspend":
@@ -433,6 +450,14 @@ export function useRowMenu({ context, kind, actions, group }: UseRowMenuArgs): {
         onPick: () => open({ type: "restart", row }),
       });
     }
+    if (actions.rollback) {
+      destructive.push({
+        label: ROW_ACTION_LABEL.rollback,
+        icon: Icons.rollback,
+        danger: true,
+        onPick: () => open({ type: "rollback", row }),
+      });
+    }
     if (actions.evict) {
       destructive.push({ label: ROW_ACTION_LABEL.evict, icon: Icons.evict, danger: true, onPick: () => open({ type: "evict", row }) });
     }
@@ -457,6 +482,8 @@ export function useRowMenu({ context, kind, actions, group }: UseRowMenuArgs): {
       error={error}
       replicas={replicas}
       onReplicasChange={setReplicas}
+      revision={revision}
+      onRevisionChange={setRevision}
       onConfirm={() => void confirm()}
       onCancel={close}
     />
@@ -518,6 +545,7 @@ const TITLES: Record<Exclude<Pending["type"], "suspend">, (kind: string) => stri
   delete: (kind) => `Delete ${kind}?`,
   scale: (kind) => `Scale ${kind}`,
   restart: (kind) => `Restart ${kind}`,
+  rollback: (kind) => `Roll back ${kind}`,
   evict: () => "Evict pod?",
 };
 
@@ -551,6 +579,13 @@ function messageFor(pending: Pending): ReactNode {
           {where}? This reschedules all of its pods.
         </>
       );
+    case "rollback":
+      return (
+        <>
+          Roll <code>{row.name}</code>
+          {where} back to an earlier revision? Its pods are replaced with that revision&apos;s.
+        </>
+      );
     case "evict":
       return (
         <>
@@ -571,7 +606,13 @@ function messageFor(pending: Pending): ReactNode {
   }
 }
 
-function kubectlFor(pending: Pending, kind: string, context: string, replicas: string): { command?: string; note?: string } {
+function kubectlFor(
+  pending: Pending,
+  kind: string,
+  context: string,
+  replicas: string,
+  revision: string,
+): { command?: string; note?: string } {
   const { row } = pending;
   const namespace = row.namespace ?? null;
   switch (pending.type) {
@@ -579,6 +620,13 @@ function kubectlFor(pending: Pending, kind: string, context: string, replicas: s
       return { command: toKubectl({ action: "delete", kind, name: row.name, namespace, context }) };
     case "restart":
       return { command: toKubectl({ action: "rollout-restart", kind, name: row.name, namespace, context }) };
+    case "rollback":
+      // No line until a revision is chosen: `--to-revision=` with nothing
+      // after it is not a command anyone could check.
+      if (revision === "") return {};
+      return {
+        command: toKubectl({ action: "rollout-undo", kind, name: row.name, namespace, context, revision: Number(revision) }),
+      };
     case "evict":
       return {
         note: "No single-line kubectl equivalent — eviction uses the pod's /eviction subresource, which respects PodDisruptionBudgets (a plain delete does not).",
@@ -610,6 +658,8 @@ function PendingDialog({
   error,
   replicas,
   onReplicasChange,
+  revision,
+  onRevisionChange,
   onConfirm,
   onCancel,
 }: {
@@ -623,6 +673,8 @@ function PendingDialog({
   error: string;
   replicas: string;
   onReplicasChange: (value: string) => void;
+  revision: string;
+  onRevisionChange: (value: string) => void;
   onConfirm: () => void;
   onCancel: () => void;
 }) {
@@ -634,12 +686,14 @@ function PendingDialog({
         ? "Scale"
         : pending.type === "restart"
           ? "Restart"
-          : pending.type === "evict"
-            ? "Evict"
-            : pending.suspend
-              ? "Suspend"
-              : "Resume";
-  const { command, note } = kubectlFor(pending, kind, context, replicas);
+          : pending.type === "rollback"
+            ? "Roll back"
+            : pending.type === "evict"
+              ? "Evict"
+              : pending.suspend
+                ? "Suspend"
+                : "Resume";
+  const { command, note } = kubectlFor(pending, kind, context, replicas, revision);
 
   return (
     <ConfirmDialog
@@ -666,6 +720,15 @@ function PendingDialog({
               aria-label="Replica count"
               invalid={Boolean(error)}
               autoFocus
+            />
+          )}
+          {pending.type === "rollback" && (
+            <RevisionPicker
+              context={context}
+              namespace={pending.row.namespace ?? ""}
+              name={pending.row.name}
+              value={revision}
+              onChange={onRevisionChange}
             />
           )}
           <KubectlPreview command={command} note={note} onCopy={command ? () => copyKubectlCommand(command) : undefined} />

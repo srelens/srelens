@@ -279,7 +279,7 @@ pub async fn run_native_agent_turn(
                     result: Ok(format!("{}|{}|{}", id, tool, args_preview)),
                 });
             }
-            AgentEvent::ToolResult { id, status } => {
+            AgentEvent::ToolResult { id, status, .. } => {
                 let status_str = match status {
                     srelens_agent::event::ToolStatus::Ok => "ok",
                     srelens_agent::event::ToolStatus::Error => "error",

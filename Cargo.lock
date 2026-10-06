@@ -7210,6 +7210,7 @@ dependencies = [
  "tokio",
  "url",
  "windows-sys 0.59.0",
+ "zbus 5.18.0",
 ]
 
 [[package]]
@@ -7223,6 +7224,7 @@ dependencies = [
  "flate2",
  "libc",
  "log",
+ "percent-encoding",
  "proptest",
  "reqwest 0.13.4",
  "ring",

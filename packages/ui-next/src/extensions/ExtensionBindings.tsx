@@ -299,6 +299,46 @@ const listed = (items: ReactNode[]) =>
     </span>
   ));
 
+/** The provider lists (#569), what each is called, and the parameters the host sets on its request. */
+const PROVIDER_LISTS = [
+  { list: "metricProviders", what: "Metric provider", language: "PromQL", sets: ["query", "start", "end", "step"], polls: false },
+  { list: "logProviders", what: "Log provider", language: "LogQL", sets: ["query", "start", "end", "limit", "direction"], polls: true },
+  { list: "traceProviders", what: "Trace provider", language: "TraceQL", sets: ["q", "start", "end", "limit"], polls: false },
+] as const;
+
+/** "a, b and c". */
+const inWords = (words: readonly string[]) =>
+  words.length < 2 ? words.join("") : `${words.slice(0, -1).join(", ")} and ${words[words.length - 1]}`;
+
+/**
+ * The providers that send their query through `binding` (#569): each one's whole
+ * template, as the manifest writes it, and what the host adds to it. A log provider
+ * is asked again while a view follows it, and says so, since that is a request on a
+ * timer to another system.
+ */
+function Providers({ manifest, binding }: { manifest: unknown; binding: Binding }) {
+  const contributions = fields(fields(manifest).contributions);
+  const through = PROVIDER_LISTS.flatMap((kind) =>
+    items(contributions[kind.list])
+      .map(fields)
+      .filter((provider) => provider.capability === binding.name)
+      .map((provider) => ({ kind, provider })),
+  );
+  if (through.length === 0) return null;
+  return (
+    <ul className="extension-binding-readers" aria-label={`Providers that query through ${label(binding)}`}>
+      {through.map(({ kind, provider }, index) => (
+        <li key={index}>
+          {kind.what} <strong>{show(provider.title ?? provider.id)}</strong>, {kind.language}, for{" "}
+          {show(items(provider.forKinds).join(", "))}: <code>{show(provider.query)}</code>. The host binds each{" "}
+          <code>{"${…}"}</code> for the view it is shown in, and sets {inWords(kind.sets)}
+          {kind.polls && "; asked again every 5 s while a log view follows it"}.
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 /**
  * `network.http` (#568): where the app may reach, then what each request sends. The
  * hosts are the grant's scope, and a secret header is named by the setting that keeps
@@ -359,6 +399,7 @@ function NetworkRequests({ bindings, manifest }: { bindings: Binding[]; manifest
                 </>
               )}
               {secrets.length > 0 && <>; sends {listed(secrets)}</>}.
+              <Providers manifest={manifest} binding={binding} />
             </li>
           );
         })}

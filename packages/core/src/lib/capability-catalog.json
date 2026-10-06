@@ -92,6 +92,15 @@
     "confirm": null
   },
   {
+    "id": "extensions.queryProvider",
+    "readOnly": true,
+    "destructive": false,
+    "requiresConfirm": false,
+    "sensitive": false,
+    "impact": "low",
+    "confirm": null
+  },
+  {
     "id": "extensions.read",
     "readOnly": true,
     "destructive": false,
@@ -954,6 +963,15 @@
     "sensitive": false,
     "impact": "medium",
     "confirm": "Roll every pod[ of {resource}][ in cluster {cluster}]?"
+  },
+  {
+    "id": "k8s.rolloutUndo",
+    "readOnly": false,
+    "destructive": false,
+    "requiresConfirm": true,
+    "sensitive": false,
+    "impact": "medium",
+    "confirm": "Roll back Deployment[ {namespace}/{name}][ in cluster {cluster}] to an earlier revision?"
   },
   {
     "id": "k8s.scale",

@@ -109,6 +109,50 @@ describe("Table virtualization", () => {
     expect(container.querySelector("table")?.className).toContain("tbl-resized");
   });
 
+  it("re-pins wide enough for a row the window has not rendered", () => {
+    // Pinned widths put the table in fixed layout, where a cell wider than
+    // its column draws over the next one. A resize measures again while only
+    // a window of rows exists, so a long value further down was left out and
+    // overflowed once scrolled to (#797 review).
+    //
+    // jsdom lays nothing out, so each header reports what automatic layout
+    // would give its column: 8px a character of the longest cell in the DOM.
+    vi.spyOn(HTMLTableRowElement.prototype, "getBoundingClientRect").mockReturnValue({
+      height: 20,
+    } as DOMRect);
+    vi.spyOn(HTMLTableCellElement.prototype, "getBoundingClientRect").mockImplementation(function (
+      this: HTMLTableCellElement,
+    ) {
+      const rows = Array.from(this.closest("table")?.querySelectorAll("tbody tr") ?? []) as HTMLTableRowElement[];
+      const lengths = rows.map((row) => row.cells[this.cellIndex]?.textContent?.length ?? 0);
+      return { width: Math.max(this.textContent?.length ?? 0, ...lengths) * 8 } as DOMRect;
+    });
+    const callbacks: ResizeObserverCallback[] = [];
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        constructor(callback: ResizeObserverCallback) {
+          callbacks.push(callback);
+        }
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+      },
+    );
+    const long = "/mongodb-opensearch-monstache-passview-userdevices/";
+    const data = bigData.slice(0, 200).map((row, i) => (i === 150 ? { ...row, name: long } : row));
+
+    const { container, sp } = renderScrollable(data);
+    Object.defineProperty(sp, "clientWidth", { value: 640, configurable: true });
+    act(() => callbacks.forEach((notify) => notify([], {} as ResizeObserver)));
+
+    // Row 150 is far outside the window; it is not on screen, yet its column
+    // is as wide as it needs.
+    expect(screen.queryByText(long)).toBeNull();
+    expect(parseFloat(colWidths(container)[0])).toBeGreaterThanOrEqual(long.length * 8);
+    vi.unstubAllGlobals();
+  });
+
   it("keeps those widths identical across scrolls (#298)", () => {
     mockLayout();
     const { container, sp } = renderScrollable(bigData);
