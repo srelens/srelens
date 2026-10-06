@@ -135,14 +135,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // This build is the last one published as srelens-tui. Running it
         // from that name installs srectl beside it and continues as srectl,
         // so the next update can fetch srectl archives.
-        if srelens_tui::rebrand::should_rebrand(&exe) {
-            match srelens_tui::rebrand::apply_rebrand(&exe) {
+        if srectl::rebrand::should_rebrand(&exe) {
+            match srectl::rebrand::apply_rebrand(&exe) {
                 Ok(next) => {
                     use std::io::IsTerminal;
                     if std::io::stderr().is_terminal() {
-                        eprintln!("{}", srelens_tui::rebrand::notice());
+                        eprintln!("{}", srectl::rebrand::notice());
                     }
-                    let why = srelens_tui::rebrand::exec_next(&next);
+                    let why = srectl::rebrand::exec_next(&next);
                     eprintln!(
                         "srelens-tui: could not start {}: {why}",
                         next.display()

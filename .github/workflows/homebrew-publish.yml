@@ -163,6 +163,17 @@ jobs:
             git rm -f Formula/srelens-tui.rb
           fi
 
+          # Ensure formula_renames.json exists so Homebrew knows srelens-tui was renamed to srectl.
+          # Homebrew automatically reads this on brew update and migrates existing installs.
+          node -e '
+            const fs = require("fs");
+            const file = "formula_renames.json";
+            const renames = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : {};
+            renames["srelens-tui"] = "srectl";
+            fs.writeFileSync(file, JSON.stringify(renames, null, 2) + "\n");
+          '
+          git add formula_renames.json
+
           # Staged BEFORE the comparison, and compared against the index.
           # `git diff` only looks at tracked files, so on the very first publish
           # — when the tap has no Formula/srectl.rb yet — the freshly
