@@ -217,6 +217,10 @@ function validator(context: string) {
  * assistant for a review.
  */
 function useAnalysis(pinned: string, yaml: string) {
+  // A lint result rerenders this screen. Keep the validator's identity until
+  // the pinned cluster changes, or CodeEditor schedules another lint pass for
+  // the same YAML and CodeMirror closes the open diagnostic tooltip.
+  const schemaValidator = useMemo(() => validator(pinned), [pinned]);
   // `null` until the first pass: "no problems" before anything has looked
   // would be a guess, and the toolbar says "unchecked" instead.
   const [problems, setProblems] = useState<EditorDiagnostic[] | null>(null);
@@ -257,6 +261,7 @@ function useAnalysis(pinned: string, yaml: string) {
     problems: problems ?? [],
     checked: problems !== null,
     setProblems,
+    schemaValidator,
     setCursor,
     schema,
     keys,
@@ -711,7 +716,7 @@ function EditExisting({ context, parts }: { context: ClusterContext; parts: Edit
                 copy
                 readOnly={!revealed}
                 ariaLabel={`${name} manifest`}
-                schemaValidate={validator(pinned)}
+                schemaValidate={analysis.schemaValidator}
                 completions={analysis.completions}
                 onCursorChange={analysis.setCursor}
                 onDiagnostics={analysis.setProblems}
@@ -1009,7 +1014,7 @@ function NewResource({ context, cluster }: { context: ClusterContext; cluster?: 
               flush
               copy
               ariaLabel="New resource manifest"
-              schemaValidate={validator(pinned)}
+              schemaValidate={analysis.schemaValidator}
               completions={analysis.completions}
               onCursorChange={analysis.setCursor}
               onDiagnostics={analysis.setProblems}
