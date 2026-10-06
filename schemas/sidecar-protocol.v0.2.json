@@ -422,6 +422,14 @@
         },
         "context": {
           "$ref": "#/definitions/CallContext"
+        },
+        "cursor": {
+          "description": "Opaque continuation from this binding's previous page (API 0.2).",
+          "maxLength": 8192,
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [

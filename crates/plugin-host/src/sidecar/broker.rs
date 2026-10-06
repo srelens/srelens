@@ -327,7 +327,11 @@ impl CapabilityBroker {
                 "namespace": namespace,
                 "bindings": given["bindings"],
             }),
-            "extensions.read" => selection(),
+            "extensions.read" => {
+                let mut selection = selection();
+                if let Some(cursor) = given.get("cursor") { selection["cursor"] = cursor.clone(); }
+                selection
+            },
             "extensions.runJob" => {
                 let mut selection = selection();
                 selection["inputs"] = given["inputs"].clone();
@@ -397,7 +401,7 @@ pub(crate) fn host_call(name: &str, params: Value) -> Result<HostCall, RpcError>
         });
     }
     let (tool, fields): (&'static str, &[&str]) = match name {
-        method::HOST_READ => ("extensions.read", &["capability"]),
+        method::HOST_READ => ("extensions.read", &["capability", "cursor"]),
         method::HOST_RESOURCE => ("extensions.resource", &["capability", "name"]),
         method::HOST_ACTION => (
             "extensions.action",
@@ -436,7 +440,7 @@ pub(crate) fn host_call(name: &str, params: Value) -> Result<HostCall, RpcError>
         };
         given.insert(key, value);
     }
-    if let Some(missing) = fields.iter().find(|f| !given.contains_key(**f)) {
+    if let Some(missing) = fields.iter().find(|f| **f != "cursor" && !given.contains_key(**f)) {
         return Err(invalid(format!("`{name}` needs `{missing}`")));
     }
     for (field, value) in &given {
@@ -444,6 +448,7 @@ pub(crate) fn host_call(name: &str, params: Value) -> Result<HostCall, RpcError>
         let (fits, shape) = match field.as_str() {
             "capability" | "action" => (is_identifier(value), IDENTIFIER),
             "name" => (is_object_name(value), OBJECT_NAME),
+            "cursor" => (value.len() <= 8192 && value.bytes().all(|b| b.is_ascii_graphic()), "a continuation token of at most 8192 printable bytes"),
             _ => (is_token(value), TOKEN),
         };
         if !fits {
@@ -836,6 +841,14 @@ mod tests {
         let params = json!({"context": on("prod", Value::Null), "capability": "applications"});
         h.call("host/read", params).await.unwrap();
         assert_eq!(h.seen()[0].1["namespace"], "");
+    }
+
+    #[tokio::test]
+    async fn a_paged_read_preserves_cursor_and_host_owned_scope() {
+        let h = harness(Arc::new(NoConsent));
+        h.call("host/read", json!({"context":on("prod",json!("team")),"capability":"applications","cursor":"next-page"})).await.unwrap();
+        assert_eq!(h.seen()[0].1, json!({"id":APP,"revision":7,"context":"prod","namespace":"team","capability":"applications","cursor":"next-page"}));
+        assert!(h.call("host/read", json!({"context":on("prod",json!("team")),"capability":"applications","cursor":"x".repeat(8193)})).await.is_err());
     }
 
     #[tokio::test]

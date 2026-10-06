@@ -458,6 +458,10 @@ fn workload_image_bindings_fix_kind_and_expose_only_cluster_and_namespace() {
     let parsed = Manifest::parse(&value.to_string()).unwrap();
     let validation = validate_app(&parsed, &["k8s.listWorkloadImages".into()], core.clone());
     assert!(validation.is_ok(), "{validation:?}");
+    value["capabilities"][0]["inputs"] = json!(["context", "namespace", "cursor"]);
+    let paged = Manifest::parse(&value.to_string()).unwrap();
+    let paged_validation = validate_app(&paged, &["k8s.listWorkloadImages".into()], core.clone());
+    assert!(paged_validation.is_ok(), "{paged_validation:?}");
     for bad in [json!({"kind":"Pod"}), json!({"kind":"Deployment","manifest":true}), json!({})] {
         value["capabilities"][0]["arguments"] = bad;
         let parsed = Manifest::parse(&value.to_string()).unwrap();

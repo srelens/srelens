@@ -584,6 +584,9 @@ fn context_names_or_null(
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct Read {
+    #[serde(default)]
+    #[schemars(length(max = 8192))]
+    cursor: Option<String>,
     #[serde(default, rename = "useCrdColumns")]
     use_crd_columns: bool,
     id: String,
@@ -962,7 +965,7 @@ fn validate_app(
             continue;
         }
         for (position, key) in binding.inputs.iter().enumerate() {
-            if key != "context" && key != "namespace" {
+            if key != "context" && key != "namespace" && !(key == "cursor" && binding.target == "k8s.listWorkloadImages") {
                 problems.push(
                     Code::InvalidBinding,
                     format!("{at}.inputs[{position}]"),
@@ -2689,6 +2692,12 @@ async fn read_contribution(
         )
         .map_err(CapabilityError::Handler)?;
     let mut args = json!({ "context": context });
+    if let Some(cursor) = &input.cursor {
+        if cursor.len() > 8192 || !cursor.bytes().all(|b|b.is_ascii_graphic()) || !plugin.manifest.capabilities.iter().any(|b|b.name == input.capability && b.target == "k8s.listWorkloadImages" && b.inputs.iter().any(|key|key == "cursor")) {
+            return Err(CapabilityError::InvalidInput("This binding does not accept this image page cursor".into()));
+        }
+        args["cursor"] = json!(cursor);
+    }
     if plugin
         .manifest
         .capabilities

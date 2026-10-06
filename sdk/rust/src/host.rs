@@ -99,6 +99,7 @@ impl Host {
         let params = HostReadParams {
             context: context.clone(),
             capability: capability.to_owned(),
+            cursor: None,
         };
         self.call(
             method::HOST_READ,

@@ -299,6 +299,7 @@ impl Inner {
                     match kind {
                         Some(Kind::Reader) => {
                             let read = Read {
+                                cursor: input.get("cursor").and_then(Value::as_str).map(str::to_owned),
                                 use_crd_columns: false,
                                 id,
                                 revision,

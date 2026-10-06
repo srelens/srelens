@@ -23,6 +23,50 @@ func prod(t testing.TB) sidecar.CallContext {
 	return cc
 }
 
+func TestPageReadCarriesPinnedScopeAndOpaqueCursor(t *testing.T) {
+	s := sidecar.New("t", "1")
+	sidecar.Operation(s, "page", func(ctx context.Context, _ struct{}) (json.RawMessage, error) {
+		return sidecar.HostFrom(ctx).ReadPage(ctx, prod(t), "images", "next-page")
+	})
+	h := start(t, s)
+	h.answer(h.request("initialize", initializeParams([]string{"0.2.0"}, h.DataDir, defaultLimits())))
+	h.answer(h.request("activate", map[string]any{}))
+	id := h.request("page", map[string]any{})
+	call := h.call()
+	want := map[string]any{"context": map[string]any{"clusterId": "kind-dev", "namespace": "team"}, "capability": "images", "cursor": "next-page"}
+	if !reflect.DeepEqual(call["params"], want) {
+		t.Fatalf("wrong page payload: %v", call)
+	}
+	h.reply(call["id"], map[string]any{"items": []any{}, "nextCursor": ""}, nil)
+	if h.answer(id)["error"] != nil {
+		t.Fatal("page response failed")
+	}
+	if err := h.finish(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestFirstPageIsExplicitlyRequestedWithoutChangingLegacyReads(t *testing.T) {
+	s := sidecar.New("t", "1")
+	sidecar.Operation(s, "page", func(ctx context.Context, _ struct{}) (json.RawMessage, error) {
+		return sidecar.HostFrom(ctx).ReadPage(ctx, prod(t), "images", "")
+	})
+	h := start(t, s)
+	h.answer(h.request("initialize", initializeParams([]string{"0.2.0"}, h.DataDir, defaultLimits())))
+	h.answer(h.request("activate", map[string]any{}))
+	id := h.request("page", map[string]any{})
+	call := h.call()
+	params := call["params"].(map[string]any)
+	if cursor, present := params["cursor"]; !present || cursor != "" {
+		t.Fatal("missing explicit first-page cursor")
+	}
+	h.reply(call["id"], map[string]any{"items": []any{}}, nil)
+	h.answer(id)
+	if err := h.finish(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestEachHostCallNamesItsContextAndGetsTheHostsAnswer(t *testing.T) {
 	s := sidecar.New("t", "1")
 	sidecar.Operation(s, "read", func(ctx context.Context, _ struct{}) (json.RawMessage, error) {

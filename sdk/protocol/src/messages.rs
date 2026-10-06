@@ -197,6 +197,10 @@ pub struct HostReadParams {
     pub context: CallContext,
     #[cfg_attr(feature = "schema", schemars(schema_with = "identifier"))]
     pub capability: String,
+    /// Opaque continuation from this binding's previous page (API 0.2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(length(max = 8192)))]
+    pub cursor: Option<String>,
 }
 
 /// Discover only the resource bindings declared and granted to this app (API 0.2).
@@ -630,6 +634,7 @@ mod tests {
         let read: HostReadParams =
             serde_json::from_value(json!({"context": context, "capability": "apps"})).unwrap();
         assert_eq!(read.capability, "apps");
+        assert!(serde_json::from_value::<HostReadParams>(json!({"context":context,"capability":"apps","cursor":"next-page"})).is_ok());
         let action: HostActionParams = serde_json::from_value(json!({"context": context,
             "capability": "apps", "name": "web", "action": "sync", "uid": "u-1",
             "resourceVersion": "42"}))

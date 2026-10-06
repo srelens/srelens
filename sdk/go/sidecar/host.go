@@ -124,6 +124,28 @@ func (h *Host) Read(ctx context.Context, cc CallContext, capability string) (jso
 	return h.call(ctx, protocol.MethodHostRead, protocol.HostReadParams{Context: cc, Capability: capability})
 }
 
+// ReadPage reads a bounded page from a declared image inventory binding (API 0.2).
+func (h *Host) ReadPage(ctx context.Context, cc CallContext, capability, cursor string) (json.RawMessage, error) {
+	if h.absent {
+		return nil, ErrNoSession
+	}
+	if APIVersion(ctx) != "0.2.0" {
+		return nil, fmt.Errorf("%w: paged reads require sidecar API 0.2.0", ErrInvalidCall)
+	}
+	if err := check(cc, field{"capability", capability, protocol.IsIdentifier, identifierRule}); err != nil {
+		return nil, err
+	}
+	if len(cursor) > 8192 {
+		return nil, fmt.Errorf("%w: cursor is at most 8192 printable bytes", ErrInvalidCall)
+	}
+	for _, b := range []byte(cursor) {
+		if b < 33 || b > 126 {
+			return nil, fmt.Errorf("%w: cursor is at most 8192 printable bytes", ErrInvalidCall)
+		}
+	}
+	return h.call(ctx, protocol.MethodHostRead, protocol.HostReadParams{Context: cc, Capability: capability, Cursor: &cursor})
+}
+
 // BindingAvailability discovers only the app's declared resource readers.
 // An older protocol is incompatible, never evidence that the Operator is absent.
 func (h *Host) BindingAvailability(ctx context.Context, cc CallContext, bindings []string) (json.RawMessage, error) {

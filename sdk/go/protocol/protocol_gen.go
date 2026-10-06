@@ -103,6 +103,8 @@ type HostBindingAvailabilityParams struct {
 type HostReadParams struct {
 	Capability string      `json:"capability"`
 	Context    CallContext `json:"context"`
+	// Opaque continuation from this binding's previous page (API 0.2).
+	Cursor *string `json:"cursor,omitempty"`
 }
 
 // HostResourceParams: `host/resource`'s params: inspect object `name` of a declared custom-resource reader.

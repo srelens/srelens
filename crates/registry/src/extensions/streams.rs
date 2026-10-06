@@ -921,6 +921,7 @@ struct ReadAsk {
 impl ReadAsk {
     fn read(&self) -> Read {
         Read {
+            cursor: None,
             use_crd_columns: false,
             id: self.id.clone(),
             revision: self.revision,
