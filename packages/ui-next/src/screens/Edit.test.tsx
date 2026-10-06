@@ -93,6 +93,7 @@ function latestEditor() {
     completions?: unknown;
     onCursorChange?: (pos: number) => void;
     onDiagnostics?: (diagnostics: unknown[]) => void;
+    schemaValidate?: (yaml: string) => Promise<unknown[]>;
   };
   return props;
 }
@@ -156,6 +157,19 @@ data:
 `;
 
 describe("EditResource", () => {
+  it.each([ROUTE, "/new/prod-eu"])("keeps the validator stable when lint results rerender the screen: %s", async route => {
+    render(<EditResource route={route} />);
+    await waitFor(() => expect(latestEditor()?.schemaValidate).toBeDefined());
+    const validate = latestEditor().schemaValidate;
+
+    act(() => latestEditor().onDiagnostics!([
+      { from: 0, to: 1, line: 1, severity: "error", message: "invalid YAML" },
+    ]));
+
+    expect(screen.getByTestId("manifest-status").textContent).toContain("1 problem");
+    expect(latestEditor().schemaValidate).toBe(validate);
+  });
+
   it.each([ROUTE, "/new/prod-eu"])("keeps unsaved YAML across a router pause: %s", async route => {
     const props = { route, ported: [], onOpenInClassic: () => {}, onLocked: () => {} };
     const { rerender } = render(<Body {...props} />);
