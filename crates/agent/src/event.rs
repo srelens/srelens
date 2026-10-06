@@ -23,32 +23,46 @@ pub const DENIED_PREFIX: &str = "consent denied: ";
 /// an object's kind and name, or the first line of plain text or of an error.
 /// Any other structured result gets no summary rather than a JSON fragment.
 pub fn summarize_result(text: &str, is_error: bool) -> Option<String> {
-    let first_line =
-        || text.lines().map(str::trim).find(|l| !l.is_empty()).map(|l| bound(&mask_credentials(l)));
+    let first_line = || {
+        text.lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty())
+            .map(|l| bound(&mask_credentials(l)))
+    };
     if is_error {
         return first_line();
     }
     match serde_json::from_str::<serde_json::Value>(text.trim()) {
         Ok(serde_json::Value::Array(items)) => Some(bound(&format!("{} items", items.len()))),
         Ok(serde_json::Value::Object(map)) => {
-            let arrays: Vec<(&String, usize)> =
-                map.iter().filter_map(|(k, v)| v.as_array().map(|a| (k, a.len()))).collect();
+            let arrays: Vec<(&String, usize)> = map
+                .iter()
+                .filter_map(|(k, v)| v.as_array().map(|a| (k, a.len())))
+                .collect();
             // One list, counted once even when a known second view of it sits
             // beside it (`VIEW_FIELDS`, PR #806 review). Arrays that merely
             // share a length are not one list, and say nothing.
-            let (views, lists): (Vec<_>, Vec<_>) =
-                arrays.iter().partition(|(k, _)| VIEW_FIELDS.contains(&k.as_str()));
+            let (views, lists): (Vec<_>, Vec<_>) = arrays
+                .iter()
+                .partition(|(k, _)| VIEW_FIELDS.contains(&k.as_str()));
             let counted = match (lists.as_slice(), views.as_slice()) {
                 ([list], views) if views.iter().all(|(_, len)| *len == list.1) => Some(*list),
                 ([], [only]) => Some(*only),
                 _ => None,
             };
             if let Some((field, n)) = counted {
-                let noun = if n == 1 { singular(field) } else { field.to_string() };
+                let noun = if n == 1 {
+                    singular(field)
+                } else {
+                    field.to_string()
+                };
                 return Some(bound(&format!("{n} {noun}")));
             }
             let kind = map.get("kind").and_then(|k| k.as_str());
-            let name = map.get("metadata").and_then(|m| m.get("name")).and_then(|n| n.as_str());
+            let name = map
+                .get("metadata")
+                .and_then(|m| m.get("name"))
+                .and_then(|n| n.as_str());
             match (kind, name) {
                 (Some(kind), Some(name)) => Some(bound(&format!("{kind} {name}"))),
                 _ => None,
@@ -80,8 +94,19 @@ const REDACTED: &str = "[redacted]";
 
 /// Words that, as the key of a `key=value` or `key: value`, name a credential.
 /// Matched inside the key, so `DB_PASSWORD` and `x-api-key` count.
-const CREDENTIAL_KEYS: &[&str] =
-    &["password", "passwd", "secret", "token", "apikey", "api_key", "api-key", "access_key", "private_key", "credential", "authorization"];
+const CREDENTIAL_KEYS: &[&str] = &[
+    "password",
+    "passwd",
+    "secret",
+    "token",
+    "apikey",
+    "api_key",
+    "api-key",
+    "access_key",
+    "private_key",
+    "credential",
+    "authorization",
+];
 
 /// Credentials in well-known shapes, masked in a line of free text before it
 /// becomes a summary (PR #806 review): a summary is written into the saved
@@ -102,7 +127,9 @@ fn mask_credentials(line: &str) -> String {
         let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
         let (word, tail) = rest.split_at(end);
         out.push_str(&mask_word(word, &mut mask_next));
-        let gap = tail.find(|c: char| !c.is_whitespace()).unwrap_or(tail.len());
+        let gap = tail
+            .find(|c: char| !c.is_whitespace())
+            .unwrap_or(tail.len());
         out.push_str(&tail[..gap]);
         rest = &tail[gap..];
     }
@@ -154,7 +181,11 @@ fn mask_word(word: &str, mask_next: &mut bool) -> String {
                 return out;
             }
         }
-        out.push_str(if looks_like_a_token(piece) { REDACTED } else { piece });
+        out.push_str(if looks_like_a_token(piece) {
+            REDACTED
+        } else {
+            piece
+        });
         let gap = tail.find(|c: char| !is_joiner(c)).unwrap_or(tail.len());
         out.push_str(&tail[..gap]);
         rest = &tail[gap..];
@@ -168,13 +199,24 @@ fn mask_word(word: &str, mask_next: &mut bool) -> String {
 /// Anthropic (`sk-`), Slack (`xox?-`), an AWS access key id, or a JWT.
 fn looks_like_a_token(word: &str) -> bool {
     let w = word.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '-');
-    let prefixed = ["ghp_", "gho_", "ghs_", "ghu_", "ghr_", "github_pat_", "xoxb-", "xoxp-", "xoxa-"]
-        .iter()
-        .any(|p| w.starts_with(p) && w.len() > p.len() + 8);
+    let prefixed = [
+        "ghp_",
+        "gho_",
+        "ghs_",
+        "ghu_",
+        "ghr_",
+        "github_pat_",
+        "xoxb-",
+        "xoxp-",
+        "xoxa-",
+    ]
+    .iter()
+    .any(|p| w.starts_with(p) && w.len() > p.len() + 8);
     let openai = w.starts_with("sk-") && w.len() >= 20;
     let aws = w.len() == 20
         && w.starts_with("AKIA")
-        && w.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit());
+        && w.chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit());
     let jwt = w.starts_with("eyJ") && w.matches('.').count() == 2;
     prefixed || openai || aws || jwt
 }
@@ -186,7 +228,10 @@ fn singular(plural: &str) -> String {
     if let Some(stem) = plural.strip_suffix("ies") {
         return format!("{stem}y");
     }
-    if ["sses", "ches", "shes", "xes"].iter().any(|ending| plural.ends_with(ending)) {
+    if ["sses", "ches", "shes", "xes"]
+        .iter()
+        .any(|ending| plural.ends_with(ending))
+    {
         return plural[..plural.len() - 2].to_string();
     }
     plural.strip_suffix('s').unwrap_or(plural).to_string()
@@ -210,7 +255,11 @@ pub enum AgentEvent {
     TextDelta { text: String },
     /// The agent has begun a tool call. `id` correlates with the matching
     /// `ToolResult`.
-    ToolCallStart { id: String, tool: String, args: serde_json::Value },
+    ToolCallStart {
+        id: String,
+        tool: String,
+        args: serde_json::Value,
+    },
     /// A tool call finished with this status — and, when its result says
     /// something short and honest, what (#385, see [`summarize_result`]).
     ToolResult {
@@ -222,6 +271,14 @@ pub enum AgentEvent {
     /// A chunk of the agent's internal reasoning/thinking, shown separately
     /// from its final response text.
     Thinking { text: String },
+    /// Token usage reported by the provider for the current turn.
+    #[serde(rename_all = "camelCase")]
+    Usage {
+        prompt_tokens: usize,
+        completion_tokens: usize,
+        cached_tokens: usize,
+        total_tokens: usize,
+    },
     /// The agent finished this turn and is waiting for the next user message.
     TurnDone,
     /// A fatal error for this turn (parse failure, process died, transport).
@@ -255,7 +312,11 @@ mod tests {
 
     #[test]
     fn tool_result_reports_a_status() {
-        let e = AgentEvent::ToolResult { id: "t1".into(), status: ToolStatus::Ok, summary: None };
+        let e = AgentEvent::ToolResult {
+            id: "t1".into(),
+            status: ToolStatus::Ok,
+            summary: None,
+        };
         let v = serde_json::to_value(&e).unwrap();
         assert_eq!(v["type"], "toolResult");
         assert_eq!(v["status"], "ok");
@@ -263,16 +324,39 @@ mod tests {
 
     #[test]
     fn thinking_serializes_with_a_tagged_type() {
-        let e = AgentEvent::Thinking { text: "pondering...".into() };
+        let e = AgentEvent::Thinking {
+            text: "pondering...".into(),
+        };
         let v = serde_json::to_value(&e).unwrap();
         assert_eq!(v["type"], "thinking");
         assert_eq!(v["text"], "pondering...");
     }
 
     #[test]
+    fn usage_serializes_with_a_tagged_type() {
+        let e = AgentEvent::Usage {
+            prompt_tokens: 1500,
+            completion_tokens: 200,
+            cached_tokens: 500,
+            total_tokens: 1700,
+        };
+        let v = serde_json::to_value(&e).unwrap();
+        assert_eq!(v["type"], "usage");
+        assert_eq!(v["promptTokens"], 1500);
+        assert_eq!(v["completionTokens"], 200);
+        assert_eq!(v["cachedTokens"], 500);
+        assert_eq!(v["totalTokens"], 1700);
+    }
+
+    #[test]
     fn error_and_turn_done_are_distinct_variants() {
-        assert_eq!(serde_json::to_value(AgentEvent::TurnDone).unwrap()["type"], "turnDone");
-        let err = AgentEvent::Error { message: "boom".into() };
+        assert_eq!(
+            serde_json::to_value(AgentEvent::TurnDone).unwrap()["type"],
+            "turnDone"
+        );
+        let err = AgentEvent::Error {
+            message: "boom".into(),
+        };
         assert_eq!(serde_json::to_value(&err).unwrap()["type"], "error");
     }
 
@@ -281,18 +365,38 @@ mod tests {
     #[test]
     fn a_result_is_summarised_by_what_it_actually_says() {
         let cases: &[(&str, bool, Option<&str>)] = &[
-            (r#"{"pods":[{"name":"a"},{"name":"b"},{"name":"c"}]}"#, false, Some("3 pods")),
-            (r#"{"replicasets":[{"name":"a"}]}"#, false, Some("1 replicaset")),
+            (
+                r#"{"pods":[{"name":"a"},{"name":"b"},{"name":"c"}]}"#,
+                false,
+                Some("3 pods"),
+            ),
+            (
+                r#"{"replicasets":[{"name":"a"}]}"#,
+                false,
+                Some("1 replicaset"),
+            ),
             (r#"[1,2]"#, false, Some("2 items")),
-            (r#"{"kind":"Pod","metadata":{"name":"api-0"}}"#, false, Some("Pod api-0")),
+            (
+                r#"{"kind":"Pod","metadata":{"name":"api-0"}}"#,
+                false,
+                Some("Pod api-0"),
+            ),
             (r#"{"a":1,"b":[1],"c":[2,3]}"#, false, None),
             ("first line\nsecond", false, Some("first line")),
             ("\n\n  spaced  \n", false, Some("spaced")),
-            ("consent denied: user declined `k8s.scale`\nmore", true, Some("consent denied: user declined `k8s.scale`")),
+            (
+                "consent denied: user declined `k8s.scale`\nmore",
+                true,
+                Some("consent denied: user declined `k8s.scale`"),
+            ),
             ("", false, None),
         ];
         for (text, is_error, want) in cases {
-            assert_eq!(summarize_result(text, *is_error).as_deref(), *want, "for {text:?}");
+            assert_eq!(
+                summarize_result(text, *is_error).as_deref(),
+                *want,
+                "for {text:?}"
+            );
         }
     }
 
@@ -309,7 +413,11 @@ mod tests {
             ("releases", "1 release"),
         ] {
             let text = format!(r#"{{"{field}":[{{}}]}}"#);
-            assert_eq!(summarize_result(&text, false).as_deref(), Some(want), "for {field}");
+            assert_eq!(
+                summarize_result(&text, false).as_deref(),
+                Some(want),
+                "for {field}"
+            );
         }
     }
 
@@ -322,12 +430,30 @@ mod tests {
     fn only_known_views_of_one_list_are_counted_once() {
         let names_first = r#"{"namespaces":["a","b"],"summaries":[{},{}]}"#;
         let rows_first = r#"{"summaries":[{},{}],"namespaces":["a","b"]}"#;
-        assert_eq!(summarize_result(names_first, false).as_deref(), Some("2 namespaces"));
-        assert_eq!(summarize_result(rows_first, false).as_deref(), Some("2 namespaces"));
-        assert_eq!(summarize_result(r#"{"namespaces":["a"],"summaries":[{},{}]}"#, false), None);
-        assert_eq!(summarize_result(r#"{"edges":[1,2],"nodes":[1,2]}"#, false), None);
-        assert_eq!(summarize_result(r#"{"errors":["failed"],"pods":["api-0"]}"#, false), None);
-        assert_eq!(summarize_result(r#"{"pods":[1,2],"warnings":[1]}"#, false), None);
+        assert_eq!(
+            summarize_result(names_first, false).as_deref(),
+            Some("2 namespaces")
+        );
+        assert_eq!(
+            summarize_result(rows_first, false).as_deref(),
+            Some("2 namespaces")
+        );
+        assert_eq!(
+            summarize_result(r#"{"namespaces":["a"],"summaries":[{},{}]}"#, false),
+            None
+        );
+        assert_eq!(
+            summarize_result(r#"{"edges":[1,2],"nodes":[1,2]}"#, false),
+            None
+        );
+        assert_eq!(
+            summarize_result(r#"{"errors":["failed"],"pods":["api-0"]}"#, false),
+            None
+        );
+        assert_eq!(
+            summarize_result(r#"{"pods":[1,2],"warnings":[1]}"#, false),
+            None
+        );
     }
 
     /// PR #806 review: a summary is written into the saved conversation, and
@@ -337,18 +463,41 @@ mod tests {
     fn a_credential_in_a_first_line_is_masked() {
         let cases = [
             ("API_KEY=sk-abcdef0123456789abcdef", "API_KEY=[redacted]"),
-            ("db password: hunter2 for admin", "db password: [redacted] for admin"),
-            ("Authorization: Bearer eyJhbGciOi.eyJzdWIiOi.c2ln", "Authorization: Bearer [redacted]"),
-            ("pushed with ghp_abcdefghijklmnopqrstuvwxyz0123456789", "pushed with [redacted]"),
-            ("aws key AKIAIOSFODNN7EXAMPLE in use", "aws key [redacted] in use"),
+            (
+                "db password: hunter2 for admin",
+                "db password: [redacted] for admin",
+            ),
+            (
+                "Authorization: Bearer eyJhbGciOi.eyJzdWIiOi.c2ln",
+                "Authorization: Bearer [redacted]",
+            ),
+            (
+                "pushed with ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+                "pushed with [redacted]",
+            ),
+            (
+                "aws key AKIAIOSFODNN7EXAMPLE in use",
+                "aws key [redacted] in use",
+            ),
             ("-----BEGIN RSA PRIVATE KEY-----", "[redacted]"),
         ];
         for (line, want) in cases {
-            assert_eq!(summarize_result(line, false).as_deref(), Some(want), "for {line:?}");
-            assert_eq!(summarize_result(line, true).as_deref(), Some(want), "error {line:?}");
+            assert_eq!(
+                summarize_result(line, false).as_deref(),
+                Some(want),
+                "for {line:?}"
+            );
+            assert_eq!(
+                summarize_result(line, true).as_deref(),
+                Some(want),
+                "error {line:?}"
+            );
         }
         // Ordinary results are left exactly as they were.
-        for line in ["5 pods running", "handler error: failed to load current context: no-such-context"] {
+        for line in [
+            "5 pods running",
+            "handler error: failed to load current context: no-such-context",
+        ] {
             assert_eq!(summarize_result(line, false).as_deref(), Some(line));
         }
     }
@@ -365,11 +514,21 @@ mod tests {
             ("user=bob,password=hunter2", "user=bob,password=[redacted]"),
             ("user=bob;secret=abc", "user=bob;secret=[redacted]"),
             ("password=abc,def is set", "password=[redacted] is set"),
-            ("callback https://x.test/cb?token=abc123&state=1", "callback https://x.test/cb?token=[redacted]"),
-            ("Authorization:Bearer abc123", "Authorization:Bearer [redacted]"),
+            (
+                "callback https://x.test/cb?token=abc123&state=1",
+                "callback https://x.test/cb?token=[redacted]",
+            ),
+            (
+                "Authorization:Bearer abc123",
+                "Authorization:Bearer [redacted]",
+            ),
         ];
         for (line, want) in cases {
-            assert_eq!(summarize_result(line, false).as_deref(), Some(want), "for {line:?}");
+            assert_eq!(
+                summarize_result(line, false).as_deref(),
+                Some(want),
+                "for {line:?}"
+            );
         }
     }
 
@@ -379,12 +538,20 @@ mod tests {
         let got = summarize_result(&long, false).unwrap();
         assert_eq!(got.chars().count(), 80);
         assert!(got.ends_with('…'));
-        assert_eq!(summarize_result("a\u{1b}[31mred", false).as_deref(), Some("a[31mred"));
+        assert_eq!(
+            summarize_result("a\u{1b}[31mred", false).as_deref(),
+            Some("a[31mred")
+        );
     }
 
     #[test]
     fn a_result_without_a_summary_serialises_as_before() {
-        let v = serde_json::to_value(AgentEvent::ToolResult { id: "t".into(), status: ToolStatus::Ok, summary: None }).unwrap();
+        let v = serde_json::to_value(AgentEvent::ToolResult {
+            id: "t".into(),
+            status: ToolStatus::Ok,
+            summary: None,
+        })
+        .unwrap();
         assert!(v.get("summary").is_none(), "got {v}");
     }
 }

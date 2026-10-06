@@ -242,6 +242,9 @@ pub async fn run_native_agent_turn(
     let last_act_clone = last_activity.clone();
     let start_time_copy = start_time;
 
+    let real_usage = Arc::new(std::sync::Mutex::new(None));
+    let real_usage_clone = real_usage.clone();
+
     let ctx_tag = active_context.clone();
     let mut on_event = move |ev: AgentEvent| {
         last_act_clone.store(
@@ -289,6 +292,19 @@ pub async fn run_native_agent_turn(
                     title: format!("ai_tool_done:{}", ctx_tag),
                     result: Ok(format!("{}|{}", id, status_str)),
                 });
+            }
+            AgentEvent::Usage {
+                prompt_tokens,
+                completion_tokens,
+                cached_tokens,
+                total_tokens,
+            } => {
+                *real_usage_clone.lock().unwrap() = Some((
+                    prompt_tokens,
+                    completion_tokens,
+                    cached_tokens,
+                    total_tokens,
+                ));
             }
             AgentEvent::TurnDone => {}
             AgentEvent::Error { message } => {
@@ -338,12 +354,17 @@ pub async fn run_native_agent_turn(
     };
 
     let duration_ms = start_time.elapsed().as_millis() as u64;
-    let prompt_est = (prompt.len() + 200) / 4;
-    let comp_est = out_chars.load(std::sync::atomic::Ordering::Relaxed).max(1) / 4;
-    let total_est = prompt_est + comp_est;
+    let (prompt_tokens, comp_tokens, cached_tokens, total_tokens) =
+        if let Some(u) = real_usage.lock().unwrap().take() {
+            u
+        } else {
+            let prompt_est = (prompt.len() + 200) / 4;
+            let comp_est = out_chars.load(std::sync::atomic::Ordering::Relaxed).max(1) / 4;
+            (prompt_est, comp_est, 0, prompt_est + comp_est)
+        };
     let payload = format!(
         "{}|{}|{}|{}|{}",
-        prompt_est, comp_est, 0, total_est, duration_ms
+        prompt_tokens, comp_tokens, cached_tokens, total_tokens, duration_ms
     );
     let _ = event_tx.send(AppEvent::ActionResult {
         title: format!("ai_usage:{}", active_context),

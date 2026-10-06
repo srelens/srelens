@@ -7,12 +7,18 @@ use std::collections::HashMap;
 
 use serde_json::{json, Value};
 
-use crate::types::{StopReason, StreamItem, ToolCall, ToolDef, Turn};
+use crate::types::{StopReason, StreamItem, TokenUsage, ToolCall, ToolDef, Turn};
 
 /// Build the JSON body for `POST /v1/messages` with `stream: true`. `system` is
 /// the base system prompt; `turns` is the running conversation; `tools` are the
 /// srelens MCP tools the model may call.
-pub fn build_request(model: &str, max_tokens: u32, system: &str, turns: &[Turn], tools: &[ToolDef]) -> Value {
+pub fn build_request(
+    model: &str,
+    max_tokens: u32,
+    system: &str,
+    turns: &[Turn],
+    tools: &[ToolDef],
+) -> Value {
     json!({
         "model": model,
         "max_tokens": max_tokens,
@@ -86,6 +92,9 @@ enum BlockKind {
 pub struct Stream {
     blocks: HashMap<u64, Block>,
     stop_reason: Option<PendingStop>,
+    prompt_tokens: usize,
+    cached_tokens: usize,
+    completion_tokens: usize,
 }
 
 /// A `stop_reason` from `message_delta`, held until `message_stop` decides
@@ -109,6 +118,23 @@ impl Stream {
             return Vec::new();
         };
         match v.get("type").and_then(Value::as_str) {
+            Some("message_start") => {
+                if let Some(usage) = v.get("message").and_then(|m| m.get("usage")) {
+                    self.prompt_tokens = usage
+                        .get("input_tokens")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0) as usize;
+                    self.cached_tokens = usage
+                        .get("cache_read_input_tokens")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0) as usize;
+                    self.completion_tokens = usage
+                        .get("output_tokens")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0) as usize;
+                }
+                Vec::new()
+            }
             Some("content_block_start") => {
                 self.on_block_start(&v);
                 Vec::new()
@@ -116,20 +142,42 @@ impl Stream {
             Some("content_block_delta") => self.on_block_delta(&v),
             Some("content_block_stop") => self.on_block_stop(&v),
             Some("message_delta") => {
-                if let Some(reason) = v.get("delta").and_then(|d| d.get("stop_reason")).and_then(Value::as_str) {
+                if let Some(reason) = v
+                    .get("delta")
+                    .and_then(|d| d.get("stop_reason"))
+                    .and_then(Value::as_str)
+                {
                     self.stop_reason = Some(map_stop_reason(reason));
+                }
+                if let Some(usage) = v.get("usage") {
+                    if let Some(out) = usage.get("output_tokens").and_then(Value::as_u64) {
+                        self.completion_tokens = out as usize;
+                    }
                 }
                 Vec::new()
             }
-            Some("message_stop") => match self.stop_reason.take() {
-                // A refusal or unknown stop reason is not a normal finish —
-                // surface it rather than persisting a partial/empty reply.
-                Some(PendingStop::Abnormal(reason)) => {
-                    vec![StreamItem::Error(format!("the provider stopped generating: {reason}"))]
+            Some("message_stop") => {
+                let mut out = match self.stop_reason.take() {
+                    // A refusal or unknown stop reason is not a normal finish —
+                    // surface it rather than persisting a partial/empty reply.
+                    Some(PendingStop::Abnormal(reason)) => {
+                        vec![StreamItem::Error(format!(
+                            "the provider stopped generating: {reason}"
+                        ))]
+                    }
+                    Some(PendingStop::Clean(reason)) => vec![StreamItem::Done(reason)],
+                    None => vec![StreamItem::Done(StopReason::EndTurn)],
+                };
+                if self.prompt_tokens > 0 || self.completion_tokens > 0 {
+                    out.push(StreamItem::Usage(TokenUsage {
+                        prompt_tokens: self.prompt_tokens,
+                        completion_tokens: self.completion_tokens,
+                        cached_tokens: self.cached_tokens,
+                        total_tokens: self.prompt_tokens + self.completion_tokens,
+                    }));
                 }
-                Some(PendingStop::Clean(reason)) => vec![StreamItem::Done(reason)],
-                None => vec![StreamItem::Done(StopReason::EndTurn)],
-            },
+                out
+            }
             Some("error") => {
                 let msg = v
                     .get("error")
@@ -144,20 +192,34 @@ impl Stream {
     }
 
     fn on_block_start(&mut self, v: &Value) {
-        let Some(index) = v.get("index").and_then(Value::as_u64) else { return };
+        let Some(index) = v.get("index").and_then(Value::as_u64) else {
+            return;
+        };
         let cb = v.get("content_block");
         let mut block = Block::default();
         if cb.and_then(|c| c.get("type")).and_then(Value::as_str) == Some("tool_use") {
             block.kind = BlockKind::ToolUse;
-            block.tool_id = cb.and_then(|c| c.get("id")).and_then(Value::as_str).unwrap_or("").to_string();
-            block.tool_name = cb.and_then(|c| c.get("name")).and_then(Value::as_str).unwrap_or("").to_string();
+            block.tool_id = cb
+                .and_then(|c| c.get("id"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            block.tool_name = cb
+                .and_then(|c| c.get("name"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
         }
         self.blocks.insert(index, block);
     }
 
     fn on_block_delta(&mut self, v: &Value) -> Vec<StreamItem> {
-        let Some(index) = v.get("index").and_then(Value::as_u64) else { return Vec::new() };
-        let Some(delta) = v.get("delta") else { return Vec::new() };
+        let Some(index) = v.get("index").and_then(Value::as_u64) else {
+            return Vec::new();
+        };
+        let Some(delta) = v.get("delta") else {
+            return Vec::new();
+        };
         match delta.get("type").and_then(Value::as_str) {
             Some("text_delta") => {
                 let text = delta.get("text").and_then(Value::as_str).unwrap_or("");
@@ -169,7 +231,12 @@ impl Stream {
             }
             Some("input_json_delta") => {
                 if let Some(block) = self.blocks.get_mut(&index) {
-                    block.json_buf.push_str(delta.get("partial_json").and_then(Value::as_str).unwrap_or(""));
+                    block.json_buf.push_str(
+                        delta
+                            .get("partial_json")
+                            .and_then(Value::as_str)
+                            .unwrap_or(""),
+                    );
                 }
                 Vec::new()
             }
@@ -178,8 +245,12 @@ impl Stream {
     }
 
     fn on_block_stop(&mut self, v: &Value) -> Vec<StreamItem> {
-        let Some(index) = v.get("index").and_then(Value::as_u64) else { return Vec::new() };
-        let Some(block) = self.blocks.remove(&index) else { return Vec::new() };
+        let Some(index) = v.get("index").and_then(Value::as_u64) else {
+            return Vec::new();
+        };
+        let Some(block) = self.blocks.remove(&index) else {
+            return Vec::new();
+        };
         if block.kind != BlockKind::ToolUse {
             return Vec::new();
         }
@@ -246,7 +317,10 @@ mod tests {
         assert_eq!(req["max_tokens"], 2048);
         assert_eq!(req["system"], "you are srelens");
         assert_eq!(req["messages"][0]["role"], "user");
-        assert_eq!(req["messages"][0]["content"][0]["text"], "why is web-0 down?");
+        assert_eq!(
+            req["messages"][0]["content"][0]["text"],
+            "why is web-0 down?"
+        );
         assert_eq!(req["tools"][0]["name"], "k8s_listPods");
         assert_eq!(req["tools"][0]["input_schema"]["type"], "object");
     }
@@ -260,7 +334,9 @@ mod tests {
                 tool_calls: vec![ToolCall {
                     id: "call_1".into(),
                     name: "k8s_scale".into(),
-                    arguments: json!({ "replicas": 3 }), thought_signature: None }],
+                    arguments: json!({ "replicas": 3 }),
+                    thought_signature: None,
+                }],
             },
             Turn::ToolResults(vec![ToolOutcome {
                 id: "call_1".into(),
@@ -286,7 +362,12 @@ mod tests {
     fn an_assistant_turn_with_no_text_omits_the_text_block() {
         let turns = vec![Turn::Assistant {
             text: String::new(),
-            tool_calls: vec![ToolCall { id: "c".into(), name: "t".into(), arguments: json!({}), thought_signature: None }],
+            tool_calls: vec![ToolCall {
+                id: "c".into(),
+                name: "t".into(),
+                arguments: json!({}),
+                thought_signature: None,
+            }],
         }];
         let req = build_request("m", 1, "s", &turns, &[]);
         assert_eq!(req["messages"][0]["content"][0]["type"], "tool_use");
@@ -336,7 +417,9 @@ mod tests {
             vec![StreamItem::ToolCall(ToolCall {
                 id: "call_9".into(),
                 name: "k8s_scale".into(),
-                arguments: json!({ "replicas": 3 }), thought_signature: None })]
+                arguments: json!({ "replicas": 3 }),
+                thought_signature: None
+            })]
         );
     }
 
@@ -347,7 +430,12 @@ mod tests {
         let items = s.push(r#"{"type":"content_block_stop","index":0}"#);
         assert_eq!(
             items,
-            vec![StreamItem::ToolCall(ToolCall { id: "c".into(), name: "ping".into(), arguments: json!({}), thought_signature: None })]
+            vec![StreamItem::ToolCall(ToolCall {
+                id: "c".into(),
+                name: "ping".into(),
+                arguments: json!({}),
+                thought_signature: None
+            })]
         );
     }
 
@@ -355,23 +443,34 @@ mod tests {
     fn message_stop_reports_the_stop_reason_from_the_message_delta() {
         let mut s = Stream::new();
         s.push(r#"{"type":"message_delta","delta":{"stop_reason":"tool_use"}}"#);
-        assert_eq!(s.push(r#"{"type":"message_stop"}"#), vec![StreamItem::Done(StopReason::ToolUse)]);
+        assert_eq!(
+            s.push(r#"{"type":"message_stop"}"#),
+            vec![StreamItem::Done(StopReason::ToolUse)]
+        );
 
         let mut s2 = Stream::new();
         s2.push(r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"}}"#);
-        assert_eq!(s2.push(r#"{"type":"message_stop"}"#), vec![StreamItem::Done(StopReason::EndTurn)]);
+        assert_eq!(
+            s2.push(r#"{"type":"message_stop"}"#),
+            vec![StreamItem::Done(StopReason::EndTurn)]
+        );
 
         // A token-limit cutoff is truncation, not a normal finish.
         let mut s3 = Stream::new();
         s3.push(r#"{"type":"message_delta","delta":{"stop_reason":"max_tokens"}}"#);
-        assert_eq!(s3.push(r#"{"type":"message_stop"}"#), vec![StreamItem::Done(StopReason::MaxTokens)]);
+        assert_eq!(
+            s3.push(r#"{"type":"message_stop"}"#),
+            vec![StreamItem::Done(StopReason::MaxTokens)]
+        );
 
         // A refusal is not a normal finish — it surfaces as an error.
         let mut s4 = Stream::new();
         s4.push(r#"{"type":"message_delta","delta":{"stop_reason":"refusal"}}"#);
         assert_eq!(
             s4.push(r#"{"type":"message_stop"}"#),
-            vec![StreamItem::Error("the provider stopped generating: refusal".into())]
+            vec![StreamItem::Error(
+                "the provider stopped generating: refusal".into()
+            )]
         );
     }
 
@@ -383,7 +482,8 @@ mod tests {
         assert_eq!(
             s.push(r#"{"type":"content_block_stop","index":0}"#),
             vec![StreamItem::Error(
-                "the model produced malformed arguments for tool `k8s_scale`; not running it".into()
+                "the model produced malformed arguments for tool `k8s_scale`; not running it"
+                    .into()
             )]
         );
     }
@@ -391,14 +491,19 @@ mod tests {
     #[test]
     fn a_stop_with_no_prior_stop_reason_defaults_to_end_turn() {
         let mut s = Stream::new();
-        assert_eq!(s.push(r#"{"type":"message_stop"}"#), vec![StreamItem::Done(StopReason::EndTurn)]);
+        assert_eq!(
+            s.push(r#"{"type":"message_stop"}"#),
+            vec![StreamItem::Done(StopReason::EndTurn)]
+        );
     }
 
     #[test]
     fn an_error_event_surfaces_its_message() {
         let mut s = Stream::new();
         assert_eq!(
-            s.push(r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#),
+            s.push(
+                r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#
+            ),
             vec![StreamItem::Error("Overloaded".into())]
         );
     }
@@ -409,7 +514,29 @@ mod tests {
         assert!(s.push("").is_empty());
         assert!(s.push("   ").is_empty());
         assert!(s.push("not json").is_empty());
-        assert!(s.push(r#"{"type":"message_start","message":{}}"#).is_empty());
+        assert!(s
+            .push(r#"{"type":"message_start","message":{}}"#)
+            .is_empty());
         assert!(s.push(r#"{"type":"ping"}"#).is_empty());
+    }
+
+    #[test]
+    fn stream_parses_anthropic_usage() {
+        let mut s = Stream::new();
+        s.push(r#"{"type":"message_start","message":{"usage":{"input_tokens":2045,"cache_creation_input_tokens":0,"cache_read_input_tokens":1024,"output_tokens":1}}}"#);
+        s.push(r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":150}}"#);
+        let items = s.push(r#"{"type":"message_stop"}"#);
+        assert_eq!(
+            items,
+            vec![
+                StreamItem::Done(StopReason::EndTurn),
+                StreamItem::Usage(TokenUsage {
+                    prompt_tokens: 2045,
+                    completion_tokens: 150,
+                    cached_tokens: 1024,
+                    total_tokens: 2195,
+                }),
+            ]
+        );
     }
 }
