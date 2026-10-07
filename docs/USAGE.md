@@ -194,8 +194,8 @@ In the new design, Cordon/Uncordon and Drain are on a node's row menu in
 desktop the confirmed action runs as the `kubectl` command the dialog showed, in a
 local terminal scoped to that cluster, so you can watch a drain evict each pod and
 wait on disruption budgets; it needs `kubectl` on your `PATH`. In the browser,
-which has no local terminal, it runs through the API and reports the result when
-it finishes.
+which has no local terminal, and on the Windows desktop, it runs through the API
+and reports the result when it finishes.
 
 ## Logs
 

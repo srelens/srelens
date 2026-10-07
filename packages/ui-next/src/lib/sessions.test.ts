@@ -546,6 +546,19 @@ describe("hearing a session's output settle", () => {
     expect(heard).not.toHaveBeenCalled();
   });
 
+  it("tells a listener straight away about a session that was over before it listened", async () => {
+    // A shell that could not be started closes inside the call that starts
+    // it, before the caller holds an id to listen on.
+    startLocalTerminal.mockRejectedValue(new Error("start_terminal is not available"));
+    const id = await startLocalSession({ context: "kind-srelens-demo", command: "kubectl drain worker-1" });
+    expect(getSessions()[0].state).toBe("closed");
+
+    const heard = vi.fn();
+    const release = onSessionSettled(id, heard);
+    expect(heard).toHaveBeenCalledTimes(1);
+    expect(() => release()).not.toThrow();
+  });
+
   it("is a no-op for an id that names no session", () => {
     const heard = vi.fn();
     const release = onSessionSettled(404, heard);

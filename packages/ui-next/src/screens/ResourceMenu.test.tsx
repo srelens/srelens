@@ -686,6 +686,26 @@ describe("useRowMenu — Cordon and Drain on a node (#820)", () => {
     );
   });
 
+  it("on a Windows desktop, which has no /bin/sh to run it under, drains through the call instead (PR #831 review)", async () => {
+    isTauri.mockReturnValue(true);
+    const agent = vi.spyOn(window.navigator, "userAgent", "get").mockReturnValue(
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    );
+    try {
+      render(<Harness args={NODE_OPS_ARGS} row={NODE_ROW} />);
+      await userEvent.click(screen.getByRole("button", { name: "Drain" }));
+      // No promise of a terminal that could not start.
+      expect(box().queryByText(/Runs in a terminal/)).toBeNull();
+      await userEvent.click(box().getByRole("button", { name: "Drain" }));
+
+      await waitFor(() => expect(drainNode).toHaveBeenCalledWith("prod", "worker-1"));
+      await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith("Drained worker-1", "4 evicted, 2 skipped"));
+      expect(startLocalSession).not.toHaveBeenCalled();
+    } finally {
+      agent.mockRestore();
+    }
+  });
+
   it("in the browser, where there is no local shell, drains through the call and says how it went", async () => {
     render(<Harness args={NODE_OPS_ARGS} row={NODE_ROW} />);
     await userEvent.click(screen.getByRole("button", { name: "Drain" }));

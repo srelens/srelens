@@ -117,6 +117,13 @@ impl TerminalManager {
         rows: Option<u16>,
         command: Option<String>,
     ) -> Result<u64, String> {
+        // Refused before anything is allocated: `run_then_shell` is a POSIX
+        // script for `/bin/sh`, and a platform without one would fail at the
+        // spawn below with an error about a path the caller never named.
+        #[cfg(not(unix))]
+        if command.is_some() {
+            return Err("Running a command in a new local terminal is not supported on this platform".into());
+        }
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let overlay_id = NEXT_OVERLAY_ID.fetch_add(1, Ordering::SeqCst);
         let ctx = context.clone();

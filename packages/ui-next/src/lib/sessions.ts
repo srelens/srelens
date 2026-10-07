@@ -289,6 +289,14 @@ export async function startLocalSession(req: LocalSessionRequest): Promise<numbe
  */
 export function onSessionSettled(id: number, listener: () => void): () => void {
   if (!emulators.has(id)) return () => {};
+  // A session can be over before its starter gets as far as listening — one
+  // that failed to open closes inside `startLocalSession`'s own await. Its
+  // one report has already gone out to nobody, so it is given again here
+  // rather than leaving this listener waiting on a quiet that cannot come.
+  if (sessions.some((s) => s.id === id && s.state === "closed")) {
+    listener();
+    return () => {};
+  }
   let set = settleListeners.get(id);
   if (!set) settleListeners.set(id, (set = new Set()));
   set.add(listener);

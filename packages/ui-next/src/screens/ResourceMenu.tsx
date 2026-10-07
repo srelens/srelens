@@ -125,9 +125,14 @@ function isCordoned(row: ListRow): boolean {
  * is the one command the web surface denies outright, because there the shell
  * would be srelens's own process on the server. The browser keeps the call —
  * the same `k8s.cordonNode`/`k8s.drainNode` Overview's node rows make.
+ *
+ * And not on Windows, which keeps the call too. The host runs the command
+ * under `/bin/sh`, which a Windows desktop does not have, and `toKubectl`
+ * writes it there in cmd/PowerShell quoting that `sh` would not read anyway. A
+ * confirmed drain that cannot start is worse than one that reports in a toast.
  */
 function runsInTerminal(): boolean {
-  return isTauri();
+  return isTauri() && !(typeof navigator !== "undefined" && navigator.userAgent.includes("Windows"));
 }
 
 /** The kubectl verb a node action is. */
