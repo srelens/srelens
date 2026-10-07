@@ -31,7 +31,11 @@ export function NodeLink({ name }: { name: string }) {
   return (
     <button
       type="button"
-      className="max-w-full cursor-pointer truncate text-left hover:underline focus-visible:underline"
+      // Dotted at rest, solid under the pointer or the keyboard: a name with
+      // nothing drawn on it reads as text, and nobody clicks text to find out.
+      // Dotted rather than solid because this is one cell in every row of a
+      // column, and a column of solid underlines is a column of rules.
+      className="max-w-full cursor-pointer truncate text-left underline decoration-dotted underline-offset-2 hover:decoration-solid focus-visible:decoration-solid"
       title={label}
       aria-label={label}
       onClick={(e) => {

@@ -38,6 +38,17 @@ describe("NodeLink", () => {
     expect(link.textContent).toBe("worker-2");
   });
 
+  it("reads as a link before it is hovered — underlined at rest, not only under the pointer", () => {
+    // Underlined only on hover, the name was indistinguishable from the
+    // plain text it replaced (PR #833 review).
+    render(<NodeLink name="worker-2" />);
+    const classes = screen.getByRole("button", { name: "Open node worker-2" }).className.split(/\s+/);
+    expect(classes).toContain("underline");
+    expect(classes).toContain("decoration-dotted");
+    expect(classes).toContain("hover:decoration-solid");
+    expect(classes).toContain("focus-visible:decoration-solid");
+  });
+
   it("opens the node's detail in a tab, on the cluster in focus", async () => {
     render(<NodeLink name="worker-2" />);
     await userEvent.click(screen.getByRole("button", { name: "Open node worker-2" }));
