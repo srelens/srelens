@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { describe, it, expect, vi } from "vitest";
+import { afterEach, describe, it, expect, vi } from "vitest";
 import { useState, type FormEvent } from "react";
 import { render, screen, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -688,10 +688,28 @@ describe("keeping the active tab on screen", () => {
       Object.defineProperty(screen.getByRole("tablist"), "clientWidth", { value: width, configurable: true });
     }
 
+    /** The width every element reports at mount, which is when the strip takes
+     *  its first reading. Put back after each test. */
+    let restoreWidth: (() => void) | undefined;
+    function setInitialWidth(width: number) {
+      const proto = window.HTMLElement.prototype;
+      const original = Object.getOwnPropertyDescriptor(proto, "clientWidth");
+      Object.defineProperty(proto, "clientWidth", { get: () => width, configurable: true });
+      restoreWidth = () => {
+        if (original) Object.defineProperty(proto, "clientWidth", original);
+        else delete (proto as unknown as { clientWidth?: number }).clientWidth;
+      };
+    }
+    afterEach(() => {
+      restoreWidth?.();
+      restoreWidth = undefined;
+    });
+
     it("brings the active tab back into view when the strip gets narrower", () => {
       const resize = watchResize();
       const scroll = watchScroll();
       try {
+        setInitialWidth(1300);
         render(<TabStrip tabs={MANY} activeId="t13" onSelect={() => {}} />);
         scroll.calls.length = 0;
 
@@ -711,6 +729,7 @@ describe("keeping the active tab on screen", () => {
       const resize = watchResize();
       const scroll = watchScroll();
       try {
+        setInitialWidth(1300);
         const view = render(<TabStrip tabs={MANY} activeId="t13" onSelect={() => {}} />);
         view.rerender(<TabStrip tabs={MANY} activeId="t2" onSelect={() => {}} />);
         scroll.calls.length = 0;
@@ -719,6 +738,31 @@ describe("keeping the active tab on screen", () => {
         resize.resize();
 
         expect(scroll.calls.at(-1)?.title).toBe("Tab 2");
+      } finally {
+        scroll.restore();
+        resize.restore();
+      }
+    });
+
+    it("leaves the strip where the reader scrolled it when the strip gets wider", () => {
+      // Scrolled away to look at other tabs, then the window widened or the
+      // sidebar collapsed: nothing was cut off, so nothing is theirs to lose.
+      const resize = watchResize();
+      const scroll = watchScroll();
+      try {
+        setInitialWidth(900);
+        render(<TabStrip tabs={MANY} activeId="t13" onSelect={() => {}} />);
+        scroll.calls.length = 0;
+
+        setListWidth(1300);
+        resize.resize();
+        expect(scroll.calls).toEqual([]);
+
+        // And narrowing again from there still acts: the width it compares
+        // against is the last one seen, not the one at mount.
+        setListWidth(1000);
+        resize.resize();
+        expect(scroll.calls.at(-1)?.title).toBe("Tab 13");
       } finally {
         scroll.restore();
         resize.restore();

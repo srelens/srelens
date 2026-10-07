@@ -216,9 +216,10 @@ export function TabStrip({
   // active tab sitting at the right edge was simply cut off by the edge moving
   // in over it.
   //
-  // On a change of WIDTH only. The observer also reports on first observe and
-  // on height changes; acting on those would scroll a strip the reader has
-  // deliberately moved, for no reason they could see.
+  // Only when it gets NARROWER. The observer also reports on first observe and
+  // on height changes, and a strip that got wider has cut nothing off: a
+  // reader who has scrolled away to look at other tabs, and then widens the
+  // window, must not be thrown back to the active one for it.
   const activeIdRef = useRef(activeId);
   activeIdRef.current = activeId;
   useEffect(() => {
@@ -226,8 +227,9 @@ export function TabStrip({
     if (!list || typeof ResizeObserver === "undefined") return;
     let width = list.clientWidth;
     const observer = new ResizeObserver(() => {
-      if (list.clientWidth === width) return;
+      const narrower = list.clientWidth < width;
       width = list.clientWidth;
+      if (!narrower) return;
       refs.current.get(activeIdRef.current)?.scrollIntoView?.({ block: "nearest", inline: "nearest" });
     });
     observer.observe(list);
