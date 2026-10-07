@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 const { watchResource, useNamespaceOptions, cronjobSetSuspend } = vi.hoisted(() => ({
@@ -156,6 +156,33 @@ describe("Workloads", () => {
     await waitFor(() => {
       const row = screen.getByText("node-exporter").closest("tr");
       expect(row).not.toBeNull();
+      expect(document.activeElement).toBe(row);
+    });
+  });
+
+  it("still returns focus to the row when the reader clicks the loading view that stands in for the table (PR #832 review)", async () => {
+    // The first listing answers at once; the one the new selection asks for
+    // is held, so the loading view is on screen long enough to be clicked.
+    const held: (() => void)[] = [];
+    watchResource.mockImplementation(
+      async (_context: string, namespace: string, kind: string, onRows: (rows: unknown[]) => void) => {
+        if (namespace === "kube-system") held.push(() => onRows(FIXTURES[kind] ?? []));
+        else onRows(FIXTURES[kind] ?? []);
+        return { stop };
+      },
+    );
+    open();
+    const cell = await screen.findByRole("button", { name: "Show only namespace kube-system" });
+    cell.focus();
+    await userEvent.keyboard("{Enter}");
+
+    const loading = await screen.findByRole("status", { name: /Loading/ });
+    // Where the table was. Not a move away from it.
+    fireEvent.pointerDown(loading);
+    act(() => held.forEach((release) => release()));
+
+    await waitFor(() => {
+      const row = screen.getByText("node-exporter").closest("tr");
       expect(document.activeElement).toBe(row);
     });
   });

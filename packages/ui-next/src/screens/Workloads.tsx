@@ -638,11 +638,15 @@ function WorkloadList({
       />
 
       {allLoading ? (
-        <div className="scroll min-h-0 flex-1">
+        // `refocus.scope` on every state of this region, not only the table:
+        // it marks where the table IS, and while the lists reload this is
+        // what stands there. A click on it is not the reader moving on, and
+        // must not be taken for one — see `useRowRefocus`.
+        <div ref={refocus.scope} className="scroll min-h-0 flex-1">
           <LoadingState label={`Loading ${lower}`} />
         </div>
       ) : allFailed ? (
-        <div className="scroll min-h-0 flex-1">
+        <div ref={refocus.scope} className="scroll min-h-0 flex-1">
           <FailureState
             title={`Could not list ${lower} on ${name}`}
             error={allFailedReasons}
