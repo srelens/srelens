@@ -557,14 +557,19 @@ jobs:
           # keychain, which answers only an app holding its App ID entitlement,
           # and a Developer ID app may claim that only with an embedded
           # provisioning profile. Signed builds only: an unsigned build that
-          # claims it is killed at launch. Without the profile the build stays
-          # signed but unentitled, and Settings hides the Touch ID switch.
-          # The profile names the APPLE_CERTIFICATE certificate: renewing that
-          # certificate means regenerating the profile with the new one, or
-          # macOS refuses to launch the signed app.
+          # claims it is killed at launch. Without the profile a dev build
+          # stays signed but unentitled, and Settings hides the Touch ID
+          # switch. A stable build fails instead: once a release has shipped
+          # the entitlement, one without it locks out everyone who turned
+          # Touch ID on. The profile names the APPLE_CERTIFICATE certificate:
+          # renewing that certificate means regenerating the profile with the
+          # new one, or macOS refuses to launch the signed app.
           if [ -n "$APPLE_PROVISIONING_PROFILE" ]; then
             printf '%s' "$APPLE_PROVISIONING_PROFILE" | base64 --decode > "$GITHUB_WORKSPACE/apps/desktop/src-tauri/embedded.provisionprofile"
             echo "MAC_SIGNED_CONFIG=--config $GITHUB_WORKSPACE/apps/desktop/src-tauri/macos-signing.conf.json" >> "$GITHUB_ENV"
+          elif [ "${{ github.ref_name }}" = "main" ]; then
+            echo "::error::APPLE_PROVISIONING_PROFILE is not set, so this stable build would ship without the App ID entitlement and break Touch ID unlock for everyone who enabled it."
+            exit 1
           else
             echo "::warning::APPLE_PROVISIONING_PROFILE is not set — this macOS build has no App ID entitlement, so Touch ID unlock stays unavailable."
           fi
@@ -618,6 +623,15 @@ jobs:
           # latest.json — parallel jobs would race on that single asset. The
           # updater-manifest job assembles it once, after all builds.
           includeUpdaterJson: false
+
+      # macOS launches an app claiming the App ID entitlement (#819) only if
+      # its embedded profile grants it, names its signing certificate and
+      # hasn't expired; notarization checks none of that. Fail on main before
+      # the draft is published, and on both channels before updater-manifest
+      # points any install at an app that would not open.
+      - name: Assert the macOS app's profile covers its signature
+        if: runner.os == 'macOS' && env.MAC_SIGNED_CONFIG != ''
+        run: sh packaging/macos/check-profile.sh "target/${{ matrix.target }}/release/bundle/macos/srelens.app"
 
       # Regression tripwire for #111: fail the build if the AppImage bundles
       # host-ABI Wayland libs. The release is still a draft at this point, so
