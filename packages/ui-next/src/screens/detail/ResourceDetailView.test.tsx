@@ -280,6 +280,42 @@ describe("ResourceDetailView", () => {
     expect(screen.queryByTestId("peek-related")).toBeNull();
   });
 
+  describe("the name's copy control (#827)", () => {
+    const copy = () => screen.getByRole("button", { name: "Copy name web-1" });
+
+    it("sits directly after the peek's heading, in the row that reveals it", async () => {
+      getObject.mockResolvedValue({ object: POD });
+      render(<ResourceDetailView context="ctx" kind="Pod" namespace="default" name="web-1" />);
+      const heading = await screen.findByRole("heading", { level: 2, name: "web-1" });
+
+      expect(heading.nextElementSibling?.contains(copy())).toBe(true);
+      expect(copy().closest(".name-row")?.contains(heading)).toBe(true);
+    });
+
+    it("is there while the object is still loading — the name is the route's, not the object's", () => {
+      getObject.mockReturnValue(new Promise(() => {}));
+      render(<ResourceDetailView context="ctx" kind="Pod" namespace="default" name="web-1" />);
+      expect(screen.getByText(/Loading/)).toBeDefined();
+      expect(copy()).toBeDefined();
+    });
+
+    it("is there when the object could not be read, which is when a reader goes to ask kubectl", async () => {
+      getObject.mockResolvedValue({ error: "pods \"web-1\" not found" });
+      render(<ResourceDetailView context="ctx" kind="Pod" namespace="default" name="web-1" />);
+      await waitFor(() => expect(screen.getByText(/Could not load/)).toBeDefined());
+      expect(copy()).toBeDefined();
+    });
+
+    it("is offered for every kind, since the heading is the one every kind shares", async () => {
+      getObject.mockResolvedValue({
+        object: { kind: "ConfigMap", apiVersion: "v1", metadata: { name: "web-1", namespace: "default" }, data: {} },
+      });
+      render(<ResourceDetailView context="ctx" kind="ConfigMap" namespace="default" name="web-1" />);
+      await screen.findByRole("heading", { level: 2, name: "web-1" });
+      expect(copy()).toBeDefined();
+    });
+  });
+
   it("names the object in the error state", async () => {
     getObject.mockResolvedValue({ error: "forbidden" });
     const { getByRole } = render(<ResourceDetailView context="ctx" kind="Pod" namespace="default" name="web-1" />);
