@@ -41,6 +41,7 @@ import {
 } from "@srelens/core";
 import { AgeCell } from "../ageCell";
 import { Badge, StatusPill, Tooltip, type Column, type Tone } from "@srelens/ui-kit";
+import { NodeLink } from "../nodeLink";
 
 export type PodRow = PodSummary & { cpu?: number; memory?: number };
 export type NodeRow = NodeSummary & { cpu?: number; memory?: number };
@@ -110,7 +111,9 @@ export const podColumns: Column<PodRow>[] = [
     key: "node",
     header: "Node",
     sortable: true,
-    render: (p) => p.node || "—",
+    // The name is the way to the node (#822). A pod not yet scheduled has
+    // none, and a dash that opened nothing would be a link to nowhere.
+    render: (p) => (p.node ? <NodeLink name={p.node} /> : "—"),
   },
   { key: "ready", header: "Ready", align: "end" },
   {

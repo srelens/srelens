@@ -180,6 +180,9 @@ Evict, Delete. Evict and Delete confirm; Debug asks for an image (default
 `busybox`) and an optional container whose process namespace to share, then opens a
 shell into the new debug container.
 
+In the new design, the node name in the Pods list's Node column, and on a pod's
+detail view, opens that node in its own tab.
+
 **Deployments, StatefulSets, DaemonSets, ReplicaSets, Jobs** — Logs, Edit, Scale
 (validated replica count), Restart (rollout restart, applied immediately), Delete.
 

@@ -1,7 +1,7 @@
-import { describe, it, expect, vi } from "vitest";
+import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import type { K8sObject } from "@srelens/core";
+import type { ClusterContext, K8sObject } from "@srelens/core";
 import { KV } from "@srelens/ui-kit";
 
 // What §A.4's dialog reaches for once a container's port opens it. This file
@@ -19,6 +19,10 @@ vi.mock("@srelens/core", async (importOriginal) => ({
   ...forwardCore,
 }));
 
+import { resetContexts, setContexts } from "../../lib/clusters";
+import { detailRoute } from "../../lib/detailRoute";
+import { defaultState } from "../../lib/tabs";
+import * as store from "../../lib/tabsStore";
 import { Section } from "./Section";
 import { PodContainersBody, PodContainersTable, PodDetailsBody, podFacts } from "./PodBody";
 
@@ -563,7 +567,8 @@ describe("PodDetailsBody", () => {
       expect(screen.getByText("Burstable")).toBeDefined();
       // Namespace, Node, Service account, Priority class, Runtime class and
       // Controlled by are `ResourceLink`s in classic; nothing here can
-      // navigate (see the task report).
+      // navigate (see the task report) — bar the Node, which is a link once a
+      // cluster is resolved (#822). None is here, so it too is text.
       expect(screen.queryByRole("button", { name: /^Open / })).toBeNull();
     });
 
@@ -696,7 +701,59 @@ describe("PodDetailsBody", () => {
       expect(screen.getByText("ssd")).toBeDefined();
       expect(screen.getByText("Pod anti-affinity: 1 required")).toBeDefined();
       expect(screen.getByText("dedicated=gpu → NoSchedule")).toBeDefined();
+      // With no cluster resolved there is nowhere to open the node, and the
+      // name stays text — see `NodeLink`.
       expect(screen.queryByRole("button", { name: /^Open / })).toBeNull();
+    });
+
+    describe("on a resolved cluster (#822)", () => {
+      const PROD: ClusterContext = {
+        name: "prod-eu",
+        stableId: "prod",
+        key: "prod",
+        cluster: "prod",
+        server: "https://prod",
+        isCurrent: true,
+        sourceFile: "/home/dana/.kube/config",
+        authKind: "client certificate",
+      };
+      const scheduled = () => pod({ nodeName: "node-b" }, {}, { name: "web-2" });
+
+      beforeEach(() => {
+        resetContexts();
+        setContexts([PROD]);
+        store.setState(defaultState([PROD]));
+      });
+      afterEach(() => {
+        resetContexts();
+        store.setState(defaultState([]));
+      });
+
+      it("makes the node under Scheduling the way to that node", async () => {
+        render(<PodDetailsBody object={scheduled()} />);
+        await userEvent.click(screen.getByRole("button", { name: "Open node node-b" }));
+
+        const tab = store.currentWorkspace().tabs.find((t) => t.route === detailRoute("Node", null, "node-b"));
+        expect(tab).toBeDefined();
+        expect(tab!.sub).toBe("prod-eu");
+      });
+
+      it("makes the pod's own Node fact the same link", () => {
+        const fact = podFacts({ kind: "Pod", object: scheduled() }).find((f) => f.label === "Node")!;
+        render(<>{fact.value}</>);
+        expect(screen.getByRole("button", { name: "Open node node-b" }).textContent).toBe("node-b");
+      });
+
+      it("offers nothing to open for a pod that has not been scheduled", () => {
+        const pending = pod(
+          { tolerations: [{ key: "dedicated", operator: "Equal", value: "gpu", effect: "NoSchedule" }] },
+          {},
+          { name: "web-6" },
+        );
+        render(<PodDetailsBody object={pending} />);
+        expect(screen.getByText("Not scheduled")).toBeDefined();
+        expect(screen.queryByRole("button", { name: /^Open node/ })).toBeNull();
+      });
     });
 
     it("omits the Scheduling block when the pod has no placement info", () => {
