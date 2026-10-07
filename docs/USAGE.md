@@ -117,7 +117,9 @@ CPU and memory when a metrics server is available.
 choose which columns are visible with the column picker (remembered per kind), and
 scope to one or more namespaces with the namespace selector (empty means all
 namespaces). If your credentials can't list all namespaces, srelens scopes to the
-namespaces you can see and tells you so.
+namespaces you can see and tells you so. In the new design, with all namespaces
+shown, clicking a value in a list's Namespace column scopes the list to that
+namespace, the same as picking it in the selector.
 
 **Bulk actions.** Select rows with their checkboxes to reveal a bar with **Delete**,
 **Evict** (Pods), and **Rollout restart** (Deployments, StatefulSets, DaemonSets).
