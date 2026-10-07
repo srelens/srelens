@@ -143,6 +143,23 @@ describe("Workloads", () => {
     );
   });
 
+  it("returns keyboard focus to the workload's row after Enter on its namespace, once the rows are back (PR #832 review)", async () => {
+    open();
+    const cell = await screen.findByRole("button", { name: "Show only namespace kube-system" });
+    cell.focus();
+
+    await userEvent.keyboard("{Enter}");
+
+    // The five lists reload under the new selection; the row that was read
+    // off is the one focus comes back to, not the top of the page.
+    await waitFor(() => expect(tabFor("/resources").namespaces).toEqual({ [CTX.stableId]: ["kube-system"] }));
+    await waitFor(() => {
+      const row = screen.getByText("node-exporter").closest("tr");
+      expect(row).not.toBeNull();
+      expect(document.activeElement).toBe(row);
+    });
+  });
+
   it("writes a namespace pick to its own tab — another Workloads tab on the same cluster keeps its selection", async () => {
     store.openTab("/resources");
     const first = tabFor("/resources").id;
