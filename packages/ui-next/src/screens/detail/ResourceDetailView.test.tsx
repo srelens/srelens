@@ -1655,5 +1655,40 @@ describe("ResourceDetailView", () => {
       expect(suspended).toContain("Resume");
       expect(suspended).not.toContain("Suspend");
     });
+
+    /**
+     * The same adaptation, for a Node's `spec.unschedulable` (#820): it is
+     * what makes the pane offer Uncordon on a node that is already cordoned,
+     * rather than Cordon again. Both directions, for the reason given above.
+     */
+    async function nodeFooterActionsFor(unschedulable: boolean): Promise<(string | null)[]> {
+      getObject.mockResolvedValue({
+        object: {
+          kind: "Node",
+          apiVersion: "v1",
+          metadata: { name: "worker-1", creationTimestamp: daysAgo(120) },
+          spec: unschedulable ? { unschedulable } : {},
+          status: {},
+        },
+      });
+      descriptorFor.mockReturnValue(baseDescriptor({ k8sKind: "Node", actions: { cordon: true, drain: true } }));
+      const view = render(<ResourceDetailView context="ctx" kind="Node" namespace={null} name="worker-1" />);
+      await waitFor(() => expect(view.getByRole("tab", { name: "Details" })).toBeDefined());
+      const words = await allFooterActions();
+      view.unmount();
+      return words;
+    }
+
+    it("offers Cordon and Drain on a node, and Uncordon on one that is already cordoned", async () => {
+      const schedulable = await nodeFooterActionsFor(false);
+      expect(schedulable).toContain("Cordon");
+      expect(schedulable).toContain("Drain");
+      expect(schedulable).not.toContain("Uncordon");
+
+      const cordoned = await nodeFooterActionsFor(true);
+      expect(cordoned).toContain("Uncordon");
+      expect(cordoned).toContain("Drain");
+      expect(cordoned).not.toContain("Cordon");
+    });
   });
 });

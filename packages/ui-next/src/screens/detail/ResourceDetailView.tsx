@@ -279,6 +279,11 @@ export function ResourceDetailView({ context, kind, namespace, name, peek }: Res
           actions={descriptor?.actions ?? CUSTOM_RESOURCE_ACTIONS}
           flagged={header.flagged ?? false}
           suspended={object.spec?.suspend === true}
+          unschedulable={object.spec?.unschedulable === true}
+          // Those two are read off this pane's object, so a write made from the
+          // bar has to bring a new one: without it a node cordoned from here
+          // went on being offered Cordon.
+          onChanged={subject.refresh}
         />
       }
     >

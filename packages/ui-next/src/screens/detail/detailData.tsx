@@ -278,6 +278,8 @@ export interface DetailSubject {
   object?: K8sObject;
   status: ReturnType<typeof useObject>["status"];
   error?: string;
+  /** Read the subject again without blanking the pane — see `useObject`. */
+  refresh: () => void;
   /** The kind's own row actions and extra panes, or `undefined` for a CRD. */
   descriptor: ReturnType<typeof descriptorFor>;
   /** Core's one verdict on this subject — the peek's status line and the
@@ -331,7 +333,7 @@ export function useDetailSubject({
   namespace: string | null;
   name: string;
 }): DetailSubject {
-  const { object, status, error } = useObject(context, kind, namespace, name);
+  const { object, status, error, refresh } = useObject(context, kind, namespace, name);
 
   const slug = SLUG_BY_K8S_KIND[kind];
   const descriptor = slug ? descriptorFor(slug) : undefined;
@@ -362,6 +364,7 @@ export function useDetailSubject({
     object,
     status,
     error,
+    refresh,
     descriptor,
     statusLine: object ? resourceStatusLine(kind, object) : null,
     hasContainers,

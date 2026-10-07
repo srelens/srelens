@@ -42,6 +42,10 @@ export interface KindActions {
   suspend?: boolean;
   /** CronJob only: offers Run now — not destructive, takes no confirm. */
   trigger?: boolean;
+  /** Node only: offers Cordon/Uncordon, labelled from the row's own state (#820). */
+  cordon?: boolean;
+  /** Node only: offers Drain (#820). */
+  drain?: boolean;
   /**
    * Opposite default from every field above: absent (or `true`) offers
    * Delete, which is what keeps all 34 built-in kinds offering it without

@@ -23,9 +23,11 @@ vi.mock("@srelens/core", async (importOriginal) => {
 // Tauri-backed session openers.
 const {
   SESSION_IDLE_AFTER_MS,
+  SESSION_SETTLE_MS,
   __resetSessionsForTests,
   endSession,
   getSessions,
+  onSessionSettled,
   startLocalSession,
   startPodSession,
   subscribeSessions,
@@ -407,6 +409,162 @@ describe("the session store", () => {
     vi.advanceTimersByTime(SESSION_IDLE_AFTER_MS * 2);
 
     expect(getSessions()[0].state).toBe("closed");
+  });
+});
+
+describe("a local shell opened to run a command", () => {
+  const drain = { context: "kind-srelens-demo", title: "Drain worker-1", command: "kubectl drain worker-1" };
+
+  it("hands the command to the host with the session, rather than typing it", async () => {
+    const backend = fakeBackend();
+    await startLocalSession(drain);
+    backend.out("user@host ~ % ");
+
+    // The host starts it as the terminal's first process. Typed from here it
+    // could reach a shell still reading its rc files and be swallowed.
+    expect(startLocalTerminal).toHaveBeenCalledTimes(1);
+    expect(startLocalTerminal.mock.calls[0][0]).toBe("kind-srelens-demo");
+    expect(startLocalTerminal.mock.calls[0][5]).toBe("kubectl drain worker-1");
+    expect(backend.handle.send).not.toHaveBeenCalled();
+  });
+
+  it("types nothing however long the shell takes or whatever it prints", async () => {
+    vi.useFakeTimers({ now: new Date("2026-10-07T10:00:00.000Z") });
+    const backend = fakeBackend();
+    await startLocalSession(drain);
+
+    backend.out("Last login: Wed Oct  7\r\n");
+    vi.advanceTimersByTime(60_000);
+    backend.out("node/worker-1 cordoned\r\n");
+    vi.advanceTimersByTime(60_000);
+
+    expect(backend.handle.send).not.toHaveBeenCalled();
+  });
+
+  it("shows the command above its output, since no shell echoes it", async () => {
+    const backend = fakeBackend();
+    const id = await startLocalSession(drain);
+    backend.out("node/worker-1 cordoned\r\n");
+
+    await vi.waitFor(() =>
+      expect(screenOf(terminalFor(id), 2)).toEqual(["$ kubectl drain worker-1", "node/worker-1 cordoned"]),
+    );
+  });
+
+  it("passes no command, and writes no line, for an ordinary local shell", async () => {
+    const backend = fakeBackend();
+    const id = await startLocalSession({ context: "kind-srelens-demo" });
+    backend.out("% ");
+
+    expect(startLocalTerminal.mock.calls[0][5]).toBeUndefined();
+    await vi.waitFor(() => expect(screenOf(terminalFor(id))).toEqual(["%"]));
+  });
+});
+
+describe("hearing a session's output settle", () => {
+  beforeEach(() => {
+    vi.useFakeTimers({ now: new Date("2026-10-07T10:00:00.000Z") });
+  });
+
+  it("tells a listener once the output has stopped, not between two lines of it", async () => {
+    const backend = fakeBackend();
+    const id = await startLocalSession({ context: "kind-srelens-demo", command: "kubectl drain worker-1" });
+    const heard = vi.fn();
+    onSessionSettled(id, heard);
+
+    backend.out("evicting pod shop/web-0\r\n");
+    vi.advanceTimersByTime(SESSION_SETTLE_MS - 1);
+    backend.out("pod/web-0 evicted\r\n");
+    vi.advanceTimersByTime(SESSION_SETTLE_MS - 1);
+    expect(heard).not.toHaveBeenCalled();
+
+    vi.advanceTimersByTime(1);
+    expect(heard).toHaveBeenCalledTimes(1);
+  });
+
+  it("tells it again each time the output stops", async () => {
+    // A drain waiting on a disruption budget goes quiet and then carries on.
+    const backend = fakeBackend();
+    const id = await startLocalSession({ context: "kind-srelens-demo", command: "kubectl drain worker-1" });
+    const heard = vi.fn();
+    onSessionSettled(id, heard);
+
+    backend.out("node/worker-1 cordoned\r\n");
+    vi.advanceTimersByTime(SESSION_SETTLE_MS);
+    backend.out("node/worker-1 drained\r\n");
+    vi.advanceTimersByTime(SESSION_SETTLE_MS);
+
+    expect(heard).toHaveBeenCalledTimes(2);
+  });
+
+  it("says nothing while the session says nothing", async () => {
+    fakeBackend();
+    const id = await startLocalSession({ context: "kind-srelens-demo" });
+    const heard = vi.fn();
+    onSessionSettled(id, heard);
+
+    vi.advanceTimersByTime(SESSION_SETTLE_MS * 10);
+    expect(heard).not.toHaveBeenCalled();
+  });
+
+  it("tells a listener when the far end goes, without waiting for a quiet that will not come", async () => {
+    const backend = fakeBackend();
+    const id = await startLocalSession({ context: "kind-srelens-demo" });
+    const heard = vi.fn();
+    onSessionSettled(id, heard);
+
+    backend.out("logout\r\n");
+    backend.exit();
+    expect(heard).toHaveBeenCalledTimes(1);
+
+    // And the clock that output started does not fire a second time.
+    vi.advanceTimersByTime(SESSION_SETTLE_MS * 2);
+    expect(heard).toHaveBeenCalledTimes(1);
+  });
+
+  it("stops telling a listener that released", async () => {
+    const backend = fakeBackend();
+    const id = await startLocalSession({ context: "kind-srelens-demo" });
+    const heard = vi.fn();
+    const release = onSessionSettled(id, heard);
+
+    release();
+    backend.out("% ");
+    vi.advanceTimersByTime(SESSION_SETTLE_MS);
+    expect(heard).not.toHaveBeenCalled();
+  });
+
+  it("tells nobody about a session the reader dismissed", async () => {
+    const backend = fakeBackend();
+    const id = await startLocalSession({ context: "kind-srelens-demo" });
+    const heard = vi.fn();
+    onSessionSettled(id, heard);
+
+    backend.out("% ");
+    endSession(id);
+    vi.advanceTimersByTime(SESSION_SETTLE_MS);
+    expect(heard).not.toHaveBeenCalled();
+  });
+
+  it("tells a listener straight away about a session that was over before it listened", async () => {
+    // A shell that could not be started closes inside the call that starts
+    // it, before the caller holds an id to listen on.
+    startLocalTerminal.mockRejectedValue(new Error("start_terminal is not available"));
+    const id = await startLocalSession({ context: "kind-srelens-demo", command: "kubectl drain worker-1" });
+    expect(getSessions()[0].state).toBe("closed");
+
+    const heard = vi.fn();
+    const release = onSessionSettled(id, heard);
+    expect(heard).toHaveBeenCalledTimes(1);
+    expect(() => release()).not.toThrow();
+  });
+
+  it("is a no-op for an id that names no session", () => {
+    const heard = vi.fn();
+    const release = onSessionSettled(404, heard);
+    expect(() => release()).not.toThrow();
+    vi.advanceTimersByTime(SESSION_SETTLE_MS);
+    expect(heard).not.toHaveBeenCalled();
   });
 });
 
