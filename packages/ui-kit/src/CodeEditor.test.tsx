@@ -304,3 +304,27 @@ describe("CodeEditor — find", () => {
     expect(winningRule(".cm-textfield")).toContain("background-color: var(--");
   });
 });
+
+/**
+ * Hovering a squiggle on a dark theme showed the lint message as near-white
+ * ink on CodeMirror's light-only `#f5f5f5`. The dressing was written for
+ * `.cm-tooltip.cm-tooltip-lint`, which is the gutter marker's tooltip; the
+ * squiggle's is a `.cm-tooltip-hover` host with the lint list inside it as a
+ * section, so the rule reached neither element. A completion's description
+ * (`.cm-completionInfo`) is a third host, which is why the rule is on the
+ * class every tooltip carries rather than on a list of them.
+ */
+describe("CodeEditor — tooltips", () => {
+  it("dresses the tooltip box itself, whichever path opened it", () => {
+    render(<CodeEditor value="a: 1" />);
+    const rule = winningRule(".cm-tooltip");
+    expect(rule, "no rule for .cm-tooltip").toBeDefined();
+    expect(rule).toContain("background-color: var(--surface-sunk)");
+    expect(rule).toMatch(/[{;]\s*color: var\(--ink\)/);
+  });
+
+  it("rules stacked sections apart from a token, not the base theme's grey", () => {
+    render(<CodeEditor value="a: 1" />);
+    expect(winningRule(".cm-tooltip-section:not(:first-child)")).toContain("var(--rule)");
+  });
+});
