@@ -650,6 +650,111 @@ describe("keeping the active tab on screen", () => {
     }
   });
 
+  describe("when the strip itself is resized (PR #837 review)", () => {
+    /** The observers the strip created, so a test can fire the one on the tab list. */
+    function watchResize() {
+      const observers: { callback: () => void; targets: Element[]; disconnected: boolean }[] = [];
+      const holder = window as unknown as { ResizeObserver?: unknown };
+      const original = holder.ResizeObserver;
+      holder.ResizeObserver = class {
+        private entry: (typeof observers)[number];
+        constructor(callback: () => void) {
+          this.entry = { callback, targets: [], disconnected: false };
+          observers.push(this.entry);
+        }
+        observe(target: Element) {
+          this.entry.targets.push(target);
+        }
+        unobserve() {}
+        disconnect() {
+          this.entry.disconnected = true;
+        }
+      };
+      return {
+        /** Fire every live observer watching the tab list, as a resize does. */
+        resize: () => {
+          const list = screen.getByRole("tablist");
+          for (const o of observers) if (!o.disconnected && o.targets.includes(list)) o.callback();
+        },
+        observers,
+        restore: () => {
+          holder.ResizeObserver = original;
+        },
+      };
+    }
+
+    /** jsdom reports 0 for every width; give the tab list one a test can change. */
+    function setListWidth(width: number) {
+      Object.defineProperty(screen.getByRole("tablist"), "clientWidth", { value: width, configurable: true });
+    }
+
+    it("brings the active tab back into view when the strip gets narrower", () => {
+      const resize = watchResize();
+      const scroll = watchScroll();
+      try {
+        render(<TabStrip tabs={MANY} activeId="t13" onSelect={() => {}} />);
+        scroll.calls.length = 0;
+
+        // The window narrowed, or the sidebar widened: same tabs, same active one.
+        setListWidth(900);
+        resize.resize();
+
+        expect(scroll.calls.at(-1)?.title).toBe("Tab 13");
+        expect(scroll.calls.at(-1)?.options).toEqual({ block: "nearest", inline: "nearest" });
+      } finally {
+        scroll.restore();
+        resize.restore();
+      }
+    });
+
+    it("follows the tab that is active now, not the one that was when the strip mounted", () => {
+      const resize = watchResize();
+      const scroll = watchScroll();
+      try {
+        const view = render(<TabStrip tabs={MANY} activeId="t13" onSelect={() => {}} />);
+        view.rerender(<TabStrip tabs={MANY} activeId="t2" onSelect={() => {}} />);
+        scroll.calls.length = 0;
+
+        setListWidth(900);
+        resize.resize();
+
+        expect(scroll.calls.at(-1)?.title).toBe("Tab 2");
+      } finally {
+        scroll.restore();
+        resize.restore();
+      }
+    });
+
+    it("does nothing when the observer reports and the width has not changed", () => {
+      // First observe, and a change of height alone, both arrive here.
+      const resize = watchResize();
+      const scroll = watchScroll();
+      try {
+        render(<TabStrip tabs={MANY} activeId="t13" onSelect={() => {}} />);
+        scroll.calls.length = 0;
+        resize.resize();
+        expect(scroll.calls).toEqual([]);
+      } finally {
+        scroll.restore();
+        resize.restore();
+      }
+    });
+
+    it("stops watching when the strip goes away", () => {
+      const resize = watchResize();
+      try {
+        const view = render(<TabStrip tabs={MANY} activeId="t13" onSelect={() => {}} />);
+        const list = screen.getByRole("tablist");
+        const watching = resize.observers.filter((o) => o.targets.includes(list));
+        expect(watching.length).toBeGreaterThan(0);
+        view.unmount();
+        expect(watching.every((o) => o.disconnected)).toBe(true);
+      } finally {
+        resize.restore();
+      }
+    });
+  });
+
   it("does not fail where there is no scrollIntoView at all", () => {
     expect(() => render(<TabStrip tabs={MANY} activeId="t13" onSelect={() => {}} />)).not.toThrow();
   });

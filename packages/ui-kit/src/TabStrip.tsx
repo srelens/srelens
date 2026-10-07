@@ -210,6 +210,30 @@ export function TabStrip({
     refs.current.get(activeId)?.scrollIntoView?.({ block: "nearest", inline: "nearest" });
   }, [activeId, tabCount]);
 
+  // And kept on screen when the strip itself gets narrower: the window is
+  // resized, or the sidebar beside it widened. Neither changes which tab is
+  // active or how many there are, so the effect above does not run, and an
+  // active tab sitting at the right edge was simply cut off by the edge moving
+  // in over it.
+  //
+  // On a change of WIDTH only. The observer also reports on first observe and
+  // on height changes; acting on those would scroll a strip the reader has
+  // deliberately moved, for no reason they could see.
+  const activeIdRef = useRef(activeId);
+  activeIdRef.current = activeId;
+  useEffect(() => {
+    const list = listRef.current;
+    if (!list || typeof ResizeObserver === "undefined") return;
+    let width = list.clientWidth;
+    const observer = new ResizeObserver(() => {
+      if (list.clientWidth === width) return;
+      width = list.clientWidth;
+      refs.current.get(activeIdRef.current)?.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+    });
+    observer.observe(list);
+    return () => observer.disconnect();
+  }, []);
+
   function requestMove(id: string, to: number, focus: boolean) {
     const from = tabs.findIndex(t => t.id === id);
     to = Math.max(0, Math.min(tabs.length - 1, to));
