@@ -259,6 +259,10 @@ main() {
     say "Installed: $install_dir/$BIN"
     say "  $installed_version"
     warn_if_not_on_path "$install_dir"
+    if [ -e "$install_dir/srelens-tui" ]; then
+        say ""
+        say "Note: $install_dir/srelens-tui has been replaced by $BIN. You can remove the old binary or use $BIN directly."
+    fi
     say ""
     say "Next: $BIN            # browse the cluster in your current context"
     say "      $BIN toolbox    # what it found on your PATH (kubectl, helm)"
