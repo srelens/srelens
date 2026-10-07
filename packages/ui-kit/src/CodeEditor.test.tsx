@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { fireEvent, render, waitFor } from "@testing-library/react";
 import { EditorState } from "@codemirror/state";
-import { EditorView } from "@codemirror/view";
+import { EditorView, activateHover } from "@codemirror/view";
+import { forEachDiagnostic } from "@codemirror/lint";
 import { openSearchPanel } from "@codemirror/search";
 import { CodeEditor } from "./CodeEditor";
 
@@ -326,5 +327,45 @@ describe("CodeEditor — tooltips", () => {
   it("rules stacked sections apart from a token, not the base theme's grey", () => {
     render(<CodeEditor value="a: 1" />);
     expect(winningRule(".cm-tooltip-section:not(:first-child)")).toContain("var(--rule)");
+  });
+
+  it("reaches the host a squiggle's hover actually opens", async () => {
+    // The two above read the stylesheet without opening anything, so they
+    // pass whatever element a hover lands in, and the fault was exactly a rule
+    // that existed and matched no host. Open the squiggle's tooltip the way a
+    // pointer would and ask which background the element it landed in gets.
+    // `activateHover` stands in for the pointer: jsdom has no layout, so
+    // `posAtCoords` cannot place a mouse over a character. (#826 review)
+    const onDiagnostics = vi.fn();
+    const { container } = render(<CodeEditor value={"a: 1\na: 2\n"} onDiagnostics={onDiagnostics} />);
+    await waitFor(() => expect(onDiagnostics).toHaveBeenCalled(), { timeout: 3000 });
+    const view = EditorView.findFromDOM(container.querySelector(".cm-editor")!)!;
+    let at = -1;
+    forEachDiagnostic(view.state, (_, from) => {
+      if (at < 0) at = from;
+    });
+    expect(at, "the duplicate key raised no diagnostic").toBeGreaterThan(-1);
+
+    activateHover(view, at, 1);
+
+    const host = await waitFor(() => {
+      const list = view.dom.querySelector(".cm-tooltip-lint");
+      expect(list, "no lint tooltip opened").not.toBeNull();
+      return list!.closest<HTMLElement>(".cm-tooltip")!;
+    });
+    // The squiggle's path, not the gutter marker's: the list is a section of
+    // a hover host, and the host is not itself the lint tooltip.
+    expect(host.classList.contains("cm-tooltip-hover")).toBe(true);
+    expect(host.classList.contains("cm-tooltip-lint")).toBe(false);
+    // Ties go to the later rule, as in `winningRule`; every candidate here is
+    // a theme-scoped `.cm-tooltip`, so specificity does not split them. Read
+    // off the rule text rather than `document.styleSheets`: jsdom's CSSOM
+    // drops declarations it cannot parse, `var()` among them.
+    const background = mountedRules()
+      .filter((rule) => rule.includes("background-color:"))
+      .filter((rule) => host.matches(rule.slice(0, rule.indexOf("{")).trim()))
+      .at(-1);
+    expect(background, "no background reaches the hover host").toBeDefined();
+    expect(background).toContain("background-color: var(--surface-sunk)");
   });
 });
