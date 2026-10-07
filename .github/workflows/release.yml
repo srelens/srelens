@@ -559,6 +559,9 @@ jobs:
           # provisioning profile. Signed builds only: an unsigned build that
           # claims it is killed at launch. Without the profile the build stays
           # signed but unentitled, and Settings hides the Touch ID switch.
+          # The profile names the APPLE_CERTIFICATE certificate: renewing that
+          # certificate means regenerating the profile with the new one, or
+          # macOS refuses to launch the signed app.
           if [ -n "$APPLE_PROVISIONING_PROFILE" ]; then
             printf '%s' "$APPLE_PROVISIONING_PROFILE" | base64 --decode > "$GITHUB_WORKSPACE/apps/desktop/src-tauri/embedded.provisionprofile"
             echo "MAC_SIGNED_CONFIG=--config $GITHUB_WORKSPACE/apps/desktop/src-tauri/macos-signing.conf.json" >> "$GITHUB_ENV"
