@@ -107,3 +107,21 @@ it("steps a subset context one place either way without disturbing the others", 
   act(() => moveContextBy(workspace, "prod", 1, true));
   expect(loadContextOrder()).toEqual(["dev", "other", "prod", "staging"]);
 });
+it("replaces a legacy NAME slot with the cluster's id, in place, on a subset move (PR #838 review)", async () => {
+  // An order saved by name, and not migrated because the context listing is
+  // incomplete — the one state in which a name is still a key. Matched on ids
+  // alone, the name slots were left standing and the ids appended at the end.
+  const { setContexts, resetContexts } = await import("./clusters");
+  const workspace = [
+    { name: "prod", stableId: "prod-id", key: "prod-id" },
+    { name: "staging", stableId: "staging-id", key: "staging-id" },
+  ];
+  saveContextOrder(["prod", "other", "staging"]);
+  act(() => setContexts(workspace as import("@srelens/core").ClusterContext[], "Unreadable source"));
+  try {
+    act(() => moveContext(workspace, "staging", "prod", true));
+    expect(loadContextOrder()).toEqual(["staging-id", "other", "prod-id"]);
+  } finally {
+    resetContexts();
+  }
+});

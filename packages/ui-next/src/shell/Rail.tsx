@@ -1,5 +1,5 @@
 import { PALETTE, SYMBOLS, symbolFor } from "../lib/markSymbols";
-import { moveContext, moveContextBy, useOrderedContexts } from "../lib/contextOrder";
+import { moveContext, useOrderedContexts } from "../lib/contextOrder";
 import { useEffect, useState } from "react";
 import type { ClusterContext } from "@srelens/core";
 import {
@@ -10,6 +10,7 @@ import {
   Mark,
   NavIcon,
   type ClusterRailItem,
+  type ClusterRailMoves,
   type ContextMenuItem,
 } from "@srelens/ui-kit";
 import { friendly } from "../lib/errorCopy";
@@ -198,21 +199,13 @@ export function Rail({ contexts, onConnect, error }: RailProps) {
     moveContext(ordered, moving.name, rest[toIndex]?.name ?? null, true);
   }
 
-  /** One place up or down, from the menu. */
-  function moveBy(id: string, delta: -1 | 1) {
-    const moving = ordered.find((ctx) => ctx.stableId === id);
-    if (moving) moveContextBy(ordered, moving.name, delta, true);
-  }
-
-  function menuFor(item: ClusterRailItem): ContextMenuItem[] {
-    const at = ordered.findIndex((ctx) => ctx.stableId === item.id);
-    // Absent, not disabled, at either end: the first cluster has nowhere up to
-    // go, and a greyed entry is a thing to read that does nothing.
-    const moves: ContextMenuItem[] = [
-      ...(at > 0 ? [{ label: "Move up", onPick: () => moveBy(item.id, -1) } as ContextMenuItem] : []),
-      ...(at >= 0 && at < ordered.length - 1
-        ? [{ label: "Move down", onPick: () => moveBy(item.id, 1) } as ContextMenuItem]
-        : []),
+  function menuFor(item: ClusterRailItem, moves: ClusterRailMoves): ContextMenuItem[] {
+    // The rail's own moves, so one picked here is announced like a drag or a
+    // key press. Each is there only when the mark has somewhere to go: absent,
+    // not disabled, because a greyed entry is a thing to read that does nothing.
+    const moveItems: ContextMenuItem[] = [
+      ...(moves.moveUp ? [{ label: "Move up", onPick: moves.moveUp } as ContextMenuItem] : []),
+      ...(moves.moveDown ? [{ label: "Move down", onPick: moves.moveDown } as ContextMenuItem] : []),
     ];
     return [
       { label: `Open ${item.name}`, onPick: () => select(item.id) },
@@ -244,7 +237,7 @@ export function Rail({ contexts, onConnect, error }: RailProps) {
       { label: workspace.pausedClusters?.includes(item.id) ? "Reconnect" : "Disconnect", onPick: () => toggleConnection(item.id) },
       { label: "Connection details", onPick: () => openTab("/connections") },
       // The pointer-free way to rearrange, beside the drag and the keys.
-      ...(moves.length > 0 ? [{ kind: "sep" } as ContextMenuItem, ...moves] : []),
+      ...(moveItems.length > 0 ? [{ kind: "sep" } as ContextMenuItem, ...moveItems] : []),
       { kind: "sep" },
       // Named for what it does. See the note above on the design's Disconnect.
       { label: "Remove from workspace", icon: Icons.trash, danger: true, onPick: () => remove(item.id) },

@@ -64,8 +64,15 @@ function mergeSubsetOrder(previous: readonly string[], names: readonly string[],
   const idOf = new Map(contexts.map((context) => [context.name, context.stableId]));
   const reordered = names.map((name) => idOf.get(name)).filter((id): id is string => !!id);
   const subset = new Set(contexts.map((context) => context.stableId));
+  // A slot is the subset's when it holds one of its stable ids — or one of its
+  // NAMES. An order saved before identities, and not yet migrated because the
+  // context listing is incomplete, still keys a cluster by name; matched on
+  // ids alone, that slot was left standing and the cluster's id appended at
+  // the end, so the move landed somewhere else and the stale name outlived it.
+  // An exact name only: a legacy key that merely resembles one stays put.
+  const held = (key: string) => subset.has(key) || idOf.has(key);
   let next = 0;
-  const merged = previous.map((id) => (subset.has(id) ? reordered[next++] : id)).filter((id): id is string => !!id);
+  const merged = previous.map((key) => (held(key) ? reordered[next++] : key)).filter((key): key is string => !!key);
   return [...merged, ...reordered.slice(next)];
 }
 

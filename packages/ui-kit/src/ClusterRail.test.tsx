@@ -362,20 +362,30 @@ describe("reordering", () => {
     fireEvent(node, event);
   }
 
-  /** Give a mark a box: 30px tall, starting at `top`. */
-  function box(node: Element, top: number) {
-    node.getBoundingClientRect = () =>
-      ({ top, bottom: top + 30, height: 30, left: 0, right: 30, width: 30, x: 0, y: top, toJSON: () => ({}) }) as DOMRect;
+  /**
+   * jsdom lays nothing out, and the rail reads the pointer against every
+   * mark's box: stack the three, 30px tall with the rail's 6px gap. So
+   * prod-eu is 0–30, prod-us 36–66, staging 72–102.
+   */
+  const TOPS: Record<string, number> = { "prod-eu": 0, "prod-us": 36, staging: 72 };
+  function layOut() {
+    for (const [name, top] of Object.entries(TOPS)) {
+      chip(name).getBoundingClientRect = () =>
+        ({ top, bottom: top + 30, height: 30, left: 0, right: 30, width: 30, x: 0, y: top, toJSON: () => ({}) }) as DOMRect;
+    }
+  }
+
+  /** Start dragging `source` and hold it at height `y` over `node`; drop there unless told not to. */
+  function dragTo(source: string, node: Element, y: number, drop = true) {
+    layOut();
+    fireEvent.pointerDown(chip(source));
+    fireEvent.dragStart(chip(source), { dataTransfer: dataTransfer() });
+    fireAt("dragOver", node, y);
+    if (drop) fireAt("drop", node, y);
   }
 
   function dragOnto(source: string, target: string, half: "upper" | "lower", drop = true) {
-    const to = chip(target);
-    box(to, 100);
-    const y = half === "upper" ? 105 : 125;
-    fireEvent.pointerDown(chip(source));
-    fireEvent.dragStart(chip(source), { dataTransfer: dataTransfer() });
-    fireAt("dragOver", to, y);
-    if (drop) fireAt("drop", to, y);
+    dragTo(source, chip(target), TOPS[target] + (half === "upper" ? 5 : 25), drop);
   }
 
   it("is not draggable, and refuses a drag, unless the caller can reorder", () => {
@@ -424,6 +434,100 @@ describe("reordering", () => {
     dragOnto("prod-us", "prod-us", "lower");
     dragOnto("prod-us", "staging", "upper");
     expect(onMove).not.toHaveBeenCalled();
+  });
+
+  describe("over the gap between two marks (PR #838 review)", () => {
+    // The gaps are inside the drop area and are not marks. Read off the
+    // event's target, a release over one fell back to wherever the pointer
+    // had last been over a mark, or to the end.
+    it("drops between the two marks either side of the gap, wherever the pointer came from", () => {
+      const onMove = vi.fn();
+      const { container } = setup({ onMove });
+      const list = container.querySelector("ul")!;
+      // Straight into the gap between prod-eu (0–30) and prod-us (36–66),
+      // never having been over a mark: staging lands between them.
+      dragTo("staging", list, 33);
+      expect(onMove).toHaveBeenCalledWith("staging", 1);
+    });
+
+    it("does not carry over the place of the last mark the pointer crossed", () => {
+      const onMove = vi.fn();
+      const { container } = setup({ onMove });
+      const list = container.querySelector("ul")!;
+      layOut();
+      fireEvent.pointerDown(chip("prod-eu"));
+      fireEvent.dragStart(chip("prod-eu"), { dataTransfer: dataTransfer() });
+      // Over the upper half of prod-us first (before it: no move for prod-eu)...
+      fireAt("dragOver", chip("prod-us"), 40);
+      // ...then down into the gap below prod-us, and released there.
+      fireAt("dragOver", list, 69);
+      fireAt("drop", list, 69);
+      expect(onMove).toHaveBeenCalledWith("prod-eu", 1);
+    });
+
+    it("drops at the end below the last mark, and at the start above the first", () => {
+      const onMove = vi.fn();
+      const { container } = setup({ onMove });
+      const list = container.querySelector("ul")!;
+      dragTo("prod-eu", list, 140);
+      expect(onMove).toHaveBeenLastCalledWith("prod-eu", 2);
+      dragTo("staging", list, -4);
+      expect(onMove).toHaveBeenLastCalledWith("staging", 0);
+    });
+
+    it("draws the rule for the gap the pointer is in", () => {
+      const { container } = setup({ onMove: vi.fn() });
+      dragTo("staging", container.querySelector("ul")!, 33, false);
+      expect(Array.from(container.querySelectorAll("li")).map((li) => li.getAttribute("data-drop"))).toEqual([
+        null,
+        "before",
+        null,
+      ]);
+    });
+  });
+
+  describe("moves offered to the caller's menu (PR #838 review)", () => {
+    function movesFor(onMove?: (id: string, to: number) => void) {
+      const seen = new Map<string, { up: boolean; down: boolean; moves: { moveUp?: () => void; moveDown?: () => void } }>();
+      const view = render(
+        <ClusterRail
+          items={ITEMS}
+          activeId="prod-eu"
+          onSelect={vi.fn()}
+          onMove={onMove}
+          menuFor={(item, moves) => {
+            seen.set(item.id, { up: !!moves.moveUp, down: !!moves.moveDown, moves });
+            return [{ label: "Open", onPick: () => {} }];
+          }}
+        />,
+      );
+      return { seen, view };
+    }
+
+    it("offers each direction only where the mark has somewhere to go", () => {
+      const { seen } = movesFor(vi.fn());
+      expect(seen.get("prod-eu")).toMatchObject({ up: false, down: true });
+      expect(seen.get("prod-us")).toMatchObject({ up: true, down: true });
+      expect(seen.get("staging")).toMatchObject({ up: true, down: false });
+    });
+
+    it("offers neither on a rail that cannot be reordered", () => {
+      const { seen } = movesFor(undefined);
+      for (const id of ["prod-eu", "prod-us", "staging"]) expect(seen.get(id)).toMatchObject({ up: false, down: false });
+    });
+
+    it("makes the move through the rail, so it is announced like any other", () => {
+      const onMove = vi.fn();
+      const { seen, view } = movesFor(onMove);
+
+      seen.get("staging")!.moves.moveUp!();
+      expect(onMove).toHaveBeenCalledWith("staging", 1);
+
+      view.rerender(
+        <ClusterRail items={[ITEMS[0], ITEMS[2], ITEMS[1]]} activeId="prod-eu" onSelect={vi.fn()} onMove={onMove} menuFor={() => []} />,
+      );
+      expect(screen.getByRole("status").textContent).toBe("staging moved to position 2 of 3");
+    });
   });
 
   it("draws a rule where the item would land, and none where dropping changes nothing", () => {

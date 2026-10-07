@@ -41,6 +41,19 @@ export interface ClusterRailItem {
   group?: string;
 }
 
+/**
+ * What a reorderable rail hands `menuFor` for each mark: the move one place up
+ * and one place down, each present only when that mark has somewhere to go —
+ * and both absent on a rail with no `onMove`.
+ *
+ * The caller decides the words and where in its menu they sit; the rail makes
+ * the move, so that it is announced and counted like every other.
+ */
+export interface ClusterRailMoves {
+  moveUp?: () => void;
+  moveDown?: () => void;
+}
+
 export interface ClusterRailProps {
   /** Already filtered and ordered: the rail shows what it is given. */
   items: ClusterRailItem[];
@@ -58,7 +71,7 @@ export interface ClusterRailProps {
    * as `TabStrip.menuFor`, for the same reason: the rail knows a mark can be
    * right-clicked, not what the product offers when it is.
    */
-  menuFor?: (item: ClusterRailItem) => ContextMenuItem[];
+  menuFor?: (item: ClusterRailItem, moves: ClusterRailMoves) => ContextMenuItem[];
   /**
    * Makes the rail reorderable: called with the item moved and the index it
    * should end up at, counted in the list as it will be once the item is
@@ -235,15 +248,24 @@ export function ClusterRail({
     onMove(id, to);
   }
 
-  /** Where a drop at this point would insert: before item `n`, or `length` for the end. */
+  /**
+   * Where a drop at this point would insert: before item `n`, or `length` for
+   * the end.
+   *
+   * From the pointer's height against every mark, not from whichever element
+   * the event happened to land on. The gaps between marks, and a group's rule,
+   * are inside the drop area and are not marks; read off the event's target, a
+   * release over one of them fell back to wherever the pointer had last been
+   * over a mark — or to the end, if it had come in from the side and never
+   * been over one. The first mark whose middle is below the pointer is the
+   * one the drop goes before, wherever exactly the pointer is.
+   */
   function dropPosition(event: DragEvent<HTMLElement>): number {
-    const target = (event.target as HTMLElement).closest("button");
-    const index = items.findIndex((item) => refs.current.get(item.id) === target);
-    // Between two marks, in the gap: keep the last answer rather than jumping
-    // to the end and back as the pointer crosses it.
-    if (index < 0) return dropAt ?? items.length;
-    const rect = target!.getBoundingClientRect();
-    return index + (event.clientY > rect.top + rect.height / 2 ? 1 : 0);
+    for (let index = 0; index < items.length; index++) {
+      const rect = refs.current.get(items[index].id)?.getBoundingClientRect();
+      if (rect && event.clientY < rect.top + rect.height / 2) return index;
+    }
+    return items.length;
   }
 
   function endDrag() {
@@ -354,7 +376,18 @@ export function ClusterRail({
               .filter((part) => filled(part))
               .join(", ");
             const hint = [item.name, item.detail].filter((part) => filled(part)).join(" — ");
-            const menu = menuFor?.(item) ?? [];
+            // Offered to the caller's menu rather than called by it directly,
+            // so a move picked from the menu is the rail's own move: announced
+            // like the keyboard's and the drag's, which a caller reordering
+            // its list behind the rail's back was not. Absent, not disabled,
+            // where there is nowhere to go.
+            const moves: ClusterRailMoves = onMove
+              ? {
+                  moveUp: index > 0 ? () => requestMove(item.id, index - 1, false) : undefined,
+                  moveDown: index < items.length - 1 ? () => requestMove(item.id, index + 1, false) : undefined,
+                }
+              : {};
+            const menu = menuFor?.(item, moves) ?? [];
 
             // A rule above the item it would land before, or below the last
             // one for "at the end". Not drawn where dropping changes nothing —

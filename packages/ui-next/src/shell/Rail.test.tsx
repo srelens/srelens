@@ -462,9 +462,17 @@ describe("rearranging clusters in the rail (#829)", () => {
   function drag(source: string, target: string, half: "upper" | "lower") {
     const from = screen.getByRole("button", { name: source });
     const to = screen.getByRole("button", { name: target });
-    to.getBoundingClientRect = () => ({ top: 100, bottom: 130, height: 30, left: 0, right: 30, width: 30, x: 0, y: 100, toJSON: () => ({}) });
+    // jsdom lays nothing out, and the rail reads the pointer against every
+    // mark's box: stack them, 30px tall with the rail's 6px gap, in the order
+    // they are on screen now.
+    const marks = order().map((name) => screen.getByRole("button", { name }));
+    marks.forEach((mark, i) => {
+      const top = i * 36;
+      mark.getBoundingClientRect = () => ({ top, bottom: top + 30, height: 30, left: 0, right: 30, width: 30, x: 0, y: top, toJSON: () => ({}) });
+    });
     const dataTransfer = { effectAllowed: "", dropEffect: "", setData: vi.fn(), getData: vi.fn() };
-    const clientY = half === "upper" ? 105 : 125;
+    const top = marks.indexOf(to) * 36;
+    const clientY = half === "upper" ? top + 5 : top + 25;
     // jsdom has no DragEvent, so the pointer's position does not survive an
     // init dictionary; it is put on the event by hand.
     const at = (event: Event) => {
@@ -559,6 +567,9 @@ describe("rearranging clusters in the rail (#829)", () => {
     setupThree();
     await pick("dev", "Move up");
     await waitFor(() => expect(order()).toEqual(["prod-eu", "dev", "staging"]));
+    // Announced, like a drag or a key press: it is the rail's own move, not a
+    // reorder made behind its back (PR #838 review).
+    expect(screen.getByRole("status").textContent).toBe("dev moved to position 2 of 3");
     await pick("prod-eu", "Move down");
     await waitFor(() => expect(order()).toEqual(["dev", "prod-eu", "staging"]));
   });
