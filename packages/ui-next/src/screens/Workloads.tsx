@@ -1,5 +1,5 @@
 import { ContextLabel } from "../lib/contextLabel";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ageSortValue,
   podStatus,
@@ -44,6 +44,7 @@ import {
   type PodRow,
 } from "../lib/kinds/columns";
 import { descriptorFor } from "../lib/kinds/descriptors";
+import { addNamespace, withNamespaceSelect } from "../lib/kinds/namespaceCell";
 import { withRowAffordances } from "../lib/kinds/rowAffordances";
 import type { ListRow } from "../lib/kinds/types";
 import { useResourceList, type ResourceList } from "../lib/resourceList";
@@ -481,9 +482,20 @@ function WorkloadList({
     () => UNION_COLUMNS.filter((column) => column.key === NAME_KEY || !hidden.has(column.key)),
     [hidden],
   );
+  // The Namespace column's values add to this tab's selection, as they do on
+  // a kind's own list (#821) — see `withNamespaceSelect`.
+  const addToSelection = useCallback(
+    (namespace: string) => setNamespaces(context.stableId, addNamespace(selection, namespace)),
+    [setNamespaces, context.stableId, selection],
+  );
   const renderedColumns = useMemo(
-    () => withRowAffordances(columns, (row) => row.flagged, ask),
-    [columns, ask],
+    () =>
+      withRowAffordances(
+        withNamespaceSelect(columns, selection, scope ? undefined : addToSelection),
+        (row) => row.flagged,
+        ask,
+      ),
+    [columns, ask, selection, scope, addToSelection],
   );
 
   const {

@@ -130,6 +130,19 @@ function open() {
 }
 
 describe("Workloads", () => {
+  it("narrows to a namespace clicked in the table, as a kind's own list does (#821)", async () => {
+    open();
+    const cell = await screen.findByRole("button", { name: "Show only namespace kube-system" });
+
+    await userEvent.click(cell);
+
+    await waitFor(() => expect(tabFor("/resources").namespaces).toEqual({ [CTX.stableId]: ["kube-system"] }));
+    // Narrowed to it, and nothing on screen is left to add.
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: /^(Show only|Also show) namespace/ })).toBeNull(),
+    );
+  });
+
   it("writes a namespace pick to its own tab — another Workloads tab on the same cluster keeps its selection", async () => {
     store.openTab("/resources");
     const first = tabFor("/resources").id;
