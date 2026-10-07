@@ -44,7 +44,7 @@ import {
   type PodRow,
 } from "../lib/kinds/columns";
 import { descriptorFor } from "../lib/kinds/descriptors";
-import { addNamespace, withNamespaceSelect } from "../lib/kinds/namespaceCell";
+import { addNamespace, useRowRefocus, withNamespaceSelect } from "../lib/kinds/namespaceCell";
 import { withRowAffordances } from "../lib/kinds/rowAffordances";
 import type { ListRow } from "../lib/kinds/types";
 import { useResourceList, type ResourceList } from "../lib/resourceList";
@@ -195,6 +195,9 @@ function fromCronJob(row: ListRow): WorkloadRow {
  * answered by a subset of rows — the rest render an em dash rather than
  * being flattened away, per the controller ruling.
  */
+/** One row's identity in the union table: two kinds may share a name. */
+const workloadRowKey = (row: WorkloadRow) => `${row.kind}/${row.namespace ?? ""}/${row.name}`;
+
 const UNION_COLUMNS: Column<WorkloadRow>[] = [
   { key: "name", header: "Name", sortable: true },
   { key: "kind", header: "Kind", sortable: true },
@@ -484,9 +487,14 @@ function WorkloadList({
   );
   // The Namespace column's values add to this tab's selection, as they do on
   // a kind's own list (#821) — see `withNamespaceSelect`.
+  const refocus = useRowRefocus();
+  const rememberRow = refocus.remember;
   const addToSelection = useCallback(
-    (namespace: string) => setNamespaces(context.stableId, addNamespace(selection, namespace)),
-    [setNamespaces, context.stableId, selection],
+    (namespace: string, row: WorkloadRow) => {
+      rememberRow(workloadRowKey(row));
+      setNamespaces(context.stableId, addNamespace(selection, namespace));
+    },
+    [setNamespaces, context.stableId, selection, rememberRow],
   );
   const renderedColumns = useMemo(
     () =>
@@ -667,11 +675,11 @@ function WorkloadList({
               className="mx-3 mt-3 mb-3"
             />
           ))}
-          <div className="scroll min-h-0 flex-1">
+          <div ref={refocus.scope} className="scroll min-h-0 flex-1">
             <Table
               columns={renderedColumns}
               data={filtered}
-              getRowKey={(row) => `${row.kind}/${row.namespace ?? ""}/${row.name}`}
+              getRowKey={workloadRowKey}
               sort={sort}
               onSortChange={setSort}
               activeFilterKey={filterKey}

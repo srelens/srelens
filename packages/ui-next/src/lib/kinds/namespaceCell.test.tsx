@@ -1,8 +1,9 @@
-import { describe, it, expect, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { useState } from "react";
+import { afterEach, describe, it, expect, vi } from "vitest";
+import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Table, type Column } from "@srelens/ui-kit";
-import { addNamespace, withNamespaceSelect } from "./namespaceCell";
+import { REFOCUS_WITHIN_MS, addNamespace, useRowRefocus, withNamespaceSelect } from "./namespaceCell";
 import type { ListRow } from "./types";
 
 const COLUMNS: Column<ListRow>[] = [
@@ -68,7 +69,8 @@ describe("withNamespaceSelect", () => {
     await userEvent.click(screen.getByRole("button", { name: "Show only namespace monitoring" }));
 
     expect(onAdd).toHaveBeenCalledTimes(1);
-    expect(onAdd).toHaveBeenCalledWith("monitoring");
+    // The row too, so the screen can bring focus back to it.
+    expect(onAdd).toHaveBeenCalledWith("monitoring", ROWS[1]);
     // The row peeks on a click. A namespace picked off it must not also open
     // the resource it was read off.
     expect(onRowClick).not.toHaveBeenCalled();
@@ -87,11 +89,41 @@ describe("withNamespaceSelect", () => {
 
     screen.getByRole("button", { name: "Show only namespace monitoring" }).focus();
     await userEvent.keyboard("{Enter}");
+    // Focus is handed to the row on a press (see the focus test below), so
+    // the second key is pressed from the button again.
+    screen.getByRole("button", { name: "Show only namespace monitoring" }).focus();
     await userEvent.keyboard(" ");
 
     expect(onAdd).toHaveBeenCalledTimes(2);
-    expect(onAdd).toHaveBeenLastCalledWith("monitoring");
+    expect(onAdd).toHaveBeenLastCalledWith("monitoring", ROWS[1]);
     expect(onRowActivate).not.toHaveBeenCalled();
+  });
+
+  it("keeps a keyboard reader's place: focus moves to the row when the button gives way to text", async () => {
+    // Selecting the namespace is what makes its own cell plain text, so the
+    // focused button is removed by the very press that used it.
+    function Live() {
+      const [selection, setSelection] = useState<string[]>([]);
+      return (
+        <Table
+          columns={withNamespaceSelect(COLUMNS, selection, (ns) => setSelection(addNamespace(selection, ns)))}
+          data={ROWS}
+          getRowKey={(row) => `${row.namespace ?? ""}/${row.name}`}
+          onRowClick={() => {}}
+          onRowActivate={() => {}}
+        />
+      );
+    }
+    render(<Live />);
+    const button = screen.getByRole("button", { name: "Show only namespace monitoring" });
+    button.focus();
+
+    await userEvent.keyboard("{Enter}");
+
+    expect(screen.queryByRole("button", { name: /namespace monitoring/ })).toBeNull();
+    const row = screen.getByText("prometheus-0").closest("tr");
+    expect(document.activeElement).toBe(row);
+    expect(document.activeElement).not.toBe(document.body);
   });
 
   it("says a click ADDS when some namespaces are already selected", () => {
@@ -131,5 +163,117 @@ describe("withNamespaceSelect", () => {
     const decorated = withNamespaceSelect(COLUMNS, [], vi.fn());
     expect(decorated[0]).toBe(COLUMNS[0]);
     expect(decorated[1]).toMatchObject({ key: "namespace", header: "Namespace", sortable: true });
+  });
+});
+
+/**
+ * The list reloads under a new selection, and a list that is loading shows no
+ * table: every row leaves the document, the focused one with it (PR #832
+ * review). `Reloading` is that screen in miniature — a pick blanks the table,
+ * and `finish()` brings the rows back.
+ */
+describe("useRowRefocus", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const keyOf = (row: ListRow) => `${row.namespace ?? ""}/${row.name}`;
+  let finish!: () => void;
+
+  function Reloading({ rows = ROWS }: { rows?: ListRow[] }) {
+    const [selection, setSelection] = useState<string[]>([]);
+    const [loading, setLoading] = useState(false);
+    const refocus = useRowRefocus();
+    finish = () => setLoading(false);
+    const shown = selection.length ? rows.filter((r) => selection.includes(r.namespace ?? "")) : rows;
+    return (
+      <>
+        <input aria-label="Filter" />
+        <div ref={refocus.scope}>
+          {loading ? (
+            <p>Loading</p>
+          ) : (
+            <Table
+              columns={withNamespaceSelect(COLUMNS, selection, (ns, row) => {
+                refocus.remember(keyOf(row));
+                setSelection(addNamespace(selection, ns));
+                setLoading(true);
+              })}
+              data={shown}
+              getRowKey={keyOf}
+              onRowClick={() => {}}
+              onRowActivate={() => {}}
+            />
+          )}
+        </div>
+      </>
+    );
+  }
+
+  const rowOf = (name: string) => screen.getByText(name).closest("tr");
+
+  it("puts focus back on the row once the reloaded table is on screen", async () => {
+    render(<Reloading />);
+    screen.getByRole("button", { name: "Show only namespace monitoring" }).focus();
+    await userEvent.keyboard("{Enter}");
+
+    // The table is gone, and focus with it.
+    expect(screen.getByText("Loading")).toBeDefined();
+    expect(document.activeElement).toBe(document.body);
+
+    act(() => finish());
+    expect(document.activeElement).toBe(rowOf("prometheus-0"));
+  });
+
+  it("brings it back after a pointer pick as well", async () => {
+    render(<Reloading />);
+    await userEvent.click(screen.getByRole("button", { name: "Show only namespace shop" }));
+    act(() => finish());
+    expect(document.activeElement).toBe(rowOf("web-0"));
+  });
+
+  it("leaves focus where the reader put it while the list was loading", async () => {
+    render(<Reloading />);
+    screen.getByRole("button", { name: "Show only namespace monitoring" }).focus();
+    await userEvent.keyboard("{Enter}");
+
+    const filter = screen.getByRole("textbox", { name: "Filter" });
+    filter.focus();
+    act(() => finish());
+
+    expect(document.activeElement).toBe(filter);
+    // And it has given up for good: focus dropping later is not its to fix.
+    act(() => filter.blur());
+    act(() => finish());
+    expect(document.activeElement).toBe(document.body);
+  });
+
+  it("does nothing when the row did not come back", async () => {
+    const view = render(<Reloading />);
+    screen.getByRole("button", { name: "Show only namespace monitoring" }).focus();
+    await userEvent.keyboard("{Enter}");
+
+    // Deleted while the list was loading.
+    view.rerender(<Reloading rows={[ROWS[0]]} />);
+    act(() => finish());
+    expect(document.activeElement).toBe(document.body);
+  });
+
+  it("gives up after a while rather than moving focus on a reader who has moved on", async () => {
+    vi.useFakeTimers({ now: new Date("2026-10-07T10:00:00.000Z"), shouldAdvanceTime: true });
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    render(<Reloading />);
+    screen.getByRole("button", { name: "Show only namespace monitoring" }).focus();
+    await user.keyboard("{Enter}");
+
+    vi.setSystemTime(Date.now() + REFOCUS_WITHIN_MS + 1);
+    act(() => finish());
+    expect(document.activeElement).toBe(document.body);
+  });
+
+  it("never moves focus when no row was remembered", () => {
+    render(<Reloading />);
+    act(() => finish());
+    expect(document.activeElement).toBe(document.body);
   });
 });

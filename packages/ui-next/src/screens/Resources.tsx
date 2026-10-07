@@ -32,7 +32,7 @@ import { useHiddenColumns } from "../lib/columnPrefs";
 import { detailRoute, newRoute, parseDetailRoute } from "../lib/detailRoute";
 import { customDescriptor } from "../lib/kinds/custom";
 import { descriptorFor } from "../lib/kinds/descriptors";
-import { addNamespace, withNamespaceSelect } from "../lib/kinds/namespaceCell";
+import { addNamespace, useRowRefocus, withNamespaceSelect } from "../lib/kinds/namespaceCell";
 import { withRowAffordances } from "../lib/kinds/rowAffordances";
 import { rowKey, type KindDescriptor, type ListRow } from "../lib/kinds/types";
 import { clampPeekWidth, savePeekWidth, setPeekWidth, usePeekBounds, usePeekWidth } from "../lib/peekWidth";
@@ -213,9 +213,16 @@ function KindList({
   // namespace to this tab's selection (#821) — the same write the picker in
   // the filter bar makes. Withheld from a namespace-scoped credential, which
   // has the one namespace and no way to ask for another.
+  // The list reloads under the new selection, which takes the table — and
+  // the reader's keyboard focus — away; `refocus` puts it back on the row.
+  const refocus = useRowRefocus();
+  const rememberRow = refocus.remember;
   const addToSelection = useCallback(
-    (namespace: string) => setNamespaces(context.stableId, addNamespace(selection, namespace)),
-    [setNamespaces, context.stableId, selection],
+    (namespace: string, row: ListRow) => {
+      rememberRow(rowKey(row));
+      setNamespaces(context.stableId, addNamespace(selection, namespace));
+    },
+    [setNamespaces, context.stableId, selection, rememberRow],
   );
   const renderedColumns = useMemo(() => {
     const selectable = withNamespaceSelect(columns, selection, scope ? undefined : addToSelection);
@@ -421,7 +428,7 @@ function KindList({
    */
   const listAndPeek = (
     <div ref={listRow.ref} className="flex min-h-0 flex-1">
-      <div className="scroll min-h-0 min-w-0 flex-1">
+      <div ref={refocus.scope} className="scroll min-h-0 min-w-0 flex-1">
         {list.status === "loading" ? (
           <LoadingState label={`Loading ${lower}`} />
         ) : list.status === "error" ? (

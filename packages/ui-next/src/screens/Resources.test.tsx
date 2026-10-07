@@ -942,6 +942,18 @@ describe("Resources", () => {
       expect(selectionOf()).toEqual({ [CTX.stableId]: ["default"] });
     });
 
+    it("leaves keyboard focus on the row after Enter on the namespace, once the list has narrowed (PR #832 review)", async () => {
+      open("/k/pods");
+      await waitFor(() => expect(rowNames()).toEqual(["web-1", "api-7"]));
+
+      screen.getByRole("button", { name: "Show only namespace default" }).focus();
+      await userEvent.keyboard("{Enter}");
+
+      await waitFor(() => expect(rowNames()).toEqual(["web-1"]));
+      const row = screen.getByText("web-1").closest("tr");
+      expect(document.activeElement).toBe(row);
+    });
+
     it("does not peek the row the namespace was read off", async () => {
       open("/k/pods");
       await waitFor(() => expect(rowNames()).toEqual(["web-1", "api-7"]));

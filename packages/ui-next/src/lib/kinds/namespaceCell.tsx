@@ -1,3 +1,4 @@
+import { useCallback, useEffect, useRef, type RefObject } from "react";
 import type { Column } from "@srelens/ui-kit";
 import type { ListRow } from "./types";
 
@@ -51,11 +52,14 @@ function hint(selection: readonly string[], namespace: string): string {
  * stop at it, for the reason `AskChip` gives: the row underneath peeks on a
  * click and opens a tab on a double-click or Enter, and a namespace picked
  * must not also open the resource it happened to be read off.
+ *
+ * `onAdd` is handed the row as well as the namespace, so the screen can bring
+ * focus back to it — see {@link useRowRefocus}.
  */
 export function withNamespaceSelect<Row extends ListRow>(
   columns: Column<Row>[],
   selection: readonly string[],
-  onAdd: ((namespace: string) => void) | undefined,
+  onAdd: ((namespace: string, row: Row) => void) | undefined,
 ): Column<Row>[] {
   if (!onAdd) return columns;
   return columns.map((column) => {
@@ -75,7 +79,15 @@ export function withNamespaceSelect<Row extends ListRow>(
             aria-label={label}
             onClick={(e) => {
               e.stopPropagation();
-              onAdd(namespace);
+              // This button is about to be replaced by plain text — its
+              // namespace will be in the selection — and a focused element
+              // that leaves the document drops focus to the page, which for a
+              // keyboard reader is their place in the table gone. The row is
+              // the table's own focus stop, so focus is handed to it first.
+              // (A list that reloads takes the row away too; `useRowRefocus`
+              // is what brings focus back then.)
+              e.currentTarget.closest("tr")?.focus();
+              onAdd(namespace, row);
             }}
             onDoubleClick={(e) => e.stopPropagation()}
             onKeyDown={(e) => {
@@ -88,4 +100,62 @@ export function withNamespaceSelect<Row extends ListRow>(
       },
     };
   });
+}
+
+/** How long after a pick focus is still brought back. Past this the reader
+ *  has had the page to themselves, and focus appearing on a row would be
+ *  srelens moving it, not returning it. */
+export const REFOCUS_WITHIN_MS = 10_000;
+
+/**
+ * Bring keyboard focus back to one row after the table it was in is rebuilt.
+ *
+ * Picking a namespace changes the selection, a changed selection is a new
+ * listing, and a list that is listing again shows a loading state where the
+ * table was — every row, the focused one included, leaves the document, and
+ * focus falls to the page. A keyboard reader who pressed Enter on a namespace
+ * was left at the top of the window with the table to walk into again.
+ *
+ * `remember(key)` names the row (by the table's own `getRowKey`); when rows
+ * are next on screen under `scope` and nothing else holds focus, that row is
+ * focused. It gives up — without touching focus — as soon as the reader has
+ * put focus somewhere outside the table themselves, or after {@link
+ * REFOCUS_WITHIN_MS}.
+ *
+ * Checked after every render of the screen that calls it rather than on a
+ * dependency list: what it waits on is the table's rows being in the DOM,
+ * which is not a value this hook is handed.
+ */
+export function useRowRefocus(): { scope: RefObject<HTMLDivElement | null>; remember: (key: string) => void } {
+  const scope = useRef<HTMLDivElement | null>(null);
+  const pending = useRef<{ key: string; at: number } | null>(null);
+  const remember = useCallback((key: string) => {
+    pending.current = { key, at: Date.now() };
+  }, []);
+
+  useEffect(() => {
+    const wanted = pending.current;
+    if (!wanted) return;
+    if (Date.now() - wanted.at > REFOCUS_WITHIN_MS) {
+      pending.current = null;
+      return;
+    }
+    const active = document.activeElement;
+    const lost = active === null || active === document.body;
+    if (!lost) {
+      // Still inside the table: nothing to restore yet, and it may yet be
+      // rebuilt. Anywhere else is the reader's own move, and theirs to keep.
+      if (!scope.current?.contains(active)) pending.current = null;
+      return;
+    }
+    const rows = scope.current?.querySelectorAll<HTMLElement>("tr[data-row-key]") ?? [];
+    for (const row of rows) {
+      if (row.dataset.rowKey !== wanted.key) continue;
+      row.focus();
+      pending.current = null;
+      return;
+    }
+  });
+
+  return { scope, remember };
 }
