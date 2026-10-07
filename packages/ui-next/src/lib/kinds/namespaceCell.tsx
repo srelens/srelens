@@ -74,7 +74,10 @@ export function withNamespaceSelect<Row extends ListRow>(
         return (
           <button
             type="button"
-            className="max-w-full cursor-pointer truncate text-left hover:underline focus-visible:underline"
+            // Dotted at rest, solid under the pointer or the keyboard: a
+            // name with nothing drawn on it reads as text, and nobody clicks
+            // text to find out. Dotted because this is one cell in every row.
+            className="max-w-full cursor-pointer truncate text-left underline decoration-dotted underline-offset-2 hover:decoration-solid focus-visible:decoration-solid"
             title={label}
             aria-label={label}
             onClick={(e) => {

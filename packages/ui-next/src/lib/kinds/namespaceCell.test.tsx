@@ -62,6 +62,15 @@ describe("withNamespaceSelect", () => {
     expect(screen.getByRole("button", { name: "Show only namespace shop" })).toBeDefined();
   });
 
+  it("reads as a link before it is hovered — underlined at rest, not only under the pointer", () => {
+    renderList([], vi.fn());
+    const classes = screen.getByRole("button", { name: "Show only namespace shop" }).className.split(/\s+/);
+    expect(classes).toContain("underline");
+    expect(classes).toContain("decoration-dotted");
+    expect(classes).toContain("hover:decoration-solid");
+    expect(classes).toContain("focus-visible:decoration-solid");
+  });
+
   it("hands the clicked namespace to onAdd, and leaves the row beneath it alone", async () => {
     const onAdd = vi.fn();
     const { onRowClick, onRowActivate } = renderList([], onAdd);
