@@ -119,14 +119,14 @@ export interface LocalSessionRequest {
   extraKubeconfigs?: string[];
   title?: string;
   /**
-   * A command to type into the shell once it is ready, as though the reader
-   * had typed it and pressed Enter — a `kubectl drain` they have just
-   * confirmed, run where they can watch it (#820).
+   * A command to run first, with the shell following it — a `kubectl drain`
+   * the reader has just confirmed, run where they can watch it (#820).
    *
-   * Typed, not passed as the shell's argument: the shell stays afterwards,
-   * with the output above the prompt and the command in its history, so the
-   * reader can run the next thing — `kubectl get pods -o wide`, the uncordon —
-   * in the same place.
+   * Handed to the host, which starts it as the terminal's first process. It is
+   * NOT typed into the shell from here: nothing on this side of a PTY can tell
+   * when a shell has finished its rc files and is the one reading, and a
+   * confirmed command typed too early is swallowed — the node silently never
+   * drained. The shell the reader is left in afterwards is their own.
    *
    * The caller has already asked. Nothing here confirms anything.
    */
@@ -134,23 +134,12 @@ export interface LocalSessionRequest {
 }
 
 /**
- * How long a starting shell must have been quiet before {@link
- * LocalSessionRequest.command} is typed into it.
- *
- * A login shell is not listening the moment its PTY exists: it runs the
- * reader's rc files first, and a prompt framework among them may query the
- * terminal and read the answer off the same input the command would arrive
- * on. Output that has stopped is the only sign available from out here that
- * the prompt is up and the line editor is the one reading.
+ * How long a session's output must have stopped before {@link
+ * onSessionSettled}'s listeners are told. Long enough that a command still
+ * printing is not reported between two of its lines; short enough that a
+ * cordon's one line is followed promptly.
  */
-export const COMMAND_QUIET_MS = 400;
-
-/**
- * How long to wait for a shell that says nothing at all before typing the
- * command anyway. A shell with an empty prompt is unusual and not wrong, and a
- * confirmed command that never ran because of it would be.
- */
-export const COMMAND_WAIT_MS = 3_000;
+export const SESSION_SETTLE_MS = 1_000;
 
 let sessions: TerminalSessionRow[] = [];
 const listeners = new Set<() => void>();
@@ -163,14 +152,11 @@ const handles = new Map<number, TerminalConnection>();
 const unwires = new Map<number, () => void>();
 const idleTimers = new Map<number, ReturnType<typeof setTimeout>>();
 /**
- * The command each starting session still owes its shell — see {@link
- * LocalSessionRequest.command}. An entry leaves the moment the command is
- * typed, or the session ends first, so it is typed once or not at all.
+ * Who asked to hear when a session's output settles, and the clock each
+ * session's quiet is measured on. See {@link onSessionSettled}.
  */
-const queuedCommands = new Map<
-  number,
-  { command: string; spoke: boolean; timer?: ReturnType<typeof setTimeout> }
->();
+const settleListeners = new Map<number, Set<() => void>>();
+const settleTimers = new Map<number, ReturnType<typeof setTimeout>>();
 /**
  * The privileged debug pod a `kind: "node"` session is exec'd into — the
  * object `k8s.createNodeDebugPod` left on the cluster, and the store's own to
@@ -270,44 +256,52 @@ export async function startLocalSession(req: LocalSessionRequest): Promise<numbe
     // is honest where naming the cluster's current one would not be.
     namespace: "",
   });
-  // Queued before the connect for the reason the row is registered before it:
-  // the shell can print its prompt before the handle arrives, and a command
-  // queued afterwards would not know the shell had already spoken.
-  if (req.command) queuedCommands.set(id, { command: req.command, spoke: false });
+  // The host runs the command without a shell to echo it, so the line that
+  // says what is running is written here — first, before anything the far
+  // end can say, so the output under it is read as that command's.
+  if (req.command) emulators.get(id)?.write(`\x1b[2m$ ${req.command}\x1b[0m\r\n`);
   await connect(id, (onData, onExit, size) =>
-    startLocalTerminal(req.context, req.extraKubeconfigs ?? [], onData, () => onExit(null), size),
+    startLocalTerminal(
+      req.context,
+      req.extraKubeconfigs ?? [],
+      onData,
+      () => onExit(null),
+      size,
+      req.command,
+    ),
   );
-  // Only now is there a handle to type into. A session that failed to open,
-  // or ended while it was opening, has already dropped its entry.
-  awaitQuiet(id);
   return id;
 }
 
 /**
- * (Re)start the wait before this session's queued command is typed: {@link
- * COMMAND_QUIET_MS} after the shell last spoke, or {@link COMMAND_WAIT_MS} for
- * one that has not spoken yet. A no-op for a session with nothing queued, and
- * for one whose far end is not connected yet — {@link startLocalSession}
- * calls this again once it is.
+ * Hear when this session's output settles: {@link SESSION_SETTLE_MS} after it
+ * last printed, each time, and once more when its far end goes.
+ *
+ * For a caller that started a command here and holds something the command
+ * changes — the node detail whose Cordon/Uncordon label a `kubectl cordon`
+ * has just made wrong. There is no "the command finished" to report from
+ * outside a shell; output that has stopped is the nearest thing, and a
+ * listener that re-reads on it is right whether it was the command or the
+ * reader's own next line that stopped.
+ *
+ * Returns the release. A session the reader dismisses releases its listeners
+ * itself, and listening to an id that names no session is a no-op.
  */
-function awaitQuiet(id: number) {
-  const queued = queuedCommands.get(id);
-  if (!queued || !handles.has(id)) return;
-  clearTimeout(queued.timer);
-  queued.timer = setTimeout(() => typeQueued(id), queued.spoke ? COMMAND_QUIET_MS : COMMAND_WAIT_MS);
+export function onSessionSettled(id: number, listener: () => void): () => void {
+  if (!emulators.has(id)) return () => {};
+  let set = settleListeners.get(id);
+  if (!set) settleListeners.set(id, (set = new Set()));
+  set.add(listener);
+  return () => {
+    set.delete(listener);
+  };
 }
 
-/** Type the queued command and its Enter. Once: the entry is taken first. */
-function typeQueued(id: number) {
-  const queued = queuedCommands.get(id);
-  queuedCommands.delete(id);
-  if (queued) handles.get(id)?.send(`${queued.command}\r`);
-}
-
-/** Forget a command that was never typed — its session is over. */
-function dropQueued(id: number) {
-  clearTimeout(queuedCommands.get(id)?.timer);
-  queuedCommands.delete(id);
+/** Tell this session's listeners its output has settled. */
+function settled(id: number) {
+  clearTimeout(settleTimers.get(id));
+  settleTimers.delete(id);
+  for (const listener of [...(settleListeners.get(id) ?? [])]) listener();
 }
 
 /**
@@ -321,6 +315,7 @@ function dropQueued(id: number) {
  */
 export function endSession(id: number): void {
   disconnect(id);
+  settleListeners.delete(id);
   emulators.get(id)?.dispose();
   emulators.delete(id);
   const debugPod = takeDebugPod(id);
@@ -370,7 +365,9 @@ export function __resetSessionsForTests(): void {
   for (const id of [...emulators.keys()]) endSession(id);
   for (const id of [...handles.keys()]) disconnect(id);
   nodeDebugPods.clear();
-  for (const id of [...queuedCommands.keys()]) dropQueued(id);
+  for (const timer of settleTimers.values()) clearTimeout(timer);
+  settleTimers.clear();
+  settleListeners.clear();
   sessions = [];
   listeners.clear();
   seq = 0;
@@ -464,10 +461,12 @@ async function connect(
 function receive(id: number, chunk: string) {
   emulators.get(id)?.write(chunk);
   markActive(id);
-  const queued = queuedCommands.get(id);
-  if (queued) {
-    queued.spoke = true;
-    awaitQuiet(id);
+  if (settleListeners.get(id)?.size) {
+    clearTimeout(settleTimers.get(id));
+    settleTimers.set(
+      id,
+      setTimeout(() => settled(id), SESSION_SETTLE_MS),
+    );
   }
 }
 
@@ -531,6 +530,9 @@ function close(id: number, reason: unknown) {
   // delete between here and `endSession`, either order.
   const debugPod = takeDebugPod(id);
   if (debugPod) void deleteDebugPod(debugPod);
+  // Whatever the session was running has stopped with it; there will be no
+  // later quiet to report this on.
+  settled(id);
   const error = describedReason(reason);
   commit(
     sessions.map((s) => {
@@ -548,9 +550,8 @@ function close(id: number, reason: unknown) {
 function disconnect(id: number) {
   clearTimeout(idleTimers.get(id));
   idleTimers.delete(id);
-  // A shell that is gone cannot be typed into, and a confirmed command must
-  // not be left to fire at whatever a later session's handle turns out to be.
-  dropQueued(id);
+  clearTimeout(settleTimers.get(id));
+  settleTimers.delete(id);
   unwires.get(id)?.();
   unwires.delete(id);
   handles.get(id)?.close();

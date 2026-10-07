@@ -22,12 +22,12 @@ vi.mock("@srelens/core", async (importOriginal) => {
 // Imported after the mock so the store binds the doubles rather than the real
 // Tauri-backed session openers.
 const {
-  COMMAND_QUIET_MS,
-  COMMAND_WAIT_MS,
   SESSION_IDLE_AFTER_MS,
+  SESSION_SETTLE_MS,
   __resetSessionsForTests,
   endSession,
   getSessions,
+  onSessionSettled,
   startLocalSession,
   startPodSession,
   subscribeSessions,
@@ -412,127 +412,146 @@ describe("the session store", () => {
   });
 });
 
-describe("a command queued for a local shell", () => {
+describe("a local shell opened to run a command", () => {
   const drain = { context: "kind-srelens-demo", title: "Drain worker-1", command: "kubectl drain worker-1" };
 
+  it("hands the command to the host with the session, rather than typing it", async () => {
+    const backend = fakeBackend();
+    await startLocalSession(drain);
+    backend.out("user@host ~ % ");
+
+    // The host starts it as the terminal's first process. Typed from here it
+    // could reach a shell still reading its rc files and be swallowed.
+    expect(startLocalTerminal).toHaveBeenCalledTimes(1);
+    expect(startLocalTerminal.mock.calls[0][0]).toBe("kind-srelens-demo");
+    expect(startLocalTerminal.mock.calls[0][5]).toBe("kubectl drain worker-1");
+    expect(backend.handle.send).not.toHaveBeenCalled();
+  });
+
+  it("types nothing however long the shell takes or whatever it prints", async () => {
+    vi.useFakeTimers({ now: new Date("2026-10-07T10:00:00.000Z") });
+    const backend = fakeBackend();
+    await startLocalSession(drain);
+
+    backend.out("Last login: Wed Oct  7\r\n");
+    vi.advanceTimersByTime(60_000);
+    backend.out("node/worker-1 cordoned\r\n");
+    vi.advanceTimersByTime(60_000);
+
+    expect(backend.handle.send).not.toHaveBeenCalled();
+  });
+
+  it("shows the command above its output, since no shell echoes it", async () => {
+    const backend = fakeBackend();
+    const id = await startLocalSession(drain);
+    backend.out("node/worker-1 cordoned\r\n");
+
+    await vi.waitFor(() =>
+      expect(screenOf(terminalFor(id), 2)).toEqual(["$ kubectl drain worker-1", "node/worker-1 cordoned"]),
+    );
+  });
+
+  it("passes no command, and writes no line, for an ordinary local shell", async () => {
+    const backend = fakeBackend();
+    const id = await startLocalSession({ context: "kind-srelens-demo" });
+    backend.out("% ");
+
+    expect(startLocalTerminal.mock.calls[0][5]).toBeUndefined();
+    await vi.waitFor(() => expect(screenOf(terminalFor(id))).toEqual(["%"]));
+  });
+});
+
+describe("hearing a session's output settle", () => {
   beforeEach(() => {
     vi.useFakeTimers({ now: new Date("2026-10-07T10:00:00.000Z") });
   });
 
-  it("types the command and its Enter once the shell's prompt has gone quiet", async () => {
+  it("tells a listener once the output has stopped, not between two lines of it", async () => {
     const backend = fakeBackend();
-    await startLocalSession(drain);
+    const id = await startLocalSession({ context: "kind-srelens-demo", command: "kubectl drain worker-1" });
+    const heard = vi.fn();
+    onSessionSettled(id, heard);
 
-    backend.out("user@host ~ % ");
-    vi.advanceTimersByTime(COMMAND_QUIET_MS - 1);
-    expect(backend.handle.send).not.toHaveBeenCalled();
-
-    vi.advanceTimersByTime(1);
-    expect(backend.handle.send).toHaveBeenCalledTimes(1);
-    expect(backend.handle.send).toHaveBeenCalledWith("kubectl drain worker-1\r");
-  });
-
-  it("waits out a shell that is still printing its startup", async () => {
-    const backend = fakeBackend();
-    await startLocalSession(drain);
-
-    // An rc file's banner, then the prompt: each chunk restarts the wait, so
-    // the command is not typed into the middle of the shell's own startup.
-    backend.out("Last login: Wed Oct  7\r\n");
-    vi.advanceTimersByTime(COMMAND_QUIET_MS - 1);
-    backend.out("user@host ~ % ");
-    vi.advanceTimersByTime(COMMAND_QUIET_MS - 1);
-    expect(backend.handle.send).not.toHaveBeenCalled();
-
-    vi.advanceTimersByTime(1);
-    expect(backend.handle.send).toHaveBeenCalledTimes(1);
-  });
-
-  it("types it anyway into a shell that never prints a prompt", async () => {
-    const backend = fakeBackend();
-    await startLocalSession(drain);
-
-    vi.advanceTimersByTime(COMMAND_WAIT_MS - 1);
-    expect(backend.handle.send).not.toHaveBeenCalled();
-    vi.advanceTimersByTime(1);
-    expect(backend.handle.send).toHaveBeenCalledWith("kubectl drain worker-1\r");
-  });
-
-  it("types it once, however much the shell says afterwards", async () => {
-    const backend = fakeBackend();
-    await startLocalSession(drain);
-
-    backend.out("% ");
-    vi.advanceTimersByTime(COMMAND_QUIET_MS);
-    backend.out("node/worker-1 cordoned\r\n");
     backend.out("evicting pod shop/web-0\r\n");
-    vi.advanceTimersByTime(COMMAND_WAIT_MS * 2);
+    vi.advanceTimersByTime(SESSION_SETTLE_MS - 1);
+    backend.out("pod/web-0 evicted\r\n");
+    vi.advanceTimersByTime(SESSION_SETTLE_MS - 1);
+    expect(heard).not.toHaveBeenCalled();
 
-    expect(backend.handle.send).toHaveBeenCalledTimes(1);
+    vi.advanceTimersByTime(1);
+    expect(heard).toHaveBeenCalledTimes(1);
   });
 
-  it("counts a prompt that arrived before the shell finished opening", async () => {
-    // The backend emits as soon as the PTY exists, which can be before the
-    // call that started it resolves with the handle to type into.
-    let onData!: (chunk: string) => void;
-    let open!: () => void;
-    const handle = { send: vi.fn(), resize: vi.fn(), close: vi.fn() };
-    startLocalTerminal.mockImplementation((_c: string, _e: string[], data: (c: string) => void) => {
-      onData = data;
-      return new Promise<typeof handle>((resolve) => {
-        open = () => resolve(handle);
-      });
-    });
-
-    const started = startLocalSession(drain);
-    onData("% ");
-    vi.advanceTimersByTime(COMMAND_WAIT_MS);
-    expect(handle.send).not.toHaveBeenCalled();
-
-    open();
-    await started;
-    vi.advanceTimersByTime(COMMAND_QUIET_MS);
-    expect(handle.send).toHaveBeenCalledWith("kubectl drain worker-1\r");
-  });
-
-  it("types nothing into a session the reader ended first", async () => {
+  it("tells it again each time the output stops", async () => {
+    // A drain waiting on a disruption budget goes quiet and then carries on.
     const backend = fakeBackend();
-    const id = await startLocalSession(drain);
+    const id = await startLocalSession({ context: "kind-srelens-demo", command: "kubectl drain worker-1" });
+    const heard = vi.fn();
+    onSessionSettled(id, heard);
+
+    backend.out("node/worker-1 cordoned\r\n");
+    vi.advanceTimersByTime(SESSION_SETTLE_MS);
+    backend.out("node/worker-1 drained\r\n");
+    vi.advanceTimersByTime(SESSION_SETTLE_MS);
+
+    expect(heard).toHaveBeenCalledTimes(2);
+  });
+
+  it("says nothing while the session says nothing", async () => {
+    fakeBackend();
+    const id = await startLocalSession({ context: "kind-srelens-demo" });
+    const heard = vi.fn();
+    onSessionSettled(id, heard);
+
+    vi.advanceTimersByTime(SESSION_SETTLE_MS * 10);
+    expect(heard).not.toHaveBeenCalled();
+  });
+
+  it("tells a listener when the far end goes, without waiting for a quiet that will not come", async () => {
+    const backend = fakeBackend();
+    const id = await startLocalSession({ context: "kind-srelens-demo" });
+    const heard = vi.fn();
+    onSessionSettled(id, heard);
+
+    backend.out("logout\r\n");
+    backend.exit();
+    expect(heard).toHaveBeenCalledTimes(1);
+
+    // And the clock that output started does not fire a second time.
+    vi.advanceTimersByTime(SESSION_SETTLE_MS * 2);
+    expect(heard).toHaveBeenCalledTimes(1);
+  });
+
+  it("stops telling a listener that released", async () => {
+    const backend = fakeBackend();
+    const id = await startLocalSession({ context: "kind-srelens-demo" });
+    const heard = vi.fn();
+    const release = onSessionSettled(id, heard);
+
+    release();
+    backend.out("% ");
+    vi.advanceTimersByTime(SESSION_SETTLE_MS);
+    expect(heard).not.toHaveBeenCalled();
+  });
+
+  it("tells nobody about a session the reader dismissed", async () => {
+    const backend = fakeBackend();
+    const id = await startLocalSession({ context: "kind-srelens-demo" });
+    const heard = vi.fn();
+    onSessionSettled(id, heard);
 
     backend.out("% ");
     endSession(id);
-    vi.advanceTimersByTime(COMMAND_WAIT_MS);
-
-    expect(backend.handle.send).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(SESSION_SETTLE_MS);
+    expect(heard).not.toHaveBeenCalled();
   });
 
-  it("types nothing into a shell that exited before it was ready", async () => {
-    const backend = fakeBackend();
-    await startLocalSession(drain);
-
-    backend.exit();
-    vi.advanceTimersByTime(COMMAND_WAIT_MS);
-
-    expect(backend.handle.send).not.toHaveBeenCalled();
-    expect(getSessions()[0].state).toBe("closed");
-  });
-
-  it("types nothing when the shell could not be started", async () => {
-    startLocalTerminal.mockRejectedValue(new Error("start_terminal is not available"));
-    await startLocalSession(drain);
-
-    vi.advanceTimersByTime(COMMAND_WAIT_MS);
-    expect(getSessions()[0].state).toBe("closed");
-  });
-
-  it("types nothing into a shell opened without a command", async () => {
-    const backend = fakeBackend();
-    await startLocalSession({ context: "kind-srelens-demo" });
-
-    backend.out("% ");
-    vi.advanceTimersByTime(COMMAND_WAIT_MS);
-
-    expect(backend.handle.send).not.toHaveBeenCalled();
+  it("is a no-op for an id that names no session", () => {
+    const heard = vi.fn();
+    const release = onSessionSettled(404, heard);
+    expect(() => release()).not.toThrow();
+    vi.advanceTimersByTime(SESSION_SETTLE_MS);
+    expect(heard).not.toHaveBeenCalled();
   });
 });
 

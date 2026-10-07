@@ -94,7 +94,19 @@ const {
 const startPodSession = vi.hoisted(() => vi.fn(async () => 1));
 // A node action on the desktop starts a local one, with its command queued.
 const startLocalSession = vi.hoisted(() => vi.fn(async () => 2));
-vi.mock("../lib/sessions", () => ({ startPodSession, startLocalSession }));
+// ...and listens for that session's output to settle. The double hands back
+// the listener it was given, so a test can settle the session itself.
+const settle = vi.hoisted(() => ({
+  listeners: new Map<number, () => void>(),
+  release: vi.fn(),
+}));
+const onSessionSettled = vi.hoisted(() =>
+  vi.fn((id: number, listener: () => void) => {
+    settle.listeners.set(id, listener);
+    return settle.release;
+  }),
+);
+vi.mock("../lib/sessions", () => ({ startPodSession, startLocalSession, onSessionSettled }));
 
 // Direct references, not `(...a) => fn(...a)` wrappers: each mock above is
 // typed by its own implementation (zero declared params), and TypeScript
@@ -191,6 +203,7 @@ const CORDONED_ROW: ListRow & { unschedulable: boolean } = { name: "worker-1", u
 
 beforeEach(() => {
   vi.clearAllMocks();
+  settle.listeners.clear();
   isTauri.mockReturnValue(false);
   store.setState(defaultState([]));
 });
@@ -729,6 +742,92 @@ describe("useRowMenu — Cordon and Drain on a node (#820)", () => {
     expect(startLocalSession).toHaveBeenCalledWith(expect.objectContaining({ context: "prod-eu" }));
     // And the tab it opens is that cluster's, not the one the rail is on.
     expect(store.currentWorkspace().tabs.some((t) => t.route === "/terminals" && t.sub === "prod-eu")).toBe(true);
+  });
+});
+
+/**
+ * A write made from the detail pane's bar has to bring the pane a new object:
+ * the pane reads its subject once, and labels Suspend/Resume and
+ * Cordon/Uncordon from it. Without `onChanged` a node cordoned from its own
+ * detail view went on being offered Cordon (PR #831 review).
+ */
+describe("useRowMenu — telling its host the subject changed", () => {
+  const box = () => within(screen.getByRole("dialog"));
+  const withChanged = (args: UseRowMenuArgs, onChanged: () => void): UseRowMenuArgs => ({ ...args, onChanged });
+
+  it("says so after a browser cordon goes through, and after a drain", async () => {
+    const onChanged = vi.fn();
+    render(<Harness args={withChanged(NODE_OPS_ARGS, onChanged)} row={NODE_ROW} />);
+
+    await userEvent.click(screen.getByRole("button", { name: "Cordon" }));
+    await userEvent.click(box().getByRole("button", { name: "Cordon" }));
+    await waitFor(() => expect(onChanged).toHaveBeenCalledTimes(1));
+
+    await userEvent.click(screen.getByRole("button", { name: "Drain" }));
+    await userEvent.click(box().getByRole("button", { name: "Drain" }));
+    await waitFor(() => expect(onChanged).toHaveBeenCalledTimes(2));
+  });
+
+  it("says so for the other label read off the object — a CronJob's Suspend", async () => {
+    const onChanged = vi.fn();
+    render(<Harness args={withChanged(CRON_ARGS, onChanged)} row={CRON_ROW} />);
+    await userEvent.click(screen.getByRole("button", { name: "Suspend" }));
+    await userEvent.click(box().getByRole("button", { name: "Suspend" }));
+    await waitFor(() => expect(onChanged).toHaveBeenCalledTimes(1));
+  });
+
+  it("says nothing when the write was refused, or cancelled", async () => {
+    const onChanged = vi.fn();
+    cordonNode.mockResolvedValueOnce({ error: "forbidden" });
+    render(<Harness args={withChanged(NODE_OPS_ARGS, onChanged)} row={NODE_ROW} />);
+
+    await userEvent.click(screen.getByRole("button", { name: "Cordon" }));
+    await userEvent.click(box().getByRole("button", { name: "Cordon" }));
+    await waitFor(() => expect(screen.getByText(/forbidden/)).toBeDefined());
+    await userEvent.click(box().getByRole("button", { name: "Cancel" }));
+
+    expect(onChanged).not.toHaveBeenCalled();
+  });
+
+  it("says nothing after a delete — there is nothing left to read again", async () => {
+    const onChanged = vi.fn();
+    render(<Harness args={withChanged(POD_ARGS, onChanged)} row={POD_ROW} />);
+    await userEvent.click(screen.getByRole("button", { name: "Delete" }));
+    await userEvent.click(box().getByRole("button", { name: "Delete" }));
+    await waitFor(() => expect(deleteResource).toHaveBeenCalled());
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(onChanged).not.toHaveBeenCalled();
+  });
+
+  it("on the desktop, says so each time the terminal's output settles, not when the command is started", async () => {
+    isTauri.mockReturnValue(true);
+    const onChanged = vi.fn();
+    render(<Harness args={withChanged(NODE_OPS_ARGS, onChanged)} row={NODE_ROW} />);
+    await userEvent.click(screen.getByRole("button", { name: "Drain" }));
+    await userEvent.click(box().getByRole("button", { name: "Drain" }));
+
+    // Listening to the session the command was started in...
+    await waitFor(() => expect(onSessionSettled).toHaveBeenCalledWith(2, expect.any(Function)));
+    // ...and nothing has changed yet: the command has only just been started.
+    expect(onChanged).not.toHaveBeenCalled();
+
+    act(() => settle.listeners.get(2)!());
+    expect(onChanged).toHaveBeenCalledTimes(1);
+    // A drain waiting on a disruption budget settles more than once.
+    act(() => settle.listeners.get(2)!());
+    expect(onChanged).toHaveBeenCalledTimes(2);
+  });
+
+  it("stops listening to the terminal when the menu's host goes away", async () => {
+    isTauri.mockReturnValue(true);
+    const view = render(<Harness args={withChanged(NODE_OPS_ARGS, vi.fn())} row={NODE_ROW} />);
+    await userEvent.click(screen.getByRole("button", { name: "Cordon" }));
+    await userEvent.click(box().getByRole("button", { name: "Cordon" }));
+    await waitFor(() => expect(onSessionSettled).toHaveBeenCalled());
+    expect(settle.release).not.toHaveBeenCalled();
+
+    view.unmount();
+    expect(settle.release).toHaveBeenCalledTimes(1);
   });
 });
 

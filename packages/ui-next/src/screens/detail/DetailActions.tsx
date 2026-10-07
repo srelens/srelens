@@ -99,6 +99,9 @@ export interface DetailActionsProps {
   /** Node only: `spec.unschedulable`, so Cordon/Uncordon is labelled the right
    *  way round, for the same reason and by the same route. */
   unschedulable?: boolean;
+  /** A write made from this bar went through: read the subject again, so
+   *  the two fields above are the object's as it now is. */
+  onChanged?: () => void;
   /**
    * Which host is drawing the row. The peek's footer gives `Ask` whatever the
    * kind's own actions leave and keeps two of them on the bar; the full tab's
@@ -148,10 +151,11 @@ export function DetailActions({
   flagged,
   suspended,
   unschedulable,
+  onChanged,
   host = "peek",
 }: DetailActionsProps) {
   const { ask } = useConsole();
-  const { items, dialog } = useRowMenu({ context, kind, actions });
+  const { items, dialog } = useRowMenu({ context, kind, actions, onChanged });
 
   // What a table would have handed the hook. `suspended` is not on `ListRow`
   // — `useRowMenu` reads it off the row with the same cast a `CronJobSummary`

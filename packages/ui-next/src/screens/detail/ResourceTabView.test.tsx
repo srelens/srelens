@@ -9,7 +9,8 @@ import type { KindDescriptor, ListRow } from "../../lib/kinds/types";
 // The reads behind the tab: the object itself, the pod usage its CPU and
 // Memory tiles show, and the two pane fetches it inherits from the shared
 // pane machinery.
-const { getObject, getManifest, listEvents, listCrds, podMetrics, podsForSelector, podsOnNode } = vi.hoisted(() => ({
+const { getObject, getManifest, listEvents, listCrds, podMetrics, podsForSelector, podsOnNode, cordonNode } = vi.hoisted(() => ({
+  cordonNode: vi.fn(async (): Promise<{ ok?: boolean; error?: string }> => ({ ok: true })),
   getObject: vi.fn(async (): Promise<{ object?: K8sObject; error?: string }> => ({})),
   getManifest: vi.fn(async (): Promise<{ yaml?: string; error?: string }> => ({ yaml: "" })),
   listEvents: vi.fn(async () => ({ events: [] })),
@@ -28,6 +29,7 @@ vi.mock("@srelens/core", async (importOriginal) => ({
   podMetrics,
   podsForSelector,
   podsOnNode,
+  cordonNode,
   // The web server's answer for a user with no apps (#515): the app slot stays empty.
   listExtensions: async () => ({ schemaVersion: 1, nextRevision: 1, plugins: [] }),
 }));
@@ -226,6 +228,40 @@ describe("ResourceTabView — the full tab the design draws", () => {
       expect(words).toContain("Shell");
       expect(words).toContain("Edit");
       expect(document.querySelector("footer")).toBeNull();
+    });
+
+    it("re-reads the node after a cordon made from the header, so the action becomes Uncordon (PR #831 review)", async () => {
+      // The page reads its subject once. Cordoned from here, the node went on
+      // being offered Cordon until the reader reopened the page.
+      const node = (unschedulable: boolean) => ({
+        object: {
+          kind: "Node",
+          apiVersion: "v1",
+          metadata: { name: "worker-1" },
+          spec: unschedulable ? { unschedulable } : {},
+        },
+      });
+      const header = () => document.querySelector("header")!;
+      const headerWords = () => Array.from(header().querySelectorAll("button")).map((b) => b.textContent);
+      descriptorFor.mockReturnValue(
+        podDescriptor({ k8sKind: "Node", panes: {}, actions: { cordon: true, drain: true } }),
+      );
+      getObject.mockResolvedValue(node(false));
+      await openPod({ kind: "Node", namespace: null, name: "worker-1" });
+      expect(headerWords()).toContain("Cordon");
+
+      // What the cluster answers once the write has landed.
+      getObject.mockResolvedValue(node(true));
+      const readsBefore = getObject.mock.calls.length;
+      await userEvent.click(within(header()).getByRole("button", { name: "Cordon" }));
+      await userEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Cordon" }));
+
+      await waitFor(() => expect(cordonNode).toHaveBeenCalledWith("prod-eu", "worker-1", true));
+      await waitFor(() => expect(headerWords()).toContain("Uncordon"));
+      expect(headerWords()).not.toContain("Cordon");
+      expect(getObject.mock.calls.length).toBe(readsBefore + 1);
+      // And the page was never taken away to do it: its tabs are still there.
+      expect(screen.getAllByRole("tab").length).toBeGreaterThan(0);
     });
 
     it("offers a node Cordon and Drain in the header row, and Uncordon once it is cordoned (#820)", async () => {

@@ -103,7 +103,7 @@ describe("kubectlMapper", () => {
       ).toBe("kubectl drain node-1 --ignore-daemonsets --delete-emptydir-data --force --context prod");
     });
 
-    it("leaves --context off a command typed into a shell already scoped to the cluster", () => {
+    it("leaves --context off a command run in a terminal already scoped to the cluster", () => {
       // The app's name for a duplicate-named context is not the name that
       // shell's kubeconfig holds it under, so naming it there would fail.
       expect(

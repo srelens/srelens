@@ -17,6 +17,10 @@ use crate::window_streams::{Stream, WindowStreams};
 /// The shell belongs to the calling window and is killed when it closes or
 /// reloads (#735). One whose window reloaded while it was starting is killed
 /// at once and refused.
+///
+/// `command`, when given, runs first and the shell follows it (#820). It adds
+/// nothing this command did not already grant: the caller is handed a shell on
+/// this machine either way, and the web host denies the command outright.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn start_terminal<R: Runtime>(
@@ -25,6 +29,7 @@ pub async fn start_terminal<R: Runtime>(
     channel: String,
     cols: Option<u16>,
     rows: Option<u16>,
+    command: Option<String>,
     app: AppHandle<R>,
     window: Window<R>,
     manager: State<'_, TerminalManager>,
@@ -41,6 +46,7 @@ pub async fn start_terminal<R: Runtime>(
             channel,
             cols,
             rows,
+            command,
         )
         .await?;
     owned.keep(window.label(), epoch, Stream::Terminal(session), || {

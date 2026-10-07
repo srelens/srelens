@@ -67,6 +67,30 @@ fn write_locked_kubeconfig(overlay_id: u64, context: &str, paths: &[PathBuf]) ->
     Ok(path)
 }
 
+/// The script that runs `command` and then becomes the user's own shell, for a
+/// terminal opened to run one thing the reader has just confirmed — a
+/// `kubectl drain` they want to watch (srelens/srelens#820).
+///
+/// The command is the PTY's first process rather than keystrokes sent to an
+/// interactive shell, because nothing outside a shell can tell when it has
+/// finished its rc files and is the one reading the terminal: typed too early,
+/// a confirmed command is swallowed and the node is silently never drained.
+///
+/// `/bin/sh`, not `$SHELL`: the command is written in POSIX quoting, and the
+/// environment is already the one the user's shell would give it (see the
+/// `PATH` note in [`TerminalManager::start`]). The shell they chose is what
+/// they are left in afterwards.
+///
+/// The `INT` trap is a handler, not `''`, so it is not inherited: Ctrl-C still
+/// stops the command, and the script lives to hand over the shell instead of
+/// dying with it and taking the terminal away mid-read.
+///
+/// One statement per line, so nothing the command ends with — a comment, a
+/// trailing operator — can swallow the hand-over that follows it.
+fn run_then_shell(command: &str) -> String {
+    format!("trap : INT\n{command}\ntrap - INT\nexec \"$SHELL\"\n")
+}
+
 impl TerminalManager {
     pub fn new() -> Self {
         Self {
@@ -79,6 +103,10 @@ impl TerminalManager {
     /// `kubeconfig_paths`, pre-merged by the caller). Returns the session id;
     /// output streams on `term:out:<channel>` and a `term:exit:<channel>`
     /// event fires when it ends.
+    ///
+    /// `command`, when given, is run first and the shell follows it: see
+    /// [`run_then_shell`].
+    #[allow(clippy::too_many_arguments)]
     pub async fn start(
         &self,
         sink: Arc<dyn EventSink>,
@@ -87,6 +115,7 @@ impl TerminalManager {
         channel: String,
         cols: Option<u16>,
         rows: Option<u16>,
+        command: Option<String>,
     ) -> Result<u64, String> {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let overlay_id = NEXT_OVERLAY_ID.fetch_add(1, Ordering::SeqCst);
@@ -109,13 +138,24 @@ impl TerminalManager {
             .map_err(|e| e.to_string())?;
 
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
-        let mut cmd = CommandBuilder::new(&shell);
+        let mut cmd = match &command {
+            Some(command) => {
+                let mut cmd = CommandBuilder::new("/bin/sh");
+                cmd.arg("-c");
+                cmd.arg(run_then_shell(command));
+                cmd
+            }
+            None => CommandBuilder::new(&shell),
+        };
         // Propagate the parent environment (on desktop, PATH is already
         // resolved by fix-path-env at startup, so kubectl / helm / cloud CLIs
         // are found), then scope kubectl.
         for (key, value) in std::env::vars() {
             cmd.env(key, value);
         }
+        // After the loop, so a `SHELL` the parent never had still names the
+        // shell `run_then_shell` hands over to.
+        cmd.env("SHELL", &shell);
         cmd.env("KUBECONFIG", &kubeconfig);
         cmd.env("TERM", "xterm-256color");
         cmd.env("SRELENS_CONTEXT", &context);
@@ -274,6 +314,7 @@ contexts:
                 "t1".into(),
                 Some(80),
                 Some(24),
+                None,
             )
             .await
             .expect("terminal starts");
@@ -304,6 +345,96 @@ contexts:
         assert!(seen, "PTY output arrived on the sink");
     }
 
+    /// Everything the terminal on `channel` has printed so far.
+    fn output_on(sink: &TestSink, channel: &str) -> String {
+        sink.payloads_for(&format!("term:out:{channel}"))
+            .iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect()
+    }
+
+    async fn wait_for_output(sink: &TestSink, channel: &str, needle: &str) -> bool {
+        for _ in 0..100 {
+            if output_on(sink, channel).contains(needle) {
+                return true;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        false
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_command_runs_first_without_being_typed_and_the_shell_follows_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let kc = fixture_kubeconfig(dir.path());
+        let sink = Arc::new(TestSink::default());
+        let manager = TerminalManager::new();
+        // Arithmetic, for the reason given above: only execution turns
+        // `$((20+22))` into `42`. Nothing is sent on stdin for it.
+        let id = manager
+            .start(
+                sink.clone(),
+                "test".into(),
+                vec![kc],
+                "t3".into(),
+                Some(80),
+                Some(24),
+                Some("printf 'srelens-first:%s\\n' $((20+22))".into()),
+            )
+            .await
+            .expect("terminal starts");
+
+        let ran = wait_for_output(&sink, "t3", "srelens-first:42").await;
+        // And the session is still a shell afterwards: it takes the next line.
+        manager.input(id, "printf 'srelens-after:%s\\n' $((1+2))\n");
+        let followed = wait_for_output(&sink, "t3", "srelens-after:3").await;
+        manager.close(id);
+
+        assert!(ran, "the command ran as the terminal's first process");
+        assert!(followed, "the user's shell took over after the command");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_failing_command_still_leaves_the_shell() {
+        let dir = tempfile::tempdir().unwrap();
+        let kc = fixture_kubeconfig(dir.path());
+        let sink = Arc::new(TestSink::default());
+        let manager = TerminalManager::new();
+        let id = manager
+            .start(
+                sink.clone(),
+                "test".into(),
+                vec![kc],
+                "t4".into(),
+                Some(80),
+                Some(24),
+                Some("srelens-no-such-command-820".into()),
+            )
+            .await
+            .expect("terminal starts");
+
+        manager.input(id, "printf 'srelens-after:%s\\n' $((1+2))\n");
+        let followed = wait_for_output(&sink, "t4", "srelens-after:3").await;
+        manager.close(id);
+
+        assert!(followed, "a refused or missing command does not take the terminal away");
+    }
+
+    #[test]
+    fn the_hand_over_is_on_its_own_line_whatever_the_command_ends_with() {
+        let script = run_then_shell("kubectl drain node-1 # a trailing comment");
+        let lines: Vec<&str> = script.lines().collect();
+        assert_eq!(
+            lines,
+            vec![
+                "trap : INT",
+                "kubectl drain node-1 # a trailing comment",
+                "trap - INT",
+                "exec \"$SHELL\"",
+            ]
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn shutdown_all_kills_children_and_removes_overlay() {
         let dir = tempfile::tempdir().unwrap();
@@ -318,6 +449,7 @@ contexts:
                 "t2".into(),
                 Some(80),
                 Some(24),
+                None,
             )
             .await
             .expect("terminal starts");

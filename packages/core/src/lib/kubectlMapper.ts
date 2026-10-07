@@ -36,8 +36,8 @@ export interface KubectlInput {
   /** For port-forward: the port on the target pod/service. */
   remotePort?: number;
   /**
-   * Leave `--context` off, for a command srelens itself types into a local
-   * shell whose KUBECONFIG already holds that one cluster and nothing else.
+   * Leave `--context` off, for a command srelens itself runs in a local
+   * terminal whose KUBECONFIG already holds that one cluster and nothing else.
    *
    * Not a shorter spelling of the same command: the name `context` carries is
    * the app's, and a duplicate-named or pinned context is written to that

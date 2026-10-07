@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
   copyKubectlCommand,
   cordonNode,
@@ -28,7 +28,7 @@ import { FailureLine } from "../lib/errorCopy";
 import { Icons } from "../lib/icons";
 import { ROW_ACTION_LABEL } from "../lib/kinds/rowActions";
 import type { KindActions, ListRow } from "../lib/kinds/types";
-import { startLocalSession, startPodSession } from "../lib/sessions";
+import { onSessionSettled, startLocalSession, startPodSession } from "../lib/sessions";
 import { openTab } from "../lib/tabsStore";
 import { isContextPaused, useDismissOnPause } from "../lib/pausedContext";
 import { NewForwardDialog } from "./forwards/NewForwardDialog";
@@ -44,6 +44,19 @@ export interface UseRowMenuArgs {
   /** The API group, for a custom kind only — see `KindDescriptor.group`. Edit
    *  carries it, so a CRD that reuses a built-in kind's name opens ITS object. */
   group?: string;
+  /**
+   * A write this menu made has changed the subject: whoever is showing it
+   * should read it again.
+   *
+   * For the detail pane, whose object is read once and whose Suspend/Resume
+   * and Cordon/Uncordon entries are labelled from it — after a cordon it went
+   * on offering Cordon. A list does not pass this: it polls or watches, and
+   * shows the change on its own.
+   *
+   * Not called for Delete. There is nothing left to read, and re-reading would
+   * swap the pane the reader deleted from for a "not found".
+   */
+  onChanged?: () => void;
 }
 
 /** What a picked entry is waiting to do, once the confirm is taken. */
@@ -186,10 +199,29 @@ interface ShellPick {
  * `danger`, and Run now skips `pending` entirely — it is a call, not a
  * mutation of anything already running.
  */
-export function useRowMenu({ context, kind, actions, group }: UseRowMenuArgs): {
+export function useRowMenu({ context, kind, actions, group, onChanged }: UseRowMenuArgs): {
   items: (row: ListRow) => ContextMenuItem[];
   dialog: ReactNode;
 } {
+  // The latest `onChanged`, for the terminal sessions below to call long
+  // after the render that started them.
+  const changed = useRef(onChanged);
+  changed.current = onChanged;
+  /**
+   * The terminal sessions this menu started node actions in, and is listening
+   * to. A command in a shell reports no completion; the session's output going
+   * quiet is when its effect can be read back, so `onChanged` is called on
+   * each one (see `onSessionSettled`). Released when this menu unmounts — the
+   * session itself is the store's and carries on.
+   */
+  const listening = useRef<(() => void)[]>([]);
+  useEffect(
+    () => () => {
+      for (const release of listening.current) release();
+      listening.current = [];
+    },
+    [],
+  );
   const [pending, setPending] = useState<Pending | null>(null);
   /**
    * The row whose `Port forward` was picked, if any.
@@ -375,7 +407,7 @@ export function useRowMenu({ context, kind, actions, group }: UseRowMenuArgs): {
     setError("");
 
     // A node action on the desktop: the confirm was the gate, and what it let
-    // through is the command the dialog printed, typed into a local shell
+    // through is the command the dialog printed, run in a local terminal
     // scoped to `target` so the reader watches each eviction, each
     // disruption-budget retry and the refusal, if there is one, as it happens
     // (#820). `scoped` because that shell's kubeconfig holds the one cluster
@@ -385,11 +417,12 @@ export function useRowMenu({ context, kind, actions, group }: UseRowMenuArgs): {
     // that could not be opened is a `closed` row on `/terminals` saying why,
     // which is worth landing on rather than hiding behind a dialog.
     if ((pending.type === "cordon" || pending.type === "drain") && runsInTerminal()) {
-      await startLocalSession({
+      const session = await startLocalSession({
         context: target,
         title: `${nodeLabel(pending)} ${row.name}`,
         command: toKubectl({ action: nodeVerb(pending), kind, name: row.name, context: target, scoped: true }),
       });
+      listening.current.push(onSessionSettled(session, () => changed.current?.()));
       setBusy(false);
       close();
       openTab("/terminals", { clusterName: target });
@@ -435,6 +468,7 @@ export function useRowMenu({ context, kind, actions, group }: UseRowMenuArgs): {
       notify.success(`${pending.unschedulable ? "Cordoned" : "Uncordoned"} ${row.name}`);
     }
     close();
+    if (pending.type !== "delete") onChanged?.();
   }
 
   function items(row: ListRow): ContextMenuItem[] {
