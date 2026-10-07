@@ -23,6 +23,7 @@ srelens-signing-key.asc
 srelens-revoke.asc
 *.private.asc
 *-secret.asc
+*.provisionprofile
 
 # Coverage reports (root workspace run and per-package runs)
 coverage/
