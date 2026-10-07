@@ -407,6 +407,9 @@ jobs:
       # Apple secret set is present; with anything less the build stays
       # unsigned rather than failing on a partial configuration.
       ENABLE_MAC_SIGNING: ${{ secrets.APPLE_CERTIFICATE != '' && secrets.APPLE_CERTIFICATE_PASSWORD != '' && secrets.APPLE_SIGNING_IDENTITY != '' }}
+      # The profile behind Touch ID's App ID entitlement (#819); see the
+      # signing step below.
+      HAS_MAC_PROFILE: ${{ secrets.APPLE_PROVISIONING_PROFILE != '' }}
       # Libraries the AppImage must NOT bundle (#111) — see the seed step below.
       # Single source of truth: the build passes this to linuxdeploy, and the
       # post-build assert greps for the same pattern. Keep them in lockstep.
@@ -533,6 +536,16 @@ jobs:
           ' "$V"
           echo "Built version: $V"
 
+      # Touch ID unlock (#819) works only in a build signed with the App ID
+      # entitlement. Once a release has shipped it, a stable build without it
+      # (unsigned, or signed without the profile) locks out everyone who
+      # turned Touch ID on, so stable refuses both. Dev still builds, warned.
+      - name: Require signing and the provisioning profile for stable macOS releases
+        if: matrix.platform == 'macos-latest' && github.ref_name == 'main' && (env.ENABLE_MAC_SIGNING != 'true' || env.HAS_MAC_PROFILE != 'true')
+        run: |
+          echo "::error::A stable macOS build needs APPLE_CERTIFICATE, APPLE_CERTIFICATE_PASSWORD, APPLE_SIGNING_IDENTITY and APPLE_PROVISIONING_PROFILE: without the App ID entitlement it breaks Touch ID unlock for everyone who enabled it."
+          exit 1
+
       # Export the Apple signing env ONLY when the full secret set exists.
       # Tauri treats a *defined but empty* APPLE_CERTIFICATE as "please sign"
       # and then fails importing the empty cert — so these variables must be
@@ -559,17 +572,13 @@ jobs:
           # provisioning profile. Signed builds only: an unsigned build that
           # claims it is killed at launch. Without the profile a dev build
           # stays signed but unentitled, and Settings hides the Touch ID
-          # switch. A stable build fails instead: once a release has shipped
-          # the entitlement, one without it locks out everyone who turned
-          # Touch ID on. The profile names the APPLE_CERTIFICATE certificate:
-          # renewing that certificate means regenerating the profile with the
-          # new one, or macOS refuses to launch the signed app.
+          # switch; a stable one was refused by the step above. The profile
+          # names the APPLE_CERTIFICATE certificate: renewing that certificate
+          # means regenerating the profile with the new one, or macOS refuses
+          # to launch the signed app.
           if [ -n "$APPLE_PROVISIONING_PROFILE" ]; then
             printf '%s' "$APPLE_PROVISIONING_PROFILE" | base64 --decode > "$GITHUB_WORKSPACE/apps/desktop/src-tauri/embedded.provisionprofile"
             echo "MAC_SIGNED_CONFIG=--config $GITHUB_WORKSPACE/apps/desktop/src-tauri/macos-signing.conf.json" >> "$GITHUB_ENV"
-          elif [ "${{ github.ref_name }}" = "main" ]; then
-            echo "::error::APPLE_PROVISIONING_PROFILE is not set, so this stable build would ship without the App ID entitlement and break Touch ID unlock for everyone who enabled it."
-            exit 1
           else
             echo "::warning::APPLE_PROVISIONING_PROFILE is not set — this macOS build has no App ID entitlement, so Touch ID unlock stays unavailable."
           fi
