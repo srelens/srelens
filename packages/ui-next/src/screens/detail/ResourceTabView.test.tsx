@@ -218,10 +218,27 @@ describe("ResourceTabView — the full tab the design draws", () => {
       expect(pair.compareDocumentPosition(pods) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
     });
 
+    it("offers the name to copy, directly after the heading, in the row that reveals it (#827)", async () => {
+      await openPod();
+      const heading = screen.getByRole("heading", { level: 1, name: "cart-session-store-1" });
+      const copy = screen.getByRole("button", { name: "Copy name cart-session-store-1" });
+
+      // After the name, not somewhere else in the header.
+      expect(heading.nextElementSibling?.contains(copy)).toBe(true);
+      // `.name-row` is what the stylesheet shows the control on hover and
+      // focus of; outside one it would never appear.
+      expect(copy.closest(".name-action")).not.toBeNull();
+      expect(copy.closest(".name-row")?.contains(heading)).toBe(true);
+    });
+
     it("puts the actions in the header row, not in a footer bar", async () => {
       await openPod();
       const header = document.querySelector("header")!;
-      const words = Array.from(header.querySelectorAll("button")).map((b) => b.textContent);
+      // The actions, and not the copy control that sits beside the name: that
+      // one acts on the heading, and is not part of this row (#827).
+      const words = Array.from(header.querySelectorAll("button"))
+        .filter((b) => !b.closest('[data-slot="tab-name-action"]'))
+        .map((b) => b.textContent);
       // The design's row: Ask first, then the kind's own, then the overflow.
       expect(words[0]).toBe("Ask");
       expect(words).toContain("Logs");

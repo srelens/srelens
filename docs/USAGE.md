@@ -172,6 +172,9 @@ Action buttons live in the detail drawer header and are preflighted against your
 RBAC: an action you can't perform is disabled with the reason. Destructive actions
 confirm before running.
 
+In the new design, hovering a resource's name at the top of its detail view shows a
+copy button beside it, which copies the bare name.
+
 **Pods** — Logs, Shell, Debug (attach an ephemeral debug container), Edit, Forward,
 Evict, Delete. Evict and Delete confirm; Debug asks for an image (default
 `busybox`) and an optional container whose process namespace to share, then opens a
