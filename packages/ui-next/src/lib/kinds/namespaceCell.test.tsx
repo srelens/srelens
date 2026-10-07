@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { afterEach, describe, it, expect, vi } from "vitest";
-import { act, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Table, type Column } from "@srelens/ui-kit";
 import { REFOCUS_WITHIN_MS, addNamespace, useRowRefocus, withNamespaceSelect } from "./namespaceCell";
@@ -255,6 +255,67 @@ describe("useRowRefocus", () => {
     act(() => filter.blur());
     act(() => finish());
     expect(document.activeElement).toBe(document.body);
+  });
+
+  describe("when the reader moves on without taking focus anywhere (PR #832 review)", () => {
+    // `document.activeElement` is `body` in all of these, exactly as it is
+    // when the table has merely been taken away — so where focus sits cannot
+    // be what tells them apart.
+    async function pickThenLoad() {
+      render(
+        <>
+          <h1>Pods</h1>
+          <Reloading />
+        </>,
+      );
+      screen.getByRole("button", { name: "Show only namespace monitoring" }).focus();
+      await userEvent.keyboard("{Enter}");
+      expect(document.activeElement).toBe(document.body);
+    }
+
+    it("leaves focus alone after a click on something that takes no focus", async () => {
+      await pickThenLoad();
+      fireEvent.pointerDown(screen.getByRole("heading", { name: "Pods" }));
+      act(() => finish());
+      expect(document.activeElement).toBe(document.body);
+    });
+
+    it("leaves focus alone after a key pressed with focus on the page", async () => {
+      await pickThenLoad();
+      fireEvent.keyDown(document.body, { key: "Tab" });
+      act(() => finish());
+      expect(document.activeElement).toBe(document.body);
+    });
+
+    it("still brings focus back after a click inside the table's own area", async () => {
+      await pickThenLoad();
+      // The loading state is where the table was; a click on it is not a move away.
+      fireEvent.pointerDown(screen.getByText("Loading"));
+      act(() => finish());
+      expect(document.activeElement).toBe(rowOf("prometheus-0"));
+    });
+
+    it("stops listening once it has brought focus back", async () => {
+      const remove = vi.spyOn(document, "removeEventListener");
+      await pickThenLoad();
+      act(() => finish());
+      expect(document.activeElement).toBe(rowOf("prometheus-0"));
+      expect(remove).toHaveBeenCalledWith("pointerdown", expect.any(Function), true);
+      expect(remove).toHaveBeenCalledWith("keydown", expect.any(Function), true);
+      remove.mockRestore();
+    });
+
+    it("stops listening when the screen goes away with a row still remembered", async () => {
+      const remove = vi.spyOn(document, "removeEventListener");
+      const view = render(<Reloading />);
+      screen.getByRole("button", { name: "Show only namespace monitoring" }).focus();
+      await userEvent.keyboard("{Enter}");
+      remove.mockClear();
+
+      view.unmount();
+      expect(remove).toHaveBeenCalledWith("pointerdown", expect.any(Function), true);
+      remove.mockRestore();
+    });
   });
 
   it("does nothing when the row did not come back", async () => {

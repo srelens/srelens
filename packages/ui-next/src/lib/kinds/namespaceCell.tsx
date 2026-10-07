@@ -132,15 +132,51 @@ export const REFOCUS_WITHIN_MS = 10_000;
 export function useRowRefocus(): { scope: RefObject<HTMLDivElement | null>; remember: (key: string) => void } {
   const scope = useRef<HTMLDivElement | null>(null);
   const pending = useRef<{ key: string; at: number } | null>(null);
-  const remember = useCallback((key: string) => {
-    pending.current = { key, at: Date.now() };
+  /** Stops listening for the reader's own next move — see `remember`. */
+  const unlisten = useRef<(() => void) | null>(null);
+
+  const forget = useCallback(() => {
+    pending.current = null;
+    unlisten.current?.();
+    unlisten.current = null;
   }, []);
+
+  const remember = useCallback(
+    (key: string) => {
+      forget();
+      pending.current = { key, at: Date.now() };
+      // Where focus sits is not the whole of what the reader has done since.
+      // A click on something that takes no focus — the page's own background,
+      // a heading — or a key pressed with focus already on the page leaves
+      // `document.activeElement` on `body`, which is exactly what a table
+      // that was taken away leaves too. Those are the reader moving on, so
+      // the first one outside the table ends the wait.
+      //
+      // Capturing, on the document: a handler that stops propagation must not
+      // be able to hide the reader's move from this.
+      const moved = (event: Event) => {
+        const target = event.target instanceof Node ? event.target : null;
+        if (target && scope.current?.contains(target)) return;
+        forget();
+      };
+      document.addEventListener("pointerdown", moved, true);
+      document.addEventListener("keydown", moved, true);
+      unlisten.current = () => {
+        document.removeEventListener("pointerdown", moved, true);
+        document.removeEventListener("keydown", moved, true);
+      };
+    },
+    [forget],
+  );
+
+  // The screen is gone: nothing is left to focus, and nothing should listen.
+  useEffect(() => forget, [forget]);
 
   useEffect(() => {
     const wanted = pending.current;
     if (!wanted) return;
     if (Date.now() - wanted.at > REFOCUS_WITHIN_MS) {
-      pending.current = null;
+      forget();
       return;
     }
     const active = document.activeElement;
@@ -148,14 +184,14 @@ export function useRowRefocus(): { scope: RefObject<HTMLDivElement | null>; reme
     if (!lost) {
       // Still inside the table: nothing to restore yet, and it may yet be
       // rebuilt. Anywhere else is the reader's own move, and theirs to keep.
-      if (!scope.current?.contains(active)) pending.current = null;
+      if (!scope.current?.contains(active)) forget();
       return;
     }
     const rows = scope.current?.querySelectorAll<HTMLElement>("tr[data-row-key]") ?? [];
     for (const row of rows) {
       if (row.dataset.rowKey !== wanted.key) continue;
       row.focus();
-      pending.current = null;
+      forget();
       return;
     }
   });
