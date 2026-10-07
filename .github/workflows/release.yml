@@ -539,6 +539,8 @@ jobs:
       # absent (not empty) on unsigned builds.
       - name: Enable macOS signing (when secrets are configured)
         if: matrix.platform == 'macos-latest' && env.ENABLE_MAC_SIGNING == 'true'
+        env:
+          APPLE_PROVISIONING_PROFILE: ${{ secrets.APPLE_PROVISIONING_PROFILE }}
         run: |
           {
             echo "APPLE_CERTIFICATE<<__EOF__";          echo "${{ secrets.APPLE_CERTIFICATE }}";          echo "__EOF__"
@@ -551,6 +553,18 @@ jobs:
           # to a file; tauri-action reads APPLE_API_KEY_PATH from there.
           echo "${{ secrets.APPLE_API_KEY_P8 }}" | base64 --decode > "$RUNNER_TEMP/apple_api_key.p8"
           echo "APPLE_API_KEY_PATH=$RUNNER_TEMP/apple_api_key.p8" >> "$GITHUB_ENV"
+          # Touch ID unlock (#819) keeps its key in the data-protection
+          # keychain, which answers only an app holding its App ID entitlement,
+          # and a Developer ID app may claim that only with an embedded
+          # provisioning profile. Signed builds only: an unsigned build that
+          # claims it is killed at launch. Without the profile the build stays
+          # signed but unentitled, and Settings hides the Touch ID switch.
+          if [ -n "$APPLE_PROVISIONING_PROFILE" ]; then
+            printf '%s' "$APPLE_PROVISIONING_PROFILE" | base64 --decode > "$GITHUB_WORKSPACE/apps/desktop/src-tauri/embedded.provisionprofile"
+            echo "MAC_SIGNED_CONFIG=--config $GITHUB_WORKSPACE/apps/desktop/src-tauri/macos-signing.conf.json" >> "$GITHUB_ENV"
+          else
+            echo "::warning::APPLE_PROVISIONING_PROFILE is not set — this macOS build has no App ID entitlement, so Touch ID unlock stays unavailable."
+          fi
 
       # Stable -> srelens-v<version>. Dev -> a unique semver pre-release
       # (srelens-vX.Y.Z-<run>) so every dev build gets its own tag.
@@ -595,7 +609,8 @@ jobs:
           # `releases/latest`, and the dev-channel manifest published by
           # updater-manifest must point at assets that are live immediately.
           releaseDraft: ${{ github.ref_name == 'main' }}
-          args: ${{ matrix.args }}
+          # MAC_SIGNED_CONFIG is set only by the macOS signing step above.
+          args: ${{ matrix.args }} ${{ env.MAC_SIGNED_CONFIG }}
           # Each matrix job uploads its own binaries + signatures, but NOT
           # latest.json — parallel jobs would race on that single asset. The
           # updater-manifest job assembles it once, after all builds.
