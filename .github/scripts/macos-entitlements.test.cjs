@@ -31,7 +31,12 @@ test('only signed macOS release builds get the entitlements', () => {
   const workflow = readFileSync(join(__dirname, '../workflows/release.yml'), 'utf8');
   const step = workflow.match(/- name: Enable macOS signing[\s\S]*?(?=\n      - name:)/)?.[0] ?? '';
   assert.match(step, /if: matrix\.platform == 'macos-latest' && env\.ENABLE_MAC_SIGNING == 'true'/);
-  assert.match(step, /MAC_SIGNED_CONFIG=--config \S*macos-signing\.conf\.json/);
+  // Only once the profile is written: the signing config embeds that file,
+  // so setting it without the secret fails the build on a missing file.
+  assert.match(
+    step,
+    /if \[ -n "\$APPLE_PROVISIONING_PROFILE" \]; then\n\s*printf [^\n]*> "[^"]*\/embedded\.provisionprofile"\n\s*echo "MAC_SIGNED_CONFIG=--config \S*macos-signing\.conf\.json" >> "\$GITHUB_ENV"\n\s*elif /,
+  );
   assert.equal(workflow.match(/MAC_SIGNED_CONFIG=/g)?.length, 1, 'MAC_SIGNED_CONFIG may only be set by the signing step');
   assert.match(workflow, /args: \$\{\{ matrix\.args \}\} \$\{\{ env\.MAC_SIGNED_CONFIG \}\}/);
 });
