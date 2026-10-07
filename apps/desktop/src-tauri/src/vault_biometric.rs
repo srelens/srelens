@@ -26,12 +26,14 @@ use crate::vault::{self, Vault};
 /// Biometric-store coordinates for the master key.
 const BIO_DOMAIN: &str = "app.srelens.desktop.vault";
 const BIO_NAME: &str = "master-key";
+/// A name that never holds data, so deleting it to probe the store is a no-op.
+const BIO_PROBE_NAME: &str = "store-probe";
 
 /// What Settings needs to render the Touch ID control.
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VaultBiometricStatus {
-    /// A usable biometric sensor exists on this machine.
+    /// A usable biometric sensor exists and the store serves this build.
     pub available: bool,
     /// The gate is on (the marker exists — the key lives behind biometrics).
     pub enabled: bool,
@@ -48,28 +50,37 @@ pub(crate) fn vault_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, St
     Ok(app.path().app_config_dir().map_err(|e| e.to_string())?.join("mcp"))
 }
 
-/// Sensor availability + gate state. Never hard-fails: a plugin/platform
+/// Biometric availability + gate state. Never hard-fails: a plugin/platform
 /// error reads as unavailable so Settings simply hides the control.
 #[tauri::command]
 pub async fn vault_biometric_status(
     app: tauri::AppHandle,
     vault: tauri::State<'_, Arc<Vault>>,
 ) -> Result<VaultBiometricStatus, String> {
-    let biometry = app.biometry();
-    let available = biometric_available(biometry.status(), biometry.has_data(data_options()));
+    let available = biometric_available(&app);
     let enabled = vault_dir(&app).map(|d| vault::biometric_marker_path(&d).exists()).unwrap_or(false);
     Ok(VaultBiometricStatus { available, enabled, unlocked: vault.current_key().is_some() })
 }
 
-/// Offer the gate only when the sensor works AND the biometric store answers
-/// a read (#819). A macOS build signed without an App ID entitlement has a
-/// working Touch ID sensor, but its store refuses every call with
-/// errSecMissingEntitlement (-34018), so the switch could only ever fail.
-fn biometric_available<E>(
-    sensor: Result<tauri_plugin_biometry::Status, E>,
-    store: Result<bool, E>,
-) -> bool {
+/// The one availability rule, for Settings and the vault gate alike: the
+/// sensor works AND the biometric store answers this build (#819).
+pub(crate) fn biometric_available<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
+    gate_available(app.biometry().status(), store_probe(app))
+}
+
+fn gate_available<E>(sensor: Result<tauri_plugin_biometry::Status, E>, store: Result<(), E>) -> bool {
     sensor.map(|s| s.is_available).unwrap_or(false) && store.is_ok()
+}
+
+/// Whether the biometric store will serve this build at all. A macOS build
+/// signed without its App ID entitlement has a working Touch ID sensor, but
+/// the data-protection keychain refuses its writes and deletes with
+/// errSecMissingEntitlement (-34018) — while a read just reports "not found",
+/// so `has_data` can't tell. Deleting a name that never holds data changes
+/// nothing, and is `Ok` wherever the store works.
+fn store_probe<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri_plugin_biometry::Result<()> {
+    app.biometry()
+        .remove_data(DataOptions { domain: BIO_DOMAIN.to_string(), name: BIO_PROBE_NAME.to_string() })
 }
 
 /// Turn the gate ON: move the cached master key into the biometric store.
@@ -136,7 +147,10 @@ pub async fn vault_biometric_disable(
     // reporting success while a valid key stays in the biometric store would
     // leave a supposedly disabled unlock method alive.
     if app.biometry().remove_data(data_options()).is_err() {
-        let still_present = app.biometry().has_data(data_options()).unwrap_or(true);
+        // A store that refuses this build reads as empty to it (#819), so
+        // its "not found" proves nothing.
+        let still_present =
+            store_probe(&app).is_err() || app.biometry().has_data(data_options()).unwrap_or(true);
         if still_present {
             return Err("the biometric store is unavailable — try disabling again later".into());
         }
@@ -237,15 +251,30 @@ mod tests {
     }
 
     #[test]
-    fn a_store_that_refuses_reads_hides_the_switch() {
+    fn a_store_that_refuses_the_probe_hides_the_switch() {
         // #819: an app signed without the keychain entitlement has a working
-        // Touch ID sensor, but every biometric-store call fails with -34018.
-        assert!(!biometric_available(sensor(true), Err(())));
+        // Touch ID sensor, but the store refuses the probe with -34018.
+        assert!(!gate_available(sensor(true), Err(())));
     }
 
     #[test]
-    fn an_empty_store_still_offers_the_switch() {
-        // Nothing stored yet is the normal state before the first enable.
-        assert!(biometric_available(sensor(true), Ok(false)));
+    fn a_store_that_answers_the_probe_offers_the_switch() {
+        assert!(gate_available(sensor(true), Ok(())));
+    }
+
+    // `cargo test` binaries are signed ad hoc, without the App ID entitlement:
+    // the same position as the release builds #819 broke. Their keychain
+    // reports every read as "not found" yet refuses deletes — which is why the
+    // probe deletes, and what the first version of this fix, a `has_data`
+    // probe, got wrong. Desktop CI is Linux-only, so this runs on a Mac.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_unentitled_build_cannot_reach_the_store() {
+        let app = tauri::test::mock_builder()
+            .plugin(tauri_plugin_biometry::init())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        assert_eq!(app.biometry().has_data(data_options()).ok(), Some(false));
+        assert!(store_probe(app.handle()).is_err());
     }
 }
