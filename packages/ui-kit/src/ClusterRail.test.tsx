@@ -456,12 +456,31 @@ describe("reordering", () => {
   it("does not select the cluster a drag started on, and selects again on the next plain click", () => {
     const { onSelect } = setup({ onMove: vi.fn() });
     dragOnto("staging", "prod-eu", "upper");
-    fireEvent.click(chip("staging"));
+    // The click a host fires at the end of a drag is a pointer's: detail 1.
+    fireEvent.click(chip("staging"), { detail: 1 });
     expect(onSelect).not.toHaveBeenCalled();
 
     fireEvent.pointerDown(chip("staging"));
-    fireEvent.click(chip("staging"));
+    fireEvent.click(chip("staging"), { detail: 1 });
     expect(onSelect).toHaveBeenCalledWith("staging");
+  });
+
+  it("still selects from the keyboard after a drag, with no pointer press in between (PR #838 review)", async () => {
+    // Enter and Space click a button without a pointerdown, which is the only
+    // thing that clears the drag's flag: after one drag every mark was dead
+    // to the keyboard until the pointer was used again.
+    const { onSelect } = setup({ onMove: vi.fn() });
+    dragOnto("staging", "prod-eu", "upper");
+    fireEvent.dragEnd(chip("staging"), { dataTransfer: dataTransfer() });
+
+    chip("prod-us").focus();
+    await userEvent.keyboard("{Enter}");
+    expect(onSelect).toHaveBeenLastCalledWith("prod-us");
+
+    chip("staging").focus();
+    await userEvent.keyboard(" ");
+    expect(onSelect).toHaveBeenLastCalledWith("staging");
+    expect(onSelect).toHaveBeenCalledTimes(2);
   });
 
   it("moves the focused mark one place with Ctrl/Cmd+Shift+Arrow, and does not wrap", () => {

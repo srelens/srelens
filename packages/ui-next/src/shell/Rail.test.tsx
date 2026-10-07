@@ -509,7 +509,7 @@ describe("rearranging clusters in the rail (#829)", () => {
     const before = activeCluster();
     act(() => drag("dev", "prod-eu", "upper"));
     // Some hosts fire a click at the end of a drag; it must not select.
-    fireEvent.click(screen.getByRole("button", { name: "dev" }));
+    fireEvent.click(screen.getByRole("button", { name: "dev" }), { detail: 1 });
     expect(activeCluster()).toBe(before);
   });
 
@@ -518,7 +518,7 @@ describe("rearranging clusters in the rail (#829)", () => {
     act(() => drag("dev", "prod-eu", "upper"));
     const staging = screen.getByRole("button", { name: "staging" });
     fireEvent.pointerDown(staging);
-    fireEvent.click(staging);
+    fireEvent.click(staging, { detail: 1 });
     expect(activeCluster()).toBe("staging");
   });
 
@@ -586,6 +586,26 @@ describe("rearranging clusters in the rail (#829)", () => {
     act(() => drag("dev", "prod-eu", "upper"));
 
     expect(order()).toEqual(["dev", "prod-eu", "staging"]);
-    expect(loadContextOrder()).toContain("other");
+    // `other` is still second. Only the three slots this workspace's clusters
+    // held were rewritten; it was not taken for offline and sent to the end.
+    expect(loadContextOrder()).toEqual(["dev", "other", "prod-eu", "staging"]);
+  });
+
+  it("leaves that outside cluster in place for a menu move and a keyboard move too (PR #838 review)", async () => {
+    const { loadContextOrder, saveContextOrder } = await import("@srelens/core");
+    const FOUR = [...THREE, ctx("other")];
+    saveContextOrder(["prod-eu", "other", "staging", "dev"]);
+    setState(defaultState(THREE));
+    render(<Rail contexts={FOUR} onConnect={vi.fn()} />);
+
+    await pick("dev", "Move up");
+    await waitFor(() => expect(order()).toEqual(["prod-eu", "dev", "staging"]));
+    expect(loadContextOrder()).toEqual(["prod-eu", "other", "dev", "staging"]);
+
+    const dev = screen.getByRole("button", { name: "dev" });
+    dev.focus();
+    fireEvent.keyDown(dev, { key: "ArrowUp", ctrlKey: true, shiftKey: true });
+    expect(order()).toEqual(["dev", "prod-eu", "staging"]);
+    expect(loadContextOrder()).toEqual(["dev", "other", "prod-eu", "staging"]);
   });
 });

@@ -181,9 +181,11 @@ export function Rail({ contexts, onConnect, error }: RailProps) {
    *
    * The order is the one Settings → Clusters edits, written through the same
    * `moveContext`, so the two places cannot disagree — the rail simply had no
-   * way to ask. `ordered` is this workspace's clusters only, and that is what
-   * is handed over: `moveContext` rearranges the contexts it is given and
-   * leaves every other one where it was in the shared order.
+   * way to ask. `ordered` is this workspace's clusters only, so the move is
+   * made as a `subset` one: the slots these clusters hold in the shared order
+   * are the only ones rewritten, and a context outside the workspace stays
+   * exactly where it was. Without that it was taken for offline and sent to
+   * the end — see `mergeSubsetOrder`.
    *
    * `toIndex` is the kit's: where the cluster ends up, counted with it already
    * taken out. `moveContext` wants the neighbour it goes BEFORE, or `null` for
@@ -193,13 +195,13 @@ export function Rail({ contexts, onConnect, error }: RailProps) {
     const moving = ordered.find((ctx) => ctx.stableId === id);
     if (!moving) return;
     const rest = ordered.filter((ctx) => ctx.stableId !== id);
-    moveContext(ordered, moving.name, rest[toIndex]?.name ?? null);
+    moveContext(ordered, moving.name, rest[toIndex]?.name ?? null, true);
   }
 
   /** One place up or down, from the menu. */
   function moveBy(id: string, delta: -1 | 1) {
     const moving = ordered.find((ctx) => ctx.stableId === id);
-    if (moving) moveContextBy(ordered, moving.name, delta);
+    if (moving) moveContextBy(ordered, moving.name, delta, true);
   }
 
   function menuFor(item: ClusterRailItem): ContextMenuItem[] {

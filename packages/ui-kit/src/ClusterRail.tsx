@@ -418,8 +418,14 @@ export function ClusterRail({
                       event.dataTransfer.setData("text/plain", item.id);
                     }}
                     onDragEnd={endDrag}
-                    onClick={() => {
-                      if (!suppressClick.current) onSelect(item.id);
+                    onClick={(event) => {
+                      // `detail` is 0 for a click the keyboard made — Enter or
+                      // Space on the button — and no drag precedes one of
+                      // those. The flag is only ever cleared by a pointer
+                      // press, so without this a finished drag left every
+                      // mark dead to the keyboard until the pointer was used
+                      // again.
+                      if (event.detail === 0 || !suppressClick.current) onSelect(item.id);
                     }}
                     onDoubleClick={onOpen ? () => onOpen(item.id) : undefined}
                     className="relative flex w-full flex-col items-center gap-0.5"
