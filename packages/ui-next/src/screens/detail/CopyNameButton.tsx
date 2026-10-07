@@ -37,5 +37,12 @@ async function copyName(name: string): Promise<boolean> {
  * reader who cannot see which one they are on.
  */
 export function CopyNameButton({ name }: { name: string }) {
-  return <CopyIconButton icon={Icons.copy} label={`Copy name ${name}`} onCopy={() => copyName(name)} />;
+  // Keyed by the name, so the confirmation belongs to the name it was given
+  // for. The peek stays mounted while the reader walks from row to row, and
+  // an un-keyed button carried its check across: copy `web-1`, click `web-2`,
+  // and the control beside `web-2` said "Copied" over a clipboard holding
+  // `web-1`. A new name is a new button, at rest.
+  return (
+    <CopyIconButton key={name} icon={Icons.copy} label={`Copy name ${name}`} onCopy={() => copyName(name)} />
+  );
 }

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { CopyNameButton } from "./CopyNameButton";
 
@@ -74,6 +74,44 @@ describe("CopyNameButton", () => {
     // Not "Copied" over an empty clipboard, which is what an optional-chained
     // write would have reported.
     expect((await screen.findByRole("status")).textContent).toBe("Could not copy to clipboard");
+  });
+
+  it("does not carry a confirmation over to the next subject's name (PR #835 review)", async () => {
+    // The peek stays mounted from row to row. "Copied" beside `web-2` while
+    // the clipboard holds the previous name is a confirmation of something
+    // that did not happen.
+    const view = render(<CopyNameButton name={NAME} />);
+    await press();
+    expect((await screen.findByRole("status")).textContent).toBe("Copied to clipboard");
+
+    view.rerender(<CopyNameButton name="web-2" />);
+
+    const next = screen.getByRole("button", { name: "Copy name web-2" });
+    expect(next.title).not.toBe("Copied");
+    expect(next.className).not.toContain("copy-ok");
+    expect(screen.queryByRole("status")).toBeNull();
+    expect(writeText).toHaveBeenCalledTimes(1);
+    expect(writeText).toHaveBeenCalledWith(NAME);
+  });
+
+  it("does not confirm on the next subject a copy that was still in flight when the pane moved on", async () => {
+    let land!: () => void;
+    writeText = vi.fn(
+      (_text: string): Promise<void> =>
+        new Promise((resolve) => {
+          land = resolve;
+        }),
+    );
+    const view = render(<CopyNameButton name={NAME} />);
+    await press();
+
+    view.rerender(<CopyNameButton name="web-2" />);
+    await act(async () => land());
+
+    const next = screen.getByRole("button", { name: "Copy name web-2" });
+    expect(next.title).not.toBe("Copied");
+    expect(next.className).not.toContain("copy-ok");
+    expect(screen.queryByRole("status")).toBeNull();
   });
 
   it("copies the name it is showing now, after the pane moves to another subject", async () => {
