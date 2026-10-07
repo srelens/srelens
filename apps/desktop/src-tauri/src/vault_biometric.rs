@@ -68,8 +68,29 @@ pub(crate) fn biometric_available<R: tauri::Runtime>(app: &tauri::AppHandle<R>) 
     gate_available(app.biometry().status(), store_probe(app))
 }
 
-fn gate_available<E>(sensor: Result<tauri_plugin_biometry::Status, E>, store: Result<(), E>) -> bool {
-    sensor.map(|s| s.is_available).unwrap_or(false) && store.is_ok()
+fn gate_available<E: std::fmt::Display>(
+    sensor: Result<tauri_plugin_biometry::Status, E>,
+    store: Result<(), E>,
+) -> bool {
+    if !sensor.map(|s| s.is_available).unwrap_or(false) {
+        return false;
+    }
+    // Only with a working sensor: without one, the store's answer hides
+    // nothing, and on Linux every call fails.
+    match store {
+        Ok(()) => true,
+        Err(e) => {
+            log::warn!("the biometric store refuses this build, so biometric unlock is hidden: {e}");
+            false
+        }
+    }
+}
+
+/// After a failed delete of the key item: may it still be there? A store
+/// that refuses this build reads as empty to it (#819), so its "not found"
+/// proves nothing.
+fn may_still_hold_key<E>(probe: Result<(), E>, present: Result<bool, E>) -> bool {
+    probe.is_err() || present.unwrap_or(true)
 }
 
 /// Whether the biometric store will serve this build at all. A macOS build
@@ -146,14 +167,10 @@ pub async fn vault_biometric_disable(
     // store is unavailable the disable must fail with the marker intact —
     // reporting success while a valid key stays in the biometric store would
     // leave a supposedly disabled unlock method alive.
-    if app.biometry().remove_data(data_options()).is_err() {
-        // A store that refuses this build reads as empty to it (#819), so
-        // its "not found" proves nothing.
-        let still_present =
-            store_probe(&app).is_err() || app.biometry().has_data(data_options()).unwrap_or(true);
-        if still_present {
-            return Err("the biometric store is unavailable — try disabling again later".into());
-        }
+    if app.biometry().remove_data(data_options()).is_err()
+        && may_still_hold_key(store_probe(&app), app.biometry().has_data(data_options()))
+    {
+        return Err("the biometric store is unavailable — try disabling again later".into());
     }
     match std::fs::remove_file(vault::biometric_marker_path(&dir)) {
         Ok(()) => {}
@@ -246,7 +263,9 @@ mod tests {
     use super::*;
     use tauri_plugin_biometry::{BiometryType, Status};
 
-    fn sensor(is_available: bool) -> Result<Status, ()> {
+    const MISSING_ENTITLEMENT: &str = "Error adding item to keychain: -34018";
+
+    fn sensor(is_available: bool) -> Result<Status, &'static str> {
         Ok(Status { is_available, biometry_type: BiometryType::TouchID, error: None, error_code: None })
     }
 
@@ -254,12 +273,27 @@ mod tests {
     fn a_store_that_refuses_the_probe_hides_the_switch() {
         // #819: an app signed without the keychain entitlement has a working
         // Touch ID sensor, but the store refuses the probe with -34018.
-        assert!(!gate_available(sensor(true), Err(())));
+        assert!(!gate_available(sensor(true), Err(MISSING_ENTITLEMENT)));
     }
 
     #[test]
     fn a_store_that_answers_the_probe_offers_the_switch() {
         assert!(gate_available(sensor(true), Ok(())));
+    }
+
+    #[test]
+    fn a_store_that_refuses_the_build_never_proves_the_key_gone() {
+        // #819: the refused build's has_data reads "not found" — disable must
+        // still fail rather than report the gate off over a stored key.
+        assert!(may_still_hold_key(Err(MISSING_ENTITLEMENT), Ok(false)));
+    }
+
+    #[test]
+    fn a_store_that_answers_decides_by_what_it_holds() {
+        let answers: Result<(), &str> = Ok(());
+        assert!(!may_still_hold_key(answers, Ok(false)));
+        assert!(may_still_hold_key(answers, Ok(true)));
+        assert!(may_still_hold_key(answers, Err(MISSING_ENTITLEMENT)));
     }
 
     // `cargo test` binaries are signed ad hoc, without the App ID entitlement:
