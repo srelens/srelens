@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "srelens-tui",
+    name = "srectl",
     version,
     about = "Kubernetes control room in your terminal — built in Rust with k9s navigation"
 )]
@@ -60,7 +60,7 @@ pub enum CliCommand {
     Toolbox,
     /// Print version information
     Version,
-    /// Update srelens-tui to the latest release
+    /// Update srectl to the latest release
     ///
     /// A release is installed only if its checksum file is signed by a
     /// srelens release key compiled into this binary, from the repository's

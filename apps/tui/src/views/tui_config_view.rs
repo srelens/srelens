@@ -211,7 +211,7 @@ pub const SAMPLE_SUGGESTIONS: &[(&str, &[&str], &str, &str, &str)] = &[
         "quit",
         &["q", "exit"],
         "System",
-        "Quit SRElens TUI session",
+        "Quit srectl session",
         ":quit",
     ),
 ];

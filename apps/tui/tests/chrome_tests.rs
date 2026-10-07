@@ -14,24 +14,24 @@ use crossterm::event::KeyCode;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::Line;
-use srelens_tui::ai_skills::CavemanLevel;
-use srelens_tui::app::ActiveView;
-use srelens_tui::commands::command_suggestions;
-use srelens_tui::ui::dialogs::{
+use srectl::ai_skills::CavemanLevel;
+use srectl::app::ActiveView;
+use srectl::commands::command_suggestions;
+use srectl::ui::dialogs::{
     render_modal, ContainerAction, ContextPickerItem, Modal, QuickActionId, QuickActionItem,
 };
-use srelens_tui::ui::header::{render_header, ContextChipInfo, HeaderProps};
-use srelens_tui::ui::help::{centered_rect, render_help_modal};
-use srelens_tui::ui::statusbar::{command_popup_rect, render_statusbar, InputMode, StatusBarProps};
-use srelens_tui::views::assistant_view::{
+use srectl::ui::header::{render_header, ContextChipInfo, HeaderProps};
+use srectl::ui::help::{centered_rect, render_help_modal};
+use srectl::ui::statusbar::{command_popup_rect, render_statusbar, InputMode, StatusBarProps};
+use srectl::views::assistant_view::{
     format_message_content, format_message_content_with_width, parse_inline_markdown,
     render_assistant_view, render_markdown_table, wrap_line, AssistantViewState, ChatMessage,
     TokenUsage, ToolCallRecord, ToolCallStatus,
 };
-use srelens_tui::views::metrics_panel_view::MetricsPanelState;
-use srelens_tui::views::reason_rail::ReasonTally;
-use srelens_tui::AiSettings;
-use srelens_tui::CommandPopupDensity;
+use srectl::views::metrics_panel_view::MetricsPanelState;
+use srectl::views::reason_rail::ReasonTally;
+use srectl::AiSettings;
+use srectl::CommandPopupDensity;
 
 // ───────────────────────── helpers ─────────────────────────
 
@@ -821,7 +821,7 @@ fn the_help_modal_lists_every_section_and_its_key_bindings() {
     }
     for (key, desc) in [
         (": <command>", "Open command prompt"),
-        ("Ctrl+c", "Exit / kill srelens-tui immediately"),
+        ("Ctrl+c", "Exit / kill srectl immediately"),
         ("/ <filter>", "Filter table rows by substring or regex"),
         ("j / k / ↑ / ↓", "Navigate up / down"),
         ("g / G", "Jump to top / bottom"),
@@ -907,7 +907,7 @@ fn command_mode_echoes_the_prompt_with_a_cursor_and_no_popup_without_suggestions
     let mode = InputMode::Command;
     let mut props = status_props(&mode);
     props.command_input = "zzz";
-    let empty: Vec<(srelens_tui::commands::DynamicCommandDef, usize)> = Vec::new();
+    let empty: Vec<(srectl::commands::DynamicCommandDef, usize)> = Vec::new();
     props.suggestions = Some((&empty, 0));
     let text = statusbar_text(props);
     assert!(text.contains(":zzz█"), "{text}");
@@ -2405,10 +2405,10 @@ async fn the_app_renders_the_assistant_view_with_the_active_context_in_its_title
 #[tokio::test]
 async fn the_app_renders_helm_and_helm_detail_views_across_all_tabs() {
     use srelens_kube::helm::{HelmReleaseDetail, HelmRevision};
-    use srelens_tui::views::helm_detail_view::{
+    use srectl::views::helm_detail_view::{
         render_helm_detail_view, HelmDetailTab, HelmDetailViewState,
     };
-    use srelens_tui::views::helm_view::{render_helm_view, HelmReleaseItem, HelmViewState};
+    use srectl::views::helm_view::{render_helm_view, HelmReleaseItem, HelmViewState};
 
     // 1. render_helm_view states
     let mut helm_state = HelmViewState::new();
@@ -2590,7 +2590,7 @@ fn feature_banner_modal_renders_all_highlighted_features_and_toggle_state() {
     let text_enabled = modal_text(100, 30, &modal_enabled);
 
     assert!(
-        text_enabled.contains("Welcome to SRElens — Feature Highlights"),
+        text_enabled.contains("Welcome to srectl — Feature Highlights"),
         "has header title"
     );
     assert!(text_enabled.contains(":helm"), "shows helm command");
@@ -2660,7 +2660,7 @@ fn feature_banner_modal_renders_update_available_alert_and_version() {
         "shows target version in banner"
     );
     assert!(
-        text.contains("srelens-tui update"),
+        text.contains("srectl update"),
         "shows install command in banner"
     );
     assert!(text.contains(":update"), "shows :update command in list");
@@ -2684,7 +2684,7 @@ fn feature_banner_stays_inside_small_preview_regions() {
                     Rect::new(0, y, 80, 1),
                 );
             }
-            srelens_tui::ui::dialogs::render_feature_banner_modal(f, area, true, None);
+            srectl::ui::dialogs::render_feature_banner_modal(f, area, true, None);
         });
         for (y, line) in lines.iter().enumerate() {
             for (x, c) in line.chars().enumerate() {
@@ -2702,7 +2702,7 @@ fn feature_banner_stays_inside_small_preview_regions() {
 
 #[test]
 fn long_helm_errors_show_the_reason_and_recovery_with_and_without_stale_rows() {
-    use srelens_tui::views::helm_view::{render_helm_view, HelmReleaseItem, HelmViewState};
+    use srectl::views::helm_view::{render_helm_view, HelmReleaseItem, HelmViewState};
     for stale in [false, true] {
         let mut state = HelmViewState::new();
         if stale {
@@ -2739,7 +2739,7 @@ fn long_helm_errors_show_the_reason_and_recovery_with_and_without_stale_rows() {
 
 #[test]
 fn oversized_helm_errors_preserve_recovery_and_stale_rows() {
-    use srelens_tui::views::helm_view::{render_helm_view, HelmReleaseItem, HelmViewState};
+    use srectl::views::helm_view::{render_helm_view, HelmReleaseItem, HelmViewState};
     for (width, height) in [(80, 12), (40, 12), (80, 8)] {
         for stale in [false, true] {
             let mut state = HelmViewState::new();

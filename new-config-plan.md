@@ -5,7 +5,7 @@
 Command mode (`:`) draws a suggestions popup with hardcoded caps (65 max columns, 6 visible rows). On modern terminal displays, this is often too constrained. Terminals cannot change font size per widget, so sizing the `:` popup means controlling **the popup's column width and visible row count**.
 
 This feature introduces:
-1. `TuiConfig` persisted in `~/.config/srelens/tui.json` (`$SRELENS_CONFIG_DIR/tui.json`, or overridden by `SRELENS_TUI_CONFIG_PATH`).
+1. `TuiConfig` persisted in `~/.config/srelens/tui.json` (`$SRELENS_CONFIG_DIR/tui.json`, or overridden by `SRECTL_CONFIG_PATH`; `SRELENS_TUI_CONFIG_PATH` still applies when the new name is unset).
 2. Driving the statusbar command popup geometry from `TuiConfig`.
 3. A dedicated `:config` view (`ResourceKind::TuiConfig`) featuring live adjustments with `j`/`k`/`h`/`l`/`-`/`+`/arrows and an embedded live preview of the command popup.
 4. Reclaiming `:config` for TUI chrome settings while keeping AI settings accessible on `:ai-settings` (and `:settings`).
@@ -24,9 +24,11 @@ pub struct TuiConfig {
 ```
 
 Path resolution order:
-1. `SRELENS_TUI_CONFIG_PATH` if set (for isolated tests)
-2. else `$SRELENS_CONFIG_DIR/tui.json`
-3. else `dirs::config_dir()/srelens/tui.json`
+1. `SRECTL_CONFIG_PATH` if set
+2. else `SRELENS_TUI_CONFIG_PATH` if set (the name from before the srectl rename)
+3. else `$SRELENS_CONFIG_DIR/tui.json`
+4. else `dirs::config_dir()/srelens/tui.json`
+5. else `.srectl.json`, and `.srelens-tui.json` when that file is absent
 
 `TuiConfig::load()` returns clamped values or defaults if missing/corrupt.
 `TuiConfig::save()` writes pretty JSON atomically or directly to the resolved path.

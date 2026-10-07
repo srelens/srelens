@@ -1,4 +1,4 @@
-//! Who built a release: the check `srelens-tui update` makes before it trusts
+//! Who built a release: the check `srectl update` makes before it trusts
 //! anything a release publishes (#448).
 //!
 //! A checksum proves a download arrived intact, not who made it. The checksum

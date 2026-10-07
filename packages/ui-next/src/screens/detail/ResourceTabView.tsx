@@ -27,6 +27,7 @@ import {
 import { FailureState } from "../../lib/errorCopy";
 import { CUSTOM_RESOURCE_ACTIONS } from "../../lib/kinds/custom";
 import { formatCpu, formatMemory } from "../../lib/kinds/columns";
+import { CopyNameButton } from "./CopyNameButton";
 import { DetailActions } from "./DetailActions";
 import { SectionMemory, Section } from "./Section";
 import {
@@ -268,13 +269,18 @@ export function ResourceTabView({ context, kind, namespace, name }: ResourceTabV
       className="flex min-h-0 min-w-0 flex-1 flex-col"
     >
       <header className="rule-b flex items-center gap-3 px-3 py-2">
-        <div className="flex min-w-0 items-baseline gap-2.5">
+        <div className="name-row flex min-w-0 items-baseline gap-2.5">
           {/* An `h1`: this is a page, and the tab strip above it is chrome.
               The peek's subject is an `h2` because a peek sits inside a
               screen that already has one. */}
           <h1 id={headingId} className="truncate text-[1.25rem] font-semibold">
             {name}
           </h1>
+          {/* The peek's own control, in the same place: directly after the
+              name, shown when this row is hovered or focused (`.name-row`). */}
+          <span data-slot="tab-name-action" className="name-action self-center">
+            <CopyNameButton name={name} />
+          </span>
           {/* Cluster, namespace, kind — the design's small-caps trail. A
               cluster-scoped subject has no namespace to place, so the trail is
               two steps rather than a step reading "—". */}
@@ -297,6 +303,11 @@ export function ResourceTabView({ context, kind, namespace, name }: ResourceTabV
             actions={descriptor?.actions ?? CUSTOM_RESOURCE_ACTIONS}
             flagged={statusLine?.flagged ?? false}
             suspended={object.spec?.suspend === true}
+            unschedulable={object.spec?.unschedulable === true}
+            // Those two are read off this pane's object, so a write made from the
+            // bar has to bring a new one: without it a node cordoned from here
+            // went on being offered Cordon.
+            onChanged={subject.refresh}
           />
         </div>
       </header>

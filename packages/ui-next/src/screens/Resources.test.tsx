@@ -975,6 +975,41 @@ describe("Resources", () => {
     });
   });
 
+  /**
+   * #822: from a pod to the node it runs on is one of the commonest steps in
+   * working out why the pod is unwell, and the name was plain text.
+   */
+  describe("a node clicked in the Pods list", () => {
+    const nodeTabs = () =>
+      store.currentWorkspace().tabs.filter((t) => t.route.startsWith("/k/Node/"));
+
+    it("opens that node's detail in a tab on this cluster, and does not peek the pod", async () => {
+      open("/k/pods");
+      await waitFor(() => expect(rowNames()).toEqual(["web-1", "api-7"]));
+      const before = detailProps.length;
+
+      await userEvent.click(screen.getAllByRole("button", { name: "Open node n1" })[0]);
+
+      expect(nodeTabs()).toHaveLength(1);
+      expect(nodeTabs()[0].route.endsWith("/n1")).toBe(true);
+      expect(nodeTabs()[0].sub).toBe("prod-eu");
+      // The pod's row was not what was asked for.
+      expect(detailProps.length).toBe(before);
+    });
+
+    it("leaves a pod with no node yet as a dash, with nothing to open", async () => {
+      watchResource.mockImplementation(async (_c: string, _n: string, _k: string, onRows: (rows: unknown[]) => void) => {
+        onRows([{ ...PODS[0], name: "pending-0", node: "" }]);
+        return { stop };
+      });
+      open("/k/pods");
+      await waitFor(() => expect(rowNames()).toEqual(["pending-0"]));
+
+      expect(screen.queryByRole("button", { name: /^Open node/ })).toBeNull();
+      expect(nodeTabs()).toHaveLength(0);
+    });
+  });
+
   // Zero options while `namespaces` is null reads as "this cluster has no
   // namespaces"; a disabled, spinning stand-in says "not yet" instead.
   it("shows the namespace picker as loading rather than empty before namespaces arrive", async () => {

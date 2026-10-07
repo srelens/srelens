@@ -1208,6 +1208,29 @@
   }
   .icon-btn:hover { background: var(--field); color: var(--ink); }
 
+  /* A control that acts on a heading's own text — copy the name — drawn right
+     after it and kept out of sight until the reader reaches for it: a glyph
+     permanently beside every subject's name is a second thing to read on the
+     largest line of the pane.
+
+     Three ways in, because the pointer is only one of them: the row hovered,
+     focus anywhere in the row (so a keyboard reader tabbing onto the control
+     sees what they landed on), and the moment after a copy, when the check
+     must stay up even though the pointer has already left.
+
+     `opacity`, not `display` or `visibility`: the control keeps its place, so
+     the name does not shift when it appears, and it stays in the tab order.
+
+     A device with no hover has no way to ask for it, so there it is simply
+     shown. */
+  .name-action { display: inline-flex; flex-shrink: 0; opacity: 0; }
+  .name-row:hover .name-action,
+  .name-row:focus-within .name-action,
+  .name-action:has(.copy-ok) { opacity: 1; }
+  @media (hover: none) {
+    .name-action { opacity: 1; }
+  }
+
   /* The same chrome as `.icon-btn`, sized by its CONTENT.
      `.icon-btn` is `width: 24px` — a box for a glyph — and the dock's `clear`
      and `full view` controls hold words. Text in a 24px box overflows it, so

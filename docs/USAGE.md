@@ -174,10 +174,16 @@ Action buttons live in the detail drawer header and are preflighted against your
 RBAC: an action you can't perform is disabled with the reason. Destructive actions
 confirm before running.
 
+In the new design, hovering a resource's name at the top of its detail view shows a
+copy button beside it, which copies the bare name.
+
 **Pods** — Logs, Shell, Debug (attach an ephemeral debug container), Edit, Forward,
 Evict, Delete. Evict and Delete confirm; Debug asks for an image (default
 `busybox`) and an optional container whose process namespace to share, then opens a
 shell into the new debug container.
+
+In the new design, the node name in the Pods list's Node column, and on a pod's
+detail view, opens that node in its own tab.
 
 **Deployments, StatefulSets, DaemonSets, ReplicaSets, Jobs** — Logs, Edit, Scale
 (validated replica count), Restart (rollout restart, applied immediately), Delete.
@@ -190,6 +196,14 @@ shell into the new debug container.
 static pods), and Node shell (a privileged host-namespaced debug pod you get a
 shell into; it is deleted when you close the terminal). Drain and Node shell
 confirm.
+
+In the new design, Cordon/Uncordon and Drain are on a node's row menu in
+**Cluster → Nodes** and on the node's detail view, and all three confirm. On the
+desktop the confirmed action runs as the `kubectl` command the dialog showed, in a
+local terminal scoped to that cluster, so you can watch a drain evict each pod and
+wait on disruption budgets; it needs `kubectl` on your `PATH`. In the browser,
+which has no local terminal, and on the Windows desktop, it runs through the API
+and reports the result when it finishes.
 
 ## Logs
 

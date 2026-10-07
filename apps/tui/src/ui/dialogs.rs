@@ -1344,7 +1344,7 @@ pub fn render_feature_banner_modal(
         .border_type(Theme::border_type())
         .border_style(Style::default().fg(Theme::cyan()))
         .title(Span::styled(
-            " ✨ Welcome to SRElens — Feature Highlights ✨ ",
+            " ✨ Welcome to srectl — Feature Highlights ✨ ",
             Style::default()
                 .fg(Theme::cyan())
                 .add_modifier(Modifier::BOLD),
@@ -1388,7 +1388,7 @@ pub fn render_feature_banner_modal(
             ),
             Span::styled("• Run '", Style::default().fg(Theme::dim())),
             Span::styled(
-                "srelens-tui update",
+                "srectl update",
                 Style::default()
                     .fg(Theme::cyan())
                     .add_modifier(Modifier::BOLD),
@@ -1447,9 +1447,9 @@ pub fn render_feature_banner_modal(
 
     // 2. Feature highlights
     let update_desc = if let Some(ver) = update_available {
-        format!("▲ New version v{} available! Run 'srelens-tui update'", ver)
+        format!("▲ New version v{} available! Run 'srectl update'", ver)
     } else {
-        "Check for new releases & update binary ('srelens-tui update')".to_string()
+        "Check for new releases & update binary ('srectl update')".to_string()
     };
 
     let features: [(&str, &str, &str, String, &str); 14] = [

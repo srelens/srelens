@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use srelens_tui::rebrand::{
+use srectl::rebrand::{
     apply_rebrand, legacy_file_name, next_command_path, next_file_name, should_rebrand,
     wrapper_script,
 };
@@ -137,9 +137,8 @@ fn an_existing_srectl_with_different_uid_is_refused() {
         let candidate_path = Path::new(candidate);
         if let Ok(meta) = std::fs::metadata(candidate_path) {
             if meta.uid() != my_uid {
-                let err =
-                    srelens_tui::rebrand::is_trusted_existing_command(&legacy, candidate_path)
-                        .unwrap_err();
+                let err = srectl::rebrand::is_trusted_existing_command(&legacy, candidate_path)
+                    .unwrap_err();
                 assert!(err.contains("owned by a different user"), "{err}");
                 break;
             }

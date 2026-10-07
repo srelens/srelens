@@ -1,4 +1,4 @@
-//! `srelens-tui update` — move this binary to the latest stable release.
+//! `srectl update` — move this binary to the latest stable release.
 //!
 //! The desktop app updates itself from Settings; the TUI is a loose binary on
 //! someone's `PATH`, so it has to do the same job by hand. The shape here is
@@ -137,7 +137,7 @@ impl fmt::Display for UpdateError {
         match self {
             Self::UnsupportedPlatform { os, arch } => write!(
                 f,
-                "no srectl release is built for {os}/{arch} — build from source with `cargo build --release -p srelens-tui`"
+                "no srectl release is built for {os}/{arch} — build from source with `cargo build --release -p srectl`"
             ),
             // No prefix: these messages are whole sentences, and a "could not
             // read" preamble was actively wrong for the common case, where the
@@ -169,12 +169,12 @@ impl fmt::Display for UpdateError {
             ),
             Self::NotWritable { path } => write!(
                 f,
-                "cannot write to {} — re-run with the rights to change it, or install srelens-tui somewhere you own",
+                "cannot write to {} — re-run with the rights to change it, or install srectl somewhere you own",
                 path.display()
             ),
             Self::UnsafeDirectory { path } => write!(
                 f,
-                "anyone on this machine can create files in {}, so an update there cannot be made safe — move srelens-tui somewhere only you can write, then update",
+                "anyone on this machine can create files in {}, so an update there cannot be made safe — move srectl somewhere only you can write, then update",
                 path.display()
             ),
             Self::StagedChanged => write!(
@@ -542,7 +542,7 @@ pub fn package_manager_for(path: &Path) -> Option<&'static str> {
     let text = path.to_string_lossy().replace('\\', "/");
 
     // Roots a package manager owns, matched as PREFIXES. Matching them
-    // anywhere was wrong: `/home/me/rootfs/usr/bin/srelens-tui` is a file its
+    // anywhere was wrong: `/home/me/rootfs/usr/bin/srectl` is a file its
     // owner controls, and calling it distribution-managed refused to update
     // it. Compared case-sensitively, because `/usr/bin` and `/USR/BIN` are
     // different directories on Unix.
@@ -733,7 +733,7 @@ pub fn plan(
 pub fn resolve_owner(path: &Path) -> (PathBuf, Option<&'static str>) {
     // The LINK'S OWN LOCATION is checked first, because it can carry ownership
     // that its target does not. A distribution package may install
-    // `/usr/bin/srelens-tui` pointing into `/usr/lib/srelens/`, and following
+    // `/usr/bin/srectl` pointing into `/usr/lib/srelens/`, and following
     // the link throws away the `/usr/bin/` that said who owns it — leaving the
     // updater to report a permissions problem, or to overwrite a packaged
     // symlink when re-run with enough privilege.
@@ -879,7 +879,7 @@ pub(crate) fn create_new_file(
 /// permission bits do not account for ownership, ACLs or a read-only mount,
 /// and a wrong guess here turns into a confusing failure halfway through.
 fn writable_dir(dir: &Path) -> bool {
-    match create_new_file(dir, ".srelens-tui-write-test-") {
+    match create_new_file(dir, ".srectl-write-test-") {
         Ok((probe, file)) => {
             drop(file);
             let _ = std::fs::remove_file(&probe);
@@ -1260,7 +1260,7 @@ pub fn replace_running_binary(target: &Path, bytes: &[u8]) -> Result<(), UpdateE
     // Named after the file being replaced rather than after the compiled-in
     // name. Someone who renames the binary to `lens` gets `.lens.srelens-update.old` and
     // `.lens.new-…`, so an interrupted update recovers the command they
-    // actually had — the fixed name restored `srelens-tui` and left `lens`
+    // actually had — the fixed name restored `srectl` and left `lens`
     // missing.
     let name = target
         .file_name()
@@ -1672,7 +1672,7 @@ mod tests {
         use super::resolve_owner;
         use std::path::Path;
 
-        let packaged = Path::new("/usr/bin/srelens-tui");
+        let packaged = Path::new("/usr/bin/srectl");
         let (from, owner) = resolve_owner(packaged);
         assert_eq!(owner, Some("your distribution's package manager"));
         assert_eq!(from, packaged, "the deciding path is the one that matched");
@@ -1691,14 +1691,14 @@ mod tests {
 
         let _guard = file_test_lock();
         let dir = tempfile::tempdir().expect("temp dir");
-        let cellar = dir.path().join("Cellar/srelens-tui/1.2.3/bin");
+        let cellar = dir.path().join("Cellar/srectl/1.2.3/bin");
         std::fs::create_dir_all(&cellar).expect("cellar");
-        let installed = cellar.join("srelens-tui");
+        let installed = cellar.join("srectl");
         std::fs::write(&installed, b"the real binary").expect("write");
 
         let bin = dir.path().join("bin");
         std::fs::create_dir_all(&bin).expect("bin");
-        let linked = bin.join("srelens-tui");
+        let linked = bin.join("srectl");
         std::os::unix::fs::symlink(&installed, &linked).expect("symlink");
 
         let (resolved, _) = resolve_owner(&linked);
@@ -1776,12 +1776,12 @@ mod tests {
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .collect();
         assert!(
-            names.iter().all(|n| !n.contains("srelens-tui")),
+            names.iter().all(|n| !n.contains("srectl")),
             "displaced under the wrong name: {names:?}"
         );
 
         // And the displaced file, where Windows leaves one, maps back to the
-        // invoked name rather than to srelens-tui.
+        // invoked name rather than to srectl.
         if cfg!(windows) {
             let displaced = dir.path().join(".lens.exe.srelens-update.old");
             if displaced.exists() {

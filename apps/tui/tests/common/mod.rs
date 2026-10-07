@@ -14,8 +14,8 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent,
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
 use ratatui::{Frame, Terminal};
-use srelens_tui::app::App;
-use srelens_tui::event::AppEvent;
+use srectl::app::App;
+use srectl::event::AppEvent;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
 
 /// An `App` with no kubeconfig, no cluster, and the given context/namespace,

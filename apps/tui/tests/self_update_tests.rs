@@ -1,4 +1,4 @@
-//! Tests for `srelens-tui update`.
+//! Tests for `srectl update`.
 //!
 //! No stable release carries the TUI archives yet — #444 only just landed — so
 //! the download-verify-replace path cannot be proven against a real release.
@@ -8,13 +8,13 @@
 
 use std::path::{Path, PathBuf};
 
-use srelens_tui::self_update::{
+use srectl::self_update::{
     apply, apply_with_keys, asset_name, asset_url, checksum_for, extract_binary, is_newer,
     package_manager_for, parse_latest_version, parse_newest_version, plan, replace_running_binary,
     sums_name, sums_signature_name, triple_for, verify_sha256, Channel, Check, Plan, UpdateError,
     LATEST_RELEASE_URL, RELEASES_URL,
 };
-use srelens_tui::update_signature::SignatureProblem;
+use srectl::update_signature::SignatureProblem;
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -790,17 +790,17 @@ fn an_unparseable_version_never_triggers_an_update() {
 #[test]
 fn a_binary_a_package_manager_owns_is_recognised() {
     for (path, manager) in [
-        ("/opt/homebrew/bin/srelens-tui", "Homebrew"),
+        ("/opt/homebrew/bin/srectl", "Homebrew"),
         (
-            "/usr/local/Cellar/srelens-tui/1.0.0/bin/srelens-tui",
+            "/usr/local/Cellar/srectl/1.0.0/bin/srectl",
             "Homebrew",
         ),
         (
-            "/usr/bin/srelens-tui",
+            "/usr/bin/srectl",
             "your distribution's package manager",
         ),
-        ("/snap/srelens/current/bin/srelens-tui", "snap"),
-        ("/nix/store/abc-srelens/bin/srelens-tui", "Nix"),
+        ("/snap/srelens/current/bin/srectl", "snap"),
+        ("/nix/store/abc-srelens/bin/srectl", "Nix"),
     ] {
         assert_eq!(
             package_manager_for(Path::new(path)),
@@ -819,20 +819,20 @@ fn a_binary_a_package_manager_owns_is_recognised() {
 fn a_windows_package_manager_is_recognised_at_any_depth_and_any_case() {
     for (path, manager) in [
         (
-            r"C:\ProgramData\chocolatey\bin\srelens-tui.exe",
+            r"C:\ProgramData\chocolatey\bin\srectl.exe",
             "Chocolatey",
         ),
         (
-            r"C:\PROGRAMDATA\CHOCOLATEY\bin\srelens-tui.exe",
+            r"C:\PROGRAMDATA\CHOCOLATEY\bin\srectl.exe",
             "Chocolatey",
         ),
         (
-            r"C:\Users\me\Scoop\Apps\srelens-tui\current\srelens-tui.exe",
+            r"C:\Users\me\Scoop\Apps\srectl\current\srectl.exe",
             "Scoop",
         ),
-        (r"C:\Users\me\scoop\shims\srelens-tui.exe", "Scoop"),
+        (r"C:\Users\me\scoop\shims\srectl.exe", "Scoop"),
         (
-            r"C:\Users\me\AppData\Local\Microsoft\WinGet\Packages\x\srelens-tui.exe",
+            r"C:\Users\me\AppData\Local\Microsoft\WinGet\Packages\x\srectl.exe",
             "winget",
         ),
     ] {
@@ -850,15 +850,15 @@ fn a_windows_package_manager_is_recognised_at_any_depth_and_any_case() {
 #[test]
 fn windows_package_markers_do_not_apply_on_unix() {
     for path in [
-        "/home/me/scoop/apps/demo/srelens-tui",
-        "/home/me/scoop/shims/srelens-tui",
-        "/opt/chocolatey/srelens-tui",
+        "/home/me/scoop/apps/demo/srectl",
+        "/home/me/scoop/shims/srectl",
+        "/opt/chocolatey/srectl",
     ] {
         assert_eq!(package_manager_for(Path::new(path)), None, "{path}");
     }
 }
 
-/// The layouts `brew install srelens/tap/srelens-tui` actually produces.
+/// The layouts `brew install srelens/tap/srectl` actually produces.
 ///
 /// Homebrew installs into `<prefix>/Cellar/<formula>/<version>/bin` and links
 /// that into `<prefix>/bin`, so what `apply` checks is the resolved Cellar
@@ -867,11 +867,11 @@ fn windows_package_markers_do_not_apply_on_unix() {
 #[test]
 fn a_homebrew_install_is_recognised_on_both_prefixes() {
     for path in [
-        "/opt/homebrew/Cellar/srelens-tui/1.2.3/bin/srelens-tui",
-        "/usr/local/Cellar/srelens-tui/1.2.3/bin/srelens-tui",
-        "/home/linuxbrew/.linuxbrew/Cellar/srelens-tui/1.2.3/bin/srelens-tui",
-        "/opt/homebrew/bin/srelens-tui",
-        "/home/linuxbrew/.linuxbrew/bin/srelens-tui",
+        "/opt/homebrew/Cellar/srectl/1.2.3/bin/srectl",
+        "/usr/local/Cellar/srectl/1.2.3/bin/srectl",
+        "/home/linuxbrew/.linuxbrew/Cellar/srectl/1.2.3/bin/srectl",
+        "/opt/homebrew/bin/srectl",
+        "/home/linuxbrew/.linuxbrew/bin/srectl",
     ] {
         assert_eq!(
             package_manager_for(Path::new(path)),
@@ -883,7 +883,7 @@ fn a_homebrew_install_is_recognised_on_both_prefixes() {
     // The hand-install location, which shares a prefix with Intel Homebrew
     // and must not be mistaken for it.
     assert_eq!(
-        package_manager_for(Path::new("/usr/local/bin/srelens-tui")),
+        package_manager_for(Path::new("/usr/local/bin/srectl")),
         None
     );
 }
@@ -897,17 +897,17 @@ fn a_homebrew_install_is_recognised_on_both_prefixes() {
 #[test]
 fn a_package_root_buried_inside_another_path_is_not_its_owner() {
     for path in [
-        "/home/me/rootfs/usr/bin/srelens-tui",
-        "/home/me/containers/alpine/usr/bin/srelens-tui",
-        "/tmp/extract/snap/srelens-tui",
-        "/home/me/backup/nix/store/srelens-tui",
+        "/home/me/rootfs/usr/bin/srectl",
+        "/home/me/containers/alpine/usr/bin/srectl",
+        "/tmp/extract/snap/srectl",
+        "/home/me/backup/nix/store/srectl",
     ] {
         assert_eq!(package_manager_for(Path::new(path)), None, "{path}");
     }
 
     // The same markers at the front still count.
     assert_eq!(
-        package_manager_for(Path::new("/usr/bin/srelens-tui")),
+        package_manager_for(Path::new("/usr/bin/srectl")),
         Some("your distribution's package manager")
     );
 }
@@ -916,8 +916,8 @@ fn a_package_root_buried_inside_another_path_is_not_its_owner() {
 /// different directory and not the package manager's.
 #[test]
 fn a_unix_root_is_matched_case_sensitively() {
-    assert_eq!(package_manager_for(Path::new("/USR/BIN/srelens-tui")), None);
-    assert_eq!(package_manager_for(Path::new("/Snap/srelens-tui")), None);
+    assert_eq!(package_manager_for(Path::new("/USR/BIN/srectl")), None);
+    assert_eq!(package_manager_for(Path::new("/Snap/srectl")), None);
 }
 
 /// The locations the install guide tells people to use by hand. Reporting one
@@ -925,10 +925,10 @@ fn a_unix_root_is_matched_case_sensitively() {
 #[test]
 fn a_hand_installed_binary_is_not_mistaken_for_a_managed_one() {
     for path in [
-        "/usr/local/bin/srelens-tui",
-        "/home/me/.local/bin/srelens-tui",
-        "/home/me/bin/srelens-tui",
-        r"C:\Users\me\bin\srelens-tui.exe",
+        "/usr/local/bin/srectl",
+        "/home/me/.local/bin/srectl",
+        "/home/me/bin/srectl",
+        r"C:\Users\me\bin\srectl.exe",
     ] {
         assert_eq!(package_manager_for(Path::new(path)), None, "{path}");
     }
@@ -949,7 +949,7 @@ fn being_up_to_date_is_a_quiet_success_not_an_error() {
             "1.0.0",
             Channel::Stable,
             false,
-            PathBuf::from("/tmp/srelens-tui"),
+            PathBuf::from("/tmp/srectl"),
             &fetch
         )
         .unwrap(),
@@ -972,7 +972,7 @@ fn a_build_ahead_of_stable_is_not_reported_as_up_to_date() {
             "0.8.1-152",
             Channel::Stable,
             false,
-            PathBuf::from("/tmp/srelens-tui"),
+            PathBuf::from("/tmp/srectl"),
             &fetch
         )
         .unwrap(),
@@ -990,7 +990,7 @@ fn a_build_ahead_of_stable_is_not_reported_as_up_to_date() {
             "0.8.0-7",
             Channel::Stable,
             false,
-            PathBuf::from("/tmp/srelens-tui"),
+            PathBuf::from("/tmp/srectl"),
             &fetch
         )
         .unwrap(),
@@ -1009,7 +1009,7 @@ fn an_unparseable_current_version_is_not_claimed_to_be_ahead() {
             "nightly",
             Channel::Stable,
             false,
-            PathBuf::from("/tmp/srelens-tui"),
+            PathBuf::from("/tmp/srectl"),
             &fetch
         )
         .unwrap(),
@@ -1027,7 +1027,7 @@ fn a_newer_release_plans_urls_under_its_own_tag() {
         "1.0.0",
         Channel::Stable,
         false,
-        PathBuf::from("/tmp/srelens-tui"),
+        PathBuf::from("/tmp/srectl"),
         &fetch,
     )
     .unwrap()
@@ -1186,7 +1186,7 @@ fn a_failed_release_lookup_is_reported_rather_than_swallowed() {
             "1.0.0",
             Channel::Stable,
             false,
-            PathBuf::from("/tmp/srelens-tui"),
+            PathBuf::from("/tmp/srectl"),
             &fetch
         ),
         Err(UpdateError::Download(_))
@@ -1600,7 +1600,7 @@ fn the_installed_binary_is_executable() {
 #[test]
 fn update_help_says_what_is_verified_before_installing() {
     use clap::CommandFactory;
-    let mut cli = srelens_tui::Cli::command();
+    let mut cli = srectl::Cli::command();
     let help = cli
         .find_subcommand_mut("update")
         .expect("an update subcommand")

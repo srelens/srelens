@@ -1,14 +1,17 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
   copyKubectlCommand,
+  cordonNode,
   cronjobSetSuspend,
   cronjobTriggerNow,
   defaultContainer,
   deleteResource,
   describeError,
+  drainNode,
   evictPod,
   execCandidates,
   getObject,
+  isTauri,
   notify,
   podContainerChoices,
   rolloutRestart,
@@ -25,7 +28,7 @@ import { FailureLine } from "../lib/errorCopy";
 import { Icons } from "../lib/icons";
 import { ROW_ACTION_LABEL } from "../lib/kinds/rowActions";
 import type { KindActions, ListRow } from "../lib/kinds/types";
-import { startPodSession } from "../lib/sessions";
+import { onSessionSettled, startLocalSession, startPodSession } from "../lib/sessions";
 import { openTab } from "../lib/tabsStore";
 import { isContextPaused, useDismissOnPause } from "../lib/pausedContext";
 import { NewForwardDialog } from "./forwards/NewForwardDialog";
@@ -41,6 +44,19 @@ export interface UseRowMenuArgs {
   /** The API group, for a custom kind only — see `KindDescriptor.group`. Edit
    *  carries it, so a CRD that reuses a built-in kind's name opens ITS object. */
   group?: string;
+  /**
+   * A write this menu made has changed the subject: whoever is showing it
+   * should read it again.
+   *
+   * For the detail pane, whose object is read once and whose Suspend/Resume
+   * and Cordon/Uncordon entries are labelled from it — after a cordon it went
+   * on offering Cordon. A list does not pass this: it polls or watches, and
+   * shows the change on its own.
+   *
+   * Not called for Delete. There is nothing left to read, and re-reading would
+   * swap the pane the reader deleted from for a "not found".
+   */
+  onChanged?: () => void;
 }
 
 /** What a picked entry is waiting to do, once the confirm is taken. */
@@ -52,7 +68,10 @@ type Ask =
   | { type: "rollback"; row: ListRow }
   | { type: "evict"; row: ListRow }
   /** `suspend: true` sets the CronJob suspended; `false` resumes it. */
-  | { type: "suspend"; row: ListRow; suspend: boolean };
+  | { type: "suspend"; row: ListRow; suspend: boolean }
+  /** `unschedulable: true` cordons the node; `false` uncordons it (#820). */
+  | { type: "cordon"; row: ListRow; unschedulable: boolean }
+  | { type: "drain"; row: ListRow };
 
 /**
  * An {@link Ask}, plus the cluster it was asked ON.
@@ -80,6 +99,7 @@ type Pending = Ask & { context: string };
 function verbOf(pending: Pending | null): string {
   if (!pending) return "act";
   if (pending.type === "suspend") return pending.suspend ? "suspend" : "resume";
+  if (pending.type === "cordon") return pending.unschedulable ? "cordon" : "uncordon";
   if (pending.type === "rollback") return "roll back";
   return pending.type;
 }
@@ -88,6 +108,42 @@ function verbOf(pending: Pending | null): string {
 function isSuspended(row: ListRow): boolean {
   const value = (row as { suspended?: unknown }).suspended;
   return typeof value === "boolean" && value;
+}
+
+/** `NodeSummary` carries `unschedulable`; a bare `ListRow` doesn't promise it. */
+function isCordoned(row: ListRow): boolean {
+  const value = (row as { unschedulable?: unknown }).unschedulable;
+  return typeof value === "boolean" && value;
+}
+
+/**
+ * Whether a node action runs as its kubectl command in a local terminal,
+ * where the reader watches it, rather than as a call that answers once with a
+ * toast (#820).
+ *
+ * The desktop only, and for the reason `NewSessionMenu` gives: the local PTY
+ * is the one command the web surface denies outright, because there the shell
+ * would be srelens's own process on the server. The browser keeps the call —
+ * the same `k8s.cordonNode`/`k8s.drainNode` Overview's node rows make.
+ *
+ * And not on Windows, which keeps the call too. The host runs the command
+ * under `/bin/sh`, which a Windows desktop does not have, and `toKubectl`
+ * writes it there in cmd/PowerShell quoting that `sh` would not read anyway. A
+ * confirmed drain that cannot start is worse than one that reports in a toast.
+ */
+function runsInTerminal(): boolean {
+  return isTauri() && !(typeof navigator !== "undefined" && navigator.userAgent.includes("Windows"));
+}
+
+/** The kubectl verb a node action is. */
+function nodeVerb(pending: Extract<Pending, { type: "cordon" | "drain" }>): "cordon" | "uncordon" | "drain" {
+  if (pending.type === "drain") return "drain";
+  return pending.unschedulable ? "cordon" : "uncordon";
+}
+
+/** The word on a node action's entry, its dialog and its terminal session. */
+function nodeLabel(pending: Extract<Pending, { type: "cordon" | "drain" }>): string {
+  return ROW_ACTION_LABEL[nodeVerb(pending)];
 }
 
 /**
@@ -148,10 +204,29 @@ interface ShellPick {
  * `danger`, and Run now skips `pending` entirely — it is a call, not a
  * mutation of anything already running.
  */
-export function useRowMenu({ context, kind, actions, group }: UseRowMenuArgs): {
+export function useRowMenu({ context, kind, actions, group, onChanged }: UseRowMenuArgs): {
   items: (row: ListRow) => ContextMenuItem[];
   dialog: ReactNode;
 } {
+  // The latest `onChanged`, for the terminal sessions below to call long
+  // after the render that started them.
+  const changed = useRef(onChanged);
+  changed.current = onChanged;
+  /**
+   * The terminal sessions this menu started node actions in, and is listening
+   * to. A command in a shell reports no completion; the session's output going
+   * quiet is when its effect can be read back, so `onChanged` is called on
+   * each one (see `onSessionSettled`). Released when this menu unmounts — the
+   * session itself is the store's and carries on.
+   */
+  const listening = useRef<(() => void)[]>([]);
+  useEffect(
+    () => () => {
+      for (const release of listening.current) release();
+      listening.current = [];
+    },
+    [],
+  );
   const [pending, setPending] = useState<Pending | null>(null);
   /**
    * The row whose `Port forward` was picked, if any.
@@ -335,6 +410,30 @@ export function useRowMenu({ context, kind, actions, group }: UseRowMenuArgs): {
 
     setBusy(true);
     setError("");
+
+    // A node action on the desktop: the confirm was the gate, and what it let
+    // through is the command the dialog printed, run in a local terminal
+    // scoped to `target` so the reader watches each eviction, each
+    // disruption-budget retry and the refusal, if there is one, as it happens
+    // (#820). `scoped` because that shell's kubeconfig holds the one cluster
+    // and may not hold it under the app's name for it — see `KubectlInput`.
+    //
+    // Started, then shown, as `launchShell` does and for its reason: a shell
+    // that could not be opened is a `closed` row on `/terminals` saying why,
+    // which is worth landing on rather than hiding behind a dialog.
+    if ((pending.type === "cordon" || pending.type === "drain") && runsInTerminal()) {
+      const session = await startLocalSession({
+        context: target,
+        title: `${nodeLabel(pending)} ${row.name}`,
+        command: toKubectl({ action: nodeVerb(pending), kind, name: row.name, context: target, scoped: true }),
+      });
+      listening.current.push(onSessionSettled(session, () => changed.current?.()));
+      setBusy(false);
+      close();
+      openTab("/terminals", { clusterName: target });
+      return;
+    }
+
     const result = await (async () => {
       switch (pending.type) {
         // Every one of these takes `target` — the cluster the entry was picked
@@ -351,6 +450,10 @@ export function useRowMenu({ context, kind, actions, group }: UseRowMenuArgs): {
           return evictPod(target, ns, row.name);
         case "suspend":
           return cronjobSetSuspend(target, ns, row.name, pending.suspend);
+        case "cordon":
+          return cordonNode(target, row.name, pending.unschedulable);
+        case "drain":
+          return drainNode(target, row.name);
       }
     })();
     setBusy(false);
@@ -361,7 +464,16 @@ export function useRowMenu({ context, kind, actions, group }: UseRowMenuArgs): {
       setError(result.error);
       return;
     }
+    // Said, for the two node actions only: nothing on the Nodes list moves
+    // until its next poll, and a drain's whole result is these two numbers.
+    if (pending.type === "drain") {
+      const out = result as { evicted?: number; skipped?: number };
+      notify.success(`Drained ${row.name}`, `${out.evicted ?? 0} evicted, ${out.skipped ?? 0} skipped`);
+    } else if (pending.type === "cordon") {
+      notify.success(`${pending.unschedulable ? "Cordoned" : "Uncordoned"} ${row.name}`);
+    }
     close();
+    if (pending.type !== "delete") onChanged?.();
   }
 
   function items(row: ListRow): ContextMenuItem[] {
@@ -434,6 +546,18 @@ export function useRowMenu({ context, kind, actions, group }: UseRowMenuArgs): {
     if (actions.trigger) {
       list.push({ label: ROW_ACTION_LABEL.trigger, onPick: () => void runNow(row) });
     }
+    if (actions.cordon) {
+      // A cordoned node is offered the other direction rather than the same
+      // action again, and under the same glyph: it is one switch, and the
+      // label is what says which way it is being thrown. Not `danger` — it
+      // moves no pod and the entry beside it undoes it.
+      const cordoned = isCordoned(row);
+      list.push({
+        label: cordoned ? ROW_ACTION_LABEL.uncordon : ROW_ACTION_LABEL.cordon,
+        icon: Icons.cordon,
+        onPick: () => open({ type: "cordon", row, unschedulable: !cordoned }),
+      });
+    }
 
     // The destructive group. Every entry in it sets `danger` — shipping only
     // Delete as danger was a real bug caught on the tab menu (#335); the same
@@ -461,6 +585,9 @@ export function useRowMenu({ context, kind, actions, group }: UseRowMenuArgs): {
     if (actions.evict) {
       destructive.push({ label: ROW_ACTION_LABEL.evict, icon: Icons.evict, danger: true, onPick: () => open({ type: "evict", row }) });
     }
+    if (actions.drain) {
+      destructive.push({ label: ROW_ACTION_LABEL.drain, icon: Icons.drain, danger: true, onPick: () => open({ type: "drain", row }) });
+    }
     if (actions.delete !== false) {
       destructive.push({ label: ROW_ACTION_LABEL.delete, icon: Icons.trash, danger: true, onPick: () => open({ type: "delete", row }) });
     }
@@ -480,6 +607,7 @@ export function useRowMenu({ context, kind, actions, group }: UseRowMenuArgs): {
       moved={gate.alert}
       busy={busy}
       error={error}
+      inTerminal={runsInTerminal()}
       replicas={replicas}
       onReplicasChange={setReplicas}
       revision={revision}
@@ -539,14 +667,16 @@ export function useRowMenu({ context, kind, actions, group }: UseRowMenuArgs): {
   return { items, dialog };
 }
 
-// `suspend` isn't here: its title depends on direction (Suspend vs. Resume),
-// decided per-instance in `PendingDialog` rather than by a fixed lookup.
-const TITLES: Record<Exclude<Pending["type"], "suspend">, (kind: string) => string> = {
+// `suspend` and `cordon` aren't here: their titles depend on direction
+// (Suspend vs. Resume, Cordon vs. Uncordon), decided per-instance in
+// `PendingDialog` rather than by a fixed lookup.
+const TITLES: Record<Exclude<Pending["type"], "suspend" | "cordon">, (kind: string) => string> = {
   delete: (kind) => `Delete ${kind}?`,
   scale: (kind) => `Scale ${kind}`,
   restart: (kind) => `Restart ${kind}`,
   rollback: (kind) => `Roll back ${kind}`,
   evict: () => "Evict pod?",
+  drain: () => "Drain node?",
 };
 
 function messageFor(pending: Pending): ReactNode {
@@ -603,6 +733,26 @@ function messageFor(pending: Pending): ReactNode {
             : "Scheduled runs will resume."}
         </>
       );
+    // Overview's own words for the same three questions, so a node is asked
+    // about the same way from either screen.
+    case "cordon":
+      return pending.unschedulable ? (
+        <>
+          Cordon <code>{row.name}</code>? No new pods will be scheduled to it; the pods already running
+          there stay.
+        </>
+      ) : (
+        <>
+          Uncordon <code>{row.name}</code>? It becomes schedulable again.
+        </>
+      );
+    case "drain":
+      return (
+        <>
+          Drain <code>{row.name}</code>? This evicts every pod on the node and stops new ones being
+          scheduled to it.
+        </>
+      );
   }
 }
 
@@ -646,6 +796,12 @@ function kubectlFor(
       if (replicas.trim() === "" || !Number.isInteger(n) || n < 0) return {};
       return { command: toKubectl({ action: "scale", kind, name: row.name, namespace, context, replicas: n }) };
     }
+    // With `--context`, unlike the line the confirm types into the terminal:
+    // this one is for reading and for copying, and a copied command with no
+    // context runs against whatever the reader's own shell points at.
+    case "cordon":
+    case "drain":
+      return { command: toKubectl({ action: nodeVerb(pending), kind, name: row.name, namespace, context }) };
   }
 }
 
@@ -656,6 +812,7 @@ function PendingDialog({
   moved,
   busy,
   error,
+  inTerminal,
   replicas,
   onReplicasChange,
   revision,
@@ -671,6 +828,8 @@ function PendingDialog({
   moved: ReactNode;
   busy: boolean;
   error: string;
+  /** Whether a node action will run in a local terminal — see `runsInTerminal`. */
+  inTerminal: boolean;
   replicas: string;
   onReplicasChange: (value: string) => void;
   revision: string;
@@ -678,9 +837,18 @@ function PendingDialog({
   onConfirm: () => void;
   onCancel: () => void;
 }) {
-  const title = pending.type === "suspend" ? (pending.suspend ? "Suspend CronJob" : "Resume CronJob") : TITLES[pending.type](kind);
+  const title =
+    pending.type === "suspend"
+      ? pending.suspend
+        ? "Suspend CronJob"
+        : "Resume CronJob"
+      : pending.type === "cordon"
+        ? `${nodeLabel(pending)} node?`
+        : TITLES[pending.type](kind);
   const confirmLabel =
-    pending.type === "delete"
+    pending.type === "cordon" || pending.type === "drain"
+      ? nodeLabel(pending)
+      : pending.type === "delete"
       ? "Delete"
       : pending.type === "scale"
         ? "Scale"
@@ -699,8 +867,10 @@ function PendingDialog({
     <ConfirmDialog
       title={title}
       // Suspend/resume is a write with no danger styling (R-4 of the CronJob
-      // ruling); every other entry that reaches this dialog is destructive.
-      danger={pending.type !== "suspend"}
+      // ruling), and so is cordon/uncordon: it moves no pod, and the entry
+      // beside it undoes it. Every other entry that reaches this dialog is
+      // destructive.
+      danger={pending.type !== "suspend" && pending.type !== "cordon"}
       busy={busy}
       confirmLabel={confirmLabel}
       onConfirm={onConfirm}
@@ -732,6 +902,14 @@ function PendingDialog({
             />
           )}
           <KubectlPreview command={command} note={note} onCopy={command ? () => copyKubectlCommand(command) : undefined} />
+          {/* Said before the click rather than discovered after it: the
+              confirm is about to move the reader to another tab, and a drain
+              is worth knowing you will be able to watch. */}
+          {inTerminal && (pending.type === "cordon" || pending.type === "drain") && (
+            <p className="text-muted" style={{ marginBottom: 0 }}>
+              Runs in a terminal scoped to <code>{context}</code>, so you can watch it.
+            </p>
+          )}
           {/* The dialog stays open on a refusal rather than closing as if the
               write had happened, so this line is the whole of what the reader
               is told about why. A validation message this component wrote
