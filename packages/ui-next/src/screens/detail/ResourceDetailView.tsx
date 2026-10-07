@@ -279,6 +279,7 @@ export function ResourceDetailView({ context, kind, namespace, name, peek }: Res
           actions={descriptor?.actions ?? CUSTOM_RESOURCE_ACTIONS}
           flagged={header.flagged ?? false}
           suspended={object.spec?.suspend === true}
+          unschedulable={object.spec?.unschedulable === true}
         />
       }
     >

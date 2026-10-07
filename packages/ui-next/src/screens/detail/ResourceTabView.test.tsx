@@ -227,6 +227,36 @@ describe("ResourceTabView — the full tab the design draws", () => {
       expect(words).toContain("Edit");
       expect(document.querySelector("footer")).toBeNull();
     });
+
+    it("offers a node Cordon and Drain in the header row, and Uncordon once it is cordoned (#820)", async () => {
+      const node = (unschedulable: boolean) => ({
+        object: {
+          kind: "Node",
+          apiVersion: "v1",
+          metadata: { name: "worker-1" },
+          spec: unschedulable ? { unschedulable } : {},
+        },
+      });
+      const headerWords = () =>
+        Array.from(document.querySelector("header")!.querySelectorAll("button")).map((b) => b.textContent);
+      descriptorFor.mockReturnValue(
+        podDescriptor({ k8sKind: "Node", panes: {}, actions: { cordon: true, drain: true } }),
+      );
+
+      getObject.mockResolvedValue(node(false));
+      const view = await openPod({ kind: "Node", namespace: null, name: "worker-1" });
+      expect(headerWords()).toContain("Cordon");
+      expect(headerWords()).toContain("Drain");
+      expect(headerWords()).not.toContain("Uncordon");
+      view.unmount();
+
+      // The pane's own `spec.unschedulable`, not a default: a cordoned node
+      // offered Cordon again is an action that does nothing.
+      getObject.mockResolvedValue(node(true));
+      await openPod({ kind: "Node", namespace: null, name: "worker-1" });
+      expect(headerWords()).toContain("Uncordon");
+      expect(headerWords()).not.toContain("Cordon");
+    });
   });
 
   describe("the tab strip", () => {

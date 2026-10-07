@@ -160,6 +160,17 @@ describe("descriptors", () => {
     });
   });
 
+  describe("node actions (#820)", () => {
+    it("offers Cordon and Drain on nodes, and on no other kind", () => {
+      expect(descriptorFor("nodes")!.actions).toMatchObject({ cordon: true, drain: true });
+      for (const slug of ["pods", "deployments", "statefulsets", "daemonsets", "cronjobs", "namespaces", "configmaps"]) {
+        const actions = descriptorFor(slug)!.actions;
+        expect(actions.cordon).toBeUndefined();
+        expect(actions.drain).toBeUndefined();
+      }
+    });
+  });
+
   describe("pod metrics enrichment", () => {
     beforeEach(() => {
       podMetrics.mockReset();

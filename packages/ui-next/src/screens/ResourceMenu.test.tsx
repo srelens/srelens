@@ -51,6 +51,10 @@ const {
   cronjobSetSuspend,
   cronjobTriggerNow,
   getObject,
+  cordonNode,
+  drainNode,
+  isTauri,
+  notifySuccess,
 } =
   vi.hoisted(() => ({
     deleteResource: vi.fn(async (): Promise<ActionResult> => ({ ok: true })),
@@ -63,6 +67,16 @@ const {
     cronjobTriggerNow: vi.fn(async (): Promise<{ jobName?: string; error?: string }> => ({
       jobName: "nightly-manual-1",
     })),
+    cordonNode: vi.fn(async (): Promise<ActionResult> => ({ ok: true })),
+    drainNode: vi.fn(async (): Promise<ActionResult & { evicted?: number; skipped?: number }> => ({
+      ok: true,
+      evicted: 4,
+      skipped: 2,
+    })),
+    // The browser unless a case says otherwise: the local PTY a node action
+    // runs in exists on the desktop only.
+    isTauri: vi.fn(() => false),
+    notifySuccess: vi.fn(),
     // `Open shell` looks the pod up fresh, off the live cluster, to find out
     // which containers are worth asking about — a list row carries no
     // container names. Real by default (one running "app" container); tests
@@ -78,7 +92,9 @@ const {
 // minting a route — mocked so a test can see exactly what it was asked to
 // start, without a real xterm instance or a real PTY behind it.
 const startPodSession = vi.hoisted(() => vi.fn(async () => 1));
-vi.mock("../lib/sessions", () => ({ startPodSession }));
+// A node action on the desktop starts a local one, with its command queued.
+const startLocalSession = vi.hoisted(() => vi.fn(async () => 2));
+vi.mock("../lib/sessions", () => ({ startPodSession, startLocalSession }));
 
 // Direct references, not `(...a) => fn(...a)` wrappers: each mock above is
 // typed by its own implementation (zero declared params), and TypeScript
@@ -95,8 +111,14 @@ const forwardCore = vi.hoisted(() => ({
   startPortForward: vi.fn(async () => ({ id: 1, localPort: 9090 })),
 }));
 
-vi.mock("@srelens/core", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@srelens/core")>()),
+vi.mock("@srelens/core", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@srelens/core")>();
+  return {
+  ...actual,
+  cordonNode,
+  drainNode,
+  isTauri,
+  notify: { ...actual.notify, success: notifySuccess },
   deleteResource,
   scaleResource,
   rolloutRestart,
@@ -107,7 +129,8 @@ vi.mock("@srelens/core", async (importOriginal) => ({
   cronjobTriggerNow,
   getObject,
   ...forwardCore,
-}));
+  };
+});
 
 import { useRowMenu, type UseRowMenuArgs } from "./ResourceMenu";
 import type { ContextMenuItem } from "@srelens/ui-kit";
@@ -162,9 +185,13 @@ const CM_ARGS: UseRowMenuArgs = { context: "prod", kind: "ConfigMap", actions: {
 const DEPLOY_ARGS: UseRowMenuArgs = { context: "prod", kind: "Deployment", actions: { scale: true, restart: true } };
 const CRON_ARGS: UseRowMenuArgs = { context: "prod", kind: "CronJob", actions: { suspend: true, trigger: true } };
 const NODE_ARGS: UseRowMenuArgs = { context: "prod", kind: "Node", actions: {} };
+/** A node as the Nodes list offers it: the two actions only a node has. */
+const NODE_OPS_ARGS: UseRowMenuArgs = { context: "prod", kind: "Node", actions: { cordon: true, drain: true } };
+const CORDONED_ROW: ListRow & { unschedulable: boolean } = { name: "worker-1", unschedulable: true };
 
 beforeEach(() => {
   vi.clearAllMocks();
+  isTauri.mockReturnValue(false);
   store.setState(defaultState([]));
 });
 
@@ -521,6 +548,187 @@ describe("useRowMenu", () => {
     await waitFor(() => expect(cronjobTriggerNow).toHaveBeenCalledWith("prod", "ops", "nightly"));
     // No dialog appeared for it — Cancel is not on screen.
     expect(screen.queryByRole("button", { name: "Cancel" })).toBeNull();
+  });
+});
+
+/**
+ * Cordon and Drain on a node (#820).
+ *
+ * The Nodes list offered neither while Overview's node rows offered both. They
+ * are the row menu's now, so the list, the peek and the full tab all reach one
+ * confirm — and on the desktop that confirm runs the command it printed in a
+ * local terminal, where a drain can be watched, instead of answering once with
+ * a toast.
+ */
+describe("useRowMenu — Cordon and Drain on a node (#820)", () => {
+  const labelsOf = (items: ContextMenuItem[]) => items.map((i) => (i.kind === "sep" ? "—" : i.label));
+  const box = () => within(screen.getByRole("dialog"));
+
+  it("offers Cordon and Drain on a node, and neither on any other kind", () => {
+    const node = labelsOf(menuItems(NODE_OPS_ARGS, NODE_ROW));
+    expect(node).toContain("Cordon");
+    expect(node).toContain("Drain");
+    expect(node).not.toContain("Uncordon");
+
+    for (const [args, row] of [
+      [POD_ARGS, POD_ROW],
+      [DEPLOY_ARGS, DEPLOY_ROW],
+      [CRON_ARGS, CRON_ROW],
+      [CM_ARGS, CM_ROW],
+    ] as const) {
+      const labels = labelsOf(menuItems(args, row));
+      expect(labels).not.toContain("Cordon");
+      expect(labels).not.toContain("Uncordon");
+      expect(labels).not.toContain("Drain");
+    }
+  });
+
+  it("offers a cordoned node the other direction, not the same action again", () => {
+    const labels = labelsOf(menuItems(NODE_OPS_ARGS, CORDONED_ROW));
+    expect(labels).toContain("Uncordon");
+    expect(labels).not.toContain("Cordon");
+  });
+
+  it("marks Drain as danger and sits it with the destructive entries; Cordon is neither", () => {
+    const items = menuItems(NODE_OPS_ARGS, NODE_ROW);
+    const labels = labelsOf(items);
+    const find = (label: string) =>
+      items.find((i): i is Extract<ContextMenuItem, { label: string }> => i.kind !== "sep" && i.label === label);
+
+    expect(find("Drain")?.danger).toBe(true);
+    expect(find("Cordon")?.danger).toBeFalsy();
+    // Below the separator with Delete, and Cordon above it.
+    expect(labels.indexOf("Drain")).toBeGreaterThan(labels.indexOf("—"));
+    expect(labels.indexOf("Cordon")).toBeLessThan(labels.indexOf("—"));
+  });
+
+  it("asks before draining, names the node and the cluster, and does nothing on Cancel", async () => {
+    isTauri.mockReturnValue(true);
+    render(<Harness args={NODE_OPS_ARGS} row={NODE_ROW} />);
+    await userEvent.click(screen.getByRole("button", { name: "Drain" }));
+
+    expect(box().getByText("Drain node?")).toBeDefined();
+    expect(box().getByText("worker-1")).toBeDefined();
+    // The line for reading and copying carries the cluster.
+    expect(
+      box().getByText("kubectl drain worker-1 --ignore-daemonsets --delete-emptydir-data --force --context prod"),
+    ).toBeDefined();
+
+    await userEvent.click(box().getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(startLocalSession).not.toHaveBeenCalled();
+    expect(drainNode).not.toHaveBeenCalled();
+    expect(store.currentWorkspace().tabs.some((t) => t.route === "/terminals")).toBe(false);
+  });
+
+  it("on the desktop, runs the confirmed drain in a local terminal and opens it", async () => {
+    isTauri.mockReturnValue(true);
+    render(<Harness args={NODE_OPS_ARGS} row={NODE_ROW} />);
+    await userEvent.click(screen.getByRole("button", { name: "Drain" }));
+    expect(box().getByText(/Runs in a terminal scoped to/)).toBeDefined();
+    await userEvent.click(box().getByRole("button", { name: "Drain" }));
+
+    await waitFor(() =>
+      expect(startLocalSession).toHaveBeenCalledWith({
+        context: "prod",
+        title: "Drain worker-1",
+        // No `--context`: the shell is scoped to the one cluster already.
+        command: "kubectl drain worker-1 --ignore-daemonsets --delete-emptydir-data --force",
+      }),
+    );
+    await waitFor(() => expect(store.currentWorkspace().tabs.some((t) => t.route === "/terminals")).toBe(true));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    // The terminal IS the action: the call that answers with a toast is not
+    // made as well, or the node would be drained twice over.
+    expect(drainNode).not.toHaveBeenCalled();
+    expect(notifySuccess).not.toHaveBeenCalled();
+  });
+
+  it("on the desktop, cordons in a terminal, and uncordons a cordoned node", async () => {
+    isTauri.mockReturnValue(true);
+    const view = render(<Harness args={NODE_OPS_ARGS} row={NODE_ROW} />);
+    await userEvent.click(screen.getByRole("button", { name: "Cordon" }));
+    expect(box().getByText("Cordon node?")).toBeDefined();
+    expect(box().getByText("kubectl cordon worker-1 --context prod")).toBeDefined();
+    await userEvent.click(box().getByRole("button", { name: "Cordon" }));
+    await waitFor(() =>
+      expect(startLocalSession).toHaveBeenCalledWith({
+        context: "prod",
+        title: "Cordon worker-1",
+        command: "kubectl cordon worker-1",
+      }),
+    );
+    expect(cordonNode).not.toHaveBeenCalled();
+
+    view.rerender(<Harness args={NODE_OPS_ARGS} row={CORDONED_ROW} />);
+    await userEvent.click(screen.getByRole("button", { name: "Uncordon" }));
+    expect(box().getByText("Uncordon node?")).toBeDefined();
+    await userEvent.click(box().getByRole("button", { name: "Uncordon" }));
+    await waitFor(() =>
+      expect(startLocalSession).toHaveBeenLastCalledWith({
+        context: "prod",
+        title: "Uncordon worker-1",
+        command: "kubectl uncordon worker-1",
+      }),
+    );
+  });
+
+  it("in the browser, where there is no local shell, drains through the call and says how it went", async () => {
+    render(<Harness args={NODE_OPS_ARGS} row={NODE_ROW} />);
+    await userEvent.click(screen.getByRole("button", { name: "Drain" }));
+    // No promise of a terminal the browser cannot open.
+    expect(box().queryByText(/Runs in a terminal/)).toBeNull();
+    await userEvent.click(box().getByRole("button", { name: "Drain" }));
+
+    await waitFor(() => expect(drainNode).toHaveBeenCalledWith("prod", "worker-1"));
+    await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith("Drained worker-1", "4 evicted, 2 skipped"));
+    expect(startLocalSession).not.toHaveBeenCalled();
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("in the browser, cordons and uncordons through the call, in the direction picked", async () => {
+    const view = render(<Harness args={NODE_OPS_ARGS} row={NODE_ROW} />);
+    await userEvent.click(screen.getByRole("button", { name: "Cordon" }));
+    await userEvent.click(box().getByRole("button", { name: "Cordon" }));
+    await waitFor(() => expect(cordonNode).toHaveBeenCalledWith("prod", "worker-1", true));
+    await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith("Cordoned worker-1"));
+
+    view.rerender(<Harness args={NODE_OPS_ARGS} row={CORDONED_ROW} />);
+    await userEvent.click(screen.getByRole("button", { name: "Uncordon" }));
+    await userEvent.click(box().getByRole("button", { name: "Uncordon" }));
+    await waitFor(() => expect(cordonNode).toHaveBeenLastCalledWith("prod", "worker-1", false));
+    await waitFor(() => expect(notifySuccess).toHaveBeenLastCalledWith("Uncordoned worker-1"));
+  });
+
+  it("in the browser, keeps the dialog open with the reason when the drain is refused", async () => {
+    drainNode.mockResolvedValueOnce({ error: "forbidden" });
+    render(<Harness args={NODE_OPS_ARGS} row={NODE_ROW} />);
+    await userEvent.click(screen.getByRole("button", { name: "Drain" }));
+    await userEvent.click(box().getByRole("button", { name: "Drain" }));
+
+    await waitFor(() => expect(screen.getByText(/forbidden/)).toBeDefined());
+    expect(screen.getByRole("dialog")).toBeDefined();
+    expect(notifySuccess).not.toHaveBeenCalled();
+  });
+
+  it("drains the cluster the node was picked on, after the reader confirms which, when the rail has moved", async () => {
+    isTauri.mockReturnValue(true);
+    const on = (context: string): UseRowMenuArgs => ({ ...NODE_OPS_ARGS, context });
+    const view = render(<Harness args={on("prod-eu")} row={NODE_ROW} />);
+    await userEvent.click(screen.getByRole("button", { name: "Drain" }));
+    await screen.findByRole("dialog");
+    view.rerender(<Harness args={on("stage-eu")} row={NODE_ROW} />);
+
+    // One click must not drain a node on a cluster the reader has left.
+    await userEvent.click(box().getByRole("button", { name: "Drain" }));
+    expect(startLocalSession).not.toHaveBeenCalled();
+
+    await userEvent.click(screen.getByRole("checkbox", { name: "Yes, still drain on prod-eu." }));
+    await userEvent.click(box().getByRole("button", { name: "Drain" }));
+    await waitFor(() => expect(startLocalSession).toHaveBeenCalledTimes(1));
+    expect(startLocalSession).toHaveBeenCalledWith(expect.objectContaining({ context: "prod-eu" }));
+    // And the tab it opens is that cluster's, not the one the rail is on.
+    expect(store.currentWorkspace().tabs.some((t) => t.route === "/terminals" && t.sub === "prod-eu")).toBe(true);
   });
 });
 

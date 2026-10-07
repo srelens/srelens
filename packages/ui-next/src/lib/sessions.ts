@@ -118,7 +118,39 @@ export interface LocalSessionRequest {
   /** Extra kubeconfigs to put on the shell's KUBECONFIG. */
   extraKubeconfigs?: string[];
   title?: string;
+  /**
+   * A command to type into the shell once it is ready, as though the reader
+   * had typed it and pressed Enter — a `kubectl drain` they have just
+   * confirmed, run where they can watch it (#820).
+   *
+   * Typed, not passed as the shell's argument: the shell stays afterwards,
+   * with the output above the prompt and the command in its history, so the
+   * reader can run the next thing — `kubectl get pods -o wide`, the uncordon —
+   * in the same place.
+   *
+   * The caller has already asked. Nothing here confirms anything.
+   */
+  command?: string;
 }
+
+/**
+ * How long a starting shell must have been quiet before {@link
+ * LocalSessionRequest.command} is typed into it.
+ *
+ * A login shell is not listening the moment its PTY exists: it runs the
+ * reader's rc files first, and a prompt framework among them may query the
+ * terminal and read the answer off the same input the command would arrive
+ * on. Output that has stopped is the only sign available from out here that
+ * the prompt is up and the line editor is the one reading.
+ */
+export const COMMAND_QUIET_MS = 400;
+
+/**
+ * How long to wait for a shell that says nothing at all before typing the
+ * command anyway. A shell with an empty prompt is unusual and not wrong, and a
+ * confirmed command that never ran because of it would be.
+ */
+export const COMMAND_WAIT_MS = 3_000;
 
 let sessions: TerminalSessionRow[] = [];
 const listeners = new Set<() => void>();
@@ -130,6 +162,15 @@ const handles = new Map<number, TerminalConnection>();
 /** Everything wired to a session's emulator, unwired when the row goes. */
 const unwires = new Map<number, () => void>();
 const idleTimers = new Map<number, ReturnType<typeof setTimeout>>();
+/**
+ * The command each starting session still owes its shell — see {@link
+ * LocalSessionRequest.command}. An entry leaves the moment the command is
+ * typed, or the session ends first, so it is typed once or not at all.
+ */
+const queuedCommands = new Map<
+  number,
+  { command: string; spoke: boolean; timer?: ReturnType<typeof setTimeout> }
+>();
 /**
  * The privileged debug pod a `kind: "node"` session is exec'd into — the
  * object `k8s.createNodeDebugPod` left on the cluster, and the store's own to
@@ -229,10 +270,44 @@ export async function startLocalSession(req: LocalSessionRequest): Promise<numbe
     // is honest where naming the cluster's current one would not be.
     namespace: "",
   });
+  // Queued before the connect for the reason the row is registered before it:
+  // the shell can print its prompt before the handle arrives, and a command
+  // queued afterwards would not know the shell had already spoken.
+  if (req.command) queuedCommands.set(id, { command: req.command, spoke: false });
   await connect(id, (onData, onExit, size) =>
     startLocalTerminal(req.context, req.extraKubeconfigs ?? [], onData, () => onExit(null), size),
   );
+  // Only now is there a handle to type into. A session that failed to open,
+  // or ended while it was opening, has already dropped its entry.
+  awaitQuiet(id);
   return id;
+}
+
+/**
+ * (Re)start the wait before this session's queued command is typed: {@link
+ * COMMAND_QUIET_MS} after the shell last spoke, or {@link COMMAND_WAIT_MS} for
+ * one that has not spoken yet. A no-op for a session with nothing queued, and
+ * for one whose far end is not connected yet — {@link startLocalSession}
+ * calls this again once it is.
+ */
+function awaitQuiet(id: number) {
+  const queued = queuedCommands.get(id);
+  if (!queued || !handles.has(id)) return;
+  clearTimeout(queued.timer);
+  queued.timer = setTimeout(() => typeQueued(id), queued.spoke ? COMMAND_QUIET_MS : COMMAND_WAIT_MS);
+}
+
+/** Type the queued command and its Enter. Once: the entry is taken first. */
+function typeQueued(id: number) {
+  const queued = queuedCommands.get(id);
+  queuedCommands.delete(id);
+  if (queued) handles.get(id)?.send(`${queued.command}\r`);
+}
+
+/** Forget a command that was never typed — its session is over. */
+function dropQueued(id: number) {
+  clearTimeout(queuedCommands.get(id)?.timer);
+  queuedCommands.delete(id);
 }
 
 /**
@@ -295,6 +370,7 @@ export function __resetSessionsForTests(): void {
   for (const id of [...emulators.keys()]) endSession(id);
   for (const id of [...handles.keys()]) disconnect(id);
   nodeDebugPods.clear();
+  for (const id of [...queuedCommands.keys()]) dropQueued(id);
   sessions = [];
   listeners.clear();
   seq = 0;
@@ -388,6 +464,11 @@ async function connect(
 function receive(id: number, chunk: string) {
   emulators.get(id)?.write(chunk);
   markActive(id);
+  const queued = queuedCommands.get(id);
+  if (queued) {
+    queued.spoke = true;
+    awaitQuiet(id);
+  }
 }
 
 /**
@@ -467,6 +548,9 @@ function close(id: number, reason: unknown) {
 function disconnect(id: number) {
   clearTimeout(idleTimers.get(id));
   idleTimers.delete(id);
+  // A shell that is gone cannot be typed into, and a confirmed command must
+  // not be left to fire at whatever a later session's handle turns out to be.
+  dropQueued(id);
   unwires.get(id)?.();
   unwires.delete(id);
   handles.get(id)?.close();

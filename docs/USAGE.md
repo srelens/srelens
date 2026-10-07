@@ -189,6 +189,14 @@ static pods), and Node shell (a privileged host-namespaced debug pod you get a
 shell into; it is deleted when you close the terminal). Drain and Node shell
 confirm.
 
+In the new design, Cordon/Uncordon and Drain are on a node's row menu in
+**Cluster → Nodes** and on the node's detail view, and all three confirm. On the
+desktop the confirmed action runs as the `kubectl` command the dialog showed, in a
+local terminal scoped to that cluster, so you can watch a drain evict each pod and
+wait on disruption budgets; it needs `kubectl` on your `PATH`. In the browser,
+which has no local terminal, it runs through the API and reports the result when
+it finishes.
+
 ## Logs
 
 Open logs from a Pod (the **Logs** action, or a container's **Logs** button) or

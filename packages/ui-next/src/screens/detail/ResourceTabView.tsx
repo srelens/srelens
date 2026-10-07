@@ -297,6 +297,7 @@ export function ResourceTabView({ context, kind, namespace, name }: ResourceTabV
             actions={descriptor?.actions ?? CUSTOM_RESOURCE_ACTIONS}
             flagged={statusLine?.flagged ?? false}
             suspended={object.spec?.suspend === true}
+            unschedulable={object.spec?.unschedulable === true}
           />
         </div>
       </header>
