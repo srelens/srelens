@@ -1,4 +1,4 @@
-//! Who built a release, checked before `srelens-tui update` trusts it (#448).
+//! Who built a release, checked before `srectl update` trusts it (#448).
 //!
 //! The real release's checksum file and signature prove the keys compiled
 //! into the binary verify what the release workflow actually publishes. The
@@ -12,7 +12,7 @@
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 
-use srelens_tui::update_signature::{verify_release_signature, SignatureProblem, RELEASE_KEYS};
+use srectl::update_signature::{verify_release_signature, SignatureProblem, RELEASE_KEYS};
 
 /// The release key `KEYS` holds today, as `docs/INSTALL.md` prints it.
 const RELEASE_KEY: &str = "6CFC34803A21C0E6DB18BA47DDEEDBFF499D9481";

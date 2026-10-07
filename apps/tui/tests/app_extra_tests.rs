@@ -23,16 +23,16 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use srelens_kube::lineage::{LineageNode, LineageRelation};
 use srelens_kube::node_inspector::{NodeInspectorDetails, NodePodItem};
-use srelens_tui::app::{ActiveView, App, SuspendAction};
-use srelens_tui::commands::{CrdMeta, ResourceKind};
-use srelens_tui::event::AppEvent;
-use srelens_tui::ui::Modal;
-use srelens_tui::views::helm_view::{HelmReleaseItem, HelmViewState};
-use srelens_tui::views::node_inspector_view::NodeInspectorState;
-use srelens_tui::views::port_forward_view::{PortForwardEntry, PortForwardViewState};
-use srelens_tui::views::resource_table::ResourceTableState;
-use srelens_tui::views::toolbox_view::{ToolStatusItem, ToolboxViewState};
-use srelens_tui::views::tree_view::TreeViewState;
+use srectl::app::{ActiveView, App, SuspendAction};
+use srectl::commands::{CrdMeta, ResourceKind};
+use srectl::event::AppEvent;
+use srectl::ui::Modal;
+use srectl::views::helm_view::{HelmReleaseItem, HelmViewState};
+use srectl::views::node_inspector_view::NodeInspectorState;
+use srectl::views::port_forward_view::{PortForwardEntry, PortForwardViewState};
+use srectl::views::resource_table::ResourceTableState;
+use srectl::views::toolbox_view::{ToolStatusItem, ToolboxViewState};
+use srectl::views::tree_view::TreeViewState;
 
 // ---------------------------------------------------------------------------
 // A loopback apiserver
@@ -2025,7 +2025,7 @@ async fn helm_keys_copy_a_deep_link_and_open_the_values_and_manifest() {
     app.handle_key_event(common::ch('v')).await;
     match &app.active_view {
         ActiveView::HelmDetail(d) => {
-            assert_eq!(d.active_tab, srelens_tui::views::HelmDetailTab::ValuesDiff);
+            assert_eq!(d.active_tab, srectl::views::HelmDetailTab::ValuesDiff);
             assert_eq!(d.release_name, "nginx");
         }
         _ => panic!("expected the Helm values view"),
@@ -2035,7 +2035,7 @@ async fn helm_keys_copy_a_deep_link_and_open_the_values_and_manifest() {
     app.handle_key_event(common::ch('y')).await;
     match &app.active_view {
         ActiveView::HelmDetail(d) => {
-            assert_eq!(d.active_tab, srelens_tui::views::HelmDetailTab::Manifest);
+            assert_eq!(d.active_tab, srectl::views::HelmDetailTab::Manifest);
             assert_eq!(d.release_name, "nginx");
         }
         _ => panic!("expected the Helm manifest view"),
@@ -2043,7 +2043,7 @@ async fn helm_keys_copy_a_deep_link_and_open_the_values_and_manifest() {
 
     // Direct HelmDetail key handling: tabs, diff toggle, scrolling, copy, esc
     let mut detail_state =
-        srelens_tui::views::HelmDetailViewState::new("nginx".into(), "default".into());
+        srectl::views::HelmDetailViewState::new("nginx".into(), "default".into());
     detail_state.set_detail(srelens_kube::helm::HelmReleaseDetail {
         name: "nginx".into(),
         namespace: "default".into(),
@@ -2080,28 +2080,28 @@ async fn helm_keys_copy_a_deep_link_and_open_the_values_and_manifest() {
     // Number keys switch tabs
     app.handle_key_event(common::ch('1')).await;
     if let ActiveView::HelmDetail(ref d) = app.active_view {
-        assert_eq!(d.active_tab, srelens_tui::views::HelmDetailTab::Overview);
+        assert_eq!(d.active_tab, srectl::views::HelmDetailTab::Overview);
     }
     app.handle_key_event(common::ch('2')).await;
     if let ActiveView::HelmDetail(ref d) = app.active_view {
-        assert_eq!(d.active_tab, srelens_tui::views::HelmDetailTab::ValuesDiff);
+        assert_eq!(d.active_tab, srectl::views::HelmDetailTab::ValuesDiff);
     }
     app.handle_key_event(common::ch('m')).await;
     if let ActiveView::HelmDetail(ref d) = app.active_view {
         assert_eq!(
             d.values_diff_mode,
-            srelens_tui::views::ValuesDiffMode::CustomVsDefault
+            srectl::views::ValuesDiffMode::CustomVsDefault
         );
     }
     app.handle_key_event(common::ch('3')).await;
     if let ActiveView::HelmDetail(ref d) = app.active_view {
-        assert_eq!(d.active_tab, srelens_tui::views::HelmDetailTab::Revisions);
+        assert_eq!(d.active_tab, srectl::views::HelmDetailTab::Revisions);
     }
     app.handle_key_event(common::ch('j')).await;
     app.handle_key_event(common::ch('k')).await;
     app.handle_key_event(common::ch('4')).await;
     if let ActiveView::HelmDetail(ref d) = app.active_view {
-        assert_eq!(d.active_tab, srelens_tui::views::HelmDetailTab::Manifest);
+        assert_eq!(d.active_tab, srectl::views::HelmDetailTab::Manifest);
     }
     app.handle_key_event(common::ch('j')).await;
     app.handle_key_event(common::ch('k')).await;
@@ -2112,7 +2112,7 @@ async fn helm_keys_copy_a_deep_link_and_open_the_values_and_manifest() {
         .await;
     app.handle_key_event(common::ch('5')).await;
     if let ActiveView::HelmDetail(ref d) = app.active_view {
-        assert_eq!(d.active_tab, srelens_tui::views::HelmDetailTab::Notes);
+        assert_eq!(d.active_tab, srectl::views::HelmDetailTab::Notes);
     }
 
     // Copy deep link and manifest/yaml
@@ -2416,7 +2416,7 @@ async fn a_command_only_a_crd_short_name_can_explain_still_opens_that_crd() {
     app.crds = vec![crd];
 
     assert!(
-        srelens_tui::commands::resolve_command_with_crds("wd", &app.crds).is_none(),
+        srectl::commands::resolve_command_with_crds("wd", &app.crds).is_none(),
         "'wd' resolves to nothing on its own"
     );
 
@@ -2545,7 +2545,7 @@ async fn releasing_a_drag_in_the_yaml_view_copies_the_dragged_lines() {
 
     let (mut app, _rx) = common::app_with(FAKE_CONTEXT, "default").await;
     let content: String = (0..12).map(|i| format!("line-{i}\n")).collect();
-    app.active_view = ActiveView::Yaml(srelens_tui::views::yaml_view::YamlViewState::new(
+    app.active_view = ActiveView::Yaml(srectl::views::yaml_view::YamlViewState::new(
         "web-0".into(),
         "Pod".into(),
         None,
@@ -2686,7 +2686,7 @@ async fn yaml_error_reverts_editor_content_and_reports_error() {
     let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app_with(FAKE_CONTEXT, "default").await;
     let original = "apiVersion: external-secrets.io/v1beta1\nkind: ClusterSecretStore\nmetadata:\n  name: vault\nspec:\n  provider: {}\n";
-    let mut yaml_view = srelens_tui::views::yaml_view::YamlViewState::new(
+    let mut yaml_view = srectl::views::yaml_view::YamlViewState::new(
         "vault".to_string(),
         "ClusterSecretStore".to_string(),
         None,
@@ -2718,7 +2718,7 @@ async fn yaml_applied_invalidates_cache_and_commits_content() {
     let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app_with(FAKE_CONTEXT, "default").await;
     let initial = "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cfg\n";
-    let mut yaml_view = srelens_tui::views::yaml_view::YamlViewState::new(
+    let mut yaml_view = srectl::views::yaml_view::YamlViewState::new(
         "cfg".to_string(),
         "ConfigMap".to_string(),
         Some("default".to_string()),
@@ -2761,7 +2761,7 @@ async fn yaml_applied_invalidates_cache_in_all_namespaces_view() {
     let (mut app, _rx) = common::app_with(FAKE_CONTEXT, "").await;
     app.active_namespace = String::new(); // all namespaces
 
-    let crd = srelens_tui::commands::CrdMeta {
+    let crd = srectl::commands::CrdMeta {
         crd_name: "secretstores.external-secrets.io".to_string(),
         group: "external-secrets.io".to_string(),
         version: "v1".to_string(),
@@ -2776,7 +2776,7 @@ async fn yaml_applied_invalidates_cache_in_all_namespaces_view() {
     app.crds = vec![crd];
 
     let initial = "apiVersion: external-secrets.io/v1\nkind: SecretStore\nmetadata:\n  name: store\n  namespace: cluster-autoscaler\n";
-    let mut yaml_view = srelens_tui::views::yaml_view::YamlViewState::new(
+    let mut yaml_view = srectl::views::yaml_view::YamlViewState::new(
         "store".to_string(),
         "SecretStore".to_string(),
         Some("cluster-autoscaler".to_string()),
@@ -2914,7 +2914,7 @@ async fn a_manifest_that_cannot_be_fetched_says_why_and_is_not_edited() {
 
 #[test]
 fn manifest_fetch_error_names_every_attempt() {
-    let msg = srelens_tui::app::manifest_fetch_error(
+    let msg = srectl::app::manifest_fetch_error(
         "SecretStore",
         "vault",
         Some("prod"),
@@ -2927,7 +2927,7 @@ fn manifest_fetch_error_names_every_attempt() {
         msg,
         "Unable to fetch live manifest for SecretStore/vault in namespace prod:\n  apiserver (external-secrets.io/v1): forbidden"
     );
-    let bare = srelens_tui::app::manifest_fetch_error("Node", "n1", None, &[]);
+    let bare = srectl::app::manifest_fetch_error("Node", "n1", None, &[]);
     assert_eq!(
         bare,
         "Unable to fetch live manifest for Node/n1: no lookup applied to this kind"

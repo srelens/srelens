@@ -76,7 +76,7 @@ each component must be:
   both at once there: only an entry's owner may unlink it, and `/tmp` is
   `drwxrwxrwt`, so treating either write bit as disqualifying would refuse
   every path running through it. The **destination** gets no such exemption —
-  sticky stops another user removing our files, not creating `srelens-tui`
+  sticky stops another user removing our files, not creating `srectl`
   there first and owning it, after which its mode is copied onto the rollback
   (a planted 4755 becoming a root-owned setuid file) and it can be swapped for
   a symlink to a directory so the `mv` lands underneath it;
@@ -151,7 +151,7 @@ piece here the filesystem re-derives, since the rollback copy is created by
 `mktemp` in the destination directory and labelled by the same policy.
 
 **Unpredictable staging, and a private unpack.** The staging file is created
-with `mktemp` rather than at `.srelens-tui.install.<pid>`, which could be
+with `mktemp` rather than at `.srectl.install.<pid>`, which could be
 pre-created as a symlink for `cp` to write through. The archive is unpacked
 one level below the private temp directory, never into it: it carries a `./`
 member, and GNU tar restores directory ownership and permissions from the
@@ -168,11 +168,11 @@ pipe executes as it arrives, so a connection dropped halfway would otherwise
 run whatever fragment arrived. With the wrapper, a truncated download is a
 syntax error that does nothing.
 
-**Linux only.** macOS gets `brew install srelens/tap/srelens-tui`, which is
+**Linux only.** macOS gets `brew install srelens/tap/srectl`, which is
 already the documented path there; the script says so rather than competing
 with it.
 
-**Stable only.** The binary's own `srelens-tui update` carries the dev and
+**Stable only.** The binary's own `srectl update` carries the dev and
 stable channels for anyone who wants a pre-release. Bootstrapping is not the
 place for that choice.
 

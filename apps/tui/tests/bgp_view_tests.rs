@@ -13,9 +13,9 @@ use ratatui::{Frame, Terminal};
 use srelens_kube::bgp::{
     BgpAdvertisedService, BgpClusterSummary, BgpEngineType, BgpIpPool, BgpNeighbor, BgpSessionState,
 };
-use srelens_tui::commands::{resolve_command, CommandTarget, ResourceKind};
-use srelens_tui::deep_link::DeepLink;
-use srelens_tui::views::bgp_view::{render_bgp_view, BgpTab, BgpViewState};
+use srectl::commands::{resolve_command, CommandTarget, ResourceKind};
+use srectl::deep_link::DeepLink;
+use srectl::views::bgp_view::{render_bgp_view, BgpTab, BgpViewState};
 
 /// Render one frame and return the buffer as lines of text
 fn render_lines<F>(width: u16, height: u16, draw: F) -> Vec<String>
@@ -495,7 +495,7 @@ fn bgp_view_warns_when_a_found_engine_was_read_only_in_part() {
 
 #[test]
 fn bgp_peer_drilldown_carries_the_crd_the_row_came_from() {
-    use srelens_tui::views::bgp_view::peer_drilldown_target;
+    use srectl::views::bgp_view::peer_drilldown_target;
 
     let mut metallb_peer = sample_bgp_summary().peers.remove(0);
     metallb_peer.policy_name = "metallb-peer-1".to_string();
@@ -643,7 +643,7 @@ fn bgp_view_does_not_call_routes_it_cannot_enumerate_vips() {
 
 #[test]
 fn bgp_view_dynamic_column_widths_and_uptime_formatting() {
-    use srelens_tui::views::bgp_view::format_uptime_display;
+    use srectl::views::bgp_view::format_uptime_display;
 
     // Test format_uptime_display
     assert_eq!(format_uptime_display(None), "-");
