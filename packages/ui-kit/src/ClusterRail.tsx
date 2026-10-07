@@ -1,4 +1,4 @@
-import { useRef, type KeyboardEvent, type ReactNode } from "react";
+import { useEffect, useRef, useState, type DragEvent, type KeyboardEvent, type ReactNode } from "react";
 import { ContextMenu, type ContextMenuItem } from "./ContextMenu";
 import { cx } from "./cx";
 import type { IconComponent } from "./IconButton";
@@ -59,6 +59,17 @@ export interface ClusterRailProps {
    * right-clicked, not what the product offers when it is.
    */
   menuFor?: (item: ClusterRailItem) => ContextMenuItem[];
+  /**
+   * Makes the rail reorderable: called with the item moved and the index it
+   * should end up at, counted in the list as it will be once the item is
+   * there. The caller owns the order and re-renders with it.
+   *
+   * Three ways to ask, because a pointer is only one of them: drag a mark and
+   * drop it between two others; Ctrl/Cmd+Shift+Up or Down on a focused mark,
+   * the vertical twin of the tab strip's own reorder keys; and whatever the
+   * caller puts in `menuFor`. Omitted, the rail is as fixed as it always was.
+   */
+  onMove?: (id: string, toIndex: number) => void;
   /** Print the name under each mark. Off by default: the mark carries it. */
   showNames?: boolean;
   /** How wide the marks are, in px. The rail sizes itself and its add tile to match. */
@@ -174,6 +185,7 @@ export function ClusterRail({
   onSelect,
   onOpen,
   menuFor,
+  onMove,
   showNames = false,
   markSize,
   onAdd,
@@ -191,11 +203,74 @@ export function ClusterRail({
   // either side of them.
   const width = mark + (showNames ? 30 : 16);
 
+  // --- reordering -----------------------------------------------------
+  // The same shape as `TabStrip`'s: the id being dragged in a ref (the drag
+  // events need it synchronously), where it would land in state (the rule is
+  // drawn from it), and the move just asked for in a ref until the caller's
+  // new order arrives — only then is it announced, and focus put back.
+  const dragId = useRef<string | null>(null);
+  const suppressClick = useRef(false);
+  const [dragging, setDragging] = useState<string | null>(null);
+  const [dropAt, setDropAt] = useState<number | null>(null);
+  const [announcement, setAnnouncement] = useState("");
+  const moved = useRef<{ id: string; to: number; focus: boolean } | null>(null);
+
+  useEffect(() => {
+    const move = moved.current;
+    if (!move) return;
+    moved.current = null;
+    const at = items.findIndex((item) => item.id === move.id);
+    // The caller may have declined, or put it somewhere else. Nothing is
+    // announced unless the item is where it was asked to go.
+    if (at < 0 || at !== move.to) return;
+    setAnnouncement(`${items[at].name} moved to position ${at + 1} of ${items.length}`);
+    if (move.focus) refs.current.get(move.id)?.focus();
+  }, [items]);
+
+  function requestMove(id: string, to: number, focus: boolean) {
+    const from = items.findIndex((item) => item.id === id);
+    to = Math.max(0, Math.min(items.length - 1, to));
+    if (!onMove || from < 0 || from === to) return;
+    moved.current = { id, to, focus };
+    onMove(id, to);
+  }
+
+  /** Where a drop at this point would insert: before item `n`, or `length` for the end. */
+  function dropPosition(event: DragEvent<HTMLElement>): number {
+    const target = (event.target as HTMLElement).closest("button");
+    const index = items.findIndex((item) => refs.current.get(item.id) === target);
+    // Between two marks, in the gap: keep the last answer rather than jumping
+    // to the end and back as the pointer crosses it.
+    if (index < 0) return dropAt ?? items.length;
+    const rect = target!.getBoundingClientRect();
+    return index + (event.clientY > rect.top + rect.height / 2 ? 1 : 0);
+  }
+
+  function endDrag() {
+    dragId.current = null;
+    setDragging(null);
+    setDropAt(null);
+  }
+
   function onKeyDown(event: KeyboardEvent<HTMLElement>) {
     // From the focused mark, not from `activeId`: the arrows move focus without
     // selecting, so the two are routinely on different clusters.
     const index = items.findIndex((item) => refs.current.get(item.id) === document.activeElement);
     if (index < 0) return;
+    if (
+      onMove &&
+      (event.ctrlKey || event.metaKey) &&
+      event.shiftKey &&
+      (event.key === "ArrowUp" || event.key === "ArrowDown")
+    ) {
+      // No wrapping, unlike the plain arrows: the first mark has nowhere
+      // further up to go, and sending it to the bottom would be a different
+      // act under the same key.
+      event.preventDefault();
+      event.stopPropagation();
+      requestMove(items[index].id, index + (event.key === "ArrowUp" ? -1 : 1), true);
+      return;
+    }
     let next: number | null = null;
     if (event.key === "ArrowDown") next = (index + 1) % items.length;
     else if (event.key === "ArrowUp") next = (index - 1 + items.length) % items.length;
@@ -220,6 +295,12 @@ export function ClusterRail({
       className={cx("rule-r flex shrink-0 flex-col items-center gap-1.5 bg-canvas-deep py-2", className)}
       style={{ width }}
     >
+      {/* What a move did, for anyone who cannot see the marks change places.
+          Empty until the first move, so a rail that is merely on screen says
+          nothing. */}
+      <span className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+        {announcement}
+      </span>
       {failure !== undefined && (
         <Tooltip label={failure} side="right">
           {/* An image with a name rather than a bare glyph: the failure is the
@@ -243,7 +324,28 @@ export function ClusterRail({
         // this narrow, and it is the one line here that is a sentence.
         <p className="px-1 text-center text-[0.5625rem] leading-tight text-faint">{emptyLabel}</p>
       ) : (
-        <ul className="flex w-full flex-col items-center gap-1.5">
+        <ul
+          className="flex w-full flex-col items-center gap-1.5"
+          onDragOver={(event) => {
+            if (!dragId.current) return;
+            event.preventDefault();
+            event.dataTransfer.dropEffect = "move";
+            setDropAt(dropPosition(event));
+          }}
+          onDragLeave={(event) => {
+            if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDropAt(null);
+          }}
+          onDrop={(event) => {
+            const id = dragId.current;
+            if (!id) return;
+            event.preventDefault();
+            const from = items.findIndex((item) => item.id === id);
+            const insertion = dropPosition(event);
+            // Taking the item out shifts everything after it up by one.
+            requestMove(id, insertion > from ? insertion - 1 : insertion, false);
+            endDrag();
+          }}
+        >
           {items.map((item, index) => {
             const active = item.id === activeId;
             const markers = item.markers ?? [];
@@ -254,15 +356,39 @@ export function ClusterRail({
             const hint = [item.name, item.detail].filter((part) => filled(part)).join(" — ");
             const menu = menuFor?.(item) ?? [];
 
+            // A rule above the item it would land before, or below the last
+            // one for "at the end". Not drawn where dropping changes nothing —
+            // on either side of the mark being dragged.
+            const from = dragging === null ? -1 : items.findIndex((other) => other.id === dragging);
+            const idle = dropAt === null || dropAt === from || dropAt === from + 1;
+            const drop = idle
+              ? undefined
+              : dropAt === index
+                ? "before"
+                : dropAt === items.length && index === items.length - 1
+                  ? "after"
+                  : undefined;
+
             const node = (
-              <li key={item.id} className="flex w-full flex-col items-center gap-1.5">
+              <li
+                key={item.id}
+                data-drop={drop}
+                className="flex w-full flex-col items-center gap-1.5"
+                // In the gap between two marks rather than over either: the
+                // list's own `gap-1.5` is 6px, and the rule sits in its middle.
+                style={
+                  drop
+                    ? { boxShadow: `0 ${drop === "before" ? "-4px" : "4px"} 0 -2px var(--accent)` }
+                    : undefined
+                }
+              >
                 {/* The rule belongs to the item that starts a new run, so the
                     list stays one list — a reader hears how many clusters there
                     are before arrowing through them. */}
                 {index > 0 && items[index - 1].group !== item.group && (
                   <span data-slot="group-rule" aria-hidden="true" className="my-0.5 h-px w-5 bg-rule-strong" />
                 )}
-                <Tooltip label={hint} side="right">
+                <Tooltip label={hint} side="right" disabled={dragging !== null}>
                   <button
                     type="button"
                     ref={(node) => {
@@ -272,10 +398,32 @@ export function ClusterRail({
                     aria-label={spoken}
                     aria-current={active || undefined}
                     data-unavailable={away || undefined}
-                    onClick={() => onSelect(item.id)}
+                    data-dragging={dragging === item.id || undefined}
+                    draggable={!!onMove}
+                    onPointerDown={() => {
+                      suppressClick.current = false;
+                    }}
+                    onDragStart={(event) => {
+                      if (!onMove) {
+                        event.preventDefault();
+                        return;
+                      }
+                      dragId.current = item.id;
+                      // A drag that ends where it began still fires a click in
+                      // some hosts, and a rearrange must never also switch
+                      // cluster.
+                      suppressClick.current = true;
+                      setDragging(item.id);
+                      event.dataTransfer.effectAllowed = "move";
+                      event.dataTransfer.setData("text/plain", item.id);
+                    }}
+                    onDragEnd={endDrag}
+                    onClick={() => {
+                      if (!suppressClick.current) onSelect(item.id);
+                    }}
                     onDoubleClick={onOpen ? () => onOpen(item.id) : undefined}
                     className="relative flex w-full flex-col items-center gap-0.5"
-                    style={away ? { opacity: 0.42 } : undefined}
+                    style={dragging === item.id ? { opacity: 0.55 } : away ? { opacity: 0.42 } : undefined}
                   >
                     <span
                       className="relative inline-flex shrink-0 items-center justify-center"

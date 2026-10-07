@@ -1,5 +1,5 @@
 import { PALETTE, SYMBOLS, symbolFor } from "../lib/markSymbols";
-import { useOrderedContexts } from "../lib/contextOrder";
+import { moveContext, moveContextBy, useOrderedContexts } from "../lib/contextOrder";
 import { useEffect, useState } from "react";
 import type { ClusterContext } from "@srelens/core";
 import {
@@ -176,7 +176,42 @@ export function Rail({ contexts, onConnect, error }: RailProps) {
     else pauseCluster(workspace.id, id);
   }
 
+  /**
+   * Put a cluster somewhere else in the rail (#829).
+   *
+   * The order is the one Settings → Clusters edits, written through the same
+   * `moveContext`, so the two places cannot disagree — the rail simply had no
+   * way to ask. `ordered` is this workspace's clusters only, and that is what
+   * is handed over: `moveContext` rearranges the contexts it is given and
+   * leaves every other one where it was in the shared order.
+   *
+   * `toIndex` is the kit's: where the cluster ends up, counted with it already
+   * taken out. `moveContext` wants the neighbour it goes BEFORE, or `null` for
+   * the end, which is the item at that index in the list without it.
+   */
+  function move(id: string, toIndex: number) {
+    const moving = ordered.find((ctx) => ctx.stableId === id);
+    if (!moving) return;
+    const rest = ordered.filter((ctx) => ctx.stableId !== id);
+    moveContext(ordered, moving.name, rest[toIndex]?.name ?? null);
+  }
+
+  /** One place up or down, from the menu. */
+  function moveBy(id: string, delta: -1 | 1) {
+    const moving = ordered.find((ctx) => ctx.stableId === id);
+    if (moving) moveContextBy(ordered, moving.name, delta);
+  }
+
   function menuFor(item: ClusterRailItem): ContextMenuItem[] {
+    const at = ordered.findIndex((ctx) => ctx.stableId === item.id);
+    // Absent, not disabled, at either end: the first cluster has nowhere up to
+    // go, and a greyed entry is a thing to read that does nothing.
+    const moves: ContextMenuItem[] = [
+      ...(at > 0 ? [{ label: "Move up", onPick: () => moveBy(item.id, -1) } as ContextMenuItem] : []),
+      ...(at >= 0 && at < ordered.length - 1
+        ? [{ label: "Move down", onPick: () => moveBy(item.id, 1) } as ContextMenuItem]
+        : []),
+    ];
     return [
       { label: `Open ${item.name}`, onPick: () => select(item.id) },
       ...(isTauri()
@@ -206,6 +241,8 @@ export function Rail({ contexts, onConnect, error }: RailProps) {
       { kind: "sep" },
       { label: workspace.pausedClusters?.includes(item.id) ? "Reconnect" : "Disconnect", onPick: () => toggleConnection(item.id) },
       { label: "Connection details", onPick: () => openTab("/connections") },
+      // The pointer-free way to rearrange, beside the drag and the keys.
+      ...(moves.length > 0 ? [{ kind: "sep" } as ContextMenuItem, ...moves] : []),
       { kind: "sep" },
       // Named for what it does. See the note above on the design's Disconnect.
       { label: "Remove from workspace", icon: Icons.trash, danger: true, onPick: () => remove(item.id) },
@@ -221,6 +258,7 @@ export function Rail({ contexts, onConnect, error }: RailProps) {
         activeId={active ?? undefined}
         onSelect={select}
         menuFor={menuFor}
+        onMove={move}
         onAdd={onConnect}
         error={error}
       />

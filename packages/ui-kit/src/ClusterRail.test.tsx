@@ -345,3 +345,173 @@ describe("ClusterRail footer", () => {
     expect(container.querySelector("[data-slot='footer']")).toBeNull();
   });
 });
+
+/**
+ * Reordering (#829). The rail knows a mark can be moved; the caller owns the
+ * order, so every case here is about what `onMove` is asked for and what the
+ * rail shows while it is being asked.
+ */
+describe("reordering", () => {
+  const dataTransfer = () => ({ effectAllowed: "", dropEffect: "", setData: vi.fn() });
+
+  /** jsdom has no DragEvent, so the pointer's position is put on by hand. */
+  function fireAt(type: "dragOver" | "drop", node: Element, clientY: number) {
+    const event = createEvent[type](node);
+    Object.defineProperty(event, "clientY", { value: clientY });
+    Object.defineProperty(event, "dataTransfer", { value: dataTransfer() });
+    fireEvent(node, event);
+  }
+
+  /** Give a mark a box: 30px tall, starting at `top`. */
+  function box(node: Element, top: number) {
+    node.getBoundingClientRect = () =>
+      ({ top, bottom: top + 30, height: 30, left: 0, right: 30, width: 30, x: 0, y: top, toJSON: () => ({}) }) as DOMRect;
+  }
+
+  function dragOnto(source: string, target: string, half: "upper" | "lower", drop = true) {
+    const to = chip(target);
+    box(to, 100);
+    const y = half === "upper" ? 105 : 125;
+    fireEvent.pointerDown(chip(source));
+    fireEvent.dragStart(chip(source), { dataTransfer: dataTransfer() });
+    fireAt("dragOver", to, y);
+    if (drop) fireAt("drop", to, y);
+  }
+
+  it("is not draggable, and refuses a drag, unless the caller can reorder", () => {
+    setup();
+    for (const name of ["prod-eu", "prod-us", "staging"]) expect(chip(name).getAttribute("draggable")).toBe("false");
+    // A drag that starts anyway (an image inside the mark can be dragged by
+    // the browser) is cancelled rather than left to carry the mark off.
+    expect(fireEvent.dragStart(chip("prod-us"), { dataTransfer: dataTransfer() })).toBe(false);
+    expect(chip("prod-us").getAttribute("data-dragging")).toBeNull();
+  });
+
+  it("marks every mark draggable when it can", () => {
+    setup({ onMove: vi.fn() });
+    for (const name of ["prod-eu", "prod-us", "staging"]) expect(chip(name).getAttribute("draggable")).toBe("true");
+  });
+
+  it("asks for the index the item ends up at when dropped on a mark's upper half", () => {
+    const onMove = vi.fn();
+    setup({ onMove });
+    // staging (2) onto the upper half of prod-eu (0): before it, so index 0.
+    dragOnto("staging", "prod-eu", "upper");
+    expect(onMove).toHaveBeenCalledTimes(1);
+    expect(onMove).toHaveBeenCalledWith("staging", 0);
+  });
+
+  it("counts the index with the item already taken out when it moves down", () => {
+    const onMove = vi.fn();
+    setup({ onMove });
+    // prod-eu (0) onto the lower half of prod-us (1): after it. Insertion point
+    // 2, less the slot prod-eu itself leaves, is index 1.
+    dragOnto("prod-eu", "prod-us", "lower");
+    expect(onMove).toHaveBeenCalledWith("prod-eu", 1);
+  });
+
+  it("moves to the end when dropped on the last mark's lower half", () => {
+    const onMove = vi.fn();
+    setup({ onMove });
+    dragOnto("prod-eu", "staging", "lower");
+    expect(onMove).toHaveBeenCalledWith("prod-eu", 2);
+  });
+
+  it("asks for nothing when the drop would leave the item where it is", () => {
+    const onMove = vi.fn();
+    setup({ onMove });
+    // Onto its own lower half, and onto the upper half of the mark below it.
+    dragOnto("prod-us", "prod-us", "lower");
+    dragOnto("prod-us", "staging", "upper");
+    expect(onMove).not.toHaveBeenCalled();
+  });
+
+  it("draws a rule where the item would land, and none where dropping changes nothing", () => {
+    const { container } = setup({ onMove: vi.fn() });
+    const rule = () => Array.from(container.querySelectorAll("li")).map((li) => li.getAttribute("data-drop"));
+
+    dragOnto("staging", "prod-eu", "upper", false);
+    expect(rule()).toEqual(["before", null, null]);
+
+    dragOnto("prod-eu", "staging", "lower", false);
+    expect(rule()).toEqual([null, null, "after"]);
+
+    // Either side of the mark being dragged: no rule at all.
+    dragOnto("prod-us", "prod-us", "upper", false);
+    expect(rule()).toEqual([null, null, null]);
+    dragOnto("prod-us", "staging", "upper", false);
+    expect(rule()).toEqual([null, null, null]);
+  });
+
+  it("dims the mark being dragged, and clears everything when the drag ends", () => {
+    const { container } = setup({ onMove: vi.fn() });
+    dragOnto("staging", "prod-eu", "upper", false);
+    expect(chip("staging").getAttribute("data-dragging")).toBe("true");
+
+    fireEvent.dragEnd(chip("staging"), { dataTransfer: dataTransfer() });
+    expect(chip("staging").getAttribute("data-dragging")).toBeNull();
+    expect(container.querySelector("[data-drop]")).toBeNull();
+  });
+
+  it("does not select the cluster a drag started on, and selects again on the next plain click", () => {
+    const { onSelect } = setup({ onMove: vi.fn() });
+    dragOnto("staging", "prod-eu", "upper");
+    fireEvent.click(chip("staging"));
+    expect(onSelect).not.toHaveBeenCalled();
+
+    fireEvent.pointerDown(chip("staging"));
+    fireEvent.click(chip("staging"));
+    expect(onSelect).toHaveBeenCalledWith("staging");
+  });
+
+  it("moves the focused mark one place with Ctrl/Cmd+Shift+Arrow, and does not wrap", () => {
+    const onMove = vi.fn();
+    setup({ onMove });
+    chip("prod-us").focus();
+    fireEvent.keyDown(chip("prod-us"), { key: "ArrowUp", ctrlKey: true, shiftKey: true });
+    expect(onMove).toHaveBeenLastCalledWith("prod-us", 0);
+    fireEvent.keyDown(chip("prod-us"), { key: "ArrowDown", metaKey: true, shiftKey: true });
+    expect(onMove).toHaveBeenLastCalledWith("prod-us", 2);
+
+    onMove.mockClear();
+    chip("prod-eu").focus();
+    fireEvent.keyDown(chip("prod-eu"), { key: "ArrowUp", ctrlKey: true, shiftKey: true });
+    chip("staging").focus();
+    fireEvent.keyDown(chip("staging"), { key: "ArrowDown", ctrlKey: true, shiftKey: true });
+    expect(onMove).not.toHaveBeenCalled();
+  });
+
+  it("leaves the plain arrows moving focus, not marks", () => {
+    const onMove = vi.fn();
+    setup({ onMove });
+    chip("prod-eu").focus();
+    fireEvent.keyDown(chip("prod-eu"), { key: "ArrowDown" });
+    expect(document.activeElement).toBe(chip("prod-us"));
+    expect(onMove).not.toHaveBeenCalled();
+  });
+
+  it("says where the mark went, and keeps focus on it, once the caller's new order arrives", () => {
+    const onMove = vi.fn();
+    const view = setup({ onMove });
+    expect(screen.getByRole("status").textContent).toBe("");
+    chip("staging").focus();
+    fireEvent.keyDown(chip("staging"), { key: "ArrowUp", ctrlKey: true, shiftKey: true });
+    // Nothing yet: the order is the caller's, and it has not changed.
+    expect(screen.getByRole("status").textContent).toBe("");
+
+    const reordered = [ITEMS[0], ITEMS[2], ITEMS[1]];
+    view.rerender(<ClusterRail items={reordered} activeId="prod-eu" onSelect={vi.fn()} onMove={onMove} />);
+    expect(screen.getByRole("status").textContent).toBe("staging moved to position 2 of 3");
+    expect(document.activeElement).toBe(chip("staging"));
+  });
+
+  it("announces nothing when the caller declines the move", () => {
+    const onMove = vi.fn();
+    const view = setup({ onMove });
+    chip("staging").focus();
+    fireEvent.keyDown(chip("staging"), { key: "ArrowUp", ctrlKey: true, shiftKey: true });
+    // Same order back, as a new array.
+    view.rerender(<ClusterRail items={[...ITEMS]} activeId="prod-eu" onSelect={vi.fn()} onMove={onMove} />);
+    expect(screen.getByRole("status").textContent).toBe("");
+  });
+});
