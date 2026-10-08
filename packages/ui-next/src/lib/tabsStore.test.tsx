@@ -204,13 +204,17 @@ describe("openTab carries the namespace selection of the tab it was opened from 
     narrowedPods();
     store.openTab("/k/deployments");
 
+    // Not even the array is shared between them — checked here, straight
+    // after the open: every `setTabNamespaces` below replaces a tab's array,
+    // so by the end the two would differ even if the copy had been a share.
+    expect(selection("/k/deployments")).toEqual(["team-a", "team-b"]);
+    expect(tabFor("/k/pods").namespaces![PROD]).not.toBe(tabFor("/k/deployments").namespaces![PROD]);
+
     store.setTabNamespaces(tabFor("/k/deployments").id, PROD, ["team-c"]);
     expect(selection("/k/pods")).toEqual(["team-a", "team-b"]);
 
     store.setTabNamespaces(tabFor("/k/pods").id, PROD, ["team-d"]);
     expect(selection("/k/deployments")).toEqual(["team-c"]);
-    // Not even the array is shared between them.
-    expect(tabFor("/k/pods").namespaces![PROD]).not.toBe(tabFor("/k/deployments").namespaces![PROD]);
   });
 
   it("chains: a tab opened from a tab that inherited carries the same selection on", () => {
