@@ -156,6 +156,16 @@ describe("the session store", () => {
     expect(row.state).toBe("attached");
   });
 
+  it("hands the host the namespace a local shell should start in, and still records none", async () => {
+    fakeBackend();
+    await startLocalSession({ context: "kind-srelens-demo", namespace: "payments" });
+
+    // Seventh argument: after the callbacks, the size and the command.
+    expect(startLocalTerminal.mock.calls[0][6]).toBe("payments");
+    // Where it starts, not where it is: the reader can move it from inside.
+    expect(getSessions()[0].namespace).toBe("");
+  });
+
   it("hands out the same emulator every time it is asked", async () => {
     fakeBackend();
     const id = await startPodSession(pod);

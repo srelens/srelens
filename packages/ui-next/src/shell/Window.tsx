@@ -92,6 +92,7 @@ function resetWorkspacesToHome(state: TabsState): void {
   }
 }
 import { useConsole } from "../console";
+import { canOpenClusterTerminal, openClusterTerminal } from "../lib/clusterTerminal";
 import { hint, matchWindowKey, type WindowAction } from "../lib/shortcuts";
 import { AgentConsent } from "./AgentConsent";
 import { Body } from "./Body";
@@ -488,6 +489,10 @@ export function Window({
     );
   }
 
+  function openTerminal(cluster: ClusterContext | undefined): void {
+    if (canOpenClusterTerminal(cluster)) void openClusterTerminal(cluster);
+  }
+
   // Read at call time rather than closed over: an effect installed once must
   // act on whatever the strip shows now, not whatever it showed at mount.
   function run(action: WindowAction) {
@@ -511,6 +516,10 @@ export function Window({
         return selectIndex(action.index);
       case "console":
         return setOpen(true);
+      case "terminal":
+        // The status bar's Terminal button, from the keyboard: the same
+        // conditions, so the chord does nothing where the button is absent.
+        return openTerminal(activeCtx ?? undefined);
       case "lock":
         return lockNow();
       case "zoom-in":
@@ -582,6 +591,9 @@ export function Window({
       // command is a Tauri command, so in web mode there is no vault to seal
       // and the chord could only log a refusal. It falls through untouched.
       if (action.type === "lock" && !desktop) return;
+      // The local shell is the desktop's too, and Ctrl+J is the browser's
+      // downloads list: left alone rather than swallowed for nothing.
+      if (action.type === "terminal" && !desktop) return;
       e.preventDefault();
       runRef.current(action);
     }

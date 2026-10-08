@@ -259,10 +259,10 @@ srelens opens interactive sessions in the dock:
   container (default image `busybox`, optionally sharing another container's
   process namespace) and opens a shell into it — useful for debugging distroless
   or minimal images.
-- **Local terminal** — your own shell on your machine, scoped to the current
-  cluster. srelens points `kubectl` at a private, single-context kubeconfig so you
-  can't accidentally act on another cluster. Open a new one from the dock's **+**
-  button.
+- **Local terminal** — your own shell on your machine, bound to one cluster. Open
+  it with **Terminal** in the status bar (or **Cmd/Ctrl-J**) for the cluster you
+  are looking at, or from **Terminals → New session → Local shell**. See
+  [A terminal bound to one cluster](#a-terminal-bound-to-one-cluster).
 - **Node shell** — a privileged debug pod pinned to a node that enters the host
   namespaces (via `nsenter`), for node-level troubleshooting. Open it from a
   Node's **Node shell** action; the pod is deleted automatically when you close the
@@ -271,6 +271,42 @@ srelens opens interactive sessions in the dock:
 Dock sessions stay alive when you switch tabs, so scrollback and live streams are
 preserved. Resize the dock by dragging its top edge; close individual sessions or
 the whole dock.
+
+### A terminal bound to one cluster
+
+A local terminal is opened for one cluster and stays on it, so a command typed
+there does not land on another cluster by accident:
+
+- `kubectl` and `helm` read a private kubeconfig that holds only that cluster's
+  context. `kubectl config get-contexts` lists one context, and there is nothing
+  for `kubectl config use-context` to switch to.
+- `kubectl` and `helm` in that terminal refuse to be pointed elsewhere:
+  `--kubeconfig`, `--context`, `--cluster`, `--server`/`-s` (and helm's
+  `--kube-context`, `--kube-apiserver`), and `kubectl config use-context`,
+  `set-cluster`, `set-credentials` and `set` are answered with a line naming the
+  cluster the terminal is bound to. Changing namespace with
+  `kubectl config set-context --current --namespace=…` still works.
+- In bash and zsh, `KUBECONFIG` is read-only, so `export KUBECONFIG=…` and
+  `unset KUBECONFIG` fail instead of quietly leaving the cluster.
+- The terminal opens with a line saying which cluster it is bound to, and in bash
+  and zsh the prompt starts with `[cluster/namespace]`.
+- Opened from a tab that is looking at exactly one namespace, the terminal starts
+  in that namespace.
+
+To work on another cluster, open a terminal from that cluster.
+
+**What this is not.** The shell is your own process on your own machine; this is
+a guard against accidents, not a sandbox. It does not cover:
+
+- tools other than `kubectl` and `helm` that are given another kubeconfig through
+  their own flags;
+- shells other than bash and zsh (fish, for example), which get the private
+  kubeconfig and the `kubectl`/`helm` guards but not the read-only variable or the
+  prompt tag;
+- prompt themes that redraw the whole prompt and drop the tag;
+- deliberately calling the real binary by its full path, or starting a new shell
+  with a clean environment;
+- the Windows desktop, where the terminal gets the private kubeconfig only.
 
 ## Port forwarding
 
@@ -337,6 +373,7 @@ each key applies. The ones worth knowing before you look:
 | Key | Does |
 | --- | --- |
 | **Cmd/Ctrl-K** | Command palette |
+| **Cmd/Ctrl-J** | Open a local terminal bound to the current cluster (desktop app) |
 | **?** | This list |
 | **Cmd-W** (macOS only) | Close the tab — or the window, on the last one. It comes from the macOS app menu, so there is no Windows/Linux equivalent yet. |
 | **Cmd/Ctrl +** / **-** / **0** | Interface larger / smaller / reset |

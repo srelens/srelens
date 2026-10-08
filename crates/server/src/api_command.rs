@@ -347,7 +347,7 @@ async fn run(
                 // No command: running one first is the desktop's (#820), where
                 // the shell is the reader's own machine. This command is on
                 // `WEB_DENIED_COMMANDS`, and the web client never asks for it.
-                .start(sink(), a.context, paths, a.channel, a.cols, a.rows, None)
+                .start(sink(), a.context, paths, a.channel, a.cols, a.rows, None, None)
                 .await
                 .map_err(|e| command_error(&e))?;
             json!(id)

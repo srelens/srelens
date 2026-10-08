@@ -21,6 +21,8 @@ use crate::window_streams::{Stream, WindowStreams};
 /// `command`, when given, runs first and the shell follows it (#820). It adds
 /// nothing this command did not already grant: the caller is handed a shell on
 /// this machine either way, and the web host denies the command outright.
+///
+/// `namespace`, when given, is the terminal's default namespace (#846).
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn start_terminal<R: Runtime>(
@@ -30,6 +32,7 @@ pub async fn start_terminal<R: Runtime>(
     cols: Option<u16>,
     rows: Option<u16>,
     command: Option<String>,
+    namespace: Option<String>,
     app: AppHandle<R>,
     window: Window<R>,
     manager: State<'_, TerminalManager>,
@@ -47,6 +50,7 @@ pub async fn start_terminal<R: Runtime>(
             cols,
             rows,
             command,
+            namespace,
         )
         .await?;
     owned.keep(window.label(), epoch, Stream::Terminal(session), || {

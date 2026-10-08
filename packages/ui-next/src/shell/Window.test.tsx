@@ -123,6 +123,14 @@ vi.mock("@srelens/core", async (importOriginal) => {
   };
 });
 
+// The terminal chord's two halves — may one be opened, and opening it — are
+// `lib/clusterTerminal`'s and tested there; here they are the boundary.
+const clusterTerminal = vi.hoisted(() => ({ can: true, open: vi.fn() }));
+vi.mock("../lib/clusterTerminal", () => ({
+  canOpenClusterTerminal: (cluster: unknown) => cluster !== undefined && clusterTerminal.can,
+  openClusterTerminal: clusterTerminal.open,
+}));
+
 vi.mock("../lib/tabsPersist", () => ({ loadTabsState, scheduleSave, installFlushOnUnload, flushSave }));
 
 // The zoom helper lives in Chrome (shared with its buttons); spied rather than
@@ -866,6 +874,36 @@ describe("Window accelerators", () => {
     act(() => store.openTab("/k/pods"));
     const notCancelled = fireEvent.keyDown(window, { key: "w", metaKey: true });
     expect(store.currentWorkspace().tabs).toHaveLength(2);
+    expect(notCancelled).toBe(true);
+  });
+
+  it("opens a terminal for the active cluster on ⌘J, and eats the keystroke", async () => {
+    clusterTerminal.open.mockReset();
+    await booted();
+    const notCancelled = fireEvent.keyDown(window, { key: "j", metaKey: true });
+    expect(clusterTerminal.open).toHaveBeenCalledTimes(1);
+    expect(clusterTerminal.open.mock.calls[0][0]).toMatchObject({
+      stableId: store.activeCluster(),
+    });
+    expect(notCancelled).toBe(false);
+  });
+
+  it("opens nothing on ⌘J where the status bar offers no terminal", async () => {
+    clusterTerminal.open.mockReset();
+    clusterTerminal.can = false;
+    await booted();
+    fireEvent.keyDown(window, { key: "j", metaKey: true });
+    clusterTerminal.can = true;
+    expect(clusterTerminal.open).not.toHaveBeenCalled();
+  });
+
+  it("leaves Ctrl+J to the browser in web mode, which has no local shell", async () => {
+    clusterTerminal.open.mockReset();
+    isTauri.mockReturnValue(false);
+    isApplePlatform.mockReturnValue(false);
+    await booted();
+    const notCancelled = fireEvent.keyDown(window, { key: "j", ctrlKey: true });
+    expect(clusterTerminal.open).not.toHaveBeenCalled();
     expect(notCancelled).toBe(true);
   });
 

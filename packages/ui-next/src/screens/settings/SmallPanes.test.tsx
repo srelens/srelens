@@ -26,9 +26,9 @@ function declaredActionTypes(): string[] {
   // `select-tab`'s member carries a second field after its own `;`
   // (`{ type: "select-tab"; index: number }`), so a naive "stop at the first
   // semicolon" cut would silently drop console, the lock and every zoom action
-  // — this asserts the fixture itself still has all eleven before trusting it.
-  if (types.length !== 11) {
-    throw new Error(`expected 11 window action types in the union, read ${types.length}`);
+  // — this asserts the fixture itself still has all twelve before trusting it.
+  if (types.length !== 12) {
+    throw new Error(`expected 12 window action types in the union, read ${types.length}`);
   }
   return types;
 }

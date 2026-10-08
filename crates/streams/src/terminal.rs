@@ -13,18 +13,20 @@ use std::sync::{Arc, Mutex};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 
 use crate::sink::EventSink;
+use crate::terminal_scope::{banner, Scope};
 
-/// Global counter for unique overlay kubeconfig filenames across all
+/// Global counter for unique session directory names across all
 /// TerminalManager instances in this process. Guarantees no collision even
-/// when multiple managers (e.g., per-user in a web server) create overlays.
+/// when multiple managers (e.g., per-user in a web server) create them.
 static NEXT_OVERLAY_ID: AtomicU64 = AtomicU64::new(1);
 
 struct Session {
     master: Mutex<Box<dyn MasterPty + Send>>,
     writer: Mutex<Box<dyn Write + Send>>,
     child: Mutex<Box<dyn Child + Send + Sync>>,
-    /// The temp overlay kubeconfig to clean up when the session closes.
-    overlay: PathBuf,
+    /// The session's private directory — its one-context kubeconfig and the
+    /// guards that keep it on that cluster — removed when the session closes.
+    scope: Arc<Scope>,
 }
 
 /// Owns running local terminals (keyed by numeric id).
@@ -37,34 +39,6 @@ impl Default for TerminalManager {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// Write a **standalone** kubeconfig that contains only `context` (and the one
-/// cluster/user it references) to a private temp file. Pointing `KUBECONFIG`
-/// at just this file locks the terminal to that cluster — no other contexts
-/// are listed or switchable. Returns the temp file path.
-fn write_locked_kubeconfig(overlay_id: u64, context: &str, paths: &[PathBuf]) -> Result<PathBuf, String> {
-    let yaml = srelens_kube::connect::single_context_kubeconfig_yaml(paths, context)?;
-
-    // Unique per-process name (globally unique across all TerminalManager
-    // instances), created atomically with O_EXCL so a pre-existing path/symlink
-    // can't be followed or overwritten, and mode 0600 at creation so there's no
-    // world-readable window.
-    let path = std::env::temp_dir().join(format!(
-        "srelens-term-{}-{}.kubeconfig",
-        std::process::id(),
-        overlay_id
-    ));
-    let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(0o600);
-    }
-    let mut file = opts.open(&path).map_err(|e| e.to_string())?;
-    file.write_all(yaml.as_bytes()).map_err(|e| e.to_string())?;
-    Ok(path)
 }
 
 /// The script that runs `command` and then becomes the user's own shell, for a
@@ -87,8 +61,16 @@ fn write_locked_kubeconfig(overlay_id: u64, context: &str, paths: &[PathBuf]) ->
 ///
 /// One statement per line, so nothing the command ends with — a comment, a
 /// trailing operator — can swallow the hand-over that follows it.
-fn run_then_shell(command: &str) -> String {
-    format!("trap : INT\n{command}\ntrap - INT\nexec \"$SHELL\"\n")
+///
+/// `shell_args` are the ones the shell is started with when there is no
+/// command — the rc file that confines it (#846) — so the shell that follows a
+/// command is confined the same way.
+fn run_then_shell(command: &str, shell_args: &[String]) -> String {
+    let args: String = shell_args
+        .iter()
+        .map(|arg| format!(" '{}'", arg.replace('\'', "'\\''")))
+        .collect();
+    format!("trap : INT\n{command}\ntrap - INT\nexec \"$SHELL\"{args}\n")
 }
 
 impl TerminalManager {
@@ -106,6 +88,9 @@ impl TerminalManager {
     ///
     /// `command`, when given, is run first and the shell follows it: see
     /// [`run_then_shell`].
+    ///
+    /// `namespace`, when given, is the one `kubectl` uses by default in this
+    /// terminal — the one the tab it was opened from is looking at (#846).
     #[allow(clippy::too_many_arguments)]
     pub async fn start(
         &self,
@@ -116,6 +101,7 @@ impl TerminalManager {
         cols: Option<u16>,
         rows: Option<u16>,
         command: Option<String>,
+        namespace: Option<String>,
     ) -> Result<u64, String> {
         // Refused before anything is allocated: `run_then_shell` is a POSIX
         // script for `/bin/sh`, and a platform without one would fail at the
@@ -126,13 +112,40 @@ impl TerminalManager {
         }
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let overlay_id = NEXT_OVERLAY_ID.fetch_add(1, Ordering::SeqCst);
+        let namespace = namespace.filter(|ns| !ns.is_empty());
         let ctx = context.clone();
-        let overlay = tokio::task::spawn_blocking(move || {
-            write_locked_kubeconfig(overlay_id, &ctx, &kubeconfig_paths)
+        let ns = namespace.clone();
+        let scope = tokio::task::spawn_blocking(move || {
+            Scope::create(overlay_id, &ctx, ns.as_deref(), &kubeconfig_paths)
         })
         .await
         .map_err(|e| e.to_string())??;
-        let kubeconfig = overlay.clone().into_os_string();
+        let scope = Arc::new(scope);
+        // Everything below can fail, and a session that never started has
+        // nobody to close it: the directory holds credentials, so it goes with
+        // the error rather than staying in the temp directory.
+        let started = self
+            .spawn(id, sink, &scope, context, namespace, channel, cols, rows, command)
+            .await;
+        if started.is_err() {
+            scope.remove();
+        }
+        started.map(|()| id)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn spawn(
+        &self,
+        id: u64,
+        sink: Arc<dyn EventSink>,
+        scope: &Arc<Scope>,
+        context: String,
+        namespace: Option<String>,
+        channel: String,
+        cols: Option<u16>,
+        rows: Option<u16>,
+        command: Option<String>,
+    ) -> Result<(), String> {
 
         let pty = native_pty_system();
         let pair = pty
@@ -145,14 +158,19 @@ impl TerminalManager {
             .map_err(|e| e.to_string())?;
 
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
+        let shell_start = scope.shell_start(&shell);
         let mut cmd = match &command {
             Some(command) => {
                 let mut cmd = CommandBuilder::new("/bin/sh");
                 cmd.arg("-c");
-                cmd.arg(run_then_shell(command));
+                cmd.arg(run_then_shell(command, &shell_start.args));
                 cmd
             }
-            None => CommandBuilder::new(&shell),
+            None => {
+                let mut cmd = CommandBuilder::new(&shell);
+                cmd.args(&shell_start.args);
+                cmd
+            }
         };
         // Propagate the parent environment (on desktop, PATH is already
         // resolved by fix-path-env at startup, so kubectl / helm / cloud CLIs
@@ -163,7 +181,15 @@ impl TerminalManager {
         // After the loop, so a `SHELL` the parent never had still names the
         // shell `run_then_shell` hands over to.
         cmd.env("SHELL", &shell);
-        cmd.env("KUBECONFIG", &kubeconfig);
+        cmd.env("KUBECONFIG", &scope.kubeconfig);
+        // The guards go first on PATH here, for every shell and for a command
+        // run before one; bash and zsh put them back after their rc files.
+        if let Some(path) = scope.path_with_guards(std::env::var_os("PATH")) {
+            cmd.env("PATH", path);
+        }
+        for (key, value) in &shell_start.env {
+            cmd.env(key, value);
+        }
         cmd.env("TERM", "xterm-256color");
         cmd.env("SRELENS_CONTEXT", &context);
         if let Ok(home) = std::env::var("HOME") {
@@ -181,7 +207,7 @@ impl TerminalManager {
             master: Mutex::new(pair.master),
             writer: Mutex::new(writer),
             child: Mutex::new(child),
-            overlay: overlay.clone(),
+            scope: Arc::clone(scope),
         });
         self.sessions.lock().unwrap().insert(id, session);
 
@@ -189,6 +215,13 @@ impl TerminalManager {
         let out_channel = format!("term:out:{channel}");
         let exit_channel = format!("term:exit:{channel}");
         let sessions = Arc::clone(&self.sessions);
+        let scope = Arc::clone(scope);
+        // Before the reader thread exists, so it is the first thing on the
+        // channel whatever the shell is quick enough to print.
+        sink.emit(
+            &out_channel,
+            serde_json::Value::String(banner(&context, namespace.as_deref())),
+        );
         std::thread::spawn(move || {
             let mut buf = [0u8; 8192];
             let mut carry: Vec<u8> = Vec::new();
@@ -226,11 +259,11 @@ impl TerminalManager {
                 );
             }
             sink.emit(&exit_channel, serde_json::Value::Null);
-            let _ = std::fs::remove_file(&overlay);
+            scope.remove();
             sessions.lock().unwrap().remove(&id);
         });
 
-        Ok(id)
+        Ok(())
     }
 
     /// Forward keystrokes / pasted input to a terminal's stdin.
@@ -260,18 +293,18 @@ impl TerminalManager {
     pub fn close(&self, session: u64) {
         if let Some(s) = self.sessions.lock().unwrap().remove(&session) {
             let _ = s.child.lock().unwrap().kill();
-            let _ = std::fs::remove_file(&s.overlay);
+            s.scope.remove();
         }
     }
 
-    /// Kill every running terminal's child shell and remove its overlay
-    /// kubeconfig (used when a user's environment is dropped). Mirrors
+    /// Kill every running terminal's child shell and remove its session
+    /// directory (used when a user's environment is dropped). Mirrors
     /// `close`, applied to every tracked session.
     pub fn shutdown_all(&self) {
         let mut sessions = self.sessions.lock().unwrap();
         for (_, s) in sessions.drain() {
             let _ = s.child.lock().unwrap().kill();
-            let _ = std::fs::remove_file(&s.overlay);
+            s.scope.remove();
         }
     }
 }
@@ -321,6 +354,7 @@ contexts:
                 "t1".into(),
                 Some(80),
                 Some(24),
+                None,
                 None,
             )
             .await
@@ -387,6 +421,7 @@ contexts:
                 Some(80),
                 Some(24),
                 Some("printf 'srelens-first:%s\\n' $((20+22))".into()),
+                None,
             )
             .await
             .expect("terminal starts");
@@ -416,6 +451,7 @@ contexts:
                 Some(80),
                 Some(24),
                 Some("srelens-no-such-command-820".into()),
+                None,
             )
             .await
             .expect("terminal starts");
@@ -429,7 +465,7 @@ contexts:
 
     #[test]
     fn the_hand_over_is_on_its_own_line_whatever_the_command_ends_with() {
-        let script = run_then_shell("kubectl drain node-1 # a trailing comment");
+        let script = run_then_shell("kubectl drain node-1 # a trailing comment", &[]);
         let lines: Vec<&str> = script.lines().collect();
         assert_eq!(
             lines,
@@ -440,6 +476,100 @@ contexts:
                 "exec \"$SHELL\"",
             ]
         );
+    }
+
+    #[test]
+    fn the_shell_that_follows_a_command_is_started_with_the_same_arguments() {
+        let script = run_then_shell("true", &["--rcfile".into(), "/tmp/it's here/bashrc".into()]);
+        assert_eq!(
+            script.lines().last(),
+            Some(r#"exec "$SHELL" '--rcfile' '/tmp/it'\''s here/bashrc'"#)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_terminal_says_what_it_is_bound_to_before_anything_else() {
+        let dir = tempfile::tempdir().unwrap();
+        let kc = fixture_kubeconfig(dir.path());
+        let sink = Arc::new(TestSink::default());
+        let manager = TerminalManager::new();
+        let id = manager
+            .start(
+                sink.clone(),
+                "test".into(),
+                vec![kc],
+                "t5".into(),
+                Some(80),
+                Some(24),
+                None,
+                Some("payments".into()),
+            )
+            .await
+            .expect("terminal starts");
+
+        let first = sink.payloads_for("term:out:t5").first().cloned();
+        // And the namespace is the one `kubectl` will use, not only one named
+        // in a sentence: it is in the kubeconfig the shell was given.
+        manager.input(id, "grep -c 'namespace: payments' \"$KUBECONFIG\" | sed 's/^/srelens-ns:/'\n");
+        let in_kubeconfig = wait_for_output(&sink, "t5", "srelens-ns:1").await;
+        manager.close(id);
+
+        let first = first.and_then(|v| v.as_str().map(String::from)).unwrap_or_default();
+        assert!(first.contains("bound to test, namespace payments"), "{first}");
+        assert!(in_kubeconfig, "the session kubeconfig names the namespace");
+    }
+
+    /// The guards, met the way the reader meets them: typed at the prompt of
+    /// the real shell, after its rc files have had their say about `PATH`.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn kubectl_typed_in_the_terminal_cannot_be_aimed_at_another_cluster() {
+        let dir = tempfile::tempdir().unwrap();
+        let kc = fixture_kubeconfig(dir.path());
+        let sink = Arc::new(TestSink::default());
+        let manager = TerminalManager::new();
+        let id = manager
+            .start(
+                sink.clone(),
+                "test".into(),
+                vec![kc],
+                "t7".into(),
+                Some(200),
+                Some(24),
+                None,
+                None,
+            )
+            .await
+            .expect("terminal starts");
+
+        // Refused by the guard before any `kubectl` is looked for, so this
+        // holds on a machine that has none installed.
+        manager.input(id, "kubectl --context elsewhere get pods\n");
+        let refused = wait_for_output(&sink, "t7", "This terminal is bound to test").await;
+        manager.close(id);
+
+        assert!(refused, "{}", output_on(&sink, "t7"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_terminal_for_a_context_that_is_not_there_is_refused_and_not_tracked() {
+        let dir = tempfile::tempdir().unwrap();
+        let kc = fixture_kubeconfig(dir.path());
+        let manager = TerminalManager::new();
+        let refused = manager
+            .start(
+                Arc::new(TestSink::default()),
+                "no-such-context".into(),
+                vec![kc],
+                "t6".into(),
+                Some(80),
+                Some(24),
+                None,
+                None,
+            )
+            .await;
+        assert!(refused.is_err());
+        assert!(manager.sessions.lock().unwrap().is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -457,6 +587,7 @@ contexts:
                 Some(80),
                 Some(24),
                 None,
+                None,
             )
             .await
             .expect("terminal starts");
@@ -467,14 +598,15 @@ contexts:
             .unwrap()
             .get(&id)
             .expect("session tracked")
-            .overlay
+            .scope
+            .dir
             .clone();
-        assert!(overlay.exists(), "overlay kubeconfig was written");
+        assert!(overlay.join("kubeconfig").exists(), "session kubeconfig was written");
 
         manager.shutdown_all(); // no panic; subsequent close is a no-op
 
         assert!(manager.sessions.lock().unwrap().is_empty());
-        assert!(!overlay.exists(), "overlay kubeconfig was removed");
+        assert!(!overlay.exists(), "session directory was removed");
         manager.close(id);
     }
 }

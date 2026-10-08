@@ -131,6 +131,13 @@ export interface LocalSessionRequest {
    * The caller has already asked. Nothing here confirms anything.
    */
   command?: string;
+  /**
+   * The namespace `kubectl` uses by default in this shell — the one the tab it
+   * was opened from is looking at (#846). Left out, the kubeconfig's own
+   * default stands. A starting point, not an identity: the reader can change
+   * it from inside the shell, which is why the row below still records none.
+   */
+  namespace?: string;
 }
 
 /**
@@ -268,6 +275,7 @@ export async function startLocalSession(req: LocalSessionRequest): Promise<numbe
       () => onExit(null),
       size,
       req.command,
+      req.namespace,
     ),
   );
   return id;

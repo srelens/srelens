@@ -51,6 +51,15 @@ vi.mock("../lib/helmOps", () => ({
   },
 }));
 
+// Whether a terminal can be opened, and the opening of one, belong to
+// `lib/clusterTerminal` and are tested there. Here they are the boundary: what
+// this strip does with the answer.
+const terminal = vi.hoisted(() => ({ can: true, open: vi.fn() }));
+vi.mock("../lib/clusterTerminal", () => ({
+  canOpenClusterTerminal: (cluster: unknown) => cluster !== undefined && terminal.can,
+  openClusterTerminal: terminal.open,
+}));
+
 const ctx = {
   name: "prod-eu", stableId: "prod", key: "prod", cluster: "c", server: "", isCurrent: false,
   sourceFile: "/home/dana/.kube/config", authKind: "client certificate",
@@ -60,6 +69,8 @@ beforeEach(() => {
   forwards.list = [];
   sessions.list = [];
   helmOps.list = [];
+  terminal.can = true;
+  terminal.open.mockReset();
   resetView();
   resetProbes();
   resetLock();
@@ -314,6 +325,36 @@ describe("Status", () => {
     mount(<Status contexts={[ctx]} />);
     expect(screen.getByRole("button", { name: "1 port-forward" })).toBeDefined();
     expect(screen.getByRole("button", { name: "1 shell" })).toBeDefined();
+  });
+
+  it("opens a terminal bound to the cluster the strip names", async () => {
+    setState(defaultState([ctx]));
+    mount(<Status contexts={[ctx]} />);
+    await userEvent.click(screen.getByRole("button", { name: "Terminal" }));
+    expect(terminal.open).toHaveBeenCalledTimes(1);
+    expect(terminal.open).toHaveBeenCalledWith(ctx);
+  });
+
+  it("offers no terminal where one cannot be opened", () => {
+    // The web build, or a paused cluster: absent, not a button that does nothing.
+    terminal.can = false;
+    setState(defaultState([ctx]));
+    mount(<Status contexts={[ctx]} />);
+    expect(screen.queryByText("Terminal")).toBeNull();
+  });
+
+  it("offers no terminal when no cluster is active", () => {
+    setState(defaultState([]));
+    mount(<Status contexts={[]} />);
+    expect(screen.queryByText("Terminal")).toBeNull();
+  });
+
+  it("leaves Terminal as a word, not a way in, while the vault is sealed", () => {
+    setState(defaultState([ctx]));
+    lockWorkspace();
+    mount(<Status contexts={[ctx]} />);
+    expect(screen.getByText("Terminal")).toBeDefined();
+    expect(screen.queryByRole("button", { name: "Terminal" })).toBeNull();
   });
 
   it("opens the console from Ask", async () => {
