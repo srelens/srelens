@@ -31,6 +31,12 @@ export interface ImportReport {
   promptsAdded: string[];
   promptsKeptLocal: string[];
   secretsWritten: string[];
+  /**
+   * Why the import stopped, when a step failed after writing may have begun.
+   * The lists above are still what was written before it, and no later step
+   * was attempted. `null` when every selected step finished.
+   */
+  failure: string | null;
 }
 
 /** The passphrase minimum the backend enforces; mirrored so the form can say so. */

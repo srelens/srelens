@@ -50,6 +50,7 @@ const EMPTY_REPORT: ImportReport = {
   promptsAdded: [],
   promptsKeptLocal: [],
   secretsWritten: [],
+  failure: null,
 };
 
 beforeEach(() => {
@@ -176,6 +177,46 @@ describe("BackupSettingsSection", () => {
 
     expect(screen.getByRole("alert").textContent).toMatch(/read-only/);
     expect(screen.queryByRole("status")).toBeNull();
+  });
+
+  it("shows what an import that stopped partway already wrote, beside the failure", async () => {
+    // The backend returns the report WITH the failure once anything may have
+    // been written. An error alone hid the kubeconfigs that were added.
+    importSetupBundleMock.mockResolvedValue({
+      ...EMPTY_REPORT,
+      kubeconfigsAdded: ["prod.yaml"],
+      failure: "create /config/skills: Access is denied.",
+    });
+    const user = userEvent.setup();
+    render(<BackupSettingsSection />);
+    await user.click(screen.getByRole("button", { name: /choose file/i }));
+    await user.type(screen.getByLabelText("Bundle passphrase"), "pw");
+    await user.click(screen.getByRole("button", { name: "Open" }));
+    await user.click(screen.getByRole("button", { name: /import selected/i }));
+
+    expect(screen.getByRole("alert").textContent).toMatch(/stopped.*Access is denied/);
+    const status = screen.getByRole("status").textContent ?? "";
+    expect(status).toMatch(/Added 1 kubeconfig: prod\.yaml/);
+    expect(status).toMatch(/Importing the bundle again/);
+    expect(notifyMock.success).not.toHaveBeenCalled();
+  });
+
+  it("does not claim the machine has everything when an import stopped before writing", async () => {
+    importSetupBundleMock.mockResolvedValue({
+      ...EMPTY_REPORT,
+      failure: "create /config/kubeconfigs: Access is denied.",
+    });
+    const user = userEvent.setup();
+    render(<BackupSettingsSection />);
+    await user.click(screen.getByRole("button", { name: /choose file/i }));
+    await user.type(screen.getByLabelText("Bundle passphrase"), "pw");
+    await user.click(screen.getByRole("button", { name: "Open" }));
+    await user.click(screen.getByRole("button", { name: /import selected/i }));
+
+    const status = screen.getByRole("status").textContent ?? "";
+    expect(status).toMatch(/Nothing was imported/);
+    expect(status).not.toMatch(/already has everything/);
+    expect(notifyMock.info).not.toHaveBeenCalled();
   });
 
   it("clears a stale error and report when a different file is chosen", async () => {

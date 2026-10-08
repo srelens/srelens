@@ -43,6 +43,7 @@ const EMPTY_REPORT: ImportReport = {
   promptsAdded: [],
   promptsKeptLocal: [],
   secretsWritten: [],
+  failure: null,
 };
 
 /** A passphrase that is long enough and is not a word anyone would type. */
@@ -189,6 +190,40 @@ describe("BackupPane", () => {
     expect(screen.queryByText("That bundle could not be opened")).toBeNull();
     // The backend's own words survive the titling.
     expect(screen.getByText(/read-only/)).toBeDefined();
+  });
+
+  it("shows what an import that stopped partway already wrote, beside the failure", async () => {
+    // The backend returns the report WITH the failure once anything may have
+    // been written. An error alone hid the kubeconfigs that were added.
+    core.importSetupBundle.mockResolvedValue({
+      ...EMPTY_REPORT,
+      kubeconfigsAdded: ["prod.yaml"],
+      failure: "create /config/skills: Access is denied.",
+    });
+    render(<BackupPane />);
+    const user = await openTheBundle();
+    await user.click(screen.getByRole("button", { name: /import selected/i }));
+
+    expect(screen.getByText("The import stopped before it finished")).toBeDefined();
+    expect(screen.getByText(/Access is denied/)).toBeDefined();
+    const status = screen.getByRole("status").textContent ?? "";
+    expect(status).toMatch(/Added 1 kubeconfig: prod\.yaml/);
+    expect(status).toMatch(/Importing the bundle again/);
+    expect(notifications.success).not.toHaveBeenCalled();
+  });
+
+  it("does not claim the machine has everything when an import stopped before writing", async () => {
+    core.importSetupBundle.mockResolvedValue({
+      ...EMPTY_REPORT,
+      failure: "create /config/kubeconfigs: Access is denied.",
+    });
+    render(<BackupPane />);
+    const user = await openTheBundle();
+    await user.click(screen.getByRole("button", { name: /import selected/i }));
+
+    const status = screen.getByRole("status").textContent ?? "";
+    expect(status).toMatch(/Nothing was imported/);
+    expect(status).not.toMatch(/already has everything/);
   });
 
   it("cannot import a manifest that belongs to a file the reader has left", async () => {

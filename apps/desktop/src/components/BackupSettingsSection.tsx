@@ -94,7 +94,8 @@ export function noChangeVerdict(report: ImportReport, wholeBundle: boolean): str
   // clusters and imports the settings alone has been told nothing about the
   // clusters, so the bundle-wide sentence is only available when every group
   // the bundle offered was selected.
-  return report.kubeconfigsRejected.length > 0 || !wholeBundle
+  // An import that stopped has not checked the steps after the failure.
+  return report.failure || report.kubeconfigsRejected.length > 0 || !wholeBundle
     ? "Nothing was imported."
     : "Nothing to import — this machine already has everything in that bundle.";
 }
@@ -142,6 +143,11 @@ export function reportLines(report: ImportReport): string[] {
     (n, list) => `Kept your own version of ${n} ${plural(n, "prompt")}: ${list}.`,
   );
   say(report.secretsWritten, (_n, list) => `Stored ${list}.`);
+  if (report.failure) {
+    lines.push(
+      "The steps after the failure were not attempted. Importing the bundle again once it is fixed adds them, and skips what is already here.",
+    );
+  }
   return lines;
 }
 
@@ -293,7 +299,10 @@ export function BackupSettingsSection() {
       });
       if (!current(token)) return;
       setOutcome({ report: result, wholeBundle });
-      if (importWroteSomething(result)) {
+      if (result.failure) {
+        // Stopped partway: the report says what landed, the alert why it stopped.
+        setError(`The import stopped before it finished: ${result.failure}`);
+      } else if (importWroteSomething(result)) {
         notify.success("Setup imported. Reload srelens to see the imported settings.");
       } else {
         notify.info(noChangeVerdict(result, wholeBundle));
