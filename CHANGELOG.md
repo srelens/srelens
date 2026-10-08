@@ -33,11 +33,14 @@ the API they need, API 0.6, until it is frozen as 1.0 (srelens/srelens#582). Whe
 run:
 
 - Windows: out of the box.
-- Linux: not out of the box. It needs the launcher `srelens-sandbox-launch`, which the
-  bundles do not ship, Landlock and a cgroup v2 directory delegated to the user, set up by
-  hand; `SRELENS_SANDBOX_LAUNCHER` and `SRELENS_SANDBOX_CGROUP_ROOT` name them
-  ([what is needed](docs/extensions/manifest.md#where-executable-apps-run)). Without them
-  the app installs, but srelens refuses to start its sidecar and says what is missing.
+- Linux: out of the box on a systemd desktop with Landlock. The deb, rpm, AppImage and AUR
+  packages ship the launcher `srelens-sandbox-launch`, and srelens asks your systemd user
+  manager for a delegated cgroup. On systemd before 252 (Ubuntu 22.04) and the RHEL 9
+  family, delegate the `cpu` controller first
+  ([how](docs/extensions/manifest.md#where-executable-apps-run)). Without systemd,
+  `SRELENS_SANDBOX_LAUNCHER` and `SRELENS_SANDBOX_CGROUP_ROOT` name them. Where a piece is
+  missing, the app installs, but srelens refuses to start its sidecar and says what is
+  missing.
 - macOS: not yet. srelens refuses to start any sidecar until its memory and CPU watchdog has
   been checked with Seatbelt on a macOS 27 Mac.
 - The web host: it refuses to install an executable app.

@@ -279,6 +279,18 @@ pub fn validate_kubeconfig_yaml(yaml: &str) -> Result<usize, String> {
 /// at this file means `kubectl config get-contexts` lists just that context and
 /// `use-context` can't switch to any other.
 pub fn single_context_kubeconfig_yaml(paths: &[PathBuf], context: &str) -> Result<String, String> {
+    single_context_kubeconfig_yaml_in(paths, context, None)
+}
+
+/// [`single_context_kubeconfig_yaml`], with the context's default namespace
+/// replaced by `namespace` when one is given — so a terminal opened from a tab
+/// that is looking at one namespace starts in it (#846). `None` keeps whatever
+/// the kubeconfig names.
+pub fn single_context_kubeconfig_yaml_in(
+    paths: &[PathBuf],
+    context: &str,
+    namespace: Option<&str>,
+) -> Result<String, String> {
     // Map the (possibly disambiguated) display name back to its owning file and
     // in-file name, so a duplicate-named context scopes to its own cluster/user.
     let resolved = resolve_context(paths, context);
@@ -294,23 +306,27 @@ pub fn single_context_kubeconfig_yaml(paths: &[PathBuf], context: &str) -> Resul
         let target = resolved.as_ref().expect("checked pinned context");
         let config = Kubeconfig::read_from(&target.source)
             .map_err(|_| "Pinned kubeconfig could not be read".to_string())?;
-        return standalone_context_yaml(config, &target.original_name);
+        return standalone_context_yaml(config, &target.original_name, namespace);
     }
     // Prefer the owning file (correct for duplicate names); fall back to the
     // merged view when the context is a single config split across files.
     if let Some(target) = &resolved {
         if let Ok(config) = Kubeconfig::read_from(&target.source) {
-            if let Ok(yaml) = standalone_context_yaml(config, &in_config) {
+            if let Ok(yaml) = standalone_context_yaml(config, &in_config, namespace) {
                 return Ok(yaml);
             }
         }
     }
-    standalone_context_yaml(load_kubeconfigs(paths)?, &in_config)
+    standalone_context_yaml(load_kubeconfigs(paths)?, &in_config, namespace)
 }
 
 /// Build a standalone kubeconfig YAML keeping only `context` plus the one
 /// cluster and user it references, with `current-context` pinned to it.
-fn standalone_context_yaml(mut config: Kubeconfig, context: &str) -> Result<String, String> {
+fn standalone_context_yaml(
+    mut config: Kubeconfig,
+    context: &str,
+    namespace: Option<&str>,
+) -> Result<String, String> {
     let named = config
         .contexts
         .iter()
@@ -331,6 +347,13 @@ fn standalone_context_yaml(mut config: Kubeconfig, context: &str) -> Result<Stri
     }
 
     config.contexts.retain(|c| c.name == context);
+    if let Some(namespace) = namespace {
+        for named in &mut config.contexts {
+            if let Some(inner) = named.context.as_mut() {
+                inner.namespace = Some(namespace.to_string());
+            }
+        }
+    }
     config.clusters.retain(|c| c.name == inner.cluster);
     config.auth_infos.retain(|a| a.name == inner_user);
     config.current_context = Some(context.to_string());
@@ -1125,6 +1148,37 @@ mod tests {
             assert_eq!(mode & 0o777, 0o600);
         }
         let _ = std::fs::remove_file(&out);
+    }
+
+    #[test]
+    fn single_context_kubeconfig_starts_in_the_namespace_it_is_given() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!(
+            "srelens-single-context-ns-{}-{}.yaml",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::write(
+            &path,
+            "apiVersion: v1\nkind: Config\ncurrent-context: ctx-a\nclusters:\n  - name: cluster-a\n    cluster: { server: https://a:6443 }\nusers:\n  - name: user-a\n    user: {}\ncontexts:\n  - name: ctx-a\n    context: { cluster: cluster-a, user: user-a, namespace: from-file }\n",
+        )
+        .unwrap();
+        let namespace_of = |yaml: &str| {
+            let config = Kubeconfig::from_yaml(yaml).unwrap();
+            config.contexts[0].context.as_ref().unwrap().namespace.clone()
+        };
+
+        let given =
+            single_context_kubeconfig_yaml_in(&[path.clone()], "ctx-a", Some("payments")).unwrap();
+        let kept = single_context_kubeconfig_yaml_in(&[path.clone()], "ctx-a", None).unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(namespace_of(&given).as_deref(), Some("payments"));
+        // Nothing asked for: the kubeconfig's own default stands.
+        assert_eq!(namespace_of(&kept).as_deref(), Some("from-file"));
     }
 
     #[test]

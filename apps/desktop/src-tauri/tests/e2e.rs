@@ -262,6 +262,7 @@ impl Harness {
 /// A capability registered later with no case here fails the coverage
 /// assertion at the end of `full_capability_suite`.
 const EXCLUDED: &[(&str, &str)] = &[
+    ("k8s.runJob", "broker-only declaration stub; scoped Job authorization, results and cleanup are exercised in registry lifecycle tests"),
     (
         "k8s.nodeJournalLogs",
         "requires SSH access to the node host; exercised via unit tests with mocked sessions",
@@ -1070,6 +1071,12 @@ async fn run_suite() {
         .iter()
         .any(|d| d["name"] == DEPLOY));
 
+    let images = h.ok("k8s.listWorkloadImages", json!({"context":ctx,"namespace":NS,"kind":"Deployment"})).await;
+    let workload = images["items"].as_array().unwrap().iter().find(|row| row["name"] == DEPLOY).expect("deployment image identity");
+    assert_eq!(workload["namespace"], NS);
+    assert!(workload["uid"].as_str().is_some_and(|uid| !uid.is_empty()));
+    assert!(workload["containers"].as_array().unwrap().iter().any(|row| row["type"] == "regular" && row["image"].as_str().is_some_and(|image| !image.is_empty())));
+
     let out = h
         .ok(
             "k8s.listStatefulSets",
@@ -1415,6 +1422,77 @@ async fn run_suite() {
         .iter()
         .any(|i| i["name"] == CM));
 
+    // Selectors the API server applies and fields projected per item — the
+    // one-call answer to a question no summary tool covers, spelled the way
+    // the tool schema advertises it to an MCP client.
+    let out = h
+        .ok(
+            "k8s.listResource",
+            json!({
+                "context": ctx, "kind": "Pod", "namespace": NS,
+                "labelSelector": format!("app={DEPLOY}"),
+                "fields": [".spec.nodeName", ".spec.nonexistent"],
+            }),
+        )
+        .await;
+    let pods = out["items"].as_array().unwrap();
+    assert!(!pods.is_empty(), "the Deployment's pods are Running by now: {out}");
+    for pod in pods {
+        assert!(pod["name"].as_str().unwrap().starts_with(&format!("{DEPLOY}-")), "{out}");
+        assert!(pod["fields"][".spec.nodeName"].is_string(), "{out}");
+        assert_eq!(pod["fields"][".spec.nonexistent"], Value::Null, "{out}");
+    }
+    let out = h
+        .ok(
+            "k8s.listResource",
+            json!({
+                "context": ctx, "kind": "ConfigMap", "namespace": NS,
+                "fieldSelector": format!("metadata.name={CM}"),
+                "fields": [".data.greeting"],
+            }),
+        )
+        .await;
+    let only = out["items"].as_array().unwrap();
+    assert_eq!(only.len(), 1, "the field selector narrows to one: {out}");
+    assert_eq!(only[0]["fields"][".data.greeting"], "hello");
+    let out = h
+        .ok(
+            "k8s.listResource",
+            json!({ "context": ctx, "kind": "Node", "fields": [".status.allocatable"] }),
+        )
+        .await;
+    let nodes = out["items"].as_array().unwrap();
+    assert!(!nodes.is_empty(), "a cluster has at least one Node: {out}");
+    assert!(
+        nodes
+            .iter()
+            .all(|n| n["fields"][".status.allocatable"]["cpu"].is_string()),
+        "{out}"
+    );
+    // listResource reads Secrets without consent: a projected value arrives
+    // blank, and the consent-gated k8s.getSecret stays the only way to it.
+    let out = h
+        .ok(
+            "k8s.listResource",
+            json!({
+                "context": ctx, "kind": "Secret", "namespace": NS,
+                "fieldSelector": format!("metadata.name={SECRET}"),
+                "fields": [".data", ".data.password"],
+            }),
+        )
+        .await;
+    let text = out.to_string();
+    assert!(text.contains("password"), "{text}");
+    assert!(!text.contains("aHVudGVyMg==") && !text.contains("hunter2"), "{text}");
+    // A JSON Pointer would come back null on every item; refused instead.
+    let err = h
+        .err(
+            "k8s.listResource",
+            json!({ "context": ctx, "kind": "Node", "fields": ["/status/allocatable"] }),
+        )
+        .await;
+    assert!(err.contains("not a supported path"), "{err}");
+
     // === 2. Object / manifest ================================================
     println!("=== object/manifest ===");
     let out = h
@@ -1433,6 +1511,19 @@ async fn run_suite() {
         )
         .await;
     assert_eq!(out["object"]["metadata"]["name"], DEPLOY);
+    let out = h
+        .ok(
+            "k8s.getObject",
+            json!({
+                "context": ctx, "kind": "Deployment", "namespace": NS, "name": DEPLOY,
+                "fields": [".spec.template.spec.containers[0].image"],
+            }),
+        )
+        .await;
+    assert_eq!(
+        out["object"],
+        json!({ ".spec.template.spec.containers[0].image": "busybox:1.36" })
+    );
 
     // validateManifest: this capability never propagates a raw Result::Err
     // for a well-formed-but-invalid document — it always returns
@@ -2058,6 +2149,76 @@ async fn run_suite() {
         )
         .await;
     assert_eq!(out["ok"], true);
+
+    // #389: roll the restart back. Wait for the restart's ReplicaSet (revision
+    // 2) first: rolled back before the controller made it, the original
+    // template would be re-adopted as revision 2, not 3.
+    let dl = deadline(120);
+    let original = loop {
+        let out = h
+            .ok(
+                "k8s.listReplicaSets",
+                json!({ "context": ctx, "namespace": NS, "ownerName": DEPLOY }),
+            )
+            .await;
+        let rows = out["replicasets"].as_array().cloned().unwrap_or_default();
+        let named = |rev: &str| {
+            rows.iter()
+                .find(|r| r["revision"] == rev)
+                .and_then(|r| r["name"].as_str())
+                .map(str::to_string)
+        };
+        if let (Some(first), Some(_)) = (named("1"), named("2")) {
+            break first;
+        }
+        if Instant::now() > dl {
+            panic!("timed out waiting for {DEPLOY}'s second revision: {out}");
+        }
+        poll_sleep().await;
+    };
+    let refused = h
+        .err(
+            "k8s.rolloutUndo",
+            json!({ "context": ctx, "namespace": NS, "name": DEPLOY, "revision": 99 }),
+        )
+        .await;
+    assert!(refused.contains("has no revision 99"), "{refused}");
+    let out = h
+        .ok(
+            "k8s.rolloutUndo",
+            json!({ "context": ctx, "namespace": NS, "name": DEPLOY, "revision": 1 }),
+        )
+        .await;
+    assert_eq!(out["revision"], 1);
+    let dl = deadline(120);
+    loop {
+        let out = h
+            .ok(
+                "k8s.listReplicaSets",
+                json!({ "context": ctx, "namespace": NS, "ownerName": DEPLOY }),
+            )
+            .await;
+        if out["replicasets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["name"] == original.as_str() && r["revision"] == "3")
+        {
+            break;
+        }
+        if Instant::now() > dl {
+            panic!("timed out waiting for {original} to come back as revision 3: {out}");
+        }
+        poll_sleep().await;
+    }
+    let refused = h
+        .err(
+            "k8s.rolloutUndo",
+            json!({ "context": ctx, "namespace": NS, "name": DEPLOY, "revision": 3 }),
+        )
+        .await;
+    assert!(refused.contains("already runs revision 3"), "{refused}");
+    println!("{DEPLOY}: rolled back to revision 1 (now revision 3)");
 
     // Review afresh only if a controller races this live fixture's pinned write.
     let (out, reviewed) = h
@@ -3434,6 +3595,104 @@ async fn extensions_and_gitops(h: &mut Harness, ctx: &str, settings: &TempSettin
     )
     .await;
 
+    // #569. A metric provider's PromQL template, bound for a Deployment and sent
+    // through its network.http binding to a one-request Prometheus stand-in on
+    // loopback, with the payload `@srelens/core`'s wrapper sends; the answer is
+    // the chart the host draws.
+    println!("=== extensions: metric provider ===");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+    let port = listener.local_addr().unwrap().port();
+    let served = std::thread::spawn(move || {
+        use std::io::{BufRead, BufReader, Write};
+        let (stream, _) = listener.accept().expect("accept");
+        let mut reader = BufReader::new(stream);
+        let mut request_line = String::new();
+        reader.read_line(&mut request_line).unwrap();
+        loop {
+            let mut header = String::new();
+            if reader.read_line(&mut header).unwrap() == 0 || header.trim().is_empty() {
+                break;
+            }
+        }
+        // One sample at the first step of the range the host asked for.
+        let target = request_line.split(' ').nth(1).unwrap_or_default();
+        let start = target
+            .split(['?', '&'])
+            .find_map(|pair| pair.strip_prefix("start="))
+            .unwrap_or("0")
+            .to_owned();
+        let body = format!(
+            r#"{{"status":"success","data":{{"resultType":"matrix","result":[{{"metric":{{"pod":"web-1"}},"values":[[{start},"0.5"]]}}]}}}}"#
+        );
+        write!(
+            reader.get_mut(),
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+        request_line
+    });
+    let observability = json!({
+        "id": "org.example.observability", "name": "Observability", "version": "0.1.0",
+        "srelensApiVersion": "^0.7", "kind": "declarative",
+        "permissions": [{"capability": "network.http", "hosts": ["${settings.prometheusUrl}"]}],
+        "settings": [{"id": "prometheusUrl", "type": "url", "title": "Prometheus URL", "required": true}],
+        "capabilities": [{"name": "prom", "title": "Prometheus range query", "target": "network.http",
+            "inputs": [], "arguments": {"url": "${settings.prometheusUrl}", "path": "/api/v1/query_range"}}],
+        "contributions": {"pages": [], "detailTabs": [], "detailLinks": [],
+            "metricProviders": [{"id": "cpu", "title": "CPU", "capability": "prom", "language": "promql",
+                "forKinds": ["apps/Deployment"], "unit": "cores",
+                "query": "sum(rate(container_cpu_usage_seconds_total{namespace=\"${namespace}\",pod=~\"${workload:regex}-.*\"}[${step}]))"}]}
+    });
+    h.ok(
+        "extensions.configure",
+        json!({"action": "install", "manifest": observability.to_string(), "grants": ["network.http"]}),
+    )
+    .await;
+    h.ok(
+        "extensions.configure",
+        json!({"action": "settings", "id": "org.example.observability",
+               "settings": {"prometheusUrl": format!("http://127.0.0.1:{port}")}}),
+    )
+    .await;
+    h.ok(
+        "extensions.configure",
+        json!({"action": "loopbackHttp", "id": "org.example.observability", "allowLoopbackHttp": true}),
+    )
+    .await;
+    let listed = h.ok("extensions.list", json!({})).await;
+    let observability_revision = listed["plugins"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["manifest"]["id"] == "org.example.observability")
+        .and_then(|p| p["revision"].as_u64())
+        .unwrap_or_else(|| panic!("the observability app is installed: {listed}"));
+    let query = json!({"id": "org.example.observability", "revision": observability_revision,
+        "provider": "cpu", "context": ctx, "namespace": NS, "resourceKind": "apps/Deployment",
+        "name": "web", "rangeSeconds": 3600});
+    // The Rust spelling is refused: the wrapper's camelCase is the contract.
+    let mut snake = query.clone();
+    snake["resource_kind"] = snake["resourceKind"].take();
+    snake.as_object_mut().unwrap().remove("resourceKind");
+    let err = h.err("extensions.queryProvider", snake).await;
+    assert!(err.contains("resource_kind"), "{err}");
+    let answer = h.ok("extensions.queryProvider", query).await;
+    assert_eq!(answer["kind"], "metrics", "{answer}");
+    assert_eq!(answer["chart"]["unit"], "cores", "{answer}");
+    assert_eq!(answer["chart"]["series"][0]["name"], "pod=\"web-1\"", "{answer}");
+    assert_eq!(answer["chart"]["series"][0]["values"][0], json!(0.5), "{answer}");
+    let request_line = served.join().expect("the server thread");
+    assert!(
+        request_line.starts_with("GET /api/v1/query_range?query=sum%28rate%28container_cpu_usage_seconds_total%7Bnamespace%3D%22"),
+        "{request_line}"
+    );
+    h.ok(
+        "extensions.configure",
+        json!({"action": "remove", "id": "org.example.observability"}),
+    )
+    .await;
+
     // #562. A package file, reviewed and installed as Settings → Apps sends it: the
     // manifest, signature and digest list the review returns are checked together, then
     // the bytes are installed, unpacked into the app's own directory, and its logo listed.
@@ -3503,6 +3762,12 @@ async fn extensions_and_gitops(h: &mut Harness, ctx: &str, settings: &TempSettin
         )
         .await;
     assert!(item_names(&out).contains(&KUSTOMIZATION), "{out}");
+    let available = h.ok("extensions.bindingAvailability", json!({"id":"org.example.flux","revision":revision(&flux_app),"context":ctx,"namespace":NS,"bindings":["kustomizations"]})).await;
+    assert_eq!(available["bindings"][0]["state"], "served", "{available}");
+    // A reader app cannot acquire container execution through the Job facade.
+    // Constrained Job lifecycle and cancellation are exercised by registry tests.
+    h.err("extensions.runJob", json!({"id":"org.example.flux","revision":revision(&flux_app),"context":ctx,"namespace":NS,"capability":"undeclared-job","inputs":{}})).await;
+    h.err("extensions.callOperation", json!({"id":"org.example.flux","revision":revision(&flux_app),"context":ctx,"operation":"undeclared","params":{}})).await;
     let columns = h
         .ok(
             "extensions.resolveColumns",

@@ -89,7 +89,8 @@ const tables: Record<string, Record<string, "required" | "optional">> = {
     contributions: "required",
   } satisfies Presence<ExtensionManifest>,
   Sidecar: { binaries: "required", operations: "required" } satisfies Presence<ExtensionSidecar>,
-  Operation: { name: "required", title: "required", inputs: "optional" } satisfies Presence<ExtensionOperation>,
+  Operation: { name: "required", title: "required", inputs: "optional", view: "optional" } satisfies Presence<ExtensionOperation>,
+  OperationView: { autoRun: "optional", stream: "optional", hidden: "optional" } satisfies Presence<NonNullable<ExtensionOperation["view"]>>,
   OperationInput: {
     name: "required", title: "optional", type: "required", required: "optional", maxLength: "optional",
   } satisfies Presence<ExtensionOperationInput>,
@@ -138,7 +139,22 @@ const tables: Record<string, Record<string, "required" | "optional">> = {
     badges: "optional",
     commands: "optional",
     resourceLinks: "optional",
+    metricProviders: "optional",
+    logProviders: "optional",
+    traceProviders: "optional",
   } satisfies Presence<Contributions>,
+  MetricProvider: {
+    id: "required", title: "required", capability: "required", language: "required", forKinds: "required",
+    query: "required", unit: "required",
+  } satisfies Presence<NonNullable<Contributions["metricProviders"]>[number]>,
+  LogProvider: {
+    id: "required", title: "required", capability: "required", language: "required", forKinds: "required",
+    query: "required",
+  } satisfies Presence<NonNullable<Contributions["logProviders"]>[number]>,
+  TraceProvider: {
+    id: "required", title: "required", capability: "required", language: "required", forKinds: "required",
+    query: "required",
+  } satisfies Presence<NonNullable<Contributions["traceProviders"]>[number]>,
   PaletteCommand: { id:"required", title:"required", target:"required", forKinds:"optional" } satisfies Presence<NonNullable<Contributions["commands"]>[number]>,
   ResourceLink: { id:"required", from:"required", to:"required", relation:"required", match:"required" } satisfies Presence<NonNullable<Contributions["resourceLinks"]>[number]>,
   LinkMatch: { label:"optional", namespaceLabel:"optional", ownerReference:"optional", annotation:"optional", parse:"optional", defaultNamespace:"optional", name:"optional", path:"optional" } satisfies Presence<NonNullable<Contributions["resourceLinks"]>[number]["match"]>,

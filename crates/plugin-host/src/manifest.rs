@@ -10,6 +10,7 @@ mod builtin;
 mod cards;
 mod network;
 mod pods;
+mod providers;
 mod settings;
 mod sidecar;
 mod versions;
@@ -17,6 +18,7 @@ pub use builtin::{builtin_link_kind, BuiltinKind, BUILTIN_LINK_KINDS};
 pub use cards::*;
 pub use network::*;
 pub use pods::*;
+pub use providers::*;
 pub use settings::*;
 pub use sidecar::*;
 pub use versions::{MAX_BINDING_VERSIONS, MAX_PATH_OVERRIDES};
@@ -24,7 +26,7 @@ pub use versions::{MAX_BINDING_VERSIONS, MAX_PATH_OVERRIDES};
 /// Extension API versions this host implements, oldest first. A manifest is accepted when
 /// its `srelensApiVersion` range matches any of them. How versions are added and retired
 /// is specified in docs/extensions/specification.md.
-pub const SUPPORTED_API_VERSIONS: &[&str] = &["0.3.0", "0.4.0", "0.5.0", "0.6.0"];
+pub const SUPPORTED_API_VERSIONS: &[&str] = &["0.3.0", "0.4.0", "0.5.0", "0.6.0", "0.7.0", "0.8.0"];
 
 /// The `format` values JSON Schema draft-07 defines.
 const STANDARD_FORMATS: &[&str] = &[
@@ -190,6 +192,16 @@ const fn api_0_6(path: &'static str) -> ApiField {
     }
 }
 
+/// A field API 0.7 added (#569).
+const fn api_0_7(path: &'static str) -> ApiField {
+    ApiField {
+        path,
+        introduced: "0.7.0",
+        removed: None,
+        form: None,
+    }
+}
+
 /// Whether `kind` is API 0.6's executable kind (#574).
 fn executable_kind(_manifest: &Value, kind: &str) -> bool {
     kind == "executable"
@@ -217,6 +229,19 @@ fn builtin_target(manifest: &Value, to: &str) -> bool {
 /// supported API version. A manifest may use one only when every version its range
 /// admits has it. A rename is a removal plus an addition.
 pub const API_FIELDS: &[ApiField] = &[
+    ApiField { path: "sidecar.operations[].view", introduced: "0.8.0", removed: None, form: None },
+    ApiField { path: "capabilities[].target", introduced: "0.8.0", removed: None,
+        form: Some(ApiForm { name: "workload image or scoped Job", matches: |_manifest, value| matches!(value, "k8s.listWorkloadImages" | "k8s.runJob") }) },
+    // A duration selected from declared options, without moving the card's reader (#582).
+    ApiField {
+        path: "contributions.dashboardCards[].predicate.within",
+        introduced: "0.7.0",
+        removed: None,
+        form: Some(ApiForm {
+            name: "a settings-backed duration",
+            matches: |_manifest, text| srelens_capability::settings::mentions_setting(text),
+        }),
+    },
     // Added to API 0.3 in place while the platform was being built, then moved to a line
     // of their own before a signed release used them (#709): a host that implements 0.3
     // without them is told "requires API 0.4" rather than meeting an unknown field.
@@ -266,6 +291,13 @@ pub const API_FIELDS: &[ApiField] = &[
         ..api_0_6("kind")
     },
     api_0_6("sidecar"),
+    // Metric, log and trace providers (#569). API 0.6 had been published in srelens
+    // builds without them (0.15.1-192 and later), so they join API 0.7. Each sends its
+    // query through a `network.http` binding, which API 0.4 already had, so each list
+    // is the one new field.
+    api_0_7("contributions.metricProviders"),
+    api_0_7("contributions.logProviders"),
+    api_0_7("contributions.traceProviders"),
 ];
 
 /// Rejects a field in `raw` that is missing from any of `versions`: every supported API
@@ -573,6 +605,27 @@ pub struct Contributions {
         skip_serializing_if = "Vec::is_empty"
     )]
     pub resource_links: Vec<ResourceLink>,
+    /// PromQL range queries drawn as charts on workload and pod overviews (#569).
+    #[serde(
+        default,
+        rename = "metricProviders",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub metric_providers: Vec<MetricProvider>,
+    /// LogQL queries the log view can follow as a source beside Kubernetes (#569).
+    #[serde(
+        default,
+        rename = "logProviders",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub log_providers: Vec<LogProvider>,
+    /// TraceQL searches listed on workload and pod overviews (#569).
+    #[serde(
+        default,
+        rename = "traceProviders",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub trace_providers: Vec<TraceProvider>,
 }
 
 /// Most palette commands one manifest may declare.
@@ -1951,6 +2004,7 @@ impl Manifest {
         network::permission_problems(self, &mut problems);
         pods::pod_problems(self, &mut problems);
         sidecar::sidecar_problems(self, &mut problems);
+        providers::provider_problems(self, &mut problems);
         self.command_problems(&mut problems);
         self.link_problems(&mut problems);
         problems

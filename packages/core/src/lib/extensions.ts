@@ -2,6 +2,7 @@ import { invokeCapability } from "../transport/transport";
 import { isTauri } from "../transport/platform";
 import type { ActionPredicate } from "./actionPredicates";
 import type { CapabilityImpact } from "./capabilities";
+import type { NativeTimeseriesData, NativeTimeseriesUnit } from "./nativeComponents";
 // These mirror crates/plugin-host/src/manifest.rs and crates/registry/src/extensions.rs;
 // extensionTypes.test.ts fails when a field name or its optionality differs.
 interface ExtensionContributionBase {
@@ -261,6 +262,53 @@ export function podNamespaces(manifest: unknown, capability: string): string[] {
     ? scoped.namespaces.filter((namespace): namespace is string => typeof namespace === "string")
     : [];
 }
+/** The fields every provider has: a query template sent through a `network.http` binding. */
+interface ExtensionProviderBase {
+  id: string;
+  title: string;
+  /** The `network.http` binding the query goes through. */
+  capability: string;
+  forKinds: string[];
+  /**
+   * The query, with `${cluster}`, `${namespace}`, `${workload}` or `${pod}` inside
+   * double-quoted strings, which the host escapes, and a metric provider's
+   * `${range}` and `${step}`. The host binds every one; the app sends nothing.
+   */
+  query: string;
+}
+/** A PromQL range query, drawn as a chart on each kind's overview. */
+export interface ExtensionMetricProvider extends ExtensionProviderBase {
+  language: "promql";
+  unit: NativeTimeseriesUnit;
+}
+/** A LogQL query the log view can follow as a source beside Kubernetes. */
+export interface ExtensionLogProvider extends ExtensionProviderBase {
+  language: "logql";
+}
+/** A TraceQL search, listed on each kind's overview. */
+export interface ExtensionTraceProvider extends ExtensionProviderBase {
+  language: "traceql";
+}
+/** The three provider lists, by what they answer. */
+export interface ExtensionProviderLists {
+  metrics: ExtensionMetricProvider;
+  logs: ExtensionLogProvider;
+  traces: ExtensionTraceProvider;
+}
+const PROVIDER_LISTS = {
+  metrics: "metricProviders",
+  logs: "logProviders",
+  traces: "traceProviders",
+} as const;
+/** The providers of one list that `manifest` declares for `kind`, in manifest order. */
+export function providersFor<K extends keyof ExtensionProviderLists>(
+  manifest: ExtensionManifest,
+  list: K,
+  kind: string,
+): ExtensionProviderLists[K][] {
+  const declared = manifest.contributions[PROVIDER_LISTS[list]] as ExtensionProviderLists[K][] | undefined;
+  return (declared ?? []).filter((provider) => provider.forKinds.includes(kind));
+}
 export interface ExtensionManifest {
   /** Editor metadata naming the manifest's JSON Schema; the host ignores it. */
   $schema?: string;
@@ -335,6 +383,12 @@ export interface ExtensionManifest {
     badges?: ExtensionBadge[];
     commands?: ExtensionCommand[];
     resourceLinks?: ExtensionResourceLink[];
+    /** PromQL range queries drawn as charts on workload and pod overviews (#569). */
+    metricProviders?: ExtensionMetricProvider[];
+    /** LogQL queries the log view can follow as a source (#569). */
+    logProviders?: ExtensionLogProvider[];
+    /** TraceQL searches listed on workload and pod overviews (#569). */
+    traceProviders?: ExtensionTraceProvider[];
   };
 }
 /**
@@ -350,6 +404,7 @@ export interface ExtensionOperation {
   name: string;
   title: string;
   inputs?: ExtensionOperationInput[];
+  view?: { autoRun?: boolean; stream?: boolean; hidden?: boolean };
 }
 export interface ExtensionOperationInput {
   name: string;
@@ -497,8 +552,8 @@ export type ExtensionChange =
   | { action: "unsignedApps"; allowUnsignedApps: boolean }
   /** `keyId` is the key the signature names (#559), as the catalog review returned it. */
   | { action: "install"; manifest: string; grants: string[]; signature?: number[]; keyId?: string; reviewedRevision?: number }
-  /** Installs a package file (#562), sent as base64; the host verifies it again. */
-  | { action: "installPackage"; package: string; grants: string[]; reviewedRevision?: number }
+  /** Installs a package file (#562): native bytes or existing base64; the host verifies it again. */
+  | { action: "installPackage"; package: string | Uint8Array; grants: string[]; reviewedRevision?: number }
   /**
    * Installs a catalog release's package (#562), which the host downloads again. `sha256`
    * names the release; `packageSha256` is the package that was reviewed.
@@ -618,7 +673,7 @@ export interface ExtensionReview {
   package?: ExtensionPackageReview;
 }
 /** The largest package file the host accepts (#562). */
-export const MAX_EXTENSION_PACKAGE_BYTES = 16 * 1024 * 1024;
+export const MAX_EXTENSION_PACKAGE_BYTES = 512 * 1024 * 1024;
 /** A package file's bytes as the base64 the host reads. */
 export function encodePackage(bytes: Uint8Array): string {
   let binary = "";
@@ -628,7 +683,7 @@ export function encodePackage(bytes: Uint8Array): string {
 }
 /** Verifies a package file (`.srelens-extension`) and returns what to review; installs nothing. */
 export const reviewExtensionPackage = (bytes: Uint8Array) =>
-  invokeCapability<ExtensionReview>("extensions.packageManifest", { package: encodePackage(bytes) });
+  invokeCapability<ExtensionReview>("extensions.packageManifest", { package: isTauri() ? bytes : encodePackage(bytes) });
 export interface ExtensionResourceResult {
   printerColumns?: Array<{name:string;jsonPath:string;type?:string}>;
   columnsError?: string;
@@ -687,6 +742,46 @@ export const readExtension = <T = ExtensionResourceResult>(
     ...(useCrdColumns ? {useCrdColumns:true} : {}),
     ...(card ? { card } : {}),
     ...(card && namespaces?.length ? { namespaces } : {}),
+  });
+/** What `extensions.queryProvider` is asked: one provider, for the resource a view shows (#569). */
+export interface ExtensionProviderQuery {
+  id: string;
+  revision: number;
+  /** The provider's `id`. */
+  provider: string;
+  context: string;
+  namespace: string;
+  /** The qualified kind of the resource the view shows, e.g. `apps/Deployment`. */
+  resourceKind: string;
+  name: string;
+  /** How far back from now, 300–604800 seconds; the host's default is an hour. */
+  rangeSeconds?: number;
+}
+/** One trace a trace provider's search found. */
+export interface ExtensionTrace {
+  traceId: string;
+  rootService?: string;
+  rootName?: string;
+  /** When it started, in epoch milliseconds. */
+  start?: number;
+  durationMs?: number;
+}
+/** What a provider answered, as the host read it: never markup, only data it draws. */
+export type ExtensionProviderResult =
+  | { kind: "metrics"; chart: NativeTimeseriesData }
+  | { kind: "logs"; lines: Array<{ time: string; source: string; line: string; truncated?: boolean }>; truncated: boolean }
+  | { kind: "traces"; traces: ExtensionTrace[]; truncated: boolean };
+/** One provider query, through its `network.http` binding and every rule the host holds that to. */
+export const queryExtensionProvider = (query: ExtensionProviderQuery) =>
+  invokeCapability<ExtensionProviderResult>("extensions.queryProvider", {
+    id: query.id,
+    revision: query.revision,
+    provider: query.provider,
+    context: query.context,
+    namespace: query.namespace,
+    resourceKind: query.resourceKind,
+    name: query.name,
+    ...(query.rangeSeconds !== undefined ? { rangeSeconds: query.rangeSeconds } : {}),
   });
 /**
  * One dashboard card's answer. `error` is a read that failed or a figure that
@@ -812,6 +907,32 @@ export function extensionClusterRoute(contextKey: string, id: string, page: stri
 }
 export function extensionClusterResourceRoute(contextKey: string, id: string, page: string, namespace: string, name: string) {
   return `${extensionClusterRoute(contextKey, id, page, namespace)}/${encodeURIComponent(name)}`;
+}
+
+/** Executable tabs retain their context and installed revision after a rail switch or update. */
+export function extensionOperationRoute(contextKey: string, id: string, revision: number, operation: string, params?: Record<string, string | number | boolean>) {
+  const base = `/extension-operation-contexts/${encodeURIComponent(contextKey)}/${encodeURIComponent(id)}/${revision}/${encodeURIComponent(operation)}`;
+  return params && Object.keys(params).length ? `${base}/${encodeURIComponent(JSON.stringify(params))}` : base;
+}
+export function parseExtensionOperationRoute(route: string) {
+  const pieces = route.split("/");
+  if (![6, 7].includes(pieces.length) || pieces[1] !== "extension-operation-contexts" || route.includes("?") || route.length > 32768) return null;
+  try {
+    const [contextKey, id, rawRevision, operation] = pieces.slice(2, 6).map(decodeURIComponent);
+    const revision = Number(rawRevision);
+    let params: Record<string, string | number | boolean> | undefined;
+    if (pieces.length === 7) {
+      const value: unknown = JSON.parse(decodeURIComponent(pieces[6]));
+      if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).length > 16 || Object.entries(value).some(([key, v]) => !/^[a-zA-Z0-9-]{1,64}$/.test(key) || !["string", "number", "boolean"].includes(typeof v))) return null;
+      params = value as typeof params;
+    }
+    return contextKey && id && operation && /^[1-9]\d*$/.test(rawRevision) && Number.isSafeInteger(revision)
+      ? { contextKey, id, revision, operation, ...(params ? { params } : {}) } : null;
+  } catch { return null; }
+}
+
+export function callExtensionOperation(input: { id: string; revision: number; context: string; operation: string; params: Record<string, unknown> }): Promise<unknown> {
+  return invokeCapability("extensions.callOperation", input);
 }
 /**
  * A dashboard card's target: its app page, filtered to what the card counted.

@@ -33,8 +33,13 @@ export interface ExtensionExecConfirmation {
  * container and command the host confirmation showed ({@link ExtensionExecEvent});
  * `portForward` listens on a local port the host picks, to `pod` or through
  * `service` ({@link ExtensionForwardEvent}).
+ *
+ * `logProvider` follows one of the app's log providers (#569) for the resource a
+ * view shows (`resourceKind`, `name`): its history, then what is new, as the same
+ * {@link ExtensionLogEvent}s `logs` sends.
  */
 export type ExtensionStreamSource =
+  | { kind: "operation"; method: string; params: Record<string, unknown> }
   | { kind: "read"; capability: string; intervalSeconds?: number }
   | { kind: "watch"; capability: string }
   | {
@@ -55,12 +60,22 @@ export type ExtensionStreamSource =
       container?: string;
       confirmed?: ExtensionExecConfirmation;
     }
-  | { kind: "portForward"; capability: string; name?: string; pod?: string; service?: string };
+  | { kind: "portForward"; capability: string; name?: string; pod?: string; service?: string }
+  | {
+      kind: "logProvider";
+      provider: string;
+      resourceKind: string;
+      name: string;
+      tailLines?: number;
+      sinceSeconds?: number;
+      timestamps?: boolean;
+    };
 
 /**
  * A log source's `data` (#567): lines, each tagged `pod/container`, and each
- * source's connection state. The same shape a log provider will send (#569), so
- * the pod log view follows any source through one path.
+ * source's connection state. A log provider sends the same (#569), its status
+ * tagged with the provider's id, so the pod log view follows any source through
+ * one path.
  */
 export type ExtensionLogEvent =
   | { event: "lines"; lines: Array<{ source: string; line: string; truncated?: boolean }>; dropped?: number }
@@ -231,6 +246,8 @@ function defined<T extends Record<string, unknown>>(fields: T): Partial<T> {
  */
 function sourcePayload(asked: ExtensionStreamSource): ExtensionStreamSource {
   switch (asked.kind) {
+    case "operation":
+      return { kind: "operation", method: asked.method, params: { ...asked.params } };
     case "watch":
       return { kind: "watch", capability: asked.capability };
     case "logs":
@@ -268,6 +285,14 @@ function sourcePayload(asked: ExtensionStreamSource): ExtensionStreamSource {
         kind: "portForward",
         capability: asked.capability,
         ...defined({ name: asked.name, pod: asked.pod, service: asked.service }),
+      };
+    case "logProvider":
+      return {
+        kind: "logProvider",
+        provider: asked.provider,
+        resourceKind: asked.resourceKind,
+        name: asked.name,
+        ...defined({ tailLines: asked.tailLines, sinceSeconds: asked.sinceSeconds, timestamps: asked.timestamps }),
       };
     default:
       return {
@@ -435,14 +460,14 @@ export interface ExtensionLogStreamHandlers {
 }
 
 /**
- * Follow an app's `logs` source (#567) through the callbacks `startLogStream`
- * takes, so the pod log view's buffer, pause and status counting follow it
- * unchanged — and a log provider's stream later (#569), which sends the same
+ * Follow an app's `logs` source (#567), or one of its log providers (#569),
+ * through the callbacks `startLogStream` takes, so the pod log view's buffer,
+ * pause and status counting follow it unchanged: both send the same
  * {@link ExtensionLogEvent}s. `options` fill in what the source leaves unset.
  */
 export async function startExtensionLogStream(
   view: ExtensionView,
-  request: ExtensionStreamRequest & { source: Extract<ExtensionStreamSource, { kind: "logs" }> },
+  request: ExtensionStreamRequest & { source: Extract<ExtensionStreamSource, { kind: "logs" | "logProvider" }> },
   onLine: (source: string, line: string, truncated: boolean) => void,
   onStatus?: (status: LogStatus, source: string) => void,
   handlers: ExtensionLogStreamHandlers = {},

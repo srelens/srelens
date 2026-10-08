@@ -119,6 +119,41 @@ impl AppTools {
         self.inner.sidecars.serve(host);
     }
 
+    pub(super) async fn call_native(
+        &self,
+        input: super::operations::CallOperation,
+    ) -> Result<Value, CapabilityError> {
+        let (app, params) = self.native_authority(&input).await?;
+        if app.manifest.operation(&input.operation).and_then(|op| op.view.as_ref()).is_some_and(|view| view.stream) {
+            return Err(CapabilityError::InvalidInput("Open a streaming operation through an app view".into()));
+        }
+        self.inner.sidecars.request(&app, &input.operation, params).await
+    }
+
+    pub(super) async fn native_authority(&self, input: &super::operations::CallOperation) -> Result<(super::Installed, Map<String, Value>), CapabilityError> {
+        if input.context.is_empty() {
+            return Err(CapabilityError::InvalidInput("An app operation needs a pinned cluster".into()));
+        }
+        let (state, index, context) = super::resolver_app(
+            self.inner.store.clone(), &self.inner.core, &self.inner.cache,
+            &input.id, input.revision, input.context.clone(),
+        ).await?;
+        if input.params.get("clusterId").is_some_and(|value| value.as_str() != Some(&context)) {
+            return Err(CapabilityError::InvalidInput("The operation's cluster differs from its pinned cluster".into()));
+        }
+        let app = state.plugins[index].clone();
+        // Native views currently serve reading apps. An app that can write
+        // needs the operation-level consent its dynamic MCP tool already has.
+        if !app.manifest.actions.is_empty() { return Err(CapabilityError::InvalidInput("This app's operations require confirmation through its installed-app tools".into())); }
+        let operation = app.manifest.operation(&input.operation).ok_or_else(|| CapabilityError::InvalidInput("This app does not declare the operation".into()))?;
+        let params = operation.check_input(&Value::Object(input.params.clone())).map_err(CapabilityError::InvalidInput)?;
+        Ok((app, params))
+    }
+
+    pub(super) async fn open_native_stream(&self, app: &super::Installed, method: &str, params: Map<String, Value>) -> Result<srelens_plugin_host::sidecar::SidecarStream, CapabilityError> {
+        self.inner.sidecars.open_stream(app, method, params).await
+    }
+
     /// End at once the sidecars of apps `state` no longer holds. Blocking-safe.
     pub(super) fn end_uninstalled(&self, state: &Inventory) {
         self.inner.sidecars.end_uninstalled(state);
@@ -233,6 +268,7 @@ impl Inner {
             .sidecar
             .iter()
             .flat_map(|sidecar| &sidecar.operations)
+            .filter(|operation| !operation.view.as_ref().is_some_and(|view| view.stream))
         {
             kinds.insert(operation.name.clone(), Kind::Operation);
         }
@@ -263,6 +299,7 @@ impl Inner {
                     match kind {
                         Some(Kind::Reader) => {
                             let read = Read {
+                                cursor: input.get("cursor").and_then(Value::as_str).map(str::to_owned),
                                 use_crd_columns: false,
                                 id,
                                 revision,

@@ -91,10 +91,11 @@ permission grants, action confirmation, cluster scoping, or manifest validation.
    `0.MINOR` version. A `0.MINOR.PATCH` bump is for clarifications that do not change
    which manifests validate. From 1.0: MAJOR for breaking changes, MINOR for
    additive ones, PATCH for fixes.
-5. **Current supported lines.** This host implements **API 0.3, API 0.4, API 0.5 and
-   API 0.6**. A `^0.3` manifest is served under 0.3 and may use only what 0.3 has; a
+5. **Current supported lines.** This host implements **API 0.3, API 0.4, API 0.5,
+   API 0.6 and API 0.7**. A `^0.3` manifest is served under 0.3 and may use only what 0.3 has; a
    `^0.4` one may also use what [0.4 added](#040), a `^0.5` one what [0.5 added](#050),
-   and a `^0.6` one what [0.6 added](#060). API 0.1 and API 0.2 are not supported. Existing
+   a `^0.6` one what [0.6 added](#060),
+   and a `^0.7` one what [0.7 added](#070). API 0.1 and API 0.2 are not supported. Existing
    installations targeting a retired line are quarantined until replaced by a
    compatible manifest. Official manifests must receive a new version and publisher
    signature; editing an installed signed manifest invalidates its proof. Before 1.0 a
@@ -102,7 +103,7 @@ permission grants, action confirmation, cluster scoping, or manifest validation.
    two were.
 6. **API 1.0.** The API is frozen as 1.0 when the cert-manager declarative milestone
    ([#582](https://github.com/srelens/srelens/issues/582)) passes. Until then the newest
-   line, API 0.6, is a preview. After that, the 1.x line only grows additively, and a line
+   line, API 0.7, is a preview. After that, the 1.x line only grows additively, and a line
    is retired only after the window in [Deprecation](#deprecation).
 
 ## Compatibility rules
@@ -141,7 +142,9 @@ pre-releases `0.15.1-186` and `0.15.1-187`, with `network.http`, #568, the last 
 added to it), so what [#728](https://github.com/srelens/srelens/issues/728) added to
 resource links, and the logs, exec and port-forwards of
 [#567](https://github.com/srelens/srelens/issues/567), are [API 0.5](#050), not additions
-to 0.4 in place.
+to 0.4 in place. Builds implementing API 0.6 were published in turn (the pre-releases
+`0.15.1-192` and later), so the metric, log and trace providers of
+[#569](https://github.com/srelens/srelens/issues/569) are [API 0.7](#070).
 
 The host enforces this. `API_FIELDS` in `crates/plugin-host/src/manifest.rs` lists every
 field whose availability differs across supported API lines, and every *form* of value
@@ -309,6 +312,40 @@ list, and the [developer harness](testing.md#developer-harness) prints one per l
   [#563](https://github.com/srelens/srelens/issues/563).
 
 ## API changelog
+
+### 0.8.0
+
+Executable operations may declare native `view` metadata (`autoRun`, `stream`, `hidden`). The host provides pinned operation routes, tables, namespace selection, retry, pagination and owned cancellable streams. A stream cannot start automatically. The kind-bound `k8s.listWorkloadImages` reader returns regular/init-container images for Deployments, StatefulSets or DaemonSets. The schema for this line is `schemas/extension-manifest.v0.8.json`; older line schemas remain frozen. The executable-only `k8s.runJob` binding also requires API `^0.8`; it fixes a digest-pinned scanner image, command, scalar argument slots and bounded namespace read rules. Sidecar protocol 0.2.0 adds binding availability, scoped Job execution and paged reads; the host refuses these additions under protocol 0.1.0. Runtime Job values cannot start with `-`, so callers cannot substitute command-line options.
+
+### 0.7.0
+
+Dashboard predicates may use a whole-value settings reference in `within` (#582).
+It must name a declared `select` with a default, whose every option is a positive,
+bounded duration. Counts and their linked resource lists resolve the same saved
+choice. The reference changes only the duration, not the reader, path or target.
+A manifest using this form must admit only API 0.7 or later; literal durations
+retain their existing meaning on older lines. The schema for this line is
+`schemas/extension-manifest.v0.7.json`; the 0.6 schema remains frozen.
+
+Also new in this line ([#569](https://github.com/srelens/srelens/issues/569)):
+
+- **Providers.** `contributions.metricProviders`, `logProviders` and `traceProviders`
+  declare a PromQL, LogQL or TraceQL template that one of the app's `network.http`
+  bindings sends, for the workload and pod kinds in `forKinds`. The host binds
+  `${cluster}`, `${namespace}`, `${workload}` and `${pod}` — each only inside a
+  double-quoted string, with `\` and `"` escaped and the value held to a name's
+  characters, and in a regex matcher only as `${name:regex}`, which quotes RE2
+  metacharacters first — and a metric provider's `${range}` and `${step}`, and sets the
+  query and time range as the language's HTTP parameters, which the binding may not.
+  It reads a Prometheus range query into the timeseries chart (at most 8 series), a
+  Loki range query into log lines, and a Tempo search into a list of traces (at most
+  50). Each list is gated in `API_FIELDS`, so a `^0.6` manifest that declares a
+  provider is told it requires API 0.7. The new read-only capability
+  `extensions.queryProvider` runs one query; the `logProvider` stream source follows a
+  log provider, asking again every 5 seconds while its view is open. See
+  [Metric, log and trace providers](manifest.md#metric-log-and-trace-providers).
+- The reference providers are `examples/extensions/prometheus.json` and `loki.json`,
+  0.1.0 on `^0.7`. Publishing them is a separate signed release and catalog update.
 
 ### 0.6.0
 

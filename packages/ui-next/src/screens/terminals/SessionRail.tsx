@@ -1,6 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode, type Ref } from "react";
 import { ageFromTimestamp } from "@srelens/core";
-import { Button, EmptyState, Section, StatusPill, toneColor, toneWash, type StatusKind } from "@srelens/ui-kit";
+import { Button, EmptyState, IconButton, Section, StatusPill, toneColor, toneWash, type StatusKind } from "@srelens/ui-kit";
 import { Icons } from "../../lib/icons";
 import type { SessionKind, SessionState, TerminalSessionRow } from "../../lib/sessions";
 
@@ -91,32 +91,185 @@ function idleFor(lastOutputAt: number, now: number): string {
   return ageFromTimestamp(new Date(lastOutputAt).toISOString(), now);
 }
 
+/**
+ * The name, being typed over. Enter or leaving the field keeps what was typed;
+ * Escape keeps what was there. A blank name keeps what was there too — the
+ * store would refuse it, and the field closing on a name that then did not
+ * change is the same answer said once.
+ */
+function RenameField({
+  title,
+  onDone,
+}: {
+  title: string;
+  /** `next` is the name to keep, or `null` to keep the old one. `byKey` says
+   *  the field was closed from the keyboard, with focus still in it. */
+  onDone: (next: string | null, byKey: boolean) => void;
+}) {
+  const [draft, setDraft] = useState(title);
+  // Escape blurs the field as it unmounts; without this the blur would keep
+  // the very text the reader had just abandoned.
+  const settled = useRef(false);
+  const finish = (next: string | null, byKey: boolean) => {
+    if (settled.current) return;
+    settled.current = true;
+    onDone(next, byKey);
+  };
+  return (
+    <input
+      aria-label={`Rename ${title}`}
+      value={draft}
+      autoFocus
+      onFocus={(e) => e.currentTarget.select()}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={() => finish(draft, false)}
+      onKeyDown={(e) => {
+        if (e.key !== "Enter" && e.key !== "Escape") return;
+        // An input method is still composing: this Enter picks a candidate
+        // and this Escape drops one. Neither is about the field.
+        if (e.nativeEvent.isComposing) return;
+        // Finishing hands focus back to the row's button within this same
+        // keystroke; left to its default, the rest of the keystroke would
+        // then press that button and select a row the reader only renamed.
+        e.preventDefault();
+        finish(e.key === "Enter" ? draft : null, true);
+      }}
+      className="min-w-0 flex-1 rounded border border-rule bg-transparent px-1 py-0.5 text-[0.8125rem] font-medium outline-none focus:border-[var(--accent)]"
+    />
+  );
+}
+
 function SessionRow({
   session,
   active,
   now,
   onSelect,
+  onRename,
+  onDetach,
 }: {
   session: TerminalSessionRow;
   active: boolean;
   now: number;
   onSelect: () => void;
+  onRename: (title: string) => void;
+  onDetach: () => void;
 }) {
   const verdict = SESSION_VERDICT[session.state];
+  const [renaming, setRenaming] = useState(false);
+  const selector = useRef<HTMLButtonElement>(null);
+  // Back to the row once the field has gone, so the keyboard is where it was
+  // rather than on the document body. After the render that brings the row's
+  // button back — while renaming there is no such button to focus. Only when
+  // the field was closed from the keyboard: a reader who left it by Tab or by
+  // clicking something has already said where focus goes, and it stays there.
+  const refocus = useRef(false);
+  useEffect(() => {
+    if (!refocus.current) return;
+    refocus.current = false;
+    selector.current?.focus();
+  });
+
+  const body = (
+    <span className="flex items-center gap-1.5">
+      <span className="truncate text-[0.75rem] text-muted">
+        {SESSION_KIND_LABEL[session.kind]} · {idleFor(session.lastOutputAt, now)}
+      </span>
+      <StatusPill status={verdict.word} kind={verdict.kind} tinted />
+    </span>
+  );
+  const icon = (
+    <Icons.terminal
+      size={14}
+      aria-hidden="true"
+      className="mt-0.5 shrink-0"
+      style={{ color: active ? toneColor("accent") : toneColor("muted") }}
+    />
+  );
+
+  // The row is a group of three controls, not one button holding two more: a
+  // button inside a button is invalid, and a reader on a keyboard could reach
+  // neither of the inner ones.
   return (
-    <button
-      type="button"
-      onClick={onSelect}
-      aria-current={active || undefined}
-      className="flex w-full items-start gap-1.5 rounded px-1 py-1.5 text-left"
+    <div
+      data-slot="session-row"
+      className="flex w-full items-start rounded"
       style={{ background: active ? toneWash("accent") : undefined }}
     >
-      <Icons.terminal
-        size={14}
-        aria-hidden="true"
-        className="mt-0.5 shrink-0"
-        style={{ color: active ? toneColor("accent") : toneColor("muted") }}
-      />
+      {renaming ? (
+        <span className="flex min-w-0 flex-1 items-start gap-1.5 px-1 py-1.5">
+          {icon}
+          <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+            <RenameField
+              title={session.title}
+              onDone={(next, byKey) => {
+                refocus.current = byKey;
+                setRenaming(false);
+                if (next !== null) onRename(next);
+              }}
+            />
+            {body}
+          </span>
+        </span>
+      ) : (
+        <SessionSelect
+          ref={selector}
+          session={session}
+          active={active}
+          icon={icon}
+          body={body}
+          onSelect={onSelect}
+          onRename={() => setRenaming(true)}
+        />
+      )}
+      {!renaming && (
+        <span className="flex shrink-0 items-center py-1 pr-0.5">
+          <IconButton
+            icon={Icons.edit}
+            label={`Rename ${session.title}`}
+            onClick={() => setRenaming(true)}
+          />
+          {/* The pane's own Detach, reachable for a session that is not the
+              one on screen: closing the third of five no longer means
+              selecting it first. Same act, same store call, and like that one
+              it asks nothing — a row is the reader's to dismiss. */}
+          <IconButton icon={Icons.close} label={`Detach ${session.title}`} danger onClick={onDetach} />
+        </span>
+      )}
+    </div>
+  );
+}
+
+function SessionSelect({
+  ref,
+  session,
+  active,
+  icon,
+  body,
+  onSelect,
+  onRename,
+}: {
+  ref: Ref<HTMLButtonElement>;
+  session: TerminalSessionRow;
+  active: boolean;
+  icon: ReactNode;
+  body: ReactNode;
+  onSelect: () => void;
+  onRename: () => void;
+}) {
+  return (
+    <button
+      ref={ref}
+      type="button"
+      onClick={onSelect}
+      // The two ways a name is edited everywhere else a reader has met one.
+      onDoubleClick={onRename}
+      onKeyDown={(e) => {
+        if (e.key === "F2") onRename();
+      }}
+      aria-current={active || undefined}
+      className="flex min-w-0 flex-1 items-start gap-1.5 rounded px-1 py-1.5 text-left"
+    >
+      {icon}
       {/* Stacked, because the rail is 230px and the row carries four things.
           Laid out on one line the name got 44px of 229 — two pods from the
           same namespace were told apart by four characters, which is no
@@ -126,12 +279,7 @@ function SessionRow({
           name would widen the column rather than ellipsing. */}
       <span className="flex min-w-0 flex-1 flex-col gap-0.5">
         <span className="truncate text-[0.8125rem] font-medium">{session.title}</span>
-        <span className="flex items-center gap-1.5">
-          <span className="truncate text-[0.75rem] text-muted">
-            {SESSION_KIND_LABEL[session.kind]} · {idleFor(session.lastOutputAt, now)}
-          </span>
-          <StatusPill status={verdict.word} kind={verdict.kind} tinted />
-        </span>
+        {body}
       </span>
     </button>
   );
@@ -146,6 +294,10 @@ export interface SessionRailProps {
   activeId: number | null;
   /** A row was picked — make it the active session. */
   onSelect: (id: number) => void;
+  /** A row's name was typed over — already trimmed of nothing; the store decides what a name is. */
+  onRename: (id: number, title: string) => void;
+  /** A row's Detach was pressed — end that session, whichever one is on screen. */
+  onDetach: (id: number) => void;
   /** "New session" was picked, from the empty state. */
   onNewSession: () => void;
   /** The screen is still usable, but the active cluster cannot start a shell. */
@@ -173,7 +325,7 @@ export interface SessionRailProps {
  * store precisely so a ticking display here does not churn its snapshot —
  * this component owns the clock the store deliberately does not.
  */
-export function SessionRail({ sessions, activeId, onSelect, onNewSession, newSessionDisabled = false }: SessionRailProps) {
+export function SessionRail({ sessions, activeId, onSelect, onRename, onDetach, onNewSession, newSessionDisabled = false }: SessionRailProps) {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     const tick = setInterval(() => setNow(Date.now()), IDLE_TICK_MS);
@@ -204,6 +356,8 @@ export function SessionRail({ sessions, activeId, onSelect, onNewSession, newSes
           active={session.id === activeId}
           now={now}
           onSelect={() => onSelect(session.id)}
+          onRename={(title) => onRename(session.id, title)}
+          onDetach={() => onDetach(session.id)}
         />
       ))}
     </Section>

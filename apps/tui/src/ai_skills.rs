@@ -1,4 +1,4 @@
-//! AI SRE Playbooks & Slash Commands Registry for SRElens TUI.
+//! AI SRE Playbooks & Slash Commands Registry for srectl.
 //!
 //! Provides battle-tested Kubernetes diagnostic playbooks (matching GUI assistant_skills.rs)
 //! with interactive slash-command autocomplete, zero-argument discovery fallbacks,

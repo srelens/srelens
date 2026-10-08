@@ -4,6 +4,8 @@ vi.mock("@srelens/core", async (original) => ({
   ...(await original<typeof import("@srelens/core")>()),
   listCrds: vi.fn(),
   readExtension: vi.fn(),
+  resolveDashboardCards: vi.fn(),
+  resolveExtensionColumns: vi.fn(),
   listNamespaces: vi.fn(),
   openExtensionView: vi.fn(),
   isTauri: vi.fn(),
@@ -11,6 +13,8 @@ vi.mock("@srelens/core", async (original) => ({
 import {
   listCrds,
   readExtension,
+  resolveDashboardCards,
+  resolveExtensionColumns,
   listNamespaces,
   openExtensionView,
   isTauri,
@@ -188,7 +192,7 @@ it("watches each reader of a dashboard page once, for the page, and re-reads its
     view: `${app}/${label}`,
     close,
     open: async (request, handlers) => {
-      opened.push({ capability: request.source.capability, onData: handlers.onData as never, onEnd: handlers.onEnd as never });
+      opened.push({ capability: "capability" in request.source ? request.source.capability : "", onData: handlers.onData as never, onEnd: handlers.onEnd as never });
       return { stream: `s-${opened.length}`, cancel: vi.fn(async () => {}) };
     },
   }));
@@ -635,4 +639,109 @@ it("shows unsupported-cluster requirements without reading app resources", async
   expect(await screen.findByText("Missing requirements")).toBeTruthy();
   expect(readExtension).not.toHaveBeenCalled();
   expect(screen.getByRole("navigation", { name: "Flux pages" })).toBeTruthy();
+});
+
+function withCards() {
+  const app = structuredClone(plugin);
+  app.enabled = true;
+  app.manifest.contributions.dashboardCards = [
+    { id: "expiring", title: "Certificates expiring soon", type: "count", size: "s", source: "apps", target: { page: "apps" } },
+    { id: "upcoming", title: "Upcoming expirations", type: "list", size: "l", source: "apps", target: { page: "apps" }, list: { jsonPath: ".status.notAfter", order: "asc", limit: 2 } },
+  ];
+  return app;
+}
+it("shows app cards inside an overview and opens their filtered page in its namespace", async () => {
+  const app = withCards();
+  vi.mocked(resolveDashboardCards).mockResolvedValue({ cards: [{ id: "expiring", state: "count", count: 2 }] });
+  const onCard = vi.fn();
+  render(<ExtensionWorkspace plugin={app} page={app.manifest.contributions.pages[0]} context="staging" namespace="team" onCard={onCard} />);
+  const card = await screen.findByRole("region", { name: "Certificates expiring soon" });
+  expect(card.textContent).toContain("2");
+  fireEvent.click(screen.getByRole("button", { name: "Open Certificates expiring soon" }));
+  expect(onCard).toHaveBeenCalledWith("apps", "team", "expiring");
+});
+it("keeps overview card failures distinct from zero and retries them", async () => {
+  const app = withCards();
+  vi.mocked(resolveDashboardCards).mockRejectedValue(new Error("expiry read timed out"));
+  render(<ExtensionWorkspace plugin={app} page={app.manifest.contributions.pages[0]} context="staging" />);
+  const card = await screen.findByRole("region", { name: "Certificates expiring soon" });
+  await waitFor(() => expect(card.getAttribute("data-state")).toBe("error"));
+  expect(card.textContent).toContain("expiry read timed out");
+  vi.mocked(resolveDashboardCards).mockResolvedValue({ cards: [{ id: "expiring", state: "count", count: 0 }] });
+  fireEvent.click(screen.getByRole("button", { name: "Retry Certificates expiring soon" }));
+  await waitFor(() => expect(card.getAttribute("data-state")).toBe("zero"));
+  expect(card.textContent).toContain("None match");
+});
+it("previews soonest expirations with issuer and status, bounded to the declared list limit", async () => {
+  const app = withCards();
+  app.manifest.capabilities[0].target = "k8s.listCustomResource";
+  app.manifest.capabilities[0].arguments = {group:"cert-manager.io",version:"v1",plural:"certificates",kind:"Certificate",namespaced:true,printerColumns:[{name:"Secret"}]};
+  vi.mocked(listCrds).mockResolvedValue({crds:[{group:"cert-manager.io",version:"v1",plural:"certificates",kind:"Certificate",namespaced:true}]} as never);
+  app.manifest.contributions.statusResolvers = [{forKinds:["cert-manager.io/Certificate"],rules:[]}];
+  app.manifest.contributions.tableColumns = [
+    {id:"not-after",title:"Not after",forKinds:["cert-manager.io/Certificate"],source:{jsonPath:".status.notAfter"},format:"date",sortable:true},
+    {id:"issuer",title:"Issuer",forKinds:["cert-manager.io/Certificate"],source:{jsonPath:".spec.issuerRef.name"},format:"text"},
+  ];
+  const items = ["late", "first", "next"].map(name=>({name,namespace:"team",age:"1d",columns:[],status:{status:"healthy" as const,label:"Ready"}}));
+  vi.mocked(readExtension).mockResolvedValue({items});
+  vi.mocked(resolveDashboardCards).mockResolvedValue({cards:[{id:"expiring",state:"count",count:3},{id:"upcoming",state:"list",total:3,rows:[{name:"first",namespace:"team"},{name:"next",namespace:"team"}]}]});
+  vi.mocked(resolveExtensionColumns).mockResolvedValue({ columns: app.manifest.contributions.tableColumns, cells: items.map((row,i)=>({uid:null,name:row.name,namespace:row.namespace,values:{"not-after":["2026-11-01T00:00:00Z","2026-10-06T00:00:00Z","2026-10-08T00:00:00Z"][i],issuer:"production-ca"}})) });
+  render(<ExtensionWorkspace plugin={app} page={app.manifest.contributions.pages[0]} context="staging" />);
+  await screen.findByRole("columnheader", {name:"Issuer"});
+  await waitFor(()=>expect(screen.getAllByRole("cell",{name:"production-ca"})).toHaveLength(2));
+  expect(screen.queryByRole("columnheader",{name:"Secret"})).toBeNull();
+  expect(screen.queryByRole("columnheader",{name:"Age"})).toBeNull();
+  expect(vi.mocked(resolveExtensionColumns).mock.calls.at(-1)?.[5].map(row=>row.name).sort()).toEqual(["first","next"]);
+  const names = screen.getAllByRole("row").slice(1).map(row=>row.querySelector("td")?.textContent);
+  expect(names).toEqual(["first","next"]);
+  expect(screen.queryByRole("button",{name:"Select all"})).toBeNull();
+  expect(screen.queryByRole("textbox",{name:"Search app resources"})).toBeNull();
+});
+it("keeps a card filter when an embedded overview navigates without a route callback", async () => {
+  const app = withCards();
+  vi.mocked(resolveDashboardCards).mockResolvedValue({cards:[{id:"expiring",state:"count",count:2}]});
+  render(<ExtensionWorkspace plugin={app} page={app.manifest.contributions.pages[0]} context="staging" namespace="team" />);
+  fireEvent.click(await screen.findByRole("button",{name:"Open Certificates expiring soon"}));
+  await waitFor(()=>expect(readExtension).toHaveBeenLastCalledWith(app.manifest.id,3,"apps","staging","team",true,"expiring"));
+});
+
+it("keeps the namespace chosen on an embedded overview when opening a card", async () => {
+  const app=withCards();
+  vi.mocked(listNamespaces).mockResolvedValue({namespaces:["team"]} as never);
+  vi.mocked(resolveDashboardCards).mockResolvedValue({cards:[{id:"expiring",state:"count",count:2}]});
+  render(<ExtensionWorkspace plugin={app} page={app.manifest.contributions.pages[0]} context="staging" />);
+  fireEvent.click(await screen.findByRole("combobox",{name:"App namespace"}));
+  fireEvent.click(await screen.findByRole("option",{name:"team"}));
+  fireEvent.click(await screen.findByRole("button",{name:"Open Certificates expiring soon"}));
+  await waitFor(()=>expect(readExtension).toHaveBeenLastCalledWith(app.manifest.id,3,"apps","staging","team",true,"expiring"));
+});
+
+it("uses the host list's ordering and limit even without a sortable app column", async () => {
+  const app=withCards();
+  vi.mocked(readExtension).mockResolvedValue({items:["late","first","next"].map(name=>({name,namespace:"team",age:"1d",columns:[]}))});
+  vi.mocked(resolveDashboardCards).mockResolvedValue({cards:[{id:"expiring",state:"count",count:3},{id:"upcoming",state:"list",total:3,rows:[{name:"first",namespace:"team"},{name:"next",namespace:"team"}]}]});
+  render(<ExtensionWorkspace plugin={app} page={app.manifest.contributions.pages[0]} context="staging" />);
+  await waitFor(()=>expect(screen.getAllByRole("cell").filter(cell=>["first","next","late"].includes(cell.textContent??"")).map(cell=>cell.textContent)).toEqual(["first","next"]));
+});
+it("names the configured expiry window, including its manifest default", async () => {
+  const app=withCards();
+  app.manifest.settings=[{id:"expiryWindow",title:"Warn before expiry",type:"select",default:"14d",options:[{value:"14d",label:"14 days"},{value:"30d",label:"30 days"}]}];
+  app.manifest.contributions.dashboardCards![0].predicate={jsonPath:".status.notAfter",within:"${settings.expiryWindow}"};
+  vi.mocked(resolveDashboardCards).mockResolvedValue({cards:[{id:"expiring",state:"count",count:2}]});
+  const view=render(<ExtensionWorkspace plugin={app} page={app.manifest.contributions.pages[0]} context="staging" />);
+  expect(await screen.findByText("Window: 14 days")).toBeTruthy();
+  view.rerender(<ExtensionWorkspace plugin={{...app,revision:4,settings:{expiryWindow:"30d"}}} page={app.manifest.contributions.pages[0]} context="staging" />);
+  expect(await screen.findByText("Window: 30 days")).toBeTruthy();
+});
+
+it("reads a preview in one namespace without also sending a namespace list", async () => {
+  const app=withCards();
+  vi.mocked(readExtension).mockImplementation(async (...args)=>{
+    if (args[4] && args[7]?.length) throw new Error("Name one namespace or a list of them, not both");
+    return {items:[{name:"apps",namespace:"team",age:"1d",columns:[]}]};
+  });
+  vi.mocked(resolveDashboardCards).mockResolvedValue({cards:[{id:"expiring",state:"count",count:1},{id:"upcoming",state:"list",total:1,rows:[{name:"apps",namespace:"team"}]}]});
+  render(<ExtensionWorkspace plugin={app} page={app.manifest.contributions.pages[0]} context="staging" namespace="team" />);
+  expect(await screen.findByRole("cell",{name:"apps"})).toBeTruthy();
+  expect(screen.queryByText("Name one namespace or a list of them, not both")).toBeNull();
 });

@@ -692,6 +692,8 @@ pub(crate) mod tests {
             channel.into(),
             None,
             None,
+            None,
+            None,
             app.handle().clone(),
             window.clone(),
             app.state(),

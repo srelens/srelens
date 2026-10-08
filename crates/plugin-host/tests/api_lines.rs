@@ -297,6 +297,16 @@ fn uses_of_0_5() -> Vec<(&'static str, Use)> {
     ]
 }
 
+/// A `network.http` binding named `request` to `path` on one granted host.
+fn with_request(v: &mut Value, path: &str) {
+    v["permissions"].as_array_mut().unwrap().push(
+        json!({"capability":"network.http","hosts":["observability.example.com"]}),
+    );
+    v["capabilities"].as_array_mut().unwrap().push(json!({"name":"request",
+        "title":"Query","target":"network.http","inputs":[],
+        "arguments":{"url":"https://observability.example.com","path":path}}));
+}
+
 #[test]
 fn every_0_5_addition_under_a_0_4_range_is_told_it_requires_api_0_5() {
     for (field, apply) in uses_of_0_5() {
@@ -337,6 +347,97 @@ fn every_0_5_entry_in_the_table_has_a_case_above() {
     for path in &gated {
         assert!(covered.contains(path), "{path} has no case");
     }
+}
+
+/// Each field API 0.7 added for providers (#569), used validly, with the `API_FIELDS`
+/// entry it uses. API 0.6 was published in srelens builds without them (0.15.1-192 and
+/// later), so a `^0.6` manifest may use none. API 0.7's settings-backed card duration
+/// (#582), a form entry, has its own cases in `card_settings.rs`.
+fn uses_of_0_7() -> Vec<(&'static str, Use)> {
+    vec![
+        // Metric, log and trace providers (#569), each through a `network.http`
+        // binding, which API 0.4 already had: the provider list is the one new field.
+        ("contributions.metricProviders", |v| {
+            with_request(v, "/api/v1/query_range");
+            v["contributions"]["metricProviders"] = json!([{"id":"cpu","title":"CPU",
+                "capability":"request","language":"promql","forKinds":["apps/Deployment"],
+                "unit":"cores","query":"sum(rate(container_cpu_usage_seconds_total{namespace=\"${namespace}\"}[${step}]))"}]);
+        }),
+        ("contributions.logProviders", |v| {
+            with_request(v, "/loki/api/v1/query_range");
+            v["contributions"]["logProviders"] = json!([{"id":"loki","title":"Loki",
+                "capability":"request","language":"logql","forKinds":["/Pod"],
+                "query":"{namespace=\"${namespace}\", pod=\"${pod}\"}"}]);
+        }),
+        ("contributions.traceProviders", |v| {
+            with_request(v, "/api/search");
+            v["contributions"]["traceProviders"] = json!([{"id":"traces","title":"Traces",
+                "capability":"request","language":"traceql","forKinds":["/Pod"],
+                "query":"{ resource.k8s.pod.name = \"${pod}\" }"}]);
+        }),
+    ]
+}
+
+#[test]
+fn every_0_7_provider_field_under_a_0_6_range_is_told_it_requires_api_0_7() {
+    for (field, apply) in uses_of_0_7() {
+        let mut value = manifest();
+        apply(&mut value);
+        for range in ["^0.7", ">=0.7, <0.8"] {
+            Manifest::parse(&with_range(value.clone(), range))
+                .unwrap_or_else(|e| panic!("{field} under {range}: {e}"));
+        }
+        // A range that admits 0.6 claims the hosts published on that line.
+        for range in ["^0.6", ">=0.6, <0.8"] {
+            let errors = Manifest::parse(&with_range(value.clone(), range))
+                .expect_err(&format!("{field} under {range}"))
+                .0;
+            assert_eq!(errors.len(), 1, "{field} under {range}: {errors:?}");
+            let error = &errors[0];
+            assert_eq!(error.code, ValidationCode::ApiIncompatible, "{error:?}");
+            assert_eq!(error.path, "srelensApiVersion", "{error:?}");
+            assert!(
+                error.message.contains("requires API 0.7.0")
+                    && error.message.contains("admits API 0.6.0")
+                    && error.message.contains(&format!("`{field}`")),
+                "{error:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn every_0_7_field_entry_in_the_table_has_a_case_above() {
+    let covered: Vec<&str> = uses_of_0_7().iter().map(|(field, _)| *field).collect();
+    let gated: Vec<&str> = API_FIELDS
+        .iter()
+        .filter(|field| field.introduced == "0.7.0" && field.form.is_none())
+        .map(|field| field.path)
+        .collect();
+    assert_eq!(gated.len(), covered.len(), "{gated:?}");
+    for path in &gated {
+        assert!(covered.contains(path), "{path} has no case");
+    }
+}
+
+#[test]
+fn a_0_7_manifest_is_incompatible_with_a_host_on_the_0_6_line() {
+    // What the published 0.6 hosts (srelens 0.15.1-192 and later) check first.
+    let published = ["0.3.0", "0.4.0", "0.5.0", "0.6.0"];
+    for range in ["^0.7", ">=0.7, <0.8"] {
+        let range = semver::VersionReq::parse(range).unwrap();
+        assert!(matching_api_versions_in(&range, &published).is_empty());
+        assert_eq!(
+            negotiate_api_version(&range).map(|v| v.to_string()),
+            Some("0.7.0".into())
+        );
+    }
+    // And `^0.6` pins its minor: a 0.6 app keeps its line here.
+    let range = semver::VersionReq::parse("^0.6").unwrap();
+    assert_eq!(
+        negotiate_api_version(&range).map(|v| v.to_string()),
+        Some("0.6.0".into())
+    );
 }
 
 #[test]

@@ -38,7 +38,7 @@ pub use extensions::{
 /// Making `.srelens-extension` packages (#562): what a publisher runs before a release, and
 /// what `cargo run -p srelens-registry --example pack-extension` wraps.
 pub mod extension_package {
-    pub use crate::extensions::package::{digest_list, pack};
+    pub use crate::extensions::package::{digest_list, pack, MAX_PACKAGE_BYTES};
 }
 pub use settings::default_settings_path;
 /// The secret store a host supplies for apps' secret settings (#543), so a
@@ -482,6 +482,7 @@ fn build_with(
         cache.clone(),
     ));
     reg.register(srelens_kube::workloads::list_pods_capability(cache.clone()));
+    reg.register(srelens_kube::workload_images::list_workload_images_capability(cache.clone()));
     reg.register(srelens_kube::workloads::pods_for_selector_capability(
         cache.clone(),
     ));
@@ -559,6 +560,9 @@ fn build_with(
     ));
     reg.register(srelens_kube::actions::scale_capability(cache.clone()));
     reg.register(srelens_kube::actions::rollout_restart_capability(
+        cache.clone(),
+    ));
+    reg.register(srelens_kube::deployments::rollout_undo_capability(
         cache.clone(),
     ));
     reg.register(srelens_kube::actions::update_config_data_capability(
@@ -722,6 +726,7 @@ enum BrokeredNetwork {
 /// the pod capabilities (#567), which run only as app streams.
 fn broker_only(cache: Arc<ClientCache>, network: BrokeredNetwork) -> Vec<Capability> {
     let mut capabilities = vec![extensions::crd::check_capability(cache)];
+    capabilities.push(extensions::jobs::capability());
     if network != BrokeredNetwork::Off {
         capabilities.push(extensions::network::capability());
     }
@@ -925,7 +930,8 @@ mod tests {
     /// reads them, and nothing sends them anywhere. The one path out of the
     /// registry to someone else is MCP, whose agent hands its context to an
     /// LLM provider; so they are not tools. Exactly these two are UI-only: a
-    /// third is a decision to make here, not a way around the rule above.
+    /// executable invocation also stays UI-only: MCP uses its existing per-app
+    /// operation tools, with their declared schemas and consent annotations.
     #[tokio::test]
     async fn app_logs_and_metrics_never_leave_through_mcp_or_the_audit_trail() {
         let reg = build_registry();
@@ -934,7 +940,7 @@ mod tests {
             .filter(|capability| capability.ui_only)
             .map(|capability| capability.id.as_str())
             .collect();
-        assert_eq!(ui_only, ["extensions.inspect", "extensions.logs"]);
+        assert_eq!(ui_only, ["extensions.callOperation", "extensions.inspect", "extensions.logs"]);
         for id in &ui_only {
             assert!(reg.get(id).unwrap().annotations.read_only, "{id}");
         }
@@ -965,7 +971,7 @@ mod tests {
             }
         }
         let spy = Spy::default();
-        for id in &ui_only {
+        for id in ["extensions.inspect", "extensions.logs"] {
             let _ = reg
                 .invoke_audited(
                     id,

@@ -1,4 +1,4 @@
-import { extensionClusterRoute, extensionEnabledFor, type InstalledExtension } from "@srelens/core";
+import { extensionClusterRoute, extensionOperationRoute, extensionEnabledFor, type InstalledExtension } from "@srelens/core";
 import type { ResourceNode } from "@srelens/ui-kit";
 import { Icons } from "../lib/icons";
 import { extensionLogoIcon, extensionPageIcon } from "./ExtensionLogo";
@@ -14,13 +14,13 @@ import { extensionLogoIcon, extensionPageIcon } from "./ExtensionLogo";
  * the budget test (#581) times exactly what the sidebar builds.
  */
 export function appNavigation(plugins: InstalledExtension[], contextKey: string): ResourceNode | null {
-  const apps = plugins.filter((p) => p.enabled && extensionEnabledFor(p, contextKey) && p.manifest.contributions.pages.length);
+  const apps = plugins.filter((p) => p.enabled && extensionEnabledFor(p, contextKey) && (p.manifest.contributions.pages.length || p.manifest.sidecar?.operations.some(operation => !operation.view?.hidden)));
   if (!apps.length) return null;
   return {
     id: "extensions", label: "Apps", icon: Icons.apps,
     children: apps.map((p) => ({
       id: `extension:${p.manifest.id}`, label: p.manifest.name, icon: extensionLogoIcon(p.manifest.name, p.icon),
-      children: p.manifest.contributions.pages.flatMap((page, index, pages) => {
+      children: [...p.manifest.contributions.pages.flatMap((page, index, pages) => {
         const leaf = (item: typeof page) => ({
           id: `route:${extensionClusterRoute(contextKey, p.manifest.id, item.id)}`,
           label: item.title, icon: extensionPageIcon(item.title),
@@ -29,7 +29,10 @@ export function appNavigation(plugins: InstalledExtension[], contextKey: string)
         if (pages.findIndex((item) => item.group === page.group) !== index) return [];
         return [{ id: `extension:${p.manifest.id}:${page.group}`, label: page.group, icon: extensionPageIcon(page.group),
           children: pages.filter((item) => item.group === page.group).map(leaf) }];
-      }),
+      }), ...(p.manifest.sidecar?.operations ?? []).filter((operation) => !operation.view?.hidden).map((operation) => ({
+        id: `route:${extensionOperationRoute(contextKey, p.manifest.id, p.revision, operation.name)}`,
+        label: operation.title, icon: extensionPageIcon(operation.title),
+      }))],
     })),
   };
 }

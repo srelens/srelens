@@ -38,6 +38,62 @@ describe("Inspector", () => {
     expect(screen.getByRole("heading", { level: 2, name: "checkout-api" })).toBeDefined();
   });
 
+  it("draws a name action directly after the heading, in the row that reveals it", () => {
+    setup({ nameAction: <button type="button">Copy name</button> });
+    const heading = screen.getByRole("heading", { name: "checkout-api" });
+    const action = screen.getByRole("button", { name: "Copy name" });
+
+    expect(heading.nextElementSibling?.contains(action)).toBe(true);
+    expect(action.closest(".name-action")).not.toBeNull();
+    expect(action.closest(".name-row")?.contains(heading)).toBe(true);
+    // Beside the name, not in the actions cluster at the far end of the header.
+    expect(action.closest('[data-slot="inspector-actions"]')).toBeNull();
+  });
+
+  it("draws no name-action slot when there is none", () => {
+    setup();
+    expect(document.querySelector('[data-slot="inspector-name-action"]')).toBeNull();
+  });
+
+  it("draws no name-action slot when the slot resolved to false", () => {
+    setup({ nameAction: false });
+    expect(document.querySelector('[data-slot="inspector-name-action"]')).toBeNull();
+  });
+
+  it("keeps the heading the panel's name whatever sits beside it", () => {
+    setup({ nameAction: <button type="button">Copy name</button> });
+    expect(screen.getByRole("region", { name: "checkout-api" })).toBeDefined();
+  });
+
+  describe("the name action's stylesheet", () => {
+    const css = readFileSync(join(__dirname, "styles", "kit.css"), "utf8");
+    const rule = (selector: string) => {
+      const at = css.indexOf(selector);
+      expect(at).toBeGreaterThan(-1);
+      return css.slice(at, css.indexOf("}", at) + 1);
+    };
+
+    it("hides it at rest by opacity, so the name does not shift and the control stays tabbable", () => {
+      const rest = rule(".name-action { ");
+      expect(rest).toContain("opacity: 0");
+      expect(rest).not.toContain("display: none");
+      expect(rest).not.toContain("visibility");
+    });
+
+    it("shows it on hover, on keyboard focus, and while a copy is being confirmed", () => {
+      const shown = rule(".name-row:hover .name-action");
+      expect(shown).toContain(".name-row:focus-within .name-action");
+      expect(shown).toContain(".name-action:has(.copy-ok)");
+      expect(shown).toContain("opacity: 1");
+    });
+
+    it("shows it outright where there is no hover to ask with", () => {
+      const at = css.indexOf("@media (hover: none)");
+      expect(at).toBeGreaterThan(-1);
+      expect(css.slice(at, at + 120)).toContain(".name-action { opacity: 1; }");
+    });
+  });
+
   it("is a region named by that heading", () => {
     // So it can nest wherever the caller docks it without inventing a second
     // complementary landmark beside Drawer's.

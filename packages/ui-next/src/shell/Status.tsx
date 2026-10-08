@@ -13,6 +13,7 @@ import { getHelmOps, subscribeHelmOps } from "../lib/helmOps";
 import { useInfo } from "../lib/probe";
 import { getSessions, subscribeSessions } from "../lib/sessions";
 import { resolveContext } from "../lib/clusters";
+import { canOpenClusterTerminal, openClusterTerminal } from "../lib/clusterTerminal";
 import { openTab, useActiveCluster, useTabs } from "../lib/tabsStore";
 import { useWorkspaceSealed } from "./LockGate";
 // The words and their tones live beside `LinkState` rather than here: the
@@ -228,6 +229,15 @@ export function Status({ contexts }: { contexts: ClusterContext[] }) {
       dot: true,
       onSelect: () => openTab("/helm"),
     });
+  }
+  // The way in to a shell on this machine that is bound to the cluster this
+  // strip names (#846). Absent rather than dead where there is nothing to
+  // open — no cluster, a paused one, or the web build, which has no local
+  // shell — for the reason the cluster segment gives: a button that leads
+  // nowhere is a dead end dressed as a way out. `ctx` is captured here, at the
+  // press, so the shell is for the cluster the reader was looking at.
+  if (canOpenClusterTerminal(ctx)) {
+    end.push({ id: "terminal", label: "Terminal", onSelect: () => void openClusterTerminal(ctx) });
   }
   end.push({ id: "ask", label: "Ask", tone: "accent", onSelect: () => setOpen(true) });
 

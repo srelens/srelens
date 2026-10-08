@@ -180,7 +180,7 @@ fn the_schema_carries_what_an_sdk_needs_beside_the_types() {
             "no definition {definition}"
         );
     }
-    assert_eq!(schema_file(), "sidecar-protocol.v0.1.json");
+    assert_eq!(schema_file(), "sidecar-protocol.v0.2.json");
 }
 
 /// Every type the crate exports has a definition, including one no

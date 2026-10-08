@@ -8,16 +8,75 @@ import userEvent from "@testing-library/user-event";
 // demand — the dialog's error path is the whole point of half these tests.
 type ActionResult = { ok?: boolean; error?: string };
 
-const { deleteResource, scaleResource, rolloutRestart, evictPod, cronjobSetSuspend, cronjobTriggerNow, getObject } =
+/**
+ * The Roll back dialog's revision picker is the kit's `Combobox`, which opens a
+ * Radix popover (positioned with a ResizeObserver) over a cmdk list (which
+ * scrolls the highlighted row into view). jsdom implements neither, so both are
+ * stubbed here, as the kit's own `Combobox.test.tsx` does, rather than
+ * globally: a global stub would hide from the next component that it needs one.
+ */
+if (!("ResizeObserver" in window)) {
+  (window as unknown as { ResizeObserver: unknown }).ResizeObserver = class {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  };
+}
+{
+  const proto = window.HTMLElement.prototype as unknown as Record<string, unknown>;
+  proto.scrollIntoView ??= () => {};
+  proto.hasPointerCapture ??= () => false;
+}
+
+/** One `k8s.listReplicaSets` row, as far as the rollback dialog reads it. */
+type Revision = {
+  name: string;
+  revision: string;
+  desired: number;
+  ready: number;
+  current: number;
+  age: string;
+  images?: string[];
+  changeCause?: string;
+  currentTemplate?: boolean;
+};
+
+const {
+  deleteResource,
+  scaleResource,
+  rolloutRestart,
+  rolloutUndo,
+  listReplicaSets,
+  evictPod,
+  cronjobSetSuspend,
+  cronjobTriggerNow,
+  getObject,
+  cordonNode,
+  drainNode,
+  isTauri,
+  notifySuccess,
+} =
   vi.hoisted(() => ({
     deleteResource: vi.fn(async (): Promise<ActionResult> => ({ ok: true })),
     scaleResource: vi.fn(async (): Promise<ActionResult> => ({ ok: true })),
     rolloutRestart: vi.fn(async (): Promise<ActionResult> => ({ ok: true })),
+    rolloutUndo: vi.fn(async (): Promise<ActionResult> => ({ ok: true })),
+    listReplicaSets: vi.fn(async (): Promise<{ replicasets?: Revision[]; error?: string }> => ({ replicasets: [] })),
     evictPod: vi.fn(async (): Promise<ActionResult> => ({ ok: true })),
     cronjobSetSuspend: vi.fn(async (): Promise<ActionResult> => ({ ok: true })),
     cronjobTriggerNow: vi.fn(async (): Promise<{ jobName?: string; error?: string }> => ({
       jobName: "nightly-manual-1",
     })),
+    cordonNode: vi.fn(async (): Promise<ActionResult> => ({ ok: true })),
+    drainNode: vi.fn(async (): Promise<ActionResult & { evicted?: number; skipped?: number }> => ({
+      ok: true,
+      evicted: 4,
+      skipped: 2,
+    })),
+    // The browser unless a case says otherwise: the local PTY a node action
+    // runs in exists on the desktop only.
+    isTauri: vi.fn(() => false),
+    notifySuccess: vi.fn(),
     // `Open shell` looks the pod up fresh, off the live cluster, to find out
     // which containers are worth asking about — a list row carries no
     // container names. Real by default (one running "app" container); tests
@@ -33,7 +92,21 @@ const { deleteResource, scaleResource, rolloutRestart, evictPod, cronjobSetSuspe
 // minting a route — mocked so a test can see exactly what it was asked to
 // start, without a real xterm instance or a real PTY behind it.
 const startPodSession = vi.hoisted(() => vi.fn(async () => 1));
-vi.mock("../lib/sessions", () => ({ startPodSession }));
+// A node action on the desktop starts a local one, with its command queued.
+const startLocalSession = vi.hoisted(() => vi.fn(async () => 2));
+// ...and listens for that session's output to settle. The double hands back
+// the listener it was given, so a test can settle the session itself.
+const settle = vi.hoisted(() => ({
+  listeners: new Map<number, () => void>(),
+  release: vi.fn(),
+}));
+const onSessionSettled = vi.hoisted(() =>
+  vi.fn((id: number, listener: () => void) => {
+    settle.listeners.set(id, listener);
+    return settle.release;
+  }),
+);
+vi.mock("../lib/sessions", () => ({ startPodSession, startLocalSession, onSessionSettled }));
 
 // Direct references, not `(...a) => fn(...a)` wrappers: each mock above is
 // typed by its own implementation (zero declared params), and TypeScript
@@ -50,17 +123,26 @@ const forwardCore = vi.hoisted(() => ({
   startPortForward: vi.fn(async () => ({ id: 1, localPort: 9090 })),
 }));
 
-vi.mock("@srelens/core", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@srelens/core")>()),
+vi.mock("@srelens/core", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@srelens/core")>();
+  return {
+  ...actual,
+  cordonNode,
+  drainNode,
+  isTauri,
+  notify: { ...actual.notify, success: notifySuccess },
   deleteResource,
   scaleResource,
   rolloutRestart,
+  rolloutUndo,
+  listReplicaSets,
   evictPod,
   cronjobSetSuspend,
   cronjobTriggerNow,
   getObject,
   ...forwardCore,
-}));
+  };
+});
 
 import { useRowMenu, type UseRowMenuArgs } from "./ResourceMenu";
 import type { ContextMenuItem } from "@srelens/ui-kit";
@@ -115,9 +197,14 @@ const CM_ARGS: UseRowMenuArgs = { context: "prod", kind: "ConfigMap", actions: {
 const DEPLOY_ARGS: UseRowMenuArgs = { context: "prod", kind: "Deployment", actions: { scale: true, restart: true } };
 const CRON_ARGS: UseRowMenuArgs = { context: "prod", kind: "CronJob", actions: { suspend: true, trigger: true } };
 const NODE_ARGS: UseRowMenuArgs = { context: "prod", kind: "Node", actions: {} };
+/** A node as the Nodes list offers it: the two actions only a node has. */
+const NODE_OPS_ARGS: UseRowMenuArgs = { context: "prod", kind: "Node", actions: { cordon: true, drain: true } };
+const CORDONED_ROW: ListRow & { unschedulable: boolean } = { name: "worker-1", unschedulable: true };
 
 beforeEach(() => {
   vi.clearAllMocks();
+  settle.listeners.clear();
+  isTauri.mockReturnValue(false);
   store.setState(defaultState([]));
 });
 
@@ -478,6 +565,293 @@ describe("useRowMenu", () => {
 });
 
 /**
+ * Cordon and Drain on a node (#820).
+ *
+ * The Nodes list offered neither while Overview's node rows offered both. They
+ * are the row menu's now, so the list, the peek and the full tab all reach one
+ * confirm — and on the desktop that confirm runs the command it printed in a
+ * local terminal, where a drain can be watched, instead of answering once with
+ * a toast.
+ */
+describe("useRowMenu — Cordon and Drain on a node (#820)", () => {
+  const labelsOf = (items: ContextMenuItem[]) => items.map((i) => (i.kind === "sep" ? "—" : i.label));
+  const box = () => within(screen.getByRole("dialog"));
+
+  it("offers Cordon and Drain on a node, and neither on any other kind", () => {
+    const node = labelsOf(menuItems(NODE_OPS_ARGS, NODE_ROW));
+    expect(node).toContain("Cordon");
+    expect(node).toContain("Drain");
+    expect(node).not.toContain("Uncordon");
+
+    for (const [args, row] of [
+      [POD_ARGS, POD_ROW],
+      [DEPLOY_ARGS, DEPLOY_ROW],
+      [CRON_ARGS, CRON_ROW],
+      [CM_ARGS, CM_ROW],
+    ] as const) {
+      const labels = labelsOf(menuItems(args, row));
+      expect(labels).not.toContain("Cordon");
+      expect(labels).not.toContain("Uncordon");
+      expect(labels).not.toContain("Drain");
+    }
+  });
+
+  it("offers a cordoned node the other direction, not the same action again", () => {
+    const labels = labelsOf(menuItems(NODE_OPS_ARGS, CORDONED_ROW));
+    expect(labels).toContain("Uncordon");
+    expect(labels).not.toContain("Cordon");
+  });
+
+  it("marks Drain as danger and sits it with the destructive entries; Cordon is neither", () => {
+    const items = menuItems(NODE_OPS_ARGS, NODE_ROW);
+    const labels = labelsOf(items);
+    const find = (label: string) =>
+      items.find((i): i is Extract<ContextMenuItem, { label: string }> => i.kind !== "sep" && i.label === label);
+
+    expect(find("Drain")?.danger).toBe(true);
+    expect(find("Cordon")?.danger).toBeFalsy();
+    // Below the separator with Delete, and Cordon above it.
+    expect(labels.indexOf("Drain")).toBeGreaterThan(labels.indexOf("—"));
+    expect(labels.indexOf("Cordon")).toBeLessThan(labels.indexOf("—"));
+  });
+
+  it("asks before draining, names the node and the cluster, and does nothing on Cancel", async () => {
+    isTauri.mockReturnValue(true);
+    render(<Harness args={NODE_OPS_ARGS} row={NODE_ROW} />);
+    await userEvent.click(screen.getByRole("button", { name: "Drain" }));
+
+    expect(box().getByText("Drain node?")).toBeDefined();
+    expect(box().getByText("worker-1")).toBeDefined();
+    // The line for reading and copying carries the cluster.
+    expect(
+      box().getByText("kubectl drain worker-1 --ignore-daemonsets --delete-emptydir-data --force --context prod"),
+    ).toBeDefined();
+
+    await userEvent.click(box().getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(startLocalSession).not.toHaveBeenCalled();
+    expect(drainNode).not.toHaveBeenCalled();
+    expect(store.currentWorkspace().tabs.some((t) => t.route === "/terminals")).toBe(false);
+  });
+
+  it("on the desktop, runs the confirmed drain in a local terminal and opens it", async () => {
+    isTauri.mockReturnValue(true);
+    render(<Harness args={NODE_OPS_ARGS} row={NODE_ROW} />);
+    await userEvent.click(screen.getByRole("button", { name: "Drain" }));
+    expect(box().getByText(/Runs in a terminal scoped to/)).toBeDefined();
+    await userEvent.click(box().getByRole("button", { name: "Drain" }));
+
+    await waitFor(() =>
+      expect(startLocalSession).toHaveBeenCalledWith({
+        context: "prod",
+        title: "Drain worker-1",
+        // No `--context`: the shell is scoped to the one cluster already.
+        command: "kubectl drain worker-1 --ignore-daemonsets --delete-emptydir-data --force",
+      }),
+    );
+    await waitFor(() => expect(store.currentWorkspace().tabs.some((t) => t.route === "/terminals")).toBe(true));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    // The terminal IS the action: the call that answers with a toast is not
+    // made as well, or the node would be drained twice over.
+    expect(drainNode).not.toHaveBeenCalled();
+    expect(notifySuccess).not.toHaveBeenCalled();
+  });
+
+  it("on the desktop, cordons in a terminal, and uncordons a cordoned node", async () => {
+    isTauri.mockReturnValue(true);
+    const view = render(<Harness args={NODE_OPS_ARGS} row={NODE_ROW} />);
+    await userEvent.click(screen.getByRole("button", { name: "Cordon" }));
+    expect(box().getByText("Cordon node?")).toBeDefined();
+    expect(box().getByText("kubectl cordon worker-1 --context prod")).toBeDefined();
+    await userEvent.click(box().getByRole("button", { name: "Cordon" }));
+    await waitFor(() =>
+      expect(startLocalSession).toHaveBeenCalledWith({
+        context: "prod",
+        title: "Cordon worker-1",
+        command: "kubectl cordon worker-1",
+      }),
+    );
+    expect(cordonNode).not.toHaveBeenCalled();
+
+    view.rerender(<Harness args={NODE_OPS_ARGS} row={CORDONED_ROW} />);
+    await userEvent.click(screen.getByRole("button", { name: "Uncordon" }));
+    expect(box().getByText("Uncordon node?")).toBeDefined();
+    await userEvent.click(box().getByRole("button", { name: "Uncordon" }));
+    await waitFor(() =>
+      expect(startLocalSession).toHaveBeenLastCalledWith({
+        context: "prod",
+        title: "Uncordon worker-1",
+        command: "kubectl uncordon worker-1",
+      }),
+    );
+  });
+
+  it("on a Windows desktop, which has no /bin/sh to run it under, drains through the call instead (PR #831 review)", async () => {
+    isTauri.mockReturnValue(true);
+    const agent = vi.spyOn(window.navigator, "userAgent", "get").mockReturnValue(
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    );
+    try {
+      render(<Harness args={NODE_OPS_ARGS} row={NODE_ROW} />);
+      await userEvent.click(screen.getByRole("button", { name: "Drain" }));
+      // No promise of a terminal that could not start.
+      expect(box().queryByText(/Runs in a terminal/)).toBeNull();
+      await userEvent.click(box().getByRole("button", { name: "Drain" }));
+
+      await waitFor(() => expect(drainNode).toHaveBeenCalledWith("prod", "worker-1"));
+      await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith("Drained worker-1", "4 evicted, 2 skipped"));
+      expect(startLocalSession).not.toHaveBeenCalled();
+    } finally {
+      agent.mockRestore();
+    }
+  });
+
+  it("in the browser, where there is no local shell, drains through the call and says how it went", async () => {
+    render(<Harness args={NODE_OPS_ARGS} row={NODE_ROW} />);
+    await userEvent.click(screen.getByRole("button", { name: "Drain" }));
+    // No promise of a terminal the browser cannot open.
+    expect(box().queryByText(/Runs in a terminal/)).toBeNull();
+    await userEvent.click(box().getByRole("button", { name: "Drain" }));
+
+    await waitFor(() => expect(drainNode).toHaveBeenCalledWith("prod", "worker-1"));
+    await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith("Drained worker-1", "4 evicted, 2 skipped"));
+    expect(startLocalSession).not.toHaveBeenCalled();
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("in the browser, cordons and uncordons through the call, in the direction picked", async () => {
+    const view = render(<Harness args={NODE_OPS_ARGS} row={NODE_ROW} />);
+    await userEvent.click(screen.getByRole("button", { name: "Cordon" }));
+    await userEvent.click(box().getByRole("button", { name: "Cordon" }));
+    await waitFor(() => expect(cordonNode).toHaveBeenCalledWith("prod", "worker-1", true));
+    await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith("Cordoned worker-1"));
+
+    view.rerender(<Harness args={NODE_OPS_ARGS} row={CORDONED_ROW} />);
+    await userEvent.click(screen.getByRole("button", { name: "Uncordon" }));
+    await userEvent.click(box().getByRole("button", { name: "Uncordon" }));
+    await waitFor(() => expect(cordonNode).toHaveBeenLastCalledWith("prod", "worker-1", false));
+    await waitFor(() => expect(notifySuccess).toHaveBeenLastCalledWith("Uncordoned worker-1"));
+  });
+
+  it("in the browser, keeps the dialog open with the reason when the drain is refused", async () => {
+    drainNode.mockResolvedValueOnce({ error: "forbidden" });
+    render(<Harness args={NODE_OPS_ARGS} row={NODE_ROW} />);
+    await userEvent.click(screen.getByRole("button", { name: "Drain" }));
+    await userEvent.click(box().getByRole("button", { name: "Drain" }));
+
+    await waitFor(() => expect(screen.getByText(/forbidden/)).toBeDefined());
+    expect(screen.getByRole("dialog")).toBeDefined();
+    expect(notifySuccess).not.toHaveBeenCalled();
+  });
+
+  it("drains the cluster the node was picked on, after the reader confirms which, when the rail has moved", async () => {
+    isTauri.mockReturnValue(true);
+    const on = (context: string): UseRowMenuArgs => ({ ...NODE_OPS_ARGS, context });
+    const view = render(<Harness args={on("prod-eu")} row={NODE_ROW} />);
+    await userEvent.click(screen.getByRole("button", { name: "Drain" }));
+    await screen.findByRole("dialog");
+    view.rerender(<Harness args={on("stage-eu")} row={NODE_ROW} />);
+
+    // One click must not drain a node on a cluster the reader has left.
+    await userEvent.click(box().getByRole("button", { name: "Drain" }));
+    expect(startLocalSession).not.toHaveBeenCalled();
+
+    await userEvent.click(screen.getByRole("checkbox", { name: "Yes, still drain on prod-eu." }));
+    await userEvent.click(box().getByRole("button", { name: "Drain" }));
+    await waitFor(() => expect(startLocalSession).toHaveBeenCalledTimes(1));
+    expect(startLocalSession).toHaveBeenCalledWith(expect.objectContaining({ context: "prod-eu" }));
+    // And the tab it opens is that cluster's, not the one the rail is on.
+    expect(store.currentWorkspace().tabs.some((t) => t.route === "/terminals" && t.sub === "prod-eu")).toBe(true);
+  });
+});
+
+/**
+ * A write made from the detail pane's bar has to bring the pane a new object:
+ * the pane reads its subject once, and labels Suspend/Resume and
+ * Cordon/Uncordon from it. Without `onChanged` a node cordoned from its own
+ * detail view went on being offered Cordon (PR #831 review).
+ */
+describe("useRowMenu — telling its host the subject changed", () => {
+  const box = () => within(screen.getByRole("dialog"));
+  const withChanged = (args: UseRowMenuArgs, onChanged: () => void): UseRowMenuArgs => ({ ...args, onChanged });
+
+  it("says so after a browser cordon goes through, and after a drain", async () => {
+    const onChanged = vi.fn();
+    render(<Harness args={withChanged(NODE_OPS_ARGS, onChanged)} row={NODE_ROW} />);
+
+    await userEvent.click(screen.getByRole("button", { name: "Cordon" }));
+    await userEvent.click(box().getByRole("button", { name: "Cordon" }));
+    await waitFor(() => expect(onChanged).toHaveBeenCalledTimes(1));
+
+    await userEvent.click(screen.getByRole("button", { name: "Drain" }));
+    await userEvent.click(box().getByRole("button", { name: "Drain" }));
+    await waitFor(() => expect(onChanged).toHaveBeenCalledTimes(2));
+  });
+
+  it("says so for the other label read off the object — a CronJob's Suspend", async () => {
+    const onChanged = vi.fn();
+    render(<Harness args={withChanged(CRON_ARGS, onChanged)} row={CRON_ROW} />);
+    await userEvent.click(screen.getByRole("button", { name: "Suspend" }));
+    await userEvent.click(box().getByRole("button", { name: "Suspend" }));
+    await waitFor(() => expect(onChanged).toHaveBeenCalledTimes(1));
+  });
+
+  it("says nothing when the write was refused, or cancelled", async () => {
+    const onChanged = vi.fn();
+    cordonNode.mockResolvedValueOnce({ error: "forbidden" });
+    render(<Harness args={withChanged(NODE_OPS_ARGS, onChanged)} row={NODE_ROW} />);
+
+    await userEvent.click(screen.getByRole("button", { name: "Cordon" }));
+    await userEvent.click(box().getByRole("button", { name: "Cordon" }));
+    await waitFor(() => expect(screen.getByText(/forbidden/)).toBeDefined());
+    await userEvent.click(box().getByRole("button", { name: "Cancel" }));
+
+    expect(onChanged).not.toHaveBeenCalled();
+  });
+
+  it("says nothing after a delete — there is nothing left to read again", async () => {
+    const onChanged = vi.fn();
+    render(<Harness args={withChanged(POD_ARGS, onChanged)} row={POD_ROW} />);
+    await userEvent.click(screen.getByRole("button", { name: "Delete" }));
+    await userEvent.click(box().getByRole("button", { name: "Delete" }));
+    await waitFor(() => expect(deleteResource).toHaveBeenCalled());
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(onChanged).not.toHaveBeenCalled();
+  });
+
+  it("on the desktop, says so each time the terminal's output settles, not when the command is started", async () => {
+    isTauri.mockReturnValue(true);
+    const onChanged = vi.fn();
+    render(<Harness args={withChanged(NODE_OPS_ARGS, onChanged)} row={NODE_ROW} />);
+    await userEvent.click(screen.getByRole("button", { name: "Drain" }));
+    await userEvent.click(box().getByRole("button", { name: "Drain" }));
+
+    // Listening to the session the command was started in...
+    await waitFor(() => expect(onSessionSettled).toHaveBeenCalledWith(2, expect.any(Function)));
+    // ...and nothing has changed yet: the command has only just been started.
+    expect(onChanged).not.toHaveBeenCalled();
+
+    act(() => settle.listeners.get(2)!());
+    expect(onChanged).toHaveBeenCalledTimes(1);
+    // A drain waiting on a disruption budget settles more than once.
+    act(() => settle.listeners.get(2)!());
+    expect(onChanged).toHaveBeenCalledTimes(2);
+  });
+
+  it("stops listening to the terminal when the menu's host goes away", async () => {
+    isTauri.mockReturnValue(true);
+    const view = render(<Harness args={withChanged(NODE_OPS_ARGS, vi.fn())} row={NODE_ROW} />);
+    await userEvent.click(screen.getByRole("button", { name: "Cordon" }));
+    await userEvent.click(box().getByRole("button", { name: "Cordon" }));
+    await waitFor(() => expect(onSessionSettled).toHaveBeenCalled());
+    expect(settle.release).not.toHaveBeenCalled();
+
+    view.unmount();
+    expect(settle.release).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
  * **Every write here runs on the cluster the row was picked on.**
  *
  * Until #357 a dialog was window-modal: its overlay covered the cluster rail,
@@ -499,6 +873,115 @@ describe("useRowMenu", () => {
  * one click (Scale takes one number, and it is kept), so asking again costs
  * the reader a tick.
  */
+describe("useRowMenu — Roll back (#389)", () => {
+  const ROLLBACK_ARGS: UseRowMenuArgs = { context: "prod", kind: "Deployment", actions: { restart: true, rollback: true } };
+  const REV3: Revision = { name: "web-c", revision: "3", desired: 2, ready: 2, current: 2, age: "2d", images: ["api:3"], currentTemplate: true };
+  const REV2: Revision = { name: "web-b", revision: "2", desired: 0, ready: 0, current: 0, age: "2d", images: ["api:2"], changeCause: "bump api" };
+  const REV1: Revision = { name: "web-a", revision: "1", desired: 0, ready: 0, current: 0, age: "2d", images: ["api:1"] };
+  const REV2_LABEL = "rev 2 · api:2 · 2d ago · “bump api”";
+
+  async function openRollback() {
+    render(<Harness args={ROLLBACK_ARGS} row={DEPLOY_ROW} />);
+    await userEvent.click(screen.getByRole("button", { name: "Roll back" }));
+    return within(await screen.findByRole("dialog"));
+  }
+
+  /** The revision picker — a searchable `Combobox`, whose trigger reads the choice. */
+  const picker = (dialog: ReturnType<typeof within>) => dialog.getByRole("combobox", { name: "Revision" });
+
+  it("offers Roll back on a Deployment, and not on a kind without revision history", () => {
+    const labels = (args: UseRowMenuArgs, row: ListRow) =>
+      menuItems(args, row).map((i) => (i.kind === "sep" ? "—" : i.label));
+    expect(labels(ROLLBACK_ARGS, DEPLOY_ROW)).toContain("Roll back");
+    expect(labels(DEPLOY_ARGS, DEPLOY_ROW)).not.toContain("Roll back");
+    expect(labels(POD_ARGS, POD_ROW)).not.toContain("Roll back");
+  });
+
+  it("lists the earlier revisions, starts on the one before current, and shows the kubectl it will run", async () => {
+    listReplicaSets.mockResolvedValueOnce({ replicasets: [REV3, REV2, REV1] });
+    const dialog = await openRollback();
+    expect(await dialog.findByText("rev 3 · api:3 · 2d ago")).toBeDefined();
+    await waitFor(() => expect(picker(dialog).textContent).toContain(REV2_LABEL));
+    expect(dialog.getByText("kubectl rollout undo deployments/web --to-revision=2 -n default --context prod")).toBeDefined();
+    // The revision the Deployment runs is shown, never offered.
+    await userEvent.click(picker(dialog));
+    expect(screen.getByRole("option", { name: REV2_LABEL })).toBeDefined();
+    expect(screen.queryByRole("option", { name: /^rev 3/ })).toBeNull();
+    // Cluster-supplied, so searchable (AGENTS.md, PR #810 review).
+    await userEvent.type(screen.getByPlaceholderText("Search revisions…"), "bump");
+    expect(screen.getByRole("option", { name: REV2_LABEL })).toBeDefined();
+    expect(screen.queryByRole("option", { name: /^rev 1/ })).toBeNull();
+    expect(listReplicaSets).toHaveBeenCalledWith("prod", "default", "web");
+  });
+
+  it("rolls back to the revision chosen", async () => {
+    listReplicaSets.mockResolvedValueOnce({ replicasets: [REV3, REV2, REV1] });
+    const dialog = await openRollback();
+    await waitFor(() => expect(picker(dialog).textContent).toContain(REV2_LABEL));
+    await userEvent.click(picker(dialog));
+    await userEvent.click(screen.getByRole("option", { name: "rev 1 · api:1 · 2d ago" }));
+    expect(dialog.getByText("kubectl rollout undo deployments/web --to-revision=1 -n default --context prod")).toBeDefined();
+    await userEvent.click(dialog.getByRole("button", { name: "Roll back" }));
+    await waitFor(() => expect(rolloutUndo).toHaveBeenCalledWith("prod", "default", "web", 1));
+  });
+
+  it("offers every revision, newest first, when none is the template the Deployment runs yet (PR #810 review)", async () => {
+    // Right after a template change the newest ReplicaSet can still be the
+    // previous template: nothing is "current", and it is a real target.
+    listReplicaSets.mockResolvedValueOnce({ replicasets: [{ ...REV3, currentTemplate: false }, REV2, REV1] });
+    const dialog = await openRollback();
+    await waitFor(() => expect(picker(dialog).textContent).toContain("rev 3 · api:3 · 2d ago"));
+    expect(dialog.queryByText(/^Current:/)).toBeNull();
+    await userEvent.click(picker(dialog));
+    expect(screen.getByRole("option", { name: "rev 3 · api:3 · 2d ago" })).toBeDefined();
+  });
+
+  it("says so when there is no earlier revision, and writes nothing", async () => {
+    listReplicaSets.mockResolvedValueOnce({ replicasets: [REV3] });
+    const dialog = await openRollback();
+    expect(await dialog.findByText("This Deployment has no earlier revision to roll back to.")).toBeDefined();
+    await userEvent.click(dialog.getByRole("button", { name: "Roll back" }));
+    expect(await dialog.findByText("Choose an earlier revision to roll back to.")).toBeDefined();
+    expect(rolloutUndo).not.toHaveBeenCalled();
+  });
+
+  it("keeps the dialog open with the refusal when the rollback is refused", async () => {
+    listReplicaSets.mockResolvedValueOnce({ replicasets: [REV3, REV2] });
+    rolloutUndo.mockResolvedValueOnce({ error: "Deployment default/web already runs revision 2" });
+    const dialog = await openRollback();
+    await waitFor(() => expect(picker(dialog).textContent).toContain(REV2_LABEL));
+    await userEvent.click(dialog.getByRole("button", { name: "Roll back" }));
+    await waitFor(() => expect(screen.getByText(/already runs revision 2/)).toBeDefined());
+    expect(screen.getByRole("dialog")).toBeDefined();
+  });
+
+  it("offers Retry when the revisions could not be read, and reads them again (PR #810 review)", async () => {
+    listReplicaSets
+      .mockResolvedValueOnce({ error: "forbidden: cannot list replicasets" })
+      .mockResolvedValueOnce({ replicasets: [REV3, REV2] });
+    const dialog = await openRollback();
+    expect(await dialog.findByText(/forbidden/)).toBeDefined();
+    await userEvent.click(dialog.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(picker(dialog).textContent).toContain(REV2_LABEL));
+    expect(listReplicaSets).toHaveBeenCalledTimes(2);
+  });
+
+  it("says why when reading the revisions rejects, rather than reading forever", async () => {
+    listReplicaSets.mockRejectedValueOnce(new Error("socket closed"));
+    const dialog = await openRollback();
+    expect(await dialog.findByText(/socket closed/)).toBeDefined();
+    expect(dialog.queryByText("Reading revisions…")).toBeNull();
+  });
+
+  it("says why the revisions could not be listed, and writes nothing", async () => {
+    listReplicaSets.mockResolvedValueOnce({ error: "forbidden: cannot list replicasets" });
+    const dialog = await openRollback();
+    expect(await dialog.findByText(/forbidden/)).toBeDefined();
+    await userEvent.click(dialog.getByRole("button", { name: "Roll back" }));
+    expect(rolloutUndo).not.toHaveBeenCalled();
+  });
+});
+
 describe("useRowMenu — the cluster the row was picked on", () => {
   const PINNED = "prod-eu";
   const MOVED = "stage-eu";

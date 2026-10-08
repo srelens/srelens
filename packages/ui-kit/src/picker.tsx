@@ -16,6 +16,57 @@ export function optionLabel(option: ComboboxOption): string {
   return option.label ?? option.value;
 }
 
+/** Where in a name the search text was found, best first. cmdk orders rows by these. */
+const AT_START = 1;
+const AT_WORD = 0.8;
+const INSIDE = 0.6;
+
+/** A letter, a digit, or an accent stored after its letter — anything a word is made of. */
+const WORD_CHAR = /^[\p{L}\p{N}\p{M}]$/u;
+
+/**
+ * The character that ends just before `at`, read whole: a letter outside the
+ * basic plane takes two UTF-16 units, and half of one is not a letter.
+ */
+function charBefore(text: string, at: number): string {
+  const unit = text.charCodeAt(at - 1);
+  const whole = unit >= 0xdc00 && unit <= 0xdfff && at >= 2 ? text.codePointAt(at - 2)! : unit;
+  return String.fromCodePoint(whole > 0xffff ? whole : unit);
+}
+
+/** The best place `needle` occurs in `text`, or 0 when it does not occur at all. */
+function placeIn(text: string, needle: string): number {
+  let best = 0;
+  for (let at = text.indexOf(needle); at !== -1; at = text.indexOf(needle, at + 1)) {
+    if (at === 0) return AT_START;
+    best = Math.max(best, WORD_CHAR.test(charBefore(text, at)) ? INSIDE : AT_WORD);
+  }
+  return best;
+}
+
+/**
+ * Whether a row survives the search box, and how well it matched.
+ *
+ * A row is kept when its value or its label contains what was typed, ignoring
+ * case. cmdk's own filter is fuzzy — it keeps any row the typed letters can be
+ * picked out of in order, however far apart — which is right for a command
+ * palette and wrong for a list of names: "test" kept `kafka-system`, and the
+ * names that really did say test were lost among the ones that did not.
+ *
+ * The score only orders what is kept: a name that starts with the text, then
+ * one where it starts a word (`team-test`), then one where it falls inside a
+ * word (`contest`). (#844)
+ */
+export function pickerFilter(value: string, search: string, keywords?: string[]): number {
+  const needle = search.trim().toLowerCase();
+  if (needle === "") return AT_START;
+  let best = 0;
+  for (const text of [value, ...(keywords ?? [])]) {
+    best = Math.max(best, placeIn(text.toLowerCase(), needle));
+  }
+  return best;
+}
+
 export interface PickerProps {
   /** A row under the list, ruled off from it — counts and list-wide actions. */
   footer?: ReactNode;
@@ -96,7 +147,7 @@ export function Picker({ summary, ariaLabel, ariaInvalid, ariaRequired, ariaDesc
           // stylesheet's z-index doing its job.
           style={{ position: "relative" }}
         >
-          <Command>
+          <Command filter={pickerFilter}>
             <div className="rule-b flex items-center gap-1.5 px-2 py-1.5">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden="true" className="shrink-0 text-faint">
                 <circle cx="11" cy="11" r="7" stroke="currentColor" strokeWidth="2" />

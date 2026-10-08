@@ -3,27 +3,30 @@
 Every app is one JSON manifest. The rules for versioning, identifiers and unknown
 fields are normative and live in [specification.md](specification.md); this page is
 the field reference. Complete examples: [argocd.json](../../examples/extensions/argocd.json)
-and [flux.json](../../examples/extensions/flux.json).
+and [flux.json](../../examples/extensions/flux.json), and the reference providers
+[prometheus.json](../../examples/extensions/prometheus.json) and
+[loki.json](../../examples/extensions/loki.json).
 
 ## JSON Schema
 
-The schema for API 0.6 is committed at
-[`schemas/extension-manifest.v0.6.json`](../../schemas/extension-manifest.v0.6.json).
+The schema for API 0.7 is committed at
+[`schemas/extension-manifest.v0.7.json`](../../schemas/extension-manifest.v0.7.json).
 Point your editor at it by naming it in the manifest:
 
 ```json
 {
-  "$schema": "https://raw.githubusercontent.com/srelens/srelens/main/schemas/extension-manifest.v0.6.json",
+  "$schema": "https://raw.githubusercontent.com/srelens/srelens/main/schemas/extension-manifest.v0.7.json",
   "id": "io.example.cert-manager"
 }
 ```
 
 The file is generated from the host's `Manifest` type, and `cargo test` fails when the
-two differ. [`schemas/extension-manifest.v0.5.json`](../../schemas/extension-manifest.v0.5.json),
+two differ. [`schemas/extension-manifest.v0.6.json`](../../schemas/extension-manifest.v0.6.json),
+[`schemas/extension-manifest.v0.5.json`](../../schemas/extension-manifest.v0.5.json),
 [`schemas/extension-manifest.v0.4.json`](../../schemas/extension-manifest.v0.4.json)
 and [`schemas/extension-manifest.v0.3.json`](../../schemas/extension-manifest.v0.3.json)
-are the API 0.5, 0.4 and 0.3 contracts, each kept as it was when the next line was cut,
-for manifests that still require `^0.5`, `^0.4` or `^0.3`; name the one your range
+are the API 0.6, 0.5, 0.4 and 0.3 contracts, each kept as it was when the next line was cut,
+for manifests that still require `^0.6`, `^0.5`, `^0.4` or `^0.3`; name the one your range
 negotiates to.
 After changing a manifest field, regenerate the newest file with:
 
@@ -44,7 +47,7 @@ before publishing.
 | `id` | Yes | Reverse-domain identifier. See [Identifiers](specification.md#identifiers). |
 | `name` | Yes | Display name, 1–120 characters, with no control characters and no bidirectional or invisible format characters. See [Identifiers](specification.md#identifiers). |
 | `version` | Yes | The app's own SemVer version. |
-| `srelensApiVersion` | Yes | A SemVer range of extension API versions, for example `^0.5`. The fields marked **API 0.4** on this page need a range that admits only 0.4 or later, those marked **API 0.5** one that admits only 0.5 or later, and those marked **API 0.6** one that admits only 0.6 or later; see [Versioning](specification.md#versioning). |
+| `srelensApiVersion` | Yes | A SemVer range of extension API versions, for example `^0.7`. Each field or value form marked **API 0.x** needs a range that admits only that version or later; see [Versioning](specification.md#versioning). |
 | `kind` | Yes | `declarative`, or (**API 0.6**) `executable` for an app that also runs a sidecar; see [Executable apps](#executable-apps). |
 | `permissions` | Yes | The exact host capability IDs the bindings use. `network.http` is written `{ "capability": "network.http", "hosts": [...] }` (API 0.4); see [Network requests](#network-requests). A pod capability may be written `{ "capability": "k8s.streamLogs", "namespaces": [...] }` (API 0.5); see [Logs, exec and port-forwards](#logs-exec-and-port-forwards). |
 | `capabilities` | Yes | 1–32 bindings, below; 0–32 for an executable app, which may do all its work in its sidecar. |
@@ -541,6 +544,14 @@ shows on the app's list. A `countByStatus` card over a reader whose kind has no
 at install at `contributions.dashboardCards[i].type`. It never counts by
 `statusColumns`.
 
+From **API 0.7**, `within` may be the whole value
+`"${settings.<id>}"` (for example `"${settings.expiryWindow}"`), naming a declared
+`select` setting with a default.
+Every option must be a positive duration under the same bounded grammar.
+The host uses the saved choice, or the default, for both the count and its
+linked page's filter. Invalid stored values show an error, never a zero count.
+Only this duration is settable: the card's source, path and target remain fixed.
+
 ### `commands`
 
 Entries in the new design's command palette (#544). The host shows each as
@@ -820,6 +831,9 @@ The access review lists the declaration of each setting an action or reader
 interpolates, so an update that lets a setting write another value shows as changed
 access.
 
+API 0.7 also permits a duration `select` in a dashboard predicate's `within`,
+under the narrower rules in [Dashboard cards](#dashboard-cards).
+
 ### Secret settings
 
 A `secret-reference` setting is kept by the host's secret store (#543). On the desktop
@@ -926,8 +940,9 @@ declared `url` setting. Problems are reported at `permissions[i].hosts[j]`.
 
 ### A request
 
-A `network.http` binding is one fixed GET. It takes no `inputs` in API 0.4; templated
-queries are [#569](https://github.com/srelens/srelens/issues/569)'s.
+A `network.http` binding is one fixed GET. It takes no `inputs`: a
+[provider](#metric-log-and-trace-providers) (API 0.7) that sends its query through the
+binding adds only the query and time range the host binds, as parameters the host sets.
 
 | Argument | Meaning |
 |---|---|
@@ -975,7 +990,151 @@ is refused there (`EXTENSION_UNSUPPORTED_TARGET`); see
 `extensions.read` sends a request, with every check an app read makes: the app enabled,
 at the revision the view knows, on a cluster it is enabled for, with its grants. A read
 stream (`extensions.streams`) refuses a `network.http` binding, so nothing calls another
-system on a timer.
+system on a timer. The one exception is a [log provider](#log-providers) the log view
+follows: the host asks it again every 5 seconds while the view is open, at an interval
+the app cannot set.
+
+## Metric, log and trace providers
+
+API 0.7 ([#569](https://github.com/srelens/srelens/issues/569)). A provider is a query
+template that one of the app's `network.http` bindings sends: a PromQL range query drawn
+as a chart on a workload's or a pod's overview, a LogQL query the log view can follow as
+a source beside Kubernetes, or a TraceQL search listed on an overview. The app writes the
+template. The host binds the view's cluster, namespace, workload or pod and time range
+into it, sends it through the binding with every rule [a request](#what-the-host-holds-a-request-to)
+is held to, reads the answer, and draws it itself. A provider supplies data, never markup.
+
+```json
+"permissions": [{ "capability": "network.http", "hosts": ["${settings.prometheusUrl}"] }],
+"settings": [{ "id": "prometheusUrl", "type": "url", "title": "Prometheus URL", "required": true }],
+"capabilities": [
+  { "name": "rangeQuery", "title": "Prometheus range query", "target": "network.http", "inputs": [],
+    "arguments": { "url": "${settings.prometheusUrl}", "path": "/api/v1/query_range" } }
+],
+"contributions": {
+  "metricProviders": [
+    { "id": "cpu", "title": "CPU by pod", "capability": "rangeQuery", "language": "promql",
+      "forKinds": ["apps/Deployment", "apps/StatefulSet", "apps/DaemonSet"], "unit": "cores",
+      "query": "sum by (pod) (rate(container_cpu_usage_seconds_total{namespace=\"${namespace}\", pod=~\"${workload:regex}-.+\"}[5m]))" }
+  ]
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `id` | 1–64 letters, digits and `-`, unique across all three lists. |
+| `title` | 1–120 characters, no control or format characters. The panel's or the source's name. |
+| `capability` | A `network.http` binding in `capabilities`. Its `path` is the endpoint: `/api/v1/query_range`, `/loki/api/v1/query_range`, `/api/search`. |
+| `language` | `promql` in `metricProviders`, `logql` in `logProviders`, `traceql` in `traceProviders`. |
+| `forKinds` | 1–4 of `apps/Deployment`, `apps/StatefulSet`, `apps/DaemonSet` and `/Pod`, each once: where the provider is shown. |
+| `query` | The template, 1–2048 characters on one line. See below. |
+| `unit` | Metric providers only: `number`, `percent`, `ratio`, `bytes`, `bytesPerSecond`, `seconds`, `cores` or `perSecond`. |
+
+Each list holds at most 16 providers.
+
+### Variables
+
+| Variable | Is | Known on |
+|---|---|---|
+| `${cluster}` | The kubeconfig context's name, as its file declares it. | Every kind. |
+| `${namespace}` | The view's namespace. | Every kind. |
+| `${workload}` | The Deployment, StatefulSet or DaemonSet the view shows. | The three workload kinds. |
+| `${pod}` | The Pod the view shows. | `/Pod`. |
+| `${range}` | The panel's whole time range, as a duration: `3600s`. | Metric providers. |
+| `${step}` | The panel's resolution, as a duration: `15s`. | Metric providers. |
+
+A variable must be known on every kind in `forKinds`, so `${pod}` needs `forKinds` to be
+`["/Pod"]` alone, and `${workload}` is refused beside `/Pod`.
+
+**Where a variable may stand.** The host reads the template the way the language reads
+its strings, and a name — `cluster`, `namespace`, `workload`, `pod` — may stand only
+inside a double-quoted string: `namespace="${namespace}"`. In a regex matcher's string
+(after `=~`, `!~` or `|~`, and an `or` alternative of a LogQL line filter such as
+`|~ "error" or "${pod:regex}"`) it is written `${name:regex}`, which escapes the value's RE2
+metacharacters first, so `pod=~"${workload:regex}-.+"` matches a workload named `api.v2`
+literally and a cluster named `.*` matches only that name; `${name:regex}` anywhere else
+is refused. The host escapes `\` and `"` as it inserts every value, so with each backslash
+doubled a value can neither end its string nor begin one of the languages' other escape
+sequences, such as `\n`, and it holds each value to what it can be: a namespace, workload
+or pod is a Kubernetes name, and a cluster's name is 1–1024 letters, digits and
+`._:/@+-` — what kubeconfig context names carry, from `kind-dev` to an EKS ARN. A value
+outside that is refused rather than sent, so no value can end its string, start a
+comment or open a template inside one (LogQL's `line_format`): a context named
+`prod"} or vector(1) #` never reaches a query. `${range}` and `${step}` are the host's
+own durations and stand outside strings: `[${range}]`.
+
+Refused at install, at `contributions.<list>[i].query`: a name outside a double-quoted
+string (bare, in a raw string between backticks, or in a PromQL single-quoted string); a
+duration inside a string; an unknown variable or format; a name in a regex matcher
+without `:regex`, or `:regex` outside one; a comment — `#`, or `/* */` and `//`, which
+LogQL's and TraceQL's lexers skip, quotes and all; a control character or a line or
+paragraph separator; an unclosed string; a
+string delimiter the language lacks (LogQL has no single-quoted string, and TraceQL
+strings are double-quoted only); and `${settings.…}`, since a setting never reaches a
+query.
+
+The values are checked on every query, as above.
+
+### What the host sends and reads
+
+The host adds these parameters after the binding's own, which may not set them:
+
+| Language | Endpoint | Parameters the host sets | Read as |
+|---|---|---|---|
+| PromQL | Prometheus `query_range` | `query`, `start`, `end`, `step` (seconds) | The [timeseries chart](native-components.md#timeseries): one series per result, named by its labels. |
+| LogQL | Loki `query_range` | `query`, `start`, `end` (nanoseconds), `limit`, `direction` | Log lines, oldest first, each tagged `pod/container` from its stream's labels. |
+| TraceQL | Tempo `search` | `q`, `start`, `end` (seconds), `limit` | Traces, newest first: ID, root service, root operation, start and duration. |
+
+- **Metrics.** A range of 5 minutes to 7 days, rounded up to whole steps and ending at
+  the last whole step, so both ends are on it; the step is at least 15 seconds and makes
+  at most 251 points. A sample lands on the step nearest it, within half a step, so a
+  query frontend that evaluates a little off the asked start still draws. At most 8 series: more is refused
+  with a request to aggregate them, never cut. A sample that is not a finite number
+  (`NaN`, `+Inf`) is a gap. A query that matches nothing is a chart that says no data
+  was reported.
+- **Logs.** At most 1,000 lines a query, or a follow's history of up to 5,000 (its
+  `tailLines`), and a line past 16 KiB is cut and marked. An answer past the 4 MiB limit
+  is asked again for half as many lines, down to 10.
+- **Traces.** At most 50; the host asks for 51, so a search that finds more says so.
+  An answer with an `error` is refused with it, and one with neither `traces` nor
+  Tempo's `metrics` is refused, never read as a search that found nothing.
+- **Failures.** A status outside 2xx is refused with the server's own reason quoted —
+  a JSON body's `error`, as Prometheus explains a bad query, or the text Loki and Tempo
+  send — cut to 300 characters and scrubbed of the URL, its host, any secret header's
+  value, and each path segment and query value (as sent and decoded) of 8 or more
+  characters the binding's URL carries (a `url` setting may hold a token there; the query and time range the host adds
+  are kept, so a reason that quotes the query still reads). A reason that holds a secret too short to replace (under 4 characters) is left
+  out, and a 2xx answer's `status: "error"` text is scrubbed the same way. An answer
+  that is not the language's (a login page, a metric query's matrix
+  where lines were expected) is refused with why. The 4 MiB limit, timeouts and status
+  rules are `network.http`'s; a 408, 429 or 5xx is one nothing answered.
+
+`extensions.queryProvider` runs one query of a metric, log or trace provider for a
+resource; see [capabilities.md](capabilities.md). Its input is held to what each field
+can be before anything is looked up, and no refusal repeats it: an app ID, a provider
+ID of 1–64 letters, digits and `-`, a context name of at most 1,024 characters, and
+Kubernetes names. On the web host it answers only under
+the operator's network ceiling, as every `network.http` request there does, and a log
+provider's follow is an app stream, which the web host does not run yet.
+
+### Log providers
+
+A log provider is a source of the log view (`/logs/<kind>/<namespace>/<name>`) for each
+kind in `forKinds`. The view follows it as the `logProvider` stream source
+([streams.md](streams.md#logprovider)): the history the view asks for (its tail length
+and how far back), then a query every 5 seconds for what is newer than the last line it
+sent, for as long as the view is open. Closing the view, or choosing another source, ends
+it.
+
+### What to write
+
+The labels a query matches are the backend's, not Kubernetes': the reference manifests
+assume a collector that labels series and streams with `namespace`, `pod` and
+`container`, as the common Kubernetes scrape and log configurations do. A workload's
+pods are matched by name, `pod=~"${workload:regex}-.+"`, which also matches the pods of
+a workload whose name starts with this one's and a `-`. A backend that needs a
+credential takes it through the binding's `secretHeaders`, such as `Authorization` after
+`Bearer `, and a multi-tenant Loki's `X-Scope-OrgID` is a literal header.
 
 ## Logs, exec and port-forwards
 
@@ -1136,23 +1295,34 @@ Executable apps are a preview, and so is API 0.6, until the API is frozen as 1.0
 ([specification.md](specification.md#versioning)).
 
 - **Windows:** out of the box.
-- **Linux:** not out of the box in this release. It needs all of these:
-  - the launcher `srelens-sandbox-launch`, which the bundles do not ship. Build it with
-    `cargo build --release -p srelens-plugin-host --bin srelens-sandbox-launch`. srelens
-    finds it beside its own binary, or at the path in `SRELENS_SANDBOX_LAUNCHER`;
-  - a kernel with Landlock enabled;
-  - a cgroup v2 directory delegated to the user, with the `memory` and `cpu` controllers
-    enabled for its children, named in `SRELENS_SANDBOX_CGROUP_ROOT`, and srelens itself
-    running in a leaf of it. A process can move another only between cgroups under one it
-    may write, and each sidecar's launcher moves itself into a new sibling of that leaf.
+- **Linux:** out of the box on a systemd desktop whose kernel has Landlock. The deb, rpm,
+  AppImage and AUR packages ship the launcher `srelens-sandbox-launch` beside `srelens`. At
+  its first sidecar start, srelens asks your systemd user manager for a delegated scope,
+  `app-srelens-<pid>.scope`, moves itself into the scope's `host/` leaf, and gives each
+  sidecar a cgroup beside it with its memory and CPU limits. That needs the `memory` and
+  `cpu` controllers delegated to your session. systemd 252 and later delegate both, but
+  systemd before 252 (Ubuntu 22.04) and the RHEL 9 family leave out `cpu`. There, add it:
 
-  There is no tested desktop procedure for the cgroup yet. The `sandbox-conformance` job in
-  [ci.yml](../../.github/workflows/ci.yml) shows the exact steps on a runner. Its "Delegate
-  a cgroup" step makes a subtree the runner's user owns and enables `memory` and `cpu` at
-  the root. Its Linux "Conformance" step moves the shell into a leaf of the subtree, enables
-  `+memory +cpu` for the subtree's children, and sets `SRELENS_SANDBOX_CGROUP_ROOT`.
-- **macOS:** not yet. srelens refuses to start any sidecar until its memory and CPU
-  watchdog has been checked with Seatbelt on a macOS 27 Mac.
+  ```sh
+  sudo mkdir -p /etc/systemd/system/user@.service.d
+  printf '[Service]\nDelegate=pids memory cpu\n' | sudo tee /etc/systemd/system/user@.service.d/delegate.conf
+  sudo systemctl daemon-reload
+  ```
+
+  then log out and in again. Without systemd, or in a container, name both pieces yourself:
+  `SRELENS_SANDBOX_LAUNCHER` for a launcher built with
+  `cargo build --release -p srelens-plugin-host --bin srelens-sandbox-launch`, and
+  `SRELENS_SANDBOX_CGROUP_ROOT` for a cgroup v2 directory delegated to you, with `memory`
+  and `cpu` enabled for its children and srelens running in a leaf of it. A process can
+  move another only between cgroups under one it may write, and each sidecar's launcher
+  moves itself into a new sibling of that leaf. The `sandbox-conformance` job in
+  [ci.yml](../../.github/workflows/ci.yml) runs both setups on a runner.
+- **macOS:** Seatbelt isolation with host-enforced memory and CPU limits. The
+  watchdog bounds sustained use; a burst between readings can exceed a limit
+  ([sandbox guarantees](sidecar-protocol.md#sandbox)).
+  It needs `srelens-sandbox-launch` beside the desktop binary, or its absolute path
+  in `SRELENS_SANDBOX_LAUNCHER`. For local development, build it with
+  `cargo build -p srelens-plugin-host --bin srelens-sandbox-launch` before `pnpm dev`.
 - **The web host:** it refuses to install an executable app. Its extension policy does not
   allow one: `allowExecutableApps` must stay `false`, and an app that fails a policy rule
   is refused as a whole ([the policy table](../WEB.md#extension-policy)). It also keeps no
@@ -1182,12 +1352,12 @@ its sidecar and says what is missing; it never starts a sidecar unconfined.
 - **It runs only in a sandbox.** Linux and Windows run sidecars in the backends
   [sidecar-protocol.md](sidecar-protocol.md#sandbox) describes. On Linux the sandbox
   launcher is found beside the srelens binary or at `SRELENS_SANDBOX_LAUNCHER`, and the
-  cgroup delegated to srelens is named by `SRELENS_SANDBOX_CGROUP_ROOT`; without them
-  srelens refuses to start its sidecar and says what is missing, and the bundles do not
-  ship the launcher.
-  On macOS srelens refuses to start any sidecar until its memory and CPU watchdog has
-  been checked with Seatbelt on a macOS 27 Mac
-  ([#713](https://github.com/srelens/srelens/issues/713)).
+  cgroup is the scope srelens asks systemd for, or the directory
+  `SRELENS_SANDBOX_CGROUP_ROOT` names; without them srelens refuses to start its sidecar
+  and says what is missing and how to add it.
+  On macOS the same launcher applies Seatbelt and the host watchdog limits memory
+  and CPU ([#713](https://github.com/srelens/srelens/issues/713)); a burst between
+  readings can exceed a limit.
 - **Its input is the host's to check.** Every call is held to the operation's declared
   inputs before the sidecar sees it: no field it does not declare, every required one
   present, each of its type, each string within its `maxLength`, and the whole call
@@ -1206,7 +1376,10 @@ The desktop app accepts a narrower surface than the developer broker:
 
 - Targets are `k8s.listCustomResource`, `k8s.listEvents`, the built-in workload and
   node summary readers, `network.http`, or a pod capability (`k8s.streamLogs`,
-  `k8s.exec`, `k8s.portForward`). A reader target must be read-only with no
+  `k8s.exec`, `k8s.portForward`). A provider sends its query through a `network.http`
+  binding, so an app with providers is refused wherever `network.http` is (on the web,
+  without the operator's network ceiling).
+  A reader target must be read-only with no
   confirmation, sensitive or destructive annotation; `network.http` and the pod
   capabilities are held to [their](#network-requests) [own](#logs-exec-and-port-forwards)
   rules.

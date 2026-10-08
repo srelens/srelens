@@ -9,8 +9,8 @@
 use serde_json::json;
 use srelens_plugin_host::sidecar::data::DataDir;
 use srelens_plugin_host::sidecar::{
-    Enforcement, Exit, LaunchError, Launched, Launcher, Limits, LogSource, NoBroker, OsSandbox,
-    Policy, RequestError, SandboxConfig, SidecarCommand, SidecarConfig, SidecarStatus, Supervisor,
+    Enforcement, Exit, LaunchError, Launched, Launcher, Limits, LogSource, NoBroker, Policy,
+    RequestError, SidecarCommand, SidecarConfig, SidecarStatus, Supervisor,
 };
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -292,13 +292,14 @@ async fn dropping_the_supervisor_kills_a_real_sidecar() {
 }
 
 /// The one refusal that holds on this machine, through the real backend:
-/// macOS until #713, or an OS with no backend at all.
-#[cfg(not(any(target_os = "linux", windows)))]
+/// an OS with no backend at all.
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 #[tokio::test]
 async fn the_os_sandbox_refuses_to_run_sidecars_here_and_says_why() {
+    use srelens_plugin_host::sidecar::{OsSandbox, SandboxConfig};
     let sandbox = OsSandbox::new(SandboxConfig {
         launcher: Some(env!("CARGO_BIN_EXE_srelens-sandbox-launch").into()),
-        cgroup_root: None,
+        cgroup: srelens_plugin_host::sidecar::CgroupRoot::Missing,
     });
     let supervisor = Supervisor::start(config(&[]), Arc::new(sandbox), Arc::new(NoBroker));
     let SidecarStatus::Refused { reason } =
@@ -306,12 +307,10 @@ async fn the_os_sandbox_refuses_to_run_sidecars_here_and_says_why() {
     else {
         unreachable!()
     };
-    let expected = if cfg!(target_os = "macos") {
-        "#713"
-    } else {
-        "no sandbox for executable apps"
-    };
-    assert!(reason.contains(expected), "{reason}");
+    assert!(
+        reason.contains("no sandbox for executable apps"),
+        "{reason}"
+    );
 }
 
 /// On Linux without a delegated cgroup, as on an ordinary test machine, the
@@ -319,9 +318,10 @@ async fn the_os_sandbox_refuses_to_run_sidecars_here_and_says_why() {
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn without_a_delegated_cgroup_linux_refuses_to_run_sidecars() {
+    use srelens_plugin_host::sidecar::{OsSandbox, SandboxConfig};
     let sandbox = OsSandbox::new(SandboxConfig {
         launcher: Some(env!("CARGO_BIN_EXE_srelens-sandbox-launch").into()),
-        cgroup_root: None,
+        cgroup: srelens_plugin_host::sidecar::CgroupRoot::Missing,
     });
     let supervisor = Supervisor::start(config(&[]), Arc::new(sandbox), Arc::new(NoBroker));
     let SidecarStatus::Refused { reason } =

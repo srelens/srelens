@@ -4,7 +4,7 @@ mod common;
 use std::time::Duration;
 
 use crossterm::event::KeyCode;
-use srelens_tui::{event::AppEvent, ui::Modal};
+use srectl::{event::AppEvent, ui::Modal};
 
 async fn recovery_controls_remain_responsive(stalled: bool) {
     let _settings = common::env::isolate_settings();

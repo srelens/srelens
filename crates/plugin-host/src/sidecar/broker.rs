@@ -129,6 +129,23 @@ pub struct CapabilityBroker {
     consent: Arc<dyn Consent>,
 }
 
+// Ordinary approved writes finish in their task; cancelled Jobs also need an
+// audit entry when dropping the runner starts its owned-resource cleanup.
+struct CancelledJob<'a> { broker: &'a CapabilityBroker, args: &'a Value, finished: bool }
+impl Drop for CancelledJob<'_> {
+    fn drop(&mut self) {
+        if self.finished { return; }
+        let tool = "extensions.runJob";
+        let redacted = audit::redact(self.args, false);
+        let (app, cluster, resource) = audit::describe_call_target(tool, self.args, &redacted);
+        self.broker.audit.record(audit::AuditRecord {
+            source: Source::Sidecar, tool: tool.into(), app, cluster, resource,
+            decision: "approved", outcome: audit::OUTCOME_FAILED,
+            error: Some("Job scan was cancelled before completion".into()), args: redacted,
+        });
+    }
+}
+
 impl CapabilityBroker {
     /// `registry` is the host's, with the `extensions.*` facade in it. Every
     /// write is recorded to `audit`, and every gated call put to `consent`.
@@ -186,6 +203,14 @@ impl CapabilityBroker {
         if let Err(why) = self.consent.confirm(&request).await {
             self.record_denied(tool, &args, annotations.sensitive, &why);
             return Err(RpcError::new(code::CONSENT_DENIED, why));
+        }
+        // A Job is a cancellable task with owned cleanup, unlike an ordinary
+        // approved write. Dropping its future triggers that cleanup.
+        if tool == "extensions.runJob" {
+            let mut guard = CancelledJob { broker: self, args: &args, finished: false };
+            let result = self.registry.invoke_audited(tool, args.clone(), self.audit.as_ref(), Source::Sidecar, "approved").await;
+            guard.finished = true;
+            return result.map_err(|error| self.refusal(error));
         }
         // Approved: on a task of its own, so once it starts it finishes and is
         // recorded, whether or not the sidecar is still waiting for the answer.
@@ -295,7 +320,23 @@ impl CapabilityBroker {
             })
         };
         let args = match tool {
-            "extensions.read" => selection(),
+            "extensions.bindingAvailability" => json!({
+                "id": self.app.id,
+                "revision": self.app.revision,
+                "context": context.cluster_id,
+                "namespace": namespace,
+                "bindings": given["bindings"],
+            }),
+            "extensions.read" => {
+                let mut selection = selection();
+                if let Some(cursor) = given.get("cursor") { selection["cursor"] = cursor.clone(); }
+                selection
+            },
+            "extensions.runJob" => {
+                let mut selection = selection();
+                selection["inputs"] = given["inputs"].clone();
+                selection
+            }
             "extensions.resource" => {
                 let mut selection = selection();
                 selection["name"] = given["name"].clone();
@@ -330,8 +371,37 @@ pub(crate) struct HostCall {
 /// the same codes and sentences as always. The committed protocol schema
 /// takes exactly what this takes (see the conformance test).
 pub(crate) fn host_call(name: &str, params: Value) -> Result<HostCall, RpcError> {
+    if name == method::HOST_RUN_JOB {
+        let input: srelens_sidecar_protocol::HostRunJobParams =
+            serde_json::from_value(params).map_err(|error| invalid(error.to_string()))?;
+        let context = CallContext {cluster_id:input.context.cluster_id,namespace:Some(input.context.namespace)};
+        context.validate().map_err(|error| invalid(error.to_string()))?;
+        if !is_identifier(&input.capability) {
+            return Err(invalid("A Job needs a selected namespace and declared capability".into()));
+        }
+        return Ok(HostCall {
+            tool: "extensions.runJob", context,
+            fields: json!({"capability":input.capability,"inputs":input.inputs}).as_object().unwrap().clone(),
+        });
+    }
+    if name == method::HOST_BINDING_AVAILABILITY {
+        let input: srelens_sidecar_protocol::HostBindingAvailabilityParams =
+            serde_json::from_value(params).map_err(|error| invalid(error.to_string()))?;
+        input
+            .context
+            .validate()
+            .map_err(|error| invalid(error.to_string()))?;
+        return Ok(HostCall {
+            tool: "extensions.bindingAvailability",
+            context: input.context,
+            fields: json!({"bindings":input.bindings})
+                .as_object()
+                .unwrap()
+                .clone(),
+        });
+    }
     let (tool, fields): (&'static str, &[&str]) = match name {
-        method::HOST_READ => ("extensions.read", &["capability"]),
+        method::HOST_READ => ("extensions.read", &["capability", "cursor"]),
         method::HOST_RESOURCE => ("extensions.resource", &["capability", "name"]),
         method::HOST_ACTION => (
             "extensions.action",
@@ -370,7 +440,7 @@ pub(crate) fn host_call(name: &str, params: Value) -> Result<HostCall, RpcError>
         };
         given.insert(key, value);
     }
-    if let Some(missing) = fields.iter().find(|f| !given.contains_key(**f)) {
+    if let Some(missing) = fields.iter().find(|f| **f != "cursor" && !given.contains_key(**f)) {
         return Err(invalid(format!("`{name}` needs `{missing}`")));
     }
     for (field, value) in &given {
@@ -378,6 +448,7 @@ pub(crate) fn host_call(name: &str, params: Value) -> Result<HostCall, RpcError>
         let (fits, shape) = match field.as_str() {
             "capability" | "action" => (is_identifier(value), IDENTIFIER),
             "name" => (is_object_name(value), OBJECT_NAME),
+            "cursor" => (value.len() <= 8192 && value.bytes().all(|b| b.is_ascii_graphic()), "a continuation token of at most 8192 printable bytes"),
             _ => (is_token(value), TOKEN),
         };
         if !fits {
@@ -598,6 +669,146 @@ mod tests {
         json!({"clusterId": cluster, "namespace": namespace})
     }
 
+    #[tokio::test]
+    async fn binding_discovery_is_dispatched_with_the_supervisors_identity() {
+        let seen = Seen::default();
+        let capture = seen.clone();
+        let mut registry = Registry::new();
+        registry.register(Capability::read_only(
+            "extensions.bindingAvailability",
+            "availability",
+            move |input| {
+                let capture = capture.clone();
+                async move {
+                    capture
+                        .lock()
+                        .unwrap()
+                        .push(("extensions.bindingAvailability".into(), input));
+                    Ok(json!({"bindings":[{"binding":"reports","state":"absent"}]}))
+                }
+            },
+        ));
+        let broker = CapabilityBroker::new(
+            Arc::new(registry),
+            app(),
+            Arc::new(Spy::default()),
+            Arc::new(NoConsent),
+        );
+        let answer = broker.call(method::HOST_BINDING_AVAILABILITY, json!({"context":{"clusterId":"pinned-cluster","namespace":"team"},"bindings":["reports"]})).await.unwrap();
+        assert_eq!(answer["bindings"][0]["state"], "absent");
+        assert_eq!(
+            seen.lock().unwrap()[0].1,
+            json!({"id":APP,"revision":7,"context":"pinned-cluster","namespace":"team","bindings":["reports"]})
+        );
+    }
+
+    #[test]
+    fn binding_discovery_callback_keeps_context_and_checks_declared_name_shapes() {
+        let params = json!({"context":{"clusterId":"pinned-cluster","namespace":null},"bindings":["vulnerability-reports","sbom-reports"]});
+        let call = host_call("host/bindingAvailability", params.clone()).unwrap();
+        assert_eq!(call.tool, "extensions.bindingAvailability");
+        assert_eq!(call.context.cluster_id, "pinned-cluster");
+        assert_eq!(call.fields["bindings"], params["bindings"]);
+        for bindings in [
+            json!([]),
+            json!(["bad/name"]),
+            json!(["reports", "reports"]),
+            json!(vec!["reports"; 17]),
+            json!("reports"),
+        ] {
+            let mut bad = params.clone();
+            bad["bindings"] = bindings;
+            assert!(host_call("host/bindingAvailability", bad).is_err());
+        }
+        let mut impersonation = params.clone();
+        impersonation["id"] = json!("another-app");
+        assert!(host_call("host/bindingAvailability", impersonation).is_err());
+        let mut wrong = params;
+        wrong["context"] = json!({"cluster_id":"pinned-cluster","namespace":null});
+        assert!(host_call("host/bindingAvailability", wrong).is_err());
+    }
+
+    #[test]
+    fn job_callback_accepts_caller_payload_and_rejects_impersonation_or_unscoped_inputs() {
+        let params = json!({"context":{"clusterId":"pinned-cluster","namespace":"team"},"capability":"scan-namespace","inputs":{"namespace":"team"}});
+        let call = host_call("host/runJob", params.clone()).unwrap();
+        assert_eq!(call.tool, "extensions.runJob");
+        assert_eq!(call.fields["inputs"], params["inputs"]);
+        for (key, value) in [("id", json!("another-app")), ("revision", json!(99)), ("inputs", json!({"bad/name":"value"})), ("inputs", json!({"image":42})), ("inputs", json!({"image":""})), ("inputs", json!({"image":"a".repeat(513)})), ("context", json!({"cluster_id":"pinned-cluster","namespace":"team"})), ("context", json!({"clusterId":"pinned-cluster","namespace":null}))] {
+            let mut bad = params.clone();
+            bad[key] = value;
+            assert!(host_call("host/runJob", bad).is_err(), "{key}");
+        }
+    }
+
+    #[test]
+    fn job_callback_schema_and_broker_agree_on_scope_and_bounded_inputs() {
+        let root = srelens_sidecar_protocol::schema();
+        let validator = jsonschema::draft7::new(&json!({"definitions":root["definitions"],"allOf":[{"$ref":"#/definitions/HostRunJobParams"}]})).unwrap();
+        let valid = json!({"context":{"clusterId":"pinned-cluster","namespace":"team"},"capability":"scan","inputs":{"namespace":"team"}});
+        let mut cases = vec![valid.clone()];
+        for (key,value) in [("context",json!({"clusterId":"pinned-cluster","namespace":null})),("inputs",json!({"image":"a\nother"})),("inputs",json!({"bad/name":"x"})),("inputs",json!({"image":"é"})),("inputs",json!({"image":"x".repeat(513)})),("inputs",json!({})),("capability",json!("bad/name")),("id",json!("other"))] { let mut case=valid.clone();case[key]=value;cases.push(case); }
+        for params in cases { assert_eq!(host_call("host/runJob",params.clone()).is_ok(),validator.is_valid(&params),"{params}"); }
+    }
+
+    #[tokio::test]
+    async fn job_callback_requires_consent_and_injects_the_supervisors_identity() {
+        let seen = Seen::default();
+        let capture = seen.clone();
+        let mut registry = Registry::new();
+        registry.register(Capability::typed::<Value, Value, _, _>("extensions.runJob", "run a scoped Job", Annotations::MUTATING, move |input| {
+            let capture = capture.clone();
+            async move {
+                capture.lock().unwrap().push(("extensions.runJob".into(), input));
+                Ok(json!({"path":"job-result.json"}))
+            }
+        }));
+        let registry = Arc::new(registry);
+        let params = json!({"context":{"clusterId":"pinned-cluster","namespace":"team"},"capability":"scan-namespace","inputs":{"namespace":"team"}});
+        let denied = CapabilityBroker::new(registry.clone(), app(), Arc::new(Spy::default()), Arc::new(NoConsent));
+        assert_eq!(denied.call("host/runJob", params.clone()).await.unwrap_err().code, code::CONSENT_DENIED);
+        assert!(seen.lock().unwrap().is_empty());
+        let consent = Arc::new(Approve::default());
+        let approved = CapabilityBroker::new(registry, app(), Arc::new(Spy::default()), consent.clone());
+        approved.call("host/runJob", params).await.unwrap();
+        assert_eq!(seen.lock().unwrap()[0].1, json!({"id":APP,"revision":7,"context":"pinned-cluster","namespace":"team","capability":"scan-namespace","inputs":{"namespace":"team"}}));
+        assert_eq!(consent.0.lock().unwrap()[0].namespace.as_deref(), Some("team"));
+    }
+
+    #[tokio::test]
+    async fn cancelling_an_approved_job_drops_the_runner_to_trigger_owned_cleanup() {
+        struct Dropped(Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for Dropped {
+            fn drop(&mut self) { self.0.store(true, std::sync::atomic::Ordering::SeqCst); }
+        }
+        let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (started, mut running) = tokio::sync::mpsc::unbounded_channel::<()>();
+        let mut registry = Registry::new();
+        let d = dropped.clone();
+        registry.register(Capability::typed::<Value, Value, _, _>("extensions.runJob", "Job", Annotations::MUTATING, move |_| {
+            let guard = Dropped(d.clone());
+            let started = started.clone();
+            async move {
+                let _guard = guard;
+                let _ = started.send(());
+                std::future::pending::<()>().await;
+                Ok(Value::Null)
+            }
+        }));
+        let audit = Arc::new(Spy::default());
+        let broker = CapabilityBroker::new(Arc::new(registry), app(), audit.clone(), Arc::new(Approve::default()));
+        {
+            let call = broker.call("host/runJob", json!({"context":{"clusterId":"prod","namespace":"team"},"capability":"scan","inputs":{}}));
+            tokio::select! { _ = call => panic!("Job finished"), _ = running.recv() => {} }
+        }
+        for _ in 0..10 { tokio::task::yield_now().await; }
+        assert!(dropped.load(std::sync::atomic::Ordering::SeqCst), "Job outlived its cancellation");
+        let records = audit.records();
+        assert_eq!(records.len(), 1, "Cancelled approved Jobs must be audited");
+        assert_eq!(records[0].outcome, audit::OUTCOME_FAILED);
+        assert_eq!(records[0].decision, "approved");
+    }
+
     impl Harness {
         async fn call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
             self.broker.call(method, params).await
@@ -630,6 +841,14 @@ mod tests {
         let params = json!({"context": on("prod", Value::Null), "capability": "applications"});
         h.call("host/read", params).await.unwrap();
         assert_eq!(h.seen()[0].1["namespace"], "");
+    }
+
+    #[tokio::test]
+    async fn a_paged_read_preserves_cursor_and_host_owned_scope() {
+        let h = harness(Arc::new(NoConsent));
+        h.call("host/read", json!({"context":on("prod",json!("team")),"capability":"applications","cursor":"next-page"})).await.unwrap();
+        assert_eq!(h.seen()[0].1, json!({"id":APP,"revision":7,"context":"prod","namespace":"team","capability":"applications","cursor":"next-page"}));
+        assert!(h.call("host/read", json!({"context":on("prod",json!("team")),"capability":"applications","cursor":"x".repeat(8193)})).await.is_err());
     }
 
     #[tokio::test]
@@ -1121,6 +1340,11 @@ mod tests {
             });
         }
         let mut cases = vec![base.clone()];
+        if method == "host/read" {
+            for cursor in [Value::Null, json!(""), json!("a b"), json!("a".repeat(8192)), json!("a".repeat(8193))] {
+                let mut case = base.clone(); case["cursor"] = cursor; cases.push(case);
+            }
+        }
         for field in fields {
             let values = match *field {
                 "capability" | "action" => vec![

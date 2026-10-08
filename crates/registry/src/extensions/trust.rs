@@ -1229,7 +1229,8 @@ mod tests {
 
     /// Run once the key ceremony has replaced the placeholders: the pinned root verifies,
     /// and its shipped srelens delegation holds the key every published release was
-    /// signed with, so apps installed before #559 go on verifying.
+    /// signed with, so apps installed before #559 go on verifying, and the key that
+    /// replaced it (#582).
     #[test]
     fn the_pinned_root_verifies_and_delegates_org_srelens_to_the_release_key() {
         let pinned = TrustRoot::open(
@@ -1241,9 +1242,11 @@ mod tests {
         let srelens = srelens
             .owner("org.srelens.flux")
             .expect("org.srelens is delegated");
-        let release_key = key_id(include_bytes!(
-            "../../tests/fixtures/trust/srelens-apps.pub"
-        ));
-        assert!(srelens.keys.iter().any(|key| key.id == release_key));
+        for release_key in [
+            key_id(include_bytes!("../../tests/fixtures/trust/srelens-apps.pub")),
+            key_id(include_bytes!("../../tests/fixtures/trust/srelens-publisher.pub")),
+        ] {
+            assert!(srelens.keys.iter().any(|key| key.id == release_key));
+        }
     }
 }

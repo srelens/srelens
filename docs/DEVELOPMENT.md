@@ -42,7 +42,7 @@ The first `pnpm dev` compiles the full Rust dependency tree and takes a few minu
 | `cd sdk/go && go test ./...` | The Go sidecar SDK (CI adds `-race`, which needs cgo and a C compiler) |
 | `cd sdk/go && go generate ./...` | Regenerate `protocol/protocol_gen.go` after the protocol schema changes |
 | `go build -C sdk/examples/hello-world/go -o "$PWD/target/hello-world-go" .`, then `SRELENS_HELLO_WORLD_GO="$PWD/target/hello-world-go" cargo test -p srelens-sidecar-hello-world --test supervised -- --ignored` | The Go example under the supervisor; add `--test sandboxed` and the sandbox variables in the next row to run both examples in the sandbox too (on Windows, the binary ends `.exe` and the path must be a Windows one, such as `$(pwd -W)` in Git Bash) |
-| `cargo build -p srelens-plugin-host --bin srelens-sandbox-launch`, then `SRELENS_SANDBOX_LAUNCHER="$PWD/target/debug/srelens-sandbox-launch" SRELENS_HELLO_WORLD_GO="$PWD/target/hello-world-go" SRELENS_SANDBOX_CGROUP_ROOT=/sys/fs/cgroup/<delegated> cargo test -p srelens-sidecar-hello-world --test sandboxed --test supervised -- --ignored --test-threads=1` | The example inside the OS sandbox, run from the workspace root (Linux needs the launcher built first and passed as an absolute path, plus `SRELENS_SANDBOX_CGROUP_ROOT`; on Windows neither variable is needed) |
+| `cargo build -p srelens-plugin-host --bin srelens-sandbox-launch`, then `SRELENS_SANDBOX_LAUNCHER="$PWD/target/debug/srelens-sandbox-launch" SRELENS_HELLO_WORLD_GO="$PWD/target/hello-world-go" cargo test -p srelens-sidecar-hello-world --test sandboxed --test supervised -- --ignored --test-threads=1` | The example inside the OS sandbox, run from the workspace root (Linux needs the launcher built first and passed as an absolute path; it asks the systemd user manager for a delegated scope, and without a user session needs `SRELENS_SANDBOX_CGROUP_ROOT`; on Windows neither variable is needed) |
 | `PROPTEST_RNG_SEED=7 PROPTEST_CASES=10000 cargo test -p srelens-registry --lib fuzzing` | Run the extension parser property tests past their fixed cases |
 | `cargo +nightly fuzz run manifest` | Fuzz an extension parser (Linux or macOS, nightly); setup in [docs/extensions/testing.md](extensions/testing.md#fuzzing) |
 
@@ -133,11 +133,11 @@ Four invariants are enforced by tests rather than by review, so "everything is e
 
 | Test | Guarantee |
 | --- | --- |
-| `every_capability_is_mcp_exposed` (`crates/registry`) | The registry and the MCP tool list match exactly, except for UI-only capabilities (`Capability::ui_only`), which must not be tools. `app_logs_and_metrics_never_leave_through_mcp_or_the_audit_trail` pins that set to `extensions.inspect` and `extensions.logs`, an app's logs and metrics ([#575](https://github.com/srelens/srelens/issues/575)). |
+| `every_capability_is_mcp_exposed` (`crates/registry`) | The registry and the MCP tool list match exactly, except for UI-only capabilities (`Capability::ui_only`), which must not be tools. `app_logs_and_metrics_never_leave_through_mcp_or_the_audit_trail` pins that set to `extensions.inspect`, `extensions.logs` and `extensions.callOperation`, the native app surfaces ([#575](https://github.com/srelens/srelens/issues/575)). |
 | `assert_mutating_capabilities_are_gated` (`crates/mcp/src/completeness.rs`) | Every capability that is not `read_only` is `requires_confirm`. Note the predicate is *mutating*, not *destructive* — a non-destructive capability can still need consent. |
 | `capability_catalog_json_is_in_sync` (`crates/registry`) | The committed `packages/core/src/lib/capability-catalog.json` equals the live registry, so the frontend palette audit can cross-check without linking Rust. Regenerate with `UPDATE_CATALOG=1 cargo test -p srelens-registry`. |
-| `committed_manifest_schema_matches_the_contract` (`crates/plugin-host/tests/schema.rs`) | The committed `schemas/extension-manifest.v0.5.json` (the newest supported API line) equals `Manifest::schema()`, and Vitest validates every example manifest against it. An older line's file stays as it was when the next line was cut, and `a_field_missing_from_an_older_lines_schema_is_gated_in_api_fields` fails when the contract has a field that file lacks and `API_FIELDS` does not list. Regenerate with `UPDATE_CATALOG=1 cargo test -p srelens-plugin-host --test schema`. |
-| `committed_protocol_schema_matches_the_types` (`sdk/protocol/tests/schema.rs`) | The committed `schemas/sidecar-protocol.v0.1.json` (the newest sidecar API line) equals `srelens_sidecar_protocol::schema()`, generated from the types srelens builds its sidecar messages from. The fixtures in `sdk/protocol/tests/messages/` validate against it, `everything_srelens_writes_is_a_host_message_in_the_protocol_schema` holds what the host writes to it, and the broker's conformance test holds its `host/*` shapes to it. Regenerate with `UPDATE_CATALOG=1 cargo test -p srelens-sidecar-protocol --test schema`. |
+| `committed_manifest_schema_matches_the_contract` (`crates/plugin-host/tests/schema.rs`) | The committed `schemas/extension-manifest.v0.8.json` (the newest supported API line) equals `Manifest::schema()`, and Vitest validates every example manifest against it. An older line's file stays as it was when the next line was cut, and `a_field_missing_from_an_older_lines_schema_is_gated_in_api_fields` fails when the contract has a field that file lacks and `API_FIELDS` does not list. Regenerate with `UPDATE_CATALOG=1 cargo test -p srelens-plugin-host --test schema`. |
+| `committed_protocol_schema_matches_the_types` (`sdk/protocol/tests/schema.rs`) | The committed `schemas/sidecar-protocol.v0.2.json` (the newest sidecar API line) equals `srelens_sidecar_protocol::schema()`, generated from the types srelens builds its sidecar messages from. The fixtures in `sdk/protocol/tests/messages/` validate against it, `everything_srelens_writes_is_a_host_message_in_the_protocol_schema` holds what the host writes to it, and the broker's conformance test holds its `host/*` shapes to it. Regenerate with `UPDATE_CATALOG=1 cargo test -p srelens-sidecar-protocol --test schema`. |
 | `a_sidecar_built_with_default_features_does_not_build_schemars` (`sdk/rust/tests/dependencies.rs`) | `cargo tree -e no-dev` for `srelens-sidecar`, `srelens-sidecar-protocol` and the Rust hello-world lists no `schemars`: the protocol's JSON Schema is its `schema` feature, off by default, so a sidecar author does not build it. The tests that need the schema (the SDK's, the protocol crate's, `srelens-plugin-host`'s) turn the feature on as a dev-dependency, so their commands need no `--features`. |
 | `extension_inventory_schema_json_is_in_sync` (`crates/registry`) | The committed `packages/core/src/lib/extension-inventory.schema.json` equals the Rust inventory and manifest types, and `extensionTypes.test.ts` holds the `@srelens/core` extension types to its field names and optionality. Regenerate with `UPDATE_CATALOG=1 cargo test -p srelens-registry`. |
 | `full_capability_suite` (`apps/desktop/src-tauri/tests/e2e.rs`) | Every registered capability is actually exercised against a live kind cluster, or explicitly excluded with a reason. Runs in the `backend` CI job. |
@@ -151,7 +151,7 @@ Watches, pod exec, log tails, terminals, helm operations, and port-forwards don'
 
 The frontend side is identical in both cases and lives in `@srelens/core` (`packages/core/src/lib/`: `watch.ts`, `exec.ts`, `logsStream.ts`, `forward.ts`).
 
-Streams an app's views open go through one generic contract instead of a manager per kind: `crates/streams/src/app.rs` (frames, view ownership, per-app limits, metrics), with the extension broker deciding what an app may open. A new app stream source is a new `source` kind, not a new command: an app's logs, exec and port-forwards (#567) are the `logs`, `exec` and `portForward` sources, held to the binding's pod scope in `crates/registry/src/extensions/pods.rs`, rather than more uses of the core log, exec and forward managers. See [docs/extensions/streams.md](extensions/streams.md).
+Streams an app's views open go through one generic contract instead of a manager per kind: `crates/streams/src/app.rs` (frames, view ownership, per-app limits, metrics), with the extension broker deciding what an app may open. A new app stream source is a new `source` kind, not a new command: an app's logs, exec and port-forwards (#567) are the `logs`, `exec` and `portForward` sources, held to the binding's pod scope in `crates/registry/src/extensions/pods.rs`, rather than more uses of the core log, exec and forward managers. A log provider (#569) is the `logProvider` source, which polls its backend through `network.http` while its view is open. See [docs/extensions/streams.md](extensions/streams.md).
 
 ### The transport shim
 
@@ -476,7 +476,7 @@ unrevoked. A rotation that updates the secret but not the table — or the
 reverse — fails the release rather than publishing signatures the instructions
 tell users to reject.
 
-**Rotate in two releases, for `srelens-tui update`.** The TUI's self-update
+**Rotate in two releases, for `srectl update`.** The TUI's self-update
 trusts the keys `KEYS` held when that binary was built, compiled in, and
 nothing else (#448). A binary already installed never learns a key added
 later. So a new key has to ship before it signs:
@@ -507,3 +507,23 @@ is *usable*.
 - **UI** — the new design composes `@srelens/ui-kit` in `packages/ui-next`; shared tokens and component rules live in `packages/ui-kit/src/styles`. Read the [design contract and visibility audit](../design.md) for theme, contrast, typography, density and verification rules. The classic design uses `src/components/ui` (shadcn/radix), `src/ui` and `src/ui/styles.css`. Use the owning design’s tokens rather than ad-hoc colours.
 - **No direct Tauri imports** outside `src/transport/`.
 - **No host-specific logic in `crates/`** — if a change only makes sense for the desktop or only for the web, it belongs in `apps/desktop/src-tauri` or `crates/server`, not in the shared core.
+
+### macOS executable-app bundles
+
+Release builds prepare `srelens-sandbox-launch` for the same architecture as
+Srelens, then load the release-only Tauri binary overlay. The preparation script
+signs the helper without the desktop's restricted App ID
+entitlements; Tauri copies it unchanged into `Contents/MacOS` beside the host
+and notarizes the complete app.
+For a local bundle, run from the repository root:
+
+```bash
+sh packaging/macos/prepare-launcher.sh aarch64-apple-darwin
+pnpm tauri build --target aarch64-apple-darwin --config src-tauri/macos-launcher.conf.json
+```
+
+Use `x86_64-apple-darwin` for Intel. Ordinary Cargo/dev builds do not load the
+overlay, so they do not require a prebuilt release launcher. The release
+workflow checks that the bundled launcher is executable and verifies its
+signature on signed builds and executes its error path before the updater
+manifest can publish.

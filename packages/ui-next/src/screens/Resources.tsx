@@ -1,5 +1,5 @@
 import { ContextLabel } from "../lib/contextLabel";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   describeError,
   listCrds,
@@ -32,6 +32,7 @@ import { useHiddenColumns } from "../lib/columnPrefs";
 import { detailRoute, newRoute, parseDetailRoute } from "../lib/detailRoute";
 import { customDescriptor } from "../lib/kinds/custom";
 import { descriptorFor } from "../lib/kinds/descriptors";
+import { addNamespace, useRowRefocus, withNamespaceSelect } from "../lib/kinds/namespaceCell";
 import { withRowAffordances } from "../lib/kinds/rowAffordances";
 import { rowKey, type KindDescriptor, type ListRow } from "../lib/kinds/types";
 import { clampPeekWidth, savePeekWidth, setPeekWidth, usePeekBounds, usePeekWidth } from "../lib/peekWidth";
@@ -48,6 +49,7 @@ import { ResourceDetailView } from "./detail/ResourceDetailView";
 import { ResourceTabView } from "./detail/ResourceTabView";
 import { ResourceBulk } from "./ResourceBulk";
 import { useRowMenu } from "./ResourceMenu";
+import { ListCount } from "./ListCount";
 import {
   NamespaceErrorAlert,
   NamespacePicker,
@@ -207,13 +209,28 @@ function KindList({
   // what `filterTableData` searches. `flagged` is the only per-kind
   // knowledge either affordance needs, and most kinds have none; with no
   // descriptor yet, columns pass through undecorated, same as before.
-  const renderedColumns = useMemo(
-    () =>
-      descriptor
-        ? withRowAffordances(columns, (row) => descriptor.flagged?.(row) ?? false, ask)
-        : columns,
-    [columns, descriptor, ask],
+  //
+  // And, under them, the Namespace column's values as buttons that add the
+  // namespace to this tab's selection (#821) — the same write the picker in
+  // the filter bar makes. Withheld from a namespace-scoped credential, which
+  // has the one namespace and no way to ask for another.
+  // The list reloads under the new selection, which takes the table — and
+  // the reader's keyboard focus — away; `refocus` puts it back on the row.
+  const refocus = useRowRefocus();
+  const rememberRow = refocus.remember;
+  const addToSelection = useCallback(
+    (namespace: string, row: ListRow) => {
+      rememberRow(rowKey(row));
+      setNamespaces(context.stableId, addNamespace(selection, namespace));
+    },
+    [setNamespaces, context.stableId, selection, rememberRow],
   );
+  const renderedColumns = useMemo(() => {
+    const selectable = withNamespaceSelect(columns, selection, scope ? undefined : addToSelection);
+    return descriptor
+      ? withRowAffordances(selectable, (row) => descriptor.flagged?.(row) ?? false, ask)
+      : selectable;
+  }, [columns, descriptor, ask, selection, scope, addToSelection]);
 
   // Sort, filter text and filter column live on the tab — see
   // `useResourceTabView`'s own comment for why, and why `filterKey` is
@@ -412,7 +429,7 @@ function KindList({
    */
   const listAndPeek = (
     <div ref={listRow.ref} className="flex min-h-0 flex-1">
-      <div className="scroll min-h-0 min-w-0 flex-1">
+      <div ref={refocus.scope} className="scroll min-h-0 min-w-0 flex-1">
         {list.status === "loading" ? (
           <LoadingState label={`Loading ${lower}`} />
         ) : list.status === "error" ? (
@@ -505,6 +522,14 @@ function KindList({
       fill
       actions={
         <>
+          {/* The list's own size, and how much of it the filter is showing
+              (#402). Only once the list has answered: while it is loading or
+              refused there is no number, and `0 items` would be a wrong one a
+              reader believes. Both figures are the table's — `rows` is what it
+              holds for the namespaces selected, `filtered` what it draws. */}
+          {showRows && (
+            <ListCount total={rows.length} shown={filtered.length} truncated={list.truncated} noun={lower} />
+          )}
           {descriptor.source === "watch" && (
             <LiveSignal
               // The label carries the meaning; the tone only colours it.
@@ -616,14 +641,10 @@ function KindList({
         <SideRail
           head="About this kind"
           width={CRD_RAIL_WIDTH}
-          // The count is what the TABLE beside it holds — narrowed by the
-          // namespace selection, not a cluster-wide total, because no such
-          // total is available without a second call and a number that
-          // disagreed with the rows under it would be worse than a narrow
-          // one. It is withheld entirely until the list has answered:
-          // `AboutKind` drops the row rather than drawing `Objects 0`, which
-          // is a wrong number a reader would believe.
-          rail={<AboutKind crd={crd} context={name} objects={showRows ? rows.length : undefined} />}
+          // No object count here any more: it is in the header, for every
+          // kind, and the same figure in two places on one screen is two
+          // things to keep agreeing (#402).
+          rail={<AboutKind crd={crd} context={name} />}
         >
           {/* The left pane's own head, as the design words it. `crd.kind` again
               — the slug is a plural DNS name and reads as one. */}

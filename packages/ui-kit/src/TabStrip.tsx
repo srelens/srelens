@@ -195,6 +195,47 @@ export function TabStrip({
     refs.current.get(move.id)?.scrollIntoView?.({ block: "nearest", inline: "nearest" });
   }, [tabs]);
 
+  // The active tab is kept on screen. Opening a tab appends it at the far end
+  // and activates it, so on a strip that already overflows the tab the reader
+  // just asked for was the one tab they could not see — with nothing on the
+  // bar to say which way it had gone (#828). Choosing a tab from the overflow
+  // menu had the same ending.
+  //
+  // `nearest`, so a tab that is already in view does not move: only one cut
+  // off by an edge scrolls, and only as far as that edge. Keyed on the tab
+  // count as well as the id, because closing the active tab's neighbours can
+  // leave it where it was while the strip under it changes length.
+  const tabCount = tabs.length;
+  useEffect(() => {
+    refs.current.get(activeId)?.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+  }, [activeId, tabCount]);
+
+  // And kept on screen when the strip itself gets narrower: the window is
+  // resized, or the sidebar beside it widened. Neither changes which tab is
+  // active or how many there are, so the effect above does not run, and an
+  // active tab sitting at the right edge was simply cut off by the edge moving
+  // in over it.
+  //
+  // Only when it gets NARROWER. The observer also reports on first observe and
+  // on height changes, and a strip that got wider has cut nothing off: a
+  // reader who has scrolled away to look at other tabs, and then widens the
+  // window, must not be thrown back to the active one for it.
+  const activeIdRef = useRef(activeId);
+  activeIdRef.current = activeId;
+  useEffect(() => {
+    const list = listRef.current;
+    if (!list || typeof ResizeObserver === "undefined") return;
+    let width = list.clientWidth;
+    const observer = new ResizeObserver(() => {
+      const narrower = list.clientWidth < width;
+      width = list.clientWidth;
+      if (!narrower) return;
+      refs.current.get(activeIdRef.current)?.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+    });
+    observer.observe(list);
+    return () => observer.disconnect();
+  }, []);
+
   function requestMove(id: string, to: number, focus: boolean) {
     const from = tabs.findIndex(t => t.id === id);
     to = Math.max(0, Math.min(tabs.length - 1, to));
@@ -400,7 +441,7 @@ export function TabStrip({
                   <NavIcon icon={tab.icon} />
                 </span>
               )}
-              <span className="truncate">{tab.title}</span>
+              <span className="tab-title truncate">{tab.title}</span>
               {filled(tab.sub) && <span className="tab-sub truncate">{tab.sub}</span>}
               {tab.pinned ? (
                 // A dot in the stylesheet, not a glyph. Hidden: the tab's own

@@ -1,4 +1,4 @@
-//! Tests for `srelens-tui update`.
+//! Tests for `srectl update`.
 //!
 //! No stable release carries the TUI archives yet — #444 only just landed — so
 //! the download-verify-replace path cannot be proven against a real release.
@@ -8,13 +8,13 @@
 
 use std::path::{Path, PathBuf};
 
-use srelens_tui::self_update::{
+use srectl::self_update::{
     apply, apply_with_keys, asset_name, asset_url, checksum_for, extract_binary, is_newer,
     package_manager_for, parse_latest_version, parse_newest_version, plan, replace_running_binary,
     sums_name, sums_signature_name, triple_for, verify_sha256, Channel, Check, Plan, UpdateError,
     LATEST_RELEASE_URL, RELEASES_URL,
 };
-use srelens_tui::update_signature::SignatureProblem;
+use srectl::update_signature::SignatureProblem;
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -115,9 +115,9 @@ fn release_json(tag: &str) -> Vec<u8> {
 /// The binary name inside an archive for the platform under test.
 fn bin_name() -> &'static str {
     if cfg!(windows) {
-        "srelens-tui.exe"
+        "srectl.exe"
     } else {
-        "srelens-tui"
+        "srectl"
     }
 }
 
@@ -207,18 +207,18 @@ fn a_musl_binary_updates_to_a_musl_archive() {
 fn asset_names_match_what_the_release_workflow_publishes() {
     assert_eq!(
         asset_name("1.2.3", "x86_64-unknown-linux-gnu"),
-        "srelens-tui-1.2.3-x86_64-unknown-linux-gnu.tar.gz"
+        "srectl-1.2.3-x86_64-unknown-linux-gnu.tar.gz"
     );
     // Windows is a zip, never a bare exe — size-baseline.mjs treats any .exe
     // as a desktop installer.
     assert_eq!(
         asset_name("1.2.3", "x86_64-pc-windows-msvc"),
-        "srelens-tui-1.2.3-x86_64-pc-windows-msvc.zip"
+        "srectl-1.2.3-x86_64-pc-windows-msvc.zip"
     );
-    assert_eq!(sums_name("1.2.3"), "srelens-tui-1.2.3-SHA256SUMS.txt");
+    assert_eq!(sums_name("1.2.3"), "srectl-1.2.3-SHA256SUMS.txt");
     assert_eq!(
-        asset_url("1.2.3", "srelens-tui-1.2.3-SHA256SUMS.txt"),
-        "https://github.com/srelens/srelens/releases/download/srelens-v1.2.3/srelens-tui-1.2.3-SHA256SUMS.txt"
+        asset_url("1.2.3", "srectl-1.2.3-SHA256SUMS.txt"),
+        "https://github.com/srelens/srelens/releases/download/srelens-v1.2.3/srectl-1.2.3-SHA256SUMS.txt"
     );
 }
 
@@ -679,7 +679,7 @@ fn a_stable_release_without_a_build_for_this_platform_says_so() {
 #[test]
 fn a_checksum_is_found_in_either_sha256sum_format() {
     let hash = "a".repeat(64);
-    let asset = "srelens-tui-1.2.3-x86_64-unknown-linux-gnu.tar.gz";
+    let asset = "srectl-1.2.3-x86_64-unknown-linux-gnu.tar.gz";
     let gnu = format!("{hash}  {asset}\n{}  other.tar.gz\n", "b".repeat(64));
     let binary_mode = format!("{hash} *{asset}\n");
 
@@ -691,7 +691,7 @@ fn a_checksum_is_found_in_either_sha256sum_format() {
 fn a_checksum_file_that_does_not_list_the_asset_is_refused() {
     let sums = format!("{}  some-other-file.tar.gz\n", "a".repeat(64));
     assert!(matches!(
-        checksum_for(&sums, "srelens-tui-1.2.3-x86_64-apple-darwin.tar.gz"),
+        checksum_for(&sums, "srectl-1.2.3-x86_64-apple-darwin.tar.gz"),
         Err(UpdateError::ChecksumMissing { .. })
     ));
     // A line for the right asset carrying something that is not a hash is the
@@ -724,25 +724,22 @@ fn verification_accepts_the_published_hash_and_rejects_any_other() {
 
 #[test]
 fn the_binary_is_pulled_out_of_a_tarball_stored_at_the_root() {
-    let archive = targz("srelens-tui", b"ELF-ish");
-    let got = extract_binary(
-        &archive,
-        "srelens-tui-1.2.3-x86_64-unknown-linux-gnu.tar.gz",
-    );
+    let archive = targz("srectl", b"ELF-ish");
+    let got = extract_binary(&archive, "srectl-1.2.3-x86_64-unknown-linux-gnu.tar.gz");
     assert_eq!(got.unwrap(), b"ELF-ish");
 }
 
 #[test]
 fn the_binary_is_pulled_out_of_a_zip() {
-    let archive = zip_with("srelens-tui.exe", b"MZ-ish");
-    let got = extract_binary(&archive, "srelens-tui-1.2.3-x86_64-pc-windows-msvc.zip");
+    let archive = zip_with("srectl.exe", b"MZ-ish");
+    let got = extract_binary(&archive, "srectl-1.2.3-x86_64-pc-windows-msvc.zip");
     assert_eq!(got.unwrap(), b"MZ-ish");
 }
 
 #[test]
 fn an_archive_without_the_binary_is_an_error_naming_the_asset() {
     let archive = targz("README", b"nope");
-    let asset = "srelens-tui-1.2.3-x86_64-unknown-linux-gnu.tar.gz";
+    let asset = "srectl-1.2.3-x86_64-unknown-linux-gnu.tar.gz";
     match extract_binary(&archive, asset) {
         Err(UpdateError::BinaryMissing { asset: named }) => assert_eq!(named, asset),
         other => panic!("expected BinaryMissing, got {other:?}"),
@@ -793,17 +790,17 @@ fn an_unparseable_version_never_triggers_an_update() {
 #[test]
 fn a_binary_a_package_manager_owns_is_recognised() {
     for (path, manager) in [
-        ("/opt/homebrew/bin/srelens-tui", "Homebrew"),
+        ("/opt/homebrew/bin/srectl", "Homebrew"),
         (
-            "/usr/local/Cellar/srelens-tui/1.0.0/bin/srelens-tui",
+            "/usr/local/Cellar/srectl/1.0.0/bin/srectl",
             "Homebrew",
         ),
         (
-            "/usr/bin/srelens-tui",
+            "/usr/bin/srectl",
             "your distribution's package manager",
         ),
-        ("/snap/srelens/current/bin/srelens-tui", "snap"),
-        ("/nix/store/abc-srelens/bin/srelens-tui", "Nix"),
+        ("/snap/srelens/current/bin/srectl", "snap"),
+        ("/nix/store/abc-srelens/bin/srectl", "Nix"),
     ] {
         assert_eq!(
             package_manager_for(Path::new(path)),
@@ -822,20 +819,20 @@ fn a_binary_a_package_manager_owns_is_recognised() {
 fn a_windows_package_manager_is_recognised_at_any_depth_and_any_case() {
     for (path, manager) in [
         (
-            r"C:\ProgramData\chocolatey\bin\srelens-tui.exe",
+            r"C:\ProgramData\chocolatey\bin\srectl.exe",
             "Chocolatey",
         ),
         (
-            r"C:\PROGRAMDATA\CHOCOLATEY\bin\srelens-tui.exe",
+            r"C:\PROGRAMDATA\CHOCOLATEY\bin\srectl.exe",
             "Chocolatey",
         ),
         (
-            r"C:\Users\me\Scoop\Apps\srelens-tui\current\srelens-tui.exe",
+            r"C:\Users\me\Scoop\Apps\srectl\current\srectl.exe",
             "Scoop",
         ),
-        (r"C:\Users\me\scoop\shims\srelens-tui.exe", "Scoop"),
+        (r"C:\Users\me\scoop\shims\srectl.exe", "Scoop"),
         (
-            r"C:\Users\me\AppData\Local\Microsoft\WinGet\Packages\x\srelens-tui.exe",
+            r"C:\Users\me\AppData\Local\Microsoft\WinGet\Packages\x\srectl.exe",
             "winget",
         ),
     ] {
@@ -853,15 +850,15 @@ fn a_windows_package_manager_is_recognised_at_any_depth_and_any_case() {
 #[test]
 fn windows_package_markers_do_not_apply_on_unix() {
     for path in [
-        "/home/me/scoop/apps/demo/srelens-tui",
-        "/home/me/scoop/shims/srelens-tui",
-        "/opt/chocolatey/srelens-tui",
+        "/home/me/scoop/apps/demo/srectl",
+        "/home/me/scoop/shims/srectl",
+        "/opt/chocolatey/srectl",
     ] {
         assert_eq!(package_manager_for(Path::new(path)), None, "{path}");
     }
 }
 
-/// The layouts `brew install srelens/tap/srelens-tui` actually produces.
+/// The layouts `brew install srelens/tap/srectl` actually produces.
 ///
 /// Homebrew installs into `<prefix>/Cellar/<formula>/<version>/bin` and links
 /// that into `<prefix>/bin`, so what `apply` checks is the resolved Cellar
@@ -870,11 +867,11 @@ fn windows_package_markers_do_not_apply_on_unix() {
 #[test]
 fn a_homebrew_install_is_recognised_on_both_prefixes() {
     for path in [
-        "/opt/homebrew/Cellar/srelens-tui/1.2.3/bin/srelens-tui",
-        "/usr/local/Cellar/srelens-tui/1.2.3/bin/srelens-tui",
-        "/home/linuxbrew/.linuxbrew/Cellar/srelens-tui/1.2.3/bin/srelens-tui",
-        "/opt/homebrew/bin/srelens-tui",
-        "/home/linuxbrew/.linuxbrew/bin/srelens-tui",
+        "/opt/homebrew/Cellar/srectl/1.2.3/bin/srectl",
+        "/usr/local/Cellar/srectl/1.2.3/bin/srectl",
+        "/home/linuxbrew/.linuxbrew/Cellar/srectl/1.2.3/bin/srectl",
+        "/opt/homebrew/bin/srectl",
+        "/home/linuxbrew/.linuxbrew/bin/srectl",
     ] {
         assert_eq!(
             package_manager_for(Path::new(path)),
@@ -886,7 +883,7 @@ fn a_homebrew_install_is_recognised_on_both_prefixes() {
     // The hand-install location, which shares a prefix with Intel Homebrew
     // and must not be mistaken for it.
     assert_eq!(
-        package_manager_for(Path::new("/usr/local/bin/srelens-tui")),
+        package_manager_for(Path::new("/usr/local/bin/srectl")),
         None
     );
 }
@@ -900,17 +897,17 @@ fn a_homebrew_install_is_recognised_on_both_prefixes() {
 #[test]
 fn a_package_root_buried_inside_another_path_is_not_its_owner() {
     for path in [
-        "/home/me/rootfs/usr/bin/srelens-tui",
-        "/home/me/containers/alpine/usr/bin/srelens-tui",
-        "/tmp/extract/snap/srelens-tui",
-        "/home/me/backup/nix/store/srelens-tui",
+        "/home/me/rootfs/usr/bin/srectl",
+        "/home/me/containers/alpine/usr/bin/srectl",
+        "/tmp/extract/snap/srectl",
+        "/home/me/backup/nix/store/srectl",
     ] {
         assert_eq!(package_manager_for(Path::new(path)), None, "{path}");
     }
 
     // The same markers at the front still count.
     assert_eq!(
-        package_manager_for(Path::new("/usr/bin/srelens-tui")),
+        package_manager_for(Path::new("/usr/bin/srectl")),
         Some("your distribution's package manager")
     );
 }
@@ -919,8 +916,8 @@ fn a_package_root_buried_inside_another_path_is_not_its_owner() {
 /// different directory and not the package manager's.
 #[test]
 fn a_unix_root_is_matched_case_sensitively() {
-    assert_eq!(package_manager_for(Path::new("/USR/BIN/srelens-tui")), None);
-    assert_eq!(package_manager_for(Path::new("/Snap/srelens-tui")), None);
+    assert_eq!(package_manager_for(Path::new("/USR/BIN/srectl")), None);
+    assert_eq!(package_manager_for(Path::new("/Snap/srectl")), None);
 }
 
 /// The locations the install guide tells people to use by hand. Reporting one
@@ -928,10 +925,10 @@ fn a_unix_root_is_matched_case_sensitively() {
 #[test]
 fn a_hand_installed_binary_is_not_mistaken_for_a_managed_one() {
     for path in [
-        "/usr/local/bin/srelens-tui",
-        "/home/me/.local/bin/srelens-tui",
-        "/home/me/bin/srelens-tui",
-        r"C:\Users\me\bin\srelens-tui.exe",
+        "/usr/local/bin/srectl",
+        "/home/me/.local/bin/srectl",
+        "/home/me/bin/srectl",
+        r"C:\Users\me\bin\srectl.exe",
     ] {
         assert_eq!(package_manager_for(Path::new(path)), None, "{path}");
     }
@@ -952,7 +949,7 @@ fn being_up_to_date_is_a_quiet_success_not_an_error() {
             "1.0.0",
             Channel::Stable,
             false,
-            PathBuf::from("/tmp/srelens-tui"),
+            PathBuf::from("/tmp/srectl"),
             &fetch
         )
         .unwrap(),
@@ -975,7 +972,7 @@ fn a_build_ahead_of_stable_is_not_reported_as_up_to_date() {
             "0.8.1-152",
             Channel::Stable,
             false,
-            PathBuf::from("/tmp/srelens-tui"),
+            PathBuf::from("/tmp/srectl"),
             &fetch
         )
         .unwrap(),
@@ -993,7 +990,7 @@ fn a_build_ahead_of_stable_is_not_reported_as_up_to_date() {
             "0.8.0-7",
             Channel::Stable,
             false,
-            PathBuf::from("/tmp/srelens-tui"),
+            PathBuf::from("/tmp/srectl"),
             &fetch
         )
         .unwrap(),
@@ -1012,7 +1009,7 @@ fn an_unparseable_current_version_is_not_claimed_to_be_ahead() {
             "nightly",
             Channel::Stable,
             false,
-            PathBuf::from("/tmp/srelens-tui"),
+            PathBuf::from("/tmp/srectl"),
             &fetch
         )
         .unwrap(),
@@ -1030,7 +1027,7 @@ fn a_newer_release_plans_urls_under_its_own_tag() {
         "1.0.0",
         Channel::Stable,
         false,
-        PathBuf::from("/tmp/srelens-tui"),
+        PathBuf::from("/tmp/srectl"),
         &fetch,
     )
     .unwrap()
@@ -1047,9 +1044,135 @@ fn a_newer_release_plans_urls_under_its_own_tag() {
         plan.archive_url
     );
     assert!(
-        plan.sums_url.ends_with("srelens-tui-2.0.0-SHA256SUMS.txt"),
+        plan.sums_url.ends_with("srectl-2.0.0-SHA256SUMS.txt"),
         "{}",
         plan.sums_url
+    );
+}
+
+/// The bridge release is still published as `srelens-tui`. Checking for an
+/// update from that same version finds no `srectl` archive and is not a
+/// failure: there is nothing newer to install.
+#[test]
+fn a_release_that_still_publishes_srelens_tui_is_current() {
+    let fetch = |_: &str| -> Result<Vec<u8>, UpdateError> {
+        Ok(br#"{"tag_name":"srelens-v1.2.0","prerelease":false,"assets":[{"name":"srelens-tui-1.2.0-SHA256SUMS.txt"}]}"#.to_vec())
+    };
+    assert_eq!(
+        plan(
+            "1.2.0",
+            Channel::Stable,
+            false,
+            PathBuf::from("/tmp/srelens-tui"),
+            &fetch
+        )
+        .unwrap(),
+        Check::UpToDate {
+            channel: Channel::Stable,
+            latest: "1.2.0".into()
+        }
+    );
+}
+
+/// A newer tag that also lacks a `srectl` archive is a release we could not
+/// take, not a claim that this build is the latest.
+#[test]
+fn a_newer_release_without_srectl_is_still_an_error() {
+    let fetch = |_: &str| -> Result<Vec<u8>, UpdateError> {
+        Ok(br#"{"tag_name":"srelens-v2.0.0","prerelease":false,"assets":[{"name":"srelens-tui-2.0.0-SHA256SUMS.txt"}]}"#.to_vec())
+    };
+    let err = plan(
+        "1.2.0",
+        Channel::Stable,
+        false,
+        PathBuf::from("/tmp/srelens-tui"),
+        &fetch,
+    )
+    .unwrap_err();
+    let UpdateError::BadRelease(message) = err else {
+        panic!("expected the missing build to be reported, got {err:?}");
+    };
+    assert!(message.contains("carries no srectl build"), "{message}");
+}
+
+#[test]
+fn a_newer_dev_release_without_srectl_is_still_an_error() {
+    let fetch = |_: &str| -> Result<Vec<u8>, UpdateError> {
+        let body = format!(
+            r#"[
+            {{"tag_name":"srelens-v2.0.0-dev.1","prerelease":true,"assets":[{{"name":"srelens-tui-2.0.0-dev.1-SHA256SUMS.txt"}}]}}
+        ]"#
+        );
+        Ok(body.into_bytes())
+    };
+    let err = plan(
+        "1.2.0-dev.1",
+        Channel::Dev,
+        false,
+        PathBuf::from("/tmp/srelens-tui"),
+        &fetch,
+    )
+    .unwrap_err();
+    let UpdateError::BadRelease(message) = err else {
+        panic!("expected the missing build to be reported, got {err:?}");
+    };
+    assert!(
+        message.contains("release srelens-v2.0.0-dev.1 carries no srectl build"),
+        "{message}"
+    );
+}
+
+#[test]
+fn a_newer_dev_release_without_signature_is_still_an_error() {
+    let fetch = |_: &str| -> Result<Vec<u8>, UpdateError> {
+        let body = format!(
+            r#"[
+            {{"tag_name":"srelens-v2.0.0-dev.1","prerelease":true,"assets":{}}}
+        ]"#,
+            unsigned_assets_for("2.0.0-dev.1")
+        );
+        Ok(body.into_bytes())
+    };
+    let err = plan(
+        "1.2.0-dev.1",
+        Channel::Dev,
+        false,
+        PathBuf::from("/tmp/srelens-tui"),
+        &fetch,
+    )
+    .unwrap_err();
+    let UpdateError::BadRelease(message) = err else {
+        panic!("expected the missing signature to be reported, got {err:?}");
+    };
+    assert!(
+        message.contains("release srelens-v2.0.0-dev.1 is not signed"),
+        "{message}"
+    );
+}
+
+#[test]
+fn a_dev_release_that_still_publishes_srelens_tui_at_same_version_is_current() {
+    let fetch = |_: &str| -> Result<Vec<u8>, UpdateError> {
+        let body = format!(
+            r#"[
+            {{"tag_name":"srelens-v1.2.0-dev.1","prerelease":true,"assets":[{{"name":"srelens-tui-1.2.0-dev.1-SHA256SUMS.txt"}}]}}
+        ]"#
+        );
+        Ok(body.into_bytes())
+    };
+    assert_eq!(
+        plan(
+            "1.2.0-dev.1",
+            Channel::Dev,
+            false,
+            PathBuf::from("/tmp/srelens-tui"),
+            &fetch
+        )
+        .unwrap(),
+        Check::UpToDate {
+            channel: Channel::Dev,
+            latest: "1.2.0-dev.1".into()
+        }
     );
 }
 
@@ -1063,7 +1186,7 @@ fn a_failed_release_lookup_is_reported_rather_than_swallowed() {
             "1.0.0",
             Channel::Stable,
             false,
-            PathBuf::from("/tmp/srelens-tui"),
+            PathBuf::from("/tmp/srectl"),
             &fetch
         ),
         Err(UpdateError::Download(_))
@@ -1477,7 +1600,7 @@ fn the_installed_binary_is_executable() {
 #[test]
 fn update_help_says_what_is_verified_before_installing() {
     use clap::CommandFactory;
-    let mut cli = srelens_tui::Cli::command();
+    let mut cli = srectl::Cli::command();
     let help = cli
         .find_subcommand_mut("update")
         .expect("an update subcommand")

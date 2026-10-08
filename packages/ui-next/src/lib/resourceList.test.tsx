@@ -128,7 +128,11 @@ describe("useResourceList", () => {
     expect(result.current.rows).toHaveLength(1);
   });
 
-  it("stores truncated from a capped poll and clears it when a later poll fails", async () => {
+  it("stores truncated from a capped poll and keeps it while those rows stay on screen after a failed poll", async () => {
+    // It used to be cleared here, with the rows kept. `truncated` says the
+    // rows stopped at the backend's cap, and the same rows are still the ones
+    // shown — so a count drawn from them read as exact when it was a floor
+    // (#402, PR #843 review).
     const load = vi.fn()
       .mockResolvedValueOnce({ rows: [{ name: "a" }], truncated: true })
       .mockResolvedValueOnce({ error: "connection refused" });
@@ -138,8 +142,54 @@ describe("useResourceList", () => {
     expect(result.current.rows).toHaveLength(1);
     act(() => result.current.reload());
     await waitFor(() => expect(result.current.error).toBe("connection refused"));
-    expect(result.current.truncated).toBeUndefined();
+    expect(result.current.truncated).toBe(true);
     expect(result.current.rows).toHaveLength(1);
+  });
+
+  it("clears truncated when a later poll answers with a list that was not cut off", async () => {
+    const load = vi.fn()
+      .mockResolvedValueOnce({ rows: [{ name: "a" }], truncated: true })
+      .mockResolvedValueOnce({ rows: [{ name: "a" }, { name: "b" }] });
+    const polled: KindDescriptor<ListRow> = { ...watched, source: "poll", load };
+    const { result } = renderHook(() => useResourceList("prod", "widgets", polled, ["default"], []));
+    await waitFor(() => expect(result.current.truncated).toBe(true));
+    act(() => result.current.reload());
+    await waitFor(() => expect(result.current.rows).toHaveLength(2));
+    expect(result.current.truncated).toBeUndefined();
+  });
+
+  it("brings truncated back with the cached rows when a capped list is reopened", async () => {
+    // The cache hands the rows back before the first poll answers. Without the
+    // flag beside them they were a capped list's rows with no cap.
+    const polled: KindDescriptor<ListRow> = {
+      ...watched,
+      source: "poll",
+      load: vi.fn().mockResolvedValueOnce({ rows: [{ name: "a" }], truncated: true }),
+    };
+    const first = renderHook(() => useResourceList("prod", "widgets", polled, ["default"], []));
+    await waitFor(() => expect(first.result.current.truncated).toBe(true));
+    first.unmount();
+
+    // Reopened; this poll never answers, so what is read is the cache's.
+    const reopened: KindDescriptor<ListRow> = { ...polled, load: vi.fn(() => new Promise<never>(() => {})) };
+    const second = renderHook(() => useResourceList("prod", "widgets", reopened, ["default"], []));
+    expect(second.result.current.rows).toHaveLength(1);
+    expect(second.result.current.truncated).toBe(true);
+  });
+
+  it("does not hand a cached list that was not cut off a truncated flag", async () => {
+    const polled: KindDescriptor<ListRow> = {
+      ...watched,
+      source: "poll",
+      load: vi.fn().mockResolvedValueOnce({ rows: [{ name: "a" }] }),
+    };
+    const first = renderHook(() => useResourceList("prod", "widgets", polled, ["default"], []));
+    await waitFor(() => expect(first.result.current.rows).toHaveLength(1));
+    first.unmount();
+    const reopened: KindDescriptor<ListRow> = { ...polled, load: vi.fn(() => new Promise<never>(() => {})) };
+    const second = renderHook(() => useResourceList("prod", "widgets", reopened, ["default"], []));
+    expect(second.result.current.rows).toHaveLength(1);
+    expect(second.result.current.truncated).toBeUndefined();
   });
 
   it("evicts the oldest view key at the 40-entry cap, but spares one just refreshed", async () => {

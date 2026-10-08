@@ -97,9 +97,9 @@ pub type ToolRoute =
 pub const MAX_TOOL_STRING_BYTES: usize = 1024;
 
 /// What a reader's tool takes: the cluster it is read in, and the namespace
-/// when the binding takes one. What the broker reads a reader with, and
+/// when the binding takes one, plus a declared image paging cursor. What the broker reads a reader with, and
 /// nothing a caller could use to widen it.
-const READER_TOOL_INPUTS: &[&str] = &["context", "namespace"];
+const READER_TOOL_INPUTS: &[&str] = &["context", "namespace", "cursor"];
 
 /// One of an app's tools, before it is registered.
 struct Tool {
@@ -114,7 +114,7 @@ struct Tool {
 /// What one registered tool takes.
 #[derive(Clone)]
 enum ToolInputs {
-    /// Strings, each at most [`MAX_TOOL_STRING_BYTES`]: a reader's or an action's.
+    /// Reader/action strings: bounded names, with an 8 KiB image cursor exception.
     Strings { names: Vec<String>, required: Vec<String> },
     /// A sidecar operation's declared inputs.
     Operation(Operation),
@@ -136,9 +136,13 @@ impl ToolInputs {
                     let Some(text) = value.as_str() else {
                         return Err(invalid(format!("`{key}` must be a string")));
                     };
-                    if text.len() > MAX_TOOL_STRING_BYTES {
+                    let limit = if key == "cursor" { 8192 } else { MAX_TOOL_STRING_BYTES };
+                    if key == "cursor" && !text.bytes().all(|b| (0x21..=0x7e).contains(&b)) {
+                        return Err(invalid("`cursor` must contain printable ASCII".into()));
+                    }
+                    if text.len() > limit {
                         return Err(invalid(format!(
-                            "`{key}` is at most {MAX_TOOL_STRING_BYTES} bytes"
+                            "`{key}` is at most {limit} bytes"
                         )));
                     }
                 }
@@ -520,7 +524,7 @@ impl PluginHost {
         // What the app's sidecar may ask the broker to run: its declared actions.
         let mut writes = Vec::new();
         for (index, binding) in manifest.capabilities.iter().enumerate() {
-            if is_pod_target(&binding.target) {
+            if is_pod_target(&binding.target) || binding.target == "k8s.runJob" {
                 continue;
             }
             if let Some(problem) = self.binding_problems(index, manifest, binding).first() {
@@ -587,7 +591,9 @@ impl PluginHost {
             });
         }
         let operation_row = sidecar_operation_annotations(writes);
-        for operation in manifest.sidecar.iter().flat_map(|sidecar| &sidecar.operations) {
+        for operation in manifest.sidecar.iter().flat_map(|sidecar| &sidecar.operations)
+            .filter(|operation| !operation.view.as_ref().is_some_and(|view| view.stream))
+        {
             tools.push(Tool {
                 name: operation.name.clone(),
                 title: operation.title.clone(),

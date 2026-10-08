@@ -23,6 +23,50 @@ func prod(t testing.TB) sidecar.CallContext {
 	return cc
 }
 
+func TestPageReadCarriesPinnedScopeAndOpaqueCursor(t *testing.T) {
+	s := sidecar.New("t", "1")
+	sidecar.Operation(s, "page", func(ctx context.Context, _ struct{}) (json.RawMessage, error) {
+		return sidecar.HostFrom(ctx).ReadPage(ctx, prod(t), "images", "next-page")
+	})
+	h := start(t, s)
+	h.answer(h.request("initialize", initializeParams([]string{"0.2.0"}, h.DataDir, defaultLimits())))
+	h.answer(h.request("activate", map[string]any{}))
+	id := h.request("page", map[string]any{})
+	call := h.call()
+	want := map[string]any{"context": map[string]any{"clusterId": "kind-dev", "namespace": "team"}, "capability": "images", "cursor": "next-page"}
+	if !reflect.DeepEqual(call["params"], want) {
+		t.Fatalf("wrong page payload: %v", call)
+	}
+	h.reply(call["id"], map[string]any{"items": []any{}, "nextCursor": ""}, nil)
+	if h.answer(id)["error"] != nil {
+		t.Fatal("page response failed")
+	}
+	if err := h.finish(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestFirstPageIsExplicitlyRequestedWithoutChangingLegacyReads(t *testing.T) {
+	s := sidecar.New("t", "1")
+	sidecar.Operation(s, "page", func(ctx context.Context, _ struct{}) (json.RawMessage, error) {
+		return sidecar.HostFrom(ctx).ReadPage(ctx, prod(t), "images", "")
+	})
+	h := start(t, s)
+	h.answer(h.request("initialize", initializeParams([]string{"0.2.0"}, h.DataDir, defaultLimits())))
+	h.answer(h.request("activate", map[string]any{}))
+	id := h.request("page", map[string]any{})
+	call := h.call()
+	params := call["params"].(map[string]any)
+	if cursor, present := params["cursor"]; !present || cursor != "" {
+		t.Fatal("missing explicit first-page cursor")
+	}
+	h.reply(call["id"], map[string]any{"items": []any{}}, nil)
+	h.answer(id)
+	if err := h.finish(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestEachHostCallNamesItsContextAndGetsTheHostsAnswer(t *testing.T) {
 	s := sidecar.New("t", "1")
 	sidecar.Operation(s, "read", func(ctx context.Context, _ struct{}) (json.RawMessage, error) {
@@ -61,6 +105,75 @@ func TestEachHostCallNamesItsContextAndGetsTheHostsAnswer(t *testing.T) {
 	}
 	if err := h.finish(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestBindingAvailabilityNeedsNewProtocolAndPreservesPinnedContext(t *testing.T) {
+	for _, version := range []string{"0.1.0", "0.2.0"} {
+		t.Run(version, func(t *testing.T) {
+			s := sidecar.New("t", "1")
+			sidecar.Operation(s, "availability", func(ctx context.Context, _ struct{}) (json.RawMessage, error) {
+				return sidecar.HostFrom(ctx).BindingAvailability(ctx, prod(t), []string{"vulnerability-reports", "sbom-reports"})
+			})
+			h := start(t, s)
+			init := h.request("initialize", initializeParams([]string{version}, h.DataDir, defaultLimits()))
+			if h.answer(init)["error"] != nil {
+				t.Fatal("protocol not supported")
+			}
+			h.answer(h.request("activate", map[string]any{}))
+			id := h.request("availability", map[string]any{})
+			if version == "0.1.0" {
+				if h.answer(id)["error"] == nil {
+					t.Fatal("old host accepted new callback")
+				}
+			} else {
+				call := h.call()
+				want := map[string]any{"context": map[string]any{"clusterId": "kind-dev", "namespace": "team"}, "bindings": []any{"vulnerability-reports", "sbom-reports"}}
+				if call["method"] != "host/bindingAvailability" || !reflect.DeepEqual(call["params"], want) {
+					t.Fatalf("wrong discovery call: %v", call)
+				}
+				h.reply(call["id"], map[string]any{"bindings": []any{map[string]any{"binding": "vulnerability-reports", "state": "absent"}}}, nil)
+				if h.answer(id)["error"] != nil {
+					t.Fatal("discovery response failed")
+				}
+			}
+			if err := h.finish(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestJobCallbackNamesItsNamespaceAndRejectsOldProtocol(t *testing.T) {
+	for _, version := range []string{"0.1.0", "0.2.0"} {
+		t.Run(version, func(t *testing.T) {
+			s := sidecar.New("t", "1")
+			sidecar.Operation(s, "scan", func(ctx context.Context, _ struct{}) (json.RawMessage, error) {
+				return sidecar.HostFrom(ctx).RunJob(ctx, prod(t), "scan-namespace", map[string]string{"namespace": "team"})
+			})
+			h := start(t, s)
+			h.answer(h.request("initialize", initializeParams([]string{version}, h.DataDir, defaultLimits())))
+			h.answer(h.request("activate", map[string]any{}))
+			id := h.request("scan", map[string]any{})
+			if version == "0.1.0" {
+				if h.answer(id)["error"] == nil {
+					t.Fatal("old protocol accepted Job callback")
+				}
+			} else {
+				call := h.call()
+				want := map[string]any{"context": map[string]any{"clusterId": "kind-dev", "namespace": "team"}, "capability": "scan-namespace", "inputs": map[string]any{"namespace": "team"}}
+				if call["method"] != "host/runJob" || !reflect.DeepEqual(call["params"], want) {
+					t.Fatalf("wrong Job call: %v", call)
+				}
+				h.reply(call["id"], map[string]any{"path": "job-result.json"}, nil)
+				if h.answer(id)["error"] != nil {
+					t.Fatal("Job response failed")
+				}
+			}
+			if err := h.finish(); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }
 
@@ -370,5 +483,26 @@ func TestShutdownWhileAHandlerWaitsOnTheHostSendsOnlyItsAnswer(t *testing.T) {
 	}
 	if err := h.ended(); err != nil {
 		t.Fatalf("the session ended with %v", err)
+	}
+}
+
+func TestJobRejectsOptionInjectionBeforeCallingHost(t *testing.T) {
+	for _, value := range []string{"--server=http://attacker.example", "--output=/data/result", "-q"} {
+		t.Run(value, func(t *testing.T) {
+			s := sidecar.New("t", "1")
+			sidecar.Operation(s, "scan", func(ctx context.Context, _ struct{}) (json.RawMessage, error) {
+				return sidecar.HostFrom(ctx).RunJob(ctx, prod(t), "scan-image", map[string]string{"image": value})
+			})
+			h := start(t, s)
+			h.answer(h.request("initialize", initializeParams([]string{"0.2.0"}, h.DataDir, defaultLimits())))
+			h.answer(h.request("activate", map[string]any{}))
+			id := h.request("scan", map[string]any{})
+			if h.answer(id)["error"] == nil {
+				t.Fatal("Job option injection accepted")
+			}
+			if err := h.finish(); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }

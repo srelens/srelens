@@ -1,5 +1,6 @@
 import { ExtensionResourceSlot } from "../../extensions/Extensions";
 import { ExtensionPanelSlot } from "../../extensions/ExtensionPanelSlot";
+import { ExtensionProviderSlot } from "../../extensions/ExtensionProviderSlot";
 import { ExtensionRelatedSlot } from "../../extensions/ExtensionRelatedSlot";
 import { ExtensionPodSlot } from "../../extensions/ExtensionPodTools";
 import type { ReactNode } from "react";
@@ -15,6 +16,7 @@ import {
 import { FailureState } from "../../lib/errorCopy";
 import { Icons } from "../../lib/icons";
 import { CUSTOM_RESOURCE_ACTIONS } from "../../lib/kinds/custom";
+import { CopyNameButton } from "./CopyNameButton";
 import { DetailActions } from "./DetailActions";
 import { SectionMemory, Section } from "./Section";
 import {
@@ -207,10 +209,15 @@ export function ResourceDetailView({ context, kind, namespace, name, peek }: Res
   // to load, or that failed to, is exactly the one a reader wants in a tab of
   // its own rather than in a peek that the next row click will replace.
   const actions = peek && <OpenTabButton onClick={peek.onOpenTab} />;
+  // On every state too, and for the same reason: the name is the route's, not
+  // the object's, so it is as copyable while loading or after a failed read
+  // as it is over a pane full of facts — and a resource that will not load is
+  // one a reader is about to go and ask kubectl about.
+  const copyName = <CopyNameButton name={name} />;
 
   if (status === "loading") {
     return (
-      <Inspector name={name} subtitle={subtitle} actions={actions} onClose={peek?.onClose}>
+      <Inspector name={name} nameAction={copyName} subtitle={subtitle} actions={actions} onClose={peek?.onClose}>
         <LoadingState label={`Loading ${describeTarget(kind, namespace, name)}`} />
       </Inspector>
     );
@@ -220,7 +227,7 @@ export function ResourceDetailView({ context, kind, namespace, name, peek }: Res
     // Names the object that failed, not just "failed" — several panes can be
     // open at once, and a bare failure doesn't say which one broke.
     return (
-      <Inspector name={name} subtitle={subtitle} actions={actions} onClose={peek?.onClose}>
+      <Inspector name={name} nameAction={copyName} subtitle={subtitle} actions={actions} onClose={peek?.onClose}>
         <FailureState title={`Could not load ${describeTarget(kind, namespace, name)}`} error={error} />
       </Inspector>
     );
@@ -252,6 +259,7 @@ export function ResourceDetailView({ context, kind, namespace, name, peek }: Res
   return (
     <Inspector
       name={name}
+      nameAction={copyName}
       subtitle={subtitle}
       {...header}
       actions={actions}
@@ -278,6 +286,11 @@ export function ResourceDetailView({ context, kind, namespace, name, peek }: Res
           actions={descriptor?.actions ?? CUSTOM_RESOURCE_ACTIONS}
           flagged={header.flagged ?? false}
           suspended={object.spec?.suspend === true}
+          unschedulable={object.spec?.unschedulable === true}
+          // Those two are read off this pane's object, so a write made from the
+          // bar has to bring a new one: without it a node cordoned from here
+          // went on being offered Cordon.
+          onChanged={subject.refresh}
         />
       }
     >
@@ -290,6 +303,7 @@ export function ResourceDetailView({ context, kind, namespace, name, peek }: Res
           hairline is unchanged. (`lib/sectionFolds.ts`) */}
       <SectionMemory kind={kind}>{pane}</SectionMemory>
         {active === PANE_DETAILS && <ExtensionPanelSlot context={context} resource={object}/>}
+        {active === PANE_DETAILS && <ExtensionProviderSlot context={context} resource={object}/>}
         {active === PANE_DETAILS && <ExtensionRelatedSlot context={context} resource={object}/>}
         {active === PANE_DETAILS && <ExtensionPodSlot context={context} resource={object}/>}
         {active === PANE_DETAILS && <ExtensionResourceSlot context={context} kind={object.kind ?? kind} group={object.apiVersion?.includes("/") ? object.apiVersion.split("/")[0] : ""} namespace={namespace} name={name} />}

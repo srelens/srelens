@@ -354,10 +354,13 @@ impl TuiConfig {
     }
 
     pub fn config_file_path() -> PathBuf {
-        if let Ok(custom) = std::env::var("SRELENS_TUI_CONFIG_PATH") {
-            if !custom.trim().is_empty() {
-                return PathBuf::from(custom);
-            }
+        if let Some(path) = env_config_path("SRECTL_CONFIG_PATH") {
+            return path;
+        }
+        // Set by installs from before the srectl rename. Honored only when the
+        // new name is unset, so an existing override does not silently reset.
+        if let Some(path) = env_config_path("SRELENS_TUI_CONFIG_PATH") {
+            return path;
         }
         if let Ok(custom_dir) = std::env::var("SRELENS_CONFIG_DIR") {
             if !custom_dir.trim().is_empty() {
@@ -366,18 +369,30 @@ impl TuiConfig {
         }
         dirs::config_dir()
             .map(|p| p.join("srelens").join("tui.json"))
-            .unwrap_or_else(|| PathBuf::from(".srelens-tui.json"))
+            .unwrap_or_else(|| PathBuf::from(".srectl.json"))
     }
 
     pub fn load() -> Self {
         let path = Self::config_file_path();
-        if let Ok(content) = std::fs::read_to_string(&path) {
-            if let Ok(mut config) = serde_json::from_str::<TuiConfig>(&content) {
-                config.clamp();
-                return config;
+        match std::fs::read_to_string(&path) {
+            Ok(content) => parse_config(&content).unwrap_or_default(),
+            Err(error) => {
+                // The no-config-dir fallback used to be `.srelens-tui.json`.
+                // Read it only when the new file is absent. A present file
+                // that cannot be read stays a default.
+                if error.kind() == std::io::ErrorKind::NotFound
+                    && path.file_name().and_then(|n| n.to_str()) == Some(".srectl.json")
+                {
+                    let legacy = path.with_file_name(".srelens-tui.json");
+                    if let Ok(content) = std::fs::read_to_string(&legacy) {
+                        if let Some(config) = parse_config(&content) {
+                            return config;
+                        }
+                    }
+                }
+                Self::default()
             }
         }
-        Self::default()
     }
 
     pub fn save(&self) -> Result<(), String> {
@@ -392,6 +407,23 @@ impl TuiConfig {
         std::fs::write(&path, json)
             .map_err(|e| format!("Failed to write {}: {}", path.display(), e))
     }
+}
+
+fn env_config_path(key: &str) -> Option<PathBuf> {
+    let custom = std::env::var(key).ok()?;
+    // Trim only to decide emptiness. A nonempty value is the path as written,
+    // including any leading or trailing space the caller actually set.
+    if custom.trim().is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(custom))
+    }
+}
+
+fn parse_config(content: &str) -> Option<TuiConfig> {
+    let mut config = serde_json::from_str::<TuiConfig>(content).ok()?;
+    config.clamp();
+    Some(config)
 }
 
 #[cfg(test)]

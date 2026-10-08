@@ -8,9 +8,9 @@ use fake::{FakeLauncher, Reply};
 use serde_json::{json, Value};
 use srelens_plugin_host::sidecar::data::DataDir;
 use srelens_plugin_host::sidecar::{
-    Action, AppLog, Enforcement, Limits, LogLevel, LogSource, NoBroker, Policy, RequestError,
-    RequestMetrics, SidecarCommand, SidecarConfig, SidecarStatus, StreamEvent, Supervisor,
-    SIDECAR_API_VERSIONS, UNEXPECTED_EXIT,
+    Action, AppLog, Enforcement, LaunchError, Launched, Launcher, Limits, LogLevel, LogSource,
+    NoBroker, Policy, RequestError, RequestMetrics, SidecarCommand, SidecarConfig, SidecarStatus,
+    StreamEvent, Supervisor, SIDECAR_API_VERSIONS, UNEXPECTED_EXIT,
 };
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -76,6 +76,46 @@ async fn next(stream: &mut srelens_plugin_host::sidecar::SidecarStream) -> Optio
 
 fn secs(n: u64) -> Duration {
     Duration::from_secs(n)
+}
+
+/// A backend that takes its time to launch, as Linux's does while systemd
+/// sets up its scope (`sandbox/systemd.rs`), and then refuses.
+struct Slow;
+
+impl Launcher for Slow {
+    fn enforcement(&self) -> Enforcement {
+        Enforcement::Kernel
+    }
+
+    fn launch(&self, _: &SidecarCommand, _: &Limits) -> Result<Launched, LaunchError> {
+        std::thread::sleep(Duration::from_millis(300));
+        Err(LaunchError::Unavailable("slow".into()))
+    }
+}
+
+/// A launch blocks a thread for as long as its backend takes, so it runs off
+/// the runtime's own threads: on a single-threaded runtime nothing else would
+/// run meanwhile. On the real clock, since the launch sleeps on it.
+#[tokio::test]
+async fn a_slow_launch_does_not_stop_the_runtime() {
+    let ticks = Arc::new(AtomicUsize::new(0));
+    let ticking = tokio::spawn({
+        let ticks = ticks.clone();
+        async move {
+            loop {
+                sleep(Duration::from_millis(10)).await;
+                ticks.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    });
+    let supervisor = Supervisor::start(config(), Arc::new(Slow), Arc::new(NoBroker));
+    until(&supervisor, |s| matches!(s, SidecarStatus::Refused { .. })).await;
+    ticking.abort();
+    let ticks = ticks.load(Ordering::SeqCst);
+    assert!(
+        ticks >= 10,
+        "the runtime ran {ticks} 10 ms ticks during a 300 ms launch"
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -528,8 +568,7 @@ async fn a_sandbox_this_machine_cannot_provide_is_refused_without_retrying() {
 #[tokio::test(start_paused = true)]
 async fn a_backend_that_enforces_no_limits_is_refused_before_anything_starts() {
     let launcher = FakeLauncher::well_behaved().enforcing(Enforcement::Missing(
-        "srelens's memory and CPU watchdog for macOS has not yet been checked with Seatbelt on a macOS 27 Mac (#713)"
-            .into(),
+        "this host cannot measure memory or CPU".into(),
     ));
     let supervisor = start(&launcher);
     let SidecarStatus::Refused { reason } =
@@ -537,7 +576,7 @@ async fn a_backend_that_enforces_no_limits_is_refused_before_anything_starts() {
     else {
         unreachable!()
     };
-    assert!(reason.contains("#713"), "{reason}");
+    assert!(reason.contains("cannot measure memory or CPU"), "{reason}");
     assert_eq!(launcher.launches(), 0);
 }
 

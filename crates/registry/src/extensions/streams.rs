@@ -14,14 +14,17 @@
 //! everything a single read would; and `watch` (#566), which follows the kind
 //! a declared reader lists and says when it changed, so the view reads again
 //! through that same path. Logs, exec and port-forwards (#567) are the pod
-//! sources (`pods`): each reaches only pods its binding's scope admits. Metric
-//! providers (#569) are further `source` kinds on the same wire; none of them
-//! changes the frames.
+//! sources (`pods`): each reaches only pods its binding's scope admits. A log
+//! provider (#569) is the `logProvider` source (`providers`): it follows a
+//! LogQL query with the same frames a pod's `logs` source sends.
 
 mod pods;
+mod providers;
+mod operations;
+pub(super) use pods::MAX_LINE_BYTES;
 pub use pods::{ExecConfirmed, PodTiming};
 #[cfg(test)]
-pub(super) use pods::{MAX_LINES_PER_FRAME, MAX_LINE_BYTES};
+pub(super) use pods::MAX_LINES_PER_FRAME;
 
 use super::{columns, crd, read_contribution, resolver_app, Inventory, InventoryKey, Read, Store};
 use serde::{Deserialize, Serialize};
@@ -77,6 +80,8 @@ pub struct OpenStreamIn {
 #[derive(Debug, PartialEq, Eq, Deserialize)]
 #[serde(tag = "kind", deny_unknown_fields)]
 pub enum StreamSourceIn {
+    #[serde(rename = "operation")]
+    Operation { method: String, params: serde_json::Map<String, Value> },
     /// Re-run a declared reader every `intervalSeconds` (5–300, default 15).
     #[serde(rename = "read")]
     Read {
@@ -130,6 +135,24 @@ pub enum StreamSourceIn {
         pod: Option<String>,
         #[serde(default)]
         service: Option<String>,
+    },
+    /// Follow one of the app's log providers (#569) for the resource the view
+    /// shows: its history, then what is new, in the frames `logs` sends.
+    #[serde(rename = "logProvider")]
+    LogProvider {
+        provider: String,
+        /// The qualified kind of the resource, e.g. `/Pod`.
+        #[serde(rename = "resourceKind")]
+        resource_kind: String,
+        name: String,
+        /// Lines of history to start with: 0–5000, default 200.
+        #[serde(default, rename = "tailLines")]
+        tail_lines: Option<i64>,
+        /// How far back the history reaches: 1 s to 7 days, default an hour.
+        #[serde(default, rename = "sinceSeconds")]
+        since_seconds: Option<i64>,
+        #[serde(default)]
+        timestamps: bool,
     },
 }
 
@@ -251,6 +274,7 @@ pub struct OpenStreamOut {
 /// this process that serves it: the desktop UI's and an MCP server's registry
 /// see the same streams, and a lifecycle change made through either ends them.
 pub struct ExtensionStreams {
+    apps: super::Apps,
     path: Store,
     core: Arc<Registry>,
     cache: Arc<srelens_kube::client_cache::ClientCache>,
@@ -262,13 +286,16 @@ pub struct ExtensionStreams {
     /// The cluster the pod sources reach (#567); replaced by tests.
     cluster: Mutex<Arc<dyn super::pods::PodCluster>>,
     pod_timing: Mutex<PodTiming>,
+    /// How often a log provider is asked for what is new; replaced by tests.
+    provider_timing: Mutex<super::providers::ProviderTiming>,
     /// Bumped on every announced inventory write, after the lifecycle's own
     /// endings: every watch rechecks what it may still follow.
     inventory: tokio::sync::watch::Sender<u64>,
     /// Windows told of every announced inventory write (#566).
     listeners: Mutex<Vec<Arc<dyn EventSink>>>,
-    /// What the app tools (#574) are built with: the store for apps' secret settings,
-    /// and where packages and sidecars' directories are.
+    /// What the app tools (#574) are built with, and what a log provider's request
+    /// (#569) carries secrets from: the store for apps' secret settings, and where
+    /// packages and sidecars' directories are.
     secrets: Arc<dyn srelens_plugin_host::SecretStore>,
     packages: Option<std::path::PathBuf>,
     data: Option<std::path::PathBuf>,
@@ -279,6 +306,12 @@ pub struct ExtensionStreams {
 }
 
 impl ExtensionStreams {
+    /// A one-call native package boundary. The archive stays in owned bytes;
+    /// small JSON metadata still uses the registry's existing audit path.
+    pub fn raw_package_registry(&self, registry: &Registry, id: &str, bytes: Vec<u8>) -> Result<Registry, CapabilityError> {
+        super::uploads::registry(registry, id, bytes, self.apps.clone(), self.core.clone(), self.secrets.clone())
+    }
+
     /// Open a stream for one view, owned by no window. `input` is the
     /// caller's JSON, parsed here so the host command and the tests read it
     /// the same way.
@@ -358,6 +391,7 @@ impl ExtensionStreams {
             ));
         }
         let (capability, interval_seconds) = match &input.source {
+            StreamSourceIn::Operation { .. } => return self.open_operation(sink, window, input).await,
             StreamSourceIn::Read {
                 capability,
                 interval_seconds,
@@ -367,6 +401,9 @@ impl ExtensionStreams {
             StreamSourceIn::Exec { .. } => return self.open_exec(sink, window, audit, input).await,
             StreamSourceIn::PortForward { .. } => {
                 return self.open_forward(sink, window, audit, input).await
+            }
+            StreamSourceIn::LogProvider { .. } => {
+                return self.open_log_provider(sink, window, input).await
             }
         };
         let interval = interval_seconds.unwrap_or(DEFAULT_INTERVAL);
@@ -550,6 +587,12 @@ impl ExtensionStreams {
     pub(super) fn script_pods(&self, cluster: Arc<dyn super::pods::PodCluster>, timing: PodTiming) {
         *self.cluster.lock().unwrap() = cluster;
         *self.pod_timing.lock().unwrap() = timing;
+    }
+
+    /// Replace how often a log provider is asked for what is new. Test support.
+    #[cfg(test)]
+    pub(super) fn set_provider_timing(&self, timing: super::providers::ProviderTiming) {
+        *self.provider_timing.lock().unwrap() = timing;
     }
 
     /// The cluster the pod sources reach.
@@ -885,6 +928,7 @@ struct ReadAsk {
 impl ReadAsk {
     fn read(&self) -> Read {
         Read {
+            cursor: None,
             use_crd_columns: false,
             id: self.id.clone(),
             revision: self.revision,
@@ -973,11 +1017,13 @@ pub(super) fn register(
             Some(streams) => streams,
             None => {
                 let streams = Arc::new(ExtensionStreams {
+                    apps: apps.clone(),
                     path: path.clone(),
                     core,
                     watcher: Mutex::new(kube_session(cache.clone())),
                     cluster: Mutex::new(Arc::new(super::pods::KubePods(cache.clone()))),
                     pod_timing: Mutex::new(PodTiming::default()),
+                    provider_timing: Mutex::new(super::providers::ProviderTiming::default()),
                     cache,
                     snapshots,
                     streams: AppStreams::new(StreamLimits::default()),
@@ -1079,6 +1125,35 @@ mod tests {
             "context": "cluster/a", "namespace": "team",
             "source": {"kind": "read", "capability": "applications"},
         })
+    }
+
+    #[tokio::test]
+    async fn operation_streams_check_declared_method_inputs_and_pin_before_launch() {
+        use super::super::executable_tests::{install_scanner, install_package, package_with_binaries, scanner_manifest, SCANNER};
+        use super::super::sidecars::fake::FakeSidecar;
+        let dir = tempfile::tempdir().unwrap();
+        let (path, _, streams) = setup(dir.path());
+        install_scanner(&path);
+        let mut source = scanner_manifest();
+        source["srelensApiVersion"] = json!("^0.8");
+        source["sidecar"]["operations"][0]["view"] = json!({"stream":true});
+        let installed = install_package(&path, &package_with_binaries(&source)).unwrap();
+        let revision = installed.plugins.iter().find(|p| p.manifest.id == SCANNER).unwrap().revision;
+        let fake = FakeSidecar::default();
+        streams.app_tools().script_sidecars(Arc::new(fake.clone()));
+        let sink = Arc::new(TestSink::default());
+        let mut input = request(SCANNER, revision, "scan-view", "extstream:scan");
+        input["namespace"] = json!("");
+        input["source"] = json!({"kind":"operation","method":"scan","params":{"image":"alpine:3.9"}});
+        for changed in [json!({"method":"status","params":{}}),json!({"method":"scan","params":{"image":"alpine","unknown":true}}),json!({"method":"scan","params":{"image":"alpine","clusterId":"other"}})] {
+            let mut invalid = input.clone(); invalid["source"].as_object_mut().unwrap().extend(changed.as_object().unwrap().clone());
+            assert!(streams.open(sink.clone(), invalid).await.is_err());
+        }
+        assert_eq!(fake.launches(), 0);
+        let opened = streams.open(sink.clone(), input).await.expect("operation stream");
+        eventually("operation data", || types(&sink, "extstream:scan").contains(&"data".into())).await;
+        assert!(streams.cancel(&opened.stream));
+        assert_eq!(types(&sink, "extstream:scan").last().map(String::as_str), Some("close"));
     }
 
     async fn eventually(what: &str, check: impl Fn() -> bool) {

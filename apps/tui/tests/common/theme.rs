@@ -19,10 +19,10 @@ use std::cell::Cell;
 use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard};
 
-use srelens_tui::app::App;
-use srelens_tui::commands::ResourceKind;
-use srelens_tui::event::AppEvent;
-use srelens_tui::theme::{Theme, ThemePalette};
+use srectl::app::App;
+use srectl::commands::ResourceKind;
+use srectl::event::AppEvent;
+use srectl::theme::{Theme, ThemePalette};
 use tokio::sync::mpsc::UnboundedSender;
 
 /// Index of the theme a test sees when nobody has switched it.

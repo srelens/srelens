@@ -12,6 +12,7 @@ or the limits.
 | The contract: frames, ownership, limits, metrics | `crates/streams/src/app.rs` (`AppStreams`) |
 | Who may open what, lifecycle, the `read` and `watch` sources | `crates/registry/src/extensions/streams.rs` (`ExtensionStreams`) |
 | The pod sources `logs`, `exec`, `portForward` (#567) | `crates/registry/src/extensions/streams/pods.rs`; scopes in `crates/registry/src/extensions/pods.rs`, cluster calls in `crates/kube/src/app_pods.rs` |
+| The `logProvider` source (#569) | `crates/registry/src/extensions/streams/providers.rs`; binding and the backends' answers in `crates/registry/src/extensions/providers.rs` |
 | Desktop commands, frames on the opener's channel | `apps/desktop/src-tauri/src/extension_streams.rs` |
 | Client | `packages/core/src/lib/extensionStreams.ts` (`openExtensionView`) |
 
@@ -261,8 +262,10 @@ announces nothing, so there the list is read when the window changes it and
 when the window gains focus, which is where a change made in another tab shows.
 It neither polls nor claims to be live.
 
-Metric providers ([#569](https://github.com/srelens/srelens/issues/569)) are further
-`source` kinds.
+A log provider ([#569](https://github.com/srelens/srelens/issues/569)) is one more
+`source` kind, [`logProvider`](#logprovider). Metric and trace providers are not
+streams: a panel asks `extensions.queryProvider` when it opens, when its range changes
+and on Refresh.
 
 ### Pod sources
 
@@ -383,6 +386,43 @@ to offer, held to the same authority and scope an open is — `{ "id", "revision
 forward through a Service, lists the Services that send to a pod in scope.
 `extensionPods()` in `@srelens/core` reads it.
 
+### `logProvider`
+
+```json
+{ "kind": "logProvider", "provider": "loki", "resourceKind": "/Pod", "name": "web-1",
+  "tailLines": 200, "sinceSeconds": 3600, "timestamps": true }
+```
+
+Follows one of the app's log providers for the resource the view shows: `resourceKind`
+is one of the provider's `forKinds` and `name` is the resource, in the stream's
+`namespace`. The open is authorized as a read is and binds the provider's template
+([manifest.md](manifest.md#metric-log-and-trace-providers)), so a refusal — no such
+provider, one not for this kind, a name that is not a Kubernetes name, a template that
+cannot be bound — comes back from the open, and nothing is sent. `tailLines` (0–5000,
+default 200) and `sinceSeconds` (1 s to 7 days, default an hour) shape the history.
+
+It sends the frames `logs` does: `lines`, each line tagged `pod/container` from the Loki
+stream's labels (else its pod, else the provider's id) and prefixed with its RFC 3339
+time when `timestamps` is set; and `status`, tagged with the provider's id. The source
+asks for the history — the newest `tailLines` lines of the window — until a query
+answers it, and says `live` once one has; then it asks every **5 seconds**, the host's
+interval and not the app's, for what is newer than the last line it sent: from that
+line's instant, since lines can share one, and never the same line twice (two identical
+lines at one instant are both sent, once). After a query that answered a whole page of
+1,000 lines it asks again a second later; a whole page all at one instant, already
+sent, is followed past that instant, and the rest of it is not sent. Every query stops
+**2 seconds** short of now, because log agents push in batches and Loki takes lines
+with older timestamps, as Loki's own tail waits (`delay_for`); a line that reaches Loki
+later than that, for an instant the follow has passed, is not shown. An answer past the
+4 MiB limit is asked again for half as many lines, down to 10. Every query goes through
+the provider's `network.http` binding with the app's settings at that moment. A query
+nothing answered — the connection failed or timed out, or the server answered 5xx, 408
+or 429 — sends `reconnecting` with why, and the next one that is answered sends `live`
+again. A query the host or the server refused — the allowlist, a 4xx, an answer too
+large even at 10 lines, or not Loki's — ends the stream with `error: source` and the
+reason. It asks nothing more once the stream has ended: its view closed, its window
+closed or reloaded, or the app was disabled, updated or removed.
+
 ## Opening a stream
 
 `extension_stream_open` takes one argument, `input`, which the host holds to
@@ -403,15 +443,17 @@ snake_case spelling among them:
 
 That payload is committed as `packages/core/src/lib/extension-stream-open.json`:
 the TypeScript wrapper is tested to produce it and the Rust struct to accept it. The
-watch and pod sources have theirs beside it (`extension-stream-watch.json`,
+watch, pod and log provider sources have theirs beside it (`extension-stream-watch.json`,
 `extension-stream-logs.json`, `extension-stream-exec.json`,
-`extension-stream-port-forward.json`).
+`extension-stream-port-forward.json`, `extension-stream-log-provider.json`).
 
 It answers `{ "stream", "channel" }`, or refuses with why: not installed,
 disabled or at another revision, not enabled for the cluster, no such reader,
 an interval out of range, a channel outside `extstream:`, a missing view, the
 open-stream cap, or — for a pod source — a pod outside the binding's scope, an exec
-without the host confirmation, or a local port the host could not open.
+without the host confirmation, or a local port the host could not open, or — for a log
+provider — a provider that is not a log provider for the view's kind, or a template it
+cannot bind for the resource.
 
 ## Metrics
 

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 const { watchResource, useNamespaceOptions, cronjobSetSuspend } = vi.hoisted(() => ({
@@ -130,6 +130,63 @@ function open() {
 }
 
 describe("Workloads", () => {
+  it("narrows to a namespace clicked in the table, as a kind's own list does (#821)", async () => {
+    open();
+    const cell = await screen.findByRole("button", { name: "Show only namespace kube-system" });
+
+    await userEvent.click(cell);
+
+    await waitFor(() => expect(tabFor("/resources").namespaces).toEqual({ [CTX.stableId]: ["kube-system"] }));
+    // Narrowed to it, and nothing on screen is left to add.
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: /^(Show only|Also show) namespace/ })).toBeNull(),
+    );
+  });
+
+  it("returns keyboard focus to the workload's row after Enter on its namespace, once the rows are back (PR #832 review)", async () => {
+    open();
+    const cell = await screen.findByRole("button", { name: "Show only namespace kube-system" });
+    cell.focus();
+
+    await userEvent.keyboard("{Enter}");
+
+    // The five lists reload under the new selection; the row that was read
+    // off is the one focus comes back to, not the top of the page.
+    await waitFor(() => expect(tabFor("/resources").namespaces).toEqual({ [CTX.stableId]: ["kube-system"] }));
+    await waitFor(() => {
+      const row = screen.getByText("node-exporter").closest("tr");
+      expect(row).not.toBeNull();
+      expect(document.activeElement).toBe(row);
+    });
+  });
+
+  it("still returns focus to the row when the reader clicks the loading view that stands in for the table (PR #832 review)", async () => {
+    // The first listing answers at once; the one the new selection asks for
+    // is held, so the loading view is on screen long enough to be clicked.
+    const held: (() => void)[] = [];
+    watchResource.mockImplementation(
+      async (_context: string, namespace: string, kind: string, onRows: (rows: unknown[]) => void) => {
+        if (namespace === "kube-system") held.push(() => onRows(FIXTURES[kind] ?? []));
+        else onRows(FIXTURES[kind] ?? []);
+        return { stop };
+      },
+    );
+    open();
+    const cell = await screen.findByRole("button", { name: "Show only namespace kube-system" });
+    cell.focus();
+    await userEvent.keyboard("{Enter}");
+
+    const loading = await screen.findByRole("status", { name: /Loading/ });
+    // Where the table was. Not a move away from it.
+    fireEvent.pointerDown(loading);
+    act(() => held.forEach((release) => release()));
+
+    await waitFor(() => {
+      const row = screen.getByText("node-exporter").closest("tr");
+      expect(document.activeElement).toBe(row);
+    });
+  });
+
   it("writes a namespace pick to its own tab — another Workloads tab on the same cluster keeps its selection", async () => {
     store.openTab("/resources");
     const first = tabFor("/resources").id;

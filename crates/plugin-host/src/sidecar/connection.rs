@@ -170,6 +170,7 @@ struct OpenStream {
 
 #[derive(Default)]
 struct State {
+    api_version: Option<semver::Version>,
     /// The id the next request gets; every id below it has been sent.
     next_id: u64,
     pending: HashMap<u64, oneshot::Sender<Answer>>,
@@ -200,6 +201,9 @@ pub(crate) struct Connection {
 }
 
 impl Connection {
+    pub(crate) fn set_api_version(&self, version: semver::Version) {
+        self.state().api_version = Some(version);
+    }
     /// A session under `limits`, and the lines to write to the sidecar.
     pub(crate) fn new(limits: Limits) -> (Connection, Outbox) {
         let (out, host) = mpsc::unbounded_channel();
@@ -534,6 +538,13 @@ impl Connection {
                 "is not reading its standard input: {ANSWER_BUFFER} answers to its calls are waiting for it"
             )));
         };
+        if (matches!(name.as_str(), method::HOST_BINDING_AVAILABILITY | method::HOST_RUN_JOB)
+            || (name == method::HOST_READ && params.get("cursor").is_some()))
+            && !self.state().api_version.as_ref().is_some_and(|version| version >= &semver::Version::new(0, 2, 0))
+        {
+            place.send(protocol::response(&id, &Err(RpcError::new(code::METHOD_NOT_FOUND, "This callback requires negotiated sidecar API 0.2.0"))));
+            return Ok(());
+        }
         let Ok(permit) = self.inner.callbacks.clone().try_acquire_owned() else {
             let error = RpcError::new(
                 code::INTERNAL_ERROR,
@@ -1211,6 +1222,22 @@ mod tests {
         let after = connection.request("scan", json!({})).await;
         assert_eq!(after, Err(RequestError::Ended(why.into())));
         assert!(connection.is_ended());
+    }
+
+    #[tokio::test]
+    async fn new_callbacks_require_negotiated_protocol_0_2() {
+        let (connection, mut lines) = Connection::new(limits());
+        connection.set_api_version(semver::Version::new(0, 1, 0));
+        for (name, params) in [
+            (method::HOST_BINDING_AVAILABILITY, json!({})),
+            (method::HOST_RUN_JOB, json!({})),
+            (method::HOST_READ, json!({"cursor":""})),
+        ] {
+            connection.handle(Incoming::Request { id: json!(name), method: name.into(), params }, &broker()).unwrap();
+            let answer: Value = serde_json::from_str(&lines.answers.recv().await.unwrap()).unwrap();
+            assert_eq!(answer["error"]["code"], code::METHOD_NOT_FOUND, "{name}: {answer}");
+            assert!(answer["error"]["message"].as_str().unwrap().contains("0.2"));
+        }
     }
 
     #[tokio::test(start_paused = true)]

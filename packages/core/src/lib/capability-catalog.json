@@ -18,6 +18,25 @@
     "confirm": "Run the declared action[ ({action})][ on {resource}][ in cluster {cluster}]?"
   },
   {
+    "id": "extensions.bindingAvailability",
+    "readOnly": true,
+    "destructive": false,
+    "requiresConfirm": false,
+    "sensitive": false,
+    "impact": "low",
+    "confirm": null
+  },
+  {
+    "id": "extensions.callOperation",
+    "readOnly": true,
+    "destructive": false,
+    "requiresConfirm": false,
+    "sensitive": true,
+    "impact": "low",
+    "confirm": null,
+    "uiOnly": true
+  },
+  {
     "id": "extensions.catalog",
     "readOnly": true,
     "destructive": false,
@@ -92,6 +111,15 @@
     "confirm": null
   },
   {
+    "id": "extensions.queryProvider",
+    "readOnly": true,
+    "destructive": false,
+    "requiresConfirm": false,
+    "sensitive": false,
+    "impact": "low",
+    "confirm": null
+  },
+  {
     "id": "extensions.read",
     "readOnly": true,
     "destructive": false,
@@ -153,6 +181,15 @@
     "sensitive": false,
     "impact": "low",
     "confirm": null
+  },
+  {
+    "id": "extensions.runJob",
+    "readOnly": false,
+    "destructive": false,
+    "requiresConfirm": true,
+    "sensitive": false,
+    "impact": "medium",
+    "confirm": "Run this app's container Job[ in namespace {namespace}][ in cluster {cluster}]? It reads only its declared resources and is cleaned up after the scan."
   },
   {
     "id": "extensions.streams",
@@ -758,6 +795,15 @@
     "confirm": null
   },
   {
+    "id": "k8s.listWorkloadImages",
+    "readOnly": true,
+    "destructive": false,
+    "requiresConfirm": false,
+    "sensitive": false,
+    "impact": "low",
+    "confirm": null
+  },
+  {
     "id": "k8s.mergePatch",
     "readOnly": false,
     "destructive": false,
@@ -954,6 +1000,15 @@
     "sensitive": false,
     "impact": "medium",
     "confirm": "Roll every pod[ of {resource}][ in cluster {cluster}]?"
+  },
+  {
+    "id": "k8s.rolloutUndo",
+    "readOnly": false,
+    "destructive": false,
+    "requiresConfirm": true,
+    "sensitive": false,
+    "impact": "medium",
+    "confirm": "Roll back Deployment[ {namespace}/{name}][ in cluster {cluster}] to an earlier revision?"
   },
   {
     "id": "k8s.scale",

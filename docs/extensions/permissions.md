@@ -82,6 +82,12 @@ a fixed GET, and holds it and every redirect to that allowlist:
   host puts the value into the header as the request is sent. A request carrying one
   follows no redirect to another origin.
 - Bounded time and size, and no error repeats the URL or a secret.
+- A provider (#569) adds to a binding's request only the query and its time range, which
+  the host binds from the view: the cluster's name, the namespace, the workload or pod,
+  each escaped inside a double-quoted string so no name becomes query syntax, and the
+  range. The access review lists each provider's whole template, so a changed query is
+  changed access. A log provider the log view follows is asked again every 5 seconds
+  while the view is open; nothing else asks another system on a timer.
 
 `network.http` is the broker's alone: it is not in the capability catalog or MCP, so
 nothing can call it except through an installed app's binding. See

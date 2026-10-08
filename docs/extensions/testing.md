@@ -48,7 +48,7 @@ handler's consent gate.
 
 | Suite | Covers |
 |---|---|
-| `cargo test -p srelens-plugin-host` | Manifest parsing and validation, API version negotiation, broker registration, revocation, consent, that `schemas/extension-manifest.v0.6.json` equals the generated schema, and that a field missing from the frozen 0.3, 0.4 and 0.5 schemas is gated in `API_FIELDS` |
+| `cargo test -p srelens-plugin-host` | Manifest parsing and validation, API version negotiation, broker registration, revocation, consent, that `schemas/extension-manifest.v0.7.json` equals the generated schema, and that a field missing from the frozen 0.3, 0.4, 0.5 and 0.6 schemas is gated in `API_FIELDS` |
 | `cargo test -p srelens-plugin-host --test executable --test tools` | Executable apps ([#574](https://github.com/srelens/srelens/issues/574)): the kind and its `sidecar`, the binaries, operation names and inputs; the host-built input schema and every call's checks; and `PluginHost::register_tools`, which gives each reader, action and operation the host's schema and annotations and withdraws them all at once |
 | `cargo test -p srelens-plugin-host --test sidecar` | The sidecar supervisor ([#572](https://github.com/srelens/srelens/issues/572)) against an in-process fake sidecar on a paused clock, so every wait is asserted to its exact length: the handshake and version negotiation, the request timeout and cancellation, the request and stream limits, the 1 s, 5 s and 30 s restart backoff and the disable after it, health checks, protocol violations, and stopping |
 | `cargo test -p srelens-plugin-host --test sidecar_process` | The same lifecycle against a real process, the probe (`src/bin/srelens-sidecar-probe.rs`), started without a sandbox: an abort mid-request leaves the host running and the sidecar restarted, one that dies at every start is disabled, a hung one is killed, and it gets only the environment srelens names |
@@ -93,6 +93,25 @@ cargo test -p srelens-registry --lib -- --ignored --exact \
 
 An authoring CLI with a test command is planned
 ([#577](https://github.com/srelens/srelens/issues/577)).
+
+## macOS conformance
+
+On 2026-10-05, the release-built production backend passed all 14 sandbox conformance
+checks on macOS 27.0.1 (26A434), arm64. The supervisor used `OsSandbox` directly, with
+Seatbelt and the host watchdog; no test launcher vouched for limits. The three watchdog
+checks without Seatbelt also passed.
+
+```sh
+cargo test --release -p srelens-plugin-host --test sandbox_conformance --test macos_watchdog -- --include-ignored --test-threads=1 --nocapture
+```
+
+Both CPU checks measured 0.25 CPUs against a 0.25 CPU limit. The release probe held
+512 MiB against a 128 MiB memory limit: the watchdog stopped it, measuring 514 MiB
+with Seatbelt and 447 MiB without it. These are sampled readings, not peak memory or
+a maximum overshoot. A fast allocation can finish between the watchdog's 50 ms readings;
+the memory limit bounds sustained use, not an instantaneous burst. This guarantee is
+weaker than the kernel limits on Linux and Windows. Intel Macs and older macOS versions
+with Seatbelt remain unverified.
 
 ## Performance budgets
 

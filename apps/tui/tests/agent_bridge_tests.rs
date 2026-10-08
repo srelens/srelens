@@ -28,10 +28,10 @@ use srelens_llm::ProviderConfig;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
 
-use srelens_tui::agent::{
+use srectl::agent::{
     build_mcp_server, run_boxed_cursor_turn, run_native_agent_turn, McpToolInvoker,
 };
-use srelens_tui::event::AppEvent;
+use srectl::event::AppEvent;
 
 // ---------------------------------------------------------------------------
 // Shared helpers

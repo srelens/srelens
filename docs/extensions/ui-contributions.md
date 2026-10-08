@@ -199,6 +199,41 @@ Each section is one app stream view: closing the Inspector, switching resources 
 closing the window ends every session it opened, forwards and their ports included. On
 the web the section says that app streams run in the desktop app.
 
+## Metrics, logs and traces from providers
+
+API 0.7 ([#569](https://github.com/srelens/srelens/issues/569)). An app's providers
+([manifest.md](manifest.md#metric-log-and-trace-providers)) are drawn by the host in two
+places, in the new design:
+
+- **Overviews.** On a Deployment, StatefulSet, DaemonSet or Pod a metric or trace
+  provider is for, the Overview (and the Inspector's Details) gains a **Metrics and
+  traces from apps** section after the app's detail panels (`ExtensionProviderSlot` in
+  `packages/ui-next/src/extensions/ExtensionProviderSlot.tsx`): one range picker (15
+  minutes to 7 days, an hour by default) and **Refresh**, then a
+  [timeseries chart](native-components.md#timeseries) per metric provider and a table of
+  traces per trace provider, each saying which app it is from. A panel asks when it
+  opens, when the range changes and on Refresh, never on a timer. Loading, a failure
+  (with its reason and Retry) and a query that matched nothing each look different; a
+  failure is never drawn as an empty chart.
+- **The log view.** On `/logs/<kind>/<namespace>/<name>`, when an installed, enabled
+  app has a log provider for the kind and the cluster, the controls bar gains a
+  **from** picker (the log source; the rail's Sources are the pods): **Kubernetes**,
+  then each provider as "title · app". Choosing one
+  follows it through the view's own buffer, pause, filters and readout (`useLogStream`'s
+  `source`, from `packages/ui-next/src/extensions/logProviders.ts`), on an app stream
+  view of its own that closes when the source changes or the screen closes. The
+  **Previous instance** control is the cluster's and is not drawn for a provider. A
+  provider's stream that ended says how, as an ending or a failure, with **Follow
+  again**, and is not drawn as followed. A provider the inventory no longer offers
+  says so, and the view follows Kubernetes and stays there if the app comes back. An
+  inventory read that fails says so too, but is not taken for a removal: the view
+  goes on following the provider. "all" in **since** reaches back 7 days for a
+  provider, and says so.
+
+The classic design does not draw providers. On the web, metric and trace panels answer
+only under the operator's network ceiling, as every `network.http` request there does,
+and the log view offers no provider, since the web host runs no app streams yet.
+
 ## Actions and refresh
 
 The details footer offers the installed manifest's explicitly granted actions (see [capabilities.md](capabilities.md#declared-gitops-actions)). Each opens a
@@ -225,3 +260,9 @@ a review. The classic palette does not list app
 commands.
 
 Arbitrary custom renderer code is not supported.
+
+## Executable operation screens (API 0.8)
+
+An executable sidecar operation can declare `view: {"autoRun": true}` for a read screen, `view: {"stream": true}` for an explicitly started cancellable stream, or `view: {"hidden": true}` for a detail operation reached from a result row. Automatic stream starts are rejected. Executable apps with declared operations appear in the Apps rail even without declarative pages; hidden operations stay out of the rail.
+
+The host renders scalar inputs, searchable namespaces, metadata, tables, errors, retry and cursor pagination. It runs no app-provided HTML or JavaScript. An operation route pins the context key, app ID and installed numeric revision; detail routes also carry scalar inputs such as a report ID. Updates refuse old tabs. Native ordinary calls use `extensions.callOperation`; streams use the existing owned app-stream transport with an `operation` source. Stream-only operations are excluded from ordinary MCP request tools. The native bridge currently accepts apps without declared actions; action-bearing apps require the consent-aware dynamic tool path.

@@ -10,6 +10,7 @@ export type AgentEvent =
    *  kind and name, or a first line (#385). Absent when it says nothing short
    *  and honest. */
   | { type: "toolResult"; id: string; status: ToolStatus; summary?: string }
+  | { type: "usage"; promptTokens: number; completionTokens: number; cachedTokens: number; totalTokens: number }
   | { type: "turnDone" }
   | { type: "error"; message: string };
 
@@ -53,6 +54,23 @@ export function parseAgentEvent(raw: unknown): AgentEvent | null {
     case "textDelta":
     case "thinking":
     case "toolCallStart":
+      return raw as AgentEvent;
+    case "usage": {
+      const u = raw as Record<string, unknown>;
+      if (
+        typeof u.promptTokens !== "number" ||
+        !Number.isFinite(u.promptTokens) ||
+        typeof u.completionTokens !== "number" ||
+        !Number.isFinite(u.completionTokens) ||
+        typeof u.cachedTokens !== "number" ||
+        !Number.isFinite(u.cachedTokens) ||
+        typeof u.totalTokens !== "number" ||
+        !Number.isFinite(u.totalTokens)
+      ) {
+        return null;
+      }
+      return raw as AgentEvent;
+    }
     case "turnDone":
     case "error":
       return raw as AgentEvent;

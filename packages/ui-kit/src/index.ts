@@ -9,7 +9,13 @@ export { Badge, type BadgeTone } from "./Badge";
 export { Breadcrumb, type BreadcrumbProps } from "./Breadcrumb";
 export { Button, type ButtonProps, type ButtonSize, type ButtonVariant } from "./Button";
 export { Checkbox, type CheckboxProps } from "./Checkbox";
-export { ClusterRail, type ClusterRailItem, type ClusterRailMarker, type ClusterRailProps } from "./ClusterRail";
+export {
+  ClusterRail,
+  type ClusterRailItem,
+  type ClusterRailMarker,
+  type ClusterRailMoves,
+  type ClusterRailProps,
+} from "./ClusterRail";
 export {
   CodeEditor,
   documentDiagnostics,

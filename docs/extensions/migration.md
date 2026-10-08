@@ -88,6 +88,14 @@ before 0.6 cannot read an inventory that holds one, since installed apps are rea
 strictly: remove it before going back. Its sidecar's data directory,
 under `*.extensions.data/`, is removed with it.
 
+## Metric, log and trace providers (#569)
+
+They are API 0.7. An app that declares `metricProviders`, `logProviders` or
+`traceProviders` requires `^0.7`; the same manifest under `^0.6` is told "requires API
+0.7.0". Nothing else about a 0.6 app changes: it keeps its range, its schema file
+(`extension-manifest.v0.6.json`) and its signature. A host from before 0.7 lists a
+`^0.7` release as incompatible rather than offering it.
+
 ## Plain HTTP to this computer (#568)
 
 An installed app records **Allow plain HTTP to this computer** as `allowLoopbackHttp`,

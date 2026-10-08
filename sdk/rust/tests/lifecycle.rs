@@ -54,7 +54,7 @@ async fn with_no_version_in_common_initialize_says_which_it_speaks() {
         .await;
     let answer = host.answer(id).await;
     assert_eq!(answer["error"]["code"], -32001);
-    assert_eq!(answer["error"]["data"], json!({"supported": ["0.1.0"]}));
+    assert_eq!(answer["error"]["data"], json!({"supported": ["0.1.0", "0.2.0"]}));
     host.finish().await.unwrap();
 }
 

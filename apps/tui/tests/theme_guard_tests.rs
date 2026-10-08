@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::Duration;
 
-use srelens_tui::theme::Theme;
+use srectl::theme::Theme;
 
 /// The palette every test expects when it holds the guard.
 const DEFAULT: usize = 0;

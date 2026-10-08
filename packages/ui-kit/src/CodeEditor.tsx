@@ -325,8 +325,15 @@ function editorTheme(minHeight: number, maxHeight: number, fill: boolean, flush:
       backgroundColor: "color-mix(in srgb, var(--accent) 42%, transparent)",
       outline: "1px solid var(--accent)",
     },
-    ".cm-tooltip": { maxWidth: "480px" },
-    ".cm-tooltip.cm-tooltip-lint": {
+    // The box goes on `.cm-tooltip` itself, not on `.cm-tooltip-lint`. Hovering
+    // the gutter marker makes the lint list the tooltip, but hovering the
+    // squiggle hosts it as a `.cm-tooltip-section` inside a `.cm-tooltip-hover`,
+    // and a rule needing both classes on one element matched neither. The host
+    // kept the base theme's light-only `#f5f5f5`, since this editor never sets
+    // `darkTheme`, under the dark theme's near-white ink. Naming each host in
+    // turn misses the next one: a completion's description is a
+    // `.cm-tooltip.cm-completionInfo` of its own, and had the same fault.
+    ".cm-tooltip": {
       backgroundColor: "var(--surface-sunk)",
       border: "1px solid var(--rule)",
       borderRadius: "var(--radius-tile)",
@@ -334,6 +341,9 @@ function editorTheme(minHeight: number, maxHeight: number, fill: boolean, flush:
       color: "var(--ink)",
       maxWidth: "480px",
     },
+    // A hover tooltip can stack sections (a diagnostic and anything else
+    // hovering the same spot); the base theme rules them apart in `#bbb`.
+    ".cm-tooltip-section:not(:first-child)": { borderTop: "1px solid var(--rule)" },
     ".cm-diagnostic": {
       padding: "6px 10px",
       whiteSpace: "normal",
@@ -343,12 +353,6 @@ function editorTheme(minHeight: number, maxHeight: number, fill: boolean, flush:
       lineHeight: "1.45",
     },
     ".cm-diagnostic-error": { borderLeft: "3px solid var(--sev)" },
-    ".cm-tooltip.cm-tooltip-autocomplete": {
-      backgroundColor: "var(--surface-sunk)",
-      border: "1px solid var(--rule)",
-      borderRadius: "var(--radius-tile)",
-      boxShadow: "0 4px 16px color-mix(in srgb, var(--canvas-deep) 60%, transparent)",
-    },
     ".cm-tooltip-autocomplete > ul > li": {
       padding: "2px 8px",
       fontFamily: "var(--font-mono)",

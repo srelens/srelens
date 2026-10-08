@@ -305,7 +305,7 @@
           "type": "string"
         },
         "within": {
-          "description": "The value at `jsonPath` is an RFC 3339 timestamp within this duration of now: `14d` is from now until fourteen days ahead, `-1h` the last hour. Units s, m, h, d and w.",
+          "description": "The value at `jsonPath` is an RFC 3339 timestamp within this duration of now: `14d` is from now until fourteen days ahead, `-1h` the last hour. Units s, m, h, d and w. Extension dashboard cards on API 0.7 or later also accept `\"${settings.<id>}\"` referencing a declared select setting with a default; every option must be a positive duration of at most 3650 days. The host resolves the setting before evaluating this predicate.",
           "type": [
             "string",
             "null"
@@ -523,6 +523,20 @@
           },
           "type": "array"
         },
+        "logProviders": {
+          "description": "LogQL queries the log view can follow as a source beside Kubernetes (#569).",
+          "items": {
+            "$ref": "#/definitions/LogProvider"
+          },
+          "type": "array"
+        },
+        "metricProviders": {
+          "description": "PromQL range queries drawn as charts on workload and pod overviews (#569).",
+          "items": {
+            "$ref": "#/definitions/MetricProvider"
+          },
+          "type": "array"
+        },
         "pages": {
           "items": {
             "$ref": "#/definitions/Page"
@@ -546,6 +560,13 @@
         "tableColumns": {
           "items": {
             "$ref": "#/definitions/TableColumn"
+          },
+          "type": "array"
+        },
+        "traceProviders": {
+          "description": "TraceQL searches listed on workload and pod overviews (#569).",
+          "items": {
+            "$ref": "#/definitions/TraceProvider"
           },
           "type": "array"
         }
@@ -1133,6 +1154,51 @@
       ],
       "type": "string"
     },
+    "LogLanguage": {
+      "description": "The one language a log provider queries in.",
+      "enum": [
+        "logql"
+      ],
+      "type": "string"
+    },
+    "LogProvider": {
+      "additionalProperties": false,
+      "description": "A log provider: a LogQL stream selector the pod log view can follow as a source beside Kubernetes, for each kind in `forKinds`.",
+      "properties": {
+        "capability": {
+          "description": "A `network.http` binding whose `path` is the range query endpoint, e.g. `/loki/api/v1/query_range`.",
+          "type": "string"
+        },
+        "forKinds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "id": {
+          "type": "string"
+        },
+        "language": {
+          "$ref": "#/definitions/LogLanguage"
+        },
+        "query": {
+          "description": "The LogQL log query, with `${…}` variables the host binds.",
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "capability",
+        "forKinds",
+        "id",
+        "language",
+        "query",
+        "title"
+      ],
+      "type": "object"
+    },
     "Manifest": {
       "additionalProperties": false,
       "properties": {
@@ -1220,6 +1286,74 @@
       ],
       "type": "string"
     },
+    "MetricLanguage": {
+      "description": "The one language a metric provider queries in.",
+      "enum": [
+        "promql"
+      ],
+      "type": "string"
+    },
+    "MetricProvider": {
+      "additionalProperties": false,
+      "description": "A metric provider: a PromQL range query drawn as a chart on the overview of each kind in `forKinds`.",
+      "properties": {
+        "capability": {
+          "description": "A `network.http` binding in `capabilities`, whose `path` is the range query endpoint, e.g. `/api/v1/query_range`.",
+          "type": "string"
+        },
+        "forKinds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "id": {
+          "type": "string"
+        },
+        "language": {
+          "$ref": "#/definitions/MetricLanguage"
+        },
+        "query": {
+          "description": "The PromQL expression, with `${…}` variables the host binds.",
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "unit": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/MetricUnit"
+            }
+          ],
+          "description": "How the host formats the values: one unit, so one y axis."
+        }
+      },
+      "required": [
+        "capability",
+        "forKinds",
+        "id",
+        "language",
+        "query",
+        "title",
+        "unit"
+      ],
+      "type": "object"
+    },
+    "MetricUnit": {
+      "description": "The units a chart formats, as the host's timeseries component (#570) names them.",
+      "enum": [
+        "number",
+        "percent",
+        "ratio",
+        "bytes",
+        "bytesPerSecond",
+        "seconds",
+        "cores",
+        "perSecond"
+      ],
+      "type": "string"
+    },
     "NormalizedStatus": {
       "description": "The six statuses every surface knows how to draw.",
       "enum": [
@@ -1248,6 +1382,16 @@
         },
         "title": {
           "type": "string"
+        },
+        "view": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/OperationView"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -1289,6 +1433,22 @@
         "name",
         "type"
       ],
+      "type": "object"
+    },
+    "OperationView": {
+      "additionalProperties": false,
+      "description": "Native host rendering choices. Apps supply data, never executable frontend code.",
+      "properties": {
+        "autoRun": {
+          "type": "boolean"
+        },
+        "hidden": {
+          "type": "boolean"
+        },
+        "stream": {
+          "type": "boolean"
+        }
+      },
       "type": "object"
     },
     "Page": {
@@ -1927,6 +2087,51 @@
         "format",
         "id",
         "source",
+        "title"
+      ],
+      "type": "object"
+    },
+    "TraceLanguage": {
+      "description": "The one language a trace provider queries in.",
+      "enum": [
+        "traceql"
+      ],
+      "type": "string"
+    },
+    "TraceProvider": {
+      "additionalProperties": false,
+      "description": "A trace provider: a TraceQL search listed on the overview of each kind in `forKinds`.",
+      "properties": {
+        "capability": {
+          "description": "A `network.http` binding whose `path` is the search endpoint, e.g. `/api/search`.",
+          "type": "string"
+        },
+        "forKinds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "id": {
+          "type": "string"
+        },
+        "language": {
+          "$ref": "#/definitions/TraceLanguage"
+        },
+        "query": {
+          "description": "The TraceQL query, with `${…}` variables the host binds.",
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "capability",
+        "forKinds",
+        "id",
+        "language",
+        "query",
         "title"
       ],
       "type": "object"

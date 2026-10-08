@@ -472,9 +472,27 @@ const NOT_HERE: &str =
 /// capability's to say ([`crate::PluginHost::interpolate`]), and a host is the
 /// permission's own rules' (`network::permission_problems`).
 fn interpolation_problems(manifest: &Manifest, problems: &mut ValidationErrors) {
-    let Ok(raw) = serde_json::to_value(manifest) else {
+    let Ok(mut raw) = serde_json::to_value(manifest) else {
         return;
     };
+    // Only this exact contribution position is settable (#582). cards::card_problems
+    // validates the reference, declaration and every duration option; scan all siblings.
+    if let Some(cards) = raw
+        .pointer_mut("/contributions/dashboardCards")
+        .and_then(Value::as_array_mut)
+    {
+        for card in cards {
+            if let Some(predicate) = card.get_mut("predicate").and_then(Value::as_object_mut) {
+                if predicate
+                    .get("within")
+                    .and_then(settings::reference)
+                    .is_some()
+                {
+                    predicate.remove("within");
+                }
+            }
+        }
+    }
     for (list, entries) in raw.as_object().into_iter().flatten() {
         let Value::Array(entries) = entries else {
             refuse_anywhere(entries, list, problems);

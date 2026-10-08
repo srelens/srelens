@@ -17,9 +17,14 @@ import {
   parseExtensionRoute,
   itemStatus,
   itemStatuses,
+  providersFor,
+  queryExtensionProvider,
+  type ExtensionManifest,
   inspectExtension,
   extensionLogs,
 } from "./extensions";
+// What the Rust `QueryIn` test deserializes, byte for byte (#569).
+import queryProviderPayload from "./extension-query-provider.json";
 // What the Rust `extensions.logs` input test deserializes, byte for byte.
 import logsRequest from "./extension-logs-request.json";
 
@@ -219,7 +224,7 @@ it("sends a package's digest list with its manifest and signature for the check 
   expect(invokeCapability).toHaveBeenLastCalledWith("extensions.validate", { manifest: "{}", grants: [], digests: "{}" });
 });
 
-it("sends a package file as base64, for review and for install (#562)", async () => {
+it("sends native package bytes for review and preserves existing base64 installs (#562)", async () => {
   const { reviewExtensionPackage, encodePackage } = await import("./extensions");
   const bytes = new Uint8Array([0x1f, 0x8b, 0x08, 0x00, 0xff]);
   expect(encodePackage(bytes)).toBe("H4sIAP8=");
@@ -228,7 +233,14 @@ it("sends a package file as base64, for review and for install (#562)", async ()
   expect(atob(encodePackage(large)).length).toBe(large.length);
   expect(Uint8Array.from(atob(encodePackage(large)), (c) => c.charCodeAt(0))).toEqual(large);
   await reviewExtensionPackage(bytes);
-  expect(invokeCapability).toHaveBeenLastCalledWith("extensions.packageManifest", { package: "H4sIAP8=" });
+  expect(invokeCapability).toHaveBeenLastCalledWith("extensions.packageManifest", { package: bytes });
+  vi.mocked(isTauri).mockReturnValue(false);
+  try {
+    await reviewExtensionPackage(bytes);
+    expect(invokeCapability).toHaveBeenLastCalledWith("extensions.packageManifest", { package: "H4sIAP8=" });
+  } finally {
+    vi.mocked(isTauri).mockReturnValue(true);
+  }
   await configureExtensions({ action: "installPackage", package: "H4sIAP8=", grants: ["k8s.listCustomResource"], reviewedRevision: 2 });
   expect(invokeCapability).toHaveBeenLastCalledWith("extensions.configure", {
     action: "installPackage",
@@ -393,6 +405,46 @@ describe("dashboard cards (#540)", () => {
     expect(parseExtensionRoute("/extension-clusters/c/org.test.app/page/team/name?card=x")).toBeNull();
     expect(parseExtensionRoute("/extension-clusters/c/org.test.app/page/team?card=")).toBeNull();
     expect(parseExtensionRoute("/extension-clusters/c/org.test.app/page/team?other=x")).toBeNull();
+  });
+});
+
+describe("providers (#569)", () => {
+  it("queries one exactly as the host's QueryIn accepts it", async () => {
+    vi.mocked(invokeCapability).mockClear();
+    await queryExtensionProvider({
+      id: "org.example.observability", revision: 3, provider: "cpu", context: "kind-dev",
+      namespace: "team", resourceKind: "apps/Deployment", name: "web", rangeSeconds: 3600,
+    });
+    expect(invokeCapability).toHaveBeenCalledWith("extensions.queryProvider", queryProviderPayload);
+    expect(JSON.stringify(vi.mocked(invokeCapability).mock.calls[0][1])).not.toMatch(/resource_kind|range_seconds/);
+  });
+
+  it("leaves the range out when the view names none, so the host's default holds", async () => {
+    vi.mocked(invokeCapability).mockClear();
+    await queryExtensionProvider({
+      id: "a.b", revision: 1, provider: "cpu", context: "c", namespace: "n", resourceKind: "/Pod", name: "p",
+    });
+    expect(vi.mocked(invokeCapability).mock.calls[0][1]).not.toHaveProperty("rangeSeconds");
+  });
+
+  const manifest = {
+    contributions: {
+      pages: [], detailTabs: [], detailLinks: [],
+      metricProviders: [
+        { id: "cpu", title: "CPU", capability: "prom", language: "promql", forKinds: ["apps/Deployment"], unit: "cores", query: "up" },
+        { id: "pods", title: "Pod CPU", capability: "prom", language: "promql", forKinds: ["/Pod"], unit: "cores", query: "up" },
+      ],
+      logProviders: [{ id: "loki", title: "Loki", capability: "loki", language: "logql", forKinds: ["/Pod"], query: "{}" }],
+    },
+  } as unknown as ExtensionManifest;
+
+  it("finds the providers of one list declared for a kind, in manifest order", () => {
+    expect(providersFor(manifest, "metrics", "apps/Deployment").map((p) => p.id)).toEqual(["cpu"]);
+    expect(providersFor(manifest, "metrics", "/Pod").map((p) => p.id)).toEqual(["pods"]);
+    expect(providersFor(manifest, "logs", "/Pod").map((p) => p.id)).toEqual(["loki"]);
+    expect(providersFor(manifest, "traces", "/Pod")).toEqual([]);
+    // A manifest from before providers, or one the host has not checked, has none.
+    expect(providersFor({ contributions: {} } as unknown as ExtensionManifest, "logs", "/Pod")).toEqual([]);
   });
 });
 

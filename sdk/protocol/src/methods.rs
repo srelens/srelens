@@ -95,6 +95,8 @@ pub static METHODS: &[MethodSpec] = &[
     request(method::HOST_READ, SidecarToHost),
     request(method::HOST_RESOURCE, SidecarToHost),
     request(method::HOST_ACTION, SidecarToHost),
+    request(method::HOST_BINDING_AVAILABILITY, SidecarToHost),
+    request(method::HOST_RUN_JOB, SidecarToHost),
 ];
 
 /// Whether `name` is one of the host's own methods, which an app request may
@@ -153,6 +155,8 @@ mod tests {
             method::HOST_READ,
             method::HOST_RESOURCE,
             method::HOST_ACTION,
+            method::HOST_BINDING_AVAILABILITY,
+            method::HOST_RUN_JOB,
         ];
         for name in all {
             let entries = METHODS.iter().filter(|m| m.name == name).count();

@@ -24,6 +24,29 @@ vi.mock("../lib/clusterLogin", async (importOriginal) => ({
 describe("tauriTransport.invokeCapability", () => {
   afterEach(() => { vi.clearAllMocks(); vi.restoreAllMocks(); });
 
+  it.each([
+    ["extensions.packageManifest", {}],
+    ["extensions.configure", { action: "installPackage", grants: ["k8s.listCustomResource"], reviewedRevision: 7 }],
+  ])("sends %s package bytes through raw IPC without a browser base64 string", async (id, metadata) => {
+    vi.mocked(invoke).mockResolvedValue({ ok: true });
+    const packageBytes = new Uint8Array(512 * 1024 * 1024);
+    packageBytes.set([0x1f, 0x8b, 0x08, 0x00, 0xff]);
+    await expect(invokeCapability(id, { ...metadata, package: packageBytes })).resolves.toEqual({ ok: true });
+    const call = vi.mocked(invoke).mock.calls.at(-1)!;
+    expect(call[0]).toBe("invoke_package_capability");
+    expect(call[1]).toBe(packageBytes);
+    expect(call[2]).toEqual({
+      headers: { "x-srelens-package-input": JSON.stringify({ id, input: metadata }) },
+    });
+  });
+
+  it("keeps existing base64 package calls on the JSON capability bridge", async () => {
+    vi.mocked(invoke).mockResolvedValue({ ok: true });
+    const input = { package: "H4sIAP8=" };
+    await invokeCapability("extensions.packageManifest", input);
+    expect(invoke).toHaveBeenCalledWith("invoke_capability", { id: "extensions.packageManifest", input });
+  });
+
   it("prompts cluster sign-in and rethrows a stable sentinel when the rejection carries the marker", async () => {
     vi.mocked(invoke).mockRejectedValue("NEEDS_CLUSTER_LOGIN:k:ctx");
     await expect(invokeCapability("k8s.listPods")).rejects.toThrow("cluster_login_required");

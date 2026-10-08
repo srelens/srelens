@@ -62,9 +62,9 @@ const LOGOS: [(&str, &str); 2] = [
 ];
 
 /// The largest package file, compressed: what is downloaded, or sent from the app.
-pub(super) const MAX_PACKAGE_BYTES: usize = 16 * 1024 * 1024;
+pub const MAX_PACKAGE_BYTES: usize = 512 * 1024 * 1024;
 /// The most every file together may hold, uncompressed.
-pub(super) const MAX_UNPACKED_BYTES: u64 = 64 * 1024 * 1024;
+pub(super) const MAX_UNPACKED_BYTES: u64 = MAX_PACKAGE_BYTES as u64;
 /// The most entries, files and directories, one archive may hold.
 pub(super) const MAX_ENTRIES: usize = 256;
 /// The largest digest list. It is kept in the inventory for a signed package.
@@ -400,7 +400,10 @@ pub(super) fn parse_digests(raw: &[u8]) -> Result<DigestList, String> {
         }
         total = total.saturating_add(file.size);
         if total > MAX_UNPACKED_BYTES {
-            return Err("The files in digests.json come to more than 64 MiB".into());
+            return Err(format!(
+                "The files in digests.json come to more than {} MiB",
+                MAX_UNPACKED_BYTES / (1024 * 1024)
+            ));
         }
     }
     names.check_nesting()?;

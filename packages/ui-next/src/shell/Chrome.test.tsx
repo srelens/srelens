@@ -134,6 +134,13 @@ describe("Chrome", () => {
     expect(document.querySelectorAll("[data-light]")).toHaveLength(3);
   });
 
+  it("carries the way to the repository, ahead of the window's own controls", () => {
+    chrome();
+    const actions = document.querySelector('[data-slot="actions"]') as HTMLElement;
+    const first = actions.querySelector("button");
+    expect(first?.getAttribute("aria-label")).toBe("Star srelens on GitHub");
+  });
+
   it("zooms through uiScale", async () => {
     chrome();
     await userEvent.click(screen.getByRole("button", { name: "Zoom in" }));

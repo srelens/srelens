@@ -2,8 +2,10 @@
 //! tokio runtime (threads, the reactor, the blocking stdin reader) works
 //! under Linux's Landlock and seccomp layers and in a Windows AppContainer.
 //! `#[ignore]`: it needs the sandbox, and on Linux the trusted launcher and a
-//! delegated cgroup. The `sandbox-conformance` CI job runs it, from the
-//! workspace root:
+//! delegated cgroup: the scope srelens asks the systemd user manager for, or,
+//! without a user session, the directory `SRELENS_SANDBOX_CGROUP_ROOT` names.
+//! The `sandbox-conformance` CI job runs it, from the workspace root, with
+//! that variable:
 //! ```text
 //! cargo build -p srelens-plugin-host --bin srelens-sandbox-launch
 //! go build -C sdk/examples/hello-world/go -o "$PWD/target/hello-world-go" .
@@ -17,7 +19,7 @@
 
 mod common;
 
-use srelens_plugin_host::sidecar::{Limits, OsSandbox, SandboxConfig};
+use srelens_plugin_host::sidecar::{CgroupRoot, Limits, OsSandbox, SandboxConfig};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -31,7 +33,10 @@ fn sandbox() -> Arc<OsSandbox> {
     }
     Arc::new(OsSandbox::new(SandboxConfig {
         launcher,
-        cgroup_root: std::env::var_os("SRELENS_SANDBOX_CGROUP_ROOT").map(PathBuf::from),
+        cgroup: std::env::var_os("SRELENS_SANDBOX_CGROUP_ROOT")
+            .map_or(CgroupRoot::SystemdScope, |root| {
+                CgroupRoot::Delegated(root.into())
+            }),
     }))
 }
 

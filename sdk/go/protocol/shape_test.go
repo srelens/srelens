@@ -7,6 +7,17 @@ import (
 	"unicode"
 )
 
+func TestBindingNamesUseGeneratedArrayAndItemBounds(t *testing.T) {
+	if !IsBindingNames([]string{"reports", "sbom"}) {
+		t.Fatal("valid binding list refused")
+	}
+	for _, invalid := range [][]string{nil, {"reports", "reports"}, {"bad/name"}, {strings.Repeat("x", 65)}, make([]string, 17)} {
+		if IsBindingNames(invalid) {
+			t.Fatalf("accepted invalid bindings %v", invalid)
+		}
+	}
+}
+
 func TestTheShapesAreTheBrokers(t *testing.T) {
 	checks := []struct {
 		name string

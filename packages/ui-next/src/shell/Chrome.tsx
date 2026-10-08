@@ -6,6 +6,7 @@ import { Icons } from "../lib/icons";
 import { hint } from "../lib/shortcuts";
 import { openTab, removeWorkspace, switchWorkspace, useTabs } from "../lib/tabsStore";
 import { useCanLockWorkspace, useWorkspaceSealed } from "./LockGate";
+import { StarButton } from "./StarButton";
 
 export interface ChromeProps {
   controls: "macos" | "none";
@@ -179,6 +180,9 @@ export function Chrome({ controls, clusterName, onToggleTheme, onNewWorkspace, o
         title={clusterName ?? "srelens"}
         actions={
           <>
+            {/* First, so it sits apart from the controls that act on this
+                window: this one leads out of the app. */}
+            <StarButton />
             {desktop && <IconButton icon={Icons.zoomOut} label="Zoom out" onClick={() => zoom("out")} />}
             {desktop && <IconButton icon={Icons.zoomReset} label="Reset zoom" onClick={() => zoom("reset")} />}
             {desktop && <IconButton icon={Icons.zoomIn} label="Zoom in" onClick={() => zoom("in")} />}

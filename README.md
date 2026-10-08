@@ -118,7 +118,7 @@ Download the latest release for your platform from
 | macOS | `.dmg` for Apple Silicon and Intel | Developer ID signed and notarized |
 | Linux | `.AppImage`, `.deb`, `.rpm` | AppImage supports the in-app updater |
 | Windows | `.exe`, `.msi` | Windows may show a SmartScreen prompt while code signing remains on the roadmap |
-| Terminal UI | `srelens-tui-<version>-<target>.tar.gz` / `.zip`, or the one-liners below | A single binary for Linux (glibc and static musl), macOS and Windows, on x86-64 and arm64; macOS builds on a stable release are signed and notarized |
+| Terminal UI | `srectl-<version>-<target>.tar.gz` / `.zip`, or the one-liners below | A single binary for Linux (glibc and static musl), macOS and Windows, on x86-64 and arm64; macOS builds on a stable release are signed and notarized |
 
 The terminal UI also installs in one line. Linux:
 
@@ -131,7 +131,7 @@ The terminal UI also installs in one line. Linux:
 macOS:
 
 ```bash
-brew install srelens/tap/srelens-tui
+brew install srelens/tap/srectl
 ```
 
 See the [installation guide](docs/INSTALL.md) for platform-specific installation,

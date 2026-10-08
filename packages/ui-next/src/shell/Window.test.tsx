@@ -146,6 +146,22 @@ vi.mock("@srelens/core", async (importOriginal) => {
   };
 });
 
+// The terminal chord's two halves — may one be opened, and opening it — are
+// `lib/clusterTerminal`'s and tested there; here they are the boundary.
+const clusterTerminal = vi.hoisted(() => ({ can: true, open: vi.fn() }));
+vi.mock("../lib/clusterTerminal", () => ({
+  canOpenClusterTerminal: (cluster: unknown) => cluster !== undefined && clusterTerminal.can,
+  openClusterTerminal: clusterTerminal.open,
+}));
+
+// The star button's start-up acts reach GitHub; a test of the window must not.
+const starOnGitHub = vi.hoisted(() => ({ countLaunch: vi.fn(), refreshStarCount: vi.fn(async () => {}) }));
+vi.mock("../lib/starOnGitHub", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../lib/starOnGitHub")>()),
+  countLaunch: starOnGitHub.countLaunch,
+  refreshStarCount: starOnGitHub.refreshStarCount,
+}));
+
 vi.mock("../lib/tabsPersist", () => ({ loadTabsState, scheduleSave, installFlushOnUnload, flushSave }));
 
 // The zoom helper lives in Chrome (shared with its buttons); spied rather than
@@ -898,6 +914,44 @@ describe("Window accelerators", () => {
     const notCancelled = fireEvent.keyDown(window, { key: "w", metaKey: true });
     expect(store.currentWorkspace().tabs).toHaveLength(2);
     expect(notCancelled).toBe(true);
+  });
+
+  it("opens a terminal for the active cluster on ⌘J, and eats the keystroke", async () => {
+    clusterTerminal.open.mockReset();
+    await booted();
+    const notCancelled = fireEvent.keyDown(window, { key: "j", metaKey: true });
+    expect(clusterTerminal.open).toHaveBeenCalledTimes(1);
+    expect(clusterTerminal.open.mock.calls[0][0]).toMatchObject({
+      stableId: store.activeCluster(),
+    });
+    expect(notCancelled).toBe(false);
+  });
+
+  it("opens nothing on ⌘J where the status bar offers no terminal", async () => {
+    clusterTerminal.open.mockReset();
+    clusterTerminal.can = false;
+    await booted();
+    fireEvent.keyDown(window, { key: "j", metaKey: true });
+    clusterTerminal.can = true;
+    expect(clusterTerminal.open).not.toHaveBeenCalled();
+  });
+
+  it("leaves Ctrl+J to the browser in web mode, which has no local shell", async () => {
+    clusterTerminal.open.mockReset();
+    isTauri.mockReturnValue(false);
+    isApplePlatform.mockReturnValue(false);
+    await booted();
+    const notCancelled = fireEvent.keyDown(window, { key: "j", ctrlKey: true });
+    expect(clusterTerminal.open).not.toHaveBeenCalled();
+    expect(notCancelled).toBe(true);
+  });
+
+  it("counts the launch and asks for the star count once, after boot", async () => {
+    starOnGitHub.countLaunch.mockClear();
+    starOnGitHub.refreshStarCount.mockClear();
+    await booted();
+    expect(starOnGitHub.countLaunch).toHaveBeenCalledTimes(1);
+    expect(starOnGitHub.refreshStarCount).toHaveBeenCalledTimes(1);
   });
 
   it("leaves the browser's own zoom alone in web mode", async () => {

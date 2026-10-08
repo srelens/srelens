@@ -18,15 +18,15 @@ sidecar under this supervisor the first time one of those operations is called i
 process, and stops it when the app is disabled, updated or removed. It calls back into
 srelens only through the [broker](#calls-from-the-sidecar), and writes only its
 [data directory](#data-directory). Its log and its process show in the app's
-Inspector ([#575](https://github.com/srelens/srelens/issues/575)). Each operation is an
+Inspector ([#575](https://github.com/srelens/srelens/issues/575)). Each ordinary operation is an
 MCP tool, `plugin/<id>/<operation>` ([MCP.md](../MCP.md#installed-apps-tools)). The
 registry's side is `crates/registry/src/extensions/sidecars.rs`. What is not built is
 listed under [Not yet](#not-yet).
 
-Executable apps are a preview. They run out of the box on Windows. On Linux they are not out of the box:
-they need the launcher `srelens-sandbox-launch`, Landlock and a delegated cgroup v2
-directory, set up by hand ([what is needed](manifest.md#where-executable-apps-run)). On macOS they do not run yet. srelens refuses to start any sidecar until its memory and CPU watchdog has
-been checked with Seatbelt on a macOS 27 Mac. The [sandbox](#sandbox) section has the detail.
+Executable apps are a preview. They run out of the box on Windows, and on a systemd Linux
+desktop with Landlock, where systemd before 252 and the RHEL 9 family need the `cpu`
+controller delegated first ([what is needed](manifest.md#where-executable-apps-run)). On macOS they run under Seatbelt with host-enforced memory and CPU limits: the
+watchdog bounds sustained use, but a burst between readings can exceed a limit. The [sandbox](#sandbox) section has the detail.
 
 ## The wire
 
@@ -41,7 +41,7 @@ JSON-RPC 2.0, one message per line.
 - **Params** are an object or an array, or absent.
 
 The same contract in machine-readable form is
-[`schemas/sidecar-protocol.v0.1.json`](../../schemas/sidecar-protocol.v0.1.json), one
+[`schemas/sidecar-protocol.v0.2.json`](../../schemas/sidecar-protocol.v0.2.json), one
 file per sidecar API line. It is generated from the `srelens-sidecar-protocol` crate
 (`sdk/protocol/`), whose types srelens itself builds its messages from, and which the SDKs
 share. It has:
@@ -240,7 +240,7 @@ On every call, in this order:
    `-32003` ("permissions: k8s.annotate was not granted").
 3. **The cluster.** An app limited to some clusters is refused on any other ("App is not
    enabled for this cluster").
-4. **Confirmation.** A call the host gates, which is `host/action` today (`requires_confirm`
+4. **Confirmation.** A call the host gates, including `host/action` and `host/runJob` (`requires_confirm`
    or `destructive`, the same rule MCP's gate reads), is put to a person first, with the
    host's own sentence for it, its impact and the requesting app named. Before anyone is
    asked, the object is read through `extensions.resource`, which makes every check above
@@ -427,21 +427,24 @@ in `crates/plugin-host/src/sidecar/sandbox/`:
 
 | OS | Isolation | Memory and CPU |
 |---|---|---|
-| Linux | Landlock and a seccomp filter, applied by `srelens-sandbox-launch` before it runs the sidecar | a cgroup v2 directory under a root delegated to srelens |
+| Linux | Landlock and a seccomp filter, applied by `srelens-sandbox-launch` before it runs the sidecar | a cgroup v2 directory under the scope srelens asks systemd for, or under a root delegated by hand |
 | Windows | an AppContainer with no capabilities, one profile per app | the Job Object the process starts in |
-| macOS | Seatbelt through `/usr/bin/sandbox-exec` | a host-side watchdog ([#713](https://github.com/srelens/srelens/issues/713)), weaker than the kernel's: **every sidecar is still refused** until it has been checked with Seatbelt on a macOS 27 Mac |
+| macOS | Seatbelt through `/usr/bin/sandbox-exec` | a host-side watchdog ([#713](https://github.com/srelens/srelens/issues/713)), weaker than the kernel's: sustained use is bounded, but a burst between readings can exceed a limit |
 | any other OS | — | — |
 
 A sidecar is **refused, never started unconfined**:
 
 - on an OS with no backend;
-- on macOS, until its watchdog has been checked with Seatbelt on a macOS 27 Mac (#713);
-- on Linux without Landlock, without the launcher, or without a delegated cgroup;
+- on macOS without the launcher or `/usr/bin/sandbox-exec`;
+- on Linux without Landlock, without the launcher, or without a delegated cgroup: no
+  systemd user session, a container, or a session without the `memory` and `cpu`
+  controllers;
 - anywhere the backend cannot set a limit.
 
-In every case the refusal names what is missing. Whether a Linux or Windows machine that
-lacks only a limit layer should instead run the sidecar with a warning is still open (ADR,
-"Open questions"). Until that is decided, the supervisor refuses.
+In every case the refusal names what is missing. On Linux a machine that lacks only a limit
+layer is refused, a session without the `cpu` controller delegated included; that is
+decided (ADR, "Open questions"). Whether a Windows machine that lacks one should instead run
+the sidecar with a warning is still open. Until that is decided, the supervisor refuses.
 
 What the sidecar gets:
 
@@ -580,8 +583,40 @@ uninstalled; locking it down while the app is installed is left for the escape r
 
 | What | Where |
 |---|---|
-| An operation that answers with a stream: the protocol has streams, and nothing opens one on an app's behalf yet | — |
-| Shipping `srelens-sandbox-launch` in the desktop bundles, and finding a delegated cgroup on a systemd desktop; until then Linux names them with `SRELENS_SANDBOX_LAUNCHER` and `SRELENS_SANDBOX_CGROUP_ROOT` | — |
 | A "Clear data" action for an app refused for its data directory (`DataDir::clear` is there; the Inspector, #575, is where a person would find it) | not filed yet |
-| Checking macOS's watchdog on a macOS 27 Mac, and then running sidecars there | [#713](https://github.com/srelens/srelens/issues/713), closed: the watchdog is built, the check is not done |
 | The escape-hardening review of the supervisor and its backends, which the ADR assigned to #572 | [#744](https://github.com/srelens/srelens/issues/744) |
+
+## Binding discovery in protocol 0.2.0
+
+The host and Go SDK negotiate `0.2.0` while continuing to offer `0.1.0` to older peers. `host/bindingAvailability` requires the new line. Its caller sends an explicit `context` (`clusterId`, required but nullable `namespace`) and 1–16 unique declared `bindings`. The host checks the installed app session, grants and context scope before discovery. Each result is `served`, `absent` or `unknown`; discovery errors retain a bounded reason. Unknown never means the Operator is absent. This callback does not fetch report details or install CRDs.
+
+## Scoped Jobs in protocol 0.2.0
+
+`host/runJob` sends `context`, a declared Job `capability`, and `inputs`, a map
+of at most sixteen names to strings of 1–512 printable ASCII bytes. Context
+always names one namespace; null is refused. App identity and revision come
+from the supervisor, and the host rechecks the app's grants and scope before
+creating anything. The Job binding requires extension API 0.8 and an executable
+app. Older hosts that do not provide `k8s.runJob` refuse installation.
+
+```json
+{"context":{"clusterId":"pinned-cluster","namespace":"team"},
+ "capability":"scan-namespace","inputs":{"namespace":"team"}}
+```
+
+After confirmation, the host runs the fixed, digest-pinned container with
+declared namespace read rules. It grants no Secret, wildcard or write access.
+The worker uses UID 10001, a read-only root, no additional capabilities, one
+CPU, one GiB RAM and sixteen GiB ephemeral storage. A required readiness
+ConfigMap blocks startup until the Job-owned reader account and RBAC exist.
+Image workers without reader rules mount no service-account token.
+
+The Job has no retries, a twenty-minute deadline and a ten-minute cleanup TTL.
+Completion requires the original Job UID and its single successful worker.
+The host collects at most eight MiB into a new, private file in the app data
+root, then waits for foreground deletion. The reply contains `state` (`completed` or `failed`), an optional safe `error`, `path`, `job`,
+`uid`, `namespace`, `image`, `bytes` and `finishedAt`; `path` is app-relative,
+and credentials or raw results never travel in that reply. The app removes
+the temporary file after consumption. A failed worker's bounded diagnostic file remains private; the app classifies its cause without returning raw log lines, never saves it as a completed report, and removes it. Scheduling failures retain their scheduling reason. Cancellation drops the runner and
+cleans up that UID; ordinary approved action writes retain their existing
+finish-after-cancellation behavior. One scan per app may run through cleanup.

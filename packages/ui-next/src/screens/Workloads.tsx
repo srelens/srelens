@@ -1,5 +1,5 @@
 import { ContextLabel } from "../lib/contextLabel";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ageSortValue,
   podStatus,
@@ -44,6 +44,7 @@ import {
   type PodRow,
 } from "../lib/kinds/columns";
 import { descriptorFor } from "../lib/kinds/descriptors";
+import { addNamespace, useRowRefocus, withNamespaceSelect } from "../lib/kinds/namespaceCell";
 import { withRowAffordances } from "../lib/kinds/rowAffordances";
 import type { ListRow } from "../lib/kinds/types";
 import { useResourceList, type ResourceList } from "../lib/resourceList";
@@ -194,6 +195,9 @@ function fromCronJob(row: ListRow): WorkloadRow {
  * answered by a subset of rows — the rest render an em dash rather than
  * being flattened away, per the controller ruling.
  */
+/** One row's identity in the union table: two kinds may share a name. */
+const workloadRowKey = (row: WorkloadRow) => `${row.kind}/${row.namespace ?? ""}/${row.name}`;
+
 const UNION_COLUMNS: Column<WorkloadRow>[] = [
   { key: "name", header: "Name", sortable: true },
   { key: "kind", header: "Kind", sortable: true },
@@ -481,9 +485,25 @@ function WorkloadList({
     () => UNION_COLUMNS.filter((column) => column.key === NAME_KEY || !hidden.has(column.key)),
     [hidden],
   );
+  // The Namespace column's values add to this tab's selection, as they do on
+  // a kind's own list (#821) — see `withNamespaceSelect`.
+  const refocus = useRowRefocus();
+  const rememberRow = refocus.remember;
+  const addToSelection = useCallback(
+    (namespace: string, row: WorkloadRow) => {
+      rememberRow(workloadRowKey(row));
+      setNamespaces(context.stableId, addNamespace(selection, namespace));
+    },
+    [setNamespaces, context.stableId, selection, rememberRow],
+  );
   const renderedColumns = useMemo(
-    () => withRowAffordances(columns, (row) => row.flagged, ask),
-    [columns, ask],
+    () =>
+      withRowAffordances(
+        withNamespaceSelect(columns, selection, scope ? undefined : addToSelection),
+        (row) => row.flagged,
+        ask,
+      ),
+    [columns, ask, selection, scope, addToSelection],
   );
 
   const {
@@ -618,11 +638,15 @@ function WorkloadList({
       />
 
       {allLoading ? (
-        <div className="scroll min-h-0 flex-1">
+        // `refocus.scope` on every state of this region, not only the table:
+        // it marks where the table IS, and while the lists reload this is
+        // what stands there. A click on it is not the reader moving on, and
+        // must not be taken for one — see `useRowRefocus`.
+        <div ref={refocus.scope} className="scroll min-h-0 flex-1">
           <LoadingState label={`Loading ${lower}`} />
         </div>
       ) : allFailed ? (
-        <div className="scroll min-h-0 flex-1">
+        <div ref={refocus.scope} className="scroll min-h-0 flex-1">
           <FailureState
             title={`Could not list ${lower} on ${name}`}
             error={allFailedReasons}
@@ -655,11 +679,11 @@ function WorkloadList({
               className="mx-3 mt-3 mb-3"
             />
           ))}
-          <div className="scroll min-h-0 flex-1">
+          <div ref={refocus.scope} className="scroll min-h-0 flex-1">
             <Table
               columns={renderedColumns}
               data={filtered}
-              getRowKey={(row) => `${row.kind}/${row.namespace ?? ""}/${row.name}`}
+              getRowKey={workloadRowKey}
               sort={sort}
               onSortChange={setSort}
               activeFilterKey={filterKey}
