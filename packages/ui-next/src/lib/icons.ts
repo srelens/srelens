@@ -52,6 +52,7 @@ import {
   Sparkles,
   SlidersHorizontal,
   Scaling,
+  Star,
   Sun,
   Terminal,
   TimerReset,
@@ -93,6 +94,8 @@ import type { IconComponent } from "@srelens/ui-kit";
  */
 export const Icons = {
   // The titlebar and the window's own actions.
+  /** The repository's star — the top bar's way to GitHub (#850). */
+  star: Star,
   sun: Sun,
   moon: Moon,
   zoomIn: ZoomIn,

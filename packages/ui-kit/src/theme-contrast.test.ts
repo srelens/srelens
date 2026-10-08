@@ -72,6 +72,19 @@ it("uses the legible metadata scale for small operational text", () => {
 });
 
 
+it.each(themes)("keeps the %s GitHub pill legible, and visible on the bar it sits in", theme => {
+  const values = tokens(theme, "violet");
+  const floor = theme === "contrast" ? 7 : 4.5;
+  for (const surface of ["gh-surface", "gh-surface-hover"]) {
+    // The words and the mark, and the star beside them.
+    expect(contrast(values["gh-ink"], values[surface]), `ink on ${surface}`).toBeGreaterThanOrEqual(floor);
+    expect(contrast(values["gh-star"], values[surface]), `star on ${surface}`).toBeGreaterThanOrEqual(floor);
+  }
+  // The pill's edge against whatever it is drawn on: a dark pill on a dark
+  // title bar is found by its outline, as any control is.
+  for (const ground of grounds) expect(contrast(values["gh-line"], values[ground]), ground).toBeGreaterThanOrEqual(3);
+});
+
 it.each(themes)("gives %s form boundaries enough contrast against their surfaces", theme => {
   const values = tokens(theme, "violet");
   expect(values["control-line"]).toMatch(/^#[\da-fA-F]{6}$/);

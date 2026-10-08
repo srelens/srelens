@@ -200,8 +200,29 @@
   --shadow-lift: none;
 }
 
+/* --- GitHub: the Star pill's own palette ----------------------------
+   The one control that does not take the theme's colours, because being
+   recognisably GitHub's is its job: GitHub's button ink, its light text and
+   its star gold, the same on every theme. `--gh-line` is the pill's edge, and
+   is what keeps a dark pill visible on a dark title bar; it is checked against
+   every theme's grounds in `theme-contrast.test.ts`, as the text and the star
+   are against the pill. Declared before the contrast theme so that theme can
+   still take them to their extremes. */
+:root {
+  --gh-surface: #24292f;
+  --gh-surface-hover: #32383f;
+  --gh-ink: #f6f8fa;
+  --gh-line: #6e7781;
+  --gh-star: #e3b341;
+}
+
 /* --- contrast: WCAG AAA text, heavier rules, no washes -------------- */
 [data-theme="contrast"] {
+  --gh-surface: #000000;
+  --gh-surface-hover: #1b1f24;
+  --gh-ink: #ffffff;
+  --gh-line: #000000;
+  --gh-star: #ffd33d;
   --canvas: #ffffff;
   --canvas-deep: #ffffff;
   --surface: #ffffff;

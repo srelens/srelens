@@ -22,7 +22,7 @@ Everything this server exposes over MCP, generated from the live registry so it 
 | `k8s.diffManifest` | low | diff a manifest against the cluster via server dry-run apply (per document) |
 | `k8s.getCustomResource` | low | Inspect one custom resource and its events |
 | `k8s.getManifest` | low | fetch a resource's manifest as YAML (any supported kind) |
-| `k8s.getObject` | low | fetch a resource as a structured JSON object (any supported kind) |
+| `k8s.getObject` | low | fetch one resource as a structured JSON object (any supported kind). Pass `fields` (kubectl-style JSONPath such as .status.allocatable) to get only those paths, keyed by path, with null where the object has none. To read a field across many objects, use k8s.listResource with `fields` instead of calling this once per object. |
 | `k8s.listCRDs` | low | list installed CustomResourceDefinitions (group, kind, plural, scope) |
 | `k8s.listChanges` | low | holistic deployment and change incident triage: evaluates recent rollouts, GitOps release info, pod crash loops, compute/storage blockers, and error log snippets |
 | `k8s.listClusterRoleBindings` | low | list ClusterRoleBindings of a connected kube context (cluster-scoped) |
@@ -46,7 +46,7 @@ Everything this server exposes over MCP, generated from the live registry so it 
 | `k8s.listPersistentVolumes` | low | list PersistentVolumes of a connected kube context (cluster-scoped) |
 | `k8s.listPods` | low | list pods in a namespace of a connected kube context |
 | `k8s.listReplicaSets` | low | list the ReplicaSets owned by a Deployment (its rollout revisions) |
-| `k8s.listResource` | low | list any supported resource kind (name + namespace) |
+| `k8s.listResource` | low | list any supported resource kind (name + namespace), optionally filtered by `labelSelector`/`fieldSelector`. Pass `fields` (kubectl-style JSONPath such as .status.allocatable or .spec.taints) to get those paths for every item in one call, keyed by path in each row's `fields`, with null where an item has none. Prefer this over one getObject call per item when a summary tool lacks a field you need. |
 | `k8s.listResourceQuotas` | low | list ResourceQuotas in a namespace of a connected kube context |
 | `k8s.listRoleBindings` | low | list RoleBindings in a namespace of a connected kube context |
 | `k8s.listRoles` | low | list Roles in a namespace of a connected kube context |

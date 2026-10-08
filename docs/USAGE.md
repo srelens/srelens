@@ -613,3 +613,13 @@ Have a question, hit a rough edge, or want to suggest a feature?
 - Join the community on Reddit at [r/srelens](https://www.reddit.com/r/srelens/).
 - File bugs and feature requests on
   [GitHub Issues](https://github.com/srelens/srelens/issues).
+
+The top bar has a **Star** button that opens the srelens repository on GitHub; a
+star helps other people find the project. After you have used the app for a few
+days it asks once, in a small callout, whether you would like to star it, and
+never asks again whichever way you answer. It does not ask at all if you have
+already used one of the app's Star buttons. To show the star count, srelens makes
+one unauthenticated request a day to the public GitHub API; if that fails the
+button keeps the last count it had, or shows no number if it never had one. The
+button is not shown while the workspace is locked. **Settings → Workspace → srelens on GitHub** hides
+the button, which also stops that request.

@@ -1422,6 +1422,77 @@ async fn run_suite() {
         .iter()
         .any(|i| i["name"] == CM));
 
+    // Selectors the API server applies and fields projected per item — the
+    // one-call answer to a question no summary tool covers, spelled the way
+    // the tool schema advertises it to an MCP client.
+    let out = h
+        .ok(
+            "k8s.listResource",
+            json!({
+                "context": ctx, "kind": "Pod", "namespace": NS,
+                "labelSelector": format!("app={DEPLOY}"),
+                "fields": [".spec.nodeName", ".spec.nonexistent"],
+            }),
+        )
+        .await;
+    let pods = out["items"].as_array().unwrap();
+    assert!(!pods.is_empty(), "the Deployment's pods are Running by now: {out}");
+    for pod in pods {
+        assert!(pod["name"].as_str().unwrap().starts_with(&format!("{DEPLOY}-")), "{out}");
+        assert!(pod["fields"][".spec.nodeName"].is_string(), "{out}");
+        assert_eq!(pod["fields"][".spec.nonexistent"], Value::Null, "{out}");
+    }
+    let out = h
+        .ok(
+            "k8s.listResource",
+            json!({
+                "context": ctx, "kind": "ConfigMap", "namespace": NS,
+                "fieldSelector": format!("metadata.name={CM}"),
+                "fields": [".data.greeting"],
+            }),
+        )
+        .await;
+    let only = out["items"].as_array().unwrap();
+    assert_eq!(only.len(), 1, "the field selector narrows to one: {out}");
+    assert_eq!(only[0]["fields"][".data.greeting"], "hello");
+    let out = h
+        .ok(
+            "k8s.listResource",
+            json!({ "context": ctx, "kind": "Node", "fields": [".status.allocatable"] }),
+        )
+        .await;
+    let nodes = out["items"].as_array().unwrap();
+    assert!(!nodes.is_empty(), "a cluster has at least one Node: {out}");
+    assert!(
+        nodes
+            .iter()
+            .all(|n| n["fields"][".status.allocatable"]["cpu"].is_string()),
+        "{out}"
+    );
+    // listResource reads Secrets without consent: a projected value arrives
+    // blank, and the consent-gated k8s.getSecret stays the only way to it.
+    let out = h
+        .ok(
+            "k8s.listResource",
+            json!({
+                "context": ctx, "kind": "Secret", "namespace": NS,
+                "fieldSelector": format!("metadata.name={SECRET}"),
+                "fields": [".data", ".data.password"],
+            }),
+        )
+        .await;
+    let text = out.to_string();
+    assert!(text.contains("password"), "{text}");
+    assert!(!text.contains("aHVudGVyMg==") && !text.contains("hunter2"), "{text}");
+    // A JSON Pointer would come back null on every item; refused instead.
+    let err = h
+        .err(
+            "k8s.listResource",
+            json!({ "context": ctx, "kind": "Node", "fields": ["/status/allocatable"] }),
+        )
+        .await;
+    assert!(err.contains("not a supported path"), "{err}");
+
     // === 2. Object / manifest ================================================
     println!("=== object/manifest ===");
     let out = h
@@ -1440,6 +1511,19 @@ async fn run_suite() {
         )
         .await;
     assert_eq!(out["object"]["metadata"]["name"], DEPLOY);
+    let out = h
+        .ok(
+            "k8s.getObject",
+            json!({
+                "context": ctx, "kind": "Deployment", "namespace": NS, "name": DEPLOY,
+                "fields": [".spec.template.spec.containers[0].image"],
+            }),
+        )
+        .await;
+    assert_eq!(
+        out["object"],
+        json!({ ".spec.template.spec.containers[0].image": "busybox:1.36" })
+    );
 
     // validateManifest: this capability never propagates a raw Result::Err
     // for a well-formed-but-invalid document — it always returns

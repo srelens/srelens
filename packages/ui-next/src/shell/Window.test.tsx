@@ -131,6 +131,14 @@ vi.mock("../lib/clusterTerminal", () => ({
   openClusterTerminal: clusterTerminal.open,
 }));
 
+// The star button's start-up acts reach GitHub; a test of the window must not.
+const starOnGitHub = vi.hoisted(() => ({ countLaunch: vi.fn(), refreshStarCount: vi.fn(async () => {}) }));
+vi.mock("../lib/starOnGitHub", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../lib/starOnGitHub")>()),
+  countLaunch: starOnGitHub.countLaunch,
+  refreshStarCount: starOnGitHub.refreshStarCount,
+}));
+
 vi.mock("../lib/tabsPersist", () => ({ loadTabsState, scheduleSave, installFlushOnUnload, flushSave }));
 
 // The zoom helper lives in Chrome (shared with its buttons); spied rather than
@@ -905,6 +913,14 @@ describe("Window accelerators", () => {
     const notCancelled = fireEvent.keyDown(window, { key: "j", ctrlKey: true });
     expect(clusterTerminal.open).not.toHaveBeenCalled();
     expect(notCancelled).toBe(true);
+  });
+
+  it("counts the launch and asks for the star count once, after boot", async () => {
+    starOnGitHub.countLaunch.mockClear();
+    starOnGitHub.refreshStarCount.mockClear();
+    await booted();
+    expect(starOnGitHub.countLaunch).toHaveBeenCalledTimes(1);
+    expect(starOnGitHub.refreshStarCount).toHaveBeenCalledTimes(1);
   });
 
   it("leaves the browser's own zoom alone in web mode", async () => {
