@@ -216,24 +216,56 @@ pub struct ObjectOut {
 }
 
 /// What a `fields` entry means, said once for both tools that take it.
+/// What a `fields` entry means, for the error that refuses one. The
+/// arguments' doc comments say the same to an MCP client through the schema.
 const FIELDS_HELP: &str = "kubectl-style JSONPath, each starting with '.', e.g. \
     .status.allocatable, .metadata.labels['app.kubernetes.io/name'] or \
     .status.conditions[?(@.type==\"Ready\")].status";
 
-/// Refuse a `fields` path the walker could only ever resolve to nothing. A
-/// JSON Pointer (`/status/x`), a kubectl template (`{.x}`) or an unclosed
-/// bracket would come back `null` on every item, and a column of nulls reads
-/// as "none of them have it" — a confident answer to a malformed question.
+/// Bounds on what a caller may ask for (#633): every path is walked once per
+/// item. Thirty-two matches the printer columns `listCustomResource` evaluates.
+const MAX_FIELDS: usize = 32;
+const MAX_FIELD_CHARS: usize = 256;
+const MAX_SELECTOR_CHARS: usize = 1024;
+
+/// Refuse `fields` the walker could only ever resolve to nothing — a JSON
+/// Pointer (`/status/x`), a kubectl template (`{.x}`), a wildcard, a broken
+/// bracket. Each would come back `null` on every item, and a column of nulls
+/// reads as "none of them have it": a confident answer to a malformed question.
 fn check_fields(fields: &[String]) -> Result<(), CapabilityError> {
-    match fields
-        .iter()
-        .find(|f| !f.starts_with('.') || f.matches('[').count() != f.matches(']').count())
-    {
-        Some(bad) => Err(CapabilityError::InvalidInput(format!(
-            "fields: {bad:?} is not a path; use {FIELDS_HELP}"
-        ))),
-        None => Ok(()),
+    if fields.len() > MAX_FIELDS {
+        return Err(CapabilityError::InvalidInput(format!(
+            "fields: {} paths requested, at most {MAX_FIELDS}",
+            fields.len()
+        )));
     }
+    for f in fields {
+        if f.len() > MAX_FIELD_CHARS {
+            return Err(CapabilityError::InvalidInput(format!(
+                "fields: a path is longer than {MAX_FIELD_CHARS} characters"
+            )));
+        }
+        if let Some(problem) = crate::crds::json_path_problem(f) {
+            return Err(CapabilityError::InvalidInput(format!(
+                "fields: {f:?} is not a supported path: it {problem}. Use {FIELDS_HELP}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn check_selectors(input: &ListResourceIn) -> Result<(), CapabilityError> {
+    for (name, value) in [
+        ("labelSelector", &input.label_selector),
+        ("fieldSelector", &input.field_selector),
+    ] {
+        if value.as_ref().is_some_and(|s| s.len() > MAX_SELECTOR_CHARS) {
+            return Err(CapabilityError::InvalidInput(format!(
+                "{name}: longer than {MAX_SELECTOR_CHARS} characters"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// An object as any ungated reader may see it: `managedFields` dropped, and
@@ -285,7 +317,13 @@ fn object_out(
 pub struct GetObjectIn {
     #[serde(flatten)]
     pub target: ManifestIn,
-    /// Return only these paths instead of the whole object; see `FIELDS_HELP`.
+    /// Return only these paths instead of the whole object: kubectl-style
+    /// JSONPath, each starting with '.', e.g. `.status.allocatable`,
+    /// `.metadata.labels['app.kubernetes.io/name']`, `.spec.containers[0].image`
+    /// or `.status.conditions[?(@.type=="Ready")].status`. The result maps each
+    /// path to its value, `null` where the object has none. Wildcards `[*]`,
+    /// slices and `..` are not supported: ask for the parent, e.g.
+    /// `.spec.containers`. At most 32 paths.
     #[serde(default)]
     pub fields: Vec<String>,
 }
@@ -559,7 +597,13 @@ pub struct ListResourceIn {
     /// --field-selector` takes it, e.g. `spec.nodeName=worker-1`.
     #[serde(default, rename = "fieldSelector")]
     pub field_selector: Option<String>,
-    /// Paths to return for each item, in its row's `fields`; see `FIELDS_HELP`.
+    /// Paths to return for every item, in its row's `fields`: kubectl-style
+    /// JSONPath, each starting with '.', e.g. `.status.allocatable`,
+    /// `.metadata.labels['app.kubernetes.io/name']`, `.spec.containers[0].image`
+    /// or `.status.conditions[?(@.type=="Ready")].status`. Each row maps a path
+    /// to its value, `null` where that item has none. Wildcards `[*]`, slices
+    /// and `..` are not supported: ask for the parent, e.g. `.spec.containers`.
+    /// At most 32 paths.
     #[serde(default)]
     pub fields: Vec<String>,
 }
@@ -636,6 +680,7 @@ pub fn list_resource_capability(cache: Arc<ClientCache>) -> Capability {
             let cache = cache.clone();
             async move {
                 check_fields(&input.fields)?;
+                check_selectors(&input)?;
                 let (gvk, namespaced) = gvk_for(&input.kind).ok_or_else(|| {
                     CapabilityError::Handler(format!("unsupported kind: {}", input.kind))
                 })?;
@@ -2730,7 +2775,16 @@ metadata:
     /// a malformed request is an error and not an answer about the cluster.
     #[test]
     fn check_fields_refuses_paths_that_could_only_resolve_to_nothing() {
-        for bad in ["/status/allocatable", "{.metadata.name}", "status", "", ".spec.ports[0"] {
+        for bad in [
+            "/status/allocatable",
+            "{.metadata.name}",
+            "status",
+            "",
+            ".spec.ports[0",
+            ".a][",
+            ".spec.containers[*].image",
+            "..image",
+        ] {
             assert!(
                 matches!(check_fields(&[bad.to_string()]), Err(CapabilityError::InvalidInput(_))),
                 "{bad:?} must be refused"
@@ -2743,6 +2797,52 @@ metadata:
         ]
         .map(String::from);
         assert!(check_fields(&good).is_ok());
+        assert!(check_fields(&[".".to_string()]).is_ok(), "root is a path");
+    }
+
+    /// Every path is walked once per item, so the count and length a caller
+    /// may send are bounded, like every other caller-supplied size (#633).
+    #[test]
+    fn check_fields_bounds_how_many_paths_and_how_long() {
+        let at_limit: Vec<String> = (0..MAX_FIELDS).map(|i| format!(".a{i}")).collect();
+        assert!(check_fields(&at_limit).is_ok());
+        let over: Vec<String> = (0..=MAX_FIELDS).map(|i| format!(".a{i}")).collect();
+        assert!(matches!(check_fields(&over), Err(CapabilityError::InvalidInput(_))));
+        let long = format!(".{}", "a".repeat(MAX_FIELD_CHARS));
+        assert!(matches!(check_fields(&[long]), Err(CapabilityError::InvalidInput(_))));
+    }
+
+    #[test]
+    fn selectors_longer_than_the_bound_are_refused() {
+        let input = |label: String| -> ListResourceIn {
+            serde_json::from_value(serde_json::json!({
+                "context": "c", "kind": "Pod", "labelSelector": label,
+            }))
+            .unwrap()
+        };
+        assert!(check_selectors(&input("a".repeat(MAX_SELECTOR_CHARS))).is_ok());
+        assert!(matches!(
+            check_selectors(&input("a".repeat(MAX_SELECTOR_CHARS + 1))),
+            Err(CapabilityError::InvalidInput(_))
+        ));
+    }
+
+    /// `tools/list` hands an MCP client the input schema, whose property
+    /// descriptions come from these doc comments: the `fields` argument has
+    /// to explain its own syntax there, not point at a Rust constant the
+    /// client never sees.
+    #[test]
+    fn the_fields_argument_explains_its_syntax_to_an_mcp_client() {
+        for schema in [
+            serde_json::to_value(schemars::schema_for!(ListResourceIn)).unwrap(),
+            serde_json::to_value(schemars::schema_for!(GetObjectIn)).unwrap(),
+        ] {
+            let text = schema["properties"]["fields"]["description"].as_str().unwrap();
+            assert!(text.contains(".status.allocatable"), "{text}");
+            assert!(text.contains("[?(@.type"), "{text}");
+            assert!(text.contains("[*]"), "says wildcards are unsupported: {text}");
+            assert!(!text.contains("FIELDS_HELP"), "{text}");
+        }
     }
 
     fn node_object() -> DynamicObject {

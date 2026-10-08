@@ -1461,10 +1461,10 @@ async fn run_suite() {
             json!({ "context": ctx, "kind": "Node", "fields": [".status.allocatable"] }),
         )
         .await;
+    let nodes = out["items"].as_array().unwrap();
+    assert!(!nodes.is_empty(), "a cluster has at least one Node: {out}");
     assert!(
-        out["items"]
-            .as_array()
-            .unwrap()
+        nodes
             .iter()
             .all(|n| n["fields"][".status.allocatable"]["cpu"].is_string()),
         "{out}"
@@ -1491,7 +1491,7 @@ async fn run_suite() {
             json!({ "context": ctx, "kind": "Node", "fields": ["/status/allocatable"] }),
         )
         .await;
-    assert!(err.contains("not a path"), "{err}");
+    assert!(err.contains("not a supported path"), "{err}");
 
     // === 2. Object / manifest ================================================
     println!("=== object/manifest ===");

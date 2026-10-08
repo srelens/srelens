@@ -161,6 +161,62 @@ pub fn resolve_json_path(value: &serde_json::Value, path: &str) -> String {
     }
 }
 
+/// Why `path` is outside the grammar [`json_path_value`] reads, or `None`
+/// when it is in. For a path taken from a caller: the walker reads anything
+/// it does not recognise as a key, so `[*]` or `..` would silently resolve to
+/// nothing and a present field would be reported absent. Root `.` is in.
+pub fn json_path_problem(path: &str) -> Option<&'static str> {
+    let Some(mut rest) = path.strip_prefix('.') else {
+        return Some("must start with '.'");
+    };
+    if rest.starts_with('.') {
+        return Some("uses '..', which is not supported");
+    }
+    while !rest.is_empty() {
+        if let Some(open) = rest.strip_prefix('[') {
+            let Some(close) = open.find(']') else {
+                return Some("has an unclosed '['");
+            };
+            let inner = open[..close].trim();
+            let quoted = inner.len() >= 2
+                && ((inner.starts_with('\'') && inner.ends_with('\''))
+                    || (inner.starts_with('"') && inner.ends_with('"')));
+            let filter = inner.starts_with("?(") && inner.ends_with(')') && inner.contains("==");
+            if !(quoted || filter || inner.parse::<usize>().is_ok()) {
+                return Some(
+                    "uses a bracket other than [0], ['key'] or [?(@.field==\"value\")]; \
+                     wildcards [*], slices and negative indexes are not supported",
+                );
+            }
+            rest = &open[close + 1..];
+        } else {
+            let mut end = rest.len();
+            let mut chars = rest.char_indices();
+            while let Some((index, ch)) = chars.next() {
+                match ch {
+                    '\\' => {
+                        chars.next();
+                    }
+                    '.' | '[' => {
+                        end = index;
+                        break;
+                    }
+                    ']' => return Some("has a ']' with no '['"),
+                    _ => {}
+                }
+            }
+            rest = &rest[end..];
+        }
+        if let Some(after) = rest.strip_prefix('.') {
+            if after.starts_with('.') {
+                return Some("uses '..', which is not supported");
+            }
+            rest = after;
+        }
+    }
+    None
+}
+
 /// The value a [`resolve_json_path`] path lands on, unrendered — a map or a
 /// list as well as a scalar. `None` when the path is absent or malformed.
 pub fn json_path_value<'v>(
@@ -1003,6 +1059,43 @@ mod tests {
         );
         assert_eq!(json_path_value(&obj(), ".status.nope"), None);
         assert_eq!(json_path_value(&obj(), ".spec.ports[0"), None);
+    }
+
+    /// A path from outside must be one the walker can read, or a present
+    /// field comes back as absent. Every form the walker tests above read is
+    /// in; kubectl forms it does not implement are out, not read as keys.
+    #[test]
+    fn json_path_problem_accepts_what_the_walker_reads_and_refuses_the_rest() {
+        for good in [
+            ".",
+            ".status.health",
+            r".metadata.labels.app\.kubernetes\.io/name",
+            ".metadata.labels['app.kubernetes.io/name']",
+            ".metadata.labels[\"app.kubernetes.io/name\"]",
+            ".status.conditions[?(@.type==\"Ready\")].status",
+            ".status.conditions[?(@.type == 'Stalled')].status",
+            ".spec.ports[1].port",
+        ] {
+            assert_eq!(json_path_problem(good), None, "{good:?}");
+        }
+        for bad in [
+            "status",
+            "/status/allocatable",
+            "{.metadata.name}",
+            "",
+            ".spec.ports[0",
+            ".a][",
+            ".a]",
+            ".spec.containers[*].image",
+            ".spec.containers[-1]",
+            ".spec.containers[0:2]",
+            ".spec.containers[name]",
+            ".status.conditions[?(@.count>1)]",
+            "..image",
+            ".spec..image",
+        ] {
+            assert!(json_path_problem(bad).is_some(), "{bad:?} must be refused");
+        }
     }
 
     fn spec_with_columns() -> serde_json::Value {
