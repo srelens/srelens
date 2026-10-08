@@ -1010,6 +1010,27 @@ describe("Resources", () => {
     });
   });
 
+  /**
+   * #839: Pods narrowed to a namespace, then Deployments from the sidebar.
+   * The Deployments tab used to start on "all namespaces" — which a
+   * namespace-scoped credential is refused outright.
+   */
+  it("lists the next kind in the namespaces the reader had narrowed to, not across the cluster", async () => {
+    store.openTab("/k/pods");
+    act(() => setNamespaces(CTX.stableId, ["billing"]));
+
+    // What the sidebar does: open the route, from the Pods tab.
+    open("/k/deployments");
+
+    await waitFor(() =>
+      expect(watchResource.mock.calls.some((call) => call[2] === "deployments" && call[1] === "billing")).toBe(true),
+    );
+    // Never asked for at cluster scope — the listing a scoped credential cannot make.
+    expect(watchResource.mock.calls.some((call) => call[2] === "deployments" && call[1] === "")).toBe(false);
+    // And the picker shows what it is narrowed to.
+    expect((await screen.findByRole("combobox", { name: "Namespaces" })).textContent).toContain("billing");
+  });
+
   // Zero options while `namespaces` is null reads as "this cluster has no
   // namespaces"; a disabled, spinning stand-in says "not yet" instead.
   it("shows the namespace picker as loading rather than empty before namespaces arrive", async () => {

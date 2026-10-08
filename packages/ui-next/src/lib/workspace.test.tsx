@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 import { renderHook, act } from "@testing-library/react";
 import type { ReactNode } from "react";
 import * as ws from "./workspace";
-import { activateTab, getState, setState, subscribe as subscribeTabs } from "./tabsStore";
+import { activateTab, getState, openTab, setState, subscribe as subscribeTabs } from "./tabsStore";
 import { makeTab } from "./tabs";
 import { TabScope } from "./tabScope";
 import { settingsStorage } from "@srelens/core";
@@ -138,6 +138,55 @@ describe("namespace selection", () => {
     expect(result.current).toEqual(["billing"]);
     act(() => activateTab("tab-b"));
     expect(result.current).toEqual(["shop"]);
+  });
+
+  /**
+   * #839: what a screen mounted in the newly opened tab actually reads. The
+   * store carrying the selection is half of it; the other half is that
+   * `useNamespaces`, scoped to the new tab, hands the screen that selection
+   * and not the default.
+   */
+  describe("a tab opened from another", () => {
+    const opened = () => getState().workspaces[0].tabs.at(-1)!;
+
+    it("reads the selection of the tab it was opened from", () => {
+      ws.setNamespaces("prod", ["team-a", "team-b"], "tab-a");
+      act(() => openTab("/k/deployments"));
+
+      const { result } = renderHook(() => ws.useNamespaces("prod"), { wrapper: inTab(opened().id) });
+      expect(result.current).toEqual(["team-a", "team-b"]);
+    });
+
+    it("reads an inherited all-namespaces over a default-namespace preference", () => {
+      // The reader chose "all" on the source; the default must not narrow the
+      // tab they opened from it.
+      act(() => ws.setNamespaceDefault("team"));
+      ws.setNamespaces("prod", [], "tab-a");
+      act(() => openTab("/k/deployments"));
+
+      const { result } = renderHook(() => ws.useNamespaces("prod"), { wrapper: inTab(opened().id) });
+      expect(result.current).toEqual([]);
+      act(() => ws.setNamespaceDefault(""));
+    });
+
+    it("follows the default preference when the source had made no selection", () => {
+      act(() => ws.setNamespaceDefault("team"));
+      act(() => openTab("/k/deployments"));
+
+      const { result } = renderHook(() => ws.useNamespaces("prod"), { wrapper: inTab(opened().id) });
+      expect(result.current).toEqual(["team"]);
+      act(() => ws.setNamespaceDefault(""));
+    });
+
+    it("keeps its own selection when the source is narrowed further afterwards", () => {
+      ws.setNamespaces("prod", ["team-a"], "tab-a");
+      act(() => openTab("/k/deployments"));
+      const mine = renderHook(() => ws.useNamespaces("prod"), { wrapper: inTab(opened().id) });
+
+      act(() => ws.setNamespaces("prod", ["team-z"], "tab-a"));
+
+      expect(mine.result.current).toEqual(["team-a"]);
+    });
   });
 
   it("does not notify when the selection is set to what it already is", () => {
