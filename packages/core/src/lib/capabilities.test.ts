@@ -135,7 +135,9 @@ describe("capability metadata v2", () => {
    * is a claim the host has to earn, so the exceptions are named here rather
    * than merely permitted. A new one has to be added to this list on purpose.
    *
-   * `k8s.diffManifest` is the only member. It earns it by redaction rather
+   * `extensions.callOperation` redacts app-defined arguments and admits only
+   * reading apps; declared writes retain their consent-gated tool path.
+   * `k8s.diffManifest` earns it by redaction rather
    * than consent: `redact_secret_data` (`crates/kube/src/secrets.rs`) blanks a
    * Secret's `data`, `stringData` AND every `metadata.annotations` value on
    * both sides of the diff, so no cluster-side secret material reaches the
@@ -144,7 +146,7 @@ describe("capability metadata v2", () => {
    */
   it("names every capability that is sensitive but not gated", () => {
     const sensitiveUngated = rows.filter((c) => c.sensitive && !c.requiresConfirm).map((c) => c.id);
-    expect(sensitiveUngated).toEqual(["k8s.diffManifest"]);
+    expect(sensitiveUngated).toEqual(["extensions.callOperation", "k8s.diffManifest"]);
     // And it is a read at the lowest level, which is the only way an ungated
     // capability can be spelled (see the coherence test above).
     const diff = rows.find((c) => c.id === "k8s.diffManifest");
@@ -236,9 +238,9 @@ describe("renderConfirmTemplate", () => {
 });
 
 describe("UI-only capabilities (#575)", () => {
-  it("are an app's log and metrics, read-only, marked only where true", () => {
+  it("are native app operations, log and metrics, read-only, marked only where true", () => {
     const uiOnly = CAPABILITY_CATALOG.filter((c) => c.uiOnly).map((c) => c.id);
-    expect(uiOnly).toEqual(["extensions.inspect", "extensions.logs"]);
+    expect(uiOnly).toEqual(["extensions.callOperation", "extensions.inspect", "extensions.logs"]);
     expect(CAPABILITY_CATALOG.filter((c) => c.uiOnly).every((c) => c.readOnly && !c.requiresConfirm)).toBe(true);
     // Every other row leaves the field out rather than writing `false`.
     expect(catalog.filter((row) => "uiOnly" in row).map((row) => row.id)).toEqual(uiOnly);

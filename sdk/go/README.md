@@ -1,6 +1,6 @@
 # sdk/go: the Go SDK for srelens sidecars
 
-Executable apps are a preview. They run out of the box on Windows, on Linux only with the launcher, Landlock and a delegated cgroup set up by hand, and not yet on macOS ([where they run](../../docs/extensions/manifest.md#where-executable-apps-run)).
+Executable apps are a preview. They run out of the box on Windows, on Linux with Landlock and a delegated cgroup, and on macOS with Seatbelt and host-enforced memory and CPU limits ([where they run](../../docs/extensions/manifest.md#where-executable-apps-run)).
 
 An executable srelens app runs as a sidecar that speaks JSON-RPC to srelens over its stdin and stdout ([protocol](../../docs/extensions/sidecar-protocol.md)). This package does the protocol for you; you write handlers.
 
@@ -108,4 +108,4 @@ The module is `github.com/srelens/srelens/sdk/go`, with Go 1.25 or later. It use
 
 ## Regenerating the protocol types
 
-`protocol/protocol_gen.go` is generated from [`schemas/sidecar-protocol.v0.1.json`](../../schemas/sidecar-protocol.v0.1.json). After the schema changes, run `go generate ./...` here. CI fails when the file is stale.
+`protocol/protocol_gen.go` is generated from [`schemas/sidecar-protocol.v0.2.json`](../../schemas/sidecar-protocol.v0.2.json). After the schema changes, run `go generate ./...` here. CI fails when the file is stale.

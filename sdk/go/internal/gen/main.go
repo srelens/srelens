@@ -8,7 +8,7 @@ import (
 
 // Run by `go generate` in sdk/go/protocol, so the defaults are relative to it.
 func main() {
-	schemaPath := flag.String("schema", "../../../schemas/sidecar-protocol.v0.1.json", "the committed protocol schema")
+	schemaPath := flag.String("schema", "../../../schemas/sidecar-protocol.v0.2.json", "the committed protocol schema")
 	outPath := flag.String("out", "protocol_gen.go", "the file to write")
 	flag.Parse()
 	schema, err := os.ReadFile(*schemaPath)

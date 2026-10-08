@@ -18,6 +18,25 @@
     "confirm": "Run the declared action[ ({action})][ on {resource}][ in cluster {cluster}]?"
   },
   {
+    "id": "extensions.bindingAvailability",
+    "readOnly": true,
+    "destructive": false,
+    "requiresConfirm": false,
+    "sensitive": false,
+    "impact": "low",
+    "confirm": null
+  },
+  {
+    "id": "extensions.callOperation",
+    "readOnly": true,
+    "destructive": false,
+    "requiresConfirm": false,
+    "sensitive": true,
+    "impact": "low",
+    "confirm": null,
+    "uiOnly": true
+  },
+  {
     "id": "extensions.catalog",
     "readOnly": true,
     "destructive": false,
@@ -162,6 +181,15 @@
     "sensitive": false,
     "impact": "low",
     "confirm": null
+  },
+  {
+    "id": "extensions.runJob",
+    "readOnly": false,
+    "destructive": false,
+    "requiresConfirm": true,
+    "sensitive": false,
+    "impact": "medium",
+    "confirm": "Run this app's container Job[ in namespace {namespace}][ in cluster {cluster}]? It reads only its declared resources and is cleaned up after the scan."
   },
   {
     "id": "extensions.streams",
@@ -759,6 +787,15 @@
   },
   {
     "id": "k8s.listStorageClasses",
+    "readOnly": true,
+    "destructive": false,
+    "requiresConfirm": false,
+    "sensitive": false,
+    "impact": "low",
+    "confirm": null
+  },
+  {
+    "id": "k8s.listWorkloadImages",
     "readOnly": true,
     "destructive": false,
     "requiresConfirm": false,

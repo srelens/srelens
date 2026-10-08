@@ -423,9 +423,55 @@ fn paths_one_file_system_would_merge_are_refused() {
 }
 
 #[test]
+fn large_executable_files_fit_the_new_package_budget() {
+    let mut files = files_of("example");
+    let mut manifest: Value = serde_json::from_slice(&files[MANIFEST]).unwrap();
+    manifest["srelensApiVersion"] = json!("^0.7");
+    manifest["kind"] = json!("executable");
+    manifest["sidecar"] = json!({
+        "binaries": {"darwin-arm64": "bin/darwin-arm64/scanner"},
+        "operations": [{"name": "scan", "title": "Scan"}]
+    });
+    files.insert(MANIFEST.into(), serde_json::to_vec(&manifest).unwrap());
+    files.insert("bin/darwin-arm64/scanner".into(), vec![0; 80 * 1024 * 1024]);
+    files.insert(
+        DIGESTS.into(),
+        digests_for(&files, "org.example.packaged", "1.0.0"),
+    );
+    // Stored deflate blocks exceed both old caps without an incompressible fixture.
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::none());
+    encoder.write_all(&Raw::new().files(&files).tar()).unwrap();
+    let archive = encoder.finish().unwrap();
+    assert!(archive.len() > 16 * 1024 * 1024);
+    let package = read(&archive, &mut Discard, &shipped()).unwrap();
+    check_installable(&package).unwrap();
+    assert!(package
+        .list
+        .files
+        .iter()
+        .any(|f| f.path == "bin/darwin-arm64/scanner" && f.size == 80 * 1024 * 1024));
+}
+
+#[test]
+fn declared_binary_sizes_share_the_512_mib_budget() {
+    let mut list = json!({
+        "format": "srelens-extension-package", "formatVersion": 1,
+        "id": "org.example.packaged", "version": "1.0.0", "files": [
+            {"path": "bin/darwin-arm64/scan", "size": 256 * 1024 * 1024 - 1, "sha256": "0".repeat(64)},
+            {"path": "bin/linux-amd64/scan", "size": 256 * 1024 * 1024, "sha256": "0".repeat(64)},
+            {"path": "extension.json", "size": 1, "sha256": "0".repeat(64)}
+        ]
+    });
+    parse_digests(&serde_json::to_vec(&list).unwrap()).unwrap();
+    list["files"][0]["size"] = json!(256 * 1024 * 1024);
+    let reason = parse_digests(&serde_json::to_vec(&list).unwrap()).unwrap_err();
+    assert!(reason.contains("512 MiB"), "{reason}");
+}
+
+#[test]
 fn oversized_packages_are_refused() {
     // Compressed, before anything is read.
-    assert_refused(&vec![0; MAX_PACKAGE_BYTES + 1], "exceeds 16 MiB");
+    assert_refused(&vec![0; MAX_PACKAGE_BYTES + 1], "exceeds 512 MiB");
     // One file over its place's limit, refused at its header.
     let files = files_of("example");
     let archive = Raw::new()
@@ -434,21 +480,21 @@ fn oversized_packages_are_refused() {
         .gz();
     assert_refused(&archive, "icons/big.svg is larger than the package allows");
     // Files that come to more than the whole package may unpack to.
-    let chunk = vec![0u8; 40 * 1024 * 1024];
+    let chunk = vec![0u8; 260 * 1024 * 1024];
     let archive = Raw::new()
         .files(&files)
         .file("bin/linux-amd64/one", &chunk)
         .file("bin/linux-amd64/two", &chunk)
         .gz();
     assert!(archive.len() < MAX_PACKAGE_BYTES);
-    assert_refused(&archive, "unpacks to more than 64 MiB");
+    assert_refused(&archive, "unpacks to more than 512 MiB");
     // Zeros after the end of the archive, which compress to almost nothing: a bomb is
     // stopped at the limit rather than read to its end.
     let mut tar = Raw::new().files(&files).tar();
     tar.resize(tar.len() + MAX_STREAM_BYTES as usize, 0);
     let archive = gzip(&tar);
     assert!(archive.len() < MAX_PACKAGE_BYTES);
-    assert_refused(&archive, "unpacks to more than 64 MiB");
+    assert_refused(&archive, "unpacks to more than 512 MiB");
     // More entries than the limit.
     let archive = (0..=MAX_ENTRIES)
         .fold(Raw::new(), |raw, n| {
@@ -627,8 +673,7 @@ fn binaries_install_only_as_the_ones_an_executable_manifest_runs() {
     let why = check_installable(&declarative).unwrap_err();
     assert!(why.contains("its manifest runs none"), "{why}");
     // An executable app ships only what its sidecar names.
-    let mut executable: Value =
-        serde_json::from_slice(&files_of("example")[MANIFEST]).unwrap();
+    let mut executable: Value = serde_json::from_slice(&files_of("example")[MANIFEST]).unwrap();
     executable["srelensApiVersion"] = json!("^0.6");
     executable["kind"] = json!("executable");
     executable["sidecar"] = json!({"binaries":{"linux-amd64":"bin/linux-amd64/tool"},

@@ -404,6 +404,7 @@ export interface ExtensionOperation {
   name: string;
   title: string;
   inputs?: ExtensionOperationInput[];
+  view?: { autoRun?: boolean; stream?: boolean; hidden?: boolean };
 }
 export interface ExtensionOperationInput {
   name: string;
@@ -551,8 +552,8 @@ export type ExtensionChange =
   | { action: "unsignedApps"; allowUnsignedApps: boolean }
   /** `keyId` is the key the signature names (#559), as the catalog review returned it. */
   | { action: "install"; manifest: string; grants: string[]; signature?: number[]; keyId?: string; reviewedRevision?: number }
-  /** Installs a package file (#562), sent as base64; the host verifies it again. */
-  | { action: "installPackage"; package: string; grants: string[]; reviewedRevision?: number }
+  /** Installs a package file (#562): native bytes or existing base64; the host verifies it again. */
+  | { action: "installPackage"; package: string | Uint8Array; grants: string[]; reviewedRevision?: number }
   /**
    * Installs a catalog release's package (#562), which the host downloads again. `sha256`
    * names the release; `packageSha256` is the package that was reviewed.
@@ -672,7 +673,7 @@ export interface ExtensionReview {
   package?: ExtensionPackageReview;
 }
 /** The largest package file the host accepts (#562). */
-export const MAX_EXTENSION_PACKAGE_BYTES = 16 * 1024 * 1024;
+export const MAX_EXTENSION_PACKAGE_BYTES = 512 * 1024 * 1024;
 /** A package file's bytes as the base64 the host reads. */
 export function encodePackage(bytes: Uint8Array): string {
   let binary = "";
@@ -682,7 +683,7 @@ export function encodePackage(bytes: Uint8Array): string {
 }
 /** Verifies a package file (`.srelens-extension`) and returns what to review; installs nothing. */
 export const reviewExtensionPackage = (bytes: Uint8Array) =>
-  invokeCapability<ExtensionReview>("extensions.packageManifest", { package: encodePackage(bytes) });
+  invokeCapability<ExtensionReview>("extensions.packageManifest", { package: isTauri() ? bytes : encodePackage(bytes) });
 export interface ExtensionResourceResult {
   printerColumns?: Array<{name:string;jsonPath:string;type?:string}>;
   columnsError?: string;
@@ -906,6 +907,32 @@ export function extensionClusterRoute(contextKey: string, id: string, page: stri
 }
 export function extensionClusterResourceRoute(contextKey: string, id: string, page: string, namespace: string, name: string) {
   return `${extensionClusterRoute(contextKey, id, page, namespace)}/${encodeURIComponent(name)}`;
+}
+
+/** Executable tabs retain their context and installed revision after a rail switch or update. */
+export function extensionOperationRoute(contextKey: string, id: string, revision: number, operation: string, params?: Record<string, string | number | boolean>) {
+  const base = `/extension-operation-contexts/${encodeURIComponent(contextKey)}/${encodeURIComponent(id)}/${revision}/${encodeURIComponent(operation)}`;
+  return params && Object.keys(params).length ? `${base}/${encodeURIComponent(JSON.stringify(params))}` : base;
+}
+export function parseExtensionOperationRoute(route: string) {
+  const pieces = route.split("/");
+  if (![6, 7].includes(pieces.length) || pieces[1] !== "extension-operation-contexts" || route.includes("?") || route.length > 32768) return null;
+  try {
+    const [contextKey, id, rawRevision, operation] = pieces.slice(2, 6).map(decodeURIComponent);
+    const revision = Number(rawRevision);
+    let params: Record<string, string | number | boolean> | undefined;
+    if (pieces.length === 7) {
+      const value: unknown = JSON.parse(decodeURIComponent(pieces[6]));
+      if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).length > 16 || Object.entries(value).some(([key, v]) => !/^[a-zA-Z0-9-]{1,64}$/.test(key) || !["string", "number", "boolean"].includes(typeof v))) return null;
+      params = value as typeof params;
+    }
+    return contextKey && id && operation && /^[1-9]\d*$/.test(rawRevision) && Number.isSafeInteger(revision)
+      ? { contextKey, id, revision, operation, ...(params ? { params } : {}) } : null;
+  } catch { return null; }
+}
+
+export function callExtensionOperation(input: { id: string; revision: number; context: string; operation: string; params: Record<string, unknown> }): Promise<unknown> {
+  return invokeCapability("extensions.callOperation", input);
 }
 /**
  * A dashboard card's target: its app page, filtered to what the card counted.

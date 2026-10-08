@@ -34,8 +34,9 @@ as 1.0 ([specification.md](specification.md#versioning)). Where they run:
 - **Linux:** out of the box on a systemd desktop with Landlock. On systemd before 252 and
   the RHEL 9 family, delegate the `cpu` controller first
   ([what is needed](manifest.md#where-executable-apps-run)).
-- **macOS:** not yet. srelens refuses to start any sidecar until its memory and CPU
-  watchdog has been checked with Seatbelt on a macOS 27 Mac.
+- **macOS:** Seatbelt isolation with host-enforced memory and CPU limits. The
+  watchdog bounds sustained use; a burst between readings can exceed a limit
+  ([sandbox guarantees](sidecar-protocol.md#sandbox)).
 - **The web host:** it refuses to install an executable app: its extension policy does not
   allow one ([WEB.md](../WEB.md#extension-policy)), and it keeps no files for an app's
   package ([capabilities.md](capabilities.md#web-host)).

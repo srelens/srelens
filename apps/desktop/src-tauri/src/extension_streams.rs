@@ -9,13 +9,34 @@ use std::sync::Arc;
 use serde_json::Value;
 use srelens_registry::{ExtensionStreams, OpenStreamOut};
 use tauri::ipc::Channel;
-use tauri::{AppHandle, Runtime, State, Window};
+use tauri::{AppHandle, Manager, Runtime, State, Window};
 
 use crate::bridge::AppAudit;
 use crate::sink::{ChannelSink, TauriSink};
 
 /// The registry's app streams, or `None` on a host built without apps.
 pub struct AppExtensionStreams(pub Option<Arc<ExtensionStreams>>);
+
+fn native_sidecar_host<R: Runtime>(app: &AppHandle<R>) -> srelens_registry::SidecarHost {
+    srelens_registry::SidecarHost {
+        registry: Arc::new(app.state::<crate::bridge::AppRegistry>().0.clone()),
+        audit: app.state::<AppAudit>().0.clone(),
+        consent: Arc::new(crate::mcp_confirm::PromptUser::new(
+            app.clone(),
+            app.state::<Arc<crate::mcp_confirm::Pending>>()
+                .inner()
+                .clone(),
+            std::time::Duration::from_secs(60),
+        )),
+    }
+}
+
+/// Native app views need their broker even when the MCP service is off.
+pub fn serve_native_broker<R: Runtime>(app: &AppHandle<R>) {
+    if let Some(streams) = &app.state::<AppExtensionStreams>().0 {
+        streams.app_tools().serve_sidecars(native_sidecar_host(app));
+    }
+}
 
 impl AppExtensionStreams {
     fn get(&self) -> Result<&ExtensionStreams, String> {
@@ -87,6 +108,23 @@ mod tests {
     use serde_json::json;
     use srelens_kube::client_cache::ClientCache;
     use tauri::Manager;
+
+    #[tokio::test]
+    async fn native_apps_have_a_checked_broker_without_an_mcp_server() {
+        let mut registry = srelens_capability::Registry::new();
+        registry.register(srelens_capability::Capability::read_only(
+            "extensions.read",
+            "Native reader",
+            |input| async move { Ok(input) },
+        ));
+        let app = tauri::test::mock_app();
+        app.manage(crate::bridge::AppRegistry(registry));
+        app.manage(AppAudit(Arc::new(srelens_capability::audit::NoopAudit)));
+        app.manage(Arc::new(crate::mcp_confirm::Pending::default()));
+        let host = native_sidecar_host(app.handle());
+        let result = host.registry.invoke("extensions.read", json!({"id":"org.example.native","revision":7,"context":"cluster-a","capability":"images"})).await.unwrap();
+        assert_eq!(result["context"], "cluster-a");
+    }
 
     /// The three commands against a MockRuntime, over a real registry with an
     /// empty inventory: an open for an app that is not installed is refused

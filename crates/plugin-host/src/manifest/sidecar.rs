@@ -115,6 +115,20 @@ pub struct Operation {
     /// asked. An operation that takes nothing leaves this out.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub inputs: Vec<OperationInput>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view: Option<OperationView>,
+}
+
+/// Native host rendering choices. Apps supply data, never executable frontend code.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OperationView {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub auto_run: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub stream: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hidden: bool,
 }
 
 /// One input an operation takes.
@@ -361,6 +375,9 @@ pub(super) fn sidecar_problems(manifest: &Manifest, problems: &mut ValidationErr
         .collect();
     for (index, operation) in sidecar.operations.iter().enumerate() {
         let at = format!("sidecar.operations[{index}]");
+        if operation.view.as_ref().is_some_and(|view| view.auto_run && view.stream) {
+            problems.push(Code::InvalidValue, format!("{at}.view"), "A streaming operation requires an explicit Run");
+        }
         if !identifier(&operation.name) {
             problems.push(Code::InvalidValue, format!("{at}.name"), IDENTIFIER);
         } else if crate::sidecar::protocol::is_reserved(&operation.name) {

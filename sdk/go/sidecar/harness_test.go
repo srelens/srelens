@@ -32,7 +32,7 @@ var (
 func sidecarMessageSchema(t testing.TB) *jsonschema.Schema {
 	t.Helper()
 	schemaOnce.Do(func() {
-		f, err := os.Open(filepath.Join("..", "..", "..", "schemas", "sidecar-protocol.v0.1.json"))
+		f, err := os.Open(filepath.Join("..", "..", "..", "schemas", "sidecar-protocol.v0.2.json"))
 		if err != nil {
 			schemaErr = err
 			return

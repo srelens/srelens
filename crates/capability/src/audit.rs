@@ -248,7 +248,7 @@ pub fn redact(args: &Value, sensitive: bool) -> Value {
     /// `k8s.applyManifest` and `manifest` on `extensions.configure` (opaque
     /// strings holding whole manifests), `package` on `extensions.configure`
     /// and `extensions.packageManifest` (a whole app package as base64, up to
-    /// 16 MiB of it, #562), and
+    /// 512 MiB of it, #562), and
     /// `values` on the helm install/upgrade/template capabilities (user YAML
     /// that routinely holds registry credentials and database passwords).
     ///
@@ -274,7 +274,9 @@ pub fn redact(args: &Value, sensitive: bool) -> Value {
     /// whole, since a denied call is audited before its arguments are checked
     /// against the schema. Matched exactly, like `PAYLOAD_FIELDS`, and no other
     /// capability takes a `settings` argument (`settings.set` takes `values`).
-    const KEYED_PAYLOAD_FIELDS: [&str; 1] = ["settings"];
+    // Job inputs are also app-defined: a name such as `credential` carries
+    // no reliable sensitivity hint, so their values never enter an audit.
+    const KEYED_PAYLOAD_FIELDS: [&str; 2] = ["settings", "inputs"];
     /// Fields that promise a URL, so a value that is not one is a value the
     /// parser cannot pick the password out of: blanked whole rather than
     /// guessed at. Matched exactly, like the two sets above.
@@ -1253,6 +1255,16 @@ mod tests {
     }
 
     #[test]
+    fn app_job_input_values_and_echoed_errors_are_redacted() {
+        let args = json!({"id":"org.example.app","context":"prod","namespace":"team","capability":"worker","inputs":{"credential":"private-value","image":"private/image:tag"}});
+        let redacted = redact(&args,false);
+        assert_eq!(redacted["namespace"],"team");
+        assert_eq!(redacted["inputs"]["credential"],REDACTED);
+        assert_eq!(redacted["inputs"]["image"],REDACTED);
+        assert!(!redact_error("worker rejected private-value for private/image:tag",&args,&redacted).contains("private-value"));
+    }
+
+    #[test]
     fn redacts_opaque_extension_manifest_text_before_any_audit_sink_sees_it() {
         let args = json!({
             "action": "install",
@@ -1265,7 +1277,7 @@ mod tests {
         assert!(!out.to_string().contains("hunter2"));
     }
 
-    /// A package is a whole app as base64 (#562): opaque, and up to 16 MiB, so
+    /// A package is a whole app as base64 (#562): opaque, and up to 512 MiB, so
     /// neither its bytes nor an error that could quote its files is kept.
     #[test]
     fn redacts_a_package_and_the_errors_its_install_can_raise() {

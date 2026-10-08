@@ -19,9 +19,8 @@
 ;; and on macOS /tmp and /var are symlinks into /private.
 ;;
 ;; Memory and CPU are not Seatbelt's job, and macOS has no kernel facility for
-;; them: the host's watchdog (`watchdog.rs`, #713) limits them. srelens still
-;; refuses to run sidecars on macOS until that has been checked with Seatbelt
-;; on a macOS 27 Mac.
+;; them: the host's watchdog (`watchdog.rs`, #713) limits sustained use.
+;; A burst between its readings can exceed a limit.
 
 (deny default)
 

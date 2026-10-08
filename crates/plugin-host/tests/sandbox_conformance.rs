@@ -22,11 +22,9 @@
 //!    without it the result says nothing about the sandbox: INCONCLUSIVE), and
 //! 3. the failure is one a sandbox produces for that operation (`Denial`).
 //!
-//! On macOS the supervisor refuses sidecars until the #713 watchdog has been
-//! checked with Seatbelt on a macOS 27 Mac. The checks run there anyway,
-//! through a launcher that vouches for limits (see `IsolationOnly`): the
-//! isolation checks, and the memory and CPU checks against the watchdog
-//! `launch` attaches. Run them by hand on a macOS 27 Mac, release-built: how
+//! On macOS these use the real Seatbelt backend and the #713 watchdog that
+//! `launch` attaches, through the same supervisor as the desktop. Run them
+//! by hand on a macOS 27 Mac, release-built: how
 //! far the memory check overshoots is how much the probe allocates between
 //! two readings, which a debug-built probe, allocating slowly, understates.
 //!
@@ -37,8 +35,8 @@
 use serde_json::{json, Value};
 use srelens_plugin_host::sidecar::data::DataDir;
 use srelens_plugin_host::sidecar::{
-    CgroupRoot, Enforcement, LaunchError, Launched, Launcher, Limits, NoBroker, OsSandbox, Policy,
-    RequestError, SandboxConfig, SidecarCommand, SidecarConfig, SidecarStatus, Supervisor,
+    CgroupRoot, Limits, NoBroker, OsSandbox, Policy, RequestError, SandboxConfig, SidecarCommand,
+    SidecarConfig, SidecarStatus, Supervisor,
 };
 use std::net::{TcpListener, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
@@ -55,24 +53,6 @@ fn limits() -> Limits {
         memory_bytes: 128 * 1024 * 1024,
         cpus: 0.25,
         ..Limits::default()
-    }
-}
-
-/// On macOS, the OS sandbox with its limits vouched for, as they will be once
-/// the watchdog is checked with Seatbelt on a macOS 27 Mac, so its isolation
-/// and its watchdog can be checked. Anywhere else, the OS sandbox unchanged.
-struct IsolationOnly(OsSandbox);
-
-impl Launcher for IsolationOnly {
-    fn enforcement(&self) -> Enforcement {
-        match self.0.enforcement() {
-            Enforcement::Missing(_) if cfg!(target_os = "macos") => Enforcement::Host,
-            other => other,
-        }
-    }
-
-    fn launch(&self, command: &SidecarCommand, limits: &Limits) -> Result<Launched, LaunchError> {
-        self.0.launch(command, limits)
     }
 }
 
@@ -158,11 +138,7 @@ async fn sidecar_with(fixture: &Fixture, limits: Limits) -> Supervisor {
             ..Policy::default()
         },
     };
-    let supervisor = Supervisor::start(
-        config,
-        Arc::new(IsolationOnly(sandbox())),
-        Arc::new(NoBroker),
-    );
+    let supervisor = Supervisor::start(config, Arc::new(sandbox()), Arc::new(NoBroker));
     let mut status = supervisor.watch();
     let started = tokio::time::timeout(
         Duration::from_secs(60),
@@ -513,10 +489,13 @@ async fn check_5_memory_past_the_limit_is_refused_or_stops_the_sidecar_at_the_li
             ));
         }
         // Linux: the cgroup OOM-kills it, with its counters as evidence. macOS: the watchdog kills it.
-        Reply::Stopped(why) => assert!(
-            why.contains("memory limit"),
-            "stopped, but not by the limit: {why}"
-        ),
+        Reply::Stopped(why) => {
+            eprintln!("stopped: {why}");
+            assert!(
+                why.contains("memory limit"),
+                "stopped, but not by the limit: {why}"
+            );
+        }
         other => panic!("not limited: {other:?}"),
     }
 }

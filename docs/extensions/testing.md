@@ -94,6 +94,25 @@ cargo test -p srelens-registry --lib -- --ignored --exact \
 An authoring CLI with a test command is planned
 ([#577](https://github.com/srelens/srelens/issues/577)).
 
+## macOS conformance
+
+On 2026-10-05, the release-built production backend passed all 14 sandbox conformance
+checks on macOS 27.0.1 (26A434), arm64. The supervisor used `OsSandbox` directly, with
+Seatbelt and the host watchdog; no test launcher vouched for limits. The three watchdog
+checks without Seatbelt also passed.
+
+```sh
+cargo test --release -p srelens-plugin-host --test sandbox_conformance --test macos_watchdog -- --include-ignored --test-threads=1 --nocapture
+```
+
+Both CPU checks measured 0.25 CPUs against a 0.25 CPU limit. The release probe held
+512 MiB against a 128 MiB memory limit: the watchdog stopped it, measuring 514 MiB
+with Seatbelt and 447 MiB without it. These are sampled readings, not peak memory or
+a maximum overshoot. A fast allocation can finish between the watchdog's 50 ms readings;
+the memory limit bounds sustained use, not an instantaneous burst. This guarantee is
+weaker than the kernel limits on Linux and Windows. Intel Macs and older macOS versions
+with Seatbelt remain unverified.
+
 ## Performance budgets
 
 The roadmap sets three targets for the platform: loading the installed apps' manifests

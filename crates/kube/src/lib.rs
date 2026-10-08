@@ -186,3 +186,4 @@ pub mod toolbox_install;
 pub mod topology;
 pub mod watch;
 pub mod workloads;
+pub mod workload_images;

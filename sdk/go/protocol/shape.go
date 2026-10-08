@@ -14,6 +14,26 @@ import (
 // name: 1 to 64 ASCII letters, digits and hyphens.
 func IsIdentifier(v string) bool { return fits("HostReadParams.capability", v) }
 
+// IsBindingNames checks the generated array bounds and each item's shape.
+func IsBindingNames(values []string) bool {
+	const key = "HostBindingAvailabilityParams.bindings"
+	shape, ok := arrayShapes[key]
+	if !ok {
+		panic("protocol: the schema states no rule for " + key)
+	}
+	if len(values) < shape.min || len(values) > shape.max {
+		return false
+	}
+	seen := make(map[string]bool, len(values))
+	for _, value := range values {
+		if !fits(key+".items", value) || (shape.unique && seen[value]) {
+			return false
+		}
+		seen[value] = true
+	}
+	return true
+}
+
 // IsObjectName reports whether v can be a Kubernetes object name: 1 to 253
 // ASCII letters, digits, dots and hyphens, and not "." or "..".
 func IsObjectName(v string) bool { return fits("HostResourceParams.name", v) }

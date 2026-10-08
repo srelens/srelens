@@ -211,7 +211,7 @@ mod tests {
             assert!(
                 refused
                     .as_ref()
-                    .is_err_and(|e| e.to_string().contains("package exceeds 16 MiB")),
+                    .is_err_and(|e| e.to_string().contains("package exceeds 512 MiB")),
                 "{over} bytes: {refused:?}"
             );
         }

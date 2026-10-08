@@ -49,7 +49,7 @@ func TestWithNoVersionInCommonInitializeSaysWhichItSpeaks(t *testing.T) {
 	if e.code != -32001 || !strings.Contains(e.message, "9.9.9") || !strings.Contains(e.message, "0.1.0") {
 		t.Fatalf("%+v", e)
 	}
-	if !reflect.DeepEqual(e.data, map[string]any{"supported": []any{"0.1.0"}}) {
+	if !reflect.DeepEqual(e.data, map[string]any{"supported": []any{"0.1.0", "0.2.0"}}) {
 		t.Fatalf("data %v", e.data)
 	}
 	if err := h.finish(); err != nil {

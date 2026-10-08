@@ -1317,8 +1317,12 @@ Executable apps are a preview, and so is API 0.6, until the API is frozen as 1.0
   move another only between cgroups under one it may write, and each sidecar's launcher
   moves itself into a new sibling of that leaf. The `sandbox-conformance` job in
   [ci.yml](../../.github/workflows/ci.yml) runs both setups on a runner.
-- **macOS:** not yet. srelens refuses to start any sidecar until its memory and CPU
-  watchdog has been checked with Seatbelt on a macOS 27 Mac.
+- **macOS:** Seatbelt isolation with host-enforced memory and CPU limits. The
+  watchdog bounds sustained use; a burst between readings can exceed a limit
+  ([sandbox guarantees](sidecar-protocol.md#sandbox)).
+  It needs `srelens-sandbox-launch` beside the desktop binary, or its absolute path
+  in `SRELENS_SANDBOX_LAUNCHER`. For local development, build it with
+  `cargo build -p srelens-plugin-host --bin srelens-sandbox-launch` before `pnpm dev`.
 - **The web host:** it refuses to install an executable app. Its extension policy does not
   allow one: `allowExecutableApps` must stay `false`, and an app that fails a policy rule
   is refused as a whole ([the policy table](../WEB.md#extension-policy)). It also keeps no
@@ -1351,9 +1355,9 @@ its sidecar and says what is missing; it never starts a sidecar unconfined.
   cgroup is the scope srelens asks systemd for, or the directory
   `SRELENS_SANDBOX_CGROUP_ROOT` names; without them srelens refuses to start its sidecar
   and says what is missing and how to add it.
-  On macOS srelens refuses to start any sidecar until its memory and CPU watchdog has
-  been checked with Seatbelt on a macOS 27 Mac
-  ([#713](https://github.com/srelens/srelens/issues/713)).
+  On macOS the same launcher applies Seatbelt and the host watchdog limits memory
+  and CPU ([#713](https://github.com/srelens/srelens/issues/713)); a burst between
+  readings can exceed a limit.
 - **Its input is the host's to check.** Every call is held to the operation's declared
   inputs before the sidecar sees it: no field it does not declare, every required one
   present, each of its type, each string within its `maxLength`, and the whole call

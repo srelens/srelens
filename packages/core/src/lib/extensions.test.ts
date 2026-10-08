@@ -224,7 +224,7 @@ it("sends a package's digest list with its manifest and signature for the check 
   expect(invokeCapability).toHaveBeenLastCalledWith("extensions.validate", { manifest: "{}", grants: [], digests: "{}" });
 });
 
-it("sends a package file as base64, for review and for install (#562)", async () => {
+it("sends native package bytes for review and preserves existing base64 installs (#562)", async () => {
   const { reviewExtensionPackage, encodePackage } = await import("./extensions");
   const bytes = new Uint8Array([0x1f, 0x8b, 0x08, 0x00, 0xff]);
   expect(encodePackage(bytes)).toBe("H4sIAP8=");
@@ -233,7 +233,14 @@ it("sends a package file as base64, for review and for install (#562)", async ()
   expect(atob(encodePackage(large)).length).toBe(large.length);
   expect(Uint8Array.from(atob(encodePackage(large)), (c) => c.charCodeAt(0))).toEqual(large);
   await reviewExtensionPackage(bytes);
-  expect(invokeCapability).toHaveBeenLastCalledWith("extensions.packageManifest", { package: "H4sIAP8=" });
+  expect(invokeCapability).toHaveBeenLastCalledWith("extensions.packageManifest", { package: bytes });
+  vi.mocked(isTauri).mockReturnValue(false);
+  try {
+    await reviewExtensionPackage(bytes);
+    expect(invokeCapability).toHaveBeenLastCalledWith("extensions.packageManifest", { package: "H4sIAP8=" });
+  } finally {
+    vi.mocked(isTauri).mockReturnValue(true);
+  }
   await configureExtensions({ action: "installPackage", package: "H4sIAP8=", grants: ["k8s.listCustomResource"], reviewedRevision: 2 });
   expect(invokeCapability).toHaveBeenLastCalledWith("extensions.configure", {
     action: "installPackage",

@@ -26,3 +26,9 @@
 {"jsonrpc":"2.0","method":"host/action","params":{"context":{"clusterId":"kind-dev","namespace":null},"capability":"applications","name":"web","action":"sync","uid":"u-1","resourceVersion":"1"}}
 # nor is a method srelens sends
 {"jsonrpc":"2.0","method":"initialize","params":{}}
+# The caller cannot impersonate the supervisor's installed app.
+{"jsonrpc":"2.0","id":"availability-2","method":"host/bindingAvailability","params":{"id":"org.other.app","context":{"clusterId":"kind-dev","namespace":null},"bindings":["reports"]}}
+# Binding discovery is bounded, unique, and uses the caller's camelCase cluster spelling.
+{"jsonrpc":"2.0","id":"availability-3","method":"host/bindingAvailability","params":{"context":{"cluster_id":"kind-dev","namespace":null},"bindings":["reports"]}}
+{"jsonrpc":"2.0","id":"availability-4","method":"host/bindingAvailability","params":{"context":{"clusterId":"kind-dev","namespace":null},"bindings":["reports","reports"]}}
+{"jsonrpc":"2.0","id":"availability-5","method":"host/bindingAvailability","params":{"context":{"clusterId":"kind-dev","namespace":null},"bindings":[]}}

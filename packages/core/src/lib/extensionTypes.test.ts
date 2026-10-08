@@ -89,7 +89,8 @@ const tables: Record<string, Record<string, "required" | "optional">> = {
     contributions: "required",
   } satisfies Presence<ExtensionManifest>,
   Sidecar: { binaries: "required", operations: "required" } satisfies Presence<ExtensionSidecar>,
-  Operation: { name: "required", title: "required", inputs: "optional" } satisfies Presence<ExtensionOperation>,
+  Operation: { name: "required", title: "required", inputs: "optional", view: "optional" } satisfies Presence<ExtensionOperation>,
+  OperationView: { autoRun: "optional", stream: "optional", hidden: "optional" } satisfies Presence<NonNullable<ExtensionOperation["view"]>>,
   OperationInput: {
     name: "required", title: "optional", type: "required", required: "optional", maxLength: "optional",
   } satisfies Presence<ExtensionOperationInput>,

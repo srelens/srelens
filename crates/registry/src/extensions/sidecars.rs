@@ -200,6 +200,13 @@ impl AppSidecars {
     }
 
     /// The supervisor of `app` at its revision, started now if there is none.
+    pub(super) async fn open_stream(&self, app: &Installed, method: &str, params: Map<String, Value>) -> Result<srelens_plugin_host::sidecar::SidecarStream, CapabilityError> {
+        let supervisor = self.supervisor(app).await?;
+        let mut status = supervisor.watch();
+        let _ = tokio::time::timeout(START_WAIT, status.wait_for(|status| !matches!(status, SidecarStatus::Starting))).await;
+        supervisor.open_stream(method, Value::Object(params)).await.map_err(|error| CapabilityError::Handler(error.to_string()))
+    }
+
     async fn supervisor(&self, app: &Installed) -> Result<Arc<Supervisor>, CapabilityError> {
         if let Some(supervisor) = self.current(app) {
             return Ok(supervisor);
@@ -483,6 +490,12 @@ pub(super) mod fake {
                         .methods
                         .push((launch, method.to_owned()));
                     let answer = match method {
+                        "stream/open" => {
+                            let stream = message["params"]["stream"].clone();
+                            let data = json!({"jsonrpc":"2.0","method":"stream/data","params":{"stream":stream,"data":{"state":"scanning"}}});
+                            if stdout.write_all(format!("{data}\n").as_bytes()).await.is_err() { break; }
+                            json!({"result":{}})
+                        }
                         "initialize" => json!({"result": {"apiVersion": "0.1.0"}}),
                         "activate" | "deactivate" | "health" | "shutdown" => {
                             json!({"result": {}})
@@ -563,6 +576,33 @@ mod tests {
     use super::fake::FakeSidecar;
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn cluster_scanning_keeps_trivy_on_the_default_local_data_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("extensions.json");
+        install_scanner(&path);
+        let mut app = scanner(&path);
+        let packages = path.with_extension("packages");
+        let old = packages
+            .join(&app.manifest.id)
+            .join(app.package.as_ref().unwrap());
+        let mut list: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(old.join("digests.json")).unwrap()).unwrap();
+        list["id"] = json!("org.srelens.trivy");
+        let bytes = serde_json::to_vec(&list).unwrap();
+        use sha2::Digest;
+        let digest = format!("{:x}", sha2::Sha256::digest(&bytes));
+        let target = packages.join("org.srelens.trivy").join(&digest);
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::rename(old, &target).unwrap();
+        std::fs::write(target.join("digests.json"), bytes).unwrap();
+        app.manifest.id = "org.srelens.trivy".into();
+        app.package = Some(digest);
+        let (config, _) =
+            config_for(Some(&packages), Some(&path.with_extension("data")), &app).unwrap();
+        assert_eq!(config.limits, Limits::default());
+    }
 
     #[test]
     fn without_a_named_cgroup_srelens_asks_systemd_for_one() {

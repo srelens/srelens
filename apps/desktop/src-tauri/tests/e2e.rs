@@ -262,6 +262,7 @@ impl Harness {
 /// A capability registered later with no case here fails the coverage
 /// assertion at the end of `full_capability_suite`.
 const EXCLUDED: &[(&str, &str)] = &[
+    ("k8s.runJob", "broker-only declaration stub; scoped Job authorization, results and cleanup are exercised in registry lifecycle tests"),
     (
         "k8s.nodeJournalLogs",
         "requires SSH access to the node host; exercised via unit tests with mocked sessions",
@@ -1069,6 +1070,12 @@ async fn run_suite() {
         .unwrap()
         .iter()
         .any(|d| d["name"] == DEPLOY));
+
+    let images = h.ok("k8s.listWorkloadImages", json!({"context":ctx,"namespace":NS,"kind":"Deployment"})).await;
+    let workload = images["items"].as_array().unwrap().iter().find(|row| row["name"] == DEPLOY).expect("deployment image identity");
+    assert_eq!(workload["namespace"], NS);
+    assert!(workload["uid"].as_str().is_some_and(|uid| !uid.is_empty()));
+    assert!(workload["containers"].as_array().unwrap().iter().any(|row| row["type"] == "regular" && row["image"].as_str().is_some_and(|image| !image.is_empty())));
 
     let out = h
         .ok(
@@ -3671,6 +3678,12 @@ async fn extensions_and_gitops(h: &mut Harness, ctx: &str, settings: &TempSettin
         )
         .await;
     assert!(item_names(&out).contains(&KUSTOMIZATION), "{out}");
+    let available = h.ok("extensions.bindingAvailability", json!({"id":"org.example.flux","revision":revision(&flux_app),"context":ctx,"namespace":NS,"bindings":["kustomizations"]})).await;
+    assert_eq!(available["bindings"][0]["state"], "served", "{available}");
+    // A reader app cannot acquire container execution through the Job facade.
+    // Constrained Job lifecycle and cancellation are exercised by registry tests.
+    h.err("extensions.runJob", json!({"id":"org.example.flux","revision":revision(&flux_app),"context":ctx,"namespace":NS,"capability":"undeclared-job","inputs":{}})).await;
+    h.err("extensions.callOperation", json!({"id":"org.example.flux","revision":revision(&flux_app),"context":ctx,"operation":"undeclared","params":{}})).await;
     let columns = h
         .ok(
             "extensions.resolveColumns",

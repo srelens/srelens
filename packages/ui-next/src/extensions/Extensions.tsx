@@ -12,7 +12,6 @@ import {
   clearExtensionSecret,
   configureExtensions,
   contributionKind,
-  encodePackage,
   setExtensionSecret,
   extensionEnabledFor,
   isTauri,
@@ -56,7 +55,7 @@ function problemsHeading(errors: ExtensionValidationError[]) {
  */
 type ReviewOrigin =
   | { kind: "manifest" }
-  | { kind: "packageFile"; package: ExtensionPackageReview; file: string }
+  | { kind: "packageFile"; package: ExtensionPackageReview; file: Uint8Array }
   | { kind: "catalogPackage"; package: ExtensionPackageReview; id: string; sha256: string };
 const MANIFEST_ORIGIN: ReviewOrigin = { kind: "manifest" };
 /**
@@ -222,7 +221,7 @@ export function ExtensionManager() {
       if (!current()) return;
       if (!verified.package) throw new Error("the host did not return what the package holds");
       void reviewManifest(verified.manifest, verified.signature ?? undefined, {
-        kind: "packageFile", package: verified.package, file: encodePackage(content),
+        kind: "packageFile", package: verified.package, file: content,
       }, verified.keyId);
     } catch (e) {
       if (current()) setError(`Could not review ${file.name}: ${e instanceof Error ? e.message : String(e)}`);
@@ -265,7 +264,7 @@ export function ExtensionManager() {
   /** Where executable apps run (#788). Only the web server reports a policy, and it never allows them; the desktop runs them per OS. */
   const executableAppsHint = state.policy
     ? "This server does not run executable apps."
-    : "Executable apps run sandboxed on Windows; on Linux only once the sandbox launcher and a delegated cgroup are set up by hand and the kernel has Landlock enabled; not yet on macOS.";
+    : "Executable apps run sandboxed on Windows and on Linux with Landlock and a delegated cgroup. On macOS they use Seatbelt with host-enforced memory and CPU limits.";
   return (
     <div className="extension-manager">
       <div className="extension-toolbar">

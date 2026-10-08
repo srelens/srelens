@@ -23,6 +23,7 @@ pub(crate) mod network;
 pub(crate) mod package;
 #[cfg(test)]
 mod package_tests;
+mod uploads;
 mod panels;
 pub mod pods;
 mod providers;
@@ -44,6 +45,9 @@ mod signing;
 mod store;
 pub mod streams;
 pub mod tools;
+mod operations;
+mod availability;
+pub(crate) mod jobs;
 #[cfg(test)]
 mod tools_tests;
 mod trust;
@@ -513,7 +517,7 @@ enum Configure {
     /// are the caller's consent, as for `install`.
     #[serde(rename = "installPackage")]
     InstallPackage {
-        /// The `.srelens-extension` file as base64: at most 16 MiB once decoded.
+        /// The `.srelens-extension` file as base64: at most 512 MiB once decoded.
         #[serde(deserialize_with = "limits::package")]
         #[schemars(with = "String")]
         package: Vec<u8>,
@@ -581,6 +585,9 @@ fn context_names_or_null(
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct Read {
+    #[serde(default)]
+    #[schemars(length(max = 8192))]
+    cursor: Option<String>,
     #[serde(default, rename = "useCrdColumns")]
     use_crd_columns: bool,
     id: String,
@@ -915,11 +922,20 @@ fn validate_app(
             }
             continue;
         }
+        if binding.target == "k8s.runJob" {
+            if manifest.kind != srelens_plugin_host::ManifestKind::Executable || core.get(&binding.target).is_none() {
+                problems.push(Code::UnsupportedTarget,format!("{at}.target"),"Jobs require an executable app and a host that provides k8s.runJob");
+            }
+            if !binding.inputs.is_empty() || !binding.versions.is_empty() || !binding.json_path_overrides.is_empty() {
+                problems.push(Code::InvalidBinding,format!("{at}.inputs"),"Job bindings fix their template; caller values use declared inputNames");
+            }
+            continue;
+        }
         let builtin = srelens_plugin_host::builtin_reader_identity(&binding.target);
         if builtin.is_none()
             && !matches!(
                 binding.target.as_str(),
-                "k8s.listCustomResource" | "k8s.listEvents"
+                "k8s.listCustomResource" | "k8s.listEvents" | "k8s.listWorkloadImages"
             )
         {
             problems.push(
@@ -950,7 +966,7 @@ fn validate_app(
             continue;
         }
         for (position, key) in binding.inputs.iter().enumerate() {
-            if key != "context" && key != "namespace" {
+            if key != "context" && key != "namespace" && !(key == "cursor" && binding.target == "k8s.listWorkloadImages") {
                 problems.push(
                     Code::InvalidBinding,
                     format!("{at}.inputs[{position}]"),
@@ -959,6 +975,13 @@ fn validate_app(
             }
         }
         let accepts = |key: &str| binding.inputs.iter().any(|input| input == key);
+        if binding.target == "k8s.listWorkloadImages" {
+            if binding.arguments.len() != 1 || !matches!(binding.arguments.get("kind").and_then(Value::as_str), Some("Deployment" | "StatefulSet" | "DaemonSet"))
+                || !accepts("context") || !accepts("namespace") {
+                problems.push(Code::InvalidBinding, format!("{at}.arguments"), "A workload image reader fixes kind to Deployment, StatefulSet or DaemonSet and accepts context plus namespace only");
+            }
+            continue;
+        }
         if let Some(identity) = builtin {
             let namespaced = identity["namespaced"] == true;
             if !binding.arguments.is_empty()
@@ -2018,7 +2041,7 @@ struct ValidateIn {
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct PackageIn {
-    /// The `.srelens-extension` file as base64: at most 16 MiB once decoded.
+    /// The `.srelens-extension` file as base64: at most 512 MiB once decoded.
     #[serde(deserialize_with = "limits::package")]
     #[schemars(with = "String")]
     package: Vec<u8>,
@@ -2129,6 +2152,10 @@ fn access_items(manifest: &Manifest, grants: &[String]) -> std::collections::BTr
     for binding in &manifest.capabilities {
         if let Some(item) = pod_access(manifest, binding, &reads) {
             access.insert(item);
+            continue;
+        }
+        if binding.target == "k8s.runJob" {
+            access.insert(format!("Run a scoped container Job with {}", reads(binding)));
             continue;
         }
         access.insert(format!(
@@ -2350,6 +2377,8 @@ fn register_apps(
     let packages = apps.packages.clone();
     let runtime = apps.clone();
     resource::register(reg, path.clone(), core.clone(), cache.clone());
+    availability::register(reg, path.clone(), core.clone(), cache.clone());
+    jobs::register(reg, &apps, core.clone(), cache.clone());
     // One snapshot of each granted reader, shared by table columns, dashboard
     // cards and a card's target page, so the three agree and list it once.
     let snapshots = columns::JoinCache::default();
@@ -2482,6 +2511,7 @@ fn register_apps(
     ));
     providers::register(reg, path.clone(), core.clone(), cache.clone(), secrets.clone());
     let streams = streams::register(reg, &runtime, core, cache, snapshots, secrets);
+    operations::register(reg, streams.clone());
     inspector::register(reg, path, streams.clone());
     streams
 }
@@ -2663,6 +2693,23 @@ async fn read_contribution(
         )
         .map_err(CapabilityError::Handler)?;
     let mut args = json!({ "context": context });
+    if let Some(cursor) = &input.cursor {
+        if !plugin.manifest.capabilities.iter().any(|binding| {
+            binding.name == input.capability
+                && binding.target == "k8s.listWorkloadImages"
+                && binding.inputs.iter().any(|key| key == "cursor")
+        }) {
+            return Err(CapabilityError::InvalidInput(
+                "This binding does not accept a page cursor".into(),
+            ));
+        }
+        if cursor.len() > 8192 || !cursor.bytes().all(|byte| byte.is_ascii_graphic()) {
+            return Err(CapabilityError::InvalidInput(
+                "The cursor must contain at most 8192 ASCII graphic bytes".into(),
+            ));
+        }
+        args["cursor"] = json!(cursor);
+    }
     if plugin
         .manifest
         .capabilities
@@ -4254,6 +4301,7 @@ pub(crate) mod tests {
         serve_crds(&mut core, &["applications.argoproj.io/v1alpha1"]);
         // The broker's own, as `build_registry_and_app_streams` registers them (#568, #567).
         core.register(network::capability());
+        core.register(jobs::capability());
         for capability in pods::capabilities() {
             core.register(capability);
         }
@@ -4616,8 +4664,12 @@ pub(crate) mod tests {
         // it is secret material.
         let store = reg.get("extension.secretStore").unwrap().annotations;
         assert!(store.requires_confirm && store.sensitive && !store.read_only);
+        let job = reg.get("extensions.runJob").unwrap().annotations;
+        assert!(job.requires_confirm && !job.read_only && !job.sensitive);
         let mcp = srelens_mcp::McpServer::new(Arc::new(reg));
-        assert_eq!(mcp.list_tools().len(), 18);
+        assert_eq!(mcp.list_tools().len(), 20);
+        assert!(mcp.list_tools().iter().any(|tool| tool.name == "extensions.bindingAvailability"));
+        assert!(!mcp.list_tools().iter().any(|tool| tool.name == "extensions.callOperation"));
         use srelens_mcp::{stdio::handle_request, Transport};
         for args in [
             json!({"action":"install","manifest":manifest(),"grants":["k8s.listCustomResource"]}),

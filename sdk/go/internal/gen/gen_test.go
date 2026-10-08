@@ -48,6 +48,26 @@ func TestAKeywordTheGeneratorDoesNotKnowIsRefusedNamingItsPath(t *testing.T) {
 	}
 }
 
+func TestBoundedBindingNameArraysGenerateTypedStrings(t *testing.T) {
+	code, err := generate(minimal(`"Availability": {"type":"object","additionalProperties":false,"required":["bindings"],"properties":{"bindings":{"type":"array","minItems":1,"maxItems":16,"uniqueItems":true,"items":{"type":"string","minLength":1,"maxLength":64,"pattern":"^[A-Za-z0-9-]+$"}}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(code, []byte("Bindings []string")) {
+		t.Fatalf("no typed binding names: %s", code)
+	}
+}
+
+func TestBoundedJobInputsGenerateAStringMap(t *testing.T) {
+	code, err := generate(minimal(`"Job": {"type":"object","additionalProperties":false,"required":["inputs"],"properties":{"inputs":{"type":"object","maxProperties":16,"propertyNames":{"type":"string","minLength":1,"maxLength":64,"pattern":"^[A-Za-z0-9-]{1,64}$"},"additionalProperties":{"type":"string","minLength":1,"maxLength":512,"pattern":"^[ -~]{1,512}$"}}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(code, []byte("Inputs map[string]string")) {
+		t.Fatalf("no typed Job inputs: %s", code)
+	}
+}
+
 // A top-level key the committed schema does not have, such as a new
 // x-srelens-* table, would otherwise be ignored without a word.
 func TestARootKeyTheGeneratorDoesNotKnowIsRefusedNamingIt(t *testing.T) {
@@ -153,7 +173,7 @@ func TestAPatternedFieldGetsItsShape(t *testing.T) {
 }
 
 func TestGenerationIsDeterministic(t *testing.T) {
-	schema, err := os.ReadFile("../../../../schemas/sidecar-protocol.v0.1.json")
+	schema, err := os.ReadFile("../../../../schemas/sidecar-protocol.v0.2.json")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -175,7 +195,7 @@ func TestGenerationIsDeterministic(t *testing.T) {
 // The committed protocol_gen.go is what the committed schema generates. CI
 // also regenerates it and fails on any difference; this says so locally.
 func TestTheCommittedFileIsCurrent(t *testing.T) {
-	schema, err := os.ReadFile("../../../../schemas/sidecar-protocol.v0.1.json")
+	schema, err := os.ReadFile("../../../../schemas/sidecar-protocol.v0.2.json")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -4,7 +4,7 @@
 //!
 //! The contract both sides build on. The host (`srelens-plugin-host`) and the
 //! SDKs (#576) share these constants and types, and the committed
-//! `schemas/sidecar-protocol.v0.1.json` is generated from them. The prose is
+//! `schemas/sidecar-protocol.v0.2.json` is generated from them. The prose is
 //! `docs/extensions/sidecar-protocol.md`.
 //!
 //! # The `schema` feature
@@ -40,7 +40,7 @@ pub use schema::{schema, schema_file};
 
 pub use messages::{
     CallContext, CancelParams, ContextError, Empty, HostActionParams, HostReadParams,
-    HostResourceParams, InitializeLimits, InitializeParams, InitializeResult, Peer, RequestId,
+    HostResourceParams, HostBindingAvailabilityParams, HostRunJobParams, JobContext, InitializeLimits, InitializeParams, InitializeResult, Peer, RequestId,
     StreamCancelParams, StreamCloseParams, StreamDataParams, StreamErrorParams, StreamOpenParams,
     UnsupportedApiVersion,
 };
@@ -53,7 +53,7 @@ pub use wire::{JsonRpc, Message, Notification, Request, Response};
 /// Its own line, not the extension API's (`SUPPORTED_API_VERSIONS`): no
 /// manifest kind runs a sidecar yet, so there is no extension API version for
 /// it to belong to. The executable kind (#574) kept the two apart.
-pub const SIDECAR_API_VERSIONS: &[&str] = &["0.1.0"];
+pub const SIDECAR_API_VERSIONS: &[&str] = &["0.1.0", "0.2.0"];
 
 /// The longest line a sidecar may write, not counting its line ending. The
 /// same bound as one MCP request (`MAX_REQUEST_BYTES` in `srelens-mcp`).
@@ -93,6 +93,8 @@ pub mod method {
     /// Sidecar → host request (#573): run one of the app's declared actions,
     /// through `extensions.action`, once a person has confirmed it.
     pub const HOST_ACTION: &str = "host/action";
+    pub const HOST_BINDING_AVAILABILITY: &str = "host/bindingAvailability";
+    pub const HOST_RUN_JOB: &str = "host/runJob";
 }
 
 /// Error codes. The first five are JSON-RPC 2.0's own.

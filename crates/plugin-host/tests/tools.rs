@@ -311,3 +311,54 @@ fn a_reader_that_lists_versions_is_a_tool_whichever_version_a_cluster_serves() {
     assert!(reg.get("plugin/org.example.gitops/applications").is_some());
     assert!(reg.get("plugin/org.example.gitops/refresh").is_some());
 }
+
+#[tokio::test]
+async fn declared_image_cursor_is_exposed_and_accepts_bounded_pages_only() {
+    let source = json!({
+        "kind":"declarative", "id":"org.example.images", "name":"Images", "version":"0.1.0", "srelensApiVersion":"^0.8",
+        "permissions":["k8s.listWorkloadImages"],
+        "capabilities":[{"name":"images","title":"Images","target":"k8s.listWorkloadImages",
+            "arguments":{"kind":"Deployment"},"inputs":["context","namespace","cursor"]}],
+        "contributions":{"pages":[{"id":"images","title":"Images","capability":"images"}],"detailTabs":[],"detailLinks":[]}
+    });
+    let (route, calls) = recording();
+    let (reg, _registration) = register(&source, route).unwrap();
+    let tool = reg.get("plugin/org.example.images/images").unwrap();
+    assert_eq!(tool.input_schema["properties"]["cursor"]["maxLength"], 8192);
+    for cursor in ["".to_owned(), "a".repeat(8192)] {
+        reg.invoke(
+            "plugin/org.example.images/images",
+            json!({"context":"demo","cursor":cursor}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(calls.lock().unwrap().last().unwrap().1["cursor"], cursor);
+    }
+    let before = calls.lock().unwrap().len();
+    for input in [
+        json!({"cursor":"a".repeat(8193)}),
+        json!({"cursor":false}),
+        json!({"cursor":"é"}),
+        json!({"cursor":"a b"}),
+        json!({"namespace":"a".repeat(1025)}),
+    ] {
+        let mut input = input.as_object().unwrap().clone();
+        input.insert("context".into(), json!("demo"));
+        assert!(reg
+            .invoke("plugin/org.example.images/images", Value::Object(input))
+            .await
+            .is_err());
+    }
+    assert_eq!(calls.lock().unwrap().len(), before);
+    let mut unpaged = source;
+    unpaged["capabilities"][0]["inputs"] = json!(["context", "namespace"]);
+    let (route, _) = recording();
+    let (reg, _registration) = register(&unpaged, route).unwrap();
+    assert!(reg
+        .invoke(
+            "plugin/org.example.images/images",
+            json!({"context":"demo","cursor":""})
+        )
+        .await
+        .is_err());
+}

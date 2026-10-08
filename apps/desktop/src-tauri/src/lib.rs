@@ -460,6 +460,7 @@ pub fn run() {
                 app.manage(app_audit(None));
             }
             app.manage(std::sync::Arc::new(mcp_confirm::Pending::default()));
+            extension_streams::serve_native_broker(app.handle());
 
             Ok(())
         })
@@ -513,6 +514,7 @@ pub fn run() {
             assistant_skills::skill_save,
             assistant_skills::skill_delete,
             invoke_capability,
+            bridge::invoke_package_capability,
             start_resource_watch,
             stop_watch,
             extension_streams::extension_stream_open,

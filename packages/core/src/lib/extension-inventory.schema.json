@@ -1382,6 +1382,16 @@
         },
         "title": {
           "type": "string"
+        },
+        "view": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/OperationView"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -1423,6 +1433,22 @@
         "name",
         "type"
       ],
+      "type": "object"
+    },
+    "OperationView": {
+      "additionalProperties": false,
+      "description": "Native host rendering choices. Apps supply data, never executable frontend code.",
+      "properties": {
+        "autoRun": {
+          "type": "boolean"
+        },
+        "hidden": {
+          "type": "boolean"
+        },
+        "stream": {
+          "type": "boolean"
+        }
+      },
       "type": "object"
     },
     "Page": {

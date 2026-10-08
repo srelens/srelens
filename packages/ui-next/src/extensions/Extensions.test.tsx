@@ -316,13 +316,15 @@ const packaged = {
   icon: `data:image/svg+xml;base64,${btoa("<svg/>")}`,
 };
 
-it("reviews a package file as a whole and installs the bytes that were reviewed (#562)", async () => {
+it("accepts a package up to 512 MiB and installs the bytes that were reviewed (#562)", async () => {
   const source = JSON.stringify(plugin.manifest);
   vi.mocked(reviewExtensionPackage).mockResolvedValue({ manifest: source, signature: [1, 2, 3], package: packaged });
   render(<ExtensionManager />);
   const input = await screen.findByLabelText("Local app package (.srelens-extension)");
   const content = new Uint8Array([0x1f, 0x8b, 0x08, 0x00, 0xff]);
-  fireEvent.change(input, { target: { files: [new File([content], "gitops.srelens-extension")] } });
+  const file = new File([content], "gitops.srelens-extension");
+  Object.defineProperty(file, "size", { value: 512 * 1024 * 1024 });
+  fireEvent.change(input, { target: { files: [file] } });
   const install = await screen.findByText("Install and grant permissions");
   expect(reviewExtensionPackage).toHaveBeenCalledWith(content);
   // The signature is over the digest list, so the check gets the list with it.
@@ -333,7 +335,7 @@ it("reviews a package file as a whole and installs the bytes that were reviewed 
   expect(review.querySelector("[data-extension-logo]")?.getAttribute("data-extension-logo")).toBe("package");
   fireEvent.click(install);
   await waitFor(() => expect(configureExtensions).toHaveBeenCalledWith({
-    action: "installPackage", package: "H4sIAP8=", grants: plugin.manifest.permissions,
+    action: "installPackage", package: content, grants: plugin.manifest.permissions,
   }));
 });
 
@@ -347,10 +349,10 @@ it("says why a package file was refused, and refuses one over the limit before r
   );
   expect(screen.queryByRole("region", { name: "Review app permissions" })).toBeNull();
   const large = new File([new Uint8Array([1])], "large.srelens-extension");
-  Object.defineProperty(large, "size", { value: 17 * 1024 * 1024 });
+  Object.defineProperty(large, "size", { value: 513 * 1024 * 1024 });
   fireEvent.change(input, { target: { files: [large] } });
   expect((await screen.findByRole("alert")).textContent).toBe(
-    "large.srelens-extension is 17.0 MiB; a package may be at most 16.0 MiB.",
+    "large.srelens-extension is 513.0 MiB; a package may be at most 512.0 MiB.",
   );
   expect(reviewExtensionPackage).toHaveBeenCalledTimes(1);
   expect(configureExtensions).not.toHaveBeenCalled();
@@ -2092,7 +2094,7 @@ it("says on the desktop where executable apps run, and not that the host cannot 
   render(<ExtensionManager />);
   const hint = await unsignedHint();
   expect(hint).toContain(
-    "Executable apps run sandboxed on Windows; on Linux only once the sandbox launcher and a delegated cgroup are set up by hand and the kernel has Landlock enabled; not yet on macOS.",
+    "Executable apps run sandboxed on Windows and on Linux with Landlock and a delegated cgroup. On macOS they use Seatbelt with host-enforced memory and CPU limits.",
   );
   expect(hint).not.toContain("not supported by this host");
   expect(hint).not.toContain("This server does not run executable apps");

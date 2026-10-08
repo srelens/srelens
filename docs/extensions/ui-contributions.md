@@ -260,3 +260,9 @@ a review. The classic palette does not list app
 commands.
 
 Arbitrary custom renderer code is not supported.
+
+## Executable operation screens (API 0.8)
+
+An executable sidecar operation can declare `view: {"autoRun": true}` for a read screen, `view: {"stream": true}` for an explicitly started cancellable stream, or `view: {"hidden": true}` for a detail operation reached from a result row. Automatic stream starts are rejected. Executable apps with declared operations appear in the Apps rail even without declarative pages; hidden operations stay out of the rail.
+
+The host renders scalar inputs, searchable namespaces, metadata, tables, errors, retry and cursor pagination. It runs no app-provided HTML or JavaScript. An operation route pins the context key, app ID and installed numeric revision; detail routes also carry scalar inputs such as a report ID. Updates refuse old tabs. Native ordinary calls use `extensions.callOperation`; streams use the existing owned app-stream transport with an `operation` source. Stream-only operations are excluded from ordinary MCP request tools. The native bridge currently accepts apps without declared actions; action-bearing apps require the consent-aware dynamic tool path.
