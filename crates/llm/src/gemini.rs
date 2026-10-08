@@ -6,7 +6,7 @@
 
 use serde_json::{json, Value};
 
-use crate::types::{StopReason, StreamItem, ToolCall, ToolDef, Turn};
+use crate::types::{StopReason, StreamItem, TokenUsage, ToolCall, ToolDef, Turn};
 
 /// Build the JSON body for `POST /v1beta/models/{model}:streamGenerateContent`.
 pub fn build_request(system: &str, turns: &[Turn], tools: &[ToolDef]) -> Value {
@@ -35,7 +35,8 @@ fn content_for_turn(turn: &Turn) -> Value {
                 parts.push(json!({ "text": text }));
             }
             for call in tool_calls {
-                let mut part = json!({ "functionCall": { "name": call.name, "args": call.arguments } });
+                let mut part =
+                    json!({ "functionCall": { "name": call.name, "args": call.arguments } });
                 // Replay the thinking signature on the part it arrived on —
                 // signature-requiring models reject the request without it.
                 if let Some(sig) = &call.thought_signature {
@@ -77,7 +78,10 @@ impl Stream {
     /// round must be part of the synthesized id or the first call of every
     /// round would collide as `gemini-call-0`.
     pub fn for_round(round: u64) -> Self {
-        Self { round, ..Self::default() }
+        Self {
+            round,
+            ..Self::default()
+        }
     }
 
     pub fn push(&mut self, data: &str) -> Vec<StreamItem> {
@@ -88,25 +92,69 @@ impl Stream {
         let Ok(v) = serde_json::from_str::<Value>(data) else {
             return Vec::new();
         };
-        if let Some(msg) = v.get("error").and_then(|e| e.get("message")).and_then(Value::as_str) {
+        if let Some(msg) = v
+            .get("error")
+            .and_then(|e| e.get("message"))
+            .and_then(Value::as_str)
+        {
             return vec![StreamItem::Error(msg.to_string())];
         }
-        let Some(candidate) = v.get("candidates").and_then(|c| c.get(0)) else {
-            return Vec::new();
-        };
         let mut out = Vec::new();
-        if let Some(parts) = candidate.get("content").and_then(|c| c.get("parts")).and_then(Value::as_array) {
+        if let Some(usage) = v.get("usageMetadata") {
+            let prompt = usage
+                .get("promptTokenCount")
+                .and_then(Value::as_u64)
+                .unwrap_or(0) as usize;
+            let completion = usage
+                .get("candidatesTokenCount")
+                .and_then(Value::as_u64)
+                .unwrap_or(0) as usize;
+            let cached = usage
+                .get("cachedContentTokenCount")
+                .and_then(Value::as_u64)
+                .unwrap_or(0) as usize;
+            let total = usage
+                .get("totalTokenCount")
+                .and_then(Value::as_u64)
+                .map(|n| n as usize)
+                .unwrap_or(prompt + completion);
+            out.push(StreamItem::Usage(TokenUsage {
+                prompt_tokens: prompt,
+                completion_tokens: completion,
+                cached_tokens: cached,
+                total_tokens: total,
+            }));
+        }
+        let Some(candidate) = v.get("candidates").and_then(|c| c.get(0)) else {
+            return out;
+        };
+        if let Some(parts) = candidate
+            .get("content")
+            .and_then(|c| c.get("parts"))
+            .and_then(Value::as_array)
+        {
             for part in parts {
                 if let Some(call) = part.get("functionCall") {
-                    let name = call.get("name").and_then(Value::as_str).unwrap_or("").to_string();
+                    let name = call
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
                     let arguments = call.get("args").cloned().unwrap_or_else(|| json!({}));
                     let id = format!("gemini-call-{}-{}", self.round, self.counter);
                     self.counter += 1;
                     // Thinking models stamp the part with an opaque signature
                     // that must be replayed with this call in the next request.
-                    let thought_signature =
-                        part.get("thoughtSignature").and_then(Value::as_str).map(str::to_string);
-                    out.push(StreamItem::ToolCall(ToolCall { id, name, arguments, thought_signature }));
+                    let thought_signature = part
+                        .get("thoughtSignature")
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
+                    out.push(StreamItem::ToolCall(ToolCall {
+                        id,
+                        name,
+                        arguments,
+                        thought_signature,
+                    }));
                 } else if let Some(text) = part.get("text").and_then(Value::as_str) {
                     if part.get("thought").and_then(Value::as_bool) == Some(true) {
                         out.push(StreamItem::Thinking(text.to_string()));
@@ -156,7 +204,10 @@ mod tests {
         assert_eq!(req["system_instruction"]["parts"][0]["text"], "sys");
         assert_eq!(req["contents"][0]["role"], "user");
         assert_eq!(req["contents"][0]["parts"][0]["text"], "hi");
-        assert_eq!(req["tools"][0]["function_declarations"][0]["name"], "k8s_listPods");
+        assert_eq!(
+            req["tools"][0]["function_declarations"][0]["name"],
+            "k8s_listPods"
+        );
     }
 
     #[test]
@@ -173,7 +224,9 @@ mod tests {
                 tool_calls: vec![ToolCall {
                     id: "gemini-call-0".into(),
                     name: "k8s_scale".into(),
-                    arguments: json!({ "replicas": 3 }), thought_signature: None }],
+                    arguments: json!({ "replicas": 3 }),
+                    thought_signature: None,
+                }],
             },
             Turn::ToolResults(vec![ToolOutcome {
                 id: "gemini-call-0".into(),
@@ -184,11 +237,23 @@ mod tests {
         ];
         let req = build_request("s", &turns, &[]);
         assert_eq!(req["contents"][0]["role"], "model");
-        assert_eq!(req["contents"][0]["parts"][1]["functionCall"]["name"], "k8s_scale");
-        assert_eq!(req["contents"][0]["parts"][1]["functionCall"]["args"]["replicas"], 3);
+        assert_eq!(
+            req["contents"][0]["parts"][1]["functionCall"]["name"],
+            "k8s_scale"
+        );
+        assert_eq!(
+            req["contents"][0]["parts"][1]["functionCall"]["args"]["replicas"],
+            3
+        );
         assert_eq!(req["contents"][1]["role"], "user");
-        assert_eq!(req["contents"][1]["parts"][0]["functionResponse"]["name"], "k8s_scale");
-        assert_eq!(req["contents"][1]["parts"][0]["functionResponse"]["response"]["result"], "scaled");
+        assert_eq!(
+            req["contents"][1]["parts"][0]["functionResponse"]["name"],
+            "k8s_scale"
+        );
+        assert_eq!(
+            req["contents"][1]["parts"][0]["functionResponse"]["response"]["result"],
+            "scaled"
+        );
     }
 
     #[test]
@@ -200,7 +265,10 @@ mod tests {
             is_error: true,
         }])];
         let req = build_request("s", &turns, &[]);
-        assert_eq!(req["contents"][0]["parts"][0]["functionResponse"]["response"]["error"], "denied");
+        assert_eq!(
+            req["contents"][0]["parts"][0]["functionResponse"]["response"]["error"],
+            "denied"
+        );
     }
 
     #[test]
@@ -211,7 +279,9 @@ mod tests {
             vec![StreamItem::Text("Hello".into())]
         );
         assert_eq!(
-            s.push(r#"{"candidates":[{"content":{"parts":[{"text":"reasoning","thought":true}]}}]}"#),
+            s.push(
+                r#"{"candidates":[{"content":{"parts":[{"text":"reasoning","thought":true}]}}]}"#
+            ),
             vec![StreamItem::Thinking("reasoning".into())]
         );
     }
@@ -227,7 +297,9 @@ mod tests {
             vec![StreamItem::ToolCall(ToolCall {
                 id: "gemini-call-0-0".into(),
                 name: "k8s_scale".into(),
-                arguments: json!({ "replicas": 2 }), thought_signature: None })]
+                arguments: json!({ "replicas": 2 }),
+                thought_signature: None
+            })]
         );
         // A second call in the same round gets a distinct id.
         let more = s.push(
@@ -238,7 +310,9 @@ mod tests {
             vec![StreamItem::ToolCall(ToolCall {
                 id: "gemini-call-0-1".into(),
                 name: "k8s_listPods".into(),
-                arguments: json!({}), thought_signature: None })]
+                arguments: json!({}),
+                thought_signature: None
+            })]
         );
     }
 
@@ -253,7 +327,9 @@ mod tests {
             vec![StreamItem::ToolCall(ToolCall {
                 id: "gemini-call-2-0".into(),
                 name: "k8s_scale".into(),
-                arguments: json!({}), thought_signature: None })]
+                arguments: json!({}),
+                thought_signature: None
+            })]
         );
     }
 
@@ -261,11 +337,18 @@ mod tests {
     fn a_finish_reason_ends_the_turn_once() {
         let mut s = Stream::new();
         assert_eq!(
-            s.push(r#"{"candidates":[{"content":{"parts":[{"text":"done"}]},"finishReason":"STOP"}]}"#),
-            vec![StreamItem::Text("done".into()), StreamItem::Done(StopReason::EndTurn)]
+            s.push(
+                r#"{"candidates":[{"content":{"parts":[{"text":"done"}]},"finishReason":"STOP"}]}"#
+            ),
+            vec![
+                StreamItem::Text("done".into()),
+                StreamItem::Done(StopReason::EndTurn)
+            ]
         );
         // A trailing empty candidate with another finishReason doesn't re-emit Done.
-        assert!(s.push(r#"{"candidates":[{"content":{"parts":[]},"finishReason":"STOP"}]}"#).is_empty());
+        assert!(s
+            .push(r#"{"candidates":[{"content":{"parts":[]},"finishReason":"STOP"}]}"#)
+            .is_empty());
     }
 
     #[test]
@@ -285,16 +368,36 @@ mod tests {
         let items = s.push(
             r#"{"candidates":[{"content":{"parts":[{"functionCall":{"name":"k8s_scale","args":{}},"thoughtSignature":"sig-abc"}]}}]}"#,
         );
-        let StreamItem::ToolCall(call) = &items[0] else { panic!("expected a tool call, got {items:?}") };
+        let StreamItem::ToolCall(call) = &items[0] else {
+            panic!("expected a tool call, got {items:?}")
+        };
         assert_eq!(call.thought_signature.as_deref(), Some("sig-abc"));
 
-        let turns = vec![Turn::Assistant { text: String::new(), tool_calls: vec![call.clone()] }];
+        let turns = vec![Turn::Assistant {
+            text: String::new(),
+            tool_calls: vec![call.clone()],
+        }];
         let req = build_request("s", &turns, &[]);
-        assert_eq!(req["contents"][0]["parts"][0]["thoughtSignature"], "sig-abc");
+        assert_eq!(
+            req["contents"][0]["parts"][0]["thoughtSignature"],
+            "sig-abc"
+        );
         // A signature-less call (every non-Gemini adapter) adds no field.
-        let bare = ToolCall { name: "k8s_scale".into(), ..Default::default() };
-        let req2 = build_request("s", &[Turn::Assistant { text: String::new(), tool_calls: vec![bare] }], &[]);
-        assert!(req2["contents"][0]["parts"][0].get("thoughtSignature").is_none());
+        let bare = ToolCall {
+            name: "k8s_scale".into(),
+            ..Default::default()
+        };
+        let req2 = build_request(
+            "s",
+            &[Turn::Assistant {
+                text: String::new(),
+                tool_calls: vec![bare],
+            }],
+            &[],
+        );
+        assert!(req2["contents"][0]["parts"][0]
+            .get("thoughtSignature")
+            .is_none());
     }
 
     #[test]
@@ -302,7 +405,9 @@ mod tests {
         let mut s = Stream::new();
         assert_eq!(
             s.push(r#"{"candidates":[{"content":{"parts":[]},"finishReason":"SAFETY"}]}"#),
-            vec![StreamItem::Error("Gemini stopped generating: SAFETY".into())]
+            vec![StreamItem::Error(
+                "Gemini stopped generating: SAFETY".into()
+            )]
         );
         let mut s2 = Stream::new();
         assert_eq!(
@@ -326,5 +431,20 @@ mod tests {
         assert!(s.push("").is_empty());
         assert!(s.push("not json").is_empty());
         assert!(s.push(r#"{"candidates":[]}"#).is_empty());
+    }
+
+    #[test]
+    fn stream_parses_gemini_usage() {
+        let mut s = Stream::new();
+        let items = s.push(r#"{"candidates":[],"usageMetadata":{"promptTokenCount":2143,"candidatesTokenCount":85,"totalTokenCount":2228,"cachedContentTokenCount":512}}"#);
+        assert_eq!(
+            items,
+            vec![StreamItem::Usage(TokenUsage {
+                prompt_tokens: 2143,
+                completion_tokens: 85,
+                cached_tokens: 512,
+                total_tokens: 2228,
+            })]
+        );
     }
 }

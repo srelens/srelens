@@ -242,6 +242,9 @@ pub async fn run_native_agent_turn(
     let last_act_clone = last_activity.clone();
     let start_time_copy = start_time;
 
+    let real_usage = Arc::new(std::sync::Mutex::new(None));
+    let real_usage_clone = real_usage.clone();
+
     let ctx_tag = active_context.clone();
     let mut on_event = move |ev: AgentEvent| {
         last_act_clone.store(
@@ -289,6 +292,19 @@ pub async fn run_native_agent_turn(
                     title: format!("ai_tool_done:{}", ctx_tag),
                     result: Ok(format!("{}|{}", id, status_str)),
                 });
+            }
+            AgentEvent::Usage {
+                prompt_tokens,
+                completion_tokens,
+                cached_tokens,
+                total_tokens,
+            } => {
+                *real_usage_clone.lock().unwrap() = Some((
+                    prompt_tokens,
+                    completion_tokens,
+                    cached_tokens,
+                    total_tokens,
+                ));
             }
             AgentEvent::TurnDone => {}
             AgentEvent::Error { message } => {
@@ -338,12 +354,14 @@ pub async fn run_native_agent_turn(
     };
 
     let duration_ms = start_time.elapsed().as_millis() as u64;
-    let prompt_est = (prompt.len() + 200) / 4;
-    let comp_est = out_chars.load(std::sync::atomic::Ordering::Relaxed).max(1) / 4;
-    let total_est = prompt_est + comp_est;
+    let (prompt_tokens, comp_tokens, cached_tokens, total_tokens) = resolve_token_usage(
+        real_usage.lock().unwrap().take(),
+        prompt.len(),
+        out_chars.load(std::sync::atomic::Ordering::Relaxed),
+    );
     let payload = format!(
         "{}|{}|{}|{}|{}",
-        prompt_est, comp_est, 0, total_est, duration_ms
+        prompt_tokens, comp_tokens, cached_tokens, total_tokens, duration_ms
     );
     let _ = event_tx.send(AppEvent::ActionResult {
         title: format!("ai_usage:{}", active_context),
@@ -827,6 +845,26 @@ pub async fn run_boxed_cursor_turn(
     }
 }
 
+/// Resolve token counts for an assistant turn: prefers provider-reported real usage,
+/// falling back to character-based heuristic estimates if real usage is absent (e.g. timeout).
+pub fn resolve_token_usage(
+    real_usage: Option<(usize, usize, usize, usize)>,
+    prompt_len: usize,
+    output_chars: usize,
+) -> (usize, usize, usize, usize) {
+    if let Some(u) = real_usage {
+        u
+    } else {
+        let prompt_est = (prompt_len + 200) / 4;
+        let comp_est = if output_chars == 0 {
+            0
+        } else {
+            (output_chars / 4).max(1)
+        };
+        (prompt_est, comp_est, 0, prompt_est + comp_est)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -889,5 +927,24 @@ mod tests {
         assert!(p.contains("spoke-prod"));
         assert!(p.contains("tools-mgmt"));
         assert!(p.ends_with("Where is the argo application?"));
+    }
+
+    #[test]
+    fn test_resolve_token_usage_prefers_real_usage() {
+        let real = Some((1200, 350, 800, 1550));
+        let usage = resolve_token_usage(real, 100, 40);
+        assert_eq!(usage, (1200, 350, 800, 1550));
+    }
+
+    #[test]
+    fn test_resolve_token_usage_falls_back_to_estimate() {
+        let usage = resolve_token_usage(None, 200, 40);
+        assert_eq!(usage, (100, 10, 0, 110));
+
+        let usage_short = resolve_token_usage(None, 200, 2);
+        assert_eq!(usage_short, (100, 1, 0, 101));
+
+        let usage_zero = resolve_token_usage(None, 200, 0);
+        assert_eq!(usage_zero, (100, 0, 0, 100));
     }
 }
