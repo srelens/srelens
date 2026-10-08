@@ -39,11 +39,15 @@ it("turns the top-bar Star button off and on, and opens the repository and its i
   expect(toggle.getAttribute("aria-checked")).toBe("false");
   await userEvent.click(toggle);
   expect(getStarState().show).toBe(true);
-  await userEvent.click(screen.getByRole("button", { name: "Star on GitHub" }));
+  expect(getStarState().nudged).toBe(false);
   await userEvent.click(screen.getByRole("button", { name: "Report an issue" }));
+  // Reporting an issue is not starring; going to star is, and is not asked about later.
+  expect(getStarState().nudged).toBe(false);
+  await userEvent.click(screen.getByRole("button", { name: "Star on GitHub" }));
+  expect(getStarState().nudged).toBe(true);
   expect(core.openExternal.mock.calls.map(([url]) => url)).toEqual([
-    "https://github.com/srelens/srelens",
     "https://github.com/srelens/srelens/issues/new/choose",
+    "https://github.com/srelens/srelens",
   ]);
 });
 it("says so when GitHub could not be opened from Settings", async () => {

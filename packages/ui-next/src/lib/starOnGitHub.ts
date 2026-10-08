@@ -83,13 +83,38 @@ function read(): StarState {
   return state;
 }
 
+/** The last write did not reach storage, so storage is behind this window. */
+let unsaved = false;
+
+/**
+ * What storage holds now, which another window may have changed since this one
+ * read it. Unless this window's own last write never landed: then this
+ * window's copy is the newer one and storage is not consulted.
+ */
+function stored(): StarState {
+  if (unsaved) return read();
+  try {
+    return parseStarState(settingsStorage.getItem(STAR_KEY));
+  } catch {
+    return read();
+  }
+}
+
+/**
+ * Change the named fields and nothing else. The patch is laid over what
+ * storage holds NOW rather than over this window's copy: with two windows
+ * open, a count arriving in one must not write back the `show` and `nudged`
+ * the other has since changed.
+ */
 function write(patch: Partial<StarState>): void {
-  state = { ...read(), ...patch };
+  state = { ...stored(), ...patch };
   try {
     settingsStorage.setItem(STAR_KEY, JSON.stringify(state));
+    unsaved = false;
   } catch {
     // Preference storage is unavailable. The choice holds for this session,
     // which is better than a button that ignores being turned off.
+    unsaved = true;
   }
   for (const listener of listeners) listener();
 }
@@ -132,12 +157,18 @@ let launchCounted = false;
 export function countLaunch(now: number = Date.now()): void {
   if (launchCounted) return;
   launchCounted = true;
-  const s = read();
+  const s = stored();
   write({ launches: s.launches + 1, firstLaunchAt: s.firstLaunchAt || now });
 }
 
-/** The nudge was answered — by starring, by "Not now", or by closing it. */
+/**
+ * The invitation was answered — by going to GitHub from any of the app's star
+ * buttons, by "Not now", or by closing the callout. Going there before the
+ * callout was ever due counts: someone who has already followed the button is
+ * not asked later whether they would like to.
+ */
 export function answerNudge(): void {
+  if (read().nudged && stored().nudged) return;
   write({ nudged: true });
 }
 
@@ -190,6 +221,7 @@ export async function refreshStarCount(
 /** Forget the in-memory state so a test starts from storage. */
 export function __resetStarForTests(): void {
   state = null;
+  unsaved = false;
   launchCounted = false;
   listeners.clear();
 }

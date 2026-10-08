@@ -147,6 +147,48 @@ describe("the reader's choice to show the button", () => {
   });
 });
 
+/**
+ * Two windows share one stored document and each holds its own copy of it. A
+ * write from one must change the fields it names and leave the rest as storage
+ * has them NOW, or a count arriving in one window undoes a choice made in the
+ * other.
+ */
+describe("with a second window open", () => {
+  /** What another window would do: change storage behind this one's back. */
+  function elsewhere(patch: Partial<StarState>) {
+    settingsStorage.setItem(STAR_KEY, JSON.stringify({ ...stored(), ...patch }));
+  }
+
+  it("a count arriving here does not undo a button hidden, or a question answered, there", async () => {
+    let reply!: (r: Response) => void;
+    const pending = vi.fn(() => new Promise<Response>((resolve) => (reply = resolve)));
+    const asking = refreshStarCount(T0, pending as unknown as typeof fetch);
+    elsewhere({ nudged: true });
+    reply({ ok: true, json: async () => ({ stargazers_count: 55 }) } as Response);
+    await asking;
+    expect(stored()).toMatchObject({ count: 55, nudged: true });
+    expect(getStarState()).toMatchObject({ count: 55, nudged: true });
+  });
+
+  it("counts its launch on top of the other window's", () => {
+    getStarState();
+    elsewhere({ launches: 7, firstLaunchAt: T0 - DAY });
+    countLaunch(T0);
+    expect(stored()).toMatchObject({ launches: 8, firstLaunchAt: T0 - DAY });
+  });
+
+  it("keeps a choice storage refused, rather than reading the old one back", () => {
+    const refuse = vi.spyOn(settingsStorage, "setItem").mockImplementation(() => {
+      throw new Error("Settings backend is unavailable");
+    });
+    setShowStarButton(false);
+    // A later write in the same window, still refused.
+    answerNudge();
+    refuse.mockRestore();
+    expect(getStarState()).toMatchObject({ show: false, nudged: true });
+  });
+});
+
 describe("refreshStarCount", () => {
   it("asks GitHub for the repository, with no credentials, and keeps the count", async () => {
     const fetcher = github({ stargazers_count: 1234 });

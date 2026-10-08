@@ -149,13 +149,55 @@ describe("the one-time nudge", () => {
     expect(getStarState().nudged).toBe(true);
   });
 
-  it("does not ask over a locked workspace, and has not been used up by waiting", () => {
+  it("draws neither the button nor the question over a locked workspace, and uses neither up", () => {
     seed(due);
     lockWorkspace();
     render(<StarButton />);
+    // A locked window offers nothing to press but what unlocks it.
     expect(nudge()).toBeNull();
-    expect(button()).toBeDefined();
+    expect(screen.queryByRole("button")).toBeNull();
     expect(getStarState().nudged).toBe(false);
+  });
+
+  it("is never put to someone who already followed the button, before it was due", async () => {
+    seed({ launches: 1, firstLaunchAt: Date.now() });
+    const { unmount } = render(<StarButton />);
+    await userEvent.click(button());
+    expect(getStarState().nudged).toBe(true);
+    // Weeks and launches later, it still does not ask.
+    unmount();
+    seed({ ...getStarState(), ...due });
+    render(<StarButton />);
+    expect(nudge()).toBeNull();
+  });
+
+  it("hands the keyboard to the pill when it is answered from inside", async () => {
+    seed(due);
+    render(<StarButton />);
+    const notNow = screen.getByRole("button", { name: "Not now" });
+    notNow.focus();
+    await userEvent.keyboard("{Enter}");
+    expect(nudge()).toBeNull();
+    // Not the document body, which is where focus on a removed button lands.
+    expect(document.activeElement).toBe(button());
+  });
+
+  it("hands the keyboard to the pill on Escape from inside, too", async () => {
+    seed(due);
+    render(<StarButton />);
+    screen.getByRole("button", { name: "Star on GitHub" }).focus();
+    await userEvent.keyboard("{Escape}");
+    expect(document.activeElement).toBe(button());
+  });
+
+  it("leaves focus where it was when answered from elsewhere", async () => {
+    seed(due);
+    render(<><input aria-label="elsewhere" /><StarButton /></>);
+    const elsewhere = screen.getByRole("textbox", { name: "elsewhere" });
+    elsewhere.focus();
+    await userEvent.keyboard("{Escape}");
+    expect(nudge()).toBeNull();
+    expect(document.activeElement).toBe(elsewhere);
   });
 
   it("listens for Escape only while it is asking", async () => {

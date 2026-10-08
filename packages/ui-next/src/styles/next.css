@@ -96,37 +96,35 @@
 }
 
 /* The top bar's Star on GitHub pill (#850). The one control in the bar that is
-   meant to stand out, and the one place in this stylesheet with colours that
-   are not tokens: they are GitHub's own — its button ink and its star gold —
-   and they are the point. A pill that followed the theme would be one more
-   grey control; this one is recognisably "that is GitHub" on every theme.
-   The border and the light ink keep it legible on the dark title bars too. */
+   meant to stand out: a pill in GitHub's own palette — the `--gh-*` tokens,
+   declared with the rest in the kit's `tokens.css` and held to the same
+   contrast floors — so it is recognisably "that is GitHub" on every theme
+   where a pill that took the theme's colours would be one more grey control. */
 .gh-star {
   display: inline-flex; align-items: center; gap: 6px; height: 22px; padding: 0 9px 0 7px; margin-right: 6px;
-  border-radius: 999px; border: 1px solid rgba(240, 246, 252, .18); background: #24292f; color: #f6f8fa;
+  border-radius: 999px; border: 1px solid var(--gh-line); background: var(--gh-surface); color: var(--gh-ink);
   font-size: 11px; font-weight: 600; line-height: 1; white-space: nowrap;
-  box-shadow: 0 1px 0 rgba(27, 31, 36, .12);
   transition: background 120ms ease, box-shadow 160ms ease, transform 120ms ease;
 }
-.gh-star:hover { background: #32383f; box-shadow: 0 0 0 3px rgba(227, 179, 65, .3); }
+.gh-star:hover { background: var(--gh-surface-hover); box-shadow: 0 0 0 3px color-mix(in srgb, var(--gh-star) 32%, transparent); }
 .gh-star:active { transform: scale(.97); }
 .gh-star:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .gh-star-mark { flex-shrink: 0; }
-.gh-star-count { display: inline-flex; align-items: center; gap: 4px; padding-left: 7px; border-left: 1px solid rgba(240, 246, 252, .24); font-variant-numeric: tabular-nums; }
+.gh-star-count { display: inline-flex; align-items: center; gap: 4px; padding-left: 7px; border-left: 1px solid color-mix(in srgb, var(--gh-ink) 38%, transparent); font-variant-numeric: tabular-nums; }
 /* The star is outlined at rest and fills as the pointer arrives: the button
    shows what pressing it will do on the page it opens. */
-.gh-star-glyph { color: #e3b341; fill: transparent; transition: fill 180ms ease, transform 240ms cubic-bezier(.3, 1.6, .5, 1); }
-.gh-star:hover .gh-star-glyph, .gh-star:focus-visible .gh-star-glyph { fill: #e3b341; transform: rotate(72deg) scale(1.2); }
+.gh-star-glyph { color: var(--gh-star); fill: transparent; transition: fill 180ms ease, transform 240ms cubic-bezier(.3, 1.6, .5, 1); }
+.gh-star:hover .gh-star-glyph, .gh-star:focus-visible .gh-star-glyph { fill: var(--gh-star); transform: rotate(72deg) scale(1.2); }
 /* While the one-time question is on screen the pill breathes, so the callout
    under it reads as belonging to it. It stops with the answer. */
 .gh-star[data-asking="true"] { animation: gh-star-pulse 2.4s ease-out infinite; }
 @keyframes gh-star-pulse {
-  0% { box-shadow: 0 0 0 0 rgba(227, 179, 65, .6); }
-  70%, 100% { box-shadow: 0 0 0 7px rgba(227, 179, 65, 0); }
+  0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--gh-star) 60%, transparent); }
+  70%, 100% { box-shadow: 0 0 0 7px color-mix(in srgb, var(--gh-star) 0%, transparent); }
 }
 @media (prefers-reduced-motion: reduce) {
   .gh-star, .gh-star-glyph { transition: none; }
-  .gh-star[data-asking="true"] { animation: none; box-shadow: 0 0 0 3px rgba(227, 179, 65, .45); }
+  .gh-star[data-asking="true"] { animation: none; box-shadow: 0 0 0 3px color-mix(in srgb, var(--gh-star) 45%, transparent); }
   .gh-star:hover .gh-star-glyph, .gh-star:focus-visible .gh-star-glyph { transform: none; }
 }
 /* A narrow window keeps the mark in a circle and lets the words go, so the

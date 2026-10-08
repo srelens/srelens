@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { describeError, openExternal } from "@srelens/core";
 import { Button } from "@srelens/ui-kit";
 import { Icons } from "../lib/icons";
@@ -42,9 +42,10 @@ function GitHubMark() {
  * window's to start (`Window`), once, so that drawing this button in a test or
  * a gallery never reaches the network.
  *
- * Nothing is asked while the workspace is sealed. The button stays — it leads
- * out of the app, not into the workspace — but a callout over a lock screen is
- * one more thing between the reader and unlocking.
+ * Neither is drawn while the workspace is sealed. A locked window offers what
+ * unlocks it and what makes it legible, and nothing else that can be pressed —
+ * the rule the status bar and the Settings gear already follow. The question
+ * is not used up by waiting behind the lock.
  *
  * The nudge is not a dialog: it does not take focus, trap it, or dim anything.
  * It is a labelled group beside the button, reachable in the tab order right
@@ -57,23 +58,40 @@ export function StarButton() {
   // an hour later in the middle of something.
   const [mountedAt] = useState(() => Date.now());
   const [failure, setFailure] = useState<string | null>(null);
+  const pill = useRef<HTMLButtonElement>(null);
+  const callout = useRef<HTMLDivElement>(null);
   const asking = !sealed && nudgeDue(star, mountedAt);
+
+  /**
+   * Answer the question. If the keyboard was inside the callout, it goes to
+   * the pill the callout hung from: the callout is about to leave the page,
+   * and focus left on a removed button lands on the document body.
+   */
+  function answer() {
+    const within = callout.current?.contains(document.activeElement) === true;
+    answerNudge();
+    if (within) pill.current?.focus();
+  }
 
   useEffect(() => {
     if (!asking) return undefined;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") answerNudge();
+      if (e.key !== "Escape") return;
+      // As `answer` below: the keyboard goes to the pill if it was inside.
+      const within = callout.current?.contains(document.activeElement) === true;
+      answerNudge();
+      if (within) pill.current?.focus();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [asking]);
 
-  if (!star.show) return null;
+  if (!star.show || sealed) return null;
 
   function open() {
     setFailure(null);
-    // Answered by going, whichever of the two buttons took the reader there.
-    if (asking) answerNudge();
+    // Answered by going, whether or not the question had been put yet.
+    answer();
     openExternal(REPO_URL).catch((error: unknown) => {
       // Said beside the button: the reader pressed it and nothing opened.
       setFailure(describeError(error).title);
@@ -83,6 +101,7 @@ export function StarButton() {
   return (
     <span className="relative inline-flex items-center" data-slot="star">
       <button
+        ref={pill}
         type="button"
         className="gh-star"
         data-asking={asking || undefined}
@@ -106,6 +125,7 @@ export function StarButton() {
       )}
       {asking && (
         <div
+          ref={callout}
           role="group"
           aria-label="Enjoying srelens?"
           // `.popover` places itself with `position: fixed`; this one hangs
@@ -116,7 +136,7 @@ export function StarButton() {
           <p className="font-semibold text-ink">Enjoying srelens?</p>
           <p className="text-muted">A star on GitHub costs a click, and {WHY}.</p>
           <div className="flex justify-end gap-1.5">
-            <Button variant="secondary" size="sm" onClick={answerNudge}>
+            <Button variant="secondary" size="sm" onClick={answer}>
               Not now
             </Button>
             <Button variant="primary" size="sm" onClick={open}>
