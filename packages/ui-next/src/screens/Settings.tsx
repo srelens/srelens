@@ -14,16 +14,21 @@ import { AuditPane } from "./settings/AuditPane";
 import { McpServer } from "./settings/McpServer";
 import { SecurityPane } from "./settings/SecurityPane";
 import { BackupPane } from "./settings/BackupPane";
-import { AccessibilityPane, ClustersPane, ShortcutsPane } from "./settings/SmallPanes";
+import { AccessibilityPane, ClustersPane, DeepLinksPane, ShortcutsPane } from "./settings/SmallPanes";
 
 /** Settings use the new design's stores and shared core commands. */
 /** §23's rail width for this screen, and this screen's alone (§A.1's table). */
 const NAV_WIDTH = 196;
 
-type SectionId = "extensions" | "agent" | "security" | "backup" | "appearance" | "accessibility" | "shortcuts" | "workspace" | "kubernetes" | "logs" | "updates" | "clusters";
+type SectionId = "extensions" | "agent" | "security" | "backup" | "appearance" | "accessibility" | "shortcuts" | "deeplinks" | "workspace" | "kubernetes" | "logs" | "updates" | "clusters";
 
 /**
- * §23's nav, in §23's order, minus `Deep links`.
+ * §23's nav, in §23's order.
+ *
+ * **`Deep links` is desktop-only** because only the desktop app registers the
+ * `srelens://` scheme and drains the links it receives (`shell/useDeepLinks`).
+ * In a browser no such link ever reaches srelens, so a pane listing link forms
+ * there would describe links that do nothing.
  *
  * `desktopOnly` is carried here rather than checked at the render site so the
  * order lives in exactly one list: a second array for the web build is a
@@ -86,6 +91,7 @@ const SECTIONS: ReadonlyArray<{ id: SectionId; label: string; desktopOnly?: true
   { id: "appearance", label: "Appearance" },
   { id: "accessibility", label: "Accessibility" },
   { id: "shortcuts", label: "Shortcuts" },
+  { id: "deeplinks", label: "Deep links", desktopOnly: true },
   { id: "workspace", label: "Workspace" },
   { id: "kubernetes", label: "Kubernetes" },
   { id: "logs", label: "Application logs" },
@@ -208,6 +214,8 @@ export function Settings({ ported, onSwitchToClassic, onLocked }: SettingsProps)
         return <AccessibilityPane />;
       case "shortcuts":
         return <ShortcutsPane />;
+      case "deeplinks":
+        return <DeepLinksPane />;
       case "workspace":
         return <WorkspacePane />;
       case "kubernetes":
