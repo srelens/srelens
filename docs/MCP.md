@@ -369,12 +369,18 @@ calls capabilities through Tauri, not MCP, and sees the untrimmed answer.
 anywhere in it, and the text stays valid JSON:
 
 - `metadata.managedFields` is dropped.
-- The `kubectl.kubernetes.io/last-applied-configuration` annotation keeps its
-  key; its value becomes `<omitted by srelens: N-byte copy of the manifest as
-  last applied with kubectl>`. The other annotations are untouched.
-- On an object of `"kind": "Node"`, `status.images` becomes `<omitted by
-  srelens: N cached container images; k8s.getManifest returns them>`. Any
-  other kind's `status.images` is left alone.
+- The `kubectl.kubernetes.io/last-applied-configuration` annotation in
+  `metadata.annotations` keeps its key; its value becomes `<omitted by
+  srelens: N-byte copy of the manifest as last applied with kubectl>`. The
+  other annotations are untouched, and so is the same key anywhere outside
+  `metadata`.
+- On a core Node (`"apiVersion": "v1"`, `"kind": "Node"`), `status.images`
+  becomes `<omitted by srelens: N cached container images; k8s.getManifest
+  returns them>`. Any other kind's `status.images` is left alone, including a
+  custom resource's that is also called `Node`.
+
+Each rule matches only where Kubernetes puts that field, so a custom
+resource's or an app's own data that happens to share a name is sent as it is.
 
 **Size limit.** After trimming, a **read-only** tool's answer over **50,000
 bytes** of compact JSON (`MAX_RESULT_BYTES`) is not sent. The call returns

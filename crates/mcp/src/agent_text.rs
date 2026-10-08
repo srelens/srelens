@@ -23,20 +23,23 @@ pub(crate) fn trim(v: &mut Value) {
     match v {
         Value::Array(items) => items.iter_mut().for_each(trim),
         Value::Object(map) => {
-            // Only ever under `metadata`; elsewhere the key is someone's data.
+            // Only ever under `metadata`; elsewhere these keys are someone's data.
             if let Some(Value::Object(meta)) = map.get_mut("metadata") {
                 meta.remove("managedFields");
+                if let Some(Value::String(applied)) = meta
+                    .get_mut("annotations")
+                    .and_then(|a| a.get_mut(LAST_APPLIED))
+                {
+                    *applied = format!(
+                        "<omitted by srelens: {}-byte copy of the manifest as last applied with kubectl>",
+                        applied.len()
+                    );
+                }
             }
-            if let Some(Value::String(applied)) = map
-                .get_mut("annotations")
-                .and_then(|a| a.get_mut(LAST_APPLIED))
+            // The core group's Node only: a custom resource may share the name.
+            if map.get("apiVersion").and_then(Value::as_str) == Some("v1")
+                && map.get("kind").and_then(Value::as_str) == Some("Node")
             {
-                *applied = format!(
-                    "<omitted by srelens: {}-byte copy of the manifest as last applied with kubectl>",
-                    applied.len()
-                );
-            }
-            if map.get("kind").and_then(Value::as_str) == Some("Node") {
                 if let Some(images) = map.get_mut("status").and_then(|s| s.get_mut("images")) {
                     if let Some(n) = images.as_array().map(Vec::len) {
                         *images = Value::String(format!(
@@ -125,6 +128,7 @@ mod tests {
     #[test]
     fn a_nodes_images_become_a_count_naming_get_manifest_and_allocatable_stays() {
         let mut v = json!({
+            "apiVersion": "v1",
             "kind": "Node",
             "status": {
                 "allocatable": { "cpu": "4" },
@@ -142,7 +146,7 @@ mod tests {
 
     #[test]
     fn a_node_inside_a_list_is_trimmed_too() {
-        let mut v = json!({ "items": [{ "kind": "Node", "status": { "images": [{}] } }] });
+        let mut v = json!({ "items": [{ "apiVersion": "v1", "kind": "Node", "status": { "images": [{}] } }] });
         trim(&mut v);
         assert!(v["items"][0]["status"]["images"].is_string());
     }
@@ -151,6 +155,33 @@ mod tests {
     fn images_on_any_other_kind_stay() {
         let original =
             json!({ "kind": "ImageCache", "status": { "images": [{ "names": ["a"] }] } });
+        let mut v = original.clone();
+        trim(&mut v);
+        assert_eq!(v, original);
+    }
+
+    /// A custom resource may legally be called `Node`; its images are its
+    /// own data, not the kubelet's cache (PR #859 review).
+    #[test]
+    fn images_on_a_custom_kind_named_node_stay() {
+        let original = json!({
+            "apiVersion": "example.com/v1",
+            "kind": "Node",
+            "status": { "images": [{ "names": ["a"] }] }
+        });
+        let mut v = original.clone();
+        trim(&mut v);
+        assert_eq!(v, original);
+    }
+
+    /// kubectl writes the annotation into `metadata`; the same key anywhere
+    /// else is an app's or a custom resource's own value (PR #859 review).
+    #[test]
+    fn last_applied_outside_metadata_stays() {
+        let original = json!({
+            "spec": { "annotations": { LAST_APPLIED: "mine" } },
+            "data": { "annotations": { LAST_APPLIED: "also mine" } }
+        });
         let mut v = original.clone();
         trim(&mut v);
         assert_eq!(v, original);

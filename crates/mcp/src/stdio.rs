@@ -1211,6 +1211,7 @@ mod tests {
         let mut reg = Registry::new();
         reg.register(Capability::read_only("node", "a node", |_| async {
             Ok(json!({
+                "apiVersion": "v1",
                 "kind": "Node",
                 "metadata": { "name": "n1", "managedFields": [{ "manager": "kubelet" }] },
                 "status": { "allocatable": { "cpu": "4" }, "images": [{ "names": ["a"] }] }
