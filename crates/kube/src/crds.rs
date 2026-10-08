@@ -153,14 +153,26 @@ fn version_printer_columns(version: &serde_json::Value) -> Vec<PrinterColumn> {
 /// better than a blob of JSON.
 /// Restricted scalar projection shared by CRD printer columns and host-owned app columns.
 pub fn resolve_json_path(value: &serde_json::Value, path: &str) -> String {
+    match json_path_value(value, path) {
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(serde_json::Value::Number(n)) => n.to_string(),
+        Some(serde_json::Value::Bool(b)) => b.to_string(),
+        _ => String::new(),
+    }
+}
+
+/// The value a [`resolve_json_path`] path lands on, unrendered — a map or a
+/// list as well as a scalar. `None` when the path is absent or malformed.
+pub fn json_path_value<'v>(
+    value: &'v serde_json::Value,
+    path: &str,
+) -> Option<&'v serde_json::Value> {
     let mut current = value;
     let mut rest = path.trim_start_matches('.');
     while !rest.is_empty() {
         let (segment, remainder) = match rest.strip_prefix('[') {
             Some(open) => {
-                let Some(close) = open.find(']') else {
-                    return String::new();
-                };
+                let close = open.find(']')?;
                 (
                     Segment::bracket(&open[..close]),
                     open[close + 1..].trim_start_matches('.'),
@@ -190,18 +202,10 @@ pub fn resolve_json_path(value: &serde_json::Value, path: &str) -> String {
                 (Segment::Key(key), rest[end..].trim_start_matches('.'))
             }
         };
-        let Some(next) = segment.apply(current) else {
-            return String::new();
-        };
-        current = next;
+        current = segment.apply(current)?;
         rest = remainder;
     }
-    match current {
-        serde_json::Value::String(s) => s.clone(),
-        serde_json::Value::Number(n) => n.to_string(),
-        serde_json::Value::Bool(b) => b.to_string(),
-        _ => String::new(),
-    }
+    Some(current)
 }
 
 /// One step of a CRD jsonPath.
@@ -978,6 +982,27 @@ mod tests {
         // kubectl renders arrays/objects poorly; an empty cell beats noise.
         assert_eq!(resolve_json_path(&obj(), ".status.conditions"), "");
         assert_eq!(resolve_json_path(&obj(), ".spec"), "");
+    }
+
+    /// The same walk, handing back the JSON it lands on — a whole map or list
+    /// as well as a scalar — for callers that project fields rather than
+    /// render a cell.
+    #[test]
+    fn json_path_value_returns_the_subtree_and_none_when_absent() {
+        assert_eq!(
+            json_path_value(&obj(), ".spec"),
+            Some(&serde_json::json!({ "version": "4.1.2", "nodes": 3, "paused": false }))
+        );
+        assert_eq!(
+            json_path_value(&obj(), ".metadata.labels['app.kubernetes.io/name']"),
+            Some(&serde_json::json!("cassandra"))
+        );
+        assert_eq!(
+            json_path_value(&fluxish(), ".status.conditions[?(@.type==\"Ready\")]"),
+            Some(&fluxish()["status"]["conditions"][1])
+        );
+        assert_eq!(json_path_value(&obj(), ".status.nope"), None);
+        assert_eq!(json_path_value(&obj(), ".spec.ports[0"), None);
     }
 
     fn spec_with_columns() -> serde_json::Value {
