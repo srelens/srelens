@@ -344,6 +344,17 @@ function nodeLoad(n: NodeRow) {
 const USAGE_CELL = "flex min-w-[13rem] items-center gap-2";
 
 /**
+ * The narrowest a usage column may be dragged: the cell's own 13rem (208px)
+ * and the padding either side of it.
+ *
+ * `Column.minWidth` is the floor a resize stops at, and without one it is
+ * 72px — well under what the cell above will shrink to. Dragged below 13rem
+ * the column kept the width it was given and the bar ran on into the column
+ * beside it, since a table cell does not clip what overflows it.
+ */
+const USAGE_COLUMN_MIN_WIDTH = 232;
+
+/**
  * One node's CPU or memory in the Nodes list: the amount, and the same bar
  * Overview draws for it (#830).
  *
@@ -420,6 +431,7 @@ export const nodeColumns: Column<NodeRow>[] = [
     key: "cpu",
     header: "CPU",
     sortable: true,
+    minWidth: USAGE_COLUMN_MIN_WIDTH,
     // By the share of the node in use, which is what the bar draws: sorted on
     // the amount, a small node at 90% sat below a large one at 20%, and the
     // column's order contradicted its own bars.
@@ -438,6 +450,7 @@ export const nodeColumns: Column<NodeRow>[] = [
     key: "memory",
     header: "Memory",
     sortable: true,
+    minWidth: USAGE_COLUMN_MIN_WIDTH,
     getSortValue: (n) => metricSort(nodeLoad(n).memoryPercent ?? undefined),
     render: (n) => (
       <NodeUsageCell

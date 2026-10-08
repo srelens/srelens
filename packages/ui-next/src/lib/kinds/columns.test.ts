@@ -429,6 +429,15 @@ describe("node columns", () => {
       expect(withBar).toMatch(/min-w-\[/);
     });
 
+    it("cannot be dragged narrower than the cell will shrink to (PR #840 review)", () => {
+      // The cell's own floor is 13rem — 208px — and a table cell does not clip:
+      // at the default 72px floor the bar ran on into the column beside it.
+      for (const column of [cpu, memory]) {
+        expect(column.minWidth).toBeGreaterThanOrEqual(208);
+      }
+      expect(cpu.minWidth).toBe(memory.minWidth);
+    });
+
     it("sorts by the share in use, which is what the bar shows, with no reading last", () => {
       const small: NodeRow = { ...node, name: "small", allocatableCpuMillicores: 1000, cpu: 900, memory: 1 };
       const large: NodeRow = { ...node, name: "large", allocatableCpuMillicores: 16000, cpu: 3200, memory: 1 };
