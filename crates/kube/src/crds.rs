@@ -181,11 +181,11 @@ pub fn json_path_problem(path: &str) -> Option<&'static str> {
             let quoted = inner.len() >= 2
                 && ((inner.starts_with('\'') && inner.ends_with('\''))
                     || (inner.starts_with('"') && inner.ends_with('"')));
-            let filter = inner.starts_with("?(") && inner.ends_with(')') && inner.contains("==");
-            if !(quoted || filter || inner.parse::<usize>().is_ok()) {
+            if !(quoted || single_equality(inner) || inner.parse::<usize>().is_ok()) {
                 return Some(
-                    "uses a bracket other than [0], ['key'] or [?(@.field==\"value\")]; \
-                     wildcards [*], slices and negative indexes are not supported",
+                    "uses a bracket other than [0], ['key'] or one [?(@.field==\"value\")]; \
+                     wildcards [*], slices, negative indexes and composite or non-equality \
+                     filters are not supported",
                 );
             }
             rest = &open[close + 1..];
@@ -195,7 +195,9 @@ pub fn json_path_problem(path: &str) -> Option<&'static str> {
             while let Some((index, ch)) = chars.next() {
                 match ch {
                     '\\' => {
-                        chars.next();
+                        if chars.next().is_none() {
+                            return Some("ends with an unfinished '\\' escape");
+                        }
                     }
                     '.' | '[' => {
                         end = index;
@@ -208,6 +210,9 @@ pub fn json_path_problem(path: &str) -> Option<&'static str> {
             rest = &rest[end..];
         }
         if let Some(after) = rest.strip_prefix('.') {
+            if after.is_empty() {
+                return Some("ends with '.'");
+            }
             if after.starts_with('.') {
                 return Some("uses '..', which is not supported");
             }
@@ -215,6 +220,30 @@ pub fn json_path_problem(path: &str) -> Option<&'static str> {
         }
     }
     None
+}
+
+/// `?(@.field==literal)` with one plain field and one literal — the only
+/// predicate `Segment::bracket` evaluates. It splits at the first `==`, so a
+/// composite (`&&`, `||`) would compare against the rest of the expression.
+fn single_equality(inner: &str) -> bool {
+    let Some(expression) = inner.strip_prefix("?(").and_then(|e| e.strip_suffix(')')) else {
+        return false;
+    };
+    let Some((field, literal)) = expression.split_once("==") else {
+        return false;
+    };
+    let (field, literal) = (field.trim(), literal.trim());
+    let plain = |c: char| c.is_ascii_alphanumeric() || "._-/".contains(c);
+    let quoted_with = |q: char| {
+        literal.len() >= 2
+            && literal.starts_with(q)
+            && literal.ends_with(q)
+            && !literal[1..literal.len() - 1].contains(q)
+    };
+    let literal_ok = quoted_with('"')
+        || quoted_with('\'')
+        || (!literal.is_empty() && literal.chars().all(plain));
+    field.strip_prefix('@').is_some_and(|f| f.chars().all(plain)) && literal_ok
 }
 
 /// The value a [`resolve_json_path`] path lands on, unrendered — a map or a
@@ -1074,6 +1103,7 @@ mod tests {
             ".metadata.labels[\"app.kubernetes.io/name\"]",
             ".status.conditions[?(@.type==\"Ready\")].status",
             ".status.conditions[?(@.type == 'Stalled')].status",
+            ".status.conditions[?(@.type==Ready)].status",
             ".spec.ports[1].port",
         ] {
             assert_eq!(json_path_problem(good), None, "{good:?}");
@@ -1093,6 +1123,15 @@ mod tests {
             ".status.conditions[?(@.count>1)]",
             "..image",
             ".spec..image",
+            // The walker splits at the first `==`, so a composite predicate
+            // would compare against `Ready"&&@.status=="True` and match nothing.
+            ".status.conditions[?(@.type==\"Ready\"&&@.status==\"True\")].status",
+            ".status.conditions[?(@.type==\"Ready\" || @.type==\"Stalled\")]",
+            ".status.conditions[?(@.type!=\"Ready\")]",
+            // An unfinished suffix the walker would drop, reading another path.
+            r".metadata.name\",
+            ".metadata.",
+            ".spec.ports[0].",
         ] {
             assert!(json_path_problem(bad).is_some(), "{bad:?} must be refused");
         }

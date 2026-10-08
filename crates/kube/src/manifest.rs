@@ -322,8 +322,8 @@ pub struct GetObjectIn {
     /// `.metadata.labels['app.kubernetes.io/name']`, `.spec.containers[0].image`
     /// or `.status.conditions[?(@.type=="Ready")].status`. The result maps each
     /// path to its value, `null` where the object has none. Wildcards `[*]`,
-    /// slices and `..` are not supported: ask for the parent, e.g.
-    /// `.spec.containers`. At most 32 paths.
+    /// slices, `..` and filters other than one `==` are not supported: ask for
+    /// the parent, e.g. `.spec.containers`. At most 32 paths.
     #[serde(default)]
     pub fields: Vec<String>,
 }
@@ -601,9 +601,9 @@ pub struct ListResourceIn {
     /// JSONPath, each starting with '.', e.g. `.status.allocatable`,
     /// `.metadata.labels['app.kubernetes.io/name']`, `.spec.containers[0].image`
     /// or `.status.conditions[?(@.type=="Ready")].status`. Each row maps a path
-    /// to its value, `null` where that item has none. Wildcards `[*]`, slices
-    /// and `..` are not supported: ask for the parent, e.g. `.spec.containers`.
-    /// At most 32 paths.
+    /// to its value, `null` where that item has none. Wildcards `[*]`, slices,
+    /// `..` and filters other than one `==` are not supported: ask for the
+    /// parent, e.g. `.spec.containers`. At most 32 paths.
     #[serde(default)]
     pub fields: Vec<String>,
 }
@@ -2784,6 +2784,7 @@ metadata:
             ".a][",
             ".spec.containers[*].image",
             "..image",
+            ".status.conditions[?(@.type==\"Ready\"&&@.status==\"True\")].status",
         ] {
             assert!(
                 matches!(check_fields(&[bad.to_string()]), Err(CapabilityError::InvalidInput(_))),
