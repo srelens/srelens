@@ -21,6 +21,9 @@ let terminalSeq = 0;
  * starts it as the terminal's first process, so it is not keystrokes that a
  * shell still reading its rc files could swallow (#820). Written in POSIX
  * quoting, as `toKubectl` writes it; the caller has already asked the reader.
+ *
+ * `namespace`, when given, is the one `kubectl` uses by default in this shell
+ * (#846). Left out, the kubeconfig's own default stands.
  */
 export async function startLocalTerminal(
   context: string,
@@ -29,6 +32,7 @@ export async function startLocalTerminal(
   onExit: () => void,
   size?: { cols: number; rows: number },
   command?: string,
+  namespace?: string,
 ): Promise<TerminalSession> {
   // Unique channel so we can subscribe BEFORE the backend spawns and emits —
   // otherwise the first prompt can race ahead of the listener.
@@ -44,6 +48,7 @@ export async function startLocalTerminal(
       cols: size?.cols ?? null,
       rows: size?.rows ?? null,
       command: command ?? null,
+      namespace: namespace ?? null,
     });
   } catch (e) {
     disposeOut();

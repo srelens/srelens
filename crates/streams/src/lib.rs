@@ -9,6 +9,7 @@ pub mod helm;
 pub mod logs;
 pub mod sink;
 pub mod terminal;
+mod terminal_scope;
 pub mod test_util;
 pub mod watch;
 

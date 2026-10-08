@@ -18,6 +18,7 @@ import { useDismissOnPause } from "../lib/pausedContext";
 import {
   endSession,
   getSessions,
+  renameSession,
   subscribeSessions,
   terminalFor,
   type TerminalSessionRow,
@@ -316,6 +317,8 @@ export function Terminals(_props: { route: string }) {
             sessions={sessions}
             activeId={active?.id ?? null}
             onSelect={setPicked}
+            onRename={renameSession}
+            onDetach={endSession}
             // The rail's own door into the menu, pinning the cluster exactly as
             // the toolbar's does above: two doors to one dialog is how the two
             // start disagreeing about which cluster they opened it on.

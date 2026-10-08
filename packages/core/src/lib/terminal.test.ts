@@ -26,7 +26,13 @@ describe("startLocalTerminal", () => {
       cols: 80,
       rows: 24,
       command: null,
+      namespace: null,
     });
+  });
+
+  it("hands the host the namespace the shell should start in", async () => {
+    await startLocalTerminal("prod", [], () => {}, () => {}, undefined, undefined, "payments");
+    expect(started()).toMatchObject({ namespace: "payments", command: null });
   });
 
   it("hands a command to the host to run first, under the name the host reads it by", async () => {

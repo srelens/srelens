@@ -21,6 +21,7 @@ import { hint, type WindowAction } from "../../lib/shortcuts";
  */
 const WINDOW_ACTIONS: ReadonlyArray<{ type: WindowAction["type"]; label: string }> = [
   { type: "console", label: "Open the console" },
+  { type: "terminal", label: "Open a terminal for the current cluster" },
   // First after the console, because §25's surface is the one on this list a
   // reader might need in a hurry.
   { type: "lock", label: "Lock the workspace" },

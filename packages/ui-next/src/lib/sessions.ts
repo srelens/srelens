@@ -131,6 +131,13 @@ export interface LocalSessionRequest {
    * The caller has already asked. Nothing here confirms anything.
    */
   command?: string;
+  /**
+   * The namespace `kubectl` uses by default in this shell — the one the tab it
+   * was opened from is looking at (#846). Left out, the kubeconfig's own
+   * default stands. A starting point, not an identity: the reader can change
+   * it from inside the shell, which is why the row below still records none.
+   */
+  namespace?: string;
 }
 
 /**
@@ -268,6 +275,7 @@ export async function startLocalSession(req: LocalSessionRequest): Promise<numbe
       () => onExit(null),
       size,
       req.command,
+      req.namespace,
     ),
   );
   return id;
@@ -310,6 +318,23 @@ function settled(id: number) {
   clearTimeout(settleTimers.get(id));
   settleTimers.delete(id);
   for (const listener of [...(settleListeners.get(id) ?? [])]) listener();
+}
+
+/**
+ * Give this session the name the reader wants to know it by.
+ *
+ * Three local shells opened from the status bar are all "Local shell", and the
+ * only thing telling them apart is what the reader remembers typing in each.
+ * The name is the row's and nothing else's: the far end never hears it, and it
+ * lasts as long as the session does.
+ *
+ * A blank name is not a name. It is ignored rather than stored, so a row can
+ * never be left with nothing to be picked by.
+ */
+export function renameSession(id: number, title: string): void {
+  const next = title.trim();
+  if (next === "") return;
+  commit(sessions.map((s) => (s.id === id && s.title !== next ? { ...s, title: next } : s)));
 }
 
 /**

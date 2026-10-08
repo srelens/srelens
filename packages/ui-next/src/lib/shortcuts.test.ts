@@ -69,6 +69,17 @@ describe("matchWindowKey", () => {
     expect(matchWindowKey({ ...ev("t", { metaKey: true }), target: input }, true)).toBeNull();
   });
 
+  it("opens a terminal on Mod+J, and not from a typing target", () => {
+    // Not Mod+`: macOS answers that itself, with the app's next window.
+    expect(matchWindowKey(ev("j", { metaKey: true }), true)).toEqual({ type: "terminal" });
+    expect(matchWindowKey(ev("j", { ctrlKey: true }), false)).toEqual({ type: "terminal" });
+    // A shell is itself a typing target: the chord pressed inside one must
+    // reach the shell, not open a second.
+    const input = document.createElement("input");
+    expect(matchWindowKey({ ...ev("j", { metaKey: true }), target: input }, true)).toBeNull();
+    expect(hint("terminal", false)).toBe("Ctrl+J");
+  });
+
   it("lets the console key through from a typing target", () => {
     const input = document.createElement("input");
     expect(matchWindowKey({ ...ev("k", { metaKey: true }), target: input }, true)).toEqual({
