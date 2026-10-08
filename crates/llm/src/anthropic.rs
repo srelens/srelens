@@ -93,6 +93,7 @@ pub struct Stream {
     blocks: HashMap<u64, Block>,
     stop_reason: Option<PendingStop>,
     prompt_tokens: usize,
+    cache_creation_tokens: usize,
     cached_tokens: usize,
     completion_tokens: usize,
 }
@@ -122,6 +123,10 @@ impl Stream {
                 if let Some(usage) = v.get("message").and_then(|m| m.get("usage")) {
                     self.prompt_tokens = usage
                         .get("input_tokens")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0) as usize;
+                    self.cache_creation_tokens = usage
+                        .get("cache_creation_input_tokens")
                         .and_then(Value::as_u64)
                         .unwrap_or(0) as usize;
                     self.cached_tokens = usage
@@ -168,8 +173,13 @@ impl Stream {
                     Some(PendingStop::Clean(reason)) => vec![StreamItem::Done(reason)],
                     None => vec![StreamItem::Done(StopReason::EndTurn)],
                 };
-                if self.prompt_tokens > 0 || self.completion_tokens > 0 || self.cached_tokens > 0 {
-                    let total_prompt = self.prompt_tokens + self.cached_tokens;
+                if self.prompt_tokens > 0
+                    || self.cache_creation_tokens > 0
+                    || self.completion_tokens > 0
+                    || self.cached_tokens > 0
+                {
+                    let total_prompt =
+                        self.prompt_tokens + self.cache_creation_tokens + self.cached_tokens;
                     out.push(StreamItem::Usage(TokenUsage {
                         prompt_tokens: total_prompt,
                         completion_tokens: self.completion_tokens,
@@ -536,6 +546,26 @@ mod tests {
                     completion_tokens: 150,
                     cached_tokens: 1024,
                     total_tokens: 3219,
+                }),
+            ]
+        );
+    }
+
+    #[test]
+    fn stream_parses_anthropic_usage_with_cache_creation() {
+        let mut s = Stream::new();
+        s.push(r#"{"type":"message_start","message":{"usage":{"input_tokens":10,"cache_creation_input_tokens":5000,"cache_read_input_tokens":0,"output_tokens":1}}}"#);
+        s.push(r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":80}}"#);
+        let items = s.push(r#"{"type":"message_stop"}"#);
+        assert_eq!(
+            items,
+            vec![
+                StreamItem::Done(StopReason::EndTurn),
+                StreamItem::Usage(TokenUsage {
+                    prompt_tokens: 5010,
+                    completion_tokens: 80,
+                    cached_tokens: 0,
+                    total_tokens: 5090,
                 }),
             ]
         );

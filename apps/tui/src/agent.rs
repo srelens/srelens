@@ -856,7 +856,11 @@ pub fn resolve_token_usage(
         u
     } else {
         let prompt_est = (prompt_len + 200) / 4;
-        let comp_est = output_chars.max(1) / 4;
+        let comp_est = if output_chars == 0 {
+            0
+        } else {
+            (output_chars / 4).max(1)
+        };
         (prompt_est, comp_est, 0, prompt_est + comp_est)
     }
 }
@@ -936,5 +940,11 @@ mod tests {
     fn test_resolve_token_usage_falls_back_to_estimate() {
         let usage = resolve_token_usage(None, 200, 40);
         assert_eq!(usage, (100, 10, 0, 110));
+
+        let usage_short = resolve_token_usage(None, 200, 2);
+        assert_eq!(usage_short, (100, 1, 0, 101));
+
+        let usage_zero = resolve_token_usage(None, 200, 0);
+        assert_eq!(usage_zero, (100, 0, 0, 100));
     }
 }

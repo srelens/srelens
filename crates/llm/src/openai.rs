@@ -127,7 +127,7 @@ impl Stream {
             return vec![StreamItem::Error(msg.to_string())];
         }
         let mut out = Vec::new();
-        if let Some(usage) = v.get("usage") {
+        if let Some(usage) = v.get("usage").and_then(Value::as_object) {
             let prompt = usage
                 .get("prompt_tokens")
                 .and_then(Value::as_u64)
@@ -147,12 +147,14 @@ impl Stream {
                 .and_then(Value::as_u64)
                 .map(|n| n as usize)
                 .unwrap_or(prompt + completion);
-            out.push(StreamItem::Usage(TokenUsage {
-                prompt_tokens: prompt,
-                completion_tokens: completion,
-                cached_tokens: cached,
-                total_tokens: total,
-            }));
+            if prompt > 0 || completion > 0 || total > 0 {
+                out.push(StreamItem::Usage(TokenUsage {
+                    prompt_tokens: prompt,
+                    completion_tokens: completion,
+                    cached_tokens: cached,
+                    total_tokens: total,
+                }));
+            }
         }
         let Some(choice) = v.get("choices").and_then(|c| c.get(0)) else {
             return out;
@@ -462,6 +464,13 @@ mod tests {
                 total_tokens: 1290,
             })]
         );
+    }
+
+    #[test]
+    fn stream_ignores_null_usage_chunk() {
+        let mut s = Stream::new();
+        let items = s.push(r#"{"choices":[{"delta":{"content":"hello"}}],"usage":null}"#);
+        assert_eq!(items, vec![StreamItem::Text("hello".into())]);
     }
 
     #[test]
