@@ -222,9 +222,10 @@ pub fn json_path_problem(path: &str) -> Option<&'static str> {
     None
 }
 
-/// `?(@.field==literal)` with one plain field and one literal — the only
-/// predicate `Segment::bracket` evaluates. It splits at the first `==`, so a
-/// composite (`&&`, `||`) would compare against the rest of the expression.
+/// `?(@.field==literal)` with one field and one literal — the only predicate
+/// `Segment::bracket` evaluates. It splits at the first `==`, so a composite
+/// (`&&`, `||`) would compare against the rest of the expression. The field
+/// is read as a path, escapes included, so it is checked as one.
 fn single_equality(inner: &str) -> bool {
     let Some(expression) = inner.strip_prefix("?(").and_then(|e| e.strip_suffix(')')) else {
         return false;
@@ -243,7 +244,11 @@ fn single_equality(inner: &str) -> bool {
     let literal_ok = quoted_with('"')
         || quoted_with('\'')
         || (!literal.is_empty() && literal.chars().all(plain));
-    field.strip_prefix('@').is_some_and(|f| f.chars().all(plain)) && literal_ok
+    let operator = |c: char| c.is_whitespace() || "&|!<>=()".contains(c);
+    let field_ok = field
+        .strip_prefix('@')
+        .is_some_and(|f| !f.contains(operator) && json_path_problem(f).is_none());
+    field_ok && literal_ok
 }
 
 /// The value a [`resolve_json_path`] path lands on, unrendered — a map or a
@@ -1090,6 +1095,19 @@ mod tests {
         assert_eq!(json_path_value(&obj(), ".spec.ports[0"), None);
     }
 
+    /// A filter's field is itself a path, escapes included — the walker reads
+    /// it with `resolve_json_path` — so the check takes one too.
+    #[test]
+    fn a_filter_on_an_escaped_key_is_read_and_accepted() {
+        let pod = serde_json::json!({ "spec": { "containers": [
+            { "name": "web", "resources": { "limits": { "cpu": "1" } } },
+            { "name": "trainer", "resources": { "limits": { "nvidia.com/gpu": "1" } } },
+        ]}});
+        let path = r#".spec.containers[?(@.resources.limits.nvidia\.com/gpu=="1")].name"#;
+        assert_eq!(json_path_value(&pod, path), Some(&serde_json::json!("trainer")));
+        assert_eq!(json_path_problem(path), None);
+    }
+
     /// A path from outside must be one the walker can read, or a present
     /// field comes back as absent. Every form the walker tests above read is
     /// in; kubectl forms it does not implement are out, not read as keys.
@@ -1104,6 +1122,7 @@ mod tests {
             ".status.conditions[?(@.type==\"Ready\")].status",
             ".status.conditions[?(@.type == 'Stalled')].status",
             ".status.conditions[?(@.type==Ready)].status",
+            r#".spec.containers[?(@.resources.limits.nvidia\.com/gpu=="1")].name"#,
             ".spec.ports[1].port",
         ] {
             assert_eq!(json_path_problem(good), None, "{good:?}");
@@ -1128,6 +1147,8 @@ mod tests {
             ".status.conditions[?(@.type==\"Ready\"&&@.status==\"True\")].status",
             ".status.conditions[?(@.type==\"Ready\" || @.type==\"Stalled\")]",
             ".status.conditions[?(@.type!=\"Ready\")]",
+            ".status.conditions[?(@.type && @.status==\"True\")]",
+            ".status.conditions[?(@.type==\"Ready\"&&@.status==True)]",
             // An unfinished suffix the walker would drop, reading another path.
             r".metadata.name\",
             ".metadata.",
