@@ -49,6 +49,7 @@ import { ResourceDetailView } from "./detail/ResourceDetailView";
 import { ResourceTabView } from "./detail/ResourceTabView";
 import { ResourceBulk } from "./ResourceBulk";
 import { useRowMenu } from "./ResourceMenu";
+import { ListCount } from "./ListCount";
 import {
   NamespaceErrorAlert,
   NamespacePicker,
@@ -521,6 +522,14 @@ function KindList({
       fill
       actions={
         <>
+          {/* The list's own size, and how much of it the filter is showing
+              (#402). Only once the list has answered: while it is loading or
+              refused there is no number, and `0 items` would be a wrong one a
+              reader believes. Both figures are the table's — `rows` is what it
+              holds for the namespaces selected, `filtered` what it draws. */}
+          {showRows && (
+            <ListCount total={rows.length} shown={filtered.length} truncated={list.truncated} noun={lower} />
+          )}
           {descriptor.source === "watch" && (
             <LiveSignal
               // The label carries the meaning; the tone only colours it.
@@ -632,14 +641,10 @@ function KindList({
         <SideRail
           head="About this kind"
           width={CRD_RAIL_WIDTH}
-          // The count is what the TABLE beside it holds — narrowed by the
-          // namespace selection, not a cluster-wide total, because no such
-          // total is available without a second call and a number that
-          // disagreed with the rows under it would be worse than a narrow
-          // one. It is withheld entirely until the list has answered:
-          // `AboutKind` drops the row rather than drawing `Objects 0`, which
-          // is a wrong number a reader would believe.
-          rail={<AboutKind crd={crd} context={name} objects={showRows ? rows.length : undefined} />}
+          // No object count here any more: it is in the header, for every
+          // kind, and the same figure in two places on one screen is two
+          // things to keep agreeing (#402).
+          rail={<AboutKind crd={crd} context={name} />}
         >
           {/* The left pane's own head, as the design words it. `crd.kind` again
               — the slug is a plural DNS name and reads as one. */}
