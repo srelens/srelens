@@ -189,7 +189,7 @@ function FailedOps({
       // a helm error is an unbounded string, and a flex child's
       // `min-width: auto` floor turns one into a sideways scroll of the whole
       // window.
-      className="flex min-w-0 shrink-0 flex-col gap-1.5 border-b border-rule bg-sunk px-3 py-2"
+      className="flex min-w-0 shrink-0 flex-col gap-1.5 border-b border-rule bg-[var(--ground-sunk)] px-3 py-2"
     >
       <div id={headId} className="min-w-0 truncate text-[0.75rem] font-medium text-muted">
         {/* The strip's own words, so the reader arriving from its segment can

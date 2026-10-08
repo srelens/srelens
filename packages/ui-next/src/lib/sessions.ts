@@ -426,7 +426,10 @@ function register(row: Pick<TerminalSessionRow, "kind" | "title" | "context" | "
   // where there is a DOM to read them from. `convertEol` matches the classic
   // pane — a backend that sends a bare newline still starts the next line at
   // column zero.
-  emulators.set(id, new Terminal({ convertEol: true, scrollback: 10_000 }));
+  // `allowTransparency` because the pane clears the emulator's background for a
+  // see-through window (`terminalDress`), and xterm only honours an alpha in
+  // its background when it was built with this.
+  emulators.set(id, new Terminal({ convertEol: true, scrollback: 10_000, allowTransparency: true }));
   sessions = [
     ...sessions,
     { id, ...row, state: "attached", startedAt: now, lastOutputAt: stamp },

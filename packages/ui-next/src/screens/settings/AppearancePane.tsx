@@ -5,25 +5,34 @@ import {
   getUiScale,
   isApplePlatform,
   isTauri,
+  settingsStorage,
   setUiScale,
   uiScaleFactor,
 } from "@srelens/core";
-import { Button, Panel } from "@srelens/ui-kit";
+import { Button, Checkbox, Panel } from "@srelens/ui-kit";
 import {
   ACCENTS,
   APPEARANCE_KEY,
   BARE,
   DENSITIES,
+  GLASS_OPACITY,
+  OPACITY,
   THEMES,
+  TRANSLUCENT_THEMES,
   ZOOM_STEPS,
   applyStoredAppearance,
   hasChosenTheme,
   readRootAccent,
   readRootDensity,
+  readRootOpacity,
   readRootTheme,
+  readStored,
   remember,
   subscribeToRoot,
+  supportsWindowOpacity,
+  syncWindowBlur,
   writeAxis,
+  writeOpacity,
   type AccentId,
   type DensityId,
   type ThemeId,
@@ -124,6 +133,8 @@ export {
   APPEARANCE_KEY,
   ACCENTS,
   DENSITIES,
+  GLASS_OPACITY,
+  OPACITY,
   THEMES,
   ZOOM_STEPS,
   applyStoredAppearance,
@@ -191,6 +202,11 @@ export function AppearancePane({ ported, onSwitchToClassic }: AppearancePaneProp
   const theme = useSyncExternalStore(subscribeToRoot, readRootTheme);
   const accent = useSyncExternalStore(subscribeToRoot, readRootAccent);
   const density = useSyncExternalStore(subscribeToRoot, readRootDensity);
+  const opacity = useSyncExternalStore(subscribeToRoot, readRootOpacity);
+  // The blur has no attribute of its own — it is a native effect, and nothing
+  // in the stylesheet keys on it — so the stored record is the only place to
+  // read it from. On unless the reader turned it off.
+  const [blur, setBlur] = useState(() => readStored(settingsStorage).blur ?? true);
 
   // Zoom has no change notification: the Cmd/Ctrl chords and the titlebar's
   // three buttons both go through `Chrome`'s `zoom`, which writes core's
@@ -210,10 +226,18 @@ export function AppearancePane({ ported, onSwitchToClassic }: AppearancePaneProp
   const desktop = isTauri();
   const apple = isApplePlatform();
   const rows = rowHeight();
+  const seeThrough = supportsWindowOpacity();
+  const translucentTheme = TRANSLUCENT_THEMES.includes(theme);
 
   function pickTheme(id: ThemeId) {
     writeAxis("data-theme", id, BARE.theme);
     remember({ theme: id });
+    // See `GLASS_OPACITY`: a solid window is the one case where picking Glass
+    // has to move a second axis, or the theme arrives with no glass in it.
+    if (id === "glass" && seeThrough && opacity === BARE.opacity) pickOpacity(GLASS_OPACITY);
+    // A light theme paints the page solid whatever the opacity says, and a
+    // dark one shows through again: the blur follows the theme as well.
+    else syncWindowBlur();
   }
 
   function pickAccent(id: AccentId) {
@@ -224,6 +248,19 @@ export function AppearancePane({ ported, onSwitchToClassic }: AppearancePaneProp
   function pickDensity(id: DensityId) {
     writeAxis("data-density", id, BARE.density);
     remember({ density: id });
+  }
+
+  function pickOpacity(percent: number) {
+    writeOpacity(percent);
+    remember({ opacity: percent });
+  }
+
+  function pickBlur(on: boolean) {
+    setBlur(on);
+    // Remembered first: the stored record is one of the things the blur is
+    // derived from.
+    remember({ blur: on });
+    syncWindowBlur();
   }
 
   function pickScale(percent: number) {
@@ -417,6 +454,76 @@ export function AppearancePane({ ported, onSwitchToClassic }: AppearancePaneProp
           </span>
         </div>
       </Panel>
+
+      {/*
+        Not in §23, which draws a window that is always solid. Offered only
+        where the native window is created see-through — see
+        `supportsWindowOpacity` — and left out entirely elsewhere rather than
+        shown disabled: a control that can never work on this machine is not a
+        setting, and unlike zoom there is no browser equivalent to point at.
+      */}
+      {seeThrough && (
+        <Panel title="Window">
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+            <span className="min-w-0 flex-1 basis-40">
+              <span className="block text-[0.75rem] font-medium text-ink">Window opacity</span>
+              <span data-testid="opacity-hint" className="block text-[0.6875rem] leading-snug text-muted">
+                {translucentTheme
+                  ? "How much of what is behind the window shows through its background. Menus, dialogs and table headers stay solid."
+                  : "Works on the Dark, Midnight or Glass theme. Pick one of those above to see through the window."}
+              </span>
+              {/* What is known, said where it applies: below this mark the
+                  smaller text fails contrast over a white desktop, and over a
+                  dark one it does not. A word, not only a colour. */}
+              {translucentTheme && opacity < OPACITY.LEGIBLE && (
+                <span data-testid="opacity-warning" className="mt-0.5 block text-[0.6875rem] leading-snug text-warn">
+                  Heads up: below {OPACITY.LEGIBLE}%, smaller text can be hard to read over a bright desktop.
+                </span>
+              )}
+            </span>
+            {/*
+              A native range, as the kit's Checkbox is a native checkbox and
+              for the same reason: the element already carries the arrow keys,
+              Home and End, focus and the slider semantics, and `accent-color`
+              themes it. Unlike zoom, the amount here is continuous — there is
+              no set of steps the stylesheet has to carry — so a segmented
+              control would only have been a slider with most of its positions
+              removed.
+            */}
+            <span className="flex shrink-0 items-center gap-2">
+              <input
+                type="range"
+                aria-label="Window opacity"
+                aria-valuetext={`${opacity}%`}
+                className="w-44 accent-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-50"
+                min={OPACITY.MIN}
+                max={OPACITY.MAX}
+                step={OPACITY.STEP}
+                value={opacity}
+                disabled={!translucentTheme}
+                onChange={(event) => pickOpacity(Number(event.target.value))}
+              />
+              <span
+                data-testid="opacity-value"
+                className="w-9 text-right font-mono text-[0.75rem] tabular-nums text-soft"
+              >
+                {opacity}%
+              </span>
+            </span>
+          </div>
+          <div className="mt-3">
+            {/* Disabled at 100% as well as on a light theme: with nothing
+                showing through there is nothing for it to blur, and a box
+                that toggles with no visible effect reads as broken. */}
+            <Checkbox
+              checked={blur}
+              onChange={pickBlur}
+              disabled={!translucentTheme || opacity === BARE.opacity}
+              label="Blur what is behind the window"
+            />
+          </div>
+        </Panel>
+      )}
 
       {/*
         ─────────────────────────────────────────────────────────────────

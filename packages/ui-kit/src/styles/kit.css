@@ -8,7 +8,7 @@
   html { font-size: 16px; }
 
   body {
-    background: var(--canvas);
+    background: var(--ground);
     color: var(--ink);
     font-family: var(--font-sans);
     -webkit-font-smoothing: antialiased;
@@ -45,7 +45,7 @@
 @layer components {
   /* --- surfaces ------------------------------------------------ */
   .card {
-    background: var(--surface);
+    background: var(--ground-surface);
     border: 1px solid var(--rule);
     border-radius: var(--radius-card);
     box-shadow: var(--shadow-lift);
@@ -230,7 +230,7 @@
     top: 0;
     z-index: 1;
     padding: 0.35rem 0.7rem;
-    background: var(--surface);
+    background: var(--ground-cover);
     border-bottom: 1px solid var(--rule);
     font-size: var(--text-meta);
     font-weight: 600;
@@ -466,7 +466,9 @@
     box-shadow: 0 1px 2px rgba(20, 18, 25, 0.08);
   }
   [data-theme="dark"] .seg-btn[data-on="true"],
-  [data-theme="dark"] .seg-btn[data-active="true"] { box-shadow: none; background: var(--surface-raised); }
+  [data-theme="dark"] .seg-btn[data-active="true"],
+  [data-theme="glass"] .seg-btn[data-on="true"],
+  [data-theme="glass"] .seg-btn[data-active="true"] { box-shadow: none; background: var(--surface-raised); }
   /* Five panes of a resource detail do not fit a 260px peek. The control
      carries its own overflow rather than pushing the pane sideways, and hides
      the bar for the same reason the window's tab strip does: inside a control
@@ -669,7 +671,21 @@
     overflow: hidden;
   }
   [data-theme="dark"] .popover,
-  [data-theme="midnight"] .popover { box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6); }
+  [data-theme="midnight"] .popover,
+  [data-theme="glass"] .popover { box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6); }
+
+  /* Glass, see-through: the floating layers are dark glass too, blurring
+     what is under them rather than hiding it behind a solid grey slab — which
+     on a black sheet is the one thing that would look out of place. Only
+     under `[data-opacity]`; at rest Glass is a solid theme and these stay
+     solid. Dark and Midnight keep solid furniture, by design. */
+  [data-theme="glass"][data-opacity] .popover,
+  [data-theme="glass"][data-opacity] .ctx-menu {
+    background: rgba(18, 18, 20, 0.78);
+    -webkit-backdrop-filter: blur(30px);
+    backdrop-filter: blur(30px);
+    border-color: rgba(255, 255, 255, 0.14);
+  }
 
   .tip { position: relative; display: inline-flex; }
   .tip::after {
@@ -760,7 +776,7 @@
   /* --- panes ------------------------------------------------------
      Desktop layout is flush regions divided by hairlines, each scrolling
      on its own. No gutters, no floating cards, no page scroll. */
-  .panes { display: flex; min-height: 0; flex: 1; background: var(--surface); }
+  .panes { display: flex; min-height: 0; flex: 1; background: var(--ground-surface); }
   .pane {
     display: flex;
     flex-direction: column;
@@ -776,7 +792,7 @@
     height: var(--pane-head-h);
     flex-shrink: 0;
     padding: 0 0.6rem;
-    background: var(--surface-sunk);
+    background: var(--ground-sunk);
     border-bottom: 1px solid var(--rule);
     font-size: 0.625rem;
     font-weight: 600;
@@ -805,7 +821,7 @@
     flex-direction: column;
     flex-shrink: 0;
     min-height: 0;
-    background: var(--surface);
+    background: var(--ground-surface);
     border-left: 1px solid var(--rule);
   }
   .side-rail-body { flex: 1; min-height: 0; overflow: auto; }
@@ -1186,7 +1202,7 @@
     align-items: center;
     height: 32px;
     flex-shrink: 0;
-    background: var(--canvas-deep);
+    background: var(--ground-deep);
     border-bottom: 1px solid var(--rule);
     -webkit-app-region: drag;
   }
@@ -1268,7 +1284,7 @@
     align-items: stretch;
     height: 33px;
     flex-shrink: 0;
-    background: var(--canvas-deep);
+    background: var(--ground-deep);
     border-bottom: 1px solid var(--rule);
     /* Tabs have a 108px minimum and flex items do not shrink past it, so three
        of them need 324px — more than a Drawer at its 320px minimum can give.
@@ -1338,7 +1354,7 @@
   }
   .tab:hover { background: var(--field); }
   .tab[data-active="true"] {
-    background: var(--surface);
+    background: var(--ground-surface);
     color: var(--ink);
     margin-bottom: -1px;
     padding-bottom: 1px;
@@ -1446,7 +1462,7 @@
     min-height: 34px;
     flex-shrink: 0;
     padding: 0 0.6rem;
-    background: var(--surface);
+    background: var(--ground-surface);
     border-bottom: 1px solid var(--rule);
   }
   .toolbar-title {
@@ -1461,7 +1477,7 @@
     height: 22px;
     flex-shrink: 0;
     padding: 0 0.4rem;
-    background: var(--canvas-deep);
+    background: var(--ground-deep);
     border-top: 1px solid var(--rule);
     /* MEASURED at the window's own 960px minimum (`minWidth` in
        apps/desktop/src-tauri/tauri.conf.json), with every readout the strip can
@@ -1537,7 +1553,8 @@
     background: var(--surface-raised);
     box-shadow: 0 10px 34px rgba(20, 18, 25, 0.16), 0 1px 2px rgba(20, 18, 25, 0.08);
   }
-  [data-theme="dark"] .ctx-menu { box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6); }
+  [data-theme="dark"] .ctx-menu,
+  [data-theme="glass"] .ctx-menu { box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6); }
   .ctx-item {
     display: flex;
     align-items: center;
@@ -1562,7 +1579,7 @@
   /* --- docked console --------------------------------------------- */
   .console-dock {
     flex-shrink: 0;
-    background: var(--surface);
+    background: var(--ground-surface);
     border-top: 1px solid var(--rule);
   }
 
@@ -1573,7 +1590,8 @@
     border-radius: 12px;
     box-shadow: 0 8px 30px rgba(20, 18, 25, 0.09), 0 1px 2px rgba(20, 18, 25, 0.05);
   }
-  [data-theme="dark"] .console-shell {
+  [data-theme="dark"] .console-shell,
+  [data-theme="glass"] .console-shell {
     box-shadow: 0 10px 40px rgba(0, 0, 0, 0.55);
   }
   .console-input {

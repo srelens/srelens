@@ -513,7 +513,7 @@ export function Transcript({
           // it, inside a thin border. A flat run of turns left no seam between
           // one question and the next, so a long answer and the question after
           // it read as continuous.
-          className="flex min-w-0 flex-col gap-2 rounded-card border border-rule bg-surface px-3 py-2.5"
+          className="flex min-w-0 flex-col gap-2 rounded-card border border-rule bg-[var(--ground-surface)] px-3 py-2.5"
         >
           {exchange.map((turn) => (
             <div key={turn.id} className="min-w-0">

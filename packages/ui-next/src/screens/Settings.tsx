@@ -237,7 +237,7 @@ export function Settings({ ported, onSwitchToClassic, onLocked }: SettingsProps)
             jump to and may equally want to skip. */}
         <aside
           aria-labelledby={headId}
-          className="flex min-h-0 shrink-0 flex-col border-r border-rule bg-surface"
+          className="flex min-h-0 shrink-0 flex-col border-r border-rule bg-[var(--ground-surface)]"
           style={{ width: NAV_WIDTH }}
         >
           <div id={headId} className="pane-head">

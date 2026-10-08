@@ -615,7 +615,7 @@ export function Connect({ route }: { route: string }) {
       // off the top-left corner over the canvas, in the new design's tokens.
       style={{
         background:
-          "radial-gradient(circle at 15% 8%, color-mix(in srgb, var(--accent) 7%, transparent), transparent 30%), var(--canvas)",
+          "radial-gradient(circle at 15% 8%, color-mix(in srgb, var(--accent) 7%, transparent), transparent 30%), var(--ground-canvas)",
       }}
     >
       <div

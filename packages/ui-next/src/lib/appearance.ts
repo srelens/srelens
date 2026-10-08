@@ -1,5 +1,5 @@
-// The three appearance axes — theme, accent, density — and the one place they
-// are remembered.
+// The appearance axes — theme, accent, density, and how see-through the window
+// is — and the one place they are remembered.
 //
 // **Why this is not inside `AppearancePane`.** `data-theme` has two writers a
 // reader can drive: that pane's Theme control, and the titlebar's light/dark
@@ -14,10 +14,10 @@
 // properties together are what make the two writers unable to fight — there is
 // one record of the theme axis, whoever wrote it last owns it, and no write
 // carries an axis its author was not asked about.
-import { UI_SCALE, settingsStorage } from "@srelens/core";
+import { UI_SCALE, applyWindowBlur, isApplePlatform, isTauri, settingsStorage } from "@srelens/core";
 import type { Storage } from "./tabsPersist";
 
-export type ThemeId = "light" | "paper" | "dark" | "midnight" | "contrast";
+export type ThemeId = "light" | "paper" | "dark" | "midnight" | "glass" | "contrast";
 export type AccentId = "violet" | "blue" | "teal" | "amber" | "rose";
 export type DensityId = "compact" | "default" | "comfortable";
 
@@ -34,6 +34,8 @@ export const THEMES: ReadonlyArray<{ id: ThemeId; label: string; hint: string }>
   { id: "paper", label: "Paper", hint: "warm light, easier under office lighting" },
   { id: "dark", label: "Dark", hint: "ink violet control room" },
   { id: "midnight", label: "Midnight", hint: "near black, for a dark room" },
+  // Not one of §23's five: the design draws a window that is always solid.
+  { id: "glass", label: "Glass", hint: "black glass, see-through on macOS" },
   { id: "contrast", label: "High contrast", hint: "AAA text, heavier rules, no washes" },
 ];
 
@@ -54,6 +56,54 @@ export const DENSITIES: ReadonlyArray<{ id: DensityId; label: string }> = [
 ];
 
 /**
+ * How solid the window's ground is, in percent: the range the slider covers.
+ *
+ * Both lower marks are measured, not chosen, and the measurement is in
+ * `AppearancePane.test.tsx` ("what the text is read against"): each theme's
+ * tint is laid over a WHITE desktop — the worst thing a dark theme can have
+ * behind it — and the text is held to 4.5:1 against the result. The blur does
+ * not help here; it softens what is behind the window and darkens nothing.
+ *
+ * - `MIN` is the lowest value at which body text (`--ink`) still passes. Under
+ *   it nothing on the page can be promised readable, so the slider stops.
+ * - `LEGIBLE` is the lowest value at which EVERY ink passes, the faint
+ *   metadata text included. Between the two the pane says so rather than
+ *   stopping the reader: over a dark desktop those values are fine, and which
+ *   desktop is behind the window is theirs to know. (#854 review)
+ */
+export const OPACITY = { MIN: 60, MAX: 100, STEP: 1, LEGIBLE: 90 } as const;
+
+/**
+ * The themes whose ground can be seen through. The light ones are left out on
+ * purpose: `paper` and `contrast` exist for legibility, and a light ground
+ * over an arbitrary desktop is the case with the least of it.
+ */
+export const TRANSLUCENT_THEMES: readonly ThemeId[] = ["dark", "midnight", "glass"];
+
+/**
+ * The opacity Glass puts on a window that was solid when it was picked.
+ *
+ * Glass at 100% is a neutral dark theme and nothing more — the glass is all
+ * in the see-through rules — so picking it on a solid window would show a
+ * reader a theme called Glass with no glass in it. Only a solid window is
+ * moved: an opacity the reader already chose is theirs.
+ */
+export const GLASS_OPACITY = 85;
+
+/**
+ * Whether this window can be seen through at all.
+ *
+ * Desktop on macOS only: that is the one place the native window is created
+ * transparent (`apps/desktop/src-tauri/tauri.macos.conf.json`). Anywhere else
+ * a translucent ground would be painted over an opaque window — a browser
+ * tab's white page, or the system's window background — which is a washed-out
+ * theme rather than a see-through one.
+ */
+export function supportsWindowOpacity(): boolean {
+  return isTauri() && isApplePlatform();
+}
+
+/**
  * The scales the app can actually be set to, from core's own bounds.
  *
  * `MAX` is appended when the range does not land on it, so widening
@@ -70,12 +120,19 @@ export const ZOOM_STEPS: readonly number[] = (() => {
 })();
 
 /** The value that means "no attribute", per axis. */
-export const BARE = { theme: "light", accent: "violet", density: "default" } as const;
+export const BARE = { theme: "light", accent: "violet", density: "default", opacity: OPACITY.MAX } as const;
 
 export interface Appearance {
   theme: ThemeId;
   accent: AccentId;
   density: DensityId;
+  /** A whole percentage within {@link OPACITY}. */
+  opacity: number;
+  /**
+   * Whether what is behind a see-through window is blurred. On unless the
+   * reader turned it off, so only an explicit `false` is ever worth storing.
+   */
+  blur: boolean;
 }
 
 function asTheme(value: unknown): ThemeId | null {
@@ -88,6 +145,17 @@ function asAccent(value: unknown): AccentId | null {
 
 function asDensity(value: unknown): DensityId | null {
   return DENSITIES.find((d) => d.id === value)?.id ?? null;
+}
+
+/**
+ * A percentage the slider could have produced, or nothing. Out of range is
+ * dropped rather than clamped: a stored 12 is not a reader who asked for 40,
+ * it is a document this build did not write.
+ */
+function asOpacity(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value)) return null;
+  const percent = Math.round(value);
+  return percent >= OPACITY.MIN && percent <= OPACITY.MAX ? percent : null;
 }
 
 /**
@@ -114,8 +182,99 @@ export function readRootDensity(): DensityId {
   return asDensity(document.documentElement.getAttribute("data-density")) ?? BARE.density;
 }
 
+export function readRootOpacity(): number {
+  const raw = document.documentElement.getAttribute("data-opacity");
+  return (raw === null ? null : asOpacity(Number(raw))) ?? BARE.opacity;
+}
+
 /**
- * Watch the three attributes this pane and its two co-writers share.
+ * Put an opacity on the document root.
+ *
+ * Two writes, where the other axes make one. `data-opacity` is what the
+ * stylesheet keys its see-through rules on and what this module reads back;
+ * `--window-alpha` is the amount, which no attribute selector can carry for a
+ * continuous value.
+ */
+export function writeOpacity(opacity: number, storage: Storage = settingsStorage): void {
+  writeAxis("data-opacity", String(opacity), String(BARE.opacity));
+  const style = document.documentElement.style;
+  if (opacity === BARE.opacity) style.removeProperty("--window-alpha");
+  else style.setProperty("--window-alpha", `${opacity}%`);
+  // From the first see-through moment on, whoever writes it: an opacity put
+  // back at boot and one first chosen on the pane this session both need the
+  // titlebar's theme button to be followed afterwards.
+  if (opacity !== BARE.opacity) followRootForWindowBlur(storage);
+  syncWindowBlur(storage);
+}
+
+/** What the native window was last asked for. It starts with no blur. */
+let blurApplied = false;
+
+/**
+ * Whether there is anything behind the page for a blur to soften.
+ *
+ * Three things have to hold, and the first cut checked only one. The window
+ * must be less than solid; the reader must not have turned the blur off; and
+ * the THEME must be one that is actually see-through. A light theme ignores
+ * the opacity and paints the page solid, so a reader who set Dark to 80% and
+ * then picked Paper had a blur running behind an opaque window — work nobody
+ * can see, on every frame the desktop behind it changes. (#854 review)
+ */
+function wantsWindowBlur(storage: Storage): boolean {
+  return (
+    supportsWindowOpacity() &&
+    readRootOpacity() !== BARE.opacity &&
+    TRANSLUCENT_THEMES.includes(readRootTheme()) &&
+    (readStored(storage).blur ?? true)
+  );
+}
+
+/**
+ * Bring the native window's blur into line with what the root and the stored
+ * record now say.
+ *
+ * The window is only asked when the answer CHANGES. A slider reports every
+ * position it is dragged through, and re-applying an effect the window already
+ * wears on each of them is a round trip to the host per pixel of travel.
+ *
+ * Safe to call from anywhere that might have moved one of the three inputs —
+ * that is the point of deriving the answer here rather than passing it in.
+ */
+export function syncWindowBlur(storage: Storage = settingsStorage): void {
+  const wanted = wantsWindowBlur(storage);
+  if (wanted === blurApplied) return;
+  blurApplied = wanted;
+  // A refusal puts the record back, so the next change of any input asks
+  // again. Recorded as done, a window that refused once would stay unblurred
+  // for the rest of the session with nothing left to trigger a retry. Guarded
+  // on the record still saying what this call asked for: a later call may
+  // already have moved it on.
+  void Promise.resolve(applyWindowBlur(wanted)).then((done) => {
+    if (done === false && blurApplied === wanted) blurApplied = !wanted;
+  });
+}
+
+let followingRoot = false;
+
+/**
+ * Keep the blur following `data-theme` and `data-opacity` for the life of the
+ * window, once.
+ *
+ * The Appearance pane is not the only writer of `data-theme`: the titlebar's
+ * light/dark button and the OS follower both write it from the host
+ * (`apps/desktop/src/design.ts`) and know nothing of this module. Watching the
+ * root is what makes a theme flipped from there stop or restore the blur too.
+ * Never torn down, for the reason the follower's own stop is discarded: it
+ * belongs to the window, and there is no unmount to hang it on.
+ */
+function followRootForWindowBlur(storage: Storage): void {
+  if (followingRoot) return;
+  followingRoot = true;
+  subscribeToRoot(() => syncWindowBlur(storage));
+}
+
+/**
+ * Watch the attributes this pane and its two co-writers share.
  *
  * One observer per subscriber, torn down with it. The alternative — a
  * module-level observer — would outlive the pane and keep the document under
@@ -125,7 +284,7 @@ export function subscribeToRoot(onChange: () => void): () => void {
   const observer = new MutationObserver(onChange);
   observer.observe(document.documentElement, {
     attributes: true,
-    attributeFilter: ["data-theme", "data-accent", "data-density"],
+    attributeFilter: ["data-theme", "data-accent", "data-density", "data-opacity"],
   });
   return () => observer.disconnect();
 }
@@ -147,10 +306,13 @@ export function readStored(storage: Storage): Partial<Appearance> {
   const theme = asTheme(record.theme);
   const accent = asAccent(record.accent);
   const density = asDensity(record.density);
+  const opacity = asOpacity(record.opacity);
   return {
     ...(theme === null ? {} : { theme }),
     ...(accent === null ? {} : { accent }),
     ...(density === null ? {} : { density }),
+    ...(opacity === null ? {} : { opacity }),
+    ...(typeof record.blur === "boolean" ? { blur: record.blur } : {}),
   };
 }
 
@@ -189,6 +351,18 @@ export function applyStoredAppearance(storage: Storage = settingsStorage): void 
   if (stored.theme !== undefined) writeAxis("data-theme", stored.theme, BARE.theme);
   if (stored.accent !== undefined) writeAxis("data-accent", stored.accent, BARE.accent);
   if (stored.density !== undefined) writeAxis("data-density", stored.density, BARE.density);
+  // Opacity is the one axis a stored value does not decide alone: the same
+  // settings document is read by the web host and by desktop builds whose
+  // window is opaque, and neither has anything to see through. A solid window
+  // is also left untouched rather than "cleared", so a boot that never chose
+  // an opacity asks the native window for nothing.
+  if (
+    stored.opacity !== undefined &&
+    stored.opacity !== BARE.opacity &&
+    supportsWindowOpacity()
+  ) {
+    writeOpacity(stored.opacity, storage);
+  }
 }
 
 /**

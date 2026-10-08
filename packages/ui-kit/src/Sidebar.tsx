@@ -81,7 +81,7 @@ export function Sidebar({
     <nav
       aria-label={label}
       className={cx("relative flex shrink-0 flex-col", className)}
-      style={{ width, background: "var(--surface-sunk)" }}
+      style={{ width, background: "var(--ground-sunk)" }}
     >
       {back && (
         <button type="button" className="focus-back rule-b" onClick={back.onClick}>

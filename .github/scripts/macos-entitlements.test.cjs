@@ -22,7 +22,17 @@ test('the App ID entitlement names this app\'s bundle identifier and team', () =
 // it and is killed at launch, so only the signed release path may apply it.
 test('only signed macOS release builds get the entitlements', () => {
   assert.equal(JSON.parse(read('tauri.conf.json')).bundle.macOS?.entitlements, undefined);
-  assert.ok(!existsSync(join(tauriDir, 'tauri.macos.conf.json')), 'tauri.macos.conf.json would apply to every macOS build');
+  // Tauri applies tauri.macos.conf.json to EVERY macOS build, dev and unsigned
+  // included. It may exist — #853 uses it to create the window transparent —
+  // but it must never carry bundle settings, which is where entitlements and
+  // the provisioning profile live.
+  if (existsSync(join(tauriDir, 'tauri.macos.conf.json'))) {
+    assert.equal(
+      JSON.parse(read('tauri.macos.conf.json')).bundle,
+      undefined,
+      'tauri.macos.conf.json applies to every macOS build, so it must not set bundle options',
+    );
+  }
 
   const signing = JSON.parse(read('macos-signing.conf.json')).bundle.macOS;
   assert.equal(signing.entitlements, './Entitlements.plist');

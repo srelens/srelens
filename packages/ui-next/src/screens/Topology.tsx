@@ -631,7 +631,7 @@ function Canvas({
             <circle cx={1} cy={1} r={1} className="fill-rule-strong" opacity={0.55} />
           </pattern>
         </defs>
-        <rect width="100%" height="100%" className="fill-canvas" />
+        <rect width="100%" height="100%" className="fill-[var(--ground-canvas)]" />
         <rect width="100%" height="100%" fill="url(#topo-grid)" />
       </svg>
       {/* The graph, drawn once at 1:1 and moved as a texture — see `apply`. */}

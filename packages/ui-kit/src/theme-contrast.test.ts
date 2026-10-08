@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const css = readFileSync(join(__dirname, "styles/tokens.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
-const themes = ["light", "paper", "dark", "midnight", "contrast"];
+const themes = ["light", "paper", "dark", "midnight", "glass", "contrast"];
 const accents = ["violet", "blue", "teal", "amber", "rose"];
 const grounds = ["canvas", "canvas-deep", "surface", "surface-sunk", "surface-raised"];
 
