@@ -1219,9 +1219,11 @@ mod tests {
 
     #[tokio::test]
     async fn the_request_body_limit_is_the_documented_one() {
+        // Padded beside the arguments, not in them: `ping` echoes its
+        // arguments, and an echo this size is over the result limit.
         let post = |padding: usize| {
             let body = json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
-                "params":{"name":"ping","arguments":"x".repeat(padding)}})
+                "params":{"name":"ping","arguments":{},"padding":"x".repeat(padding)}})
             .to_string();
             let request = Request::builder()
                 .method("POST")
