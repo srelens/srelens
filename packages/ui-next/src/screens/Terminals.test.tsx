@@ -218,7 +218,7 @@ describe("Terminals", () => {
     // The MIDDLE row, on purpose: with three sessions on screen, "shows the
     // active one" agrees with neither "shows the first one" nor "shows the
     // last one", so the assertion cannot pass by position.
-    await user.click(railRow(/search-indexer-0/));
+    await user.click(railRow(/^search-indexer-0/));
 
     expect(sessionName().textContent).toBe("search-indexer-0 · indexer");
     // And the pane is attached to THAT session's emulator, not merely titled
@@ -244,7 +244,7 @@ describe("Terminals", () => {
     const user = userEvent.setup();
     draw();
 
-    await user.click(railRow(/bravo/));
+    await user.click(railRow(/^bravo/));
     expect(sessionName().textContent).toBe("bravo · api");
 
     // Both neighbours go, from both ends: `charlie` shortens the array under

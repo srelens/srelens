@@ -321,6 +321,23 @@ function settled(id: number) {
 }
 
 /**
+ * Give this session the name the reader wants to know it by.
+ *
+ * Three local shells opened from the status bar are all "Local shell", and the
+ * only thing telling them apart is what the reader remembers typing in each.
+ * The name is the row's and nothing else's: the far end never hears it, and it
+ * lasts as long as the session does.
+ *
+ * A blank name is not a name. It is ignored rather than stored, so a row can
+ * never be left with nothing to be picked by.
+ */
+export function renameSession(id: number, title: string): void {
+  const next = title.trim();
+  if (next === "") return;
+  commit(sessions.map((s) => (s.id === id && s.title !== next ? { ...s, title: next } : s)));
+}
+
+/**
  * The reader is done with this session: close the far end, drop the row, and
  * dispose the emulator.
  *

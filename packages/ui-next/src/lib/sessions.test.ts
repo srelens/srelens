@@ -28,6 +28,7 @@ const {
   endSession,
   getSessions,
   onSessionSettled,
+  renameSession,
   startLocalSession,
   startPodSession,
   subscribeSessions,
@@ -164,6 +165,33 @@ describe("the session store", () => {
     expect(startLocalTerminal.mock.calls[0][6]).toBe("payments");
     // Where it starts, not where it is: the reader can move it from inside.
     expect(getSessions()[0].namespace).toBe("");
+  });
+
+  it("renames a session, and only that one", async () => {
+    fakeBackend();
+    const first = await startLocalSession({ context: "kind-srelens-demo" });
+    const second = await startLocalSession({ context: "kind-srelens-demo" });
+    const before = getSessions();
+
+    renameSession(second, "  drain watch  ");
+
+    const after = getSessions();
+    expect(after.find((s) => s.id === second)?.title).toBe("drain watch");
+    // The untouched row is the same object: a subscriber to it is not woken.
+    expect(after.find((s) => s.id === first)).toBe(before.find((s) => s.id === first));
+  });
+
+  it("ignores a blank name, the same name, and an id it never started", async () => {
+    fakeBackend();
+    const id = await startLocalSession({ context: "kind-srelens-demo" });
+    const before = getSessions();
+
+    renameSession(id, "   ");
+    renameSession(id, "Local shell");
+    renameSession(404, "ghost");
+
+    // Identity: nothing changed, so nothing was announced.
+    expect(getSessions()).toBe(before);
   });
 
   it("hands out the same emulator every time it is asked", async () => {
