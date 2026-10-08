@@ -430,10 +430,14 @@ describe("node columns", () => {
     });
 
     it("cannot be dragged narrower than the cell will shrink to (PR #840 review)", () => {
-      // The cell's own floor is 13rem — 208px — and a table cell does not clip:
-      // at the default 72px floor the bar ran on into the column beside it.
+      // A table cell does not clip: at the default 72px floor the bar ran on
+      // into the column beside it. The floor is the cell's own 13rem AND the
+      // 0.7rem of padding the table puts either side of it — 208px alone
+      // would leave the bar overflowing by the padding.
+      const REM = 16;
+      const needed = 13 * REM + 2 * 0.7 * REM; // 230.4
       for (const column of [cpu, memory]) {
-        expect(column.minWidth).toBeGreaterThanOrEqual(208);
+        expect(column.minWidth).toBeGreaterThanOrEqual(needed);
       }
       expect(cpu.minWidth).toBe(memory.minWidth);
     });
