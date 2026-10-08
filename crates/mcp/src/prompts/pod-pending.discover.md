@@ -22,11 +22,10 @@ The evidence:
   `objectName: <the pod>`, `namespace: <the pod's namespace>`. Call
   `k8s.getObject` with `context: {{context}}`, `kind: Pod`,
   `namespace: <the pod's namespace>`, `name: <the pod>`.
-- For node-side facts, Call `k8s.listNodes` with `context: {{context}}` to
-  enumerate real node names. Then Call `k8s.getObject` with
-  `context: {{context}}`, `kind: Node`, `name: <candidate>` for
-  `status.allocatable`, `metadata.labels`, and `spec.taints`. Call
-  `k8s.nodeMetrics` with `context: {{context}}` to judge scale.
+- For node-side facts, Call `k8s.listResource` with `context: {{context}}`,
+  `kind: Node`, `fields: [".status.allocatable", ".metadata.labels", ".spec.taints"]`.
+  One call reads all three for every real node — never one `k8s.getObject`
+  per node. Call `k8s.nodeMetrics` with `context: {{context}}` to judge scale.
 - For volume binding, Call `k8s.listPersistentVolumeClaims` with
   `context: {{context}}`, `namespace: <the pod's namespace>`. Use the pod's
   OWN namespace here, not the search filter — the filter defaults to
