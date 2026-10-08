@@ -207,8 +207,13 @@ export function writeOpacity(opacity: number, storage: Storage = settingsStorage
   syncWindowBlur(storage);
 }
 
-/** What the native window was last asked for. It starts with no blur. */
-let blurApplied = false;
+/**
+ * What the native window was last asked for, or `null` before this page has
+ * asked it anything. Not `false`: the window outlives the page, and a reload
+ * (switching designs is one) leaves it wearing whatever blur the last page put
+ * on it — so the first sync after a load always tells it. (#855 review)
+ */
+let blurApplied: boolean | null = null;
 
 /**
  * Whether there is anything behind the page for a blur to soften.
@@ -222,7 +227,6 @@ let blurApplied = false;
  */
 function wantsWindowBlur(storage: Storage): boolean {
   return (
-    supportsWindowOpacity() &&
     readRootOpacity() !== BARE.opacity &&
     TRANSLUCENT_THEMES.includes(readRootTheme()) &&
     (readStored(storage).blur ?? true)
@@ -241,6 +245,9 @@ function wantsWindowBlur(storage: Storage): boolean {
  * that is the point of deriving the answer here rather than passing it in.
  */
 export function syncWindowBlur(storage: Storage = settingsStorage): void {
+  // A window that cannot be seen through has never worn a blur, so there is
+  // nothing to tell it — not even "none" on the first call after a load.
+  if (!supportsWindowOpacity()) return;
   const wanted = wantsWindowBlur(storage);
   if (wanted === blurApplied) return;
   blurApplied = wanted;
@@ -354,8 +361,7 @@ export function applyStoredAppearance(storage: Storage = settingsStorage): void 
   // Opacity is the one axis a stored value does not decide alone: the same
   // settings document is read by the web host and by desktop builds whose
   // window is opaque, and neither has anything to see through. A solid window
-  // is also left untouched rather than "cleared", so a boot that never chose
-  // an opacity asks the native window for nothing.
+  // needs nothing written: the root starts bare.
   if (
     stored.opacity !== undefined &&
     stored.opacity !== BARE.opacity &&
@@ -363,6 +369,9 @@ export function applyStoredAppearance(storage: Storage = settingsStorage): void 
   ) {
     writeOpacity(stored.opacity, storage);
   }
+  // The native window is told its blur at every boot, solid or not: it may
+  // still wear the blur the page before this reload put on it. (#855 review)
+  syncWindowBlur(storage);
 }
 
 /**

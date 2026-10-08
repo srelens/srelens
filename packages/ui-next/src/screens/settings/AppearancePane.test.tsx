@@ -611,11 +611,38 @@ describe("AppearancePane", () => {
         expect(core.applyWindowBlur).not.toHaveBeenCalledWith(true);
       });
 
-      it("asks for nothing while the window is solid", () => {
-        localStorage.setItem(APPEARANCE_KEY, JSON.stringify({ opacity: 100 }));
-        applyStoredAppearance();
-        expect(root.hasAttribute("data-opacity")).toBe(false);
-        expect(core.applyWindowBlur).not.toHaveBeenCalled();
+      describe("after a reload", () => {
+        /**
+         * A reload starts this module afresh, but the native window keeps the
+         * blur the last page put on it: switching designs reloads, and so does
+         * a dev build. A fresh module instance is what the next page boots.
+         *
+         * Store nothing see-through here: that arms the fresh module's root
+         * observer, which nothing can disconnect, and it would go on calling
+         * the shared mock for the rest of this file.
+         */
+        async function reloaded() {
+          vi.resetModules();
+          return await import("../../lib/appearance");
+        }
+
+        it("tells a solid window it has no blur, in case the last page left one on it", async () => {
+          localStorage.setItem(APPEARANCE_KEY, JSON.stringify({ opacity: 100 }));
+          (await reloaded()).applyStoredAppearance();
+          expect(root.hasAttribute("data-opacity")).toBe(false);
+          expect(core.applyWindowBlur).toHaveBeenCalledTimes(1);
+          expect(core.applyWindowBlur).toHaveBeenCalledWith(false);
+        });
+
+        it("asks nothing of a window that cannot be seen through", async () => {
+          // The web, and every desktop window off macOS, has never had a blur
+          // to leave behind — nor a theme pick that should cost a round trip.
+          core.isTauri.mockReturnValue(false);
+          const appearance = await reloaded();
+          appearance.applyStoredAppearance();
+          appearance.syncWindowBlur();
+          expect(core.applyWindowBlur).not.toHaveBeenCalled();
+        });
       });
 
       it("ignores a stored opacity where the window cannot be seen through", () => {
