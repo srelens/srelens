@@ -1,5 +1,5 @@
 import { isApplePlatform } from "@srelens/core";
-import { Panel } from "@srelens/ui-kit";
+import { CopyButton, Panel, Section, Table, type Column } from "@srelens/ui-kit";
 import { hint, type WindowAction } from "../../lib/shortcuts";
 
 /**
@@ -137,6 +137,88 @@ export function AccessibilityPane() {
           Every icon-only control carries a label, switches report{" "}
           <code className="code">aria-checked</code>, and the confirmation gate is a modal dialog
           that traps escape.
+        </p>
+      </Panel>
+    </div>
+  );
+}
+
+interface LinkForm {
+  link: string;
+  opens: string;
+}
+
+/** The two forms `parseDeepLink` (`packages/core/src/lib/deepLink.ts`) accepts. */
+const LINK_FORMS: LinkForm[] = [
+  { link: "srelens://cluster/<context>", opens: "That context's cluster overview" },
+  {
+    link: "srelens://resource/<context>/<namespace>/<kind>/<name>",
+    opens: "That resource's detail",
+  },
+];
+
+const LINK_COLUMNS: Column<LinkForm>[] = [
+  {
+    key: "link",
+    header: "Link",
+    sortable: false,
+    render: (row) => <code className="code whitespace-nowrap">{row.link}</code>,
+  },
+  { key: "opens", header: "Opens", sortable: false },
+  {
+    key: "copy",
+    header: <span className="sr-only">Copy</span>,
+    sortable: false,
+    align: "end",
+    render: (row) => <CopyButton text={row.link} label={`Copy ${row.link}`} iconOnly />,
+  },
+];
+
+/**
+ * `Deep links` — §23's three subsections, drawn from the grammar `deepLink.ts`
+ * actually parses and the rules `checkDeepLink` actually applies, not from the
+ * mock. Desktop only: the scheme is registered by the desktop app, so a browser
+ * hands no such link to srelens.
+ */
+export function DeepLinksPane() {
+  return (
+    <div className="flex flex-col gap-4">
+      <Panel title="srelens:// scheme">
+        <p className="text-[0.75rem] leading-relaxed text-muted">
+          srelens registers the <code className="code">srelens://</code> URL scheme, so a link in a
+          browser, a chat message, a runbook or an alert can open the cluster or the resource it
+          names. Clicking one brings the running app to the front rather than starting a second copy.
+        </p>
+        <p className="mt-2 text-[0.75rem] leading-relaxed text-muted">
+          Any web page can ask your system to open a link like this, so srelens checks every one
+          before it opens anything. The link has to take one of the forms below, name a kube context
+          you have, and name a kind srelens can open. A link that fails a check opens nothing, and
+          srelens says why.
+        </p>
+      </Panel>
+
+      <Panel title="Link forms">
+        <Section padded={false}>
+          <Table columns={LINK_COLUMNS} data={LINK_FORMS} getRowKey={(row) => row.link} />
+        </Section>
+        <p className="mt-2 text-[0.75rem] leading-relaxed text-muted">
+          <code className="code">&lt;kind&gt;</code> is the Kubernetes kind, such as{" "}
+          <code className="code">Pod</code>, <code className="code">Deployment</code> or{" "}
+          <code className="code">Node</code>. Use <code className="code">-</code> in place of the
+          namespace for a cluster-scoped kind, such as a Node. Percent-encode any part that contains
+          a <code className="code">/</code> or a <code className="code">:</code>, which OpenShift
+          context names usually do.
+        </p>
+      </Panel>
+
+      <Panel title="Why the namespace is required">
+        <p className="text-[0.75rem] leading-relaxed text-muted">
+          Objects of a namespaced kind, such as Pods and Services, can share a name across
+          namespaces. A link that gave <code className="code">-</code> for such a kind would have to
+          search every namespace and open whichever object of that name came back first, which could
+          be a different object from the one the link meant. So a link to a namespaced kind has to
+          name its namespace, and srelens refuses one that does not. Only a cluster-scoped kind,
+          which exists outside every namespace, takes <code className="code">-</code>.
         </p>
       </Panel>
     </div>

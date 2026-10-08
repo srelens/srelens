@@ -1,7 +1,4 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { readFileSync, readdirSync } from "node:fs";
-import { dirname, join, relative } from "node:path";
-import { fileURLToPath } from "node:url";
 import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
@@ -75,6 +72,7 @@ const DESKTOP_SECTIONS = [
   "Appearance",
   "Accessibility",
   "Shortcuts",
+  "Deep links",
   "Workspace",
   "Kubernetes",
   "Application logs",
@@ -83,9 +81,13 @@ const DESKTOP_SECTIONS = [
   "Apps",
 ];
 
-/** The same nav where no vault command can answer. Apps stays: the server keeps each user's (#515). */
+/**
+ * The same nav where no vault command can answer. Apps stays: the server keeps
+ * each user's (#515). Deep links goes: only the desktop app registers the
+ * `srelens://` scheme, so in a browser no such link reaches srelens at all.
+ */
 const WEB_SECTIONS = DESKTOP_SECTIONS.filter(
-  (s) => s !== "Security" && s !== "Backup" && s !== "Updates",
+  (s) => s !== "Security" && s !== "Backup" && s !== "Updates" && s !== "Deep links",
 );
 
 function paint(props: { onLocked?: () => void } = {}) {
@@ -142,48 +144,31 @@ describe("Settings", () => {
   it("lists every section, in order, and no section it cannot fill", () => {
     paint();
     expect(sections()).toEqual(DESKTOP_SECTIONS);
-    expect(screen.queryByRole("tab", { name: /deep links/i })).toBeNull();
   });
 
   /**
-   * The reason the `Deep links` entry is absent, pinned as a property rather
-   * than asserted in a comment.
-   *
-   * The comment this replaces said `srelens://` "exists nowhere in this repo —
-   * no scheme, no handler, no parser". All three were false: the scheme is in
-   * `tauri.conf.json`, the parser is `deepLink.ts` with its own suite, the
-   * handler is `deep_link.rs` wired in four places, and `App.tsx` drains and
-   * routes. What is actually true is that the consumer is CLASSIC's:
-   * `main.tsx` mounts `App` or `NextApp` and never both, and nothing in this
-   * package touches deep links — so under the new design a link is queued and
-   * nothing opens it. A pane leading with §23's "opens the exact thing it
-   * refers to" would be false in the design a reader is reading it in.
-   *
-   * This scans the package for a consumer instead of trusting the comment.
-   * Whoever wires the drain into this tree fails this test, and adds the pane
-   * and its nav entry in the same commit (#370).
+   * #370: the two forms `parseDeepLink` accepts, each copyable exactly. The
+   * forms are written out by hand here, not read from the pane, so a pane that
+   * drew or copied a form the parser would refuse fails this.
    */
-  it("has no deep-link consumer of its own, which is why the section is absent", () => {
-    const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-    const consumers: string[] = [];
-    const walk = (dir: string) => {
-      for (const entry of readdirSync(dir, { withFileTypes: true })) {
-        const path = join(dir, entry.name);
-        if (entry.isDirectory()) {
-          walk(path);
-          continue;
-        }
-        if (!/\.tsx?$/.test(entry.name) || /\.test\.tsx?$/.test(entry.name)) continue;
-        // Comments stripped: this very absence is discussed in prose in
-        // `Settings.tsx`, and a scan that read prose would find itself.
-        const source = readFileSync(path, "utf8").replace(/\/\*[\s\S]*?\*\/|\/\/.*/g, "");
-        if (/parseDeepLink|take_pending_deep_links|deep-link-pending/.test(source)) {
-          consumers.push(relative(root, path));
-        }
-      }
-    };
-    walk(root);
-    expect(consumers).toEqual([]);
+  it("draws both link forms under Deep links, and copies each one exactly", async () => {
+    const { user } = paint();
+    // Installed after `userEvent.setup()`, which brings a clipboard of its own.
+    const writeText = vi.fn(async () => {});
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    await user.click(screen.getByRole("tab", { name: "Deep links" }));
+    const forms = screen.getByRole("heading", { name: "Link forms" }).closest("section") as HTMLElement;
+    const rows = within(within(forms).getByRole("table")).getAllByRole("row").slice(1);
+    const links = [
+      "srelens://cluster/<context>",
+      "srelens://resource/<context>/<namespace>/<kind>/<name>",
+    ];
+    expect(rows.map((row) => within(row).getAllByRole("cell")[0].textContent)).toEqual(links);
+    for (const [index, link] of links.entries()) {
+      await user.click(within(rows[index]).getByRole("button", { name: `Copy ${link}` }));
+      expect(writeText).toHaveBeenLastCalledWith(link);
+    }
+    expect(writeText).toHaveBeenCalledTimes(2);
   });
 
   it("names the rail Settings and holds it at the design's 196px", () => {

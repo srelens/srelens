@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   cleanErrorMessage,
+  DEEP_LINK_REFUSED,
   describeError,
   isApplePlatform,
   isTauri,
@@ -104,6 +105,7 @@ import { Nav } from "./Nav";
 import { Rail } from "./Rail";
 import { Status } from "./Status";
 import { TabSurface } from "./TabSurface";
+import { useDeepLinks } from "./useDeepLinks";
 
 export interface WindowProps {
   /** Display names of the screens that exist in the new design. */
@@ -226,15 +228,22 @@ export function Window({
 
   // What the desktop host reports after the page that would have heard it is
   // gone: a helm operation outlives the window that started it, and how it
-  // ended reaches every window (#735). The web host sends none.
-  const [hostNotices, setHostNotices] = useState<HostNotice[]>([]);
+  // ended reaches every window (#735). The web host sends none. A refused
+  // `srelens://` link joins the same queue (#370): one surface, oldest first.
+  const [notices, setNotices] = useState<HostNotice[]>([]);
   useEffect(
     () =>
       isTauri()
-        ? listenForHostNotices((notice) => setHostNotices((shown) => [...shown, notice]))
+        ? listenForHostNotices((notice) => setNotices((shown) => [...shown, notice]))
         : undefined,
     [],
   );
+  useDeepLinks({
+    windowLabel,
+    ready: booted,
+    onRefused: (reason) =>
+      setNotices((shown) => [...shown, { level: "error", title: DEEP_LINK_REFUSED, detail: reason }]),
+  });
 
   useEffect(() => {
     let cancelled = false;
@@ -942,14 +951,15 @@ export function Window({
       */}
       {windowLabel === "main" && <AgentConsent />}
       {/* What the host reports after the page that would have heard it is
-        gone (#735). This design mounts no `notify` sink, so the window draws
-        it: the oldest first, each until it is dismissed. */}
+        gone (#735), and why a deep link was refused (#370). This design
+        mounts no `notify` sink, so the window draws them: the oldest first,
+        each until it is dismissed. */}
       <SurfaceToast
         anchor="window"
-        title={hostNotices[0]?.title}
-        hint={hostNotices[0]?.detail}
-        tone={hostNotices[0]?.level === "error" ? "sev" : "info"}
-        onClose={() => setHostNotices((shown) => shown.slice(1))}
+        title={notices[0]?.title}
+        hint={notices[0]?.detail}
+        tone={notices[0]?.level === "error" ? "sev" : "info"}
+        onClose={() => setNotices((shown) => shown.slice(1))}
         dismissLabel="Dismiss notice"
       />
     </>

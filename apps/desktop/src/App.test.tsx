@@ -18,6 +18,9 @@ const tauri = vi.hoisted(() => {
     handlers,
     windowClose,
     windowDestroy,
+    // Undefined unless a test names it: every test written before the deep-link
+    // block ran with no label at all, and keeps doing so.
+    windowLabel: undefined as string | undefined,
     closeRequestedHandler: null as null | ((event: { preventDefault: () => void }) => unknown),
     listen: vi.fn((name: string, cb: (e: { payload: unknown }) => void) => {
       handlers.set(name, cb);
@@ -28,6 +31,7 @@ const tauri = vi.hoisted(() => {
 vi.mock("@tauri-apps/api/event", () => ({ listen: tauri.listen }));
 vi.mock("@tauri-apps/api/window", () => ({
   getCurrentWindow: () => ({
+    label: tauri.windowLabel,
     close: tauri.windowClose,
     destroy: tauri.windowDestroy,
     // Capture the handler so a test can drive the close-request path.
@@ -48,6 +52,22 @@ vi.mock("@srelens/core/lib/updater", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@srelens/core/lib/updater")>()),
   checkForUpdate: checkForUpdateMock,
 }));
+// What the backend's deep-link queue holds, handed out once per drain the way
+// `take_pending_deep_links` drains it. Every other command goes to the real
+// transport, as it did before this mock existed.
+const deepLinks = vi.hoisted(() => ({ queue: [] as string[] }));
+vi.mock("@srelens/core/transport", async (importOriginal) => {
+  const real = await importOriginal<typeof import("@srelens/core/transport")>();
+  return {
+    ...real,
+    invokeCommand: async <T,>(command: string, args?: Record<string, unknown>): Promise<T> => {
+      if (command !== "take_pending_deep_links") return real.invokeCommand<T>(command, args);
+      const drained = deepLinks.queue;
+      deepLinks.queue = [];
+      return drained as T;
+    },
+  };
+});
 const hostNotices = vi.hoisted(() => ({ listen: vi.fn(() => () => {}) }));
 vi.mock("@srelens/core/lib/hostNotices", () => ({ listenForHostNotices: hostNotices.listen }));
 vi.mock("@srelens/core/lib/notify", () => ({
@@ -932,5 +952,64 @@ describe("closing a node shell's dock tab", () => {
   it("still deletes it on the web, where no host does", () => {
     openAndCloseANodeShell();
     expect(deletePodMock).toHaveBeenCalledWith("kind-dev", "default", "srelens-node-debug-x1");
+  });
+});
+
+// Classic's half of #36/#370: drained on the main desktop window, judged
+// against the listed contexts, then routed — or refused with a reason. Both
+// designs share the rule set (`checkDeepLink` in core), so these pin what
+// classic does with each outcome rather than the rules themselves.
+describe("srelens:// deep links", () => {
+  beforeEach(() => {
+    (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__ = {};
+    tauri.windowLabel = "main";
+    deepLinks.queue = [];
+    vi.mocked(notify.error).mockClear();
+  });
+  afterEach(() => {
+    delete (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__;
+    tauri.windowLabel = undefined;
+    deepLinks.queue = [];
+  });
+
+  it("opens a cluster link on that cluster's Overview", async () => {
+    deepLinks.queue = ["srelens://cluster/prod"];
+    render(<App />);
+    expect((await screen.findByTestId("overview")).textContent).toBe("prod");
+    expect(screen.getByRole("tab", { name: /Overview · prod/ })).toBeDefined();
+  });
+
+  it("opens a resource link in its kind's view, on the link's own cluster", async () => {
+    deepLinks.queue = ["srelens://resource/prod/default/Pod/web-1"];
+    render(<App />);
+    expect((await screen.findByTestId("browser")).textContent).toContain("prod:pods");
+    expect(screen.getByRole("tab", { name: /Pods · prod/ })).toBeDefined();
+  });
+
+  it("opens a link the backend announces after the window is up", async () => {
+    render(<App />);
+    await waitFor(() => expect(tauri.handlers.has("deep-link-pending")).toBe(true));
+    deepLinks.queue = ["srelens://cluster/kind-dev"];
+    act(() => tauri.handlers.get("deep-link-pending")?.({ payload: null }));
+    expect((await screen.findByTestId("overview")).textContent).toBe("kind-dev");
+  });
+
+  it("reports each link it refuses, with the reason, and opens none of them", async () => {
+    deepLinks.queue = [
+      "srelens://evil/prod",
+      "srelens://cluster/staging",
+      "srelens://resource/prod/default/Event/web.17f",
+      "srelens://resource/prod/-/Pod/web-1",
+    ];
+    render(<App />);
+    await waitFor(() => expect(notify.error).toHaveBeenCalledTimes(4));
+    expect(vi.mocked(notify.error).mock.calls).toEqual([
+      ["Couldn't open that link", "It isn't a link srelens understands."],
+      ["Couldn't open that link", 'No kube context named "staging".'],
+      ["Couldn't open that link", "srelens can't open a Event directly."],
+      ["Couldn't open that link", "Pod is namespaced, so the link needs a namespace."],
+    ]);
+    expect(screen.queryByTestId("overview")).toBeNull();
+    expect(screen.queryByTestId("browser")).toBeNull();
   });
 });

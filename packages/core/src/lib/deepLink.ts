@@ -9,6 +9,8 @@
 // any web page can ask the OS to open one, so it is validated rather than
 // trusted.
 
+import { isClusterScopedKind, isNavigableResourceKind } from "./resourceNavigation";
+
 /** A parsed, validated deep-link destination. */
 export type DeepLinkTarget =
   | { route: "cluster"; context: string }
@@ -90,6 +92,48 @@ export function parseDeepLink(url: string): DeepLinkTarget | null {
   }
 
   return null;
+}
+
+/** The title on a refused link's notice, in both designs. */
+export const DEEP_LINK_REFUSED = "Couldn't open that link";
+
+/** A link that can be opened, or the sentence that says why it cannot. */
+export type DeepLinkCheck = { ok: true; target: DeepLinkTarget } | { ok: false; reason: string };
+
+/**
+ * Decide whether a link can be opened against the contexts this machine lists,
+ * and say why not when it cannot.
+ *
+ * Both designs judge a link by this one rule set, so a link that one refuses
+ * the other cannot open, and the reader sees the same sentence in either. It
+ * takes context NAMES because a link names its context the way a kubeconfig
+ * does, and is matched exactly: context names are case-sensitive.
+ *
+ * Call it only once the contexts have been listed. A link judged against an
+ * empty list during a cold start would be refused as naming a context that
+ * does not exist.
+ */
+export function checkDeepLink(url: string, contextNames: readonly string[]): DeepLinkCheck {
+  const target = parseDeepLink(url);
+  if (!target) return { ok: false, reason: "It isn't a link srelens understands." };
+  if (!contextNames.includes(target.context)) {
+    return { ok: false, reason: `No kube context named "${target.context}".` };
+  }
+  if (target.route === "resource") {
+    // `K8S_KIND` alone is too permissive: Events have a list view but no
+    // detail, so such a link would quietly land on the list instead of the
+    // object it named.
+    if (!isNavigableResourceKind(target.kind)) {
+      return { ok: false, reason: `srelens can't open a ${target.kind} directly.` };
+    }
+    // "-" means cluster-scoped. Allowing it for a namespaced kind would search
+    // every namespace and open whichever matching name came back first: a link
+    // that silently opens the wrong object.
+    if (!isClusterScopedKind(target.kind) && target.namespace === null) {
+      return { ok: false, reason: `${target.kind} is namespaced, so the link needs a namespace.` };
+    }
+  }
+  return { ok: true, target };
 }
 
 /**
