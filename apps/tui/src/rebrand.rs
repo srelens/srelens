@@ -154,35 +154,63 @@ pub fn is_trusted_existing_command(_current: &Path, next: &Path) -> Result<bool,
 /// limit, and overwriting it would then be that downgrade, repeated every
 /// launch. Keeping it is what this did before versions were compared.
 pub fn replaces_existing(reported: Option<&str>, this_version: &str) -> bool {
+    // Our own line, `srectl 0.16.0` (`srelens-tui 0.15.0` before the rename),
+    // and nothing else: the file at that path is ours only by its name.
     let reported = reported
         .and_then(|out| out.lines().next())
-        .and_then(|line| line.split_whitespace().last())
-        .map(|version| version.trim_start_matches('v'));
+        .and_then(|line| match line.split_whitespace().collect::<Vec<_>>()[..] {
+            ["srectl" | "srelens-tui", version] => Some(version.trim_start_matches('v')),
+            _ => None,
+        });
     reported.is_some_and(|version| is_newer(version, this_version))
 }
 
-/// What `next --version` prints, or `None` if it does not answer within a few
-/// seconds. It has passed the trust check and is about to be run anyway.
-fn reported_version(next: &Path) -> Option<String> {
-    let mut child = Command::new(next)
-        .arg("--version")
+/// How long an existing `srectl` gets to say its version.
+const VERSION_PROBE_LIMIT: Duration = Duration::from_secs(5);
+
+/// `next --version`. It has passed the trust check and is about to be run anyway.
+fn version_probe(next: &Path) -> Command {
+    let mut probe = Command::new(next);
+    probe.arg("--version");
+    probe
+}
+
+/// What `probe` prints, or `None` if it does not answer within `limit`.
+fn reported_version(mut probe: Command, limit: Duration) -> Option<String> {
+    let mut child = probe
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
         .ok()?;
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while child.try_wait().ok()?.is_none() {
+    let deadline = Instant::now() + limit;
+    // Read on a thread of its own. The probe exiting does not close the pipe
+    // while something it started still holds it, and a read here would wait
+    // for that, past the limit. The thread is left behind if it never ends.
+    let mut stdout = child.stdout.take()?;
+    let (sender, output) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut out = String::new();
+        if stdout.read_to_string(&mut out).is_ok() {
+            let _ = sender.send(out);
+        }
+    });
+    let status = loop {
+        if let Some(status) = child.try_wait().ok()? {
+            break status;
+        }
         if Instant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
             return None;
         }
         std::thread::sleep(Duration::from_millis(20));
+    };
+    // A probe that failed said nothing about the version, whatever it printed.
+    if !status.success() {
+        return None;
     }
-    let mut out = String::new();
-    child.stdout.take()?.read_to_string(&mut out).ok()?;
-    Some(out)
+    output.recv_timeout(deadline.saturating_duration_since(Instant::now())).ok()
 }
 
 /// Copy this binary to `srectl` when that command is not there yet or is older
@@ -193,7 +221,10 @@ fn reported_version(next: &Path) -> Option<String> {
 pub fn apply_rebrand(current: &Path, this_version: &str) -> Result<PathBuf, String> {
     let next = next_command_path(current);
     let install = !is_trusted_existing_command(current, &next)?
-        || replaces_existing(reported_version(&next).as_deref(), this_version);
+        || replaces_existing(
+            reported_version(version_probe(&next), VERSION_PROBE_LIMIT).as_deref(),
+            this_version,
+        );
     if install {
         let dir = next.parent().unwrap_or_else(|| Path::new("."));
         let (staged_path, mut file) = crate::self_update::create_new_file(dir, ".srectl.new-")
@@ -277,4 +308,71 @@ pub fn exec_next(next: &Path) -> String {
 
 pub fn notice() -> &'static str {
     NOTICE
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_an_srectl_reporting_an_older_version_is_replaced() {
+        // `srectl --version` prints `srectl <version>`; the `version` subcommand
+        // prints `srectl v<version>`. Builds from before the rename print
+        // `srelens-tui <version>`.
+        assert!(replaces_existing(Some("srectl 0.15.0-dev.3\n"), "0.15.0"));
+        assert!(replaces_existing(Some("srectl v0.14.2\n"), "0.15.0"));
+        assert!(replaces_existing(Some("srelens-tui 0.14.2\n"), "0.15.0"));
+        assert!(!replaces_existing(Some("srectl 0.15.0\n"), "0.15.0"));
+        assert!(!replaces_existing(Some("srectl 0.16.0-dev.1\n"), "0.15.0"));
+        // A version that cannot be read keeps the existing command.
+        assert!(!replaces_existing(None, "0.15.0"));
+        assert!(!replaces_existing(Some(""), "0.15.0"));
+        assert!(!replaces_existing(Some("command not found\n"), "0.15.0"));
+        // So does another program's version: the file is only ours by name.
+        assert!(!replaces_existing(Some("other-command 0.14.0\n"), "0.15.0"));
+        assert!(!replaces_existing(Some("srectl is 0.14.0\n"), "0.15.0"));
+    }
+
+    /// A shell command line, run the way this platform runs one.
+    fn shell(script: &str) -> Command {
+        if cfg!(windows) {
+            let mut command = Command::new("cmd");
+            command.args(["/C", script]);
+            command
+        } else {
+            let mut command = Command::new("sh");
+            command.args(["-c", script]);
+            command
+        }
+    }
+
+    #[test]
+    fn a_probe_that_answers_reports_what_it_printed() {
+        let out = reported_version(shell("echo srectl 0.1.0"), Duration::from_secs(5));
+        assert_eq!(out.as_deref().map(str::trim), Some("srectl 0.1.0"));
+    }
+
+    #[test]
+    fn a_probe_that_exits_with_a_failure_reports_nothing() {
+        let script = if cfg!(windows) { "echo srectl 0.1.0& exit 3" } else { "echo srectl 0.1.0; exit 3" };
+        assert_eq!(reported_version(shell(script), Duration::from_secs(5)), None);
+    }
+
+    #[test]
+    fn a_probe_whose_output_stays_open_after_it_exits_gives_up_at_the_limit() {
+        // The command exits at once, but what it started holds the pipe for
+        // twenty seconds, so reading to the end would wait that long.
+        let script = if cfg!(windows) {
+            "echo srectl 0.1.0& start /b ping -n 21 127.0.0.1"
+        } else {
+            "echo srectl 0.1.0; sleep 20 &"
+        };
+        let started = Instant::now();
+        assert_eq!(reported_version(shell(script), Duration::from_secs(1)), None);
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the probe outlived its limit: {:?}",
+            started.elapsed()
+        );
+    }
 }

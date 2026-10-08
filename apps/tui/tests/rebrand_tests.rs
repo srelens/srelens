@@ -3,25 +3,11 @@
 use std::path::Path;
 
 use srectl::rebrand::{
-    apply_rebrand, legacy_file_name, next_command_path, next_file_name, replaces_existing,
-    should_rebrand, wrapper_script,
+    apply_rebrand, legacy_file_name, next_command_path, next_file_name, should_rebrand,
+    wrapper_script,
 };
 
 const THIS_VERSION: &str = env!("CARGO_PKG_VERSION");
-
-#[test]
-fn only_an_srectl_reporting_an_older_version_is_replaced() {
-    // `srectl --version` prints `srectl <version>`; the `version` subcommand
-    // prints `srectl v<version>`.
-    assert!(replaces_existing(Some("srectl 0.15.0-dev.3\n"), "0.15.0"));
-    assert!(replaces_existing(Some("srectl v0.14.2\n"), "0.15.0"));
-    assert!(!replaces_existing(Some("srectl 0.15.0\n"), "0.15.0"));
-    assert!(!replaces_existing(Some("srectl 0.16.0-dev.1\n"), "0.15.0"));
-    // A version that cannot be read keeps the existing command.
-    assert!(!replaces_existing(None, "0.15.0"));
-    assert!(!replaces_existing(Some(""), "0.15.0"));
-    assert!(!replaces_existing(Some("command not found\n"), "0.15.0"));
-}
 
 #[test]
 fn an_older_srectl_beside_the_legacy_command_is_replaced_and_a_current_one_kept() {
