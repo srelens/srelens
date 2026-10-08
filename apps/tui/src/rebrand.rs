@@ -2,14 +2,16 @@
 //!
 //! Copies already installed can only download an archive named `srelens-tui`.
 //! This build is that archive. The first time it runs from that name, it
-//! copies itself to `srectl` and, on Unix, leaves `srelens-tui` as a wrapper
-//! that runs `srectl`. Later updates replace `srectl` only, so the old command
-//! keeps working.
+//! copies itself to `srectl` (unless one as new is already there) and, on
+//! Unix, leaves `srelens-tui` as a wrapper that runs `srectl`. Later updates
+//! replace `srectl` only, so the old command keeps working.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
-use crate::self_update::package_manager_for;
+use crate::self_update::{is_newer, package_manager_for};
 
 const NOTICE: &str = "srelens-tui is now srectl";
 
@@ -140,14 +142,59 @@ pub fn is_trusted_existing_command(_current: &Path, next: &Path) -> Result<bool,
     }
 }
 
-/// Copy this binary to `srectl` when that command is not there yet, and on
-/// Unix replace the old name with the wrapper.
+/// Whether an existing `srectl` whose `--version` printed `reported` should be
+/// replaced by this build, `this_version`.
+///
+/// Only an older one is. A same or newer one is kept: on Windows there is no
+/// wrapper, so `srelens-tui.exe` stays this build and runs this on every
+/// launch, and replacing anything but an older `srectl.exe` would downgrade
+/// the one self-update has since moved forward. A version that cannot be read
+/// (`None`, or output that is not `srectl <semver>`) also keeps it, for the
+/// same reason: it may be a later release, or a slow start that hit the time
+/// limit, and overwriting it would then be that downgrade, repeated every
+/// launch. Keeping it is what this did before versions were compared.
+pub fn replaces_existing(reported: Option<&str>, this_version: &str) -> bool {
+    let reported = reported
+        .and_then(|out| out.lines().next())
+        .and_then(|line| line.split_whitespace().last())
+        .map(|version| version.trim_start_matches('v'));
+    reported.is_some_and(|version| is_newer(version, this_version))
+}
+
+/// What `next --version` prints, or `None` if it does not answer within a few
+/// seconds. It has passed the trust check and is about to be run anyway.
+fn reported_version(next: &Path) -> Option<String> {
+    let mut child = Command::new(next)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while child.try_wait().ok()?.is_none() {
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let mut out = String::new();
+    child.stdout.take()?.read_to_string(&mut out).ok()?;
+    Some(out)
+}
+
+/// Copy this binary to `srectl` when that command is not there yet or is older
+/// than `this_version`, and on Unix replace the old name with the wrapper.
 ///
 /// An existing `srectl` is verified for safety before handoff.
 /// Returns the path the caller should re-exec.
-pub fn apply_rebrand(current: &Path) -> Result<PathBuf, String> {
+pub fn apply_rebrand(current: &Path, this_version: &str) -> Result<PathBuf, String> {
     let next = next_command_path(current);
-    if !is_trusted_existing_command(current, &next)? {
+    let install = !is_trusted_existing_command(current, &next)?
+        || replaces_existing(reported_version(&next).as_deref(), this_version);
+    if install {
         let dir = next.parent().unwrap_or_else(|| Path::new("."));
         let (staged_path, mut file) = crate::self_update::create_new_file(dir, ".srectl.new-")
             .map_err(|e| format!("could not create staging file for {}: {e}", next.display()))?;
