@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { TerminalSessionRow } from "../../lib/sessions";
 import { SessionRail, SESSION_RAIL_WIDTH, sessionRailHead } from "./SessionRail";
@@ -181,6 +181,20 @@ describe("SessionRail", () => {
       await userEvent.keyboard("{Enter}");
       expect(document.activeElement?.textContent).toContain("bravo");
       expect(document.activeElement?.tagName).toBe("BUTTON");
+    });
+
+    it("leaves Enter and Escape to an input method that is still composing", async () => {
+      const props = rail();
+      await userEvent.click(screen.getByRole("button", { name: "Rename bravo" }));
+      const field = screen.getByRole("textbox", { name: "Rename bravo" });
+      // Enter here picks a candidate; it does not finish the name.
+      fireEvent.keyDown(field, { key: "Enter", isComposing: true });
+      fireEvent.keyDown(field, { key: "Escape", isComposing: true });
+      expect(props.onRename).not.toHaveBeenCalled();
+      expect(screen.getByRole("textbox", { name: "Rename bravo" })).toBeDefined();
+      // Composition over, Enter is the reader's again.
+      fireEvent.keyDown(field, { key: "Enter" });
+      expect(props.onRename).toHaveBeenCalledExactlyOnceWith(22, "bravo");
     });
 
     it("keeps the old name on Escape, and says nothing to the store", async () => {

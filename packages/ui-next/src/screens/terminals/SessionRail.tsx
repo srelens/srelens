@@ -125,6 +125,9 @@ function RenameField({
       onBlur={() => finish(draft, false)}
       onKeyDown={(e) => {
         if (e.key !== "Enter" && e.key !== "Escape") return;
+        // An input method is still composing: this Enter picks a candidate
+        // and this Escape drops one. Neither is about the field.
+        if (e.nativeEvent.isComposing) return;
         // Finishing hands focus back to the row's button within this same
         // keystroke; left to its default, the rest of the keystroke would
         // then press that button and select a row the reader only renamed.
