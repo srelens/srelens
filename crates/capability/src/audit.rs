@@ -96,6 +96,31 @@ pub struct AuditRecord {
     /// text.
     pub outcome: &'static str,
     pub error: Option<String>,
+    /// Bytes of the JSON the capability answered with — over MCP, the text an
+    /// agent receives — so the heavy tools can be found from real use. `None`
+    /// when it did not answer, and for a sensitive capability, whose answer's
+    /// length is a fact about a secret.
+    pub result_bytes: Option<u64>,
+}
+
+/// The bytes `value.to_string()` would produce, counted without building the
+/// string: a list answer can run to megabytes, and this runs per audited call.
+pub(crate) fn json_len(value: &Value) -> u64 {
+    struct Count(u64);
+    impl Write for Count {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0 += buf.len() as u64;
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut count = Count(0);
+    // Neither side can fail: the writer only counts, and a `Value` always
+    // serializes.
+    let _ = serde_json::to_writer(&mut count, value);
+    count.0
 }
 
 /// The call ran and the capability answered.
@@ -719,7 +744,7 @@ fn upgrade_record(mut line: Value) -> Value {
             }),
         );
     }
-    for absent in ["app", "cluster", "resource"] {
+    for absent in ["app", "cluster", "resource", "resultBytes"] {
         map.entry(absent).or_insert(Value::Null);
     }
     line
@@ -771,6 +796,7 @@ impl AuditSink for JsonlAuditLog {
             "decision": rec.decision,
             "outcome": rec.outcome,
             "err": rec.error,
+            "resultBytes": rec.result_bytes,
         });
         // 0600: the log holds every tool call's arguments, so it is at least
         // as sensitive as the token file beside it. `mode` applies only when
@@ -918,6 +944,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let log = JsonlAuditLog::new(path.clone(), 1024 * 1024);
         log.record(AuditRecord {
+            result_bytes: None,
             source: Source::McpHttp,
             app: None,
             cluster: None,
@@ -938,10 +965,36 @@ mod tests {
         assert!(parsed["ts"].as_u64().unwrap() > 0);
     }
 
+    /// `resultBytes` is always on the line — the size when the call answered,
+    /// `null` when it did not — so a reader never tells absent from unknown.
+    #[test]
+    fn a_line_carries_the_result_size_or_null() {
+        let dir = std::env::temp_dir().join(format!("srelens-audit-size-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("size.jsonl");
+        let _ = std::fs::remove_file(&path);
+        let log = JsonlAuditLog::new(path.clone(), u64::MAX);
+        log.record(AuditRecord { result_bytes: Some(1234), ..a_record() });
+        log.record(AuditRecord { result_bytes: None, ..a_record() });
+        let body = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<Value> = body.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+        assert_eq!(lines[0]["resultBytes"], json!(1234));
+        assert_eq!(lines[1].get("resultBytes"), Some(&Value::Null));
+    }
+
+    /// Counted as the bytes `Value::to_string` produces — escapes and
+    /// multi-byte characters included — without building that string.
+    #[test]
+    fn json_len_counts_the_serialized_bytes() {
+        let v = json!({ "msg": "naïve \"quoted\"\n", "n": [1, 2.5, null] });
+        assert_eq!(json_len(&v), v.to_string().len() as u64);
+    }
+
     fn write_entries(path: &std::path::Path, count: usize, pad: usize) {
         let log = JsonlAuditLog::new(path.to_path_buf(), u64::MAX); // never rotate
         for i in 0..count {
             log.record(AuditRecord {
+                result_bytes: None,
                 source: Source::McpStdio,
                 app: None,
                 cluster: None,
@@ -1070,6 +1123,7 @@ mod tests {
 
     fn a_record() -> AuditRecord {
         AuditRecord {
+            result_bytes: None,
             source: Source::McpHttp,
             app: None,
             cluster: None,
@@ -1131,6 +1185,7 @@ mod tests {
         let log = JsonlAuditLog::new(path.clone(), 200); // tiny cap
         for i in 0..40 {
             log.record(AuditRecord {
+                result_bytes: None,
                 source: Source::McpStdio,
                 app: None,
                 cluster: None,
@@ -1744,6 +1799,12 @@ mod tests {
             json!("web-0"),
             "the arguments are untouched"
         );
+        // `get`, not indexing: `Value[...]` reads a missing key as null too.
+        assert_eq!(
+            out[0].get("resultBytes"),
+            Some(&Value::Null),
+            "a size never recorded reads as unknown, present on the row"
+        );
     }
 
     /// The other half of the old `error`: a call the consent policy refused
@@ -1780,6 +1841,7 @@ mod tests {
         let path = dir.join("current.jsonl");
         let _ = std::fs::remove_file(&path);
         JsonlAuditLog::new(path.clone(), u64::MAX).record(AuditRecord {
+            result_bytes: None,
             source: Source::Ui,
             tool: "extensions.action".into(),
             args: json!({}),

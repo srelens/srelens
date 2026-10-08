@@ -182,16 +182,22 @@ limits do.
   Each line carries the time, the `source` (`ui` or `mcp`) and the
   `transport` under it (`ui`, `stdio`, `http`), the capability, the app `id`
   and `revision` when the call went through an installed app, the `cluster`
-  and `resource` it named, the consent `decision`, and an `outcome` of `ok`,
+  and `resource` it named, the consent `decision`, an `outcome` of `ok`,
   `rejected` (it never ran — consent refused, arguments refused, no such
-  capability) or `failed` (it ran and did not finish).
+  capability) or `failed` (it ran and did not finish), and `resultBytes`: the
+  size of the JSON the capability answered with — over MCP, exactly what the
+  agent received — so the tools that fill an agent's context can be found from
+  real use, in the Size column of the same pane. It is `null` when the call
+  did not answer, and for a sensitive capability, whose answer's length is a
+  fact about a secret.
 
   **Records written by an older srelens are still readable.** Lines from
   before these fields existed carry no `source` and an `outcome` of `error`;
   they are upgraded as the log is read — `source` becomes `mcp`, since
   nothing else could have written them, and `error` becomes `rejected` or
   `failed` according to the decision beside it. `app`, `cluster` and
-  `resource` read as absent on those rows, which is what they are.
+  `resource` read as absent on those rows, which is what they are, and so
+  does `resultBytes` on any line written before sizes were kept.
 
   **What is recorded differs by source, on purpose.** MCP records every call
   an agent makes, reads included, because that is the question the trail

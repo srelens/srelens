@@ -151,6 +151,12 @@ export interface AuditEntry {
    */
   outcome: "ok" | "rejected" | "failed";
   err: string | null;
+  /**
+   * Bytes of the JSON the capability answered with — over MCP, what an agent
+   * received. `null` when it did not answer, for a sensitive capability, and
+   * on records written before sizes were kept.
+   */
+  resultBytes: number | null;
 }
 
 export async function respondToConfirm(id: string, approved: boolean): Promise<void> {

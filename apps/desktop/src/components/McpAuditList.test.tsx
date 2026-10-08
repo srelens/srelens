@@ -46,6 +46,22 @@ describe("McpAuditList", () => {
     expect(rejected.className).toContain("amber");
   });
 
+  /**
+   * What each answer weighed — the JSON an agent received — so a heavy tool
+   * shows up from real use. A call that answered nothing, a sensitive read and
+   * a record from before sizes were kept read as unknown, never as zero.
+   */
+  it("shows each answer's size, and a dash where none was recorded", async () => {
+    auditTail.mockResolvedValue([
+      { ts: 1780000002, transport: "http", tool: "k8s_getObject", args: {}, decision: "auto", outcome: "ok", err: null, resultBytes: 38_912 },
+      { ts: 1780000001, transport: "http", tool: "k8s_scale", args: {}, decision: "auto", outcome: "failed", err: "timed out", resultBytes: null },
+    ]);
+    render(<McpAuditList />);
+    expect(await screen.findByText("38.0 KiB")).toBeTruthy();
+    expect(screen.getByText("—")).toBeTruthy();
+    expect(screen.queryByText("0 B")).toBeNull();
+  });
+
   it("shows an empty state rather than a blank panel", async () => {
     auditTail.mockResolvedValue([]);
     render(<McpAuditList />);

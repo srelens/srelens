@@ -114,6 +114,7 @@ fn rejected_tool_call(
     let redacted_args = crate::audit::redact(args, sensitive);
     let (app, cluster, resource) = crate::audit::describe_call_target(name, args, &redacted_args);
     server.audit().record(crate::audit::AuditRecord {
+        result_bytes: None,
         source: transport.into(),
         tool: name.to_string(),
         app,
@@ -309,6 +310,7 @@ pub async fn handle_request_as(
                     let redacted_args = crate::audit::redact(&args, sensitive);
                     let (app, cluster, resource) = crate::audit::describe_call_target(name, &args, &redacted_args);
                     server.audit().record(crate::audit::AuditRecord {
+                        result_bytes: None,
                         source: transport.into(),
                         tool: name.to_string(),
                         app,
@@ -488,6 +490,7 @@ pub async fn handle_request_as(
                         crate::audit::redact(&read.args, server.is_sensitive(capability_id));
                     let (app, cluster, resource) = crate::audit::describe_target(&redacted_args);
                     server.audit().record(crate::audit::AuditRecord {
+                        result_bytes: None,
                         source: transport.into(),
                         tool: capability_id.to_string(),
                         app,
@@ -565,6 +568,7 @@ pub(crate) fn handle_subscription(
         Ok(u) => u,
         Err(message) => {
             server.audit().record(crate::audit::AuditRecord {
+                result_bytes: None,
                 source: transport.into(),
                 app: None,
                 cluster: None,
@@ -584,6 +588,7 @@ pub(crate) fn handle_subscription(
     if method == "resources/unsubscribe" {
         subs.remove(&canonical);
         server.audit().record(crate::audit::AuditRecord {
+            result_bytes: None,
             source: transport.into(),
             app: None,
             cluster: None,
@@ -599,6 +604,7 @@ pub(crate) fn handle_subscription(
 
     if let Err(message) = crate::resources::is_subscribable(&uri) {
         server.audit().record(crate::audit::AuditRecord {
+            result_bytes: None,
             source: transport.into(),
             app: None,
             cluster: None,
@@ -621,6 +627,7 @@ pub(crate) fn handle_subscription(
     // eventual read agree on what's addressable.
     if let Err(message) = crate::resources::plan_read(&uri, server.kind_resolver().as_ref()) {
         server.audit().record(crate::audit::AuditRecord {
+            result_bytes: None,
             source: transport.into(),
             app: None,
             cluster: None,
@@ -702,6 +709,7 @@ pub(crate) fn handle_subscription(
         Ok(h) => h,
         Err(message) => {
             server.audit().record(crate::audit::AuditRecord {
+                result_bytes: None,
                 source: transport.into(),
                 app: None,
                 cluster: None,
@@ -725,6 +733,7 @@ pub(crate) fn handle_subscription(
         handle.abort();
         let message = format!("the watch ended immediately: {reason}");
         server.audit().record(crate::audit::AuditRecord {
+            result_bytes: None,
             source: transport.into(),
             app: None,
             cluster: None,
@@ -742,6 +751,7 @@ pub(crate) fn handle_subscription(
         Ok(generation) => generation,
         Err(message) => {
             server.audit().record(crate::audit::AuditRecord {
+                result_bytes: None,
                 source: transport.into(),
                 app: None,
                 cluster: None,
@@ -767,6 +777,7 @@ pub(crate) fn handle_subscription(
         subs.remove_if(&canonical, generation);
         let message = format!("the watch ended immediately: {reason}");
         server.audit().record(crate::audit::AuditRecord {
+            result_bytes: None,
             source: transport.into(),
             app: None,
             cluster: None,
@@ -781,6 +792,7 @@ pub(crate) fn handle_subscription(
         return Some(err(id, -32603, &message));
     }
     server.audit().record(crate::audit::AuditRecord {
+        result_bytes: None,
         source: transport.into(),
         app: None,
         cluster: None,

@@ -31,6 +31,7 @@ const DENIED: AuditEntry = {
   decision: "denied",
   outcome: "rejected",
   err: "sensitive reads are off for this session",
+  resultBytes: null,
 };
 
 const ALLOWED: AuditEntry = {
@@ -45,6 +46,7 @@ const ALLOWED: AuditEntry = {
   decision: "auto",
   outcome: "ok",
   err: null,
+  resultBytes: 38_912,
 };
 
 /**
@@ -66,6 +68,7 @@ const REJECTED: AuditEntry = {
   decision: "auto",
   outcome: "rejected",
   err: "a resourceVersion is required",
+  resultBytes: null,
 };
 
 const FAILED: AuditEntry = {
@@ -80,6 +83,7 @@ const FAILED: AuditEntry = {
   decision: "approved",
   outcome: "failed",
   err: "the apiserver closed the connection",
+  resultBytes: null,
 };
 
 /**
@@ -100,6 +104,7 @@ const FROM_THE_UI: AuditEntry = {
   decision: "auto",
   outcome: "ok",
   err: null,
+  resultBytes: null,
 };
 
 /**
@@ -119,6 +124,7 @@ const FROM_A_SIDECAR: AuditEntry = {
   decision: "approved",
   outcome: "ok",
   err: null,
+  resultBytes: null,
 };
 
 describe("AuditPane", () => {
@@ -212,6 +218,19 @@ describe("AuditPane", () => {
     await screen.findByText("secret.read");
     expect(screen.getByText(/changed something or read secret material/i)).toBeTruthy();
     expect(screen.getByText(/never sent anywhere/i)).toBeTruthy();
+  });
+
+  /**
+   * What each answer weighed — the JSON an agent received — so a heavy tool
+   * shows up from real use. A refused call answered nothing, and that reads
+   * as unknown, never as `0 B`.
+   */
+  it("shows what each answer weighed, and a dash where none was recorded", async () => {
+    core.auditTail.mockResolvedValue([DENIED, ALLOWED]);
+    render(<AuditPane />);
+    await screen.findByText("secret.read");
+    const sizes = screen.getAllByTestId("audit-size").map((el) => el.textContent);
+    expect(sizes).toEqual(["—", "39 KB"]);
   });
 
   it("caps and truncates the target, with the full value in a title", async () => {

@@ -313,6 +313,7 @@ impl Registry {
                 .as_ref()
                 .err()
                 .map(|e| audit::redact_call_error(id, &e.to_string(), &input, &redacted)),
+            result_bytes: called.as_ref().ok().filter(|_| !sensitive).map(audit::json_len),
             args: redacted,
         });
         called
@@ -437,6 +438,38 @@ mod registry_tests {
             assert_eq!(record.args["manifest"], "<redacted>");
             assert!(!record.error.as_deref().unwrap_or("").contains("hunter2"));
         }
+    }
+
+    /// The trail says how much each answer weighed — the JSON the caller
+    /// received, which over MCP is what lands in an agent's context — so the
+    /// heavy tools show up from real use. A call that did not answer has no
+    /// size, and neither has a sensitive read: a Secret's length is a fact
+    /// about its value.
+    #[tokio::test]
+    async fn the_record_carries_the_size_of_an_answer_and_only_of_one() {
+        let mut reg = reg_with_a_read_and_a_write();
+        reg.register(Capability::read_only("k8s.fails", "fails", |_| async {
+            Err(CapabilityError::Handler("timed out".into()))
+        }));
+        let mut reveal = Capability::read_only("k8s.getSecret", "reveals", |_| async {
+            Ok(json!({ "data": { "password": "aHVudGVyMg==" } }))
+        });
+        reveal.annotations = Annotations::SENSITIVE_READ;
+        reg.register(reveal);
+        let spy = Spy::default();
+
+        let answer = reg
+            .invoke_audited("k8s.deletePod", json!({}), &spy, audit::Source::McpStdio, "approved")
+            .await
+            .unwrap();
+        for id in ["k8s.fails", "k8s.getSecret"] {
+            let _ = reg.invoke_audited(id, json!({}), &spy, audit::Source::McpStdio, "auto").await;
+        }
+
+        let seen = spy.seen();
+        assert_eq!(seen[0].result_bytes, Some(answer.to_string().len() as u64));
+        assert_eq!(seen[1].result_bytes, None, "a failed call answered nothing");
+        assert_eq!(seen[2].result_bytes, None, "a sensitive answer's size is not recorded");
     }
 
     /// The asymmetry #555 settles: MCP is a third party and every call it

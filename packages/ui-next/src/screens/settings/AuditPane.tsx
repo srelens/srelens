@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { auditTail, describeError, readPromptIssues, type PromptIssue, type AuditEntry } from "@srelens/core";
 import { Button, LoadingState, Panel, Section, Table, toneColor, type Column, type Tone } from "@srelens/ui-kit";
 import { FailureAlert, FailureState } from "../../lib/errorCopy";
+import { formatBytes } from "../../lib/numbers";
 
 /**
  * §23's `Audit` pane: every capability call an MCP-connected agent has made,
@@ -265,6 +266,21 @@ const columns: Column<AuditEntry>[] = [
         </span>
       );
     },
+  },
+  {
+    key: "resultBytes",
+    // What the answer weighed — over MCP, what landed in an agent's context —
+    // so the heavy tools show up from real use. No answer, a sensitive one,
+    // or a record older than the field: unknown, never `0 B`. Headed `Size`,
+    // not `Result size`: the header sets this column's width, and the values
+    // need a third of what the longer word took.
+    header: <span title="Bytes of the JSON the call answered with">Size</span>,
+    render: (entry) => (
+      <span data-testid="audit-size" className="whitespace-nowrap tabular-nums text-muted">
+        {formatBytes(entry.resultBytes) || "—"}
+      </span>
+    ),
+    getSortValue: (entry) => entry.resultBytes ?? -1,
   },
 ];
 
