@@ -93,6 +93,10 @@ Drag the grip handle (or use the move buttons) to reorder contexts. Right-click 
 context for **Reset identity** or **Remove context**. Removing a context edits the
 kubeconfig on disk and is confirmation-gated.
 
+In the new design the same order can be changed from the cluster rail itself: drag
+a cluster's mark up or down, press Ctrl/Cmd+Shift+Up or Down on a focused mark, or
+use **Move up** / **Move down** in its right-click menu.
+
 ## Browsing resources
 
 The left sidebar groups every resource kind srelens can browse:

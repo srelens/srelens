@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { act, render, screen, fireEvent, waitFor, within } from "@testing-library/react";
+import { act, createEvent, render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ClusterContext } from "@srelens/core";
 import { notify } from "@srelens/core";
@@ -122,10 +122,21 @@ describe("Rail", () => {
     const items = within(menu)
       .getAllByRole("menuitem")
       .map((item) => item.getAttribute("aria-label"));
-    expect(items).toEqual(["Open prod-eu", "Customise…", "Disconnect", "Connection details", "Remove from workspace"]);
+    // `Move down` and no `Move up`: prod-eu is first of two (#829).
+    expect(items).toEqual([
+      "Open prod-eu",
+      "Customise…",
+      "Disconnect",
+      "Connection details",
+      "Move down",
+      "Remove from workspace",
+    ]);
     const remove = within(menu).getByRole("menuitem", { name: "Remove from workspace" });
     expect(remove.previousElementSibling?.getAttribute("role")).toBe("separator");
-    expect(remove.previousElementSibling?.previousElementSibling?.getAttribute("aria-label")).toBe("Connection details");
+    // The moves are a group of their own, ruled off from the connection entries.
+    const moveDown = within(menu).getByRole("menuitem", { name: "Move down" });
+    expect(moveDown.previousElementSibling?.getAttribute("role")).toBe("separator");
+    expect(moveDown.previousElementSibling?.previousElementSibling?.getAttribute("aria-label")).toBe("Connection details");
     expect(screen.queryByRole("complementary", { name: "Details" })).toBeNull();
   });
 
@@ -428,4 +439,184 @@ it("keeps blank names editable while the rail retains its context label", async 
   expect(input.value).toBe("  Production Europe  ");
   await user.click(within(panel).getByRole("button", { name: "Done" }));
   expect(screen.getByRole("button", { name: "Production Europe" })).toBeTruthy();
+});
+
+/**
+ * #829: the rail's order was editable only from Settings → Clusters. The rail
+ * now asks for the same order to change, through the same `moveContext`.
+ */
+describe("rearranging clusters in the rail (#829)", () => {
+  const THREE = [ctx("prod-eu"), ctx("staging"), ctx("dev")];
+  const order = () =>
+    screen
+      .getAllByRole("button")
+      .map((b) => b.getAttribute("aria-label") ?? "")
+      .filter((name) => THREE.some((c) => c.name === name));
+
+  function setupThree() {
+    setState(defaultState(THREE));
+    return render(<Rail contexts={THREE} onConnect={vi.fn()} />);
+  }
+
+  /** Drag one mark and drop it on the upper or lower half of another. */
+  function drag(source: string, target: string, half: "upper" | "lower") {
+    const from = screen.getByRole("button", { name: source });
+    const to = screen.getByRole("button", { name: target });
+    // jsdom lays nothing out, and the rail reads the pointer against every
+    // mark's box: stack them, 30px tall with the rail's 6px gap, in the order
+    // they are on screen now.
+    const marks = order().map((name) => screen.getByRole("button", { name }));
+    marks.forEach((mark, i) => {
+      const top = i * 36;
+      mark.getBoundingClientRect = () => ({ top, bottom: top + 30, height: 30, left: 0, right: 30, width: 30, x: 0, y: top, toJSON: () => ({}) });
+    });
+    const dataTransfer = { effectAllowed: "", dropEffect: "", setData: vi.fn(), getData: vi.fn() };
+    const top = marks.indexOf(to) * 36;
+    const clientY = half === "upper" ? top + 5 : top + 25;
+    // jsdom has no DragEvent, so the pointer's position does not survive an
+    // init dictionary; it is put on the event by hand.
+    const at = (event: Event) => {
+      Object.defineProperty(event, "clientY", { value: clientY });
+      Object.defineProperty(event, "dataTransfer", { value: dataTransfer });
+      return event;
+    };
+    fireEvent.pointerDown(from);
+    fireEvent.dragStart(from, { dataTransfer });
+    fireEvent(to, at(createEvent.dragOver(to)));
+    fireEvent(to, at(createEvent.drop(to)));
+    fireEvent.dragEnd(from, { dataTransfer });
+  }
+
+  it("moves a dragged cluster to where it was dropped, and keeps it there", async () => {
+    const { loadContextOrder } = await import("@srelens/core");
+    setupThree();
+    expect(order()).toEqual(["prod-eu", "staging", "dev"]);
+
+    // dev, from the bottom, onto the upper half of prod-eu: to the top.
+    act(() => drag("dev", "prod-eu", "upper"));
+
+    expect(order()).toEqual(["dev", "prod-eu", "staging"]);
+    // Saved: it is the shared order, which is what survives a restart and what
+    // Settings → Clusters shows.
+    const saved = loadContextOrder();
+    expect(saved.indexOf("dev")).toBeLessThan(saved.indexOf("prod-eu"));
+    expect(saved.indexOf("prod-eu")).toBeLessThan(saved.indexOf("staging"));
+  });
+
+  it("drops after a cluster when released on its lower half, including at the end", () => {
+    setupThree();
+    act(() => drag("prod-eu", "staging", "lower"));
+    expect(order()).toEqual(["staging", "prod-eu", "dev"]);
+
+    act(() => drag("staging", "dev", "lower"));
+    expect(order()).toEqual(["prod-eu", "dev", "staging"]);
+  });
+
+  it("does not switch cluster when a mark is dragged", () => {
+    setupThree();
+    const before = activeCluster();
+    act(() => drag("dev", "prod-eu", "upper"));
+    // Some hosts fire a click at the end of a drag; it must not select.
+    fireEvent.click(screen.getByRole("button", { name: "dev" }), { detail: 1 });
+    expect(activeCluster()).toBe(before);
+  });
+
+  it("still selects a cluster on a plain click after a drag has finished", () => {
+    setupThree();
+    act(() => drag("dev", "prod-eu", "upper"));
+    const staging = screen.getByRole("button", { name: "staging" });
+    fireEvent.pointerDown(staging);
+    fireEvent.click(staging, { detail: 1 });
+    expect(activeCluster()).toBe("staging");
+  });
+
+  it("moves the focused cluster with Ctrl+Shift+Arrow, keeps focus on it, and says where it went", async () => {
+    setupThree();
+    const staging = () => screen.getByRole("button", { name: "staging" });
+    staging().focus();
+
+    fireEvent.keyDown(staging(), { key: "ArrowUp", ctrlKey: true, shiftKey: true });
+    expect(order()).toEqual(["staging", "prod-eu", "dev"]);
+    expect(document.activeElement).toBe(staging());
+    expect(screen.getByRole("status").textContent).toBe("staging moved to position 1 of 3");
+
+    // Already first: nothing to do, and no wrap to the bottom.
+    fireEvent.keyDown(staging(), { key: "ArrowUp", metaKey: true, shiftKey: true });
+    expect(order()).toEqual(["staging", "prod-eu", "dev"]);
+
+    fireEvent.keyDown(staging(), { key: "ArrowDown", metaKey: true, shiftKey: true });
+    expect(order()).toEqual(["prod-eu", "staging", "dev"]);
+  });
+
+  it("offers Move up and Move down in the menu, each only where there is somewhere to go", async () => {
+    setupThree();
+    const names = async (cluster: string) => {
+      const menu = await openMenu(cluster);
+      const labels = within(menu).getAllByRole("menuitem").map((item) => item.getAttribute("aria-label"));
+      await userEvent.keyboard("{Escape}");
+      return labels;
+    };
+    expect(await names("prod-eu")).not.toContain("Move up");
+    expect(await names("prod-eu")).toContain("Move down");
+    expect(await names("staging")).toEqual(expect.arrayContaining(["Move up", "Move down"]));
+    expect(await names("dev")).toContain("Move up");
+    expect(await names("dev")).not.toContain("Move down");
+  });
+
+  it("moves a cluster one place from the menu", async () => {
+    setupThree();
+    await pick("dev", "Move up");
+    await waitFor(() => expect(order()).toEqual(["prod-eu", "dev", "staging"]));
+    // Announced, like a drag or a key press: it is the rail's own move, not a
+    // reorder made behind its back (PR #838 review).
+    expect(screen.getByRole("status").textContent).toBe("dev moved to position 2 of 3");
+    await pick("prod-eu", "Move down");
+    await waitFor(() => expect(order()).toEqual(["dev", "prod-eu", "staging"]));
+  });
+
+  it("offers no moves for the only cluster in a workspace", async () => {
+    const one = [ctx("prod-eu")];
+    setState(defaultState(one));
+    render(<Rail contexts={one} onConnect={vi.fn()} />);
+    const menu = await openMenu("prod-eu");
+    const labels = within(menu).getAllByRole("menuitem").map((item) => item.getAttribute("aria-label"));
+    expect(labels).not.toContain("Move up");
+    expect(labels).not.toContain("Move down");
+  });
+
+  it("rearranges this workspace's clusters without disturbing one that is not in it", async () => {
+    const { loadContextOrder, saveContextOrder } = await import("@srelens/core");
+    const FOUR = [...THREE, ctx("other")];
+    // `other` sits between the workspace's clusters in the shared order, and
+    // is not in this workspace.
+    saveContextOrder(["prod-eu", "other", "staging", "dev"]);
+    setState(defaultState(THREE));
+    render(<Rail contexts={FOUR} onConnect={vi.fn()} />);
+    expect(order()).toEqual(["prod-eu", "staging", "dev"]);
+
+    act(() => drag("dev", "prod-eu", "upper"));
+
+    expect(order()).toEqual(["dev", "prod-eu", "staging"]);
+    // `other` is still second. Only the three slots this workspace's clusters
+    // held were rewritten; it was not taken for offline and sent to the end.
+    expect(loadContextOrder()).toEqual(["dev", "other", "prod-eu", "staging"]);
+  });
+
+  it("leaves that outside cluster in place for a menu move and a keyboard move too (PR #838 review)", async () => {
+    const { loadContextOrder, saveContextOrder } = await import("@srelens/core");
+    const FOUR = [...THREE, ctx("other")];
+    saveContextOrder(["prod-eu", "other", "staging", "dev"]);
+    setState(defaultState(THREE));
+    render(<Rail contexts={FOUR} onConnect={vi.fn()} />);
+
+    await pick("dev", "Move up");
+    await waitFor(() => expect(order()).toEqual(["prod-eu", "dev", "staging"]));
+    expect(loadContextOrder()).toEqual(["prod-eu", "other", "dev", "staging"]);
+
+    const dev = screen.getByRole("button", { name: "dev" });
+    dev.focus();
+    fireEvent.keyDown(dev, { key: "ArrowUp", ctrlKey: true, shiftKey: true });
+    expect(order()).toEqual(["dev", "prod-eu", "staging"]);
+    expect(loadContextOrder()).toEqual(["dev", "other", "prod-eu", "staging"]);
+  });
 });
