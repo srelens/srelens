@@ -17,9 +17,11 @@ export function WorkspacePane() {
   const navigationWidth = useNavigationWidth();
   const star = useStarState();
   const [openError, setOpenError] = useState<unknown>(null);
-  const open = (url: string) => {
+  // `opened` runs only once the browser has the address: going to star the
+  // repository answers the one-time question, and failing to get there does not.
+  const open = (url: string, opened?: () => void) => {
     setOpenError(null);
-    openExternal(url).catch(setOpenError);
+    openExternal(url).then(opened, setOpenError);
   };
   return (
     <div className="flex flex-col gap-4">
@@ -42,7 +44,7 @@ export function WorkspacePane() {
         <Switch label="Show the Star button in the top bar" hint="Turning it off also stops the daily star-count request to GitHub."
           on={star.show} onChange={setShowStarButton} />
         <div className="flex flex-wrap gap-2">
-          <Button variant="secondary" onClick={() => { answerNudge(); open(REPO_URL); }}>Star on GitHub</Button>
+          <Button variant="secondary" onClick={() => open(REPO_URL, answerNudge)}>Star on GitHub</Button>
           <Button variant="secondary" onClick={() => open(ISSUES_URL)}>Report an issue</Button>
         </div>
         {openError !== null && <FailureAlert tone="sev" title="Could not open GitHub in your browser" error={openError} domain="http" />}

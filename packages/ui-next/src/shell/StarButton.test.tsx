@@ -89,6 +89,17 @@ describe("StarButton", () => {
     await userEvent.click(button());
     expect((await screen.findByRole("alert")).textContent).toContain("Could not open GitHub");
   });
+
+  it("does not count a browser that never opened as having gone to GitHub", async () => {
+    openExternal.mockRejectedValue(new Error("no handler for https"));
+    seed(due);
+    render(<StarButton />);
+    await userEvent.click(screen.getByRole("button", { name: "Star on GitHub" }));
+    await screen.findByRole("alert");
+    // The question is still there to be answered, and has not been used up.
+    expect(nudge()).not.toBeNull();
+    expect(getStarState().nudged).toBe(false);
+  });
 });
 
 describe("the one-time nudge", () => {

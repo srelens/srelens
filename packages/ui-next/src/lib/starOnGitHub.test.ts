@@ -170,6 +170,23 @@ describe("with a second window open", () => {
     expect(getStarState()).toMatchObject({ count: 55, nudged: true });
   });
 
+  it("answers again when storage no longer says so, though this window remembers answering", () => {
+    answerNudge();
+    expect(stored().nudged).toBe(true);
+    // Another window wrote its older copy back over ours.
+    elsewhere({ nudged: false });
+    answerNudge();
+    expect(stored().nudged).toBe(true);
+  });
+
+  it("writes nothing when both this window and storage already say answered", () => {
+    answerNudge();
+    const write = vi.spyOn(settingsStorage, "setItem");
+    answerNudge();
+    expect(write).not.toHaveBeenCalled();
+    write.mockRestore();
+  });
+
   it("counts its launch on top of the other window's", () => {
     getStarState();
     elsewhere({ launches: 7, firstLaunchAt: T0 - DAY });

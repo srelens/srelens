@@ -90,9 +90,10 @@ export function StarButton() {
 
   function open() {
     setFailure(null);
-    // Answered by going, whether or not the question had been put yet.
-    answer();
-    openExternal(REPO_URL).catch((error: unknown) => {
+    // Answered by going, whether or not the question had been put yet — and
+    // only by going: a browser that did not open took the reader nowhere, and
+    // must not cost them the one time they are asked.
+    openExternal(REPO_URL).then(answer, (error: unknown) => {
       // Said beside the button: the reader pressed it and nothing opened.
       setFailure(describeError(error).title);
     });

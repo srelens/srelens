@@ -44,7 +44,7 @@ it("turns the top-bar Star button off and on, and opens the repository and its i
   // Reporting an issue is not starring; going to star is, and is not asked about later.
   expect(getStarState().nudged).toBe(false);
   await userEvent.click(screen.getByRole("button", { name: "Star on GitHub" }));
-  expect(getStarState().nudged).toBe(true);
+  await waitFor(() => expect(getStarState().nudged).toBe(true));
   expect(core.openExternal.mock.calls.map(([url]) => url)).toEqual([
     "https://github.com/srelens/srelens/issues/new/choose",
     "https://github.com/srelens/srelens",
@@ -53,8 +53,11 @@ it("turns the top-bar Star button off and on, and opens the repository and its i
 it("says so when GitHub could not be opened from Settings", async () => {
   core.openExternal.mockRejectedValue(new Error("no handler for https"));
   render(<WorkspacePane />);
+  __resetStarForTests();
   await userEvent.click(screen.getByRole("button", { name: "Star on GitHub" }));
   expect(await screen.findByText("Could not open GitHub in your browser")).toBeTruthy();
+  // Nothing opened, so the one-time question has not been answered.
+  expect(getStarState().nudged).toBe(false);
 });
 it("saves a default namespace and commits only a nonempty timeout draft", async () => {
   render(<KubernetesPane />);
