@@ -596,7 +596,9 @@ jobs:
       # and notarizing the app itself.
       - name: Prepare the macOS sandbox launcher
         if: runner.os == 'macOS'
-        run: sh packaging/macos/prepare-launcher.sh "${{ matrix.target }}"
+        env:
+          SRELENS_BUNDLE_TARGET: ${{ matrix.target }}
+        run: sh packaging/macos/prepare-launcher.sh "$SRELENS_BUNDLE_TARGET"
 
       - name: Build app & publish release
         uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
@@ -642,8 +644,10 @@ jobs:
 
       - name: Assert the macOS sandbox launcher is bundled and signed
         if: runner.os == 'macOS'
+        env:
+          SRELENS_BUNDLE_TARGET: ${{ matrix.target }}
         run: |
-          LAUNCHER="target/${{ matrix.target }}/release/bundle/macos/srelens.app/Contents/MacOS/srelens-sandbox-launch"
+          LAUNCHER="target/$SRELENS_BUNDLE_TARGET/release/bundle/macos/srelens.app/Contents/MacOS/srelens-sandbox-launch"
           test -x "$LAUNCHER"
           if [ "$ENABLE_MAC_SIGNING" = 'true' ]; then
             codesign --verify --strict --verbose=2 "$LAUNCHER"
