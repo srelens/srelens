@@ -41,17 +41,24 @@ pub fn set_window_blur<R: Runtime>(window: WebviewWindow<R>, on: bool) -> Result
 #[cfg(target_os = "macos")]
 fn apply<R: Runtime>(window: &WebviewWindow<R>, radius: i32) -> Result<(), String> {
     let target = window.clone();
-    // AppKit is main-thread only, and a command runs on a worker.
+    let (answer, answered) = std::sync::mpsc::channel();
+    // AppKit is main-thread only, and a command runs on a worker — so the
+    // work is posted there and its result carried back, rather than the
+    // command answering `Ok` for something it never saw happen.
     window
         .run_on_main_thread(move || {
-            // A window with no native handle has nothing behind it to blur.
-            if let Ok(ns_window) = target.ns_window() {
+            let result = match target.ns_window() {
                 // SAFETY: on the main thread, with a pointer Tauri just handed
                 // out for a window this closure keeps alive.
-                unsafe { macos::set_background_blur(ns_window, radius) };
-            }
+                Ok(ns_window) => unsafe { macos::set_background_blur(ns_window, radius) },
+                Err(e) => Err(format!("the window has no native handle: {e}")),
+            };
+            let _ = answer.send(result);
         })
-        .map_err(|e| format!("could not reach the window to blur behind it: {e}"))
+        .map_err(|e| format!("could not reach the window to blur behind it: {e}"))?;
+    answered
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .map_err(|_| "the window did not answer in time".to_string())?
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -78,13 +85,17 @@ mod macos {
     /// # Safety
     /// `ns_window` must be null or a live `NSWindow`, and this must be called
     /// on the main thread.
-    pub unsafe fn set_background_blur(ns_window: *mut c_void, radius: i32) {
+    pub unsafe fn set_background_blur(ns_window: *mut c_void, radius: i32) -> Result<(), String> {
         if ns_window.is_null() {
-            return;
+            return Err("the window is already gone".into());
         }
         let number: isize = msg_send![ns_window.cast::<AnyObject>(), windowNumber];
-        // A refusal leaves the window unblurred, which is where it started.
-        let _ = CGSSetWindowBackgroundBlurRadius(CGSMainConnectionID(), number as i32, radius);
+        // A `CGError`: zero is success, and anything else is the window
+        // server declining — which the page must hear about, not `Ok`.
+        match CGSSetWindowBackgroundBlurRadius(CGSMainConnectionID(), number as i32, radius) {
+            0 => Ok(()),
+            code => Err(format!("the window server refused the blur (error {code})")),
+        }
     }
 }
 
@@ -100,11 +111,13 @@ mod tests {
         assert!(radius_for(true) > 0);
     }
 
-    /// A null handle is a window that is already gone; it must be a no-op, not
-    /// a message sent to nothing.
+    /// A null handle is a window that is already gone. It must be reported,
+    /// not messaged — and not answered `Ok`, which would tell the page a blur
+    /// was applied to a window that does not exist.
     #[cfg(target_os = "macos")]
     #[test]
-    fn a_window_with_no_handle_is_left_alone() {
-        unsafe { macos::set_background_blur(std::ptr::null_mut(), BLUR_RADIUS) };
+    fn a_window_with_no_handle_is_an_error_not_a_message_to_nothing() {
+        let result = unsafe { macos::set_background_blur(std::ptr::null_mut(), BLUR_RADIUS) };
+        assert!(result.is_err());
     }
 }

@@ -244,7 +244,14 @@ export function syncWindowBlur(storage: Storage = settingsStorage): void {
   const wanted = wantsWindowBlur(storage);
   if (wanted === blurApplied) return;
   blurApplied = wanted;
-  applyWindowBlur(wanted);
+  // A refusal puts the record back, so the next change of any input asks
+  // again. Recorded as done, a window that refused once would stay unblurred
+  // for the rest of the session with nothing left to trigger a retry. Guarded
+  // on the record still saying what this call asked for: a later call may
+  // already have moved it on.
+  void Promise.resolve(applyWindowBlur(wanted)).then((done) => {
+    if (done === false && blurApplied === wanted) blurApplied = !wanted;
+  });
 }
 
 let followingRoot = false;

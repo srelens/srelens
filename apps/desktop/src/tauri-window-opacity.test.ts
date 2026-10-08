@@ -47,6 +47,29 @@ describe("the see-through window on macOS", () => {
     expect(json("capabilities/default.json").permissions).not.toContain("core:window:allow-set-effects");
   });
 
+  it("opens wearing the theme's own canvas, light or dark, until the stylesheet lands", () => {
+    // A transparent window with an unpainted page is a hole in the desktop.
+    // The coat is two literals in index.html, because nothing else has loaded
+    // yet; this is what stops them drifting from the tokens they stand in for.
+    const html = readFileSync(join(__dirname, "../index.html"), "utf8");
+    const tokens = readFileSync(join(__dirname, "../../../packages/ui-kit/src/styles/tokens.css"), "utf8");
+    const canvas = (block: string) => block.match(/--canvas:\s*(#[0-9a-fA-F]{6})/)![1];
+    const light = canvas(tokens.match(/\n:root \{([^}]*)\}/)![1]);
+    const dark = canvas(tokens.match(/\n\[data-theme="dark"\] \{([^}]*)\}/)![1]);
+    const style = html.match(/<style>([\s\S]*?)<\/style>/)![1];
+    expect(style).toMatch(new RegExp(`html\\s*\\{\\s*background:\\s*${light};`));
+    expect(style).toMatch(
+      new RegExp(`@media \\(prefers-color-scheme: dark\\)\\s*\\{\\s*html\\s*\\{\\s*background:\\s*${dark};`),
+    );
+    // And the see-through themes take it off again, on the root itself.
+    for (const theme of ["dark", "midnight", "glass"]) {
+      const rule = [...tokens.matchAll(/([^{}]+)\{([^{}]*)\}/g)].find(([, selectors]) =>
+        selectors.includes(`[data-theme="${theme}"][data-opacity]`),
+      );
+      expect(rule?.[2], theme).toMatch(/\n\s*background:\s*transparent;/);
+    }
+  });
+
   it("builds the windows opened at runtime the same way", () => {
     // `open_context_window` and the recreated `main` are built in Rust and
     // never read the config; both go through one helper so neither can be

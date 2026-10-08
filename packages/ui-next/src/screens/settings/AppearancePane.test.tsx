@@ -14,7 +14,7 @@ const HERE = __dirname;
 const core = vi.hoisted(() => ({
   isTauri: vi.fn(() => true),
   applyUiScale: vi.fn(),
-  applyWindowBlur: vi.fn(),
+  applyWindowBlur: vi.fn(async (_on: boolean) => true),
 }));
 vi.mock("@srelens/core", async (orig) => ({
   ...(await orig<typeof import("@srelens/core")>()),
@@ -435,6 +435,18 @@ describe("AppearancePane", () => {
         await Promise.resolve();
       });
       expect(core.applyWindowBlur).toHaveBeenLastCalledWith(false);
+    });
+
+    it("asks again when the window refused, instead of believing it is blurred", async () => {
+      core.applyWindowBlur.mockResolvedValueOnce(false);
+      paint();
+      await slideTo(80);
+      expect(core.applyWindowBlur).toHaveBeenCalledTimes(1);
+      // Nothing about what is wanted has changed — only that the first ask
+      // failed. A record that said "blurred" here would never ask again.
+      await slideTo(79);
+      expect(core.applyWindowBlur).toHaveBeenCalledTimes(2);
+      expect(core.applyWindowBlur).toHaveBeenLastCalledWith(true);
     });
 
     it("follows an outside theme change for an opacity first chosen this session", async () => {
