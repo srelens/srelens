@@ -102,16 +102,18 @@ function RenameField({
   onDone,
 }: {
   title: string;
-  onDone: (next: string | null) => void;
+  /** `next` is the name to keep, or `null` to keep the old one. `byKey` says
+   *  the field was closed from the keyboard, with focus still in it. */
+  onDone: (next: string | null, byKey: boolean) => void;
 }) {
   const [draft, setDraft] = useState(title);
   // Escape blurs the field as it unmounts; without this the blur would keep
   // the very text the reader had just abandoned.
   const settled = useRef(false);
-  const finish = (next: string | null) => {
+  const finish = (next: string | null, byKey: boolean) => {
     if (settled.current) return;
     settled.current = true;
-    onDone(next);
+    onDone(next, byKey);
   };
   return (
     <input
@@ -120,14 +122,14 @@ function RenameField({
       autoFocus
       onFocus={(e) => e.currentTarget.select()}
       onChange={(e) => setDraft(e.target.value)}
-      onBlur={() => finish(draft)}
+      onBlur={() => finish(draft, false)}
       onKeyDown={(e) => {
         if (e.key !== "Enter" && e.key !== "Escape") return;
         // Finishing hands focus back to the row's button within this same
         // keystroke; left to its default, the rest of the keystroke would
         // then press that button and select a row the reader only renamed.
         e.preventDefault();
-        finish(e.key === "Enter" ? draft : null);
+        finish(e.key === "Enter" ? draft : null, true);
       }}
       className="min-w-0 flex-1 rounded border border-rule bg-transparent px-1 py-0.5 text-[0.8125rem] font-medium outline-none focus:border-[var(--accent)]"
     />
@@ -154,7 +156,9 @@ function SessionRow({
   const selector = useRef<HTMLButtonElement>(null);
   // Back to the row once the field has gone, so the keyboard is where it was
   // rather than on the document body. After the render that brings the row's
-  // button back — while renaming there is no such button to focus.
+  // button back — while renaming there is no such button to focus. Only when
+  // the field was closed from the keyboard: a reader who left it by Tab or by
+  // clicking something has already said where focus goes, and it stays there.
   const refocus = useRef(false);
   useEffect(() => {
     if (!refocus.current) return;
@@ -194,8 +198,8 @@ function SessionRow({
           <span className="flex min-w-0 flex-1 flex-col gap-0.5">
             <RenameField
               title={session.title}
-              onDone={(next) => {
-                refocus.current = true;
+              onDone={(next, byKey) => {
+                refocus.current = byKey;
                 setRenaming(false);
                 if (next !== null) onRename(next);
               }}

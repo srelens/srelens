@@ -167,6 +167,22 @@ describe("SessionRail", () => {
       expect(props.onRename).toHaveBeenCalledExactlyOnceWith(11, "logs");
     });
 
+    it("leaves focus where the reader moved it when the field is left by Tab", async () => {
+      rail();
+      await userEvent.click(screen.getByRole("button", { name: "Rename alpha" }));
+      await userEvent.tab();
+      // Onward to the next row, not pulled back to the one just renamed.
+      expect(document.activeElement?.textContent).toContain("bravo");
+    });
+
+    it("hands focus back to the row when the field is closed with Enter", async () => {
+      rail();
+      await userEvent.click(screen.getByRole("button", { name: "Rename bravo" }));
+      await userEvent.keyboard("{Enter}");
+      expect(document.activeElement?.textContent).toContain("bravo");
+      expect(document.activeElement?.tagName).toBe("BUTTON");
+    });
+
     it("keeps the old name on Escape, and says nothing to the store", async () => {
       const props = rail();
       await userEvent.click(screen.getByRole("button", { name: "Rename bravo" }));

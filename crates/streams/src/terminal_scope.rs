@@ -182,12 +182,15 @@ impl Tool {
         }
     }
 
-    /// The flags that aim the tool at a cluster, as a `case` pattern. Each is
-    /// listed bare and with `=`, the two ways a value is attached.
+    /// The flags that aim the tool at a cluster, as a `case` pattern. Each
+    /// long flag is listed bare and with `=`, the two ways its value is
+    /// attached. kubectl's `-s` is matched as a prefix: a short flag takes its
+    /// value attached with nothing between (`-shttps://…`), and kubectl has no
+    /// other short flag that begins with `s`.
     fn refused_flags(self) -> &'static str {
         match self {
             Tool::Kubectl => {
-                "--kubeconfig|--kubeconfig=*|--context|--context=*|--cluster|--cluster=*|--server|--server=*|-s|-s=*"
+                "--kubeconfig|--kubeconfig=*|--context|--context=*|--cluster|--cluster=*|--server|--server=*|-s*"
             }
             Tool::Helm => {
                 "--kubeconfig|--kubeconfig=*|--kube-context|--kube-context=*|--kube-apiserver|--kube-apiserver=*"
@@ -203,6 +206,22 @@ impl Tool {
         match self {
             Tool::Kubectl => Some("use-context|use|set-cluster|set-credentials|set"),
             Tool::Helm => None,
+        }
+    }
+
+    /// The `kubectl config` verbs that are left alone. Named so the verb can be
+    /// told from a flag's value standing before it (`config -n default set …`):
+    /// the verb is the first word after `config` that is a verb at all.
+    const ALLOWED_CONFIG_VERBS: &'static str = "current-context|delete-cluster|delete-context|delete-user|get-clusters|get-contexts|get-users|rename-context|set-context|unset|view";
+
+    /// Environment that aims the tool at a cluster without a flag, cleared
+    /// before the real tool runs. helm reads its target from these as readily
+    /// as from `--kube-context` and `--kube-apiserver`, and an rc file or the
+    /// app's own environment may have set them for another cluster.
+    fn cleared_env(self) -> &'static str {
+        match self {
+            Tool::Kubectl => "",
+            Tool::Helm => "unset HELM_KUBECONTEXT HELM_KUBEAPISERVER\n",
         }
     }
 }
@@ -225,12 +244,15 @@ fn guard_script(tool: Tool, context: &str, bin: &Path, kubeconfig: &Path) -> Str
     let name = tool.name();
     let config_check = match tool.refused_config_verbs() {
         Some(verbs) => format!(
-            r#"  if [ "$previous" = config ]; then
+            r#"  if [ "$config" = verb ]; then
     case "$arg" in
       {verbs}) refuse "config $arg" ;;
+      {allowed}) config=done ;;
     esac
   fi
-"#
+  [ "$arg" = config ] && [ -z "$config" ] && config=verb
+"#,
+            allowed = Tool::ALLOWED_CONFIG_VERBS,
         ),
         None => String::new(),
     };
@@ -242,20 +264,19 @@ bound={bound}
 bin={bin}
 KUBECONFIG={kubeconfig}
 export KUBECONFIG
-
+{cleared_env}
 refuse() {{
   printf 'srelens: "%s" is not available here. This terminal is bound to %s; open a terminal from the other cluster to work there.\n' "$1" "$bound" >&2
   exit 64
 }}
 
-previous=
+config=
 for arg in "$@"; do
   [ "$arg" = -- ] && break
   case "$arg" in
     {flags}) refuse "$arg" ;;
   esac
-{config_check}  previous=$arg
-done
+{config_check}done
 
 IFS=:
 for dir in $PATH; do
@@ -271,6 +292,7 @@ exit 127
         bin = sh_path(bin),
         kubeconfig = sh_path(kubeconfig),
         flags = tool.refused_flags(),
+        cleared_env = tool.cleared_env(),
     )
 }
 
@@ -531,6 +553,13 @@ contexts:
             vec!["get", "pods", "--cluster", "other"],
             vec!["get", "pods", "--server=https://elsewhere:6443"],
             vec!["get", "pods", "-s", "https://elsewhere:6443"],
+            // A short flag's value attached with nothing between.
+            vec!["get", "pods", "-shttps://elsewhere:6443"],
+            vec!["get", "pods", "-s=https://elsewhere:6443"],
+            // A flag, or a flag and its value, between `config` and the verb.
+            vec!["config", "--namespace=default", "set", "clusters.dev.server", "https://elsewhere:6443"],
+            vec!["config", "-n", "default", "set-cluster", "dev", "--server=https://elsewhere:6443"],
+            vec!["-n", "default", "config", "use-context", "other-cluster"],
             vec!["config", "use-context", "other-cluster"],
             vec!["config", "set-cluster", "dev", "--server=https://elsewhere:6443"],
             vec!["config", "set-credentials", "dev-user", "--token=x"],
@@ -556,6 +585,12 @@ contexts:
             vec!["exec", "web-0", "--", "curl", "--server", "x", "-s", "http://svc"],
             // A value that merely looks like a refused verb.
             vec!["get", "configmap", "set"],
+            // Once the verb is found, later words are its arguments: a
+            // namespace called `set` is a namespace.
+            vec!["config", "set-context", "--current", "--namespace", "set"],
+            vec!["config", "-n", "default", "view", "--minify"],
+            // Short flags that are not `-s`.
+            vec!["get", "pods", "-n", "kube-system", "-o", "wide", "-A"],
         ] {
             let out = f.run("kubectl", &args);
             assert!(out.status.success(), "{args:?}: {}", stderr(&out));
@@ -580,6 +615,25 @@ contexts:
         let out = f.run("helm", &["template", "chart", "-s", "templates/a.yaml"]);
         assert!(out.status.success(), "{}", stderr(&out));
         assert!(stdout(&out).contains(&format!("KUBECONFIG={}", f.scope.kubeconfig.display())));
+    }
+
+    #[test]
+    fn helm_is_not_aimed_elsewhere_by_its_environment() {
+        let f = fixture("dev-cluster", None);
+        // A stand-in that reports what it was left with.
+        std::fs::write(
+            f.real.join("helm"),
+            "#!/bin/sh\nprintf 'context=%s server=%s\\n' \"${HELM_KUBECONTEXT-unset}\" \"${HELM_KUBEAPISERVER-unset}\"\n",
+        )
+        .unwrap();
+        let out = Command::new("helm")
+            .arg("list")
+            .env("PATH", f.path())
+            .env("HELM_KUBECONTEXT", "other-cluster")
+            .env("HELM_KUBEAPISERVER", "https://elsewhere:6443")
+            .output()
+            .unwrap();
+        assert_eq!(stdout(&out).trim(), "context=unset server=unset", "{}", stderr(&out));
     }
 
     #[test]
