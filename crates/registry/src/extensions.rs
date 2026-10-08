@@ -23,6 +23,7 @@ pub(crate) mod network;
 pub(crate) mod package;
 #[cfg(test)]
 mod package_tests;
+mod uploads;
 mod panels;
 pub mod pods;
 mod providers;

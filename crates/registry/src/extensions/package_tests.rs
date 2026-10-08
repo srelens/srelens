@@ -747,3 +747,125 @@ fn a_package_the_policy_refuses_is_neither_installed_nor_unpacked() {
     assert!(read(&path).unwrap().plugins.is_empty());
     assert!(!path.with_extension("packages").join(&id).exists());
 }
+
+#[tokio::test]
+async fn native_package_bytes_preserve_review_install_grants_and_audit_without_base64() {
+    use srelens_capability::audit::{AuditRecord, AuditSink};
+    #[derive(Default)]
+    struct Audit(std::sync::Mutex<Vec<AuditRecord>>);
+    impl AuditSink for Audit {
+        fn record(&self, r: AuditRecord) {
+            self.0.lock().unwrap().push(r);
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("extensions.json");
+    let mut registry = Registry::new();
+    let streams = register(
+        &mut registry,
+        path.clone(),
+        fake_core(),
+        srelens_kube::client_cache::ClientCache::new_many(vec![]),
+    );
+    let archive = packed("example");
+    let audit = Audit::default();
+    let local = streams
+        .raw_package_registry(&registry, "extensions.packageManifest", archive.clone())
+        .unwrap();
+    let review = local
+        .invoke_audited(
+            "extensions.packageManifest",
+            json!({"package":""}),
+            &audit,
+            srelens_capability::audit::Source::Ui,
+            "auto",
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(review["manifest"].as_str().unwrap()).unwrap()["id"],
+        "org.example.packaged"
+    );
+    assert!(local
+        .invoke("extensions.packageManifest", json!({"package":""}))
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("already been consumed"));
+    for grants in [json!([]), json!(GRANTS)] {
+        let local = streams
+            .raw_package_registry(&registry, "extensions.configure", archive.clone())
+            .unwrap();
+        let result = local
+            .invoke_audited(
+                "extensions.configure",
+                json!({"package":"","action":"installPackage","grants":grants}),
+                &audit,
+                srelens_capability::audit::Source::Ui,
+                "auto",
+            )
+            .await;
+        assert_eq!(result.is_ok(), grants == json!(GRANTS));
+    }
+    assert_eq!(read(&path).unwrap().plugins.len(), 1);
+    let local = streams
+        .raw_package_registry(&registry, "extensions.configure", archive.clone())
+        .unwrap();
+    assert!(local
+        .invoke(
+            "extensions.configure",
+            json!({"package":"","action":"installPackage","grants":GRANTS,"reviewedRevision":999})
+        )
+        .await
+        .is_err());
+    let local = streams
+        .raw_package_registry(&registry, "extensions.configure", archive)
+        .unwrap();
+    assert!(local
+        .invoke(
+            "extensions.configure",
+            json!({"package":"","action":"unsignedApps","allowUnsignedApps":true})
+        )
+        .await
+        .is_err());
+    assert!(streams
+        .raw_package_registry(&registry, "k8s.listPods", vec![])
+        .is_err());
+    let saved = fs::read(&path).unwrap();
+    let tampered = {
+        use std::io::Read as _;
+        let mut tar = Vec::new();
+        flate2::read::GzDecoder::new(&packed("example")[..])
+            .read_to_end(&mut tar)
+            .unwrap();
+        let at = tar.windows(9).position(|w| w == b"# Package").unwrap();
+        tar[at + 2] = b'p';
+        super::package::tests::gzip(&tar)
+    };
+    let local = streams
+        .raw_package_registry(&registry, "extensions.configure", tampered)
+        .unwrap();
+    let rejected = local
+        .invoke_audited(
+            "extensions.configure",
+            json!({"package":"","action":"installPackage","grants":GRANTS}),
+            &audit,
+            srelens_capability::audit::Source::Ui,
+            "auto",
+        )
+        .await
+        .unwrap_err();
+    assert!(rejected.to_string().contains("does not match its digest"));
+    assert_eq!(fs::read(&path).unwrap(), saved);
+    let records = audit.0.lock().unwrap();
+    assert_eq!(records.len(), 3);
+    for record in records.iter() {
+        assert_eq!(record.args["package"], "<redacted>");
+    }
+    assert_eq!(records[1].outcome, "ok");
+    assert_eq!(records[2].outcome, "failed");
+    assert_eq!(
+        records[2].error.as_deref(),
+        Some("App install failed; details omitted from audit")
+    );
+}

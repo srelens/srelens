@@ -274,6 +274,7 @@ pub struct OpenStreamOut {
 /// this process that serves it: the desktop UI's and an MCP server's registry
 /// see the same streams, and a lifecycle change made through either ends them.
 pub struct ExtensionStreams {
+    apps: super::Apps,
     path: Store,
     core: Arc<Registry>,
     cache: Arc<srelens_kube::client_cache::ClientCache>,
@@ -305,6 +306,12 @@ pub struct ExtensionStreams {
 }
 
 impl ExtensionStreams {
+    /// A one-call native package boundary. The archive stays in owned bytes;
+    /// small JSON metadata still uses the registry's existing audit path.
+    pub fn raw_package_registry(&self, registry: &Registry, id: &str, bytes: Vec<u8>) -> Result<Registry, CapabilityError> {
+        super::uploads::registry(registry, id, bytes, self.apps.clone(), self.core.clone(), self.secrets.clone())
+    }
+
     /// Open a stream for one view, owned by no window. `input` is the
     /// caller's JSON, parsed here so the host command and the tests read it
     /// the same way.
@@ -1010,6 +1017,7 @@ pub(super) fn register(
             Some(streams) => streams,
             None => {
                 let streams = Arc::new(ExtensionStreams {
+                    apps: apps.clone(),
                     path: path.clone(),
                     core,
                     watcher: Mutex::new(kube_session(cache.clone())),

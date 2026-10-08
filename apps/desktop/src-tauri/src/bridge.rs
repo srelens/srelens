@@ -26,12 +26,11 @@ pub struct AppRegistry(pub Registry);
 pub struct AppAudit(pub Arc<dyn AuditSink>);
 
 /// Package bytes use raw IPC: a 512 MiB package's base64 cannot fit a V8 string.
-/// Encoding stays in Rust; verification, grants and auditing stay in the registry.
+/// Only metadata enters JSON; verification, grants and auditing stay in the registry.
 fn package_invocation(
     body: &tauri::ipc::InvokeBody,
     metadata: Option<&str>,
 ) -> Result<(String, Value), String> {
-    use base64::Engine as _;
     let tauri::ipc::InvokeBody::Raw(bytes) = body else {
         return Err("A package upload must contain raw bytes".into());
     };
@@ -55,19 +54,17 @@ fn package_invocation(
     }
     metadata.input.insert(
         "package".into(),
-        Value::String(base64::engine::general_purpose::STANDARD.encode(bytes)),
+        Value::String(String::new()),
     );
     Ok((metadata.id, Value::Object(metadata.input)))
 }
 
 #[tauri::command]
-pub async fn invoke_package_capability<R: Runtime>(
+pub async fn invoke_package_capability(
     request: tauri::ipc::Request<'_>,
-    window: Window<R>,
-    app: AppHandle<R>,
     registry: State<'_, AppRegistry>,
     audit: State<'_, AppAudit>,
-    owned: State<'_, WindowStreams>,
+    streams: State<'_, crate::extension_streams::AppExtensionStreams>,
 ) -> Result<Value, String> {
     let (id, input) = package_invocation(
         request.body(),
@@ -76,7 +73,10 @@ pub async fn invoke_package_capability<R: Runtime>(
             .get("x-srelens-package-input")
             .and_then(|h| h.to_str().ok()),
     )?;
-    invoke_capability(id, input, window, app, registry, audit, owned).await
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else { unreachable!() };
+    let streams = streams.0.as_ref().ok_or("This host does not support package uploads")?;
+    let local = streams.raw_package_registry(&registry.0, &id, bytes.clone()).map_err(|e| e.to_string())?;
+    local.invoke_audited(&id, input, audit.0.as_ref(), Source::Ui, "auto").await.map_err(|e| e.to_string())
 }
 
 /// Invoke a backend capability by id. The WebView calls this via
@@ -156,7 +156,7 @@ mod tests {
             )
             .unwrap();
             let mut expected = input;
-            expected["package"] = json!("H4sIAP8=");
+            expected["package"] = json!("");
             assert_eq!(got_id, id);
             assert_eq!(got, expected);
         }
@@ -190,7 +190,7 @@ mod tests {
             Some(r#"{"id":"extensions.packageManifest","input":{}}"#),
         )
         .unwrap();
-        assert_eq!(input["package"].as_str().unwrap().len(), 715_827_884);
+        assert_eq!(input["package"].as_str().unwrap().len(), 0);
         drop(input);
         drop(at_limit);
         let body = tauri::ipc::InvokeBody::Raw(vec![0; 512 * 1024 * 1024 + 1]);
@@ -219,14 +219,15 @@ mod tests {
 
     #[test]
     fn raw_ipc_dispatches_the_package_command_and_audits_the_install() {
-        let mut registry = Registry::new();
-        registry.register(mutating("extensions.configure"));
+        let dir = tempfile::tempdir().unwrap();
+        let (registry, streams) = srelens_registry::build_registry_and_app_streams(
+            srelens_kube::client_cache::ClientCache::new_many(vec![]), vec![], Some(dir.path().join("settings.json")));
         let audit = Arc::new(Spy::default());
         let app = tauri::test::mock_builder()
             .invoke_handler(tauri::generate_handler![invoke_package_capability])
             .manage(AppRegistry(registry))
             .manage(AppAudit(audit.clone()))
-            .manage(WindowStreams::default())
+            .manage(crate::extension_streams::AppExtensionStreams(streams))
             .build(tauri::test::mock_context(tauri::test::noop_assets()))
             .unwrap();
         let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
@@ -252,11 +253,8 @@ mod tests {
         request
             .headers
             .insert("x-srelens-package-input", metadata.parse().unwrap());
-        let response = tauri::test::get_ipc_response(&webview, request).unwrap();
-        assert_eq!(
-            response.deserialize::<Value>().unwrap(),
-            json!({"ok": true})
-        );
+        let error = tauri::test::get_ipc_response(&webview, request).unwrap_err();
+        assert!(error.to_string().contains("package"));
         let records = audit.seen();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].tool, "extensions.configure");
