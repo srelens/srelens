@@ -38,3 +38,7 @@ overrides:
   "hono@<4.13.5": "^4.13.5"
   "ip-address@<10.7.1": "^10.7.1"
   "undici@>=7.0.0 <7.29.1": "^7.29.1"
+  "@modelcontextprotocol/sdk@>=1.12.0 <1.31.0": "^1.31.0"
+  "proxy-addr@>=1.1.0 <2.0.8": "^2.0.8"
+  "postcss-selector-parser@>=7.0.0 <7.1.6": "^7.1.6"
+  "source-map-js@>=1.0.0 <1.2.2": "^1.2.2"
