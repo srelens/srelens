@@ -137,7 +137,12 @@ describe("AuditPane", () => {
   it("draws each call with its verdict, taken from the entry itself", async () => {
     render(<AuditPane />);
     expect(await screen.findByText("secret.read")).toBeTruthy();
-    expect(screen.getByText(/denied · sensitive reads are off/i)).toBeTruthy();
+    // On the whole verdict cell's text: the reason is its own capped element.
+    expect(
+      screen.getByText((_, el) => /^denied · sensitive reads are off/i.test(el?.textContent ?? ""), {
+        selector: "span",
+      }),
+    ).toBeTruthy();
     // An allowed row carries no reason, so the word stands alone.
     expect(screen.getByText("allowed")).toBeTruthy();
   });
@@ -221,6 +226,22 @@ describe("AuditPane", () => {
     expect(deniedTarget).toBeTruthy();
     expect(deniedTarget?.className).toContain("truncate");
     expect(deniedTarget?.className).toMatch(/max-w-\[\d+px\]/);
+  });
+
+  /**
+   * The reason is the other unbounded string in a row — whatever the apiserver
+   * or a policy said, after `describeError` — and an uncapped one pushed the
+   * table past the card's right edge. The word stays outside the cap, since it
+   * is the answer and must never be the part that gets cut.
+   */
+  it("caps and truncates the verdict's reason, with the full text in a title", async () => {
+    core.auditTail.mockResolvedValue([FAILED]);
+    render(<AuditPane />);
+    const reason = await screen.findByTestId("audit-reason");
+    expect(reason.title).toContain("the apiserver closed the connection");
+    expect(reason.className).toContain("truncate");
+    expect(reason.className).toMatch(/max-w-\[\d+px\]/);
+    expect(reason.textContent).not.toContain("failed");
   });
 
   it("treats an empty trail as ordinary, not as a failure", async () => {

@@ -261,7 +261,22 @@ const columns: Column<AuditEntry>[] = [
       return (
         <span style={{ color: toneColor(tone) }}>
           {word}
-          {reason ? ` · ${reason}` : null}
+          {/* The reason is as unbounded as the target — a policy sentence or
+              whatever the apiserver said — and uncapped it pushed the table
+              past the card's edge. Same fix as the target, applied to the
+              reason only: the word is the answer and is never the part cut. */}
+          {reason ? (
+            <>
+              {" · "}
+              <span
+                data-testid="audit-reason"
+                className="inline-block max-w-[140px] truncate align-bottom"
+                title={reason}
+              >
+                {reason}
+              </span>
+            </>
+          ) : null}
         </span>
       );
     },
