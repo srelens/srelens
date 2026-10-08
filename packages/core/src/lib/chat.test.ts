@@ -74,6 +74,28 @@ describe("parseAgentEvent", () => {
     });
   });
 
+  it("rejects an invalid usage event as null", () => {
+    expect(parseAgentEvent({ type: "usage", promptTokens: 100, completionTokens: 20 })).toBeNull();
+    expect(
+      parseAgentEvent({
+        type: "usage",
+        promptTokens: "100",
+        completionTokens: 20,
+        cachedTokens: 0,
+        totalTokens: 120,
+      }),
+    ).toBeNull();
+    expect(
+      parseAgentEvent({
+        type: "usage",
+        promptTokens: Number.NaN,
+        completionTokens: 20,
+        cachedTokens: 0,
+        totalTokens: 120,
+      }),
+    ).toBeNull();
+  });
+
   it("keeps tool-call fields", () => {
     const e = parseAgentEvent({ type: "toolCallStart", id: "t1", tool: "k8s.scale", args: { replicas: 3 } });
     expect(e?.type).toBe("toolCallStart");

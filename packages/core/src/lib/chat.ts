@@ -54,7 +54,23 @@ export function parseAgentEvent(raw: unknown): AgentEvent | null {
     case "textDelta":
     case "thinking":
     case "toolCallStart":
-    case "usage":
+      return raw as AgentEvent;
+    case "usage": {
+      const u = raw as Record<string, unknown>;
+      if (
+        typeof u.promptTokens !== "number" ||
+        !Number.isFinite(u.promptTokens) ||
+        typeof u.completionTokens !== "number" ||
+        !Number.isFinite(u.completionTokens) ||
+        typeof u.cachedTokens !== "number" ||
+        !Number.isFinite(u.cachedTokens) ||
+        typeof u.totalTokens !== "number" ||
+        !Number.isFinite(u.totalTokens)
+      ) {
+        return null;
+      }
+      return raw as AgentEvent;
+    }
     case "turnDone":
     case "error":
       return raw as AgentEvent;

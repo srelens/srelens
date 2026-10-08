@@ -354,14 +354,11 @@ pub async fn run_native_agent_turn(
     };
 
     let duration_ms = start_time.elapsed().as_millis() as u64;
-    let (prompt_tokens, comp_tokens, cached_tokens, total_tokens) =
-        if let Some(u) = real_usage.lock().unwrap().take() {
-            u
-        } else {
-            let prompt_est = (prompt.len() + 200) / 4;
-            let comp_est = out_chars.load(std::sync::atomic::Ordering::Relaxed).max(1) / 4;
-            (prompt_est, comp_est, 0, prompt_est + comp_est)
-        };
+    let (prompt_tokens, comp_tokens, cached_tokens, total_tokens) = resolve_token_usage(
+        real_usage.lock().unwrap().take(),
+        prompt.len(),
+        out_chars.load(std::sync::atomic::Ordering::Relaxed),
+    );
     let payload = format!(
         "{}|{}|{}|{}|{}",
         prompt_tokens, comp_tokens, cached_tokens, total_tokens, duration_ms
@@ -848,6 +845,22 @@ pub async fn run_boxed_cursor_turn(
     }
 }
 
+/// Resolve token counts for an assistant turn: prefers provider-reported real usage,
+/// falling back to character-based heuristic estimates if real usage is absent (e.g. timeout).
+pub fn resolve_token_usage(
+    real_usage: Option<(usize, usize, usize, usize)>,
+    prompt_len: usize,
+    output_chars: usize,
+) -> (usize, usize, usize, usize) {
+    if let Some(u) = real_usage {
+        u
+    } else {
+        let prompt_est = (prompt_len + 200) / 4;
+        let comp_est = output_chars.max(1) / 4;
+        (prompt_est, comp_est, 0, prompt_est + comp_est)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -910,5 +923,18 @@ mod tests {
         assert!(p.contains("spoke-prod"));
         assert!(p.contains("tools-mgmt"));
         assert!(p.ends_with("Where is the argo application?"));
+    }
+
+    #[test]
+    fn test_resolve_token_usage_prefers_real_usage() {
+        let real = Some((1200, 350, 800, 1550));
+        let usage = resolve_token_usage(real, 100, 40);
+        assert_eq!(usage, (1200, 350, 800, 1550));
+    }
+
+    #[test]
+    fn test_resolve_token_usage_falls_back_to_estimate() {
+        let usage = resolve_token_usage(None, 200, 40);
+        assert_eq!(usage, (100, 10, 0, 110));
     }
 }

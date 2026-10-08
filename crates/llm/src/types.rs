@@ -107,6 +107,11 @@ pub enum StreamItem {
 }
 
 /// Token usage reported by a provider for an API turn or tool round.
+/// Semantics are normalized across all providers:
+/// - `prompt_tokens`: Total input tokens in the prompt (including cached prompt tokens).
+/// - `completion_tokens`: Generated output tokens.
+/// - `cached_tokens`: Subset of `prompt_tokens` that were read from prompt cache.
+/// - `total_tokens`: Total tokens (`prompt_tokens + completion_tokens`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TokenUsage {

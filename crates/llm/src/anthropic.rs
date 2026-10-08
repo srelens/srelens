@@ -168,12 +168,13 @@ impl Stream {
                     Some(PendingStop::Clean(reason)) => vec![StreamItem::Done(reason)],
                     None => vec![StreamItem::Done(StopReason::EndTurn)],
                 };
-                if self.prompt_tokens > 0 || self.completion_tokens > 0 {
+                if self.prompt_tokens > 0 || self.completion_tokens > 0 || self.cached_tokens > 0 {
+                    let total_prompt = self.prompt_tokens + self.cached_tokens;
                     out.push(StreamItem::Usage(TokenUsage {
-                        prompt_tokens: self.prompt_tokens,
+                        prompt_tokens: total_prompt,
                         completion_tokens: self.completion_tokens,
                         cached_tokens: self.cached_tokens,
-                        total_tokens: self.prompt_tokens + self.completion_tokens,
+                        total_tokens: total_prompt + self.completion_tokens,
                     }));
                 }
                 out
@@ -531,10 +532,10 @@ mod tests {
             vec![
                 StreamItem::Done(StopReason::EndTurn),
                 StreamItem::Usage(TokenUsage {
-                    prompt_tokens: 2045,
+                    prompt_tokens: 3069,
                     completion_tokens: 150,
                     cached_tokens: 1024,
-                    total_tokens: 2195,
+                    total_tokens: 3219,
                 }),
             ]
         );

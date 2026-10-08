@@ -44,6 +44,8 @@ pub async fn run(
         let mut stream_error: Option<String> = None;
         let mut truncated = false;
 
+        let mut round_usage: Option<crate::types::TokenUsage> = None;
+
         {
             let mut on_item = |item: StreamItem| match item {
                 StreamItem::Text(t) => {
@@ -55,19 +57,23 @@ pub async fn run(
                 StreamItem::Done(reason) => truncated |= reason == StopReason::MaxTokens,
                 StreamItem::Error(e) => stream_error = Some(e),
                 StreamItem::Usage(u) => {
-                    total_usage.prompt_tokens += u.prompt_tokens;
-                    total_usage.completion_tokens += u.completion_tokens;
-                    total_usage.cached_tokens += u.cached_tokens;
-                    total_usage.total_tokens += u.total_tokens;
+                    round_usage = Some(u);
                     on_event(AgentEvent::Usage {
-                        prompt_tokens: total_usage.prompt_tokens,
-                        completion_tokens: total_usage.completion_tokens,
-                        cached_tokens: total_usage.cached_tokens,
-                        total_tokens: total_usage.total_tokens,
+                        prompt_tokens: total_usage.prompt_tokens + u.prompt_tokens,
+                        completion_tokens: total_usage.completion_tokens + u.completion_tokens,
+                        cached_tokens: total_usage.cached_tokens + u.cached_tokens,
+                        total_tokens: total_usage.total_tokens + u.total_tokens,
                     });
                 }
             };
             provider.stream_turn(&turns, &tools, &mut on_item).await?;
+        }
+
+        if let Some(u) = round_usage {
+            total_usage.prompt_tokens += u.prompt_tokens;
+            total_usage.completion_tokens += u.completion_tokens;
+            total_usage.cached_tokens += u.cached_tokens;
+            total_usage.total_tokens += u.total_tokens;
         }
 
         if let Some(message) = stream_error {
@@ -691,5 +697,59 @@ mod tests {
             cached_tokens: 500,
             total_tokens: 2330,
         }));
+    }
+
+    #[test]
+    fn a_round_with_multiple_usage_snapshots_does_not_double_count() {
+        let provider = ScriptedProvider::new(vec![vec![
+            StreamItem::Text("working...".into()),
+            StreamItem::Usage(crate::types::TokenUsage {
+                prompt_tokens: 1000,
+                completion_tokens: 20,
+                cached_tokens: 0,
+                total_tokens: 1020,
+            }),
+            StreamItem::Text("done".into()),
+            StreamItem::Usage(crate::types::TokenUsage {
+                prompt_tokens: 1000,
+                completion_tokens: 50,
+                cached_tokens: 0,
+                total_tokens: 1050,
+            }),
+            StreamItem::Done(StopReason::EndTurn),
+        ]]);
+        let invoker = StubInvoker {
+            result: ToolCallResult {
+                content: "ok".into(),
+                is_error: false,
+                denied: false,
+            },
+            calls: Mutex::new(Vec::new()),
+        };
+        let events = drive(&provider, &invoker, "do work");
+        let final_usage = events
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::Usage {
+                    prompt_tokens,
+                    completion_tokens,
+                    cached_tokens,
+                    total_tokens,
+                } => Some((
+                    *prompt_tokens,
+                    *completion_tokens,
+                    *cached_tokens,
+                    *total_tokens,
+                )),
+                _ => None,
+            })
+            .last()
+            .expect("should have emitted usage");
+
+        assert_eq!(
+            final_usage,
+            (1000, 50, 0, 1050),
+            "multiple snapshots in a single round must record the latest snapshot, not sum them"
+        );
     }
 }
