@@ -93,6 +93,7 @@ function resetWorkspacesToHome(state: TabsState): void {
 }
 import { useConsole } from "../console";
 import { canOpenClusterTerminal, openClusterTerminal } from "../lib/clusterTerminal";
+import { countLaunch, refreshStarCount } from "../lib/starOnGitHub";
 import { hint, matchWindowKey, type WindowAction } from "../lib/shortcuts";
 import { AgentConsent } from "./AgentConsent";
 import { Body } from "./Body";
@@ -212,6 +213,16 @@ export function Window({
   useEffect(() => {
     setScope(contextLabelFor(activeTabRoute, scopeLabel));
   }, [activeTabRoute, scopeLabel, setScope]);
+
+  // The star button's two start-up acts (#850), done here rather than by the
+  // button: once per window, after boot — settings are readable by then — and
+  // never from a test or a gallery that merely draws the bar. The count is
+  // asked for at most once a day and its failure is silent by design.
+  useEffect(() => {
+    if (!booted) return;
+    countLaunch();
+    void refreshStarCount();
+  }, [booted]);
 
   // What the desktop host reports after the page that would have heard it is
   // gone: a helm operation outlives the window that started it, and how it

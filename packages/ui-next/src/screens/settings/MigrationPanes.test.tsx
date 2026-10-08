@@ -9,6 +9,7 @@ import { UpdatesPane } from "./UpdatesPane";
 import { loadPeekWidth, peekWidth } from "../../lib/peekWidth";
 import { resetView } from "../../lib/workspace";
 import { openTab } from "../../lib/tabsStore";
+import { __resetStarForTests, getStarState } from "../../lib/starOnGitHub";
 vi.mock("../../lib/tabsStore", () => ({ openTab: vi.fn() }));
 const update = { version: "2.0.0", currentVersion: "1.0.0", notes: "## Fixed\nA useful fix", external: false, elevates: false };
 beforeEach(() => {
@@ -27,6 +28,29 @@ it("persists restore-session and applies the detail width to the live store", as
   fireEvent.change(screen.getByLabelText("Left navigation width"), { target: { value: "300" } });
   expect(loadWorkspaceLayout().leftSidebarWidth).toBe(300);
   loadPeekWidth(); expect(peekWidth()).toBe(480);
+});
+it("turns the top-bar Star button off and on, and opens the repository and its issues", async () => {
+  __resetStarForTests();
+  render(<WorkspacePane />);
+  const toggle = screen.getByRole("switch", { name: "Show the Star button in the top bar" });
+  expect(toggle.getAttribute("aria-checked")).toBe("true");
+  await userEvent.click(toggle);
+  expect(getStarState().show).toBe(false);
+  expect(toggle.getAttribute("aria-checked")).toBe("false");
+  await userEvent.click(toggle);
+  expect(getStarState().show).toBe(true);
+  await userEvent.click(screen.getByRole("button", { name: "Star on GitHub" }));
+  await userEvent.click(screen.getByRole("button", { name: "Report an issue" }));
+  expect(core.openExternal.mock.calls.map(([url]) => url)).toEqual([
+    "https://github.com/srelens/srelens",
+    "https://github.com/srelens/srelens/issues/new/choose",
+  ]);
+});
+it("says so when GitHub could not be opened from Settings", async () => {
+  core.openExternal.mockRejectedValue(new Error("no handler for https"));
+  render(<WorkspacePane />);
+  await userEvent.click(screen.getByRole("button", { name: "Star on GitHub" }));
+  expect(await screen.findByText("Could not open GitHub in your browser")).toBeTruthy();
 });
 it("saves a default namespace and commits only a nonempty timeout draft", async () => {
   render(<KubernetesPane />);

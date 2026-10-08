@@ -1,12 +1,13 @@
 import { useState } from "react";
 import {
   DEFAULT_WORKSPACE_LAYOUT, getDefaultNamespace, getRequestTimeoutSecs, isTauri, loadRestoreSession,
-  REQUEST_TIMEOUT, saveRestoreSession, updateRequestTimeout,
+  openExternal, REQUEST_TIMEOUT, saveRestoreSession, updateRequestTimeout,
 } from "@srelens/core";
 import { Button, Field, Panel, Switch, TextInput } from "@srelens/ui-kit";
 import { FailureAlert } from "../../lib/errorCopy";
 import { DEFAULT_PEEK_WIDTH, MIN_PEEK_WIDTH, MAX_PEEK_WIDTH, savePeekWidth, usePeekWidth } from "../../lib/peekWidth";
 import { MIN_NAVIGATION_WIDTH, MAX_NAVIGATION_WIDTH, saveNavigationWidth, useNavigationWidth } from "../../lib/navigationWidth";
+import { ISSUES_URL, REPO_URL, setShowStarButton, useStarState } from "../../lib/starOnGitHub";
 import { openTab } from "../../lib/tabsStore";
 import { setNamespaceDefault } from "../../lib/workspace";
 
@@ -14,6 +15,12 @@ export function WorkspacePane() {
   const [restore, setRestore] = useState(loadRestoreSession);
   const width = usePeekWidth();
   const navigationWidth = useNavigationWidth();
+  const star = useStarState();
+  const [openError, setOpenError] = useState<unknown>(null);
+  const open = (url: string) => {
+    setOpenError(null);
+    openExternal(url).catch(setOpenError);
+  };
   return (
     <div className="flex flex-col gap-4">
       <Panel title="Session">
@@ -30,6 +37,15 @@ export function WorkspacePane() {
             value={width} onChange={(event) => savePeekWidth(Number(event.target.value))} />
         </Field>
         <Button variant="secondary" onClick={() => { savePeekWidth(DEFAULT_PEEK_WIDTH); saveNavigationWidth(DEFAULT_WORKSPACE_LAYOUT.leftSidebarWidth); }}>Restore layout defaults</Button>
+      </Panel>
+      <Panel title="srelens on GitHub" description="srelens is open source. A star helps other people find the project.">
+        <Switch label="Show the Star button in the top bar" hint="Turning it off also stops the daily star-count request to GitHub."
+          on={star.show} onChange={setShowStarButton} />
+        <div className="flex flex-wrap gap-2">
+          <Button variant="secondary" onClick={() => open(REPO_URL)}>Star on GitHub</Button>
+          <Button variant="secondary" onClick={() => open(ISSUES_URL)}>Report an issue</Button>
+        </div>
+        {openError !== null && <FailureAlert tone="sev" title="Could not open GitHub in your browser" error={openError} domain="http" />}
       </Panel>
     </div>
   );
