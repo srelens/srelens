@@ -734,6 +734,7 @@ mod audit_wiring_tests {
 
     fn a_record() -> AuditRecord {
         AuditRecord {
+            result_bytes: None,
             source: Source::Ui,
             tool: "k8s.deletePod".into(),
             args: serde_json::json!({ "name": "web-0" }),

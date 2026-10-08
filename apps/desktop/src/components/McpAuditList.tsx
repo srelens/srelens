@@ -1,4 +1,4 @@
-import { auditTail, describeError, type AuditEntry } from "@srelens/core";
+import { auditTail, describeError, formatBytes, type AuditEntry } from "@srelens/core";
 import { Badge, Button, ErrorState, Spinner, Table, type BadgeVariant, type Column } from "../ui";
 import { RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
@@ -35,6 +35,13 @@ const columns: Column<Row>[] = [
     key: "outcome",
     header: "Outcome",
     render: (e) => <Badge variant={OUTCOME_VARIANT[e.outcome]}>{e.outcome}</Badge>,
+  },
+  {
+    // What the answer weighed: the heavy tools, found from real use. Sorts on
+    // the raw number, an unknown lowest as every unset value here does.
+    key: "resultBytes",
+    header: "Size",
+    render: (e) => (e.resultBytes == null ? "—" : formatBytes(e.resultBytes)),
   },
 ];
 

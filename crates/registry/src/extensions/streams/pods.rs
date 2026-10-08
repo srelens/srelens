@@ -166,6 +166,7 @@ struct Record<'a> {
 impl Record<'_> {
     fn write(&self, pod: Option<&str>, args: Value, decision: &'static str, refused: Option<&str>) {
         self.audit.record(AuditRecord {
+            result_bytes: None,
             source: Source::Ui,
             tool: self.tool.to_owned(),
             args,

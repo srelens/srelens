@@ -139,6 +139,7 @@ impl Drop for CancelledJob<'_> {
         let redacted = audit::redact(self.args, false);
         let (app, cluster, resource) = audit::describe_call_target(tool, self.args, &redacted);
         self.broker.audit.record(audit::AuditRecord {
+            result_bytes: None,
             source: Source::Sidecar, tool: tool.into(), app, cluster, resource,
             decision: "approved", outcome: audit::OUTCOME_FAILED,
             error: Some("Job scan was cancelled before completion".into()), args: redacted,
@@ -285,6 +286,7 @@ impl CapabilityBroker {
         let redacted = audit::redact(args, sensitive);
         let (app, cluster, resource) = audit::describe_call_target(tool, args, &redacted);
         self.audit.record(audit::AuditRecord {
+            result_bytes: None,
             source: Source::Sidecar,
             tool: tool.to_owned(),
             app,

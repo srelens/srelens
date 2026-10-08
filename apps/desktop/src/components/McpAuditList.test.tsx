@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const auditTail = vi.fn();
@@ -44,6 +44,45 @@ describe("McpAuditList", () => {
     // amber for warning. Asserting the mapping, not the palette.
     expect(failed.className).toContain("destructive");
     expect(rejected.className).toContain("amber");
+  });
+
+  /**
+   * What each answer weighed — the JSON a tool call handed an agent — so a heavy tool
+   * shows up from real use. A call that answered nothing, a sensitive read and
+   * a record from before sizes were kept read as unknown, never as zero.
+   */
+  it("shows each answer's size, and a dash where none was recorded", async () => {
+    auditTail.mockResolvedValue([
+      { ts: 1780000002, transport: "http", tool: "k8s_getObject", args: {}, decision: "auto", outcome: "ok", err: null, resultBytes: 38_912 },
+      { ts: 1780000001, transport: "http", tool: "k8s_scale", args: {}, decision: "auto", outcome: "failed", err: "timed out", resultBytes: null },
+    ]);
+    render(<McpAuditList />);
+    expect(await screen.findByText("38.0 KiB")).toBeTruthy();
+    expect(screen.getByText("—")).toBeTruthy();
+    expect(screen.queryByText("0 B")).toBeNull();
+  });
+
+  /**
+   * Sorted as numbers — as text, "212 B" would outrank "38.0 KiB" — with an
+   * unknown size as the lowest value, the convention every table here keeps
+   * for an unset sort value. The button is named by the header a reader sees,
+   * not by the column's key.
+   */
+  it("sorts by size numerically from a header named for it", async () => {
+    auditTail.mockResolvedValue([
+      { ts: 3, transport: "http", tool: "k8s_small", args: {}, decision: "auto", outcome: "ok", err: null, resultBytes: 212 },
+      { ts: 2, transport: "http", tool: "k8s_unknown", args: {}, decision: "auto", outcome: "failed", err: "timed out", resultBytes: null },
+      { ts: 1, transport: "http", tool: "k8s_large", args: {}, decision: "auto", outcome: "ok", err: null, resultBytes: 38_912 },
+    ]);
+    render(<McpAuditList />);
+    await screen.findByText("k8s_small");
+    const order = () =>
+      screen.getAllByRole("row").slice(1).map((row) => within(row).getByText(/^k8s_/).textContent);
+    const sortBySize = screen.getByRole("button", { name: "Sort by Size" });
+    fireEvent.click(sortBySize);
+    expect(order()).toEqual(["k8s_unknown", "k8s_small", "k8s_large"]);
+    fireEvent.click(sortBySize);
+    expect(order()).toEqual(["k8s_large", "k8s_small", "k8s_unknown"]);
   });
 
   it("shows an empty state rather than a blank panel", async () => {
