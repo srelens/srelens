@@ -269,18 +269,19 @@ const columns: Column<AuditEntry>[] = [
   },
   {
     key: "resultBytes",
-    // What the answer weighed — over MCP, what landed in an agent's context —
+    // What the answer weighed — for an MCP tool call, what landed in an agent's context —
     // so the heavy tools show up from real use. No answer, a sensitive one,
     // or a record older than the field: unknown, never `0 B`. Headed `Size`,
     // not `Result size`: the header sets this column's width, and the values
-    // need a third of what the longer word took.
-    header: <span title="Bytes of the JSON the call answered with">Size</span>,
+    // need a third of what the longer word took. A plain string, because the
+    // sort button is named from it and falls back to the key otherwise. Sorts
+    // on the raw number, an unknown lowest as every unset value here does.
+    header: "Size",
     render: (entry) => (
       <span data-testid="audit-size" className="whitespace-nowrap tabular-nums text-muted">
         {formatBytes(entry.resultBytes) || "—"}
       </span>
     ),
-    getSortValue: (entry) => entry.resultBytes ?? -1,
   },
 ];
 

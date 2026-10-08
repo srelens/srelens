@@ -185,11 +185,13 @@ limits do.
   and `resource` it named, the consent `decision`, an `outcome` of `ok`,
   `rejected` (it never ran — consent refused, arguments refused, no such
   capability) or `failed` (it ran and did not finish), and `resultBytes`: the
-  size of the JSON the capability answered with — over MCP, exactly what the
-  agent received — so the tools that fill an agent's context can be found from
-  real use, in the Size column of the same pane. It is `null` when the call
-  did not answer, and for a sensitive capability, whose answer's length is a
-  fact about a secret.
+  size of the JSON the capability answered with, so the tools that fill an
+  agent's context can be found from real use, in the Size column of the same
+  pane. For a `tools/call` it is exactly the text the agent received. A
+  `resources/read` of a manifest or logs hands over the unwrapped document
+  instead, so there the figure also counts the wrapper and the JSON escaping
+  of the text. It is `null` when the call did not answer, and for a sensitive
+  capability, whose answer's length is a fact about a secret.
 
   **Records written by an older srelens are still readable.** Lines from
   before these fields existed carry no `source` and an `outcome` of `error`;

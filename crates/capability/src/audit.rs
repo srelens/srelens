@@ -96,8 +96,11 @@ pub struct AuditRecord {
     /// text.
     pub outcome: &'static str,
     pub error: Option<String>,
-    /// Bytes of the JSON the capability answered with — over MCP, the text an
-    /// agent receives — so the heavy tools can be found from real use. `None`
+    /// Bytes of the JSON the capability answered with — for an MCP tool call,
+    /// exactly the text the agent receives; a `resources/read` of a manifest
+    /// or logs hands over the unwrapped document, without the wrapper and the
+    /// JSON escaping this counts — so the heavy tools can be found from real
+    /// use. `None`
     /// when it did not answer, and for a sensitive capability, whose answer's
     /// length is a fact about a secret.
     pub result_bytes: Option<u64>,

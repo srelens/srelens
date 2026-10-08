@@ -440,8 +440,9 @@ mod registry_tests {
         }
     }
 
-    /// The trail says how much each answer weighed — the JSON the caller
-    /// received, which over MCP is what lands in an agent's context — so the
+    /// The trail says how much each answer weighed — the JSON the capability
+    /// answered with, which for an MCP tool call is what lands in an agent's
+    /// context — so the
     /// heavy tools show up from real use. A call that did not answer has no
     /// size, and neither has a sensitive read: a Secret's length is a fact
     /// about its value.

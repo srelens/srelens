@@ -221,7 +221,7 @@ describe("AuditPane", () => {
   });
 
   /**
-   * What each answer weighed — the JSON an agent received — so a heavy tool
+   * What each answer weighed — the JSON a tool call handed an agent — so a heavy tool
    * shows up from real use. A refused call answered nothing, and that reads
    * as unknown, never as `0 B`.
    */
@@ -231,6 +231,27 @@ describe("AuditPane", () => {
     await screen.findByText("secret.read");
     const sizes = screen.getAllByTestId("audit-size").map((el) => el.textContent);
     expect(sizes).toEqual(["—", "39 KB"]);
+  });
+
+  /**
+   * Sorted as numbers — as text, "212 B" would outrank "39 KB" — with an
+   * unknown size as the lowest value, the convention every table here keeps
+   * for an unset sort value. The button is named by the header a reader sees.
+   */
+  it("sorts by size numerically from a header named for it", async () => {
+    core.auditTail.mockResolvedValue([
+      { ...ALLOWED, ts: 3, resultBytes: 212 },
+      DENIED,
+      { ...ALLOWED, ts: 1, resultBytes: 38_912 },
+    ]);
+    render(<AuditPane />);
+    await screen.findByText("secret.read");
+    const sizes = () => screen.getAllByTestId("audit-size").map((el) => el.textContent);
+    const sortBySize = screen.getByRole("button", { name: "Sort by Size" });
+    await userEvent.click(sortBySize);
+    expect(sizes()).toEqual(["—", "212 B", "39 KB"]);
+    await userEvent.click(sortBySize);
+    expect(sizes()).toEqual(["39 KB", "212 B", "—"]);
   });
 
   it("caps and truncates the target, with the full value in a title", async () => {

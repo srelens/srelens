@@ -152,9 +152,12 @@ export interface AuditEntry {
   outcome: "ok" | "rejected" | "failed";
   err: string | null;
   /**
-   * Bytes of the JSON the capability answered with — over MCP, what an agent
-   * received. `null` when it did not answer, for a sensitive capability, and
-   * on records written before sizes were kept.
+   * Bytes of the JSON the capability answered with — for an MCP tool call,
+   * exactly what the agent received; a `resources/read` of a manifest or logs
+   * hands over the unwrapped document, without the wrapper and the JSON
+   * escaping counted here. `null` when it did not
+   * answer, for a sensitive capability, and on records written before sizes
+   * were kept.
    */
   resultBytes: number | null;
 }

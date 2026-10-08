@@ -37,11 +37,11 @@ const columns: Column<Row>[] = [
     render: (e) => <Badge variant={OUTCOME_VARIANT[e.outcome]}>{e.outcome}</Badge>,
   },
   {
-    // What the answer weighed: the heavy tools, found from real use.
+    // What the answer weighed: the heavy tools, found from real use. Sorts on
+    // the raw number, an unknown lowest as every unset value here does.
     key: "resultBytes",
-    header: <span title="Bytes of the JSON the call answered with">Size</span>,
+    header: "Size",
     render: (e) => (e.resultBytes == null ? "—" : formatBytes(e.resultBytes)),
-    getSortValue: (e) => e.resultBytes ?? -1,
   },
 ];
 
