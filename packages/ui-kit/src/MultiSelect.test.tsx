@@ -221,6 +221,24 @@ describe("MultiSelect's ordering", () => {
     expect(rows()).toEqual(["gamma", "alpha", "Beta service"]);
   });
 
+  it("narrows to the options that contain the search text, not the ones its letters are scattered through", async () => {
+    // cmdk's default filter is fuzzy, and kept `kafka-system` for "test". (#844)
+    const names = ["kafka-system", "team-test-01", "redis-system", "load-testing", "test-runner"];
+    open({ options: names.map((value) => ({ value })) });
+    await userEvent.click(trigger());
+    await userEvent.type(screen.getByPlaceholderText("Search…"), "test");
+    // Best match first: the name that starts with it, then a word that does.
+    expect(rows()).toEqual(["test-runner", "team-test-01", "load-testing"]);
+  });
+
+  it("says so when nothing contains the search text", async () => {
+    open();
+    await userEvent.click(trigger());
+    await userEvent.type(screen.getByPlaceholderText("Search…"), "aa");
+    expect(screen.queryByRole("option")).toBeNull();
+    expect(screen.getByText("No results")).toBeDefined();
+  });
+
   it("shows the empty state when there is nothing to choose from", async () => {
     open({ options: [] });
     await userEvent.click(trigger());

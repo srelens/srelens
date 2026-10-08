@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
-import { Picker, PickerRow } from "./picker";
+import { Picker, PickerRow, pickerFilter } from "./picker";
 import { PortalScopeProvider, usePortalHost } from "./portal";
 
 /**
@@ -116,5 +116,58 @@ describe("Picker inside a surface", () => {
     await openInSurface();
     fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" });
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+});
+
+/**
+ * Searching a picker narrows it to the options that contain what was typed.
+ *
+ * cmdk's default filter is a fuzzy one: it keeps any option the typed letters
+ * can be picked out of in order, however far apart they sit. That suits a
+ * command palette, where the reader half-remembers a verb. It does not suit a
+ * list of names: "test" kept `kafka-system` and `redis-system`, because a t, an
+ * e, an s and a t can be found in each, and the namespaces actually called
+ * test-something were left among dozens that were not. (#844)
+ */
+describe("pickerFilter", () => {
+  it("keeps an option that contains the search text", () => {
+    expect(pickerFilter("team-test-01", "test")).toBeGreaterThan(0);
+    expect(pickerFilter("load-testing", "test")).toBeGreaterThan(0);
+  });
+
+  it("drops an option the letters are merely scattered through", () => {
+    expect(pickerFilter("kafka-system", "test")).toBe(0);
+    expect(pickerFilter("redis-system", "test")).toBe(0);
+  });
+
+  it("ignores case, and space around what was typed", () => {
+    expect(pickerFilter("Team-Test-01", " TEST ")).toBeGreaterThan(0);
+  });
+
+  it("finds an option by its label as well as its value", () => {
+    expect(pickerFilter("beta", "service", ["Beta service"])).toBeGreaterThan(0);
+    expect(pickerFilter("beta", "gamma", ["Beta service"])).toBe(0);
+  });
+
+  it("keeps everything while nothing has been typed", () => {
+    expect(pickerFilter("kafka-system", "")).toBeGreaterThan(0);
+    expect(pickerFilter("kafka-system", "   ")).toBeGreaterThan(0);
+  });
+
+  it("ranks a name that starts with the text over a word that does, and that over the middle of one", () => {
+    const start = pickerFilter("test-runner", "test");
+    const word = pickerFilter("team-test-01", "test");
+    const dotted = pickerFilter("team.test", "test");
+    const middle = pickerFilter("contest", "test");
+    expect(start).toBeGreaterThan(word);
+    expect(dotted).toBe(word);
+    expect(word).toBeGreaterThan(middle);
+    expect(middle).toBeGreaterThan(0);
+  });
+
+  it("ranks by the best place the text is found, across the value and the label", () => {
+    expect(pickerFilter("contest", "test", ["Test bed"])).toBe(pickerFilter("test-runner", "test"));
+    // An earlier, weaker occurrence does not mask a later, better one.
+    expect(pickerFilter("contest-test", "test")).toBe(pickerFilter("team-test-01", "test"));
   });
 });
