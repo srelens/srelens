@@ -187,6 +187,21 @@ export async function setWebviewZoom(factor: number): Promise<void> {
 }
 
 /**
+ * Blur what is behind this window, or stop — the backdrop for a see-through
+ * dark theme. macOS only in effect: the window is created transparent there
+ * (`tauri.macos.conf.json`), and without that there is nothing behind the
+ * webview to blur. The host answers `Ok` and does nothing elsewhere.
+ *
+ * The host's `set_window_blur` rather than the window API's `setEffects`:
+ * every effect that API offers on macOS is a system material, and a material
+ * brings a tint of its own — the first cut used `hudWindow` and the "black
+ * glass" came out grey. The command asks the window server for the blur alone.
+ */
+export async function setWindowBlur(on: boolean): Promise<void> {
+  await invoke("set_window_blur", { on });
+}
+
+/**
  * Intercept window close request, run an async cleanup handler (e.g. flushing
  * state writes to disk), then destroy the window.
  *

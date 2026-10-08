@@ -93,6 +93,7 @@ export * from "./lib/terminalDriver";
 export * from "./lib/terminalReconnect";
 export * from "./lib/toolbox";
 export * from "./lib/uiScale";
+export * from "./lib/windowBlur";
 export * from "./lib/updateNotifier";
 export * from "./lib/updater";
 export * from "./lib/updateNotes";

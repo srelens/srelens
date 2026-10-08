@@ -314,7 +314,7 @@ export function ClusterRail({
     <nav
       aria-label={label}
       onKeyDown={onKeyDown}
-      className={cx("rule-r flex shrink-0 flex-col items-center gap-1.5 bg-canvas-deep py-2", className)}
+      className={cx("rule-r flex shrink-0 flex-col items-center gap-1.5 bg-[var(--ground-deep)] py-2", className)}
       style={{ width }}
     >
       {/* What a move did, for anyone who cannot see the marks change places.

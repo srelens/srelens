@@ -161,6 +161,45 @@
   --shadow-lift: none;
 }
 
+/* --- glass: neutral dark, black glass on macOS -----------------------
+   Not one of §23's five. The other dark themes are an ink-violet and a
+   near-black with a blue cast; this one is neutral, so that what shows
+   through it is coloured by the desktop behind and not by the theme.
+
+   This block is the theme at rest, fully solid — what it looks like at 100%
+   window opacity, in a browser, and on any desktop whose window is not
+   created see-through. Every value is a solid so the contrast suite can hold
+   it to the same floor as the rest. The glass is the `[data-opacity]` block
+   further down. */
+[data-theme="glass"] {
+  --canvas: #111114;
+  --canvas-deep: #0a0a0c;
+  --surface: #1a1a1e;
+  --surface-sunk: #151518;
+  --surface-raised: #242428;
+  --ink: #f5f5f7;
+  --ink-soft: #d4d4d9;
+  --ink-muted: #b0b0b6;
+  --ink-faint: #9a9aa1;
+  --rule: #2c2c31;
+  --rule-strong: #3d3d43;
+  --control-line: #85858c;
+  --accent: #9a8cff;
+  --accent-ink: #100e1a;
+  --accent-wash: #1f1c33;
+  --accent-line: #3b3468;
+  --sev: #f2776c;
+  --sev-wash: #2a1917;
+  --warn: #dda446;
+  --warn-wash: #2a2015;
+  --ok: #55cd97;
+  --ok-wash: #12241c;
+  --info: #7aa9ea;
+  --info-wash: #151d2b;
+  --field: rgba(255, 255, 255, 0.06);
+  --shadow-lift: none;
+}
+
 /* --- contrast: WCAG AAA text, heavier rules, no washes -------------- */
 [data-theme="contrast"] {
   --canvas: #ffffff;
@@ -203,7 +242,8 @@
    `paper` and `contrast` are light grounds, so the light set above is theirs
    and they need no override here. */
 [data-theme="dark"],
-[data-theme="midnight"] {
+[data-theme="midnight"],
+[data-theme="glass"] {
   --mark-red: #f2776c;
   --mark-orange: #f0955e;
   --mark-amber: #dda446;
@@ -217,6 +257,84 @@
   --mark-ink: #e7e5ed;
 }
 
+/* --- window opacity: one sheet of dark glass ------------------------
+   `--ground` is what the page itself paints with, and the `--ground-*` tokens
+   are what the window's in-flow REGIONS paint with: titlebar, tab strip,
+   status bar, cluster rail, sidebar, panes, pane heads, toolbars, cards. At
+   rest each is just its solid token, so nothing changes for anyone who never
+   touches the setting.
+
+   See-through, the page alone carries the tint and every region above it goes
+   clear. That is what makes the window ONE sheet: a region that kept a coat of
+   its own would be a second layer over the first, and two coats at 80% are
+   96% solid — the sidebar would read as a black slab beside grey panes, which
+   is exactly what the first cut of this looked like. The hairlines still
+   divide the regions; the fills no longer do.
+
+   Opt-in on purpose. Clearing `--surface` and `--canvas` themselves would have
+   been one block instead of a few dozen edits, and wrong twice over. Those
+   tokens also paint everything that must HIDE what is under it — a popover, a
+   dialog's wash, a pinned column — and they are used as INK: a Mark's letters,
+   a tooltip's text and a solid badge's label are all `color: var(--surface)`,
+   and would have vanished. Only a layer that names a ground token is ever
+   see-through.
+
+   `--ground-cover` is for the one kind of region that is in flow and still
+   has to hide things: a sticky table head, which rows scroll under. It stays
+   solid, in the glass's own colour so it does not read as a band.
+
+   Dark grounds only. The light themes are the legibility themes, and a light
+   ground over an arbitrary desktop is the case with the least of it.
+
+   `--window-alpha` is written on the root by `writeOpacity` (ui-next's
+   `lib/appearance.ts`), which also sets `data-opacity`. The attribute is what
+   these rules key on; the property is the amount. */
+:root {
+  --ground: var(--canvas);
+  --ground-canvas: var(--canvas);
+  --ground-deep: var(--canvas-deep);
+  --ground-surface: var(--surface);
+  --ground-sunk: var(--surface-sunk);
+  --ground-cover: var(--surface);
+}
+
+[data-theme="dark"][data-opacity],
+[data-theme="midnight"][data-opacity] {
+  --ground: color-mix(in srgb, var(--canvas-deep) var(--window-alpha, 100%), transparent);
+  --ground-canvas: transparent;
+  --ground-deep: transparent;
+  --ground-surface: transparent;
+  --ground-sunk: transparent;
+  --ground-cover: var(--canvas-deep);
+  /* The root element itself: the host page paints `html` solid so a window
+     that is created transparent does not open as a hole in the desktop before
+     the stylesheet lands (`apps/desktop/index.html`). This is where that coat
+     comes off. */
+  background: transparent;
+}
+/* Glass, see-through: black glass, the way a translucent terminal is.
+   One flat sheet like the two themes above, with two differences. The tint is
+   BLACK rather than the theme's own canvas — at rest Glass is a neutral dark
+   grey, and a grey pane over a blurred desktop reads as fog, not glass. And
+   the hairlines turn into faint light edges, because a rule drawn in a solid
+   dark grey is invisible on a sheet that is darker than it is.
+
+   No veils on the regions. The first cut frosted each one a little, and the
+   result was a window of visibly different greys; the thing this is modelled
+   on is a single dark pane with everything behind it blurred. */
+[data-theme="glass"][data-opacity] {
+  --ground: color-mix(in srgb, #000000 var(--window-alpha, 100%), transparent);
+  --ground-canvas: transparent;
+  --ground-deep: transparent;
+  --ground-surface: transparent;
+  --ground-sunk: transparent;
+  --ground-cover: #000000;
+  --rule: rgba(255, 255, 255, 0.08);
+  --rule-strong: rgba(255, 255, 255, 0.14);
+  --field: rgba(255, 255, 255, 0.07);
+  background: transparent;
+}
+
 /* --- accent axis: independent of the theme -------------------------- */
 [data-accent="blue"]   { --accent: #1f5fd0; --accent-wash: #e9f0fd; --accent-line: #b7cdf5; }
 [data-accent="teal"]   { --accent: #0d7068; --accent-wash: #e4f4f2; --accent-line: #a8ded8; }
@@ -224,13 +342,17 @@
 [data-accent="rose"]   { --accent: #ad2456; --accent-wash: #fdeaf1; --accent-line: #f0bbcf; }
 
 [data-theme="dark"][data-accent="blue"],
-[data-theme="midnight"][data-accent="blue"]  { --accent: #7fa8f5; --accent-wash: #141c2e; --accent-line: #2c3f66; }
+[data-theme="midnight"][data-accent="blue"],
+[data-theme="glass"][data-accent="blue"]  { --accent: #7fa8f5; --accent-wash: #141c2e; --accent-line: #2c3f66; }
 [data-theme="dark"][data-accent="teal"],
-[data-theme="midnight"][data-accent="teal"]  { --accent: #55c9bd; --accent-wash: #0f2422; --accent-line: #235049; }
+[data-theme="midnight"][data-accent="teal"],
+[data-theme="glass"][data-accent="teal"]  { --accent: #55c9bd; --accent-wash: #0f2422; --accent-line: #235049; }
 [data-theme="dark"][data-accent="amber"],
-[data-theme="midnight"][data-accent="amber"] { --accent: #e0a94e; --accent-wash: #26200f; --accent-line: #574326; }
+[data-theme="midnight"][data-accent="amber"],
+[data-theme="glass"][data-accent="amber"] { --accent: #e0a94e; --accent-wash: #26200f; --accent-line: #574326; }
 [data-theme="dark"][data-accent="rose"],
-[data-theme="midnight"][data-accent="rose"]  { --accent: #ef7fa4; --accent-wash: #2a1620; --accent-line: #5c2f43; }
+[data-theme="midnight"][data-accent="rose"],
+[data-theme="glass"][data-accent="rose"]  { --accent: #ef7fa4; --accent-wash: #2a1620; --accent-line: #5c2f43; }
 
 /* Accent choice must preserve the high-contrast theme's text floor. */
 [data-theme="contrast"][data-accent="blue"]  { --accent: #164a9f; --accent-line: #164a9f; }

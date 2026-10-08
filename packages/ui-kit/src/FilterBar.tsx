@@ -79,7 +79,7 @@ export function FilterBar({
       role="search"
       aria-label={label}
       className={cx("rule-b flex shrink-0 flex-wrap items-center gap-3 px-2.5 py-1.5", className)}
-      style={{ background: "var(--surface-sunk)" }}
+      style={{ background: "var(--ground-sunk)" }}
     >
       {leading}
       <div

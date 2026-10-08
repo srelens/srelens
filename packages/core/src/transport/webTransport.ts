@@ -89,6 +89,9 @@ export async function subscribe(channel: string, handler: (payload: unknown) => 
  */
 export async function setWebviewZoom(_factor: number): Promise<void> {}
 
+/** No-op on the web: a browser tab has no window of its own to see through. */
+export async function setWindowBlur(_on: boolean): Promise<void> {}
+
 /** No-op on the web: window closure is managed by the browser. */
 export function onWindowCloseRequested(
   _handler: () => Promise<void> | void,

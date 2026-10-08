@@ -7094,6 +7094,7 @@ dependencies = [
  "getrandom 0.2.17",
  "keyring",
  "log",
+ "objc2",
  "reqwest 0.13.4",
  "serde",
  "serde_json",

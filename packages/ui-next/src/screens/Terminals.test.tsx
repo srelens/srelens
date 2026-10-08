@@ -547,7 +547,7 @@ describe("Terminals", () => {
   });
 
   it("dresses the emulator from the app's tokens rather than colours of its own", async () => {
-    document.documentElement.style.setProperty("--surface-sunk", "#101014");
+    document.documentElement.style.setProperty("--ground-sunk", "#101014");
     document.documentElement.style.setProperty("--ink-soft", "#443f52");
     document.documentElement.style.setProperty("--accent", "#4b3bd6");
     document.documentElement.style.setProperty("--font-mono", '"Test Mono", monospace');
@@ -563,7 +563,7 @@ describe("Terminals", () => {
   });
 
   it("re-reads the tokens when the theme changes under it", async () => {
-    document.documentElement.style.setProperty("--surface-sunk", "#fafafc");
+    document.documentElement.style.setProperty("--ground-sunk", "#fafafc");
     const id = await openPod("checkout-api-5c8b7f2d9-mk3wl");
     draw();
     await waitFor(() => {
@@ -573,12 +573,37 @@ describe("Terminals", () => {
     // What a theme switch does: the same token, a different value, announced
     // by the attribute `applyNextThemeAttribute` writes on the root.
     await act(async () => {
-      document.documentElement.style.setProperty("--surface-sunk", "#121118");
+      document.documentElement.style.setProperty("--ground-sunk", "#121118");
       document.documentElement.dataset.theme = "dark";
     });
 
     await waitFor(() => {
       expect(terminalFor(id)?.options.theme?.background).toBe("#121118");
     });
+  });
+
+  it("clears the emulator's background when the window turns see-through", async () => {
+    document.documentElement.style.setProperty("--ground-sunk", "#121118");
+    const id = await openPod("checkout-api-5c8b7f2d9-mk3wl");
+    draw();
+    await waitFor(() => {
+      expect(terminalFor(id)?.options.theme?.background).toBe("#121118");
+    });
+    // Built to take an alpha at all: xterm ignores one otherwise.
+    expect(terminalFor(id)?.options.allowTransparency).toBe(true);
+
+    // What the Appearance pane's window opacity does: the stylesheet clears
+    // the ground tokens, announced by the attribute `writeOpacity` puts on the
+    // root. The keyword is what the cleared token resolves to, and xterm
+    // throws on it — it wants the function form.
+    await act(async () => {
+      document.documentElement.style.setProperty("--ground-sunk", "transparent");
+      document.documentElement.dataset.opacity = "80";
+    });
+
+    await waitFor(() => {
+      expect(terminalFor(id)?.options.theme?.background).toBe("rgba(0, 0, 0, 0)");
+    });
+    delete document.documentElement.dataset.opacity;
   });
 });

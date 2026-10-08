@@ -38,6 +38,7 @@ mod toolbox;
 mod updater;
 mod watch;
 mod window;
+mod window_blur;
 mod window_streams;
 
 use app_log::{app_log_path, read_app_log, reveal_app_log};
@@ -579,6 +580,7 @@ pub fn run() {
             cluster_oidc_cmd::cluster_logout,
             cluster_oidc_cmd::list_clusters,
             window::open_context_window,
+            window_blur::set_window_blur,
         ])
         .build(tauri::generate_context!())
         .expect("error while running tauri application")

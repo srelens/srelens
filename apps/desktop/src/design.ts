@@ -182,7 +182,7 @@ function applyNextThemeAttribute(): void {
  * and the stylesheet ever disagree. A theme added to `tokens.css` fails that
  * test rather than quietly being treated as light here.
  */
-export const DARK_NEXT_THEMES: ReadonlySet<string> = new Set(["dark", "midnight"]);
+export const DARK_NEXT_THEMES: ReadonlySet<string> = new Set(["dark", "midnight", "glass"]);
 
 /**
  * The lightness of the theme the reader can actually SEE.

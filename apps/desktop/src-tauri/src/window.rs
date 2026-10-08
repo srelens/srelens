@@ -6,6 +6,26 @@
 
 use tauri::{AppHandle, Manager, Runtime, WebviewWindowBuilder, WebviewUrl};
 
+/// Make a window see-through where the Appearance pane can use it.
+///
+/// macOS only, to match `tauri.macos.conf.json`, which does the same for the
+/// configured `main` window: the page offers window opacity nowhere else, and
+/// a transparent window on Windows or Linux is at the mercy of the compositor.
+/// Transparency can only be chosen when a window is created, so every window
+/// is created with it and the stylesheet paints the page solid until a
+/// see-through theme is picked.
+///
+/// One helper for every window built in Rust — the config file is not read for
+/// these, and a builder that skipped this would open a window whose
+/// translucent theme sits on an opaque backdrop, with nothing failing.
+pub(crate) fn see_through<'a, R: Runtime, M: Manager<R>>(
+    builder: WebviewWindowBuilder<'a, R, M>,
+) -> WebviewWindowBuilder<'a, R, M> {
+    #[cfg(target_os = "macos")]
+    let builder = builder.transparent(true);
+    builder
+}
+
 /// The label a context's window opens under: `ctx-` plus the hex of its
 /// identifier.
 ///
@@ -76,7 +96,7 @@ pub async fn open_context_window<R: Runtime>(
 
     let url = WebviewUrl::App(format!("index.html?context={}", encoded_context(&context_id)).into());
 
-    WebviewWindowBuilder::new(&app, &label, url)
+    see_through(WebviewWindowBuilder::new(&app, &label, url))
         .title("srelens")
         .inner_size(1024.0, 768.0)
         .min_inner_size(640.0, 480.0)
@@ -93,6 +113,18 @@ pub async fn open_context_window<R: Runtime>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The helper hands back a builder that still builds: it adds to the
+    /// window, and must not be able to cost the app the window itself.
+    #[test]
+    fn a_see_through_window_still_opens() {
+        let app = tauri::test::mock_app();
+        let window = see_through(WebviewWindowBuilder::new(&app, "glass", WebviewUrl::default()))
+            .title("srelens")
+            .build()
+            .expect("a see-through window builds");
+        assert_eq!(window.label(), "glass");
+    }
 
     /// The label is a pure function of the identifier: the same context always
     /// maps to the same window, and two that differ anywhere in the pair do not

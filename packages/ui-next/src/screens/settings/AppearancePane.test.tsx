@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -14,6 +14,7 @@ const HERE = __dirname;
 const core = vi.hoisted(() => ({
   isTauri: vi.fn(() => true),
   applyUiScale: vi.fn(),
+  applyWindowBlur: vi.fn(),
 }));
 vi.mock("@srelens/core", async (orig) => ({
   ...(await orig<typeof import("@srelens/core")>()),
@@ -25,6 +26,8 @@ import {
   APPEARANCE_KEY,
   ACCENTS,
   DENSITIES,
+  GLASS_OPACITY,
+  OPACITY,
   THEMES,
   ZOOM_STEPS,
   AppearancePane,
@@ -69,6 +72,15 @@ function rootAttributes(): Record<string, string | undefined> {
   };
 }
 
+/**
+ * Window opacity is offered only where the native window can be seen through:
+ * the desktop shell on macOS. `isApplePlatform` reads `navigator.platform`, so
+ * that is what a test moves — the same thing the runtime answers from.
+ */
+function onPlatform(platform: string) {
+  vi.spyOn(navigator, "platform", "get").mockReturnValue(platform);
+}
+
 function stored(): unknown {
   const raw = localStorage.getItem(APPEARANCE_KEY);
   return raw === null ? null : JSON.parse(raw);
@@ -84,9 +96,13 @@ describe("AppearancePane", () => {
   // this one test's Midnight is the next test's starting state.
   afterEach(() => {
     const root = document.documentElement;
-    for (const name of ["data-theme", "data-accent", "data-density"]) root.removeAttribute(name);
+    for (const name of ["data-theme", "data-accent", "data-density", "data-opacity"]) {
+      root.removeAttribute(name);
+    }
+    root.style.removeProperty("--window-alpha");
     setUiScale(UI_SCALE.DEFAULT, "next");
     localStorage.clear();
+    vi.restoreAllMocks();
   });
 
   describe("theme", () => {
@@ -97,6 +113,7 @@ describe("AppearancePane", () => {
         "Paper",
         "Dark",
         "Midnight",
+        "Glass",
         "High contrast",
       ]);
     });
@@ -271,6 +288,224 @@ describe("AppearancePane", () => {
       paint();
       expect(screen.queryAllByTestId("zoom-label")).toHaveLength(0);
       expect(screen.getByText(/browser/i)).toBeTruthy();
+    });
+  });
+
+  describe("window opacity", () => {
+    const root = document.documentElement;
+
+    function slider(): HTMLInputElement {
+      return screen.getByRole("slider", { name: "Window opacity" }) as HTMLInputElement;
+    }
+
+    /**
+     * Drag the slider to a value, as the browser reports it: a string.
+     *
+     * Awaited, because the pane reads the opacity back off the root through a
+     * MutationObserver, and those deliver in a microtask: without the flush
+     * the control still shows the old value, and a second drag back to it is
+     * not a change at all.
+     */
+    async function slideTo(percent: number) {
+      fireEvent.change(slider(), { target: { value: String(percent) } });
+      await act(async () => {
+        await Promise.resolve();
+      });
+    }
+
+    beforeEach(() => {
+      onPlatform("MacIntel");
+      root.setAttribute("data-theme", "dark");
+    });
+
+    it("is a slider from the floor up to fully solid", () => {
+      paint();
+      expect(slider().min).toBe(String(OPACITY.MIN));
+      expect(slider().max).toBe(String(OPACITY.MAX));
+      expect(OPACITY.MAX).toBe(100);
+      // Below the floor the text is at the mercy of whatever is behind the
+      // window, and no token can promise a contrast against a wallpaper.
+      expect(OPACITY.MIN).toBe(40);
+      expect(slider().value).toBe("100");
+    });
+
+    it("says the value it is set to, in words a slider alone does not", async () => {
+      paint();
+      await slideTo(85);
+      expect(screen.getByTestId("opacity-value").textContent).toBe("85%");
+      expect(slider().getAttribute("aria-valuetext")).toBe("85%");
+    });
+
+    it("lets only the dark grounds be seen through", () => {
+      expect(TOKENS).toContain(`[data-theme="dark"][data-opacity]`);
+      expect(TOKENS).toContain(`[data-theme="midnight"][data-opacity]`);
+      expect(TOKENS).toContain(`[data-theme="glass"][data-opacity]`);
+      for (const light of ["paper", "contrast"]) {
+        expect(TOKENS).not.toContain(`[data-theme="${light}"][data-opacity]`);
+      }
+    });
+
+    it("tints with the amount the page was given, and nothing else", () => {
+      // The stylesheet reads the amount from the property this pane writes; a
+      // rule that stopped reading it would leave the slider moving nothing.
+      expect(TOKENS).toMatch(/--ground:\s*color-mix\([^;]*var\(--window-alpha/);
+    });
+
+    it("puts the chosen opacity on the document root and remembers it", async () => {
+      paint();
+      await slideTo(85);
+      expect(root.getAttribute("data-opacity")).toBe("85");
+      expect(root.style.getPropertyValue("--window-alpha")).toBe("85%");
+      expect(stored()).toMatchObject({ opacity: 85 });
+      expect(slider().value).toBe("85");
+    });
+
+    it("takes both off again at 100%, which the stylesheet draws bare", async () => {
+      paint();
+      await slideTo(85);
+      await slideTo(100);
+      expect(root.hasAttribute("data-opacity")).toBe(false);
+      expect(root.style.getPropertyValue("--window-alpha")).toBe("");
+      expect(stored()).toMatchObject({ opacity: 100 });
+    });
+
+    it("stores the opacity and nothing else", async () => {
+      paint();
+      await slideTo(90);
+      expect(stored()).toEqual({ opacity: 90 });
+    });
+
+    it("blurs what is behind a see-through window, and stops when it is solid again", async () => {
+      paint();
+      await slideTo(80);
+      expect(core.applyWindowBlur).toHaveBeenLastCalledWith(true);
+      await slideTo(100);
+      expect(core.applyWindowBlur).toHaveBeenLastCalledWith(false);
+    });
+
+    it("asks the window once for a whole drag, not once per position", async () => {
+      paint();
+      for (const percent of [99, 95, 90, 80, 70]) await slideTo(percent);
+      expect(core.applyWindowBlur).toHaveBeenCalledTimes(1);
+    });
+
+    it("lets the reader turn the blur off, and remembers that", async () => {
+      const { user } = paint();
+      await slideTo(80);
+      const blur = screen.getByRole("checkbox", { name: /blur/i }) as HTMLInputElement;
+      expect(blur.checked).toBe(true);
+      await user.click(blur);
+      expect(core.applyWindowBlur).toHaveBeenLastCalledWith(false);
+      expect(stored()).toMatchObject({ opacity: 80, blur: false });
+    });
+
+    it("has no blur to offer while the window is solid", () => {
+      paint();
+      expect((screen.getByRole("checkbox", { name: /blur/i }) as HTMLInputElement).disabled).toBe(true);
+    });
+
+    it("is switched off on a light theme, and says which themes it works on", () => {
+      root.setAttribute("data-theme", "paper");
+      paint();
+      expect(slider().disabled).toBe(true);
+      expect(screen.getByTestId("opacity-hint").textContent).toMatch(/dark, midnight or glass/i);
+    });
+
+    it("is not offered on the web, which has no window to see through", () => {
+      core.isTauri.mockReturnValue(false);
+      paint();
+      expect(screen.queryByRole("slider", { name: "Window opacity" })).toBeNull();
+    });
+
+    it("is not offered off macOS, where the window is not created see-through", () => {
+      onPlatform("Win32");
+      paint();
+      expect(screen.queryByRole("slider", { name: "Window opacity" })).toBeNull();
+    });
+
+    describe("the Glass theme", () => {
+      beforeEach(() => root.removeAttribute("data-theme"));
+
+      it("turns a solid window see-through, because that is what makes it glass", async () => {
+        const { user } = paint();
+        await user.click(screen.getByRole("radio", { name: /^glass/i }));
+        expect(root.getAttribute("data-theme")).toBe("glass");
+        expect(root.getAttribute("data-opacity")).toBe(String(GLASS_OPACITY));
+        expect(root.style.getPropertyValue("--window-alpha")).toBe(`${GLASS_OPACITY}%`);
+        expect(stored()).toEqual({ theme: "glass", opacity: GLASS_OPACITY });
+        expect(core.applyWindowBlur).toHaveBeenLastCalledWith(true);
+        // Inside the slider's own range, or the control could not show it.
+        expect(GLASS_OPACITY).toBeGreaterThanOrEqual(OPACITY.MIN);
+        expect(GLASS_OPACITY).toBeLessThan(OPACITY.MAX);
+      });
+
+      it("keeps an opacity the reader already chose", async () => {
+        const { user } = paint();
+        await user.click(screen.getByRole("radio", { name: /^dark/i }));
+        await slideTo(88);
+        await user.click(screen.getByRole("radio", { name: /^glass/i }));
+        expect(root.getAttribute("data-opacity")).toBe("88");
+        expect(stored()).toEqual({ theme: "glass", opacity: 88 });
+      });
+
+      it("stays a solid theme where the window cannot be seen through", async () => {
+        core.isTauri.mockReturnValue(false);
+        const { user } = paint();
+        await user.click(screen.getByRole("radio", { name: /^glass/i }));
+        expect(root.getAttribute("data-theme")).toBe("glass");
+        expect(root.hasAttribute("data-opacity")).toBe(false);
+        expect(stored()).toEqual({ theme: "glass" });
+        expect(core.applyWindowBlur).not.toHaveBeenCalled();
+      });
+
+      it("can be made see-through like the other dark themes", async () => {
+        root.setAttribute("data-theme", "glass");
+        paint();
+        expect(slider().disabled).toBe(false);
+      });
+    });
+
+    describe("at boot", () => {
+      it("puts a stored opacity back on the root and blurs behind it", () => {
+        localStorage.setItem(APPEARANCE_KEY, JSON.stringify({ opacity: 90 }));
+        applyStoredAppearance();
+        expect(root.getAttribute("data-opacity")).toBe("90");
+        expect(root.style.getPropertyValue("--window-alpha")).toBe("90%");
+        expect(core.applyWindowBlur).toHaveBeenCalledWith(true);
+      });
+
+      it("leaves the blur off for a reader who turned it off", () => {
+        localStorage.setItem(APPEARANCE_KEY, JSON.stringify({ opacity: 90, blur: false }));
+        applyStoredAppearance();
+        expect(root.getAttribute("data-opacity")).toBe("90");
+        expect(core.applyWindowBlur).not.toHaveBeenCalledWith(true);
+      });
+
+      it("asks for nothing while the window is solid", () => {
+        localStorage.setItem(APPEARANCE_KEY, JSON.stringify({ opacity: 100 }));
+        applyStoredAppearance();
+        expect(root.hasAttribute("data-opacity")).toBe(false);
+        expect(core.applyWindowBlur).not.toHaveBeenCalled();
+      });
+
+      it("ignores a stored opacity where the window cannot be seen through", () => {
+        localStorage.setItem(APPEARANCE_KEY, JSON.stringify({ opacity: 90 }));
+        core.isTauri.mockReturnValue(false);
+        applyStoredAppearance();
+        onPlatform("Linux x86_64");
+        core.isTauri.mockReturnValue(true);
+        applyStoredAppearance();
+        expect(root.hasAttribute("data-opacity")).toBe(false);
+        expect(core.applyWindowBlur).not.toHaveBeenCalled();
+      });
+
+      it("ignores an opacity outside the range the slider offers", () => {
+        for (const opacity of [12, 140, "90", null]) {
+          localStorage.setItem(APPEARANCE_KEY, JSON.stringify({ opacity, blur: "yes" }));
+          applyStoredAppearance();
+          expect(root.hasAttribute("data-opacity"), String(opacity)).toBe(false);
+        }
+      });
     });
   });
 
