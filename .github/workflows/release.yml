@@ -430,10 +430,10 @@ jobs:
         include:
           - platform: macos-latest      # Apple Silicon
             target: aarch64-apple-darwin
-            args: --target aarch64-apple-darwin
+            args: --target aarch64-apple-darwin --config src-tauri/macos-launcher.conf.json
           - platform: macos-latest      # Intel
             target: x86_64-apple-darwin
-            args: --target x86_64-apple-darwin
+            args: --target x86_64-apple-darwin --config src-tauri/macos-launcher.conf.json
           - platform: ubuntu-22.04      # Linux
             target: ''
             args: ''
@@ -591,6 +591,13 @@ jobs:
           echo "REL_TAG=srelens-v${{ needs.version.outputs.version }}" >> "$GITHUB_ENV"
           echo "REL_NAME=srelens v${{ needs.version.outputs.version }}" >> "$GITHUB_ENV"
 
+      # Sign the non-bundle launcher without the desktop's restricted App ID
+      # entitlements. Tauri copies it unchanged beside srelens before signing
+      # and notarizing the app itself.
+      - name: Prepare the macOS sandbox launcher
+        if: runner.os == 'macOS'
+        run: sh packaging/macos/prepare-launcher.sh "${{ matrix.target }}"
+
       - name: Build app & publish release
         uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
         env:
@@ -632,6 +639,23 @@ jobs:
           # latest.json — parallel jobs would race on that single asset. The
           # updater-manifest job assembles it once, after all builds.
           includeUpdaterJson: false
+
+      - name: Assert the macOS sandbox launcher is bundled and signed
+        if: runner.os == 'macOS'
+        run: |
+          LAUNCHER="target/${{ matrix.target }}/release/bundle/macos/srelens.app/Contents/MacOS/srelens-sandbox-launch"
+          test -x "$LAUNCHER"
+          if [ "$ENABLE_MAC_SIGNING" = 'true' ]; then
+            codesign --verify --strict --verbose=2 "$LAUNCHER"
+          fi
+          # Valid signatures can still be killed for invalid entitlements.
+          # No arguments must reach the launcher's own error path (exit 125).
+          set +e
+          "$LAUNCHER" > "$RUNNER_TEMP/launcher-check.log" 2>&1
+          STATUS=$?
+          set -e
+          test "$STATUS" -eq 125
+          grep -q 'missing --data DIR' "$RUNNER_TEMP/launcher-check.log"
 
       # macOS launches an app claiming the App ID entitlement (#819) only if
       # its embedded profile grants it, names its signing certificate and

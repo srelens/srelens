@@ -1,0 +1,8 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "macOS": {
+      "files": {"MacOS/srelens-sandbox-launch": "./sidecars/srelens-sandbox-launch"}
+    }
+  }
+}

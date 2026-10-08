@@ -507,3 +507,23 @@ is *usable*.
 - **UI** — the new design composes `@srelens/ui-kit` in `packages/ui-next`; shared tokens and component rules live in `packages/ui-kit/src/styles`. Read the [design contract and visibility audit](../design.md) for theme, contrast, typography, density and verification rules. The classic design uses `src/components/ui` (shadcn/radix), `src/ui` and `src/ui/styles.css`. Use the owning design’s tokens rather than ad-hoc colours.
 - **No direct Tauri imports** outside `src/transport/`.
 - **No host-specific logic in `crates/`** — if a change only makes sense for the desktop or only for the web, it belongs in `apps/desktop/src-tauri` or `crates/server`, not in the shared core.
+
+### macOS executable-app bundles
+
+Release builds prepare `srelens-sandbox-launch` for the same architecture as
+Srelens, then load the release-only Tauri binary overlay. The preparation script
+signs the helper without the desktop's restricted App ID
+entitlements; Tauri copies it unchanged into `Contents/MacOS` beside the host
+and notarizes the complete app.
+For a local bundle, run from the repository root:
+
+```bash
+sh packaging/macos/prepare-launcher.sh aarch64-apple-darwin
+pnpm tauri build --target aarch64-apple-darwin --config src-tauri/macos-launcher.conf.json
+```
+
+Use `x86_64-apple-darwin` for Intel. Ordinary Cargo/dev builds do not load the
+overlay, so they do not require a prebuilt release launcher. The release
+workflow checks that the bundled launcher is executable and verifies its
+signature on signed builds and executes its error path before the updater
+manifest can publish.
