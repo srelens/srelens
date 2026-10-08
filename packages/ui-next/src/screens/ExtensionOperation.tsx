@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from "react";
-import { callExtensionOperation, describeError, describeStreamEnd, extensionEnabledFor, extensionOperationRoute, openExtensionView, parseExtensionOperationRoute, relativeTime, type ExtensionOperation as Operation, type ExtensionView, type ExtensionStream } from "@srelens/core";
+import { listContexts, callExtensionOperation, describeError, describeStreamEnd, extensionEnabledFor, extensionOperationRoute, openExtensionView, parseExtensionOperationRoute, relativeTime, type ExtensionOperation as Operation, type ExtensionView, type ExtensionStream } from "@srelens/core";
 import { useNamespaceOptions } from "@srelens/core/react";
 import { ActionBar, Badge, Button, Combobox, Popover, Screen, Table, TextInput, type BadgeTone } from "@srelens/ui-kit";
 import { ExtensionLogo } from "../extensions/ExtensionLogo";
 import { useExtensions } from "../extensions/inventoryStore";
+import { ErrorNotice } from "../extensions/ExtensionResults";
 import { plainText } from "../extensions/displayText";
-import { useContexts, useContextsError, useContextsStatus } from "../lib/clusters";
+import { getContexts, getKubeconfigFiles, setContexts, useContexts, useContextsError, useContextsStatus } from "../lib/clusters";
 import type { RoutedScreenProps } from "../lib/routes";
 import { openTab } from "../lib/tabsStore";
 import { NamespaceChoice, NamespaceErrorAlert } from "./resourceShell";
@@ -41,8 +42,8 @@ function ReportActions({ data, operations, current, onOpen }: { data: Record<str
 }
 
 function ReportTable({ rows, operations, current, onOpen }: { rows: ResultRow[]; operations: Operation[]; current: string; onOpen: (operation: string, params: Record<string, Scalar>) => void }) {
- return <Table<ResultRow> data={rows} getRowKey={({data})=>String(data.reportId)} columns={[
-  {key:"subject",header:"Report",getValue:({data})=>data.subject,render:({data})=><div className="app-report-subject"><strong title={cell(data.subject)}>{cell(data.subject || "Unnamed report")}</strong><span title={cell(data.image || data.category)}>{label(String(data.category))} report{data.image && data.image !== data.subject ? <> · <span>{cell(data.image)}</span></> : null}</span></div>},
+ return <Table<ResultRow> data={rows} getRowKey={({data,index})=>typeof data.reportId === "string" ? data.reportId : `row-${index}`} columns={[
+  {key:"subject",header:"Report",getValue:({data})=>data.subject,render:({data})=><div className="app-report-subject"><strong tabIndex={0} title={cell(data.subject)}>{cell(data.subject || "Unnamed report")}</strong><span tabIndex={0} title={cell(data.image || data.category)}>{label(String(data.category))} report{data.image && data.image !== data.subject ? <> · <span>{cell(data.image)}</span></> : null}</span></div>},
   {key:"findings",header:"Findings",getValue:({data})=>data.findings,render:({data})=><div className="app-report-findings"><strong>{cell(data.findings)}</strong>{object(data.summary) && Object.values(data.summary).some(count=>typeof count==="number"&&count>0) ? <ResultValue field="summary" value={Object.fromEntries(Object.entries(data.summary).filter(([,count])=>typeof count==="number"&&count>0))}/> : <span className="text-muted">{data.findings===0 ? "No findings" : "Severity unavailable"}</span>}</div>},
   {key:"namespace",header:"Namespace",getValue:({data})=>data.namespace,render:({data})=><ResultValue field="namespace" value={data.namespace || "Cluster"}/>},
   {key:"source",header:"Source",getValue:({data})=>data.source,render:({data})=><div className="app-report-source"><span>{data.source==="app" ? "App scan" : data.source==="operator" ? "Operator" : cell(data.source)}</span><ResultValue field="freshness" value={data.freshness ?? "unknown"}/></div>},
@@ -52,8 +53,8 @@ function ReportTable({ rows, operations, current, onOpen }: { rows: ResultRow[];
 }
 
 function ResultValue({ field, value, compact = false }: { field: string; value: unknown; compact?: boolean }) {
-  if (field === "image" && typeof value === "string") return <span className="app-image-reference" title={cell(value)}>{cell(value)}</span>;
-  if (["name", "namespace", "container"].includes(field) && typeof value === "string") return <span className="app-resource-reference" title={cell(value)}>{cell(value)}</span>;
+  if (field === "image" && typeof value === "string") return <span tabIndex={0} className="app-image-reference" title={cell(value)}>{cell(value)}</span>;
+  if (["name", "namespace", "container"].includes(field) && typeof value === "string") return <span tabIndex={0} className="app-resource-reference" title={cell(value)}>{cell(value)}</span>;
   if (compact && Array.isArray(value)) return <div className="flex flex-wrap gap-1">{value.map((item, index) => <Badge key={index}>{cell(item)}</Badge>)}</div>;
   if (field === "summary" && object(value)) return <div className="flex flex-wrap gap-1">{Object.entries(value).sort(([a],[b])=>severityOrder(a)-severityOrder(b)).map(([name, count]) => <Badge key={name} tone={severityTone[severityName(name)] ?? "muted"}>{label((severityTone[severityName(name)] ? severityName(name) : name).toLowerCase())} {cell(count)}</Badge>)}</div>;
   if (["severity", "state", "freshness", "source"].includes(field) && typeof value === "string") {
@@ -84,7 +85,7 @@ function OperationResult({ value, operations, current, onOpen }: { value: unknow
   const [filter, setFilter] = useState("");
   const [source, setSource] = useState("");
   const fields = object(value) ? Object.entries(value) : [["Result", value] as const];
-  const reports = object(value) && !value.state && Array.isArray(value.items) && (typeof value.totalReports === "number" || value.items.some(reportRow));
+  const reports = object(value) && !value.state && Array.isArray(value.items) && value.items.every(reportRow) && (typeof value.totalReports === "number" || value.items.length > 0);
   const compactList = (key: string, value: unknown) => !["items", "findings", "bindings", "warnings"].includes(key) && Array.isArray(value) && value.length > 0 && value.length <= 8 && value.every(scalar);
   const metadata = fields.filter(([key, value]) => key !== "nextCursor" && (!Array.isArray(value) || compactList(key, value))).flatMap(([key, value]) => object(value) && key !== "summary" ? flatten(value) : [[key, value] as [string, unknown]]);
   const identity = metadata.filter(([key]) => technical(key) && key !== "scope");
@@ -120,7 +121,7 @@ function OperationResult({ value, operations, current, onOpen }: { value: unknow
 }
 
 function OperationForm({ id, revision, context, contextKey, operation, operations, initial = {} }: { id: string; revision: number; context: string; contextKey: string; operation: Operation; operations: Operation[]; initial?: Record<string, Scalar> }) {
-  const [values, setValues] = useState<Record<string, Scalar>>(initial);
+  const [values, setValues] = useState<Record<string, Scalar>>(() => ({ ...Object.fromEntries((operation.inputs ?? []).filter(input => input.type === "boolean").map(input => [input.name, false])), ...initial }));
   const [result, setResult] = useState<unknown>();
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -206,6 +207,10 @@ export function ExtensionOperation({ route }: RoutedScreenProps) {
   const contexts = useContexts();
   const status = useContextsStatus();
   const contextError = useContextsError();
+  const retryContexts = async () => {
+    try { const result = await listContexts(getKubeconfigFiles()); setContexts([...(result.contexts ?? getContexts())], result.error ?? ""); }
+    catch (error) { setContexts(getContexts(), describeError(error).detail); }
+  };
   if (!target) return null;
   const app = inventory.data?.plugins.find((app) => app.manifest.id === target.id);
   const cluster = contexts.find((context) => context.key === target.contextKey);
@@ -220,6 +225,8 @@ export function ExtensionOperation({ route }: RoutedScreenProps) {
   return <Screen title={<span className="flex min-w-0 items-center gap-2"><ExtensionLogo icon={app?.icon} name={app?.manifest.name ?? target.id} size={22} /><span className="text-muted">{app?.manifest.name ?? target.id}</span><span className="text-faint">/</span><span>{operation?.title ?? "App"}</span></span>} actions={<span className="block max-w-56 truncate text-xs text-muted" title={cluster?.name ?? target.contextKey}>{cluster?.name ?? target.contextKey}</span>} fill>
     <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
       {inventory.status === "loading" || status === "loading" ? <p className="extension-message" role="status">Loading app…</p>
+        : inventory.status === "error" ? <ErrorNotice title="Could not load apps" message={inventory.error} retry={inventory.reload} />
+        : !cluster && status === "failed" ? <ErrorNotice title="Could not load clusters" message={contextError} retry={() => { void retryContexts(); }} />
         : error ? <p className="extension-message" role="alert">{error}</p>
         : <OperationForm key={route} id={target.id} revision={target.revision} contextKey={target.contextKey} context={cluster!.pinnedId!} operation={operation!} operations={app!.manifest.sidecar!.operations} initial={target.params} />}
     </div>

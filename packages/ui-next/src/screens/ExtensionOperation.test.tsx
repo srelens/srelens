@@ -1,10 +1,11 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, expect, it, vi } from "vitest";
 const host = vi.hoisted(() => ({ calls: [] as any[], answer: {} as unknown, error: "", pending: undefined as Promise<unknown> | undefined }));
-const appState = vi.hoisted(() => ({ revision: 3, enabled: true, autoRun: false, stream: false, namespace: false }));
+const appState = vi.hoisted(() => ({ revision: 3, enabled: true, autoRun: false, stream: false, namespace: false, boolean: false, inventoryError: false, contextError: false, reloads: 0, refreshes: 0 }));
 const streamState = vi.hoisted(() => ({ handlers: undefined as any, request: undefined as any, closed: 0, cancelled: 0, pending: undefined as Promise<any> | undefined }));
 vi.mock("@srelens/core", async (original) => ({
   ...(await original<typeof import("@srelens/core")>()),
+  listContexts: async () => { appState.refreshes++; return {contexts:[]}; },
   openExtensionView: () => ({ close: async () => { streamState.closed++; }, open: async (request: unknown, handlers: unknown) => { streamState.request = request; streamState.handlers = handlers; if (streamState.pending) return await streamState.pending; return { cancel: async () => { streamState.cancelled++; streamState.handlers.onEnd({ type: "close", reason: "cancelled" }); } }; } }),
 }));
 vi.mock("@srelens/core/transport", async (original) => ({
@@ -18,13 +19,13 @@ vi.mock("@srelens/core/transport", async (original) => ({
 }));
 vi.mock("@srelens/core/react", () => ({ useNamespaceOptions: () => ({ namespaces: ["team", "default"], scope: null, error: "" }) }));
 vi.mock("../lib/clusters", () => ({
-  useContexts: () => [{ name: "demo", stableId: "same-id", key: "config#demo", pinnedId: "srelens-context:config#demo" }],
-  useContextsStatus: () => "loaded", useContextsError: () => "",
+  useContexts: () => appState.contextError ? [] : [{ name: "demo", stableId: "same-id", key: "config#demo", pinnedId: "srelens-context:config#demo" }],
+  useContextsStatus: () => appState.contextError ? "failed" : "loaded", useContextsError: () => "Kubeconfig read denied", getContexts: () => [], getKubeconfigFiles: () => [], setContexts: () => { appState.contextError = false; },
 }));
 vi.mock("../extensions/inventoryStore", () => ({
-  useExtensions: () => ({ status: "ready", data: { plugins: [{ ...appState,
+  useExtensions: () => ({ status: appState.inventoryError ? "error" : "ready", error: "Inventory read denied", reload: () => { appState.reloads++; appState.inventoryError = false; }, data: { plugins: [{ ...appState,
     manifest: { id: "org.srelens.trivy", name: "Trivy", sidecar: { operations: [{ name: "scan", title: "Scan image", view: { autoRun: appState.autoRun, stream: appState.stream }, inputs: [
-      { name: "clusterId", type: "string", required: true }, ...(appState.namespace ? [{ name: "namespace", title: "Namespace", type: "string", required: true }] : []), { name: "image", title: "Image", type: "string", required: true, maxLength: 512 },
+      { name: "clusterId", type: "string", required: true }, ...(appState.namespace ? [{ name: "namespace", title: "Namespace", type: "string", required: true }] : []), { name: "image", title: "Image", type: "string", required: true, maxLength: 512 }, ...(appState.boolean ? [{name:"includeFixed",title:"Include fixed",type:"boolean",required:true}] : []),
     ] }, { name: "findings", title: "Findings", view: { autoRun: true, hidden: true }, inputs: [{ name: "clusterId", type: "string", required: true }, { name: "reportId", type: "string", required: true }, { name: "cursor", type: "string" }] }, {name:"scan-namespace",title:"Scan namespace",view:{stream:true},inputs:[{name:"clusterId",type:"string",required:true},{name:"namespace",type:"string",required:true}]}, {name:"list-images",title:"Images",view:{autoRun:true},inputs:[{name:"clusterId",type:"string",required:true},{name:"namespace",type:"string"},{name:"cursor",type:"string"}]}] } },
   }] } }),
 }));
@@ -38,7 +39,7 @@ const route = "/extension-operation-contexts/config%23demo/org.srelens.trivy/3/s
 const open = () => render(<ExtensionOperation route={route} ported={[]} onSwitchToClassic={() => {}} onLocked={() => {}} />);
 beforeEach(() => { host.calls = []; host.error = ""; host.pending = undefined; host.answer = { state: "completed", source: "app", findings: [
   { id: "CVE-2019-1549", severity: "HIGH", package: "libssl1.1", installedVersion: "1.1.1b-r1", fixedVersion: "1.1.1d-r0" },
-] }; appState.revision = 3; appState.enabled = true; appState.autoRun = false; appState.stream = false; appState.namespace = false; streamState.request = undefined; streamState.pending = undefined; streamState.closed = 0; streamState.cancelled = 0; });
+] }; appState.revision = 3; appState.enabled = true; appState.autoRun = false; appState.stream = false; appState.namespace = false; appState.boolean = false; appState.inventoryError = false; appState.contextError = false; appState.reloads = 0; appState.refreshes = 0; streamState.request = undefined; streamState.pending = undefined; streamState.closed = 0; streamState.cancelled = 0; });
 
 it("registers a native screen and renders the declared operation's real result", async () => {
   expect(screenFor(route)).toBe(ExtensionOperation);
@@ -318,4 +319,46 @@ it("distinguishes Operator resources sharing an image and renders Operator sever
   expect(within(row).getByText("Low 1")).toBeTruthy();
   expect(within(row).getByText("Unknown 1")).toBeTruthy();
  }
+});
+
+it("submits a required boolean's visible unchecked choice on the first run", async () => {
+  appState.boolean = true;
+  open();
+  expect((await screen.findByLabelText("Include fixed") as HTMLInputElement).checked).toBe(false);
+  fireEvent.change(screen.getByLabelText("Image"), {target:{value:"alpine:3.9"}});
+  fireEvent.click(screen.getByRole("button", {name:"Scan image"}));
+  await screen.findByText("CVE-2019-1549");
+  expect(host.calls[0].params.includeFixed).toBe(false);
+});
+
+it("preserves a route-provided true boolean when initializing the form", async () => {
+  appState.boolean = true;
+  render(<ExtensionOperation route={route + "/" + encodeURIComponent(JSON.stringify({image:"alpine:3.9",includeFixed:true}))} ported={[]} onSwitchToClassic={() => {}} onLocked={() => {}} />);
+  fireEvent.click(await screen.findByRole("button", {name:"Scan image"}));
+  await screen.findByText("CVE-2019-1549");
+  expect(host.calls[0].params.includeFixed).toBe(true);
+});
+
+it("renders malformed report collections as generic results with independent row identity", async () => {
+  host.answer = {totalReports:2,items:[{image:"alpine:a"},{image:"alpine:b"}]};
+  open(); fireEvent.change(await screen.findByLabelText("Image"),{target:{value:"alpine:3.9"}});
+  fireEvent.click(screen.getByRole("button",{name:"Scan image"}));
+  await screen.findByText("alpine:a");
+  expect(screen.getByRole("table").textContent).toContain("alpine:b");
+  expect(screen.getByRole("columnheader",{name:/Image/})).toBeTruthy();
+  expect(screen.queryByText("Undefined report")).toBeNull();
+});
+
+it("offers retry for failed inventory and context loads", async () => {
+  appState.inventoryError = true;
+  let mounted = open();
+  expect((await screen.findByRole("alert")).textContent).toContain("Inventory read denied");
+  fireEvent.click(screen.getByRole("button",{name:"Retry"}));
+  expect(appState.reloads).toBe(1);
+  mounted.unmount();
+  appState.contextError = true;
+  mounted = open();
+  expect((await screen.findByRole("alert")).textContent).toContain("Kubeconfig read denied");
+  fireEvent.click(screen.getByRole("button",{name:"Retry"}));
+  expect(appState.refreshes).toBe(1);
 });

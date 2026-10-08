@@ -12,8 +12,7 @@
 
 /* App result panes keep dense report evidence readable without stretching rows. */
 .app-results .tbl thead th { text-transform: none; letter-spacing: 0; font-size: 12px; padding-block: 9px; }
-.app-results .tbl td { height: 52px; padding-block: 8px; }
-.app-image-reference, .app-resource-reference { display: block; max-width: 340px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.app-image-reference, .app-resource-reference { display: block; max-width: 340px; overflow-x: auto; white-space: nowrap; }
 .app-resource-reference { max-width: 220px; }
 .app-results .app-row-actions { flex-wrap: nowrap; }
 .app-results .badge { text-transform: none; letter-spacing: 0; font-family: var(--font-sans); padding: 2px 6px; border-radius: 4px; }
@@ -24,15 +23,15 @@
 .app-result-filters { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; padding: 10px 12px; border-bottom: 1px solid var(--rule); }
 .app-result-filters > :first-child { max-width: 360px; flex: 1 1 240px; }
 .app-source-filters { display: flex; gap: 3px; margin-left: auto; }
-.app-source-filters button[aria-pressed="true"] { background: var(--accent-wash); color: var(--accent); border-color: var(--accent-line); }
+.app-source-filters button[aria-pressed="true"] { font-weight: 600; text-decoration: underline; text-underline-offset: 3px; background: var(--accent-wash); color: var(--accent); border-color: var(--accent-line); }
 .app-report-subject, .app-report-time, .app-report-source { display: flex; flex-direction: column; gap: 3px; }
-.app-report-subject strong { max-width: 260px; overflow: hidden; text-overflow: ellipsis; font-weight: 500; }
-.app-report-subject > span { max-width: 260px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.app-report-subject strong { max-width: 260px; overflow-x: auto; white-space: nowrap; font-weight: 500; }
+.app-report-subject > span { max-width: 260px; overflow-x: auto; white-space: nowrap; }
 .app-report-subject > span, .app-report-time > span:last-child { font-size: 11px; color: var(--ink-muted); }
 .app-report-source .badge { align-self: flex-start; }
 .app-report-findings { display: flex; align-items: center; gap: 10px; }
 .app-report-findings > strong { min-width: 22px; font-size: 16px; font-weight: 600; }
-.app-report-findings .badge { font-size: 10px; }
+.app-report-findings .badge { font-size: 11px; }
 .app-report-findings > div { flex-wrap: nowrap; }
 .app-report-actions { display: flex; align-items: center; justify-content: flex-end; gap: 10px; }
 .app-report-actions .btn { font-size: 11px; padding: 4px 8px; }

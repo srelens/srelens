@@ -14,7 +14,7 @@ import { extensionLogoIcon, extensionPageIcon } from "./ExtensionLogo";
  * the budget test (#581) times exactly what the sidebar builds.
  */
 export function appNavigation(plugins: InstalledExtension[], contextKey: string): ResourceNode | null {
-  const apps = plugins.filter((p) => p.enabled && extensionEnabledFor(p, contextKey) && (p.manifest.contributions.pages.length || p.manifest.sidecar?.operations.length));
+  const apps = plugins.filter((p) => p.enabled && extensionEnabledFor(p, contextKey) && (p.manifest.contributions.pages.length || p.manifest.sidecar?.operations.some(operation => !operation.view?.hidden)));
   if (!apps.length) return null;
   return {
     id: "extensions", label: "Apps", icon: Icons.apps,

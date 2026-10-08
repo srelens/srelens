@@ -22,3 +22,10 @@ it("opens executable operations on the cluster and installed revision they belon
   expect(appNavigation([{ ...app, enabled: false }], "config#a/b")).toBeNull();
   expect(appNavigation([{ ...app, contexts: ["other"] }], "config#a/b")).toBeNull();
 });
+
+it("omits an app whose only operations are hidden", () => {
+  const hidden = structuredClone(app);
+  hidden.manifest.contributions.pages = [];
+  hidden.manifest.sidecar!.operations = [{name:"findings",title:"Findings",view:{hidden:true}}];
+  expect(appNavigation([hidden], "config#demo")).toBeNull();
+});

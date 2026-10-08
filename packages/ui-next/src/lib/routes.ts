@@ -121,7 +121,11 @@ function decodedSegment(raw: string): string {
  */
 export function describe(route: string, clusterName?: string): RouteInfo {
   const operation = parseExtensionOperationRoute(route);
-  if (operation) return { route, title: operation.operation, sub: clusterName ?? operation.contextKey, kind: "resource" };
+  if (operation) {
+    const title = operation.operation.replace(/[-_]/g, " ").replace(/^./, c => c.toUpperCase());
+    const subject = operation.params?.reportId ?? operation.params?.image ?? operation.params?.namespace;
+    return { route, title: subject ? `${title} · ${subject}` : title, sub: clusterName ?? operation.contextKey, kind: "resource" };
+  }
   const extension = parseExtensionRoute(route);
   // A route that names its cluster by key or stable ID is labelled with the cluster's name;
   // a legacy one already carries the name.
