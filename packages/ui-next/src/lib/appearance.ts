@@ -179,30 +179,82 @@ export function readRootOpacity(): number {
 }
 
 /**
- * Put an opacity on the document root, with the blur that goes with it.
+ * Put an opacity on the document root.
  *
- * The two travel together because the blur is only ever the backdrop of a
- * see-through window: at 100% there is nothing showing through to blur, and a
- * native effect left running behind an opaque page is work nobody can see.
- *
- * Two writes on the root, where the other axes make one. `data-opacity` is
- * what the stylesheet keys its see-through rules on and what this module reads
- * back; `--window-alpha` is the amount, which no attribute selector can carry
- * for a continuous value.
- *
- * The native window is only asked when the answer changes — when the window
- * goes from solid to see-through or back. A slider reports every position it
- * is dragged through, and re-applying an effect the window already wears on
- * each of them is a round trip to the host per pixel of travel.
+ * Two writes, where the other axes make one. `data-opacity` is what the
+ * stylesheet keys its see-through rules on and what this module reads back;
+ * `--window-alpha` is the amount, which no attribute selector can carry for a
+ * continuous value.
  */
-export function writeOpacity(opacity: number, blur: boolean): void {
-  const wasSolid = readRootOpacity() === BARE.opacity;
-  const solid = opacity === BARE.opacity;
+export function writeOpacity(opacity: number, storage: Storage = settingsStorage): void {
   writeAxis("data-opacity", String(opacity), String(BARE.opacity));
   const style = document.documentElement.style;
-  if (solid) style.removeProperty("--window-alpha");
+  if (opacity === BARE.opacity) style.removeProperty("--window-alpha");
   else style.setProperty("--window-alpha", `${opacity}%`);
-  if (solid !== wasSolid) applyWindowBlur(blur && !solid);
+  // From the first see-through moment on, whoever writes it: an opacity put
+  // back at boot and one first chosen on the pane this session both need the
+  // titlebar's theme button to be followed afterwards.
+  if (opacity !== BARE.opacity) followRootForWindowBlur(storage);
+  syncWindowBlur(storage);
+}
+
+/** What the native window was last asked for. It starts with no blur. */
+let blurApplied = false;
+
+/**
+ * Whether there is anything behind the page for a blur to soften.
+ *
+ * Three things have to hold, and the first cut checked only one. The window
+ * must be less than solid; the reader must not have turned the blur off; and
+ * the THEME must be one that is actually see-through. A light theme ignores
+ * the opacity and paints the page solid, so a reader who set Dark to 80% and
+ * then picked Paper had a blur running behind an opaque window — work nobody
+ * can see, on every frame the desktop behind it changes. (#854 review)
+ */
+function wantsWindowBlur(storage: Storage): boolean {
+  return (
+    supportsWindowOpacity() &&
+    readRootOpacity() !== BARE.opacity &&
+    TRANSLUCENT_THEMES.includes(readRootTheme()) &&
+    (readStored(storage).blur ?? true)
+  );
+}
+
+/**
+ * Bring the native window's blur into line with what the root and the stored
+ * record now say.
+ *
+ * The window is only asked when the answer CHANGES. A slider reports every
+ * position it is dragged through, and re-applying an effect the window already
+ * wears on each of them is a round trip to the host per pixel of travel.
+ *
+ * Safe to call from anywhere that might have moved one of the three inputs —
+ * that is the point of deriving the answer here rather than passing it in.
+ */
+export function syncWindowBlur(storage: Storage = settingsStorage): void {
+  const wanted = wantsWindowBlur(storage);
+  if (wanted === blurApplied) return;
+  blurApplied = wanted;
+  applyWindowBlur(wanted);
+}
+
+let followingRoot = false;
+
+/**
+ * Keep the blur following `data-theme` and `data-opacity` for the life of the
+ * window, once.
+ *
+ * The Appearance pane is not the only writer of `data-theme`: the titlebar's
+ * light/dark button and the OS follower both write it from the host
+ * (`apps/desktop/src/design.ts`) and know nothing of this module. Watching the
+ * root is what makes a theme flipped from there stop or restore the blur too.
+ * Never torn down, for the reason the follower's own stop is discarded: it
+ * belongs to the window, and there is no unmount to hang it on.
+ */
+function followRootForWindowBlur(storage: Storage): void {
+  if (followingRoot) return;
+  followingRoot = true;
+  subscribeToRoot(() => syncWindowBlur(storage));
 }
 
 /**
@@ -293,7 +345,7 @@ export function applyStoredAppearance(storage: Storage = settingsStorage): void 
     stored.opacity !== BARE.opacity &&
     supportsWindowOpacity()
   ) {
-    writeOpacity(stored.opacity, stored.blur ?? true);
+    writeOpacity(stored.opacity, storage);
   }
 }
 

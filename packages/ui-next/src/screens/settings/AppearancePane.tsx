@@ -2,7 +2,6 @@ import { useEffect, useState, useSyncExternalStore } from "react";
 import {
   UI_SCALE,
   applyUiScale,
-  applyWindowBlur,
   getUiScale,
   isApplePlatform,
   isTauri,
@@ -31,6 +30,7 @@ import {
   remember,
   subscribeToRoot,
   supportsWindowOpacity,
+  syncWindowBlur,
   writeAxis,
   writeOpacity,
   type AccentId,
@@ -235,6 +235,9 @@ export function AppearancePane({ ported, onSwitchToClassic }: AppearancePaneProp
     // See `GLASS_OPACITY`: a solid window is the one case where picking Glass
     // has to move a second axis, or the theme arrives with no glass in it.
     if (id === "glass" && seeThrough && opacity === BARE.opacity) pickOpacity(GLASS_OPACITY);
+    // A light theme paints the page solid whatever the opacity says, and a
+    // dark one shows through again: the blur follows the theme as well.
+    else syncWindowBlur();
   }
 
   function pickAccent(id: AccentId) {
@@ -248,16 +251,16 @@ export function AppearancePane({ ported, onSwitchToClassic }: AppearancePaneProp
   }
 
   function pickOpacity(percent: number) {
-    writeOpacity(percent, blur);
+    writeOpacity(percent);
     remember({ opacity: percent });
   }
 
   function pickBlur(on: boolean) {
     setBlur(on);
-    // Straight to the window rather than through `writeOpacity`, which only
-    // asks it when solid turns see-through or back — and this is neither.
-    applyWindowBlur(on && opacity !== BARE.opacity);
+    // Remembered first: the stored record is one of the things the blur is
+    // derived from.
     remember({ blur: on });
+    syncWindowBlur();
   }
 
   function pickScale(percent: number) {

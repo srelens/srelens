@@ -34,7 +34,7 @@ import {
   applyStoredAppearance,
   hasChosenTheme,
 } from "./AppearancePane";
-import { rememberTheme } from "../../lib/appearance";
+import { rememberTheme, syncWindowBlur } from "../../lib/appearance";
 
 /**
  * The stylesheet that actually defines the themes, accents and densities this
@@ -100,6 +100,11 @@ describe("AppearancePane", () => {
       root.removeAttribute(name);
     }
     root.style.removeProperty("--window-alpha");
+    // The module remembers what it last asked the native window for, so that
+    // it asks once per change. With the root bare this settles it back to
+    // "no blur", or one test's see-through window would be the next one's
+    // starting state.
+    syncWindowBlur();
     setUiScale(UI_SCALE.DEFAULT, "next");
     localStorage.clear();
     vi.restoreAllMocks();
@@ -404,6 +409,44 @@ describe("AppearancePane", () => {
       expect((screen.getByRole("checkbox", { name: /blur/i }) as HTMLInputElement).disabled).toBe(true);
     });
 
+    it("stops blurring behind a theme that paints the page solid, and keeps the opacity", async () => {
+      const { user } = paint();
+      await slideTo(80);
+      expect(core.applyWindowBlur).toHaveBeenLastCalledWith(true);
+      // A light theme ignores the opacity and paints solid, so there is
+      // nothing showing through and the blur is drawing work nobody can see.
+      await user.click(screen.getByRole("radio", { name: /^paper/i }));
+      expect(core.applyWindowBlur).toHaveBeenLastCalledWith(false);
+      expect(root.getAttribute("data-opacity")).toBe("80");
+      expect(stored()).toMatchObject({ theme: "paper", opacity: 80 });
+      // And back: the opacity was the reader's, and so was the blur.
+      await user.click(screen.getByRole("radio", { name: /^midnight/i }));
+      expect(core.applyWindowBlur).toHaveBeenLastCalledWith(true);
+    });
+
+    it("follows a theme changed from outside this pane, as the titlebar's button does", async () => {
+      localStorage.setItem(APPEARANCE_KEY, JSON.stringify({ opacity: 80 }));
+      applyStoredAppearance();
+      expect(core.applyWindowBlur).toHaveBeenLastCalledWith(true);
+      // `toggleNextDesignTheme` and the OS follower write `data-theme`
+      // themselves; neither knows this module exists.
+      await act(async () => {
+        root.removeAttribute("data-theme");
+        await Promise.resolve();
+      });
+      expect(core.applyWindowBlur).toHaveBeenLastCalledWith(false);
+    });
+
+    it("follows an outside theme change for an opacity first chosen this session", async () => {
+      paint();
+      await slideTo(80);
+      await act(async () => {
+        root.setAttribute("data-theme", "contrast");
+        await Promise.resolve();
+      });
+      expect(core.applyWindowBlur).toHaveBeenLastCalledWith(false);
+    });
+
     it("is switched off on a light theme, and says which themes it works on", () => {
       root.setAttribute("data-theme", "paper");
       paint();
@@ -477,6 +520,14 @@ describe("AppearancePane", () => {
       it("leaves the blur off for a reader who turned it off", () => {
         localStorage.setItem(APPEARANCE_KEY, JSON.stringify({ opacity: 90, blur: false }));
         applyStoredAppearance();
+        expect(root.getAttribute("data-opacity")).toBe("90");
+        expect(core.applyWindowBlur).not.toHaveBeenCalledWith(true);
+      });
+
+      it("does not blur behind a light theme, whatever opacity is stored", () => {
+        localStorage.setItem(APPEARANCE_KEY, JSON.stringify({ theme: "paper", opacity: 90 }));
+        applyStoredAppearance();
+        // The opacity is still the reader's, and waits for a theme that uses it.
         expect(root.getAttribute("data-opacity")).toBe("90");
         expect(core.applyWindowBlur).not.toHaveBeenCalledWith(true);
       });
