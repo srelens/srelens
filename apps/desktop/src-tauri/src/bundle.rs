@@ -512,7 +512,30 @@ fn write_member(path: &Path, content: &str) -> Result<(), String> {
     if content.len() > MAX_MEMBER_BYTES {
         return Err(format!("{} is larger than the 1 MB limit", path.display()));
     }
-    fs::write(path, content).map_err(|e| format!("write {}: {e}", path.display()))
+    write_new(path, |file| std::io::Write::write_all(file, content.as_bytes()))
+}
+
+/// Create `path`, which must not exist yet, and fill it with `write`.
+///
+/// A write that fails takes the file away again. Left behind, a part-written
+/// skill reads as one the reader edited here, and the retry the report invites
+/// would keep it as theirs. Creating with `create_new` is what makes that
+/// removal safe: the file removed can only be the one this call made.
+fn write_new(
+    path: &Path,
+    write: impl FnOnce(&mut fs::File) -> std::io::Result<()>,
+) -> Result<(), String> {
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|e| format!("write {}: {e}", path.display()))?;
+    if let Err(e) = write(&mut file) {
+        drop(file);
+        let _ = fs::remove_file(path);
+        return Err(format!("write {}: {e}", path.display()));
+    }
+    Ok(())
 }
 
 /// The settings to write on import: the bundle's keys, minus the ones that
@@ -1056,6 +1079,37 @@ current-context: other
         assert!(skills_dir(&base).join("triage.md").exists());
         let failure = report.failure.as_deref().expect("the failure is reported");
         assert!(failure.contains("huge.md"), "{failure}");
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_write_that_fails_part_way_leaves_no_file_for_a_retry_to_skip() {
+        // A full disk, say: the file exists and half of it is written. Left
+        // there, the retry the report invites would find the name taken, read
+        // the half as the reader's own edit, and keep it instead of the skill.
+        let base = temp_dir("half-written");
+        let path = base.join("triage.md");
+
+        let result = write_new(&path, |file| {
+            use std::io::Write;
+            file.write_all(b"# tri")?;
+            Err(std::io::Error::other("no space left on device"))
+        });
+
+        let error = result.expect_err("the failed write is reported");
+        assert!(error.contains("no space left"), "{error}");
+        assert!(!path.exists(), "the part-written file was left behind");
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_member_is_never_written_over_a_file_that_appeared_meanwhile() {
+        let base = temp_dir("no-clobber");
+        let path = base.join("triage.md");
+        fs::write(&path, "# my own version").unwrap();
+
+        assert!(write_member(&path, "# triage").is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "# my own version");
         let _ = fs::remove_dir_all(&base);
     }
 
