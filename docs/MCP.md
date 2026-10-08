@@ -359,6 +359,48 @@ one that can express an Argo CD sync, and `k8s.requestRolloutRestart` is
 `high` because it replaces a workload's running pods; the other four are
 `medium`.
 
+### What a tool's answer looks like to an agent
+
+Every successful `tools/call` result, on either transport and for the in-process agent,
+becomes text in one place (`crates/mcp/src/agent_text.rs`). The desktop UI
+calls capabilities through Tauri, not MCP, and sees the untrimmed answer.
+
+**Trimmed.** Three kinds of noise are replaced before the answer is sent,
+anywhere in it, and the text stays valid JSON:
+
+- `metadata.managedFields` is dropped.
+- The `kubectl.kubernetes.io/last-applied-configuration` annotation in
+  `metadata.annotations` keeps its key; its value becomes `<omitted by
+  srelens: N-byte copy of the manifest as last applied with kubectl>`. The
+  other annotations are untouched, and so is the same key anywhere outside
+  `metadata`.
+- On a core Node (`"apiVersion": "v1"`, `"kind": "Node"`), `status.images`
+  becomes `<omitted by srelens: N cached container images; k8s.getManifest
+  returns them>`. Any other kind's `status.images` is left alone, including a
+  custom resource's that is also called `Node`.
+
+Each rule matches only where Kubernetes puts that field, so a custom
+resource's or an app's own data that happens to share a name is sent as it is.
+
+**Size limit.** After trimming, a **read-only** tool's answer over **50,000
+bytes** of compact JSON (`MAX_RESULT_BYTES`) is not sent. The call returns
+`isError: true` with a one-line message giving the size and the limit, saying
+the call itself succeeded and nothing about the cluster follows from the
+refusal, and asking the agent to narrow the call — a namespace, a label or
+field selector, fewer fields or lines where the tool takes them — and call
+again. The number follows Claude Code's threshold for saving an MCP result to
+a file instead of showing it to the model ([MCP output limits and
+warnings](https://code.claude.com/docs/en/mcp.md)); srelens' agent cannot read
+files, so a larger answer was lost to it. A tool that is not read-only always
+has its answer sent, at any size: refusing the output of a change that
+happened would tell the agent it did not, and invite it to make the change
+again.
+
+Not covered: `resources/read`, which renders its text separately, and the
+YAML string `k8s.getManifest` returns, which is sent as it is (the size limit
+still applies to it). The audit log's `resultBytes`, where it records one, is the
+answer's size before trimming.
+
 ## Installed apps' tools
 
 Each app installed in the desktop app, and on, adds its operations as tools named

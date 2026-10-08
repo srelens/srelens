@@ -1,5 +1,6 @@
 //! Bridges the capability registry to the Model Context Protocol.
 
+mod agent_text;
 #[cfg(test)]
 mod app_tools_tests;
 pub mod audit;

@@ -350,10 +350,15 @@ pub async fn handle_request_as(
                 .call_tool_audited_in(&registry, name, args, transport, decision)
                 .await;
             let result = match called {
-                Ok(v) => json!({
-                    "content": [{ "type": "text", "text": v.to_string() }],
-                    "isError": false
-                }),
+                // Trimmed, and a read too large for the agent refused (`agent_text`).
+                Ok(v) => {
+                    let read_only = registry.get(name).is_some_and(|c| c.annotations.read_only);
+                    let (text, is_error) = match crate::agent_text::render(v, read_only) {
+                        Ok(text) => (text, false),
+                        Err(refusal) => (refusal, true),
+                    };
+                    json!({ "content": [{ "type": "text", "text": text }], "isError": is_error })
+                }
                 Err(e) => json!({
                     "content": [{ "type": "text", "text": e.to_string() }],
                     "isError": true
@@ -1187,6 +1192,61 @@ mod tests {
         assert_eq!(resp["result"]["isError"], false);
         let text = resp["result"]["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("echo"));
+    }
+
+    /// Where every tool result becomes text: a Node's noise is trimmed, a read
+    /// too large for the agent is refused, and a mutation's answer of the same
+    /// size is sent, because the change happened either way.
+    #[tokio::test]
+    async fn tools_call_trims_a_node_and_refuses_only_an_over_limit_read() {
+        use srelens_capability::Annotations;
+        struct Yes;
+        #[async_trait::async_trait]
+        impl crate::policy::ConfirmPolicy for Yes {
+            async fn confirm(&self, _: &crate::policy::ConsentRequest) -> crate::policy::Decision {
+                crate::policy::Decision::Approved
+            }
+        }
+        let big = || json!({ "data": "x".repeat(crate::agent_text::MAX_RESULT_BYTES) });
+        let mut reg = Registry::new();
+        reg.register(Capability::read_only("node", "a node", |_| async {
+            Ok(json!({
+                "apiVersion": "v1",
+                "kind": "Node",
+                "metadata": { "name": "n1", "managedFields": [{ "manager": "kubelet" }] },
+                "status": { "allocatable": { "cpu": "4" }, "images": [{ "names": ["a"] }] }
+            }))
+        }));
+        reg.register(Capability::read_only("bigRead", "a big read", move |_| async move { Ok(big()) }));
+        let mut write = Capability::read_only("bigWrite", "a big write", move |_| async move { Ok(big()) });
+        write.annotations = Annotations::MUTATING;
+        reg.register(write);
+        let server = &McpServer::new(Arc::new(reg)).with_policy(Arc::new(Yes));
+        let call = |name: &'static str| async move {
+            handle_request(
+                server,
+                &json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":{}}}),
+                Transport::Stdio,
+            )
+            .await
+            .unwrap()["result"]
+                .clone()
+        };
+
+        let node = call("node").await;
+        assert_eq!(node["isError"], false, "{node}");
+        let node: Value = serde_json::from_str(node["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert!(node["metadata"].get("managedFields").is_none(), "{node}");
+        assert!(node["status"]["images"].as_str().unwrap().contains("k8s.getManifest"));
+        assert_eq!(node["status"]["allocatable"]["cpu"], "4");
+
+        let read = call("bigRead").await;
+        assert_eq!(read["isError"], true, "a read over the limit is refused");
+        assert!(read["content"][0]["text"].as_str().unwrap().contains("narrow"), "{read}");
+
+        let write = call("bigWrite").await;
+        assert_eq!(write["isError"], false, "a mutation's answer is sent whatever its size");
+        assert!(write["content"][0]["text"].as_str().unwrap().len() > crate::agent_text::MAX_RESULT_BYTES);
     }
 
     fn server_with_destructive() -> McpServer {
