@@ -258,6 +258,35 @@ describe("Terminals", () => {
     expect(attached()).toEqual([terminalFor(bravo)?.element]);
   });
 
+  it("renames a session from its row, in the rail and in the pane head alike", async () => {
+    await openPod("alpha");
+    const bravo = await openPod("bravo");
+    const user = userEvent.setup();
+    draw();
+
+    await user.click(railRow(/^Rename bravo/));
+    await user.keyboard("drain watch{Enter}");
+
+    // The store's own row changed, so both places that read it agree.
+    expect(getSessions().find((s) => s.id === bravo)?.title).toBe("drain watch");
+    expect(railRow(/^drain watch/)).toBeTruthy();
+    expect(sessionName().textContent).toBe("drain watch");
+  });
+
+  it("detaches a session from its row without it being the one on screen", async () => {
+    const alpha = await openPod("alpha");
+    await openPod("bravo");
+    const user = userEvent.setup();
+    draw();
+    // `bravo` is newest, so it is the one on screen.
+    expect(sessionName().textContent).toBe("bravo · api");
+
+    await user.click(railRow(/^Detach alpha/));
+
+    expect(getSessions().some((s) => s.id === alpha)).toBe(false);
+    expect(sessionName().textContent).toBe("bravo · api");
+  });
+
   it("names the active session in normal case, beside its state badge", async () => {
     await openPod("checkout-api-5c8b7f2d9-mk3wl");
     draw();

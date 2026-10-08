@@ -214,6 +214,11 @@ impl Tool {
     /// the verb is the first word after `config` that is a verb at all.
     const ALLOWED_CONFIG_VERBS: &'static str = "current-context|delete-cluster|delete-context|delete-user|get-clusters|get-contexts|get-users|rename-context|set-context|unset|view";
 
+    /// kubectl's global flags that take their value as the next word. That
+    /// word is a value, never the verb: `config -n set view` is `view` in a
+    /// namespace called `set`, and must not be read as `config set`.
+    const VALUE_FLAGS: &'static str = "-n|--namespace|--as|--as-group|--as-uid|--user|--token|--username|--password|--request-timeout|--cache-dir|--certificate-authority|--client-certificate|--client-key|--tls-server-name|-v|--v|--vmodule|--profile|--profile-output|--log-flush-frequency";
+
     /// Environment that aims the tool at a cluster without a flag, cleared
     /// before the real tool runs. helm reads its target from these as readily
     /// as from `--kube-context` and `--kube-apiserver`, and an rc file or the
@@ -244,7 +249,14 @@ fn guard_script(tool: Tool, context: &str, bin: &Path, kubeconfig: &Path) -> Str
     let name = tool.name();
     let config_check = match tool.refused_config_verbs() {
         Some(verbs) => format!(
-            r#"  if [ "$config" = verb ]; then
+            r#"  if [ -n "$value" ]; then
+    value=
+    continue
+  fi
+  case "$arg" in
+    {value_flags}) value=next; continue ;;
+  esac
+  if [ "$config" = verb ]; then
     case "$arg" in
       {verbs}) refuse "config $arg" ;;
       {allowed}) config=done ;;
@@ -253,6 +265,7 @@ fn guard_script(tool: Tool, context: &str, bin: &Path, kubeconfig: &Path) -> Str
   [ "$arg" = config ] && [ -z "$config" ] && config=verb
 "#,
             allowed = Tool::ALLOWED_CONFIG_VERBS,
+            value_flags = Tool::VALUE_FLAGS,
         ),
         None => String::new(),
     };
@@ -271,6 +284,7 @@ refuse() {{
 }}
 
 config=
+value=
 for arg in "$@"; do
   [ "$arg" = -- ] && break
   case "$arg" in
@@ -560,6 +574,12 @@ contexts:
             vec!["config", "--namespace=default", "set", "clusters.dev.server", "https://elsewhere:6443"],
             vec!["config", "-n", "default", "set-cluster", "dev", "--server=https://elsewhere:6443"],
             vec!["-n", "default", "config", "use-context", "other-cluster"],
+            // A flag's value that happens to be a harmless verb does not end
+            // the search for the real one.
+            vec!["config", "-n", "view", "set-cluster", "dev", "--server=https://elsewhere:6443"],
+            vec!["config", "-v=1", "set", "clusters.dev.server", "https://elsewhere:6443"],
+            // A refused flag is refused wherever it stands, a value's place included.
+            vec!["get", "pods", "-n", "--context=other-cluster"],
             vec!["config", "use-context", "other-cluster"],
             vec!["config", "set-cluster", "dev", "--server=https://elsewhere:6443"],
             vec!["config", "set-credentials", "dev-user", "--token=x"],
@@ -589,6 +609,11 @@ contexts:
             // namespace called `set` is a namespace.
             vec!["config", "set-context", "--current", "--namespace", "set"],
             vec!["config", "-n", "default", "view", "--minify"],
+            // A flag's value is a value: these are namespaces called `set` and
+            // `config`, not the verb or the command.
+            vec!["config", "-n", "set", "view", "--minify"],
+            vec!["config", "--namespace", "use-context", "get-contexts"],
+            vec!["get", "pods", "-n", "config", "set"],
             // Short flags that are not `-s`.
             vec!["get", "pods", "-n", "kube-system", "-o", "wide", "-A"],
         ] {
