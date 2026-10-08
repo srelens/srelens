@@ -650,6 +650,8 @@ describe("Resources", () => {
     await waitFor(() => expect(rowNames()).toEqual(["left"]));
     expect(screen.getByText(/Showing the first 1 widget/i)).toBeTruthy();
     expect(screen.getByText(/shared list row cap/i)).toBeTruthy();
+    // And the header does not pass the cap off as a count (#402).
+    expect(listCount()).toBe("1+ items");
   });
 
   it("does not claim a capped list when the custom-resource list failed", async () => {
