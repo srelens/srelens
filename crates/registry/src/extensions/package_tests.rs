@@ -749,6 +749,55 @@ fn a_package_the_policy_refuses_is_neither_installed_nor_unpacked() {
 }
 
 #[tokio::test]
+async fn invalid_native_upload_metadata_does_not_consume_the_archive() {
+    for (id, invalid, valid, cause) in [
+        (
+            "extensions.packageManifest",
+            json!({}),
+            json!({"package":""}),
+            "empty package marker",
+        ),
+        (
+            "extensions.packageManifest",
+            json!({"package":"","extra":true}),
+            json!({"package":""}),
+            "unknown field",
+        ),
+        (
+            "extensions.configure",
+            json!({"package":"","action":"unsignedApps","allowUnsignedApps":true}),
+            json!({"package":"","action":"installPackage","grants":GRANTS}),
+            "unknown field `package`",
+        ),
+        (
+            "extensions.configure",
+            json!({"package":"","action":"installPackage","grants":"wrong type"}),
+            json!({"package":"","action":"installPackage","grants":GRANTS}),
+            "invalid type",
+        ),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut registry = Registry::new();
+        let streams = register(
+            &mut registry,
+            dir.path().join("extensions.json"),
+            fake_core(),
+            srelens_kube::client_cache::ClientCache::new_many(vec![]),
+        );
+        let local = streams
+            .raw_package_registry(&registry, id, packed("example"))
+            .unwrap();
+        let rejected = local.invoke(id, invalid).await.unwrap_err().to_string();
+        assert!(rejected.contains(cause), "{rejected}");
+        let retry = local.invoke(id, valid).await;
+        assert!(
+            retry.is_ok(),
+            "corrected metadata must still have its archive: {retry:?}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn native_package_bytes_preserve_review_install_grants_and_audit_without_base64() {
     use srelens_capability::audit::{AuditRecord, AuditSink};
     #[derive(Default)]

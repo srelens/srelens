@@ -221,7 +221,10 @@ mod tests {
     fn raw_ipc_dispatches_the_package_command_and_audits_the_install() {
         let dir = tempfile::tempdir().unwrap();
         let (registry, streams) = srelens_registry::build_registry_and_app_streams(
-            srelens_kube::client_cache::ClientCache::new_many(vec![]), vec![], Some(dir.path().join("settings.json")));
+            srelens_kube::client_cache::ClientCache::new_many(vec![]),
+            vec![],
+            Some(dir.path().join("settings.json")),
+        );
         let audit = Arc::new(Spy::default());
         let app = tauri::test::mock_builder()
             .invoke_handler(tauri::generate_handler![invoke_package_capability])
@@ -233,35 +236,69 @@ mod tests {
         let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
             .build()
             .unwrap();
-        let metadata = r#"{"id":"extensions.configure","input":{"action":"installPackage","grants":["k8s.listCustomResource"],"reviewedRevision":7}}"#;
-        // HeaderMap's type comes from the request, keeping the test on Tauri's wire.
-        let mut request = tauri::webview::InvokeRequest {
-            cmd: "invoke_package_capability".into(),
-            callback: tauri::ipc::CallbackFn(0),
-            error: tauri::ipc::CallbackFn(1),
-            url: if cfg!(windows) {
-                "http://tauri.localhost"
+        let metadata = r#"{"id":"extensions.configure","input":{"action":"installPackage","grants":["k8s.listCustomResource"]}}"#;
+        let packed = srelens_registry::extension_package::pack(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../../crates/registry/tests/fixtures/packages/example"),
+        )
+        .unwrap();
+        for (archive, succeeds) in [(vec![0x1f, 0x8b, 0x08, 0, 0xff], false), (packed, true)] {
+            // HeaderMap's type comes from the request, keeping the test on Tauri's wire.
+            let mut request = tauri::webview::InvokeRequest {
+                cmd: "invoke_package_capability".into(),
+                callback: tauri::ipc::CallbackFn(0),
+                error: tauri::ipc::CallbackFn(1),
+                url: if cfg!(windows) {
+                    "http://tauri.localhost"
+                } else {
+                    "tauri://localhost"
+                }
+                .parse()
+                .unwrap(),
+                body: tauri::ipc::InvokeBody::Raw(archive),
+                headers: Default::default(),
+                invoke_key: tauri::test::INVOKE_KEY.to_string(),
+            };
+            request
+                .headers
+                .insert("x-srelens-package-input", metadata.parse().unwrap());
+            let result = tauri::test::get_ipc_response(&webview, request);
+            if succeeds {
+                let inventory = result.unwrap().deserialize::<Value>().unwrap();
+                assert_eq!(
+                    inventory["plugins"][0]["manifest"]["id"],
+                    "org.example.packaged"
+                );
             } else {
-                "tauri://localhost"
+                let error = result.unwrap_err();
+                assert!(
+                    error
+                        .to_string()
+                        .contains("The package is not a valid gzip-compressed tar archive"),
+                    "{error}"
+                );
             }
-            .parse()
-            .unwrap(),
-            body: tauri::ipc::InvokeBody::Raw(vec![0x1f, 0x8b, 0x08, 0, 0xff]),
-            headers: Default::default(),
-            invoke_key: tauri::test::INVOKE_KEY.to_string(),
-        };
-        request
-            .headers
-            .insert("x-srelens-package-input", metadata.parse().unwrap());
-        let error = tauri::test::get_ipc_response(&webview, request).unwrap_err();
-        assert!(error.to_string().contains("package"));
+        }
+        let registry = app.state::<AppRegistry>();
+        let inventory =
+            tauri::async_runtime::block_on(registry.0.invoke("extensions.list", json!({}))).unwrap();
+        assert_eq!(
+            inventory["plugins"][0]["manifest"]["id"],
+            "org.example.packaged"
+        );
         let records = audit.seen();
-        assert_eq!(records.len(), 1);
-        assert_eq!(records[0].tool, "extensions.configure");
-        assert_eq!(records[0].source, Source::Ui);
-        assert!(!serde_json::to_string(&records[0].args)
-            .unwrap()
-            .contains("H4sIAP8="));
+        assert_eq!(records.len(), 2);
+        for record in &records {
+            assert_eq!(record.tool, "extensions.configure");
+            assert_eq!(record.source, Source::Ui);
+            assert_eq!(record.args["package"], "<redacted>");
+        }
+        assert_eq!(records[0].outcome, "failed");
+        assert_eq!(
+            records[0].error.as_deref(),
+            Some("App install failed; details omitted from audit")
+        );
+        assert_eq!(records[1].outcome, "ok");
     }
 
     /// `invoke_capability` as the `main` window calls it.

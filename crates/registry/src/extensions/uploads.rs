@@ -28,12 +28,14 @@ pub(super) fn registry(
         let (apps, core, secrets, bytes) =
             (apps.clone(), core.clone(), secrets.clone(), bytes.clone());
         Box::pin(async move {
-            let bytes = bytes.lock().unwrap().take().ok_or_else(|| {
-                CapabilityError::InvalidInput(
-                    "This package upload has already been consumed".into(),
-                )
-            })?;
             tokio::task::spawn_blocking(move || {
+                let consume = || {
+                    bytes.lock().unwrap().take().ok_or_else(|| {
+                        CapabilityError::InvalidInput(
+                            "This package upload has already been consumed".into(),
+                        )
+                    })
+                };
                 if input.get("package").and_then(Value::as_str) != Some("") {
                     return Err(CapabilityError::InvalidInput(
                         "A raw upload requires an empty package marker".into(),
@@ -42,6 +44,7 @@ pub(super) fn registry(
                 if review {
                     let _: PackageIn = serde_json::from_value(input)
                         .map_err(|e| CapabilityError::InvalidInput(e.to_string()))?;
+                    let bytes = consume()?;
                     let verified = read_package(&bytes, &apps.catalog.authority())
                         .map_err(CapabilityError::Handler)?;
                     package::check_installable(&verified).map_err(CapabilityError::Handler)?;
@@ -58,7 +61,7 @@ pub(super) fn registry(
                             "Raw uploads only install packages".into(),
                         ));
                     };
-                    *package = bytes;
+                    *package = consume()?;
                     let inventory = configure(&apps, core, secrets.as_ref(), command)
                         .map_err(CapabilityError::Handler)?;
                     serde_json::to_value(inventory)

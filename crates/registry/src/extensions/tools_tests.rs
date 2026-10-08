@@ -469,6 +469,32 @@ fn workload_image_bindings_fix_kind_and_expose_only_cluster_and_namespace() {
     }
 }
 
+#[tokio::test]
+async fn image_cursor_errors_distinguish_binding_support_from_invalid_values() {
+    let setup = setup(fake_core());
+    let mut source: Value = serde_json::from_str(&manifest()).unwrap();
+    source["srelensApiVersion"] = json!("^0.8");
+    source["permissions"] = json!(["k8s.listWorkloadImages"]);
+    source["contributions"] = json!({"pages":[],"detailTabs":[],"detailLinks":[]});
+    source["capabilities"] = json!([{"name":"applications","title":"Images","target":"k8s.listWorkloadImages","inputs":["context","namespace","cursor"],"arguments":{"kind":"Deployment"}}]);
+    for accepts_cursor in [true, false] {
+        if !accepts_cursor {
+            source["capabilities"][0]["inputs"] = json!(["context", "namespace"]);
+        }
+        let installed = configure(&setup.path, json!({"action":"install","manifest":source.to_string(),"grants":["k8s.listWorkloadImages"]})).unwrap();
+        let revision = installed.plugins[0].revision;
+        for cursor in ["x".repeat(8193), "with space".into(), "é".into()] {
+            let error = setup.registry.invoke("extensions.read", json!({"id":"org.example.argocd","revision":revision,"capability":"applications","context":"demo","namespace":"team","cursor":cursor})).await.unwrap_err().to_string();
+            let expected = if accepts_cursor {
+                "cursor must contain at most 8192 ASCII graphic bytes"
+            } else {
+                "binding does not accept a page cursor"
+            };
+            assert!(error.contains(expected), "{error}");
+        }
+    }
+}
+
 impl srelens_mcp::audit::AuditSink for Spy {
     fn record(&self, record: srelens_mcp::audit::AuditRecord) {
         self.0.lock().unwrap().push(record);
