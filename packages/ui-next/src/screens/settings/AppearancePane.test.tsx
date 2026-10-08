@@ -328,9 +328,9 @@ describe("AppearancePane", () => {
       expect(slider().min).toBe(String(OPACITY.MIN));
       expect(slider().max).toBe(String(OPACITY.MAX));
       expect(OPACITY.MAX).toBe(100);
-      // Below the floor the text is at the mercy of whatever is behind the
-      // window, and no token can promise a contrast against a wallpaper.
-      expect(OPACITY.MIN).toBe(40);
+      // The floor is where body text still reads over a white desktop — see
+      // "what the text is read against" below, which is what holds it there.
+      expect(OPACITY.MIN).toBe(60);
       expect(slider().value).toBe("100");
     });
 
@@ -464,6 +464,73 @@ describe("AppearancePane", () => {
       onPlatform("Win32");
       paint();
       expect(screen.queryByRole("slider", { name: "Window opacity" })).toBeNull();
+    });
+
+    describe("what the text is read against", () => {
+      // The token contrast suite in ui-kit checks solid colours, and a
+      // see-through ground is not one: what the text sits on is the theme's
+      // tint laid over whatever is behind the window. White is the worst
+      // desktop there is for a dark theme, so that is what is composited here.
+      // The blur softens what is behind the window; it does not darken it.
+      const block = (theme: string) =>
+        TOKENS.match(new RegExp(`\\n\\[data-theme="${theme}"\\] \\{([^}]*)\\}`))![1];
+      const token = (theme: string, name: string) =>
+        block(theme).match(new RegExp(`--${name}:\\s*(#[0-9a-fA-F]{6})`))![1];
+      /** The colour the see-through page is tinted with, as the stylesheet mixes it. */
+      function tint(theme: string): string {
+        const rule = [...TOKENS.matchAll(/([^{}]+)\{([^{}]*--ground:\s*color-mix\(in srgb, ([^ ]+) var\(--window-alpha[^{}]*)\}/g)]
+          .find(([, selectors]) => selectors.includes(`[data-theme="${theme}"][data-opacity]`));
+        const mixed = rule![3];
+        return mixed.startsWith("#") ? mixed : token(theme, mixed.match(/var\(--([\w-]+)\)/)![1]);
+      }
+      const channels = (hex: string) => [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
+      const luminance = (rgb: number[]) => {
+        const [r, g, b] = rgb.map((v) => v / 255).map((v) => (v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4));
+        return r * 0.2126 + g * 0.7152 + b * 0.0722;
+      };
+      /** WCAG contrast of an ink on the theme's tint at `percent`, over a white desktop. */
+      function contrastOverWhite(theme: string, ink: string, percent: number): number {
+        const alpha = percent / 100;
+        const ground = channels(tint(theme)).map((c) => c * alpha + 255 * (1 - alpha));
+        const [lo, hi] = [luminance(ground), luminance(channels(token(theme, ink)))].sort((a, b) => a - b);
+        return (hi + 0.05) / (lo + 0.05);
+      }
+      const INKS = ["ink", "ink-soft", "ink-muted", "ink-faint"];
+      const SEE_THROUGH = ["dark", "midnight", "glass"];
+
+      it.each(SEE_THROUGH)("keeps %s's body text readable at the floor, over a white desktop", (theme) => {
+        expect(contrastOverWhite(theme, "ink", OPACITY.MIN)).toBeGreaterThanOrEqual(4.5);
+      });
+
+      it.each(SEE_THROUGH)("keeps every ink on %s readable from the legible mark up", (theme) => {
+        for (const ink of INKS) {
+          expect(contrastOverWhite(theme, ink, OPACITY.LEGIBLE), ink).toBeGreaterThanOrEqual(4.5);
+        }
+      });
+
+      it("puts the legible mark where it is needed, not merely somewhere safe", () => {
+        // Five points lower and at least one theme's faintest ink fails; that
+        // is what makes the warning below worth showing where it shows.
+        const lower = OPACITY.LEGIBLE - 5;
+        const failing = SEE_THROUGH.filter((theme) =>
+          INKS.some((ink) => contrastOverWhite(theme, ink, lower) < 4.5),
+        );
+        expect(failing.length).toBeGreaterThan(0);
+      });
+
+      it("opens Glass at an opacity where all of its own text is readable", () => {
+        for (const ink of INKS) {
+          expect(contrastOverWhite("glass", ink, GLASS_OPACITY), ink).toBeGreaterThanOrEqual(4.5);
+        }
+      });
+
+      it("says so when the reader goes below the legible mark, and not above it", async () => {
+        paint();
+        await slideTo(OPACITY.LEGIBLE);
+        expect(screen.queryByTestId("opacity-warning")).toBeNull();
+        await slideTo(OPACITY.LEGIBLE - 1);
+        expect(screen.getByTestId("opacity-warning").textContent).toMatch(/bright/i);
+      });
     });
 
     describe("the Glass theme", () => {

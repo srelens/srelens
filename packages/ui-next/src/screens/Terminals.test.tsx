@@ -601,9 +601,15 @@ describe("Terminals", () => {
       document.documentElement.dataset.opacity = "80";
     });
 
-    await waitFor(() => {
-      expect(terminalFor(id)?.options.theme?.background).toBe("rgba(0, 0, 0, 0)");
-    });
-    delete document.documentElement.dataset.opacity;
+    try {
+      await waitFor(() => {
+        expect(terminalFor(id)?.options.theme?.background).toBe("rgba(0, 0, 0, 0)");
+      });
+    } finally {
+      // The root outlives the test, pass or fail: a failed assertion must not
+      // leave the next case starting on a see-through window.
+      delete document.documentElement.dataset.opacity;
+      document.documentElement.style.removeProperty("--ground-sunk");
+    }
   });
 });

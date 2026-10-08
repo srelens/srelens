@@ -472,6 +472,14 @@ export function AppearancePane({ ported, onSwitchToClassic }: AppearancePaneProp
                   ? "How much of what is behind the window shows through its background. Menus, dialogs and table headers stay solid."
                   : "Works on the Dark, Midnight or Glass theme. Pick one of those above to see through the window."}
               </span>
+              {/* What is known, said where it applies: below this mark the
+                  smaller text fails contrast over a white desktop, and over a
+                  dark one it does not. A word, not only a colour. */}
+              {translucentTheme && opacity < OPACITY.LEGIBLE && (
+                <span data-testid="opacity-warning" className="mt-0.5 block text-[0.6875rem] leading-snug text-warn">
+                  Heads up: below {OPACITY.LEGIBLE}%, smaller text can be hard to read over a bright desktop.
+                </span>
+              )}
             </span>
             {/*
               A native range, as the kit's Checkbox is a native checkbox and

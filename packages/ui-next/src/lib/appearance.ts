@@ -58,11 +58,20 @@ export const DENSITIES: ReadonlyArray<{ id: DensityId; label: string }> = [
 /**
  * How solid the window's ground is, in percent: the range the slider covers.
  *
- * The floor is a decision, not a limit of the control. Under it the text is at
- * the mercy of whatever is behind the window, and no token can promise a
- * contrast against a wallpaper.
+ * Both lower marks are measured, not chosen, and the measurement is in
+ * `AppearancePane.test.tsx` ("what the text is read against"): each theme's
+ * tint is laid over a WHITE desktop — the worst thing a dark theme can have
+ * behind it — and the text is held to 4.5:1 against the result. The blur does
+ * not help here; it softens what is behind the window and darkens nothing.
+ *
+ * - `MIN` is the lowest value at which body text (`--ink`) still passes. Under
+ *   it nothing on the page can be promised readable, so the slider stops.
+ * - `LEGIBLE` is the lowest value at which EVERY ink passes, the faint
+ *   metadata text included. Between the two the pane says so rather than
+ *   stopping the reader: over a dark desktop those values are fine, and which
+ *   desktop is behind the window is theirs to know. (#854 review)
  */
-export const OPACITY = { MIN: 40, MAX: 100, STEP: 1 } as const;
+export const OPACITY = { MIN: 60, MAX: 100, STEP: 1, LEGIBLE: 90 } as const;
 
 /**
  * The themes whose ground can be seen through. The light ones are left out on
