@@ -1237,6 +1237,7 @@ mod tests {
         "k8s.listNodes",
         "k8s.listPersistentVolumeClaims",
         "k8s.listPods",
+        "k8s.listResource",
         "k8s.listResourceQuotas",
         "k8s.listServices",
         "k8s.listStorageClasses",

@@ -153,14 +153,116 @@ fn version_printer_columns(version: &serde_json::Value) -> Vec<PrinterColumn> {
 /// better than a blob of JSON.
 /// Restricted scalar projection shared by CRD printer columns and host-owned app columns.
 pub fn resolve_json_path(value: &serde_json::Value, path: &str) -> String {
+    match json_path_value(value, path) {
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(serde_json::Value::Number(n)) => n.to_string(),
+        Some(serde_json::Value::Bool(b)) => b.to_string(),
+        _ => String::new(),
+    }
+}
+
+/// Why `path` is outside the grammar [`json_path_value`] reads, or `None`
+/// when it is in. For a path taken from a caller: the walker reads anything
+/// it does not recognise as a key, so `[*]` or `..` would silently resolve to
+/// nothing and a present field would be reported absent. Root `.` is in.
+pub fn json_path_problem(path: &str) -> Option<&'static str> {
+    let Some(mut rest) = path.strip_prefix('.') else {
+        return Some("must start with '.'");
+    };
+    if rest.starts_with('.') {
+        return Some("uses '..', which is not supported");
+    }
+    while !rest.is_empty() {
+        if let Some(open) = rest.strip_prefix('[') {
+            let Some(close) = open.find(']') else {
+                return Some("has an unclosed '['");
+            };
+            let inner = open[..close].trim();
+            let quoted = inner.len() >= 2
+                && ((inner.starts_with('\'') && inner.ends_with('\''))
+                    || (inner.starts_with('"') && inner.ends_with('"')));
+            if !(quoted || single_equality(inner) || inner.parse::<usize>().is_ok()) {
+                return Some(
+                    "uses a bracket other than [0], ['key'] or one [?(@.field==\"value\")]; \
+                     wildcards [*], slices, negative indexes and composite or non-equality \
+                     filters are not supported",
+                );
+            }
+            rest = &open[close + 1..];
+        } else {
+            let mut end = rest.len();
+            let mut chars = rest.char_indices();
+            while let Some((index, ch)) = chars.next() {
+                match ch {
+                    '\\' => {
+                        if chars.next().is_none() {
+                            return Some("ends with an unfinished '\\' escape");
+                        }
+                    }
+                    '.' | '[' => {
+                        end = index;
+                        break;
+                    }
+                    ']' => return Some("has a ']' with no '['"),
+                    _ => {}
+                }
+            }
+            rest = &rest[end..];
+        }
+        if let Some(after) = rest.strip_prefix('.') {
+            if after.is_empty() {
+                return Some("ends with '.'");
+            }
+            if after.starts_with('.') {
+                return Some("uses '..', which is not supported");
+            }
+            rest = after;
+        }
+    }
+    None
+}
+
+/// `?(@.field==literal)` with one field and one literal — the only predicate
+/// `Segment::bracket` evaluates. It splits at the first `==`, so a composite
+/// (`&&`, `||`) would compare against the rest of the expression. The field
+/// is read as a path, escapes included, so it is checked as one.
+fn single_equality(inner: &str) -> bool {
+    let Some(expression) = inner.strip_prefix("?(").and_then(|e| e.strip_suffix(')')) else {
+        return false;
+    };
+    let Some((field, literal)) = expression.split_once("==") else {
+        return false;
+    };
+    let (field, literal) = (field.trim(), literal.trim());
+    let plain = |c: char| c.is_ascii_alphanumeric() || "._-/".contains(c);
+    let quoted_with = |q: char| {
+        literal.len() >= 2
+            && literal.starts_with(q)
+            && literal.ends_with(q)
+            && !literal[1..literal.len() - 1].contains(q)
+    };
+    let literal_ok = quoted_with('"')
+        || quoted_with('\'')
+        || (!literal.is_empty() && literal.chars().all(plain));
+    let operator = |c: char| c.is_whitespace() || "&|!<>=()".contains(c);
+    let field_ok = field
+        .strip_prefix('@')
+        .is_some_and(|f| !f.contains(operator) && json_path_problem(f).is_none());
+    field_ok && literal_ok
+}
+
+/// The value a [`resolve_json_path`] path lands on, unrendered — a map or a
+/// list as well as a scalar. `None` when the path is absent or malformed.
+pub fn json_path_value<'v>(
+    value: &'v serde_json::Value,
+    path: &str,
+) -> Option<&'v serde_json::Value> {
     let mut current = value;
     let mut rest = path.trim_start_matches('.');
     while !rest.is_empty() {
         let (segment, remainder) = match rest.strip_prefix('[') {
             Some(open) => {
-                let Some(close) = open.find(']') else {
-                    return String::new();
-                };
+                let close = open.find(']')?;
                 (
                     Segment::bracket(&open[..close]),
                     open[close + 1..].trim_start_matches('.'),
@@ -190,18 +292,10 @@ pub fn resolve_json_path(value: &serde_json::Value, path: &str) -> String {
                 (Segment::Key(key), rest[end..].trim_start_matches('.'))
             }
         };
-        let Some(next) = segment.apply(current) else {
-            return String::new();
-        };
-        current = next;
+        current = segment.apply(current)?;
         rest = remainder;
     }
-    match current {
-        serde_json::Value::String(s) => s.clone(),
-        serde_json::Value::Number(n) => n.to_string(),
-        serde_json::Value::Bool(b) => b.to_string(),
-        _ => String::new(),
-    }
+    Some(current)
 }
 
 /// One step of a CRD jsonPath.
@@ -978,6 +1072,90 @@ mod tests {
         // kubectl renders arrays/objects poorly; an empty cell beats noise.
         assert_eq!(resolve_json_path(&obj(), ".status.conditions"), "");
         assert_eq!(resolve_json_path(&obj(), ".spec"), "");
+    }
+
+    /// The same walk, handing back the JSON it lands on — a whole map or list
+    /// as well as a scalar — for callers that project fields rather than
+    /// render a cell.
+    #[test]
+    fn json_path_value_returns_the_subtree_and_none_when_absent() {
+        assert_eq!(
+            json_path_value(&obj(), ".spec"),
+            Some(&serde_json::json!({ "version": "4.1.2", "nodes": 3, "paused": false }))
+        );
+        assert_eq!(
+            json_path_value(&obj(), ".metadata.labels['app.kubernetes.io/name']"),
+            Some(&serde_json::json!("cassandra"))
+        );
+        assert_eq!(
+            json_path_value(&fluxish(), ".status.conditions[?(@.type==\"Ready\")]"),
+            Some(&fluxish()["status"]["conditions"][1])
+        );
+        assert_eq!(json_path_value(&obj(), ".status.nope"), None);
+        assert_eq!(json_path_value(&obj(), ".spec.ports[0"), None);
+    }
+
+    /// A filter's field is itself a path, escapes included — the walker reads
+    /// it with `resolve_json_path` — so the check takes one too.
+    #[test]
+    fn a_filter_on_an_escaped_key_is_read_and_accepted() {
+        let pod = serde_json::json!({ "spec": { "containers": [
+            { "name": "web", "resources": { "limits": { "cpu": "1" } } },
+            { "name": "trainer", "resources": { "limits": { "nvidia.com/gpu": "1" } } },
+        ]}});
+        let path = r#".spec.containers[?(@.resources.limits.nvidia\.com/gpu=="1")].name"#;
+        assert_eq!(json_path_value(&pod, path), Some(&serde_json::json!("trainer")));
+        assert_eq!(json_path_problem(path), None);
+    }
+
+    /// A path from outside must be one the walker can read, or a present
+    /// field comes back as absent. Every form the walker tests above read is
+    /// in; kubectl forms it does not implement are out, not read as keys.
+    #[test]
+    fn json_path_problem_accepts_what_the_walker_reads_and_refuses_the_rest() {
+        for good in [
+            ".",
+            ".status.health",
+            r".metadata.labels.app\.kubernetes\.io/name",
+            ".metadata.labels['app.kubernetes.io/name']",
+            ".metadata.labels[\"app.kubernetes.io/name\"]",
+            ".status.conditions[?(@.type==\"Ready\")].status",
+            ".status.conditions[?(@.type == 'Stalled')].status",
+            ".status.conditions[?(@.type==Ready)].status",
+            r#".spec.containers[?(@.resources.limits.nvidia\.com/gpu=="1")].name"#,
+            ".spec.ports[1].port",
+        ] {
+            assert_eq!(json_path_problem(good), None, "{good:?}");
+        }
+        for bad in [
+            "status",
+            "/status/allocatable",
+            "{.metadata.name}",
+            "",
+            ".spec.ports[0",
+            ".a][",
+            ".a]",
+            ".spec.containers[*].image",
+            ".spec.containers[-1]",
+            ".spec.containers[0:2]",
+            ".spec.containers[name]",
+            ".status.conditions[?(@.count>1)]",
+            "..image",
+            ".spec..image",
+            // The walker splits at the first `==`, so a composite predicate
+            // would compare against `Ready"&&@.status=="True` and match nothing.
+            ".status.conditions[?(@.type==\"Ready\"&&@.status==\"True\")].status",
+            ".status.conditions[?(@.type==\"Ready\" || @.type==\"Stalled\")]",
+            ".status.conditions[?(@.type!=\"Ready\")]",
+            ".status.conditions[?(@.type && @.status==\"True\")]",
+            ".status.conditions[?(@.type==\"Ready\"&&@.status==True)]",
+            // An unfinished suffix the walker would drop, reading another path.
+            r".metadata.name\",
+            ".metadata.",
+            ".spec.ports[0].",
+        ] {
+            assert!(json_path_problem(bad).is_some(), "{bad:?} must be refused");
+        }
     }
 
     fn spec_with_columns() -> serde_json::Value {

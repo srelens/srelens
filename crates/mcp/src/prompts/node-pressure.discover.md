@@ -16,12 +16,12 @@ The evidence:
   node OUT (first pitfall).
 - Call `k8s.nodeMetrics` with `context: {{context}}` for raw cpu and memory
   use per node.
-- For each node, Call `k8s.getObject` with `context: {{context}}`,
-  `kind: Node`, `name: <node>`. Read `status.conditions` for the pressure
-  flags and `status.capacity` / `status.allocatable` to turn raw use into a
-  fraction of that node's own capacity. This is one call per node — on a
-  large cluster, say plainly how many nodes were sampled rather than
-  silently truncating.
+- Call `k8s.listResource` with `context: {{context}}`, `kind: Node`,
+  `fields: [".status.conditions", ".status.capacity", ".status.allocatable"]`.
+  One call reads them for every node — never one `k8s.getObject` per node.
+  Read `status.conditions` for the pressure flags and `status.capacity` /
+  `status.allocatable` to turn raw use into a fraction of that node's own
+  capacity.
 - For the worst node: Call `k8s.listEvents` with `context: {{context}}`,
   `objectKind: Node`, `objectName: <node>`. Call `k8s.listPods` with
   `context: {{context}}`, `namespace: ""` and keep its pods. Under

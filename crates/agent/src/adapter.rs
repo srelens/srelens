@@ -127,9 +127,12 @@ pub const BASE_SYSTEM_PROMPT: &str = concat!(
     "assumptions, or prior conversation turns. Always execute the appropriate MCP tool to inspect ",
     "the live cluster freshly before answering.\n",
     "2. Say what you know, not what you guess: Summary listing tools (such as listNodes or listPods) ",
-    "return abridged data and omit full metadata.labels, annotations, and complete container specs. ",
-    "If a field or label is not displayed in a summary list, NEVER assert that it does not exist ",
-    "on the resource—call getObject or getManifest to inspect the complete resource definition.\n",
+    "return abridged data and omit full metadata.labels, annotations, extended resources, and complete ",
+    "container specs. If a field or label is not displayed in a summary list, NEVER assert that it does ",
+    "not exist on the resource. To read it across many resources, call listResource once with `fields` ",
+    "(kubectl-style JSONPath such as \".status.allocatable\" or \".spec.taints\"), narrowing the set with ",
+    "labelSelector or fieldSelector; do not call getObject once per item. For one specific resource, ",
+    "call getObject (with `fields` when only part of it is needed) or getManifest.\n",
     "3. Zero-hallucination component verification: NEVER name, diagnose, or blame a specific infrastructure ",
     "component (such as Cilium, Calico, Istio, MetalLB, CoreDNS, Vault) without confirming its presence ",
     "in the cluster first via listPods or getObject. On managed Kubernetes (GKE, EKS, AKS), verify the native ",
@@ -542,6 +545,17 @@ mod tests {
         assert!(BASE_SYSTEM_PROMPT.contains("Cross-layer incident correlation"));
         assert!(BASE_SYSTEM_PROMPT.contains("TaintManagerEviction"));
         assert!(BASE_SYSTEM_PROMPT.contains("listEndpoints"));
+    }
+
+    /// A field a summary lacks is read across the set in one projected list,
+    /// not with one full-object fetch per item — the fan-out the old rule
+    /// prescribed cost a whole Node (every cached image included) per node.
+    #[test]
+    fn base_system_prompt_reads_a_missing_field_with_one_projected_list() {
+        assert!(BASE_SYSTEM_PROMPT.contains("listResource"));
+        assert!(BASE_SYSTEM_PROMPT.contains("`fields`"));
+        assert!(BASE_SYSTEM_PROMPT.contains("labelSelector"));
+        assert!(BASE_SYSTEM_PROMPT.contains("not call getObject once per item"));
     }
 
     #[test]
