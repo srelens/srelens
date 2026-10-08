@@ -32,6 +32,10 @@ const {
   startMcpHttp,
   respondToConfirm,
   pendingConfirms,
+  deepLinks,
+  takePendingDeepLinks,
+  subscribeGates,
+  getObjectSpy,
   bus,
 } = vi.hoisted(() => ({
   listContexts: vi.fn(),
@@ -64,6 +68,15 @@ const {
   // says otherwise. Unmocked, the real one's `invoke` rejects in jsdom and the
   // component says so on screen — over every window test.
   pendingConfirms: vi.fn<() => Promise<never[]>>(async () => []),
+  // The backend's deep-link queue, handed out whole and emptied by each drain
+  // the way `take_pending_deep_links` empties it.
+  deepLinks: { queue: [] as string[] },
+  takePendingDeepLinks: vi.fn<() => Promise<string[]>>(),
+  // A channel listed here registers only once its promise settles, so a test
+  // can hold one subscription open and see what happens before it lands.
+  subscribeGates: new Map<string, Promise<void>>(),
+  // A spy on the detail screen's read, passed through to the real one.
+  getObjectSpy: vi.fn(),
   // The backend event bus, captured per channel so a test can emit exactly
   // what `mcp_confirm.rs` emits.
   //
@@ -97,6 +110,14 @@ vi.mock("@srelens/core", async (importOriginal) => {
     startMcpHttp: (port: number) => startMcpHttp(port),
     respondToConfirm: (id: string, approved: boolean) => respondToConfirm(id, approved),
     pendingConfirms: () => pendingConfirms(),
+    invokeCommand: <T,>(command: string, args?: Record<string, unknown>): Promise<T> =>
+      command === "take_pending_deep_links"
+        ? (takePendingDeepLinks() as Promise<T>)
+        : real.invokeCommand<T>(command, args),
+    getObject: (...a: Parameters<typeof real.getObject>) => {
+      getObjectSpy(...a);
+      return real.getObject(...a);
+    },
     on: (channel: string, handler: (payload: unknown) => void) => {
       const handlers = bus.get(channel) ?? new Set<(payload: unknown) => void>();
       handlers.add(handler);
@@ -113,6 +134,8 @@ vi.mock("@srelens/core", async (importOriginal) => {
     // shape itself is pinned in `AgentConsent.test.tsx`; here one microtask
     // is enough, since these tests wait for boot before they ask.
     subscribe: async (channel: string, handler: (payload: unknown) => void) => {
+      const gate = subscribeGates.get(channel);
+      if (gate) await gate;
       const handlers = bus.get(channel) ?? new Set<(payload: unknown) => void>();
       handlers.add(handler);
       bus.set(channel, handlers);
@@ -253,6 +276,14 @@ beforeEach(() => {
   startMcpHttp.mockReset().mockResolvedValue("http://127.0.0.1:8765/mcp");
   pendingConfirms.mockReset().mockResolvedValue([]);
   respondToConfirm.mockReset().mockResolvedValue(undefined);
+  deepLinks.queue = [];
+  takePendingDeepLinks.mockReset().mockImplementation(async () => {
+    const drained = deepLinks.queue;
+    deepLinks.queue = [];
+    return drained;
+  });
+  subscribeGates.clear();
+  getObjectSpy.mockReset();
   bus.clear();
   resetLock();
   resetMcpAutoStart();
@@ -1742,4 +1773,163 @@ it("does not label an app-level tab with the active cluster", async () => {
   act(() => { store.openTab("/settings"); });
   act(() => { screen.getByRole("tab", { name: "Settings" }).focus(); });
   expect((await screen.findByRole("tooltip")).textContent).not.toContain("prod");
+});
+
+/**
+ * #370: `srelens://` links under the new design.
+ *
+ * The backend queues every link and only nudges (`deep_link.rs`), so a window
+ * that never drains leaves each one queued and opens nothing, which is what
+ * this design did until now. Classic's consumer is the model: subscribe, then
+ * drain; hold what is drained until the contexts are listed; judge each link by
+ * core's `checkDeepLink`; then open it on the cluster the LINK names.
+ */
+describe("Window — srelens:// deep links", () => {
+  function twoClusters() {
+    listContexts.mockResolvedValue({ contexts: [ctx("prod"), ctx("stage")] });
+  }
+
+  /** What `deep_link.rs` emits once it has queued a link. */
+  function nudge() {
+    act(() => {
+      for (const handler of bus.get("deep-link-pending") ?? []) handler(null);
+    });
+  }
+
+  function tabFor(route: string) {
+    return store.currentWorkspace().tabs.find((t) => t.route === route);
+  }
+
+  it("listens for the nudge before it drains, drains on mount, and lets go on unmount", async () => {
+    let land!: () => void;
+    subscribeGates.set("deep-link-pending", new Promise<void>((resolve) => (land = resolve)));
+    await booted();
+    // Draining before the listener lands leaves a gap: a link queued in it is
+    // nudged to nobody and waits for whichever link happens to come next.
+    expect(takePendingDeepLinks).not.toHaveBeenCalled();
+    await act(async () => land());
+    await waitFor(() => expect(takePendingDeepLinks).toHaveBeenCalledTimes(1));
+    nudge();
+    await waitFor(() => expect(takePendingDeepLinks).toHaveBeenCalledTimes(2));
+    cleanup();
+    expect(bus.get("deep-link-pending")?.size ?? 0).toBe(0);
+  });
+
+  it("holds a link drained before the contexts are listed, and opens it once they are", async () => {
+    let answer!: (outcome: unknown) => void;
+    listContexts.mockReturnValue(new Promise((resolve) => (answer = resolve)));
+    deepLinks.queue = ["srelens://cluster/stage"];
+    render(
+      <ConsoleProvider>
+        <Window ported={[]} onOpenInClassic={() => {}} />
+      </ConsoleProvider>,
+    );
+    await waitFor(() => expect(takePendingDeepLinks).toHaveBeenCalledTimes(1));
+    // Taken off the backend's queue already, so it lives only here now — and
+    // judged against no contexts it would be refused as naming none.
+    await act(async () => answer({ contexts: [ctx("prod"), ctx("stage")] }));
+    await waitFor(() => expect(store.activeRoute()).toBe("/overview"));
+    expect(store.activeCluster()).toBe("stage");
+    expect(screen.queryByText("Couldn't open that link")).toBeNull();
+  });
+
+  it("opens a cluster link on that cluster's overview, whichever cluster the rail is on", async () => {
+    twoClusters();
+    await booted();
+    expect(store.activeCluster()).toBe("prod");
+    deepLinks.queue = ["srelens://cluster/stage"];
+    nudge();
+    await waitFor(() => expect(store.activeRoute()).toBe("/overview"));
+    expect(store.activeCluster()).toBe("stage");
+    expect(tabFor("/overview")?.sub).toBe("stage");
+  });
+
+  it("opens a resource link's detail on the link's own cluster, not the one the rail is on", async () => {
+    twoClusters();
+    await booted();
+    expect(store.activeCluster()).toBe("prod");
+    deepLinks.queue = ["srelens://resource/stage/payments/Pod/web-7d4b"];
+    nudge();
+    await waitFor(() => expect(store.activeRoute()).toBe("/k/Pod/payments/web-7d4b"));
+    expect(tabFor("/k/Pod/payments/web-7d4b")?.sub).toBe("stage");
+    // The detail reads whichever cluster is in focus, so this is what the tab
+    // actually shows: stage's pod, and never prod's pod of the same name.
+    await waitFor(() =>
+      expect(getObjectSpy).toHaveBeenCalledWith("stage", "Pod", "payments", "web-7d4b"),
+    );
+    expect(getObjectSpy).not.toHaveBeenCalledWith("prod", "Pod", "payments", "web-7d4b");
+  });
+
+  it("opens a cluster-scoped resource link with no namespace", async () => {
+    twoClusters();
+    await booted();
+    deepLinks.queue = ["srelens://resource/stage/-/Node/worker-1"];
+    nudge();
+    await waitFor(() => expect(store.activeRoute()).toBe("/k/Node/-/worker-1"));
+    expect(store.activeCluster()).toBe("stage");
+  });
+
+  it("says why it refused each link, one notice at a time, and opens none of them", async () => {
+    await booted();
+    const before = store.currentWorkspace().tabs.map((t) => t.route);
+    deepLinks.queue = [
+      "srelens://evil/prod",
+      "srelens://cluster/staging",
+      "srelens://resource/prod/default/Event/web.17f",
+      "srelens://resource/prod/-/Pod/web",
+    ];
+    nudge();
+    const reasons = [
+      "It isn't a link srelens understands.",
+      'No kube context named "staging".',
+      "srelens can't open a Event directly.",
+      "Pod is namespaced, so the link needs a namespace.",
+    ];
+    for (const reason of reasons) {
+      const notice = await screen.findByRole("alert");
+      expect(notice.textContent).toContain("Couldn't open that link");
+      expect(notice.textContent).toContain(reason);
+      fireEvent.click(screen.getByRole("button", { name: "Dismiss notice" }));
+    }
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(store.currentWorkspace().tabs.map((t) => t.route)).toEqual(before);
+  });
+
+  it("drains only in the main window, and only on the desktop", async () => {
+    render(
+      <ConsoleProvider>
+        <Window ported={[]} onOpenInClassic={() => {}} windowLabel="context-2" />
+      </ConsoleProvider>,
+    );
+    await waitFor(() => expect(screen.getByRole("tablist", { name: "Open tabs" })).toBeDefined());
+    cleanup();
+    isTauri.mockReturnValue(false);
+    await booted();
+    expect(takePendingDeepLinks).not.toHaveBeenCalled();
+    expect(bus.has("deep-link-pending")).toBe(false);
+  });
+
+  it("holds a link that arrives behind the lock, and opens it once the vault opens", async () => {
+    twoClusters();
+    await booted();
+    fireEvent.keyDown(window, { key: "L", metaKey: true, shiftKey: true });
+    await screen.findByText("Workspace locked");
+    deepLinks.queue = ["srelens://cluster/stage"];
+    nudge();
+    await waitFor(() => expect(takePendingDeepLinks).toHaveBeenCalledTimes(2));
+    // Let the drained link land and every effect it wakes run, so the checks
+    // below see what the window did with it rather than a drain still in flight.
+    await act(async () => {
+      await takePendingDeepLinks.mock.results[1].value;
+    });
+    // Behind the cover nothing in the workspace moves: no tab, no focus, no
+    // probe of the cluster the link names.
+    expect(store.activeCluster()).toBe("prod");
+    expect(tabFor("/overview")).toBeUndefined();
+    vaultStatus.mockResolvedValue(VAULT_OPEN);
+    await userEvent.type(screen.getByLabelText("Master passphrase"), "aaaa1111aaaa");
+    await userEvent.click(screen.getByRole("button", { name: "Unlock workspace" }));
+    await waitFor(() => expect(store.activeRoute()).toBe("/overview"));
+    expect(store.activeCluster()).toBe("stage");
+  });
 });
