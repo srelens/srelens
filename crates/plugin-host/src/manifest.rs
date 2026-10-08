@@ -231,7 +231,7 @@ fn builtin_target(manifest: &Value, to: &str) -> bool {
 pub const API_FIELDS: &[ApiField] = &[
     ApiField { path: "sidecar.operations[].view", introduced: "0.8.0", removed: None, form: None },
     ApiField { path: "capabilities[].target", introduced: "0.8.0", removed: None,
-        form: Some(ApiForm { name: "workload image, scoped Job or OCI artifact acquisition", matches: |_manifest, value| matches!(value, "k8s.listWorkloadImages" | "k8s.runJob" | "network.fetchOciArtifact") }) },
+        form: Some(ApiForm { name: "workload image or scoped Job", matches: |_manifest, value| matches!(value, "k8s.listWorkloadImages" | "k8s.runJob") }) },
     // A duration selected from declared options, without moving the card's reader (#582).
     ApiField {
         path: "contributions.dashboardCards[].predicate.within",

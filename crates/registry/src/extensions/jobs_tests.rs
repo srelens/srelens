@@ -9,9 +9,20 @@ enum Scenario {
     Failed,
     Pending,
     DeniedReader,
+    LostCreateReply,
+    ReplacedAfterLostReply,
+    AdmissionAfterLostReply,
+    DelayedCommit,
 }
 
 async fn server(scenario: Scenario) -> (Client, Requests, tokio::task::JoinHandle<()>) {
+    controlled_server(scenario, None).await
+}
+
+async fn controlled_server(
+    scenario: Scenario,
+    reply: Option<Arc<tokio::sync::Notify>>,
+) -> (Client, Requests, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
         .await
         .unwrap();
@@ -20,9 +31,11 @@ async fn server(scenario: Scenario) -> (Client, Requests, tokio::task::JoinHandl
     let seen = requests.clone();
     let deleted = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let gone = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let created = Arc::new(Mutex::new(Value::Null));
     let task = tokio::spawn(async move {
         while let Ok((socket, _)) = listener.accept().await {
             let (seen, deleted, gone) = (seen.clone(), deleted.clone(), gone.clone());
+            let (created, reply) = (created.clone(), reply.clone());
             tokio::spawn(async move {
                 let mut reader = BufReader::new(socket);
                 let mut line = String::new();
@@ -53,8 +66,44 @@ async fn server(scenario: Scenario) -> (Client, Requests, tokio::task::JoinHandl
                 seen.lock()
                     .unwrap()
                     .push((method.clone(), path.clone(), input.clone()));
+                if method == "POST" && resource.ends_with("/jobs") {
+                    let mut stored = input.clone();
+                    stored["metadata"]["uid"] = json!("j-1");
+                    stored["metadata"]["name"] = json!("scan-1");
+                    if matches!(scenario, Scenario::DelayedCommit) {
+                        if let Some(ref reply) = reply {
+                            reply.notified().await;
+                        }
+                    }
+                    if matches!(scenario, Scenario::AdmissionAfterLostReply) {
+                        stored["metadata"]["labels"]["policy.example/team"] = json!("team");
+                        stored["metadata"]["annotations"]["policy.example/audit"] = json!("true");
+                    }
+                    *created.lock().unwrap() = stored;
+                    if let Some(reply) =
+                        reply.filter(|_| !matches!(scenario, Scenario::DelayedCommit))
+                    {
+                        reply.notified().await;
+                    }
+                }
                 let mut code = "200 OK";
-                let body = if method == "DELETE" {
+                let body = if method == "POST"
+                    && resource.ends_with("/jobs")
+                    && matches!(
+                        scenario,
+                        Scenario::LostCreateReply
+                            | Scenario::ReplacedAfterLostReply
+                            | Scenario::AdmissionAfterLostReply
+                    ) {
+                    code = "500 Internal Server Error";
+                    json!({"kind":"Status","apiVersion":"v1","status":"Failure","reason":"InternalError","message":"create reply lost","code":500}).to_string()
+                } else if method == "GET"
+                    && resource.ends_with("/jobs/scan-1")
+                    && created.lock().unwrap().is_null()
+                {
+                    code = "404 Not Found";
+                    json!({"kind":"Status","apiVersion":"v1","status":"Failure","reason":"NotFound","code":404}).to_string()
+                } else if method == "DELETE" {
                     deleted.store(true, std::sync::atomic::Ordering::SeqCst);
                     json!({"kind":"Status","apiVersion":"v1","status":"Success"}).to_string()
                 } else if resource.ends_with("/jobs/scan-1")
@@ -81,7 +130,13 @@ async fn server(scenario: Scenario) -> (Client, Requests, tokio::task::JoinHandl
                         }
                         _ => json!({"active":1}),
                     };
-                    json!({"metadata":{"name":"scan-1","uid":"j-1"},"status":status}).to_string()
+                    let mut result = created.lock().unwrap().clone();
+                    result["status"] = status;
+                    if matches!(scenario, Scenario::ReplacedAfterLostReply) {
+                        result["metadata"]["uid"] = json!("unrelated");
+                        result["metadata"]["labels"] = json!({"srelens.io/run":"another-run"});
+                    }
+                    result.to_string()
                 } else if resource == "/api/v1/namespaces/team/pods" {
                     let exit = if matches!(scenario, Scenario::Failed) {
                         1
@@ -115,14 +170,17 @@ fn active() -> Active {
     Active::take(Arc::new(Mutex::new(HashSet::new())), "org.example.app").unwrap()
 }
 fn job(template: &JobTemplate) -> Job {
-    build_job(
+    let mut job = build_job(
         "org.example.app",
         "team",
         "run-1",
         template,
         &BTreeMap::from([("namespace".into(), "team".into())]),
     )
-    .unwrap()
+    .unwrap();
+    job.metadata.name = Some("scan-1".into());
+    job.metadata.generate_name = None;
+    job
 }
 
 #[tokio::test]
@@ -430,5 +488,161 @@ async fn failed_worker_keeps_bounded_private_diagnostics_before_cleanup() {
         .iter()
         .any(|(method, path, _)| method == "DELETE"
             && path.split('?').next().unwrap().ends_with("/jobs/scan-1")));
+    server.abort();
+}
+
+#[tokio::test]
+async fn cancellation_during_creation_keeps_ownership_and_slot_until_cleanup() {
+    let reply = Arc::new(tokio::sync::Notify::new());
+    let (client, seen, server) = controlled_server(Scenario::Pending, Some(reply.clone())).await;
+    let data = tempfile::tempdir().unwrap();
+    let template = template();
+    let slots = Arc::new(Mutex::new(HashSet::new()));
+    {
+        let running = run_job(
+            client,
+            "team",
+            "run-1",
+            job(&template),
+            &template,
+            data.path(),
+            Active::take(slots.clone(), "org.example.app").unwrap(),
+        );
+        tokio::select! {
+            _ = running => panic!("creation completed before its reply"),
+            _ = async { loop { if seen.lock().unwrap().iter().any(|(method,_,_)|method=="POST") { break; } tokio::task::yield_now().await; } } => {}
+        }
+    }
+    assert!(
+        slots.lock().unwrap().contains("org.example.app"),
+        "cancel released ownership while creation was still in flight"
+    );
+    reply.notify_one();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while !slots.lock().unwrap().is_empty() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let seen = seen.lock().unwrap();
+    let deletes: Vec<_> = seen
+        .iter()
+        .filter(|(method, _, _)| method == "DELETE")
+        .collect();
+    assert_eq!(deletes.len(), 1);
+    assert_eq!(deletes[0].2["preconditions"]["uid"], "j-1");
+    assert!(!seen
+        .iter()
+        .any(|(_, path, _)| path.ends_with("/serviceaccounts")));
+    server.abort();
+}
+
+#[tokio::test]
+async fn a_lost_create_reply_recovers_only_the_matching_run_for_cleanup() {
+    for (scenario, expected_deletes) in [
+        (Scenario::LostCreateReply, 1),
+        (Scenario::AdmissionAfterLostReply, 1),
+        (Scenario::ReplacedAfterLostReply, 0),
+    ] {
+        let (client, seen, server) = server(scenario).await;
+        let data = tempfile::tempdir().unwrap();
+        let template = template();
+        let slots = Arc::new(Mutex::new(HashSet::new()));
+        assert!(run_job(
+            client,
+            "team",
+            "run-1",
+            job(&template),
+            &template,
+            data.path(),
+            Active::take(slots.clone(), "org.example.app").unwrap()
+        )
+        .await
+        .is_err());
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !slots.lock().unwrap().is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let seen = seen.lock().unwrap();
+        let deletes: Vec<_> = seen
+            .iter()
+            .filter(|(method, _, _)| method == "DELETE")
+            .collect();
+        assert_eq!(deletes.len(), expected_deletes);
+        if let Some(deletion) = deletes.first() {
+            assert_eq!(deletion.2["preconditions"]["uid"], "j-1");
+        }
+        assert_eq!(std::fs::read_dir(data.path()).unwrap().count(), 0);
+        server.abort();
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_delayed_commit_after_create_timeout_stays_owned_until_recovery() {
+    let commit = Arc::new(tokio::sync::Notify::new());
+    let (client, seen, server) =
+        controlled_server(Scenario::DelayedCommit, Some(commit.clone())).await;
+    let data = tempfile::tempdir().unwrap();
+    let template = template();
+    let slots = Arc::new(Mutex::new(HashSet::new()));
+    {
+        let running = run_job(
+            client,
+            "team",
+            "run-1",
+            job(&template),
+            &template,
+            data.path(),
+            Active::take(slots.clone(), "org.example.app").unwrap(),
+        );
+        tokio::select! {
+            _ = running => panic!("creation completed before committing"),
+            _ = async { loop { if seen.lock().unwrap().iter().any(|(method,_,_)|method=="POST") { break; } tokio::task::yield_now().await; } } => {}
+        }
+    }
+    tokio::time::advance(Duration::from_secs(31)).await;
+    for _ in 0..200 {
+        if seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(method, _, _)| method == "GET")
+        {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(seen
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|(method, _, _)| method == "GET"));
+    for _ in 0..20 {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        slots.lock().unwrap().contains("org.example.app"),
+        "404 before a delayed commit released the scan slot"
+    );
+    commit.notify_one();
+    for _ in 0..100 {
+        tokio::time::advance(Duration::from_millis(250)).await;
+        tokio::task::yield_now().await;
+        if slots.lock().unwrap().is_empty() {
+            break;
+        }
+    }
+    let seen = seen.lock().unwrap();
+    let deletes: Vec<_> = seen
+        .iter()
+        .filter(|(method, _, _)| method == "DELETE")
+        .collect();
+    assert_eq!(deletes.len(), 1);
+    assert_eq!(deletes[0].2["preconditions"]["uid"], "j-1");
+    assert!(slots.lock().unwrap().is_empty());
     server.abort();
 }

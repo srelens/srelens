@@ -279,7 +279,7 @@ reports the request as accepted rather than as complete.
 
 ## Workload image inventory (API 0.8)
 
-A `k8s.listWorkloadImages` binding fixes `arguments.kind` to `Deployment`, `StatefulSet` or `DaemonSet` and accepts only explicit `context` and optional `namespace`. The reader returns workload UID/resourceVersion and each regular or init container's name, type and image reference. It omits environment variables, credentials and Secret references. Pagination is bounded; exceeding the inventory limit asks the caller to narrow its namespace rather than presenting a partial inventory as complete.
+A `k8s.listWorkloadImages` binding fixes `arguments.kind` to `Deployment`, `StatefulSet` or `DaemonSet` and accepts explicit `context`, optional `namespace` and an optional `cursor` input. Omitting `cursor` requests the complete legacy inventory (at most 1,000 container images); `cursor: ""` requests a bounded first page, and subsequent requests pass the returned `nextCursor`. Cursors are at most 8,192 ASCII graphic bytes and pin the cluster, namespace and workload kind. Installed-app MCP reader tools expose `cursor` only when the binding declares it. The reader returns workload UID/resourceVersion and each regular or init container's name, type and image reference. It omits environment variables, credentials and Secret references. Each page is bounded. Complete-inventory readers exceeding their limit ask the caller to narrow its namespace or request pages; no partial inventory is presented as complete.
 
 An executable app may declare a `k8s.runJob` binding on API 0.8. Its arguments
 fix `image` (a SHA-256 digest), `command`, `args`, `inputNames` and optional

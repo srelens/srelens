@@ -183,7 +183,7 @@ func (h *Host) RunJob(ctx context.Context, cc CallContext, capability string, in
 		return nil, fmt.Errorf("%w: at most sixteen Job inputs", ErrInvalidCall)
 	}
 	for name, value := range inputs {
-		if !protocol.IsIdentifier(name) || len(value) == 0 || len(value) > 512 {
+		if !protocol.IsIdentifier(name) || len(value) == 0 || value[0] == '-' || len(value) > 512 {
 			return nil, fmt.Errorf("%w: invalid Job input", ErrInvalidCall)
 		}
 		for _, b := range []byte(value) {

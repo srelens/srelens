@@ -35,6 +35,8 @@ fn native_operation_views_require_api_0_8_and_streams_never_auto_run() {
     source["srelensApiVersion"] = json!("^0.8");
     source["sidecar"]["operations"][0]["view"]["stream"] = json!(true);
     assert!(Manifest::parse(&source.to_string()).is_err(), "stream scans require an explicit Run");
+    source["sidecar"]["operations"][0]["view"] = json!({"stream":true});
+    assert!(Manifest::parse(&source.to_string()).is_ok(), "explicit streams are supported");
 }
 
 fn problems(value: &Value) -> Vec<(ValidationCode, String, String)> {

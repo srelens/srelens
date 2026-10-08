@@ -315,7 +315,7 @@ list, and the [developer harness](testing.md#developer-harness) prints one per l
 
 ### 0.8.0
 
-Executable operations may declare native `view` metadata (`autoRun`, `stream`, `hidden`). The host provides pinned operation routes, tables, namespace selection, retry, pagination and owned cancellable streams. A stream cannot start automatically. The kind-bound `k8s.listWorkloadImages` reader returns regular/init-container images for Deployments, StatefulSets or DaemonSets. The schema for this line is `schemas/extension-manifest.v0.8.json`; older line schemas remain frozen. Binding availability is a separate sidecar protocol 0.2.0 callback.
+Executable operations may declare native `view` metadata (`autoRun`, `stream`, `hidden`). The host provides pinned operation routes, tables, namespace selection, retry, pagination and owned cancellable streams. A stream cannot start automatically. The kind-bound `k8s.listWorkloadImages` reader returns regular/init-container images for Deployments, StatefulSets or DaemonSets. The schema for this line is `schemas/extension-manifest.v0.8.json`; older line schemas remain frozen. The executable-only `k8s.runJob` binding also requires API `^0.8`; it fixes a digest-pinned scanner image, command, scalar argument slots and bounded namespace read rules. Sidecar protocol 0.2.0 adds binding availability, scoped Job execution and paged reads; the host refuses these additions under protocol 0.1.0. Runtime Job values cannot start with `-`, so callers cannot substitute command-line options.
 
 ### 0.7.0
 

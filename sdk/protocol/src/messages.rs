@@ -198,9 +198,22 @@ pub struct HostReadParams {
     #[cfg_attr(feature = "schema", schemars(schema_with = "identifier"))]
     pub capability: String,
     /// Opaque continuation from this binding's previous page (API 0.2).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "schema", schemars(length(max = 8192)))]
+    #[serde(default, deserialize_with = "read_cursor", skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(schema_with = "cursor_schema"))]
     pub cursor: Option<String>,
+}
+
+fn read_cursor<'de, D: Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+    let cursor = String::deserialize(d)?;
+    if cursor.len() > 8192 || !cursor.bytes().all(|b| b.is_ascii_graphic()) {
+        return Err(serde::de::Error::custom("cursor needs at most 8192 ASCII graphic bytes"));
+    }
+    Ok(Some(cursor))
+}
+
+#[cfg(feature = "schema")]
+fn cursor_schema(_: &mut SchemaGenerator) -> Schema {
+    schema(json!({"type":"string","maxLength":8192,"pattern":"^[!-~]*$"}))
 }
 
 /// Discover only the resource bindings declared and granted to this app (API 0.2).
@@ -256,6 +269,7 @@ fn read_job_inputs<'de, D: Deserializer<'de>>(
         || inputs.iter().any(|(name, value)| {
             !crate::shape::is_identifier(name)
                 || value.is_empty()
+                || value.starts_with('-')
                 || value.len() > 512
                 || !value.bytes().all(|b| (b' '..=b'~').contains(&b))
         })
@@ -271,7 +285,7 @@ fn read_job_inputs<'de, D: Deserializer<'de>>(
 fn job_inputs(generator: &mut SchemaGenerator) -> Schema {
     schema(
         json!({"type":"object", "maxProperties":16, "propertyNames":identifier(generator),
-        "additionalProperties":{"type":"string","minLength":1,"maxLength":512,"pattern":"^[ -~]{1,512}$"}}),
+        "additionalProperties":{"type":"string","minLength":1,"maxLength":512,"pattern":"^[\\x20-\\x2c\\x2e-\\x7e][ -~]{0,511}$"}}),
     )
 }
 

@@ -538,7 +538,8 @@ impl Connection {
                 "is not reading its standard input: {ANSWER_BUFFER} answers to its calls are waiting for it"
             )));
         };
-        if name == method::HOST_BINDING_AVAILABILITY
+        if (matches!(name.as_str(), method::HOST_BINDING_AVAILABILITY | method::HOST_RUN_JOB)
+            || (name == method::HOST_READ && params.get("cursor").is_some()))
             && !self.state().api_version.as_ref().is_some_and(|version| version >= &semver::Version::new(0, 2, 0))
         {
             place.send(protocol::response(&id, &Err(RpcError::new(code::METHOD_NOT_FOUND, "This callback requires negotiated sidecar API 0.2.0"))));
@@ -1227,10 +1228,16 @@ mod tests {
     async fn new_callbacks_require_negotiated_protocol_0_2() {
         let (connection, mut lines) = Connection::new(limits());
         connection.set_api_version(semver::Version::new(0, 1, 0));
-        connection.handle(Incoming::Request { id: json!("availability"), method: "host/bindingAvailability".into(), params: json!({}) }, &broker()).unwrap();
-        let answer: Value = serde_json::from_str(&lines.answers.recv().await.unwrap()).unwrap();
-        assert_eq!(answer["error"]["code"], code::METHOD_NOT_FOUND);
-        assert!(answer["error"]["message"].as_str().unwrap().contains("0.2"));
+        for (name, params) in [
+            (method::HOST_BINDING_AVAILABILITY, json!({})),
+            (method::HOST_RUN_JOB, json!({})),
+            (method::HOST_READ, json!({"cursor":""})),
+        ] {
+            connection.handle(Incoming::Request { id: json!(name), method: name.into(), params }, &broker()).unwrap();
+            let answer: Value = serde_json::from_str(&lines.answers.recv().await.unwrap()).unwrap();
+            assert_eq!(answer["error"]["code"], code::METHOD_NOT_FOUND, "{name}: {answer}");
+            assert!(answer["error"]["message"].as_str().unwrap().contains("0.2"));
+        }
     }
 
     #[tokio::test(start_paused = true)]

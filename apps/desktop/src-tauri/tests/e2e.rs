@@ -262,6 +262,7 @@ impl Harness {
 /// A capability registered later with no case here fails the coverage
 /// assertion at the end of `full_capability_suite`.
 const EXCLUDED: &[(&str, &str)] = &[
+    ("k8s.runJob", "broker-only declaration stub; scoped Job authorization, results and cleanup are exercised in registry lifecycle tests"),
     (
         "k8s.nodeJournalLogs",
         "requires SSH access to the node host; exercised via unit tests with mocked sessions",

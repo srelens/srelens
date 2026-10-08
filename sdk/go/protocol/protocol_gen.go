@@ -222,6 +222,7 @@ var fieldShapes = map[string]fieldShape{
 	"HostActionParams.uid":                         {pattern: regexp.MustCompile("^[!-~]{1,128}$"), maxLength: 128, not: []string(nil)},
 	"HostBindingAvailabilityParams.bindings.items": {pattern: regexp.MustCompile("^[A-Za-z0-9-]{1,64}$"), maxLength: 64, not: []string(nil)},
 	"HostReadParams.capability":                    {pattern: regexp.MustCompile("^[A-Za-z0-9-]{1,64}$"), maxLength: 64, not: []string(nil)},
+	"HostReadParams.cursor":                        {pattern: regexp.MustCompile("^[!-~]*$"), maxLength: 8192, not: []string(nil)},
 	"HostResourceParams.capability":                {pattern: regexp.MustCompile("^[A-Za-z0-9-]{1,64}$"), maxLength: 64, not: []string(nil)},
 	"HostResourceParams.name":                      {pattern: regexp.MustCompile("^[A-Za-z0-9.-]{1,253}$"), maxLength: 253, not: []string{".", ".."}},
 	"HostRunJobParams.capability":                  {pattern: regexp.MustCompile("^[A-Za-z0-9-]{1,64}$"), maxLength: 64, not: []string(nil)},

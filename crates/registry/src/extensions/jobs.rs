@@ -304,20 +304,77 @@ async fn delete_owned(api: &Api<Job>, name: &str, uid: &str) -> Result<(), Strin
 struct Cleanup {
     api: Api<Job>,
     owned: Option<(String, String)>,
+    pending: Option<Job>,
     active: Option<Active>,
     raw: Option<PathBuf>,
 }
 impl Drop for Cleanup {
     fn drop(&mut self) {
-        let Some((name, uid)) = self.owned.take() else {
+        let owned = self.owned.take();
+        let pending = self.pending.take();
+        if owned.is_none() && pending.is_none() {
             return;
-        };
+        }
         let api = self.api.clone();
         let active = self.active.take();
         let raw = self.raw.take();
         tokio::spawn(async move {
-            if let Err(error) = delete_owned(&api, &name, &uid).await {
-                log::warn!("{error}; Kubernetes deadline and TTL remain in place");
+            let owned = match (owned, pending) {
+                (Some(owned), _) => Some(owned),
+                (None, Some(pending)) => {
+                    // A failed create reply is not evidence that Kubernetes did
+                    // not commit the Job. Recover only this uniquely named run.
+                    let name = pending.metadata.name.as_deref().unwrap_or_default();
+                    let recover = async {
+                        loop {
+                            match api.get(name).await {
+                                Ok(job) => {
+                                    let expected = &pending.metadata;
+                                    let matches =
+                                        ["srelens.io/app", "srelens.io/run"].iter().all(|key| {
+                                            job.metadata.labels.as_ref().and_then(|m| m.get(*key))
+                                                == expected
+                                                    .labels
+                                                    .as_ref()
+                                                    .and_then(|m| m.get(*key))
+                                        }) && job
+                                            .metadata
+                                            .annotations
+                                            .as_ref()
+                                            .and_then(|m| m.get("srelens.io/app-id"))
+                                            == expected
+                                                .annotations
+                                                .as_ref()
+                                                .and_then(|m| m.get("srelens.io/app-id"));
+                                    // Admission may add metadata, but never change the
+                                    // app/run identity we use to recover ownership.
+                                    return if matches {
+                                        job.metadata
+                                            .uid
+                                            .filter(|uid| !uid.is_empty())
+                                            .map(|uid| (name.to_owned(), uid))
+                                    } else {
+                                        None
+                                    };
+                                }
+                                Err(_) => tokio::time::sleep(Duration::from_millis(250)).await,
+                            }
+                        }
+                    };
+                    match tokio::time::timeout(Duration::from_secs(30), recover).await {
+                        Ok(owned) => owned,
+                        Err(_) => {
+                            log::warn!("Could not recover the scan Job for cleanup; its deadline and TTL remain in place");
+                            None
+                        }
+                    }
+                }
+                _ => None,
+            };
+            if let Some((name, uid)) = owned {
+                if let Err(error) = delete_owned(&api, &name, &uid).await {
+                    log::warn!("{error}; Kubernetes deadline and TTL remain in place");
+                }
             }
             if let Some(path) = raw {
                 let _ = std::fs::remove_file(path);
@@ -337,26 +394,51 @@ async fn run_job(
     active: Active,
 ) -> Result<RunOut, String> {
     let api: Api<Job> = Api::namespaced(client.clone(), namespace);
-    let mut cleanup = Cleanup {
-        api: api.clone(),
-        owned: None,
-        active: Some(active),
-        raw: None,
-    };
+    // Creation must outlive a dropped caller: otherwise the server may
+    // commit the Job after cancellation without anyone holding its UID.
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    let create_api = api.clone();
+    tokio::spawn(async move {
+        let mut cleanup = Cleanup {
+            api: create_api.clone(),
+            owned: None,
+            pending: Some(job.clone()),
+            active: Some(active),
+            raw: None,
+        };
+        let created = tokio::time::timeout(
+            Duration::from_secs(30),
+            create_api.create(&PostParams::default(), &job),
+        )
+        .await;
+        let result = match created {
+            Ok(Ok(created)) => match (created.metadata.name, created.metadata.uid) {
+                (Some(name), Some(uid)) => {
+                    cleanup.owned = Some((name.clone(), uid.clone()));
+                    cleanup.pending = None;
+                    Ok((name, uid, cleanup))
+                }
+                _ => Err("The API returned a scan Job without its name or UID".to_owned()),
+            },
+            Ok(Err(error)) => {
+                if matches!(&error, srelens_kube::kube::Error::Api(status) if matches!(status.code, 400 | 401 | 403 | 404 | 422))
+                {
+                    cleanup.pending = None; // An explicit refusal did not create a Job.
+                }
+                Err(format!("Could not create scan Job: {error}"))
+            }
+            Err(_) => Err(
+                "Creating the scan Job timed out; ownership is being recovered for cleanup"
+                    .to_owned(),
+            ),
+        };
+        // On cancellation, send fails and drops the ownership guard here.
+        let _ = sender.send(result);
+    });
+    let (name, uid, mut cleanup) = receiver
+        .await
+        .map_err(|_| "The scan Job creation task ended unexpectedly".to_owned())??;
     let task = async {
-        let created = api
-            .create(&PostParams::default(), &job)
-            .await
-            .map_err(|e| format!("Could not create scan Job in {namespace}: {e}"))?;
-        let name = created
-            .metadata
-            .name
-            .ok_or_else(|| "The API returned a scan Job without a name".to_owned())?;
-        let uid = created
-            .metadata
-            .uid
-            .ok_or_else(|| "The API returned a scan Job without its UID".to_owned())?;
-        cleanup.owned = Some((name.clone(), uid.clone()));
         if !template.read_rules.is_empty() {
             let reader = format!("srelens-run-{run}");
             let metadata = json!({"name":reader,"namespace":namespace,"ownerReferences":[{"apiVersion":"batch/v1","kind":"Job","name":name,"uid":uid}]});
@@ -646,6 +728,7 @@ fn build_job(
             .any(|name| !inputs.contains_key(name))
         || inputs.values().any(|value| {
             value.is_empty()
+                || value.starts_with('-')
                 || value.len() > 512
                 || !value.bytes().all(|b| (b' '..=b'~').contains(&b))
         })
@@ -696,7 +779,7 @@ fn build_job(
     }
     serde_json::from_value(json!({
         "apiVersion":"batch/v1","kind":"Job",
-        "metadata":{"generateName":"srelens-scan-","namespace":namespace,"labels":{"srelens.io/app":&app_hash[..32],"srelens.io/run":run},"annotations":{"srelens.io/app-id":app}},
+        "metadata":{"name":format!("srelens-scan-{run}"),"namespace":namespace,"labels":{"srelens.io/app":&app_hash[..32],"srelens.io/run":run},"annotations":{"srelens.io/app-id":app}},
         "spec":{"backoffLimit":0,"activeDeadlineSeconds":1200,"ttlSecondsAfterFinished":600,"template":{"metadata":{"labels":{"srelens.io/app":&app_hash[..32],"srelens.io/run":run}},"spec":pod}}
     })).map_err(|_| "The constrained Job template could not be built".into())
 }
@@ -715,6 +798,26 @@ mod tests {
             "inputNames": ["namespace"],
             "readRules": [{"apiGroups":["apps"], "resources":["deployments"], "verbs":["get","list"]}]
         })).unwrap()
+    }
+
+    #[test]
+    fn job_arguments_refuse_caller_supplied_options() {
+        let template: JobTemplate = serde_json::from_value(json!({"image":format!("aquasec/trivy@sha256:{}","a".repeat(64)),"command":["trivy"],"args":["image","${inputs.image}"],"inputNames":["image"]})).unwrap();
+        for image in [
+            "--server=http://attacker.example",
+            "--output=/data/result",
+            "-q",
+        ] {
+            assert!(build_job(
+                "org.example.app",
+                "team",
+                "run-1",
+                &template,
+                &BTreeMap::from([("image".into(), image.into())])
+            )
+            .is_err());
+            assert!(serde_json::from_value::<srelens_sidecar_protocol::HostRunJobParams>(json!({"context":{"clusterId":"demo","namespace":"team"},"capability":"image-job","inputs":{"image":image}})).is_err());
+        }
     }
 
     #[test]

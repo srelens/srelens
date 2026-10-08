@@ -1340,6 +1340,11 @@ mod tests {
             });
         }
         let mut cases = vec![base.clone()];
+        if method == "host/read" {
+            for cursor in [Value::Null, json!(""), json!("a b"), json!("a".repeat(8192)), json!("a".repeat(8193))] {
+                let mut case = base.clone(); case["cursor"] = cursor; cases.push(case);
+            }
+        }
         for field in fields {
             let values = match *field {
                 "capability" | "action" => vec![

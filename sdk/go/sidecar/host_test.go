@@ -485,3 +485,24 @@ func TestShutdownWhileAHandlerWaitsOnTheHostSendsOnlyItsAnswer(t *testing.T) {
 		t.Fatalf("the session ended with %v", err)
 	}
 }
+
+func TestJobRejectsOptionInjectionBeforeCallingHost(t *testing.T) {
+	for _, value := range []string{"--server=http://attacker.example", "--output=/data/result", "-q"} {
+		t.Run(value, func(t *testing.T) {
+			s := sidecar.New("t", "1")
+			sidecar.Operation(s, "scan", func(ctx context.Context, _ struct{}) (json.RawMessage, error) {
+				return sidecar.HostFrom(ctx).RunJob(ctx, prod(t), "scan-image", map[string]string{"image": value})
+			})
+			h := start(t, s)
+			h.answer(h.request("initialize", initializeParams([]string{"0.2.0"}, h.DataDir, defaultLimits())))
+			h.answer(h.request("activate", map[string]any{}))
+			id := h.request("scan", map[string]any{})
+			if h.answer(id)["error"] == nil {
+				t.Fatal("Job option injection accepted")
+			}
+			if err := h.finish(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}

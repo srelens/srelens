@@ -426,10 +426,8 @@
         "cursor": {
           "description": "Opaque continuation from this binding's previous page (API 0.2).",
           "maxLength": 8192,
-          "type": [
-            "string",
-            "null"
-          ]
+          "pattern": "^[!-~]*$",
+          "type": "string"
         }
       },
       "required": [
@@ -488,7 +486,7 @@
           "additionalProperties": {
             "maxLength": 512,
             "minLength": 1,
-            "pattern": "^[ -~]{1,512}$",
+            "pattern": "^[\\x20-\\x2c\\x2e-\\x7e][ -~]{0,511}$",
             "type": "string"
           },
           "maxProperties": 16,

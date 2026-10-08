@@ -211,6 +211,11 @@ async fn list_complete(
         let mut containers = 0;
         loop {
             let page = list_page(client.clone(), context, kind, namespace.clone(), &cursor).await?;
+            if !page.next_cursor.is_empty() && page.next_cursor == cursor {
+                return Err(CapabilityError::Handler(
+                    "Workload image pagination did not advance; refresh Images".into(),
+                ));
+            }
             containers += page
                 .items
                 .iter()
@@ -403,6 +408,23 @@ mod tests {
         assert_eq!(result["items"].as_array().unwrap().len(), 100);
         assert!(!result["nextCursor"].as_str().unwrap_or_default().is_empty());
         assert_eq!(seen.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_repeated_cursor_is_reported_as_non_advancing_pagination() {
+        let (client, _) = crate::test_support::fake_api(
+            |_| json!({"apiVersion":"apps/v1","kind":"DeploymentList","metadata":{"continue":"same-page"},"items":[]}),
+        );
+        let error = list_complete(
+            client,
+            "cluster-a",
+            ImageWorkloadKind::Deployment,
+            None,
+            std::time::Duration::from_millis(200),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("did not advance"), "{error}");
     }
 
     #[test]
