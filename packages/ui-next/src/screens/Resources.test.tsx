@@ -414,6 +414,10 @@ function openDetailTab(route: string) {
   );
 }
 
+/** What the header's item count reads, or `null` when the header has none. */
+const listCount = () =>
+  document.querySelector('[data-slot="list-count"] [aria-hidden="true"]')?.textContent ?? null;
+
 /** One row of the "About this kind" rail, by its key. */
 const railRow = (rail: HTMLElement, key: string) =>
   Array.from(rail.querySelectorAll("dl.kv"))
@@ -646,6 +650,8 @@ describe("Resources", () => {
     await waitFor(() => expect(rowNames()).toEqual(["left"]));
     expect(screen.getByText(/Showing the first 1 widget/i)).toBeTruthy();
     expect(screen.getByText(/shared list row cap/i)).toBeTruthy();
+    // And the header does not pass the cap off as a count (#402).
+    expect(listCount()).toBe("1+ items");
   });
 
   it("does not claim a capped list when the custom-resource list failed", async () => {
@@ -675,14 +681,15 @@ describe("Resources", () => {
     expect(railRow(rail, "Scope")).toBe("Namespaced");
     expect(railRow(rail, "Served versions")).toBe("v1, v1beta1");
     expect(railRow(rail, "Storage version")).toBe("v1");
-    expect(railRow(rail, "Objects")).toBe("1");
+    // The count is the header's, not the rail's (#402): one figure, one place.
+    expect(rail.textContent).not.toContain("Objects");
+    expect(listCount()).toBe("1 item");
     expect(within(rail).getByText(/kubectl --context prod-eu get widgets.example.com -A -o wide/)).toBeDefined();
   });
 
   it("counts no objects until the list has answered, rather than saying nought", async () => {
-    // `Objects 0` while the rows are still in flight is not a small number,
-    // it is a wrong one — and it is the number a reader glances at and
-    // believes. The row waits for a count.
+    // `0 items` while the rows are still in flight is not a small number, it
+    // is a wrong one — and it is the number a reader glances at and believes.
     listCrds.mockResolvedValue({ crds: [WIDGETS] });
     listCustomResource.mockReturnValue(new Promise(() => {}));
 
@@ -690,7 +697,7 @@ describe("Resources", () => {
 
     const rail = await screen.findByRole("complementary", { name: "About this kind" });
     expect(railRow(rail, "Kind")).toBe("Widget");
-    expect(rail.textContent).not.toContain("Objects");
+    expect(listCount()).toBeNull();
   });
 
   it("heads the custom list's own pane with the kind, not the slug", async () => {
@@ -1029,6 +1036,88 @@ describe("Resources", () => {
     expect(watchResource.mock.calls.some((call) => call[2] === "deployments" && call[1] === "")).toBe(false);
     // And the picker shows what it is narrowed to.
     expect((await screen.findByRole("combobox", { name: "Namespaces" })).textContent).toContain("billing");
+  });
+
+  /**
+   * #402 Part B: a list said nothing about its own size, and the filter box
+   * shrank the table with no word on how much it had hidden.
+   */
+  describe("the item count in the header", () => {
+    it("says how many rows the list holds", async () => {
+      open("/k/pods");
+      await waitFor(() => expect(rowNames()).toEqual(["web-1", "api-7"]));
+      expect(listCount()).toBe("2 items");
+    });
+
+    it("becomes filtered over full while the filter hides rows, and goes back when it is cleared", async () => {
+      open("/k/pods");
+      await waitFor(() => expect(rowNames()).toHaveLength(2));
+      const filter = screen.getByRole("searchbox", { name: "Filter pods" });
+
+      await userEvent.type(filter, "web");
+      await waitFor(() => expect(rowNames()).toEqual(["web-1"]));
+      expect(listCount()).toBe("1 / 2");
+      // One element changing its text, not a second line beside the first.
+      expect(document.querySelectorAll('[data-slot="list-count"]')).toHaveLength(1);
+
+      await userEvent.clear(filter);
+      await waitFor(() => expect(rowNames()).toHaveLength(2));
+      expect(listCount()).toBe("2 items");
+    });
+
+    it("says nought of the total when the filter matches nothing", async () => {
+      open("/k/pods");
+      await waitFor(() => expect(rowNames()).toHaveLength(2));
+      await userEvent.type(screen.getByRole("searchbox", { name: "Filter pods" }), "zzz-no-such-pod");
+      await waitFor(() => expect(rowNames()).toEqual([]));
+      expect(listCount()).toBe("0 / 2");
+    });
+
+    it("counts the view, so narrowing the namespaces moves the total", async () => {
+      open("/k/pods");
+      await waitFor(() => expect(listCount()).toBe("2 items"));
+      // The picker's own write: the denominator is the pods in the namespaces
+      // selected, not the pods in the cluster.
+      act(() => setNamespaces(CTX.stableId, ["default"], store.currentWorkspace().activeId));
+      await waitFor(() => expect(rowNames()).toEqual(["web-1"]));
+      expect(listCount()).toBe("1 item");
+    });
+
+    it("has no count while the list is loading", () => {
+      watchResource.mockImplementation(() => new Promise(() => {}));
+      open("/k/pods");
+      expect(listCount()).toBeNull();
+    });
+
+    it("has no count for a list that was refused — never 0 items", async () => {
+      // A refused list and an empty cluster are the same picture and opposite
+      // facts, and zero is the one a reader believes.
+      watchResource.mockImplementation(
+        async (_c: string, _n: string, _k: string, _rows: unknown, _status: unknown, onError: (message: string) => void) => {
+          onError("pods is forbidden");
+          return { stop };
+        },
+      );
+      open("/k/pods");
+      expect(await screen.findByText(/Could not list pods/)).toBeTruthy();
+      expect(listCount()).toBeNull();
+    });
+
+    it("says 0 items for a list that answered with none", async () => {
+      watchResource.mockImplementation(async (_c: string, _n: string, _k: string, onRows: (rows: unknown[]) => void) => {
+        onRows([]);
+        return { stop };
+      });
+      open("/k/pods");
+      await waitFor(() => expect(listCount()).toBe("0 items"));
+    });
+
+    it("is there for a cluster-scoped kind too", async () => {
+      listNodes.mockResolvedValue({ nodes: [{ name: "n1", status: "Ready", roles: "worker", version: "1.30", age: "9d", taints: 0 }] });
+      open("/k/nodes");
+      await waitFor(() => expect(rowNames()).toEqual(["n1"]));
+      expect(listCount()).toBe("1 item");
+    });
   });
 
   // Zero options while `namespaces` is null reads as "this cluster has no

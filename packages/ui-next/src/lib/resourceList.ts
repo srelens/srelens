@@ -42,20 +42,30 @@ const CACHE_LIMIT = 40;
 // Memory-only, view-keyed row cache. Capped at CACHE_LIMIT entries, evicting
 // the oldest on insert. Never persisted (R-6) — a cache that survived a
 // restart would show a cluster's old workloads before its real ones.
-let rowCache = new Map<string, unknown[]>();
+//
+// `truncated` is kept WITH the rows it describes. It says those rows stopped
+// at the backend's cap, which is a fact about them and stays true for as long
+// as they are the ones on screen. Cached apart from it, a capped list
+// reopened from the cache came back as rows with no cap — and a header count
+// drawn from them read as an exact total when more objects exist (#402).
+interface CachedRows {
+  rows: unknown[];
+  truncated?: boolean;
+}
+let rowCache = new Map<string, CachedRows>();
 
-function cacheGet(key: string): unknown[] | undefined {
+function cacheGet(key: string): CachedRows | undefined {
   return rowCache.get(key);
 }
 
-function cacheSet(key: string, rows: unknown[]) {
+function cacheSet(key: string, rows: unknown[], truncated?: boolean) {
   if (!rowCache.has(key) && rowCache.size >= CACHE_LIMIT) {
     const oldest = rowCache.keys().next().value;
     if (oldest !== undefined) rowCache.delete(oldest);
   }
   // Re-insert to keep the key fresh in insertion order (Map preserves it).
   rowCache.delete(key);
-  rowCache.set(key, rows);
+  rowCache.set(key, truncated ? { rows, truncated } : { rows });
 }
 
 /** Test-only: clear the module-level cache between test cases. */
@@ -189,7 +199,7 @@ export function useResourceList<Row extends ListRow>(
 
   const [state, setState] = useState<ListState>(() => {
     const cached = cacheGet(key);
-    return { rows: cached ?? [], error: undefined, errors: NO_ERRORS, unscoped: false, loading: cached === undefined, watch: "live", forKey: key };
+    return { rows: cached?.rows ?? [], truncated: cached?.truncated, error: undefined, errors: NO_ERRORS, unscoped: false, loading: cached === undefined, watch: "live", forKey: key };
   });
 
   // Held apart from `state`: enrichment (pod/node metrics) runs on its own
@@ -200,7 +210,7 @@ export function useResourceList<Row extends ListRow>(
   useEffect(() => {
     const mine = ++gen.current;
     const cached = cacheGet(key);
-    setState({ rows: cached ?? [], error: undefined, errors: NO_ERRORS, unscoped: false, loading: cached === undefined, watch: "live", forKey: key });
+    setState({ rows: cached?.rows ?? [], truncated: cached?.truncated, error: undefined, errors: NO_ERRORS, unscoped: false, loading: cached === undefined, watch: "live", forKey: key });
     setMetrics(undefined);
 
     if (!descriptor) {
@@ -318,10 +328,14 @@ export function useResourceList<Row extends ListRow>(
           }
         });
         if (errors.size === scopes.length) {
-          setState((s) => ({ ...s, errors, error: firstError(errors), truncated: undefined, loading: false }));
+          // The rows are kept — the last good list is still on screen — so
+          // what is known about them is kept too. Clearing `truncated` here
+          // left a capped list's rows standing with nothing to say they were
+          // capped.
+          setState((s) => ({ ...s, errors, error: firstError(errors), loading: false }));
           return;
         }
-        cacheSet(key, rows);
+        cacheSet(key, rows, truncated);
         setState((s) => ({
           ...s,
           rows,
