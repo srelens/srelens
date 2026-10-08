@@ -12,9 +12,10 @@
 //! **Where a variable may stand.** A value the host binds is a name: a cluster,
 //! a namespace, a workload, a pod. [`QueryTemplate::parse`] reads the template
 //! the way each language reads its strings, and admits one of those variables
-//! only inside a double-quoted string, where the host escapes `\` and `"` — the
-//! two escapes PromQL, LogQL and TraceQL all document (Tempo's TraceQL docs list no
-//! others). It refuses `/* */` and `//` comments outside strings, which LogQL's and
+//! only inside a double-quoted string, where the host escapes `\` and `"` as it
+//! inserts the value: with every backslash doubled, a value can neither end its
+//! string nor begin any other escape sequence the languages read (`\n`, `\t`, octal,
+//! hex and the rest). It refuses `/* */` and `//` comments outside strings, which LogQL's and
 //! TraceQL's lexers skip, and a name in a regex matcher (`=~`, `!~`, `|~`) must be
 //! `${name:regex}`. The values are held to what they can be: Kubernetes names, and
 //! a context name of letters, digits and `._:/@+-`. One that is not is refused

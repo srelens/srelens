@@ -1,7 +1,7 @@
 # Release-signing fixtures
 
 Used by `apps/tui/tests/update_signature_tests.rs` to test how
-`srelens-tui update` verifies a release signature (#448).
+`srectl update` verifies a release signature (#448).
 
 - `srelens-tui-0.15.0-SHA256SUMS.txt` and its `.asc` are copied byte for byte
   from the `srelens-v0.15.0` release. They were signed by the real release key

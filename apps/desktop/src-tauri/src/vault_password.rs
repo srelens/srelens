@@ -23,7 +23,7 @@ pub struct VaultStatus {
     pub mode: &'static str,
     /// The vault's `key_source` verbatim, for Settings copy.
     pub key_source: &'static str,
-    /// A usable biometric sensor exists on this machine.
+    /// A usable biometric sensor exists and the store serves this build.
     pub biometric_available: bool,
     /// The biometric skip is enrolled (marker present).
     pub biometric_enrolled: bool,
@@ -34,10 +34,8 @@ pub async fn vault_status(
     app: tauri::AppHandle,
     vault: tauri::State<'_, Arc<Vault>>,
 ) -> Result<VaultStatus, String> {
-    use tauri_plugin_biometry::BiometryExt;
     let dir = vault_biometric::vault_dir(&app)?;
-    let biometric_available = app.biometry().status().map(|s| s.is_available).unwrap_or(false);
-    Ok(status_core(&vault, &dir, biometric_available))
+    Ok(status_core(&vault, &dir, vault_biometric::biometric_available(&app)))
 }
 
 /// Everything but the Tauri plumbing (#28 seam): the AppHandle contributes

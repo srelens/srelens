@@ -1208,6 +1208,29 @@
   }
   .icon-btn:hover { background: var(--field); color: var(--ink); }
 
+  /* A control that acts on a heading's own text — copy the name — drawn right
+     after it and kept out of sight until the reader reaches for it: a glyph
+     permanently beside every subject's name is a second thing to read on the
+     largest line of the pane.
+
+     Three ways in, because the pointer is only one of them: the row hovered,
+     focus anywhere in the row (so a keyboard reader tabbing onto the control
+     sees what they landed on), and the moment after a copy, when the check
+     must stay up even though the pointer has already left.
+
+     `opacity`, not `display` or `visibility`: the control keeps its place, so
+     the name does not shift when it appears, and it stays in the tab order.
+
+     A device with no hover has no way to ask for it, so there it is simply
+     shown. */
+  .name-action { display: inline-flex; flex-shrink: 0; opacity: 0; }
+  .name-row:hover .name-action,
+  .name-row:focus-within .name-action,
+  .name-action:has(.copy-ok) { opacity: 1; }
+  @media (hover: none) {
+    .name-action { opacity: 1; }
+  }
+
   /* The same chrome as `.icon-btn`, sized by its CONTENT.
      `.icon-btn` is `width: 24px` — a box for a glyph — and the dock's `clear`
      and `full view` controls hold words. Text in a 24px box overflows it, so
@@ -1329,7 +1352,24 @@
     background: var(--accent);
   }
   .tab[data-preview="true"] { font-style: italic; }
+  /* Who gives way when a tab is narrow: the cluster, not the title.
+
+     Both were plain flex items shrinking in proportion to their own width, and
+     the cluster's name is usually the longer of the two, in a wider face — so
+     at the 108px minimum it kept most of the row and the title was cut to a
+     letter: `N.`, `E.`, `J.` across a full strip, each beside a legible
+     `kind-s…`. A strip of thirteen such tabs fits its bar exactly, so there is
+     nothing for the scroll controls to scroll to either, and the reader is
+     left with tabs they cannot tell apart and arrows that do nothing (#828).
+
+     The title is what tells one tab from the next; the cluster is the same
+     word on most of them and is in the tab's tooltip in full. So the cluster
+     shrinks first — by a factor large enough that it is gone before the title
+     loses a character — and only then does the title truncate. */
+  .tab-title { flex: 0 1 auto; min-width: 0; }
   .tab-sub {
+    flex: 1 1 0;
+    min-width: 0;
     font-family: var(--font-mono);
     font-size: var(--text-meta);
     letter-spacing: 0.02em;

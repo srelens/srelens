@@ -140,9 +140,9 @@ jobs:
             // Every crate inherits [workspace.package].version from the root
             // Cargo.toml (src-tauri included), so ONE Cargo bump versions the
             // whole workspace — the server binary, the MCP serverInfo, all of
-            // it — and the lock updates every srelens-* member to match.
+            // it — and the lock updates every srelens-* member, and srectl, to match.
             sub("Cargo.toml",/^version = "[^"]+"/m,`version = "${v}"`);
-            sub("Cargo.lock",/(name = "srelens-[a-z-]+"\r?\nversion = ")[^"]+(")/g,`$1${v}$2`);
+            sub("Cargo.lock",/(name = "(?:srelens-[a-z-]+|srectl)"\r?\nversion = ")[^"]+(")/g,`$1${v}$2`);
           ' "$NEW"
           # Grouped changelog for the release body. The Conventional Commit type
           # is dropped (the section heading already says Features / Fixes) but
@@ -305,7 +305,7 @@ jobs:
             const fs=require("fs");const v=process.argv[1];
             const sub=(p,re,to)=>{const s=fs.readFileSync(p,"utf8");if(!re.test(s))throw new Error("no version field in "+p);fs.writeFileSync(p,s.replace(re,to))};
             sub("Cargo.toml",/^version = "[^"]+"/m,`version = "${v}"`);
-            sub("Cargo.lock",/(name = "srelens-[a-z-]+"\r?\nversion = ")[^"]+(")/g,`$1${v}$2`);
+            sub("Cargo.lock",/(name = "(?:srelens-[a-z-]+|srectl)"\r?\nversion = ")[^"]+(")/g,`$1${v}$2`);
           ' "$V"
           echo "Docker build version: $V"
       - name: Set up Buildx
@@ -407,6 +407,9 @@ jobs:
       # Apple secret set is present; with anything less the build stays
       # unsigned rather than failing on a partial configuration.
       ENABLE_MAC_SIGNING: ${{ secrets.APPLE_CERTIFICATE != '' && secrets.APPLE_CERTIFICATE_PASSWORD != '' && secrets.APPLE_SIGNING_IDENTITY != '' }}
+      # The profile behind Touch ID's App ID entitlement (#819); see the
+      # signing step below.
+      HAS_MAC_PROFILE: ${{ secrets.APPLE_PROVISIONING_PROFILE != '' }}
       # Libraries the AppImage must NOT bundle (#111) — see the seed step below.
       # Single source of truth: the build passes this to linuxdeploy, and the
       # post-build assert greps for the same pattern. Keep them in lockstep.
@@ -529,9 +532,19 @@ jobs:
             const sub=(p,re,to)=>{const s=fs.readFileSync(p,"utf8");if(!re.test(s))throw new Error("no version field in "+p);fs.writeFileSync(p,s.replace(re,to))};
             sub("apps/desktop/src-tauri/tauri.conf.json",/("version":\s*)"[^"]+"/,`$1"${v}"`);
             sub("Cargo.toml",/^version = "[^"]+"/m,`version = "${v}"`);
-            sub("Cargo.lock",/(name = "srelens-[a-z-]+"\r?\nversion = ")[^"]+(")/g,`$1${v}$2`);
+            sub("Cargo.lock",/(name = "(?:srelens-[a-z-]+|srectl)"\r?\nversion = ")[^"]+(")/g,`$1${v}$2`);
           ' "$V"
           echo "Built version: $V"
+
+      # Touch ID unlock (#819) works only in a build signed with the App ID
+      # entitlement. Once a release has shipped it, a stable build without it
+      # (unsigned, or signed without the profile) locks out everyone who
+      # turned Touch ID on, so stable refuses both. Dev still builds, warned.
+      - name: Require signing and the provisioning profile for stable macOS releases
+        if: matrix.platform == 'macos-latest' && github.ref_name == 'main' && (env.ENABLE_MAC_SIGNING != 'true' || env.HAS_MAC_PROFILE != 'true')
+        run: |
+          echo "::error::A stable macOS build needs APPLE_CERTIFICATE, APPLE_CERTIFICATE_PASSWORD, APPLE_SIGNING_IDENTITY and APPLE_PROVISIONING_PROFILE: without the App ID entitlement it breaks Touch ID unlock for everyone who enabled it."
+          exit 1
 
       # Export the Apple signing env ONLY when the full secret set exists.
       # Tauri treats a *defined but empty* APPLE_CERTIFICATE as "please sign"
@@ -539,6 +552,8 @@ jobs:
       # absent (not empty) on unsigned builds.
       - name: Enable macOS signing (when secrets are configured)
         if: matrix.platform == 'macos-latest' && env.ENABLE_MAC_SIGNING == 'true'
+        env:
+          APPLE_PROVISIONING_PROFILE: ${{ secrets.APPLE_PROVISIONING_PROFILE }}
         run: |
           {
             echo "APPLE_CERTIFICATE<<__EOF__";          echo "${{ secrets.APPLE_CERTIFICATE }}";          echo "__EOF__"
@@ -551,6 +566,22 @@ jobs:
           # to a file; tauri-action reads APPLE_API_KEY_PATH from there.
           echo "${{ secrets.APPLE_API_KEY_P8 }}" | base64 --decode > "$RUNNER_TEMP/apple_api_key.p8"
           echo "APPLE_API_KEY_PATH=$RUNNER_TEMP/apple_api_key.p8" >> "$GITHUB_ENV"
+          # Touch ID unlock (#819) keeps its key in the data-protection
+          # keychain, which answers only an app holding its App ID entitlement,
+          # and a Developer ID app may claim that only with an embedded
+          # provisioning profile. Signed builds only: an unsigned build that
+          # claims it is killed at launch. Without the profile a dev build
+          # stays signed but unentitled, and Settings hides the Touch ID
+          # switch; a stable one was refused by the step above. The profile
+          # names the APPLE_CERTIFICATE certificate: renewing that certificate
+          # means regenerating the profile with the new one, or macOS refuses
+          # to launch the signed app.
+          if [ -n "$APPLE_PROVISIONING_PROFILE" ]; then
+            printf '%s' "$APPLE_PROVISIONING_PROFILE" | base64 --decode > "$GITHUB_WORKSPACE/apps/desktop/src-tauri/embedded.provisionprofile"
+            echo "MAC_SIGNED_CONFIG=--config $GITHUB_WORKSPACE/apps/desktop/src-tauri/macos-signing.conf.json" >> "$GITHUB_ENV"
+          else
+            echo "::warning::APPLE_PROVISIONING_PROFILE is not set — this macOS build has no App ID entitlement, so Touch ID unlock stays unavailable."
+          fi
 
       # Stable -> srelens-v<version>. Dev -> a unique semver pre-release
       # (srelens-vX.Y.Z-<run>) so every dev build gets its own tag.
@@ -595,11 +626,21 @@ jobs:
           # `releases/latest`, and the dev-channel manifest published by
           # updater-manifest must point at assets that are live immediately.
           releaseDraft: ${{ github.ref_name == 'main' }}
-          args: ${{ matrix.args }}
+          # MAC_SIGNED_CONFIG is set only by the macOS signing step above.
+          args: ${{ matrix.args }} ${{ env.MAC_SIGNED_CONFIG }}
           # Each matrix job uploads its own binaries + signatures, but NOT
           # latest.json — parallel jobs would race on that single asset. The
           # updater-manifest job assembles it once, after all builds.
           includeUpdaterJson: false
+
+      # macOS launches an app claiming the App ID entitlement (#819) only if
+      # its embedded profile grants it, names its signing certificate and
+      # hasn't expired; notarization checks none of that. Fail on main before
+      # the draft is published, and on both channels before updater-manifest
+      # points any install at an app that would not open.
+      - name: Assert the macOS app's profile covers its signature
+        if: runner.os == 'macOS' && env.MAC_SIGNED_CONFIG != ''
+        run: sh packaging/macos/check-profile.sh "target/${{ matrix.target }}/release/bundle/macos/srelens.app"
 
       # Regression tripwire for #111: fail the build if the AppImage bundles
       # host-ABI Wayland libs. The release is still a draft at this point, so
@@ -720,7 +761,7 @@ jobs:
 
       # Every crate inherits [workspace.package].version, so without this the
       # binary reports the committed placeholder: on dev the pre-release
-      # version is never committed at all, and `srelens-tui --version` would
+      # version is never committed at all, and `srectl --version` would
       # disagree with the release it was downloaded from. The smoke step below
       # asserts they match, so a drift here fails the leg rather than shipping.
       - name: Set build version
@@ -731,7 +772,7 @@ jobs:
             const fs=require("fs");const v=process.argv[1];
             const sub=(p,re,to)=>{const s=fs.readFileSync(p,"utf8");if(!re.test(s))throw new Error("no version field in "+p);fs.writeFileSync(p,s.replace(re,to))};
             sub("Cargo.toml",/^version = "[^"]+"/m,`version = "${v}"`);
-            sub("Cargo.lock",/(name = "srelens-[a-z-]+"\r?\nversion = ")[^"]+(")/g,`$1${v}$2`);
+            sub("Cargo.lock",/(name = "(?:srelens-[a-z-]+|srectl)"\r?\nversion = ")[^"]+(")/g,`$1${v}$2`);
           ' "$V"
           echo "TUI build version: $V"
 
@@ -749,7 +790,7 @@ jobs:
         # matching Cargo.lock entries together; if it ever stops doing that,
         # failing here is better than resolving a different dependency set into
         # a release binary.
-        run: cargo build --release --locked -p srelens-tui --target ${{ matrix.target }}
+        run: cargo build --release --locked -p srectl --target ${{ matrix.target }}
 
       # A stable release REQUIRES signing; only dev may fall open. This
       # mirrors sign-artifacts, which refuses to cut a stable release without a
@@ -790,7 +831,7 @@ jobs:
           APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
         run: |
           set -euo pipefail
-          BIN="target/${{ matrix.target }}/release/srelens-tui"
+          BIN="target/${{ matrix.target }}/release/srectl"
 
           # A dedicated keychain, deleted at the end of the step: importing into
           # the login keychain would leave the certificate on a runner image
@@ -850,7 +891,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          BIN="target/${{ matrix.target }}/release/srelens-tui"
+          BIN="target/${{ matrix.target }}/release/srectl"
           [ "${{ runner.os }}" = "Windows" ] && BIN="$BIN.exe"
           OUT="$("$BIN" --version)"
           echo "$OUT"
@@ -873,7 +914,7 @@ jobs:
       - name: Assert the musl build is static
         if: ${{ endsWith(matrix.target, '-musl') }}
         run: |
-          BIN="target/${{ matrix.target }}/release/srelens-tui"
+          BIN="target/${{ matrix.target }}/release/srectl"
           if file "$BIN" | grep -q "dynamically linked"; then
             echo "::error::the musl build is dynamically linked, which defeats the target"
             file "$BIN"
@@ -881,7 +922,7 @@ jobs:
           fi
           file "$BIN"
 
-      # Files sit at the archive root, so `tar xzf` drops `srelens-tui` straight
+      # Files sit at the archive root, so `tar xzf` drops `srectl` straight
       # into the working directory and the user can move it onto PATH without
       # navigating a wrapper folder.
       - name: Package (unix)
@@ -889,12 +930,24 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          NAME="srelens-tui-${{ needs.version.outputs.version }}-${{ matrix.target }}"
+          # Primary srectl archive
+          NAME="srectl-${{ needs.version.outputs.version }}-${{ matrix.target }}"
           mkdir -p "dist/$NAME"
-          cp "target/${{ matrix.target }}/release/srelens-tui" "dist/$NAME/"
+          cp "target/${{ matrix.target }}/release/srectl" "dist/$NAME/"
           cp LICENSE "dist/$NAME/"
           tar -czf "dist/$NAME.tar.gz" -C "dist/$NAME" .
           rm -rf "dist/$NAME"
+
+          # Legacy compatibility archive for <=0.15.0 updaters.
+          # Contains both srelens-tui and srectl so legacy extractors find "srelens-tui"
+          # and rebrand seamlessly on first execution.
+          LEGACY_NAME="srelens-tui-${{ needs.version.outputs.version }}-${{ matrix.target }}"
+          mkdir -p "dist/$LEGACY_NAME"
+          cp "target/${{ matrix.target }}/release/srectl" "dist/$LEGACY_NAME/srelens-tui"
+          cp "target/${{ matrix.target }}/release/srectl" "dist/$LEGACY_NAME/srectl"
+          cp LICENSE "dist/$LEGACY_NAME/"
+          tar -czf "dist/$LEGACY_NAME.tar.gz" -C "dist/$LEGACY_NAME" .
+          rm -rf "dist/$LEGACY_NAME"
           ls -l dist
 
       # Windows ships a .zip, never a bare .exe: scripts/perf/size-baseline.mjs
@@ -905,12 +958,21 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $name = "srelens-tui-${{ needs.version.outputs.version }}-${{ matrix.target }}"
+          $name = "srectl-${{ needs.version.outputs.version }}-${{ matrix.target }}"
           New-Item -ItemType Directory -Force -Path "dist/$name" | Out-Null
-          Copy-Item "target/${{ matrix.target }}/release/srelens-tui.exe" "dist/$name/"
+          Copy-Item "target/${{ matrix.target }}/release/srectl.exe" "dist/$name/"
           Copy-Item LICENSE "dist/$name/"
           Compress-Archive -Path "dist/$name/*" -DestinationPath "dist/$name.zip"
           Remove-Item -Recurse -Force "dist/$name"
+
+          # Legacy compatibility archive for Windows
+          $legacy_name = "srelens-tui-${{ needs.version.outputs.version }}-${{ matrix.target }}"
+          New-Item -ItemType Directory -Force -Path "dist/$legacy_name" | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/srectl.exe" "dist/$legacy_name/srelens-tui.exe"
+          Copy-Item "target/${{ matrix.target }}/release/srectl.exe" "dist/$legacy_name/srectl.exe"
+          Copy-Item LICENSE "dist/$legacy_name/"
+          Compress-Archive -Path "dist/$legacy_name/*" -DestinationPath "dist/$legacy_name.zip"
+          Remove-Item -Recurse -Force "dist/$legacy_name"
           Get-ChildItem dist
 
       - name: Upload the archive
@@ -944,23 +1006,33 @@ jobs:
         run: |
           set -euo pipefail
           TAG="srelens-v${{ needs.version.outputs.version }}"
-          SUMS="srelens-tui-${{ needs.version.outputs.version }}-SHA256SUMS.txt"
+          SUMS="srectl-${{ needs.version.outputs.version }}-SHA256SUMS.txt"
+          LEGACY_SUMS="srelens-tui-${{ needs.version.outputs.version }}-SHA256SUMS.txt"
           cd dist
           # Every leg is required, so count the archives rather than trusting
           # that six jobs each uploaded one: a silently missing target is the
           # failure this is here to catch.
-          count=$(ls -1 srelens-tui-*.tar.gz srelens-tui-*.zip 2>/dev/null | wc -l)
+          count=$(ls -1 srectl-*.tar.gz srectl-*.zip 2>/dev/null | wc -l)
           if [ "$count" -ne 7 ]; then
-            echo "::error::expected 7 TUI archives, found $count"
+            echo "::error::expected 7 srectl archives, found $count"
+            ls -l
+            exit 1
+          fi
+          count_legacy=$(ls -1 srelens-tui-*.tar.gz srelens-tui-*.zip 2>/dev/null | wc -l)
+          if [ "$count_legacy" -ne 7 ]; then
+            echo "::error::expected 7 legacy srelens-tui archives, found $count_legacy"
             ls -l
             exit 1
           fi
           # Named for the release so it cannot collide with a checksum file for
           # the desktop installers if one is ever added to the same tag.
-          sha256sum srelens-tui-*.tar.gz srelens-tui-*.zip > "$SUMS"
+          sha256sum srectl-*.tar.gz srectl-*.zip > "$SUMS"
+          sha256sum srelens-tui-*.tar.gz srelens-tui-*.zip > "$LEGACY_SUMS"
           cat "$SUMS"
+          cat "$LEGACY_SUMS"
           gh release upload "$TAG" --repo "${{ github.repository }}" \
-            srelens-tui-*.tar.gz srelens-tui-*.zip "$SUMS" --clobber
+            srectl-*.tar.gz srectl-*.zip "$SUMS" \
+            srelens-tui-*.tar.gz srelens-tui-*.zip "$LEGACY_SUMS" --clobber
 
   # Dev only: fill the pre-release body with a recent-commit list and keep the
   # Releases page tidy. Stable (main) notes come from the version job.
@@ -1135,8 +1207,8 @@ jobs:
     # when this runs. Without it the two race, and whether the TUI downloads
     # carry a .asc comes down to which job finished first.
     #
-    # `srelens-tui update` depends on one of these signatures: it installs a
-    # release only once srelens-tui-<version>-SHA256SUMS.txt.asc verifies
+    # `srectl update` depends on one of these signatures: it installs a
+    # release only once srectl-<version>-SHA256SUMS.txt.asc verifies
     # against the keys in KEYS (#448). Skipping .txt files here would leave
     # every TUI unable to update. A stable release without it is refused, and
     # the dev channel passes over a pre-release without it.

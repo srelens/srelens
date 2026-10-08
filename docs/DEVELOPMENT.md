@@ -476,7 +476,7 @@ unrevoked. A rotation that updates the secret but not the table — or the
 reverse — fails the release rather than publishing signatures the instructions
 tell users to reject.
 
-**Rotate in two releases, for `srelens-tui update`.** The TUI's self-update
+**Rotate in two releases, for `srectl update`.** The TUI's self-update
 trusts the keys `KEYS` held when that binary was built, compiled in, and
 nothing else (#448). A binary already installed never learns a key added
 later. So a new key has to ship before it signs:

@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-/// Supported Resource Views in the SRElens TUI
+/// Supported Resource Views in srectl
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ResourceKind {
     Pods,
@@ -703,7 +703,7 @@ pub const COMMAND_REGISTRY: &[CommandDef] = &[
     CommandDef {
         name: "quit",
         aliases: &["q", "exit"],
-        description: "Quit SRElens TUI session",
+        description: "Quit srectl session",
         target: CommandTarget::Quit,
     },
     CommandDef {

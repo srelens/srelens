@@ -130,12 +130,9 @@ function shorten(text: string, max = EYEBROW_MAX): string {
   return `${text.slice(0, head)}…${text.slice(text.length - (max - 1 - head))}`;
 }
 
-/** This screen's own words for the two node actions. Nothing else renders them. */
-const NODE_ACTION_LABEL = {
-  cordon: "Cordon",
-  uncordon: "Uncordon",
-  drain: "Drain",
-} as const;
+/** The node actions' words — the row menu's own, so this screen's buttons and
+ *  the Nodes list's entries cannot come to call one action two things. */
+const NODE_ACTION_LABEL = ROW_ACTION_LABEL;
 
 /** One node, flattened so the table can key, sort and filter on its fields. */
 type NodeRow = NodeSummary & { usage: NodeUsage };

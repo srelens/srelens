@@ -19,7 +19,7 @@ crates/registry/tests/fixtures/flux-0.4.0-manifest.json -text
 crates/registry/tests/fixtures/packages/** -text
 crates/registry/tests/fixtures/trust/example-release.json -text
 
-# OpenPGP-signed files for `srelens-tui update` (#448). A signature covers the
+# OpenPGP-signed files for `srectl update` (#448). A signature covers the
 # exact bytes, so a checkout that converts line endings fails every check.
 apps/tui/tests/fixtures/release-signing/** -text
 

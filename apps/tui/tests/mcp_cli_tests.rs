@@ -2,7 +2,7 @@ use serde_json::{json, Value};
 use tokio::io::AsyncWriteExt;
 
 use clap::Parser;
-use srelens_tui::mcp_server::{build_stdio_mcp_server, run_mcp_stdio};
+use srectl::mcp_server::{build_stdio_mcp_server, run_mcp_stdio};
 
 fn init_crypto_provider() {
     let _ = rustls::crypto::ring::default_provider().install_default();
@@ -431,9 +431,9 @@ async fn mcp_stdio_sensitive_reads_policy_allows_with_flag_and_confirm() {
 fn cli_parses_mcp_subcommand_and_flags() {
     // 1. Subcommand default
     let cli =
-        srelens_tui::Cli::try_parse_from(["srelens-tui", "mcp"]).expect("parse mcp subcommand");
+        srectl::Cli::try_parse_from(["srectl", "mcp"]).expect("parse mcp subcommand");
     match cli.command {
-        Some(srelens_tui::CliCommand::Mcp {
+        Some(srectl::CliCommand::Mcp {
             allow_destructive,
             allow_sensitive_reads,
         }) => {
@@ -444,15 +444,15 @@ fn cli_parses_mcp_subcommand_and_flags() {
     }
 
     // 2. Subcommand with flags
-    let cli = srelens_tui::Cli::try_parse_from([
-        "srelens-tui",
+    let cli = srectl::Cli::try_parse_from([
+        "srectl",
         "mcp",
         "--allow-destructive",
         "--allow-sensitive-reads",
     ])
     .expect("parse mcp subcommand with flags");
     match cli.command {
-        Some(srelens_tui::CliCommand::Mcp {
+        Some(srectl::CliCommand::Mcp {
             allow_destructive,
             allow_sensitive_reads,
         }) => {
@@ -463,8 +463,8 @@ fn cli_parses_mcp_subcommand_and_flags() {
     }
 
     // 3. Top-level flags
-    let cli = srelens_tui::Cli::try_parse_from([
-        "srelens-tui",
+    let cli = srectl::Cli::try_parse_from([
+        "srectl",
         "--mcp-stdio",
         "--mcp-allow-destructive",
         "--mcp-allow-sensitive-reads",
@@ -500,7 +500,7 @@ fn isolated_kubeconfig() -> (tempfile::TempDir, std::path::PathBuf) {
 }
 
 async fn run_binary_mcp_init(args: &[&str]) -> serde_json::Value {
-    let binary_path = env!("CARGO_BIN_EXE_srelens-tui");
+    let binary_path = env!("CARGO_BIN_EXE_srectl");
     let (kubeconfig_dir, kubeconfig) = isolated_kubeconfig();
     let mut child = tokio::process::Command::new(binary_path)
         .args(args)

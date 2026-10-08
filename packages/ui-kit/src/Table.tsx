@@ -875,6 +875,9 @@ export function Table<T>({
                 else rowRefs.current.delete(rowKey);
               }}
               aria-selected={selected}
+              // The caller's own key, so a screen that has to find one row
+              // again after the table was rebuilt can.
+              data-row-key={rowKey}
               data-state={selected || checked ? "selected" : undefined}
               tabIndex={interactive ? (rowKey === stopKey ? 0 : -1) : undefined}
               onFocus={interactive ? () => setFocusKey(rowKey) : undefined}

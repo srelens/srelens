@@ -16,31 +16,31 @@ use ratatui::{Frame, Terminal};
 use serde_json::{json, Value};
 use srelens_kube::lineage::{LineageNode, LineageRelation};
 use srelens_kube::metrics::MetricSample;
-use srelens_tui::commands::{CrdMeta, PrinterColumn, ResourceKind};
-use srelens_tui::theme::Theme;
-use srelens_tui::views::argo_detail_view::{
+use srectl::commands::{CrdMeta, PrinterColumn, ResourceKind};
+use srectl::theme::Theme;
+use srectl::views::argo_detail_view::{
     render_argo_detail_view, ArgoDetailTab, ArgoDetailViewState,
 };
-use srelens_tui::views::cracked_lens::render_cracked_lens;
-use srelens_tui::views::describe_view::{render_describe_view, DescribeViewState};
-use srelens_tui::views::helm_view::{render_helm_view, HelmReleaseItem, HelmViewState};
-use srelens_tui::views::logs_view::{render_logs_view, LogsViewState};
-use srelens_tui::views::metrics_panel_view::{
+use srectl::views::cracked_lens::render_cracked_lens;
+use srectl::views::describe_view::{render_describe_view, DescribeViewState};
+use srectl::views::helm_view::{render_helm_view, HelmReleaseItem, HelmViewState};
+use srectl::views::logs_view::{render_logs_view, LogsViewState};
+use srectl::views::metrics_panel_view::{
     render_metrics_panel_modal, MetricsPanelState, MetricsTimeRange,
 };
-use srelens_tui::views::port_forward_view::{
+use srectl::views::port_forward_view::{
     render_port_forward_view, PortForwardEntry, PortForwardViewState,
 };
-use srelens_tui::views::reason_rail::{
+use srectl::views::reason_rail::{
     render_reason_rail_modal, render_reason_rail_widget, tally_event_reasons, ReasonTally,
 };
-use srelens_tui::views::resource_table::{
+use srectl::views::resource_table::{
     default_columns_for_kind, eval_crd_json_path, extract_field_str, is_event_warning_or_failure,
     render_resource_table, ResourceTableState, WorkloadSegment,
 };
-use srelens_tui::views::toolbox_view::{render_toolbox_view, ToolStatusItem, ToolboxViewState};
-use srelens_tui::views::tree_view::{render_tree_view, TreeViewState};
-use srelens_tui::views::{highlight_text_matches, sanitize_span_text};
+use srectl::views::toolbox_view::{render_toolbox_view, ToolStatusItem, ToolboxViewState};
+use srectl::views::tree_view::{render_tree_view, TreeViewState};
+use srectl::views::{highlight_text_matches, sanitize_span_text};
 
 /// Render one frame and hand back the raw buffer so a test can inspect cell
 /// styles (the colour a status cell was drawn in), not only the text.

@@ -907,6 +907,109 @@ describe("Resources", () => {
     expect(await screen.findByRole("combobox", { name: "Namespaces" })).toBeTruthy();
   });
 
+  /**
+   * #821: the namespace a reader wants to narrow by is already on the row that
+   * caught their eye. Clicking it is the picker's own write, made from the
+   * table.
+   */
+  describe("a namespace clicked in the table", () => {
+    const selectionOf = () => store.currentWorkspace().tabs.find((t) => t.route === "/k/pods")!.namespaces;
+
+    it("narrows all namespaces to the one clicked, in this tab's selection and in the watch", async () => {
+      open("/k/pods");
+      await waitFor(() => expect(rowNames()).toEqual(["web-1", "api-7"]));
+      expect(selectionOf()).toBeUndefined();
+
+      await userEvent.click(screen.getByRole("button", { name: "Show only namespace default" }));
+
+      await waitFor(() => expect(selectionOf()).toEqual({ [CTX.stableId]: ["default"] }));
+      // The list is asked for that namespace — the picker's own effect.
+      await waitFor(() =>
+        expect(watchResource.mock.calls.some((call) => call[2] === "pods" && call[1] === "default")).toBe(true),
+      );
+    });
+
+    it("leaves the namespace as plain text once it is selected — there is nothing left to add", async () => {
+      open("/k/pods");
+      await waitFor(() => expect(rowNames()).toEqual(["web-1", "api-7"]));
+
+      await userEvent.click(screen.getByRole("button", { name: "Show only namespace default" }));
+
+      // The list shows the selection's rows only, so every namespace still on
+      // screen is one already selected, and none of them is a control.
+      await waitFor(() => expect(rowNames()).toEqual(["web-1"]));
+      expect(screen.queryByRole("button", { name: /^(Show only|Also show) namespace/ })).toBeNull();
+      expect(selectionOf()).toEqual({ [CTX.stableId]: ["default"] });
+    });
+
+    it("leaves keyboard focus on the row after Enter on the namespace, once the list has narrowed (PR #832 review)", async () => {
+      open("/k/pods");
+      await waitFor(() => expect(rowNames()).toEqual(["web-1", "api-7"]));
+
+      screen.getByRole("button", { name: "Show only namespace default" }).focus();
+      await userEvent.keyboard("{Enter}");
+
+      await waitFor(() => expect(rowNames()).toEqual(["web-1"]));
+      const row = screen.getByText("web-1").closest("tr");
+      expect(document.activeElement).toBe(row);
+    });
+
+    it("does not peek the row the namespace was read off", async () => {
+      open("/k/pods");
+      await waitFor(() => expect(rowNames()).toEqual(["web-1", "api-7"]));
+      const before = detailProps.length;
+
+      await userEvent.click(screen.getByRole("button", { name: "Show only namespace default" }));
+      await waitFor(() => expect(selectionOf()).toEqual({ [CTX.stableId]: ["default"] }));
+
+      expect(detailProps.length).toBe(before);
+    });
+
+    it("offers nothing to click under a credential scoped to one namespace", async () => {
+      useNamespaceOptions.mockReturnValue({ namespaces: ["default"], scope: "default", error: "" });
+      open("/k/pods");
+      // The scope is written to the selection, so only its rows are listed.
+      await waitFor(() => expect(rowNames()).toEqual(["web-1"]));
+
+      expect(screen.queryByRole("button", { name: /^(Show only|Also show) namespace/ })).toBeNull();
+    });
+  });
+
+  /**
+   * #822: from a pod to the node it runs on is one of the commonest steps in
+   * working out why the pod is unwell, and the name was plain text.
+   */
+  describe("a node clicked in the Pods list", () => {
+    const nodeTabs = () =>
+      store.currentWorkspace().tabs.filter((t) => t.route.startsWith("/k/Node/"));
+
+    it("opens that node's detail in a tab on this cluster, and does not peek the pod", async () => {
+      open("/k/pods");
+      await waitFor(() => expect(rowNames()).toEqual(["web-1", "api-7"]));
+      const before = detailProps.length;
+
+      await userEvent.click(screen.getAllByRole("button", { name: "Open node n1" })[0]);
+
+      expect(nodeTabs()).toHaveLength(1);
+      expect(nodeTabs()[0].route.endsWith("/n1")).toBe(true);
+      expect(nodeTabs()[0].sub).toBe("prod-eu");
+      // The pod's row was not what was asked for.
+      expect(detailProps.length).toBe(before);
+    });
+
+    it("leaves a pod with no node yet as a dash, with nothing to open", async () => {
+      watchResource.mockImplementation(async (_c: string, _n: string, _k: string, onRows: (rows: unknown[]) => void) => {
+        onRows([{ ...PODS[0], name: "pending-0", node: "" }]);
+        return { stop };
+      });
+      open("/k/pods");
+      await waitFor(() => expect(rowNames()).toEqual(["pending-0"]));
+
+      expect(screen.queryByRole("button", { name: /^Open node/ })).toBeNull();
+      expect(nodeTabs()).toHaveLength(0);
+    });
+  });
+
   // Zero options while `namespaces` is null reads as "this cluster has no
   // namespaces"; a disabled, spinning stand-in says "not yet" instead.
   it("shows the namespace picker as loading rather than empty before namespaces arrive", async () => {

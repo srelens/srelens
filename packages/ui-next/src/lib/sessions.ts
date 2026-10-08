@@ -118,7 +118,28 @@ export interface LocalSessionRequest {
   /** Extra kubeconfigs to put on the shell's KUBECONFIG. */
   extraKubeconfigs?: string[];
   title?: string;
+  /**
+   * A command to run first, with the shell following it — a `kubectl drain`
+   * the reader has just confirmed, run where they can watch it (#820).
+   *
+   * Handed to the host, which starts it as the terminal's first process. It is
+   * NOT typed into the shell from here: nothing on this side of a PTY can tell
+   * when a shell has finished its rc files and is the one reading, and a
+   * confirmed command typed too early is swallowed — the node silently never
+   * drained. The shell the reader is left in afterwards is their own.
+   *
+   * The caller has already asked. Nothing here confirms anything.
+   */
+  command?: string;
 }
+
+/**
+ * How long a session's output must have stopped before {@link
+ * onSessionSettled}'s listeners are told. Long enough that a command still
+ * printing is not reported between two of its lines; short enough that a
+ * cordon's one line is followed promptly.
+ */
+export const SESSION_SETTLE_MS = 1_000;
 
 let sessions: TerminalSessionRow[] = [];
 const listeners = new Set<() => void>();
@@ -130,6 +151,12 @@ const handles = new Map<number, TerminalConnection>();
 /** Everything wired to a session's emulator, unwired when the row goes. */
 const unwires = new Map<number, () => void>();
 const idleTimers = new Map<number, ReturnType<typeof setTimeout>>();
+/**
+ * Who asked to hear when a session's output settles, and the clock each
+ * session's quiet is measured on. See {@link onSessionSettled}.
+ */
+const settleListeners = new Map<number, Set<() => void>>();
+const settleTimers = new Map<number, ReturnType<typeof setTimeout>>();
 /**
  * The privileged debug pod a `kind: "node"` session is exec'd into — the
  * object `k8s.createNodeDebugPod` left on the cluster, and the store's own to
@@ -229,10 +256,60 @@ export async function startLocalSession(req: LocalSessionRequest): Promise<numbe
     // is honest where naming the cluster's current one would not be.
     namespace: "",
   });
+  // The host runs the command without a shell to echo it, so the line that
+  // says what is running is written here — first, before anything the far
+  // end can say, so the output under it is read as that command's.
+  if (req.command) emulators.get(id)?.write(`\x1b[2m$ ${req.command}\x1b[0m\r\n`);
   await connect(id, (onData, onExit, size) =>
-    startLocalTerminal(req.context, req.extraKubeconfigs ?? [], onData, () => onExit(null), size),
+    startLocalTerminal(
+      req.context,
+      req.extraKubeconfigs ?? [],
+      onData,
+      () => onExit(null),
+      size,
+      req.command,
+    ),
   );
   return id;
+}
+
+/**
+ * Hear when this session's output settles: {@link SESSION_SETTLE_MS} after it
+ * last printed, each time, and once more when its far end goes.
+ *
+ * For a caller that started a command here and holds something the command
+ * changes — the node detail whose Cordon/Uncordon label a `kubectl cordon`
+ * has just made wrong. There is no "the command finished" to report from
+ * outside a shell; output that has stopped is the nearest thing, and a
+ * listener that re-reads on it is right whether it was the command or the
+ * reader's own next line that stopped.
+ *
+ * Returns the release. A session the reader dismisses releases its listeners
+ * itself, and listening to an id that names no session is a no-op.
+ */
+export function onSessionSettled(id: number, listener: () => void): () => void {
+  if (!emulators.has(id)) return () => {};
+  // A session can be over before its starter gets as far as listening — one
+  // that failed to open closes inside `startLocalSession`'s own await. Its
+  // one report has already gone out to nobody, so it is given again here
+  // rather than leaving this listener waiting on a quiet that cannot come.
+  if (sessions.some((s) => s.id === id && s.state === "closed")) {
+    listener();
+    return () => {};
+  }
+  let set = settleListeners.get(id);
+  if (!set) settleListeners.set(id, (set = new Set()));
+  set.add(listener);
+  return () => {
+    set.delete(listener);
+  };
+}
+
+/** Tell this session's listeners its output has settled. */
+function settled(id: number) {
+  clearTimeout(settleTimers.get(id));
+  settleTimers.delete(id);
+  for (const listener of [...(settleListeners.get(id) ?? [])]) listener();
 }
 
 /**
@@ -246,6 +323,7 @@ export async function startLocalSession(req: LocalSessionRequest): Promise<numbe
  */
 export function endSession(id: number): void {
   disconnect(id);
+  settleListeners.delete(id);
   emulators.get(id)?.dispose();
   emulators.delete(id);
   const debugPod = takeDebugPod(id);
@@ -295,6 +373,9 @@ export function __resetSessionsForTests(): void {
   for (const id of [...emulators.keys()]) endSession(id);
   for (const id of [...handles.keys()]) disconnect(id);
   nodeDebugPods.clear();
+  for (const timer of settleTimers.values()) clearTimeout(timer);
+  settleTimers.clear();
+  settleListeners.clear();
   sessions = [];
   listeners.clear();
   seq = 0;
@@ -388,6 +469,13 @@ async function connect(
 function receive(id: number, chunk: string) {
   emulators.get(id)?.write(chunk);
   markActive(id);
+  if (settleListeners.get(id)?.size) {
+    clearTimeout(settleTimers.get(id));
+    settleTimers.set(
+      id,
+      setTimeout(() => settled(id), SESSION_SETTLE_MS),
+    );
+  }
 }
 
 /**
@@ -450,6 +538,9 @@ function close(id: number, reason: unknown) {
   // delete between here and `endSession`, either order.
   const debugPod = takeDebugPod(id);
   if (debugPod) void deleteDebugPod(debugPod);
+  // Whatever the session was running has stopped with it; there will be no
+  // later quiet to report this on.
+  settled(id);
   const error = describedReason(reason);
   commit(
     sessions.map((s) => {
@@ -467,6 +558,8 @@ function close(id: number, reason: unknown) {
 function disconnect(id: number) {
   clearTimeout(idleTimers.get(id));
   idleTimers.delete(id);
+  clearTimeout(settleTimers.get(id));
+  settleTimers.delete(id);
   unwires.get(id)?.();
   unwires.delete(id);
   handles.get(id)?.close();

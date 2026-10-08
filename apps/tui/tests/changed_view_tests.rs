@@ -11,8 +11,8 @@ use srelens_kube::changed::{
 };
 use srelens_kube::events::EventSummary;
 use srelens_registry::github::{CausePull, RolloutCause};
-use srelens_tui::commands::{resolve_command, CommandTarget, ResourceKind};
-use srelens_tui::views::changed_view::{
+use srectl::commands::{resolve_command, CommandTarget, ResourceKind};
+use srectl::views::changed_view::{
     render_changed_view, wrap_message_text, CauseLookup, ChangedTab, ChangedViewState,
     IncidentFilter, QuickRca, QuickRcaStatus,
 };
@@ -608,7 +608,7 @@ fn crash_pod(name: &str) -> PodIncidentDetail {
 
 #[test]
 fn group_pod_symptoms_collapses_identical_pods() {
-    use srelens_tui::views::changed_view::group_pod_symptoms;
+    use srectl::views::changed_view::group_pod_symptoms;
     let pods: Vec<_> = (0..150).map(|i| crash_pod(&format!("api-{i}"))).collect();
     let groups = group_pod_symptoms(&pods);
     assert_eq!(groups.len(), 1);

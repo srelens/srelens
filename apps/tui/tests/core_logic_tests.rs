@@ -19,27 +19,27 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
 
-use srelens_tui::agent::{
+use srectl::agent::{
     build_mcp_server, run_boxed_cursor_turn, run_native_agent_turn, McpToolInvoker,
 };
-use srelens_tui::ai_config::{
+use srectl::ai_config::{
     default_base_url_for_provider, default_model_for_provider, env_var_for_provider,
     provider_display_name, provider_slug, AiProvider, AiSettings, ALL_PROVIDERS,
 };
-use srelens_tui::ai_skills::{
+use srectl::ai_skills::{
     expand_slash_command, load_user_skills_dir, match_slash_commands, parse_caveman_command,
     CavemanCommandAction, CavemanLevel, BUILTIN_PLAYBOOKS,
 };
-use srelens_tui::commands::{
+use srectl::commands::{
     command_suggestions, command_suggestions_with_crds, crd_cache_path, load_cached_crds,
     resolve_command, resolve_command_with_crds, save_cached_crds, CommandTarget, CrdMeta,
     DynamicCommandDef, ResourceKind, COMMAND_REGISTRY,
 };
-use srelens_tui::deep_link::DeepLink;
-use srelens_tui::event::{AppEvent, EventHandler};
-use srelens_tui::sink::TuiSink;
-use srelens_tui::theme::{status_style, Theme};
-use srelens_tui::tui_config::{CommandPopupDensity, TuiConfig};
+use srectl::deep_link::DeepLink;
+use srectl::event::{AppEvent, EventHandler};
+use srectl::sink::TuiSink;
+use srectl::theme::{status_style, Theme};
+use srectl::tui_config::{CommandPopupDensity, TuiConfig};
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -2073,10 +2073,13 @@ fn crd_suggestions_are_scored_by_exact_prefix_alias_and_group() {
 fn tui_config_file_paths_clamping_and_round_trip() {
     let mut env = common::env::lock();
 
-    // 1. Explicit path override
+    // 1. Explicit path override. The documented name wins over the one from
+    // before the srectl rename.
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("nested").join("tui.json");
-    env.set("SRELENS_TUI_CONFIG_PATH", &file);
+    let legacy_file = dir.path().join("legacy.json");
+    env.set("SRECTL_CONFIG_PATH", &file);
+    env.set("SRELENS_TUI_CONFIG_PATH", &legacy_file);
     env.remove("SRELENS_CONFIG_DIR");
     assert_eq!(TuiConfig::config_file_path(), file);
 
@@ -2098,10 +2101,37 @@ fn tui_config_file_paths_clamping_and_round_trip() {
     assert!(file.is_file());
     assert_eq!(TuiConfig::load(), cfg);
 
-    // 3. Fallback to SRELENS_CONFIG_DIR
+    // 3. The previous override still applies when the new name is unset.
+    env.remove("SRECTL_CONFIG_PATH");
+    assert_eq!(TuiConfig::config_file_path(), legacy_file);
+
+    // 4. Fallback to SRELENS_CONFIG_DIR
     env.remove("SRELENS_TUI_CONFIG_PATH");
     env.set("SRELENS_CONFIG_DIR", dir.path());
     assert_eq!(TuiConfig::config_file_path(), dir.path().join("tui.json"));
+
+    // 5. The cwd fallback used to be .srelens-tui.json. Load reads it when
+    // the new file is absent.
+    let cwd_dir = tempfile::tempdir().unwrap();
+    let new_fallback = cwd_dir.path().join(".srectl.json");
+    let old_fallback = cwd_dir.path().join(".srelens-tui.json");
+    std::fs::write(
+        &old_fallback,
+        r#"{"commandPopupMaxWidth":120,"commandPopupMaxVisible":12}"#,
+    )
+    .unwrap();
+    env.remove("SRELENS_CONFIG_DIR");
+    env.set("SRECTL_CONFIG_PATH", &new_fallback);
+    let loaded_legacy = TuiConfig::load();
+    assert_eq!(loaded_legacy.command_popup_max_width, 120);
+    assert_eq!(loaded_legacy.command_popup_max_visible, 12);
+    assert!(!new_fallback.exists());
+
+    // A present file that cannot be read must not use the old fallback.
+    // Invalid UTF-8 makes read_to_string fail on every platform; a directory
+    // does not.
+    std::fs::write(&new_fallback, [0xff_u8]).unwrap();
+    assert_eq!(TuiConfig::load(), TuiConfig::default());
 
     // 4. Clamping out-of-range values
     let mut clamped = TuiConfig {
@@ -2144,9 +2174,9 @@ fn tui_config_file_paths_clamping_and_round_trip() {
     assert!(!low.show_feature_banner);
     assert!(!low.check_updates);
 
-    // 5. Corrupt file gracefully falls back to default
+    // 6. A present but unreadable file is a default, not the old fallback.
     std::fs::write(&file, "{ corrupt json").unwrap();
-    env.set("SRELENS_TUI_CONFIG_PATH", &file);
+    env.set("SRECTL_CONFIG_PATH", &file);
     assert_eq!(TuiConfig::load(), TuiConfig::default());
 }
 
@@ -2183,7 +2213,7 @@ fn crd_cache_persistence_and_sanitization() {
             singular: "virtualmachine".to_string(),
             namespaced: true,
             short_names: vec!["vm".to_string(), "vms".to_string()],
-            printer_columns: vec![srelens_tui::commands::PrinterColumn {
+            printer_columns: vec![srectl::commands::PrinterColumn {
                 name: "AGE".to_string(),
                 json_path: ".metadata.creationTimestamp".to_string(),
                 col_type: "date".to_string(),

@@ -93,6 +93,10 @@ Drag the grip handle (or use the move buttons) to reorder contexts. Right-click 
 context for **Reset identity** or **Remove context**. Removing a context edits the
 kubeconfig on disk and is confirmation-gated.
 
+In the new design the same order can be changed from the cluster rail itself: drag
+a cluster's mark up or down, press Ctrl/Cmd+Shift+Up or Down on a focused mark, or
+use **Move up** / **Move down** in its right-click menu.
+
 ## Browsing resources
 
 The left sidebar groups every resource kind srelens can browse:
@@ -117,7 +121,9 @@ CPU and memory when a metrics server is available.
 choose which columns are visible with the column picker (remembered per kind), and
 scope to one or more namespaces with the namespace selector (empty means all
 namespaces). If your credentials can't list all namespaces, srelens scopes to the
-namespaces you can see and tells you so.
+namespaces you can see and tells you so. In the new design, with all namespaces
+shown, clicking a value in a list's Namespace column scopes the list to that
+namespace, the same as picking it in the selector.
 
 **Bulk actions.** Select rows with their checkboxes to reveal a bar with **Delete**,
 **Evict** (Pods), and **Rollout restart** (Deployments, StatefulSets, DaemonSets).
@@ -172,10 +178,16 @@ Action buttons live in the detail drawer header and are preflighted against your
 RBAC: an action you can't perform is disabled with the reason. Destructive actions
 confirm before running.
 
+In the new design, hovering a resource's name at the top of its detail view shows a
+copy button beside it, which copies the bare name.
+
 **Pods** — Logs, Shell, Debug (attach an ephemeral debug container), Edit, Forward,
 Evict, Delete. Evict and Delete confirm; Debug asks for an image (default
 `busybox`) and an optional container whose process namespace to share, then opens a
 shell into the new debug container.
+
+In the new design, the node name in the Pods list's Node column, and on a pod's
+detail view, opens that node in its own tab.
 
 **Deployments, StatefulSets, DaemonSets, ReplicaSets, Jobs** — Logs, Edit, Scale
 (validated replica count), Restart (rollout restart, applied immediately), Delete.
@@ -188,6 +200,14 @@ shell into the new debug container.
 static pods), and Node shell (a privileged host-namespaced debug pod you get a
 shell into; it is deleted when you close the terminal). Drain and Node shell
 confirm.
+
+In the new design, Cordon/Uncordon and Drain are on a node's row menu in
+**Cluster → Nodes** and on the node's detail view, and all three confirm. On the
+desktop the confirmed action runs as the `kubectl` command the dialog showed, in a
+local terminal scoped to that cluster, so you can watch a drain evict each pod and
+wait on disruption budgets; it needs `kubectl` on your `PATH`. In the browser,
+which has no local terminal, and on the Windows desktop, it runs through the API
+and reports the result when it finishes.
 
 ## Logs
 

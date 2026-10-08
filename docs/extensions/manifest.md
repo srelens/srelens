@@ -1053,8 +1053,9 @@ inside a double-quoted string: `namespace="${namespace}"`. In a regex matcher's 
 `|~ "error" or "${pod:regex}"`) it is written `${name:regex}`, which escapes the value's RE2
 metacharacters first, so `pod=~"${workload:regex}-.+"` matches a workload named `api.v2`
 literally and a cluster named `.*` matches only that name; `${name:regex}` anywhere else
-is refused. The host escapes `\` and `"` in every value, the two escapes PromQL, LogQL
-and TraceQL all document, and holds each value to what it can be: a namespace, workload
+is refused. The host escapes `\` and `"` as it inserts every value, so with each backslash
+doubled a value can neither end its string nor begin one of the languages' other escape
+sequences, such as `\n`, and it holds each value to what it can be: a namespace, workload
 or pod is a Kubernetes name, and a cluster's name is 1–1024 letters, digits and
 `._:/@+-` — what kubeconfig context names carry, from `kind-dev` to an EKS ARN. A value
 outside that is refused rather than sent, so no value can end its string, start a
