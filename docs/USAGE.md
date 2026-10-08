@@ -121,6 +121,10 @@ namespaces you can see and tells you so. In the new design, with all namespaces
 shown, clicking a value in a list's Namespace column scopes the list to that
 namespace, the same as picking it in the selector.
 
+The selection belongs to the tab. In the new design a tab opened from another, such
+as Deployments from the sidebar while you are on Pods, starts with that tab's
+selection and is independent from then on.
+
 **Bulk actions.** Select rows with their checkboxes to reveal a bar with **Delete**,
 **Evict** (Pods), and **Rollout restart** (Deployments, StatefulSets, DaemonSets).
 Each is confirmation-gated and reports partial failures.

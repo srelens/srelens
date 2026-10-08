@@ -193,24 +193,71 @@ export function useTabs() {
  */
 export function openTab(route: string, opts: { preview?: boolean; clusterName?: string } = {}): void {
   patchCurrent((w) => {
+    // The tab the reader is opening this FROM — see `inheritNamespaces`.
+    const source = w.tabs.find((t) => t.id === w.activeId);
     const existing = w.tabs.find((t) => t.route === route);
     if (existing) {
       // Opening for real promotes a preview; re-previewing leaves it be.
       const promoted =
         !opts.preview && existing.preview ? { ...existing, preview: false } : existing;
-      const next = relabel(promoted, opts.clusterName);
+      const next = inheritNamespaces(relabel(promoted, opts.clusterName), source);
       // Identity is the signal, as everywhere else in this store: nothing to
-      // promote and nothing to relabel means no new array and no emit.
+      // promote, relabel or inherit means no new array and no emit.
       const tabs = next === existing ? w.tabs : w.tabs.map((t) => (t.id === existing.id ? next : t));
       if (tabs === w.tabs && w.activeId === existing.id) return w;
       return { ...w, tabs, activeId: existing.id };
     }
-    const next = makeTab(route, opts);
+    const next = inheritNamespaces(makeTab(route, opts), source);
     const previewAt = w.tabs.findIndex((t) => t.preview);
     const tabs =
       opts.preview && previewAt >= 0 ? w.tabs.map((t, i) => (i === previewAt ? next : t)) : [...w.tabs, next];
     return { ...w, tabs, activeId: next.id };
   });
+}
+
+/**
+ * Carry the namespace selection from the tab a reader navigates FROM onto the
+ * tab they land on (#839).
+ *
+ * The selection is per tab, deliberately: narrowing one tab must not narrow
+ * another behind the reader's back. But a tab opened from another started
+ * with no selection at all, so Pods narrowed to two namespaces and then
+ * Deployments from the sidebar was Deployments on "all namespaces" — and for
+ * a reader whose credentials are namespace-scoped, that is not a wider list
+ * but a refusal ("You don't have permission to list deployments at the
+ * cluster scope"), on every kind they visit, until they pick the same
+ * namespaces again.
+ *
+ * So a tab STARTS from where the reader came from, and is its own from then
+ * on. This is a copy at the moment of opening; nothing links the two tabs
+ * afterwards, and changing either leaves the other as it is.
+ *
+ * Per cluster, by `stableId`, and only into the gaps:
+ * - a cluster the source has an entry for and the target does not is copied,
+ *   an explicit empty array — "all namespaces", chosen — included;
+ * - a cluster the target already has an entry for keeps it. That is the
+ *   reader's own choice on that tab, and opening it again from somewhere else
+ *   is not a reason to overrule it;
+ * - a cluster the source has no entry for is left unset, so the target goes on
+ *   following the default-namespace preference there.
+ *
+ * The gaps of an EXISTING tab are filled too, not only a new one's. Tabs
+ * persist across restarts, so the Deployments tab a reader reaches from the
+ * sidebar is as often yesterday's as a fresh one, and one that was never
+ * narrowed is in exactly the state a new tab is.
+ *
+ * The same reference back when there is nothing to carry, which is what
+ * `openTab` reads to decide whether anything changed.
+ */
+function inheritNamespaces(target: Tab, source: Tab | undefined): Tab {
+  if (!source?.namespaces || source.id === target.id) return target;
+  const missing = Object.entries(source.namespaces).filter(([clusterId]) => !(clusterId in (target.namespaces ?? {})));
+  if (missing.length === 0) return target;
+  const namespaces = { ...target.namespaces };
+  // A copy of each list, not the list: the two tabs must not share an array
+  // one of them could be handed back to mutate.
+  for (const [clusterId, selection] of missing) namespaces[clusterId] = [...selection];
+  return { ...target, namespaces };
 }
 
 /**
