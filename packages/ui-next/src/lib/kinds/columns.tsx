@@ -4,6 +4,7 @@ import {
   formatStorageSize,
   jobStatus,
   nodeStatus,
+  nodeUsage,
   phaseKind,
   podStatus,
   scaledStatus,
@@ -40,7 +41,7 @@ import {
   taintTooltip,
 } from "@srelens/core";
 import { AgeCell } from "../ageCell";
-import { Badge, StatusPill, Tooltip, type Column, type Tone } from "@srelens/ui-kit";
+import { Badge, Meter, StatusPill, Tooltip, type Column, type Tone } from "@srelens/ui-kit";
 import { NodeLink } from "../nodeLink";
 
 export type PodRow = PodSummary & { cpu?: number; memory?: number };
@@ -315,6 +316,95 @@ function TaintTally({ row }: { row: NodeRow }) {
   );
 }
 
+/**
+ * A node's CPU and memory as a share of what it can allocate — core's
+ * `nodeUsage`, the one Overview's node rows read, so the two screens cannot
+ * come to mean different things by a percentage.
+ *
+ * The list row carries the metric's two figures flattened onto it (`cpu`,
+ * `memory`); they arrive together or not at all, so one missing is no
+ * reading for either.
+ */
+function nodeLoad(n: NodeRow) {
+  const metric =
+    n.cpu == null || n.memory == null ? undefined : { name: n.name, cpuMillicores: n.cpu, memoryMiB: n.memory };
+  return nodeUsage(n, metric, undefined);
+}
+
+/**
+ * How much room a usage cell asks for, whether or not it holds a bar.
+ *
+ * `Table` measures the natural column widths on the first render that has
+ * rows and pins them, and the node list answers before the metrics do — so
+ * the first render is all dashes. A width that arrived with the bars arrived
+ * after the column had been fixed at the width of a dash, and the bars drew
+ * across the column beside them. Overview's node table hit exactly this; see
+ * `READING_WIDTH` there.
+ */
+const USAGE_CELL = "flex min-w-[13rem] items-center gap-2";
+
+/**
+ * The narrowest a usage column may be dragged: the cell's own 13rem (208px)
+ * and the padding either side of it.
+ *
+ * `Column.minWidth` is the floor a resize stops at, and without one it is
+ * 72px — well under what the cell above will shrink to. Dragged below 13rem
+ * the column kept the width it was given and the bar ran on into the column
+ * beside it, since a table cell does not clip what overflows it.
+ */
+const USAGE_COLUMN_MIN_WIDTH = 232;
+
+/**
+ * One node's CPU or memory in the Nodes list: the amount, and the same bar
+ * Overview draws for it (#830).
+ *
+ * The amount alone does not say whether a node is busy — `1.6 Gi` is nothing
+ * on a 64 Gi node and nearly all of a 2 Gi one — and this is the screen a
+ * reader comes to in order to compare nodes. The bar is the share of the
+ * node's allocatable capacity in use, tinted by load, with the percentage
+ * beside it.
+ *
+ * The amount stays, in front of the bar, because it is what the column showed
+ * before and what a reader sizing a workload still wants; the capacity it is
+ * measured against is in the tooltip (`0.19 cores of 12 cores`).
+ *
+ * Three states, kept apart:
+ * - no metric (no metrics-server, or a node that joined since the last
+ *   scrape): a dash, and no bar — an empty bar would read as an idle node;
+ * - a metric, but the node reports no allocatable capacity: the amount, and
+ *   no bar, since there is nothing to take a share of;
+ * - both: the amount and the bar.
+ */
+function NodeUsageCell({
+  used,
+  allocatable,
+  percent,
+  format,
+  what,
+}: {
+  used: number | undefined;
+  allocatable: number;
+  percent: number | null;
+  format: (value: number) => string;
+  what: string;
+}) {
+  if (used == null) return <div className={USAGE_CELL}>—</div>;
+  const amount = format(used);
+  return (
+    <div className={USAGE_CELL} title={percent === null ? undefined : `${amount} of ${format(allocatable)}`}>
+      <span className="num w-[4.75rem] shrink-0 text-right">{amount}</span>
+      {percent !== null && (
+        <span className="min-w-0 flex-1">
+          {/* Unrounded and unclamped, as on Overview: `Meter` clamps the bar
+              and rounds what it shows, and a node over its allocatable must
+              not be drawn the same as one exactly at it. */}
+          <Meter value={percent} ariaLabel={what} />
+        </span>
+      )}
+    </div>
+  );
+}
+
 export const nodeColumns: Column<NodeRow>[] = [
   { key: "name", header: "Name", sortable: true },
   {
@@ -337,8 +427,41 @@ export const nodeColumns: Column<NodeRow>[] = [
     ),
   },
   { key: "roles", header: "Roles" },
-  { key: "cpu", header: "CPU", sortable: true, align: "end", render: (n) => metric(n.cpu, formatNodeCpu), getSortValue: (n) => metricSort(n.cpu) },
-  { key: "memory", header: "Memory", sortable: true, align: "end", render: (n) => metric(n.memory, formatMemory), getSortValue: (n) => metricSort(n.memory) },
+  {
+    key: "cpu",
+    header: "CPU",
+    sortable: true,
+    minWidth: USAGE_COLUMN_MIN_WIDTH,
+    // By the share of the node in use, which is what the bar draws: sorted on
+    // the amount, a small node at 90% sat below a large one at 20%, and the
+    // column's order contradicted its own bars.
+    getSortValue: (n) => metricSort(nodeLoad(n).cpuPercent ?? undefined),
+    render: (n) => (
+      <NodeUsageCell
+        used={n.cpu}
+        allocatable={n.allocatableCpuMillicores}
+        percent={nodeLoad(n).cpuPercent}
+        format={formatNodeCpu}
+        what={`${n.name} CPU`}
+      />
+    ),
+  },
+  {
+    key: "memory",
+    header: "Memory",
+    sortable: true,
+    minWidth: USAGE_COLUMN_MIN_WIDTH,
+    getSortValue: (n) => metricSort(nodeLoad(n).memoryPercent ?? undefined),
+    render: (n) => (
+      <NodeUsageCell
+        used={n.memory}
+        allocatable={n.allocatableMemoryMiB}
+        percent={nodeLoad(n).memoryPercent}
+        format={formatMemory}
+        what={`${n.name} memory`}
+      />
+    ),
+  },
   { key: "version", header: "Version" },
   {
     key: "taints",
