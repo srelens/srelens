@@ -21,8 +21,17 @@ const AT_START = 1;
 const AT_WORD = 0.8;
 const INSIDE = 0.6;
 
-function isWordChar(ch: string): boolean {
-  return /[\p{L}\p{N}]/u.test(ch);
+/** A letter, a digit, or an accent stored after its letter — anything a word is made of. */
+const WORD_CHAR = /^[\p{L}\p{N}\p{M}]$/u;
+
+/**
+ * The character that ends just before `at`, read whole: a letter outside the
+ * basic plane takes two UTF-16 units, and half of one is not a letter.
+ */
+function charBefore(text: string, at: number): string {
+  const unit = text.charCodeAt(at - 1);
+  const whole = unit >= 0xdc00 && unit <= 0xdfff && at >= 2 ? text.codePointAt(at - 2)! : unit;
+  return String.fromCodePoint(whole > 0xffff ? whole : unit);
 }
 
 /** The best place `needle` occurs in `text`, or 0 when it does not occur at all. */
@@ -30,7 +39,7 @@ function placeIn(text: string, needle: string): number {
   let best = 0;
   for (let at = text.indexOf(needle); at !== -1; at = text.indexOf(needle, at + 1)) {
     if (at === 0) return AT_START;
-    best = Math.max(best, isWordChar(text[at - 1]!) ? INSIDE : AT_WORD);
+    best = Math.max(best, WORD_CHAR.test(charBefore(text, at)) ? INSIDE : AT_WORD);
   }
   return best;
 }

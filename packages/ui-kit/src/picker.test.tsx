@@ -165,6 +165,14 @@ describe("pickerFilter", () => {
     expect(middle).toBeGreaterThan(0);
   });
 
+  it("reads the character before a match whole, when deciding whether it is inside a word", () => {
+    const middle = pickerFilter("contest", "test");
+    // An accent stored after its letter (e + U+0301) is part of the word.
+    expect(pickerFilter("cafe\u0301test", "test")).toBe(middle);
+    // A letter outside the basic plane takes two UTF-16 units (U+1D4B3).
+    expect(pickerFilter("\u{1D4B3}test", "test")).toBe(middle);
+  });
+
   it("ranks by the best place the text is found, across the value and the label", () => {
     expect(pickerFilter("contest", "test", ["Test bed"])).toBe(pickerFilter("test-runner", "test"));
     // An earlier, weaker occurrence does not mask a later, better one.
