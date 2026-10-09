@@ -193,7 +193,7 @@ export interface AppearancePaneProps {
    * and it must stay one: switching back has to work when this screen is the
    * thing being left. `NextApp`'s `leave` is what this is for — it saves the
    * handoff, calls `switchDesign`, and renders a refusal at the window root,
-   * because the classic toast host is not in this tree.
+   * because the toast host was not in this tree when it was written (#374).
    */
   onSwitchToClassic: () => void;
 }

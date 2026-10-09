@@ -101,8 +101,8 @@ export function NextApp({
   const [error, setError] = useState<string | null>(null);
 
   async function leave(route: string, context?: string) {
-    // Rendered here rather than raised as a toast: the toast host lives in the
-    // classic tree, so a failure on the way out would have been invisible and
+    // Rendered here rather than raised as a toast: the toast host lived only in the
+    // classic tree then (#374), so a failure on the way out would have been invisible and
     // this button would have looked inert. (#314 review)
     setError((await onExit(route, context)) ?? null);
   }
