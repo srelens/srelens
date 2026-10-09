@@ -108,6 +108,8 @@
 .home-live-go { flex: 1; min-width: 0; padding: 4px 0; font-size: 13px; text-align: left; }
 .home-live-go:hover { color: var(--accent); }
 .home-app-go { display: flex; align-items: center; gap: 10px; }
+.home-ask-row { display: flex; align-items: center; gap: 6px; }
+.home-ask-row > :first-child { flex: 1; min-width: 0; }
 .home-action { display: grid; grid-template-columns: 18px minmax(0, 1fr) 12px; align-items: center; gap: 12px; width: 100%; min-height: 52px; padding: 10px 20px; border-bottom: 1px solid var(--rule); font-size: 13px; }
 @container (max-width: 720px) {
   .home-intro { align-items: flex-start; flex-direction: column; padding: 24px 20px; gap: 18px; }

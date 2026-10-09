@@ -143,6 +143,17 @@ export async function readClusterAttention(
   }
 }
 
+/** Broken pods before short workloads before warnings: the worst thing first. */
+const RANK: Record<AttentionItem["cause"], number> = { crash: 0, image: 0, replicas: 1, warning: 2 };
+
+/**
+ * Every answered target's items in one list, worst first and otherwise in
+ * target order — the order the strip draws and the suggestions are taken in.
+ */
+export function rankedAttention(targets: readonly ClusterContext[], scans: Readonly<Record<string, ClusterAttention>>): AttentionItem[] {
+  return targets.flatMap((t) => scans[t.stableId]?.items ?? []).sort((a, b) => RANK[a.cause] - RANK[b.cause]);
+}
+
 /** `namespace/name`, or the bare name for a cluster-scoped object such as a Node. */
 export function attentionPath(item: Pick<AttentionItem, "namespace" | "name">): string {
   return item.namespace ? `${item.namespace}/${item.name}` : item.name;

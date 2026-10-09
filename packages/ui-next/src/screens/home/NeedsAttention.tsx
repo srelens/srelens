@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { isTauri, plural, type ClusterContext } from "@srelens/core";
 import { Alert, Button, EmptyState, LoadingState, RawError, StatusPill } from "@srelens/ui-kit";
-import { attentionPath, attentionQuestion, type AttentionItem, type ClusterAttention } from "../../lib/attention";
+import { attentionPath, attentionQuestion, rankedAttention, type ClusterAttention } from "../../lib/attention";
 import { detailRoute } from "../../lib/detailRoute";
 import { summarise } from "../../lib/errorCopy";
 import { getMark } from "../../lib/marks";
@@ -10,9 +10,6 @@ import { useAskAssistant } from "./ask";
 
 /** How many rows show before the reader asks for the rest — a strip, not a second resource list. */
 const SHOWN = 10;
-
-/** Broken pods before short workloads before warnings: the worst thing is at the top. */
-const RANK: Record<AttentionItem["cause"], number> = { crash: 0, image: 0, replicas: 1, warning: 2 };
 
 export interface NeedsAttentionProps {
   /** The clusters that were read: this workspace's connected, unpaused ones. */
@@ -40,9 +37,7 @@ export function NeedsAttention({ targets, scans }: NeedsAttentionProps) {
   const [all, setAll] = useState(false);
   const byId = new Map(targets.map((t) => [t.stableId, t]));
   const label = (t: ClusterContext) => getMark(t.stableId, t.name).name;
-  const items = targets
-    .flatMap((t) => scans[t.stableId]?.items ?? [])
-    .sort((a, b) => RANK[a.cause] - RANK[b.cause]);
+  const items = rankedAttention(targets, scans);
   const pending = targets.filter((t) => !scans[t.stableId]).length;
   const failed = targets.filter((t) => (scans[t.stableId]?.failures.length ?? 0) > 0);
   const short = targets.filter((t) => scans[t.stableId]?.truncated);
