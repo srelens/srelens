@@ -66,7 +66,7 @@ export function AppearanceSettingsSection() {
           aria-pressed={current === "next"}
           disabled={busy}
         >
-          New design (in progress)
+          New design (default)
         </Button>
       </div>
     </div>

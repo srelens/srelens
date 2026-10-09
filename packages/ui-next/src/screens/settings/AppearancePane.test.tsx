@@ -681,6 +681,12 @@ describe("AppearancePane", () => {
       ).toBeDefined();
     });
 
+    it("calls the new design the default, not work in progress", () => {
+      paint();
+      expect(screen.getByText(/you are in the new design, the default/i)).toBeDefined();
+      expect(screen.queryByText(/in progress/i)).toBeNull();
+    });
+
     it("names the screens that have been ported", () => {
       paint();
       expect(screen.getAllByTestId("ported-screen").map((li) => li.textContent)).toEqual(

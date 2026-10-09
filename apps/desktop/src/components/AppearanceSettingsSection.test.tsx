@@ -33,6 +33,12 @@ describe("AppearanceSettingsSection", () => {
     expect(screen.getByRole("button", { name: "Classic (deprecated)" })).toBeDefined();
   });
 
+  it("offers the new design as the default, not as work in progress", () => {
+    render(<AppearanceSettingsSection />);
+    expect(screen.getByRole("button", { name: "New design (default)" })).toBeDefined();
+    expect(screen.queryByText(/in progress/i)).toBeNull();
+  });
+
   it("lists the screens that are already in the new design", () => {
     // Someone weighing the switch should see which screens are there. The
     // list comes from PORTED_SCREENS, the same one the new
