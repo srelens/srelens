@@ -1,4 +1,5 @@
 import { K8S_KIND, WATCHABLE_KINDS, listNamespaces, listNodes, listResource, nodeMetrics, podMetrics, type ResourceKind } from "@srelens/core";
+import { recordUsage } from "../usageHistory";
 import type { Column } from "@srelens/ui-kit";
 import {
   clusterRoleBindingColumns,
@@ -95,11 +96,17 @@ const podEnrich = async (context: string, namespace: string): Promise<Map<RowKey
   // an `api-0` are two readings. Keyed by name, the second overwrote the
   // first and the table then showed — and sorted on — one pod's CPU and
   // memory against the other's row.
+  const readings = (out.metrics ?? []).map((m) => ({
+    key: rowKey({ name: m.name, namespace: m.namespace }),
+    cpu: m.cpuMillicores,
+    memory: m.memoryMiB,
+  }));
+  // Each reading is also kept, so the row can draw where the figure has been
+  // (#864). metrics-server has no past of its own; this window's is the
+  // readings it has been handed, per cluster — see `lib/usageHistory`.
+  const past = recordUsage(context, readings);
   return new Map(
-    (out.metrics ?? []).map((m) => [
-      rowKey({ name: m.name, namespace: m.namespace }),
-      { cpu: m.cpuMillicores, memory: m.memoryMiB },
-    ]),
+    readings.map(({ key, cpu, memory }) => [key, { cpu, memory, usageHistory: past.get(key) ?? [] }]),
   );
 };
 
