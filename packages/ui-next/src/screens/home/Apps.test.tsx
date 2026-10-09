@@ -8,10 +8,10 @@ import { defaultState } from "../../lib/tabs";
 import { activeRoute, setState } from "../../lib/tabsStore";
 import { Apps } from "./Apps";
 
-const inventory = vi.hoisted(() => ({ snapshot: { status: "loading" } as Record<string, unknown> }));
+const inventory = vi.hoisted(() => ({ snapshot: { status: "loading" } as Record<string, unknown>, reload: vi.fn() }));
 vi.mock("../../extensions/inventoryStore", async (original) => ({
   ...(await original<typeof import("../../extensions/inventoryStore")>()),
-  useExtensions: () => ({ ...inventory.snapshot, reload: () => {} }),
+  useExtensions: () => ({ ...inventory.snapshot, reload: inventory.reload }),
 }));
 
 const ctx = (stableId: string, name: string): ClusterContext => ({
@@ -80,5 +80,13 @@ describe("Apps", () => {
     render(<Apps />);
     expect(screen.getByText("Could not read your apps")).toBeTruthy();
     expect(screen.queryByText("No apps installed")).toBeNull();
+  });
+
+  it("offers to read the list again when it could not be read", async () => {
+    inventory.snapshot = { status: "error", error: "connection refused" };
+    inventory.reload.mockReset();
+    render(<Apps />);
+    await userEvent.click(screen.getByRole("button", { name: "Retry reading your apps" }));
+    expect(inventory.reload).toHaveBeenCalledTimes(1);
   });
 });

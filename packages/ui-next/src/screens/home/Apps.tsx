@@ -41,7 +41,12 @@ export function Apps() {
       {inventory.status === "loading" ? (
         <LoadingState label="Reading your apps…" />
       ) : inventory.status === "error" ? (
-        <FailureAlert title="Could not read your apps" error={inventory.error} className="home-section-alert" />
+        <>
+          <FailureAlert title="Could not read your apps" error={inventory.error} className="home-section-alert" />
+          <div className="home-section-foot">
+            <Button variant="secondary" size="sm" aria-label="Retry reading your apps" onClick={inventory.reload}>Retry</Button>
+          </div>
+        </>
       ) : plugins.length === 0 ? (
         <p className="home-note">No apps installed</p>
       ) : (
