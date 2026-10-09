@@ -23,9 +23,10 @@ const label = (context: ClusterContext) => getMark(context.stableId, context.nam
  *
  * Followed logs are checked against their cluster before they are offered,
  * exactly as `/logs` checks them, and only on `targets` — the connected,
- * unpaused clusters — because checking is a read.
+ * unpaused clusters — because checking is a read. For the same reason nothing
+ * is checked while `paused`: Home sealed, behind another tab, or hidden.
  */
-export function PickUp({ targets }: { targets: readonly ClusterContext[] }) {
+export function PickUp({ targets, paused = false }: { targets: readonly ClusterContext[]; paused?: boolean }) {
   const { closed } = useTabs();
   const contexts = useContexts();
   const recents = useAllRecentLogSubjects();
@@ -73,7 +74,7 @@ export function PickUp({ targets }: { targets: readonly ClusterContext[] }) {
             <div>
               <Eyebrow>Recently followed logs</Eyebrow>
               <ul className="home-pick-list">
-                {followed.map((context) => <FollowedLogs key={context.stableId} context={context} />)}
+                {followed.map((context) => <FollowedLogs key={context.stableId} context={context} paused={paused} />)}
               </ul>
             </div>
           )}
@@ -84,8 +85,8 @@ export function PickUp({ targets }: { targets: readonly ClusterContext[] }) {
 }
 
 /** One cluster's checked log subjects, as rows of the list above. */
-function FollowedLogs({ context }: { context: ClusterContext }) {
-  const offered = useOfferedRecents(context.name, context.stableId);
+function FollowedLogs({ context, paused }: { context: ClusterContext; paused: boolean }) {
+  const offered = useOfferedRecents(context.name, context.stableId, paused);
   const where = label(context);
   return (
     <>

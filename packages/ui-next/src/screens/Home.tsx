@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { describeError, listContexts, plural, type ClusterContext } from "@srelens/core";
 import { Badge, Button, EmptyState, LoadingState, Mark, NavIcon, Screen, StatusPill, TextInput, usePortalShowing } from "@srelens/ui-kit";
 import { useAttention, type ClusterAttention } from "../lib/attention";
@@ -20,6 +20,12 @@ import { LiveNow } from "./home/LiveNow";
 import { NeedsAttention } from "./home/NeedsAttention";
 import { PickUp } from "./home/PickUp";
 import { WhatsNew } from "./home/WhatsNew";
+
+const isWindowHidden = () => document.visibilityState === "hidden";
+function onVisibilityChange(listener: () => void): () => void {
+  document.addEventListener("visibilitychange", listener);
+  return () => document.removeEventListener("visibilitychange", listener);
+}
 
 /**
  * App-wide entry point: what needs attention across the workspace, the
@@ -47,6 +53,8 @@ export function Home() {
   const sealed = useWorkspaceSealed();
   const showing = usePortalShowing();
   const scans = useAttention(targets, sealed || !showing);
+  // `useAttention` minds the window itself; the one-off checks in Pick up are told.
+  const hidden = useSyncExternalStore(onVisibilityChange, isWindowHidden, isWindowHidden);
   const [query, setQuery] = useState("");
   const [retrying, setRetrying] = useState(false);
   const mounted = useRef(false);
@@ -102,7 +110,7 @@ export function Home() {
                 </ul>
               )}
             </section>
-            <PickUp targets={targets} />
+            <PickUp targets={targets} paused={sealed || !showing || hidden} />
           </div>
           <aside className="home-start" aria-label="Workspace tools">
             <LiveNow />

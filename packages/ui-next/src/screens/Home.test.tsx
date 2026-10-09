@@ -1,7 +1,7 @@
 import type { ReactElement } from "react";
 import { act, render as rtlRender, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { saveContextOrder, type ClusterContext } from "@srelens/core";
 import { PortalScopeProvider } from "@srelens/ui-kit";
 import { ConsoleProvider } from "../console";
@@ -9,6 +9,7 @@ import { lockWorkspace, resetLock } from "../shell/LockGate";
 import { screenFor } from "../lib/routes";
 import { Home } from "./Home";
 import { resetContexts, setContexts } from "../lib/clusters";
+import { loadRecentLogSubjects, rememberLogSubject } from "../lib/logRecents";
 import { defaultMark, loadMarks, setMark } from "../lib/marks";
 import { activeCluster, activeRoute, currentWorkspace, setState, setClusterPaused } from "../lib/tabsStore";
 import { defaultState } from "../lib/tabs";
@@ -22,6 +23,7 @@ const { listContexts, reads } = vi.hoisted(() => ({
   listContexts: vi.fn(),
   reads: {
     podOverview: vi.fn(), listDeployments: vi.fn(), listStatefulSets: vi.fn(), listDaemonSets: vi.fn(), listEvents: vi.fn(),
+    listResource: vi.fn(),
   },
 }));
 vi.mock("@srelens/core", async original => ({ ...(await original<typeof import("@srelens/core")>()), listContexts, ...reads }));
@@ -36,9 +38,11 @@ beforeEach(() => {
   reads.listStatefulSets.mockReset().mockResolvedValue({ statefulsets: [] });
   reads.listDaemonSets.mockReset().mockResolvedValue({ daemonsets: [] });
   reads.listEvents.mockReset().mockResolvedValue({ events: [] });
-  localStorage.clear(); loadMarks(); resetContexts(); resetView(); resetLock();
+  reads.listResource.mockReset().mockResolvedValue({ items: [] });
+  localStorage.clear(); loadMarks(); resetContexts(); resetView(); resetLock(); loadRecentLogSubjects();
   setState(defaultState([]));
 });
+afterEach(() => vi.restoreAllMocks());
 
 describe("Home", () => {
   it("uses a neutral status for a paused cluster with a retained successful probe", () => {
@@ -149,13 +153,16 @@ describe("Home", () => {
     ["Home is a tab behind another", () => (
       <PortalScopeProvider scope={{ container: undefined, visible: false, hold: () => () => {} }}><Home /></PortalScopeProvider>
     )],
+    ["the window is hidden", () => { vi.spyOn(document, "visibilityState", "get").mockReturnValue("hidden"); return <Home />; }],
   ])("reads nothing while %s", async (_, ui) => {
     setContexts([PROD]);
     setState(defaultState([PROD]));
     setLink(PROD.stableId, "connected");
+    rememberLogSubject({ cluster: PROD.stableId, kind: "Deployment", namespace: "checkout", name: "web" });
     render(ui());
     await act(async () => { await Promise.resolve(); });
     expect(reads.podOverview).not.toHaveBeenCalled();
+    expect(reads.listResource).not.toHaveBeenCalled();
   });
 
   it.each([["Manage connections", "/connections"], ["Settings", "/settings"], ["Release notes", "/notes"]])(

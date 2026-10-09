@@ -290,9 +290,11 @@ export function reviewRecents(
  * forgotten on a list that failed.
  *
  * Shared by `/logs`' empty state and Home's "Pick up where you left off", so
- * the two cannot disagree about which subjects are still there.
+ * the two cannot disagree about which subjects are still there. `paused` holds
+ * the checks back — Home behind another tab, sealed, or in a hidden window —
+ * and they run when it clears.
  */
-export function useOfferedRecents(context: string, clusterId: string): OfferedRecent[] {
+export function useOfferedRecents(context: string, clusterId: string, paused = false): OfferedRecent[] {
   const entries = useRecentLogSubjects(clusterId);
   const [scans, setScans] = useState<ReadonlyMap<string, SubjectScan>>(() => new Map());
   /**
@@ -309,10 +311,13 @@ export function useOfferedRecents(context: string, clusterId: string): OfferedRe
   const scanKeys = useMemo(() => [...new Set(entries.map(scanKey))].sort().join("\n"), [entries]);
 
   useEffect(() => {
+    if (paused) return;
     let alive = true;
+    const unanswered = new Set<string>();
     for (const key of scanKeys === "" ? [] : scanKeys.split("\n")) {
       if (asked.current.has(key)) continue;
       asked.current.add(key);
+      unanswered.add(key);
       const [kind, namespace] = key.split("\u0000");
       // `listResource` reports failure by returning `{ error }` rather than
       // throwing, so this reads the field — and keeps the failure AS a
@@ -320,14 +325,17 @@ export function useOfferedRecents(context: string, clusterId: string): OfferedRe
       // answer as an unanswered one.
       void listResource(context, kind, namespace).then((out) => {
         if (!alive) return;
+        unanswered.delete(key);
         const scan: SubjectScan = out.error !== undefined ? { error: true } : { names: (out.items ?? []).map((item) => item.name) };
         setScans((current) => new Map(current).set(key, scan));
       });
     }
     return () => {
       alive = false;
+      // An answer this run will now drop was never had: ask again next run.
+      for (const key of unanswered) asked.current.delete(key);
     };
-  }, [context, scanKeys]);
+  }, [context, scanKeys, paused]);
 
   const { offered, forget } = useMemo(() => reviewRecents(entries, scans), [entries, scans]);
 

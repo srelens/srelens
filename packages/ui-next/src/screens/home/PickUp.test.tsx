@@ -94,6 +94,30 @@ describe("PickUp", () => {
     expect(screen.queryByRole("button", { name: /^Follow logs/ })).toBeNull();
   });
 
+  it("checks no followed logs while Home is paused, and checks them once it is not", async () => {
+    rememberLogSubject({ cluster: PROD.stableId, kind: "Deployment", namespace: "checkout", name: "web" }, memory());
+    listResource.mockResolvedValue({ items: [{ name: "web" }] });
+    const view = render(<PickUp targets={[PROD]} paused />);
+    await act(async () => { await Promise.resolve(); });
+    expect(listResource).not.toHaveBeenCalled();
+    view.rerender(<PickUp targets={[PROD]} paused={false} />);
+    expect(await screen.findByRole("button", { name: "Follow logs of Deployment checkout/web on prod" })).toBeTruthy();
+    expect(listResource).toHaveBeenCalledTimes(1);
+  });
+
+  it("asks again for a check a pause cut off, once Home resumes", async () => {
+    rememberLogSubject({ cluster: PROD.stableId, kind: "Deployment", namespace: "checkout", name: "web" }, memory());
+    let answer!: (value: unknown) => void;
+    listResource.mockImplementationOnce(() => new Promise((done) => { answer = done; })).mockResolvedValue({ items: [{ name: "web" }] });
+    const view = render(<PickUp targets={[PROD]} paused={false} />);
+    await act(async () => { await Promise.resolve(); });
+    view.rerender(<PickUp targets={[PROD]} paused />);
+    await act(async () => { answer({ items: [{ name: "web" }] }); await Promise.resolve(); });
+    view.rerender(<PickUp targets={[PROD]} paused={false} />);
+    expect(await screen.findByRole("button", { name: "Follow logs of Deployment checkout/web on prod" })).toBeTruthy();
+    expect(listResource).toHaveBeenCalledTimes(2);
+  });
+
   it("says there is nothing to pick up yet rather than drawing an empty list", () => {
     render(<PickUp targets={[PROD]} />);
     expect(screen.getByRole("heading", { name: "Pick up where you left off", level: 2 })).toBeTruthy();
