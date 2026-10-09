@@ -14,8 +14,8 @@ import { useContexts } from "../../lib/clusters";
 import { FailureAlert } from "../../lib/errorCopy";
 import { openOnCluster } from "../../lib/openCluster";
 import { endSession, getSessions, subscribeSessions } from "../../lib/sessions";
+import { useLiveLogStreams } from "../../lib/liveLogStreams";
 import { activateTab, closeTab, openTab, useTabs } from "../../lib/tabsStore";
-import { parseLogsRoute } from "../Logs";
 
 /**
  * "Live now": what this window is holding open — running port-forwards, open
@@ -23,20 +23,24 @@ import { parseLogsRoute } from "../Logs";
  * to stop it, from the stores that already own them. Not drawn when nothing is
  * live, because an empty "Live now" is a heading over nothing.
  *
- * A logs tab IS its stream: tabs stay mounted behind the one on screen, so the
- * stream runs while the tab is open and stops when it closes. That is what
- * Stop does. A shell is jumped to through `/terminals`, which shows the newest
- * session; the store keeps no way to ask it for a particular one.
+ * A log stream lives in its tab: tabs stay mounted behind the one on screen,
+ * so the stream runs while the tab is open and stops when it closes, which is
+ * what Stop does. Only a tab whose stream is actually running is listed — the
+ * stream marks its own tab (`lib/liveLogStreams`), because a logs route alone
+ * may be a subject that never resolved. A shell is jumped to through
+ * `/terminals`, which shows the newest session; the store keeps no way to ask
+ * it for a particular one.
  */
 export function LiveNow() {
   const forwards = useSyncExternalStore(subscribeForwards, getForwards, getForwards);
   const sessions = useSyncExternalStore(subscribeSessions, getSessions, getSessions);
   const { tabs } = useTabs();
+  const streaming = useLiveLogStreams();
   const contexts = useContexts();
   const [failure, setFailure] = useState<{ title: string; error: unknown } | null>(null);
   const running = forwards.filter((f) => !isForwardEnded(f));
   const shells = sessions.filter((s) => s.state !== "closed");
-  const logs = tabs.filter((t) => parseLogsRoute(t.route) !== null);
+  const logs = tabs.filter((t) => streaming.has(t.id));
   if (running.length === 0 && shells.length === 0 && logs.length === 0 && !failure) return null;
 
   // Forwards and shells name their cluster by context name.

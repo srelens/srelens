@@ -53,6 +53,8 @@ import {
   type PreviousInstance,
 } from "../lib/logSubject";
 import { recentKey, rememberLogSubject, useOfferedRecents } from "../lib/logRecents";
+import { useMarkLogStream } from "../lib/liveLogStreams";
+import { useTabScope } from "../lib/tabScope";
 import { openTab } from "../lib/tabsStore";
 import {
   StreamRail,
@@ -773,6 +775,8 @@ function LogsStream({
     tailLines: TAIL_LINES,
     source: provider.source,
   });
+  // Home's "Live now" lists this tab only while the stream is actually running.
+  useMarkLogStream(useTabScope(), stream.status !== "error" && stream.status !== "completed");
   /**
    * The restarts the "Scrollback cleared" notice is not about. That notice says a
    * change of window reopened the stream and nothing already sent comes back. A change

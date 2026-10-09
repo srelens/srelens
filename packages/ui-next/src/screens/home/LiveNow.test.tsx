@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { browsable, forwardAddress, type ActiveForward, type ClusterContext } from "@srelens/core";
 import { resetContexts, setContexts } from "../../lib/clusters";
+import { markLogStream } from "../../lib/liveLogStreams";
 import { loadMarks } from "../../lib/marks";
 import type { TerminalSessionRow } from "../../lib/sessions";
 import { defaultState } from "../../lib/tabs";
@@ -108,8 +109,16 @@ describe("LiveNow", () => {
     expect(activeRoute()).toBe("/terminals");
   });
 
+  it("does not count an open logs tab as live until its stream is running", () => {
+    openTab(logsRoute("Deployment", "checkout", "web"), { clusterName: "prod" });
+    openTab("/");
+    const { container } = render(<LiveNow />);
+    expect(container.innerHTML).toBe("");
+  });
+
   it("jumps to and stops a logs tab that is following a stream", async () => {
     openTab(logsRoute("Deployment", "checkout", "web"), { clusterName: "prod" });
+    markLogStream(currentWorkspace().activeId, true);
     openTab("/");
     render(<LiveNow />);
     await userEvent.click(screen.getByRole("button", { name: "Go to web · logs" }));
