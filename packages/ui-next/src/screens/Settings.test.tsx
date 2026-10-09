@@ -43,6 +43,7 @@ vi.mock("@srelens/core", async (orig) => ({
 }));
 
 import type { VaultBiometricStatus } from "@srelens/core";
+import { openSettings } from "../lib/settingsRequest";
 import { Settings } from "./Settings";
 
 const ROUTE = "/settings";
@@ -144,6 +145,26 @@ describe("Settings", () => {
   it("lists every section, in order, and no section it cannot fill", () => {
     paint();
     expect(sections()).toEqual(DESKTOP_SECTIONS);
+  });
+
+  it("opens on the section another screen asked for, and moves to one asked for while open", async () => {
+    openSettings("extensions", "catalog");
+    paint();
+    const rail = screen.getByRole("complementary", { name: "Settings" });
+    expect(within(rail).getByRole("tab", { name: "Apps" }).getAttribute("aria-selected")).toBe("true");
+    expect((await screen.findByRole("tab", { name: "Catalog" })).getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByRole("region", { name: "App catalog" })).toBeTruthy();
+    act(() => openSettings("appearance"));
+    expect(within(rail).getByRole("tab", { name: "Appearance" }).getAttribute("aria-selected")).toBe("true");
+  });
+
+  it("moves an open Apps section to its catalog when asked", async () => {
+    openSettings("extensions");
+    paint();
+    expect((await screen.findByRole("tab", { name: "Catalog" })).getAttribute("aria-selected")).toBe("false");
+    act(() => openSettings("extensions", "catalog"));
+    expect(screen.getByRole("tab", { name: "Catalog" }).getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByRole("region", { name: "App catalog" })).toBeTruthy();
   });
 
   /**
