@@ -13,6 +13,7 @@ import { openTab } from "../lib/tabsStore";
 import { LINK_WORD, useWorkspaceView } from "../lib/workspace";
 import { useTabs } from "../lib/tabsStore";
 import { useWorkspaceSealed } from "../shell/LockGate";
+import { Apps } from "./home/Apps";
 import { LiveNow } from "./home/LiveNow";
 import { NeedsAttention } from "./home/NeedsAttention";
 import { PickUp } from "./home/PickUp";
@@ -102,6 +103,7 @@ export function Home() {
           </div>
           <aside className="home-start" aria-label="Workspace tools">
             <LiveNow />
+            <Apps />
             <h2 className="home-section-heading">Quick links</h2>
             <HomeAction title="Manage connections" icon={Icons.cluster} route="/connections" />
             <HomeAction title="Settings" icon={Icons.settings} route="/settings" />
