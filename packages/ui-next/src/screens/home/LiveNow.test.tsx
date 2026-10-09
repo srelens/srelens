@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { browsable, forwardAddress, type ActiveForward, type ClusterContext } from "@srelens/core";
 import { resetContexts, setContexts } from "../../lib/clusters";
-import { markLogStream } from "../../lib/liveLogStreams";
+import { __resetLiveLogStreamsForTests, liveLogStreams, markLogStream } from "../../lib/liveLogStreams";
 import { loadMarks } from "../../lib/marks";
 import type { TerminalSessionRow } from "../../lib/sessions";
 import { defaultState } from "../../lib/tabs";
@@ -51,6 +51,7 @@ beforeEach(() => {
   core.stopPortForward.mockReset().mockResolvedValue(undefined);
   core.openExternal.mockReset().mockResolvedValue(undefined);
   shells.endSession.mockReset();
+  __resetLiveLogStreamsForTests();
   localStorage.clear(); loadMarks(); resetContexts();
   setContexts([PROD, STAGE]);
   setState(defaultState([PROD, STAGE]));
@@ -136,5 +137,10 @@ describe("LiveNow", () => {
     expect(activeRoute()).toBe(logsRoute("Deployment", "checkout", "web"));
     await userEvent.click(screen.getByRole("button", { name: "Stop web · logs" }));
     expect(currentWorkspace().tabs.map((t) => t.route)).toEqual(["/"]);
+  });
+
+  // Last on purpose: the tests above mark streams, and none of them may leak into the next.
+  it("starts with no stream marked by an earlier test", () => {
+    expect(liveLogStreams().size).toBe(0);
   });
 });

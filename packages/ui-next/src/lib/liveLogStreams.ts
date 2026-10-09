@@ -46,3 +46,9 @@ export function useMarkLogStream(tabId: string | null, running: boolean): void {
     return () => markLogStream(tabId, false);
   }, [tabId, running]);
 }
+
+/** Forget every mark — for tests, which share this module's state. */
+export function __resetLiveLogStreamsForTests(): void {
+  live = new Set();
+  for (const listener of [...listeners]) listener();
+}
