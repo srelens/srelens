@@ -113,6 +113,13 @@ describe("readClusterAttention", () => {
     core.podOverview.mockResolvedValue({ pods: { total: 900, byNode: [], unsettled: [], truncated: true } });
     expect((await readClusterAttention(ctx("prod-id"), NOW)).truncated).toBe(true);
   });
+
+  it("says when the event read stopped short, since recent warnings may be past the cap", async () => {
+    core.listEvents.mockResolvedValue({ events: [], truncated: true });
+    const scan = await readClusterAttention(ctx("prod-id"), NOW);
+    expect(scan.eventsTruncated).toBe(true);
+    expect(scan.truncated).toBe(false);
+  });
 });
 
 describe("attentionQuestion", () => {

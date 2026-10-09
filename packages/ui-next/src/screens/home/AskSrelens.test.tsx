@@ -22,7 +22,7 @@ const item = (cluster: ClusterContext, over: Partial<AttentionItem>): AttentionI
   clusterId: cluster.stableId, cluster: cluster.name, kind: "Pod", namespace: "checkout", name: "web-7d4b",
   problem: "CrashLoopBackOff", cause: "crash", ...over,
 });
-const scan = (items: AttentionItem[]): ClusterAttention => ({ items, failures: [], truncated: false });
+const scan = (items: AttentionItem[]): ClusterAttention => ({ items, failures: [], truncated: false, eventsTruncated: false });
 
 function Draft() {
   return <output aria-label="Assistant draft">{useConsole().draft}</output>;

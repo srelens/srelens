@@ -41,6 +41,7 @@ export function NeedsAttention({ targets, scans }: NeedsAttentionProps) {
   const pending = targets.filter((t) => !scans[t.stableId]).length;
   const failed = targets.filter((t) => (scans[t.stableId]?.failures.length ?? 0) > 0);
   const short = targets.filter((t) => scans[t.stableId]?.truncated);
+  const eventsShort = targets.filter((t) => scans[t.stableId]?.eventsTruncated);
   const shown = all ? items : items.slice(0, SHOWN);
 
   return (
@@ -74,6 +75,11 @@ export function NeedsAttention({ targets, scans }: NeedsAttentionProps) {
               The list stops before the whole set. The cluster&rsquo;s pod list has all of them.
             </Alert>
           ))}
+          {eventsShort.map((t) => (
+            <Alert key={t.stableId} tone="warn" title={`Not every event on ${label(t)} could be read`} className="home-section-alert">
+              The event list stopped at its limit, so recent warnings may be missing here. The cluster&rsquo;s Events screen has them all.
+            </Alert>
+          ))}
           {pending > 0 && <p className="home-note">Still checking {plural(pending, "cluster")}</p>}
           {items.length > 0 ? (
             <ul className="home-attention-list" aria-label="Things that need attention">
@@ -104,7 +110,7 @@ export function NeedsAttention({ targets, scans }: NeedsAttentionProps) {
               })}
             </ul>
           ) : (
-            pending === 0 && failed.length === 0 && short.length === 0 && (
+            pending === 0 && failed.length === 0 && short.length === 0 && eventsShort.length === 0 && (
               <EmptyState
                 compact
                 title="Nothing needs attention"

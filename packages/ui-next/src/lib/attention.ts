@@ -64,6 +64,12 @@ export interface ClusterAttention {
   failures: string[];
   /** The pod read stopped before the whole list — see `PodOverview.truncated`. */
   truncated: boolean;
+  /**
+   * The event list stopped at the backend's cap. Recent warnings can sit past
+   * it on a busy cluster, so "no warnings in the last hour" is not a claim
+   * this read can make.
+   */
+  eventsTruncated: boolean;
 }
 
 /** kubectl's words for a pod that cannot pull its image: the first try, the back-off, a bad name. */
@@ -137,9 +143,9 @@ export async function readClusterAttention(
       if (!object.kind || !object.name) continue;
       add({ kind: object.kind, namespace: event.namespace, name: object.name, problem: event.reason, cause: "warning" });
     }
-    return { items, failures, truncated: pods.pods?.truncated ?? false };
+    return { items, failures, truncated: pods.pods?.truncated ?? false, eventsTruncated: events.truncated ?? false };
   } catch (cause) {
-    return { items: [], failures: [String(cause)], truncated: false };
+    return { items: [], failures: [String(cause)], truncated: false, eventsTruncated: false };
   }
 }
 

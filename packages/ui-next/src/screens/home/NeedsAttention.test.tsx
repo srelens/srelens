@@ -25,7 +25,7 @@ const item = (cluster: ClusterContext, over: Partial<AttentionItem> = {}): Atten
   clusterId: cluster.stableId, cluster: cluster.name, kind: "Pod", namespace: "checkout", name: "web-7d4b",
   problem: "CrashLoopBackOff", cause: "crash", ...over,
 });
-const answered = (items: AttentionItem[], failures: string[] = []): ClusterAttention => ({ items, failures, truncated: false });
+const answered = (items: AttentionItem[], failures: string[] = []): ClusterAttention => ({ items, failures, truncated: false, eventsTruncated: false });
 
 function Draft() {
   return <output aria-label="Assistant draft">{useConsole().draft}</output>;
@@ -113,8 +113,14 @@ describe("NeedsAttention", () => {
     expect(screen.queryByText("Nothing needs attention")).toBeNull();
   });
 
+  it("says an event list that stopped short may be missing warnings, and claims none are absent", () => {
+    show([PROD], { [PROD.stableId]: { items: [], failures: [], truncated: false, eventsTruncated: true } });
+    expect(screen.getByText("Not every event on prod could be read")).toBeTruthy();
+    expect(screen.queryByText("Nothing needs attention")).toBeNull();
+  });
+
   it("says a pod list that stopped short is short", () => {
-    show([PROD], { [PROD.stableId]: { items: [], failures: [], truncated: true } });
+    show([PROD], { [PROD.stableId]: { items: [], failures: [], truncated: true, eventsTruncated: false } });
     expect(screen.getByText("More pods on prod may need a look than this shows")).toBeTruthy();
     expect(screen.queryByText("Nothing needs attention")).toBeNull();
   });
