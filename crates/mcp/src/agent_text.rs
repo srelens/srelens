@@ -20,14 +20,29 @@ const LAST_APPLIED: &str = "kubectl.kubernetes.io/last-applied-configuration";
 /// summarizer parses it): `managedFields`, the copy of the manifest kubectl
 /// keeps in an annotation, and the image cache a Node reports.
 pub(crate) fn trim(v: &mut Value) {
+    trim_within(v, false);
+}
+
+/// [`trim`], where `inside` says `v` lies in a Kubernetes object's body.
+///
+/// Only an object's own `metadata` is trimmed, the one that `apiVersion` and
+/// `kind` beside it mark, and only an object the answer carries, not one inside
+/// another. Everything in an object's body is its author's data: a `metadata`
+/// in a spec, or a whole manifest a composition embeds there, `apiVersion` and
+/// all. The one exception is a list's `items`, which are objects in their own
+/// right. A projection keyed by path is not an object at all.
+fn trim_within(v: &mut Value, inside: bool) {
     match v {
-        Value::Array(items) => items.iter_mut().for_each(trim),
+        Value::Array(items) => items.iter_mut().for_each(|item| trim_within(item, inside)),
         Value::Object(map) => {
-            // Only in a Kubernetes object's own `metadata`, which `apiVersion`
-            // and `kind` beside it mark. A `metadata` in its spec, or in a
-            // projection keyed by path, is someone's data.
-            let is_object = map.get("apiVersion").is_some_and(Value::is_string)
+            let is_object = !inside
+                && map.get("apiVersion").is_some_and(Value::is_string)
                 && map.get("kind").is_some_and(Value::is_string);
+            let is_list = is_object
+                && map
+                    .get("kind")
+                    .and_then(Value::as_str)
+                    .is_some_and(|kind| kind.ends_with("List"));
             if let Some(Value::Object(meta)) = map.get_mut("metadata").filter(|_| is_object) {
                 meta.remove("managedFields");
                 if let Some(Value::String(applied)) = meta
@@ -41,7 +56,8 @@ pub(crate) fn trim(v: &mut Value) {
                 }
             }
             // The core group's Node only: a custom resource may share the name.
-            if map.get("apiVersion").and_then(Value::as_str) == Some("v1")
+            if is_object
+                && map.get("apiVersion").and_then(Value::as_str) == Some("v1")
                 && map.get("kind").and_then(Value::as_str) == Some("Node")
             {
                 if let Some(images) = map.get_mut("status").and_then(|s| s.get_mut("images")) {
@@ -52,7 +68,9 @@ pub(crate) fn trim(v: &mut Value) {
                     }
                 }
             }
-            map.values_mut().for_each(trim);
+            for (key, child) in map.iter_mut() {
+                trim_within(child, inside || (is_object && !(is_list && key == "items")));
+            }
         }
         _ => {}
     }
@@ -193,6 +211,47 @@ mod tests {
         let mut v = json!({ "items": [{ "apiVersion": "v1", "kind": "Node", "status": { "images": [{}] } }] });
         trim(&mut v);
         assert!(v["items"][0]["status"]["images"].is_string());
+    }
+
+    /// A composition-style custom resource carries whole manifests in its
+    /// spec, `apiVersion`, `kind` and all. They are the author's data, not
+    /// objects the API server wrote, so nothing inside the resource is trimmed.
+    #[test]
+    fn a_manifest_embedded_in_a_custom_resources_spec_stays_whole() {
+        let embedded = json!({
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": {
+                "managedFields": [{ "manager": "mine" }],
+                "annotations": { LAST_APPLIED: "mine" }
+            }
+        });
+        let mut v = json!({
+            "apiVersion": "example.io/v1",
+            "kind": "Composition",
+            "metadata": { "name": "c", "managedFields": [] },
+            "spec": { "resources": [embedded.clone()] }
+        });
+        trim(&mut v);
+        assert_eq!(v["metadata"], json!({ "name": "c" }));
+        assert_eq!(v["spec"]["resources"][0], embedded);
+    }
+
+    /// A `kind: List` (and `PodList` and the rest) is an object whose items are
+    /// objects in their own right, so each item is trimmed as one.
+    #[test]
+    fn the_items_of_a_kind_list_are_trimmed() {
+        let mut v = json!({
+            "apiVersion": "v1",
+            "kind": "List",
+            "items": [{
+                "apiVersion": "apps/v1",
+                "kind": "Deployment",
+                "metadata": { "name": "web", "managedFields": [] }
+            }]
+        });
+        trim(&mut v);
+        assert_eq!(v["items"][0]["metadata"], json!({ "name": "web" }));
     }
 
     #[test]
