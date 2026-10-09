@@ -7,7 +7,7 @@ import { markLogStream } from "../../lib/liveLogStreams";
 import { loadMarks } from "../../lib/marks";
 import type { TerminalSessionRow } from "../../lib/sessions";
 import { defaultState } from "../../lib/tabs";
-import { activeCluster, activeRoute, currentWorkspace, openTab, setState } from "../../lib/tabsStore";
+import { activeCluster, activeRoute, currentWorkspace, openTab, setState, togglePin } from "../../lib/tabsStore";
 import { logsRoute } from "../Logs";
 import { LiveNow } from "./LiveNow";
 
@@ -114,6 +114,17 @@ describe("LiveNow", () => {
     openTab("/");
     const { container } = render(<LiveNow />);
     expect(container.innerHTML).toBe("");
+  });
+
+  it("stops a pinned logs tab too, rather than leaving it streaming", async () => {
+    openTab(logsRoute("Deployment", "checkout", "web"), { clusterName: "prod" });
+    const logsTab = currentWorkspace().activeId;
+    togglePin(logsTab);
+    markLogStream(logsTab, true);
+    openTab("/");
+    render(<LiveNow />);
+    await userEvent.click(screen.getByRole("button", { name: "Stop web · logs" }));
+    expect(currentWorkspace().tabs.map((t) => t.route)).toEqual(["/"]);
   });
 
   it("jumps to and stops a logs tab that is following a stream", async () => {

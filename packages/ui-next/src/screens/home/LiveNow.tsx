@@ -15,7 +15,7 @@ import { FailureAlert } from "../../lib/errorCopy";
 import { openOnCluster } from "../../lib/openCluster";
 import { endSession, getSessions, subscribeSessions } from "../../lib/sessions";
 import { useLiveLogStreams } from "../../lib/liveLogStreams";
-import { activateTab, closeTab, openTab, useTabs } from "../../lib/tabsStore";
+import { activateTab, closeTab, openTab, togglePin, useTabs } from "../../lib/tabsStore";
 
 /**
  * "Live now": what this window is holding open — running port-forwards, open
@@ -93,7 +93,19 @@ export function LiveNow() {
         <LiveGroup title="Log streams">
           {logs.map((t) => (
             <LiveRow key={t.id} label={t.title} detail={t.sub} go={{ label: `Go to ${t.title}`, run: () => activateTab(t.id) }}>
-              <Button variant="secondary" size="sm" aria-label={`Stop ${t.title}`} title="Stops the stream and closes its tab" onClick={() => closeTab(t.id)}>Stop</Button>
+              <Button
+                variant="secondary"
+                size="sm"
+                aria-label={`Stop ${t.title}`}
+                title={t.pinned ? "Unpins its tab and closes it, which stops the stream" : "Stops the stream and closes its tab"}
+                onClick={() => {
+                  // `closeTab` refuses a pinned tab — silently — and Stop must stop.
+                  if (t.pinned) togglePin(t.id);
+                  closeTab(t.id);
+                }}
+              >
+                Stop
+              </Button>
             </LiveRow>
           ))}
         </LiveGroup>
