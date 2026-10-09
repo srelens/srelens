@@ -50,7 +50,13 @@ import {
   loadMcpSettings,
 } from "@srelens/core";
 import { applyUiScale, getUiScale, setUiScale, stepUiScale, uiScaleShortcut } from "@srelens/core";
-import { checkDeepLink, dedupeDeepLinkTargets, DEEP_LINK_REFUSED, type DeepLinkTarget } from "@srelens/core";
+import {
+  checkDeepLink,
+  dedupeDeepLinkTargets,
+  deepLinkHeldNotice,
+  DEEP_LINK_REFUSED,
+  type DeepLinkTarget,
+} from "@srelens/core";
 import { applyViewPatch, type TabViewState } from "@srelens/core";
 import {
   remapTabsToContexts,
@@ -362,13 +368,18 @@ export function App() {
   // Routed only once the contexts are known: a link that arrives during a cold
   // start would otherwise be judged against an empty context list and
   // rejected as pointing at a cluster that "doesn't exist".
+  //
+  // A listing that FAILED is no answer either (#855): a link naming a context
+  // it did not return stays queued, one notice says why, and the re-list that
+  // follows (`kubeconfig-changed`, a file added) judges it again.
+  const heldLinksNotified = useRef(false);
   useEffect(() => {
+    if (!contextsError) heldLinksNotified.current = false;
     if (pendingLinks.length === 0 || !contexts) return;
     // Drain the whole queue: several links can arrive while the contexts are
     // still loading, and routing only the newest would silently swallow the
     // rest. They open in order, so the last one ends up in front.
     const queued = pendingLinks;
-    setPendingLinks([]);
 
     // Validate first, then route: a batch is applied against ONE render's
     // `tabs`, so links sharing a view have to be collapsed before any of them
@@ -376,10 +387,23 @@ export function App() {
     // with the new design, so a link refused here is refused there too.
     const names = contexts.map((c) => c.name);
     const valid: DeepLinkTarget[] = [];
+    const held: string[] = [];
     for (const url of queued) {
-      const check = checkDeepLink(url, names);
+      const check = checkDeepLink(url, names, { listingFailed: contextsError !== "" });
       if (check.ok) valid.push(check.target);
+      else if (check.held) held.push(url);
       else notify.error(DEEP_LINK_REFUSED, check.reason);
+    }
+    if (held.length > 0 && !heldLinksNotified.current) {
+      heldLinksNotified.current = true;
+      const notice = deepLinkHeldNotice(contextsError);
+      notify.error(notice.title, notice.detail);
+    }
+    // Only when something left the queue: re-queuing the held links unchanged
+    // would wake this effect again for nothing. What is taken off the front is
+    // exactly `queued`, so links a drain appended meanwhile are kept.
+    if (held.length < queued.length) {
+      setPendingLinks((current) => [...held, ...current.slice(queued.length)]);
     }
 
     for (const target of dedupeDeepLinkTargets(valid)) {
@@ -396,7 +420,7 @@ export function App() {
         target.name,
       );
     }
-  }, [pendingLinks, contexts]);
+  }, [pendingLinks, contexts, contextsError]);
 
   // Restored CRD tabs carry a CrdRef captured in a previous session (#159).
   // The CRD may since have been deleted, or may now serve a different version,
