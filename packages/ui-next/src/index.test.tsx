@@ -59,14 +59,14 @@ describe("NextApp", () => {
     expect(onExit).toHaveBeenCalledTimes(1);
   });
 
-  it("shows why it could not leave, since there is no toast host here", async () => {
-    // The Toaster lives in the classic tree, so a failure on the way out would
-    // be invisible and the button would look inert. (#314 review)
+  it("shows why it could not leave, at the window root", async () => {
+    // Otherwise the button would look inert. (#314 review) Found by its text:
+    // the window's toasts are alerts too, and boot in jsdom raises one.
     render(<NextApp onExit={() => "storage refused the preference"} />);
     await screen.findByRole("tablist");
     act(() => openTab("/incidents"));
     await userEvent.click(screen.getByRole("button", { name: /open in classic/i }));
-    expect(screen.getByRole("alert").textContent).toContain("storage refused");
+    expect(screen.getByText(/storage refused/).getAttribute("role")).toBe("alert");
   });
 
   it("keeps the exit error on screen rather than below the fold", async () => {
@@ -80,7 +80,7 @@ describe("NextApp", () => {
     act(() => openTab("/incidents"));
     await userEvent.click(screen.getByRole("button", { name: /open in classic/i }));
 
-    const alert = screen.getByRole("alert");
+    const alert = screen.getByText(/storage refused/);
     const container = alert.parentElement;
     expect(container?.className).toMatch(/\bflex\b/);
     expect(container?.className).toMatch(/\bflex-col\b/);

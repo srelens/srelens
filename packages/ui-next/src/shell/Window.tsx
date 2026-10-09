@@ -9,6 +9,7 @@ import {
   listenForHostNotices,
   loadMcpSettings,
   rehydrateForwards,
+  setNotifier,
   startMcpHttp,
   vaultLock,
   type ClusterContext,
@@ -105,6 +106,19 @@ import { Rail } from "./Rail";
 import { Status } from "./Status";
 import { TabSurface } from "./TabSurface";
 import { useDeepLinks } from "./useDeepLinks";
+
+/** One toast in the window's queue: a host notice, or a `notify` call. */
+type Notice = Omit<HostNotice, "level"> & {
+  /** `ok` is `notify.success`; a host notice is only ever `info` or `error`. */
+  level: HostNotice["level"] | "ok";
+  /** A sign-in prompt's or an update's one button. */
+  action?: { label: string; run: () => void };
+  /** Goes on its own after {@link TRANSIENT_NOTICE_MS}. */
+  transient?: boolean;
+};
+
+/** How long a confirmation stays up: sonner's default, which classic used. */
+const TRANSIENT_NOTICE_MS = 4_000;
 
 export interface WindowProps {
   /** Display names of the screens that exist in the new design. */
@@ -231,7 +245,7 @@ export function Window({
   // ended reaches every window (#735). The web host sends none. A refused
   // `srelens://` link joins the same queue (#370), and so do links held behind
   // a failed context listing (#855): one surface, oldest first.
-  const [notices, setNotices] = useState<HostNotice[]>([]);
+  const [notices, setNotices] = useState<Notice[]>([]);
   useEffect(
     () =>
       isTauri()
@@ -239,6 +253,43 @@ export function Window({
         : undefined,
     [],
   );
+  // Every `notify` call joins it too (#374): its only other renderer is
+  // classic's sonner Toaster, which this design never mounts. Installed in
+  // place of that sink, not beside it, so a toast is drawn once; and handed
+  // back on unmount. Declared before boot so boot's own reports are caught.
+  useEffect(() => {
+    const push = (notice: Notice) => setNotices((shown) => [...shown, notice]);
+    return setNotifier({
+      success: (title, detail) => push({ level: "ok", title, detail, transient: true }),
+      info: (title, detail) => push({ level: "info", title, detail, transient: true }),
+      // An error stays until dismissed, and a notice with no words draws
+      // nothing, so no dismiss button either: one empty error would hold every
+      // later notice back. Core's own title for an unclassified failure.
+      error: (title, detail) =>
+        push({ level: "error", title: !title && !detail ? "Something went wrong" : title, detail }),
+      updateAvailable: (version, onView) =>
+        push({
+          level: "info",
+          title: "Update available",
+          detail: `srelens ${version} is ready to install.`,
+          action: { label: "View update", run: onView },
+        }),
+      clusterSignIn: (title, detail, onSignIn) =>
+        push({ level: "info", title, detail, action: { label: "Sign in", run: onSignIn } }),
+    });
+  }, []);
+  const notice = notices[0];
+  const dismissNotice = () => setNotices((shown) => shown.slice(1));
+  // A confirmation goes on its own, the way classic's did; a failure or a
+  // prompt waits for the reader.
+  useEffect(() => {
+    if (!notice?.transient) return;
+    const timer = setTimeout(
+      () => setNotices((shown) => (shown[0] === notice ? shown.slice(1) : shown)),
+      TRANSIENT_NOTICE_MS,
+    );
+    return () => clearTimeout(timer);
+  }, [notice]);
   useDeepLinks({
     windowLabel,
     ready: booted,
@@ -951,15 +1002,34 @@ export function Window({
       */}
       {windowLabel === "main" && <AgentConsent />}
       {/* What the host reports after the page that would have heard it is
-        gone (#735), and why a deep link was refused (#370). This design
-        mounts no `notify` sink, so the window draws them: the oldest first,
-        each until it is dismissed. */}
+        gone (#735), why a deep link was refused (#370), and every `notify`
+        call (#374): the oldest first, each until it is dismissed or, for a
+        confirmation, until it times out. */}
       <SurfaceToast
         anchor="window"
-        title={notices[0]?.title}
-        hint={notices[0]?.detail}
-        tone={notices[0]?.level === "error" ? "sev" : "info"}
-        onClose={() => setNotices((shown) => shown.slice(1))}
+        title={notice?.title}
+        hint={
+          notice?.action ? (
+            <>
+              {notice.detail}
+              <Button
+                type="button"
+                size="sm"
+                className="mt-1.5 block"
+                onClick={() => {
+                  dismissNotice();
+                  notice.action?.run();
+                }}
+              >
+                {notice.action.label}
+              </Button>
+            </>
+          ) : (
+            notice?.detail
+          )
+        }
+        tone={notice?.level === "error" ? "sev" : notice?.level === "ok" ? "ok" : "info"}
+        onClose={dismissNotice}
         dismissLabel="Dismiss notice"
       />
     </>

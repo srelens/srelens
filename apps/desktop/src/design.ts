@@ -99,8 +99,8 @@ export async function switchDesign(design: Design): Promise<SwitchResult> {
     // old design — and on desktop it could do so with the chrome already
     // changed. Leave everything alone and report it.
     //
-    // Reported to the caller rather than raised as a toast: the toast host
-    // lives in the classic tree, so a failure while leaving the new design
+    // Reported to the caller rather than raised as a toast: the toast host lived
+    // only in the classic tree then (#374), so a failure while leaving the new design
     // would have been invisible, and the button would have looked inert.
     return { ok: false, reason: "This device would not let srelens save the preference." };
   }

@@ -3,6 +3,7 @@ import { cleanup, render, screen, waitFor, act, within } from "@testing-library/
 import userEvent from "@testing-library/user-event";
 import { fireEvent } from "@testing-library/react";
 import type { HostNotice } from "@srelens/core";
+import { notify, setNotifier } from "@srelens/core";
 
 // `vi.hoisted` because `vi.mock` is hoisted above every declaration in the
 // file, and the tabsPersist factory reads these the moment `./Window` imports
@@ -1057,10 +1058,9 @@ describe("Window — what boot has to ask for", () => {
     expect(listenForHostNotices).not.toHaveBeenCalled();
   });
 
-  // This design mounts no `notify` sink, so a notice handed to one is drawn
-  // nowhere: the window draws them itself. One at a time, oldest first, each
-  // until the reader dismisses it — a failed release is not something to let
-  // fade on a timer.
+  // The window draws them itself. One at a time, oldest first, each until the
+  // reader dismisses it — a failed release is not something to let fade on a
+  // timer.
   it("draws each notice the host reports, one at a time, until it is dismissed", async () => {
     let show: (notice: HostNotice) => void = () => {};
     listenForHostNotices.mockImplementation((given) => {
@@ -1089,6 +1089,135 @@ describe("Window — what boot has to ask for", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Dismiss notice" }));
     expect(screen.queryByText("helm upgrade api finished")).toBeNull();
+  });
+});
+
+/**
+ * #374 item 2: `notify` is how screens and core modules report an outcome, and
+ * its only renderer was classic's sonner `<Toaster>` — so under this design
+ * every call drew nothing. The window draws them now, on the same surface as
+ * the host's notices, in every window and not only the main one.
+ */
+describe("Window — notify toasts (#374)", () => {
+  async function bootedAs(windowLabel: string) {
+    render(
+      <ConsoleProvider>
+        <Window ported={[]} onOpenInClassic={() => {}} windowLabel={windowLabel} />
+      </ConsoleProvider>,
+    );
+    await waitFor(() => expect(screen.getByRole("tablist", { name: "Open tabs" })).toBeDefined());
+  }
+
+  it.each(["main", "context-2"])(
+    "draws a notify.error in the %s window, and the keyboard can dismiss it",
+    async (label) => {
+      const user = userEvent.setup();
+      await bootedAs(label);
+      act(() => notify.error("Couldn't delete debug pod dbg-1", "pods is forbidden"));
+
+      const toast = screen.getByRole("alert");
+      expect(toast.textContent).toContain("Couldn't delete debug pod dbg-1");
+      expect(toast.textContent).toContain("pods is forbidden");
+
+      screen.getByRole("button", { name: "Dismiss notice" }).focus();
+      await user.keyboard("{Enter}");
+      expect(screen.queryByText("Couldn't delete debug pod dbg-1")).toBeNull();
+    },
+  );
+
+  it("draws each toast once, instead of the sink it replaced, and hands that sink back", async () => {
+    // What main.tsx installs before either design renders: classic's sonner
+    // sink. Forwarding to it as well would be a second toast wherever a
+    // Toaster exists, and leaving it replaced after unmount would point
+    // `notify` at a tree that is gone.
+    const replaced = {
+      success: vi.fn(),
+      error: vi.fn(),
+      info: vi.fn(),
+      updateAvailable: vi.fn(),
+      clusterSignIn: vi.fn(),
+    };
+    const restore = setNotifier(replaced);
+    try {
+      await booted();
+      act(() => notify.error("Failed to run nightly"));
+      expect(screen.getAllByText("Failed to run nightly")).toHaveLength(1);
+      expect(replaced.error).not.toHaveBeenCalled();
+
+      cleanup();
+      notify.error("After the window went");
+      expect(replaced.error).toHaveBeenCalledWith("After the window went", undefined);
+    } finally {
+      restore();
+    }
+  });
+
+  it("lets a success go on its own, and keeps a failure until it is dismissed", async () => {
+    await booted();
+    vi.useFakeTimers();
+    try {
+      act(() => notify.success("Copied kubectl command"));
+      expect(screen.getByText("Copied kubectl command").closest('[data-slot="toast-frame"]')).not.toBeNull();
+      act(() => vi.advanceTimersByTime(6_000));
+      expect(screen.queryByText("Copied kubectl command")).toBeNull();
+
+      act(() => notify.error("Drain failed"));
+      act(() => vi.advanceTimersByTime(60_000));
+      expect(screen.getByRole("alert").textContent).toContain("Drain failed");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("carries a sign-in prompt's action, and clears the prompt once it is taken", async () => {
+    const user = userEvent.setup();
+    await booted();
+    const onSignIn = vi.fn();
+    act(() => notify.clusterSignIn("Sign in to prod", "This cluster uses OIDC and needs you to sign in.", onSignIn));
+
+    await user.click(screen.getByRole("button", { name: "Sign in" }));
+    expect(onSignIn).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText("Sign in to prod")).toBeNull();
+  });
+
+  it("draws an error that came with no words, so it can be dismissed and the queue moves on", async () => {
+    // An error stays until dismissed and the queue shows one notice at a time.
+    // Drawn with nothing in it, it had no dismiss button, and every notice
+    // behind it waited forever.
+    const user = userEvent.setup();
+    await booted();
+    act(() => notify.error(""));
+    act(() => notify.error("Drain failed"));
+
+    expect(screen.getByRole("alert").textContent).toContain("Something went wrong");
+    await user.click(screen.getByRole("button", { name: "Dismiss notice" }));
+    expect(screen.getByRole("alert").textContent).toContain("Drain failed");
+  });
+
+  it("lets an info go on its own, like a success", async () => {
+    await booted();
+    vi.useFakeTimers();
+    try {
+      act(() => notify.info("Port forward stopped"));
+      expect(screen.getByText("Port forward stopped").closest('[data-slot="toast-frame"]')).not.toBeNull();
+      act(() => vi.advanceTimersByTime(6_000));
+      expect(screen.queryByText("Port forward stopped")).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("carries an update prompt's action, and clears the prompt once it is taken", async () => {
+    const user = userEvent.setup();
+    await booted();
+    const onView = vi.fn();
+    act(() => notify.updateAvailable("0.17.0", onView));
+
+    expect(screen.getByText("Update available")).toBeDefined();
+    expect(screen.getByText(/srelens 0\.17\.0 is ready to install/)).toBeDefined();
+    await user.click(screen.getByRole("button", { name: "View update" }));
+    expect(onView).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText("Update available")).toBeNull();
   });
 });
 

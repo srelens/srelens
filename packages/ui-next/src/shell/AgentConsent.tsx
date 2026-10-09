@@ -55,8 +55,8 @@ import { asConfirmRequest } from "../confirm/confirmRequest";
  *   package does, rather than `String(e)`.
  *
  * **A failed answer is REPORTED IN THE DIALOG, and the dialog stays up.** The
- * port carried classic's `notify.error` across, and in this tree that reports
- * nothing: `notify`'s sink is installed at `main.tsx` for both designs, but it
+ * port carried classic's `notify.error` across, and in this tree that reported
+ * nothing until the window drew `notify` (#374): the sink installed at `main.tsx` for both designs
  * calls sonner, and sonner's `<Toaster>` is mounted in classic's `App` — which
  * `main.tsx` mounts instead of this tree, never beside it. The toast was
  * created and rendered nowhere, and the `finally` below then dropped the
