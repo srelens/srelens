@@ -22,10 +22,14 @@ if [ -n "${APPLE_SIGNING_IDENTITY:-}" ]; then
         # the certificate was "1 identity imported" and then "no identity
         # found" (srelens-v0.16.0). So the keychain joins the list, as Tauri's
         # own signing keychain does, and the list is put back on exit.
+        # Read on its own, so a failure stops the script here: in a pipeline
+        # sed's status would stand in for it, the saved list would be empty,
+        # and the exit trap would "restore" the user's search list to nothing.
+        listed="$(security list-keychains -d user)"
         # Saved one path per line, unquoted: a keychain path may hold spaces,
         # and each has to reach `security` as one argument.
-        security list-keychains -d user \
-            | sed -e 's/^[[:space:]]*"//' -e 's/"[[:space:]]*$//' > "$signing_tmp/keychains"
+        printf '%s\n' "$listed" \
+            | sed -e 's/^[[:space:]]*"//' -e 's/"[[:space:]]*$//' -e '/^$/d' > "$signing_tmp/keychains"
         # Set the search list to the arguments given, then the saved list.
         search_list() {
             while IFS= read -r saved; do set -- "$@" "$saved"; done < "$signing_tmp/keychains"
