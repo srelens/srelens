@@ -5,6 +5,7 @@ import userEvent from "@testing-library/user-event";
 import { Table, filterTableData } from "@srelens/ui-kit";
 import { cronJobStatus, jobStatus, nodeUsage, podUsage, scaledStatus } from "@srelens/core";
 import {
+  ownHistory,
   podColumns,
   deploymentColumns,
   statefulSetColumns,
@@ -212,11 +213,12 @@ describe("pod columns", () => {
 
   /**
    * #864: `241m` does not say whether a pod is idle, climbing, or about to be
-   * throttled. The cell draws the last ten minutes as a small graph, against
-   * what the pod was given — its limit, or its request where it has no whole
-   * limit.
+   * throttled. The CPU cell draws the last ten minutes as a small graph,
+   * against what the pod was given — its limit, or its request where it has
+   * no whole limit. Memory, which sits or creeps rather than moves, is a bar:
+   * see "the memory bar" below.
    */
-  describe("the usage graph", () => {
+  describe("the CPU graph", () => {
     afterEach(cleanup);
     const cpu = podColumns.find((c) => c.key === "cpu")!;
     const memory = podColumns.find((c) => c.key === "memory")!;
@@ -228,9 +230,18 @@ describe("pod columns", () => {
         (m) => Number(m[1]),
       );
     const colour = () => graph().querySelector("path[fill='none']")?.getAttribute("stroke");
+    /** Readings of CPU taken `every` apart, the last of them at `T`. */
+    const T = Date.UTC(2026, 9, 9, 10, 0, 0);
+    const past = (values: number[], every = 10_000) =>
+      values.map((cpu, i) => ({ at: T - (values.length - 1 - i) * every, cpu, memory: 0 }));
+    /** The x of each point on the line. */
+    const places = () =>
+      [...(graph().querySelector("path[fill='none']")?.getAttribute("d") ?? "").matchAll(/[ML]([\d.]+),[\d.]+/g)].map(
+        (m) => Number(m[1]),
+      );
     const limited = pod({
       cpu: 250, memory: 300,
-      cpuHistory: [100, 180, 250], memoryHistory: [280, 290, 300],
+      usageHistory: past([100, 180, 250]),
       cpuReqMillicores: 100, cpuLimMillicores: 500, cpuLimAll: true,
       memReqMiB: 128, memLimMiB: 400, memLimAll: true,
     });
@@ -244,16 +255,70 @@ describe("pod columns", () => {
       expect(ys[2]).toBeLessThan(ys[1]);
     });
 
-    it("names the graph for the pod, the resource, the window, and what it is a share of", () => {
-      draw(cpu, limited);
+    it("names the graph for the pod, the resource, what it covers, and what it is a share of", () => {
+      // Sixty-one readings ten seconds apart: the whole ten minutes.
+      draw(cpu, { ...limited, usageHistory: past(Array.from({ length: 61 }, () => 250)) });
       expect(graph().getAttribute("aria-label")).toBe(
         "web-0 CPU over the last 10 minutes, now 250m, 50% of 500m limit",
       );
-      cleanup();
-      draw(memory, limited);
+    });
+
+    it("says how much past it is really showing, while it is still filling", () => {
+      // Three readings: twenty seconds, and not called ten minutes.
+      draw(cpu, limited);
       expect(graph().getAttribute("aria-label")).toBe(
-        "web-0 memory over the last 10 minutes, now 300 Mi, 75% of 400 Mi limit",
+        "web-0 CPU over the last 20 seconds, now 250m, 50% of 500m limit",
       );
+      cleanup();
+      draw(cpu, { ...limited, usageHistory: past([100, 250], 60_000) });
+      expect(graph().getAttribute("aria-label")).toContain("over the last 1 minute,");
+      cleanup();
+      // One reading covers no time at all, and claims none.
+      draw(cpu, { ...limited, usageHistory: past([250]) });
+      expect(graph().getAttribute("aria-label")).toBe("web-0 CPU, now 250m, 50% of 500m limit");
+    });
+
+    it("places each reading by when it was taken, so a gap in them is as wide as it lasted", () => {
+      // Two readings ten seconds apart, then nothing for five minutes.
+      const gapped = [
+        { at: T - 310_000, cpu: 100, memory: 0 },
+        { at: T - 300_000, cpu: 110, memory: 0 },
+        { at: T, cpu: 250, memory: 0 },
+      ];
+      draw(cpu, { ...limited, usageHistory: gapped });
+      const xs = places();
+      // The middle reading is a thirty-first of the way along, not half.
+      expect(xs[1] / xs[2]).toBeCloseTo(10 / 310, 3);
+    });
+
+    /**
+     * History is kept by name. A StatefulSet's `web-0` deleted and created
+     * again is a new pod under the old name, and must not be drawn with the
+     * load of the one before it.
+     */
+    it("draws nothing from before the pod was created", () => {
+      const inherited = past([400, 420, 440, 30, 40]);
+      // Created between the third reading and the fourth.
+      const created = new Date(inherited[3].at - 1000).toISOString();
+      draw(cpu, { ...limited, cpu: 40, created, usageHistory: inherited });
+      expect(heights()).toHaveLength(2);
+      expect(ownHistory({ created, usageHistory: inherited }).map((s) => s.cpu)).toEqual([30, 40]);
+    });
+
+    it("draws everything it holds for a pod whose creation time is not known", () => {
+      const held = past([100, 180, 250]);
+      expect(ownHistory({ created: null, usageHistory: held })).toHaveLength(3);
+      expect(ownHistory({ created: "not a date", usageHistory: held })).toHaveLength(3);
+      expect(ownHistory({ usageHistory: undefined })).toEqual([]);
+    });
+
+    it("is the CPU column's alone: memory draws no graph", () => {
+      draw(memory, limited);
+      expect(screen.queryByRole("img")).toBeNull();
+      expect(screen.getByRole("meter")).toBeDefined();
+      cleanup();
+      draw(cpu, limited);
+      expect(screen.queryByRole("meter")).toBeNull();
     });
 
     it("keeps the amount and the share beside the graph, and says the same in the tooltip", () => {
@@ -264,11 +329,11 @@ describe("pod columns", () => {
     });
 
     it("draws against the limit, so a pod far under it is a low line and one near it a high one", () => {
-      draw(cpu, { ...limited, cpu: 40, cpuHistory: [30, 35, 40] });
+      draw(cpu, { ...limited, cpu: 40, usageHistory: past([30, 35, 40]) });
       // 8% of the limit: in the bottom quarter of the 18px box.
       expect(Math.min(...heights())).toBeGreaterThan(18 * 0.75);
       cleanup();
-      draw(cpu, { ...limited, cpu: 490, cpuHistory: [470, 480, 490] });
+      draw(cpu, { ...limited, cpu: 490, usageHistory: past([470, 480, 490]) });
       expect(Math.max(...heights())).toBeLessThan(18 * 0.25);
     });
 
@@ -309,7 +374,7 @@ describe("pod columns", () => {
     });
 
     it("draws a pod with neither a limit nor a request to its own peak, with no share, and says why", () => {
-      const view = draw(cpu, pod({ cpu: 250, memory: 300, cpuHistory: [50, 250] }));
+      const view = draw(cpu, pod({ cpu: 250, memory: 300, usageHistory: past([50, 250]) }));
       expect([...view.querySelectorAll(".num")].map((n) => n.textContent)).toEqual(["250m", ""]);
       expect((view.firstElementChild as HTMLElement).title).toBe("250m, no request or limit set");
       expect(graph().getAttribute("aria-label")).toContain("no request or limit set");
@@ -319,7 +384,7 @@ describe("pod columns", () => {
 
     it("draws the one reading it has as a flat line, when nothing older is held", () => {
       // The list has just been opened: no past yet, and none invented.
-      draw(cpu, { ...limited, cpuHistory: undefined });
+      draw(cpu, { ...limited, usageHistory: undefined });
       const d = graph().querySelector("path[fill='none']")?.getAttribute("d") ?? "";
       const ys = [...d.matchAll(/[ML][\d.]+,([\d.]+)/g)].map((m) => Number(m[1]));
       expect(new Set(ys).size).toBe(1);
@@ -353,6 +418,98 @@ describe("pod columns", () => {
       const tight = { ...limited, cpu: 450 };
       expect(cpu.getSortValue!(big)).toBeGreaterThan(cpu.getSortValue!(tight) as number);
       expect(cpu.getSortValue!(pod())).toBeLessThan(cpu.getSortValue!(pod({ cpu: 0 })) as number);
+    });
+  });
+
+  /**
+   * Memory is a bar, as a node's is. It mostly sits where it is, and what a
+   * reader asks of it is how full the pod is — which a bar answers at a
+   * glance and a nearly flat line does not.
+   */
+  describe("the memory bar", () => {
+    afterEach(cleanup);
+    const memory = podColumns.find((c) => c.key === "memory")!;
+    const draw = (row: PodRow) => render(memory.render!(row) as ReactElement).container;
+    const limited = pod({
+      cpu: 250, memory: 300,
+      cpuReqMillicores: 100, cpuLimMillicores: 500, cpuLimAll: true,
+      memReqMiB: 128, memLimMiB: 400, memLimAll: true,
+    });
+
+    it("draws the share of the pod's limit, named for the pod, the resource and the bound", () => {
+      draw(limited);
+      // 300 Mi of 400 Mi.
+      const bar = screen.getByRole("meter", { name: "web-0 memory, of limit" });
+      expect(bar.getAttribute("aria-valuenow")).toBe("75");
+      expect(bar.getAttribute("aria-valuetext")).toBe("75%");
+    });
+
+    it("keeps the amount beside the bar, and says what it is a share of", () => {
+      const view = draw(limited);
+      expect(view.querySelector(".num")?.textContent).toBe("300 Mi");
+      expect((view.firstElementChild as HTMLElement).title).toBe("300 Mi, 75% of 400 Mi limit");
+    });
+
+    it("measures against the request, and says so, when a container has no limit", () => {
+      const view = draw({ ...limited, memLimAll: false });
+      // 300 Mi of the 128 Mi requested: the bar is full, the words say the real figure.
+      const bar = screen.getByRole("meter", { name: "web-0 memory, of request" });
+      expect(bar.getAttribute("aria-valuenow")).toBe("100");
+      expect(bar.getAttribute("aria-valuetext")).toBe("234%");
+      expect((view.firstElementChild as HTMLElement).title).toBe("300 Mi, 234% of 128 Mi request");
+    });
+
+    it("tints by load against a limit, and not at all against a request", () => {
+      const fill = (row: PodRow) => {
+        draw(row);
+        const colour = (screen.getByRole("meter").firstElementChild as HTMLElement).style.background;
+        cleanup();
+        return colour;
+      };
+      // Near its ceiling is near an OOM kill: a warning worth a colour.
+      const nearLimit = fill({ ...limited, memory: 390 });
+      const idleLimit = fill({ ...limited, memory: 20 });
+      expect(nearLimit).not.toBe(idleLimit);
+      const overRequest = fill({ ...limited, memLimAll: false, memory: 900 });
+      const underRequest = fill({ ...limited, memLimAll: false, memory: 50 });
+      expect(overRequest).toBe(underRequest);
+      expect(overRequest).not.toBe(nearLimit);
+    });
+
+    it("agrees with core: the percentage is podUsage's, unrounded and unclamped", () => {
+      const over = { ...limited, memory: 560 };
+      draw(over);
+      expect(screen.getByRole("meter").getAttribute("aria-valuetext")).toBe("140%");
+      expect(podUsage(over, { cpuMillicores: 250, memoryMiB: 560 }).memory?.percent).toBe(140);
+    });
+
+    it("draws a dash and no bar when there is no reading — an empty bar would say the pod is idle", () => {
+      const view = draw({ ...limited, cpu: undefined, memory: undefined });
+      expect(view.textContent).toBe("—");
+      expect(screen.queryByRole("meter")).toBeNull();
+    });
+
+    it("draws the amount and no bar for a pod with neither a limit nor a request, and says why", () => {
+      const view = draw(pod({ cpu: 250, memory: 300 }));
+      expect(view.querySelector(".num")?.textContent).toBe("300 Mi");
+      expect(screen.queryByRole("meter")).toBeNull();
+      expect((view.firstElementChild as HTMLElement).title).toBe("300 Mi, no request or limit set");
+    });
+
+    it("asks for the same room with or without a bar, and as much as the CPU column", () => {
+      const withBar = (draw(limited).firstElementChild as HTMLElement).className;
+      cleanup();
+      const without = (draw(pod()).firstElementChild as HTMLElement).className;
+      expect(withBar).toBe(without);
+      expect(withBar).toMatch(/min-w-\[/);
+      expect(memory.minWidth).toBe(podColumns.find((c) => c.key === "cpu")!.minWidth);
+    });
+
+    it("still sorts by the amount in use, with no reading last", () => {
+      expect(memory.getSortValue!(pod({ cpu: 1, memory: 900 }))).toBeGreaterThan(
+        memory.getSortValue!({ ...limited, memory: 390 }) as number,
+      );
+      expect(memory.getSortValue!(pod())).toBeLessThan(memory.getSortValue!(pod({ memory: 0 })) as number);
     });
   });
 

@@ -32,11 +32,16 @@ export interface UsageSample {
 /** Cluster, then the pod's own key within it. */
 const history = new Map<string, Map<string, UsageSample[]>>();
 
-/** `samples` with everything older than the window dropped. */
+/**
+ * `samples` with everything outside the window dropped: older than ten
+ * minutes, and — after a clock has been put back — stamped later than now. A
+ * reading "from the future" would otherwise sit at the end of the line as the
+ * current one until the clock caught up with it.
+ */
 function inWindow(samples: UsageSample[], now: number): UsageSample[] {
   const from = now - USAGE_WINDOW_MS;
-  const first = samples.findIndex((s) => s.at >= from);
-  return first <= 0 ? (first === 0 ? samples : []) : samples.slice(first);
+  if (samples.every((s) => s.at >= from && s.at <= now)) return samples;
+  return samples.filter((s) => s.at >= from && s.at <= now);
 }
 
 /**
@@ -50,6 +55,10 @@ function inWindow(samples: UsageSample[], now: number): UsageSample[] {
  * of several, and the pods of the others are simply not in it. A pod's past
  * goes when its last reading has aged out of the window, which a deleted pod's
  * does within ten minutes, swept as later batches arrive.
+ *
+ * Nor is a pod told apart here from one of the same name created after it: a
+ * reading carries a name and no identity. The row knows when its pod was
+ * created, and draws only what is newer than that — see `PodUsageCell`.
  */
 export function recordUsage(
   context: string,
@@ -62,21 +71,25 @@ export function recordUsage(
   for (const { key, cpu, memory } of readings) {
     const kept = inWindow(pods.get(key) ?? [], now);
     const last = kept[kept.length - 1];
-    // A clock put back would otherwise leave points out of order, and a line
-    // that doubles back on itself; the newer reading replaces what it cannot
-    // follow.
+    // `kept` holds nothing later than `now`, so the new reading is always the
+    // newest and the points stay in order.
     const next: UsageSample[] =
       last && now - last.at < MIN_SPACING_MS
-        ? [...kept.slice(0, -1), { at: Math.max(now, last.at), cpu, memory }]
+        ? [...kept.slice(0, -1), { at: now, cpu, memory }]
         : [...kept, { at: now, cpu, memory }];
     pods.set(key, next);
     out.set(key, next);
   }
   // The sweep: whatever has had no reading inside the window is a pod that is
-  // gone, or a scope nobody is looking at any more.
-  for (const [key, samples] of pods) {
-    const last = samples[samples.length - 1];
-    if (!last || now - last.at > USAGE_WINDOW_MS) pods.delete(key);
+  // gone, or a scope nobody is looking at any more. Every cluster, not only
+  // the one just read — a cluster the reader has left is never read again,
+  // and would otherwise keep its last ten minutes for as long as the window
+  // stays open.
+  for (const [cluster, held] of history) {
+    for (const [key, samples] of held) {
+      if (inWindow(samples, now).length === 0) held.delete(key);
+    }
+    if (held.size === 0) history.delete(cluster);
   }
   return out;
 }
@@ -84,6 +97,13 @@ export function recordUsage(
 /** What is held for one pod, oldest first; empty when nothing is. */
 export function usageHistory(context: string, key: string, now: number = Date.now()): UsageSample[] {
   return inWindow(history.get(context)?.get(key) ?? [], now);
+}
+
+/** How much is held, so a test can see that what should be forgotten is. */
+export function __usageHistorySizeForTests(): { clusters: number; pods: number } {
+  let pods = 0;
+  for (const held of history.values()) pods += held.size;
+  return { clusters: history.size, pods };
 }
 
 /** Forget everything, so a test starts with no past. */

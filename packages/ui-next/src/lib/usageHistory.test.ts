@@ -1,5 +1,11 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { USAGE_WINDOW_MS, __resetUsageHistoryForTests, recordUsage, usageHistory } from "./usageHistory";
+import {
+  USAGE_WINDOW_MS,
+  __resetUsageHistoryForTests,
+  __usageHistorySizeForTests,
+  recordUsage,
+  usageHistory,
+} from "./usageHistory";
 
 const T0 = Date.UTC(2026, 9, 9, 10, 0, 0);
 const S = 1000;
@@ -76,7 +82,35 @@ describe("recordUsage", () => {
     recordUsage("dev", one(2), T0 + 30 * S);
     const out = recordUsage("dev", one(3), T0 + 28 * S).get("shop/web-0")!;
     expect(out.map((s) => s.at)).toEqual([...out.map((s) => s.at)].sort((a, b) => a - b));
-    expect(out[out.length - 1].cpu).toBe(3);
+    expect(out[out.length - 1]).toEqual({ at: T0 + 28 * S, cpu: 3, memory: 100 });
+  });
+
+  /**
+   * A clock put back by half an hour leaves readings stamped in the future.
+   * Kept, the last of them would stand as the current one, and every new
+   * reading would overwrite it without the line growing, until the clock
+   * caught up.
+   */
+  it("drops readings stamped later than now, and carries on from the new time", () => {
+    recordUsage("dev", one(1), T0);
+    recordUsage("dev", one(2), T0 + 10 * S);
+    const back = T0 - 30 * 60 * S;
+    const first = recordUsage("dev", one(3), back).get("shop/web-0")!;
+    expect(first).toEqual([{ at: back, cpu: 3, memory: 100 }]);
+    // And the line grows again from there, a point per reading.
+    const second = recordUsage("dev", one(4), back + 10 * S).get("shop/web-0")!;
+    expect(second.map((s) => s.cpu)).toEqual([3, 4]);
+    expect(usageHistory("dev", "shop/web-0", back + 10 * S)).toHaveLength(2);
+  });
+
+  it("forgets a cluster nobody reads any more, when another is read", () => {
+    recordUsage("left", [{ key: "shop/web-0", cpu: 1, memory: 1 }], T0);
+    // The reader has moved to another cluster and never comes back.
+    recordUsage("dev", one(2), T0 + USAGE_WINDOW_MS + S);
+    expect(__usageHistorySizeForTests()).toEqual({ clusters: 1, pods: 1 });
+    // A cluster still inside its window is kept.
+    recordUsage("other", one(3), T0 + USAGE_WINDOW_MS + 2 * S);
+    expect(__usageHistorySizeForTests()).toEqual({ clusters: 2, pods: 2 });
   });
 });
 

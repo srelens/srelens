@@ -22,9 +22,18 @@ export function Sparkline({
   height = 34,
   fill = true,
   ceiling,
+  at,
   ariaLabel,
 }: {
   points: number[];
+  /**
+   * When each point was taken — any numbers that increase, one per point.
+   * Points are then placed by how far apart they were taken instead of evenly,
+   * so a gap in the readings is as wide as the time it lasted and a slow
+   * change across it is not drawn as a jump. Ignored unless there is one for
+   * every point.
+   */
+  at?: number[];
   tone?: Tone;
   height?: number;
   fill?: boolean;
@@ -61,8 +70,12 @@ export function Sparkline({
   // than dividing by zero.
   const step = points.length > 1 ? width / (points.length - 1) : 0;
   const y = (p: number) => height - ((p - min) / span) * (height - 4) - 2;
+  const elapsed = at && at.length === points.length ? at[at.length - 1] - at[0] : 0;
+  // By time when there is a time for every point and they span any; evenly
+  // otherwise, which is also what one point, or points all at one moment, get.
+  const x = (i: number) => (elapsed > 0 ? ((at![i] - at![0]) / elapsed) * width : i * step);
 
-  const line = points.map((p, i) => `${i === 0 ? "M" : "L"}${i * step},${y(p)}`).join(" ");
+  const line = points.map((p, i) => `${i === 0 ? "M" : "L"}${x(i)},${y(p)}`).join(" ");
   const stroke = points.length === 1 ? `${line} L${width},${y(points[0])}` : line;
   const area = `${stroke} L${width},${height} L0,${height} Z`;
 

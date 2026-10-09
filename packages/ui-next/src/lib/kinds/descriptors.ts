@@ -106,13 +106,7 @@ const podEnrich = async (context: string, namespace: string): Promise<Map<RowKey
   // readings it has been handed, per cluster — see `lib/usageHistory`.
   const past = recordUsage(context, readings);
   return new Map(
-    readings.map(({ key, cpu, memory }) => {
-      const samples = past.get(key) ?? [];
-      return [
-        key,
-        { cpu, memory, cpuHistory: samples.map((s) => s.cpu), memoryHistory: samples.map((s) => s.memory) },
-      ];
-    }),
+    readings.map(({ key, cpu, memory }) => [key, { cpu, memory, usageHistory: past.get(key) ?? [] }]),
   );
 };
 

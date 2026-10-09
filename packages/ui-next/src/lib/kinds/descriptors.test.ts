@@ -211,16 +211,26 @@ describe("descriptors", () => {
         vi.setSystemTime(new Date("2026-10-09T10:00:00Z"));
         reading(10, 100);
         const first = await descriptorFor("pods")!.enrich!("prod", "shop");
-        expect(first.get(key)).toEqual({ cpu: 10, memory: 100, cpuHistory: [10], memoryHistory: [100] });
+        const t0 = Date.parse("2026-10-09T10:00:00Z");
+        expect(first.get(key)).toEqual({ cpu: 10, memory: 100, usageHistory: [{ at: t0, cpu: 10, memory: 100 }] });
 
         vi.setSystemTime(new Date("2026-10-09T10:00:10Z"));
         reading(30, 120);
         const second = await descriptorFor("pods")!.enrich!("prod", "shop");
-        expect(second.get(key)).toEqual({ cpu: 30, memory: 120, cpuHistory: [10, 30], memoryHistory: [100, 120] });
+        // Each with the time it was taken, so the row can place it and can tell
+        // what was read before its own pod existed.
+        expect(second.get(key)).toEqual({
+          cpu: 30,
+          memory: 120,
+          usageHistory: [
+            { at: t0, cpu: 10, memory: 100 },
+            { at: t0 + 10_000, cpu: 30, memory: 120 },
+          ],
+        });
 
         // Another cluster's pod of the same name has its own past.
         const other = await descriptorFor("pods")!.enrich!("staging", "shop");
-        expect(other.get(key)).toMatchObject({ cpuHistory: [30] });
+        expect(other.get(key)).toMatchObject({ usageHistory: [expect.objectContaining({ cpu: 30 })] });
       } finally {
         vi.useRealTimers();
       }
