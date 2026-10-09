@@ -5,6 +5,8 @@ import {
   jobStatus,
   nodeStatus,
   nodeUsage,
+  podUsage,
+  type PodResourceUsage,
   phaseKind,
   podStatus,
   scaledStatus,
@@ -92,6 +94,95 @@ const metric = (value: number | undefined, format: (value: number) => string) =>
 const metricSort = (value: number | undefined) => value ?? -1;
 
 /**
+ * How much room a usage cell asks for, whether or not it holds a bar.
+ *
+ * `Table` measures the natural column widths on the first render that has
+ * rows and pins them, and the node list answers before the metrics do — so
+ * the first render is all dashes. A width that arrived with the bars arrived
+ * after the column had been fixed at the width of a dash, and the bars drew
+ * across the column beside them. Overview's node table hit exactly this; see
+ * `READING_WIDTH` there.
+ */
+const USAGE_CELL = "flex min-w-[13rem] items-center gap-2";
+
+/**
+ * The narrowest a usage column may be dragged: the cell's own 13rem (208px)
+ * and the padding either side of it.
+ *
+ * `Column.minWidth` is the floor a resize stops at, and without one it is
+ * 72px — well under what the cell above will shrink to. Dragged below 13rem
+ * the column kept the width it was given and the bar ran on into the column
+ * beside it, since a table cell does not clip what overflows it.
+ */
+const USAGE_COLUMN_MIN_WIDTH = 232;
+
+/**
+ * A pod's CPU and memory against what it was given — core's `podUsage`, so
+ * this list and a pod's own page cannot mean different things by a percentage.
+ *
+ * The row carries the metric's two figures flattened onto it (`cpu`,
+ * `memory`), as a node row does; they arrive together or not at all.
+ */
+function podLoad(p: PodRow) {
+  const metric = p.cpu == null || p.memory == null ? undefined : { cpuMillicores: p.cpu, memoryMiB: p.memory };
+  return podUsage(p, metric);
+}
+
+/**
+ * One pod's CPU or memory in the Pods list: the amount, and a bar (#864).
+ *
+ * `241m` does not say whether a pod is idle or about to be throttled; that
+ * depends on what it was given, which the list did not show. The bar is the
+ * share of the pod's limit in use — or of its request, where it has no whole
+ * limit — tinted by load, with the percentage beside it. Which of the two it
+ * is measured against is in the tooltip and the bar's own name, because the
+ * same 120% is a pod past its ceiling in one case and an ordinary pod using
+ * more than it asked for in the other.
+ *
+ * Three states, kept apart, as in the Nodes list:
+ * - no metric: a dash, and no bar — an empty bar would read as an idle pod;
+ * - a metric, but neither a limit nor a request: the amount, and no bar,
+ *   since there is nothing to take a share of;
+ * - both: the amount and the bar.
+ */
+function PodUsageCell({
+  used,
+  usage,
+  format,
+  what,
+}: {
+  used: number | undefined;
+  usage: PodResourceUsage | null;
+  format: (value: number) => string;
+  what: string;
+}) {
+  if (used == null) return <div className={USAGE_CELL}>—</div>;
+  const amount = format(used);
+  return (
+    <div className={USAGE_CELL} title={usage === null ? `${amount}, no request or limit set` : `${amount} of ${format(usage.bound)} ${usage.of}`}>
+      <span className="num w-[4.75rem] shrink-0 text-right">{amount}</span>
+      {usage !== null && (
+        <span className="min-w-0 flex-1">
+          {/* Unrounded and unclamped: `Meter` clamps the bar and rounds what
+              it shows, and a pod past its bound must not be drawn the same as
+              one exactly at it. */}
+          <Meter
+            value={usage.percent}
+            // Against a limit the bar is tinted by load, as a node's is: near
+            // it is near being throttled or killed. Against a request it is
+            // not a verdict at all — a request is a floor for scheduling, and
+            // a healthy pod runs past it all day — so it keeps one quiet tone
+            // however far past it goes, rather than turning red at 241%.
+            tone={usage.of === "request" ? "info" : undefined}
+            ariaLabel={`${what}, of ${usage.of}`}
+          />
+        </span>
+      )}
+    </div>
+  );
+}
+
+/**
  * The design's unhealthy dot for a pod, and the pill beside it: both read
  * core's `podStatus`, which is the same function the detail header asks about
  * the same pod. Nothing here restates a rule, so a row and a header cannot
@@ -129,8 +220,26 @@ export const podColumns: Column<PodRow>[] = [
     getSortValue: (p) => podStatus(p).status,
   },
   { key: "restarts", header: "Restarts", sortable: true, align: "end" },
-  { key: "cpu", header: "CPU", sortable: true, align: "end", render: (p) => metric(p.cpu, formatCpu), getSortValue: (p) => metricSort(p.cpu) },
-  { key: "memory", header: "Memory", sortable: true, align: "end", render: (p) => metric(p.memory, formatMemory), getSortValue: (p) => metricSort(p.memory) },
+  // The amount and a bar (#864), as the Nodes list draws them. Sorted by the
+  // amount, as before: "which pod is using the most" is the question the
+  // column was already answering, and a pod with no bound has no percentage
+  // to sort by.
+  {
+    key: "cpu",
+    header: "CPU",
+    sortable: true,
+    minWidth: USAGE_COLUMN_MIN_WIDTH,
+    render: (p) => <PodUsageCell used={p.cpu} usage={podLoad(p).cpu} format={formatCpu} what={`${p.name} CPU`} />,
+    getSortValue: (p) => metricSort(p.cpu),
+  },
+  {
+    key: "memory",
+    header: "Memory",
+    sortable: true,
+    minWidth: USAGE_COLUMN_MIN_WIDTH,
+    render: (p) => <PodUsageCell used={p.memory} usage={podLoad(p).memory} format={formatMemory} what={`${p.name} memory`} />,
+    getSortValue: (p) => metricSort(p.memory),
+  },
   // #405: derived here against a ticking clock, from the summary's
   // `created` timestamp — the backend's `age` string is rendered once per
   // watch event and freezes for an object nothing is changing.
@@ -330,29 +439,6 @@ function nodeLoad(n: NodeRow) {
     n.cpu == null || n.memory == null ? undefined : { name: n.name, cpuMillicores: n.cpu, memoryMiB: n.memory };
   return nodeUsage(n, metric, undefined);
 }
-
-/**
- * How much room a usage cell asks for, whether or not it holds a bar.
- *
- * `Table` measures the natural column widths on the first render that has
- * rows and pins them, and the node list answers before the metrics do — so
- * the first render is all dashes. A width that arrived with the bars arrived
- * after the column had been fixed at the width of a dash, and the bars drew
- * across the column beside them. Overview's node table hit exactly this; see
- * `READING_WIDTH` there.
- */
-const USAGE_CELL = "flex min-w-[13rem] items-center gap-2";
-
-/**
- * The narrowest a usage column may be dragged: the cell's own 13rem (208px)
- * and the padding either side of it.
- *
- * `Column.minWidth` is the floor a resize stops at, and without one it is
- * 72px — well under what the cell above will shrink to. Dragged below 13rem
- * the column kept the width it was given and the bar ran on into the column
- * beside it, since a table cell does not clip what overflows it.
- */
-const USAGE_COLUMN_MIN_WIDTH = 232;
 
 /**
  * One node's CPU or memory in the Nodes list: the amount, and the same bar

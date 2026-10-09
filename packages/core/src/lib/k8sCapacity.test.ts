@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { nodeUsage, clusterCapacity } from "./k8sCapacity";
+import { nodeUsage, clusterCapacity, podUsage } from "./k8sCapacity";
 import type { NodeSummary, NodeMetric } from "./manifest";
 
 function node(overrides: Partial<NodeSummary> = {}): NodeSummary {
@@ -179,5 +179,69 @@ describe("clusterCapacity — a metric names a node that is not in the list", ()
     expect(capacity.nodesReporting).toBeLessThanOrEqual(capacity.nodesTotal);
     expect(capacity.nodesReporting).toBe(2);
     expect(capacity.nodesTotal).toBe(2);
+  });
+});
+
+/**
+ * A pod's usage, against what it was given (#864). A node has one number to be
+ * a share of; a pod has two, either of which may be missing.
+ */
+describe("podUsage", () => {
+  const reading = { cpuMillicores: 250, memoryMiB: 300 };
+  const whole = {
+    cpuReqMillicores: 100, cpuLimMillicores: 500, cpuLimAll: true,
+    memReqMiB: 128, memLimMiB: 400, memLimAll: true,
+  };
+
+  it("measures against the limit when every container sets one, and says so", () => {
+    expect(podUsage(whole, reading)).toEqual({
+      cpu: { percent: 50, of: "limit", bound: 500 },
+      memory: { percent: 75, of: "limit", bound: 400 },
+    });
+  });
+
+  it("falls back to the request for a resource whose limit is not the pod's whole ceiling", () => {
+    // One container has no CPU limit: 500m is not a ceiling the pod has.
+    const usage = podUsage({ ...whole, cpuLimAll: false }, reading);
+    expect(usage.cpu).toEqual({ percent: 250, of: "request", bound: 100 });
+    // Memory is decided on its own.
+    expect(usage.memory?.of).toBe("limit");
+  });
+
+  it("falls back to the request when there is no limit at all", () => {
+    const usage = podUsage({ cpuReqMillicores: 500, memReqMiB: 600 }, reading);
+    expect(usage.cpu).toEqual({ percent: 50, of: "request", bound: 500 });
+    expect(usage.memory).toEqual({ percent: 50, of: "request", bound: 600 });
+  });
+
+  it("reports honestly above 100 against a request, never clamped", () => {
+    expect(podUsage({ cpuReqMillicores: 100 }, reading).cpu?.percent).toBe(250);
+  });
+
+  it("is null, not zero, with neither a limit nor a request", () => {
+    expect(podUsage({}, reading)).toEqual({ cpu: null, memory: null });
+    expect(podUsage({ cpuReqMillicores: 0, cpuLimMillicores: 0, cpuLimAll: false }, reading).cpu).toBeNull();
+  });
+
+  it("does not take a flag without a limit as a ceiling of zero", () => {
+    // `cpuLimAll` true with no figure is not a limit; the request stands.
+    expect(podUsage({ cpuLimAll: true, cpuLimMillicores: 0, cpuReqMillicores: 200 }, reading).cpu).toEqual({
+      percent: 125, of: "request", bound: 200,
+    });
+  });
+
+  it("is null for both when the pod has no reading", () => {
+    expect(podUsage(whole, undefined)).toEqual({ cpu: null, memory: null });
+  });
+
+  it("does not round", () => {
+    expect(podUsage({ cpuReqMillicores: 300 }, { cpuMillicores: 100, memoryMiB: 0 }).cpu?.percent).toBeCloseTo(33.3333, 3);
+  });
+
+  it("reads an idle pod as 0%, which is a measurement", () => {
+    expect(podUsage(whole, { cpuMillicores: 0, memoryMiB: 0 })).toEqual({
+      cpu: { percent: 0, of: "limit", bound: 500 },
+      memory: { percent: 0, of: "limit", bound: 400 },
+    });
   });
 });
