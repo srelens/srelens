@@ -159,15 +159,27 @@ impl Provider for HttpProvider {
 }
 
 impl HttpProvider {
-    /// Attach the provider's auth header to a request builder.
-    fn auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        match self.config.kind {
-            ProviderKind::Anthropic => {
-                req.header("x-api-key", &self.config.api_key).header("anthropic-version", "2023-06-01")
+    /// Return the static authentication and protocol headers for a given provider.
+    pub fn auth_headers(kind: ProviderKind, api_key: &str) -> Vec<(&'static str, String)> {
+        match kind {
+            ProviderKind::Anthropic => vec![
+                ("x-api-key", api_key.to_string()),
+                ("anthropic-version", "2023-06-01".to_string()),
+                ("anthropic-beta", "prompt-caching-2024-07-31".to_string()),
+            ],
+            ProviderKind::OpenAi | ProviderKind::OpenAiCompatible => {
+                vec![("Authorization", format!("Bearer {api_key}"))]
             }
-            ProviderKind::OpenAi | ProviderKind::OpenAiCompatible => req.bearer_auth(&self.config.api_key),
-            ProviderKind::Gemini => req.header("x-goog-api-key", &self.config.api_key),
+            ProviderKind::Gemini => vec![("x-goog-api-key", api_key.to_string())],
         }
+    }
+
+    /// Attach the provider's auth header to a request builder.
+    fn auth(&self, mut req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        for (k, v) in Self::auth_headers(self.config.kind, &self.config.api_key) {
+            req = req.header(k, v);
+        }
+        req
     }
 }
 
@@ -306,5 +318,19 @@ mod tests {
     fn a_models_body_of_the_wrong_shape_yields_an_empty_list() {
         assert!(parse_models(ProviderKind::OpenAi, &serde_json::json!({})).is_empty());
         assert!(parse_models(ProviderKind::Gemini, &serde_json::json!({ "models": "nope" })).is_empty());
+    }
+
+    #[test]
+    fn anthropic_auth_headers_include_beta_prompt_caching() {
+        let headers = HttpProvider::auth_headers(ProviderKind::Anthropic, "sk-ant-123");
+        assert!(headers.iter().any(|(k, v)| *k == "anthropic-beta" && v == "prompt-caching-2024-07-31"));
+        assert!(headers.iter().any(|(k, v)| *k == "x-api-key" && v == "sk-ant-123"));
+        assert!(headers.iter().any(|(k, v)| *k == "anthropic-version" && v == "2023-06-01"));
+    }
+
+    #[test]
+    fn openai_auth_headers_use_bearer_token() {
+        let headers = HttpProvider::auth_headers(ProviderKind::OpenAi, "sk-proj-xyz");
+        assert_eq!(headers, vec![("Authorization", "Bearer sk-proj-xyz".to_string())]);
     }
 }

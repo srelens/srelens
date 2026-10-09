@@ -19,17 +19,30 @@ pub fn build_request(
     turns: &[Turn],
     tools: &[ToolDef],
 ) -> Value {
+    let tool_count = tools.len();
     json!({
         "model": model,
         "max_tokens": max_tokens,
         "stream": true,
-        "system": system,
+        "system": [
+            {
+                "type": "text",
+                "text": system,
+                "cache_control": { "type": "ephemeral" }
+            }
+        ],
         "messages": turns.iter().map(message_for_turn).collect::<Vec<_>>(),
-        "tools": tools.iter().map(|t| json!({
-            "name": t.name,
-            "description": t.description,
-            "input_schema": t.input_schema,
-        })).collect::<Vec<_>>(),
+        "tools": tools.iter().enumerate().map(|(i, t)| {
+            let mut obj = json!({
+                "name": t.name,
+                "description": t.description,
+                "input_schema": t.input_schema,
+            });
+            if i == tool_count.saturating_sub(1) && tool_count > 0 {
+                obj["cache_control"] = json!({ "type": "ephemeral" });
+            }
+            obj
+        }).collect::<Vec<_>>(),
     })
 }
 
@@ -321,19 +334,23 @@ mod tests {
             2048,
             "you are srelens",
             &[Turn::User("why is web-0 down?".into())],
-            &[tool("k8s_listPods", true)],
+            &[tool("k8s_listPods", true), tool("k8s_scale", false)],
         );
         assert_eq!(req["model"], "claude-opus-4-8");
         assert_eq!(req["stream"], true);
         assert_eq!(req["max_tokens"], 2048);
-        assert_eq!(req["system"], "you are srelens");
+        assert_eq!(req["system"][0]["type"], "text");
+        assert_eq!(req["system"][0]["text"], "you are srelens");
+        assert_eq!(req["system"][0]["cache_control"]["type"], "ephemeral");
         assert_eq!(req["messages"][0]["role"], "user");
         assert_eq!(
             req["messages"][0]["content"][0]["text"],
             "why is web-0 down?"
         );
         assert_eq!(req["tools"][0]["name"], "k8s_listPods");
-        assert_eq!(req["tools"][0]["input_schema"]["type"], "object");
+        assert_eq!(req["tools"][0].get("cache_control"), None);
+        assert_eq!(req["tools"][1]["name"], "k8s_scale");
+        assert_eq!(req["tools"][1]["cache_control"]["type"], "ephemeral");
     }
 
     #[test]
