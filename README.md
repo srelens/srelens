@@ -72,7 +72,7 @@
 | **What it is** | A native window built with Tauri v2 and React 19 | One self-contained binary built with ratatui |
 | **Best for** | Daily cluster work, YAML editing, topology, many clusters side by side | SSH sessions, jump hosts, keyboard-only flow, k9s muscle memory |
 | **Runs on** | macOS, Linux, Windows — or in a browser via [web mode](docs/WEB.md) | Linux (glibc and static musl) and macOS on x86-64 and arm64; Windows on x86-64 |
-| **Install** | [Download a release](#install) | `brew install srelens/tap/srectl` or [one line](#install) |
+| **Install** | [Download a release](#install) | Homebrew or [one line](#install) |
 | **AI** | Built-in assistant, plus the MCP server in **Settings → MCP** | `:ai` assistant, plus `srectl mcp` over stdio |
 
 Both talk to your clusters directly with the credentials in your local
@@ -220,6 +220,8 @@ verifying downloads and uninstalling on each platform.
 
 ### Terminal UI
 
+> **v0.15.0 and earlier** publish the terminal UI under its old name, `srelens-tui`. The Linux one-liner handles that and installs it as `srectl`. With Homebrew, run `brew install srelens/tap/srelens-tui` until a release ships under the new name; the command it installs is `srelens-tui`. Those releases' archives are `srelens-tui-<version>-<target>.tar.gz`.
+
 macOS (Homebrew):
 
 ```bash
@@ -302,7 +304,7 @@ token storage.
 
 - [Rust](https://rustup.rs) stable
 - [Node.js](https://nodejs.org) 26 (development default; Node 24 LTS is also supported). Run `nvm install && nvm use` to use the version in `.nvmrc`.
-- [pnpm](https://pnpm.io) 9+
+- [pnpm](https://pnpm.io) 11+ (the exact version is pinned in `package.json`)
 - [Tauri v2 system dependencies](https://v2.tauri.app/start/prerequisites/)
 - A reachable Kubernetes cluster for cluster-dependent workflows
 

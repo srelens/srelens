@@ -77,7 +77,7 @@
 | **Qué es** | Una ventana nativa hecha con Tauri v2 y React 19 | Un único binario autocontenido hecho con ratatui |
 | **Ideal para** | El trabajo diario con clusters, la edición de YAML, la topología y muchos clusters a la vez | Sesiones SSH, jump hosts, trabajo solo con teclado y la memoria muscular de k9s |
 | **Funciona en** | macOS, Linux y Windows, o en un navegador con el [modo web](../WEB.md) | Linux (glibc y musl estático) y macOS en x86-64 y arm64; Windows en x86-64 |
-| **Instalación** | [Descarga una versión](#instalación) | `brew install srelens/tap/srectl` o [en una sola línea](#instalación) |
+| **Instalación** | [Descarga una versión](#instalación) | Homebrew o [en una sola línea](#instalación) |
 | **IA** | Asistente integrado, además del servidor MCP en **Settings → MCP** (Ajustes → MCP) | Asistente `:ai`, además de `srectl mcp` por stdio |
 
 Las dos hablan directamente con tus clusters usando las credenciales de tu
@@ -237,6 +237,8 @@ plataforma.
 
 ### Interfaz de terminal
 
+> **v0.15.0 y anteriores** publican la interfaz de terminal con su nombre antiguo, `srelens-tui`. El instalador de una línea para Linux lo tiene en cuenta y la instala como `srectl`. Con Homebrew, usa `brew install srelens/tap/srelens-tui` hasta que salga una versión con el nombre nuevo; el comando que instala es `srelens-tui`. Los archivos de esas versiones se llaman `srelens-tui-<version>-<target>.tar.gz`.
+
 macOS (Homebrew):
 
 ```bash
@@ -324,7 +326,7 @@ tokens.
 
 - [Rust](https://rustup.rs) estable
 - [Node.js](https://nodejs.org) 26 (la versión por defecto para desarrollo; Node 24 LTS también es compatible). Ejecuta `nvm install && nvm use` para usar la versión de `.nvmrc`.
-- [pnpm](https://pnpm.io) 9+
+- [pnpm](https://pnpm.io) 11+ (la versión exacta está fijada en `package.json`)
 - [Dependencias del sistema de Tauri v2](https://v2.tauri.app/start/prerequisites/)
 - Un cluster de Kubernetes accesible para los flujos de trabajo que dependen de un cluster
 

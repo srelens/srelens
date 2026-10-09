@@ -73,7 +73,7 @@
 | **概要** | Tauri v2 と React 19 で作られたネイティブウィンドウ | ratatui で作られた、単体で動作する 1 つのバイナリ |
 | **向いている用途** | 日々のクラスター作業、YAML の編集、トポロジー、多数のクラスターを並べての作業 | SSH セッション、踏み台ホスト、キーボードだけの操作、k9s で身についた操作感 |
 | **動作環境** | macOS、Linux、Windows。[Web モード](../WEB.md)ならブラウザーでも利用可能 | x86-64 と arm64 の Linux（glibc および静的 musl）と macOS、x86-64 の Windows |
-| **インストール** | [リリースをダウンロード](#インストール) | `brew install srelens/tap/srectl` または[ワンライナー](#インストール) |
+| **インストール** | [リリースをダウンロード](#インストール) | Homebrew または[ワンライナー](#インストール) |
 | **AI** | 組み込みのアシスタントに加え、**Settings → MCP**（設定 → MCP）から MCP サーバー | `:ai` アシスタントに加え、stdio 経由の `srectl mcp` |
 
 どちらも、ローカルの kubeconfig にある認証情報を使ってクラスターと直接通信します。srelens のクラウドサービスを経由することは一切ありません。
@@ -177,6 +177,8 @@ srectl --help               # すべてのフラグを表示
 
 ### ターミナル UI
 
+> **v0.15.0 以前**のリリースでは、ターミナル UI は旧名の `srelens-tui` で公開されています。Linux のワンライナーはこれに対応しており、`srectl` としてインストールします。Homebrew では、新しい名前でのリリースが出るまで `brew install srelens/tap/srelens-tui` を使ってください。この場合、インストールされるコマンドは `srelens-tui` です。これらのリリースのアーカイブ名は `srelens-tui-<version>-<target>.tar.gz` です。
+
 macOS（Homebrew）:
 
 ```bash
@@ -238,7 +240,7 @@ stdio の設定例:
 
 - [Rust](https://rustup.rs) の stable 版
 - [Node.js](https://nodejs.org) 26（開発時のデフォルト。Node 24 LTS もサポートしています）。`nvm install && nvm use` を実行すると、`.nvmrc` に記載されたバージョンを使えます。
-- [pnpm](https://pnpm.io) 9 以上
+- [pnpm](https://pnpm.io) 11 以上（正確なバージョンは `package.json` で固定されています）
 - [Tauri v2 のシステム依存関係](https://v2.tauri.app/start/prerequisites/)
 - クラスターに依存するワークフローのための、到達可能な Kubernetes クラスター
 

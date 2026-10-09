@@ -77,6 +77,15 @@ test("every external image in every README comes from a host GitHub's image prox
   }
 });
 
+test("every README asks for the pnpm major that package.json pins", () => {
+  const major = JSON.parse(read("package.json")).packageManager.match(/^pnpm@(\d+)\./)[1];
+  for (const file of READMES) {
+    const asked = read(file).match(/\]\(https:\/\/pnpm\.io\)\s*(\d+)/);
+    assert.ok(asked, `${file} lists no pnpm version`);
+    assert.equal(asked[1], major, `${file} asks for pnpm ${asked[1]}, but package.json pins pnpm ${major}`);
+  }
+});
+
 test("every translation shows the same screenshots as the English README", () => {
   const shots = (file) =>
     targets(read(file))

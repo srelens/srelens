@@ -76,7 +76,7 @@
 | **무엇인가요** | Tauri v2와 React 19 기반의 네이티브 창 | ratatui로 만든 자체 완결형 단일 바이너리 |
 | **이럴 때 좋습니다** | 일상적인 클러스터 작업, YAML 편집, 토폴로지, 여러 클러스터를 나란히 띄워 놓고 하는 작업 | SSH 세션, 점프 호스트, 키보드만으로 하는 작업, k9s에 익숙한 손 |
 | **실행 환경** | macOS, Linux, Windows — 또는 [웹 모드](../WEB.md)로 브라우저에서 | x86-64 및 arm64용 Linux(glibc 및 정적 musl)와 macOS, x86-64용 Windows |
-| **설치** | [릴리스 다운로드](#설치) | `brew install srelens/tap/srectl` 또는 [한 줄 명령](#설치) |
+| **설치** | [릴리스 다운로드](#설치) | Homebrew 또는 [한 줄 명령](#설치) |
 | **AI** | 내장 어시스턴트, 그리고 **Settings → MCP**(설정 → MCP)의 MCP 서버 | `:ai` 어시스턴트, 그리고 stdio로 동작하는 `srectl mcp` |
 
 두 인터페이스 모두 로컬 kubeconfig에 있는 자격 증명으로 클러스터와 직접 통신합니다.
@@ -224,6 +224,8 @@ srectl --help               # 전체 플래그 보기
 
 ### 터미널 UI
 
+> **v0.15.0 이하** 릴리스는 터미널 UI를 이전 이름인 `srelens-tui`로 배포합니다. Linux 한 줄 설치 명령은 이를 처리해 `srectl`로 설치합니다. Homebrew에서는 새 이름으로 릴리스가 나올 때까지 `brew install srelens/tap/srelens-tui`를 사용하세요. 이때 설치되는 명령은 `srelens-tui`입니다. 해당 릴리스의 아카이브 이름은 `srelens-tui-<version>-<target>.tar.gz`입니다.
+
 macOS(Homebrew):
 
 ```bash
@@ -303,7 +305,7 @@ drain할 권한까지 생기지는 않습니다. Host 헤더 검사, 감사 로�
 
 - [Rust](https://rustup.rs) stable
 - [Node.js](https://nodejs.org) 26(개발 기본값이며, Node 24 LTS도 지원합니다). `.nvmrc`에 지정된 버전을 사용하려면 `nvm install && nvm use`를 실행하십시오.
-- [pnpm](https://pnpm.io) 9+
+- [pnpm](https://pnpm.io) 11+ (정확한 버전은 `package.json`에 고정되어 있습니다)
 - [Tauri v2 시스템 의존성](https://v2.tauri.app/start/prerequisites/)
 - 클러스터가 필요한 워크플로를 위한, 접근 가능한 Kubernetes 클러스터
 

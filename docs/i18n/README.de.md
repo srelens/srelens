@@ -74,7 +74,7 @@
 | **Was es ist** | Ein natives Fenster, gebaut mit Tauri v2 und React 19 | Ein einziges, eigenständiges Binary, gebaut mit ratatui |
 | **Ideal für** | Tägliche Cluster-Arbeit, YAML-Bearbeitung, Topologie, viele Cluster nebeneinander | SSH-Sitzungen, Jump-Hosts, reine Tastaturbedienung, k9s-Muskelgedächtnis |
 | **Läuft auf** | macOS, Linux, Windows – oder im Browser über den [Web-Modus](../WEB.md) | Linux (glibc und statisches musl) und macOS auf x86-64 und arm64; Windows auf x86-64 |
-| **Installation** | [Release herunterladen](#installation) | `brew install srelens/tap/srectl` oder [per Einzeiler](#installation) |
+| **Installation** | [Release herunterladen](#installation) | Homebrew oder [per Einzeiler](#installation) |
 | **KI** | Integrierter Assistent, dazu der MCP-Server unter **Settings → MCP** (Einstellungen → MCP) | `:ai`-Assistent, dazu `srectl mcp` über stdio |
 
 Beide sprechen direkt mit deinen Clustern, mit den Zugangsdaten aus deiner lokalen
@@ -230,6 +230,8 @@ ersten Start, Updates, das Verifizieren von Downloads und die Deinstallation.
 
 ### Terminal-UI
 
+> **v0.15.0 und älter** veröffentlichen die Terminal-UI noch unter ihrem alten Namen `srelens-tui`. Der Linux-Einzeiler berücksichtigt das und installiert sie als `srectl`. Mit Homebrew nutzt du `brew install srelens/tap/srelens-tui`, bis ein Release unter dem neuen Namen erscheint; der installierte Befehl heißt dann `srelens-tui`. Die Archive dieser Releases heißen `srelens-tui-<version>-<target>.tar.gz`.
+
 macOS (Homebrew):
 
 ```bash
@@ -316,7 +318,7 @@ Audit-Log und Token-Speicherung, beschreibt [docs/MCP.md](../MCP.md).
 
 - [Rust](https://rustup.rs) (stable)
 - [Node.js](https://nodejs.org) 26 (Standard für die Entwicklung; Node 24 LTS wird ebenfalls unterstützt). Führe `nvm install && nvm use` aus, um die Version aus `.nvmrc` zu verwenden.
-- [pnpm](https://pnpm.io) 9+
+- [pnpm](https://pnpm.io) 11+ (die genaue Version legt `package.json` fest)
 - [Systemabhängigkeiten für Tauri v2](https://v2.tauri.app/start/prerequisites/)
 - Ein erreichbarer Kubernetes-Cluster für Workflows, die einen Cluster voraussetzen
 

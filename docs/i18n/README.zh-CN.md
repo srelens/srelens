@@ -75,7 +75,7 @@
 | **它是什么** | 基于 Tauri v2 和 React 19 构建的原生窗口应用 | 基于 ratatui 构建的单个自包含二进制文件 |
 | **最适合** | 日常集群工作、YAML 编辑、拓扑查看、多集群并排操作 | SSH 会话、跳板机、纯键盘操作、延续 k9s 的操作习惯 |
 | **运行平台** | macOS、Linux、Windows——也可以通过 [Web 模式](../WEB.md)在浏览器中运行 | x86-64 和 arm64 上的 Linux（glibc 与静态 musl）和 macOS；x86-64 上的 Windows |
-| **安装** | [下载发行版](#安装) | `brew install srelens/tap/srectl` 或[一行命令安装](#安装) |
+| **安装** | [下载发行版](#安装) | Homebrew 或[一行命令安装](#安装) |
 | **AI** | 内置助手，以及 **Settings → MCP**（设置 → MCP）中的 MCP 服务器 | `:ai` 助手，以及通过 stdio 运行的 `srectl mcp` |
 
 两者都使用你本地 kubeconfig 中的凭据直接连接集群，不经过任何 srelens 云服务中转。
@@ -195,6 +195,8 @@ srectl --help               # 查看全部参数
 
 ### 终端界面
 
+> **v0.15.0 及更早版本**仍以旧名称 `srelens-tui` 发布终端界面。Linux 一行安装命令会处理这一点，并将其安装为 `srectl`。使用 Homebrew 时，在以新名称发布的版本推出之前，请运行 `brew install srelens/tap/srelens-tui`，安装的命令为 `srelens-tui`。这些版本的归档文件名为 `srelens-tui-<version>-<target>.tar.gz`。
+
 macOS（Homebrew）：
 
 ```bash
@@ -267,7 +269,7 @@ Host 请求头检查、审计日志和令牌存储）请参见 [docs/MCP.md](../
 
 - [Rust](https://rustup.rs) 稳定版
 - [Node.js](https://nodejs.org) 26（开发默认版本；也支持 Node 24 LTS）。运行 `nvm install && nvm use` 即可使用 `.nvmrc` 中指定的版本。
-- [pnpm](https://pnpm.io) 9+
+- [pnpm](https://pnpm.io) 11+（具体版本由 `package.json` 固定）
 - [Tauri v2 系统依赖](https://v2.tauri.app/start/prerequisites/)
 - 一个可访问的 Kubernetes 集群，用于依赖集群的工作流
 

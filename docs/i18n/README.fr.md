@@ -77,7 +77,7 @@
 | **Ce que c'est** | Une fenêtre native construite avec Tauri v2 et React 19 | Un binaire unique et autonome construit avec ratatui |
 | **Idéal pour** | Le travail quotidien sur les clusters, l'édition YAML, la topologie, plusieurs clusters côte à côte | Les sessions SSH, les bastions, un usage 100 % clavier, vos réflexes k9s |
 | **Fonctionne sur** | macOS, Linux, Windows — ou dans un navigateur grâce au [mode web](../WEB.md) | Linux (glibc et musl statique) et macOS en x86-64 et arm64 ; Windows en x86-64 |
-| **Installation** | [Télécharger une version](#installation) | `brew install srelens/tap/srectl` ou [en une ligne](#installation) |
+| **Installation** | [Télécharger une version](#installation) | Homebrew ou [en une ligne](#installation) |
 | **IA** | Assistant intégré, plus le serveur MCP dans **Settings → MCP** (Paramètres → MCP) | Assistant `:ai`, plus `srectl mcp` via stdio |
 
 Les deux parlent directement à vos clusters, avec les identifiants de votre
@@ -235,6 +235,8 @@ jour, la vérification des téléchargements et la désinstallation sur chaque p
 
 ### Interface terminal
 
+> **Les versions jusqu'à la v0.15.0** publient l'interface terminal sous son ancien nom, `srelens-tui`. L'installation en une ligne sous Linux le gère et l'installe sous le nom `srectl`. Avec Homebrew, utilisez `brew install srelens/tap/srelens-tui` jusqu'à la première version publiée sous le nouveau nom ; la commande installée s'appelle alors `srelens-tui`. Les archives de ces versions s'appellent `srelens-tui-<version>-<target>.tar.gz`.
+
 macOS (Homebrew) :
 
 ```bash
@@ -324,7 +326,7 @@ journal d'audit et le stockage des tokens.
 
 - [Rust](https://rustup.rs) stable
 - [Node.js](https://nodejs.org) 26 (version par défaut pour le développement ; Node 24 LTS est également pris en charge). Lancez `nvm install && nvm use` pour utiliser la version indiquée dans `.nvmrc`.
-- [pnpm](https://pnpm.io) 9+
+- [pnpm](https://pnpm.io) 11+ (la version exacte est fixée dans `package.json`)
 - [Dépendances système de Tauri v2](https://v2.tauri.app/start/prerequisites/)
 - Un cluster Kubernetes joignable pour les workflows qui dépendent d'un cluster
 
