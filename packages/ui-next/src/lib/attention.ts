@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   listDaemonSets,
   listDeployments,
@@ -201,6 +201,9 @@ export function useAttention(targets: readonly ClusterContext[], paused: boolean
   const [scans, setScans] = useState<Record<string, ClusterAttention>>({});
   // The effect's identity: which clusters, by id and by the name the calls use.
   const key = targets.map((t) => `${t.stableId}\u0000${t.name}`).join("\n");
+  // The batch last started, across effect runs: a new set of clusters waits for
+  // the reads already out, so two batches never run side by side.
+  const batch = useRef<Promise<void>>(Promise.resolve());
 
   useEffect(() => {
     if (paused || targets.length === 0) return;
@@ -210,11 +213,26 @@ export function useAttention(targets: readonly ClusterContext[], paused: boolean
     const run = async () => {
       if (running || document.visibilityState === "hidden") return;
       running = true;
-      last = Date.now();
-      await eachLimited(targets, ATTENTION_CONCURRENCY, async (context) => {
-        const scan = await readClusterAttention(context);
-        if (alive) setScans((held) => ({ ...held, [context.stableId]: scan }));
-      });
+      const previous = batch.current;
+      const mine = (async () => {
+        await previous;
+        let cut = false;
+        last = Date.now();
+        await eachLimited(targets, ATTENTION_CONCURRENCY, async (context) => {
+          // Before EACH read, not once per batch: a pause or a hidden window
+          // stops the reads not yet started; the ones out are let land.
+          if (!alive || document.visibilityState === "hidden") {
+            cut = true;
+            return;
+          }
+          const scan = await readClusterAttention(context);
+          if (alive) setScans((held) => ({ ...held, [context.stableId]: scan }));
+        });
+        // A batch cut short is due again as soon as the window is shown.
+        if (cut) last = -Infinity;
+      })();
+      batch.current = mine;
+      await mine;
       running = false;
     };
     const onVisible = () => {

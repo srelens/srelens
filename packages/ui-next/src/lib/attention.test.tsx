@@ -160,6 +160,52 @@ describe("useAttention", () => {
     expect(Object.keys(result.current)).toEqual(["a"]);
   });
 
+  /** Pod reads that answer only when the test says so, by cluster. */
+  function heldReads() {
+    const release = new Map<string, () => void>();
+    core.podOverview.mockImplementation((context: string) => new Promise((done) => {
+      release.set(context, () => done({ pods: { total: 0, byNode: [], unsettled: [], truncated: false } }));
+    }));
+    return async (...contexts: string[]) => {
+      await act(async () => { for (const c of contexts) release.get(c)!(); await vi.advanceTimersByTimeAsync(0); });
+    };
+  }
+  const five = ["a", "b", "c", "d", "e"].map((id) => ctx(id));
+
+  it("starts no more reads once it is paused in the middle of a batch", async () => {
+    const answer = heldReads();
+    const view = renderHook(({ paused }) => useAttention(five, paused), { initialProps: { paused: false } });
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(asked()).toEqual(["a", "b", "c"]);
+    view.rerender({ paused: true });
+    await answer("a", "b", "c");
+    expect(asked()).toEqual(["a", "b", "c"]);
+  });
+
+  it("starts no more reads once the window is hidden in the middle of a batch, and finishes when shown", async () => {
+    const answer = heldReads();
+    renderHook(() => useAttention(five, false));
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    hidden = true;
+    await answer("a", "b", "c");
+    expect(asked()).toEqual(["a", "b", "c"]);
+    hidden = false;
+    await act(async () => { document.dispatchEvent(new Event("visibilitychange")); await vi.advanceTimersByTimeAsync(0); });
+    expect(asked().length).toBeGreaterThan(3);
+  });
+
+  it("does not start a second batch beside one still reading when the clusters change", async () => {
+    const answer = heldReads();
+    const view = renderHook(({ targets }) => useAttention(targets, false), { initialProps: { targets: five.slice(0, 3) } });
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(asked()).toEqual(["a", "b", "c"]);
+    view.rerender({ targets: five });
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(asked()).toEqual(["a", "b", "c"]);
+    await answer("a", "b", "c");
+    expect(asked()).toEqual(["a", "b", "c", "a", "b", "c"]);
+  });
+
   it("refreshes on its interval, not before", async () => {
     renderHook(() => useAttention([ctx("a")], false));
     await act(async () => { await vi.advanceTimersByTimeAsync(0); });
