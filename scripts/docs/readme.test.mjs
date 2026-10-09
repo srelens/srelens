@@ -56,6 +56,27 @@ test("every local link and image in every README resolves", () => {
   }
 });
 
+// GitHub fetches every external README image through its camo proxy, which is
+// not a browser. A host behind a bot challenge answers it with a 429 and the
+// badge renders broken: deepwiki.com/badge.svg, DeepWiki's own suggested
+// snippet, does exactly that (#865). Add a host here only once a badge from it
+// has been seen to load on github.com.
+const IMAGE_HOSTS = ["img.shields.io", "github.com", "api.scorecard.dev"];
+
+test("every external image in every README comes from a host GitHub's image proxy can fetch", () => {
+  for (const file of READMES) {
+    const text = read(file);
+    const images = [
+      ...[...text.matchAll(/<img\b[^>]*\bsrc="(https?:[^"]+)"/g)].map((m) => m[1]),
+      ...[...text.matchAll(/!\[[^\]]*\]\((https?:[^)\s]+)/g)].map((m) => m[1]),
+    ];
+    for (const src of images) {
+      const host = new URL(src).hostname;
+      assert.ok(IMAGE_HOSTS.includes(host), `${file} shows an image from ${host}, which GitHub's image proxy may not fetch: ${src}`);
+    }
+  }
+});
+
 test("every translation shows the same screenshots as the English README", () => {
   const shots = (file) =>
     targets(read(file))
