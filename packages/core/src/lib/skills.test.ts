@@ -6,7 +6,7 @@ vi.mock("../transport/transport", async (importOriginal) => {
   return { ...actual, invokeCommand: invokeCommandMock };
 });
 
-import { listSkills, loadSkill, saveSkill, deleteSkill, type Skill, type SkillMeta } from "./skills";
+import { listSkills, loadSkill, saveSkill, deleteSkill, type Skill, type SkillMeta, revealSkill, skillsDirPath } from "./skills";
 
 describe("skills", () => {
   beforeEach(() => invokeCommandMock.mockReset());
@@ -44,6 +44,20 @@ describe("skills", () => {
 
     await saveSkill(skill);
     expect(invokeCommandMock).toHaveBeenCalledWith("skill_save", { skill });
+  });
+
+  it("skillsDirPath asks for the folder skill files are kept in", async () => {
+    invokeCommandMock.mockResolvedValue("/home/dana/.config/srelens/assistant/skills");
+    await expect(skillsDirPath()).resolves.toBe("/home/dana/.config/srelens/assistant/skills");
+    expect(invokeCommandMock).toHaveBeenCalledWith("skills_dir_path");
+  });
+
+  it("revealSkill names the skill to select, or none for the folder itself", async () => {
+    invokeCommandMock.mockResolvedValue(undefined);
+    await revealSkill("team-runbook");
+    expect(invokeCommandMock).toHaveBeenLastCalledWith("skill_reveal", { name: "team-runbook" });
+    await revealSkill();
+    expect(invokeCommandMock).toHaveBeenLastCalledWith("skill_reveal", { name: null });
   });
 
   it("deleteSkill calls skill_delete with the name", async () => {

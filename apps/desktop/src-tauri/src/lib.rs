@@ -514,6 +514,8 @@ pub fn run() {
             assistant_skills::skill_load,
             assistant_skills::skill_save,
             assistant_skills::skill_delete,
+            assistant_skills::skills_dir_path,
+            assistant_skills::skill_reveal,
             invoke_capability,
             bridge::invoke_package_capability,
             start_resource_watch,

@@ -14,6 +14,13 @@ export interface SkillMeta {
   /** True for a srelens-shipped default skill with no user override — the UI
    * badges these and doesn't offer delete (there's no file to remove). */
   builtin?: boolean;
+  /** Where the skill's file is, for opening and editing it by hand. Absent
+   *  for a shipped default nobody has overridden: it has no file. (#851) */
+  path?: string | null;
+  /** True for a user file standing in for a shipped default of the same
+   *  name: deleting it brings the default back rather than removing the
+   *  skill. */
+  overridesBuiltin?: boolean;
 }
 
 /** A full skill, including its instructions body. */
@@ -39,4 +46,17 @@ export function saveSkill(skill: Skill): Promise<void> {
 /** Delete a skill's file. */
 export function deleteSkill(name: string): Promise<void> {
   return invokeCommand("skill_delete", { name });
+}
+
+/** The folder the user's skill files are kept in. */
+export function skillsDirPath(): Promise<string> {
+  return invokeCommand("skills_dir_path");
+}
+
+/**
+ * Open the skills folder in the OS file manager — with `name`'s file selected
+ * where it has one and the platform can select a file.
+ */
+export function revealSkill(name?: string): Promise<void> {
+  return invokeCommand("skill_reveal", { name: name ?? null });
 }

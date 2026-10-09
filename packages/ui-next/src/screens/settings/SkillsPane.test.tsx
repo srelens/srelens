@@ -2,7 +2,14 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
-const core = vi.hoisted(() => ({ listSkills: vi.fn(), loadSkill: vi.fn(), deleteSkill: vi.fn() }));
+const core = vi.hoisted(() => ({
+  listSkills: vi.fn(),
+  loadSkill: vi.fn(),
+  deleteSkill: vi.fn(),
+  saveSkill: vi.fn(),
+  skillsDirPath: vi.fn(),
+  revealSkill: vi.fn(),
+}));
 vi.mock("@srelens/core", async (orig) => ({ ...(await orig<typeof import("@srelens/core")>()), ...core }));
 const setSkillActive = vi.hoisted(() => vi.fn());
 vi.mock("../../lib/agentRun", () => ({ setSkillActive }));
@@ -20,8 +27,14 @@ const BODIES: Record<string, string> = {
 const METAS = [
   { name: "crashloop-triage", description: "Triage a pod stuck in CrashLoopBackOff", builtin: true },
   { name: "pending-pod", description: "Diagnose a pod stuck in Pending", builtin: true },
-  { name: "team-runbook", description: "How this team rolls back a release", builtin: false },
+  {
+    name: "team-runbook",
+    description: "How this team rolls back a release",
+    builtin: false,
+    path: "/home/dana/.config/srelens/assistant/skills/team-runbook.md",
+  },
 ];
+const FOLDER = "/home/dana/.config/srelens/assistant/skills";
 
 const card = (name: string) => document.querySelector(`[data-skill="${name}"]`) as HTMLElement;
 const toggle = (name: string) => screen.getByRole("switch", { name: `${name}: on for every new conversation` });
@@ -37,6 +50,9 @@ beforeEach(() => {
     body: BODIES[name],
   }));
   core.deleteSkill.mockReset().mockResolvedValue(undefined);
+  core.saveSkill.mockReset().mockResolvedValue(undefined);
+  core.skillsDirPath.mockReset().mockResolvedValue(FOLDER);
+  core.revealSkill.mockReset().mockResolvedValue(undefined);
 });
 
 async function shown() {
@@ -50,7 +66,7 @@ describe("SkillsPane", () => {
     expect(screen.getByText("Installed (3)")).toBeDefined();
     expect(within(card("crashloop-triage")).getByText("Triage a pod stuck in CrashLoopBackOff")).toBeDefined();
     expect(within(card("crashloop-triage")).getByText("Bundled")).toBeDefined();
-    expect(within(card("crashloop-triage")).getByText("Ships with srelens")).toBeDefined();
+    expect(within(card("crashloop-triage")).getByText(/^Ships with srelens\./)).toBeDefined();
     expect(within(card("team-runbook")).getByText("User")).toBeDefined();
   });
 
@@ -193,6 +209,109 @@ describe("SkillsPane", () => {
     render(<SkillsPane />);
     expect(await screen.findByText("No skills")).toBeDefined();
     expect(screen.getByText("Installed (0)")).toBeDefined();
+  });
+
+  /**
+   * A skill is a file. The reader who wants to change one by hand has to know
+   * where it is, and the pane is the place that knows.
+   */
+  describe("where the files are", () => {
+    it("shows the folder skill files are kept in, as text that can be copied", async () => {
+      await shown();
+      const folder = await waitFor(() => {
+        const el = document.querySelector('[data-slot="skills-folder"]');
+        expect(el).not.toBeNull();
+        return el as HTMLElement;
+      });
+      expect(folder.textContent).toBe(FOLDER);
+      expect(folder.className).toContain("select-all");
+    });
+
+    it("opens that folder", async () => {
+      await shown();
+      const where = screen.getByRole("region", { name: "Where skill files are kept" });
+      await userEvent.click(within(where).getByRole("button", { name: "Open folder" }));
+      // No name: the folder itself.
+      expect(core.revealSkill).toHaveBeenCalledExactlyOnceWith(undefined);
+    });
+
+    it("shows each of the reader's skills its own file, and opens the folder on it", async () => {
+      await shown();
+      expect(card("team-runbook").querySelector('[data-slot="skill-path"]')?.textContent).toBe(
+        "/home/dana/.config/srelens/assistant/skills/team-runbook.md",
+      );
+      await userEvent.click(within(card("team-runbook")).getByRole("button", { name: "Open folder" }));
+      expect(core.revealSkill).toHaveBeenCalledExactlyOnceWith("team-runbook");
+    });
+
+    it("says a bundled skill has no file, rather than showing a path that is not there", async () => {
+      await shown();
+      expect(card("crashloop-triage").querySelector('[data-slot="skill-path"]')).toBeNull();
+      expect(within(card("crashloop-triage")).getByText(/built into the app and has no file to edit/)).toBeDefined();
+      expect(within(card("crashloop-triage")).queryByRole("button", { name: "Open folder" })).toBeNull();
+    });
+
+    it("gives a bundled skill an editable file: its own instructions, saved under its own name", async () => {
+      await shown();
+      await userEvent.click(within(card("crashloop-triage")).getByRole("button", { name: "Make an editable copy" }));
+      await waitFor(() => expect(core.saveSkill).toHaveBeenCalledTimes(1));
+      expect(core.saveSkill).toHaveBeenCalledWith({
+        name: "crashloop-triage",
+        description: "Triage a pod stuck in CrashLoopBackOff",
+        body: BODIES["crashloop-triage"],
+      });
+      // And the list is read again, so the new file shows.
+      await waitFor(() => expect(core.listSkills).toHaveBeenCalledTimes(2));
+    });
+
+    it("marks a copy of a bundled skill as one, and offers to restore the bundled version", async () => {
+      core.listSkills.mockResolvedValue([
+        { ...METAS[0], builtin: false, overridesBuiltin: true, path: `${FOLDER}/crashloop-triage.md` },
+        ...METAS.slice(1),
+      ]);
+      await shown();
+      const mine = card("crashloop-triage");
+      expect(within(mine).getByText("Your copy of a bundled skill")).toBeDefined();
+      expect(mine.querySelector('[data-slot="skill-path"]')?.textContent).toBe(`${FOLDER}/crashloop-triage.md`);
+      expect(within(mine).queryByRole("button", { name: "Uninstall" })).toBeNull();
+      await userEvent.click(within(mine).getByRole("button", { name: "Restore bundled version" }));
+      const dialog = await screen.findByRole("dialog");
+      expect(within(dialog).getByText(/the version that ships with srelens is used again/)).toBeDefined();
+    });
+
+    it("leaves a skill on when only its copy is removed: the skill is still there", async () => {
+      settingsStorage.setItem(SKILL_DEFAULTS_KEY, JSON.stringify(["crashloop-triage"]));
+      core.listSkills.mockResolvedValue([
+        { ...METAS[0], builtin: false, overridesBuiltin: true, path: `${FOLDER}/crashloop-triage.md` },
+        ...METAS.slice(1),
+      ]);
+      await shown();
+      await userEvent.click(within(card("crashloop-triage")).getByRole("button", { name: "Restore bundled version" }));
+      await userEvent.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Restore" }));
+      await waitFor(() => expect(core.deleteSkill).toHaveBeenCalledExactlyOnceWith("crashloop-triage"));
+      expect(getSkillDefaults()).toEqual(["crashloop-triage"]);
+    });
+
+    it("says so when the folder could not be opened", async () => {
+      core.revealSkill.mockRejectedValue(new Error("no file manager"));
+      await shown();
+      await userEvent.click(within(card("team-runbook")).getByRole("button", { name: "Open folder" }));
+      expect(await screen.findByText("Could not open the skills folder")).toBeDefined();
+    });
+
+    it("says so when an editable copy could not be made", async () => {
+      core.saveSkill.mockRejectedValue(new Error("read-only file system"));
+      await shown();
+      await userEvent.click(within(card("pending-pod")).getByRole("button", { name: "Make an editable copy" }));
+      expect(await screen.findByText("Could not make an editable copy of pending-pod")).toBeDefined();
+    });
+
+    it("still lists the skills when the folder's path cannot be read", async () => {
+      core.skillsDirPath.mockRejectedValue(new Error("no config dir"));
+      await shown();
+      expect(screen.getByText("a folder that could not be found.")).toBeDefined();
+      expect(card("team-runbook")).not.toBeNull();
+    });
   });
 
   it("claims nothing it does not do: no registry, no on-demand loading", async () => {

@@ -1,5 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
-import { deleteSkill, listSkills, loadSkill, plural, type SkillMeta } from "@srelens/core";
+import {
+  deleteSkill,
+  listSkills,
+  loadSkill,
+  plural,
+  revealSkill,
+  saveSkill,
+  skillsDirPath,
+  type SkillMeta,
+} from "@srelens/core";
 import { Badge, Button, ConfirmDialog, EmptyState, Switch, TextInput } from "@srelens/ui-kit";
 import { FailureAlert } from "../../lib/errorCopy";
 import { estimateTokens, formatTokens, setSkillDefault, useSkillDefaults } from "../../lib/skillDefaults";
@@ -28,6 +37,13 @@ type Read = { state: "loading" } | { state: "failed"; error: unknown } | { state
  * each question, and it grows with every switch they turn on. It is an
  * estimate (a quarter of the characters) and is marked as one.
  *
+ * **A skill is a file, and the pane says where.** The folder the files are
+ * kept in is shown and can be opened, each of the reader's own skills shows
+ * its file, and a skill that ships with the app — which is compiled in and
+ * has no file — can be given one: an editable copy under the same name, which
+ * then stands in for the shipped one until it is removed. Edit a file in any
+ * editor and Refresh reads it again.
+ *
  * What is NOT here, because nothing behind it exists yet: skills loaded only
  * when a task calls for them, a registry to install from, adding a skill from
  * a folder. Those are drawn in the design this follows; a control for them
@@ -39,6 +55,8 @@ export function SkillsPane() {
   const [query, setQuery] = useState("");
   const [removing, setRemoving] = useState<Listed | null>(null);
   const [removeError, setRemoveError] = useState<unknown>(null);
+  const [folder, setFolder] = useState<string | null>(null);
+  const [fileError, setFileError] = useState<{ title: string; cause: unknown } | null>(null);
   const on = useSkillDefaults();
   const uses = useSkillUses();
 
@@ -68,6 +86,42 @@ export function SkillsPane() {
     };
   }, [attempt]);
 
+  // Where the files are. Asked once: it does not move while the app runs. A
+  // failure costs the path line and nothing else — the list does not need it.
+  useEffect(() => {
+    let current = true;
+    skillsDirPath().then(
+      (dir) => current && setFolder(dir),
+      () => current && setFolder(null),
+    );
+    return () => {
+      current = false;
+    };
+  }, []);
+
+  function reveal(name?: string) {
+    setFileError(null);
+    revealSkill(name).catch((cause: unknown) => setFileError({ title: "Could not open the skills folder", cause }));
+  }
+
+  /**
+   * Give a shipped skill a file of its own: its instructions as they ship,
+   * saved under the same name, where the reader can edit them. The file then
+   * stands in for the shipped one.
+   */
+  async function makeEditable(name: string) {
+    setFileError(null);
+    try {
+      // Only what a skill file holds: the name, the description, the
+      // instructions.
+      const { description, body } = await loadSkill(name);
+      await saveSkill({ name, description, body });
+      setAttempt((n) => n + 1);
+    } catch (cause) {
+      setFileError({ title: `Could not make an editable copy of ${name}`, cause });
+    }
+  }
+
   const skills = read.state === "ready" ? read.skills : [];
   const shown = useMemo(() => {
     const needle = query.trim().toLowerCase();
@@ -85,7 +139,9 @@ export function SkillsPane() {
       await deleteSkill(skill.name);
       // A deleted skill is not left on: its name would otherwise stay in the
       // kept set, counted as a choice the reader can no longer see or undo.
-      setSkillDefault(skill.name, false);
+      // A copy of a bundled skill is different: the skill is still there, as
+      // it shipped, and stays as the reader had it — on or off.
+      if (!skill.overridesBuiltin) setSkillDefault(skill.name, false);
       setRemoving(null);
       setAttempt((n) => n + 1);
     } catch (error) {
@@ -135,6 +191,30 @@ export function SkillsPane() {
         </Button>
       </section>
 
+      <section className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-rule px-4 py-2" aria-label="Where skill files are kept">
+        <span className="text-muted">Skill files are kept in</span>
+        {folder === null ? (
+          <span className="text-muted">a folder that could not be found.</span>
+        ) : (
+          // Selectable, so it can be copied into a terminal or an editor.
+          <code className="min-w-0 select-all break-all font-mono text-[0.75rem] text-ink" data-slot="skills-folder">
+            {folder}
+          </code>
+        )}
+        <Button variant="secondary" size="xs" onClick={() => reveal()}>
+          Open folder
+        </Button>
+        <span className="basis-full text-[0.75rem] text-muted">
+          Each skill is one Markdown file. Edit one in any editor, then press Refresh.
+        </span>
+      </section>
+
+      {fileError !== null && (
+        <div className="px-4 py-3">
+          <FailureAlert tone="sev" title={fileError.title} error={fileError.cause} />
+        </div>
+      )}
+
       {removeError !== null && (
         <div className="px-4 py-3">
           <FailureAlert tone="sev" title="Could not remove the skill" error={removeError} />
@@ -170,15 +250,36 @@ export function SkillsPane() {
                     <p className="flex flex-wrap items-center gap-2">
                       <span className="font-mono font-semibold text-ink">{skill.name}</span>
                       <Badge tone="muted">{skill.builtin ? "Bundled" : "User"}</Badge>
+                      {skill.overridesBuiltin && <Badge tone="info">Your copy of a bundled skill</Badge>}
                     </p>
                     <p className="mt-1 text-ink-soft">{skill.description || "No description."}</p>
-                    <p className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[0.75rem] text-muted">
+                    {/* The file itself, where there is one: what to open to
+                        change this skill by hand. */}
+                    {skill.path ? (
+                      <p className="mt-1 select-all break-all font-mono text-[0.75rem] text-muted" data-slot="skill-path">
+                        {skill.path}
+                      </p>
+                    ) : (
+                      skill.builtin && (
+                        <p className="mt-1 text-[0.75rem] text-muted">
+                          Ships with srelens. It is built into the app and has no file to edit.
+                        </p>
+                      )
+                    )}
+                    <p className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[0.75rem] text-muted">
                       {skill.builtin ? (
-                        <span>Ships with srelens</span>
-                      ) : (
-                        <Button variant="secondary" size="xs" onClick={() => setRemoving(skill)}>
-                          Uninstall
+                        <Button variant="secondary" size="xs" onClick={() => void makeEditable(skill.name)}>
+                          Make an editable copy
                         </Button>
+                      ) : (
+                        <>
+                          <Button variant="secondary" size="xs" onClick={() => reveal(skill.name)}>
+                            Open folder
+                          </Button>
+                          <Button variant="secondary" size="xs" onClick={() => setRemoving(skill)}>
+                            {skill.overridesBuiltin ? "Restore bundled version" : "Uninstall"}
+                          </Button>
+                        </>
                       )}
                       {used > 0 && <span>used {used}×</span>}
                     </p>
@@ -202,9 +303,13 @@ export function SkillsPane() {
 
       {removing && (
         <ConfirmDialog
-          title={`Uninstall ${removing.name}?`}
-          message="The skill's file is deleted. Conversations that used it keep their history."
-          confirmLabel="Uninstall"
+          title={removing.overridesBuiltin ? `Restore the bundled ${removing.name}?` : `Uninstall ${removing.name}?`}
+          message={
+            removing.overridesBuiltin
+              ? "Your copy of the file is deleted, with any changes you made to it, and the version that ships with srelens is used again."
+              : "The skill's file is deleted. Conversations that used it keep their history."
+          }
+          confirmLabel={removing.overridesBuiltin ? "Restore" : "Uninstall"}
           danger
           onConfirm={() => void remove(removing)}
           onCancel={() => setRemoving(null)}

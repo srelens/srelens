@@ -52,6 +52,15 @@ pub struct SkillMeta {
     /// `false`.
     #[serde(default)]
     pub builtin: bool,
+    /// Where this skill's file is, for a reader who wants to open it and edit
+    /// it by hand (srelens/srelens#851). `None` for a shipped default nobody
+    /// has overridden: that one is compiled into the app and has no file.
+    #[serde(default)]
+    pub path: Option<String>,
+    /// True for a user file that stands in for a shipped default of the same
+    /// name. Deleting it does not remove the skill; the default comes back.
+    #[serde(default)]
+    pub overrides_builtin: bool,
 }
 
 /// `<base>/assistant/skills` — where skill `.md` files live.
@@ -200,7 +209,15 @@ fn list_skills(dir: &Path) -> Result<Vec<SkillMeta>, String> {
             // file, but keep listing every other skill that DOES parse.
             continue;
         };
-        metas.push(SkillMeta { name: skill.name, description: skill.description, builtin: false });
+        metas.push(SkillMeta {
+            name: skill.name,
+            description: skill.description,
+            builtin: false,
+            // The file as found, not `<name>.md` rebuilt: a hand-made file may
+            // be named differently from the skill it declares.
+            path: Some(path.display().to_string()),
+            overrides_builtin: false,
+        });
     }
     metas.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(metas)
@@ -292,11 +309,18 @@ fn list_all_skills(dir: &Path) -> Result<Vec<SkillMeta>, String> {
     for b in builtin_skills() {
         by_name.insert(
             b.name.clone(),
-            SkillMeta { name: b.name, description: b.description, builtin: true },
+            SkillMeta {
+                name: b.name,
+                description: b.description,
+                builtin: true,
+                path: None,
+                overrides_builtin: false,
+            },
         );
     }
     for m in list_skills(dir)? {
-        by_name.insert(m.name.clone(), SkillMeta { name: m.name, description: m.description, builtin: false });
+        let overrides_builtin = by_name.contains_key(&m.name);
+        by_name.insert(m.name.clone(), SkillMeta { overrides_builtin, ..m });
     }
     Ok(by_name.into_values().collect())
 }
@@ -352,6 +376,39 @@ pub fn skill_delete(app: AppHandle, name: String) -> Result<(), String> {
     delete_skill(&resolve_skills_dir(&app)?, &name)
 }
 
+/// The folder the user's skill files are kept in, so the UI can say where to
+/// look. Created if it is not there yet: a path shown to the reader should be
+/// one they can open.
+#[tauri::command]
+pub fn skills_dir_path(app: AppHandle) -> Result<String, String> {
+    Ok(resolve_skills_dir(&app)?.display().to_string())
+}
+
+/// What to show in the file manager for `name`: that skill's own file, or —
+/// with no name, or for a skill that has no file — a path inside the skills
+/// folder that does not exist, which [`crate::app_log::reveal_in_file_manager`]
+/// answers by opening the folder itself.
+fn reveal_target(dir: &Path, name: Option<&str>) -> Result<PathBuf, String> {
+    let Some(name) = name else {
+        return Ok(dir.join(SKILLS_FOLDER_PLACEHOLDER));
+    };
+    validate_name(name)?;
+    let file = skill_path(dir, name);
+    Ok(if file.exists() { file } else { dir.join(SKILLS_FOLDER_PLACEHOLDER) })
+}
+
+/// A file name no skill can have (`validate_name` refuses the space), used
+/// to point the file manager at the folder rather than at a file in it.
+const SKILLS_FOLDER_PLACEHOLDER: &str = "no such skill";
+
+/// Open the skills folder in the OS file manager, with `name`'s file selected
+/// where it has one and the platform can select a file.
+#[tauri::command]
+pub fn skill_reveal(app: AppHandle, name: Option<String>) -> Result<(), String> {
+    let dir = resolve_skills_dir(&app)?;
+    crate::app_log::reveal_in_file_manager(&reveal_target(&dir, name.as_deref())?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -385,6 +442,83 @@ mod tests {
             description: format!("Description for {name}"),
             body: "Step 1: look at the pod.\n\nStep 2: check events.\n".to_string(),
         }
+    }
+
+    #[test]
+    fn a_user_skill_says_where_its_file_is_and_a_shipped_default_has_none() {
+        let tmp = TempDir::new();
+        write_skill_atomic(tmp.path(), &sample_skill("team-runbook")).unwrap();
+        let all = list_all_skills(tmp.path()).unwrap();
+
+        let mine = all.iter().find(|m| m.name == "team-runbook").unwrap();
+        assert_eq!(mine.path.as_deref(), Some(skill_path(tmp.path(), "team-runbook").display().to_string().as_str()));
+        assert!(!mine.builtin && !mine.overrides_builtin);
+
+        let shipped = all.iter().find(|m| m.name == "crashloop-triage").unwrap();
+        assert!(shipped.builtin);
+        assert_eq!(shipped.path, None);
+    }
+
+    #[test]
+    fn a_file_named_for_a_shipped_default_stands_in_for_it_and_says_so() {
+        let tmp = TempDir::new();
+        write_skill_atomic(tmp.path(), &sample_skill("crashloop-triage")).unwrap();
+        let all = list_all_skills(tmp.path()).unwrap();
+        let entry = all.iter().find(|m| m.name == "crashloop-triage").unwrap();
+
+        assert!(!entry.builtin, "the file is what is in effect");
+        assert!(entry.overrides_builtin);
+        assert!(entry.path.is_some());
+        // And the default is still there underneath: remove the file and it
+        // is back.
+        delete_skill(tmp.path(), "crashloop-triage").unwrap();
+        let all = list_all_skills(tmp.path()).unwrap();
+        assert!(all.iter().find(|m| m.name == "crashloop-triage").unwrap().builtin);
+    }
+
+    #[test]
+    fn a_skills_path_is_the_file_as_found_even_when_named_differently_from_the_skill() {
+        let tmp = TempDir::new();
+        let odd = tmp.path().join("my notes.md");
+        std::fs::write(&odd, to_markdown(&sample_skill("team-runbook"))).unwrap();
+        let metas = list_skills(tmp.path()).unwrap();
+        assert_eq!(metas[0].path.as_deref(), Some(odd.display().to_string().as_str()));
+    }
+
+    #[test]
+    fn the_new_fields_are_sent_under_the_names_the_frontend_reads() {
+        let tmp = TempDir::new();
+        write_skill_atomic(tmp.path(), &sample_skill("crashloop-triage")).unwrap();
+        let json = serde_json::to_value(list_all_skills(tmp.path()).unwrap()).unwrap();
+        let entry = json.as_array().unwrap().iter().find(|m| m["name"] == "crashloop-triage").unwrap();
+        assert_eq!(entry["overridesBuiltin"], true);
+        assert!(entry["path"].is_string());
+    }
+
+    #[test]
+    fn revealing_a_skill_points_at_its_file_and_otherwise_at_the_folder() {
+        let tmp = TempDir::new();
+        write_skill_atomic(tmp.path(), &sample_skill("team-runbook")).unwrap();
+
+        assert_eq!(
+            reveal_target(tmp.path(), Some("team-runbook")).unwrap(),
+            skill_path(tmp.path(), "team-runbook")
+        );
+        // A shipped default has no file, and no name asks for the folder: both
+        // get a path in the folder that is not there, which opens the folder.
+        for target in [reveal_target(tmp.path(), Some("crashloop-triage")).unwrap(), reveal_target(tmp.path(), None).unwrap()] {
+            assert_eq!(target.parent(), Some(tmp.path()));
+            assert!(!target.exists());
+        }
+    }
+
+    #[test]
+    fn revealing_refuses_a_name_that_could_leave_the_skills_folder() {
+        let tmp = TempDir::new();
+        assert!(reveal_target(tmp.path(), Some("../../etc/passwd")).is_err());
+        assert!(reveal_target(tmp.path(), Some("")).is_err());
+        // The placeholder itself is not a name a skill can have.
+        assert!(validate_name(SKILLS_FOLDER_PLACEHOLDER).is_err());
     }
 
     #[test]
