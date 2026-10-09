@@ -1177,6 +1177,46 @@ describe("Window — notify toasts (#374)", () => {
     expect(onSignIn).toHaveBeenCalledTimes(1);
     expect(screen.queryByText("Sign in to prod")).toBeNull();
   });
+
+  it("draws an error that came with no words, so it can be dismissed and the queue moves on", async () => {
+    // An error stays until dismissed and the queue shows one notice at a time.
+    // Drawn with nothing in it, it had no dismiss button, and every notice
+    // behind it waited forever.
+    const user = userEvent.setup();
+    await booted();
+    act(() => notify.error(""));
+    act(() => notify.error("Drain failed"));
+
+    expect(screen.getByRole("alert").textContent).toContain("Something went wrong");
+    await user.click(screen.getByRole("button", { name: "Dismiss notice" }));
+    expect(screen.getByRole("alert").textContent).toContain("Drain failed");
+  });
+
+  it("lets an info go on its own, like a success", async () => {
+    await booted();
+    vi.useFakeTimers();
+    try {
+      act(() => notify.info("Port forward stopped"));
+      expect(screen.getByText("Port forward stopped").closest('[data-slot="toast-frame"]')).not.toBeNull();
+      act(() => vi.advanceTimersByTime(6_000));
+      expect(screen.queryByText("Port forward stopped")).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("carries an update prompt's action, and clears the prompt once it is taken", async () => {
+    const user = userEvent.setup();
+    await booted();
+    const onView = vi.fn();
+    act(() => notify.updateAvailable("0.17.0", onView));
+
+    expect(screen.getByText("Update available")).toBeDefined();
+    expect(screen.getByText(/srelens 0\.17\.0 is ready to install/)).toBeDefined();
+    await user.click(screen.getByRole("button", { name: "View update" }));
+    expect(onView).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText("Update available")).toBeNull();
+  });
 });
 
 /**

@@ -261,7 +261,11 @@ export function Window({
     return setNotifier({
       success: (title, detail) => push({ level: "ok", title, detail, transient: true }),
       info: (title, detail) => push({ level: "info", title, detail, transient: true }),
-      error: (title, detail) => push({ level: "error", title, detail }),
+      // An error stays until dismissed, and a notice with no words draws
+      // nothing, so no dismiss button either: one empty error would hold every
+      // later notice back. Core's own title for an unclassified failure.
+      error: (title, detail) =>
+        push({ level: "error", title: !title && !detail ? "Something went wrong" : title, detail }),
       updateAvailable: (version, onView) =>
         push({
           level: "info",
