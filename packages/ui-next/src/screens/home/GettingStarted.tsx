@@ -4,7 +4,7 @@ import { Button } from "@srelens/ui-kit";
 import { useExtensions } from "../../extensions/inventoryStore";
 import { useAgentInventoryVersion } from "../../lib/agentInventory";
 import { useContexts, useContextsError, useContextsStatus } from "../../lib/clusters";
-import { FailureLine } from "../../lib/errorCopy";
+import { FailureAlert, FailureLine } from "../../lib/errorCopy";
 import { openSettings } from "../../lib/settingsRequest";
 import { openTab } from "../../lib/tabsStore";
 import { useCanLockWorkspace } from "../../shell/LockGate";
@@ -34,11 +34,14 @@ function readDismissed(): boolean {
     return false;
   }
 }
-function saveDismissed(): void {
+/** Keep the dismissal; the failure when it could not be kept, `null` when it was. */
+function saveDismissed(): unknown {
   try {
     settingsStorage.setItem(CHECKLIST_DISMISSED_KEY, "true");
+    return null;
   } catch (error) {
     console.error("could not persist the dismissed getting-started list", error);
+    return error;
   }
 }
 
@@ -69,6 +72,8 @@ export function GettingStarted({ retryContexts }: { retryContexts?: () => void }
   // Bumped by Retry. The step keeps saying what it last knew until the new answer lands.
   const [agentsAttempt, setAgentsAttempt] = useState(0);
   const [dismissed, setDismissed] = useState(readDismissed);
+  // A dismissal that could not be kept would come back on the next launch, so the list stays and says so.
+  const [dismissFailure, setDismissFailure] = useState<unknown>(null);
 
   useEffect(() => {
     if (!desktop || dismissed) return;
@@ -119,10 +124,22 @@ export function GettingStarted({ retryContexts }: { retryContexts?: () => void }
     <section className="home-side-section" aria-labelledby="home-start-title">
       <div className="home-section-heading">
         <h2 id="home-start-title">Getting started <span className="text-muted">{done}/{steps.length}</span></h2>
-        <Button variant="ghost" size="sm" aria-label="Dismiss getting started" onClick={() => { saveDismissed(); setDismissed(true); }}>
+        <Button
+          variant="ghost"
+          size="sm"
+          aria-label="Dismiss getting started"
+          onClick={() => {
+            const failure = saveDismissed();
+            if (failure === null) setDismissed(true);
+            else setDismissFailure(failure);
+          }}
+        >
           Dismiss
         </Button>
       </div>
+      {dismissFailure !== null && (
+        <FailureAlert title="Could not keep this dismissed" error={dismissFailure} className="home-section-alert" />
+      )}
       <ul className="home-side-group home-pick-list">
         {steps.map((step) => (
           <li key={step.name} className="home-live-row">

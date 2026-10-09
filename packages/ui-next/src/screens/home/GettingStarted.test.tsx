@@ -67,6 +67,21 @@ describe("GettingStarted", () => {
     expect(screen.queryByRole("heading", { name: /^Getting started/ })).toBeNull();
   });
 
+  it("stays up, and says so, when the dismissal cannot be kept", async () => {
+    const setItem = vi.spyOn(settingsStorage, "setItem").mockImplementation(() => { throw new Error("the settings file is read-only"); });
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      render(<GettingStarted />);
+      await userEvent.click(await screen.findByRole("button", { name: "Dismiss getting started" }));
+      expect(screen.getByRole("heading", { name: /^Getting started/ })).toBeTruthy();
+      expect(screen.getByText("Could not keep this dismissed")).toBeTruthy();
+      expect(screen.getByText(/read-only/)).toBeTruthy();
+    } finally {
+      setItem.mockRestore();
+      vi.restoreAllMocks();
+    }
+  });
+
   it("stays dismissed, through the settings storage", async () => {
     const first = render(<GettingStarted />);
     await userEvent.click(await screen.findByRole("button", { name: "Dismiss getting started" }));
