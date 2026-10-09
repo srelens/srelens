@@ -388,36 +388,56 @@ pub fn summarise_pod(pod: Pod) -> PodSummary {
         .unwrap_or_default();
 
     let (mut req_cpu, mut lim_cpu, mut req_mem, mut lim_mem) = (0i64, 0i64, 0i64, 0i64);
-    let limited = |resource: &str| {
-        pod.spec.as_ref().is_some_and(|spec| {
-            !spec.containers.is_empty()
-                && spec.containers.iter().all(|c| {
-                    c.resources
-                        .as_ref()
-                        .and_then(|r| r.limits.as_ref())
-                        .is_some_and(|limits| limits.contains_key(resource))
-                })
+    // The containers that run for as long as the pod does, which are the ones
+    // metrics-server's figure for the pod adds up: the app containers, and the
+    // init containers that restart always — native sidecars. An ordinary init
+    // container has finished before the pod is running and uses nothing.
+    //
+    // A sidecar left out of this would be usage with no bound to set it
+    // against: 200m of app under a 500m limit plus 400m of an unlimited
+    // sidecar reads as 120% of a ceiling the pod does not have.
+    let running: Vec<&k8s_openapi::api::core::v1::Container> = pod
+        .spec
+        .as_ref()
+        .map(|spec| {
+            spec.containers
+                .iter()
+                .chain(
+                    spec.init_containers
+                        .iter()
+                        .flatten()
+                        .filter(|c| c.restart_policy.as_deref() == Some("Always")),
+                )
+                .collect()
         })
+        .unwrap_or_default();
+    let limited = |resource: &str| {
+        // `all` over nothing is true; a pod with nothing in it has no ceiling.
+        !running.is_empty()
+            && running.iter().all(|c| {
+                c.resources
+                    .as_ref()
+                    .and_then(|r| r.limits.as_ref())
+                    .is_some_and(|limits| limits.contains_key(resource))
+            })
     };
     let (cpu_lim_all, mem_lim_all) = (limited("cpu"), limited("memory"));
-    if let Some(spec) = pod.spec.as_ref() {
-        for c in &spec.containers {
-            if let Some(resources) = &c.resources {
-                if let Some(reqs) = &resources.requests {
-                    if let Some(q) = reqs.get("cpu") {
-                        req_cpu += crate::metrics::cpu_millicores(&q.0);
-                    }
-                    if let Some(q) = reqs.get("memory") {
-                        req_mem += crate::metrics::mem_mib(&q.0);
-                    }
+    for c in &running {
+        if let Some(resources) = &c.resources {
+            if let Some(reqs) = &resources.requests {
+                if let Some(q) = reqs.get("cpu") {
+                    req_cpu += crate::metrics::cpu_millicores(&q.0);
                 }
-                if let Some(lims) = &resources.limits {
-                    if let Some(q) = lims.get("cpu") {
-                        lim_cpu += crate::metrics::cpu_millicores(&q.0);
-                    }
-                    if let Some(q) = lims.get("memory") {
-                        lim_mem += crate::metrics::mem_mib(&q.0);
-                    }
+                if let Some(q) = reqs.get("memory") {
+                    req_mem += crate::metrics::mem_mib(&q.0);
+                }
+            }
+            if let Some(lims) = &resources.limits {
+                if let Some(q) = lims.get("cpu") {
+                    lim_cpu += crate::metrics::cpu_millicores(&q.0);
+                }
+                if let Some(q) = lims.get("memory") {
+                    lim_mem += crate::metrics::mem_mib(&q.0);
                 }
             }
         }
@@ -844,6 +864,78 @@ mod tests {
         assert!(!empty.cpu_lim_all && !empty.mem_lim_all);
         let no_spec = summarise_pod(Pod::default());
         assert!(!no_spec.cpu_lim_all && !no_spec.mem_lim_all);
+    }
+
+    /// A pod with one app container and one init container, each given
+    /// `(cpu, memory)` limits; `sidecar` makes the init container restart
+    /// always, which is what a native sidecar is.
+    fn pod_with_init(
+        app: (Option<&str>, Option<&str>),
+        init: (Option<&str>, Option<&str>),
+        sidecar: bool,
+    ) -> Pod {
+        let limits = |(cpu, memory): (Option<&str>, Option<&str>)| {
+            let mut limits = serde_json::Map::new();
+            if let Some(cpu) = cpu {
+                limits.insert("cpu".into(), serde_json::json!(cpu));
+            }
+            if let Some(memory) = memory {
+                limits.insert("memory".into(), serde_json::json!(memory));
+            }
+            serde_json::json!({ "limits": limits.clone(), "requests": limits })
+        };
+        let mut init_container = serde_json::json!({ "name": "init", "image": "img", "resources": limits(init) });
+        if sidecar {
+            init_container["restartPolicy"] = serde_json::json!("Always");
+        }
+        serde_json::from_value(serde_json::json!({
+            "metadata": { "name": "p" },
+            "spec": {
+                "containers": [{ "name": "app", "image": "img", "resources": limits(app) }],
+                "initContainers": [init_container]
+            }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_sidecar_counts_toward_the_pods_bounds_because_its_usage_counts_toward_the_pods_usage() {
+        // An unlimited sidecar beside a limited app: the pod has no CPU
+        // ceiling, whatever the app's own limit says.
+        let unlimited = summarise_pod(pod_with_init((Some("500m"), Some("256Mi")), (None, None), true));
+        assert!(!unlimited.cpu_lim_all && !unlimited.mem_lim_all);
+
+        // A limited sidecar: its limit and request are part of the pod's.
+        let limited = summarise_pod(pod_with_init(
+            (Some("500m"), Some("256Mi")),
+            (Some("100m"), Some("64Mi")),
+            true,
+        ));
+        assert!(limited.cpu_lim_all && limited.mem_lim_all);
+        assert_eq!((limited.cpu_lim_millicores, limited.mem_lim_mib), (600, 320));
+        assert_eq!((limited.cpu_req_millicores, limited.mem_req_mib), (600, 320));
+    }
+
+    #[test]
+    fn an_ordinary_init_container_does_not_count_having_finished_before_the_pod_ran() {
+        // No limit on it, and it does not take the pod's ceiling away.
+        let pod = summarise_pod(pod_with_init((Some("500m"), Some("256Mi")), (None, None), false));
+        assert!(pod.cpu_lim_all && pod.mem_lim_all);
+        // A large limit on it, and it does not raise the pod's ceiling.
+        let pod = summarise_pod(pod_with_init((Some("500m"), Some("256Mi")), (Some("4"), Some("8Gi")), false));
+        assert_eq!((pod.cpu_lim_millicores, pod.mem_lim_mib), (500, 256));
+    }
+
+    #[test]
+    fn a_limit_written_in_decimal_units_is_still_a_limit() {
+        // `500M`, not `500Mi`: read as nothing, it was a pod with no memory
+        // limit, and the list said "no request or limit set" of a pod that
+        // had one.
+        let pod = summarise_pod(pod_with_limits(&[(Some("1"), Some("500M"))]));
+        assert_eq!(pod.mem_lim_mib, 476);
+        assert!(pod.mem_lim_all);
+        let pod = summarise_pod(pod_with_limits(&[(Some("1"), Some("2G"))]));
+        assert_eq!(pod.mem_lim_mib, 1907);
     }
 
     #[test]

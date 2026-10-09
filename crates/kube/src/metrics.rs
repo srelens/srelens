@@ -29,20 +29,37 @@ pub fn cpu_millicores(s: &str) -> i64 {
 }
 
 /// Parse a Kubernetes memory quantity to integer MiB.
+///
+/// Every suffix a quantity may carry, not only the binary ones metrics-server
+/// answers in: a pod's limit is written by a person, and `500M` and `2G` are
+/// as valid as `512Mi`. Read without their suffix they parsed as nothing, and
+/// a limit of nothing is a pod with no limit (srelens/srelens#864). A bare
+/// number is bytes, and may be written with an exponent (`1e9`).
 pub fn mem_mib(s: &str) -> i64 {
+    const MIB: f64 = 1_048_576.0;
+    // Longest first: `Mi` before `M`, and `m` (thousandths of a byte, which
+    // the API accepts) apart from `M`.
+    const SUFFIXES: [(&str, f64); 13] = [
+        ("Ki", 1024.0),
+        ("Mi", MIB),
+        ("Gi", 1024.0 * MIB),
+        ("Ti", 1024.0 * 1024.0 * MIB),
+        ("Pi", 1024.0 * 1024.0 * 1024.0 * MIB),
+        ("Ei", 1024.0 * 1024.0 * 1024.0 * 1024.0 * MIB),
+        ("k", 1e3),
+        ("M", 1e6),
+        ("G", 1e9),
+        ("T", 1e12),
+        ("P", 1e15),
+        ("E", 1e18),
+        ("m", 1e-3),
+    ];
     let s = s.trim();
-    let num = |suffix: &str| s.trim_end_matches(suffix).parse::<f64>().unwrap_or(0.0);
-    if s.ends_with("Ki") {
-        (num("Ki") / 1024.0) as i64
-    } else if s.ends_with("Mi") {
-        num("Mi") as i64
-    } else if s.ends_with("Gi") {
-        (num("Gi") * 1024.0) as i64
-    } else if s.ends_with("Ti") {
-        (num("Ti") * 1024.0 * 1024.0) as i64
-    } else {
-        (num("") / 1_048_576.0) as i64
-    }
+    let (number, bytes_per_unit) = SUFFIXES
+        .iter()
+        .find_map(|(suffix, scale)| s.strip_suffix(suffix).map(|n| (n, *scale)))
+        .unwrap_or((s, 1.0));
+    (number.parse::<f64>().unwrap_or(0.0) * bytes_per_unit / MIB) as i64
 }
 
 fn metrics_api(client: kube::Client, kind: &str, namespaced: bool, namespace: &str) -> Api<DynamicObject> {
@@ -256,6 +273,27 @@ mod tests {
         assert_eq!(mem_mib("131072Ki"), 128);
         assert_eq!(mem_mib("256Mi"), 256);
         assert_eq!(mem_mib("1Gi"), 1024);
+        assert_eq!(mem_mib("1Ti"), 1024 * 1024);
+        // A bare number is bytes.
+        assert_eq!(mem_mib("268435456"), 256);
+        assert_eq!(mem_mib("1.5Gi"), 1536);
+        assert_eq!(mem_mib("nonsense"), 0);
+    }
+
+    #[test]
+    fn reads_decimal_memory_quantities_as_well_as_binary_ones() {
+        // What a person writes in a limit: powers of ten. 500M is 500,000,000
+        // bytes, a little under 477 MiB — and not nothing.
+        assert_eq!(mem_mib("500M"), 476);
+        assert_eq!(mem_mib("2G"), 1907);
+        assert_eq!(mem_mib("1048576k"), 1000);
+        assert_eq!(mem_mib("1T"), 953_674);
+        // `M` is mega and `m` is milli: a thousandth of a byte is no MiB at all.
+        assert_eq!(mem_mib("500m"), 0);
+        // An exponent, with and without a suffix.
+        assert_eq!(mem_mib("1e9"), 953);
+        assert_eq!(mem_mib("1E"), 953_674_316_406);
+        assert_eq!(mem_mib("1Pi"), 1024 * 1024 * 1024);
     }
 
     #[test]
