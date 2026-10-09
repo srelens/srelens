@@ -234,6 +234,10 @@ export function useAttention(targets: readonly ClusterContext[], paused: boolean
       batch.current = mine;
       await mine;
       running = false;
+      // Cut short, and the window shown again while reads were still out: its
+      // catch-up found this batch running and stood down, so the skipped
+      // clusters are read now rather than at the next tick.
+      if (alive && last === -Infinity && document.visibilityState === "visible") void run();
     };
     const onVisible = () => {
       if (document.visibilityState === "visible" && Date.now() - last >= ATTENTION_REFRESH_MS) void run();

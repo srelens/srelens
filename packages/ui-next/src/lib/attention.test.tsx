@@ -194,6 +194,22 @@ describe("useAttention", () => {
     expect(asked().length).toBeGreaterThan(3);
   });
 
+  it("reads the clusters a hidden window skipped as soon as the batch ends, when shown again meanwhile", async () => {
+    // Shown again while reads from the cut batch were still out: the window's
+    // own catch-up found the batch running and stood down, so without a
+    // restart when it ends the skipped clusters waited for the next tick.
+    const answer = heldReads();
+    renderHook(() => useAttention(five, false));
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    hidden = true;
+    await answer("a");
+    expect(asked()).toEqual(["a", "b", "c"]);
+    hidden = false;
+    await act(async () => { document.dispatchEvent(new Event("visibilitychange")); await vi.advanceTimersByTimeAsync(0); });
+    await answer("b", "c");
+    expect(asked().length).toBeGreaterThan(3);
+  });
+
   it("does not start a second batch beside one still reading when the clusters change", async () => {
     const answer = heldReads();
     const view = renderHook(({ targets }) => useAttention(targets, false), { initialProps: { targets: five.slice(0, 3) } });
