@@ -5,6 +5,7 @@ import { Icons } from "../lib/icons";
 import {
   REPO_URL,
   answerNudge,
+  visitedRepository,
   formatStarCount,
   nudgeDue,
   useStarState,
@@ -67,9 +68,12 @@ export function StarButton() {
    * the pill the callout hung from: the callout is about to leave the page,
    * and focus left on a removed button lands on the document body.
    */
-  function answer() {
+  function answer(visited = false) {
     const within = callout.current?.contains(document.activeElement) === true;
-    answerNudge();
+    // Having gone to the repository answers it too, and is when the count is
+    // about to change: see `visitedRepository`.
+    if (visited) visitedRepository();
+    else answerNudge();
     if (within) pill.current?.focus();
   }
 
@@ -93,7 +97,7 @@ export function StarButton() {
     // Answered by going, whether or not the question had been put yet — and
     // only by going: a browser that did not open took the reader nowhere, and
     // must not cost them the one time they are asked.
-    openExternal(REPO_URL).then(answer, (error: unknown) => {
+    openExternal(REPO_URL).then(() => answer(true), (error: unknown) => {
       // Said beside the button: the reader pressed it and nothing opened.
       setFailure(describeError(error).title);
     });
@@ -137,7 +141,7 @@ export function StarButton() {
           <p className="font-semibold text-ink">Enjoying srelens?</p>
           <p className="text-muted">A star on GitHub costs a click, and {WHY}.</p>
           <div className="flex justify-end gap-1.5">
-            <Button variant="secondary" size="sm" onClick={answer}>
+            <Button variant="secondary" size="sm" onClick={() => answer()}>
               Not now
             </Button>
             <Button variant="primary" size="sm" onClick={open}>
