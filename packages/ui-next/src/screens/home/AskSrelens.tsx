@@ -22,7 +22,6 @@ export function AskSrelens({ targets, scans }: {
   const ask = useAskAssistant();
   const [question, setQuestion] = useState("");
   if (!isTauri()) return null;
-  const byId = new Map(targets.map((t) => [t.stableId, t]));
   const suggestions = rankedAttention(targets, scans).slice(0, SUGGESTED);
   const submit = () => {
     const text = question.trim();
@@ -43,11 +42,11 @@ export function AskSrelens({ targets, scans }: {
           <>
             <Eyebrow className="mt-3">Suggested</Eyebrow>
             <ul className="home-pick-list">
-              {suggestions.map((item) => {
+              {suggestions.map(({ item, context }) => {
                 const text = attentionQuestion(item);
                 return (
                   <li key={`${item.clusterId}/${item.kind}/${item.namespace}/${item.name}`}>
-                    <button type="button" className="home-pick-row" aria-label={`Ask: ${text}`} onClick={() => ask(text, byId.get(item.clusterId))}>
+                    <button type="button" className="home-pick-row" aria-label={`Ask: ${text}`} onClick={() => ask(text, context)}>
                       <span className="min-w-0">{text}</span>
                     </button>
                   </li>

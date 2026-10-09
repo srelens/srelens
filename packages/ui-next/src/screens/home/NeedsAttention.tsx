@@ -35,7 +35,6 @@ export function NeedsAttention({ targets, scans }: NeedsAttentionProps) {
   const desktop = isTauri();
   const ask = useAskAssistant();
   const [all, setAll] = useState(false);
-  const byId = new Map(targets.map((t) => [t.stableId, t]));
   const label = (t: ClusterContext) => getMark(t.stableId, t.name).name;
   const items = rankedAttention(targets, scans);
   const pending = targets.filter((t) => !scans[t.stableId]).length;
@@ -83,9 +82,7 @@ export function NeedsAttention({ targets, scans }: NeedsAttentionProps) {
           {pending > 0 && <p className="home-note">Still checking {plural(pending, "cluster")}</p>}
           {items.length > 0 ? (
             <ul className="home-attention-list" aria-label="Things that need attention">
-              {shown.map((item) => {
-                const context = byId.get(item.clusterId);
-                if (!context) return null;
+              {shown.map(({ item, context }) => {
                 const where = label(context);
                 const path = attentionPath(item);
                 return (
