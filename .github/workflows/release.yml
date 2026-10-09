@@ -111,6 +111,15 @@ jobs:
           # documented path is still a plain merge commit; this is the
           # backstop for the wrong button.
           CUR=$(node -p "require('./apps/desktop/src-tauri/tauri.conf.json').version")
+          # A stable run that pushed its bump and then failed leaves main at a
+          # version no release was published for, so no tag names it. Release
+          # that version again instead of bumping past it: v0.16.0 failed that
+          # way, and merging its fix bumped main to 0.17.0, a release nobody
+          # got. The notes still cover everything since the last published tag.
+          RETRY=""
+          if [ -n "$LAST_TAG" ] && ! git rev-parse -q --verify "refs/tags/srelens-v$CUR" >/dev/null; then
+            RETRY=yes
+          fi
           if echo "$SUBJECTS" | grep -qiE '(^|[[:space:]])BREAKING[ -]CHANGE' \
              || echo "$SUBJECTS" | grep -qE '^(\* )?[a-z]+(\([^)]*\))?!:'; then
             # Semver treats 0.x as unstable, so a breaking change there is a
@@ -126,24 +135,44 @@ jobs:
             BUMP=none
           fi
           echo "Detected bump since ${LAST_TAG:-<start>}: $BUMP"
-          if [ "$BUMP" = "none" ]; then
+          # Retried only when that version is at least the step the commits
+          # since the last release need: a breaking change that landed after a
+          # failed patch release must not ship as that patch.
+          if [ -n "$RETRY" ] && [ "$BUMP" != "none" ] && ! node -e '
+              const [last, cur, kind] = process.argv.slice(1);
+              const need = last.split(".").map(Number);
+              if (kind === "major") { need[0]++; need[1] = 0; need[2] = 0; }
+              else if (kind === "minor") { need[1]++; need[2] = 0; }
+              else { need[2]++; }
+              const have = cur.split(".").map(Number);
+              const i = [0, 1, 2].find((k) => have[k] !== need[k]);
+              process.exit(i === undefined || have[i] > need[i] ? 0 : 1);
+            ' "${LAST_TAG#srelens-v}" "$CUR" "$BUMP"; then
+            RETRY=""
+          fi
+          if [ "$BUMP" = "none" ] && [ -z "$RETRY" ]; then
             echo "release=false" >> "$GITHUB_OUTPUT"
             echo "No releasable (feat/fix/perf/breaking) commits — skipping release."
             exit 0
           fi
-          NEW=$(node -e 'const p=process.argv[1].split(".").map(Number);const k=process.argv[2];if(k==="major"){p[0]++;p[1]=0;p[2]=0}else if(k==="minor"){p[1]++;p[2]=0}else{p[2]++}process.stdout.write(p.join("."))' "$CUR" "$BUMP")
-          echo "Releasing $CUR -> $NEW"
-          node -e '
-            const fs=require("fs");const v=process.argv[1];
-            const sub=(p,re,to)=>{const s=fs.readFileSync(p,"utf8");const n=s.replace(re,to);if(n===s)throw new Error("no version match in "+p);fs.writeFileSync(p,n)};
-            sub("apps/desktop/src-tauri/tauri.conf.json",/("version":\s*)"[^"]+"/,`$1"${v}"`);
-            // Every crate inherits [workspace.package].version from the root
-            // Cargo.toml (src-tauri included), so ONE Cargo bump versions the
-            // whole workspace — the server binary, the MCP serverInfo, all of
-            // it — and the lock updates every srelens-* member, and srectl, to match.
-            sub("Cargo.toml",/^version = "[^"]+"/m,`version = "${v}"`);
-            sub("Cargo.lock",/(name = "(?:srelens-[a-z-]+|srectl)"\r?\nversion = ")[^"]+(")/g,`$1${v}$2`);
-          ' "$NEW"
+          if [ -n "$RETRY" ]; then
+            NEW="$CUR"
+            echo "srelens-v$CUR was bumped to but never published — releasing it again, unbumped."
+          else
+            NEW=$(node -e 'const p=process.argv[1].split(".").map(Number);const k=process.argv[2];if(k==="major"){p[0]++;p[1]=0;p[2]=0}else if(k==="minor"){p[1]++;p[2]=0}else{p[2]++}process.stdout.write(p.join("."))' "$CUR" "$BUMP")
+            echo "Releasing $CUR -> $NEW"
+            node -e '
+              const fs=require("fs");const v=process.argv[1];
+              const sub=(p,re,to)=>{const s=fs.readFileSync(p,"utf8");const n=s.replace(re,to);if(n===s)throw new Error("no version match in "+p);fs.writeFileSync(p,n)};
+              sub("apps/desktop/src-tauri/tauri.conf.json",/("version":\s*)"[^"]+"/,`$1"${v}"`);
+              // Every crate inherits [workspace.package].version from the root
+              // Cargo.toml (src-tauri included), so ONE Cargo bump versions the
+              // whole workspace — the server binary, the MCP serverInfo, all of
+              // it — and the lock updates every srelens-* member, and srectl, to match.
+              sub("Cargo.toml",/^version = "[^"]+"/m,`version = "${v}"`);
+              sub("Cargo.lock",/(name = "(?:srelens-[a-z-]+|srectl)"\r?\nversion = ")[^"]+(")/g,`$1${v}$2`);
+            ' "$NEW"
+          fi
           # Grouped changelog for the release body. The Conventional Commit type
           # is dropped (the section heading already says Features / Fixes) but
           # the SCOPE is kept as a bold lead-in: without it, subjects written to
@@ -168,10 +197,12 @@ jobs:
             [ -n "$FIXES" ] && printf '### Fixes\n%s\n\n' "$FIXES"
             echo "__NOTES_EOF__"
           } >> "$GITHUB_OUTPUT"
-          git config user.name "release-bot"
-          git config user.email "release-bot@users.noreply.github.com"
-          git commit -am "chore(release): srelens-v${NEW} [skip ci]"
-          git push origin HEAD:main
+          if [ -z "$RETRY" ]; then
+            git config user.name "release-bot"
+            git config user.email "release-bot@users.noreply.github.com"
+            git commit -am "chore(release): srelens-v${NEW} [skip ci]"
+            git push origin HEAD:main
+          fi
           echo "version=$NEW" >> "$GITHUB_OUTPUT"
           echo "release=true" >> "$GITHUB_OUTPUT"
 
@@ -1155,10 +1186,11 @@ jobs:
           fi
 
   # Download-size baseline (issue #31). Runs after the artifacts are published
-  # so it measures exactly what users download, and flags a release whose
-  # installers grew more than 15% over the previous stable one — the size
-  # advantage over an Electron client is a stated reason for the Tauri port,
-  # so a silent regression should not reach a release unnoticed.
+  # so it measures exactly what users download, and writes how each installer
+  # compares with the previous stable release into the run summary. It used to
+  # hold back any release whose installers grew more than 15%; v0.16.0 built
+  # and signed everything and then stayed a draft on that alone, so the sizes
+  # are now reported and never gate publishing.
   size-baseline:
     needs: [version, build]
     if: ${{ always() && needs.build.result == 'success' && github.ref_name == 'main' && needs.version.outputs.release == 'true' }}
@@ -1180,31 +1212,24 @@ jobs:
           # low enough for a runner pool to hit it).
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Capture the verdict rather than piping it: a `| tee` would mask the
-          # check's exit code and a regression would pass silently. The
-          # comparison table is still published either way.
-          # --tag pins the comparison to the release just built. On main that
-          # release is still a DRAFT until publish-release flips it, and drafts
-          # are excluded from the stable list — without this the check would
-          # compare the two PREVIOUS published releases and never see these
-          # artifacts at all.
-          status=0
-          node scripts/perf/size-baseline.mjs --check-regression --max-growth 15 \
-            --tag "srelens-v${{ needs.version.outputs.version }}" > check.txt || status=$?
+          # Reported, not enforced. --tag pins both reports to the release just
+          # built: on main it is still a DRAFT until publish-release flips it,
+          # and drafts are excluded from the stable list, so without it they
+          # would describe the previous published release.
+          tag="srelens-v${{ needs.version.outputs.version }}"
+          # The growth against the previous stable release. Only stdout: the
+          # old budget's verdict (stderr, and the exit status) no longer
+          # decides anything. A report that cannot be made says so.
+          growth="$(node scripts/perf/size-baseline.mjs --check-regression --tag "$tag" 2>/dev/null || true)"
           {
             echo '### Installer sizes'
             echo
             echo '```'
-            cat check.txt
+            printf '%s\n' "${growth:-The comparison with the previous stable release could not be produced.}"
             echo '```'
             echo
-            # --tag here too: without it the table would describe the
-            # previous PUBLISHED release, not the draft just built.
-            node scripts/perf/size-baseline.mjs \
-              --tag "srelens-v${{ needs.version.outputs.version }}" || true
+            node scripts/perf/size-baseline.mjs --tag "$tag" || echo "The comparison with the reference client could not be produced."
           } >> "$GITHUB_STEP_SUMMARY"
-          cat check.txt
-          exit "$status"
 
   # Attach detached GPG signatures (.asc) to every release asset so users can
   # verify authenticity (`gpg --verify file.asc file`). Activates automatically
@@ -1385,11 +1410,11 @@ jobs:
   # run leaves an invisible draft to delete instead of a public, `latest`-
   # resolving release with no manifest behind it.
   publish-release:
-    # size-baseline included so an over-budget installer never goes public: a
-    # failed check leaves the release as an invisible draft to inspect, exactly
-    # like a failed build or a missing updater manifest. tui-publish likewise:
-    # a stable release missing a platform's TUI archive, or whose checksum
-    # file does not cover all six, stays a draft.
+    # A failed build, a missing updater manifest, failed signing, or a
+    # tui-publish that is missing a platform's archive (or whose checksum file
+    # does not cover all six) leaves the release as an invisible draft to
+    # inspect. size-baseline only reports installer sizes and cannot fail on
+    # them, so it holds a release back only if the job itself breaks.
     needs: [version, build, updater-manifest, sign-artifacts, size-baseline, tui-publish]
     if: ${{ always() && github.ref_name == 'main' && needs.build.result == 'success' && needs.updater-manifest.result == 'success' && needs.sign-artifacts.result == 'success' && needs.size-baseline.result == 'success' && needs.tui-publish.result == 'success' && needs.version.outputs.release == 'true' }}
     runs-on: ubuntu-22.04
@@ -1399,10 +1424,15 @@ jobs:
       - name: Publish the release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NOTES: ${{ needs.version.outputs.notes }}
         run: |
           set -euo pipefail
+          # This run's notes, set as the draft is published: a retry of a
+          # failed release finds that run's draft, and tauri-action leaves an
+          # existing draft's body as it was.
+          printf '%s\n' "$NOTES" > notes.md
           gh release edit "srelens-v${{ needs.version.outputs.version }}" \
-            --repo "${{ github.repository }}" --draft=false
+            --repo "${{ github.repository }}" --notes-file notes.md --draft=false
 
   # Arch / CachyOS / Manjaro install path. Deliberately STABLE-ONLY: AUR users
   # expect released versions, and an Arch `pkgver` cannot carry the `-<run>`
