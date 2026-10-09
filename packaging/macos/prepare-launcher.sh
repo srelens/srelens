@@ -17,13 +17,47 @@ if [ -n "${APPLE_SIGNING_IDENTITY:-}" ]; then
         signing_tmp="$(mktemp -d)"
         keychain="$signing_tmp/launcher.keychain-db"
         password="$(uuidgen)"
-        trap 'security delete-keychain "$keychain" >/dev/null 2>&1 || true; rm -rf "$signing_tmp"' EXIT
+        # codesign finds a signing identity only in a keychain on the user's
+        # search list, `--keychain` or not: imported into a keychain off it,
+        # the certificate was "1 identity imported" and then "no identity
+        # found" (srelens-v0.16.0). So the keychain joins the list, as Tauri's
+        # own signing keychain does, and the list is put back on exit.
+        # Read on its own, so a failure stops the script here: in a pipeline
+        # sed's status would stand in for it, the saved list would be empty,
+        # and the exit trap would "restore" the user's search list to nothing.
+        listed="$(security list-keychains -d user)"
+        # Saved one path per line, unquoted: a keychain path may hold spaces,
+        # and each has to reach `security` as one argument.
+        printf '%s\n' "$listed" \
+            | sed -e 's/^[[:space:]]*"//' -e 's/"[[:space:]]*$//' -e '/^$/d' > "$signing_tmp/keychains"
+        # Set the search list to the arguments given, then the saved list.
+        search_list() {
+            while IFS= read -r saved; do set -- "$@" "$saved"; done < "$signing_tmp/keychains"
+            security list-keychains -d user -s "$@"
+        }
+        # Put the list back and throw the keychain away, keeping the script's
+        # status, except that a list left unrestored fails the run: it would
+        # still name a keychain that no longer exists.
+        cleanup() {
+            status=$?
+            if ! search_list; then
+                echo "error: could not restore the keychain search list" >&2
+                status=1
+            fi
+            security delete-keychain "$keychain" >/dev/null 2>&1 || true
+            rm -rf "$signing_tmp"
+            exit "$status"
+        }
+        trap cleanup EXIT
         security create-keychain -p "$password" "$keychain"
         security set-keychain-settings -lut 3600 "$keychain"
         security unlock-keychain -p "$password" "$keychain"
+        search_list "$keychain"
         printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$signing_tmp/cert.p12"
         security import "$signing_tmp/cert.p12" -k "$keychain" -P "${APPLE_CERTIFICATE_PASSWORD:?missing certificate password}" -T /usr/bin/codesign
         security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$password" "$keychain" >/dev/null
+        # What the keychain holds, so a failure to sign names what was there.
+        security find-identity -v -p codesigning "$keychain"
         codesign --force --options runtime --timestamp --keychain "$keychain" --sign "$APPLE_SIGNING_IDENTITY" "$launcher"
     else
         codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$launcher"
