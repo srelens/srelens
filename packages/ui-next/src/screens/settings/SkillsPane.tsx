@@ -1,15 +1,17 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   deleteSkill,
   listSkills,
   loadSkill,
+  parseSkillFile,
   plural,
   revealSkill,
   saveSkill,
+  skillNameProblem,
   skillsDirPath,
   type SkillMeta,
 } from "@srelens/core";
-import { Badge, Button, ConfirmDialog, EmptyState, Switch, TextInput } from "@srelens/ui-kit";
+import { Badge, Button, ConfirmDialog, Dialog, EmptyState, Field, Switch, TextInput } from "@srelens/ui-kit";
 import { FailureAlert } from "../../lib/errorCopy";
 import { estimateTokens, formatTokens, setSkillDefault, useSkillDefaults } from "../../lib/skillDefaults";
 import { useSkillUses } from "../../lib/skillUses";
@@ -37,16 +39,20 @@ type Read = { state: "loading" } | { state: "failed"; error: unknown } | { state
  * each question, and it grows with every switch they turn on. It is an
  * estimate (a quarter of the characters) and is marked as one.
  *
- * **A skill is a file, and the pane says where.** The folder the files are
- * kept in is shown and can be opened, each of the reader's own skills shows
- * its file, and a skill that ships with the app — which is compiled in and
- * has no file — can be given one: an editable copy under the same name, which
- * then stands in for the shipped one until it is removed. Edit a file in any
- * editor and Refresh reads it again.
+ * **Two kinds of skill, kept apart.** The ones that ship with srelens are
+ * preinstalled: they are part of the app, cannot be edited or removed here,
+ * and can only be switched on or off. The reader's own are installed by the
+ * reader — from a file they have, or written in place — and are theirs to
+ * edit and uninstall. A reader's skill may not take a preinstalled skill's
+ * name, so the two never stand in for each other from this pane.
+ *
+ * **A reader's skill is a file, and the pane says where.** The folder the
+ * files are kept in is shown and can be opened, and each of the reader's
+ * skills shows its own file. Edit one in any editor and Refresh reads it
+ * again.
  *
  * What is NOT here, because nothing behind it exists yet: skills loaded only
- * when a task calls for them, a registry to install from, adding a skill from
- * a folder. Those are drawn in the design this follows; a control for them
+ * when a task calls for them, and a registry to install from. Those are drawn in the design this follows; a control for them
  * here would be a control that does nothing.
  */
 export function SkillsPane() {
@@ -57,6 +63,7 @@ export function SkillsPane() {
   const [removeError, setRemoveError] = useState<unknown>(null);
   const [folder, setFolder] = useState<string | null>(null);
   const [fileError, setFileError] = useState<{ title: string; cause: unknown } | null>(null);
+  const [installing, setInstalling] = useState(false);
   const on = useSkillDefaults();
   const uses = useSkillUses();
 
@@ -102,24 +109,6 @@ export function SkillsPane() {
   function reveal(name?: string) {
     setFileError(null);
     revealSkill(name).catch((cause: unknown) => setFileError({ title: "Could not open the skills folder", cause }));
-  }
-
-  /**
-   * Give a shipped skill a file of its own: its instructions as they ship,
-   * saved under the same name, where the reader can edit them. The file then
-   * stands in for the shipped one.
-   */
-  async function makeEditable(name: string) {
-    setFileError(null);
-    try {
-      // Only what a skill file holds: the name, the description, the
-      // instructions.
-      const { description, body } = await loadSkill(name);
-      await saveSkill({ name, description, body });
-      setAttempt((n) => n + 1);
-    } catch (cause) {
-      setFileError({ title: `Could not make an editable copy of ${name}`, cause });
-    }
   }
 
   const skills = read.state === "ready" ? read.skills : [];
@@ -189,10 +178,13 @@ export function SkillsPane() {
         <Button variant="secondary" disabled={read.state === "loading"} onClick={() => setAttempt((n) => n + 1)}>
           {read.state === "loading" ? "Refreshing…" : "Refresh"}
         </Button>
+        <Button variant="primary" disabled={read.state !== "ready"} onClick={() => setInstalling(true)}>
+          Install skill…
+        </Button>
       </section>
 
       <section className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-rule px-4 py-2" aria-label="Where skill files are kept">
-        <span className="text-muted">Skill files are kept in</span>
+        <span className="text-muted">Skills you install are kept in</span>
         {folder === null ? (
           <span className="text-muted">a folder that could not be found.</span>
         ) : (
@@ -205,7 +197,8 @@ export function SkillsPane() {
           Open folder
         </Button>
         <span className="basis-full text-[0.75rem] text-muted">
-          Each skill is one Markdown file. Edit one in any editor, then press Refresh.
+          Each of your skills is one Markdown file. Edit one in any editor, then press Refresh. Preinstalled skills
+          are part of the app and are not in this folder.
         </span>
       </section>
 
@@ -236,7 +229,7 @@ export function SkillsPane() {
         <EmptyState
           compact
           title={skills.length === 0 ? "No skills" : "No skill matches"}
-          hint={skills.length === 0 ? "Skills you save from the agent screen appear here." : `Nothing installed matches “${query.trim()}”.`}
+          hint={skills.length === 0 ? "Install one with Install skill…" : `Nothing installed matches “${query.trim()}”.`}
         />
       ) : (
         <ul className="flex flex-col gap-2 px-4 py-3" aria-label="Installed skills">
@@ -249,8 +242,8 @@ export function SkillsPane() {
                   <div className="min-w-0 flex-1">
                     <p className="flex flex-wrap items-center gap-2">
                       <span className="font-mono font-semibold text-ink">{skill.name}</span>
-                      <Badge tone="muted">{skill.builtin ? "Bundled" : "User"}</Badge>
-                      {skill.overridesBuiltin && <Badge tone="info">Your copy of a bundled skill</Badge>}
+                      <Badge tone="muted">{skill.builtin ? "Preinstalled" : "Installed by you"}</Badge>
+                      {skill.overridesBuiltin && <Badge tone="info">Replaces a preinstalled skill</Badge>}
                     </p>
                     <p className="mt-1 text-ink-soft">{skill.description || "No description."}</p>
                     {/* The file itself, where there is one: what to open to
@@ -262,22 +255,20 @@ export function SkillsPane() {
                     ) : (
                       skill.builtin && (
                         <p className="mt-1 text-[0.75rem] text-muted">
-                          Ships with srelens. It is built into the app and has no file to edit.
+                          Ships with srelens. It is part of the app and cannot be edited or uninstalled.
                         </p>
                       )
                     )}
                     <p className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[0.75rem] text-muted">
-                      {skill.builtin ? (
-                        <Button variant="secondary" size="xs" onClick={() => void makeEditable(skill.name)}>
-                          Make an editable copy
-                        </Button>
-                      ) : (
+                      {/* A preinstalled skill has nothing to press but its
+                          switch. */}
+                      {!skill.builtin && (
                         <>
                           <Button variant="secondary" size="xs" onClick={() => reveal(skill.name)}>
                             Open folder
                           </Button>
                           <Button variant="secondary" size="xs" onClick={() => setRemoving(skill)}>
-                            {skill.overridesBuiltin ? "Restore bundled version" : "Uninstall"}
+                            {skill.overridesBuiltin ? "Restore preinstalled version" : "Uninstall"}
                           </Button>
                         </>
                       )}
@@ -301,12 +292,23 @@ export function SkillsPane() {
         </ul>
       )}
 
+      {installing && (
+        <InstallSkillDialog
+          installed={skills}
+          onClose={() => setInstalling(false)}
+          onInstalled={() => {
+            setInstalling(false);
+            setAttempt((n) => n + 1);
+          }}
+        />
+      )}
+
       {removing && (
         <ConfirmDialog
-          title={removing.overridesBuiltin ? `Restore the bundled ${removing.name}?` : `Uninstall ${removing.name}?`}
+          title={removing.overridesBuiltin ? `Restore the preinstalled ${removing.name}?` : `Uninstall ${removing.name}?`}
           message={
             removing.overridesBuiltin
-              ? "Your copy of the file is deleted, with any changes you made to it, and the version that ships with srelens is used again."
+              ? "Your file is deleted, with any changes you made to it, and the version that ships with srelens is used again."
               : "The skill's file is deleted. Conversations that used it keep their history."
           }
           confirmLabel={removing.overridesBuiltin ? "Restore" : "Uninstall"}
@@ -316,5 +318,140 @@ export function SkillsPane() {
         />
       )}
     </div>
+  );
+}
+
+/** A chosen file's text. `FileReader`, which every webview this runs in has. */
+function readText(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result ?? ""));
+    reader.onerror = () => reject(reader.error ?? new Error("The file could not be read."));
+    reader.readAsText(file);
+  });
+}
+
+/**
+ * Install a skill of the reader's own: from a file they have, or written here.
+ *
+ * Choosing a file only fills the form. Nothing is installed until the reader
+ * has seen the name, the description and the instructions and pressed
+ * Install — a file picked by mistake, or one whose name is taken, is a form to
+ * correct rather than a skill already written to disk.
+ *
+ * A preinstalled skill's name is refused: the shipped skills are not edited
+ * from here, and a file under one of their names would stand in for it. A
+ * name the reader has already used is allowed, and said to be a replacement
+ * before it happens.
+ */
+function InstallSkillDialog({
+  installed,
+  onClose,
+  onInstalled,
+}: {
+  installed: readonly Listed[];
+  onClose: () => void;
+  onInstalled: () => void;
+}) {
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [body, setBody] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<{ title: string; cause: unknown } | null>(null);
+  const picker = useRef<HTMLInputElement>(null);
+
+  const existing = installed.find((s) => s.name === name.trim());
+  const nameProblem =
+    name === ""
+      ? null
+      : (skillNameProblem(name.trim()) ??
+        (existing?.builtin || existing?.overridesBuiltin
+          ? "That name belongs to a preinstalled skill. Choose another."
+          : null));
+  const replaces = existing !== undefined && nameProblem === null;
+  const ready = name.trim() !== "" && nameProblem === null && body.trim() !== "" && !busy;
+
+  async function choose(file: File | undefined) {
+    if (!file) return;
+    setError(null);
+    try {
+      const skill = parseSkillFile(await readText(file), file.name);
+      setName(skill.name);
+      setDescription(skill.description);
+      setBody(skill.body);
+    } catch (cause) {
+      setError({ title: `Could not read ${file.name}`, cause });
+    }
+  }
+
+  async function install() {
+    setBusy(true);
+    setError(null);
+    try {
+      await saveSkill({ name: name.trim(), description: description.trim(), body });
+      onInstalled();
+    } catch (cause) {
+      setError({ title: "Could not install the skill", cause });
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Dialog
+      title="Install a skill"
+      maxWidth={560}
+      onClose={onClose}
+      footer={
+        <>
+          <Button variant="secondary" size="sm" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button variant="primary" size="sm" disabled={!ready} onClick={() => void install()}>
+            {busy ? "Installing…" : replaces ? "Replace" : "Install"}
+          </Button>
+        </>
+      }
+    >
+      <div className="flex flex-col gap-3 p-3 text-[0.8125rem]">
+        <div className="flex flex-wrap items-center gap-2">
+          <Button variant="secondary" size="sm" onClick={() => picker.current?.click()}>
+            Choose a file…
+          </Button>
+          <span className="text-muted">A Markdown file with the skill's instructions. Or write one below.</span>
+          <input
+            ref={picker}
+            type="file"
+            accept=".md,.markdown,.txt,text/markdown,text/plain"
+            aria-label="Skill file"
+            className="sr-only"
+            onChange={(e) => {
+              void choose(e.target.files?.[0]);
+              // Cleared, so choosing the same file again is still a change.
+              e.target.value = "";
+            }}
+          />
+        </div>
+        <Field label="Name" hint="Letters, numbers, dots, dashes and underscores." error={nameProblem ?? undefined}>
+          <TextInput value={name} onValueChange={setName} placeholder="team-rollback" invalid={nameProblem !== null} />
+        </Field>
+        <Field label="Description" hint="One line saying when to use it.">
+          <TextInput value={description} onValueChange={setDescription} placeholder="How this team rolls back a release" />
+        </Field>
+        <Field label="Instructions" hint={body === "" ? "What the agent should do, step by step." : `≈${formatTokens(estimateTokens(body))} tokens when on`}>
+          <textarea
+            value={body}
+            onChange={(e) => setBody(e.target.value)}
+            rows={9}
+            className="scroll w-full rounded-md border border-[var(--control-line)] bg-transparent px-2 py-1.5 font-mono text-[0.75rem] outline-none focus:border-[var(--accent)]"
+          />
+        </Field>
+        {replaces && (
+          <p className="text-muted" role="status">
+            You already have a skill called {name.trim()}. Installing replaces it.
+          </p>
+        )}
+        {error !== null && <FailureAlert tone="sev" title={error.title} error={error.cause} />}
+      </div>
+    </Dialog>
   );
 }

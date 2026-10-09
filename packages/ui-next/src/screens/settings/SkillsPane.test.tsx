@@ -65,9 +65,9 @@ describe("SkillsPane", () => {
     await shown();
     expect(screen.getByText("Installed (3)")).toBeDefined();
     expect(within(card("crashloop-triage")).getByText("Triage a pod stuck in CrashLoopBackOff")).toBeDefined();
-    expect(within(card("crashloop-triage")).getByText("Bundled")).toBeDefined();
+    expect(within(card("crashloop-triage")).getByText("Preinstalled")).toBeDefined();
     expect(within(card("crashloop-triage")).getByText(/^Ships with srelens\./)).toBeDefined();
-    expect(within(card("team-runbook")).getByText("User")).toBeDefined();
+    expect(within(card("team-runbook")).getByText("Installed by you")).toBeDefined();
   });
 
   it("says about how many tokens each skill adds when it is on", async () => {
@@ -244,37 +244,32 @@ describe("SkillsPane", () => {
       expect(core.revealSkill).toHaveBeenCalledExactlyOnceWith("team-runbook");
     });
 
-    it("says a bundled skill has no file, rather than showing a path that is not there", async () => {
+    /**
+     * The skills that ship with srelens are preinstalled: part of the app,
+     * switched on or off and nothing else.
+     */
+    it("gives a preinstalled skill nothing to press but its switch, and says why", async () => {
       await shown();
-      expect(card("crashloop-triage").querySelector('[data-slot="skill-path"]')).toBeNull();
-      expect(within(card("crashloop-triage")).getByText(/built into the app and has no file to edit/)).toBeDefined();
-      expect(within(card("crashloop-triage")).queryByRole("button", { name: "Open folder" })).toBeNull();
+      const shipped = card("crashloop-triage");
+      expect(shipped.querySelector('[data-slot="skill-path"]')).toBeNull();
+      expect(within(shipped).getByText(/part of the app and cannot be edited or uninstalled/)).toBeDefined();
+      expect(within(shipped).queryAllByRole("button")).toEqual([]);
+      expect(within(shipped).getAllByRole("switch")).toHaveLength(1);
     });
 
-    it("gives a bundled skill an editable file: its own instructions, saved under its own name", async () => {
-      await shown();
-      await userEvent.click(within(card("crashloop-triage")).getByRole("button", { name: "Make an editable copy" }));
-      await waitFor(() => expect(core.saveSkill).toHaveBeenCalledTimes(1));
-      expect(core.saveSkill).toHaveBeenCalledWith({
-        name: "crashloop-triage",
-        description: "Triage a pod stuck in CrashLoopBackOff",
-        body: BODIES["crashloop-triage"],
-      });
-      // And the list is read again, so the new file shows.
-      await waitFor(() => expect(core.listSkills).toHaveBeenCalledTimes(2));
-    });
-
-    it("marks a copy of a bundled skill as one, and offers to restore the bundled version", async () => {
+    it("marks a file that replaces a preinstalled skill, and offers to restore the preinstalled version", async () => {
       core.listSkills.mockResolvedValue([
         { ...METAS[0], builtin: false, overridesBuiltin: true, path: `${FOLDER}/crashloop-triage.md` },
         ...METAS.slice(1),
       ]);
       await shown();
       const mine = card("crashloop-triage");
-      expect(within(mine).getByText("Your copy of a bundled skill")).toBeDefined();
+      // Such a file can only have come from outside this pane: it is shown
+      // for what it is, and the way back is one press.
+      expect(within(mine).getByText("Replaces a preinstalled skill")).toBeDefined();
       expect(mine.querySelector('[data-slot="skill-path"]')?.textContent).toBe(`${FOLDER}/crashloop-triage.md`);
       expect(within(mine).queryByRole("button", { name: "Uninstall" })).toBeNull();
-      await userEvent.click(within(mine).getByRole("button", { name: "Restore bundled version" }));
+      await userEvent.click(within(mine).getByRole("button", { name: "Restore preinstalled version" }));
       const dialog = await screen.findByRole("dialog");
       expect(within(dialog).getByText(/the version that ships with srelens is used again/)).toBeDefined();
     });
@@ -286,7 +281,7 @@ describe("SkillsPane", () => {
         ...METAS.slice(1),
       ]);
       await shown();
-      await userEvent.click(within(card("crashloop-triage")).getByRole("button", { name: "Restore bundled version" }));
+      await userEvent.click(within(card("crashloop-triage")).getByRole("button", { name: "Restore preinstalled version" }));
       await userEvent.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Restore" }));
       await waitFor(() => expect(core.deleteSkill).toHaveBeenCalledExactlyOnceWith("crashloop-triage"));
       expect(getSkillDefaults()).toEqual(["crashloop-triage"]);
@@ -299,18 +294,130 @@ describe("SkillsPane", () => {
       expect(await screen.findByText("Could not open the skills folder")).toBeDefined();
     });
 
-    it("says so when an editable copy could not be made", async () => {
-      core.saveSkill.mockRejectedValue(new Error("read-only file system"));
-      await shown();
-      await userEvent.click(within(card("pending-pod")).getByRole("button", { name: "Make an editable copy" }));
-      expect(await screen.findByText("Could not make an editable copy of pending-pod")).toBeDefined();
-    });
-
     it("still lists the skills when the folder's path cannot be read", async () => {
       core.skillsDirPath.mockRejectedValue(new Error("no config dir"));
       await shown();
       expect(screen.getByText("a folder that could not be found.")).toBeDefined();
       expect(card("team-runbook")).not.toBeNull();
+    });
+  });
+
+  /**
+   * A reader's own skill, installed when they need one: from a file they
+   * have, or written in place.
+   */
+  describe("installing a skill", () => {
+    const openDialog = async () => {
+      await shown();
+      await userEvent.click(screen.getByRole("button", { name: "Install skill…" }));
+      return screen.findByRole("dialog", { name: "Install a skill" });
+    };
+    const field = (dialog: HTMLElement, label: string) => within(dialog).getByLabelText(new RegExp(`^${label}`));
+    const fill = async (dialog: HTMLElement, name: string, body = "Step 1: look.") => {
+      await userEvent.type(field(dialog, "Name"), name);
+      await userEvent.type(field(dialog, "Instructions"), body);
+    };
+
+    it("installs what was written: the name, the description and the instructions", async () => {
+      const dialog = await openDialog();
+      await userEvent.type(field(dialog, "Name"), "pvc-resize");
+      await userEvent.type(field(dialog, "Description"), "Resize a bound PVC");
+      await userEvent.type(field(dialog, "Instructions"), "Check the StorageClass first.");
+      await userEvent.click(within(dialog).getByRole("button", { name: "Install" }));
+      await waitFor(() =>
+        expect(core.saveSkill).toHaveBeenCalledExactlyOnceWith({
+          name: "pvc-resize",
+          description: "Resize a bound PVC",
+          body: "Check the StorageClass first.",
+        }),
+      );
+      // The dialog goes and the list is read again, so the new skill shows.
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+      expect(core.listSkills).toHaveBeenCalledTimes(2);
+    });
+
+    it("fills the form from a chosen file, and installs nothing until asked", async () => {
+      const dialog = await openDialog();
+      const file = new File(
+        ["---\nname: team-oncall\ndescription: Who to page and when\n---\nPage the primary first.\n"],
+        "anything.md",
+        { type: "text/markdown" },
+      );
+      await userEvent.upload(within(dialog).getByLabelText("Skill file"), file);
+      await waitFor(() => expect((field(dialog, "Name") as HTMLInputElement).value).toBe("team-oncall"));
+      expect((field(dialog, "Description") as HTMLInputElement).value).toBe("Who to page and when");
+      expect((field(dialog, "Instructions") as HTMLTextAreaElement).value).toBe("Page the primary first.\n");
+      expect(core.saveSkill).not.toHaveBeenCalled();
+      await userEvent.click(within(dialog).getByRole("button", { name: "Install" }));
+      await waitFor(() => expect(core.saveSkill).toHaveBeenCalledTimes(1));
+    });
+
+    it("names a skill for its file when the file has no front matter", async () => {
+      const dialog = await openDialog();
+      await userEvent.upload(
+        within(dialog).getByLabelText("Skill file"),
+        new File(["Just check the events.\n"], "My Runbook.md", { type: "text/markdown" }),
+      );
+      await waitFor(() => expect((field(dialog, "Name") as HTMLInputElement).value).toBe("My-Runbook"));
+    });
+
+    it("cannot install without a name and instructions", async () => {
+      const dialog = await openDialog();
+      const install = within(dialog).getByRole("button", { name: "Install" });
+      expect(install.hasAttribute("disabled")).toBe(true);
+      await userEvent.type(field(dialog, "Name"), "pvc-resize");
+      expect(install.hasAttribute("disabled")).toBe(true);
+      await userEvent.type(field(dialog, "Instructions"), "   ");
+      expect(install.hasAttribute("disabled")).toBe(true);
+      await userEvent.type(field(dialog, "Instructions"), "Do it.");
+      expect(install.hasAttribute("disabled")).toBe(false);
+    });
+
+    it("refuses a name the skill store would refuse, and says what is wrong with it", async () => {
+      const dialog = await openDialog();
+      await fill(dialog, "my skill");
+      expect(within(dialog).getByText(/letters, numbers, dots, dashes and underscores only/)).toBeDefined();
+      expect(within(dialog).getByRole("button", { name: "Install" }).hasAttribute("disabled")).toBe(true);
+    });
+
+    it("refuses a preinstalled skill's name: those are not replaced from here", async () => {
+      const dialog = await openDialog();
+      await fill(dialog, "crashloop-triage");
+      expect(within(dialog).getByText("That name belongs to a preinstalled skill. Choose another.")).toBeDefined();
+      expect(within(dialog).queryByRole("button", { name: "Replace" })).toBeNull();
+      expect(within(dialog).getByRole("button", { name: "Install" }).hasAttribute("disabled")).toBe(true);
+      expect(core.saveSkill).not.toHaveBeenCalled();
+    });
+
+    it("says it is replacing a skill the reader already has, before it does", async () => {
+      const dialog = await openDialog();
+      await fill(dialog, "team-runbook");
+      expect(within(dialog).getByText("You already have a skill called team-runbook. Installing replaces it.")).toBeDefined();
+      await userEvent.click(within(dialog).getByRole("button", { name: "Replace" }));
+      await waitFor(() => expect(core.saveSkill).toHaveBeenCalledTimes(1));
+    });
+
+    it("shows about what the skill will cost while it is being written", async () => {
+      const dialog = await openDialog();
+      await userEvent.type(field(dialog, "Instructions"), "x".repeat(40));
+      expect(within(dialog).getByText("≈10 tokens when on")).toBeDefined();
+    });
+
+    it("says so when the skill could not be installed, and keeps what was written", async () => {
+      core.saveSkill.mockRejectedValue(new Error("read-only file system"));
+      const dialog = await openDialog();
+      await fill(dialog, "pvc-resize");
+      await userEvent.click(within(dialog).getByRole("button", { name: "Install" }));
+      expect(await within(dialog).findByText("Could not install the skill")).toBeDefined();
+      expect((field(dialog, "Name") as HTMLInputElement).value).toBe("pvc-resize");
+    });
+
+    it("installs nothing when cancelled", async () => {
+      const dialog = await openDialog();
+      await fill(dialog, "pvc-resize");
+      await userEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+      expect(screen.queryByRole("dialog")).toBeNull();
+      expect(core.saveSkill).not.toHaveBeenCalled();
     });
   });
 
