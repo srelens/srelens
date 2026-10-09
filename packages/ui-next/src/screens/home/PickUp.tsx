@@ -30,6 +30,8 @@ export function PickUp({ targets }: { targets: readonly ClusterContext[] }) {
   const contexts = useContexts();
   const recents = useAllRecentLogSubjects();
   const tabs = closed
+    // One row per route: the stack is most recent first, so the first is the one to bring back.
+    .filter((tab, at) => closed.findIndex((t) => t.route === tab.route) === at)
     .map((tab) => ({ tab, context: tab.sub ? contexts.find((c) => c.name === tab.sub) : undefined }))
     .filter(({ tab, context }) => !tab.sub || context)
     .slice(0, CLOSED_SHOWN);
