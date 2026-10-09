@@ -35,7 +35,20 @@ if [ -n "${APPLE_SIGNING_IDENTITY:-}" ]; then
             while IFS= read -r saved; do set -- "$@" "$saved"; done < "$signing_tmp/keychains"
             security list-keychains -d user -s "$@"
         }
-        trap 'search_list || echo "warning: could not restore the keychain search list" >&2; security delete-keychain "$keychain" >/dev/null 2>&1 || true; rm -rf "$signing_tmp"' EXIT
+        # Put the list back and throw the keychain away, keeping the script's
+        # status, except that a list left unrestored fails the run: it would
+        # still name a keychain that no longer exists.
+        cleanup() {
+            status=$?
+            if ! search_list; then
+                echo "error: could not restore the keychain search list" >&2
+                status=1
+            fi
+            security delete-keychain "$keychain" >/dev/null 2>&1 || true
+            rm -rf "$signing_tmp"
+            exit "$status"
+        }
+        trap cleanup EXIT
         security create-keychain -p "$password" "$keychain"
         security set-keychain-settings -lut 3600 "$keychain"
         security unlock-keychain -p "$password" "$keychain"

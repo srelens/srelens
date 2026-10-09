@@ -28,13 +28,21 @@ cp "$script" "$work/repo/packaging/macos/prepare-launcher.sh"
 
 # `security list-keychains -d user` prints the list the way the real one does,
 # indented and quoted, one per line, or fails when FAKE_LIST_FAILS is set.
-# `list-keychains -d user -s ...` records each argument on its own line.
+# `list-keychains -d user -s ...` records each argument on its own line, and
+# fails the restore (the one call without the temporary keychain) when
+# FAKE_RESTORE_FAILS is set. `find-identity` records the keychain it was asked
+# about in FAKE_CALLS, where codesign records each call too, so their order shows.
 cat > "$work/bin/security" <<'EOF'
 #!/bin/sh
 if [ "$1" = list-keychains ] && [ "${4:-}" = -s ]; then
     shift 4
     echo "--- set" >> "$FAKE_LOG"
-    for keychain in "$@"; do echo "[$keychain]" >> "$FAKE_LOG"; done
+    temporary=""
+    for keychain in "$@"; do
+        echo "[$keychain]" >> "$FAKE_LOG"
+        case "$keychain" in */launcher.keychain-db) temporary=yes ;; esac
+    done
+    [ -n "$temporary" ] || [ -z "${FAKE_RESTORE_FAILS:-}" ] || exit 1
     exit 0
 fi
 if [ "$1" = list-keychains ]; then
@@ -42,10 +50,15 @@ if [ "$1" = list-keychains ]; then
     printf '    "%s"\n' "/Users/a/Library/Keychains/login.keychain-db" \
         "/Users/a/Library/Keychains/Release Signing.keychain-db"
 fi
+if [ "$1" = find-identity ]; then
+    for keychain in "$@"; do :; done
+    echo "find-identity $keychain" >> "$FAKE_CALLS"
+fi
 exit 0
 EOF
 cat > "$work/bin/codesign" <<'EOF'
 #!/bin/sh
+echo codesign >> "$FAKE_CALLS"
 exit "${FAKE_CODESIGN_STATUS:-0}"
 EOF
 cat > "$work/bin/cargo" <<'EOF'
@@ -65,9 +78,11 @@ fail() { echo "FAIL: $1" >&2; failures=$((failures + 1)); }
 # search-list change in $FAKE_LOG.
 run() {
     FAKE_LOG="$work/log"
+    FAKE_CALLS="$work/calls"
     : > "$FAKE_LOG"
+    : > "$FAKE_CALLS"
     status=0
-    env PATH="$work/bin:$PATH" FAKE_LOG="$FAKE_LOG" CARGO_TARGET_DIR="$work/target" \
+    env PATH="$work/bin:$PATH" FAKE_LOG="$FAKE_LOG" FAKE_CALLS="$FAKE_CALLS" CARGO_TARGET_DIR="$work/target" \
         APPLE_SIGNING_IDENTITY="Developer ID Application: Test" \
         APPLE_CERTIFICATE="$(printf 'not a p12' | base64)" APPLE_CERTIFICATE_PASSWORD=secret \
         "$@" sh "$work/repo/packaging/macos/prepare-launcher.sh" aarch64-apple-darwin \
@@ -95,6 +110,12 @@ esac
 [ "$(changes | grep -c '^--- set$')" = 2 ] || fail "expected one change and one restore: $(changes)"
 [ "$(change 2)" = "$expected_original" ] \
     || fail "the original search list was not restored whole: $(changes)"
+# The diagnostic shows what the temporary keychain holds, before the signing.
+case "$(sed -n 1p "$FAKE_CALLS")" in
+    "find-identity "*"/launcher.keychain-db") ;;
+    *) fail "find-identity did not report the temporary keychain before signing: $(cat "$FAKE_CALLS")" ;;
+esac
+[ "$(sed -n 2p "$FAKE_CALLS")" = codesign ] || fail "signing did not follow the diagnostic: $(cat "$FAKE_CALLS")"
 
 echo "case: a search list that cannot be read is never replaced"
 run FAKE_LIST_FAILS=1
@@ -106,6 +127,11 @@ run FAKE_CODESIGN_STATUS=1
 [ "$status" != 0 ] || fail "a failed codesign did not fail the run"
 [ "$(change 2)" = "$expected_original" ] \
     || fail "the original search list was not restored after the failure: $(changes)"
+
+echo "case: a search list that cannot be restored fails the run"
+run FAKE_RESTORE_FAILS=1
+[ "$status" != 0 ] || fail "the run passed with the search list still naming a deleted keychain"
+[ "$(changes | grep -c '^--- set$')" = 2 ] || fail "the restore was not attempted: $(changes)"
 
 if [ "$failures" -gt 0 ]; then
     echo "$failures check(s) failed" >&2

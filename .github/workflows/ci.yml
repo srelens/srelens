@@ -542,8 +542,14 @@ jobs:
   macos-launcher-script:
     name: macOS launcher script
     runs-on: ubuntu-22.04
+    permissions:
+      contents: read
     steps:
+      # It only lints and runs scripts, so the token need not stay in
+      # .git/config while the repository's code runs.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       # The launcher is signed only on a signed macOS release runner, which is
       # where its keychain handling first failed: v0.16.0 shipped no macOS
       # build (#862). Its tests run that handling against fake `security` and
