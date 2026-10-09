@@ -14,6 +14,7 @@ import { LINK_WORD, useWorkspaceView } from "../lib/workspace";
 import { useTabs } from "../lib/tabsStore";
 import { useWorkspaceSealed } from "../shell/LockGate";
 import { NeedsAttention } from "./home/NeedsAttention";
+import { PickUp } from "./home/PickUp";
 
 /**
  * App-wide entry point: what needs attention across the workspace, the
@@ -96,6 +97,7 @@ export function Home() {
               </ul>
             )}
           </section>
+          <PickUp targets={targets} />
           </div>
           <aside className="home-start" aria-label="Workspace tools">
             <h2 className="home-section-heading">Quick links</h2>
