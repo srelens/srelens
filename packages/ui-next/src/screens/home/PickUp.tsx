@@ -84,10 +84,22 @@ export function PickUp({ targets, paused = false }: { targets: readonly ClusterC
   );
 }
 
-/** One cluster's checked log subjects, as rows of the list above. */
+/**
+ * One cluster's checked log subjects, as rows of the list above. This cluster
+ * has subjects stored, or it would not be here; until the check offers any of
+ * them — still out, or held while Home is out of view — it says so, rather
+ * than leaving the heading over nothing.
+ */
 function FollowedLogs({ context, paused }: { context: ClusterContext; paused: boolean }) {
   const offered = useOfferedRecents(context.name, context.stableId, paused);
   const where = label(context);
+  if (offered.length === 0) {
+    return (
+      <li className="home-pick-pending text-xs text-muted">
+        {paused ? `Will check what you followed on ${where}` : `Checking what you followed on ${where}…`}
+      </li>
+    );
+  }
   return (
     <>
       {offered.map(({ entry, presence }) => (

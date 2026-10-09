@@ -1,4 +1,4 @@
-import { act, render, screen } from "@testing-library/react";
+import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ClusterContext } from "@srelens/core";
@@ -116,6 +116,18 @@ describe("PickUp", () => {
     view.rerender(<PickUp targets={[PROD]} paused={false} />);
     expect(await screen.findByRole("button", { name: "Follow logs of Deployment checkout/web on prod" })).toBeTruthy();
     expect(listResource).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    [false, "Checking what you followed on prod…"],
+    [true, "Will check what you followed on prod"],
+  ])("puts a line under the followed-logs heading while nothing is offered yet (paused: %s)", async (paused, line) => {
+    rememberLogSubject({ cluster: PROD.stableId, kind: "Deployment", namespace: "checkout", name: "web" }, memory());
+    listResource.mockReturnValue(new Promise(() => {}));
+    render(<PickUp targets={[PROD]} paused={paused} />);
+    await act(async () => { await Promise.resolve(); });
+    const list = screen.getByText("Recently followed logs").nextElementSibling as HTMLElement;
+    expect(within(list).getByText(line)).toBeTruthy();
   });
 
   it("says there is nothing to pick up yet rather than drawing an empty list", () => {

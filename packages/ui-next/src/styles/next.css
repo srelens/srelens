@@ -94,6 +94,7 @@
 .home-pick-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 100%; min-height: 36px; padding: 6px 8px; margin: 0 -8px; border-radius: var(--radius-tile); font-size: 13px; text-align: left; }
 .home-pick-row:hover:not(:disabled) { background: var(--surface-sunk); }
 .home-pick-row:disabled { color: var(--ink-muted); cursor: default; }
+.home-pick-pending { padding: 6px 0; }
 .home-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 20px; border-bottom: 1px solid var(--rule); font-size: 12px; font-weight: 600; }
 .home-section-heading input { max-width: 230px; }
 .home-section-heading h2 { flex-shrink: 0; }
