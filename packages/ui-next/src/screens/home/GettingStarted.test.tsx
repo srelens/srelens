@@ -78,6 +78,15 @@ describe("GettingStarted", () => {
     expect(screen.queryByRole("heading", { name: /^Getting started/ })).toBeNull();
   });
 
+  it("does not tick the cluster step when the listing failed, and stays up for it", async () => {
+    setContexts([PROD], "another kubeconfig is unreadable");
+    inventory.snapshot = apps({ manifest: { id: "io.a", name: "A" } });
+    render(<GettingStarted />);
+    await screen.findByText("Connect a cluster");
+    expect(within(item("Connect a cluster")).getByText("Could not check")).toBeTruthy();
+    expect(screen.getByRole("heading", { name: /^Getting started/ })).toBeTruthy();
+  });
+
   it("does not tick the assistant when its check failed", async () => {
     core.listAgents.mockRejectedValue(new Error("agent_list: no such command"));
     inventory.snapshot = apps({ manifest: { id: "io.a", name: "A" } });

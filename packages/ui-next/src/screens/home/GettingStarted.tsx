@@ -75,7 +75,8 @@ export function GettingStarted() {
   const steps: Step[] = [
     {
       name: "Connect a cluster",
-      state: contextsStatus === "loading" ? "checking" : contexts.length > 0 ? "done" : "todo",
+      // A listing that failed — even one that found some contexts — is not a fact about what is set up.
+      state: contextsStatus === "loading" ? "checking" : contextsStatus === "failed" ? "unknown" : contexts.length > 0 ? "done" : "todo",
       action: { label: "Connect", run: () => openTab("/connect") },
     },
     ...(desktop
