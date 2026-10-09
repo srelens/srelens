@@ -87,6 +87,9 @@ export function GettingStarted({ retryContexts }: { retryContexts?: () => void }
   const [dismissed, setDismissed] = useState(readDismissed);
   // A dismissal that could not be kept would come back on the next launch, so the list stays and says so.
   const [dismissFailure, setDismissFailure] = useState<unknown>(null);
+  // One save at a time: a failed save's rollback would otherwise remove the
+  // value a later save, queued meanwhile, had just kept.
+  const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     if (!desktop || dismissed) return;
@@ -141,8 +144,12 @@ export function GettingStarted({ retryContexts }: { retryContexts?: () => void }
           variant="ghost"
           size="sm"
           aria-label="Dismiss getting started"
+          disabled={saving}
           onClick={async () => {
+            if (saving) return;
+            setSaving(true);
             const failure = await saveDismissed();
+            setSaving(false);
             if (failure === null) setDismissed(true);
             else setDismissFailure(failure);
           }}

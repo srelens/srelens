@@ -32,6 +32,7 @@ const item = (name: string) => screen.getByText(name).closest("li") as HTMLEleme
 beforeEach(() => {
   core.isTauri.mockReturnValue(true);
   core.listAgents.mockReset().mockResolvedValue([CLAUDE]);
+  core.flushSettingsWrites.mockClear();
   inventory.snapshot = apps();
   localStorage.clear();
   resetLock();
@@ -86,6 +87,20 @@ describe("GettingStarted", () => {
     } finally {
       vi.restoreAllMocks();
     }
+  });
+
+  it("starts one dismissal at a time, so a failed save cannot erase a later one", async () => {
+    // Held open: a second click while the first save is still in flight must
+    // not queue a second, or the first one's rollback could remove its value.
+    let settle: () => void = () => {};
+    core.flushSettingsWrites.mockImplementationOnce(() => new Promise<void>((done) => { settle = done; }));
+    render(<GettingStarted />);
+    const dismiss = await screen.findByRole("button", { name: "Dismiss getting started" });
+    await userEvent.click(dismiss);
+    await userEvent.click(dismiss);
+    expect(core.flushSettingsWrites).toHaveBeenCalledTimes(1);
+    expect(dismiss.hasAttribute("disabled")).toBe(true);
+    await act(async () => { settle(); });
   });
 
   it("is still there after a remount when the backend refused the dismissal", async () => {
