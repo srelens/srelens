@@ -133,3 +133,43 @@
   .gh-star { width: 22px; padding: 0; justify-content: center; }
   .gh-star-label, .gh-star-count { display: none; }
 }
+
+/* A pod's containers in the Pods list, one square each (#878). The state is
+   `data-state`, from core's `containerVerdict`; the colours are the status
+   tokens every pill already uses. Shape says the same as colour — filled,
+   outlined, dashed — so the column reads without it. */
+.ctr-blocks { display: inline-flex; align-items: center; gap: 3px; vertical-align: middle; }
+.ctr-blocks-init { display: inline-flex; align-items: center; gap: 2px; margin-left: 3px; }
+.ctr-block {
+  --ctr: var(--ink-faint);
+  position: relative; display: inline-block; box-sizing: border-box; flex-shrink: 0;
+  width: 10px; height: 10px; border-radius: 2px;
+  border: 1.5px solid var(--ctr); background: transparent;
+}
+/* Not what the pod runs, and usually long finished: a size smaller. */
+.ctr-block[data-kind="init"] { width: 7px; height: 7px; border-width: 1px; border-radius: 1.5px; }
+/* Running and ready: the ordinary case, solid. */
+.ctr-block[data-state="ready"] { --ctr: var(--ok); background: var(--ctr); }
+/* Running, not ready: the same colour, hollow. */
+.ctr-block[data-state="unready"] { --ctr: var(--ok); }
+/* On its way up: hollow and breathing, so it reads as not settled yet. */
+.ctr-block[data-state="starting"] { --ctr: var(--ink-muted); animation: pulse-dot 2.2s ease-in-out infinite; }
+/* A back-off, or an error waiting will not fix. */
+.ctr-block[data-state="stuck"] { --ctr: var(--warn); background: var(--ctr); }
+/* Exited 0: finished, not failed. The body alone, no colour. */
+.ctr-block[data-state="completed"] { --ctr: var(--ink-faint); }
+/* Exited with anything else. */
+.ctr-block[data-state="failed"] { --ctr: var(--sev); background: var(--ctr); }
+/* The kubelet has said nothing yet. */
+.ctr-block[data-state="unknown"] { --ctr: var(--ink-faint); border-style: dashed; }
+/* Has restarted, whatever it is doing now: a dot on the corner, ringed in the
+   row's own ground so it stays a dot on a filled square as on a hollow one. */
+.ctr-block[data-restarted]::after {
+  content: ""; position: absolute; top: -3.5px; right: -3.5px; width: 5px; height: 5px; border-radius: 99px;
+  background: var(--ink); box-shadow: 0 0 0 1px var(--surface);
+}
+.ctr-block[data-kind="init"][data-restarted]::after { top: -3px; right: -3px; width: 4px; height: 4px; }
+.ctr-more { margin-left: 1px; font-size: 0.6875rem; color: var(--ink-muted); font-variant-numeric: tabular-nums; }
+@media (prefers-reduced-motion: reduce) {
+  .ctr-block[data-state="starting"] { animation: none; }
+}

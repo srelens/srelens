@@ -36,6 +36,7 @@ export * from "./lib/hostNotices";
 export * from "./lib/helmStatus";
 export * from "./lib/ingressUrl";
 export * from "./lib/k8sCapacity";
+export * from "./lib/containerVerdict";
 export * from "./lib/k8sContainer";
 export * from "./lib/k8sHealth";
 export * from "./lib/k8sQuantity";

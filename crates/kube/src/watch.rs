@@ -1432,6 +1432,7 @@ mod tests {
             mem_lim_mib: 0,
             cpu_lim_all: false,
             mem_lim_all: false,
+            containers: Vec::new(),
         }
     }
 
