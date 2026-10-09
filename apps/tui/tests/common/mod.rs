@@ -7,11 +7,15 @@
 
 #![allow(dead_code)]
 
+pub mod env;
+pub mod theme;
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::backend::TestBackend;
+use ratatui::buffer::Buffer;
 use ratatui::{Frame, Terminal};
-use srelens_tui::app::App;
-use srelens_tui::event::AppEvent;
+use srectl::app::App;
+use srectl::event::AppEvent;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
 
 /// An `App` with no kubeconfig, no cluster, and the given context/namespace,
@@ -19,7 +23,7 @@ use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
 /// app emitted.
 pub async fn app_with(context: &str, namespace: &str) -> (App, UnboundedReceiver<AppEvent>) {
     let (tx, rx) = unbounded_channel();
-    let app = App::new(
+    let app = theme::new_app(
         Some(context.to_string()),
         Some(namespace.to_string()),
         false,
@@ -29,7 +33,6 @@ pub async fn app_with(context: &str, namespace: &str) -> (App, UnboundedReceiver
     )
     .await
     .expect("App::new never needs a cluster");
-    srelens_tui::theme::Theme::set_theme_by_index(0);
     (app, rx)
 }
 
@@ -86,10 +89,24 @@ pub fn render_lines<F>(width: u16, height: u16, draw: F) -> Vec<String>
 where
     F: FnOnce(&mut Frame),
 {
+    buffer_lines(&render_buffer(width, height, draw))
+}
+
+/// Render one frame at the given size and return the raw buffer, for a test
+/// that asserts on a cell's style (the colour a status was drawn in) as well
+/// as its text.
+pub fn render_buffer<F>(width: u16, height: u16, draw: F) -> Buffer
+where
+    F: FnOnce(&mut Frame),
+{
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).expect("test terminal");
     terminal.draw(draw).expect("draw");
-    let buffer = terminal.backend().buffer();
+    terminal.backend().buffer().clone()
+}
+
+/// A buffer as text, one `String` per row, trailing spaces trimmed.
+pub fn buffer_lines(buffer: &Buffer) -> Vec<String> {
     (0..buffer.area.height)
         .map(|y| {
             let mut line = String::new();
@@ -112,6 +129,11 @@ where
 /// Render the whole app at the given size and return the screen text.
 pub fn render_app(app: &mut App, width: u16, height: u16) -> String {
     render_text(width, height, |f| app.render(f))
+}
+
+/// Render the whole app at the given size and return the raw buffer.
+pub fn render_app_buffer(app: &mut App, width: u16, height: u16) -> Buffer {
+    render_buffer(width, height, |f| app.render(f))
 }
 
 /// Drain every event the app has emitted so far.

@@ -6,16 +6,28 @@ import {
   isTauri,
   listContexts,
   loadKubeconfigFiles,
+  listenForHostNotices,
   loadMcpSettings,
   rehydrateForwards,
   startMcpHttp,
   vaultLock,
   type ClusterContext,
   type ContextProfiles,
+  type HostNotice,
   flushSettingsWrites,
   onWindowCloseRequested,
 } from "@srelens/core";
-import { Button, Checkbox, Drawer, LoadingState, TabStrip, TextInput, type ContextMenuItem, type StripTab } from "@srelens/ui-kit";
+import {
+  Button,
+  Checkbox,
+  Drawer,
+  LoadingState,
+  SurfaceToast,
+  TabStrip,
+  TextInput,
+  type ContextMenuItem,
+  type StripTab,
+} from "@srelens/ui-kit";
 import { contextLabelFor } from "../lib/agentSuggestions";
 import {
   pinContextKey,
@@ -34,7 +46,8 @@ import { mcpAutoStartSettled, mcpAutoStartStarting } from "../lib/mcpAutoStart";
 import { openCluster } from "../lib/openCluster";
 import { loadPeekWidth } from "../lib/peekWidth";
 import { loadSectionFolds } from "../lib/sectionFolds";
-import { loadExpanded, loadNamespaces } from "../lib/workspace";
+import { loadExpanded } from "../lib/workspace";
+import { TabScope } from "../lib/tabScope";
 import { getInfo, probeCluster } from "../lib/probe";
 import { defaultState, makeTab, reconcile, type TabsState } from "../lib/tabs";
 import { parseEditRoute, parseNewRoute } from "../lib/detailRoute";
@@ -79,6 +92,8 @@ function resetWorkspacesToHome(state: TabsState): void {
   }
 }
 import { useConsole } from "../console";
+import { canOpenClusterTerminal, openClusterTerminal } from "../lib/clusterTerminal";
+import { countLaunch, refreshStarCount } from "../lib/starOnGitHub";
 import { hint, matchWindowKey, type WindowAction } from "../lib/shortcuts";
 import { AgentConsent } from "./AgentConsent";
 import { Body } from "./Body";
@@ -89,6 +104,7 @@ import { Nav } from "./Nav";
 import { Rail } from "./Rail";
 import { Status } from "./Status";
 import { TabSurface } from "./TabSurface";
+import { useDeepLinks } from "./useDeepLinks";
 
 export interface WindowProps {
   /** Display names of the screens that exist in the new design. */
@@ -199,6 +215,35 @@ export function Window({
     setScope(contextLabelFor(activeTabRoute, scopeLabel));
   }, [activeTabRoute, scopeLabel, setScope]);
 
+  // The star button's two start-up acts (#850), done here rather than by the
+  // button: once per window, after boot — settings are readable by then — and
+  // never from a test or a gallery that merely draws the bar. The count is
+  // asked for at most once a day and its failure is silent by design.
+  useEffect(() => {
+    if (!booted) return;
+    countLaunch();
+    void refreshStarCount();
+  }, [booted]);
+
+  // What the desktop host reports after the page that would have heard it is
+  // gone: a helm operation outlives the window that started it, and how it
+  // ended reaches every window (#735). The web host sends none. A refused
+  // `srelens://` link joins the same queue (#370), and so do links held behind
+  // a failed context listing (#855): one surface, oldest first.
+  const [notices, setNotices] = useState<HostNotice[]>([]);
+  useEffect(
+    () =>
+      isTauri()
+        ? listenForHostNotices((notice) => setNotices((shown) => [...shown, notice]))
+        : undefined,
+    [],
+  );
+  useDeepLinks({
+    windowLabel,
+    ready: booted,
+    onNotice: (notice) => setNotices((shown) => [...shown, { level: "error", ...notice }]),
+  });
+
   useEffect(() => {
     let cancelled = false;
     void (async () => {
@@ -228,10 +273,10 @@ export function Window({
       // unfolded — and the first unfold then spreads over an empty record and
       // erases every other kind's, exactly as `loadMarks` above describes.
       loadSectionFolds();
-      // Restore each cluster's sidebar groups and namespace selection before
-      // rendering navigation, so the first toggle preserves other clusters.
+      // Restore each cluster's sidebar groups before rendering navigation, so
+      // the first toggle preserves other clusters. (Namespace selections live
+      // on the tabs and come back with them.)
       loadExpanded();
-      loadNamespaces();
       // And the subjects a bare `/logs` offers as a way in. Unread, that
       // screen has nothing to offer on the first visit of every launch — and
       // the first subject followed then spreads over an empty list and erases
@@ -463,6 +508,10 @@ export function Window({
     );
   }
 
+  function openTerminal(cluster: ClusterContext | undefined): void {
+    if (canOpenClusterTerminal(cluster)) void openClusterTerminal(cluster);
+  }
+
   // Read at call time rather than closed over: an effect installed once must
   // act on whatever the strip shows now, not whatever it showed at mount.
   function run(action: WindowAction) {
@@ -486,6 +535,10 @@ export function Window({
         return selectIndex(action.index);
       case "console":
         return setOpen(true);
+      case "terminal":
+        // The status bar's Terminal button, from the keyboard: the same
+        // conditions, so the chord does nothing where the button is absent.
+        return openTerminal(activeCtx ?? undefined);
       case "lock":
         return lockNow();
       case "zoom-in":
@@ -557,6 +610,9 @@ export function Window({
       // command is a Tauri command, so in web mode there is no vault to seal
       // and the chord could only log a refusal. It falls through untouched.
       if (action.type === "lock" && !desktop) return;
+      // The local shell is the desktop's too, and Ctrl+J is the browser's
+      // downloads list: left alone rather than swallowed for nothing.
+      if (action.type === "terminal" && !desktop) return;
       e.preventDefault();
       runRef.current(action);
     }
@@ -738,6 +794,7 @@ export function Window({
             const pausedContext = !keepsManagementWhenPaused(tab.route) && context && workspace.pausedClusters?.includes(context.stableId) ? context : undefined;
             return (
             <TabSurface key={tab.id} visible={tab.id === activeId}>
+              <TabScope.Provider value={tab.id}>
               {/* A placeholder tab without a cluster of its own still leaves
                   via the cluster this window is looking at — that is the
                   context classic reopens onto. */}
@@ -756,6 +813,7 @@ export function Window({
                 // non-throwing and idempotent: the whole of the contract.
                 onLocked={lockWorkspace}
               />
+              </TabScope.Provider>
             </TabSurface>
             );
           })}
@@ -891,6 +949,18 @@ export function Window({
         prompts and automatic denials while those windows are covered/booting.
       */}
       {windowLabel === "main" && <AgentConsent />}
+      {/* What the host reports after the page that would have heard it is
+        gone (#735), and why a deep link was refused (#370). This design
+        mounts no `notify` sink, so the window draws them: the oldest first,
+        each until it is dismissed. */}
+      <SurfaceToast
+        anchor="window"
+        title={notices[0]?.title}
+        hint={notices[0]?.detail}
+        tone={notices[0]?.level === "error" ? "sev" : "info"}
+        onClose={() => setNotices((shown) => shown.slice(1))}
+        dismissLabel="Dismiss notice"
+      />
     </>
   );
 }

@@ -485,3 +485,8 @@ it("describes resource identity for tab hints without guessing a namespace", asy
   expect(tabDetail("/logs/Pod/default/app")).toBe("Pod · default");
   expect(tabDetail("/overview")).toBeUndefined();
 });
+
+it("distinguishes operation tabs by their report or image subject", () => {
+  expect(describe("/extension-operation-contexts/config%23demo/org.srelens.trivy/3/findings/" + encodeURIComponent(JSON.stringify({reportId:"report-a"}))).title).toBe("Findings · report-a");
+  expect(describe("/extension-operation-contexts/config%23demo/org.srelens.trivy/3/findings/" + encodeURIComponent(JSON.stringify({reportId:"report-b"}))).title).toBe("Findings · report-b");
+});

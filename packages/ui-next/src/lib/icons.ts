@@ -19,6 +19,7 @@ import {
   Gauge,
   GitBranch,
   HardDrive,
+  History,
   KeyRound,
   Layers,
   LayoutDashboard,
@@ -51,6 +52,7 @@ import {
   Sparkles,
   SlidersHorizontal,
   Scaling,
+  Star,
   Sun,
   Terminal,
   TimerReset,
@@ -92,6 +94,8 @@ import type { IconComponent } from "@srelens/ui-kit";
  */
 export const Icons = {
   // The titlebar and the window's own actions.
+  /** The repository's star — the top bar's way to GitHub (#850). */
+  star: Star,
   sun: Sun,
   moon: Moon,
   zoomIn: ZoomIn,
@@ -201,6 +205,8 @@ export const Icons = {
   revert: RotateCcw,
   scale: Scaling,
   restart: RotateCw,
+  /** Return a Deployment to an earlier revision (#389). */
+  rollback: History,
   evict: LogOut,
   /** Stop new pods being scheduled to a node — the design's crossed circle. */
   cordon: Ban,

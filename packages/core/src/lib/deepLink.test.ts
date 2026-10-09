@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { dedupeDeepLinkTargets, parseDeepLink, type DeepLinkTarget } from "./deepLink";
+import {
+  checkDeepLink,
+  dedupeDeepLinkTargets,
+  deepLinkHeldNotice,
+  parseDeepLink,
+  type DeepLinkTarget,
+} from "./deepLink";
 
 describe("parseDeepLink", () => {
   it("parses a cluster link", () => {
@@ -135,5 +141,121 @@ describe("dedupeDeepLinkTargets", () => {
     expect(result).toHaveLength(2);
     expect(result[0]).toMatchObject({ route: "cluster" });
     expect(result[1]).toMatchObject({ route: "resource", name: "b" });
+  });
+});
+
+// The one rule set both designs judge a link by. The reasons are the sentences
+// classic has always shown, written out here by hand rather than read back from
+// the module, so a reworded or dropped check fails a test instead of quietly
+// changing what a reader is told.
+describe("checkDeepLink", () => {
+  const contexts = ["prod", "staging"];
+
+  it("passes a cluster link to a context that exists, as its parsed target", () => {
+    expect(checkDeepLink("srelens://cluster/staging", contexts)).toEqual({
+      ok: true,
+      target: { route: "cluster", context: "staging" },
+    });
+  });
+
+  it("passes a namespaced resource link that names its namespace", () => {
+    expect(checkDeepLink("srelens://resource/prod/kube-system/Pod/coredns-abc", contexts)).toEqual({
+      ok: true,
+      target: {
+        route: "resource",
+        context: "prod",
+        namespace: "kube-system",
+        kind: "Pod",
+        name: "coredns-abc",
+      },
+    });
+  });
+
+  it("passes '-' for a cluster-scoped kind, which has no namespace to name", () => {
+    expect(checkDeepLink("srelens://resource/prod/-/Node/worker-1", contexts)).toMatchObject({
+      ok: true,
+      target: { kind: "Node", namespace: null, name: "worker-1" },
+    });
+  });
+
+  it("refuses a link srelens cannot parse", () => {
+    expect(checkDeepLink("srelens://evil/prod", contexts)).toEqual({
+      ok: false,
+      reason: "It isn't a link srelens understands.",
+    });
+  });
+
+  it("refuses a context that is not listed, matching the name exactly", () => {
+    expect(checkDeepLink("srelens://cluster/dev", contexts)).toEqual({
+      ok: false,
+      reason: 'No kube context named "dev".',
+    });
+    // Context names are case-sensitive in a kubeconfig, so `Prod` is not `prod`.
+    expect(checkDeepLink("srelens://resource/Prod/default/Pod/web", contexts)).toEqual({
+      ok: false,
+      reason: 'No kube context named "Prod".',
+    });
+  });
+
+  it("refuses a kind with no detail view", () => {
+    // Events have a list and no detail, so such a link would land on the list
+    // instead of the object it named.
+    expect(checkDeepLink("srelens://resource/prod/default/Event/web.17f", contexts)).toEqual({
+      ok: false,
+      reason: "srelens can't open a Event directly.",
+    });
+  });
+
+  it("refuses a namespaced kind given '-' in place of its namespace", () => {
+    expect(checkDeepLink("srelens://resource/prod/-/Pod/web", contexts)).toEqual({
+      ok: false,
+      reason: "Pod is namespaced, so the link needs a namespace.",
+    });
+  });
+});
+
+// #855: a listing that failed — wholly, or partly with some contexts and a
+// reason — has not said a context is missing. A link naming one it did not
+// return is HELD, not refused as naming no context; everything a listing could
+// never change is still refused at once, with the sentence it always had.
+describe("checkDeepLink, while the context listing has failed", () => {
+  const partial = ["prod"];
+  const failed = { listingFailed: true };
+
+  it("holds a link whose context the failed listing did not return", () => {
+    expect(checkDeepLink("srelens://cluster/staging", partial, failed)).toEqual({ ok: false, held: true });
+    expect(checkDeepLink("srelens://resource/staging/payments/Pod/web", partial, failed)).toEqual({
+      ok: false,
+      held: true,
+    });
+  });
+
+  it("opens a link whose context the partial listing did return", () => {
+    expect(checkDeepLink("srelens://cluster/prod", partial, failed)).toEqual({
+      ok: true,
+      target: { route: "cluster", context: "prod" },
+    });
+  });
+
+  it("still refuses at once what no listing can change", () => {
+    expect(checkDeepLink("srelens://evil/staging", partial, failed)).toEqual({
+      ok: false,
+      reason: "It isn't a link srelens understands.",
+    });
+    expect(checkDeepLink("srelens://resource/staging/default/Event/web.17f", partial, failed)).toEqual({
+      ok: false,
+      reason: "srelens can't open a Event directly.",
+    });
+    expect(checkDeepLink("srelens://resource/staging/-/Pod/web", partial, failed)).toEqual({
+      ok: false,
+      reason: "Pod is namespaced, so the link needs a namespace.",
+    });
+  });
+
+  it("says, once, what the listing failed with and that the link will open when the contexts load", () => {
+    expect(deepLinkHeldNotice("open /home/dana/.kube/stage: permission denied")).toEqual({
+      title: "That link will be checked once the contexts load",
+      detail: "The kube contexts could not be listed. open /home/dana/.kube/stage: permission denied",
+    });
   });
 });

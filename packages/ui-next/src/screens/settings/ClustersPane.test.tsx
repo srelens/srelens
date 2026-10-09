@@ -5,15 +5,15 @@ import { loadClusterNamespaces, loadContextProfiles, loadContextOrder, saveClust
 import { setContexts } from "../../lib/clusters";
 import { loadMarks } from "../../lib/marks";
 import { ClustersPane } from "./ClustersPane";
-import { activeCluster, setState } from "../../lib/tabsStore";
+import { activeCluster, currentWorkspace, setState } from "../../lib/tabsStore";
 import { defaultState } from "../../lib/tabs";
-import { getView, loadNamespaces, setNamespaces } from "../../lib/workspace";
+import { setNamespaces } from "../../lib/workspace";
 const backend = vi.hoisted(() => ({ deleteContext: vi.fn(), listContexts: vi.fn(), isTauri: vi.fn(() => true) }));
 vi.mock("@srelens/core", async (original) => ({ ...await original<object>(), ...backend }));
 const contexts: ClusterContext[] = ["prod", "staging"].map(name => ({ name, stableId: name + "-id", key: name + "-id", cluster: name, server: "https://" + name, sourceFile: "/config", authKind: "token", isCurrent: false }));
 beforeEach(() => {
   localStorage.clear(); vi.clearAllMocks(); backend.isTauri.mockReturnValue(true);
-  loadNamespaces();
+  setState(defaultState(contexts));
   saveContextProfiles({ "prod-id": { displayName: "Production Europe", shortName: "PE", logo: "cloud", color: "#123456" } });
   saveContextOrder(["staging-id", "prod-id"]); loadMarks(); setContexts(contexts);
 });
@@ -63,7 +63,7 @@ it("clears both namespace stores after confirmed removal", async () => {
   await user.click(within(screen.getByRole("dialog")).getByRole("button", {name: "Remove context"}));
 
   expect(loadClusterNamespaces()).toEqual({ "staging-id": "default" });
-  expect(getView().namespaces).toEqual({ "staging-id": ["default"] });
+  expect(currentWorkspace().tabs[0].namespaces).toEqual({ "staging-id": ["default"] });
 });
 it("clears the original namespace key when removing a prefixed duplicate context", async () => {
   const duplicate = { ...contexts[0], name: "file-a/prod" };

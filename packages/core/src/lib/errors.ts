@@ -62,12 +62,20 @@ export function cleanErrorMessage(input: unknown): string {
   return raw.trim();
 }
 
+/** What an apiserver Forbidden message refused: the verb, the resource, and where. */
+export interface ForbiddenParts {
+  verb: string;
+  resource: string;
+  /** "in <namespace>" or "at the cluster scope" — only ever what the message said. */
+  where: string;
+}
+
 /**
- * Parse an apiserver Forbidden message into an actionable sentence naming the
- * verb, resource, and namespace (or cluster scope). Returns null when the text
- * doesn't match the standard shape.
+ * Parse an apiserver Forbidden message into the verb, resource, and namespace
+ * (or cluster scope) it refused. Returns null when the text doesn't match the
+ * standard shape.
  */
-export function describeForbidden(raw: string): string | null {
+export function parseForbidden(raw: string): ForbiddenParts | null {
   // Split from one pattern into two passes: the alternation of two lazy
   // dot-alls made a message that never completes either branch quadratic
   // (js/polynomial-redos, #49). API error text is not length-bounded.
@@ -84,13 +92,30 @@ export function describeForbidden(raw: string): string | null {
   // Namespace is tried first, matching the order of the alternation this
   // replaced, so a message carrying both reads as namespaced.
   const namespace = /in the namespace "([^"]+)"/.exec(rest)?.[1];
-  if (namespace) {
-    return `You don't have permission to ${verb} ${resource} in ${namespace}.`;
-  }
-  if (rest.includes("at the cluster scope")) {
-    return `You don't have permission to ${verb} ${resource} at the cluster scope.`;
-  }
+  if (namespace) return { verb, resource, where: `in ${namespace}` };
+  if (rest.includes("at the cluster scope")) return { verb, resource, where: "at the cluster scope" };
   return null;
+}
+
+/**
+ * The sentence for one verb refused on one or more resources in one place —
+ * one sentence for several refusals, so a screen fanned out over five kinds
+ * that one RoleBinding denies does not say it five times (#701).
+ */
+export function forbiddenSentence(verb: string, resources: string[], where: string): string {
+  const list =
+    resources.length < 2 ? (resources[0] ?? "") : `${resources.slice(0, -1).join(", ")} and ${resources.at(-1)}`;
+  return `You don't have permission to ${verb} ${list} ${where}.`;
+}
+
+/**
+ * Parse an apiserver Forbidden message into an actionable sentence naming the
+ * verb, resource, and namespace (or cluster scope). Returns null when the text
+ * doesn't match the standard shape.
+ */
+export function describeForbidden(raw: string): string | null {
+  const parts = parseForbidden(raw);
+  return parts ? forbiddenSentence(parts.verb, [parts.resource], parts.where) : null;
 }
 
 /**

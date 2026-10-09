@@ -218,7 +218,7 @@ describe("Terminals", () => {
     // The MIDDLE row, on purpose: with three sessions on screen, "shows the
     // active one" agrees with neither "shows the first one" nor "shows the
     // last one", so the assertion cannot pass by position.
-    await user.click(railRow(/search-indexer-0/));
+    await user.click(railRow(/^search-indexer-0/));
 
     expect(sessionName().textContent).toBe("search-indexer-0 · indexer");
     // And the pane is attached to THAT session's emulator, not merely titled
@@ -244,7 +244,7 @@ describe("Terminals", () => {
     const user = userEvent.setup();
     draw();
 
-    await user.click(railRow(/bravo/));
+    await user.click(railRow(/^bravo/));
     expect(sessionName().textContent).toBe("bravo · api");
 
     // Both neighbours go, from both ends: `charlie` shortens the array under
@@ -256,6 +256,35 @@ describe("Terminals", () => {
 
     expect(sessionName().textContent).toBe("bravo · api");
     expect(attached()).toEqual([terminalFor(bravo)?.element]);
+  });
+
+  it("renames a session from its row, in the rail and in the pane head alike", async () => {
+    await openPod("alpha");
+    const bravo = await openPod("bravo");
+    const user = userEvent.setup();
+    draw();
+
+    await user.click(railRow(/^Rename bravo/));
+    await user.keyboard("drain watch{Enter}");
+
+    // The store's own row changed, so both places that read it agree.
+    expect(getSessions().find((s) => s.id === bravo)?.title).toBe("drain watch");
+    expect(railRow(/^drain watch/)).toBeTruthy();
+    expect(sessionName().textContent).toBe("drain watch");
+  });
+
+  it("detaches a session from its row without it being the one on screen", async () => {
+    const alpha = await openPod("alpha");
+    await openPod("bravo");
+    const user = userEvent.setup();
+    draw();
+    // `bravo` is newest, so it is the one on screen.
+    expect(sessionName().textContent).toBe("bravo · api");
+
+    await user.click(railRow(/^Detach alpha/));
+
+    expect(getSessions().some((s) => s.id === alpha)).toBe(false);
+    expect(sessionName().textContent).toBe("bravo · api");
   });
 
   it("names the active session in normal case, beside its state badge", async () => {
@@ -318,10 +347,32 @@ describe("Terminals", () => {
     await user.click(screen.getByRole("button", { name: "Detach" }));
 
     expect(getSessions()).toHaveLength(0);
+    // Detach is `endSession`, not a row removal that happens to look like it:
+    // it closes the far end, and on desktop closing a node shell's exec is
+    // what has the host delete its privileged debug pod (#734). The page does
+    // not delete it as well.
     expect(far.close).toHaveBeenCalled();
     expect(terminalFor(id)).toBeUndefined();
-    // Detach is `endSession`, not a row removal that happens to look like it:
-    // the privileged debug pod a node shell left on the cluster goes with it.
+    expect(core.deletePod).not.toHaveBeenCalled();
+  });
+
+  it("Detach on the web deletes the debug pod itself, since no host does", async () => {
+    core.isTauri.mockReturnValue(false);
+    await act(() =>
+      startPodSession({
+        context: CTX.name,
+        namespace: "kube-system",
+        pod: "node-debug-abc",
+        container: "debug",
+        kind: "node",
+        title: "eu-w4-c3-standard-a1",
+      }),
+    );
+    const user = userEvent.setup();
+    draw();
+
+    await user.click(screen.getByRole("button", { name: "Detach" }));
+
     expect(core.deletePod).toHaveBeenCalledWith(CTX.name, "kube-system", "node-debug-abc");
   });
 
@@ -496,7 +547,7 @@ describe("Terminals", () => {
   });
 
   it("dresses the emulator from the app's tokens rather than colours of its own", async () => {
-    document.documentElement.style.setProperty("--surface-sunk", "#101014");
+    document.documentElement.style.setProperty("--ground-sunk", "#101014");
     document.documentElement.style.setProperty("--ink-soft", "#443f52");
     document.documentElement.style.setProperty("--accent", "#4b3bd6");
     document.documentElement.style.setProperty("--font-mono", '"Test Mono", monospace');
@@ -512,7 +563,7 @@ describe("Terminals", () => {
   });
 
   it("re-reads the tokens when the theme changes under it", async () => {
-    document.documentElement.style.setProperty("--surface-sunk", "#fafafc");
+    document.documentElement.style.setProperty("--ground-sunk", "#fafafc");
     const id = await openPod("checkout-api-5c8b7f2d9-mk3wl");
     draw();
     await waitFor(() => {
@@ -522,12 +573,43 @@ describe("Terminals", () => {
     // What a theme switch does: the same token, a different value, announced
     // by the attribute `applyNextThemeAttribute` writes on the root.
     await act(async () => {
-      document.documentElement.style.setProperty("--surface-sunk", "#121118");
+      document.documentElement.style.setProperty("--ground-sunk", "#121118");
       document.documentElement.dataset.theme = "dark";
     });
 
     await waitFor(() => {
       expect(terminalFor(id)?.options.theme?.background).toBe("#121118");
     });
+  });
+
+  it("clears the emulator's background when the window turns see-through", async () => {
+    document.documentElement.style.setProperty("--ground-sunk", "#121118");
+    const id = await openPod("checkout-api-5c8b7f2d9-mk3wl");
+    draw();
+    await waitFor(() => {
+      expect(terminalFor(id)?.options.theme?.background).toBe("#121118");
+    });
+    // Built to take an alpha at all: xterm ignores one otherwise.
+    expect(terminalFor(id)?.options.allowTransparency).toBe(true);
+
+    // What the Appearance pane's window opacity does: the stylesheet clears
+    // the ground tokens, announced by the attribute `writeOpacity` puts on the
+    // root. The keyword is what the cleared token resolves to, and xterm
+    // throws on it — it wants the function form.
+    await act(async () => {
+      document.documentElement.style.setProperty("--ground-sunk", "transparent");
+      document.documentElement.dataset.opacity = "80";
+    });
+
+    try {
+      await waitFor(() => {
+        expect(terminalFor(id)?.options.theme?.background).toBe("rgba(0, 0, 0, 0)");
+      });
+    } finally {
+      // The root outlives the test, pass or fail: a failed assertion must not
+      // leave the next case starting on a see-through window.
+      delete document.documentElement.dataset.opacity;
+      document.documentElement.style.removeProperty("--ground-sunk");
+    }
   });
 });

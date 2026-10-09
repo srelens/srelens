@@ -1,9 +1,17 @@
 import { useEffect, useState } from "react";
-import { isTauri, pendingConfirms, respondToConfirm, subscribe, type ConfirmRequest } from "@srelens/core";
-import { getRun, noteGate, noteGateIn, runKeyHoldingGate } from "../lib/agentRun";
+import {
+  isTauri,
+  pendingConfirms,
+  respondToConfirm,
+  subscribe,
+  type ConfirmRequest,
+} from "@srelens/core";
+import { getRun, noteGate, noteGateIn, runKeyHoldingGate, type GateRecord } from "../lib/agentRun";
 import { Alert, ConfirmDialog } from "@srelens/ui-kit";
 import { FailureLine } from "../lib/errorCopy";
 import { useWorkspaceSealed } from "./LockGate";
+import { RequestConfirmation } from "../confirm/RequestConfirmation";
+import { asConfirmRequest } from "../confirm/confirmRequest";
 
 /**
  * The consent prompt for an MCP tool call: this design's port of classic's
@@ -39,7 +47,7 @@ import { useWorkspaceSealed } from "./LockGate";
  *   `@tauri-apps/api/event`. This package depends on `@srelens/core` and
  *   `@srelens/ui-kit` and nothing else, and core's bus is the abstraction every
  *   other backend event in srelens goes through. It hands the payload as
- *   `unknown`, so {@link asRequest} narrows it instead of casting — a malformed
+ *   `unknown`, so {@link asConfirmRequest} narrows it instead of casting — a malformed
  *   payload is ignored rather than rendered as a question with `undefined` in
  *   it. It is `subscribe` and not `on` for a reason the replay paragraph below
  *   gives.
@@ -188,20 +196,21 @@ import { useWorkspaceSealed } from "./LockGate";
  */
 
 /**
- * The payload the backend emits, narrowed rather than cast.
- *
- * `subscribe` types a payload as `unknown` — correctly, it crosses a process
- * boundary — so this is the one place that decides a message is a request. A shape that
- * does not match is ignored: there is no id to answer with, and drawing a card
- * headed `undefined` over a call that will time out anyway tells the reader
- * nothing they can act on.
+ * The narrowing that used to live here is now `asConfirmRequest`
+ * (`confirm/confirmRequest.ts`), because this was never the only listener:
+ * classic's `McpConfirmDialog` and the assistant transcript hear the same
+ * event and used to push `event.payload` straight into state on a
+ * `listen<ConfirmRequest>` annotation, which checks nothing at runtime. One
+ * parser for one event, beside the component that draws what it produces.
  */
-function asRequest(payload: unknown): ConfirmRequest | null {
-  if (typeof payload !== "object" || payload === null) return null;
-  const { id, tool, args } = payload as Partial<ConfirmRequest>;
-  if (typeof id !== "string" || id === "" || typeof tool !== "string") return null;
-  return { id, tool, args: typeof args === "object" && args !== null ? args : {} };
-}
+
+/**
+ * The level's badge, the sentence and the facts beneath it now belong to
+ * `HostConfirmation` (#552). The copy that stood here — and the near-identical
+ * copies in classic's modal and the transcript's card — are gone: three
+ * renderings of one question are three chances for two of them to disagree,
+ * and one of them already did.
+ */
 
 /** The id out of a `mcp://confirm-resolved` payload, or null. */
 function resolvedId(payload: unknown): string | null {
@@ -237,6 +246,18 @@ function mergeById(queue: ConfirmRequest[], incoming: ConfirmRequest[]): Confirm
     fresh.push(r);
   }
   return fresh.length === 0 ? queue : [...queue, ...fresh];
+}
+
+/**
+ * What the host said about the call — its sentence and its level — for the
+ * gate the transcript keeps (#388). Only what was sent: a request with no
+ * sentence records none, rather than an empty one the card would draw.
+ */
+function hostWords(request: ConfirmRequest): Pick<GateRecord, "prompt" | "impact"> {
+  return {
+    ...(request.prompt ? { prompt: request.prompt } : {}),
+    ...(request.impact ? { impact: request.impact } : {}),
+  };
 }
 
 export function AgentConsent() {
@@ -312,7 +333,7 @@ export function AgentConsent() {
       });
       if (!hearingResolutions) return;
       const hearingRequests = await listen("mcp://confirm-request", (payload) => {
-        const request = asRequest(payload);
+        const request = asConfirmRequest(payload);
         if (request) setQueue((q) => [...q, request]);
       });
       if (!hearingRequests) return;
@@ -329,7 +350,7 @@ export function AgentConsent() {
       const settled = resolvedMeanwhile ?? new Set<string>();
       resolvedMeanwhile = null;
       const requests = waiting
-        .map(asRequest)
+        .map(asConfirmRequest)
         .filter((r): r is ConfirmRequest => r !== null && !settled.has(r.id));
       if (requests.length > 0) setQueue((q) => mergeById(q, requests));
     })();
@@ -389,29 +410,25 @@ export function AgentConsent() {
   // the transcript that nobody was ever asked to make. The reader would read
   // their own name on a call they never saw.
   //
-  // **Ownership is decided ONCE, here, at presentation.** `ConfirmRequest` is
-  // `{ id, tool, args }` — it carries no client identity, so this component
-  // cannot know whose call raised it. The confirm channel is app-wide by
-  // design: an external MCP client (the loopback HTTP server, bearer-token
-  // authenticated) raises the exact same `mcp://confirm-request` srelens's own
-  // agent does. The honest predicate is "does THIS store have a turn actually
-  // in flight right now" — that is the only moment srelens's own agent could
-  // be the caller. A confirm presented while the store is idle is recorded as
-  // nothing: it is still shown and still answered below, just not attributed
-  // to a conversation it may have no part in.
-  //
-  // Known limit, stated rather than hidden: a confirm raised by ANOTHER
-  // client WHILE srelens's own agent happens to be mid-turn is still
-  // misattributed — this predicate cannot tell the two apart without client
-  // identity in the payload, which `ConfirmRequest` does not carry. Fixing
-  // that needs a payload change on the backend side; filed separately.
+  // **Ownership is decided ONCE, here, at presentation, by the request's own
+  // `caller`.** The confirm channel is app-wide by design: an external MCP
+  // client (the loopback HTTP server, bearer-token authenticated) raises the
+  // exact same `mcp://confirm-request` srelens's own agent does. What tells
+  // them apart is the host (#393): srelens's own CLIs present a token minted
+  // for their chat turn, the native agent names its chat in-process, and the
+  // request carries that chat as `caller`. Anybody else's request has none —
+  // it is still shown and still answered below, just not attributed to a
+  // conversation it has no part in.
   useEffect(() => {
     if (covered || !current) return;
-    // `noteGate` records into whichever run has a turn in flight, and records
-    // NOTHING when none does. Since runs are keyed by subject, "which
-    // conversation owns this mutation" is the store's question to answer, not
-    // this component's — it only knows a request was shown.
-    noteGate({ id: current.id, tool: current.tool, args: current.args, outcome: "pending" });
+    // `noteGate` records into the run holding the request's chat, and records
+    // NOTHING when there is none. "Which conversation owns this mutation" is
+    // the store's question to answer — this component only knows a request
+    // was shown, and who the host says raised it.
+    noteGate(
+      { id: current.id, tool: current.tool, args: current.args, outcome: "pending", ...hostWords(current) },
+      current.caller,
+    );
   }, [covered, current]);
 
   async function answer(approved: boolean): Promise<void> {
@@ -439,15 +456,16 @@ export function AgentConsent() {
       // presentation but before the click). Looking the id up is the only
       // check that agrees with the presentation-time decision either way.
       // By the run that HOLDS the gate, not by whichever is busy: the run
-      // that owned it has very likely finished by the time the reader clicks,
-      // and `noteGate` only ever writes into a busy one. Looking the id up is
-      // what lets a finished conversation still receive its own outcome.
+      // that owned it has very likely finished by the time the reader clicks.
+      // Looking the id up is what lets a finished conversation still receive
+      // its own outcome.
       const owner = runKeyHoldingGate(id);
       if (owner !== null) {
         noteGateIn(owner, {
           id,
           tool: current.tool,
           args: current.args,
+          ...hostWords(current),
           outcome: approved ? "approved" : "denied",
           at: Date.now(),
         });
@@ -499,36 +517,48 @@ export function AgentConsent() {
       <ConfirmDialog
         title="An agent wants to run a cluster action"
         message={
-          <div className="flex flex-col gap-2">
-            <p className="m-0">
-              Tool: <code className="code rounded px-1.5 py-0.5">{current.tool}</code>
-            </p>
-            <pre className="code max-h-64 overflow-auto rounded p-3 text-[0.6875rem]">
-              <code>{JSON.stringify(current.args, null, 2)}</code>
-            </pre>
-            {queue.length > 1 && (
-              <p className="m-0 text-[0.6875rem] text-muted">
-                {queue.length - 1} more request{queue.length - 1 === 1 ? "" : "s"} waiting
-              </p>
-            )}
-            {/*
-              Only for the request it happened on — see {@link FailedAnswer}.
-              `role="alert"` for the reason `NextApp`'s own inline failure has
-              one: the reader pressed a button and the visible result is that
-              nothing happened, so this has to be announced rather than merely
-              drawn. It is safe to announce inside the card because the card is
-              where focus already is.
-            */}
-            {failed?.id === current.id && (
-              <div role="alert" className="text-sev">
+          /*
+            The ONE host confirmation (#552). The question, the level, the
+            cluster, the object and the requester are its words and its layout,
+            identical to what the same write is confirmed with when it is
+            clicked in an app's own resource view — this surface supplies only
+            the frame and what goes under it.
+          */
+          <RequestConfirmation
+            request={current}
+            details={
+              <div className="flex flex-col gap-2">
                 <p className="m-0">
-                  This request was not answered by you: your answer did not take effect. Try
-                  again — if the call is no longer waiting, this prompt goes away on its own.
+                  Tool: <code className="code rounded px-1.5 py-0.5">{current.tool}</code>
                 </p>
-                <FailureLine error={failed.error} className="mt-1" />
+                <pre className="code max-h-64 overflow-auto rounded p-3 text-[0.6875rem]">
+                  <code>{JSON.stringify(current.args, null, 2)}</code>
+                </pre>
+                {queue.length > 1 && (
+                  <p className="m-0 text-[0.6875rem] text-muted">
+                    {queue.length - 1} more request{queue.length - 1 === 1 ? "" : "s"} waiting
+                  </p>
+                )}
+                {/*
+                  Only for the request it happened on — see {@link FailedAnswer}.
+                  `role="alert"` for the reason `NextApp`'s own inline failure has
+                  one: the reader pressed a button and the visible result is that
+                  nothing happened, so this has to be announced rather than merely
+                  drawn. It is safe to announce inside the card because the card is
+                  where focus already is.
+                */}
+                {failed?.id === current.id && (
+                  <div role="alert" className="text-sev">
+                    <p className="m-0">
+                      This request was not answered by you: your answer did not take effect. Try
+                      again — if the call is no longer waiting, this prompt goes away on its own.
+                    </p>
+                    <FailureLine error={failed.error} className="mt-1" />
+                  </div>
+                )}
               </div>
-            )}
-          </div>
+            }
+          />
         }
         confirmLabel="Approve"
         cancelLabel="Deny"

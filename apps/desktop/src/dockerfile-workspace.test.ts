@@ -49,3 +49,39 @@ describe("the release Dockerfile", () => {
     expect(copy, `packages/${name} sources are copied after the build`).toBeLessThan(build);
   });
 });
+
+/** Members of the Cargo workspace, from the root manifest's `members` list. */
+function cargoMembers(): string[] {
+  const manifest = readFileSync(join(root, "Cargo.toml"), "utf8");
+  const list = manifest.match(/^members\s*=\s*\[([^\]]*)\]/m);
+  if (!list) return [];
+  return [...list[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+}
+
+/**
+ * Cargo loads every workspace member's manifest even for `cargo build -p
+ * srelens-server`, so the backend stage must copy every member, built or not.
+ * `apps/tui` broke the release image exactly this way (see the Dockerfile's
+ * comment on it), and the release build does not run on pull requests.
+ */
+describe("the release Dockerfile's backend stage", () => {
+  const members = cargoMembers();
+
+  it("has Cargo workspace members to check", () => {
+    // Guards the guard: an unparsed `members` list would pass vacuously.
+    expect(members.length).toBeGreaterThan(0);
+  });
+
+  it.each(members)("copies %s before the server build", (member) => {
+    const stage = dockerfile.indexOf("AS backend");
+    const build = dockerfile.indexOf("RUN cargo build", stage);
+    expect(stage, "no backend stage").toBeGreaterThan(-1);
+    expect(build, "no cargo build in the backend stage").toBeGreaterThan(stage);
+    // A member is copied by its own path or by a parent's (`COPY crates crates`).
+    // Only two-operand COPYs count: `COPY --from=…` and multi-file COPYs do not copy a member.
+    const copied = [...dockerfile.slice(stage, build).matchAll(/^COPY (\S+) (\S+)$/gm)].some(
+      ([, from]) => member === from || member.startsWith(`${from}/`),
+    );
+    expect(copied, `the backend stage never copies ${member}`).toBe(true);
+  });
+});

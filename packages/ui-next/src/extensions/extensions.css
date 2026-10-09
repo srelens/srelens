@@ -76,6 +76,33 @@
   font-weight: 600;
   background: var(--surface, var(--fl-color-surface));
 }
+.extension-column-sort {
+  all: unset;
+  cursor: pointer;
+}
+.extension-column-sort:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+/* An app's resolved status or badge (#541): a word in a badge, and the
+   reason beside it as one line that does not wrap into the row. */
+.extension-status,
+.extension-badges {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  white-space: nowrap;
+}
+.extension-status-reason {
+  color: var(--ink-muted, var(--fl-color-text-muted));
+  max-width: 28ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.extension-badge-error {
+  color: var(--ink-muted, var(--fl-color-text-muted));
+  font-style: italic;
+}
 
 
 .extension-error pre {
@@ -94,6 +121,7 @@
 
 .extension-workspace {
   min-width: 0;
+  container-type: inline-size;
 }
 .extension-workspace nav [aria-pressed="true"] {
   color: var(--accent, var(--fl-color-accent));
@@ -275,6 +303,15 @@
   outline-offset: -2px;
 }
 .extension-install > button { justify-self: start; }
+/* The administrator's policy (#578): its rules a list, as an access diff's are, and its
+   messages flush with them inside the section's own padding. */
+.extension-server-policy > details > summary { cursor: pointer; }
+.extension-server-policy > details > summary:focus-visible {
+  outline: 2px solid var(--accent, var(--fl-color-primary));
+  outline-offset: 2px;
+}
+.extension-server-policy ul { margin: 6px 0; padding-left: 18px; list-style: disc; }
+.extension-server-policy .extension-message { padding: 0; }
 .extension-catalog-description { flex: 1 1 260px; min-width: 0; }
 .extension-catalog-description p { margin: 3px 0 0; }
 .extension-catalog-meta {
@@ -286,6 +323,14 @@
 .extension-catalog-entry > .extension-toolbar { border-bottom: 0; }
 .extension-catalog-entry .extension-catalog-meta { margin-top: 3px; }
 .extension-permission-review { background: var(--surface, var(--fl-color-surface)); }
+.extension-access-diff { min-width: 0; }
+.extension-access-diff ul { margin: 4px 0; padding-left: 18px; }
+.extension-access-diff li { max-width: 100%; overflow-x: auto; white-space: nowrap; font-family: var(--font-mono); }
+/* A package's files (#562): machine paths, one line each, each with its size. */
+.extension-package-files { min-width: 0; }
+.extension-package-files ul { margin: 4px 0; padding-left: 18px; }
+.extension-package-files li { max-width: 100%; overflow-x: auto; white-space: nowrap; }
+.extension-package-size { color: var(--ink-muted, var(--fl-color-text-muted)); }
 .extension-problems { color: var(--sev, var(--fl-color-danger)); }
 .extension-problems p { margin: 0; }
 .extension-problems ul { display: grid; gap: 4px; margin: 6px 0 0; padding-left: 18px; }
@@ -364,14 +409,16 @@
   gap: 4px 12px;
 }
 .extension-grants code { font-family: var(--font-mono); }
-.extension-clusters {
+.extension-clusters,
+.extension-network {
   display: grid;
   gap: 6px;
   margin: 0;
   padding: 0;
   border: 0;
 }
-.extension-clusters legend {
+.extension-clusters legend,
+.extension-network legend {
   margin-bottom: 4px;
   font-size: var(--text-body, 0.8125rem);
   font-weight: 600;
@@ -386,6 +433,25 @@
 }
 .extension-cluster-list li { display: flex; align-items: center; gap: 8px; }
 .extension-cluster-list code { font-family: var(--font-mono); white-space: nowrap; overflow-x: auto; }
+/* An app's network.http hosts (#568), in Details and in the install review. */
+.extension-network-hosts {
+  display: grid;
+  gap: 2px;
+  margin: 0;
+  padding-left: 20px;
+  list-style: none;
+}
+/* A host is machine text: one line that scrolls inside its row rather than widening the
+   list. Inline-block, so a wildcard's "(one subdomain label)" stays beside it. */
+.extension-network-hosts li { min-width: 0; }
+.extension-network-hosts code {
+  display: inline-block;
+  max-width: 100%;
+  overflow-x: auto;
+  vertical-align: bottom;
+  font-family: var(--font-mono);
+  white-space: nowrap;
+}
 .extension-grants span { color: var(--ink-muted, var(--fl-color-text-muted)); }
 .extension-problem-code {
   color: var(--ink-muted, var(--fl-color-text-muted));
@@ -406,6 +472,18 @@
 .extension-resource-detail > .pane { flex: 1; min-height: 0; }
 .extension-detail-heading { margin: 0; padding: 8px 12px; font-size: inherit; font-weight: 600; background: var(--surface, var(--fl-color-surface)); border-block: 1px solid var(--rule, var(--fl-color-border)); }
 .extension-detail-fields { margin: 0; }
+/* The Inspector's Related links (#545): one row per target, text and links on one gutter. */
+.extension-related { list-style: none; margin: 0; padding: 6px 0; }
+/* A row names a resource: machine text, so one line that scrolls rather than wraps. */
+.extension-related > li { padding: 4px 12px; white-space: nowrap; overflow-x: auto; }
+.extension-related > li > button { justify-content: flex-start; height: auto; min-height: 0; padding: 0; font-size: inherit; text-align: start; white-space: nowrap; text-decoration: underline; }
+/* A failure is prose, and wraps. */
+.extension-related > li.extension-related-error { color: var(--danger, var(--fl-color-danger, inherit)); white-space: normal; overflow-wrap: anywhere; overflow-x: visible; }
+/* A note on a reverse link — the list was cut off, or some resources could not be read — is prose too. */
+.extension-related > li.extension-related-note { color: var(--ink-muted, var(--fl-color-text-muted)); white-space: normal; overflow-wrap: anywhere; overflow-x: visible; }
+/* The reverse links (#728), grouped under the word the relation reads as from the target. */
+.extension-related-group { margin: 0; padding: 6px 12px 0; color: var(--ink-muted, var(--fl-color-text-muted)); font-size: var(--text-caption, 0.75rem); font-weight: var(--weight-semibold); }
+.extension-related + button, [role="group"]:has(> .extension-related) + button { margin: 0 12px 8px; }
 .extension-resource-detail pre { white-space: pre; overflow: auto; max-width: 100%; font-family: var(--font-mono); font-size: inherit; }
 .extension-detail-metadata { padding: 12px; margin: 0; }
 .extension-action-review { padding: 12px; border-block: 1px solid var(--rule, var(--fl-color-border)); background: var(--surface, var(--fl-color-surface)); }
@@ -440,3 +518,553 @@
 .extension-entries th, .extension-entries td { padding: 5px 8px; text-align: left; white-space: nowrap; border-bottom: 1px solid var(--rule, var(--fl-color-border)); }
 .extension-entries th { position: sticky; top: 0; z-index: 1; background: var(--surface, var(--fl-color-surface)); font-weight: 600; }
 .extension-entries tbody tr:last-child td { border-bottom: 0; }
+
+/* Bulk actions over a selection of an app's resources (#553). */
+.extension-results th.extension-check, .extension-results td.extension-check { width: 2.25rem; padding-right: 0; }
+.extension-bulk { flex-shrink: 0; border-bottom: 1px solid var(--rule, var(--fl-color-border)); background: var(--surface, var(--fl-color-surface)); }
+.extension-bulk-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 12px; }
+.extension-bulk > .extension-action-review { border-top: 1px solid var(--rule, var(--fl-color-border)); border-bottom: 0; }
+.extension-bulk-applies { margin: 8px 0 0; font-weight: 600; }
+/* A run's lists scroll rather than pushing the table off the screen, and no
+   single name can widen the row: a 253-character resource name is a legal
+   name, and a row that grows to fit one hides every row under it. */
+.extension-bulk-list, .extension-bulk-group ul { margin: 4px 0 0; padding: 0; list-style: none; max-height: 12rem; overflow: auto; }
+.extension-bulk-list > li, .extension-bulk-group li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; min-width: 0; padding: 3px 0; }
+.extension-bulk-name { min-width: 0; flex: 1 1 14rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); }
+.extension-bulk-state { flex-shrink: 0; font-weight: 600; }
+.extension-bulk-reason { flex: 1 1 100%; min-width: 0; overflow-wrap: anywhere; color: var(--ink-muted, var(--fl-color-text-muted)); }
+.extension-bulk-list > li[data-state="error"] .extension-bulk-state { color: var(--sev, var(--fl-color-danger)); }
+.extension-bulk-list > li[data-state="cancelled"] .extension-bulk-state { color: var(--warn, var(--fl-color-warning)); }
+.extension-bulk-list > li[data-state="ok"] .extension-bulk-state { color: var(--ok, var(--fl-color-success)); }
+.extension-bulk-run, .extension-bulk-result { padding: 0 12px 8px; border-top: 1px solid var(--rule, var(--fl-color-border)); }
+.extension-bulk-run > .extension-bulk-bar, .extension-bulk-result > .extension-bulk-bar { padding-left: 0; padding-right: 0; }
+.extension-bulk-headline { margin: 8px 0 0; font-weight: 600; }
+.extension-bulk-result[data-status="failed"] .extension-bulk-headline { color: var(--sev, var(--fl-color-danger)); }
+.extension-bulk-result[data-status="partial"] .extension-bulk-headline { color: var(--warn, var(--fl-color-warning)); }
+.extension-bulk-group { margin-top: 8px; }
+.extension-bulk-group h5 { margin: 0; font-size: inherit; font-weight: 600; }
+/* An action the declared `availableWhen` rules exclude (#550).
+   The control keeps its place and its focus, and the reason it carries is a
+   real element rather than only a `title`: `title` draws on hover alone and
+   the accessibility tree reads it as a description of last resort, so a
+   sighted keyboard user reached the dimmed control and was told nothing.
+   Hidden visually — never with `display: none`, which would take it out of
+   the tree the control's `aria-describedby` points into — and brought on
+   screen while the control has focus. It is positioned rather than laid out,
+   so revealing it does not reflow the row of buttons around it.
+
+   It is anchored to the ROW, across the row's full width and just above it —
+   not to its own button. Anchored to the button and sized to its text, the
+   reason ran off the right edge of a 375px screen for any button in the right
+   half, and from a button that had wrapped onto a second line it sat on top
+   of the buttons above. Spanning the row, it cannot leave the row's bounds
+   and cannot cover one of its buttons; a long reason wraps, and grows upward
+   over the content the row sits under. (#668 review) */
+.extension-actions { position: relative; }
+.extension-action { display: inline-flex; }
+.extension-action-reason {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+.extension-action:focus-within .extension-action-reason {
+  width: auto;
+  height: auto;
+  padding: 5px 8px;
+  overflow: visible;
+  clip-path: none;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  bottom: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  z-index: 3;
+  border: 1px solid var(--rule, var(--fl-color-border));
+  background: var(--surface, var(--fl-color-surface));
+  color: var(--ink, var(--fl-color-text));
+  font-size: var(--text-meta, 0.6875rem);
+  line-height: 1.35;
+}
+
+/* Full identifiers remain single-line machine text; focus permits native
+   horizontal keyboard scrolling without widening the containing panel. */
+.extension-bulk-name[data-expanded="true"] { overflow-x: auto; text-overflow: clip; }
+.extension-bulk-name:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* Dashboard cards (#540). Flush tiles divided by hairlines, like the capacity
+   strip's `.stat`s: no gap, no radius, no lifted surface. Each wrapped row
+   shares its space, with lists taking more room beside the figures. */
+.dashboard-cards-band { container-type: inline-size; }
+.dashboard-cards-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--rule, var(--fl-color-border));
+}
+.dashboard-cards-message { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; padding: 10px 12px; }
+.dashboard-cards {
+  display: flex;
+  flex-wrap: wrap;
+}
+.dashboard-cards > .dashboard-card { flex: 1 1 14rem; }
+.dashboard-cards > .dashboard-card[data-size="m"] { flex: 2 1 28rem; }
+.dashboard-cards > .dashboard-card[data-size="l"] { flex: 4 1 28rem; }
+.dashboard-card {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  padding: 0.5rem 0.75rem;
+  /* Every tile rules its right and bottom edge; the band clips the outer ones. */
+  border-right: 1px solid var(--rule, var(--fl-color-border));
+  border-bottom: 1px solid var(--rule, var(--fl-color-border));
+}
+.dashboard-card[data-size="s"] { grid-column: span 1; }
+.dashboard-card[data-size="m"] { grid-column: span 2; }
+.dashboard-card[data-size="l"] { grid-column: 1 / -1; }
+.dashboard-card-head { display: flex; flex-direction: column; min-width: 0; }
+/* App prose, not machine text: it wraps, so the whole of it is readable
+   without a pointer, and a long unbroken word breaks inside the tile. */
+.dashboard-card-app {
+  font-size: 0.6875rem;
+  color: var(--ink-faint, var(--fl-color-text-muted));
+  overflow-wrap: anywhere;
+}
+.dashboard-card-title {
+  margin: 0;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  color: var(--ink-soft, inherit);
+  overflow-wrap: anywhere;
+}
+.dashboard-card-link {
+  display: block;
+  max-width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  text-align: left;
+  color: var(--accent, var(--fl-color-primary));
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+.dashboard-card-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.dashboard-card-figure {
+  margin: 0.15rem 0 0;
+  font-size: 1.375rem;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  font-variant-numeric: tabular-nums;
+}
+/* None is an answer, drawn quieter than a count but still a figure. */
+.dashboard-card[data-state="zero"] .dashboard-card-figure { color: var(--ink-muted, var(--fl-color-text-muted)); }
+.dashboard-card-caption {
+  margin: 0;
+  font-size: 0.75rem;
+  color: var(--ink-muted, var(--fl-color-text-muted));
+}
+.dashboard-card-loading {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0.4rem 0 0;
+  font-size: 0.75rem;
+  color: var(--ink-muted, var(--fl-color-text-muted));
+}
+/* A failed read: words first, colour second, and never a figure. */
+.dashboard-card-error {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  margin-top: 0.25rem;
+  font-size: 0.75rem;
+}
+.dashboard-card-error p { margin: 0; }
+.dashboard-card-error strong { color: var(--sev, var(--fl-color-danger)); }
+.dashboard-card-statuses,
+.dashboard-card-rows {
+  margin: 0.25rem 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: 0.75rem;
+}
+.dashboard-card-statuses li { display: flex; justify-content: space-between; gap: 8px; }
+/* Machine text keeps its line and scrolls rather than wrapping. */
+.dashboard-card-row {
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+  white-space: nowrap;
+  overflow-x: auto;
+}
+.dashboard-card-row-value { color: var(--ink-muted, var(--fl-color-text-muted)); font-variant-numeric: tabular-nums; }
+
+/* A dashboard card's target page says what it is narrowed to. */
+.extension-card-filter {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--rule, var(--fl-color-border));
+  background: var(--accent-wash, transparent);
+  font-size: 0.8125rem;
+}
+
+/* An app's typed settings (#542): a host form, one field per declared setting.
+   Help and problems are prose, so they wrap; values are one line each. */
+.extension-settings {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 12px;
+  padding: 12px;
+  border-bottom: 1px solid var(--rule, var(--fl-color-border));
+}
+.extension-settings > .extension-message { padding: 0; }
+.extension-settings > .extension-error { border-bottom: 0; padding: 0; }
+.extension-setting {
+  display: grid;
+  grid-template-columns: minmax(0, 32rem);
+  gap: 4px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.extension-setting > label,
+.extension-setting > legend,
+.extension-setting-label {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.extension-setting > legend { padding: 0; margin-bottom: 4px; }
+.extension-setting input:not([type="checkbox"]) {
+  width: 100%;
+  min-width: 0;
+  padding: 6px 8px;
+  /* The kit's control boundary (3:1 in every theme), as the pickers beside it use. */
+  border: 1px solid var(--control-line, var(--fl-color-border));
+  border-radius: 4px;
+  background: var(--surface, var(--fl-color-surface));
+  color: inherit;
+  font: inherit;
+}
+.extension-setting input:focus-visible {
+  outline: 2px solid var(--accent, var(--fl-color-primary));
+  outline-offset: 1px;
+}
+.extension-setting input[aria-invalid="true"] {
+  border-color: var(--sev, var(--fl-color-danger));
+}
+/* An option in a group is not a field's label; a lone checkbox's label is. */
+.extension-setting > .extension-setting-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 400;
+}
+.extension-setting > .extension-setting-check:first-child { font-weight: 600; }
+.extension-setting-pair {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.extension-setting-note {
+  margin: 0;
+  color: var(--ink-muted, var(--fl-color-text-muted));
+  overflow-wrap: anywhere;
+}
+.extension-setting-required { font-weight: 400; color: var(--ink-muted, var(--fl-color-text-muted)); }
+.extension-setting-problem {
+  margin: 0;
+  color: var(--sev, var(--fl-color-danger));
+  overflow-wrap: anywhere;
+}
+.extension-settings-actions { padding: 0; border-bottom: 0; }
+.extension-settings-saved { color: var(--ink-muted, var(--fl-color-text-muted)); }
+
+/* Live app views (#566). The word says the state; the dot only repeats it. */
+.extension-live {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ink-muted, var(--fl-color-text-muted));
+  font-size: var(--text-body, 0.8125rem);
+  white-space: nowrap;
+}
+.extension-live-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ink-faint, var(--fl-color-text-muted));
+}
+.extension-live[data-live="live"] .extension-live-dot { background: var(--ok, var(--fl-color-success)); }
+.extension-live[data-live="reconnecting"] .extension-live-dot { background: var(--warn, var(--fl-color-warning)); }
+.extension-live[data-live="reconnecting"] { color: var(--warn, var(--fl-color-warning)); }
+.extension-live-row {
+  display: flex;
+  justify-content: flex-end;
+  padding: 6px 12px 0;
+}
+.extension-live-notice { font-size: var(--text-body, 0.8125rem); }
+.extension-stale-notice { color: var(--warn, var(--fl-color-warning)); }
+/* What is shown while a watch reconnects is not current. The notice beside it
+   says so in words; this rule only marks the region, and never fades its text,
+   which would drop muted ink below the contrast floor. */
+.extension-table-scroll[data-stale],
+.extension-summary[data-stale],
+.dashboard-cards[data-stale] {
+  box-shadow: inset 3px 0 0 var(--warn, var(--fl-color-warning));
+}
+
+/* Logs, exec and port-forwards from apps (#567). The panel is a region of the
+   Inspector like an app's detail panels; its log and output panes are machine
+   text, so they run and scroll rather than wrap (AGENTS.md). */
+.extension-pod-tools .extension-message { padding: 4px 0; }
+.extension-pod-group { display: grid; gap: 6px; min-width: 0; }
+.extension-pod-list { display: grid; margin: 0; padding: 0; list-style: none; }
+.extension-pod {
+  display: grid;
+  gap: 4px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--rule, var(--fl-color-border));
+  min-width: 0;
+}
+.extension-pod-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 4px 12px;
+  min-width: 0;
+}
+.extension-pod-head code {
+  min-width: 0;
+  overflow-x: auto;
+  white-space: nowrap;
+}
+.extension-pod-head span { color: var(--ink-muted, var(--fl-color-text-muted)); font-size: 0.75rem; }
+.extension-pod-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.extension-pod-tools .extension-review {
+  margin: 8px 0;
+  padding: 10px 12px;
+  border: 1px solid var(--rule, var(--fl-color-border));
+  border-radius: 4px;
+}
+.extension-pod-tools .extension-review:focus-visible {
+  outline: 2px solid var(--accent, var(--fl-color-primary));
+  outline-offset: 2px;
+}
+/* One track that never grows past the Inspector: a grid column is as wide as its
+   widest line by default, and one long log line would push the Stop control out of
+   the pane with it. */
+.extension-pod-sessions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 10px;
+  margin-top: 10px;
+  min-width: 0;
+}
+.extension-pod-session { display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; min-width: 0; }
+.extension-pod-group { grid-template-columns: minmax(0, 1fr); }
+.extension-pod-session > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--rule, var(--fl-color-border));
+}
+.extension-pod-session > header strong {
+  min-width: 0;
+  overflow-x: auto;
+  white-space: nowrap;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.75rem;
+  font-weight: 500;
+}
+.extension-pod-session > header button { flex: none; }
+.extension-pod-services-label { margin: 6px 0 0; }
+.extension-pod-log,
+.extension-pod-output {
+  max-height: 20rem;
+  margin: 0;
+  overflow: auto;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.75rem;
+  white-space: pre;
+  background: var(--surface-sunk, var(--fl-color-surface-alt));
+}
+.extension-pod-output { padding: 6px 8px; }
+.extension-pod-log { padding: 4px 0; }
+.extension-pod-line { display: flex; gap: 8px; padding: 1px 8px; width: max-content; min-width: 100%; }
+.extension-pod-line:hover { background: var(--field, var(--fl-color-surface-alt)); }
+/* The level is a word on the line; its tint only helps. */
+.extension-pod-level { flex: none; text-transform: uppercase; color: var(--ink-muted, var(--fl-color-text-muted)); }
+.extension-pod-cut { flex: none; color: var(--ink-muted, var(--fl-color-text-muted)); }
+.extension-pod-level[data-level="error"],
+.extension-pod-level[data-level="fatal"] { color: var(--sev, var(--fl-color-danger)); }
+.extension-pod-level[data-level="warn"],
+.extension-pod-level[data-level="warning"] { color: var(--warn, var(--fl-color-warning)); }
+/* stderr is marked in words by the stream it came from on the span; the tint only helps. */
+.extension-pod-output [data-stream="stderr"] { color: var(--warn, var(--fl-color-warning)); }
+.extension-pod-stream { font-weight: 600; user-select: none; }
+.extension-command {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  white-space: pre;
+  overflow-x: auto;
+}
+
+/* An installed app's Inspector and Logs (#575), the other two tabs of its Details. The
+   strip runs the Details' full width like the hairlines around it; what is under it
+   keeps the Details' gutter, except the logs, which are regions of their own. */
+.extension-details > .utabs { margin: -10px -12px 0; padding: 0 8px; }
+.extension-inspector,
+.extension-inspector-part,
+.extension-logs {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 6px;
+  min-width: 0;
+}
+.extension-inspector { gap: 10px; }
+.extension-inspector-part h4 {
+  margin: 4px 0 0;
+  font-size: var(--text-caption, 0.75rem);
+  font-weight: 600;
+  color: var(--ink-muted, var(--fl-color-text-muted));
+}
+.extension-facts {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 2px 16px;
+  margin: 0;
+}
+.extension-facts > div { display: contents; }
+.extension-facts dt { color: var(--ink-muted, var(--fl-color-text-muted)); }
+.extension-facts dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.extension-facts code { font-family: var(--font-mono); }
+/* The state is a word; its tint only helps. */
+.extension-facts [data-state="disabled"],
+.extension-facts [data-state="refused"] { color: var(--sev, var(--fl-color-danger)); font-weight: 600; }
+.extension-facts [data-state="restarting"] { color: var(--warn, var(--fl-color-warning)); font-weight: 600; }
+.extension-inspector-counts,
+.extension-inspector-streams {
+  display: grid;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+/* A short run of counts, read across rather than down. */
+.extension-inspector-counts { display: flex; flex-wrap: wrap; gap: 2px 16px; }
+.extension-inspector-streams li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 12px; min-width: 0; }
+/* A view's ID is machine text: one line that scrolls inside its row. */
+.extension-inspector-streams code {
+  max-width: 100%;
+  overflow-x: auto;
+  font-family: var(--font-mono);
+  white-space: nowrap;
+}
+.extension-inspector-streams span { color: var(--ink-muted, var(--fl-color-text-muted)); }
+.extension-inspector-table { overflow-x: auto; }
+.extension-inspector-table table { border-collapse: collapse; white-space: nowrap; }
+.extension-inspector-table th,
+.extension-inspector-table td {
+  padding: 3px 16px 3px 0;
+  text-align: left;
+  border-bottom: 1px solid var(--rule, var(--fl-color-border));
+}
+.extension-inspector-table th { font-weight: 600; color: var(--ink-muted, var(--fl-color-text-muted)); }
+.extension-inspector-table code { font-family: var(--font-mono); }
+/* A crashed sidecar's headline: ruled in the danger colour, with the reason in words. */
+.extension-process-alert {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 6px;
+  padding: 10px 12px;
+  background: var(--surface-sunk, var(--fl-color-surface-alt));
+  box-shadow: inset 3px 0 0 var(--sev, var(--fl-color-danger));
+}
+.extension-process-alert strong { color: var(--sev, var(--fl-color-danger)); }
+.extension-process-alert p { margin: 0; }
+.extension-process-alert .extension-toolbar { padding: 0; border: 0; }
+.extension-log-levels { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.extension-log-levels > span { margin-right: 4px; color: var(--ink-muted, var(--fl-color-text-muted)); }
+.extension-log-levels [aria-pressed="true"] {
+  color: var(--accent, var(--fl-color-accent));
+  box-shadow: inset 0 -2px currentColor;
+}
+/* An app's log is machine text: each line runs on and the region scrolls both ways on
+   its own, flush with the Details' edges and divided from them by hairlines. */
+.extension-app-log {
+  max-height: 24rem;
+  margin: 0 -12px;
+  padding: 4px 0;
+  overflow: auto;
+  border-top: 1px solid var(--rule, var(--fl-color-border));
+  border-bottom: 1px solid var(--rule, var(--fl-color-border));
+  background: var(--surface-sunk, var(--fl-color-surface-alt));
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.75rem;
+  white-space: pre;
+}
+.extension-app-log:focus-visible {
+  outline: 2px solid var(--accent, var(--fl-color-primary));
+  outline-offset: -2px;
+}
+.extension-app-log-line { width: max-content; min-width: 100%; padding: 1px 12px; }
+.extension-app-log-line:hover { background: var(--field, var(--fl-color-surface-alt)); }
+.extension-log-time,
+.extension-log-source { color: var(--ink-muted, var(--fl-color-text-muted)); }
+.extension-log-level { display: inline-block; min-width: 5ch; }
+.extension-log-source { display: inline-block; min-width: 7ch; }
+/* The level is a word on the line; its tint only helps. */
+.extension-log-level[data-level="error"] { color: var(--sev, var(--fl-color-danger)); font-weight: 600; }
+.extension-log-level[data-level="warn"] { color: var(--warn, var(--fl-color-warning)); }
+.extension-log-level[data-level="trace"],
+.extension-log-level[data-level="debug"] { color: var(--ink-muted, var(--fl-color-text-muted)); }
+
+/* Metric and trace providers (#569): the kit's section, flush, its range and Refresh a
+   toolbar under the title, then a panel per provider that says which app asked for it. */
+.extension-providers-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 0 12px 6px; }
+.extension-provider { padding-block: 6px; border-top: 1px solid var(--rule, var(--fl-color-border)); }
+.extension-provider-title { margin: 0; padding: 0 12px 4px; font-size: inherit; font-weight: var(--weight-semibold); }
+.extension-provider-origin { margin: 0; padding: 4px 12px 0; font-size: 0.75rem; color: var(--ink-muted, var(--fl-color-text-muted)); }
+
+/* Overview hierarchy: primary resource health and expiry figures, full-width
+   upcoming resources, then supporting issuer/request health. No card gutters. */
+.extension-overview { flex: 0 0 auto; display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); min-width: 0; container-type: inline-size; }
+.extension-overview > .extension-summary { order: 4; border-bottom: 1px solid var(--rule, var(--fl-color-border)); }
+.extension-overview > .extension-summary:first-child { order: 0; grid-column: span 2; }
+.extension-overview > .dashboard-card { order: 1; padding: 20px 24px; }
+.extension-overview > .dashboard-card[data-size="l"] { grid-column: 1 / -1; order: 3; }
+.extension-overview > .dashboard-card[data-size="m"] { grid-column: span 2; }
+.extension-overview .extension-summary-body { display: flex; gap: 24px; align-items: center; justify-content: center; padding-top: 12px; }
+.extension-overview .extension-summary ul, .extension-overview .extension-donut { margin: 0; }
+.extension-overview .extension-summary:not(:first-child) .extension-donut { width: 64px; height: 64px; flex-shrink: 0; }
+.extension-overview .extension-summary:not(:first-child) .extension-donut > span { width: 54px; height: 54px; font-size: 18px; }
+.extension-overview .dashboard-card-figure { font-size: 48px; margin-top: 16px; }
+.extension-overview-live { order: 2; grid-column: 1 / -1; padding: 6px 12px; border-bottom: 1px solid var(--rule, var(--fl-color-border)); }
+.extension-overview-list { order: 3; grid-column: 1 / -1; min-width: 0; border-bottom: 1px solid var(--rule, var(--fl-color-border)); }
+.extension-overview-list > header { justify-content: space-between; }
+.extension-overview-list h3 { font-size: 13px; font-weight: 600; }
+.extension-overview-list .extension-results { min-height: 160px; max-height: 340px; }
+@container (max-width: 48rem) {
+  .extension-overview .extension-summary-body { flex-wrap: wrap; gap: 12px; }
+}
+@container (max-width: 900px) {
+  .extension-overview { grid-template-columns: minmax(0,1fr); }
+  .extension-overview > .extension-summary:first-child, .extension-overview > .dashboard-card[data-size] { grid-column: 1; }
+  .extension-overview .extension-summary-body { flex-wrap: nowrap; }
+}

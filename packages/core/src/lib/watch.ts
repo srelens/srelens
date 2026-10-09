@@ -90,3 +90,115 @@ export async function watchResource(
     },
   };
 }
+
+/** The namespace scopes to watch for a selection: `[""]` (cluster scope) for none. */
+function scopesFor(selection: string[]): string[] {
+  return selection.length === 0 ? [""] : [...new Set(selection)];
+}
+
+function mergeKey(row: { name: string; namespace?: string }): string {
+  return `${row.name}\0${row.namespace ?? ""}`;
+}
+
+/**
+ * {@link watchResource} over a namespace selection, as one watch.
+ *
+ * An empty selection is "all namespaces": one cluster-scope watch. Anything
+ * else is one namespaced watch PER selected namespace, never a cluster-scope
+ * watch narrowed afterwards. A credential scoped to a few namespaces is
+ * refused a cluster-scope list outright (#688), and on a large cluster the
+ * cluster-scope watch streamed every namespace to draw two of them.
+ *
+ * Each namespace's latest snapshot is held apart and the union is emitted
+ * ordered by name then namespace, the backend's own snapshot order. Nothing is
+ * emitted until every namespace has either answered or failed: a list missing
+ * a namespace that simply has not answered yet would be painted as loaded.
+ *
+ * A failure is reported with the namespace it came from (`""` for the cluster
+ * scope), and the message is passed through untouched so `describeError` can
+ * still classify it. The namespaces that answered keep their rows — one
+ * refused namespace is a fact about that namespace, not about the list. A
+ * namespace whose watch fails after answering loses its rows: they can no
+ * longer refresh, and a list under "could not list team-b" must not still
+ * show team-b.
+ *
+ * Status is `reconnecting` while any one watch is.
+ */
+export async function watchNamespaces(
+  context: string,
+  selection: string[],
+  kind: string,
+  onRows: (rows: Array<{ name: string; namespace?: string }>) => void,
+  onStatus?: (status: WatchStatus) => void,
+  onError?: (error: string, namespace: string) => void,
+  kubeconfigFiles: string[] = [],
+): Promise<WatchHandle> {
+  const scopes = scopesFor(selection);
+  if (scopes.length === 1) {
+    const [only] = scopes;
+    return watchResource(context, only, kind, onRows, onStatus, (e) => onError?.(e, only), kubeconfigFiles);
+  }
+
+  const snapshots = new Map<string, Array<{ name: string; namespace?: string }>>();
+  const failed = new Set<string>();
+  const reconnecting = new Set<string>();
+  let emitted = false;
+
+  const emitIfSettled = () => {
+    // Nothing answered yet and nothing ever emitted: an empty list here would
+    // read as "none", when every namespace simply failed.
+    if (snapshots.size === 0 && !emitted) return;
+    if (scopes.some((ns) => !snapshots.has(ns) && !failed.has(ns))) return;
+    const merged = [...snapshots.values()].flat();
+    merged.sort((a, b) => {
+      const ka = mergeKey(a);
+      const kb = mergeKey(b);
+      return ka < kb ? -1 : ka > kb ? 1 : 0;
+    });
+    emitted = true;
+    onRows(merged);
+  };
+
+  const started = await Promise.allSettled(
+    scopes.map((ns) =>
+      watchResource(
+        context,
+        ns,
+        kind,
+        (rows) => {
+          snapshots.set(ns, rows);
+          emitIfSettled();
+        },
+        (status) => {
+          const before = reconnecting.size > 0;
+          if (status === "live") reconnecting.delete(ns);
+          else reconnecting.add(ns);
+          const after = reconnecting.size > 0;
+          if (before !== after) onStatus?.(after ? "reconnecting" : "live");
+        },
+        (error) => {
+          failed.add(ns);
+          snapshots.delete(ns);
+          // A failed watch sends no further status: if it was the one
+          // reconnecting, what is left is live.
+          if (reconnecting.delete(ns) && reconnecting.size === 0) onStatus?.("live");
+          onError?.(error, ns);
+          emitIfSettled();
+        },
+        kubeconfigFiles,
+      ),
+    ),
+  );
+
+  const handles = started.flatMap((r) => (r.status === "fulfilled" ? [r.value] : []));
+  const rejected = started.find((r): r is PromiseRejectedResult => r.status === "rejected");
+  if (rejected) {
+    for (const h of handles) h.stop();
+    throw rejected.reason;
+  }
+  return {
+    stop: () => {
+      for (const h of handles) h.stop();
+    },
+  };
+}

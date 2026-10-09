@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { TerminalSessionRow } from "../../lib/sessions";
 import { SessionRail, SESSION_RAIL_WIDTH, sessionRailHead } from "./SessionRail";
@@ -35,7 +35,7 @@ describe("SessionRail", () => {
       row({ id: 3, kind: "local", title: "prod-eu context shell", state: "idle", lastOutputAt: now - 22 * 60_000 }),
     ];
 
-    render(<SessionRail sessions={sessions} activeId={1} onSelect={vi.fn()} onNewSession={vi.fn()} />);
+    render(<SessionRail sessions={sessions} activeId={1} onSelect={vi.fn()} onNewSession={vi.fn()} onRename={() => {}} onDetach={() => {}} />);
 
     expect(screen.getByText("checkout-api-5c8b7f2d9-mk3wl · api")).not.toBeNull();
     expect(screen.getByText("eu-w4-c3-standard-a1")).not.toBeNull();
@@ -57,7 +57,7 @@ describe("SessionRail", () => {
     // flex sibling of the kind and the pill. Fourth time on this migration a
     // width problem has been invisible to the suite.
     const only = row();
-    render(<SessionRail sessions={[only]} activeId={only.id} onSelect={() => {}} onNewSession={() => {}} />);
+    render(<SessionRail sessions={[only]} activeId={only.id} onSelect={() => {}} onNewSession={() => {}} onRename={() => {}} onDetach={() => {}} />);
     const name = screen.getByText(only.title);
     const kind = screen.getByText(/pod exec ·/);
     expect(name.parentElement).not.toBe(kind.parentElement);
@@ -69,7 +69,7 @@ describe("SessionRail", () => {
       row({ id: 2, title: "second" }),
       row({ id: 3, title: "third" }),
     ];
-    render(<SessionRail sessions={sessions} activeId={2} onSelect={vi.fn()} onNewSession={vi.fn()} />);
+    render(<SessionRail sessions={sessions} activeId={2} onSelect={vi.fn()} onNewSession={vi.fn()} onRename={() => {}} onDetach={() => {}} />);
 
     const active = screen.getByRole("button", { current: true });
     expect(active.textContent).toContain("second");
@@ -84,7 +84,7 @@ describe("SessionRail", () => {
       row({ id: 1, title: "still going", state: "attached" }),
       row({ id: 2, title: "gave up", state: "closed", error: "exit 137" }),
     ];
-    render(<SessionRail sessions={sessions} activeId={1} onSelect={vi.fn()} onNewSession={vi.fn()} />);
+    render(<SessionRail sessions={sessions} activeId={1} onSelect={vi.fn()} onNewSession={vi.fn()} onRename={() => {}} onDetach={() => {}} />);
 
     expect(screen.getByText("gave up")).not.toBeNull();
     expect(screen.getByText("Closed")).not.toBeNull();
@@ -97,7 +97,7 @@ describe("SessionRail", () => {
       row({ id: 3, title: "c", state: "closed" }),
     ];
     const { container } = render(
-      <SessionRail sessions={sessions} activeId={null} onSelect={vi.fn()} onNewSession={vi.fn()} />,
+      <SessionRail sessions={sessions} activeId={null} onSelect={vi.fn()} onNewSession={vi.fn()} onRename={() => {}} onDetach={() => {}} />,
     );
 
     expect(container.querySelectorAll("[data-kind='success']")).toHaveLength(1);
@@ -113,17 +113,130 @@ describe("SessionRail", () => {
       row({ id: 22, title: "bravo" }),
       row({ id: 33, title: "charlie" }),
     ];
-    render(<SessionRail sessions={sessions} activeId={11} onSelect={onSelect} onNewSession={vi.fn()} />);
+    render(<SessionRail sessions={sessions} activeId={11} onSelect={onSelect} onNewSession={vi.fn()} onRename={() => {}} onDetach={() => {}} />);
 
     await user.click(screen.getByText("charlie"));
 
     expect(onSelect).toHaveBeenCalledExactlyOnceWith(33);
   });
 
+  /**
+   * Three shells opened from the status bar are all "Local shell". A name of
+   * the reader's own is what tells them apart, and a Detach on the row is what
+   * lets one be closed without first putting it on screen.
+   */
+  describe("a row's own actions", () => {
+    function rail(overrides: Partial<Parameters<typeof SessionRail>[0]> = {}) {
+      const props = {
+        sessions: [row({ id: 11, title: "alpha" }), row({ id: 22, title: "bravo" })],
+        activeId: 11,
+        onSelect: vi.fn(),
+        onRename: vi.fn(),
+        onDetach: vi.fn(),
+        onNewSession: vi.fn(),
+        ...overrides,
+      };
+      render(<SessionRail {...props} />);
+      return props;
+    }
+
+    it("detaches the row it is on, without selecting it", async () => {
+      const props = rail();
+      await userEvent.click(screen.getByRole("button", { name: "Detach bravo" }));
+      expect(props.onDetach).toHaveBeenCalledExactlyOnceWith(22);
+      expect(props.onSelect).not.toHaveBeenCalled();
+    });
+
+    it("renames the row it is on to what was typed, on Enter", async () => {
+      const props = rail();
+      await userEvent.click(screen.getByRole("button", { name: "Rename bravo" }));
+      const field = screen.getByRole("textbox", { name: "Rename bravo" });
+      // The old name is there, selected, so typing replaces it.
+      expect((field as HTMLInputElement).value).toBe("bravo");
+      await userEvent.keyboard("drain watch{Enter}");
+      expect(props.onRename).toHaveBeenCalledExactlyOnceWith(22, "drain watch");
+      expect(screen.queryByRole("textbox")).toBeNull();
+      expect(props.onSelect).not.toHaveBeenCalled();
+    });
+
+    it("keeps what was typed when the field is left", async () => {
+      const props = rail();
+      await userEvent.click(screen.getByRole("button", { name: "Rename alpha" }));
+      await userEvent.keyboard("logs");
+      await userEvent.click(screen.getByText("bravo"));
+      expect(props.onRename).toHaveBeenCalledExactlyOnceWith(11, "logs");
+    });
+
+    it("leaves focus where the reader moved it when the field is left by Tab", async () => {
+      rail();
+      await userEvent.click(screen.getByRole("button", { name: "Rename alpha" }));
+      await userEvent.tab();
+      // Onward to the next row, not pulled back to the one just renamed.
+      expect(document.activeElement?.textContent).toContain("bravo");
+    });
+
+    it("hands focus back to the row when the field is closed with Enter", async () => {
+      rail();
+      await userEvent.click(screen.getByRole("button", { name: "Rename bravo" }));
+      await userEvent.keyboard("{Enter}");
+      expect(document.activeElement?.textContent).toContain("bravo");
+      expect(document.activeElement?.tagName).toBe("BUTTON");
+    });
+
+    it("leaves Enter and Escape to an input method that is still composing", async () => {
+      const props = rail();
+      await userEvent.click(screen.getByRole("button", { name: "Rename bravo" }));
+      const field = screen.getByRole("textbox", { name: "Rename bravo" });
+      // Enter here picks a candidate; it does not finish the name.
+      fireEvent.keyDown(field, { key: "Enter", isComposing: true });
+      fireEvent.keyDown(field, { key: "Escape", isComposing: true });
+      expect(props.onRename).not.toHaveBeenCalled();
+      expect(screen.getByRole("textbox", { name: "Rename bravo" })).toBeDefined();
+      // Composition over, Enter is the reader's again.
+      fireEvent.keyDown(field, { key: "Enter" });
+      expect(props.onRename).toHaveBeenCalledExactlyOnceWith(22, "bravo");
+    });
+
+    it("keeps the old name on Escape, and says nothing to the store", async () => {
+      const props = rail();
+      await userEvent.click(screen.getByRole("button", { name: "Rename bravo" }));
+      await userEvent.keyboard("oops{Escape}");
+      expect(props.onRename).not.toHaveBeenCalled();
+      expect(screen.queryByRole("textbox")).toBeNull();
+      expect(screen.getByText("bravo")).toBeDefined();
+    });
+
+    it("opens the field from a double-click on the row, and from F2", async () => {
+      rail();
+      await userEvent.dblClick(screen.getByText("bravo"));
+      expect(screen.getByRole("textbox", { name: "Rename bravo" })).toBeDefined();
+      await userEvent.keyboard("{Escape}");
+      // Escape hands the keyboard back to the row it came from.
+      expect(document.activeElement?.textContent).toContain("bravo");
+      await userEvent.keyboard("{F2}");
+      expect(screen.getByRole("textbox", { name: "Rename bravo" })).toBeDefined();
+    });
+
+    it("offers no second rename or detach while a name is being typed", async () => {
+      rail();
+      await userEvent.click(screen.getByRole("button", { name: "Rename bravo" }));
+      expect(screen.queryByRole("button", { name: "Detach bravo" })).toBeNull();
+      // The other row is untouched.
+      expect(screen.getByRole("button", { name: "Detach alpha" })).toBeDefined();
+    });
+
+    it("nests no button inside another", () => {
+      const { container } = render(
+        <SessionRail sessions={[row()]} activeId={1} onSelect={() => {}} onNewSession={() => {}} onRename={() => {}} onDetach={() => {}} />,
+      );
+      expect(container.querySelector("button button")).toBeNull();
+    });
+  });
+
   it("an empty rail offers New session and says why it's empty", async () => {
     const user = userEvent.setup();
     const onNewSession = vi.fn();
-    render(<SessionRail sessions={[]} activeId={null} onSelect={vi.fn()} onNewSession={onNewSession} />);
+    render(<SessionRail sessions={[]} activeId={null} onSelect={vi.fn()} onNewSession={onNewSession} onRename={() => {}} onDetach={() => {}} />);
 
     expect(screen.getByText(/no sessions/i)).not.toBeNull();
     const button = screen.getByRole("button", { name: "New session" });

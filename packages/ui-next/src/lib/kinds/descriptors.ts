@@ -139,7 +139,7 @@ const TYPED: Partial<Record<ResourceKind, KindDescriptor<ListRow>>> = {
     columns: deploymentColumns as Column<ListRow>[],
     source: "watch",
     scope: "namespaced",
-    actions: { logs: true, scale: true, restart: true },
+    actions: { logs: true, scale: true, restart: true, rollback: true },
     flagged: deploymentFlagged as (row: ListRow) => boolean,
   },
   statefulsets: {
@@ -183,7 +183,10 @@ const TYPED: Partial<Record<ResourceKind, KindDescriptor<ListRow>>> = {
     source: "poll",
     scope: "cluster",
     load: loadNodes,
-    actions: {},
+    // The two actions only a node has (#820). Overview's node rows offered
+    // them and this list, which is where a reader comes to work on nodes, did
+    // not.
+    actions: { cordon: true, drain: true },
     // Same variance cast every function on this table already needs:
     // `flagged` only reads `status`/`unschedulable`, fields `ListRow` does not
     // promise. Present so a NotReady or cordoned node's row asks the same

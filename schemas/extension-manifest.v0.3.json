@@ -1,0 +1,391 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "ActionBinding": {
+      "additionalProperties": false,
+      "description": "One declared mutation: a host action primitive, the reader binding whose kind it acts on, the arguments that fix what it writes, and what must be true of the object before it is written.\n\nFlux and Argo CD declare their actions using this contract in API 0.3.",
+      "properties": {
+        "arguments": {
+          "additionalProperties": true,
+          "description": "What this action writes, fixed at install time.",
+          "type": "object"
+        },
+        "availableWhen": {
+          "description": "What must be true of the object for the control to be offered. The same predicates, asked by the surface rather than by the cluster request, so a person is not shown a button whose refusal is already known.\n\nDisplay only, and deliberately so: an app that needs a condition *enforced* declares it in `preconditions`, where the host is what checks it. A surface can be out of date; the fresh GET cannot.",
+          "items": {
+            "$ref": "#/definitions/Predicate"
+          },
+          "type": "array"
+        },
+        "name": {
+          "type": "string"
+        },
+        "preconditions": {
+          "description": "What must be true of the object for the write to be sent. Evaluated by the host against the fresh GET the primitive already performs, before the patch; a predicate that does not hold refuses the request and the operator is told this predicate's `reason`.\n\nThese add refusals. The host's own guards — an object being deleted, a UID or `resourceVersion` that has moved — run first and are not something a manifest can reach.",
+          "items": {
+            "$ref": "#/definitions/Predicate"
+          },
+          "type": "array"
+        },
+        "resource": {
+          "description": "The name of a reader binding in `capabilities`. The action acts on that binding's kind and on no other.",
+          "type": "string"
+        },
+        "target": {
+          "description": "A host action primitive, e.g. `k8s.annotate`.",
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "arguments",
+        "name",
+        "resource",
+        "target",
+        "title"
+      ],
+      "type": "object"
+    },
+    "Binding": {
+      "additionalProperties": false,
+      "properties": {
+        "arguments": {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        "inputs": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "name": {
+          "type": "string"
+        },
+        "target": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "arguments",
+        "inputs",
+        "name",
+        "target",
+        "title"
+      ],
+      "type": "object"
+    },
+    "Contributions": {
+      "additionalProperties": false,
+      "properties": {
+        "detailLinks": {
+          "items": {
+            "$ref": "#/definitions/DetailLink"
+          },
+          "type": "array"
+        },
+        "detailTabs": {
+          "items": {
+            "$ref": "#/definitions/DetailTab"
+          },
+          "type": "array"
+        },
+        "pages": {
+          "items": {
+            "$ref": "#/definitions/Page"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "detailLinks",
+        "detailTabs",
+        "pages"
+      ],
+      "type": "object"
+    },
+    "Dashboard": {
+      "additionalProperties": false,
+      "properties": {
+        "events": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/DashboardEvents"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "pages": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "pages"
+      ],
+      "type": "object"
+    },
+    "DashboardEvents": {
+      "additionalProperties": false,
+      "properties": {
+        "apiGroups": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "capability": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "apiGroups",
+        "capability"
+      ],
+      "type": "object"
+    },
+    "DetailLink": {
+      "additionalProperties": false,
+      "description": "An entry in a resource detail view's app links menu that opens a read-only results panel. It never writes to the cluster; the name `rowActions` is reserved for declared mutations.",
+      "properties": {
+        "capability": {
+          "type": "string"
+        },
+        "forKinds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "id": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "capability",
+        "forKinds",
+        "id",
+        "title"
+      ],
+      "type": "object"
+    },
+    "DetailTab": {
+      "additionalProperties": false,
+      "properties": {
+        "capability": {
+          "type": "string"
+        },
+        "forKinds": {
+          "description": "Qualified Kubernetes kinds, e.g. argoproj.io/Application.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "id": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "capability",
+        "forKinds",
+        "id",
+        "title"
+      ],
+      "type": "object"
+    },
+    "ManifestKind": {
+      "description": "Only data is executable in this first host. Code-bearing manifests must go through the future sandboxed runtime, never through a permissive fallback.",
+      "enum": [
+        "declarative"
+      ],
+      "type": "string"
+    },
+    "Page": {
+      "additionalProperties": false,
+      "properties": {
+        "capability": {
+          "type": "string"
+        },
+        "dashboard": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Dashboard"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "group": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "statusColumns": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/StatusColumns"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "capability",
+        "id",
+        "title"
+      ],
+      "type": "object"
+    },
+    "Predicate": {
+      "additionalProperties": false,
+      "description": "One declared check about the object an action would write.\n\nExactly one operator per predicate:\n\n```json {\"jsonPath\": \".spec.suspend\", \"notEquals\": true, \"reason\": \"Resume this resource before requesting reconciliation\"} ```",
+      "properties": {
+        "absent": {
+          "description": "`true`: the value at `jsonPath` must be unset or null.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "equals": {
+          "description": "The value at `jsonPath` must equal this literal."
+        },
+        "jsonPath": {
+          "description": "The value this predicate asks about, as a bounded JSONPath subset: `.spec.suspend`, `.metadata.annotations['acme.io/pinned']`, `.status.conditions[0].status`. The grammar is the bounded subset the module documents: no wildcard, filter or recursive descent.",
+          "type": "string"
+        },
+        "notEquals": {
+          "description": "The value at `jsonPath` must not equal this literal. An unset field is not equal to anything, so this holds when it is absent."
+        },
+        "present": {
+          "description": "`true`: the value at `jsonPath` must be set and not null.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "reason": {
+          "description": "What the operator is told when this predicate does not hold. Untrusted display text: written by the app, and escaped by the host before anything draws it.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "jsonPath",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "StatusColumns": {
+      "additionalProperties": false,
+      "properties": {
+        "progressing": {
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "ready": {
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "suspended": {
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "ready"
+      ],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "$schema": {
+      "description": "Editor metadata: the JSON Schema the manifest is written against. The host ignores it; it is the one key allowed that is not part of the contract.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "actions": {
+      "description": "Declared mutations (#549). Absent in a manifest that only reads, and left out of the serialized form when empty so a manifest stored and signed without it still round-trips to its own bytes.",
+      "items": {
+        "$ref": "#/definitions/ActionBinding"
+      },
+      "type": "array"
+    },
+    "capabilities": {
+      "items": {
+        "$ref": "#/definitions/Binding"
+      },
+      "type": "array"
+    },
+    "contributions": {
+      "$ref": "#/definitions/Contributions"
+    },
+    "id": {
+      "type": "string"
+    },
+    "kind": {
+      "$ref": "#/definitions/ManifestKind"
+    },
+    "name": {
+      "type": "string"
+    },
+    "permissions": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "srelensApiVersion": {
+      "type": "string"
+    },
+    "version": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "capabilities",
+    "contributions",
+    "id",
+    "kind",
+    "name",
+    "permissions",
+    "srelensApiVersion",
+    "version"
+  ],
+  "title": "Manifest",
+  "type": "object"
+}

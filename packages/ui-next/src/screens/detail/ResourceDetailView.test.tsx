@@ -31,6 +31,8 @@ vi.mock("@srelens/core", async (importOriginal) => ({
   listCrds,
   deleteResource,
   podsOnNode,
+  // The web server's answer for a user with no apps (#515): the app slot stays empty.
+  listExtensions: async () => ({ schemaVersion: 1, nextRevision: 1, plugins: [] }),
 }));
 
 // The shell asks the same descriptor the list screen resolves, only to read
@@ -41,6 +43,18 @@ const { descriptorFor } = vi.hoisted(() => ({
 }));
 
 vi.mock("../../lib/kinds/descriptors", () => ({ descriptorFor }));
+vi.mock("../../extensions/ExtensionPanelSlot", () => ({
+  ExtensionPanelSlot: ({resource}:{resource:K8sObject}) =>
+    <section className="section" data-testid="peek-extension-panel">{resource.kind} app panels</section>,
+}));
+vi.mock("../../extensions/ExtensionRelatedSlot", () => ({
+  ExtensionRelatedSlot: ({context,resource}:{context:string;resource:K8sObject}) =>
+    <section className="section" data-testid="peek-related">{resource.kind} related on {context}</section>,
+}));
+vi.mock("../../extensions/ExtensionProviderSlot", () => ({
+  ExtensionProviderSlot: ({context,resource}:{context:string;resource:K8sObject}) =>
+    <section className="section" data-testid="peek-providers">{resource.kind} metrics and traces on {context}</section>,
+}));
 
 // The kit's `CodeEditor`, unchanged — wrapped only to record what the YAML
 // pane hands it. CodeMirror compiles its sizing into a generated stylesheet
@@ -231,6 +245,75 @@ describe("ResourceDetailView", () => {
     expect(getByRole("tab", { name: "Events" })).toBeDefined();
     expect(queryByRole("tab", { name: "Containers" })).toBeNull();
     expect(queryByRole("tab", { name: "Metrics" })).toBeNull();
+  });
+
+  it("places app panels after the peek's host facts only on Details", async () => {
+    getObject.mockResolvedValue({ object: POD });
+    render(<ResourceDetailView context="ctx" kind="Pod" namespace="default" name="web-1" />);
+    const panel = await screen.findByTestId("peek-extension-panel");
+    const facts = document.querySelector(".fact-list");
+    expect(facts).toBeTruthy();
+    expect(facts!.compareDocumentPosition(panel) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    await userEvent.click(screen.getByRole("tab", { name: "YAML" }));
+    expect(screen.queryByTestId("peek-extension-panel")).toBeNull();
+  });
+
+  it("places app metrics and traces after the peek's host facts only on Details (#569)", async () => {
+    getObject.mockResolvedValue({ object: POD });
+    render(<ResourceDetailView context="ctx" kind="Pod" namespace="default" name="web-1" />);
+    const providers = await screen.findByTestId("peek-providers");
+    expect(providers.textContent).toBe("Pod metrics and traces on ctx");
+    const facts = document.querySelector(".fact-list");
+    expect(facts!.compareDocumentPosition(providers) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    await userEvent.click(screen.getByRole("tab", { name: "YAML" }));
+    expect(screen.queryByTestId("peek-providers")).toBeNull();
+  });
+
+  it("places the Related section after the peek's host facts only on Details (#545)", async () => {
+    getObject.mockResolvedValue({ object: POD });
+    render(<ResourceDetailView context="ctx" kind="Pod" namespace="default" name="web-1" />);
+    const related = await screen.findByTestId("peek-related");
+    expect(related.textContent).toBe("Pod related on ctx");
+    const facts = document.querySelector(".fact-list");
+    expect(facts!.compareDocumentPosition(related) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    await userEvent.click(screen.getByRole("tab", { name: "YAML" }));
+    expect(screen.queryByTestId("peek-related")).toBeNull();
+  });
+
+  describe("the name's copy control (#827)", () => {
+    const copy = () => screen.getByRole("button", { name: "Copy name web-1" });
+
+    it("sits directly after the peek's heading, in the row that reveals it", async () => {
+      getObject.mockResolvedValue({ object: POD });
+      render(<ResourceDetailView context="ctx" kind="Pod" namespace="default" name="web-1" />);
+      const heading = await screen.findByRole("heading", { level: 2, name: "web-1" });
+
+      expect(heading.nextElementSibling?.contains(copy())).toBe(true);
+      expect(copy().closest(".name-row")?.contains(heading)).toBe(true);
+    });
+
+    it("is there while the object is still loading — the name is the route's, not the object's", () => {
+      getObject.mockReturnValue(new Promise(() => {}));
+      render(<ResourceDetailView context="ctx" kind="Pod" namespace="default" name="web-1" />);
+      expect(screen.getByText(/Loading/)).toBeDefined();
+      expect(copy()).toBeDefined();
+    });
+
+    it("is there when the object could not be read, which is when a reader goes to ask kubectl", async () => {
+      getObject.mockResolvedValue({ error: "pods \"web-1\" not found" });
+      render(<ResourceDetailView context="ctx" kind="Pod" namespace="default" name="web-1" />);
+      await waitFor(() => expect(screen.getByText(/Could not load/)).toBeDefined());
+      expect(copy()).toBeDefined();
+    });
+
+    it("is offered for every kind, since the heading is the one every kind shares", async () => {
+      getObject.mockResolvedValue({
+        object: { kind: "ConfigMap", apiVersion: "v1", metadata: { name: "web-1", namespace: "default" }, data: {} },
+      });
+      render(<ResourceDetailView context="ctx" kind="ConfigMap" namespace="default" name="web-1" />);
+      await screen.findByRole("heading", { level: 2, name: "web-1" });
+      expect(copy()).toBeDefined();
+    });
   });
 
   it("names the object in the error state", async () => {
@@ -1056,10 +1139,11 @@ describe("ResourceDetailView", () => {
 
   describe("the Secret YAML pane's redaction", () => {
     // The Details pane gates a Secret's values behind an explicit reveal.
-    // The YAML pane sits one tab over and, left alone, hands the very same
-    // values over with no gate at all — `k8s.getManifest` does not redact
-    // (only `k8s.getObject` does). This is a deliberate divergence from
-    // classic, which shows the manifest unredacted.
+    // The YAML pane sits one tab over and, left alone, would hand the very
+    // same values over with no gate at all whenever `k8s.getManifest` carries
+    // them — the host blanks them now (#661), and the pane redacts again on
+    // arrival rather than trust that alone. Classic's drawer YAML view does
+    // the same (#659).
     it("keeps a Secret's values out of the document entirely", async () => {
       getObject.mockResolvedValue({ object: SECRET });
       getManifest.mockResolvedValue({
@@ -1342,9 +1426,27 @@ describe("ResourceDetailView", () => {
       // this is the chain that carries it down to the editor.
       const host = container.querySelector('[data-slot="yaml-editor"]') as HTMLElement | null;
       expect(host?.className).toContain("h-full");
-      const seat = host?.querySelector(".cm-editor")?.parentElement?.parentElement;
+      // Found by walking DOWN from the pane rather than counting wrappers up
+      // from CodeMirror: the seat is the pane's own child that holds the
+      // editor, and how many elements the kit puts between the two is the
+      // kit's business — it gained one when the editor grew a Copy control.
+      const seat = [...(host?.children ?? [])].find((el) => el.querySelector(".cm-editor"));
       expect(seat?.className).toContain("flex-1");
       expect(seat?.className).toContain("min-h-0");
+    });
+
+    it("offers a Copy control over the manifest", async () => {
+      // #656's own surface. The chord answers for a reader who knows it; this
+      // is the half of the answer there is something to see. Asserted HERE,
+      // not only in the kit, because the prop is the call site's and dropping
+      // it would leave every editor test green. (#656 review)
+      getObject.mockResolvedValue({ object: POD });
+      const { container, getByRole } = await openYaml("Pod", "web-1");
+      await waitFor(() => expect(container.querySelector(".cm-content")).not.toBeNull());
+
+      expect(codeEditorProps.at(-1)?.copy).toBe(true);
+      // Named for what it does, and distinct from the bar's "Copy as kubectl".
+      expect(getByRole("button", { name: "Copy" })).toBeDefined();
     });
 
     it("keeps the Secret redaction notice from taking that height away", async () => {
@@ -1359,7 +1461,11 @@ describe("ResourceDetailView", () => {
       expect(codeEditorProps.at(-1)?.fill).toBe(true);
       const host = container.querySelector('[data-slot="yaml-editor"]') as HTMLElement | null;
       expect(host?.className).toContain("h-full");
-      const seat = host?.querySelector(".cm-editor")?.parentElement?.parentElement;
+      // Found by walking DOWN from the pane rather than counting wrappers up
+      // from CodeMirror: the seat is the pane's own child that holds the
+      // editor, and how many elements the kit puts between the two is the
+      // kit's business — it gained one when the editor grew a Copy control.
+      const seat = [...(host?.children ?? [])].find((el) => el.querySelector(".cm-editor"));
       expect(seat?.className).toContain("flex-1");
       expect(seat?.className).toContain("min-h-0");
     });
@@ -1584,6 +1690,41 @@ describe("ResourceDetailView", () => {
       const suspended = await footerActionsFor(true);
       expect(suspended).toContain("Resume");
       expect(suspended).not.toContain("Suspend");
+    });
+
+    /**
+     * The same adaptation, for a Node's `spec.unschedulable` (#820): it is
+     * what makes the pane offer Uncordon on a node that is already cordoned,
+     * rather than Cordon again. Both directions, for the reason given above.
+     */
+    async function nodeFooterActionsFor(unschedulable: boolean): Promise<(string | null)[]> {
+      getObject.mockResolvedValue({
+        object: {
+          kind: "Node",
+          apiVersion: "v1",
+          metadata: { name: "worker-1", creationTimestamp: daysAgo(120) },
+          spec: unschedulable ? { unschedulable } : {},
+          status: {},
+        },
+      });
+      descriptorFor.mockReturnValue(baseDescriptor({ k8sKind: "Node", actions: { cordon: true, drain: true } }));
+      const view = render(<ResourceDetailView context="ctx" kind="Node" namespace={null} name="worker-1" />);
+      await waitFor(() => expect(view.getByRole("tab", { name: "Details" })).toBeDefined());
+      const words = await allFooterActions();
+      view.unmount();
+      return words;
+    }
+
+    it("offers Cordon and Drain on a node, and Uncordon on one that is already cordoned", async () => {
+      const schedulable = await nodeFooterActionsFor(false);
+      expect(schedulable).toContain("Cordon");
+      expect(schedulable).toContain("Drain");
+      expect(schedulable).not.toContain("Uncordon");
+
+      const cordoned = await nodeFooterActionsFor(true);
+      expect(cordoned).toContain("Uncordon");
+      expect(cordoned).toContain("Drain");
+      expect(cordoned).not.toContain("Cordon");
     });
   });
 });

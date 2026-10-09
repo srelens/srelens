@@ -1,0 +1,27 @@
+# Not JSON-RPC 2.0
+{"jsonrpc":"1.0","id":1,"method":"health","params":{}}
+{"id":1,"method":"health","params":{}}
+# initialize without the versions it offers
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"host":{"name":"srelens","version":"0.15.0"},"limits":{"requestTimeoutMs":30000,"maxConcurrentRequests":8,"maxStreams":5,"memoryBytes":268435456,"cpus":1.0,"dataBytes":1073741824,"dataEntries":100000},"dataDirectory":"/d"}}
+# srelens's own ids are integers from 1
+{"jsonrpc":"2.0","id":"1","method":"health","params":{}}
+{"jsonrpc":"2.0","id":0,"method":"health","params":{}}
+# An app request may not use a reserved name
+{"jsonrpc":"2.0","id":8,"method":"$/anything","params":{}}
+{"jsonrpc":"2.0","id":8,"method":"stream/data","params":{"stream":1,"data":1}}
+# An app operation's inputs are an object
+{"jsonrpc":"2.0","id":8,"method":"scan","params":"nginx"}
+# stream/open names its stream
+{"jsonrpc":"2.0","id":5,"method":"stream/open","params":{"method":"watch","params":{}}}
+# A notification has no id
+{"jsonrpc":"2.0","id":10,"method":"stream/cancel","params":{"stream":1}}
+# An answer has exactly one of result and error, and no method
+{"jsonrpc":"2.0","id":"c-1","result":1,"error":{"code":-32603,"message":"m"}}
+{"jsonrpc":"2.0","id":"c-1"}
+{"jsonrpc":"2.0","id":"c-1","method":"host/read","result":1}
+# srelens never sends a sidecar's method: "host/read" is not even an operation name
+{"jsonrpc":"2.0","id":8,"method":"host/read","params":{"context":{"clusterId":"kind-dev","namespace":null},"capability":"applications"}}
+# A protocol method's name is never an app operation: an initialize without its params is refused, not read as an operation
+{"jsonrpc":"2.0","id":8,"method":"initialize","params":{}}
+# An app operation's inputs are an object, never an array
+{"jsonrpc":"2.0","id":8,"method":"scan","params":["nginx"]}

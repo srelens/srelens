@@ -30,6 +30,7 @@ actions are identified and ask for confirmation before they run.
 - [Application logs](#application-logs)
 - [MCP server for AI agents](#mcp-server-for-ai-agents)
 - [AI assistant](#ai-assistant)
+- [Moving to another machine](#moving-to-another-machine)
 - [Settings reference](#settings-reference)
 - [Updating](#updating)
 
@@ -92,6 +93,10 @@ Drag the grip handle (or use the move buttons) to reorder contexts. Right-click 
 context for **Reset identity** or **Remove context**. Removing a context edits the
 kubeconfig on disk and is confirmation-gated.
 
+In the new design the same order can be changed from the cluster rail itself: drag
+a cluster's mark up or down, press Ctrl/Cmd+Shift+Up or Down on a focused mark, or
+use **Move up** / **Move down** in its right-click menu.
+
 ## Browsing resources
 
 The left sidebar groups every resource kind srelens can browse:
@@ -116,7 +121,13 @@ CPU and memory when a metrics server is available.
 choose which columns are visible with the column picker (remembered per kind), and
 scope to one or more namespaces with the namespace selector (empty means all
 namespaces). If your credentials can't list all namespaces, srelens scopes to the
-namespaces you can see and tells you so.
+namespaces you can see and tells you so. In the new design, with all namespaces
+shown, clicking a value in a list's Namespace column scopes the list to that
+namespace, the same as picking it in the selector.
+
+The selection belongs to the tab. In the new design a tab opened from another, such
+as Deployments from the sidebar while you are on Pods, starts with that tab's
+selection and is independent from then on.
 
 **Bulk actions.** Select rows with their checkboxes to reveal a bar with **Delete**,
 **Evict** (Pods), and **Rollout restart** (Deployments, StatefulSets, DaemonSets).
@@ -171,10 +182,16 @@ Action buttons live in the detail drawer header and are preflighted against your
 RBAC: an action you can't perform is disabled with the reason. Destructive actions
 confirm before running.
 
+In the new design, hovering a resource's name at the top of its detail view shows a
+copy button beside it, which copies the bare name.
+
 **Pods** — Logs, Shell, Debug (attach an ephemeral debug container), Edit, Forward,
 Evict, Delete. Evict and Delete confirm; Debug asks for an image (default
 `busybox`) and an optional container whose process namespace to share, then opens a
 shell into the new debug container.
+
+In the new design, the node name in the Pods list's Node column, and on a pod's
+detail view, opens that node in its own tab.
 
 **Deployments, StatefulSets, DaemonSets, ReplicaSets, Jobs** — Logs, Edit, Scale
 (validated replica count), Restart (rollout restart, applied immediately), Delete.
@@ -187,6 +204,14 @@ shell into the new debug container.
 static pods), and Node shell (a privileged host-namespaced debug pod you get a
 shell into; it is deleted when you close the terminal). Drain and Node shell
 confirm.
+
+In the new design, Cordon/Uncordon and Drain are on a node's row menu in
+**Cluster → Nodes** and on the node's detail view, and all three confirm. On the
+desktop the confirmed action runs as the `kubectl` command the dialog showed, in a
+local terminal scoped to that cluster, so you can watch a drain evict each pod and
+wait on disruption budgets; it needs `kubectl` on your `PATH`. In the browser,
+which has no local terminal, and on the Windows desktop, it runs through the API
+and reports the result when it finishes.
 
 ## Logs
 
@@ -205,7 +230,12 @@ you:
 - **ts** — prefix each line with a timestamp.
 - **Search** — filter the buffer, with a match count.
 - **Live tail** (play/pause) — stream new lines as they arrive; the status shows
-  connecting / reconnecting / a green **live** dot.
+  connecting / reconnecting / a green **live** dot. A streamed line longer than
+  64 KiB shows its first 64 KiB followed by **[line cut: too long]**. The rest is
+  dropped up to its newline, so a container that writes a huge line, or none at
+  all, cannot fill srelens's memory. **Download all containers** fetches the
+  logs again, so it has the whole line. Output that is not valid UTF-8 shows as
+  `�` instead of stopping the stream.
 - **Wrap** — wrap long lines.
 - **Download** — save the current buffer to a `.log` file.
 - **Download all containers** — save a full dump of every container of every
@@ -229,10 +259,10 @@ srelens opens interactive sessions in the dock:
   container (default image `busybox`, optionally sharing another container's
   process namespace) and opens a shell into it — useful for debugging distroless
   or minimal images.
-- **Local terminal** — your own shell on your machine, scoped to the current
-  cluster. srelens points `kubectl` at a private, single-context kubeconfig so you
-  can't accidentally act on another cluster. Open a new one from the dock's **+**
-  button.
+- **Local terminal** — your own shell on your machine, bound to one cluster. Open
+  it with **Terminal** in the status bar (or **Cmd/Ctrl-J**) for the cluster you
+  are looking at, or from **Terminals → New session → Local shell**. See
+  [A terminal bound to one cluster](#a-terminal-bound-to-one-cluster).
 - **Node shell** — a privileged debug pod pinned to a node that enters the host
   namespaces (via `nsenter`), for node-level troubleshooting. Open it from a
   Node's **Node shell** action; the pod is deleted automatically when you close the
@@ -241,6 +271,42 @@ srelens opens interactive sessions in the dock:
 Dock sessions stay alive when you switch tabs, so scrollback and live streams are
 preserved. Resize the dock by dragging its top edge; close individual sessions or
 the whole dock.
+
+### A terminal bound to one cluster
+
+A local terminal is opened for one cluster and stays on it, so a command typed
+there does not land on another cluster by accident:
+
+- `kubectl` and `helm` read a private kubeconfig that holds only that cluster's
+  context. `kubectl config get-contexts` lists one context, and there is nothing
+  for `kubectl config use-context` to switch to.
+- `kubectl` and `helm` in that terminal refuse to be pointed elsewhere:
+  `--kubeconfig`, `--context`, `--cluster`, `--server`/`-s` (and helm's
+  `--kube-context`, `--kube-apiserver`), and `kubectl config use-context`,
+  `set-cluster`, `set-credentials` and `set` are answered with a line naming the
+  cluster the terminal is bound to. Changing namespace with
+  `kubectl config set-context --current --namespace=…` still works.
+- In bash and zsh, `KUBECONFIG` is read-only, so `export KUBECONFIG=…` and
+  `unset KUBECONFIG` fail instead of quietly leaving the cluster.
+- The terminal opens with a line saying which cluster it is bound to, and in bash
+  and zsh the prompt starts with `[cluster/namespace]`.
+- Opened from a tab that is looking at exactly one namespace, the terminal starts
+  in that namespace.
+
+To work on another cluster, open a terminal from that cluster.
+
+**What this is not.** The shell is your own process on your own machine; this is
+a guard against accidents, not a sandbox. It does not cover:
+
+- tools other than `kubectl` and `helm` that are given another kubeconfig through
+  their own flags;
+- shells other than bash and zsh (fish, for example), which get the private
+  kubeconfig and the `kubectl`/`helm` guards but not the read-only variable or the
+  prompt tag;
+- prompt themes that redraw the whole prompt and drop the tag;
+- deliberately calling the real binary by its full path, or starting a new shell
+  with a clean environment;
+- the Windows desktop, where the terminal gets the private kubeconfig only.
 
 ## Port forwarding
 
@@ -307,6 +373,7 @@ each key applies. The ones worth knowing before you look:
 | Key | Does |
 | --- | --- |
 | **Cmd/Ctrl-K** | Command palette |
+| **Cmd/Ctrl-J** | Open a local terminal bound to the current cluster (desktop app) |
 | **?** | This list |
 | **Cmd-W** (macOS only) | Close the tab — or the window, on the last one. It comes from the macOS app menu, so there is no Windows/Linux equivalent yet. |
 | **Cmd/Ctrl +** / **-** / **0** | Interface larger / smaller / reset |
@@ -386,7 +453,11 @@ AI clients, using your locally authenticated cluster contexts. Open
 - **Connect a client** — pick your client (Claude Code, Claude Desktop, Cursor,
   Codex, and others) and transport to get a ready-to-paste configuration snippet.
 - **View the bearer token and audit log** — rotate or revoke the HTTP token,
-  and review recent agent activity, from the same panel.
+  and review recent activity, from the same panel. The trail holds every
+  capability call an agent made **and** every mutating or sensitive one you
+  made in srelens itself — a Sync or Reconcile you clicked is in there beside
+  an agent's, marked `ui` rather than `mcp`. It is a file on this machine and
+  is never sent anywhere.
 
 Both transports support **resource subscriptions** (`resources/subscribe` on
 `k8s://` object URIs): the server pushes a `notifications/resources/updated`
@@ -444,9 +515,57 @@ shown inline in the drawer's own transcript as well as the usual modal. The
 agent process itself never receives your kube credentials — only a scoped
 bearer token good for this loopback MCP server and nothing else.
 
+## Moving to another machine
+
+**Settings → Backup** exports your whole setup as one file and imports it on
+another computer.
+
+**Export** asks for a passphrase and writes
+`srelens-setup-<date>.srelens`. The file is always encrypted
+(XChaCha20-Poly1305, with the passphrase stretched by argon2id) because it
+carries the credentials your clusters connect with — there is no unencrypted
+form, and **a lost passphrase means a lost file**. Its readable header holds
+only the key-derivation parameters: the list of what is inside is encrypted
+too, so a bundle sitting in a downloads folder does not enumerate your
+clusters.
+
+It contains:
+
+- every kubeconfig srelens reads, **by content** — not the paths, which mean
+  nothing on the next machine;
+- your preferences: theme, layout, default namespace, and each cluster's
+  display name, colour and position;
+- your assistant skills and any MCP prompts you wrote;
+- the names of the apps you have installed, so you know what to reinstall;
+- the assistant's API keys and the MCP token, **only** if you tick that box.
+
+It deliberately does not contain the vault master password, its keychain entry,
+biometric enrolment, the MCP audit log, window state, or cluster OIDC tokens —
+the new machine signs in again for those.
+
+**Import** asks you to pick the file, then for its passphrase, and then shows
+what it found, group by group, before writing anything. Importing only adds:
+
+- a cluster whose kubeconfig you already have is reported as already present,
+  never duplicated — so importing the same file twice changes nothing the
+  second time;
+- a skill or prompt whose name is taken here is left as you have it, and the
+  report says which;
+- an API key this machine already has is kept, and the bundle's copy ignored;
+- apps are listed but never installed — they are code with capability grants,
+  so you install them again from **Settings → Apps** and review the permissions
+  on this machine.
+
+Nothing is ever deleted. Reload srelens after an import to pick up the imported
+preferences.
+
+A wrong passphrase, a damaged file, or one that is not a bundle at all is
+refused before anything is written, and each is reported as itself rather than
+as the others.
+
 ## Settings reference
 
-**Settings** (gear icon in the hotbar) has seven sections:
+**Settings** (gear icon in the hotbar) has these sections:
 
 1. **Appearance** — display mode (Dark / Light / System) and theme palette.
 2. **Layout** — left navigation and right details panel widths, with a reset.
@@ -456,9 +575,11 @@ bearer token good for this loopback MCP server and nothing else.
    ([above](#context-identity-and-kubeconfig-sources)).
 5. **MCP** — the MCP server, CLI, and client configuration
    ([above](#mcp-server-for-ai-agents)).
-6. **Application logs** — srelens's own log file
+6. **Backup** — export and import this whole setup
+   ([above](#moving-to-another-machine)).
+7. **Application logs** — srelens's own log file
    ([above](#application-logs)).
-7. **Updates** — version, release channel, and the in-app updater
+8. **Updates** — version, release channel, and the in-app updater
    ([below](#updating)).
 
 Desktop preferences are stored in a schema-versioned `settings.json` under the
@@ -492,3 +613,13 @@ Have a question, hit a rough edge, or want to suggest a feature?
 - Join the community on Reddit at [r/srelens](https://www.reddit.com/r/srelens/).
 - File bugs and feature requests on
   [GitHub Issues](https://github.com/srelens/srelens/issues).
+
+The top bar has a **Star** button that opens the srelens repository on GitHub; a
+star helps other people find the project. After you have used the app for a few
+days it asks once, in a small callout, whether you would like to star it, and
+never asks again whichever way you answer. It does not ask at all if you have
+already used one of the app's Star buttons. To show the star count, srelens makes
+one unauthenticated request a day to the public GitHub API; if that fails the
+button keeps the last count it had, or shows no number if it never had one. The
+button is not shown while the workspace is locked. **Settings → Workspace → srelens on GitHub** hides
+the button, which also stops that request.

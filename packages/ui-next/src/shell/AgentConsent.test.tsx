@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, type Mock } from "vitest";
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 /**
@@ -83,6 +83,9 @@ const core = vi.hoisted(() => ({
   listAgents: vi.fn(async () => [
     { kind: "claude", label: "Claude", available: true, path: "/c", version: "1", installUrl: "", gated: false },
   ]),
+  // The installed inventory the requester line is read from (#552). Empty by
+  // default: a prompt with no app behind it names none.
+  listExtensions: vi.fn(async () => ({ schemaVersion: 1, nextRevision: 1, plugins: [] })),
 }));
 
 vi.mock("@srelens/core", async (orig) => ({
@@ -95,6 +98,7 @@ vi.mock("@srelens/core", async (orig) => ({
   startChat: core.startChat,
   sendChat: core.sendChat,
   listAgents: core.listAgents,
+  listExtensions: core.listExtensions,
   // Resolves once the registration has landed — the real one's contract.
   subscribe: (channel: string, handler: (payload: unknown) => void) => {
     core.subscribe(channel, handler);
@@ -171,21 +175,31 @@ function broadcast(channel: string, payload: unknown): boolean {
   return true;
 }
 
-const ask = (id: string, tool: string, args: Record<string, unknown> = {}) =>
-  emit(REQUEST, { id, tool, args });
+/** srelens's own chat, as `startChat` names it in this file's mock. */
+const OURS = { chatSession: "sess-1" };
+
+/** A confirm as the backend raises it. `caller` is who the host authenticated
+ *  the call as (#393): srelens's own chat, or `null` for anybody else. */
+const ask = (
+  id: string,
+  tool: string,
+  args: Record<string, unknown> = {},
+  caller: { chatSession: string } | null = null,
+) => emit(REQUEST, { id, tool, args, caller });
 
 /**
- * Put the run store into `busy` — the only state `AgentConsent` can use to
- * decide a confirm is srelens's own agent's doing (C1). `askAgent` commits
- * `busy: true` synchronously, before its first `await`, so this is true the
- * instant the call is made — no need to await anything here. `sendChat` is
- * left hanging (never resolves) so the run STAYS busy for the rest of the
- * test; `resetAgentRun()` in the next `beforeEach` is what cleans it up, not
+ * Put the run store into `busy`, AND wait until the run holds its backend
+ * chat — the session a gate names (#393). A CLI cannot raise a confirm before
+ * `chat_send`, which runs after `startChat` resolved, so a test that asks
+ * sooner is asking about a state the app never reaches. `sendChat` is left
+ * hanging (never resolves) so the run STAYS busy for the rest of the test;
+ * `resetAgentRun()` in the next `beforeEach` is what cleans it up, not
  * anything this helper does.
  */
-function startTurn(): void {
+async function startTurn(): Promise<void> {
   core.sendChat.mockImplementation(() => new Promise(() => {}));
   void askAgent("investigate checkout-api");
+  await waitFor(() => expect(core.sendChat).toHaveBeenCalled());
 }
 
 beforeEach(() => {
@@ -779,8 +793,8 @@ describe("AgentConsent", () => {
   describe("the record it leaves in the run", () => {
     it("still answers exactly once, with the transcript only recording it", async () => {
       await mount();
-      startTurn();
-      ask("r1", "k8s_scale", { name: "api" });
+      await startTurn();
+      ask("r1", "k8s_scale", { name: "api" }, OURS);
       await userEvent.click(await screen.findByRole("button", { name: /approve/i }));
       await waitFor(() => expect(core.respondToConfirm).toHaveBeenCalledWith("r1", true));
       expect(core.respondToConfirm.mock.calls.filter(([id]) => id === "r1")).toHaveLength(1);
@@ -788,8 +802,8 @@ describe("AgentConsent", () => {
 
     it("puts the request in the run as pending, before anyone has answered it, while srelens's own agent has a turn in flight", async () => {
       await mount();
-      startTurn();
-      ask("r1", "k8s_scale", { replicas: 3 });
+      await startTurn();
+      ask("r1", "k8s_scale", { replicas: 3 }, OURS);
       await screen.findByRole("dialog");
       // Recorded at presentation — this is what the transcript draws as
       // pending, and it must exist while the answer is still the reader's to
@@ -806,8 +820,8 @@ describe("AgentConsent", () => {
 
     it("records the outcome in the run without owning the answer", async () => {
       await mount();
-      startTurn();
-      ask("r1", "k8s_scale", { replicas: 7 });
+      await startTurn();
+      ask("r1", "k8s_scale", { replicas: 7 }, OURS);
       await userEvent.click(await screen.findByRole("button", { name: /approve/i }));
       await waitFor(() => expect(getAgentRun().gates.find((g) => g.id === "r1")?.outcome).toBe("approved"));
       // One row, not two: `noteGate` merges by id, so the pending record is
@@ -819,13 +833,28 @@ describe("AgentConsent", () => {
       expect(getAgentRun().gates.find((g) => g.id === "r1")?.args).toEqual({ replicas: 7 });
     });
 
+    it("records the host's sentence and level with the gate, and keeps them once answered (#388)", async () => {
+      await mount();
+      await startTurn();
+      emit(REQUEST, {
+        id: "r9", tool: "k8s.scale", args: { replicas: 2 },
+        prompt: "Change the replica count of Deployment shop/api in cluster prod?", impact: "medium",
+        caller: OURS,
+      });
+      await userEvent.click(await screen.findByRole("button", { name: /approve/i }));
+      await waitFor(() => expect(getAgentRun().gates.find((g) => g.id === "r9")?.outcome).toBe("approved"));
+      const gate = getAgentRun().gates.find((g) => g.id === "r9");
+      expect(gate?.prompt).toBe("Change the replica count of Deployment shop/api in cluster prod?");
+      expect(gate?.impact).toBe("medium");
+    });
+
     it("records a denial as a denial", async () => {
       // `outcome` carries three states and a denial is not the absence of an
       // approval. Without this, a field that only ever writes "approved"
       // passes the test above forever.
       await mount();
-      startTurn();
-      ask("r2", "k8s_deletePod", {});
+      await startTurn();
+      ask("r2", "k8s_deletePod", {}, OURS);
       await userEvent.click(await screen.findByRole("button", { name: /deny/i }));
       await waitFor(() => expect(getAgentRun().gates.find((g) => g.id === "r2")?.outcome).toBe("denied"));
     });
@@ -836,9 +865,9 @@ describe("AgentConsent", () => {
       // backend never accepted — and this component already keeps the prompt
       // up for exactly that reason.
       await mount();
-      startTurn();
+      await startTurn();
       core.respondToConfirm.mockRejectedValueOnce(new Error("already settled"));
-      ask("r4", "k8s_rolloutRestart", {});
+      ask("r4", "k8s_rolloutRestart", {}, OURS);
       await userEvent.click(await screen.findByRole("button", { name: /approve/i }));
       await screen.findByRole("alert");
       expect(getAgentRun().gates.find((g) => g.id === "r4")?.outcome).toBe("pending");
@@ -852,9 +881,9 @@ describe("AgentConsent", () => {
       // already by answering over a sealed vault; this is the next change to
       // touch it.
       await mount();
-      startTurn();
+      await startTurn();
       act(() => lockWorkspace());
-      ask("r3", "k8s_drainNode");
+      ask("r3", "k8s_drainNode", {}, OURS);
       await waitFor(() => expect(core.respondToConfirm).toHaveBeenCalledWith("r3", false));
       expect(getAgentRun().gates.find((g) => g.id === "r3")).toBeUndefined();
     });
@@ -872,8 +901,8 @@ describe("AgentConsent", () => {
      */
     it("settles a pending gate when the backend says the request resolved elsewhere", async () => {
       await mount();
-      startTurn();
-      ask("r8", "k8s_scale", { replicas: 3 });
+      await startTurn();
+      ask("r8", "k8s_scale", { replicas: 3 }, OURS);
       await screen.findByRole("dialog");
       await waitFor(() => expect(getAgentRun().gates.find((g) => g.id === "r8")?.outcome).toBe("pending"));
 
@@ -890,8 +919,8 @@ describe("AgentConsent", () => {
       // an unguarded settle would replace "approved" with a vaguer word a
       // moment after they approved it.
       await mount();
-      startTurn();
-      ask("r9", "k8s_deletePod", {});
+      await startTurn();
+      ask("r9", "k8s_deletePod", {}, OURS);
       await userEvent.click(await screen.findByRole("button", { name: /approve/i }));
       await waitFor(() => expect(getAgentRun().gates.find((g) => g.id === "r9")?.outcome).toBe("approved"));
 
@@ -923,8 +952,8 @@ describe("AgentConsent", () => {
      */
     it("leaves a gate the reader saw but never answered as pending", async () => {
       await mount();
-      startTurn();
-      ask("r5", "k8s_deletePod", {});
+      await startTurn();
+      ask("r5", "k8s_deletePod", {}, OURS);
       await screen.findByRole("dialog");
       await act(async () => {
         lockWorkspace();
@@ -933,16 +962,14 @@ describe("AgentConsent", () => {
       expect(getAgentRun().gates.find((g) => g.id === "r5")?.outcome).toBe("pending");
     });
 
-    // ---- Ownership at presentation (C1) ---------------------------------
+    // ---- Ownership at presentation (C1, #393) ---------------------------
     //
-    // `ConfirmRequest` carries no client identity. The confirm channel is
-    // app-wide by design — an external MCP client (the loopback HTTP server)
-    // raises the exact same event srelens's own agent does — so the only
-    // honest signal this component has is whether the run store has a turn
-    // actually in flight AT PRESENTATION. Every test above now runs with
-    // `startTurn()` so it is testing the busy case on purpose, not by
-    // accident; the two tests below are the idle case those tests deliberately
-    // exclude.
+    // The confirm channel is app-wide by design — an external MCP client (the
+    // loopback HTTP server) raises the exact same event srelens's own agent
+    // does. A request now names the chat that raised it, as the host
+    // authenticated it, and that is what decides ownership: the run holding
+    // that chat. Every test above passes `OURS` during a turn on purpose; the
+    // tests below are the requests that belong to no conversation.
 
     it("does not record a gate for a confirm raised while no srelens turn is in flight, but still presents and answers it", async () => {
       // No `startTurn()`: the store is idle, as it is for a confirm an
@@ -967,6 +994,30 @@ describe("AgentConsent", () => {
       expect(getAgentRun().gates.find((g) => g.id === "ext2")).toBeUndefined();
     });
 
+    it("does not record an external client's confirm in the conversation that happens to be mid-turn (#393)", async () => {
+      // The defect: the busy run used to be taken as the caller. An external
+      // MCP client raising a confirm while srelens's own agent is answering
+      // had its mutation recorded in a conversation that did not cause it.
+      await mount();
+      await startTurn();
+      ask("ext9", "k8s_scale", { replicas: 9 }, null);
+      await screen.findByRole("dialog");
+      expect(getAgentRun().gates.find((g) => g.id === "ext9")).toBeUndefined();
+      await userEvent.click(screen.getByRole("button", { name: /approve/i }));
+      await waitFor(() => expect(core.respondToConfirm).toHaveBeenCalledWith("ext9", true));
+      expect(getAgentRun().gates.find((g) => g.id === "ext9")).toBeUndefined();
+    });
+
+    it("does not record a confirm whose chat is not one this window holds", async () => {
+      // Matched by session, not by "some caller is set": a chat this window
+      // has no run for is not the busy one's.
+      await mount();
+      await startTurn();
+      ask("other1", "k8s_scale", { replicas: 1 }, { chatSession: "sess-elsewhere" });
+      await screen.findByRole("dialog");
+      expect(getAgentRun().gates.find((g) => g.id === "other1")).toBeUndefined();
+    });
+
     /**
      * The mutation the brief calls out by name: re-testing `busy` in
      * `answer()` instead of looking up the record already made at
@@ -983,7 +1034,8 @@ describe("AgentConsent", () => {
         () => new Promise<string | null>((resolve) => { resolveSendChat = resolve; }),
       );
       void askAgent("investigate checkout-api");
-      ask("r6", "k8s_scale", { replicas: 4 });
+      await waitFor(() => expect(core.sendChat).toHaveBeenCalled());
+      ask("r6", "k8s_scale", { replicas: 4 }, OURS);
       await waitFor(() => expect(getAgentRun().gates.find((g) => g.id === "r6")?.outcome).toBe("pending"));
 
       // The run finishes — `busy` goes back to false — before the reader answers.
@@ -996,4 +1048,257 @@ describe("AgentConsent", () => {
     });
   });
 
+});
+
+/**
+ * #548: the prompt used to be the tool id and a JSON blob, which is the same
+ * question for an Argo CD status refresh and a node drain. The backend now
+ * sends the host's own rendered sentence and the impact level beside it.
+ *
+ * The fallback is as much the point as the sentence: a template that cannot
+ * render (a field outside an optional segment with no value) arrives as no
+ * prompt at all, and the dialog shows what it always showed rather than a
+ * sentence with a hole in it.
+ */
+describe("the host's own words", () => {
+  const askWith = (payload: Record<string, unknown>) => emit(REQUEST, payload);
+
+  it("leads with the host sentence and names the impact for a high-impact call", async () => {
+    await mount();
+    askWith({
+      id: "h1",
+      tool: "k8s.drainNode",
+      args: { context: "prod", name: "node-7" },
+      prompt: "Drain node-7 in cluster prod?",
+      impact: "high",
+    });
+    expect(await screen.findByText("Drain node-7 in cluster prod?")).toBeTruthy();
+    expect(screen.getByText(/high impact/i)).toBeTruthy();
+    // The payload still travels: the sentence says what, this says which call.
+    expect(screen.getByText(/k8s.drainNode/)).toBeTruthy();
+    expect(screen.getByText(/node-7/, { selector: "code" })).toBeTruthy();
+  });
+
+  it("falls back to the tool and its arguments when the host authored no sentence", async () => {
+    await mount();
+    askWith({ id: "h2", tool: "toolbox.installHelm", args: { version: "3.16" }, impact: "medium" });
+    expect(await screen.findByText(/toolbox.installHelm/)).toBeTruthy();
+    expect(screen.getByText(/medium impact/i)).toBeTruthy();
+    expect(screen.getByText(/3.16/, { selector: "code" })).toBeTruthy();
+  });
+
+  /**
+   * A prompt that is not a non-empty string is dropped rather than drawn.
+   * `undefined` over an Approve button is the hole the backend's own
+   * fallback exists to avoid, and this is the last place it could reappear.
+   */
+  it("never draws a hole where a sentence would be", async () => {
+    await mount();
+    askWith({ id: "h3", tool: "k8s.drainNode", args: { context: "prod" }, prompt: null, impact: "high" });
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog.textContent).not.toMatch(/undefined|null/);
+    expect(dialog.textContent).toContain("k8s.drainNode");
+    // A dropped sentence is not a dropped prompt: the level the host did send
+    // is still named, so this case is distinguishable from the dialog that
+    // drew neither. Without it the assertions above hold on the old dialog too.
+    expect(within(dialog).getByText(/high impact/i)).toBeTruthy();
+  });
+
+  /** An impact the host does not define is ignored, not printed. */
+  it("ignores a level outside the host's three words", async () => {
+    await mount();
+    askWith({ id: "h4", tool: "k8s.scale", args: {}, prompt: "Change the replica count?", impact: "CRITICAL" });
+    expect(await screen.findByText("Change the replica count?")).toBeTruthy();
+    expect(screen.queryByText(/CRITICAL/)).toBeNull();
+    expect(screen.queryByText(/impact/i)).toBeNull();
+  });
+
+  /** A replayed request carries the same words a live one does. */
+  it("shows the sentence on a request handed over by the snapshot", async () => {
+    core.pendingConfirms.mockResolvedValue([
+      {
+        id: "h5",
+        tool: "k8s.drainNode",
+        args: { name: "node-7" },
+        prompt: "Drain node-7?",
+        impact: "high",
+      },
+    ]);
+    await mount();
+    expect(await screen.findByText("Drain node-7?")).toBeTruthy();
+    expect(screen.getByText(/high impact/i)).toBeTruthy();
+  });
+
+  // ---- #552: the same question as the app's own confirmation --------------
+
+  /**
+   * The cluster and the object are named under the question, and they come
+   * from the HOST's reading of the call (`ConfirmTarget`) rather than from
+   * this component digging through `args` — the second parse the one
+   * confirmation exists to remove.
+   */
+  it("names the pinned cluster and the object the host read", async () => {
+    await mount();
+    askWith({
+      id: "t1",
+      tool: "extensions.action",
+      args: { resource: { context: "prod", namespace: "team", name: "api" } },
+      prompt: "Suspend HelmRelease team/api?",
+      impact: "high",
+      target: { cluster: "prod", namespace: "team", name: "api", kind: "HelmRelease", app: null },
+    });
+    expect(await screen.findByTestId("host-confirm-cluster")).toBeTruthy();
+    expect(screen.getByTestId("host-confirm-cluster").textContent).toBe("prod");
+    expect(screen.getByTestId("host-confirm-target").textContent).toBe("team/api");
+  });
+
+  /**
+   * A malformed target is dropped, not drawn: no `undefined` under Approve,
+   * and no crash from handing a number to the text helpers.
+   *
+   * The absences below only mean something beside the presence above them —
+   * the old dialog had no fact rows either, so a test of absences alone would
+   * pass against it and prove nothing.
+   */
+  it("draws no fact it was not sent", async () => {
+    await mount();
+    askWith({
+      id: "t2",
+      tool: "toolbox.installHelm",
+      args: {},
+      prompt: "Install Helm?",
+      impact: "medium",
+      target: { cluster: 7, name: null },
+    });
+    const dialog = await screen.findByRole("dialog");
+    expect(screen.getByTestId("host-confirm-question").textContent).toBe("Install Helm?");
+    expect(screen.getByTestId("host-confirm-impact").textContent).toBe("Medium impact");
+    expect(dialog.textContent).not.toMatch(/undefined|null/);
+    expect(dialog.textContent).not.toContain("7");
+    expect(screen.queryByTestId("host-confirm-cluster")).toBeNull();
+    expect(screen.queryByTestId("host-confirm-target")).toBeNull();
+  });
+
+  /**
+   * **An agent's call is attributed to no app, whatever it claims.**
+   *
+   * "Requested by app X (srelens)" is the host vouching for who asked.
+   * `extensions.action` is reachable over MCP and the registry only checks
+   * that the ID and revision name an installed, enabled app — nothing
+   * authenticates the caller AS that app. So an attribution derived from the
+   * request would be provenance chosen by the party being vouched for, and
+   * it is not drawn: not from a `target.app` the payload invents, and not
+   * from a real installed app named in one.
+   */
+  it("names no app on an agent's call, however the payload claims one", async () => {
+    core.listExtensions.mockResolvedValue({
+      schemaVersion: 1,
+      nextRevision: 1,
+      plugins: [
+        {
+          manifest: {
+            id: "org.srelens.flux",
+            name: "Flux Tools",
+            version: "1.0.0",
+            srelensApiVersion: "1",
+            kind: "declarative",
+            permissions: [],
+            capabilities: [],
+            contributions: { pages: [], detailTabs: [], detailLinks: [] },
+          },
+          enabled: true,
+          revision: 2,
+          grants: [],
+          settings: {},
+          source: "local",
+          installedAt: 0,
+          history: [],
+          signatureProof: { manifest: "{}", signature: [1] },
+        },
+      ],
+    } as never);
+    await mount();
+    askWith({
+      id: "t3",
+      tool: "extensions.action",
+      args: { resource: { id: "org.srelens.flux", revision: 2 } },
+      prompt: "Suspend HelmRelease team/api?",
+      impact: "high",
+      target: { name: "api", app: { id: "org.srelens.flux", revision: 2 } },
+    });
+    // The question IS drawn — this is the new confirmation, not the old
+    // dialog, so the absence below is about attribution and not about the
+    // component failing to render.
+    expect((await screen.findByTestId("host-confirm-question")).textContent).toBe(
+      "Suspend HelmRelease team/api?",
+    );
+    expect(screen.getByTestId("host-confirm-target").textContent).toBe("api");
+    await waitFor(() => expect(core.listExtensions).not.toHaveBeenCalled());
+    expect(screen.queryByTestId("host-confirm-requester")).toBeNull();
+    expect(screen.getByRole("dialog").textContent).not.toContain("Flux Tools");
+  });
+
+  /**
+   * **A sidecar's call names the app the host started it for** (#573). The
+   * supervisor knows which app's process asked, so the backend sends that
+   * reference; the name and publisher still come from this window's inventory,
+   * and a revision it does not hold names nobody.
+   */
+  it("names the app a sidecar's call came from, from the window's own inventory", async () => {
+    const flux = {
+      manifest: {
+        id: "org.example.flux",
+        name: "Flux Tools",
+        version: "1.0.0",
+        srelensApiVersion: "^0.6",
+        kind: "executable",
+        permissions: [],
+        capabilities: [],
+        contributions: { pages: [], detailTabs: [], detailLinks: [] },
+      },
+      enabled: true,
+      revision: 2,
+      grants: [],
+      settings: {},
+      source: "local",
+      installedAt: 0,
+      history: [],
+    };
+    core.listExtensions.mockResolvedValue({ schemaVersion: 1, nextRevision: 3, plugins: [flux] } as never);
+    await mount();
+    askWith({
+      id: "s1",
+      tool: "extensions.action",
+      args: { resource: { id: "org.example.flux", revision: 2 }, action: "suspend" },
+      prompt: "Run the declared action (suspend) on team/api in cluster prod?",
+      impact: "high",
+      target: { cluster: "prod", namespace: "team", name: "api" },
+      requester: { id: "org.example.flux", revision: 2, name: "Not the name the host knows" },
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId("host-confirm-requester").textContent).toBe(
+        "Requested by app Flux Tools (unsigned)",
+      ),
+    );
+    expect(screen.getByRole("dialog").textContent).not.toContain("Not the name the host knows");
+  });
+
+  it("names nobody for a sidecar's call at a revision the window does not hold", async () => {
+    core.listExtensions.mockResolvedValue({ schemaVersion: 1, nextRevision: 1, plugins: [] } as never);
+    await mount();
+    askWith({
+      id: "s2",
+      tool: "extensions.action",
+      args: {},
+      prompt: "Run the declared action?",
+      impact: "high",
+      target: {},
+      requester: { id: "org.example.flux", revision: 9 },
+    });
+    expect((await screen.findByTestId("host-confirm-question")).textContent).toBe(
+      "Run the declared action?",
+    );
+    await waitFor(() => expect(core.listExtensions).toHaveBeenCalled());
+    expect(screen.queryByTestId("host-confirm-requester")).toBeNull();
+  });
 });

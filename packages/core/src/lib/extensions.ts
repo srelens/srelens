@@ -1,4 +1,8 @@
 import { invokeCapability } from "../transport/transport";
+import { isTauri } from "../transport/platform";
+import type { ActionPredicate } from "./actionPredicates";
+import type { CapabilityImpact } from "./capabilities";
+import type { NativeTimeseriesData, NativeTimeseriesUnit } from "./nativeComponents";
 // These mirror crates/plugin-host/src/manifest.rs and crates/registry/src/extensions.rs;
 // extensionTypes.test.ts fails when a field name or its optionality differs.
 interface ExtensionContributionBase {
@@ -23,6 +27,288 @@ export interface ExtensionDetailLink extends ExtensionContributionBase {
   /** Qualified Kubernetes kinds, e.g. `argoproj.io/Application`. */
   forKinds: string[];
 }
+export interface ExtensionJoin {
+  id: string;
+  capability: string;
+  match: { label?: string; kindLabel?: string; ownerReference?: boolean; annotation?: string; name?: boolean };
+}
+export interface ExtensionTableColumn {
+  id: string;
+  title: string;
+  forKinds: string[];
+  source: { join?: string; jsonPath: string };
+  format: "text" | "number" | "status" | "badge" | "date" | "duration";
+  sortable?: boolean;
+  filterable?: boolean;
+}
+/**
+ * What a dashboard card counts: one operator about one value of each object.
+ * `within` and `before` read the value as an RFC 3339 timestamp against now:
+ * `within: "14d"` is from now until 14 days ahead, `"-1h"` the last hour;
+ * `before: "14d"` is anything earlier than 14 days from now, past included.
+ */
+export interface ExtensionCardPredicate {
+  jsonPath: string;
+  equals?: unknown;
+  absent?: boolean;
+  within?: string;
+  before?: string;
+}
+/** A card on the cluster dashboard (#540). The host reads, counts and draws it. */
+export interface ExtensionDashboardCard {
+  id: string;
+  /** App text: drawn as plain text, never markup. */
+  title: string;
+  size: "s" | "m" | "l";
+  type: "count" | "countByStatus" | "metric" | "list";
+  /** A `k8s.listCustomResource` binding's name. */
+  source: string;
+  predicate?: ExtensionCardPredicate;
+  /** The page the card opens, with its predicate applied as the page's filter. */
+  target?: { page: string };
+  metric?: { jsonPath: string; aggregate: "sum" | "min" | "max" };
+  list?: { jsonPath?: string; order?: "asc" | "desc"; limit?: number };
+}
+export type ExtensionPanelFormat = ExtensionTableColumn["format"];
+/** The six statuses every surface draws (#541). */
+export type NormalizedStatus = "healthy" | "warning" | "error" | "progressing" | "suspended" | "unknown";
+/**
+ * A predicate without its refusal sentence: the same operators and path
+ * grammar, plus `selfReference` — the value must be a reference, in a
+ * host-known format, to the very object the rule reads (an Argo CD tracking
+ * id naming its own resource). The host evaluates it; the surface never does.
+ */
+export type ExtensionStatusCondition = Omit<ActionPredicate, "reason"> & { selfReference?: "argocd-tracking-id" };
+/** One status rule; the first whose conditions all hold wins. */
+export interface ExtensionStatusRule {
+  when: ExtensionStatusCondition[];
+  status: NormalizedStatus;
+  /** The word shown. Required: colour is never the only signal. */
+  label: string;
+  /** Where in the object the reason is. */
+  reason?: string;
+}
+export interface ExtensionStatusResolver {
+  /** Qualified custom-resource kinds the app declares a reader for. */
+  forKinds: string[];
+  rules: ExtensionStatusRule[];
+}
+export interface ExtensionBadge {
+  id: string;
+  /** Qualified built-in kinds, e.g. `apps/Deployment`. */
+  forKinds: string[];
+  /** A declared join whose matched resource the rules read; without one they read the row's metadata. */
+  join?: string;
+  rules: ExtensionStatusRule[];
+}
+/** What the `from` resource is to the `to` resource (#545). */
+export type ExtensionLinkRelation = "ownedBy" | "managedBy" | "exposedBy" | "references";
+/** Where on the `from` resource the target's name is written: exactly one selector. */
+export interface ExtensionLinkMatch {
+  label?: string;
+  /** With `label`: the label naming the target's namespace. */
+  namespaceLabel?: string;
+  ownerReference?: boolean;
+  annotation?: string;
+  /** With `annotation`: a host-known reference format that must name the resource itself. */
+  parse?: "argocd-tracking-id";
+  /** With `parse: "argocd-tracking-id"`: the namespace of an application written as a bare name. */
+  defaultNamespace?: string;
+  name?: boolean;
+  /**
+   * API 0.5 (#728): a path on the `from` resource, in the predicate grammar plus `[*]`,
+   * whose values name the target — its name, or an object reference with `name` and an
+   * optional `namespace`, `kind`, and `group` or `apiVersion`.
+   */
+  path?: string;
+}
+export interface ExtensionResourceLink {
+  id: string;
+  /** Qualified kind the link is read from, e.g. `apps/Deployment`. */
+  from: string;
+  /** Qualified kind of the target; a declared reader lists it, or it is a built-in kind (API 0.5, #728). */
+  to: string;
+  relation: ExtensionLinkRelation;
+  match: ExtensionLinkMatch;
+}
+/**
+ * What the host resolved an object to. `label` and `reason` are an app's and
+ * a cluster's text: draw them through `plainText`.
+ */
+export interface ResolvedStatus {
+  status: NormalizedStatus;
+  label: string;
+  reason?: string;
+}
+export interface ResolvedBadge extends ResolvedStatus {
+  id: string;
+}
+export interface ExtensionDetailField {
+  label: string;
+  jsonPath: string;
+  join?: string;
+  format?: ExtensionPanelFormat;
+}
+export type ExtensionDetailSection =
+  | { type: "fields"; fields: ExtensionDetailField[] }
+  | { type: "conditions"; jsonPath: string; join?: string };
+export interface ExtensionDetailPanel {
+  id: string;
+  title: string;
+  forKinds: string[];
+  sections: ExtensionDetailSection[];
+}
+/** The types a setting can have (#542), as a manifest spells them. */
+export type ExtensionSettingType =
+  | "string"
+  | "number"
+  | "boolean"
+  | "select"
+  | "multi-select"
+  | "url"
+  | "namespace-selector"
+  | "cluster-selector"
+  | "secret-reference";
+/**
+ * One setting an app declares. The host draws it as a form field and holds
+ * every saved value to it; the form's own checks are only a convenience.
+ * `title`, `description` and option labels are app text: draw them through
+ * `plainText`.
+ */
+export interface ExtensionSetting {
+  id: string;
+  type: ExtensionSettingType;
+  title: string;
+  description?: string;
+  required?: boolean;
+  default?: unknown;
+  /** `select` and `multi-select` only. */
+  options?: Array<{ value: string; label: string }>;
+  /** `number` only. */
+  minimum?: number;
+  maximum?: number;
+  integer?: boolean;
+  /** `string` only; 1024 when absent. */
+  maxLength?: number;
+}
+/**
+ * What the inventory holds for a `secret-reference` setting once the host's
+ * secret store (#543) has its value: a reference, never the value.
+ */
+export interface ExtensionSecretReference {
+  secretRef: string;
+}
+/**
+ * A command palette entry (#544). The host shows it under the app's name. A page
+ * command opens one of the app's pages; an action command runs one of its declared
+ * actions on the resource open in an app resource tab, through the host confirmation.
+ */
+export interface ExtensionCommand {
+  id: string;
+  title: string;
+  target: { page: string } | { action: string };
+  /** Action commands only: the qualified kind of the reader binding the action acts on. */
+  forKinds?: string[];
+}
+/** The capability granted with the hosts it may reach (#568). */
+export const NETWORK_HTTP = "network.http";
+/** Follow a pod's logs (#567). */
+export const POD_LOGS = "k8s.streamLogs";
+/** Run a command the manifest fixes in a pod, after the host confirmation (#567). */
+export const POD_EXEC = "k8s.exec";
+/** Forward a local port the host picks to a pod, while the view is open (#567). */
+export const POD_FORWARD = "k8s.portForward";
+/** The pod capabilities: the targets of a pod binding, and the only ones granted namespaces. */
+export const POD_TARGETS: readonly string[] = [POD_LOGS, POD_EXEC, POD_FORWARD];
+/**
+ * A capability granted with a scope: `network.http` with the hosts it may
+ * reach (#568) — `host`, `host:port`, `*.example.com` (one subdomain label), an
+ * IP address, or `${settings.<id>}` for a `url` setting, whose saved value's host
+ * the host allows — or a pod capability with the namespaces any of whose pods it
+ * may reach (#567, API 0.5).
+ */
+export interface ExtensionScopedPermission {
+  capability: string;
+  hosts?: string[];
+  namespaces?: string[];
+}
+/** One `permissions` entry: a host capability's id, or a scoped grant. */
+export type ExtensionPermission = string | ExtensionScopedPermission;
+/**
+ * The capability a `permissions` entry grants, which is what a grant names.
+ * Reads parsed JSON too, so a review can call it before the host has checked
+ * the manifest: anything else is `undefined`.
+ */
+export function permissionName(permission: unknown): string | undefined {
+  if (typeof permission === "string") return permission;
+  const capability = (permission as { capability?: unknown } | null)?.capability;
+  return typeof capability === "string" ? capability : undefined;
+}
+/** The hosts a manifest's `network.http` permission lists; empty when it has none. */
+export function networkHosts(manifest: unknown): string[] {
+  const permissions = (manifest as { permissions?: unknown } | null)?.permissions;
+  const scoped = (Array.isArray(permissions) ? permissions : []).find(
+    (permission) => permissionName(permission) === NETWORK_HTTP && typeof permission === "object",
+  ) as { hosts?: unknown } | undefined;
+  return Array.isArray(scoped?.hosts) ? scoped.hosts.filter((host): host is string => typeof host === "string") : [];
+}
+/** The namespaces a manifest's `capability` permission grants (#567); empty when it grants none. */
+export function podNamespaces(manifest: unknown, capability: string): string[] {
+  const permissions = (manifest as { permissions?: unknown } | null)?.permissions;
+  const scoped = (Array.isArray(permissions) ? permissions : []).find(
+    (permission) => permissionName(permission) === capability && typeof permission === "object",
+  ) as { namespaces?: unknown } | undefined;
+  return Array.isArray(scoped?.namespaces)
+    ? scoped.namespaces.filter((namespace): namespace is string => typeof namespace === "string")
+    : [];
+}
+/** The fields every provider has: a query template sent through a `network.http` binding. */
+interface ExtensionProviderBase {
+  id: string;
+  title: string;
+  /** The `network.http` binding the query goes through. */
+  capability: string;
+  forKinds: string[];
+  /**
+   * The query, with `${cluster}`, `${namespace}`, `${workload}` or `${pod}` inside
+   * double-quoted strings, which the host escapes, and a metric provider's
+   * `${range}` and `${step}`. The host binds every one; the app sends nothing.
+   */
+  query: string;
+}
+/** A PromQL range query, drawn as a chart on each kind's overview. */
+export interface ExtensionMetricProvider extends ExtensionProviderBase {
+  language: "promql";
+  unit: NativeTimeseriesUnit;
+}
+/** A LogQL query the log view can follow as a source beside Kubernetes. */
+export interface ExtensionLogProvider extends ExtensionProviderBase {
+  language: "logql";
+}
+/** A TraceQL search, listed on each kind's overview. */
+export interface ExtensionTraceProvider extends ExtensionProviderBase {
+  language: "traceql";
+}
+/** The three provider lists, by what they answer. */
+export interface ExtensionProviderLists {
+  metrics: ExtensionMetricProvider;
+  logs: ExtensionLogProvider;
+  traces: ExtensionTraceProvider;
+}
+const PROVIDER_LISTS = {
+  metrics: "metricProviders",
+  logs: "logProviders",
+  traces: "traceProviders",
+} as const;
+/** The providers of one list that `manifest` declares for `kind`, in manifest order. */
+export function providersFor<K extends keyof ExtensionProviderLists>(
+  manifest: ExtensionManifest,
+  list: K,
+  kind: string,
+): ExtensionProviderLists[K][] {
+  const declared = manifest.contributions[PROVIDER_LISTS[list]] as ExtensionProviderLists[K][] | undefined;
+  return (declared ?? []).filter((provider) => provider.forKinds.includes(kind));
+}
 export interface ExtensionManifest {
   /** Editor metadata naming the manifest's JSON Schema; the host ignores it. */
   $schema?: string;
@@ -30,37 +316,155 @@ export interface ExtensionManifest {
   name: string;
   version: string;
   srelensApiVersion: string;
-  kind: "declarative";
-  permissions: string[];
+  /** `executable` (API 0.6, #574) also runs the `sidecar` it declares. */
+  kind: "declarative" | "executable";
+  /**
+   * The host capabilities the bindings target; `network.http` with its hosts (#568),
+   * and a pod capability with the namespaces it grants, if any (#567).
+   */
+  permissions: ExtensionPermission[];
   capabilities: Array<{
     name: string;
     title: string;
     target: string;
+    /**
+     * A custom-resource reader's API versions, most preferred first, instead of one
+     * `arguments.version` (#547). The host reads, on each cluster, the first one its
+     * CustomResourceDefinition serves.
+     */
+    versions?: string[];
+    /** Per listed version: a JSONPath the manifest reads, mapped to the one to read there. */
+    jsonPathOverrides?: Record<string, Record<string, string>>;
     arguments: Record<string, unknown>;
     inputs: string[];
   }>;
+  /**
+   * Declared mutations (#549). Absent in a manifest that only reads, and left
+   * out of the stored form when empty. Each entry names a host action
+   * primitive and the reader binding whose kind it acts on; the host fills in
+   * that kind and fixes the inputs, so nothing here names a resource the app
+   * does not already hold a granted reader for.
+   */
+  actions?: Array<{
+    name: string;
+    title: string;
+    /** A host action primitive, e.g. `k8s.annotate`. */
+    target: string;
+    /** The `name` of a reader binding in `capabilities`. */
+    resource: string;
+    /** What the action writes, fixed at install time. */
+    arguments: Record<string, unknown>;
+    /**
+     * What must be true of the resource for the host to send the write
+     * (#550). Checked by the host against its own fresh read, so nothing
+     * here is a check the surface is trusted to have made.
+     */
+    preconditions?: ActionPredicate[];
+    /**
+     * What must be true of the resource for the control to be offered. The
+     * same predicates, asked here rather than of the cluster; a condition
+     * that must be *enforced* belongs in `preconditions`.
+     */
+    availableWhen?: ActionPredicate[];
+  }>;
+  /** Typed settings (#542), drawn by the host as a form in Settings → Apps. */
+  settings?: ExtensionSetting[];
+  /** The sidecar an executable app runs, and the operations it answers (#574). */
+  sidecar?: ExtensionSidecar;
   contributions: {
     pages: ExtensionPage[];
     detailTabs: ExtensionDetailTab[];
     detailLinks: ExtensionDetailLink[];
+    joins?: ExtensionJoin[];
+    tableColumns?: ExtensionTableColumn[];
+    dashboardCards?: ExtensionDashboardCard[];
+    detailPanels?: ExtensionDetailPanel[];
+    statusResolvers?: ExtensionStatusResolver[];
+    badges?: ExtensionBadge[];
+    commands?: ExtensionCommand[];
+    resourceLinks?: ExtensionResourceLink[];
+    /** PromQL range queries drawn as charts on workload and pod overviews (#569). */
+    metricProviders?: ExtensionMetricProvider[];
+    /** LogQL queries the log view can follow as a source (#569). */
+    logProviders?: ExtensionLogProvider[];
+    /** TraceQL searches listed on workload and pod overviews (#569). */
+    traceProviders?: ExtensionTraceProvider[];
   };
+}
+/**
+ * An executable app's sidecar (#574): the binary it runs on each platform, a file under
+ * `bin/<platform>/` in its package, and the operations it answers. Each operation is the
+ * MCP tool `plugin/<id>/<operation>`, whose input schema the host builds from `inputs`.
+ */
+export interface ExtensionSidecar {
+  binaries: Record<string, string>;
+  operations: ExtensionOperation[];
+}
+export interface ExtensionOperation {
+  name: string;
+  title: string;
+  inputs?: ExtensionOperationInput[];
+  view?: { autoRun?: boolean; stream?: boolean; hidden?: boolean };
+}
+export interface ExtensionOperationInput {
+  name: string;
+  title?: string;
+  type: "string" | "integer" | "number" | "boolean";
+  required?: boolean;
+  /** For a string: the most bytes it may hold, 1–65536. Default 1024. */
+  maxLength?: number;
 }
 /** Where a version came from: `catalog` is the exact bytes of a cached catalog release. */
 export type ExtensionSource = "local" | "catalog";
+/**
+ * Who signed an app, as the host verified it (#559): the publisher the catalog delegates the
+ * app's ID namespace to. Shown as "Signed by <name>".
+ */
+export interface ExtensionSigner {
+  id: string;
+  name: string;
+}
+/** A signed document (#559): a DSSE envelope over the document's exact bytes. */
+export interface ExtensionSignedDocument {
+  payloadType: string;
+  /** The document's exact bytes, in base64. */
+  payload: string;
+  signatures: Array<{ keyid?: string; sig: string }>;
+}
+/**
+ * A publisher signature the host keeps and checks on every load. For a package (#562) it is
+ * over `digests`, the package's digest list, which names `manifest`; otherwise over `manifest`.
+ */
+export interface ExtensionSignatureProof {
+  manifest: string;
+  signature: number[];
+  /**
+   * The signed publisher delegation that vouched for the signature (#559), kept so the host
+   * can verify it with no catalog at hand. Absent when the host's own delegations vouch for it.
+   */
+  delegation?: ExtensionSignedDocument;
+  digests?: string;
+}
 /** A version an update replaced, kept so it can be restored. */
 export interface ExtensionPreviousVersion {
-  signatureProof?: {manifest:string;signature:number[]};
+  signatureProof?: ExtensionSignatureProof;
   manifest: ExtensionManifest;
   grants: string[];
   revision: number;
   source: ExtensionSource;
   /** Seconds since the Unix epoch. */
   installedAt: number;
+  /** The package this version was unpacked from, by its digest list's SHA-256 (#562). */
+  package?: string;
 }
 export interface InstalledExtension {
-  signatureProof?: {manifest:string;signature:number[]};
+  signatureProof?: ExtensionSignatureProof;
   /** Set by the host when a stored app failed re-verification; the app is disabled. */
   quarantined?: string;
+  /** Host-computed unsigned-app policy denial; the affected app is disabled. */
+  policyBlocked?: string;
+  /** Who signed the installed version, when its proof verified on this read (#559). */
+  signedBy?: ExtensionSigner;
   manifest: ExtensionManifest;
   enabled: boolean;
   revision: number;
@@ -77,20 +481,92 @@ export interface InstalledExtension {
    * be shared by two contexts (#623), so neither is the identity here.
    */
   contexts?: string[];
+  /**
+   * Whether the app's `network.http` requests may use plain HTTP to this computer
+   * (#568). Off until a person turns it on for this app; absent means off.
+   */
+  allowLoopbackHttp?: boolean;
+  /**
+   * The package this version was unpacked from, by its digest list's SHA-256 (#562);
+   * absent for an app installed from a single-file manifest.
+   */
+  package?: string;
+  /**
+   * The package's logo as a `data:` URL, reported by `extensions.list` and never stored;
+   * absent from `extensions.configure`'s answer. Decoration only: it never says who
+   * published the app, which the signature label does.
+   */
+  icon?: string;
 }
 export interface ExtensionInventory {
+  /** Missing in older inventories means false. */
+  allowUnsignedApps?: boolean;
   schemaVersion: number;
   nextRevision: number;
   plugins: InstalledExtension[];
+  /**
+   * Whether the host can keep an app's secret now (#543), reported by
+   * `extensions.list` and never stored. Absent from `extensions.configure`'s
+   * answer; read it from the list.
+   */
+  secretStore?: ExtensionSecretStoreState;
+  /**
+   * The administrator's policy the host holds these apps to (#578), reported by every
+   * read on a host that has one (the web server). Never stored, and never written over
+   * the API.
+   */
+  policy?: ExtensionPolicy;
+}
+/**
+ * What an administrator allows apps to be and do on a host (#578). A `null` list
+ * allows everything of its kind; the host refuses what the policy does not allow, at
+ * install and on every call.
+ */
+export interface ExtensionPolicy {
+  /** Only these app IDs may be installed and used; `null` allows any. */
+  allowedApps?: string[] | null;
+  /** These app IDs may not be installed or used. */
+  blockedApps: string[];
+  /** Signed apps only from these publishers; `null` allows every one the host trusts. */
+  allowedPublishers?: string[] | null;
+  /** Whether apps with no publisher signature may be installed and used at all. */
+  allowUnsignedApps: boolean;
+  /** The host capabilities an app may be granted; `null` allows every one. */
+  allowedCapabilities?: string[] | null;
+  /** Whether an app may declare write actions. Commands in pods are `k8s.exec`, in `allowedCapabilities`. */
+  allowWriteActions: boolean;
+  /** The most `network.http` may reach; empty reaches no host. */
+  networkCeiling: string[];
+  /** Always false until executable apps have a per-user sidecar identity (#521). */
+  allowExecutableApps: boolean;
+  /** Apps every user keeps: one that is installed cannot be removed or disabled. */
+  requiredApps: string[];
+}
+/** The host's secret store, as `extensions.list` reports it (#543). */
+export interface ExtensionSecretStoreState {
+  available: boolean;
+  /** Why not, in the host's words: no keychain, locked, or no store on this host. */
+  reason?: string;
 }
 export type ExtensionChange =
-  | { action: "install"; manifest: string; grants: string[]; signature?: number[] }
+  | { action: "unsignedApps"; allowUnsignedApps: boolean }
+  /** `keyId` is the key the signature names (#559), as the catalog review returned it. */
+  | { action: "install"; manifest: string; grants: string[]; signature?: number[]; keyId?: string; reviewedRevision?: number }
+  /** Installs a package file (#562): native bytes or existing base64; the host verifies it again. */
+  | { action: "installPackage"; package: string | Uint8Array; grants: string[]; reviewedRevision?: number }
+  /**
+   * Installs a catalog release's package (#562), which the host downloads again. `sha256`
+   * names the release; `packageSha256` is the package that was reviewed.
+   */
+  | { action: "installCatalogPackage"; id: string; sha256: string; packageSha256: string; grants: string[]; reviewedRevision?: number }
   | { action: "enable"; id: string; enabled: boolean }
   | { action: "remove"; id: string }
   /** Restores a kept version; `grants` are what the user reviewed and grants again. */
   | { action: "rollback"; id: string; revision: number; grants: string[] }
   /** Limits the app to these stable context IDs, or with `null` allows every cluster. */
   | { action: "clusters"; id: string; contexts: string[] | null }
+  /** Lets the app's `network.http` requests use plain HTTP to this computer, or stops them (#568). */
+  | { action: "loopbackHttp"; id: string; allowLoopbackHttp: boolean }
   | { action: "settings"; id: string; settings: Record<string, unknown> };
 /**
  * Whether an installed app may be used on a context, given that context's key
@@ -113,6 +589,38 @@ export async function configureExtensions(change: ExtensionChange) {
     window.dispatchEvent(new Event(EXTENSIONS_CHANGED));
   return state;
 }
+/** Why an app's secret cannot be set or cleared outside the desktop app (#543, #522). */
+const SECRETS_ON_DESKTOP_ONLY =
+  "App secrets are kept in the desktop app's encrypted secrets vault; this host cannot store one";
+
+/** What setting or clearing a secret answers: whether it is set now, never the value. */
+export interface ExtensionSecretState {
+  set: boolean;
+}
+
+async function changeSecret(input: Record<string, unknown>): Promise<ExtensionSecretState> {
+  // Refused before the value leaves the page: the web host keeps no app
+  // secrets (#522), and a request carrying one is a request that could be
+  // logged on the way to being refused.
+  if (!isTauri()) throw new Error(SECRETS_ON_DESKTOP_ONLY);
+  const answer = await invokeCapability<{ set?: unknown }>("extension.secretStore", input);
+  if (typeof window !== "undefined") window.dispatchEvent(new Event(EXTENSIONS_CHANGED));
+  return { set: answer?.set === true };
+}
+
+/**
+ * Keep `secret` for an app's `secret-reference` setting in the host's store
+ * (#543). Write-only: the answer says the setting is set, and nothing ever
+ * returns the value. Needs the app's `extension.secretStore` grant and an
+ * available store; the host's refusal says why and never repeats the value.
+ */
+export const setExtensionSecret = (id: string, setting: string, secret: string) =>
+  changeSecret({ action: "set", id, setting, secret });
+
+/** Delete an app's secret, or every secret it keeps when no setting is named. */
+export const clearExtensionSecret = (id: string, setting?: string) =>
+  changeSecret({ action: "clear", id, ...(setting === undefined ? {} : { setting }) });
+
 /**
  * One manifest problem. `code` is stable (docs/extensions/specification.md); `path` names
  * the value at fault, e.g. `contributions.pages[2].capability`, and is empty for the whole
@@ -123,13 +631,59 @@ export interface ExtensionValidationError {
   path: string;
   message: string;
 }
-/** Checks a manifest exactly as installing it with these grants would, without installing. */
-export const validateExtension = (manifest: string, grants: string[], signature?: number[]) =>
-  invokeCapability<{ errors: ExtensionValidationError[] }>("extensions.validate", {
+/** Host-computed access changes for the exact manifest and installed revision reviewed. */
+export interface ExtensionPermissionDiff {
+  previousRevision: number | null;
+  added: string[];
+  removed: string[];
+  unchanged: string[];
+}
+/**
+ * Checks a manifest exactly as installing it with these grants would, without installing.
+ * For a package's manifest, `digests` is its digest list as the review returned it, and
+ * `signature` is over that list. `keyId` is the key the signature names (#559), and
+ * `signedBy` in the answer names the publisher when the signature verified.
+ */
+export const validateExtension = (manifest: string, grants: string[], signature?: number[], digests?: string, keyId?: string) =>
+  invokeCapability<{ errors: ExtensionValidationError[]; permissionDiff?: ExtensionPermissionDiff; signedBy?: ExtensionSigner }>("extensions.validate", {
     manifest,
     grants,
     ...(signature ? { signature } : {}),
+    ...(digests !== undefined ? { digests } : {}),
+    ...(signature && keyId ? { keyId } : {}),
   });
+/** What a package holds beyond its manifest, as the host verified it (#562). */
+export interface ExtensionPackageReview {
+  /** SHA-256 of the package file. */
+  sha256: string;
+  /** The exact digest list the signature, if any, covers; `validateExtension` takes it. */
+  digests: string;
+  files: Array<{ path: string; size: number }>;
+  /** The package's logo as a `data:` URL. Decoration, never a sign of who published it. */
+  icon?: string;
+}
+/** A manifest to review, exactly as the host verified it, and its package when it came as one. */
+export interface ExtensionReview {
+  manifest: string;
+  signature?: number[] | null;
+  /** The key the signature names (#559), passed back to the install. */
+  keyId?: string;
+  /** Who signed it: the publisher delegated its namespace (#559). */
+  signedBy?: ExtensionSigner;
+  package?: ExtensionPackageReview;
+}
+/** The largest package file the host accepts (#562). */
+export const MAX_EXTENSION_PACKAGE_BYTES = 512 * 1024 * 1024;
+/** A package file's bytes as the base64 the host reads. */
+export function encodePackage(bytes: Uint8Array): string {
+  let binary = "";
+  for (let at = 0; at < bytes.length; at += 0x8000)
+    binary += String.fromCharCode(...bytes.subarray(at, at + 0x8000));
+  return btoa(binary);
+}
+/** Verifies a package file (`.srelens-extension`) and returns what to review; installs nothing. */
+export const reviewExtensionPackage = (bytes: Uint8Array) =>
+  invokeCapability<ExtensionReview>("extensions.packageManifest", { package: isTauri() ? bytes : encodePackage(bytes) });
 export interface ExtensionResourceResult {
   printerColumns?: Array<{name:string;jsonPath:string;type?:string}>;
   columnsError?: string;
@@ -141,8 +695,32 @@ export interface ExtensionResourceResult {
     age: string;
     created?: string | null;
     columns: string[];
+    /** The row's status, when the app declares a status resolver for its kind (#541). */
+    status?: ResolvedStatus;
   }>;
 }
+type ExtensionResourceItem = ExtensionResourceResult["items"][number];
+/**
+ * One listed resource's normalized status (#541): the host's, resolved from
+ * the app's `statusResolvers` on the whole object, or — for a page still on
+ * the deprecated `statusColumns` — read from its printer columns and mapped
+ * onto the same six statuses. `unknown` when neither says anything.
+ *
+ * Per item on purpose, so a count by status (#540's `countByStatus`, an app
+ * dashboard) maps it over the rows it already holds.
+ */
+export function itemStatus(item: ExtensionResourceItem, statusColumns?: ExtensionPage["statusColumns"]): NormalizedStatus {
+  if (item.status) return item.status.status;
+  if (!statusColumns) return "unknown";
+  const truth = (index?: number) => index !== undefined && item.columns[index]?.toLowerCase() === "true";
+  if (truth(statusColumns.suspended)) return "suspended";
+  if (truth(statusColumns.progressing)) return "progressing";
+  const ready = item.columns[statusColumns.ready]?.toLowerCase();
+  return ready === "true" ? "healthy" : ready === "false" ? "error" : "unknown";
+}
+/** {@link itemStatus} for each item, in order. */
+export const itemStatuses = (items: ExtensionResourceItem[], statusColumns?: ExtensionPage["statusColumns"]) =>
+  items.map((item) => itemStatus(item, statusColumns));
 export const readExtension = <T = ExtensionResourceResult>(
   id: string,
   revision: number,
@@ -150,6 +728,10 @@ export const readExtension = <T = ExtensionResourceResult>(
   context: string,
   namespace = "",
   useCrdColumns = false,
+  /** A dashboard card's id: only the rows that card counted. */
+  card?: string,
+  /** With a card and no `namespace`: the several namespaces it counted in. */
+  namespaces?: string[],
 ) =>
   invokeCapability<T>("extensions.read", {
     id,
@@ -158,7 +740,150 @@ export const readExtension = <T = ExtensionResourceResult>(
     context,
     namespace,
     ...(useCrdColumns ? {useCrdColumns:true} : {}),
+    ...(card ? { card } : {}),
+    ...(card && namespaces?.length ? { namespaces } : {}),
   });
+/** What `extensions.queryProvider` is asked: one provider, for the resource a view shows (#569). */
+export interface ExtensionProviderQuery {
+  id: string;
+  revision: number;
+  /** The provider's `id`. */
+  provider: string;
+  context: string;
+  namespace: string;
+  /** The qualified kind of the resource the view shows, e.g. `apps/Deployment`. */
+  resourceKind: string;
+  name: string;
+  /** How far back from now, 300–604800 seconds; the host's default is an hour. */
+  rangeSeconds?: number;
+}
+/** One trace a trace provider's search found. */
+export interface ExtensionTrace {
+  traceId: string;
+  rootService?: string;
+  rootName?: string;
+  /** When it started, in epoch milliseconds. */
+  start?: number;
+  durationMs?: number;
+}
+/** What a provider answered, as the host read it: never markup, only data it draws. */
+export type ExtensionProviderResult =
+  | { kind: "metrics"; chart: NativeTimeseriesData }
+  | { kind: "logs"; lines: Array<{ time: string; source: string; line: string; truncated?: boolean }>; truncated: boolean }
+  | { kind: "traces"; traces: ExtensionTrace[]; truncated: boolean };
+/** One provider query, through its `network.http` binding and every rule the host holds that to. */
+export const queryExtensionProvider = (query: ExtensionProviderQuery) =>
+  invokeCapability<ExtensionProviderResult>("extensions.queryProvider", {
+    id: query.id,
+    revision: query.revision,
+    provider: query.provider,
+    context: query.context,
+    namespace: query.namespace,
+    resourceKind: query.resourceKind,
+    name: query.name,
+    ...(query.rangeSeconds !== undefined ? { rangeSeconds: query.rangeSeconds } : {}),
+  });
+/**
+ * One dashboard card's answer. `error` is a read that failed or a figure that
+ * could not be made, and carries no figure, so it can never be drawn as zero.
+ * `countByStatus` counts by the app's status rules (#541), one entry per label.
+ */
+export type ResolvedDashboardCard = { id: string } & (
+  | { state: "count"; count: number }
+  | { state: "countByStatus"; total: number; statuses: Array<{ status: string; count: number }> }
+  /** `value` is null when no matching object carried a number to take a minimum or maximum of. */
+  | { state: "metric"; value: number | null; counted: number }
+  | { state: "list"; total: number; rows: Array<{ namespace: string; name: string; value?: string }> }
+  | { state: "error"; reason: string }
+);
+/** Every card an enabled app declares, for one cluster and the dashboard's namespace selection. */
+export const resolveDashboardCards = (id: string, revision: number, context: string, namespaces: string[]) =>
+  invokeCapability<{ cards: ResolvedDashboardCard[] }>("extensions.resolveCards", {
+    id, revision, context, namespaces,
+  });
+export interface ExtensionColumnRow {
+  uid?: string;
+  name: string;
+  namespace: string;
+  row: Record<string, unknown>;
+}
+export interface ExtensionColumnResult {
+  columns: ExtensionTableColumn[];
+  /** The badges the app declares for the requested kind (#541). */
+  badges?: ExtensionBadge[];
+  cells: Array<{ uid?: string | null; name: string; namespace: string;
+    values: Record<string, string | null>; errors?: Record<string, string>;
+    badges?: ResolvedBadge[]; badgeErrors?: Record<string, string> }>;
+}
+export const resolveExtensionColumns = (
+  id: string, revision: number, context: string, namespace: string, kind: string,
+  uids: ExtensionColumnRow[],
+) => invokeCapability<ExtensionColumnResult>("extensions.resolveColumns", {
+  id, revision, context, namespace, kind, uids,
+});
+export type ExtensionResolvedPanel = {
+  id: string;
+  title: string;
+  sections: Array<
+    { type: "fields"; fields: Array<{ label: string; value: string | null; format?: ExtensionPanelFormat; error?: string }> }
+    | { type: "conditions"; items: Array<{ type: string; status: "True" | "False" | "Unknown"; reason?: string; message?: string; observedGeneration?: number; lastTransitionTime?: string }>; error?: string }
+  >;
+};
+export const resolveExtensionPanels = (
+  id: string, revision: number, context: string, namespace: string, kind: string, resource: object,
+) => invokeCapability<{ panels: ExtensionResolvedPanel[] }>("extensions.resolvePanels", {
+  id, revision, context, namespace, kind, resource,
+});
+/** One endpoint of a resolved link; `namespace` is null when cluster-scoped or unknown. */
+export interface ExtensionLinkEndpoint { kind: string; namespace: string | null; name: string }
+/**
+ * One resource at the other end of a link. `exists: false`: the resource names a target
+ * the cluster does not have — unless `unverified` says why the host did not look it up,
+ * or, for a source in a reverse view, why it may name a namesake instead.
+ */
+export interface ExtensionLinkTarget { namespace: string | null; name: string; exists: boolean; unverified?: string }
+/** One declared link resolved for one resource: an edge set a topology can also draw. */
+export interface ExtensionResolvedLink {
+  id: string;
+  relation: ExtensionLinkRelation;
+  /** Target kind, qualified. */
+  to: string;
+  /** The reader binding that lists `to`; empty for a built-in kind, which opens in the host's own Inspector (#728). */
+  capability: string;
+  targets: ExtensionLinkTarget[];
+  /** Why the host could not answer; distinct from an empty `targets`. */
+  error?: string;
+}
+export const resolveExtensionLinks = (
+  id: string, revision: number, context: string, namespace: string, kind: string, resource: object,
+) => invokeCapability<{ from: ExtensionLinkEndpoint; links: ExtensionResolvedLink[] }>("extensions.resolveLinks", {
+  id, revision, context, namespace, kind, resource,
+});
+/**
+ * One declared link read the other way round, for the Inspector of a resource of its `to`
+ * kind (#728): the resources of kind `from` whose link names this one. The same edges as
+ * {@link ExtensionResolvedLink}, seen from their target.
+ */
+export interface ExtensionReverseLink {
+  id: string;
+  relation: ExtensionLinkRelation;
+  /** Source kind, qualified. */
+  from: string;
+  /** The reader binding that lists `from`; empty for a built-in kind. */
+  capability: string;
+  sources: ExtensionLinkTarget[];
+  /** The host's read of `from` stopped at its 2,000-object limit: there may be more sources. */
+  truncated: boolean;
+  /** Resources of `from` the link could not be read on, and why the first could not. */
+  unreadable?: string;
+  /** Why the host could not answer; distinct from an empty `sources`. */
+  error?: string;
+}
+export const resolveExtensionReverseLinks = (
+  id: string, revision: number, context: string, namespace: string, kind: string, resource: object,
+) => invokeCapability<{ to: ExtensionLinkEndpoint; links: ExtensionReverseLink[] }>("extensions.resolveReverseLinks", {
+  id, revision, context, namespace, kind, resource,
+});
 export function extensionRoute(
   context: string,
   id: string,
@@ -167,23 +892,92 @@ export function extensionRoute(
 ) {
   return `/extensions/${[context, id, page, namespace].map(encodeURIComponent).join("/")}`;
 }
-/** A cluster identity route; legacy `/extensions/` routes still carry display names. */
-export function extensionClusterRoute(clusterId: string, id: string, page: string, namespace = "") {
-  return extensionRoute(clusterId, id, page, namespace).replace("/extensions/", "/extension-clusters/");
+/**
+ * An app page on one cluster, named by its context key (`ClusterContext.key`, #695).
+ *
+ * The route is the tab's identity — `openTab` dedupes by it — so it names the cluster by
+ * the one identity no two contexts share. A stable ID can be shared (`a` + `b#c` and
+ * `a#b` + `c`, #623), and a route carrying one opened the second context's page on the
+ * first's tab. Routes from before carry a stable ID under `/extension-clusters/`, and
+ * older ones a display name under `/extensions/`; the prefix says which, because one
+ * string can be one context's key and another's stable ID.
+ */
+export function extensionClusterRoute(contextKey: string, id: string, page: string, namespace = "") {
+  return extensionRoute(contextKey, id, page, namespace).replace("/extensions/", "/extension-contexts/");
 }
-export function extensionClusterResourceRoute(clusterId: string, id: string, page: string, namespace: string, name: string) {
-  return `${extensionClusterRoute(clusterId, id, page, namespace)}/${encodeURIComponent(name)}`;
+export function extensionClusterResourceRoute(contextKey: string, id: string, page: string, namespace: string, name: string) {
+  return `${extensionClusterRoute(contextKey, id, page, namespace)}/${encodeURIComponent(name)}`;
+}
+
+/** Executable tabs retain their context and installed revision after a rail switch or update. */
+export function extensionOperationRoute(contextKey: string, id: string, revision: number, operation: string, params?: Record<string, string | number | boolean>) {
+  const base = `/extension-operation-contexts/${encodeURIComponent(contextKey)}/${encodeURIComponent(id)}/${revision}/${encodeURIComponent(operation)}`;
+  return params && Object.keys(params).length ? `${base}/${encodeURIComponent(JSON.stringify(params))}` : base;
+}
+export function parseExtensionOperationRoute(route: string) {
+  const pieces = route.split("/");
+  if (![6, 7].includes(pieces.length) || pieces[1] !== "extension-operation-contexts" || route.includes("?") || route.length > 32768) return null;
+  try {
+    const [contextKey, id, rawRevision, operation] = pieces.slice(2, 6).map(decodeURIComponent);
+    const revision = Number(rawRevision);
+    let params: Record<string, string | number | boolean> | undefined;
+    if (pieces.length === 7) {
+      const value: unknown = JSON.parse(decodeURIComponent(pieces[6]));
+      if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).length > 16 || Object.entries(value).some(([key, v]) => !/^[a-zA-Z0-9-]{1,64}$/.test(key) || !["string", "number", "boolean"].includes(typeof v))) return null;
+      params = value as typeof params;
+    }
+    return contextKey && id && operation && /^[1-9]\d*$/.test(rawRevision) && Number.isSafeInteger(revision)
+      ? { contextKey, id, revision, operation, ...(params ? { params } : {}) } : null;
+  } catch { return null; }
+}
+
+export function callExtensionOperation(input: { id: string; revision: number; context: string; operation: string; params: Record<string, unknown> }): Promise<unknown> {
+  return invokeCapability("extensions.callOperation", input);
+}
+/**
+ * A dashboard card's target: its app page, filtered to what the card counted.
+ * The card is in the route because the route is the tab's identity — the
+ * filtered page and the whole page are two things a reader can have open.
+ */
+export function extensionCardRoute(contextKey: string, id: string, page: string, namespace: string, card: string, namespaces: string[] = []) {
+  // One namespace is the path's, as on every app route. Several are the card's
+  // selection, sorted so one selection is one tab whatever order it was picked in.
+  const several = namespace ? [] : namespaces.length === 1 ? [] : [...new Set(namespaces)].sort();
+  const path = extensionClusterRoute(contextKey, id, page, namespace || (namespaces.length === 1 ? namespaces[0] : ""));
+  const query = `card=${encodeURIComponent(card)}${several.length ? `&namespaces=${several.map(encodeURIComponent).join(",")}` : ""}`;
+  return `${path}?${query}`;
 }
 export function parseExtensionRoute(route: string) {
-  const pieces = route.split("/");
-  if ((pieces.length !== 6 && pieces.length !== 7) || !["extensions", "extension-clusters"].includes(pieces[1])) return null;
+  const query = route.indexOf("?");
+  const path = query < 0 ? route : route.slice(0, query);
+  const pieces = path.split("/");
+  if ((pieces.length !== 6 && pieces.length !== 7) || !["extensions", "extension-clusters", "extension-contexts"].includes(pieces[1])) return null;
   try {
     const [context, id, page, namespace] = pieces
       .slice(2)
       .map(decodeURIComponent);
     const resourceName = pieces.length === 7 ? decodeURIComponent(pieces[6]) : undefined;
     if (pieces.length === 7 && !resourceName) return null;
-    return context && id && page ? { context, id, page, namespace, ...(pieces[1] === "extension-clusters" ? { clusterId: context } : {}), ...(resourceName ? { resourceName } : {}) } : null;
+    let card: string | undefined;
+    let namespaces: string[] | undefined;
+    if (query >= 0) {
+      // A card narrows a page, over one namespace or a list of them; nothing else
+      // rides in the query, and a resource has no card.
+      const params = new URLSearchParams(route.slice(query + 1));
+      card = params.get("card") ?? "";
+      const listed = params.get("namespaces");
+      const known = listed === null ? ["card"] : ["card", "namespaces"];
+      if (!card || resourceName || [...params.keys()].some((key) => !known.includes(key))) return null;
+      if (listed !== null) {
+        namespaces = listed.split(",").filter(Boolean);
+        if (!namespaces.length || namespace) return null;
+      }
+    }
+    // `contextKey`: the route names its context by key. `clusterId`: by stable ID, as
+    // routes opened before #695 do. Neither: by display name, older still.
+    const identity = pieces[1] === "extension-contexts" ? { contextKey: context }
+      : pieces[1] === "extension-clusters" ? { clusterId: context } : {};
+    return context && id && page ? { context, id, page, namespace, ...identity, ...(resourceName ? { resourceName } : {}), ...(card ? { card } : {}), ...(namespaces ? { namespaces } : {}) } : null;
   } catch {
     return null;
   }
@@ -198,11 +992,32 @@ export interface ExtensionCatalogEntry {
   description: string;
   repository: string;
   license: string;
-  release: { version: string; manifestUrl: string; sha256: string; srelensApiVersion: string; prerelease: boolean };
+  release: {
+    version: string; manifestUrl: string; sha256: string; srelensApiVersion: string; prerelease: boolean;
+    /** The same release as a package (#562). A host that keeps no app files installs `manifestUrl`. */
+    package?: { url: string; sha256: string };
+  };
   testedHost: { repository: string; revision: string };
 }
+/** A publisher the signed catalog delegates app ID namespaces to (#559). */
+export interface ExtensionCatalogPublisher {
+  id: string;
+  name: string;
+  namespaces: string[];
+}
 export interface ExtensionCatalogSnapshot {
-  catalog: { schemaVersion: number; extensions: ExtensionCatalogEntry[] };
+  /**
+   * The last catalog the host verified against its pinned root (#559): refused when unsigned,
+   * expired, or older than one it already verified.
+   */
+  catalog: {
+    schemaVersion: number;
+    version: number;
+    /** When hosts stop trusting it, as an RFC 3339 time. */
+    expires: string;
+    publishers: ExtensionCatalogPublisher[];
+    extensions: ExtensionCatalogEntry[];
+  };
   fetchedAt: number;
   stale: boolean;
   error: string | null;
@@ -214,9 +1029,14 @@ export interface ExtensionCatalogSnapshot {
 }
 export const listExtensionCatalog = (refresh = false) =>
   invokeCapability<ExtensionCatalogSnapshot>("extensions.catalog", { refresh });
-/** Returns the exact checksum-verified bytes for explicit permission review. */
+/**
+ * Returns the exact checksum-verified bytes for explicit permission review; for a release
+ * the host installs as a package (#562), with the package's review. When the app's
+ * namespace is delegated (#559), with the publisher signature, the key it names, and who
+ * signed it.
+ */
 export const reviewCatalogExtension = (id: string, sha256: string) =>
-  invokeCapability<{ manifest: string; signature?: number[] | null }>("extensions.catalogManifest", { id, sha256 });
+  invokeCapability<ExtensionReview>("extensions.catalogManifest", { id, sha256 });
 
 /** Host-selected resource identity; API group/kind are resolved from the installed app. */
 export interface ExtensionResourceSelection {
@@ -225,6 +1045,9 @@ export interface ExtensionResourceSelection {
 export interface ExtensionResourceDetail {
   resource: { apiVersion?: string; kind?: string; metadata: { name: string; namespace?: string; uid: string; resourceVersion: string; creationTimestamp?: string; labels?: Record<string,string>; annotations?: Record<string,string>; [key:string]: unknown }; spec?: Record<string, any>; status?: Record<string, any>; [key:string]: unknown };
   actions: string[];
+  /** Titles and display predicates come from the installed manifest; impact
+   * and confirmation wording come exclusively from the host primitive. */
+  actionMeta?: Record<string, { title: string; availableWhen?: ActionPredicate[]; impact: CapabilityImpact; confirm: string | null }>;
   /** Newest first. */
   events?: Array<{type?:string;reason?:string;message?:string;count?:number;time?:string|null}>;
   /** True when the host returned only the newest events. */
@@ -254,3 +1077,107 @@ export function onExtensionResourceChanged(listener: (resource: ExtensionResourc
 export function extensionResourceRoute(context:string,id:string,page:string,namespace:string,name:string) {
   return `${extensionRoute(context,id,page,namespace)}/${encodeURIComponent(name)}`;
 }
+
+/*
+ * An app's log and runtime metrics (#575). Both reads are for Settings → Apps only and are
+ * deliberately not MCP tools: an agent's context goes to its model provider, and a sidecar's
+ * stderr is third-party text. The host keeps both in memory only, never on disk.
+ */
+export type ExtensionLogLevel = "trace" | "debug" | "info" | "warn" | "error";
+/** The levels, least severe first: a minimum level shows itself and every one after it. */
+export const EXTENSION_LOG_LEVELS: readonly ExtensionLogLevel[] = ["trace", "debug", "info", "warn", "error"];
+export interface ExtensionLogLine {
+  /** Counts from 1 over the life of the app's log. */
+  seq: number;
+  /** Milliseconds since the Unix epoch. */
+  at: number;
+  level: ExtensionLogLevel;
+  /** `sidecar`: the app's own process wrote it on stderr; `host`: srelens wrote it. */
+  source: "sidecar" | "host";
+  /** Already redacted by the host. */
+  text: string;
+}
+/** Declarative apps have no process of their own. */
+export type ExtensionRuntime = "declarative" | "sidecar";
+export interface ExtensionOpenStream {
+  stream: string;
+  view: string;
+  revision: number;
+  source: string;
+  messages: number;
+  bytes: number;
+}
+export type ExtensionProcessState = "starting" | "running" | "restarting" | "disabled" | "refused" | "stopping" | "stopped";
+export type ExtensionProcessAction = "restart" | "viewLogs" | "disable";
+export interface ExtensionProcess {
+  state: ExtensionProcessState;
+  /** Why, in a sentence (redacted); for restarting, disabled and refused. */
+  reason: string | null;
+  /** The headline, such as "Extension process exited unexpectedly"; only when disabled. */
+  message: string | null;
+  /** What the supervisor offers from this state. */
+  actions: ExtensionProcessAction[];
+  /** The sidecar API version negotiated at start, while running. */
+  apiVersion: string | null;
+  pid: number | null;
+  /** Milliseconds since the Unix epoch, when the running process came up. */
+  startedAt: number | null;
+  /** While restarting. */
+  restart: { attempt: number; of: number; delayMs: number } | null;
+  launches: number;
+  unexpectedExits: number;
+  /** `bytes` is null where this OS does not measure it. */
+  memory: { bytes: number | null; limitBytes: number; enforcement: "kernel" | "host" | "missing" };
+  cpus: number;
+  rpc: {
+    answered: number;
+    failed: number;
+    timedOut: number;
+    refused: number;
+    inFlight: number;
+    latency: { samples: number; p50Ms: number | null; p95Ms: number | null; maxMs: number | null };
+  };
+  /** The sidecar's own JSON-RPC streams. */
+  streams: { open: number; opened: number; limit: number };
+}
+export interface ExtensionInspection {
+  id: string;
+  runtime: ExtensionRuntime;
+  /** Always null for a declarative app. */
+  process: ExtensionProcess | null;
+  streams: {
+    /** The app streams its views opened, except watches. */
+    open: ExtensionOpenStream[];
+    /** The app streams whose source is `watch`. */
+    watches: ExtensionOpenStream[];
+    opened: number;
+    messages: number;
+    bytes: number;
+    /** Streams stopped for exceeding the message rate. */
+    rateLimited: number;
+    /** Opens refused because the app was at its cap. */
+    refused: number;
+    /** Streams ended because their window closed or reloaded. */
+    windowEnded: number;
+    /** The per-app cap on open streams. */
+    maxOpen: number;
+  };
+  /** The last 20 error lines, oldest first. */
+  recentErrors: ExtensionLogLine[];
+  log: { lines: number; capacity: number; dropped: number };
+}
+export interface ExtensionLogRead {
+  runtime: ExtensionRuntime;
+  /** The lines after `after` at `minLevel` or above, oldest first. */
+  lines: ExtensionLogLine[];
+  capacity: number;
+  dropped: number;
+}
+export const inspectExtension = (id: string) => invokeCapability<ExtensionInspection>("extensions.inspect", { id });
+/** A field left out is not sent at all: the host denies one it does not know, and `null` is not a level. */
+export const extensionLogs = (id: string, { after, minLevel }: { after?: number; minLevel?: ExtensionLogLevel } = {}) =>
+  invokeCapability<ExtensionLogRead>("extensions.logs", {
+    id,
+    ...(after === undefined ? {} : { after }),
+    ...(minLevel === undefined ? {} : { minLevel }),
+  });

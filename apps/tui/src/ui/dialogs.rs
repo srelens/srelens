@@ -101,7 +101,6 @@ pub enum QuickActionId {
     PlaybookEndpoints,
     PlaybookNodePressure,
     PlaybookArgoProgressing,
-    ArgoDetails,
     ArgoSync,
     ArgoRefresh,
     ArgoOpenGit,
@@ -255,7 +254,9 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
                 ),
                 Span::styled(" to Cancel", Style::default().fg(Theme::DIM)),
             ]);
-            let prompt_widget = Paragraph::new(prompt_line).alignment(Alignment::Center);
+            let prompt_widget = Paragraph::new(prompt_line)
+                .wrap(Wrap { trim: true })
+                .alignment(Alignment::Center);
             f.render_widget(prompt_widget, chunks[1]);
         }
         Modal::InputConfirm {
@@ -364,7 +365,9 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
                 ),
                 Span::styled(" Cancel", Style::default().fg(Theme::dim())),
             ]);
-            let prompt_widget = Paragraph::new(prompt_line).alignment(Alignment::Center);
+            let prompt_widget = Paragraph::new(prompt_line)
+                .wrap(Wrap { trim: true })
+                .alignment(Alignment::Center);
             f.render_widget(prompt_widget, chunks[2]);
         }
         Modal::Scale {
@@ -414,6 +417,7 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
                 Span::styled("[Esc]", Theme::key_hint_key()),
                 Span::styled(" Cancel", Theme::key_hint_desc()),
             ]))
+            .wrap(Wrap { trim: true })
             .alignment(Alignment::Center);
             f.render_widget(hints, chunks[2]);
         }
@@ -422,7 +426,7 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
             destination_input,
             cursor_pos,
         } => {
-            let modal_area = centered_rect(55, 30, area);
+            let modal_area = centered_rect(55, 45, area);
             f.render_widget(Clear, modal_area);
 
             let block = Block::default()
@@ -437,13 +441,14 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Length(1),
+                    Constraint::Length(2),
                     Constraint::Length(3),
                     Constraint::Length(2),
                 ])
                 .split(inner);
 
             let info = Paragraph::new("Direct SSH to host OS (works when kubelet is down)")
+                .wrap(Wrap { trim: true })
                 .style(Style::default().fg(Theme::DIM))
                 .alignment(Alignment::Center);
             f.render_widget(info, chunks[0]);
@@ -472,6 +477,7 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
                 Span::styled("[Esc]", Theme::key_hint_key()),
                 Span::styled(" Cancel", Theme::key_hint_desc()),
             ]))
+            .wrap(Wrap { trim: true })
             .alignment(Alignment::Center);
             f.render_widget(hints, chunks[2]);
         }
@@ -532,6 +538,7 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
                 Span::styled("[Esc]", Theme::key_hint_key()),
                 Span::styled(" Cancel", Theme::key_hint_desc()),
             ]))
+            .wrap(Wrap { trim: true })
             .alignment(Alignment::Center);
             f.render_widget(hints, chunks[2]);
         }
@@ -1274,7 +1281,12 @@ pub fn render_add_cluster_modal(
             Theme::BORDER
         }))
         .title(" Status & Context Preview ");
-    f.render_widget(Paragraph::new(status_lines).block(status_block), chunks[1]);
+    f.render_widget(
+        Paragraph::new(status_lines)
+            .wrap(Wrap { trim: true })
+            .block(status_block),
+        chunks[1],
+    );
 
     // 3. Footer
     let footer = Paragraph::new(Line::from(vec![
@@ -1319,7 +1331,7 @@ pub fn render_feature_banner_modal(
         .clamp(48, 118)
         .min(area.width);
     let modal_height = (area.height.saturating_sub(2))
-        .clamp(18, 29)
+        .clamp(18, 30)
         .min(area.height);
     let modal_x = area.x + (area.width.saturating_sub(modal_width)) / 2;
     let modal_y = area.y + (area.height.saturating_sub(modal_height)) / 2;
@@ -1332,7 +1344,7 @@ pub fn render_feature_banner_modal(
         .border_type(Theme::border_type())
         .border_style(Style::default().fg(Theme::cyan()))
         .title(Span::styled(
-            " ✨ Welcome to SRElens — Feature Highlights ✨ ",
+            " ✨ Welcome to srectl — Feature Highlights ✨ ",
             Style::default()
                 .fg(Theme::cyan())
                 .add_modifier(Modifier::BOLD),
@@ -1344,8 +1356,8 @@ pub fn render_feature_banner_modal(
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3), // Top description & update alert
-            Constraint::Min(13),   // Features list
+            Constraint::Length(4), // Top description & update alert, with a wrap row
+            Constraint::Min(14),   // Features list
             Constraint::Length(3), // Checkbox and key hints
         ])
         .split(inner);
@@ -1376,7 +1388,7 @@ pub fn render_feature_banner_modal(
             ),
             Span::styled("• Run '", Style::default().fg(Theme::dim())),
             Span::styled(
-                "srelens-tui update",
+                "srectl update",
                 Style::default()
                     .fg(Theme::cyan())
                     .add_modifier(Modifier::BOLD),
@@ -1417,27 +1429,30 @@ pub fn render_feature_banner_modal(
     }
 
     let header_hint = if inner_w >= 108 {
-        "Key built-in features you should know (press [0-9, b, i, u] to jump directly, or type ':' for command prompt):"
+        "Key built-in features you should know (press [0-9, b, p, i, u] to jump directly, or type ':' for command prompt):"
     } else if inner_w >= 80 {
-        "Key built-in features (press [0-9, b, i, u] to jump directly, or ':' for commands):"
+        "Key built-in features (press [0-9, b, p, i, u] to jump directly, or ':' for commands):"
     } else {
-        "Key features (press [0-9, b, i, u] to jump, ':' for commands):"
+        "Key features (press [0-9, b, p, i, u] to jump, ':' for commands):"
     };
 
     header_lines.push(Line::from(vec![Span::styled(
         header_hint,
         Style::default().fg(Theme::dim()),
     )]));
-    f.render_widget(Paragraph::new(header_lines), chunks[0]);
+    f.render_widget(
+        Paragraph::new(header_lines).wrap(Wrap { trim: true }),
+        chunks[0],
+    );
 
     // 2. Feature highlights
     let update_desc = if let Some(ver) = update_available {
-        format!("▲ New version v{} available! Run 'srelens-tui update'", ver)
+        format!("▲ New version v{} available! Run 'srectl update'", ver)
     } else {
-        "Check for new releases & update binary ('srelens-tui update')".to_string()
+        "Check for new releases & update binary ('srectl update')".to_string()
     };
 
-    let features: [(&str, &str, &str, String, &str); 13] = [
+    let features: [(&str, &str, &str, String, &str); 14] = [
         (
             "[1]",
             ":helm",
@@ -1514,6 +1529,13 @@ pub fn render_feature_banner_modal(
             "[BGP Peering]",
             "BGP control plane, live peering topology & route VIPs".to_string(),
             ":bgp",
+        ),
+        (
+            "[p]",
+            ":page",
+            "[Incident Triage]",
+            "SRE incident investigator, root-cause diagnosis & change triage".to_string(),
+            ":page [duration]",
         ),
         (
             "[i]",
@@ -1640,7 +1662,7 @@ pub fn render_feature_banner_modal(
         ]
     };
 
-    let jump_hint = "0-9, b, i, u";
+    let jump_hint = "0-9, b, p, i, u";
     let footer_spans = if inner_w >= 98 {
         vec![
             Span::styled(" Press ", Style::default().fg(Theme::dim())),
@@ -1739,5 +1761,8 @@ pub fn render_feature_banner_modal(
         Line::from(footer_spans),
     ];
 
-    f.render_widget(Paragraph::new(footer_lines), chunks[2]);
+    f.render_widget(
+        Paragraph::new(footer_lines).wrap(Wrap { trim: true }),
+        chunks[2],
+    );
 }

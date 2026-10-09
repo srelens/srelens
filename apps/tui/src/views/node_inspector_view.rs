@@ -4,7 +4,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{
         canvas::{Canvas, Line as CanvasLine},
-        Block, Borders, Gauge, Paragraph,
+        Block, Borders, Gauge, Paragraph, Wrap,
     },
     Frame,
 };
@@ -120,6 +120,7 @@ pub fn render_node_inspector_view(f: &mut Frame, area: Rect, state: &NodeInspect
             "\n  ⏳ Inspecting node '{}'...\n  Fetching hardware capacity, GPU allocations, and scheduled pods...",
             state.node_name
         ))
+        .wrap(Wrap { trim: false })
         .block(loading_block)
         .style(Style::default().fg(Theme::CYAN));
         f.render_widget(p, area);
@@ -136,6 +137,7 @@ pub fn render_node_inspector_view(f: &mut Frame, area: Rect, state: &NodeInspect
                 "\n  ❌ Failed to inspect node '{}':\n\n  {}\n\n  Press <Esc> or <q> to return, or <r> to retry.",
                 state.node_name, err
             ))
+            .wrap(Wrap { trim: false })
             .block(error_block)
             .style(Style::default().fg(Theme::RED));
             f.render_widget(p, area);
@@ -156,16 +158,31 @@ pub fn render_node_inspector_view(f: &mut Frame, area: Rect, state: &NodeInspect
     // 6. Footer Key Hints (height: 1)
     let show_sparklines = area.height >= 26;
     let sparkline_height = if show_sparklines { 4 } else { 0 };
+    let text_width = area.width.saturating_sub(2).max(1);
+    let header_height = (Paragraph::new(node_header_lines(d))
+        .wrap(Wrap { trim: true })
+        .line_count(text_width) as u16)
+        .saturating_add(2)
+        .max(4);
+    let conditions_height = (Paragraph::new(node_condition_line(d))
+        .wrap(Wrap { trim: true })
+        .line_count(text_width) as u16)
+        .saturating_add(2)
+        .max(3);
+    let footer_height = (Paragraph::new(node_footer_line(d))
+        .wrap(Wrap { trim: true })
+        .line_count(area.width.max(1)) as u16)
+        .clamp(1, 3);
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(4),                // Header
+            Constraint::Length(header_height),
             Constraint::Length(4),                // Gauges
             Constraint::Length(sparkline_height), // Live Metrics Timeline
-            Constraint::Length(3),                // Conditions & Taints
-            Constraint::Min(6),                   // Pods table
-            Constraint::Length(1),                // Footer
+            Constraint::Length(conditions_height),
+            Constraint::Min(6), // Pods table
+            Constraint::Length(footer_height),
         ])
         .split(area);
 
@@ -477,19 +494,7 @@ fn render_metrics_timeline_card(
     }
 }
 
-fn render_header_card(f: &mut Frame, area: Rect, d: &NodeInspectorDetails) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Theme::BORDER))
-        .title(Span::styled(
-            format!(" 🖥️  Node: {} ", d.name),
-            Style::default()
-                .fg(Theme::ACCENT)
-                .add_modifier(Modifier::BOLD),
-        ));
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-
+fn node_header_lines(d: &NodeInspectorDetails) -> Vec<Line<'_>> {
     let status_color = if d.status == "Ready" {
         Theme::GREEN
     } else {
@@ -514,9 +519,30 @@ fn render_header_card(f: &mut Frame, area: Rect, d: &NodeInspectorDetails) {
     }
 
     if d.has_gpu {
-        let model = d.gpu_model.as_deref().unwrap_or("GPU Accelerator");
+        let raw_model = d.gpu_model.as_deref().unwrap_or("GPU Accelerator");
+        let model = crate::views::sanitize_span_text(raw_model);
+        let badge_text = if d.is_virtual_gpu && d.gpu_allocatable_count > 1 {
+            let phys_prefix = if d.physical_gpu_count > 0 {
+                format!("{}x ", d.physical_gpu_count)
+            } else {
+                String::new()
+            };
+            if d.virtual_gpu_count.is_some() {
+                format!(
+                    "[⚡ {}{} (HAMi {} vGPUs)] ",
+                    phys_prefix, model, d.gpu_allocatable_count
+                )
+            } else {
+                format!(
+                    "[⚡ {}{} ({} vGPUs)] ",
+                    phys_prefix, model, d.gpu_allocatable_count
+                )
+            }
+        } else {
+            format!("[⚡ {}] ", model)
+        };
         row1_spans.push(Span::styled(
-            format!("[⚡ {}] ", model),
+            badge_text,
             Style::default()
                 .fg(Theme::YELLOW)
                 .add_modifier(Modifier::BOLD),
@@ -562,7 +588,23 @@ fn render_header_card(f: &mut Frame, area: Rect, d: &NodeInspectorDetails) {
         row2_spans.push(Span::styled(ip, Theme::header_val()));
     }
 
-    let p = Paragraph::new(vec![Line::from(row1_spans), Line::from(row2_spans)]);
+    vec![Line::from(row1_spans), Line::from(row2_spans)]
+}
+
+fn render_header_card(f: &mut Frame, area: Rect, d: &NodeInspectorDetails) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Theme::BORDER))
+        .title(Span::styled(
+            format!(" 🖥️  Node: {} ", d.name),
+            Style::default()
+                .fg(Theme::ACCENT)
+                .add_modifier(Modifier::BOLD),
+        ));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let p = Paragraph::new(node_header_lines(d)).wrap(Wrap { trim: true });
     f.render_widget(p, inner);
 }
 
@@ -605,10 +647,19 @@ fn render_gauges_card(f: &mut Frame, area: Rect, d: &NodeInspectorDetails) {
         Theme::CYAN
     };
 
-    let cpu_title = format!(
-        " CPU: {:.1}/{:.1} Cores ({}%) ",
-        cpu_req, cpu_alloc, cpu_pct
-    );
+    let cpu_title = Line::from(vec![
+        Span::styled(" CPU ", Style::default().fg(Theme::fg())),
+        Span::styled(
+            "(Alloc)",
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!(": {:.1}/{:.1} Cores ({}%) ", cpu_req, cpu_alloc, cpu_pct),
+            Style::default().fg(Theme::fg()),
+        ),
+    ]);
     let cpu_gauge = Gauge::default()
         .block(
             Block::default()
@@ -636,10 +687,22 @@ fn render_gauges_card(f: &mut Frame, area: Rect, d: &NodeInspectorDetails) {
         Theme::ACCENT
     };
 
-    let mem_title = format!(
-        " Memory: {:.1}/{:.1} GiB ({}%) ",
-        mem_req_gib, mem_alloc_gib, mem_pct
-    );
+    let mem_title = Line::from(vec![
+        Span::styled(" Memory ", Style::default().fg(Theme::fg())),
+        Span::styled(
+            "(Alloc)",
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!(
+                ": {:.1}/{:.1} GiB ({}%) ",
+                mem_req_gib, mem_alloc_gib, mem_pct
+            ),
+            Style::default().fg(Theme::fg()),
+        ),
+    ]);
     let mem_gauge = Gauge::default()
         .block(
             Block::default()
@@ -662,10 +725,13 @@ fn render_gauges_card(f: &mut Frame, area: Rect, d: &NodeInspectorDetails) {
         Theme::GREEN
     };
 
-    let pods_title = format!(
-        " Pods: {}/{} ({}%) ",
-        d.pods_count, d.pods_allocatable, pods_pct
-    );
+    let pods_title = Line::from(Span::styled(
+        format!(
+            " Pods: {}/{} ({}%) ",
+            d.pods_count, d.pods_allocatable, pods_pct
+        ),
+        Style::default().fg(Theme::fg()),
+    ));
     let pods_gauge = Gauge::default()
         .block(
             Block::default()
@@ -679,48 +745,160 @@ fn render_gauges_card(f: &mut Frame, area: Rect, d: &NodeInspectorDetails) {
 
     // 4. GPU Gauge (if present)
     if has_gpu {
-        let model_label = d.gpu_model.as_deref().unwrap_or("GPU");
+        let raw_model_label = d.gpu_model.as_deref().unwrap_or("GPU");
+        let model_label = crate::views::sanitize_span_text(raw_model_label);
 
-        let (gpu_title, gpu_pct) = if d.gpu_memory_requests_mib > 0
-            && d.gpu_memory_total_mib.unwrap_or(0) > 0
-        {
-            let total_vram_mib = d.gpu_memory_total_mib.unwrap_or(15360);
+        let (gpu_suffix, gpu_pct, is_phys_sat) = if d.is_virtual_gpu {
+            let req_vram_gib = d.gpu_memory_requests_mib as f64 / 1024.0;
+            let maybe_phys_vram = d.physical_gpu_memory_total_mib.filter(|&m| m > 0);
+            let maybe_virt_vram = d
+                .virtual_gpu_memory_total_mib
+                .or(d.gpu_memory_total_mib)
+                .filter(|&m| m > 0);
+
+            if let Some(virt_vram_mib) = maybe_virt_vram {
+                let virt_vram_gib = virt_vram_mib as f64 / 1024.0;
+                let virt_pct = (((d.gpu_memory_requests_mib as f64 / virt_vram_mib.max(1) as f64)
+                    * 100.0)
+                    .round() as u64)
+                    .min(999) as u16;
+
+                let (phys_str, phys_sat) = if let Some(phys_vram_mib) = maybe_phys_vram {
+                    let phys_vram_gib = phys_vram_mib as f64 / 1024.0;
+                    let phys_pct =
+                        (((d.gpu_memory_requests_mib as f64 / phys_vram_mib.max(1) as f64) * 100.0)
+                            .round() as u64)
+                            .min(999) as u16;
+                    let phys_prefix = if d.physical_gpu_count > 1 {
+                        format!("{}x ", d.physical_gpu_count)
+                    } else if d.physical_gpu_count == 1 {
+                        "1x ".to_string()
+                    } else {
+                        String::new()
+                    };
+                    (
+                        Some((phys_prefix, phys_vram_gib, phys_pct)),
+                        phys_pct >= 100,
+                    )
+                } else {
+                    (None, false)
+                };
+
+                let suffix = if let Some((phys_prefix, phys_vram_gib, phys_pct)) = phys_str {
+                    let sat_label = if phys_sat { " [Sat]" } else { "" };
+                    if gauge_chunks[3].width >= 76 {
+                        format!(
+                            ": {:.1}/{:.0}G ({}% HAMi vPool) • {}{:.0}G Phys ({}%{}) ",
+                            req_vram_gib,
+                            virt_vram_gib,
+                            virt_pct,
+                            phys_prefix,
+                            phys_vram_gib,
+                            phys_pct,
+                            sat_label
+                        )
+                    } else if gauge_chunks[3].width >= 58 {
+                        format!(
+                            ": {:.1}/{:.0}G ({}% HAMi vPool) • {}{:.0}G Phys ",
+                            req_vram_gib, virt_vram_gib, virt_pct, phys_prefix, phys_vram_gib,
+                        )
+                    } else if gauge_chunks[3].width >= 46 {
+                        format!(
+                            ": {:.1}/{:.0}G ({}% HAMi pool) ",
+                            req_vram_gib, virt_vram_gib, virt_pct
+                        )
+                    } else if gauge_chunks[3].width >= 36 {
+                        format!(
+                            ": {:.1}/{:.0}G ({}% HAMi) ",
+                            req_vram_gib, virt_vram_gib, virt_pct
+                        )
+                    } else {
+                        format!(": {:.0}/{:.0}G ", req_vram_gib, virt_vram_gib)
+                    }
+                } else {
+                    // Physical VRAM is not known: omit physical VRAM rather than guessing
+                    if gauge_chunks[3].width >= 48 {
+                        format!(
+                            ": {:.1}/{:.0}G ({}% HAMi vPool) ",
+                            req_vram_gib, virt_vram_gib, virt_pct
+                        )
+                    } else if gauge_chunks[3].width >= 36 {
+                        format!(
+                            ": {:.1}/{:.0}G ({}% HAMi) ",
+                            req_vram_gib, virt_vram_gib, virt_pct
+                        )
+                    } else {
+                        format!(": {:.0}/{:.0}G ", req_vram_gib, virt_vram_gib)
+                    }
+                };
+                (suffix, virt_pct, phys_sat)
+            } else {
+                // Unknown VRAM: don't invent capacity, render vGPU slice counts instead
+                let gpu_alloc = d.gpu_allocatable_count.max(d.gpu_capacity_count).max(1);
+                let pct = (((d.gpu_requests_count as f64 / gpu_alloc as f64) * 100.0).round()
+                    as u64)
+                    .min(999) as u16;
+                let suffix = if gauge_chunks[3].width >= 42 {
+                    format!(
+                        ": {}/{} vGPUs ({}% HAMi) ",
+                        d.gpu_requests_count, gpu_alloc, pct
+                    )
+                } else {
+                    format!(": {}/{} vGPUs ", d.gpu_requests_count, gpu_alloc)
+                };
+                (suffix, pct, false)
+            }
+        } else if d.gpu_memory_requests_mib > 0 && d.gpu_memory_total_mib.unwrap_or(0) > 0 {
+            let total_vram_mib = d.gpu_memory_total_mib.unwrap_or(0);
             let req_vram_gib = d.gpu_memory_requests_mib as f64 / 1024.0;
             let total_vram_gib = total_vram_mib as f64 / 1024.0;
-            let pct = (((d.gpu_memory_requests_mib as f64 / total_vram_mib as f64) * 100.0).round()
-                as u64)
+            let pct = (((d.gpu_memory_requests_mib as f64 / total_vram_mib.max(1) as f64) * 100.0)
+                .round() as u64)
                 .min(999) as u16;
-            (
+            let suffix = if gauge_chunks[3].width >= 48 {
                 format!(
-                    " ⚡ {}: {:.1}/{:.1} GiB VRAM ({}%) ",
-                    model_label, req_vram_gib, total_vram_gib, pct
-                ),
-                pct,
-            )
+                    ": {:.1}/{:.1} GiB VRAM ({}%) ",
+                    req_vram_gib, total_vram_gib, pct
+                )
+            } else {
+                format!(": {:.1}/{:.1}G ({}%) ", req_vram_gib, total_vram_gib, pct)
+            };
+            (suffix, pct, false)
         } else {
             let gpu_alloc = d.gpu_allocatable_count.max(d.gpu_capacity_count).max(1);
             let pct = (((d.gpu_requests_count as f64 / gpu_alloc as f64) * 100.0).round() as u64)
                 .min(999) as u16;
-            let title = if d.gpu_allocatable_count > 1 {
+            let suffix = if d.gpu_allocatable_count > 1 {
                 format!(
-                    " ⚡ {}: {}/{} Slices ({}%) ",
-                    model_label, d.gpu_requests_count, gpu_alloc, pct
+                    ": {}/{} Slices ({}%) ",
+                    d.gpu_requests_count, gpu_alloc, pct
                 )
             } else {
-                format!(
-                    " ⚡ {}: {}/{} ({}%) ",
-                    model_label, d.gpu_requests_count, gpu_alloc, pct
-                )
+                format!(": {}/{} ({}%) ", d.gpu_requests_count, gpu_alloc, pct)
             };
-            (title, pct)
+            (suffix, pct, false)
         };
 
-        let gpu_color = if gpu_pct > 90 {
+        let gpu_title = Line::from(vec![
+            Span::styled(
+                format!(" ⚡ {} ", model_label),
+                Style::default().fg(Theme::YELLOW),
+            ),
+            Span::styled(
+                "(Alloc)",
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(gpu_suffix, Style::default().fg(Theme::YELLOW)),
+        ]);
+
+        let gpu_color = if is_phys_sat || gpu_pct > 90 {
             Theme::RED
         } else if gpu_pct > 75 {
             Theme::YELLOW
         } else {
-            Theme::YELLOW
+            Theme::GREEN
         };
 
         let gpu_gauge = Gauge::default()
@@ -736,14 +914,7 @@ fn render_gauges_card(f: &mut Frame, area: Rect, d: &NodeInspectorDetails) {
     }
 }
 
-fn render_conditions_and_taints(f: &mut Frame, area: Rect, d: &NodeInspectorDetails) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Theme::BORDER))
-        .title(" Health Conditions & Taints ");
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-
+fn node_condition_line(d: &NodeInspectorDetails) -> Line<'_> {
     let mut spans = Vec::new();
 
     // Conditions
@@ -799,7 +970,18 @@ fn render_conditions_and_taints(f: &mut Frame, area: Rect, d: &NodeInspectorDeta
         }
     }
 
-    let p = Paragraph::new(Line::from(spans));
+    Line::from(spans)
+}
+
+fn render_conditions_and_taints(f: &mut Frame, area: Rect, d: &NodeInspectorDetails) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Theme::BORDER))
+        .title(" Health Conditions & Taints ");
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let p = Paragraph::new(node_condition_line(d)).wrap(Wrap { trim: true });
     f.render_widget(p, inner);
 }
 
@@ -844,6 +1026,7 @@ fn render_pods_table(
 
     if d.pods.is_empty() {
         let empty_p = Paragraph::new("\n  No pods currently scheduled on this node.")
+            .wrap(Wrap { trim: false })
             .style(Style::default().fg(Theme::dim()));
         f.render_widget(empty_p, inner);
         return;
@@ -1159,7 +1342,7 @@ fn render_pods_table(
     f.render_widget(p, inner);
 }
 
-fn render_footer_hints(f: &mut Frame, area: Rect, d: &NodeInspectorDetails) {
+fn node_footer_line(d: &NodeInspectorDetails) -> Line<'static> {
     let cordon_hint = if d.unschedulable {
         ("<c>", "Uncordon")
     } else {
@@ -1204,7 +1387,11 @@ fn render_footer_hints(f: &mut Frame, area: Rect, d: &NodeInspectorDetails) {
         ));
     }
 
-    let p = Paragraph::new(Line::from(spans));
+    Line::from(spans)
+}
+
+fn render_footer_hints(f: &mut Frame, area: Rect, d: &NodeInspectorDetails) {
+    let p = Paragraph::new(node_footer_line(d)).wrap(Wrap { trim: true });
     f.render_widget(p, area);
 }
 
@@ -1254,6 +1441,11 @@ mod tests {
             gpu_requests_count: 0,
             gpu_memory_total_mib: None,
             gpu_memory_requests_mib: 0,
+            is_virtual_gpu: false,
+            physical_gpu_count: 0,
+            physical_gpu_memory_total_mib: None,
+            virtual_gpu_count: None,
+            virtual_gpu_memory_total_mib: None,
             conditions: vec![],
             taints: vec![],
             pods: vec![

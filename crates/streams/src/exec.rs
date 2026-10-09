@@ -134,6 +134,15 @@ impl ExecManager {
         }
     }
 
+    /// Whether session `session` is still running: known, and its task not finished.
+    pub fn has_session(&self, session: u64) -> bool {
+        self.sessions
+            .lock()
+            .unwrap()
+            .get(&session)
+            .is_some_and(|s| !s.handle.is_finished())
+    }
+
     /// Close an exec session and abort its task.
     pub fn close(&self, session: u64) {
         if let Some(s) = self.sessions.lock().unwrap().remove(&session) {
@@ -213,6 +222,44 @@ mod tests {
 
         manager.shutdown_all(); // no panic; subsequent close is a no-op
         assert!(manager.sessions.lock().unwrap().is_empty());
+        assert!(!manager.has_session(id));
+        manager.close(id);
+    }
+
+    /// A session whose task ended on its own is not running, though it is
+    /// still known until it is closed.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_session_that_ended_is_not_running() {
+        let manager = ExecManager::new(ClientCache::new_many(vec![]));
+        let sink = Arc::new(TestSink::default());
+        let id = manager
+            .start(
+                sink.clone(),
+                "nope".into(),
+                "ns".into(),
+                "pod-a".into(),
+                "exec-2-abcd".into(),
+                ExecOpts::default(),
+            )
+            .await
+            .unwrap();
+        for _ in 0..100 {
+            if !sink.payloads_for("exec:exit:exec-2-abcd").is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        for _ in 0..100 {
+            if !manager.has_session(id) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert!(!manager.has_session(id));
+        assert!(
+            !manager.has_session(id + 1),
+            "an unknown session is not running"
+        );
         manager.close(id);
     }
 }

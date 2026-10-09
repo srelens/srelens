@@ -28,12 +28,7 @@ import { StatusBar } from "./components/StatusBar";
 import { LandingPage } from "./components/LandingPage";
 import { getInitialTheme, applyTheme, type Theme, type ThemeMode, type ThemeName } from "./ui";
 import { listCrds, type CrdRef } from "@srelens/core";
-import {
-  isClusterScopedKind,
-  isNavigableResourceKind,
-  targetNamespace,
-  type ResourceTarget,
-} from "@srelens/core";
+import { targetNamespace, type ResourceTarget } from "@srelens/core";
 import {
   loadClusterNamespaces,
   saveClusterNamespaces,
@@ -55,7 +50,13 @@ import {
   loadMcpSettings,
 } from "@srelens/core";
 import { applyUiScale, getUiScale, setUiScale, stepUiScale, uiScaleShortcut } from "@srelens/core";
-import { dedupeDeepLinkTargets, parseDeepLink, type DeepLinkTarget } from "@srelens/core";
+import {
+  checkDeepLink,
+  dedupeDeepLinkTargets,
+  deepLinkHeldNotice,
+  DEEP_LINK_REFUSED,
+  type DeepLinkTarget,
+} from "@srelens/core";
 import { applyViewPatch, type TabViewState } from "@srelens/core";
 import {
   remapTabsToContexts,
@@ -82,6 +83,7 @@ import { startMcpHttp } from "@srelens/core";
 import { checkForUpdateAndNotify } from "@srelens/core";
 import { currentWindowLabel } from "@srelens/core";
 import { notify } from "@srelens/core";
+import { listenForHostNotices } from "@srelens/core";
 import { describeError } from "@srelens/core";
 import { isTauri, isWeb } from "@srelens/core/platform";
 import type { SettingsSection } from "./components/SettingsView";
@@ -233,7 +235,11 @@ export function App() {
         // Computed from the ref rather than inside the updater: the active id
         // has to be reconciled alongside, and state updaters must stay free
         // of side effects (React re-invokes them in development).
-        const { tabs: kept, dropped } = pruneMissingContexts(remapped, names);
+        // Pruned only on a listing that answered: one that failed, even with
+        // a partial list, has not said a missing context is gone (#855).
+        const { tabs: kept, dropped } = o.error
+          ? { tabs: remapped, dropped: 0 }
+          : pruneMissingContexts(remapped, names);
         const renamed = remapped.some((tab, i) => tab !== tabsRef.current[i]);
         if (renamed && dropped === 0) setTabs(remapped);
         if (dropped > 0) {
@@ -251,7 +257,9 @@ export function App() {
             );
           }
         }
-        sessionPruneReported.current = true;
+        // Not after a failed listing, which judged nothing: the restored
+        // session's tabs are still to be checked, and still owed the notice.
+        if (!o.error) sessionPruneReported.current = true;
       }
     });
   };
@@ -366,48 +374,42 @@ export function App() {
   // Routed only once the contexts are known: a link that arrives during a cold
   // start would otherwise be judged against an empty context list and
   // rejected as pointing at a cluster that "doesn't exist".
+  //
+  // A listing that FAILED is no answer either (#855): a link naming a context
+  // it did not return stays queued, one notice says why, and the re-list that
+  // follows (`kubeconfig-changed`, a file added) judges it again.
+  const heldLinksNotified = useRef(false);
   useEffect(() => {
+    if (!contextsError) heldLinksNotified.current = false;
     if (pendingLinks.length === 0 || !contexts) return;
     // Drain the whole queue: several links can arrive while the contexts are
     // still loading, and routing only the newest would silently swallow the
     // rest. They open in order, so the last one ends up in front.
     const queued = pendingLinks;
-    setPendingLinks([]);
 
     // Validate first, then route: a batch is applied against ONE render's
     // `tabs`, so links sharing a view have to be collapsed before any of them
-    // appends a tab (see dedupeDeepLinkTargets).
+    // appends a tab (see dedupeDeepLinkTargets). The rules are core's, shared
+    // with the new design, so a link refused here is refused there too.
+    const names = contexts.map((c) => c.name);
     const valid: DeepLinkTarget[] = [];
+    const held: string[] = [];
     for (const url of queued) {
-      const target = parseDeepLink(url);
-      if (!target) {
-        notify.error("Couldn't open that link", "It isn't a link srelens understands.");
-        continue;
-      }
-      if (!contexts.some((c) => c.name === target.context)) {
-        notify.error("Couldn't open that link", `No kube context named "${target.context}".`);
-        continue;
-      }
-      if (target.route === "resource") {
-        // K8S_KIND alone is too permissive: Events have a list view but no
-        // detail, so such a link would quietly land on the list instead of
-        // the object it named.
-        if (!isNavigableResourceKind(target.kind)) {
-          notify.error("Couldn't open that link", `srelens can't open a ${target.kind} directly.`);
-          continue;
-        }
-        // "-" means cluster-scoped. Allowing it for a namespaced kind would
-        // search every namespace and focus whichever matching name came back
-        // first — a link that silently opens the wrong object.
-        if (!isClusterScopedKind(target.kind) && target.namespace === null) {
-          notify.error(
-            "Couldn't open that link",
-            `${target.kind} is namespaced, so the link needs a namespace.`,
-          );
-          continue;
-        }
-      }
-      valid.push(target);
+      const check = checkDeepLink(url, names, { listingFailed: contextsError !== "" });
+      if (check.ok) valid.push(check.target);
+      else if (check.held) held.push(url);
+      else notify.error(DEEP_LINK_REFUSED, check.reason);
+    }
+    if (held.length > 0 && !heldLinksNotified.current) {
+      heldLinksNotified.current = true;
+      const notice = deepLinkHeldNotice(contextsError);
+      notify.error(notice.title, notice.detail);
+    }
+    // Only when something left the queue: re-queuing the held links unchanged
+    // would wake this effect again for nothing. What is taken off the front is
+    // exactly `queued`, so links a drain appended meanwhile are kept.
+    if (held.length < queued.length) {
+      setPendingLinks((current) => [...held, ...current.slice(queued.length)]);
     }
 
     for (const target of dedupeDeepLinkTargets(valid)) {
@@ -424,7 +426,7 @@ export function App() {
         target.name,
       );
     }
-  }, [pendingLinks, contexts]);
+  }, [pendingLinks, contexts, contextsError]);
 
   // Restored CRD tabs carry a CrdRef captured in a previous session (#159).
   // The CRD may since have been deleted, or may now serve a different version,
@@ -483,6 +485,13 @@ export function App() {
     return () => {
       void unlistenPromise.then((unlisten) => unlisten());
     };
+  }, []);
+
+  // A helm operation outlives the window that started it, and the host
+  // reports how it ended to every window as a toast (#735).
+  useEffect(() => {
+    if (!("__TAURI_INTERNALS__" in window)) return;
+    return listenForHostNotices();
   }, []);
 
   // The master-password gate (issue #208) mounts as a blocking overlay via
@@ -1061,8 +1070,13 @@ export function App() {
     setDockSessions((t) => [...t, { id, kind, ...s }]);
     setActiveDock(id);
   }
-  /** Tear down any pod tied to a closing dock session (e.g. node debug shell). */
+  /**
+   * Tear down any pod tied to a closing dock session (e.g. node debug shell).
+   * On desktop the host deletes a node shell's debug pod itself, however the
+   * shell ends (#734), so only the web page still does it.
+   */
   function teardownDock(sessions: DockSession[]) {
+    if (isTauri()) return;
     for (const s of sessions) {
       if (s.deleteOnClose) {
         void deletePod(s.deleteOnClose.context, s.deleteOnClose.namespace, s.deleteOnClose.pod);

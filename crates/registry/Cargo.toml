@@ -7,6 +7,9 @@ edition.workspace = true
 srelens-plugin-host = { path = "../plugin-host" }
 srelens-capability = { path = "../capability" }
 srelens-kube = { path = "../kube" }
+# App streams (#565): the generic stream contract the extension broker drives.
+srelens-streams = { path = "../streams" }
+srelens-sidecar-protocol = { path = "../../sdk/protocol" }
 # `kind_resolver` returns `dyn srelens_mcp::resources::KindResolver`, so this is
 # real API surface, not test-only. `crates/mcp` also has `srelens-registry` as
 # a dev-dependency (for its own e2e prompt test), making this a dev-only cycle:
@@ -15,6 +18,10 @@ srelens-kube = { path = "../kube" }
 # other; confirmed via `cargo check -p srelens-registry -p srelens-mcp`.
 srelens-mcp = { path = "../mcp" }
 serde = { version = "1", features = ["derive"] }
+# The pod sources' cluster seam (#567), scripted by the tests. Already in the
+# workspace through srelens-kube and srelens-mcp.
+async-trait = "0.1"
+futures = "0.3"
 # float_roundtrip: the extension inventory is read, saved and read again; without it a
 # number in an app's settings or manifest moved a step on each save.
 serde_json = { version = "1", features = ["float_roundtrip"] }
@@ -24,17 +31,34 @@ dirs = "6"
 # NO auto crypto-provider: the workspace standardises on ring via kube-client;
 # a second provider (aws-lc-rs) causes a runtime "could not determine
 # CryptoProvider" panic. Mirrors apps/desktop/src-tauri/Cargo.toml.
+# The async client carries apps' brokered `network.http` requests (#568).
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls-no-provider"] }
 libc = "0.2"
 # `durable` warns when a save could not be made durable; the desktop app routes `log`.
 log = "0.4"
 tempfile = "3"
-tokio = { version = "1", features = ["rt"] }
+tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
 
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+# Brokered HTTP (#568) matches a URL's host against an app's allowlist. Already in the
+# workspace through reqwest and srelens-plugin-host.
+url = "2"
+# A server's refusal is scrubbed of a URL path segment as sent and as decoded (#569).
+# Already in the workspace through url, and srelens-mcp's own dependency.
+percent-encoding = "2"
 sha2 = "0.10"
 ring = "0.17"
 semver = "1"
+# `.srelens-extension` packages (#562) are gzip-compressed tar archives, and a package file
+# chosen in the app reaches `extensions.configure` as base64. All three are already in the
+# workspace through srelens-kube, which uses each of them; no new crate is built. Signed
+# catalog documents (#559) are DSSE envelopes, whose payloads and signatures are base64 too.
+tar = "0.4"
+flate2 = "1"
+base64 = "0.22"
+# A signed catalog (#559) expires at an RFC 3339 time. Already in the lockfile, through
+# srelens-capability and srelens-kube.
+chrono = { version = "0.4", default-features = false, features = ["std"] }
 
 # Windows: `durable::replace` renames with `MoveFileExW` and `MOVEFILE_WRITE_THROUGH`.
 # Already in the lockfile through tempfile and others; no new crate is built.
@@ -50,5 +74,8 @@ fuzzing = []
 # The property tests start from valid documents and edit them with plugin-host's
 # test support.
 srelens-plugin-host = { path = "../plugin-host", features = ["fuzzing"] }
+# The fake API server the resource link tests drive the resolvers against (#728).
+srelens-kube = { path = "../kube", features = ["test-support"] }
 proptest = { version = "1", default-features = false, features = ["std"] }
-tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
+# net and io-util: the `network.http` tests (#568) answer from a local socket.
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "test-util", "net", "io-util"] }

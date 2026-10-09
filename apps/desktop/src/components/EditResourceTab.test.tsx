@@ -11,8 +11,25 @@ vi.mock("@srelens/core/lib/manifest", async (importOriginal) => ({
 }));
 vi.mock("@srelens/core/lib/schema", () => ({ openApiSchema: vi.fn().mockResolvedValue({ error: "n/a" }) }));
 vi.mock("../ui/CodeEditor", () => ({
-  CodeEditor: ({ value, onChange, ariaLabel }: { value: string; onChange?: (v: string) => void; ariaLabel?: string }) => (
-    <textarea aria-label={ariaLabel} value={value} onChange={(e) => onChange?.(e.target.value)} />
+  // `copy` rides on a data attribute: the real control is the kit's, tested
+  // there, and what matters at a CALL site is that the pane asked for one.
+  CodeEditor: ({
+    value,
+    onChange,
+    ariaLabel,
+    copy,
+  }: {
+    value: string;
+    onChange?: (v: string) => void;
+    ariaLabel?: string;
+    copy?: boolean;
+  }) => (
+    <textarea
+      aria-label={ariaLabel}
+      value={value}
+      onChange={(e) => onChange?.(e.target.value)}
+      data-copy={String(!!copy)}
+    />
   ),
 }));
 
@@ -43,6 +60,15 @@ describe("EditResourceTab", () => {
     expect((screen.getByLabelText("Edit resource YAML") as HTMLTextAreaElement).value).toContain("kind: ConfigMap");
     expect(screen.getByText("Edit ConfigMap/web")).toBeDefined();
     expect(screen.getByRole("button", { name: "Apply" })).toBeDefined();
+  });
+
+  it("offers to copy the manifest it preloaded", async () => {
+    // Safe here where it is not in the drawer's YAML view:
+    // `loadEditableManifest` routes a Secret through the consent-gated
+    // `getSecret`, so what is on screen was shown deliberately. (#656 review)
+    loadEditableManifestMock.mockResolvedValue({ yaml: "kind: ConfigMap" });
+    render(<StatefulEditResourceTab context="kind-dev" kind="ConfigMap" namespace="default" name="cm" />);
+    expect((await screen.findByLabelText("Edit resource YAML")).dataset.copy).toBe("true");
   });
 
   it("shows an error when the manifest can't be loaded", async () => {

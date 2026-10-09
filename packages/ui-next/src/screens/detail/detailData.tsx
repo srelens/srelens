@@ -278,6 +278,8 @@ export interface DetailSubject {
   object?: K8sObject;
   status: ReturnType<typeof useObject>["status"];
   error?: string;
+  /** Read the subject again without blanking the pane — see `useObject`. */
+  refresh: () => void;
   /** The kind's own row actions and extra panes, or `undefined` for a CRD. */
   descriptor: ReturnType<typeof descriptorFor>;
   /** Core's one verdict on this subject — the peek's status line and the
@@ -331,7 +333,7 @@ export function useDetailSubject({
   namespace: string | null;
   name: string;
 }): DetailSubject {
-  const { object, status, error } = useObject(context, kind, namespace, name);
+  const { object, status, error, refresh } = useObject(context, kind, namespace, name);
 
   const slug = SLUG_BY_K8S_KIND[kind];
   const descriptor = slug ? descriptorFor(slug) : undefined;
@@ -362,6 +364,7 @@ export function useDetailSubject({
     object,
     status,
     error,
+    refresh,
     descriptor,
     statusLine: object ? resourceStatusLine(kind, object) : null,
     hasContainers,
@@ -470,13 +473,13 @@ export function useDetailPaneState({
   // this is looked up here rather than threaded in from a descriptor.
   const builtIn = isBuiltInKind(kind);
   // The Details pane keeps a Secret's values out of the DOM until the reader
-  // reveals them; `k8s.getManifest` returns them in the clear (only
-  // `k8s.getObject` redacts — see `crates/kube/src/manifest.rs`), so without
-  // this the reveal gate is worth nothing to anyone who clicks one tab over.
-  // The redaction goes here, on the result, rather than inside `getManifest`:
-  // classic calls that same function and deliberately shows the manifest
-  // unredacted, and classic is frozen. Divergence from classic here is the
-  // point, not an oversight.
+  // reveals them, and `k8s.getManifest` is an ungated read. The host blanks a
+  // Secret's values on it (#661, `crates/kube/src/manifest.rs`); this redacts
+  // again on arrival rather than trust that alone, because without it the
+  // reveal gate is worth nothing to anyone who clicks one tab over. The
+  // redaction goes here, on the result, rather than inside `getManifest`,
+  // because other callers of that function handle a Secret their own way.
+  // Classic's drawer YAML view does exactly this too (#659).
   const isSecret = kind === "Secret";
   const yamlState = useLoad<string>(openedPanes.has(PANE_YAML), target, async () => {
     let crd: DynamicGvk | undefined;
@@ -586,7 +589,7 @@ function YamlPane({
         </Alert>
       )}
       <div className="min-h-0 flex-1">
-        <CodeEditor value={state.data} readOnly language="yaml" fill ariaLabel={`${name} manifest`} />
+        <CodeEditor value={state.data} readOnly language="yaml" fill copy ariaLabel={`${name} manifest`} />
       </div>
     </div>
   );

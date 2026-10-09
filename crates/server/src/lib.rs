@@ -15,6 +15,7 @@ pub mod api_clusters;
 pub mod api_command;
 pub mod api_kubeconfigs;
 pub mod api_settings;
+pub mod app_inventory;
 pub mod assets;
 pub mod auth;
 pub mod cluster_auth_resolver;
@@ -24,6 +25,7 @@ pub mod cluster_tokens;
 pub mod config;
 pub mod crypto;
 pub mod db;
+pub mod extension_policy;
 pub mod oidc_provider;
 pub mod pf_proxy;
 pub mod stores;
@@ -31,11 +33,16 @@ pub mod streams;
 pub mod users;
 pub mod ws;
 
-/// Builds a full capability registry for a (cache, kubeconfig-paths) pair.
-/// The desktop binary supplies this from its capability assembly, keeping
-/// this crate assembly-agnostic.
-pub type RegistryFactory =
-    Arc<dyn Fn(Arc<ClientCache>, Vec<std::path::PathBuf>) -> Registry + Send + Sync>;
+/// Builds one user's full capability registry from their client cache, their
+/// kubeconfig paths and their apps (their own inventory and the shared catalog,
+/// #515). The binaries supply this from their capability assembly
+/// (`srelens_registry::build_registry_for_user`), keeping this crate
+/// assembly-agnostic.
+pub type RegistryFactory = Arc<
+    dyn Fn(Arc<ClientCache>, Vec<std::path::PathBuf>, srelens_registry::Apps) -> Registry
+        + Send
+        + Sync,
+>;
 
 /// The HTTP client every OIDC flow (app login and per-cluster sign-in) uses.
 ///
@@ -75,21 +82,38 @@ pub struct AppState {
 
 impl AppState {
     /// Test-only convenience: in-memory database, fixed master key, dev auth.
-    /// The factory ignores the (cache, paths) it's given and always returns a
-    /// clone of `registry` — tests don't materialize real kubeconfigs.
+    /// The factory ignores the (cache, paths, apps) it's given and always
+    /// returns a clone of `registry` — tests don't materialize real kubeconfigs.
     pub async fn for_tests(registry: Arc<Registry>) -> AppState {
-        let factory: RegistryFactory = Arc::new(move |_cache, _paths| (*registry).clone());
+        Self::for_tests_with(Arc::new(move |_cache, _paths, _apps| (*registry).clone())).await
+    }
+
+    /// [`AppState::for_tests`] with each user's registry built by `factory`.
+    pub async fn for_tests_with(factory: RegistryFactory) -> AppState {
+        Self::for_tests_with_catalog_trust(factory, srelens_registry::TrustRoot::pinned()).await
+    }
+
+    /// [`AppState::for_tests_with`], with the shared app catalog and users' app signatures
+    /// verified against `trust`: a test's root, whose catalog the test can sign (#559).
+    pub async fn for_tests_with_catalog_trust(
+        factory: RegistryFactory,
+        trust: srelens_registry::TrustRoot,
+    ) -> AppState {
         let mut bytes = [0u8; 8];
         getrandom::getrandom(&mut bytes).expect("random");
         let data_dir =
             std::env::temp_dir().join(format!("srelens-state-test-{}", hex::encode(bytes)));
         std::fs::create_dir_all(&data_dir).expect("test data dir");
         AppState {
-            user_envs: Arc::new(users::UserEnvs::new(
-                factory,
-                data_dir,
-                "http://127.0.0.1:8080".into(),
-            )),
+            user_envs: Arc::new(
+                users::UserEnvs::new(
+                    factory,
+                    data_dir,
+                    "http://127.0.0.1:8080".into(),
+                    Default::default(),
+                )
+                .with_catalog_trust(trust),
+            ),
             db: db::Db::open_in_memory().await.expect("in-memory db"),
             master_key: Arc::new(crypto::MasterKey::from_hex(&"ab".repeat(32)).expect("test key")),
             auth: Arc::new(auth::AuthConfig {
@@ -144,6 +168,7 @@ pub fn router(state: AppState) -> Router {
             "/api/command/:command",
             axum::routing::post(api_command::dispatch),
         )
+        .route("/api/extension-policy", get(extension_policy::get))
         .route("/api/settings", get(api_settings::list))
         .route(
             "/api/settings/:key",
@@ -218,6 +243,10 @@ pub async fn serve(factory: RegistryFactory, config: ServerConfig) -> Result<(),
     let env_key = std::env::var("SRELENS_MASTER_KEY").ok();
     let master_key = crypto::MasterKey::require_env(env_key.as_deref())?;
     let db = db::Db::open(&config.data_dir.join("srelens.db")).await?;
+    // Read once and checked whole before anything is served: a policy the server
+    // could not read never leaves it running with none (#578).
+    let (policy, source) = extension_policy::from_env(std::env::var(extension_policy::POLICY_ENV))?;
+    eprintln!("srelens extension policy: {source}");
     let idp: Arc<dyn auth::idp::IdentityProvider> = match &auth_config.oidc {
         Some(settings) => {
             Arc::new(auth::oidc::OidcProvider::discover(settings, &auth_config.public_url).await?)
@@ -232,6 +261,7 @@ pub async fn serve(factory: RegistryFactory, config: ServerConfig) -> Result<(),
             factory,
             config.data_dir.clone(),
             auth_config.public_url.clone(),
+            srelens_registry::SharedPolicy::new(policy),
         )),
         db,
         master_key: Arc::new(master_key),
@@ -250,6 +280,25 @@ pub async fn serve(factory: RegistryFactory, config: ServerConfig) -> Result<(),
                 tick.tick().await;
                 if let Err(e) = db.purge_expired_sessions(unix_now()).await {
                     eprintln!("session purge failed: {e}");
+                }
+            }
+        });
+    }
+    {
+        // The one app catalog every user reads (#515), refreshed here and only
+        // here: users' capabilities read it and never fetch into it. Checked
+        // hourly and fetched once it is a day old, as a desktop does; a failed
+        // fetch keeps the cached copy and is retried at the next check.
+        let catalog = state.user_envs.catalog().clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(3600));
+            loop {
+                tick.tick().await;
+                let catalog = catalog.clone();
+                match tokio::task::spawn_blocking(move || catalog.refresh_if_stale()).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => eprintln!("app catalog refresh failed: {e}"),
+                    Err(e) => eprintln!("app catalog refresh failed: {e}"),
                 }
             }
         });

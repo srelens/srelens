@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 use srelens_kube::client_cache::ClientCache;
-use tauri::State;
+use tauri::{Manager, State};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
@@ -17,8 +17,9 @@ struct Running {
     addr: SocketAddr,
     shutdown: Option<oneshot::Sender<()>>,
     handle: JoinHandle<()>,
-    // Read via `McpHttpManager::session_token`, which the assistant's
-    // `chat_send` uses to authenticate the agent CLI against this server.
+    // The Settings token: what an external MCP client presents. The
+    // assistant's own CLIs present a per-turn token instead (#393, see
+    // `McpHttpManager::mint_turn_token`).
     token: srelens_mcp::auth::Token,
 }
 
@@ -34,6 +35,10 @@ pub struct McpHttpManager {
     /// then both bind the same port, or the later one could overwrite a live
     /// `Running` and orphan a task still holding the listener.
     lifecycle: tokio::sync::Mutex<()>,
+    /// The per-chat tokens every server this manager builds accepts (#393):
+    /// one set for the process, so a token `chat_send` mints is recognised by
+    /// the HTTP server whatever restarts it has had, and by nothing else.
+    caller_tokens: srelens_mcp::auth::CallerTokens,
 }
 
 impl McpHttpManager {
@@ -42,7 +47,30 @@ impl McpHttpManager {
             cache,
             running: Mutex::new(None),
             lifecycle: tokio::sync::Mutex::new(()),
+            caller_tokens: srelens_mcp::auth::CallerTokens::new(),
         }
+    }
+
+    /// For tests to mint against the same set the server is built over;
+    /// production code mints through [`mint_turn_token`](Self::mint_turn_token).
+    #[cfg(test)]
+    pub fn caller_tokens(&self) -> &srelens_mcp::auth::CallerTokens {
+        &self.caller_tokens
+    }
+
+    /// A bearer token for one chat turn (#393): accepted by the running
+    /// server as that chat's, and revoked when the guard is dropped. The
+    /// Settings token is never handed to a CLI — it authenticates a client
+    /// without saying which one.
+    ///
+    /// Under the lifecycle lock (PR #802 review): a revoke or rotate clears
+    /// the turn tokens while holding it, so a mint that checked the server
+    /// before the clear and inserted after it would outlive the revocation.
+    pub async fn mint_turn_token(&self, session: &str) -> Result<srelens_mcp::auth::CallerTokenGuard, String> {
+        let _lifecycle = self.lifecycle().await;
+        self.session_token()
+            .ok_or("Start the MCP server in Settings → MCP before using the assistant.")?;
+        Ok(self.caller_tokens.mint(session))
     }
 
     /// Take the lifecycle lock for the duration of a start/stop/rotate. The
@@ -52,9 +80,10 @@ impl McpHttpManager {
         self.lifecycle.lock().await
     }
 
-    /// The bearer token the running loopback MCP server accepts, as hex, or
-    /// `None` if no server is running. The assistant uses this to authenticate;
-    /// it grants only the loopback MCP surface, never cluster credentials.
+    /// The Settings bearer token the running loopback MCP server accepts, as
+    /// hex, or `None` if no server is running. It grants only the loopback MCP
+    /// surface, never cluster credentials. The assistant does not hand it to
+    /// its CLIs any more — see [`mint_turn_token`](Self::mint_turn_token).
     pub fn session_token(&self) -> Option<String> {
         let running = self.running.lock().unwrap();
         running
@@ -80,24 +109,77 @@ impl McpHttpManager {
     /// server this way, so all agents get identical tools, the same
     /// destructive-tool confirm dialog, and the same audit log — the native
     /// agent just calls `handle_request` directly instead of over the wire.
-    pub fn build_server(
+    pub fn build_server<R: tauri::Runtime>(
         &self,
-        app: &tauri::AppHandle,
+        app: &tauri::AppHandle<R>,
         pending: &Arc<crate::mcp_confirm::Pending>,
         audit_path: &std::path::Path,
         prompts_dir: &std::path::Path,
     ) -> srelens_mcp::McpServer {
-        let registry = build_registry_with(self.cache.clone());
-        srelens_mcp::McpServer::new(Arc::new(registry))
-            .with_policy(Arc::new(crate::mcp_confirm::PromptUser::new(
-                app.clone(),
-                pending.clone(),
-                std::time::Duration::from_secs(60),
-            )))
-            .with_audit(Arc::new(srelens_mcp::audit::JsonlAuditLog::new(
-                audit_path.to_path_buf(),
-                5 * 1024 * 1024,
-            )))
+        // ONE sink per process, and it is the one the UI bridge writes to.
+        //
+        // `JsonlAuditLog` serializes rotate-then-append behind a `Mutex` it
+        // OWNS, so two instances over one path do not coordinate at all. Near
+        // the 5 MB cap that is a real race: one can be holding an open handle
+        // while the other renames `audit.jsonl` to `audit.jsonl.1`, and the
+        // line written through the stale handle lands in a file the next
+        // rotation replaces. Building a second sink here also meant the UI's
+        // records and MCP's were written by two locks that had never heard of
+        // each other.
+        //
+        // `AppAudit` (`bridge.rs`) is managed in `setup`, before any server is
+        // built, so in the app this always resolves. The fallback is for a
+        // host that manages none — a test harness — where a private sink is
+        // better than a silently dropped trail. A separate PROCESS (headless
+        // `--mcp-http` / `--mcp-stdio`) still has its own sink over the same
+        // path; that needs inter-process locking and is not this issue.
+        let audit: Arc<dyn srelens_capability::audit::AuditSink> =
+            match app.try_state::<crate::bridge::AppAudit>() {
+                Some(managed) => managed.0.clone(),
+                None => Arc::new(srelens_mcp::audit::JsonlAuditLog::new(
+                    audit_path.to_path_buf(),
+                    5 * 1024 * 1024,
+                )),
+            };
+        // Apps' secrets (#543) in the same vault-backed store the UI's
+        // registry uses, so an agent sees the same state and a removal made
+        // here deletes the app's secrets too. Installed apps' tools (#574) are
+        // the ones every registry over this inventory shares, so an app the
+        // GUI installs reaches the agent with `tools/list_changed`.
+        let (registry, app_tools) = match app.try_state::<crate::ExtensionSecrets>() {
+            Some(secrets) => crate::mcp_registry_for(
+                self.cache.clone(),
+                crate::capabilities::default_kubeconfig_paths(),
+                crate::capabilities::default_settings_path(),
+                secrets.0.clone(),
+            ),
+            None => (build_registry_with(self.cache.clone()), None),
+        };
+        let registry = Arc::new(registry);
+        let prompt = Arc::new(crate::mcp_confirm::PromptUser::new(
+            app.clone(),
+            pending.clone(),
+            std::time::Duration::from_secs(60),
+        ));
+        let server = srelens_mcp::McpServer::new(registry.clone());
+        let server = match app_tools {
+            Some(tools) => {
+                // An app's sidecar calls back through this registry, and a write it
+                // asks for is put to the person through the same prompt an agent's
+                // gated call is (#573, #552), naming the app.
+                tools.serve_sidecars(srelens_registry::SidecarHost {
+                    registry,
+                    consent: prompt.clone(),
+                    audit: audit.clone(),
+                });
+                server.with_app_tools(tools)
+            }
+            None => server,
+        };
+        server
+            .with_policy(prompt)
+            .with_caller_tokens(self.caller_tokens.clone())
+            .with_audit(audit)
             .with_prompts(srelens_mcp::prompts::PromptLibrary::new(Some(prompts_dir.to_path_buf())))
             .with_kind_resolver(srelens_registry::kind_resolver())
             .with_watcher(std::sync::Arc::new(crate::mcp_watch::CacheWatcher::new(self.cache.clone())))
@@ -294,6 +376,20 @@ pub fn mcp_token_get(store: State<'_, Arc<dyn srelens_mcp::auth::TokenStore>>) -
     store.load().map(|t| t.as_str().to_string())
 }
 
+/// The persisting half of a rotation: a fresh Settings token, saved, and every
+/// live turn token ended with the old one (PR #802 review). Rotating is a
+/// reader saying "these credentials may be out", and a turn's token is one of
+/// them.
+fn rotate_settings_token(
+    store: &dyn srelens_mcp::auth::TokenStore,
+    manager: &McpHttpManager,
+) -> Result<srelens_mcp::auth::Token, String> {
+    let t = srelens_mcp::auth::Token::generate();
+    store.save(&t).map_err(|e| e.to_string())?;
+    manager.caller_tokens.revoke_all();
+    Ok(t)
+}
+
 /// Generate and persist a fresh MCP bearer token, replacing any existing one.
 /// If the HTTP server is currently running, restarts it on the same port so
 /// the new token takes effect immediately — the previously running listener
@@ -315,8 +411,7 @@ pub async fn mcp_token_rotate(
     // showing a live token for a server that was deliberately switched off.
     let lifecycle = manager.lifecycle().await;
 
-    let t = srelens_mcp::auth::Token::generate();
-    store.save(&t).map_err(|e| e.to_string())?;
+    let t = rotate_settings_token(store.inner().as_ref(), &manager)?;
 
     let running_port = manager.running.lock().unwrap().as_ref().map(|r| r.addr.port());
     if let Some(port) = running_port {
@@ -360,6 +455,9 @@ pub async fn mcp_token_revoke(
     // back up on a value that has just been revoked.
     let lifecycle = manager.lifecycle().await;
     store.clear().map_err(|e| e.to_string())?;
+    // The turn tokens are MCP credentials too (#393): a revocation that left
+    // them live would let a copy of one in on the next server started.
+    manager.caller_tokens.revoke_all();
     stop_running(&manager, &pending, &lifecycle).await;
     Ok(())
 }
@@ -885,5 +983,267 @@ mod tests {
             .filter(|r| !r.handle.is_finished())
             .map(|r| url_for(r.addr));
         assert!(live.is_none());
+    }
+
+    #[derive(Default)]
+    struct Spy(Mutex<Vec<srelens_capability::audit::AuditRecord>>);
+
+    impl srelens_capability::audit::AuditSink for Spy {
+        fn record(&self, rec: srelens_capability::audit::AuditRecord) {
+            self.0.lock().unwrap().push(rec);
+        }
+    }
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("srelens-pr660-mcp-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// One `JsonlAuditLog` per process, and it is the one the UI bridge
+    /// writes to. `JsonlAuditLog` serializes rotate-then-append behind a
+    /// `Mutex` it OWNS, so a second instance over the same path does not
+    /// coordinate with the first at all — near the 5 MB cap one can hold an
+    /// open handle while the other renames the file out from under it. Both
+    /// in-process servers (the loopback transport and the native agent) come
+    /// through here, so this is the assertion that keeps them on one lock.
+    #[tokio::test]
+    async fn build_server_records_into_the_managed_sink() {
+        let dir = scratch("managed");
+        let app = tauri::test::mock_app();
+        let spy = Arc::new(Spy::default());
+        app.manage(crate::bridge::AppAudit(spy.clone()));
+        let manager = McpHttpManager::new(ClientCache::new_many(vec![]));
+        let pending = Arc::new(crate::mcp_confirm::Pending::default());
+
+        let server = manager.build_server(
+            app.handle(),
+            &pending,
+            &dir.join("audit.jsonl"),
+            &dir.join("prompts"),
+        );
+        // An unregistered tool: MCP records the attempt (that is what the
+        // trail is read for) and nothing touches a cluster to do it.
+        let _ = server
+            .call_tool_audited(
+                "k8s.nope",
+                serde_json::json!({}),
+                srelens_mcp::Transport::Http,
+                "auto",
+            )
+            .await;
+
+        let seen = spy.0.lock().unwrap();
+        assert_eq!(seen.len(), 1, "the managed sink must get the record");
+        assert_eq!(seen[0].tool, "k8s.nope");
+        assert!(
+            !dir.join("audit.jsonl").exists(),
+            "a second sink must not have been built over the same path"
+        );
+    }
+
+    /// Review of #543: an agent's registry uses the store the app manages —
+    /// the same vault the UI's registry and the unlock commands use — so it
+    /// sees the same state. Read-only on purpose: this registry points at the
+    /// real default inventory, and any change there sweeps the vault.
+    #[tokio::test]
+    async fn build_server_gives_the_agent_the_apps_secret_store() {
+        let dir = scratch("secrets");
+        let app = tauri::test::mock_app();
+        let vault = Arc::new(crate::vault::Vault::with_backend(
+            &dir.join("vault"),
+            Box::new(crate::vault::test_support::MemKeychain::empty()),
+        ));
+        app.manage(crate::ExtensionSecrets(Arc::new(
+            crate::extension_secrets::VaultSecretStore::with(vault),
+        )));
+        let manager = McpHttpManager::new(ClientCache::new_many(vec![]));
+        let pending = Arc::new(crate::mcp_confirm::Pending::default());
+
+        let server = manager.build_server(
+            app.handle(),
+            &pending,
+            &dir.join("audit.jsonl"),
+            &dir.join("prompts"),
+        );
+        let listed = server
+            .call_tool("extensions.list", serde_json::json!({}))
+            .await
+            .expect("extensions.list answers");
+        assert_eq!(
+            listed["secretStore"],
+            serde_json::json!({"available": true}),
+            "the agent's registry must use the managed store, not none"
+        );
+    }
+
+    /// The fallback is for a host that manages no sink — a test harness —
+    /// where a private log is better than a silently dropped trail.
+    #[tokio::test]
+    async fn build_server_writes_its_own_trail_when_no_sink_is_managed() {
+        let dir = scratch("unmanaged");
+        let path = dir.join("audit.jsonl");
+        let app = tauri::test::mock_app();
+        let manager = McpHttpManager::new(ClientCache::new_many(vec![]));
+        let pending = Arc::new(crate::mcp_confirm::Pending::default());
+
+        let server = manager.build_server(app.handle(), &pending, &path, &dir.join("prompts"));
+        let _ = server
+            .call_tool_audited(
+                "k8s.nope",
+                serde_json::json!({}),
+                srelens_mcp::Transport::Http,
+                "auto",
+            )
+            .await;
+
+        let body = std::fs::read_to_string(&path).expect("a trail, not silence");
+        assert!(body.contains("k8s.nope"), "unexpected line: {body}");
+    }
+
+    /// #393: the server every agent reaches is built over the manager's own
+    /// caller tokens, so a token `chat_send` mints is one that server accepts.
+    #[tokio::test]
+    async fn a_server_it_builds_recognises_the_tokens_it_mints() {
+        let app = tauri::test::mock_app();
+        let mgr = McpHttpManager::new(ClientCache::new(std::path::PathBuf::from("/dev/null")));
+        let pending = Arc::new(crate::mcp_confirm::Pending::default());
+        let dir = std::env::temp_dir();
+        let server = mgr.build_server(app.handle(), &pending, &dir.join("srelens-test-audit.jsonl"), &dir);
+        let guard = mgr.caller_tokens().mint("sess-7");
+        assert_eq!(
+            server.caller_tokens().caller_for(guard.token()),
+            Some(srelens_mcp::policy::Caller::Chat("sess-7".into()))
+        );
+    }
+
+    /// PR #802 review: revoking the MCP credentials ends the turn tokens too.
+    /// Otherwise a turn token minted before the revocation would authenticate
+    /// against the next server started, despite the reader revoking access.
+    #[tokio::test]
+    async fn revoking_mcp_credentials_ends_every_live_turn_token() {
+        let app = tauri::test::mock_app();
+        let dir = std::env::temp_dir().join(format!("srelens-revoke-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store: Arc<dyn srelens_mcp::auth::TokenStore> =
+            Arc::new(srelens_mcp::auth::FileTokenStore::new(dir.join("token")));
+        app.manage(store);
+        app.manage(McpHttpManager::new(ClientCache::new(std::path::PathBuf::from("/dev/null"))));
+        app.manage(Arc::new(crate::mcp_confirm::Pending::default()));
+        let guard = app.state::<McpHttpManager>().caller_tokens().mint("sess-7");
+
+        mcp_token_revoke(app.state(), app.state(), app.state()).await.expect("revoke");
+
+        assert_eq!(app.state::<McpHttpManager>().caller_tokens().caller_for(guard.token()), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Rotating is the other deliberate "these credentials may be out": the
+    /// new Settings token is saved, and every live turn token ends with the
+    /// old one.
+    #[test]
+    fn rotating_the_settings_token_ends_every_live_turn_token() {
+        use srelens_mcp::auth::TokenStore as _;
+        let dir = std::env::temp_dir().join(format!("srelens-rotate-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = srelens_mcp::auth::FileTokenStore::new(dir.join("token"));
+        let mgr = McpHttpManager::new(ClientCache::new(std::path::PathBuf::from("/dev/null")));
+        let guard = mgr.caller_tokens().mint("sess-7");
+
+        let fresh = rotate_settings_token(&store, &mgr).expect("rotate");
+
+        assert_eq!(store.load().map(|t| t.as_str().to_string()), Some(fresh.as_str().to_string()));
+        assert_eq!(mgr.caller_tokens().caller_for(guard.token()), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A listener standing in for the MCP server, recorded as running under a
+    /// fresh Settings token, which is returned.
+    async fn a_running_server(mgr: &McpHttpManager) -> srelens_mcp::auth::Token {
+        let listener = tokio::net::TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = oneshot::channel::<()>();
+        let handle = tokio::spawn(async move {
+            let _ = rx.await;
+            drop(listener);
+        });
+        let settings = srelens_mcp::auth::Token::generate();
+        *mgr.running.lock().unwrap() = Some(Running { addr, shutdown: Some(tx), handle, token: settings.clone() });
+        settings
+    }
+
+    /// A turn is handed a token of its own, never the Settings token, and only
+    /// while the server it would talk to is running.
+    #[tokio::test]
+    async fn a_turn_token_is_its_chat_s_and_not_the_settings_token() {
+        let mgr = McpHttpManager::new(ClientCache::new(std::path::PathBuf::from("/dev/null")));
+        assert!(mgr.mint_turn_token("sess-7").await.is_err(), "no server, no token");
+
+        let settings = a_running_server(&mgr).await;
+
+        let guard = mgr.mint_turn_token("sess-7").await.expect("server running");
+        assert_ne!(guard.token(), settings.as_str());
+        assert_eq!(
+            mgr.caller_tokens().caller_for(guard.token()),
+            Some(srelens_mcp::policy::Caller::Chat("sess-7".into()))
+        );
+    }
+
+    /// PR #802 review: a mint that races a revocation waits for it. Checking
+    /// the server and inserting the token outside the lifecycle lock let a
+    /// token land just after `revoke_all`, live for the next server started.
+    #[tokio::test]
+    async fn a_turn_token_minted_during_a_revocation_does_not_outlive_it() {
+        let mgr = Arc::new(McpHttpManager::new(ClientCache::new(std::path::PathBuf::from("/dev/null"))));
+        let pending = crate::mcp_confirm::Pending::default();
+        a_running_server(&mgr).await;
+        // A revocation under way: the lock held, the turn tokens just cleared.
+        let lifecycle = mgr.lifecycle().await;
+        mgr.caller_tokens.revoke_all();
+
+        let minting = tokio::spawn({
+            let mgr = mgr.clone();
+            async move { mgr.mint_turn_token("sess-7").await }
+        });
+        tokio::task::yield_now().await;
+        stop_running(&mgr, &pending, &lifecycle).await;
+        drop(lifecycle);
+
+        let minted = minting.await.unwrap();
+        assert!(
+            minted.as_ref().map_or(true, |g| mgr.caller_tokens().caller_for(g.token()).is_none()),
+            "a token minted during the revocation outlived it"
+        );
+    }
+
+    /// The same race against a rotation: no token is issued while the old
+    /// credentials are being retired, so none minted against them survives
+    /// into the server that replaces them.
+    #[tokio::test]
+    async fn no_turn_token_is_issued_while_a_rotation_is_under_way() {
+        let dir = std::env::temp_dir().join(format!("srelens-rotate-race-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = srelens_mcp::auth::FileTokenStore::new(dir.join("token"));
+        let mgr = Arc::new(McpHttpManager::new(ClientCache::new(std::path::PathBuf::from("/dev/null"))));
+        a_running_server(&mgr).await;
+        let lifecycle = mgr.lifecycle().await;
+        rotate_settings_token(&store, &mgr).expect("rotate");
+
+        let minting = tokio::spawn({
+            let mgr = mgr.clone();
+            async move { mgr.mint_turn_token("sess-7").await }
+        });
+        tokio::task::yield_now().await;
+        assert!(!minting.is_finished(), "a token was issued mid-rotation");
+
+        drop(lifecycle);
+        let guard = minting.await.unwrap().expect("the server is still running");
+        assert_eq!(
+            mgr.caller_tokens().caller_for(guard.token()),
+            Some(srelens_mcp::policy::Caller::Chat("sess-7".into()))
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

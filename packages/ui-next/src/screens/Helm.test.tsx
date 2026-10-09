@@ -16,10 +16,17 @@ const core = vi.hoisted(() => ({
   getHelmRelease: vi.fn(),
   startHelmOp: vi.fn(),
 }));
-vi.mock("@srelens/core", async (orig) => ({
-  ...(await orig<typeof import("@srelens/core")>()),
-  ...core,
-}));
+vi.mock("@srelens/core", async (orig) => {
+  const real = await orig<typeof import("@srelens/core")>();
+  return {
+    ...real,
+    ...core,
+    // The real per-namespace fan-out, run over the mock above: its default
+    // lister is core's module-local one, which the spread cannot reach.
+    listHelmReleasesIn: (context: string, selection: string[]) =>
+      real.listHelmReleasesIn(context, selection, (...a) => core.listHelmReleases(...a)),
+  };
+});
 
 /**
  * The namespace options, doubled the way `Workloads.test.tsx` and
@@ -53,7 +60,7 @@ import { resetContexts, setContexts, setKubeconfigFiles } from "../lib/clusters"
 import { __resetHelmOpsForTests, startHelmOperation } from "../lib/helmOps";
 import { defaultState } from "../lib/tabs";
 import * as store from "../lib/tabsStore";
-import { getView, resetView, setNamespaces } from "../lib/workspace";
+import { resetView, setNamespaces } from "../lib/workspace";
 
 const ROUTE = "/helm";
 
@@ -252,6 +259,12 @@ beforeEach(() => {
   store.setState(defaultState([CTX]));
   resetView();
 });
+
+/** The active tab's namespace selection for a cluster — where a screen outside any `TabScope` reads and writes it. */
+const selectionOf = (clusterId: string) => {
+  const w = store.currentWorkspace();
+  return w.tabs.find((t) => t.id === w.activeId)?.namespaces?.[clusterId];
+};
 
 function open() {
   store.openTab(ROUTE);
@@ -1034,7 +1047,7 @@ describe("Helm — the namespace selector", () => {
    * list --namespace` takes one namespace, so several means fetching every
    * namespace and narrowing here — classic's own rule.
    */
-  it("fetches every namespace and narrows here when several are selected", async () => {
+  it("lists each selected namespace on its own when several are selected", async () => {
     open();
     await ready();
     await pickOnly("checkout");
@@ -1050,18 +1063,36 @@ describe("Helm — the namespace selector", () => {
         "staging/checkout",
       ]),
     );
-    // One listing, unscoped — and the platform and payments releases it
-    // returned are gone from the table.
-    expect(listedNamespaces()).toEqual([null]);
+    // One listing per namespace, never an unscoped one: an unscoped `helm
+    // list` reads release Secrets cluster-wide, which a namespace-scoped
+    // credential is refused (#688).
+    expect(listedNamespaces()).toEqual(["checkout", "staging"]);
     expect(rowFor("ingress-nginx")).toBeUndefined();
   });
 
+  it("keeps the namespace that answered and names the one that was refused", async () => {
+    core.listHelmReleases.mockImplementation(async (_ctx: string, namespace?: string | null) =>
+      namespace === "staging"
+        ? { error: 'secrets is forbidden: User "dev" cannot list resource "secrets" in the namespace "staging"' }
+        : { releases: RELEASES.filter((r) => r.namespace === namespace) },
+    );
+    store.openTab(ROUTE);
+    setNamespaces(CTX.stableId, ["checkout", "staging"]);
+
+    open();
+
+    await waitFor(() => expect(drawn()).toEqual(["checkout/checkout", "checkout/redis-session"]));
+    expect(screen.getByText("Could not list releases in staging")).toBeTruthy();
+    expect(screen.queryByText(/at the cluster scope/i)).toBeNull();
+  });
+
   /**
-   * The other half of that rule: narrowing a whole-cluster listing to several
-   * namespaces asks helm for nothing new. The releases are already here — the
-   * only thing that changed is how many of them are drawn.
+   * Narrowing a whole-cluster listing to several namespaces lists those
+   * namespaces afresh. Reusing the whole-cluster answer would be cheaper for a
+   * credential that can list everything, but the one that cannot never had
+   * that answer to reuse (#688).
    */
-  it("does not re-list when the listing it already has covers the new selection", async () => {
+  it("lists the selected namespaces when narrowing from every namespace", async () => {
     open();
     await ready();
     core.listHelmReleases.mockClear();
@@ -1069,7 +1100,7 @@ describe("Helm — the namespace selector", () => {
     act(() => setNamespaces(CTX.stableId, ["checkout", "staging"]));
 
     await waitFor(() => expect(drawn()).toHaveLength(3));
-    expect(core.listHelmReleases).not.toHaveBeenCalled();
+    expect(listedNamespaces()).toEqual(["checkout", "staging"]);
   });
 
   /**
@@ -1077,16 +1108,17 @@ describe("Helm — the namespace selector", () => {
    * would pass every assertion above and lose the reader's namespace the
    * moment they walked to Workloads and back.
    */
-  it("writes the pick to the cluster's shared selection", async () => {
+  it("writes the pick to its own tab's selection", async () => {
     open();
     await ready();
 
     await pickOnly("payments");
 
-    await waitFor(() => expect(getView().namespaces.prod).toEqual(["payments"]));
+    await waitFor(() => expect(selectionOf("prod")).toEqual(["payments"]));
   });
 
-  it("opens on the namespace another screen on this cluster already chose", async () => {
+  it("opens on the namespace its tab already chose", async () => {
+    store.openTab(ROUTE);
     setNamespaces(CTX.stableId, ["payments"]);
 
     open();
@@ -1125,6 +1157,8 @@ describe("Helm — the namespace selector", () => {
           pending.set(namespace ?? "", resolve);
         }),
     );
+
+    store.openTab(ROUTE);
 
     setNamespaces(CTX.stableId, ["checkout"]);
     open();
@@ -1167,6 +1201,7 @@ describe("Helm — the namespace selector", () => {
   });
 
   it("says a namespace has no releases without blaming a failure", async () => {
+    store.openTab(ROUTE);
     setNamespaces(CTX.stableId, ["platform"]);
     core.listHelmReleases.mockResolvedValue({ releases: [] });
 
@@ -1211,8 +1246,8 @@ describe("Helm — the namespace selector", () => {
 
     open();
 
-    // Written to the shared store, so every screen on this cluster follows.
-    await waitFor(() => expect(getView().namespaces.prod).toEqual(["payments"]));
+    // Written to this tab's selection, so the picker shows the scope.
+    await waitFor(() => expect(selectionOf("prod")).toEqual(["payments"]));
     await waitFor(() => expect(drawn()).toEqual(["payments/payments"]));
     expect(listedNamespaces()).toContain("payments");
   });
@@ -1246,6 +1281,7 @@ describe("Helm — the namespace selector", () => {
   });
 
   it("explains a remembered namespace that is gone, and offers the way back", async () => {
+    store.openTab(ROUTE);
     setNamespaces(CTX.stableId, ["deleted-ns"]);
 
     open();
@@ -1254,7 +1290,7 @@ describe("Helm — the namespace selector", () => {
     expect(screen.getByText("deleted-ns no longer exist on this cluster.")).toBeTruthy();
 
     await userEvent.click(screen.getByRole("button", { name: "Show all namespaces" }));
-    await waitFor(() => expect(getView().namespaces.prod).toEqual([]));
+    await waitFor(() => expect(selectionOf("prod")).toEqual([]));
     await waitFor(() => expect(drawn()).toHaveLength(5));
   });
 });

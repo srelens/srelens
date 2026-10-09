@@ -108,7 +108,12 @@ fn tool_call(v: &serde_json::Value) -> Vec<AgentEvent> {
             tool: tool_name(key),
             args: inner.get("args").cloned().unwrap_or(serde_json::Value::Null),
         }],
-        Some("completed") => vec![AgentEvent::ToolResult { id, status: completion_status(inner) }],
+        Some("completed") => {
+            let status = completion_status(inner);
+            let failed = status != ToolStatus::Ok;
+            let summary = crate::event::summarize_result(&result_text(inner, failed), failed);
+            vec![AgentEvent::ToolResult { id, status, summary }]
+        }
         _ => Vec::new(),
     }
 }
@@ -136,6 +141,38 @@ fn completion_status(inner: &serde_json::Value) -> ToolStatus {
         return ToolStatus::Denied;
     }
     ToolStatus::Error
+}
+
+/// A completed tool call's result as text, for its summary (#385). Cursor's
+/// payloads differ by tool: an MCP call's `content[].text`, a built-in tool's
+/// `success.content`, an `error.errorMessage` / `error.message`, or the
+/// sandbox's `permissionDenied.error`. A failed call reads its explicit error
+/// first, since that decided its status, and content only as the fallback —
+/// an MCP consent refusal carries nothing else (PR #806 review).
+fn result_text(inner: &serde_json::Value, failed: bool) -> String {
+    let result = inner.get("result").unwrap_or(inner);
+    let content = result.get("content").and_then(|c| c.as_array()).and_then(|parts| {
+        let text: Vec<&str> = parts.iter().filter_map(|p| p.get("text").and_then(|t| t.as_str())).collect();
+        (!text.is_empty()).then(|| text.join("\n"))
+    });
+    // A field with no text says nothing, and must not hide one that does.
+    let pick = |path: &[&str]| -> Option<String> {
+        let mut v = result;
+        for key in path {
+            v = v.get(*key)?;
+        }
+        v.as_str().filter(|s| !s.trim().is_empty()).map(str::to_string)
+    };
+    let error = || {
+        pick(&["error", "errorMessage"])
+            .or_else(|| pick(&["error", "message"]))
+            .or_else(|| pick(&["permissionDenied", "error"]))
+    };
+    if failed {
+        error().or(content).or_else(|| pick(&["success", "content"])).unwrap_or_default()
+    } else {
+        content.or_else(|| pick(&["success", "content"])).or_else(error).unwrap_or_default()
+    }
 }
 
 fn is_truthy(v: &serde_json::Value) -> bool {
@@ -264,7 +301,7 @@ mod tests {
         let out = parse_line(
             r#"{"type":"tool_call","subtype":"completed","call_id":"call-1\nfc_2","tool_call":{"getMcpToolsToolCall":{"args":{"pattern":"echo"},"result":{"success":{"content":"{}"}}}}}"#,
         );
-        assert_eq!(out, vec![AgentEvent::ToolResult { id: "call-1\nfc_2".into(), status: ToolStatus::Ok }]);
+        assert_eq!(out, vec![AgentEvent::ToolResult { id: "call-1\nfc_2".into(), status: ToolStatus::Ok, summary: None }]);
     }
 
     #[test]
@@ -272,7 +309,27 @@ mod tests {
         let out = parse_line(
             r#"{"type":"tool_call","subtype":"completed","call_id":"call-1\nfc_2","tool_call":{"readToolCall":{"result":{"error":{"errorMessage":"Permission denied"}}}}}"#,
         );
-        assert_eq!(out, vec![AgentEvent::ToolResult { id: "call-1\nfc_2".into(), status: ToolStatus::Error }]);
+        assert_eq!(out, vec![AgentEvent::ToolResult { id: "call-1\nfc_2".into(), status: ToolStatus::Error, summary: Some("Permission denied".into()) }]);
+    }
+
+    /// PR #806 review: a failed call is summarised by its explicit error, not
+    /// by partial content; content stays the fallback (the consent refusal
+    /// below has nothing else).
+    #[test]
+    fn a_failed_tool_call_is_summarised_by_its_error_not_its_partial_content() {
+        let out = parse_line(
+            r#"{"type":"tool_call","subtype":"completed","call_id":"c3","tool_call":{"readToolCall":{"result":{"content":[{"type":"text","text":"partial"}],"error":{"errorMessage":"Permission denied"}}}}}"#,
+        );
+        assert_eq!(out, vec![AgentEvent::ToolResult { id: "c3".into(), status: ToolStatus::Error, summary: Some("Permission denied".into()) }]);
+    }
+
+    /// PR #806 review: an error with no text says nothing, so the content does.
+    #[test]
+    fn a_failed_tool_call_with_an_empty_error_is_summarised_by_its_content() {
+        let out = parse_line(
+            r#"{"type":"tool_call","subtype":"completed","call_id":"c4","tool_call":{"readToolCall":{"result":{"content":[{"type":"text","text":"partial"}],"error":{"errorMessage":""}}}}}"#,
+        );
+        assert_eq!(out, vec![AgentEvent::ToolResult { id: "c4".into(), status: ToolStatus::Error, summary: Some("partial".into()) }]);
     }
 
     #[test]
@@ -282,7 +339,7 @@ mod tests {
         let out = parse_line(
             r#"{"type":"tool_call","subtype":"completed","call_id":"c2","tool_call":{"mcpToolCall":{"result":{"isError":true,"content":[{"type":"text","text":"consent denied: user declined `k8s.deletePod`"}]}}}}"#,
         );
-        assert_eq!(out, vec![AgentEvent::ToolResult { id: "c2".into(), status: ToolStatus::Denied }]);
+        assert_eq!(out, vec![AgentEvent::ToolResult { id: "c2".into(), status: ToolStatus::Denied, summary: Some("consent denied: user declined `k8s.deletePod`".into()) }]);
     }
 
     #[test]
@@ -293,7 +350,7 @@ mod tests {
         let out = parse_line(
             r#"{"type":"tool_call","subtype":"completed","call_id":"c1","tool_call":{"shellToolCall":{"result":{"permissionDenied":{"command":"cat /etc/hosts"}}}}}"#,
         );
-        assert_eq!(out, vec![AgentEvent::ToolResult { id: "c1".into(), status: ToolStatus::Denied }]);
+        assert_eq!(out, vec![AgentEvent::ToolResult { id: "c1".into(), status: ToolStatus::Denied, summary: None }]);
     }
 
     #[test]
@@ -381,7 +438,7 @@ mod tests {
                 "toolCallId": mcp_call_id,
             }),
         }));
-        assert!(events.contains(&AgentEvent::ToolResult { id: mcp_call_id.into(), status: ToolStatus::Ok }));
+        assert!(events.contains(&AgentEvent::ToolResult { id: mcp_call_id.into(), status: ToolStatus::Ok, summary: Some("0 matches".into()) }));
 
         // The blocked local read: the completed line's call_id must match its
         // started line's call_id verbatim, embedded `\n` and all.
@@ -393,6 +450,6 @@ mod tests {
             args: serde_json::json!({ "path": "/etc/hosts" }),
         }));
         assert!(events
-            .contains(&AgentEvent::ToolResult { id: read_call_id.into(), status: ToolStatus::Error }));
+            .contains(&AgentEvent::ToolResult { id: read_call_id.into(), status: ToolStatus::Error, summary: Some("Permission denied".into()) }));
     }
 }

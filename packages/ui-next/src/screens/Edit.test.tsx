@@ -89,9 +89,11 @@ function latestEditor() {
     onChange: (v: string) => void;
     ariaLabel: string;
     readOnly?: boolean;
+    copy?: boolean;
     completions?: unknown;
     onCursorChange?: (pos: number) => void;
     onDiagnostics?: (diagnostics: unknown[]) => void;
+    schemaValidate?: (yaml: string) => Promise<unknown[]>;
   };
   return props;
 }
@@ -155,6 +157,19 @@ data:
 `;
 
 describe("EditResource", () => {
+  it.each([ROUTE, "/new/prod-eu"])("keeps the validator stable when lint results rerender the screen: %s", async route => {
+    render(<EditResource route={route} />);
+    await waitFor(() => expect(latestEditor()?.schemaValidate).toBeDefined());
+    const validate = latestEditor().schemaValidate;
+
+    act(() => latestEditor().onDiagnostics!([
+      { from: 0, to: 1, line: 1, severity: "error", message: "invalid YAML" },
+    ]));
+
+    expect(screen.getByTestId("manifest-status").textContent).toContain("1 problem");
+    expect(latestEditor().schemaValidate).toBe(validate);
+  });
+
   it.each([ROUTE, "/new/prod-eu"])("keeps unsaved YAML across a router pause: %s", async route => {
     const props = { route, ported: [], onOpenInClassic: () => {}, onLocked: () => {} };
     const { rerender } = render(<Body {...props} />);
@@ -176,6 +191,15 @@ describe("EditResource", () => {
     expect(latestEditor().ariaLabel).toBe("web manifest");
     // Nothing typed yet, so there is nothing to apply.
     expect(screen.getByRole("button", { name: "Apply" })).toHaveProperty("disabled", true);
+  });
+
+  it("offers a Copy control over the manifest", async () => {
+    // Asserted at the CALL site, not only in the kit: the prop is this
+    // screen's, and dropping it would leave every editor test green. (#656)
+    render(<EditResource route={ROUTE} />);
+    await waitFor(() => expect(latestEditor()?.value).toBe(LIVE));
+    expect(latestEditor().copy).toBe(true);
+    expect(screen.getByRole("button", { name: "Copy" })).toBeDefined();
   });
 
   it("applies an edited draft only after the reader confirms, and reloads on success", async () => {
@@ -599,6 +623,13 @@ describe("EditResource on /new", () => {
       expect(core.applyManifest).toHaveBeenCalledWith("prod-eu", TEMPLATES.Deployment("default"), false),
     );
     expect((await screen.findByRole("status")).textContent).toContain("Created ConfigMap web");
+  });
+
+  it("offers a Copy control over the draft", async () => {
+    render(<EditResource route="/new" />);
+    await waitFor(() => expect(latestEditor()?.value).toBe(TEMPLATES.Deployment("default")));
+    expect(latestEditor().copy).toBe(true);
+    expect(screen.getByRole("button", { name: "Copy" })).toBeDefined();
   });
 
   it("swaps the draft when a different template is picked", async () => {

@@ -7,61 +7,285 @@ Consent rules are in [permissions.md](permissions.md).
 
 | Capability | Kind | Purpose |
 |---|---|---|
-| `extensions.list` | Read-only | The installed apps, with revision, grants, settings, source, install time, up to three replaced versions and any quarantine reason. |
-| `extensions.read` | Read-only | Run one of an installed app's declared readers, given its ID, revision, operation and context. Refused with "App is not enabled for this cluster" on a cluster the app is not enabled for; so are `extensions.resource` and `extensions.action`. All three also refuse a custom-resource reader unless a CustomResourceDefinition named `{plural}.{group}` serves its bound version on the cluster. |
+| `extensions.list` | Read-only | The installed apps, with revision, grants, settings, source, install time, up to three replaced versions and any quarantine reason. An app installed from a package (#562) names it as `package`, and carries its logo as `icon`, a `data:` URL read from the package's files and checked against its digest list; neither `icon` nor `secretStore` is in `extensions.configure`'s answer. |
+| `extensions.read` | Read-only | Run one of an installed app's declared readers, given its ID, revision, operation and context. For a `network.http` binding it sends the app's request instead and answers `{status, contentType, body}` (#568); see [Network requests](manifest.md#network-requests). Refused with "App is not enabled for this cluster" on a cluster the app is not enabled for; so are `extensions.resource` and `extensions.action`. All three also refuse a custom-resource reader unless a CustomResourceDefinition named `{plural}.{group}` serves its bound version on the cluster. |
+| `extensions.resolveColumns` | Read-only | Resolve an app's native table columns and badges for up to 1,000 row summaries in one `uids[]` batch. Direct badges read the rows' metadata only, never Secrets. The host rechecks the installed revision, grants, cluster scope and joined CRD before listing; failed reads stay explicit. |
+| `extensions.resolveCards` | Read-only | Answer every dashboard card an app declares for one cluster and a `namespaces[]` selection (at most 256): a figure, or on that card alone why it has none. The host rechecks the installed revision, grants, cluster scope and each source's CRD, and reads each source once through the shared five-second snapshot. `extensions.read` accepts a `card` id to return only the rows that card counted, with the card's `namespaces[]` when it counted in several. |
+| `extensions.resolvePanels` | Read-only | Resolve installed declarative detail panels for a selected resource. The host rechecks the revision, grants and cluster scope, and uses only declared join readers. |
+| `extensions.resolveLinks` | Read-only | Resolve an app's `resourceLinks` for a selected resource: `{ from, links: [{ id, relation, to, capability, targets: [{ namespace, name, exists, unverified? }], error? }] }`. A target the host did not look up (a bare Argo CD name with no `defaultNamespace`) carries `unverified` with why, and is never `exists`. Targets are looked up only in the granted reader for `to`, or, for a built-in `to` (API 0.5, #728), in the kind's metadata — `capability` is then empty — and only when the resource names one. A `path` match is read on the resource as the host reads it through the reader of `from`, not on what the caller sent. A failed read, and a target list that reached its 2,000-object limit, is an `error` on that link, never an empty `targets`. |
+| `extensions.resolveReverseLinks` | Read-only | The same links read from their target (#728), for the Inspector of a resource of `to`: the same input, and `{ to, links: [{ id, relation, from, capability, sources: [{ namespace, name, exists, unverified? }], truncated, unreadable?, error? }] }`. The host lists `from` through its reader, or a built-in kind's metadata, in the target's namespace when the link can only name a target beside it and across the cluster otherwise, through the snapshot cache the other resolvers share. `truncated`: the list stopped at 2,000 objects and there may be more sources. `unreadable`: how many resources the link could not be read on, and why the first could not. A `from` the host cannot list, and a failed read, is an `error`, never an empty `sources`. A Secret's values are never read. |
 | `extensions.resource` | Read-only | Inspect one resource of an enabled app, with its events and supported actions. |
+| `extensions.queryProvider` | Read-only | Run one query of an app's metric, log or trace provider (#569) for a resource: `{id, revision, provider, context, namespace, resourceKind, name, rangeSeconds?}` in (`resourceKind` one of the provider's `forKinds`, `rangeSeconds` 300–604800, default 3600), and `{kind: "metrics", chart}` (the [timeseries](native-components.md#timeseries) data), `{kind: "logs", lines: [{time, source, line, truncated?}], truncated}` or `{kind: "traces", traces: [{traceId, rootService?, rootName?, start?, durationMs?}], truncated}` out. Authorized as `extensions.read` is; the query goes through the provider's `network.http` binding with every rule a request is held to; on the web, under the operator's network ceiling. See [Metric, log and trace providers](manifest.md#metric-log-and-trace-providers). |
+| `extensions.pods` | Read-only | The pods one of an app's pod bindings may reach now (#567), for a view to offer: `{id, revision, capability, context, namespace, name?}` in, `{pods: [{name, namespace, containers, phase, ready}], services?, truncated?, scope}` out. Held to the authority and scope a stream open is: the object `name` names and its own selector, or the namespaces the permission grants; the host matches every pod itself. See [streams.md](streams.md#pod-sources). |
+| `extensions.streams` | Read-only | The open app streams in this process and what each app has sent: open, opened, messages, payload bytes, streams stopped for the rate and opens refused for the cap, with the limits. For the Inspector ([#575](https://github.com/srelens/srelens/issues/575)); the streams themselves are opened by host commands, not capabilities. See [streams.md](streams.md). |
+| `extensions.inspect` | Read-only, **UI-only** | What an installed app is doing now: its process state and reason, the supervisor's actions, memory against its limit, requests and latency, open streams and watches, recent errors. Never an MCP tool. See [inspector.md](inspector.md). |
+| `extensions.logs` | Read-only, **UI-only** | An installed app's log, trace to error, redacted: the lines after `after` at `minLevel` or above. Never an MCP tool. See [inspector.md](inspector.md). |
 | `extensions.catalog` | Read-only | Browse the catalog, from a 24-hour cache. Reports the host's supported API versions as `hostApiVersions`; the deprecated `hostApiVersion` still gives the newest. |
-| `extensions.catalogManifest` | Read-only | Download and verify one catalog release for review. Does not install it. |
-| `extensions.validate` | Read-only | Check a manifest, with its grants and optional signature, exactly as installing it would, and return every problem as `{code, path, message}` (see [Validation errors](specification.md#validation-errors)). Does not install it. A `signature` other than 64 bytes or a `manifest` over 256 KiB is refused as invalid input, not reported as a problem. |
-| `extensions.configure` | Mutating | Install, enable, remove or configure an app. An install that fails validation is refused with the same problems. `clusters` limits an app to chosen kubeconfig contexts by context key (`{file}#{name}` with `#` and `%` encoded in each part, as `k8s.listContexts` reports under `key`; a stable ID can be shared by two contexts, #623), or with `null` allows every cluster. As with `extensions.validate`, a `signature` must be 64 bytes and a `manifest` at most 256 KiB, and `settings` must be at most 64 KiB as compact JSON. |
-| `extensions.action` | Mutating | Request a host GitOps action on an app resource. |
+| `extensions.catalogManifest` | Read-only | Download and verify one catalog release for review. Does not install it. On a host that installs packages, a release that lists one is reviewed as its package, and the answer adds `package: {sha256, digests, files, icon?}` ([packages.md](packages.md#in-the-catalog)). |
+| `extensions.packageManifest` | Read-only | Verify a `.srelens-extension` file, sent as base64 (`{"package"}`, at most 512 MiB decoded), and answer `{manifest, signature, package}` for review, as `extensions.catalogManifest` does. Does not install it. A package that fails any check is refused with why ([packages.md](packages.md#what-the-host-refuses)). |
+| `extensions.validate` | Read-only | Check a manifest, with its grants and optional signature, and for a package's manifest its `digests` list (at most 64 KiB) over which the signature is made, exactly as installing it would, and return every problem as `{code, path, message}` (see [Validation errors](specification.md#validation-errors)). Does not install it. A `signature` other than 64 bytes or a `manifest` over 256 KiB is refused as invalid input, not reported as a problem. |
+| `extensions.configure` | Mutating | Install, enable, remove or configure an app. An install that fails validation is refused with the same problems. `loopbackHttp` (`{"action":"loopbackHttp","id","allowLoopbackHttp"}`) lets an app's `network.http` requests use plain HTTP to this computer, or stops them. Turning it on is refused for an app that requests no `network.http`; turning it off is always accepted. `installPackage` (`{"action":"installPackage","package","grants","reviewedRevision"?}`) installs a package file sent as base64, verified again; `installCatalogPackage` (`{"action":"installCatalogPackage","id","sha256","packageSha256","grants","reviewedRevision"?}`) downloads and verifies again the package of the release `sha256` names, which must still be the `packageSha256` that was reviewed. A host that keeps no app files, the web host, refuses both ([packages.md](packages.md#installing)). `clusters` limits an app to chosen kubeconfig contexts by context key (`{file}#{name}` with `#` and `%` encoded in each part, as `k8s.listContexts` reports under `key`; a stable ID can be shared by two contexts, #623), or with `null` allows every cluster. As with `extensions.validate`, a `signature` must be 64 bytes and a `manifest` at most 256 KiB, and `settings` must be at most 64 KiB as compact JSON. `settings` is held to the typed settings the manifest declares and refused with each problem at `settings.<id>` (see [Settings](manifest.md#settings)); a value for a `secret-reference` is always refused. |
+| `extensions.action` | Mutating | Run an app’s declared action against a resolved resource through its bound host primitive. |
+| `extension.secretStore` | Mutating, sensitive | Set or clear an app's `secret-reference` setting in the host's secret store: `{"action":"set","id","setting","secret"}` or `{"action":"clear","id","setting"?}` (no `setting` clears every secret the app keeps). Write-only: answers `{"set": bool}` and never returns a value. A set needs the app's `extension.secretStore` grant and an available store, and `secret` is 1–16384 bytes of text with no NUL; every refusal leaves the value out. Also the permission an app requests to keep secrets, so its metadata is what the install review shows. `extensions.list` reports whether the store is available as `secretStore: {available, reason?}`. See [Secret settings](manifest.md#secret-settings). |
+
+`network.http` (#568) is a host capability only the extension broker calls. It is
+registered beside the broker's CRD check and never in the registry the catalog and MCP
+are built from, because called directly it would fetch any URL; its declaration is what
+a binding is checked against, and `extensions.read` is the one way to send a request.
+
+So are the pod capabilities (#567), on both hosts, and for the same reason: called
+directly, each would reach any pod.
+
+| Capability | Kind | Runs as |
+|---|---|---|
+| `k8s.streamLogs` | Read-only, `low` impact | The `logs` app stream. |
+| `k8s.exec` | Sensitive, confirmation-gated, `high` impact, "Run this app's command[ in {resource}][ in cluster {cluster}]?" | The `exec` app stream, after the host confirmation names the pod, container and command. |
+| `k8s.portForward` | Read-only, `medium` impact, not confirmation-gated | The `portForward` app stream. |
+
+`k8s.portForward` is the one row that breaks [the rule below](#impact) that an ungated
+read is `low`, on purpose. It changes nothing in the cluster, but while it is open any
+program on this computer may connect to its port, which is host state a person would
+want to know about. It needs no confirmation because a person starts each forward in
+the view, which says where it listens, and every forward is audited. The rule's check,
+`assert_impact_matches_the_gate`, walks the registry the catalog and MCP are built
+from, and the pod capabilities are not in it, so it does not cover them;
+`the_review_states_the_hosts_own_facts_for_the_pod_capabilities` pins their rows
+instead.
+
+Their declarations (`crates/registry/src/extensions/pods.rs`) are what a binding is
+checked against, and their handlers refuse; the stream sources in
+[streams.md](streams.md#pod-sources) are the only way to run one. Since they are not in
+the catalog, Settings → Apps states these facts itself.
 
 The app facade refuses a host reader with stronger consent annotations than the
 declarative contract allows. App-installed operations go through `extensions.read`;
 per-app `plugin/...` tool discovery is a developer-harness feature (see
 [testing.md](testing.md#developer-harness)).
 
-## Host GitOps actions
+## Host-defined capability metadata
 
-The host derives the API group, kind, plural, version and scope from the enabled app's
-declared reader. An app cannot rebind a reader to a write, and installation does not
-give the app patch access: these are host operations.
+Every capability carries six host-authored facts, written in
+`crates/capability/src/annotations.rs` beside the handler they describe and
+projected into the committed
+[`capability-catalog.json`](../../packages/core/src/lib/capability-catalog.json):
 
-Actions are offered only for the API versions whose schema carries the fields they
-write:
+| Field | Meaning |
+|---|---|
+| `readOnly` | Changes nothing. |
+| `destructive` | Destroys or disrupts something, as opposed to merely changing it. |
+| `requiresConfirm` | Execution stops at a consent step. The flag that actually gates a call, and not derivable from the others. |
+| `sensitive` | Reads or reveals secret material. A redaction flag for the audit log, not a safety class. |
+| `impact` | `low`, `medium` or `high` — how much a successful call disturbs. |
+| `confirm` | The host's confirmation wording, as a template, or `null`. |
 
-- **Flux Kustomization, GitRepository, HelmRepository, HelmChart, Bucket,
-  ImageRepository and ImageUpdateAutomation** (`v1`, `v1beta2`, `v1beta1`) and
-  **OCIRepository** (`v1`, `v1beta2`): Suspend, Resume, Reconcile.
-- **Flux HelmRelease** `v2` and `v2beta2`: Suspend, Resume, Reconcile, Force reconcile
-  and Reset retries. On `v2beta1` only Suspend, Resume and Reconcile, because force and
-  reset arrived with `v2beta2`.
-- **Argo CD Application** (`v1alpha1`): Refresh status, Hard refresh, Sync. Sync does
-  not enable pruning; configured sync options and hooks still apply.
-- **Other resources and API versions** remain inspectable without invented or
-  unsupported actions.
+**Nothing outside the host supplies any of it.** A manifest declares no
+annotations, and a binding inherits the target capability's row through
+`Annotations::for_binding`, which can raise every field and lower none — so an
+app cannot turn a destructive host operation into a read-only-looking tool, drop
+its level, or put its own words in the dialog that authorizes it. The same
+function fails closed over the host row itself: a capability that mutates,
+destroys or returns secrets is gated even if its own annotation forgot to say so.
 
-The backend fetches the resource again, checks the reviewed UID and resourceVersion,
-and includes both in a conditional PATCH, rejecting stale or replaced resources. It
-also rejects:
+### Impact
 
-- a second Argo CD sync while an operation is already present
-- reconciliation while suspended
-- a Suspend of a suspended resource, or a Resume of one that is not suspended
-- writes to a resource being deleted
+`requiresConfirm` is true for a Secret read and for a node drain alike, so on its
+own it cannot tell a reader which of two prompts deserves a pause. `impact`
+answers the other question:
 
-API failures remain errors with no success message. Kubernetes RBAC still governs the
-GET, event list and PATCH. The implementation follows
-[Flux reconciliation and Helm actions](https://fluxcd.io/flux/components/helm/helmreleases/)
-and [Argo CD operations through Kubernetes](https://argo-cd.readthedocs.io/en/stable/user-guide/sync-kubectl/).
-Declared, app-defined actions will replace this built-in list
-([#518](https://github.com/srelens/srelens/issues/518)).
+- **`low`** — a read, or a write whose only effect is to make a controller look
+  again (an Argo CD status refresh).
+- **`medium`** — changes cluster or host state, leaving workloads running: a
+  scale, a suspend, a tool install, a Secret handed to a caller.
+- **`high`** — destroys, disrupts or replaces something running: a delete, a
+  drain, a sync that applies manifests and runs hooks.
+
+The level and the gate cannot disagree: anything `destructive` is `high`,
+anything gated is at least `medium`, and an ungated read is `low`.
+`assert_impact_matches_the_gate` (`crates/mcp/src/completeness.rs`) fails the
+build over the whole registry otherwise. The broker-only capabilities are not in
+that registry; `k8s.portForward` is an ungated read at `medium`, for the reason
+[above](#extensions).
+
+A capability that accepts several named operations publishes **the highest level
+any of them reaches**, because `tools/list` and the catalog carry one row per
+capability and a row that understated the worst case would mislead every reader
+of it. `extensions.action` is `high` for that reason — a declared action can be
+an Argo CD sync — and the per-action level travels with the resource instead, as
+`actionMeta` on `extensions.resource`'s reply. See
+[Declared GitOps actions](#declared-gitops-actions).
+
+### Confirmation templates
+
+`confirm` is a template, not a finished sentence: it is rendered against one
+call's arguments. The scheme is small and deliberately closed.
+
+- `{field}` is replaced by that field's value. `field` is one of `action`,
+  `cluster`, `kind`, `name`, `namespace`, `resource` — a fixed vocabulary, so a
+  capability cannot paste a token, a manifest or a Secret value into a dialog
+  title. `{resource}` is derived from the others (`kind namespace/name`,
+  collapsed to whatever is known) and is never read from the arguments.
+- `[ … ]` is an **optional segment**: kept only when every `{field}` inside it
+  has a value, dropped whole otherwise. Segments do not nest.
+- A `{field}` **outside** a segment with no value makes the render fail. The
+  confirming surface then shows the capability summary rather than a sentence
+  with a hole in it. Every committed template must render with no fields at all,
+  which `assert_confirm_templates_are_renderable` enforces.
+
+So `k8s.scale` carries:
+
+```
+Change the replica count[ of {resource}][ in cluster {cluster}]?
+```
+
+which reads as *Change the replica count of Deployment team/api in cluster prod?*
+for a call that names both, and *Change the replica count?* for one that names
+neither.
+
+Both the host (`srelens_capability::render_confirm`) and the frontend
+(`renderConfirmTemplate` in `@srelens/core`) implement the same scheme, so the
+sentence in an MCP denial and the sentence in a dialog are one string, written
+once. A host-owned confirmation UI built on this is
+[#552](https://github.com/srelens/srelens/issues/552).
+
+## Declared GitOps actions
+
+Flux and Argo CD declare their actions in their manifests under
+`examples/extensions`. Reading a kind grants no write access. Installation or
+update must explicitly grant every action primitive in `permissions`.
+
+`extensions.action` resolves the installed app revision, cluster scope, reader,
+and action declaration before dispatching its bound primitive. The caller supplies
+only the selection, action ID, reviewed UID and `resourceVersion`; it cannot
+replace the kind, patch or preconditions. Every call rechecks app lifecycle and grants.
+
+The Flux manifest declares Suspend, Resume and Reconcile for its nine supported
+controller kinds, plus Force reconcile and Reset retries for HelmRelease. ImagePolicy,
+notification resources and all other readers have no implicit actions. Argo CD declares
+Refresh status, Hard refresh and Sync; Sync preserves `prune: false` and hook strategy.
+The reader binding fixes the exact API version for each action.
+
+`extensions.resource` returns action IDs and `actionMeta`, whose `title` and
+`availableWhen` predicates come from the installed declaration. The host primitive
+supplies `impact` and `confirm`; an app cannot soften those. Inspector and bulk
+controls render these fields without a GitOps label or availability table.
+
+Declared preconditions reject reconciliation while suspended, redundant Suspend or
+Resume requests, and Sync while an Argo CD operation exists. The primitives enforce
+these against a fresh GET after their unconditional UID/resourceVersion and deletion
+checks, then pin the PATCH. Display predicates only explain availability and never
+authorize a write. Force/reset write both Flux annotations in one patch, with the
+same request timestamp. API failures remain errors; accepted requests do not claim
+that controller work has completed.
+
+`k8s.gitOpsAction` has been removed. There is no compatibility endpoint or inherited
+write permission. API 0.1 releases must be replaced by signed API 0.3 or later
+releases and reviewed with their new grants before they can be enabled.
+
+## Host action primitives
+
+The six capabilities a manifest binds as `actions`
+([#549](https://github.com/srelens/srelens/issues/549), with the workload restart and
+Node cordon from [#557](https://github.com/srelens/srelens/issues/557), written up in
+[manifest.md](manifest.md#declared-actions)). They execute a write the *app* declares, against a kind it already holds a granted reader for,
+with every rule enforced by the host.
+
+| Primitive | Impact | Because |
+|---|---|---|
+| `k8s.annotate` | `medium` | Sets one annotation key. It changes no spec and stops nothing; what the controller does next is the controller's. |
+| `k8s.setFields` | `medium` | Sets fixed fields under `spec`. Workloads already running are not stopped. |
+| `k8s.setStatusCondition` | `medium` | Writes one condition through the status subresource, which a controller then acts on. |
+| `k8s.mergePatch` | `high` | The one that can express an Argo CD sync: applying manifests and running hooks. |
+| `k8s.requestRolloutRestart` | `high` | Stamps the pod template of the reviewed Deployment, StatefulSet or DaemonSet, so its running pods are replaced. |
+| `k8s.requestCordonNode` | `medium` | Sets `spec.unschedulable` on the reviewed Node. Running pods are not evicted. |
+
+The level is the ceiling of what the *primitive's shape* can do, not of what a
+controller may do afterwards — an app is free to bind Flux's `forceAt` key through
+`k8s.annotate`, and a host that called every annotation `high` for that reason would
+be telling every Argo CD refresh the same thing. A binding never comes out below its
+primitive's row ([`Annotations::for_binding`](#host-defined-capability-metadata) only
+raises), so #550 and #551 can publish a specific action above it without moving these.
+
+Each primitive re-reads the object, refuses a review that no longer matches and an
+object being deleted, pins its patch to the reviewed UID and `resourceVersion`, and
+reports the request as accepted rather than as complete.
 
 ## Web host
 
-- Every `extensions.*` capability is refused on the multi-user web host until app
-  state is kept per user ([#515](https://github.com/srelens/srelens/issues/515)).
-- `k8s.gitOpsAction` is refused as well. On the web no installed app scopes it to a
-  resource, and there is no consent prompt.
+- **Each signed-in user has their own apps** ([#515](https://github.com/srelens/srelens/issues/515)).
+  Their inventory — installs, grants, enabled state, cluster limits, settings, kept
+  versions and the unsigned-apps opt-in — is their row of the server database
+  (`crates/server/src/app_inventory.rs`), not a file: it survives the environment
+  rebuilds that clear `runtime/`, and goes when the account does. Every `extensions.*`
+  capability reads and writes only that user's inventory, so another user's app ID and
+  revision name nothing in it. Settings API rows (`/api/settings`) are a separate table
+  and cannot place an inventory.
+- **One catalog, shared and read-only to users.** The catalog is the same for everyone,
+  so the server keeps one cache of it (`SharedCatalog` in
+  `crates/registry/src/extensions/catalog.rs`). `extensions.catalog` and
+  `extensions.catalogManifest` read it and never fetch into or write it; `refresh` is
+  answered from the server's copy. The server checks it hourly and fetches it again
+  once it is a day old. Verification is per install, per user, as on the desktop: each
+  install downloads its release and checks the checksum, identity, API range and, for
+  an app in a delegated namespace, the publisher signature; each load re-verifies every
+  signed manifest. The server verifies the shared catalog's signature as a desktop does
+  ([trust.md](trust.md)).
+- **Declared actions run through `extensions.action` only.** It reaches a host
+  primitive through the user's own installed app — the exact group/kind/plural its
+  reader binds, its revision, grants and cluster scope rechecked on the call, and the
+  reviewed UID and `resourceVersion` as preconditions — after the host confirmation
+  the app's screen shows. The web host runs no MCP server and no agent, so every call
+  is the signed-in user's own request, and no consent is given on anyone's behalf. The
+  host action primitives themselves stay refused when called directly: without an
+  installed app, a caller would be naming the kind and the template itself.
+- **App streams are not run on the web.** The stream commands
+  (`extension_stream_open`, `extension_stream_cancel`, `extension_stream_close_view`)
+  are refused, so pages, columns and cards read on Refresh and say they are not live;
+  see [streams.md](streams.md#hosts).
+- **`network.http` on the web only under the operator's ceiling.** A request there
+  leaves from the shared server, from its network position, not from the person's
+  computer. So a web user's registry has `network.http` (#568) only when the server's
+  extension policy names hosts in `networkCeiling`. Without one, an app that binds it
+  is refused with `EXTENSION_UNSUPPORTED_TARGET` ("This host does not provide
+  network.http"), and `extensions.read` has nothing to send. With one, every request
+  and redirect must go to a host both the app and the ceiling allow, over HTTPS only:
+  plain HTTP to loopback would reach the server itself, so the per-app loopback switch
+  is refused there. A provider (#569) sends its query through a `network.http`
+  binding, so `extensions.queryProvider` answers there under the same ceiling; a log
+  provider's follow is an app stream, which the web does not run yet.
+- **Held to the operator's extension policy** ([#578](https://github.com/srelens/srelens/issues/578)).
+  The server's policy (`AppPolicy` in `crates/registry/src/extensions/app_policy.rs`,
+  read from `SRELENS_EXTENSION_POLICY`; see [WEB.md](../WEB.md#extension-policy)) says
+  which app IDs, publishers, capabilities and hosts are allowed, whether unsigned apps
+  and write actions are, and which apps users must keep. Every read of a user's
+  inventory applies the policy in force. An app it refuses is reported as
+  `policyBlocked` and disabled, and every `extensions.*` call through it is refused,
+  including for an app installed before the policy changed. `extensions.validate`
+  reports the refusal as `EXTENSION_POLICY_REFUSED`, and install, update, rollback and
+  enable refuse it. A required app can't be removed or disabled. `extensions.list`
+  reports the policy as `policy`, which is never saved with the inventory.
+- **No executable apps and no app tools on the web** ([#574](https://github.com/srelens/srelens/issues/574)).
+  An executable app installs only from a package, and the web host keeps no files for
+  its apps, so it installs none and runs no sidecar. An app's operations are MCP tools,
+  and the web host runs no MCP server; its capability route refuses any `plugin/…` id
+  before dispatch, so no app tool, and least of all one that would need a consent
+  prompt nobody can answer there, is ever served or approved.
+- **No app secrets on the web yet.** A web user's registry has no secret store, so
+  `extension.secretStore` is not registered there (and is refused before dispatch
+  too), and `extensions.list` reports the store unavailable: the web host keeps no app
+  secrets until per-user storage exists ([#522](https://github.com/srelens/srelens/issues/522)).
+  `@srelens/core` refuses a set on the web before the value leaves the page.
 - `k8s.getCustomResource` stays available: it is a read under the user's own
   kubeconfig and RBAC, like every other custom-resource read.
+
+## Workload image inventory (API 0.8)
+
+A `k8s.listWorkloadImages` binding fixes `arguments.kind` to `Deployment`, `StatefulSet` or `DaemonSet` and accepts explicit `context`, optional `namespace` and an optional `cursor` input. Omitting `cursor` requests the complete legacy inventory (at most 1,000 container images); `cursor: ""` requests a bounded first page, and subsequent requests pass the returned `nextCursor`. Cursors are at most 8,192 ASCII graphic bytes and pin the cluster, namespace and workload kind. Installed-app MCP reader tools expose `cursor` only when the binding declares it. The reader returns workload UID/resourceVersion and each regular or init container's name, type and image reference. It omits environment variables, credentials and Secret references. Each page is bounded. Complete-inventory readers exceeding their limit ask the caller to narrow its namespace or request pages; no partial inventory is presented as complete.
+
+An executable app may declare a `k8s.runJob` binding on API 0.8. Its arguments
+fix `image` (a SHA-256 digest), `command`, `args`, `inputNames` and optional
+`readRules`. Binding `inputs` stays empty: each `${inputs.name}` occupies a
+whole argument, and the scoped Job callback supplies its value. Reader rules
+name only allowed namespace resources with `get`, `list` or `watch`; Secrets,
+wildcards, token minting, exec and writes are refused. The binding is never
+exposed as a reader tool. See [scoped Jobs](sidecar-protocol.md#scoped-jobs-in-protocol-020)
+for confirmation, resource bounds, result files and cancellation.

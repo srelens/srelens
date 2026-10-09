@@ -29,7 +29,10 @@ codes are listed in [Validation errors](specification.md#validation-errors). It 
 the manifest's own rules; the desktop app's narrower rules are checked by
 `extensions.validate` and the install review in Settings → Apps.
 
-To expose only the manifest's operations to an MCP client, add `--mcp`. Supply
+To expose only the manifest's operations to an MCP client, add `--mcp`. This is the
+developer path: it binds the manifest straight to the host capabilities, with no
+inventory. The app itself serves installed apps' operations as MCP tools through the
+broker's own paths ([MCP.md](../MCP.md#installed-apps-tools)). Supply
 `context` on every call, and optionally `namespace`; omitting it lists across
 namespaces. For example:
 
@@ -45,16 +48,26 @@ handler's consent gate.
 
 | Suite | Covers |
 |---|---|
-| `cargo test -p srelens-plugin-host` | Manifest parsing and validation, API version negotiation, broker registration, revocation, consent, and that `schemas/extension-manifest.v0.1.json` equals the generated schema |
+| `cargo test -p srelens-plugin-host` | Manifest parsing and validation, API version negotiation, broker registration, revocation, consent, that `schemas/extension-manifest.v0.7.json` equals the generated schema, and that a field missing from the frozen 0.3, 0.4, 0.5 and 0.6 schemas is gated in `API_FIELDS` |
+| `cargo test -p srelens-plugin-host --test executable --test tools` | Executable apps ([#574](https://github.com/srelens/srelens/issues/574)): the kind and its `sidecar`, the binaries, operation names and inputs; the host-built input schema and every call's checks; and `PluginHost::register_tools`, which gives each reader, action and operation the host's schema and annotations and withdraws them all at once |
+| `cargo test -p srelens-plugin-host --test sidecar` | The sidecar supervisor ([#572](https://github.com/srelens/srelens/issues/572)) against an in-process fake sidecar on a paused clock, so every wait is asserted to its exact length: the handshake and version negotiation, the request timeout and cancellation, the request and stream limits, the 1 s, 5 s and 30 s restart backoff and the disable after it, health checks, protocol violations, and stopping |
+| `cargo test -p srelens-plugin-host --test sidecar_process` | The same lifecycle against a real process, the probe (`src/bin/srelens-sidecar-probe.rs`), started without a sandbox: an abort mid-request leaves the host running and the sidecar restarted, one that dies at every start is disabled, a hung one is killed, and it gets only the environment srelens names |
+| `cargo test -p srelens-plugin-host --test sandbox_conformance -- --ignored --test-threads=1` | The #571 spike's sandbox checks and two more, through the production backend for this OS. Needs the OS sandbox, a network, and on Linux `SRELENS_SANDBOX_CGROUP_ROOT` naming a delegated cgroup. The `sandbox-conformance` CI job runs it on Linux and Windows ([sidecar-protocol.md](sidecar-protocol.md#sandbox)) |
+| `cargo test -p srelens-plugin-host --test macos_watchdog -- --test-threads=1 --nocapture` | macOS only. The macOS watchdog ([#713](https://github.com/srelens/srelens/issues/713)) on a real process, the probe, without Seatbelt: held to 128 MiB and 0.25 CPUs, with how far a hold overshot printed. The `macos-watchdog` CI job runs it on GitHub's macOS runner, which is older than macOS 27; with Seatbelt, the conformance suite's memory and CPU checks are run by hand on a macOS 27 Mac |
 | `cargo test -p srelens-plugin-host --lib fuzzing` | Manifest decoding, validation and parsing on arbitrary bytes and on edits of the example manifests: no panic, a value or a coded problem, the 256 KiB limit to the byte, and an accepted manifest re-serializes to an equal one |
 | `cargo test -p srelens-registry` | Inventory lifecycle, quarantine, catalog parsing and caching, signing, app capabilities |
-| `cargo test -p srelens-registry --lib fuzzing` | The same properties for catalog parsing, publisher signature verification and the inventory reader with its legacy migration, starting from `crates/registry/tests/fixtures` |
+| `cargo test -p srelens-registry --lib -- tools_tests sidecars executable_tests` | Apps' MCP tools and sidecars (#574): an installed app's tools appear and the client is told; a disabled, updated or removed app's tools are withdrawn from every snapshot; a change another process made is found; actions stay behind the consent gate; an executable app installs only from its package, and its sidecar starts on first use from a verified binary, with no environment, and stops with its app; a sidecar reads through the broker, and each write it asks for is confirmed first, naming the app, or refused where nobody can be asked; its process shows in the Inspector. The sidecars are an in-process fake behind the `Launcher` trait |
+| `cargo test -p srelens-mcp --lib app_tools` | The transports' half: `tools.listChanged`, `notifications/tools/list_changed` on stdio and the HTTP stream, a change another process made found by the poll, and a call held to the snapshot it was asked about |
+| `cargo test -p srelens-registry --lib package` | The `.srelens-extension` format ([packages.md](packages.md)): tampered, missing and extra files, links, traversal and layout paths, oversized archives and bombs, trailing data, the digest list's exact form, a package signed outside its publisher's namespace, and a valid package that installs, reverifies, updates, rolls back and is pruned. The fixture packages' digest lists are regenerated, and the signed one re-signed with the test publisher's key, by `UPDATE_CATALOG=1 cargo test -p srelens-registry` |
+| `cargo test -p srelens-registry --lib fuzzing` | The same properties for catalog parsing, signed catalog and trust metadata verification, publisher signature verification, the package reader (on arbitrary bytes, on archives of arbitrary entries and on edits of the fixture packages) and the inventory reader with its legacy migration, starting from `crates/registry/tests/fixtures` |
 | `cargo test -p srelens-kube --lib gitops` | Resource inspection, events, GitOps action allowlist, guards and conditional PATCH |
-| `cargo test -p srelens-server` | Web-host denials |
+| `cargo test -p srelens-server` | Web-host denials, including every `plugin/…` id |
 | `packages/core/src/lib/extensionManifestSchema.test.ts` | Every example manifest validates against the committed schema and names it in `$schema` |
 | `packages/core/src/lib/extensionTypes.test.ts` | The TypeScript manifest and inventory types have the Rust field names and optionality, from `extension-inventory.schema.json` |
 | `packages/ui-next/src/extensions/*.test.tsx` | Settings → Apps, catalog, workspace, resource details |
-| `cargo test -p srelens-desktop --test e2e -- --ignored` (kind) | Every `extensions.*` capability, `k8s.getCustomResource` and `k8s.gitOpsAction` against a live cluster: the example Flux and Argo CD apps and the signed Argo CD release are validated, installed, listed, read and inspected; suspend, resume and refresh land on the object; a stale `resourceVersion` is refused; a disabled app stops reading |
+| `cargo test -p srelens-registry --lib budget_tests` | [Performance budgets](#performance-budgets), the host's half: loading 50 apps, a call's own overhead, resolving 1,000 rows, closing a view |
+| `packages/ui-next/src/extensions/extensionBudgets.test.tsx` | [Performance budgets](#performance-budgets), the client's half: the sidebar's apps, the app list, closing a view |
+| `cargo test -p srelens-desktop --test e2e -- --ignored` (kind) | Every `extensions.*` capability, `k8s.getCustomResource` and the action primitives against a live cluster: the example Flux and Argo CD apps are validated, installed, listed, read and inspected; the historical signed API 0.1 release is refused as incompatible; suspend, resume and refresh land on the object; a stale `resourceVersion` is refused; a disabled app stops reading |
 | `.github/workflows/extension-catalog.yml` (daily) | The ignored `public_catalog_release_smoke`: every release in the live public catalog downloads, matches its checksum and publisher signature, and validates on this host |
 
 ### Live cluster
@@ -81,11 +94,94 @@ cargo test -p srelens-registry --lib -- --ignored --exact \
 An authoring CLI with a test command is planned
 ([#577](https://github.com/srelens/srelens/issues/577)).
 
+## macOS conformance
+
+On 2026-10-05, the release-built production backend passed all 14 sandbox conformance
+checks on macOS 27.0.1 (26A434), arm64. The supervisor used `OsSandbox` directly, with
+Seatbelt and the host watchdog; no test launcher vouched for limits. The three watchdog
+checks without Seatbelt also passed.
+
+```sh
+cargo test --release -p srelens-plugin-host --test sandbox_conformance --test macos_watchdog -- --include-ignored --test-threads=1 --nocapture
+```
+
+Both CPU checks measured 0.25 CPUs against a 0.25 CPU limit. The release probe held
+512 MiB against a 128 MiB memory limit: the watchdog stopped it, measuring 514 MiB
+with Seatbelt and 447 MiB without it. These are sampled readings, not peak memory or
+a maximum overshoot. A fast allocation can finish between the watchdog's 50 ms readings;
+the memory limit bounds sustained use, not an instantaneous burst. This guarantee is
+weaker than the kernel limits on Linux and Windows. Intel Macs and older macOS versions
+with Seatbelt remain unverified.
+
+## Performance budgets
+
+The roadmap sets three targets for the platform: loading the installed apps' manifests
+in under 50 ms, building the navigation apps contribute in under 10 ms, and keeping a
+typical host call's own overhead under 5 ms. It also requires batching, deduplication
+and cancellation. [#581](https://github.com/srelens/srelens/issues/581) measures them in
+two suites, one per side of the bridge:
+
+| Budget | What is measured | Target |
+|---|---|---|
+| `inventory-load-50-apps` | `extensions.list` over 50 installed apps (45 Argo CD, 5 Flux, from `examples/extensions`) | 50 ms |
+| `host-call-overhead-1-app`, `-50-apps` | A broker call with nothing to read, from the bridge's entry: it resolves the context and loads the whole inventory to authorize one app | 5 ms |
+| `resolve-columns-1000-rows-warm` | `extensions.resolveColumns` over 1,000 rows, three joined columns and a badge, from the snapshot | none, tracked |
+| `close-view-6-streams` | The host's side of closing a view that holds three watches and three read streams | 5 ms |
+| `navigation-build-50-apps` | The sidebar's Apps group from 50 apps (`appNavigation.ts`) | 10 ms |
+| `inventory-store-load-50-apps` | The app list's own part of loading 50 apps: from the host's answer to a ready list | 50 ms |
+| `resolve-columns-lists-per-join` | Kubernetes lists for five resolves of 1,000 rows (four at once, then a refresh) over three joins on two readers, against a loopback API server | exactly one per joined reader |
+| `close-view-releases` | Watch sessions and streams the host still holds after views are closed | none left |
+| `client-view-close-releases` | Streams left open on the host, and channel listeners left in the client, after a view with three apps' watches unmounts | none left |
+
+Counts are held exactly, on every run. Times are held to a **ceiling**, not to the
+target: `backend` runs the Rust suite as a debug build under coverage instrumentation on
+a shared runner, many times slower than the release build a target describes, and a test
+that failed at the target there would fail on every run. A ceiling sits far enough above
+the target to catch a path that became an order of magnitude slower, and never a noisy
+runner. When one fails, find the change; do not raise the number.
+
+With `SRELENS_PERF_REPORT_DIR` set, each suite writes one JSON file per measurement into
+that directory, `rust-<name>.json` or `ts-<name>.json`, in one of two shapes. Both carry
+`kind`, `name`, `what`, the commit, and the Rust build or the Node version.
+
+- A **timing** report (`"kind": "timing"`) has the median, fastest and slowest run
+  (`medianMs`, `minMs`, `maxMs`, `runs`), `targetMs`, `ceilingMs`, `withinTarget` and a
+  `detail` object. A debug build leaves `withinTarget` empty, because the targets
+  describe a release build.
+- A **count** report (`"kind": "count"`) has no times: it has the counts the test holds
+  and what it expected of them, such as `lists` and `expectedLists`, or `leaks` and the
+  watch sessions and streams still held after the views closed. It is written before
+  the counts are held, so a run that breaks one says by how much.
+
+The `extension budgets (release)` job in `ci.yml` runs the host suite as a release build
+and the client suite in Vitest, both without coverage, checks that each wrote reports, and
+uploads the directory as the `extension-budgets` artifact on every run, so a drift is
+visible across runs long before it reaches a ceiling. The client figures are Vitest's,
+in Node with jsdom, not a production bundle in the WebView. To compare against the
+targets locally:
+
+```sh
+SRELENS_PERF_REPORT_DIR=/tmp/budgets cargo test --release -p srelens-registry --lib budget_tests -- --test-threads=1 --nocapture
+SRELENS_PERF_REPORT_DIR=/tmp/budgets pnpm exec vitest run packages/ui-next/src/extensions/extensionBudgets.test.tsx
+```
+
+The broker loads the whole inventory on every call, so a call's overhead grows with the
+number of installed apps; at 50 it is close to its target. See
+[PERFORMANCE.md](../PERFORMANCE.md#extension-platform-budgets) for the figures.
+
 ## Fuzzing
 
 The parsers that read extension input from outside the host have cargo-fuzz targets in
-`fuzz/`: `manifest`, `catalog`, `signed-manifest` and `inventory`. `signed-manifest` reads
-one byte giving the signature's length, the signature, then the manifest.
+`fuzz/`: `manifest`, `catalog`, `signed-manifest`, `package`, `inventory`, `signed-catalog`
+and `trust-metadata`. `signed-manifest` reads one byte giving the signature's length, the
+signature, then the manifest. `package` reads one mode byte, then a package: when the byte
+is odd, an uncompressed tar that the target compresses itself, so the fuzzer explores the
+archive and its checks rather than guessing gzip checksums. Its seeds are the fixture
+packages in `crates/registry/tests/fixtures/packages`. `signed-catalog` verifies a signed
+catalog as a download is, and `trust-metadata` reads the same bytes as a signed root, a
+publisher delegation and a release signature file. These three check signatures against the
+test root in `crates/registry/tests/fixtures/trust`, and accept nothing its keys did not
+sign: a fuzzer cannot sign, so anything else accepted would be a forgery.
 
 Each target calls one function in its crate's `fuzzing` module, and the `fuzzing` property
 tests above call the same function, so a property is written once. `cargo test` runs a

@@ -70,7 +70,7 @@ pub fn render_help_modal(f: &mut Frame, area: Rect) {
         ]),
         Row::new(vec![
             Cell::from(Span::styled("  Ctrl+c", Theme::key_hint_key())),
-            Cell::from("Exit / kill srelens-tui immediately"),
+            Cell::from("Exit / kill srectl immediately"),
         ]),
         Row::new(vec![
             Cell::from(Span::styled("  / <filter>", Theme::key_hint_key())),

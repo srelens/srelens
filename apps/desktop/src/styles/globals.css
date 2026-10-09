@@ -1,5 +1,6 @@
 @import "tailwindcss";
 @import "@srelens/ui-next/extensions/styles";
+@import "@srelens/ui-next/confirm/styles";
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
 

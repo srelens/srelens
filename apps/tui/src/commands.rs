@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-/// Supported Resource Views in the SRElens TUI
+/// Supported Resource Views in srectl
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ResourceKind {
     Pods,
@@ -47,6 +47,16 @@ pub enum ResourceKind {
     TopPods,
     TopNodes,
     BgpPeers,
+    Changed,
+    ReplicaSets,
+    HorizontalPodAutoscalers,
+    PodDisruptionBudgets,
+    PriorityClasses,
+    RuntimeClasses,
+    Leases,
+    MutatingWebhookConfigurations,
+    ValidatingWebhookConfigurations,
+    IngressClasses,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -189,6 +199,16 @@ impl ResourceKind {
             Self::TopPods => "Top Pods",
             Self::TopNodes => "Top Nodes",
             Self::BgpPeers => "BGP Peering & Routes",
+            Self::Changed => "Changed & Triage",
+            Self::ReplicaSets => "ReplicaSets",
+            Self::HorizontalPodAutoscalers => "HorizontalPodAutoscalers",
+            Self::PodDisruptionBudgets => "PodDisruptionBudgets",
+            Self::PriorityClasses => "PriorityClasses",
+            Self::RuntimeClasses => "RuntimeClasses",
+            Self::Leases => "Leases",
+            Self::MutatingWebhookConfigurations => "MutatingWebhookConfigurations",
+            Self::ValidatingWebhookConfigurations => "ValidatingWebhookConfigurations",
+            Self::IngressClasses => "IngressClasses",
         }
     }
 
@@ -205,6 +225,7 @@ impl ResourceKind {
             Self::ResourceQuotas => Some("resourcequotas"),
             Self::LimitRanges => Some("limitranges"),
             Self::Services => Some("services"),
+            Self::Endpoints => Some("endpoints"),
             Self::EndpointSlices => Some("endpointslices"),
             Self::Ingresses => Some("ingresses"),
             Self::NetworkPolicies => Some("networkpolicies"),
@@ -219,6 +240,15 @@ impl ResourceKind {
             Self::Nodes => Some("nodes"),
             Self::Namespaces => Some("namespaces"),
             Self::Events => Some("events"),
+            Self::ReplicaSets => Some("replicasets"),
+            Self::HorizontalPodAutoscalers => Some("horizontalpodautoscalers"),
+            Self::PodDisruptionBudgets => Some("poddisruptionbudgets"),
+            Self::PriorityClasses => Some("priorityclasses"),
+            Self::RuntimeClasses => Some("runtimeclasses"),
+            Self::Leases => Some("leases"),
+            Self::MutatingWebhookConfigurations => Some("mutatingwebhookconfigurations"),
+            Self::ValidatingWebhookConfigurations => Some("validatingwebhookconfigurations"),
+            Self::IngressClasses => Some("ingressclasses"),
             _ => None,
         }
     }
@@ -251,6 +281,15 @@ impl ResourceKind {
             Self::Nodes => Some("Node"),
             Self::Namespaces => Some("Namespace"),
             Self::Events => Some("Event"),
+            Self::ReplicaSets => Some("ReplicaSet"),
+            Self::HorizontalPodAutoscalers => Some("HorizontalPodAutoscaler"),
+            Self::PodDisruptionBudgets => Some("PodDisruptionBudget"),
+            Self::PriorityClasses => Some("PriorityClass"),
+            Self::RuntimeClasses => Some("RuntimeClass"),
+            Self::Leases => Some("Lease"),
+            Self::MutatingWebhookConfigurations => Some("MutatingWebhookConfiguration"),
+            Self::ValidatingWebhookConfigurations => Some("ValidatingWebhookConfiguration"),
+            Self::IngressClasses => Some("IngressClass"),
             Self::CustomResourceDefinitions => Some("CustomResourceDefinition"),
             Self::CustomResource(crd) => Some(crd.kind.as_str()),
             _ => None,
@@ -270,7 +309,12 @@ impl ResourceKind {
             | Self::Overview
             | Self::Toolbox
             | Self::Assistant
-            | Self::BgpPeers => false,
+            | Self::BgpPeers
+            | Self::PriorityClasses
+            | Self::RuntimeClasses
+            | Self::MutatingWebhookConfigurations
+            | Self::ValidatingWebhookConfigurations
+            | Self::IngressClasses => false,
             _ => true,
         }
     }
@@ -463,6 +507,20 @@ pub const COMMAND_REGISTRY: &[CommandDef] = &[
         target: CommandTarget::Resource(ResourceKind::Events),
     },
     CommandDef {
+        name: "changed",
+        aliases: &[
+            "change",
+            "chg",
+            "recent",
+            "triage",
+            "page",
+            "incident",
+            "incidents",
+        ],
+        description: "SRE incident investigation & change triage (:changed [duration], :page, :incident)",
+        target: CommandTarget::Resource(ResourceKind::Changed),
+    },
+    CommandDef {
         name: "serviceaccounts",
         aliases: &["sa", "serviceaccount"],
         description: "Service account identities and RBAC token bindings",
@@ -517,6 +575,78 @@ pub const COMMAND_REGISTRY: &[CommandDef] = &[
         target: CommandTarget::Resource(ResourceKind::PortForwards),
     },
     CommandDef {
+        name: "replicasets",
+        aliases: &["rs", "replicaset"],
+        description: "ReplicaSet controllers and pod replica management",
+        target: CommandTarget::Resource(ResourceKind::ReplicaSets),
+    },
+    CommandDef {
+        name: "resourcequotas",
+        aliases: &["quota", "quotas", "resourcequota"],
+        description: "Hard resource constraints and usage tracking per namespace",
+        target: CommandTarget::Resource(ResourceKind::ResourceQuotas),
+    },
+    CommandDef {
+        name: "limitranges",
+        aliases: &["limits", "limitrange"],
+        description: "Default, min, and max compute resource limits per pod",
+        target: CommandTarget::Resource(ResourceKind::LimitRanges),
+    },
+    CommandDef {
+        name: "horizontalpodautoscalers",
+        aliases: &["hpa", "autoscaler", "horizontalpodautoscaler"],
+        description: "Automatic horizontal pod scaling based on metrics",
+        target: CommandTarget::Resource(ResourceKind::HorizontalPodAutoscalers),
+    },
+    CommandDef {
+        name: "pdb",
+        aliases: &["poddisruptionbudgets", "poddisruptionbudget"],
+        description: "Voluntary disruption budgets ensuring minimum pod availability",
+        target: CommandTarget::Resource(ResourceKind::PodDisruptionBudgets),
+    },
+    CommandDef {
+        name: "priorityclasses",
+        aliases: &["pc", "priorityclass"],
+        description: "Pod scheduling priority and eviction preemption mapping",
+        target: CommandTarget::Resource(ResourceKind::PriorityClasses),
+    },
+    CommandDef {
+        name: "runtimeclasses",
+        aliases: &["rc", "runtimeclass"],
+        description: "Container runtime configurations and handler selections",
+        target: CommandTarget::Resource(ResourceKind::RuntimeClasses),
+    },
+    CommandDef {
+        name: "leases",
+        aliases: &["lease"],
+        description: "Distributed leader election locks and component heartbeat leases",
+        target: CommandTarget::Resource(ResourceKind::Leases),
+    },
+    CommandDef {
+        name: "mutatingwebhookconfigurations",
+        aliases: &["mwc", "mutatingwebhooks"],
+        description: "Admission mutating webhook interceptors and injectors",
+        target: CommandTarget::Resource(ResourceKind::MutatingWebhookConfigurations),
+    },
+    CommandDef {
+        name: "validatingwebhookconfigurations",
+        aliases: &["vwc", "validatingwebhooks"],
+        description: "Admission validating webhook policies and enforcement",
+        target: CommandTarget::Resource(ResourceKind::ValidatingWebhookConfigurations),
+    },
+    CommandDef {
+        name: "ingressclasses",
+        aliases: &["ic", "ingressclass"],
+        description: "Ingress controller implementations and routing class specs",
+        target: CommandTarget::Resource(ResourceKind::IngressClasses),
+    },
+    CommandDef {
+        name: "endpoints",
+        aliases: &["endpoint", "ep-legacy"],
+        description: "Network endpoints routing traffic to service pods",
+        target: CommandTarget::Resource(ResourceKind::Endpoints),
+    },
+    CommandDef {
         name: "contexts",
         aliases: &["ctx", "context"],
         description: "Kubeconfig context switcher for multi-cluster management",
@@ -561,7 +691,7 @@ pub const COMMAND_REGISTRY: &[CommandDef] = &[
     CommandDef {
         name: "features",
         aliases: &["banner", "guide", "welcome"],
-        description: "Show SRElens feature highlights banner (:helm, :overview, :gpuinfo, :workloads, :argo, :ai, :ai-settings, :config, :import, :banner)",
+        description: "Show SRElens feature highlights banner (:page, :helm, :overview, :gpuinfo, :workloads, :argo, :ai, :ai-settings, :config, :import, :banner)",
         target: CommandTarget::FeatureBanner,
     },
     CommandDef {
@@ -573,7 +703,7 @@ pub const COMMAND_REGISTRY: &[CommandDef] = &[
     CommandDef {
         name: "quit",
         aliases: &["q", "exit"],
-        description: "Quit SRElens TUI session",
+        description: "Quit srectl session",
         target: CommandTarget::Quit,
     },
     CommandDef {
@@ -648,17 +778,22 @@ impl DynamicCommandDef {
                 | ResourceKind::DaemonSets
                 | ResourceKind::Jobs
                 | ResourceKind::CronJobs
+                | ResourceKind::ReplicaSets
+                | ResourceKind::HorizontalPodAutoscalers
                 | ResourceKind::Workloads => "Workload",
                 ResourceKind::Services
                 | ResourceKind::Endpoints
                 | ResourceKind::EndpointSlices
                 | ResourceKind::Ingresses
+                | ResourceKind::IngressClasses
                 | ResourceKind::NetworkPolicies
                 | ResourceKind::BgpPeers => "Network",
                 ResourceKind::ConfigMaps
                 | ResourceKind::Secrets
                 | ResourceKind::ResourceQuotas
-                | ResourceKind::LimitRanges => "Config",
+                | ResourceKind::LimitRanges
+                | ResourceKind::PodDisruptionBudgets
+                | ResourceKind::Leases => "Config",
                 ResourceKind::PersistentVolumeClaims
                 | ResourceKind::PersistentVolumes
                 | ResourceKind::StorageClasses => "Storage",
@@ -667,7 +802,11 @@ impl DynamicCommandDef {
                 | ResourceKind::ClusterRoles
                 | ResourceKind::RoleBindings
                 | ResourceKind::ClusterRoleBindings => "Auth / RBAC",
-                ResourceKind::Nodes
+                ResourceKind::PriorityClasses
+                | ResourceKind::RuntimeClasses
+                | ResourceKind::MutatingWebhookConfigurations
+                | ResourceKind::ValidatingWebhookConfigurations
+                | ResourceKind::Nodes
                 | ResourceKind::Namespaces
                 | ResourceKind::Events
                 | ResourceKind::CustomResourceDefinitions => "Cluster",
@@ -682,6 +821,7 @@ impl DynamicCommandDef {
                 ResourceKind::Topology => "Topology",
                 ResourceKind::GpuInfo => "GPU / Hardware",
                 ResourceKind::TopPods | ResourceKind::TopNodes => "Hotspots",
+                ResourceKind::Changed => "Triage",
                 ResourceKind::CustomResource(_) => "Custom Resource",
             },
             CommandTarget::CustomResource(_) => "CRD",
@@ -698,6 +838,7 @@ impl DynamicCommandDef {
 
     pub fn syntax_hint(&self) -> &'static str {
         match &self.target {
+            CommandTarget::Resource(ResourceKind::Changed) => ":changed [duration]",
             CommandTarget::Resource(ResourceKind::Pods) => ":pods [namespace]",
             CommandTarget::Resource(ResourceKind::Deployments) => ":deployments [ns]",
             CommandTarget::Resource(ResourceKind::Services) => ":services [ns]",

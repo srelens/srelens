@@ -3,6 +3,8 @@
 //! bridge driven against an in-process fake OpenAI-compatible endpoint on
 //! loopback (no real provider, no agent subprocess).
 
+mod common;
+
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -17,27 +19,27 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
 
-use srelens_tui::agent::{
+use srectl::agent::{
     build_mcp_server, run_boxed_cursor_turn, run_native_agent_turn, McpToolInvoker,
 };
-use srelens_tui::ai_config::{
+use srectl::ai_config::{
     default_base_url_for_provider, default_model_for_provider, env_var_for_provider,
     provider_display_name, provider_slug, AiProvider, AiSettings, ALL_PROVIDERS,
 };
-use srelens_tui::ai_skills::{
+use srectl::ai_skills::{
     expand_slash_command, load_user_skills_dir, match_slash_commands, parse_caveman_command,
     CavemanCommandAction, CavemanLevel, BUILTIN_PLAYBOOKS,
 };
-use srelens_tui::commands::{
+use srectl::commands::{
     command_suggestions, command_suggestions_with_crds, crd_cache_path, load_cached_crds,
     resolve_command, resolve_command_with_crds, save_cached_crds, CommandTarget, CrdMeta,
     DynamicCommandDef, ResourceKind, COMMAND_REGISTRY,
 };
-use srelens_tui::deep_link::DeepLink;
-use srelens_tui::event::{AppEvent, EventHandler};
-use srelens_tui::sink::TuiSink;
-use srelens_tui::theme::{status_style, Theme};
-use srelens_tui::tui_config::{CommandPopupDensity, TuiConfig};
+use srectl::deep_link::DeepLink;
+use srectl::event::{AppEvent, EventHandler};
+use srectl::sink::TuiSink;
+use srectl::theme::{status_style, Theme};
+use srectl::tui_config::{CommandPopupDensity, TuiConfig};
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -253,6 +255,7 @@ async fn native_turn(
         prompt.to_string(),
         "kind-dev".into(),
         "payments".into(),
+        None,
         tx,
         30,
     )
@@ -362,6 +365,45 @@ async fn an_unknown_tool_name_is_a_tool_error_not_a_transport_failure() {
     assert!(res.is_error);
     assert!(!res.denied);
     assert!(!res.content.is_empty());
+}
+
+#[tokio::test]
+async fn tool_name_resolution_is_resilient_to_prefix_and_separator_variations() {
+    let inv = invoker();
+    inv.list_tools().await.unwrap();
+
+    // Calling listEndpoints without k8s_ prefix or with dot resolves to k8s.listEndpoints
+    let res1 = inv
+        .call_tool(
+            "listEndpoints",
+            &json!({"context": "prod", "namespace": "default"}),
+        )
+        .await
+        .unwrap();
+    // Reaching the handler (which errors on reading kubeconfig) proves the name resolved to the capability
+    // rather than failing at the RPC dispatcher with "unknown tool".
+    assert!(!res1.content.contains("unknown tool"));
+    assert!(res1.content.starts_with("handler error:"));
+
+    let res2 = inv
+        .call_tool(
+            "k8s.listEndpoints",
+            &json!({"context": "prod", "namespace": "default"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res1.content, res2.content);
+    assert_eq!(res1.is_error, res2.is_error);
+
+    let res3 = inv
+        .call_tool(
+            "k8s_listEndpoints",
+            &json!({"context": "prod", "namespace": "default"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res1.content, res3.content);
+    assert_eq!(res1.is_error, res3.is_error);
 }
 
 #[tokio::test]
@@ -702,6 +744,7 @@ async fn a_boxed_cursor_turn_reports_a_missing_binary_and_finishes() {
         "what is wrong?".into(),
         "kind-dev".into(),
         "default".into(),
+        None,
         cache,
         vec![],
         tx,
@@ -824,6 +867,7 @@ fn bold(style: Style) -> bool {
 
 #[test]
 fn every_theme_style_uses_its_palette_colour() {
+    let _theme = common::theme::lock();
     assert_eq!(Theme::header().fg, Some(Theme::CYAN));
     assert!(bold(Theme::header()));
     assert_eq!(Theme::header_label().fg, Some(Theme::LABEL));
@@ -882,6 +926,7 @@ fn context_colour_reflects_the_environment_named_in_the_context() {
 
 #[test]
 fn status_style_maps_every_status_family_to_its_colour() {
+    let _theme = common::theme::lock();
     for s in [
         "CrashLoopBackOff",
         "Error",
@@ -914,6 +959,34 @@ fn status_style_maps_every_status_family_to_its_colour() {
     }
     assert_eq!(status_style("Bound"), Style::default().fg(Theme::FG));
     assert_eq!(status_style(""), Style::default().fg(Theme::FG));
+}
+
+/// The words kubectl's STATUS column uses for a pod (`PodSummary::status`)
+/// that say neither "error" nor "backoff" yet name a failure, and the ones
+/// that name a pod still on its way up. Each used to fall through to plain
+/// text.
+#[test]
+fn status_style_colours_kubectls_pod_status_words() {
+    let _theme = common::theme::lock();
+    for s in [
+        "OOMKilled",
+        "ErrImagePull",
+        "ErrImageNeverPull",
+        "InvalidImageName",
+        "ExitCode:1",
+        "Signal:9",
+        "Evicted",
+        "DeadlineExceeded",
+        "Init:OOMKilled",
+        "Init:ExitCode:2",
+        "Init:CrashLoopBackOff",
+        "Init:Error",
+    ] {
+        assert_eq!(status_style(s), Theme::status_error(), "{s}");
+    }
+    for s in ["Init:0/2", "Init:1/2", "PodInitializing", "SchedulingGated"] {
+        assert_eq!(status_style(s), Theme::status_warn(), "{s}");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1151,8 +1224,16 @@ fn caveman_level_setting_round_trips_and_clears() {
     s.set_caveman_level(Some(CavemanLevel::WenyanFull));
     assert_eq!(s.caveman_level.as_deref(), Some("wenyan-full"));
     assert_eq!(s.get_caveman_level(), Some(CavemanLevel::WenyanFull));
+    // Off is stored as "off", so it is not mistaken for "never set" (ultra).
     s.set_caveman_level(None);
-    assert_eq!(s.caveman_level, None);
+    assert_eq!(s.caveman_level.as_deref(), Some("off"));
+    assert_eq!(s.get_caveman_level(), None);
+    s.caveman_level = None;
+    assert_eq!(
+        s.get_caveman_level(),
+        Some(CavemanLevel::Ultra),
+        "unset is ultra"
+    );
     s.caveman_level = Some("garbage".into());
     assert_eq!(s.get_caveman_level(), None);
 }
@@ -1188,34 +1269,15 @@ fn an_explicit_api_key_produces_a_provider_config_and_cursor_never_does() {
     assert_ne!(s.get_api_key(AiProvider::OpenAi).as_deref(), Some("   "));
 }
 
-/// The only test in this binary that touches process environment variables, so
-/// it cannot race with a sibling test. Each variable is restored afterwards.
 #[test]
 fn settings_paths_and_key_lookups_follow_the_environment() {
-    struct Restore(Vec<(&'static str, Option<String>)>);
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            for (k, v) in &self.0 {
-                match v {
-                    Some(v) => std::env::set_var(k, v),
-                    None => std::env::remove_var(k),
-                }
-            }
-        }
-    }
-    let vars = [
-        "SRELENS_AI_SETTINGS_PATH",
-        "SRELENS_CONFIG_DIR",
-        "GEMINI_API_KEY",
-        "OPENAI_COMPATIBLE_API_KEY",
-    ];
-    let _restore = Restore(vars.iter().map(|k| (*k, std::env::var(k).ok())).collect());
+    let mut env = common::env::lock();
 
     // 1. Explicit settings file: save then load round-trips.
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("nested").join("ai.json");
-    std::env::set_var("SRELENS_AI_SETTINGS_PATH", &file);
-    std::env::remove_var("SRELENS_CONFIG_DIR");
+    env.set("SRELENS_AI_SETTINGS_PATH", &file);
+    env.remove("SRELENS_CONFIG_DIR");
     assert_eq!(AiSettings::config_path(), file);
 
     let mut s = AiSettings::default();
@@ -1228,14 +1290,14 @@ fn settings_paths_and_key_lookups_follow_the_environment() {
     assert_eq!(AiSettings::load(), s);
 
     // 2. A config dir puts the file at <dir>/ai_settings.json; the explicit path wins over it.
-    std::env::set_var("SRELENS_CONFIG_DIR", dir.path());
+    env.set("SRELENS_CONFIG_DIR", dir.path());
     assert_eq!(AiSettings::config_path(), file);
-    std::env::set_var("SRELENS_AI_SETTINGS_PATH", "   ");
+    env.set("SRELENS_AI_SETTINGS_PATH", "   ");
     assert_eq!(
         AiSettings::config_path(),
         dir.path().join("ai_settings.json")
     );
-    std::env::remove_var("SRELENS_AI_SETTINGS_PATH");
+    env.remove("SRELENS_AI_SETTINGS_PATH");
     assert_eq!(
         AiSettings::config_path(),
         dir.path().join("ai_settings.json")
@@ -1243,13 +1305,13 @@ fn settings_paths_and_key_lookups_follow_the_environment() {
 
     // 3. Key lookup: stored key first, then the provider's env var, else none.
     let mut s = AiSettings::default();
-    std::env::remove_var("GEMINI_API_KEY");
+    env.remove("GEMINI_API_KEY");
     assert_eq!(s.get_api_key(AiProvider::Gemini), None);
     assert!(
         s.resolve_provider_config(AiProvider::Gemini).is_none(),
         "no key, no config"
     );
-    std::env::set_var("GEMINI_API_KEY", "g-env");
+    env.set("GEMINI_API_KEY", "g-env");
     assert_eq!(s.get_api_key(AiProvider::Gemini).as_deref(), Some("g-env"));
     assert_eq!(
         s.resolve_provider_config(AiProvider::Gemini)
@@ -1262,7 +1324,7 @@ fn settings_paths_and_key_lookups_follow_the_environment() {
         s.get_api_key(AiProvider::Gemini).as_deref(),
         Some("g-stored")
     );
-    std::env::set_var("GEMINI_API_KEY", "   ");
+    env.set("GEMINI_API_KEY", "   ");
     s.api_keys.remove("gemini");
     assert_eq!(
         s.get_api_key(AiProvider::Gemini),
@@ -1271,7 +1333,7 @@ fn settings_paths_and_key_lookups_follow_the_environment() {
     );
 
     // 4. OpenAI-compatible endpoints need no key: "ollama" is substituted.
-    std::env::remove_var("OPENAI_COMPATIBLE_API_KEY");
+    env.remove("OPENAI_COMPATIBLE_API_KEY");
     let cfg = s
         .resolve_provider_config(AiProvider::OpenAiCompatible)
         .expect("keyless config");
@@ -1534,6 +1596,15 @@ fn all_static_kinds() -> Vec<ResourceKind> {
         ResourceKind::Settings,
         ResourceKind::TuiConfig,
         ResourceKind::Workloads,
+        ResourceKind::ReplicaSets,
+        ResourceKind::HorizontalPodAutoscalers,
+        ResourceKind::PodDisruptionBudgets,
+        ResourceKind::PriorityClasses,
+        ResourceKind::RuntimeClasses,
+        ResourceKind::Leases,
+        ResourceKind::MutatingWebhookConfigurations,
+        ResourceKind::ValidatingWebhookConfigurations,
+        ResourceKind::IngressClasses,
     ]
 }
 
@@ -1570,8 +1641,7 @@ fn watch_kinds_are_lowercase_plurals_for_watchable_kinds_only() {
             None => assert!(
                 matches!(
                     kind,
-                    ResourceKind::Endpoints
-                        | ResourceKind::CustomResourceDefinitions
+                    ResourceKind::CustomResourceDefinitions
                         | ResourceKind::HelmReleases
                         | ResourceKind::PortForwards
                         | ResourceKind::Overview
@@ -1585,7 +1655,7 @@ fn watch_kinds_are_lowercase_plurals_for_watchable_kinds_only() {
             ),
         }
     }
-    assert_eq!(watchable, 25);
+    assert_eq!(watchable, 35);
     assert_eq!(
         ResourceKind::CustomResource(cilium_pool()).watch_kind(),
         None
@@ -1650,6 +1720,11 @@ fn cluster_scoped_kinds_are_not_namespaced() {
         ResourceKind::Overview,
         ResourceKind::Toolbox,
         ResourceKind::Assistant,
+        ResourceKind::PriorityClasses,
+        ResourceKind::RuntimeClasses,
+        ResourceKind::MutatingWebhookConfigurations,
+        ResourceKind::ValidatingWebhookConfigurations,
+        ResourceKind::IngressClasses,
     ];
     for kind in all_static_kinds() {
         assert_eq!(
@@ -1754,6 +1829,60 @@ fn resolve_matches_static_commands_case_insensitively_then_by_prefix() {
     assert_eq!(
         resolve_command(":netpo"),
         Some(CommandTarget::Resource(ResourceKind::NetworkPolicies))
+    );
+    assert_eq!(
+        resolve_command(":pdb"),
+        Some(CommandTarget::Resource(ResourceKind::PodDisruptionBudgets))
+    );
+    assert_eq!(
+        resolve_command(":hpa"),
+        Some(CommandTarget::Resource(
+            ResourceKind::HorizontalPodAutoscalers
+        ))
+    );
+    assert_eq!(
+        resolve_command(":rs"),
+        Some(CommandTarget::Resource(ResourceKind::ReplicaSets))
+    );
+    assert_eq!(
+        resolve_command(":quota"),
+        Some(CommandTarget::Resource(ResourceKind::ResourceQuotas))
+    );
+    assert_eq!(
+        resolve_command(":limits"),
+        Some(CommandTarget::Resource(ResourceKind::LimitRanges))
+    );
+    assert_eq!(
+        resolve_command(":pc"),
+        Some(CommandTarget::Resource(ResourceKind::PriorityClasses))
+    );
+    assert_eq!(
+        resolve_command(":rc"),
+        Some(CommandTarget::Resource(ResourceKind::RuntimeClasses))
+    );
+    assert_eq!(
+        resolve_command(":lease"),
+        Some(CommandTarget::Resource(ResourceKind::Leases))
+    );
+    assert_eq!(
+        resolve_command(":mwc"),
+        Some(CommandTarget::Resource(
+            ResourceKind::MutatingWebhookConfigurations
+        ))
+    );
+    assert_eq!(
+        resolve_command(":vwc"),
+        Some(CommandTarget::Resource(
+            ResourceKind::ValidatingWebhookConfigurations
+        ))
+    );
+    assert_eq!(
+        resolve_command(":ic"),
+        Some(CommandTarget::Resource(ResourceKind::IngressClasses))
+    );
+    assert_eq!(
+        resolve_command(":endpoints"),
+        Some(CommandTarget::Resource(ResourceKind::Endpoints))
     );
     assert_eq!(resolve_command(":?"), Some(CommandTarget::Help));
     assert_eq!(resolve_command(":exit"), Some(CommandTarget::Quit));
@@ -1942,25 +2071,16 @@ fn crd_suggestions_are_scored_by_exact_prefix_alias_and_group() {
 
 #[test]
 fn tui_config_file_paths_clamping_and_round_trip() {
-    struct Restore(Vec<(&'static str, Option<String>)>);
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            for (k, v) in &self.0 {
-                match v {
-                    Some(val) => std::env::set_var(k, val),
-                    None => std::env::remove_var(k),
-                }
-            }
-        }
-    }
-    let vars = ["SRELENS_TUI_CONFIG_PATH", "SRELENS_CONFIG_DIR"];
-    let _restore = Restore(vars.iter().map(|k| (*k, std::env::var(k).ok())).collect());
+    let mut env = common::env::lock();
 
-    // 1. Explicit path override
+    // 1. Explicit path override. The documented name wins over the one from
+    // before the srectl rename.
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("nested").join("tui.json");
-    std::env::set_var("SRELENS_TUI_CONFIG_PATH", &file);
-    std::env::remove_var("SRELENS_CONFIG_DIR");
+    let legacy_file = dir.path().join("legacy.json");
+    env.set("SRECTL_CONFIG_PATH", &file);
+    env.set("SRELENS_TUI_CONFIG_PATH", &legacy_file);
+    env.remove("SRELENS_CONFIG_DIR");
     assert_eq!(TuiConfig::config_file_path(), file);
 
     // 2. Round trip save and load
@@ -1970,18 +2090,48 @@ fn tui_config_file_paths_clamping_and_round_trip() {
         command_popup_density: CommandPopupDensity::Large,
         show_feature_banner: true,
         check_updates: true,
+        show_changed_guide: true,
         argo_hub_context: None,
         argo_hub_kubeconfig: None,
+        argo_ui_url: None,
+        argo_timeout_secs: None,
         update_available: None,
     };
     cfg.save().expect("save succeeds");
     assert!(file.is_file());
     assert_eq!(TuiConfig::load(), cfg);
 
-    // 3. Fallback to SRELENS_CONFIG_DIR
-    std::env::remove_var("SRELENS_TUI_CONFIG_PATH");
-    std::env::set_var("SRELENS_CONFIG_DIR", dir.path());
+    // 3. The previous override still applies when the new name is unset.
+    env.remove("SRECTL_CONFIG_PATH");
+    assert_eq!(TuiConfig::config_file_path(), legacy_file);
+
+    // 4. Fallback to SRELENS_CONFIG_DIR
+    env.remove("SRELENS_TUI_CONFIG_PATH");
+    env.set("SRELENS_CONFIG_DIR", dir.path());
     assert_eq!(TuiConfig::config_file_path(), dir.path().join("tui.json"));
+
+    // 5. The cwd fallback used to be .srelens-tui.json. Load reads it when
+    // the new file is absent.
+    let cwd_dir = tempfile::tempdir().unwrap();
+    let new_fallback = cwd_dir.path().join(".srectl.json");
+    let old_fallback = cwd_dir.path().join(".srelens-tui.json");
+    std::fs::write(
+        &old_fallback,
+        r#"{"commandPopupMaxWidth":120,"commandPopupMaxVisible":12}"#,
+    )
+    .unwrap();
+    env.remove("SRELENS_CONFIG_DIR");
+    env.set("SRECTL_CONFIG_PATH", &new_fallback);
+    let loaded_legacy = TuiConfig::load();
+    assert_eq!(loaded_legacy.command_popup_max_width, 120);
+    assert_eq!(loaded_legacy.command_popup_max_visible, 12);
+    assert!(!new_fallback.exists());
+
+    // A present file that cannot be read must not use the old fallback.
+    // Invalid UTF-8 makes read_to_string fail on every platform; a directory
+    // does not.
+    std::fs::write(&new_fallback, [0xff_u8]).unwrap();
+    assert_eq!(TuiConfig::load(), TuiConfig::default());
 
     // 4. Clamping out-of-range values
     let mut clamped = TuiConfig {
@@ -1990,8 +2140,11 @@ fn tui_config_file_paths_clamping_and_round_trip() {
         command_popup_density: CommandPopupDensity::Compact,
         show_feature_banner: true,
         check_updates: true,
+        show_changed_guide: true,
         argo_hub_context: None,
         argo_hub_kubeconfig: None,
+        argo_ui_url: None,
+        argo_timeout_secs: None,
         update_available: None,
     };
     clamped.clamp();
@@ -2007,8 +2160,11 @@ fn tui_config_file_paths_clamping_and_round_trip() {
         command_popup_density: CommandPopupDensity::Large,
         show_feature_banner: false,
         check_updates: false,
+        show_changed_guide: false,
         argo_hub_context: None,
         argo_hub_kubeconfig: None,
+        argo_ui_url: None,
+        argo_timeout_secs: None,
         update_available: None,
     };
     low.clamp();
@@ -2018,16 +2174,17 @@ fn tui_config_file_paths_clamping_and_round_trip() {
     assert!(!low.show_feature_banner);
     assert!(!low.check_updates);
 
-    // 5. Corrupt file gracefully falls back to default
+    // 6. A present but unreadable file is a default, not the old fallback.
     std::fs::write(&file, "{ corrupt json").unwrap();
-    std::env::set_var("SRELENS_TUI_CONFIG_PATH", &file);
+    env.set("SRECTL_CONFIG_PATH", &file);
     assert_eq!(TuiConfig::load(), TuiConfig::default());
 }
 
 #[test]
 fn crd_cache_persistence_and_sanitization() {
+    let mut env = common::env::lock();
     let temp_dir = tempfile::tempdir().unwrap();
-    std::env::set_var("SRELENS_CACHE_DIR", temp_dir.path());
+    env.set("SRELENS_CACHE_DIR", temp_dir.path());
 
     // 1. Empty context returns None
     assert_eq!(crd_cache_path(""), None);
@@ -2056,7 +2213,7 @@ fn crd_cache_persistence_and_sanitization() {
             singular: "virtualmachine".to_string(),
             namespaced: true,
             short_names: vec!["vm".to_string(), "vms".to_string()],
-            printer_columns: vec![srelens_tui::commands::PrinterColumn {
+            printer_columns: vec![srectl::commands::PrinterColumn {
                 name: "AGE".to_string(),
                 json_path: ".metadata.creationTimestamp".to_string(),
                 col_type: "date".to_string(),
@@ -2090,6 +2247,4 @@ fn crd_cache_persistence_and_sanitization() {
     std::fs::create_dir_all(corrupt_path.parent().unwrap()).unwrap();
     std::fs::write(&corrupt_path, "{ not valid json").unwrap();
     assert!(load_cached_crds(corrupt_ctx).is_empty());
-
-    std::env::remove_var("SRELENS_CACHE_DIR");
 }

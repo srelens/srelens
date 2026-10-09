@@ -4,9 +4,10 @@ mod common;
 use std::time::Duration;
 
 use crossterm::event::KeyCode;
-use srelens_tui::{app::App, event::AppEvent, ui::Modal};
+use srectl::{event::AppEvent, ui::Modal};
 
 async fn recovery_controls_remain_responsive(stalled: bool) {
+    let _settings = common::env::isolate_settings();
     // Dropping the listener models a deleted cluster. Keeping it open without
     // answering models a stopped Docker VM whose API endpoint never replies.
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -30,7 +31,7 @@ async fn recovery_controls_remain_responsive(stalled: bool) {
     });
     std::fs::write(&path, config.to_string()).unwrap();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let mut app = App::new(
+    let mut app = common::theme::new_app(
         Some("offline".into()),
         None,
         true,

@@ -18,20 +18,44 @@ The broker:
 - derives the public input schema from the allowed inputs
 - inherits the host capability's consent annotations, which an app cannot weaken
 
-It registers operations under `plugin/<app-id>/<operation>` in the shared capability
-registry, where MCP discovers and gates them through its normal request path.
+Operations are addressed as `plugin/<app-id>/<operation>`. The app's own screens reach
+them through the `extensions.*` capabilities, which register them for one call at a time
+with the app's settings as saved then. MCP clients reach them as tools
+([#574](https://github.com/srelens/srelens/issues/574), `crates/registry/src/extensions/tools.rs`):
+one snapshot per inventory in a process, built by `PluginHost::register_tools` from the
+apps in use, whose readers and actions route through the same broker paths as
+`extensions.read` and `extensions.action`, and whose sidecar operations route to the
+app's sidecar. A pod binding is a stream a view opens, and never a tool.
 
-Registration is all-or-nothing. Unregistering removes operations from the mutable
-registry and revokes their handlers in older snapshots; calls already admitted may
-finish. A host must rebuild its MCP snapshot after a lifecycle change to refresh
-discovery. An older snapshot may still list a revoked tool but cannot execute it, so
-live tool-list updates are not advertised yet.
+Registration is all-or-nothing. Every announced inventory write rebuilds the MCP snapshot
+when the apps in use changed, and revokes the one it replaces: a caller still holding it
+may list a revoked tool but cannot execute it; calls already admitted may finish. The
+servers send `notifications/tools/list_changed` for each rebuild, and notice a change
+another process made within a poll ([MCP.md](../MCP.md#installed-apps-tools)).
+
+## Sidecars
+
+Executable apps (API 0.6, [#574](https://github.com/srelens/srelens/issues/574)) run out
+of process, as supervised sidecars in the OS sandbox, speaking JSON-RPC over stdio
+([sidecar-protocol.md](sidecar-protocol.md)). The supervisor and its per-OS backends are
+in `crates/plugin-host/src/sidecar/`; the registry starts one per executable app in use,
+on its first operation call, and stops it when the app changes
+(`crates/registry/src/extensions/sidecars.rs`). Each is started with its app's data
+directory, a broker over the MCP host's registry, and its app's log, and shows in the
+Inspector. The broker's consent is the MCP host's: the desktop app's confirmation
+prompt, naming the app, or `NoConsent` headless. See
+[Executable apps](manifest.md#executable-apps).
+
+Executable apps are a preview. They run out of the box on Windows, and on a systemd Linux
+desktop with Landlock, where systemd before 252 and the RHEL 9 family need the `cpu`
+controller delegated first ([what is needed](manifest.md#where-executable-apps-run)). On macOS they run under Seatbelt with host-enforced memory and CPU limits: the
+watchdog bounds sustained use, but a burst between readings can exceed a limit.
 
 ## App lifecycle
 
 Both desktop designs manage apps through **Settings → Apps**, from the catalog or a
 pasted local manifest. The backend owns installation, grants, enable/disable,
-updates, removal and per-app JSON settings. Installation requires an explicit review
+updates, removal and per-app typed settings. Installation requires an explicit review
 of the requested permissions. There is no developer mode.
 
 Installation and enablement are app-wide, not per kubeconfig context. Enabled pages
@@ -45,10 +69,11 @@ extension replaced by `extensions.json`, so `settings.extensions.json`.
 
 - Saves use a private temporary file, sync and atomic replacement under a
   cross-process lock.
-- Updating an ID preserves its settings and assigns a new revision. The app keeps up to
+- Updating an ID keeps the settings the new version still declares and accepts, and
+  assigns a new revision. The app keeps up to
   the last three versions it replaced, fewer when they would take the inventory past
   1 MiB; restoring one grants its permissions again after
-  review, keeps settings and assigns a new revision
+  review, keeps the settings it declares and assigns a new revision
   (see [migration.md](migration.md#rolling-back)).
 - Each installed version records its source: `catalog` when its exact bytes are a
   release in the cached catalog, otherwise `local`. The host decides this, not the caller.
@@ -66,15 +91,26 @@ extension replaced by `extensions.json`, so `settings.extensions.json`.
 - Every read checks the durable inventory and revision, so a disabled, removed or
   replaced installation cannot be invoked through an old registry instance. Calls
   already admitted may finish.
+- Streams do not finish: every inventory write ends the streams the new state no
+  longer authorizes — a disabled, updated or removed app's — and nothing else. See
+  [streams.md](streams.md#ownership).
 - Nothing is persisted in browser storage.
-- Stored settings are JSON data; this declarative version does not interpolate them
-  into capability arguments.
+- Stored settings are held to the typed `settings` the manifest declares (#542). A
+  setting reaches a capability only through a binding argument the capability marks
+  settable, checked at install, on save and on every request. A secret-reference
+  setting's value never enters the inventory; it holds only a reference, and the value is
+  one more entry in srelens's encrypted secrets vault (`secrets.enc`), whose one master
+  key is held by the OS keychain or derived from the master password. The registry sees
+  the vault only as a `SecretStore`, which follows the
+  inventory: whatever the inventory stops referencing is deleted (#543). See
+  [Secret settings](manifest.md#secret-settings).
 
 ## Quarantine
 
 Every load re-verifies each installed app: its manifest against this host's supported
-API versions and rules, and a signed app's stored proof against the trusted publisher
-table. An app that fails is **quarantined on its own**:
+API versions and rules, and a signed app's stored proof against the publisher delegation
+that vouched for it, under the root the host pins ([trust.md](trust.md#installed-apps)).
+An app that fails is **quarantined on its own**:
 
 - it loads disabled, with its reason shown in Settings → Apps
 - it cannot be re-enabled until it is reinstalled or removed
@@ -89,9 +125,12 @@ whole inventory, because no single entry can be trusted then.
 ## Hosts
 
 - **Desktop:** full support in both the new and classic designs.
-- **Web:** every `extensions.*` capability is refused until app state is kept per
-  user ([#515](https://github.com/srelens/srelens/issues/515)). See
-  [capabilities.md](capabilities.md#web-host).
+- **Web:** each signed-in user has their own inventory, kept in the server database,
+  and every user reads one shared catalog only the server writes
+  ([#515](https://github.com/srelens/srelens/issues/515)). Every user's apps are held
+  to the operator's extension policy, which the broker applies on every call
+  ([#578](https://github.com/srelens/srelens/issues/578)). App streams are not run
+  there, so views read on Refresh. See [capabilities.md](capabilities.md#web-host).
 
 ## Where it is heading
 

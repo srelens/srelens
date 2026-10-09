@@ -1,0 +1,17 @@
+{
+  "id": "org.example.observability",
+  "revision": 3,
+  "view": "org.example.observability/logs:loki#1",
+  "channel": "extstream:1-k2j3h4",
+  "context": "kind-dev",
+  "namespace": "team",
+  "source": {
+    "kind": "logProvider",
+    "provider": "loki",
+    "resourceKind": "/Pod",
+    "name": "web-1",
+    "tailLines": 200,
+    "sinceSeconds": 3600,
+    "timestamps": true
+  }
+}

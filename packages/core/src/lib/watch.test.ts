@@ -9,7 +9,7 @@ vi.mock("../transport/transport", () => ({
   subscribe: subscribeMock,
 }));
 
-import { watchResource } from "./watch";
+import { watchNamespaces, watchResource } from "./watch";
 
 beforeEach(() => {
   invokeCommandMock.mockReset();
@@ -130,5 +130,189 @@ describe("watchResource", () => {
 
     await expect(watchResource("c", "ns", "pods", vi.fn())).rejects.toThrow("boom");
     expect(dispose).toHaveBeenCalled();
+  });
+});
+
+describe("watchNamespaces", () => {
+  /** Every subscribe records its channel and handler; start_resource_watch records its payload. */
+  function capture() {
+    const handlers = new Map<string, (payload: unknown) => void>();
+    const disposes: Array<ReturnType<typeof vi.fn>> = [];
+    subscribeMock.mockImplementation(async (ch: string, handler: (p: unknown) => void) => {
+      handlers.set(ch, handler);
+      const dispose = vi.fn();
+      disposes.push(dispose);
+      return dispose;
+    });
+    invokeCommandMock.mockResolvedValue(undefined);
+    const started = () =>
+      invokeCommandMock.mock.calls
+        .filter(([cmd]) => cmd === "start_resource_watch")
+        .map(([, args]) => args as { namespace: string; channel: string });
+    /** Deliver a payload to the watch started for `namespace`. */
+    const emit = (namespace: string, payload: unknown) => {
+      const start = started().find((s) => s.namespace === namespace);
+      if (!start) throw new Error(`no watch started for ${JSON.stringify(namespace)}`);
+      handlers.get(start.channel)?.(payload);
+    };
+    return { started, emit, disposes };
+  }
+
+  it("opens one namespaced watch per selected namespace, never a cluster-scope one", async () => {
+    const { started } = capture();
+
+    await watchNamespaces("c", ["team-a", "team-b"], "pods", vi.fn());
+
+    expect(started().map((s) => s.namespace)).toEqual(["team-a", "team-b"]);
+  });
+
+  it("opens a single cluster-scope watch for an empty selection (all namespaces)", async () => {
+    const { started } = capture();
+
+    await watchNamespaces("c", [], "pods", vi.fn());
+
+    expect(started().map((s) => s.namespace)).toEqual([""]);
+  });
+
+  it("merges every namespace's latest snapshot, ordered by name then namespace", async () => {
+    const { emit } = capture();
+    const onRows = vi.fn();
+
+    await watchNamespaces("c", ["team-b", "team-a"], "pods", onRows);
+    emit("team-b", [{ name: "db", namespace: "team-b" }, { name: "web", namespace: "team-b" }]);
+    emit("team-a", [{ name: "db", namespace: "team-a" }]);
+
+    expect(onRows).toHaveBeenLastCalledWith([
+      { name: "db", namespace: "team-a" },
+      { name: "db", namespace: "team-b" },
+      { name: "web", namespace: "team-b" },
+    ]);
+    // A later snapshot from one namespace replaces only that namespace's rows.
+    emit("team-b", [{ name: "api", namespace: "team-b" }]);
+    expect(onRows).toHaveBeenLastCalledWith([
+      { name: "api", namespace: "team-b" },
+      { name: "db", namespace: "team-a" },
+    ]);
+  });
+
+  it("holds the merged snapshot until every namespace has answered or failed", async () => {
+    // Emitting team-a's rows alone would paint a list that is missing team-b
+    // entirely and call it loaded.
+    const { emit } = capture();
+    const onRows = vi.fn();
+    const onError = vi.fn();
+
+    await watchNamespaces("c", ["team-a", "team-b"], "pods", onRows, undefined, onError);
+    emit("team-a", [{ name: "web", namespace: "team-a" }]);
+    expect(onRows).not.toHaveBeenCalled();
+
+    emit("team-b", { error: "pods is forbidden" });
+    expect(onRows).toHaveBeenLastCalledWith([{ name: "web", namespace: "team-a" }]);
+  });
+
+  it("reports a failure with the namespace it came from, and keeps the others' rows", async () => {
+    const { emit } = capture();
+    const onRows = vi.fn();
+    const onError = vi.fn();
+
+    await watchNamespaces("c", ["team-a", "team-b"], "pods", onRows, undefined, onError);
+    emit("team-b", { error: 'pods is forbidden: cannot watch resource "pods" in the namespace "team-b"' });
+    emit("team-a", [{ name: "web", namespace: "team-a" }]);
+
+    // The message is passed through untouched, so describeError can still
+    // classify the apiserver's words; the namespace travels beside it.
+    expect(onError).toHaveBeenCalledWith(
+      'pods is forbidden: cannot watch resource "pods" in the namespace "team-b"',
+      "team-b",
+    );
+    expect(onRows).toHaveBeenLastCalledWith([{ name: "web", namespace: "team-a" }]);
+  });
+
+  it("drops a namespace's rows once its watch fails, rather than keeping them frozen", async () => {
+    const { emit } = capture();
+    const onRows = vi.fn();
+
+    await watchNamespaces("c", ["team-a", "team-b"], "pods", onRows, undefined, vi.fn());
+    emit("team-a", [{ name: "web", namespace: "team-a" }]);
+    emit("team-b", [{ name: "db", namespace: "team-b" }]);
+    emit("team-b", { error: "pods is forbidden" });
+
+    expect(onRows).toHaveBeenLastCalledWith([{ name: "web", namespace: "team-a" }]);
+  });
+
+  it("empties the merged list when every namespace fails after answering", async () => {
+    const { emit } = capture();
+    const onRows = vi.fn();
+
+    await watchNamespaces("c", ["team-a", "team-b"], "pods", onRows, undefined, vi.fn());
+    emit("team-a", [{ name: "web", namespace: "team-a" }]);
+    emit("team-b", [{ name: "db", namespace: "team-b" }]);
+    emit("team-a", { error: "pods is forbidden" });
+    emit("team-b", { error: "pods is forbidden" });
+
+    expect(onRows).toHaveBeenLastCalledWith([]);
+  });
+
+  it("emits nothing when every namespace fails before any answered", async () => {
+    const { emit } = capture();
+    const onRows = vi.fn();
+
+    await watchNamespaces("c", ["team-a", "team-b"], "pods", onRows, undefined, vi.fn());
+    emit("team-a", { error: "pods is forbidden" });
+    emit("team-b", { error: "pods is forbidden" });
+
+    expect(onRows).not.toHaveBeenCalled();
+  });
+
+  it("is reconnecting while any one namespace's watch is, and live once all are", async () => {
+    const { emit } = capture();
+    const onStatus = vi.fn();
+
+    await watchNamespaces("c", ["team-a", "team-b"], "pods", vi.fn(), onStatus);
+    emit("team-a", { status: "reconnecting" });
+    expect(onStatus).toHaveBeenLastCalledWith("reconnecting");
+    emit("team-b", { status: "reconnecting" });
+    emit("team-a", { status: "live" });
+    // team-b is still down.
+    expect(onStatus).toHaveBeenLastCalledWith("reconnecting");
+    emit("team-b", { status: "live" });
+    expect(onStatus).toHaveBeenLastCalledWith("live");
+  });
+
+  it("goes live again when the only reconnecting namespace fails for good", async () => {
+    // A failed watch sends no further status, so leaving it in the
+    // reconnecting set would hold "Stream lost" over a live list forever.
+    const { emit } = capture();
+    const onStatus = vi.fn();
+
+    await watchNamespaces("c", ["team-a", "team-b"], "pods", vi.fn(), onStatus, vi.fn());
+    emit("team-b", { status: "reconnecting" });
+    emit("team-b", { error: "pods is forbidden" });
+
+    expect(onStatus).toHaveBeenLastCalledWith("live");
+  });
+
+  it("stops every namespace's watch through the one handle", async () => {
+    const { started, disposes } = capture();
+
+    const handle = await watchNamespaces("c", ["team-a", "team-b"], "pods", vi.fn());
+    handle.stop();
+
+    expect(disposes).toHaveLength(2);
+    for (const d of disposes) expect(d).toHaveBeenCalled();
+    for (const s of started()) {
+      expect(invokeCommandMock).toHaveBeenCalledWith("stop_watch", { channel: s.channel });
+    }
+  });
+
+  it("stops the watches that started when another fails to start, and rejects", async () => {
+    const { disposes } = capture();
+    invokeCommandMock.mockImplementation(async (cmd: string, args: { namespace?: string }) => {
+      if (cmd === "start_resource_watch" && args.namespace === "team-b") throw new Error("boom");
+    });
+
+    await expect(watchNamespaces("c", ["team-a", "team-b"], "pods", vi.fn())).rejects.toThrow("boom");
+    expect(disposes.every((d) => d.mock.calls.length > 0)).toBe(true);
+    expect(invokeCommandMock).toHaveBeenCalledWith("stop_watch", expect.anything());
   });
 });

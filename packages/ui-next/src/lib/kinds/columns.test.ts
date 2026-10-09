@@ -1,9 +1,9 @@
-import { describe, it, expect } from "vitest";
+import { afterEach, describe, it, expect } from "vitest";
 import { createElement, type ReactElement } from "react";
-import { render, screen } from "@testing-library/react";
+import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Table, filterTableData } from "@srelens/ui-kit";
-import { cronJobStatus, jobStatus, scaledStatus } from "@srelens/core";
+import { cronJobStatus, jobStatus, nodeUsage, scaledStatus } from "@srelens/core";
 import {
   podColumns,
   deploymentColumns,
@@ -225,28 +225,25 @@ describe("pod columns", () => {
     expect(pill.props.kind).toBe("danger");
   });
 
-  it("keeps flagging that same pod in the instant it is BETWEEN restarts", () => {
-    // The second moment of the very pod above, and the one no fixture in this
-    // repo used to hold: the container is briefly up, so the kubelet reports
-    // no waiting reason at all and the phase is still "Running". The row used
-    // to lose its dot for that instant and get it back a moment later — on a
-    // real cluster, two of four consecutive screenshots.
-    //
-    // Only `waitingReason` differs from the row above. The ready ratio and the
-    // restart count do not move between the two moments, which is exactly why
-    // the verdict is now derived from them.
-    const between = { name: "checkout-api-7d", namespace: "d", phase: "Running", ready: "0/1", restarts: 7, node: "n", age: "1d", image: "acme/checkout-api:4f2a1c", waitingReason: "" };
-    expect(podFlagged(between)).toBe(true);
+  it("reads that same pod BETWEEN restarts the way kubectl does", () => {
+    // The other moments of the very pod above, with no waiting reason and the
+    // phase still "Running". The row carries kubectl's word as `status`.
     const phase = podColumns.find((c) => c.key === "phase")!;
-    const pill = phase.render!(between) as { props: { status: string; kind: string } };
-    expect(pill.props.status).toBe("NotReady");
-    expect(pill.props.kind).toBe("danger");
-    // The dot and the tone are what must not move; the word legitimately does,
-    // because between restarts there is no reason for the kubelet to name.
-    const backingOff = { ...between, waitingReason: "CrashLoopBackOff" };
-    expect(podFlagged(backingOff)).toBe(podFlagged(between));
-    const other = phase.render!(backingOff) as { props: { status: string; kind: string } };
-    expect(other.props.kind).toBe(pill.props.kind);
+    const pillOf = (row: PodRow) => (phase.render!(row) as { props: { status: string; kind: string } }).props;
+    const between = { name: "checkout-api-7d", namespace: "d", phase: "Running", ready: "0/1", restarts: 7, node: "n", age: "1d", image: "acme/checkout-api:4f2a1c", waitingReason: "" };
+
+    // Exited and not yet backed off: kubectl says `Error`, and it stays red
+    // with its dot, as it was while backing off.
+    const exited = { ...between, status: "Error" };
+    expect(podFlagged(exited)).toBe(true);
+    expect(pillOf(exited)).toEqual({ status: "Error", kind: "danger" });
+
+    // Up again for a moment: kubectl says `Running`, and so does the row,
+    // green and without a dot. Matching kubectl was chosen over the earlier
+    // `NotReady` rule that held the dot through this moment.
+    const up = { ...between, status: "Running" };
+    expect(podFlagged(up)).toBe(false);
+    expect(pillOf(up)).toEqual({ status: "Running", kind: "success" });
   });
 
   it("does not flag a pod that is merely starting up, restarts or no ready containers yet", () => {
@@ -347,22 +344,115 @@ describe("node columns", () => {
     expect(nodeColumns.some((c) => c.key === "namespace")).toBe(false);
   });
 
+  const node = {
+    name: "n1", status: "Ready", roles: "worker", version: "1.30", age: "9d", taints: 0, taintDetails: [], unschedulable: false,
+    allocatableCpuMillicores: 4000, allocatableMemoryMiB: 8192, allocatablePods: 110, instanceType: "",
+  };
+  const cpu = nodeColumns.find((c) => c.key === "cpu")!;
+  const memory = nodeColumns.find((c) => c.key === "memory")!;
+  /** Draw one cell and hand back its container. */
+  const draw = (column: typeof cpu, row: NodeRow) => render(column.render!(row) as ReactElement).container;
+
   it("shows node CPU in cores while preserving memory units", () => {
-    const cpu = nodeColumns.find((c) => c.key === "cpu")!;
-    const memory = nodeColumns.find((c) => c.key === "memory")!;
-    const node = {
-      name: "n1", status: "Ready", roles: "worker", version: "1.30", age: "9d", taints: 0, taintDetails: [], unschedulable: false,
-      allocatableCpuMillicores: 4000, allocatableMemoryMiB: 8192, allocatablePods: 110, instanceType: "",
+    const amount = (column: typeof cpu, row: NodeRow) => {
+      const view = draw(column, row);
+      const text = view.querySelector(".num")?.textContent ?? view.textContent;
+      cleanup();
+      return text;
     };
-    const withCpu = { ...node, cpu: 2410 };
-    const withMemory = { ...node, memory: 3174 };
-    expect(cpu.render!(withCpu)).toBe("2.41 cores");
-    expect(cpu.render!({ ...node, cpu: 10399 })).toBe("10.4 cores");
-    expect(cpu.render!({ ...node, cpu: 964 })).toBe("0.964 cores");
-    expect(cpu.render!({ ...node, cpu: 1000 })).toBe("1 core");
-    expect(cpu.render!({ ...node, cpu: 0 })).toBe("0 cores");
-    expect(cpu.render!(node)).toBe("—");
-    expect(memory.render!(withMemory)).toBe("3.1 Gi");
+    expect(amount(cpu, { ...node, cpu: 2410, memory: 1 })).toBe("2.41 cores");
+    expect(amount(cpu, { ...node, cpu: 10399, memory: 1 })).toBe("10.4 cores");
+    expect(amount(cpu, { ...node, cpu: 964, memory: 1 })).toBe("0.964 cores");
+    expect(amount(cpu, { ...node, cpu: 1000, memory: 1 })).toBe("1 core");
+    expect(amount(cpu, { ...node, cpu: 0, memory: 1 })).toBe("0 cores");
+    expect(amount(cpu, node)).toBe("—");
+    expect(amount(memory, { ...node, cpu: 1, memory: 3174 })).toBe("3.1 Gi");
+  });
+
+  /**
+   * #830: the amount alone does not say whether a node is busy. The bar is the
+   * share of the node's allocatable capacity in use — the one Overview draws.
+   */
+  describe("the usage bar", () => {
+    afterEach(cleanup);
+    const loaded: NodeRow = { ...node, cpu: 1000, memory: 6144 };
+
+    it("draws the share of the node's allocatable capacity, named for the node and the resource", () => {
+      draw(cpu, loaded);
+      const bar = screen.getByRole("meter", { name: "n1 CPU" });
+      // 1000m of 4000m.
+      expect(bar.getAttribute("aria-valuenow")).toBe("25");
+      expect(bar.getAttribute("aria-valuetext")).toBe("25%");
+      cleanup();
+
+      draw(memory, loaded);
+      // 6144 Mi of 8192 Mi.
+      expect(screen.getByRole("meter", { name: "n1 memory" }).getAttribute("aria-valuetext")).toBe("75%");
+    });
+
+    it("keeps the amount beside the bar, and says what it is a share of", () => {
+      const view = draw(cpu, loaded);
+      expect(view.querySelector(".num")?.textContent).toBe("1 core");
+      expect((view.firstElementChild as HTMLElement).title).toBe("1 core of 4 cores");
+      cleanup();
+      expect((draw(memory, loaded).firstElementChild as HTMLElement).title).toBe("6.0 Gi of 8.0 Gi");
+    });
+
+    it("agrees with Overview: the percentage is core's nodeUsage, unrounded and unclamped", () => {
+      const over: NodeRow = { ...node, cpu: 5600, memory: 1 };
+      draw(cpu, over);
+      const bar = screen.getByRole("meter", { name: "n1 CPU" });
+      // 140% of allocatable: the bar is full, the words say the real figure.
+      expect(bar.getAttribute("aria-valuenow")).toBe("100");
+      expect(bar.getAttribute("aria-valuetext")).toBe("140%");
+      expect(nodeUsage(over, { name: "n1", cpuMillicores: 5600, memoryMiB: 1 }, undefined).cpuPercent).toBe(140);
+    });
+
+    it("draws a dash and no bar when there is no reading — an empty bar would say the node is idle", () => {
+      const view = draw(cpu, node);
+      expect(view.textContent).toBe("—");
+      expect(screen.queryByRole("meter")).toBeNull();
+    });
+
+    it("draws the amount and no bar when the node reports no allocatable capacity", () => {
+      const view = draw(cpu, { ...node, allocatableCpuMillicores: 0, cpu: 500, memory: 1 });
+      expect(view.querySelector(".num")?.textContent).toBe("0.5 cores");
+      expect(screen.queryByRole("meter")).toBeNull();
+      expect((view.firstElementChild as HTMLElement).title).toBe("");
+    });
+
+    it("asks for the same room with or without a bar, so the column is not pinned at a dash's width", () => {
+      const withBar = (draw(cpu, loaded).firstElementChild as HTMLElement).className;
+      cleanup();
+      const without = (draw(cpu, node).firstElementChild as HTMLElement).className;
+      expect(withBar).toBe(without);
+      expect(withBar).toMatch(/min-w-\[/);
+    });
+
+    it("cannot be dragged narrower than the cell will shrink to (PR #840 review)", () => {
+      // A table cell does not clip: at the default 72px floor the bar ran on
+      // into the column beside it. The floor is the cell's own 13rem AND the
+      // 0.7rem of padding the table puts either side of it — 208px alone
+      // would leave the bar overflowing by the padding.
+      const REM = 16;
+      const needed = 13 * REM + 2 * 0.7 * REM; // 230.4
+      for (const column of [cpu, memory]) {
+        expect(column.minWidth).toBeGreaterThanOrEqual(needed);
+      }
+      expect(cpu.minWidth).toBe(memory.minWidth);
+    });
+
+    it("sorts by the share in use, which is what the bar shows, with no reading last", () => {
+      const small: NodeRow = { ...node, name: "small", allocatableCpuMillicores: 1000, cpu: 900, memory: 1 };
+      const large: NodeRow = { ...node, name: "large", allocatableCpuMillicores: 16000, cpu: 3200, memory: 1 };
+      // large uses more cores (3.2 against 0.9) and is the less loaded (20% against 90%).
+      expect(cpu.getSortValue!(small)).toBeGreaterThan(cpu.getSortValue!(large) as number);
+      expect(cpu.getSortValue!(node)).toBeLessThan(cpu.getSortValue!(large) as number);
+
+      const tight: NodeRow = { ...node, allocatableMemoryMiB: 2048, cpu: 1, memory: 1843 };
+      const roomy: NodeRow = { ...node, allocatableMemoryMiB: 65536, cpu: 1, memory: 6554 };
+      expect(memory.getSortValue!(tight)).toBeGreaterThan(memory.getSortValue!(roomy) as number);
+    });
   });
 });
 
@@ -558,7 +648,10 @@ describe("column alignment — a count or a measurement is end-aligned, everythi
     [daemonSetColumns, ["desired", "current", "ready", "upToDate", "available", "age"]],
     [jobColumns, ["completions", "duration", "age"]],
     [cronJobColumns, ["active", "age"]],
-    [nodeColumns, ["cpu", "memory", "taints", "age"]],
+    // Not `cpu`/`memory`: a node's are an amount AND a bar (#830), which reads
+    // left to right like Overview's, not as a bare figure to line up on its
+    // last digit. The amount inside the cell is still right-aligned.
+    [nodeColumns, ["taints", "age"]],
     [namespaceColumns, ["age"]],
     [configMapColumns, ["keys", "age"]],
     [secretColumns, ["keys", "age"]],

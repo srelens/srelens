@@ -9,7 +9,13 @@ export { Badge, type BadgeTone } from "./Badge";
 export { Breadcrumb, type BreadcrumbProps } from "./Breadcrumb";
 export { Button, type ButtonProps, type ButtonSize, type ButtonVariant } from "./Button";
 export { Checkbox, type CheckboxProps } from "./Checkbox";
-export { ClusterRail, type ClusterRailItem, type ClusterRailMarker, type ClusterRailProps } from "./ClusterRail";
+export {
+  ClusterRail,
+  type ClusterRailItem,
+  type ClusterRailMarker,
+  type ClusterRailMoves,
+  type ClusterRailProps,
+} from "./ClusterRail";
 export {
   CodeEditor,
   documentDiagnostics,
@@ -18,6 +24,17 @@ export {
   type EditorDiagnostic,
 } from "./CodeEditor";
 export { ColumnPicker, type ColumnOption, type ColumnPickerProps } from "./ColumnPicker";
+/**
+ * The editor find widget, for a host that builds its own CodeMirror editor.
+ * Also reachable as `@srelens/ui-kit/search-panel`, which is how the classic
+ * design imports it without dragging the whole kit into its chunk.
+ */
+export {
+  codeSearchPanel,
+  matchCount,
+  searchPanelStyles,
+  type SearchPanelTokens,
+} from "./searchPanel";
 export { Combobox, type ComboboxOption, type ComboboxProps } from "./Combobox";
 export { ConfirmDialog, type ConfirmDialogProps } from "./ConfirmDialog";
 export { ConsoleDock, type ConsoleDockProps } from "./ConsoleDock";

@@ -73,6 +73,7 @@ import { describe } from "../lib/routes";
 import { openTab } from "../lib/tabsStore";
 import { LINK_WORD, useWorkspaceView } from "../lib/workspace";
 import { NoClusterScreen } from "./resourceShell";
+import { DashboardCards } from "../extensions/DashboardCards";
 
 /**
  * What a figure says when there is no reading behind it.
@@ -129,12 +130,9 @@ function shorten(text: string, max = EYEBROW_MAX): string {
   return `${text.slice(0, head)}…${text.slice(text.length - (max - 1 - head))}`;
 }
 
-/** This screen's own words for the two node actions. Nothing else renders them. */
-const NODE_ACTION_LABEL = {
-  cordon: "Cordon",
-  uncordon: "Uncordon",
-  drain: "Drain",
-} as const;
+/** The node actions' words — the row menu's own, so this screen's buttons and
+ *  the Nodes list's entries cannot come to call one action two things. */
+const NODE_ACTION_LABEL = ROW_ACTION_LABEL;
 
 /** One node, flattened so the table can key, sort and filter on its fields. */
 type NodeRow = NodeSummary & { usage: NodeUsage };
@@ -215,6 +213,8 @@ function ClusterOverview({ title, context }: { title: string; context: ClusterCo
         <div className="scroll flex min-h-0 flex-1 flex-col">
           <Stale overview={overview} />
           <Capacity overview={overview} />
+          {/* Declared by installed apps (#540); nothing at all when none declares one. */}
+          <DashboardCards context={context} />
           <Nodes context={name} nodes={overview.nodes} />
           <NotReady context={name} overview={overview} />
         </div>

@@ -3,7 +3,9 @@ import {
   cleanErrorMessage,
   describeError,
   describeForbidden,
+  forbiddenSentence,
   isExecAuthError,
+  parseForbidden,
   serviceAccountNamespace,
 } from "./errors";
 
@@ -185,6 +187,33 @@ describe("describeError", () => {
 
   it("gives a stable message when there is nothing to show", () => {
     expect(describeError("").detail).toBe("An unexpected error occurred.");
+  });
+});
+
+// #701: several refusals of one verb in one scope are one sentence — the
+// parse is exposed so a caller can group on it rather than on copy.
+describe("parseForbidden", () => {
+  it("returns the verb, the resource and where it was refused", () => {
+    const raw = 'deployments.apps is forbidden: User "dev" cannot list resource "deployments" in API group "apps" in the namespace "prod"';
+    expect(parseForbidden(raw)).toEqual({ verb: "list", resource: "deployments", where: "in prod" });
+  });
+  it("says the cluster scope only when the message does", () => {
+    const raw = 'nodes is forbidden: User "dev" cannot list resource "nodes" in API group "" at the cluster scope';
+    expect(parseForbidden(raw)).toEqual({ verb: "list", resource: "nodes", where: "at the cluster scope" });
+    expect(parseForbidden('cannot list resource "nodes" somewhere odd')).toBeNull();
+  });
+});
+
+describe("forbiddenSentence", () => {
+  it("names every resource refused, in the order given", () => {
+    expect(forbiddenSentence("list", ["deployments", "pods", "cronjobs"], "at the cluster scope")).toBe(
+      "You don't have permission to list deployments, pods and cronjobs at the cluster scope.",
+    );
+  });
+  it("reads as describeForbidden does for one resource", () => {
+    expect(forbiddenSentence("patch", ["nodes"], "at the cluster scope")).toBe(
+      "You don't have permission to patch nodes at the cluster scope.",
+    );
   });
 });
 

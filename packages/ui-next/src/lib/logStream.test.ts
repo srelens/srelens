@@ -29,7 +29,7 @@ const fanOut = (n: number): LogTarget[] =>
 /** A `startLogStream` double whose caller controls when the connect promise
  *  settles and can fire lines/status at will through the captured callbacks. */
 function fakeStream() {
-  let onLine!: (source: string, line: string) => void;
+  let onLine!: (source: string, line: string, truncated: boolean) => void;
   let onStatus: ((status: LogStatus, source: string) => void) | undefined;
   const stop = vi.fn();
   let resolveConnect!: (v: { stop: () => void }) => void;
@@ -43,7 +43,7 @@ function fakeStream() {
       _context: string,
       _namespace: string,
       _targets: LogTarget[],
-      line: (source: string, line: string) => void,
+      line: (source: string, line: string, truncated: boolean) => void,
       status?: (s: LogStatus, source: string) => void,
     ) => {
       onLine = line;
@@ -53,7 +53,7 @@ function fakeStream() {
   );
   return {
     stop,
-    line: (source: string, text: string) => onLine(source, text),
+    line: (source: string, text: string, truncated = false) => onLine(source, text, truncated),
     /** Fire a status AS a given target — the tag the backend now sends. */
     status: (s: LogStatus, source = "") => onStatus?.(s, source),
     connect: () => act(async () => { resolveConnect({ stop }); await Promise.resolve(); }),
@@ -66,6 +66,21 @@ beforeEach(() => {
 });
 
 describe("useLogStream", () => {
+  it("keeps the host's mark on a line it cut, and nothing on a whole one (#747)", async () => {
+    const s = fakeStream();
+    const { result } = renderHook(() => useLogStream("kind-dev", "default", fanOut(1)));
+    await s.connect();
+    act(() => {
+      s.line("", "the start of it", true);
+      s.line("", "whole");
+    });
+    await waitFor(() => expect(result.current.lines).toHaveLength(2));
+    expect(result.current.lines).toStrictEqual([
+      { source: "", text: "the start of it", truncated: true },
+      { source: "", text: "whole" },
+    ]);
+  });
+
   it("retains completed init logs without counting them as reconnecting or streaming", async () => {
     const s = fakeStream();
     const targets = fanOut(2);
@@ -458,5 +473,38 @@ describe("useLogStream", () => {
     act(() => result.current.clear());
     expect(result.current.lines).toHaveLength(0);
     expect(startLogStream).toHaveBeenCalledTimes(1);
+  });
+});
+
+// #567: an app's pod binding streams logs over its own source, and the pod log
+// view follows it through the same buffer, pause and status counting. A log
+// provider (#569) plugs in the same way.
+describe("useLogStream with another log source", () => {
+  it("opens the source it is given, not the cluster's own, and lands its lines", async () => {
+    startLogStream.mockReset();
+    let onLine!: (source: string, line: string, truncated: boolean) => void;
+    let onStatus!: (status: LogStatus, source: string) => void;
+    const stop = vi.fn();
+    const open = vi.fn(async (_targets: LogTarget[], line: typeof onLine, status: typeof onStatus, _options: unknown) => {
+      onLine = line;
+      onStatus = status;
+      return { stop };
+    });
+    const labelled: LogTarget = { pod: "web-1", container: "app", label: "web-1/app" };
+    const { result, unmount } = renderHook(() =>
+      useLogStream("ctx", "team", [labelled], { tailLines: 50, source: { key: "app:org.example/logs", open } }),
+    );
+    await waitFor(() => expect(open).toHaveBeenCalledTimes(1));
+    expect(startLogStream).not.toHaveBeenCalled();
+    expect(open.mock.calls[0][0]).toEqual([labelled]);
+    expect(open.mock.calls[0][3]).toMatchObject({ tailLines: 50 });
+    act(() => {
+      onStatus("live", "web-1/app");
+      onLine("web-1/app", "hello", false);
+    });
+    await waitFor(() => expect(result.current.lines.map((l) => l.text)).toEqual(["hello"]));
+    expect(result.current.status).toBe("live");
+    unmount();
+    expect(stop).toHaveBeenCalled();
   });
 });

@@ -157,12 +157,8 @@ pub fn cronjob_set_suspend_capability(cache: Arc<ClientCache>) -> Capability {
     Capability::typed::<SetSuspendIn, CronJobActionOut, _, _>(
         "k8s.cronjobSetSuspend",
         "suspend or resume a CronJob (set spec.suspend)",
-        Annotations {
-            read_only: false,
-            destructive: false,
-            requires_confirm: true,
-            sensitive: false,
-        },
+        Annotations::MUTATING
+            .with_confirm("Change the suspended state[ of {resource}][ in cluster {cluster}]?"),
         move |input: SetSuspendIn| {
             let cache = cache.clone();
             async move {
@@ -207,12 +203,7 @@ pub fn cronjob_trigger_now_capability(cache: Arc<ClientCache>) -> Capability {
     Capability::typed::<TriggerNowIn, TriggerNowOut, _, _>(
         "k8s.cronjobTriggerNow",
         "run a CronJob immediately by creating a Job from its jobTemplate",
-        Annotations {
-            read_only: false,
-            destructive: false,
-            requires_confirm: true,
-            sensitive: false,
-        },
+        Annotations::MUTATING.with_confirm("Run[ {resource}] now[ in cluster {cluster}]?"),
         move |input: TriggerNowIn| {
             let cache = cache.clone();
             async move {

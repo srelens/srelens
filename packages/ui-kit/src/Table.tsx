@@ -254,6 +254,29 @@ function getColumnValue<T>(row: T, column: Column<T>): unknown {
 }
 
 /**
+ * For each column, the row whose value is longest, unless the window already
+ * renders it. Length of text stands in for width: exact for the monospaced
+ * values that run long (names, paths, URLs), close enough for the rest.
+ */
+function widestRows<T>(rows: T[], columns: Column<T>[], window: { start: number; end: number }): T[] {
+  const picked = new Set<number>();
+  for (const column of columns) {
+    let widest = -1;
+    let length = -1;
+    rows.forEach((row, index) => {
+      const value = getColumnValue(row, column);
+      const text = value === null || value === undefined ? "" : String(value);
+      if (text.length > length) {
+        widest = index;
+        length = text.length;
+      }
+    });
+    if (widest >= 0 && (widest < window.start || widest >= window.end)) picked.add(widest);
+  }
+  return [...picked].map((index) => rows[index]);
+}
+
+/**
  * The slice of rows to render for a virtualized list. Returns the full range
  * when `rowHeight` is unknown (0) — e.g. before measurement or in jsdom — so the
  * table degrades to rendering everything rather than dividing by zero.
@@ -401,7 +424,16 @@ export function Table<T>({
   const rootRef = useRef<HTMLDivElement>(null);
   const [metrics, setMetrics] = useState({ scrollTop: 0, viewportHeight: 0, rowHeight: 0 });
 
-  useEffect(() => setColumnWidths({}), [columnSignature]);
+  // A different set of columns needs measuring again, but only a CHANGE does.
+  // Run on mount as well, this wiped the widths the layout effect below had
+  // just measured, so every table measured itself twice before its first paint,
+  // and the two did not always agree: #360's trace has `412`, then `403`.
+  const measuredFor = useRef(columnSignature);
+  useEffect(() => {
+    if (measuredFor.current === columnSignature) return;
+    measuredFor.current = columnSignature;
+    setColumnWidths({});
+  }, [columnSignature]);
 
   const visibleData = useMemo(() => {
     if (!sort) return data;
@@ -601,6 +633,14 @@ export function Table<T>({
       })
     : { start: 0, end: visibleData.length };
   const windowRows = virtualize ? visibleData.slice(range.start, range.end) : visibleData;
+  // Rows a measurement has to see that the window may not hold: per column,
+  // the row with the longest value. Pinned widths put the table in fixed
+  // layout, where a cell wider than its column draws over the next one, and a
+  // measurement taken while virtualized saw only the window, so a long value
+  // further down overflowed once scrolled to. Rendered only for the measuring
+  // pass; the pin that follows drops them before paint. (#797 review)
+  const measureRows =
+    virtualize && Object.keys(columnWidths).length === 0 ? widestRows(visibleData, columns, range) : [];
   const topPad = virtualize ? range.start * metrics.rowHeight : 0;
   const bottomPad = virtualize ? (visibleData.length - range.end) * metrics.rowHeight : 0;
 
@@ -663,12 +703,20 @@ export function Table<T>({
   // way is both uniform and simpler.
   useLayoutEffect(() => {
     if (isEmpty || Object.keys(columnWidths).length > 0) return;
-    const table = rootRef.current?.querySelector("table");
+    const root = rootRef.current;
+    const table = root?.querySelector("table");
     // Nothing to measure until a real row exists: a table showing only the
     // "no matching items" placeholder would freeze the placeholder's widths.
-    if (!table?.querySelector("tbody tr.tbl-row")) return;
+    if (!root || !table?.querySelector("tbody tr.tbl-row")) return;
     setColumnWidths(measureColumns(table));
     autoSized.current = true;
+    // The space these widths fit, for the observer below to compare against.
+    // Its first report — every browser sends one as soon as it starts watching
+    // — carries the same size, so it no longer reads as a resize and measures
+    // the table a second time. (#360) Taken here rather than when the observer
+    // starts: a table that empties out keeps its widths but stops watching, and
+    // if its space changes meanwhile, that first report is the only word of it.
+    containerWidth.current = scrollParentOf(root)?.clientWidth ?? 0;
     // measureColumns reads `columns`/`selection`, which `columnSignature` tracks.
   }, [isEmpty, visibleData.length, columnWidths, columnSignature]);
 
@@ -827,6 +875,9 @@ export function Table<T>({
                 else rowRefs.current.delete(rowKey);
               }}
               aria-selected={selected}
+              // The caller's own key, so a screen that has to find one row
+              // again after the table was rebuilt can.
+              data-row-key={rowKey}
               data-state={selected || checked ? "selected" : undefined}
               tabIndex={interactive ? (rowKey === stopKey ? 0 : -1) : undefined}
               onFocus={interactive ? () => setFocusKey(rowKey) : undefined}
@@ -893,6 +944,15 @@ export function Table<T>({
             <td colSpan={colCount} style={{ height: bottomPad, padding: 0, border: 0 }} />
           </tr>
         )}
+        {/* Not `tbl-row`: the row-pitch sample and keyboard walk skip these. */}
+        {measureRows.map((row) => (
+          <tr key={`measure-${getRowKey(row)}`} aria-hidden="true" className="tbl-measure" style={{ visibility: "hidden" }}>
+            {selection && <td className="tbl-check" />}
+            {columns.map((c) => (
+              <td key={c.key}>{c.render ? c.render(row) : String((row as Record<string, unknown>)[c.key])}</td>
+            ))}
+          </tr>
+        ))}
         {visibleData.length === 0 && (
           <tr>
             <td colSpan={colCount} className="tbl-empty">

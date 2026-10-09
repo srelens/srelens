@@ -2,6 +2,170 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "additionalProperties": false,
   "definitions": {
+    "ActionBinding": {
+      "additionalProperties": false,
+      "description": "One declared mutation: a host action primitive, the reader binding whose kind it acts on, the arguments that fix what it writes, and what must be true of the object before it is written.\n\nFlux and Argo CD declare their actions using this contract, which API 0.3 introduced.",
+      "properties": {
+        "arguments": {
+          "additionalProperties": true,
+          "description": "What this action writes, fixed at install time.",
+          "type": "object"
+        },
+        "availableWhen": {
+          "description": "What must be true of the object for the control to be offered. The same predicates, asked by the surface rather than by the cluster request, so a person is not shown a button whose refusal is already known.\n\nDisplay only, and deliberately so: an app that needs a condition *enforced* declares it in `preconditions`, where the host is what checks it. A surface can be out of date; the fresh GET cannot.",
+          "items": {
+            "$ref": "#/definitions/Predicate"
+          },
+          "type": "array"
+        },
+        "name": {
+          "type": "string"
+        },
+        "preconditions": {
+          "description": "What must be true of the object for the write to be sent. Evaluated by the host against the fresh GET the primitive already performs, before the patch; a predicate that does not hold refuses the request and the operator is told this predicate's `reason`.\n\nThese add refusals. The host's own guards — an object being deleted, a UID or `resourceVersion` that has moved — run first and are not something a manifest can reach.",
+          "items": {
+            "$ref": "#/definitions/Predicate"
+          },
+          "type": "array"
+        },
+        "resource": {
+          "description": "The name of a reader binding in `capabilities`. The action acts on that binding's kind and on no other.",
+          "type": "string"
+        },
+        "target": {
+          "description": "A host action primitive, e.g. `k8s.annotate`.",
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "arguments",
+        "name",
+        "resource",
+        "target",
+        "title"
+      ],
+      "type": "object"
+    },
+    "AppPolicy": {
+      "description": "What an administrator allows a host's apps to be and do. [`AppPolicy::default`] allows what a host with no policy does, except that `network.http` reaches no host, and no policy lets an app use plain HTTP to loopback.",
+      "properties": {
+        "allowExecutableApps": {
+          "description": "Always `false`. A policy is a shared host's, and executable apps (#574) do not run on one until they have a per-user sidecar identity (#521). The desktop, which has no policy, runs them.",
+          "type": "boolean"
+        },
+        "allowUnsignedApps": {
+          "description": "Whether apps with no publisher signature may be installed and used at all. Each user's own \"Allow unsigned apps to modify clusters\" still applies on top.",
+          "type": "boolean"
+        },
+        "allowWriteActions": {
+          "description": "Whether an app may declare write actions (the host action primitives). Running commands in pods is `k8s.exec`, allowed or not by `allowedCapabilities`.",
+          "type": "boolean"
+        },
+        "allowedApps": {
+          "description": "Only these app IDs may be installed and used; `null` allows any.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ],
+          "uniqueItems": true
+        },
+        "allowedCapabilities": {
+          "description": "The host capabilities an app may be granted; `null` allows every one the host offers apps.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ],
+          "uniqueItems": true
+        },
+        "allowedPublishers": {
+          "description": "Signed apps only from these publishers, each named by its delegation's ID (#559); `null` allows every publisher the host trusts. An unsigned app is governed by `allowUnsignedApps` instead.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ],
+          "uniqueItems": true
+        },
+        "blockedApps": {
+          "description": "These app IDs may not be installed or used, whatever else allows them.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "networkCeiling": {
+          "description": "The most `network.http` may reach, written as an app's hosts are: `name`, `name:port`, `*.example.com` or an IP address. A request goes only to a host both this and the app allow. Empty: `network.http` reaches no host.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "requiredApps": {
+          "description": "Apps every user keeps: one they have installed cannot be removed or disabled. The policy never installs an app for anyone.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "allowExecutableApps",
+        "allowUnsignedApps",
+        "allowWriteActions",
+        "blockedApps",
+        "networkCeiling",
+        "requiredApps"
+      ],
+      "type": "object"
+    },
+    "Badge": {
+      "additionalProperties": false,
+      "description": "A word on a built-in row. Without a `join`, the rules read the row's own `.metadata`; with one, they read the joined custom resource. The first rule that holds is the badge; when none does there is no badge.",
+      "properties": {
+        "forKinds": {
+          "description": "Qualified built-in kinds, e.g. `apps/Deployment`.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "id": {
+          "type": "string"
+        },
+        "join": {
+          "description": "A declared join whose matched resource the rules read.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "rules": {
+          "items": {
+            "$ref": "#/definitions/StatusRule"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "forKinds",
+        "id",
+        "rules"
+      ],
+      "type": "object"
+    },
     "Binding": {
       "additionalProperties": false,
       "properties": {
@@ -15,6 +179,16 @@
           },
           "type": "array"
         },
+        "jsonPathOverrides": {
+          "additionalProperties": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "description": "For a listed version whose objects keep a field elsewhere: each JSONPath this manifest reads the binding's objects through, mapped to the path to read at that version instead. Applied everywhere the objects are read: printer columns, status resolvers, declared actions, joined columns, badges and panels, and cards.",
+          "type": "object"
+        },
         "name": {
           "type": "string"
         },
@@ -23,6 +197,13 @@
         },
         "title": {
           "type": "string"
+        },
+        "versions": {
+          "description": "A `k8s.listCustomResource` reader's API versions, most preferred first, instead of one fixed `arguments.version` (#547). On each cluster the host reads the first one the CustomResourceDefinition serves, and refuses the read when it serves none.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         }
       },
       "required": [
@@ -34,12 +215,299 @@
       ],
       "type": "object"
     },
+    "CardAggregate": {
+      "enum": [
+        "sum",
+        "min",
+        "max"
+      ],
+      "type": "string"
+    },
+    "CardList": {
+      "additionalProperties": false,
+      "properties": {
+        "jsonPath": {
+          "description": "A value shown beside each row, and what rows are ordered by; by namespace and name when absent.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "limit": {
+          "description": "How many rows to show, 1–10; by the card's size when absent.",
+          "format": "uint",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "order": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CardOrder"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "CardMetric": {
+      "additionalProperties": false,
+      "properties": {
+        "aggregate": {
+          "$ref": "#/definitions/CardAggregate"
+        },
+        "jsonPath": {
+          "description": "A number on each object, in the predicates' bounded path grammar.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "aggregate",
+        "jsonPath"
+      ],
+      "type": "object"
+    },
+    "CardOrder": {
+      "enum": [
+        "asc",
+        "desc"
+      ],
+      "type": "string"
+    },
+    "CardPredicate": {
+      "additionalProperties": false,
+      "description": "What a dashboard card counts (#540): one question about one value of each object its source lists.\n\nThe action predicates' path grammar, literal rule and `equals` / `absent`, plus two date operators. There is no `reason`: nothing is refused, so there is nothing to tell an operator. Exactly one operator per predicate:\n\n```json {\"jsonPath\": \".status.notAfter\", \"within\": \"14d\"} ```",
+      "properties": {
+        "absent": {
+          "description": "`true`: the value at `jsonPath` must be unset or null.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "before": {
+          "description": "The value at `jsonPath` is an RFC 3339 timestamp earlier than now plus this duration: `14d` includes everything already past, `0d` is only the past, `-30d` is older than thirty days.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "equals": {
+          "description": "The value at `jsonPath` must equal this string, number or boolean."
+        },
+        "jsonPath": {
+          "description": "The value this predicate asks about, in the same bounded JSONPath subset as an action predicate's.",
+          "type": "string"
+        },
+        "within": {
+          "description": "The value at `jsonPath` is an RFC 3339 timestamp within this duration of now: `14d` is from now until fourteen days ahead, `-1h` the last hour. Units s, m, h, d and w. Extension dashboard cards on API 0.7 or later also accept `\"${settings.<id>}\"` referencing a declared select setting with a default; every option must be a positive duration of at most 3650 days. The host resolves the setting before evaluating this predicate.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "jsonPath"
+      ],
+      "type": "object"
+    },
+    "CardSize": {
+      "description": "How much of the dashboard's width a card takes.",
+      "enum": [
+        "s",
+        "m",
+        "l"
+      ],
+      "type": "string"
+    },
+    "CardTarget": {
+      "additionalProperties": false,
+      "properties": {
+        "page": {
+          "description": "The `id` of a page in `contributions.pages` that lists the card's source.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "page"
+      ],
+      "type": "object"
+    },
+    "CardType": {
+      "oneOf": [
+        {
+          "description": "How many objects the predicate holds for.",
+          "enum": [
+            "count"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Those objects counted by the status the app's status resolver gives them (#541).",
+          "enum": [
+            "countByStatus"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "One number reduced from a value of those objects.",
+          "enum": [
+            "metric"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The first few of those objects.",
+          "enum": [
+            "list"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "ColumnFormat": {
+      "enum": [
+        "text",
+        "number",
+        "status",
+        "badge",
+        "date",
+        "duration"
+      ],
+      "type": "string"
+    },
+    "ColumnSource": {
+      "additionalProperties": false,
+      "properties": {
+        "join": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "jsonPath": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "jsonPath"
+      ],
+      "type": "object"
+    },
+    "CommandTarget": {
+      "description": "What a palette command does: exactly one of opening a declared page or running a declared action through the host's confirmation.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "The `id` of a page in `contributions.pages`.",
+          "properties": {
+            "page": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "page"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The `name` of a declared action in `actions`.",
+          "properties": {
+            "action": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "action"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "Condition": {
+      "additionalProperties": false,
+      "description": "One question about one value, without a sentence to say when it fails.\n\nA [`Predicate`] is a condition plus the reason an operator is told when it does not hold. A status rule (#541) asks which of its rules describes an object; nobody is refused, so there is no reason to give — but the operators, the paths and the evaluation are these, and are this code:\n\n```json {\"jsonPath\": \".spec.suspend\", \"equals\": true} ```",
+      "properties": {
+        "absent": {
+          "description": "`true`: the value at `jsonPath` must be unset or null.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "equals": {
+          "description": "The value at `jsonPath` must equal this literal."
+        },
+        "jsonPath": {
+          "description": "The value this condition asks about, in the grammar [`resolve`] documents.",
+          "type": "string"
+        },
+        "notEquals": {
+          "description": "The value at `jsonPath` must not equal this literal. An unset field is not equal to anything, so this holds when it is absent."
+        },
+        "present": {
+          "description": "`true`: the value at `jsonPath` must be set and not null.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "selfReference": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ReferenceFormat"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The value at `jsonPath` must be a reference, in this host-known format, to the very object the rule reads. See [`ReferenceFormat`]."
+        }
+      },
+      "required": [
+        "jsonPath"
+      ],
+      "type": "object"
+    },
     "Contributions": {
       "additionalProperties": false,
       "properties": {
+        "badges": {
+          "description": "Words an app puts on built-in rows, from the row's metadata or from a joined resource (#541).",
+          "items": {
+            "$ref": "#/definitions/Badge"
+          },
+          "type": "array"
+        },
+        "commands": {
+          "description": "Entries in the command palette (#544): open one of this app's pages, or run one of its declared actions on the resource the reader has open.",
+          "items": {
+            "$ref": "#/definitions/PaletteCommand"
+          },
+          "type": "array"
+        },
+        "dashboardCards": {
+          "items": {
+            "$ref": "#/definitions/DashboardCard"
+          },
+          "type": "array"
+        },
         "detailLinks": {
           "items": {
             "$ref": "#/definitions/DetailLink"
+          },
+          "type": "array"
+        },
+        "detailPanels": {
+          "items": {
+            "$ref": "#/definitions/DetailPanel"
           },
           "type": "array"
         },
@@ -49,9 +517,56 @@
           },
           "type": "array"
         },
+        "joins": {
+          "items": {
+            "$ref": "#/definitions/Join"
+          },
+          "type": "array"
+        },
+        "logProviders": {
+          "description": "LogQL queries the log view can follow as a source beside Kubernetes (#569).",
+          "items": {
+            "$ref": "#/definitions/LogProvider"
+          },
+          "type": "array"
+        },
+        "metricProviders": {
+          "description": "PromQL range queries drawn as charts on workload and pod overviews (#569).",
+          "items": {
+            "$ref": "#/definitions/MetricProvider"
+          },
+          "type": "array"
+        },
         "pages": {
           "items": {
             "$ref": "#/definitions/Page"
+          },
+          "type": "array"
+        },
+        "resourceLinks": {
+          "description": "Relationships from one kind to another an app knows how to find (#545): the Inspector's \"Related\" links, and the edges a topology can draw.",
+          "items": {
+            "$ref": "#/definitions/ResourceLink"
+          },
+          "type": "array"
+        },
+        "statusResolvers": {
+          "description": "What status an app's custom resources have (#541). Replaces `pages[].statusColumns`, which is deprecated but still accepted on the 0.3 and 0.4 lines.",
+          "items": {
+            "$ref": "#/definitions/StatusResolver"
+          },
+          "type": "array"
+        },
+        "tableColumns": {
+          "items": {
+            "$ref": "#/definitions/TableColumn"
+          },
+          "type": "array"
+        },
+        "traceProviders": {
+          "description": "TraceQL searches listed on workload and pod overviews (#569).",
+          "items": {
+            "$ref": "#/definitions/TraceProvider"
           },
           "type": "array"
         }
@@ -88,6 +603,81 @@
       ],
       "type": "object"
     },
+    "DashboardCard": {
+      "additionalProperties": false,
+      "description": "A card on the cluster dashboard: one figure about the objects one granted custom-resource reader lists, drawn by the host.",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "list": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CardList"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "How a `list` card orders and bounds its rows; refused on other types."
+        },
+        "metric": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CardMetric"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "What a `metric` card reads; required there and refused elsewhere."
+        },
+        "predicate": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CardPredicate"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Which of the source's objects the card counts; every one when absent."
+        },
+        "size": {
+          "$ref": "#/definitions/CardSize"
+        },
+        "source": {
+          "description": "The name of a `k8s.listCustomResource` binding in `capabilities`.",
+          "type": "string"
+        },
+        "target": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CardTarget"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The app page the card opens, with the predicate applied as its filter."
+        },
+        "title": {
+          "description": "Untrusted display text, drawn as plain text.",
+          "type": "string"
+        },
+        "type": {
+          "$ref": "#/definitions/CardType"
+        }
+      },
+      "required": [
+        "id",
+        "size",
+        "source",
+        "title",
+        "type"
+      ],
+      "type": "object"
+    },
     "DashboardEvents": {
       "additionalProperties": false,
       "properties": {
@@ -104,6 +694,38 @@
       "required": [
         "apiGroups",
         "capability"
+      ],
+      "type": "object"
+    },
+    "DetailField": {
+      "additionalProperties": false,
+      "properties": {
+        "format": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ColumnFormat"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "join": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "jsonPath": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "jsonPath",
+        "label"
       ],
       "type": "object"
     },
@@ -135,6 +757,87 @@
       ],
       "type": "object"
     },
+    "DetailPanel": {
+      "additionalProperties": false,
+      "properties": {
+        "forKinds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "id": {
+          "type": "string"
+        },
+        "sections": {
+          "items": {
+            "$ref": "#/definitions/DetailSection"
+          },
+          "type": "array"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "forKinds",
+        "id",
+        "sections",
+        "title"
+      ],
+      "type": "object"
+    },
+    "DetailSection": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "fields": {
+              "items": {
+                "$ref": "#/definitions/DetailField"
+              },
+              "type": "array"
+            },
+            "type": {
+              "enum": [
+                "fields"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "fields",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "join": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "jsonPath": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "conditions"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "jsonPath",
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "DetailTab": {
       "additionalProperties": false,
       "properties": {
@@ -163,9 +866,63 @@
       ],
       "type": "object"
     },
+    "Envelope": {
+      "description": "A signed document: a DSSE envelope.",
+      "properties": {
+        "payload": {
+          "description": "The document's exact bytes, in base64.",
+          "type": "string"
+        },
+        "payloadType": {
+          "type": "string"
+        },
+        "signatures": {
+          "items": {
+            "$ref": "#/definitions/EnvelopeSignature"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "payload",
+        "payloadType",
+        "signatures"
+      ],
+      "type": "object"
+    },
+    "EnvelopeSignature": {
+      "properties": {
+        "keyid": {
+          "default": "",
+          "description": "Which key made it: DSSE's optional, unauthenticated hint. One that names a key narrows the search to that key; one left out, or empty, is tried against each of the role's keys. Either way a signature counts only when a key the role lists verifies it, and each key counts once.",
+          "type": "string"
+        },
+        "sig": {
+          "description": "The Ed25519 signature, in base64.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "sig"
+      ],
+      "type": "object"
+    },
+    "InputType": {
+      "enum": [
+        "string",
+        "integer",
+        "number",
+        "boolean"
+      ],
+      "type": "string"
+    },
     "Installed": {
       "additionalProperties": false,
       "properties": {
+        "allowLoopbackHttp": {
+          "description": "Whether the app's `network.http` requests may use plain HTTP to this computer (loopback), such as a Prometheus behind `kubectl port-forward` (#568). Off until a person turns it on for this app; kept across updates, as `contexts` is.",
+          "type": "boolean"
+        },
         "contexts": {
           "description": "The keys of the kubeconfig contexts the app is enabled for (`ResolvedContext::key`: `{file}#{name}` with `#` and `%` encoded in each part, as `k8s.listContexts` reports under `key`); `None` is every cluster. A context's display name is not identity: it changes when another kubeconfig declares the same name (#265). A stable ID is not either: `a` + `b#c` and `a#b` + `c` share one (#623).",
           "items": {
@@ -192,6 +949,13 @@
           },
           "type": "array"
         },
+        "icon": {
+          "description": "The package's logo as a `data:` URL, as `extensions.list` reports it: read from the package's files and checked against its digest list. Decoration only, never a sign of who published the app. Recomputed for every list, ignored when read from disk and never written there.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "installedAt": {
           "description": "When this version was installed, in seconds since the Unix epoch.",
           "format": "uint64",
@@ -200,6 +964,20 @@
         },
         "manifest": {
           "$ref": "#/definitions/Manifest"
+        },
+        "package": {
+          "description": "The SHA-256 of the digest list of the package this version was unpacked from (#562), which names its directory; absent for a single-file manifest.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "policyBlocked": {
+          "description": "Recomputed policy denial, distinct from a failed publisher verification.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "quarantined": {
           "description": "Why this host refused to trust the stored entry when loading it. Recomputed on every read, reported to the UI, and never written to disk.",
@@ -227,6 +1005,17 @@
             }
           ]
         },
+        "signedBy": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Signer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Who signed the installed version, when its proof verified on this read: \"Signed by <name>\". Recomputed on every read, like `quarantined`, and never written to disk."
+        },
         "source": {
           "$ref": "#/definitions/Source"
         }
@@ -243,6 +1032,173 @@
       ],
       "type": "object"
     },
+    "Join": {
+      "additionalProperties": false,
+      "description": "A single granted custom-resource list used to enrich native table rows.",
+      "properties": {
+        "capability": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "match": {
+          "$ref": "#/definitions/JoinMatch"
+        }
+      },
+      "required": [
+        "capability",
+        "id",
+        "match"
+      ],
+      "type": "object"
+    },
+    "JoinMatch": {
+      "additionalProperties": false,
+      "properties": {
+        "annotation": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kindLabel": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "boolean"
+        },
+        "ownerReference": {
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "LinkMatch": {
+      "additionalProperties": false,
+      "description": "Where on the `from` resource the target's name is written. Exactly one of `label`, `ownerReference`, `annotation`, `name` and `path`.",
+      "properties": {
+        "annotation": {
+          "description": "The annotation whose value is the target's name, or, with `parse`, a reference in a host-known format that names it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "defaultNamespace": {
+          "description": "With `parse: \"argocd-tracking-id\"`: the namespace Argo CD runs in, where an application written as a bare name lives. Without it a bare name is shown unverified, never searched for across namespaces.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "label": {
+          "description": "The label whose value is the target's name.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "description": "The target has the `from` resource's own name and namespace.",
+          "type": "boolean"
+        },
+        "namespaceLabel": {
+          "description": "With `label`: the label whose value is the target's namespace. Without it the target is in the `from` resource's namespace.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ownerReference": {
+          "description": "The `from` resource's owner references of the `to` kind.",
+          "type": "boolean"
+        },
+        "parse": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ReferenceFormat"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "With `annotation`: the format the value is written in. The host accepts a reference only when it names the `from` resource itself."
+        },
+        "path": {
+          "description": "A path on the `from` resource whose value names the target (API 0.5, #728): the predicate grammar, plus `[*]` for every element of a list, such as `.spec.rules[*].backendRefs[*]`. Each value is the target's name, or an object reference with `name` and an optional `namespace`, `kind`, and `group` or `apiVersion`; a reference to another kind is not this link's. Without a `namespace` the target is in the `from` resource's namespace. The host reads the path through the declared reader of `from`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "LinkRelation": {
+      "description": "What the `from` resource is to the `to` resource.",
+      "enum": [
+        "ownedBy",
+        "managedBy",
+        "exposedBy",
+        "references"
+      ],
+      "type": "string"
+    },
+    "LogLanguage": {
+      "description": "The one language a log provider queries in.",
+      "enum": [
+        "logql"
+      ],
+      "type": "string"
+    },
+    "LogProvider": {
+      "additionalProperties": false,
+      "description": "A log provider: a LogQL stream selector the pod log view can follow as a source beside Kubernetes, for each kind in `forKinds`.",
+      "properties": {
+        "capability": {
+          "description": "A `network.http` binding whose `path` is the range query endpoint, e.g. `/loki/api/v1/query_range`.",
+          "type": "string"
+        },
+        "forKinds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "id": {
+          "type": "string"
+        },
+        "language": {
+          "$ref": "#/definitions/LogLanguage"
+        },
+        "query": {
+          "description": "The LogQL log query, with `${…}` variables the host binds.",
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "capability",
+        "forKinds",
+        "id",
+        "language",
+        "query",
+        "title"
+      ],
+      "type": "object"
+    },
     "Manifest": {
       "additionalProperties": false,
       "properties": {
@@ -252,6 +1208,13 @@
             "string",
             "null"
           ]
+        },
+        "actions": {
+          "description": "Declared mutations (#549). Absent in a manifest that only reads, and left out of the serialized form when empty so a manifest stored and signed without it still round-trips to its own bytes.",
+          "items": {
+            "$ref": "#/definitions/ActionBinding"
+          },
+          "type": "array"
         },
         "capabilities": {
           "items": {
@@ -272,10 +1235,29 @@
           "type": "string"
         },
         "permissions": {
+          "description": "The host capabilities the bindings target, each by id; `network.http` with the hosts it may reach (#568), and a pod capability with the namespaces it grants, if any (#567).",
           "items": {
-            "type": "string"
+            "$ref": "#/definitions/Permission"
           },
           "type": "array"
+        },
+        "settings": {
+          "description": "Typed settings (#542), drawn as a host form and held to these declarations on every save. Left out of the stored form when empty.",
+          "items": {
+            "$ref": "#/definitions/Setting"
+          },
+          "type": "array"
+        },
+        "sidecar": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Sidecar"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The sidecar an app of kind `executable` runs, and the operations it answers (#574). Absent from a declarative manifest."
         },
         "srelensApiVersion": {
           "type": "string"
@@ -297,11 +1279,177 @@
       "type": "object"
     },
     "ManifestKind": {
-      "description": "Only data is executable in this first host. Code-bearing manifests must go through the future sandboxed runtime, never through a permissive fallback.",
+      "description": "What an app is made of. A declarative app is data the host interprets; an executable one (#574) also runs a sidecar, under the supervisor (#572) in the OS sandbox and never through a permissive fallback.",
       "enum": [
-        "declarative"
+        "declarative",
+        "executable"
       ],
       "type": "string"
+    },
+    "MetricLanguage": {
+      "description": "The one language a metric provider queries in.",
+      "enum": [
+        "promql"
+      ],
+      "type": "string"
+    },
+    "MetricProvider": {
+      "additionalProperties": false,
+      "description": "A metric provider: a PromQL range query drawn as a chart on the overview of each kind in `forKinds`.",
+      "properties": {
+        "capability": {
+          "description": "A `network.http` binding in `capabilities`, whose `path` is the range query endpoint, e.g. `/api/v1/query_range`.",
+          "type": "string"
+        },
+        "forKinds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "id": {
+          "type": "string"
+        },
+        "language": {
+          "$ref": "#/definitions/MetricLanguage"
+        },
+        "query": {
+          "description": "The PromQL expression, with `${…}` variables the host binds.",
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "unit": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/MetricUnit"
+            }
+          ],
+          "description": "How the host formats the values: one unit, so one y axis."
+        }
+      },
+      "required": [
+        "capability",
+        "forKinds",
+        "id",
+        "language",
+        "query",
+        "title",
+        "unit"
+      ],
+      "type": "object"
+    },
+    "MetricUnit": {
+      "description": "The units a chart formats, as the host's timeseries component (#570) names them.",
+      "enum": [
+        "number",
+        "percent",
+        "ratio",
+        "bytes",
+        "bytesPerSecond",
+        "seconds",
+        "cores",
+        "perSecond"
+      ],
+      "type": "string"
+    },
+    "NormalizedStatus": {
+      "description": "The six statuses every surface knows how to draw.",
+      "enum": [
+        "healthy",
+        "warning",
+        "error",
+        "progressing",
+        "suspended",
+        "unknown"
+      ],
+      "type": "string"
+    },
+    "Operation": {
+      "additionalProperties": false,
+      "description": "One request a sidecar answers, and the inputs it takes.",
+      "properties": {
+        "inputs": {
+          "description": "What a caller passes, each checked by the host before the sidecar is asked. An operation that takes nothing leaves this out.",
+          "items": {
+            "$ref": "#/definitions/OperationInput"
+          },
+          "type": "array"
+        },
+        "name": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "view": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/OperationView"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "title"
+      ],
+      "type": "object"
+    },
+    "OperationInput": {
+      "additionalProperties": false,
+      "description": "One input an operation takes.",
+      "properties": {
+        "maxLength": {
+          "description": "For a string: the most bytes it may hold, 1–65536. Default 1024.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "type": {
+          "$ref": "#/definitions/InputType"
+        }
+      },
+      "required": [
+        "name",
+        "type"
+      ],
+      "type": "object"
+    },
+    "OperationView": {
+      "additionalProperties": false,
+      "description": "Native host rendering choices. Apps supply data, never executable frontend code.",
+      "properties": {
+        "autoRun": {
+          "type": "boolean"
+        },
+        "hidden": {
+          "type": "boolean"
+        },
+        "stream": {
+          "type": "boolean"
+        }
+      },
+      "type": "object"
     },
     "Page": {
       "additionalProperties": false,
@@ -349,6 +1497,90 @@
       ],
       "type": "object"
     },
+    "PaletteCommand": {
+      "additionalProperties": false,
+      "description": "One command palette entry. The host shows it under the app's name, so an app cannot pass its command off as the host's own.",
+      "properties": {
+        "forKinds": {
+          "description": "For an action command: the qualified kinds it is offered on, which must be the kind of the reader binding its action acts on. A page command has no subject and takes none.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "id": {
+          "type": "string"
+        },
+        "target": {
+          "$ref": "#/definitions/CommandTarget"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "target",
+        "title"
+      ],
+      "type": "object"
+    },
+    "Permission": {
+      "anyOf": [
+        {
+          "description": "A host capability the manifest binds, by id.",
+          "type": "string"
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ScopedPermission"
+            }
+          ],
+          "description": "A capability granted with a scope: `network.http`'s hosts, or a pod capability's namespaces."
+        }
+      ],
+      "description": "One `permissions` entry: a host capability's id, `network.http` with the hosts it may reach, or a pod capability (#567) with the namespaces it grants.\n\nA plain entry is stored as the string it was written as, so a manifest signed before scoped permissions existed still round-trips to its bytes."
+    },
+    "Predicate": {
+      "additionalProperties": false,
+      "description": "One declared check about the object an action would write.\n\nExactly one operator per predicate:\n\n```json {\"jsonPath\": \".spec.suspend\", \"notEquals\": true, \"reason\": \"Resume this resource before requesting reconciliation\"} ```",
+      "properties": {
+        "absent": {
+          "description": "`true`: the value at `jsonPath` must be unset or null.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "equals": {
+          "description": "The value at `jsonPath` must equal this literal."
+        },
+        "jsonPath": {
+          "description": "The value this predicate asks about, as a bounded JSONPath subset: `.spec.suspend`, `.metadata.annotations['acme.io/pinned']`, `.status.conditions[0].status`. The grammar is the bounded subset the module documents: no wildcard or recursive descent, and one filter form, `[?(@.type==\"Ready\")]`, that selects the first matching element.",
+          "type": "string"
+        },
+        "notEquals": {
+          "description": "The value at `jsonPath` must not equal this literal. An unset field is not equal to anything, so this holds when it is absent."
+        },
+        "present": {
+          "description": "`true`: the value at `jsonPath` must be set and not null.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "reason": {
+          "description": "What the operator is told when this predicate does not hold. Untrusted display text: written by the app, and escaped by the host before anything draws it.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "jsonPath",
+        "reason"
+      ],
+      "type": "object"
+    },
     "PreviousVersion": {
       "additionalProperties": false,
       "description": "A version an update replaced, kept so it can be restored.",
@@ -366,6 +1598,13 @@
         },
         "manifest": {
           "$ref": "#/definitions/Manifest"
+        },
+        "package": {
+          "description": "The package it was unpacked from, as [`Installed`] names it.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "revision": {
           "format": "uint64",
@@ -395,9 +1634,297 @@
       ],
       "type": "object"
     },
+    "ReferenceFormat": {
+      "description": "A reference format the host knows how to check against the object that carries it (#541 review).\n\nA condition compares against literals, so it cannot say \"this annotation names the resource it is on\". An ownership claim needs exactly that — a copied annotation must not make a resource look owned — so the host implements the check for each format, exactly as the owning controller does, rather than offering a template language.",
+      "oneOf": [
+        {
+          "description": "Argo CD's resource tracking id, `<app>:<group>/<kind>:<namespace>/<name>`, parsed as Argo CD parses it (`util/argo/resource_tracking.go`, `ParseAppInstanceValue`) and held to the resource as Argo CD holds it (`controller/state.go`, `isSelfReferencedObj`): group, kind and name equal, and namespace equal unless the resource is cluster-scoped. Argo CD ignores an id that does not name its own resource, so a badge must.",
+          "enum": [
+            "argocd-tracking-id"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "ResourceLink": {
+      "additionalProperties": false,
+      "description": "A relationship from a resource of kind `from` to resources of kind `to`, found by reading the `from` resource's own metadata (#545), or a declared path on it (#728).\n\nThe metadata selectors are a join's (`joins[].match`), read the other way round: a join indexes the *listed* resources by a key that names the row, while a link reads the key on the resource being inspected, and the key names the target. The target is then looked up by name in the list of the declared reader for `to`, or of the built-in kind `to` names, through the same index a join uses. The target's own Inspector shows the same links the other way round, computed from these declarations.",
+      "properties": {
+        "from": {
+          "description": "The qualified kind of the resource the link is read from, e.g. `apps/Deployment`.",
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "match": {
+          "$ref": "#/definitions/LinkMatch"
+        },
+        "relation": {
+          "$ref": "#/definitions/LinkRelation"
+        },
+        "to": {
+          "description": "The qualified kind of the target: one a declared `k8s.listCustomResource` reader lists, or a built-in kind this host lists (API 0.5, #728). That is how the host knows the target exists.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "from",
+        "id",
+        "match",
+        "relation",
+        "to"
+      ],
+      "type": "object"
+    },
+    "ScopedPermission": {
+      "additionalProperties": false,
+      "description": "`{\"capability\": \"network.http\", \"hosts\": [...]}`, or `{\"capability\": \"k8s.streamLogs\", \"namespaces\": [...]}` (#567).",
+      "properties": {
+        "capability": {
+          "type": "string"
+        },
+        "hosts": {
+          "description": "Where `network.http` may reach: `host`, `host:port`, `*.example.com` (one subdomain label), an IP literal (`[::1]` for IPv6), or `${settings.<id>}` naming a `url` setting, whose host and port are read from the saved value on every request.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "namespaces": {
+          "description": "The namespaces a pod capability (`k8s.streamLogs`, `k8s.exec`, `k8s.portForward`) may reach any pod in, for a binding that names no `resource` (#567). API 0.5.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "capability"
+      ],
+      "type": "object"
+    },
+    "SecretStoreState": {
+      "description": "Whether the host can store a secret now, as `extensions.list` reports it.",
+      "properties": {
+        "available": {
+          "type": "boolean"
+        },
+        "reason": {
+          "description": "Why not, in the host's words, when it cannot.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "available"
+      ],
+      "type": "object"
+    },
+    "Setting": {
+      "additionalProperties": false,
+      "description": "One setting an app declares. The host renders it as a form field and checks every value saved into it.",
+      "properties": {
+        "default": {
+          "description": "The value used while none is saved. Held to the setting's own rules; refused on a `secret-reference`, since a manifest is public."
+        },
+        "description": {
+          "description": "Untrusted help text under the field, drawn as plain text.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "integer": {
+          "description": "Whether a `number` setting takes whole numbers only; refused on other types.",
+          "type": "boolean"
+        },
+        "maxLength": {
+          "description": "The most characters a `string` setting takes, 1–4096 (1024 when absent); refused on other types.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "maximum": {
+          "description": "The largest value a `number` setting takes; refused on other types.",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "minimum": {
+          "description": "The smallest value a `number` setting takes; refused on other types.",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "options": {
+          "description": "What a `select` or `multi-select` offers; refused on other types.",
+          "items": {
+            "$ref": "#/definitions/SettingOption"
+          },
+          "type": "array"
+        },
+        "required": {
+          "description": "Whether a save must give it a value. Refused beside `default`, which would make it never missing.",
+          "type": "boolean"
+        },
+        "title": {
+          "description": "Untrusted display text, drawn as plain text.",
+          "type": "string"
+        },
+        "type": {
+          "$ref": "#/definitions/SettingType"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "type"
+      ],
+      "type": "object"
+    },
+    "SettingOption": {
+      "additionalProperties": false,
+      "description": "One choice of a `select` or `multi-select` setting.",
+      "properties": {
+        "label": {
+          "description": "Untrusted display text, drawn as plain text.",
+          "type": "string"
+        },
+        "value": {
+          "description": "What is saved, and interpolated.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "label",
+        "value"
+      ],
+      "type": "object"
+    },
+    "SettingType": {
+      "description": "The type of one declared setting, as a manifest spells it.",
+      "oneOf": [
+        {
+          "enum": [
+            "boolean"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Free text on one line.",
+          "enum": [
+            "string"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "A JSON number, optionally an integer and bounded.",
+          "enum": [
+            "number"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "One of the options the manifest lists.",
+          "enum": [
+            "select"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Any of the options the manifest lists, each at most once.",
+          "enum": [
+            "multi-select"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "An `http` or `https` URL with no credentials in it.",
+          "enum": [
+            "url"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "A Kubernetes namespace name.",
+          "enum": [
+            "namespace-selector"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "A kubeconfig context, by its key (`ResolvedContext::key`).",
+          "enum": [
+            "cluster-selector"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "A secret held by the host's secret store (#543). The inventory keeps a reference, never the value, and no binding argument can take it.",
+          "enum": [
+            "secret-reference"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "Sidecar": {
+      "additionalProperties": false,
+      "description": "The sidecar an executable app runs.",
+      "properties": {
+        "binaries": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "The binary the host runs on each platform, by platform: a file directly under `bin/<platform>/` in the app's package, such as `\"linux-amd64\": \"bin/linux-amd64/scanner\"`. A platform left out does not run the app.",
+          "type": "object"
+        },
+        "operations": {
+          "description": "Every operation the sidecar answers. Each is a request of that name, with the checked input as its params.",
+          "items": {
+            "$ref": "#/definitions/Operation"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "binaries",
+        "operations"
+      ],
+      "type": "object"
+    },
     "SignatureProof": {
       "additionalProperties": false,
       "properties": {
+        "delegation": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Envelope"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The signed publisher delegation that vouched for the signature (#559), so the app is verified again on every load with no catalog at hand. Absent when this build's shipped delegations vouch for it, as they do for every release signed before #559, which keeps those inventories readable by the hosts that wrote them."
+        },
+        "digests": {
+          "description": "For a package (#562): the exact digest list `signature` covers, which names `manifest` as the package's `extension.json`. Absent for a single-file manifest, whose signature covers `manifest` itself.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "manifest": {
           "type": "string"
         },
@@ -413,6 +1940,22 @@
       "required": [
         "manifest",
         "signature"
+      ],
+      "type": "object"
+    },
+    "Signer": {
+      "description": "Who signed an app, as the host reports it: \"Signed by <name>\".",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name"
       ],
       "type": "object"
     },
@@ -453,9 +1996,152 @@
         "ready"
       ],
       "type": "object"
+    },
+    "StatusResolver": {
+      "additionalProperties": false,
+      "description": "Ordered rules that resolve the status of the custom resources of `forKinds`. The first rule whose conditions all hold is the status; when none does the host says `unknown`.",
+      "properties": {
+        "forKinds": {
+          "description": "Qualified kinds of custom resources this app declares a reader for.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "rules": {
+          "items": {
+            "$ref": "#/definitions/StatusRule"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "forKinds",
+        "rules"
+      ],
+      "type": "object"
+    },
+    "StatusRule": {
+      "additionalProperties": false,
+      "description": "One rule: when every condition holds, the object has this status.",
+      "properties": {
+        "label": {
+          "description": "The word shown. Required: colour is never the only signal.",
+          "type": "string"
+        },
+        "reason": {
+          "description": "Where in the object the reason is, e.g. `.status.conditions[?(@.type==\"Ready\")].message`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "$ref": "#/definitions/NormalizedStatus"
+        },
+        "when": {
+          "description": "Every condition must hold. An empty list always holds, which is how a last, catch-all rule is written.",
+          "items": {
+            "$ref": "#/definitions/Condition"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "label",
+        "status",
+        "when"
+      ],
+      "type": "object"
+    },
+    "TableColumn": {
+      "additionalProperties": false,
+      "properties": {
+        "filterable": {
+          "type": "boolean"
+        },
+        "forKinds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "format": {
+          "$ref": "#/definitions/ColumnFormat"
+        },
+        "id": {
+          "type": "string"
+        },
+        "sortable": {
+          "type": "boolean"
+        },
+        "source": {
+          "$ref": "#/definitions/ColumnSource"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "forKinds",
+        "format",
+        "id",
+        "source",
+        "title"
+      ],
+      "type": "object"
+    },
+    "TraceLanguage": {
+      "description": "The one language a trace provider queries in.",
+      "enum": [
+        "traceql"
+      ],
+      "type": "string"
+    },
+    "TraceProvider": {
+      "additionalProperties": false,
+      "description": "A trace provider: a TraceQL search listed on the overview of each kind in `forKinds`.",
+      "properties": {
+        "capability": {
+          "description": "A `network.http` binding whose `path` is the search endpoint, e.g. `/api/search`.",
+          "type": "string"
+        },
+        "forKinds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "id": {
+          "type": "string"
+        },
+        "language": {
+          "$ref": "#/definitions/TraceLanguage"
+        },
+        "query": {
+          "description": "The TraceQL query, with `${…}` variables the host binds.",
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "capability",
+        "forKinds",
+        "id",
+        "language",
+        "query",
+        "title"
+      ],
+      "type": "object"
     }
   },
   "properties": {
+    "allowUnsignedApps": {
+      "default": false,
+      "type": "boolean"
+    },
     "nextRevision": {
       "format": "uint64",
       "minimum": 0.0,
@@ -467,10 +2153,33 @@
       },
       "type": "array"
     },
+    "policy": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/AppPolicy"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "The administrator's policy this inventory is held to (#578), on a host that has one. Reported by every read, never read from disk and never written there.",
+      "readOnly": true
+    },
     "schemaVersion": {
       "format": "uint32",
       "minimum": 0.0,
       "type": "integer"
+    },
+    "secretStore": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/SecretStoreState"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Whether the host can store an app's secret now (#543), as `extensions.list` reports it. Recomputed for every answer, ignored when read from disk and never written there."
     }
   },
   "required": [

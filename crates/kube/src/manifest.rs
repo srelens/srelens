@@ -1,6 +1,7 @@
 //! The `k8s.getManifest` capability — fetch any supported resource as YAML via
 //! kube-rs's dynamic API, so a single capability serves every resource type.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use kube::api::{Api, DynamicObject, ListParams, Patch, PatchParams, ValidationDirective};
@@ -214,16 +215,133 @@ pub struct ObjectOut {
     pub object: serde_json::Value,
 }
 
+/// What a `fields` entry means, said once for both tools that take it.
+/// What a `fields` entry means, for the error that refuses one. The
+/// arguments' doc comments say the same to an MCP client through the schema.
+const FIELDS_HELP: &str = "kubectl-style JSONPath, each starting with '.', e.g. \
+    .status.allocatable, .metadata.labels['app.kubernetes.io/name'] or \
+    .status.conditions[?(@.type==\"Ready\")].status";
+
+/// Bounds on what a caller may ask for (#633): every path is walked once per
+/// item. Thirty-two matches the printer columns `listCustomResource` evaluates.
+const MAX_FIELDS: usize = 32;
+const MAX_FIELD_CHARS: usize = 256;
+const MAX_SELECTOR_CHARS: usize = 1024;
+
+/// Refuse `fields` the walker could only ever resolve to nothing — a JSON
+/// Pointer (`/status/x`), a kubectl template (`{.x}`), a wildcard, a broken
+/// bracket. Each would come back `null` on every item, and a column of nulls
+/// reads as "none of them have it": a confident answer to a malformed question.
+fn check_fields(fields: &[String]) -> Result<(), CapabilityError> {
+    if fields.len() > MAX_FIELDS {
+        return Err(CapabilityError::InvalidInput(format!(
+            "fields: {} paths requested, at most {MAX_FIELDS}",
+            fields.len()
+        )));
+    }
+    for f in fields {
+        if f.len() > MAX_FIELD_CHARS {
+            return Err(CapabilityError::InvalidInput(format!(
+                "fields: a path is longer than {MAX_FIELD_CHARS} characters"
+            )));
+        }
+        if let Some(problem) = crate::crds::json_path_problem(f) {
+            return Err(CapabilityError::InvalidInput(format!(
+                "fields: {f:?} is not a supported path: it {problem}. Use {FIELDS_HELP}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn check_selectors(input: &ListResourceIn) -> Result<(), CapabilityError> {
+    for (name, value) in [
+        ("labelSelector", &input.label_selector),
+        ("fieldSelector", &input.field_selector),
+    ] {
+        if value.as_ref().is_some_and(|s| s.len() > MAX_SELECTOR_CHARS) {
+            return Err(CapabilityError::InvalidInput(format!(
+                "{name}: longer than {MAX_SELECTOR_CHARS} characters"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// An object as any ungated reader may see it: `managedFields` dropped, and
+/// a Secret's values blanked — the consent-gated `k8s.getSecret` is the only
+/// way to them. Every projection runs on this, never on the raw object.
+fn readable_object(
+    mut obj: DynamicObject,
+    ar: &ApiResource,
+) -> Result<serde_json::Value, CapabilityError> {
+    obj.metadata.managed_fields = None;
+    let mut object =
+        serde_json::to_value(obj).map_err(|e| CapabilityError::Handler(e.to_string()))?;
+    if ar.kind == "Secret" && ar.group.is_empty() {
+        crate::secrets::redact_secret_data(&mut object);
+    }
+    Ok(object)
+}
+
+/// Each requested path mapped to what it lands on — a scalar, a map or a
+/// list — and `null` where the object has nothing there.
+fn project(object: &serde_json::Value, fields: &[String]) -> BTreeMap<String, serde_json::Value> {
+    fields
+        .iter()
+        .map(|f| {
+            let value = crate::crds::json_path_value(object, f).cloned();
+            (f.clone(), value.unwrap_or(serde_json::Value::Null))
+        })
+        .collect()
+}
+
+/// `getObject`'s answer: the readable object, or with `fields`, only those
+/// paths keyed by path.
+fn object_out(
+    obj: DynamicObject,
+    ar: &ApiResource,
+    fields: &[String],
+) -> Result<ObjectOut, CapabilityError> {
+    let object = readable_object(obj, ar)?;
+    if fields.is_empty() {
+        return Ok(ObjectOut { object });
+    }
+    let projected = project(&object, fields);
+    serde_json::to_value(projected)
+        .map(|object| ObjectOut { object })
+        .map_err(|e| CapabilityError::Handler(e.to_string()))
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct GetObjectIn {
+    #[serde(flatten)]
+    pub target: ManifestIn,
+    /// Return only these paths instead of the whole object: kubectl-style
+    /// JSONPath, each starting with '.', e.g. `.status.allocatable`,
+    /// `.metadata.labels['app.kubernetes.io/name']`, `.spec.containers[0].image`
+    /// or `.status.conditions[?(@.type=="Ready")].status`. The result maps each
+    /// path to its value, `null` where the object has none. Wildcards `[*]`,
+    /// slices, `..` and filters other than one `==` are not supported: ask for
+    /// the parent, e.g. `.spec.containers`. At most 32 paths.
+    #[serde(default)]
+    pub fields: Vec<String>,
+}
+
 /// `k8s.getObject` — fetch a resource as a structured JSON object (for rich
 /// detail rendering, vs. `k8s.getManifest` which returns YAML).
 pub fn get_object_capability(cache: Arc<ClientCache>) -> Capability {
-    Capability::typed::<ManifestIn, ObjectOut, _, _>(
+    Capability::typed::<GetObjectIn, ObjectOut, _, _>(
         "k8s.getObject",
-        "fetch a resource as a structured JSON object (any supported kind)",
+        "fetch one resource as a structured JSON object (any supported kind). Pass `fields` \
+         (kubectl-style JSONPath such as .status.allocatable) to get only those paths, keyed by \
+         path, with null where the object has none. To read a field across many objects, use \
+         k8s.listResource with `fields` instead of calling this once per object.",
         Annotations::READ_ONLY,
-        move |input: ManifestIn| {
+        move |GetObjectIn { target: input, fields }: GetObjectIn| {
             let cache = cache.clone();
             async move {
+                check_fields(&fields)?;
                 let (ar, namespaced) = resolve_api_resource(&input)?;
                 let client = cache
                     .get(&input.context)
@@ -239,19 +357,11 @@ pub fn get_object_capability(cache: Arc<ClientCache>) -> Capability {
                 } else {
                     Api::all_with(client, &ar)
                 };
-                let mut obj = tokio::time::timeout(request_timeout(), api.get(&input.name))
+                let obj = tokio::time::timeout(request_timeout(), api.get(&input.name))
                     .await
                     .map_err(|_| CapabilityError::Handler("get object timed out".into()))?
                     .map_err(|e| CapabilityError::Handler(e.to_string()))?;
-                obj.metadata.managed_fields = None;
-                let mut object = serde_json::to_value(obj)
-                    .map_err(|e| CapabilityError::Handler(e.to_string()))?;
-                // Never return Secret values through the generic path; the UI
-                // reads them via the dedicated, consent-gateable `k8s.getSecret`.
-                if ar.kind == "Secret" && ar.group.is_empty() {
-                    crate::secrets::redact_secret_data(&mut object);
-                }
-                Ok(ObjectOut { object })
+                object_out(obj, &ar, &fields)
             }
         },
     )
@@ -329,18 +439,24 @@ pub fn gvk_for(kind: &str) -> Option<(GroupVersionKind, bool)> {
         ),
         "resourcequota" | "resourcequotas" | "quota" => ("", "v1", "ResourceQuota", true),
         "limitrange" | "limitranges" | "limits" => ("", "v1", "LimitRange", true),
-        "horizontalpodautoscaler" | "hpa" => ("autoscaling", "v2", "HorizontalPodAutoscaler", true),
-        "poddisruptionbudget" | "pdb" => ("policy", "v1", "PodDisruptionBudget", true),
-        "priorityclass" => ("scheduling.k8s.io", "v1", "PriorityClass", false),
-        "runtimeclass" => ("node.k8s.io", "v1", "RuntimeClass", false),
+        "horizontalpodautoscaler" | "horizontalpodautoscalers" | "hpa" => {
+            ("autoscaling", "v2", "HorizontalPodAutoscaler", true)
+        }
+        "poddisruptionbudget" | "poddisruptionbudgets" | "pdb" => {
+            ("policy", "v1", "PodDisruptionBudget", true)
+        }
+        "priorityclass" | "priorityclasses" | "pc" => {
+            ("scheduling.k8s.io", "v1", "PriorityClass", false)
+        }
+        "runtimeclass" | "runtimeclasses" => ("node.k8s.io", "v1", "RuntimeClass", false),
         "lease" | "leases" => ("coordination.k8s.io", "v1", "Lease", true),
-        "mutatingwebhookconfiguration" => (
+        "mutatingwebhookconfiguration" | "mutatingwebhookconfigurations" | "mwc" => (
             "admissionregistration.k8s.io",
             "v1",
             "MutatingWebhookConfiguration",
             false,
         ),
-        "validatingwebhookconfiguration" => (
+        "validatingwebhookconfiguration" | "validatingwebhookconfigurations" | "vwc" => (
             "admissionregistration.k8s.io",
             "v1",
             "ValidatingWebhookConfiguration",
@@ -403,6 +519,31 @@ pub fn gvk_for(kind: &str) -> Option<(GroupVersionKind, bool)> {
     Some((GroupVersionKind::gvk(group, version, k), namespaced))
 }
 
+/// Serialize a fetched object as the YAML `k8s.getManifest` returns, with a
+/// core-group `Secret`'s values and annotations blanked by
+/// [`crate::secrets::redact_secret_data`] first.
+///
+/// Takes the [`ApiResource`] rather than a `bool` so a caller cannot reach
+/// this without answering "is this a Secret?" — which is the shape the leak
+/// this closes had. `k8s.getObject` redacted; this path, written beside it,
+/// serialized the object straight to YAML and simply never asked, so every
+/// Secret's `data`, `stringData` and annotations reached any MCP client
+/// outside the consent-gated `k8s.getSecret`.
+///
+/// Only a Secret takes the JSON round trip. `serde_json::Value` sorts a map's
+/// keys, so routing every kind through it would reorder every manifest the
+/// editor and the detail pane show, for no gain on a resource that carries
+/// nothing to redact.
+fn manifest_yaml(obj: &DynamicObject, ar: &ApiResource) -> Result<String, CapabilityError> {
+    if ar.kind == "Secret" && ar.group.is_empty() {
+        let mut object =
+            serde_json::to_value(obj).map_err(|e| CapabilityError::Handler(e.to_string()))?;
+        crate::secrets::redact_secret_data(&mut object);
+        return serde_yaml::to_string(&object).map_err(|e| CapabilityError::Handler(e.to_string()));
+    }
+    serde_yaml::to_string(obj).map_err(|e| CapabilityError::Handler(e.to_string()))
+}
+
 /// `k8s.getManifest` — return a resource's manifest as YAML.
 pub fn get_manifest_capability(cache: Arc<ClientCache>) -> Capability {
     Capability::typed::<ManifestIn, ManifestOut, _, _>(
@@ -433,9 +574,9 @@ pub fn get_manifest_capability(cache: Arc<ClientCache>) -> Capability {
                     .map_err(|e| CapabilityError::Handler(e.to_string()))?;
                 // Drop noisy server-managed fields for a readable manifest.
                 obj.metadata.managed_fields = None;
-                let yaml = serde_yaml::to_string(&obj)
-                    .map_err(|e| CapabilityError::Handler(e.to_string()))?;
-                Ok(ManifestOut { yaml })
+                Ok(ManifestOut {
+                    yaml: manifest_yaml(&obj, &ar)?,
+                })
             }
         },
     )
@@ -448,6 +589,56 @@ pub struct ListResourceIn {
     pub kind: String,
     #[serde(default)]
     pub namespace: Option<String>,
+    /// Label selector the API server filters by, as `kubectl get -l` takes
+    /// it, e.g. `app=web,tier!=cache`.
+    #[serde(default, rename = "labelSelector")]
+    pub label_selector: Option<String>,
+    /// Field selector the API server filters by, as `kubectl get
+    /// --field-selector` takes it, e.g. `spec.nodeName=worker-1`.
+    #[serde(default, rename = "fieldSelector")]
+    pub field_selector: Option<String>,
+    /// Paths to return for every item, in its row's `fields`: kubectl-style
+    /// JSONPath, each starting with '.', e.g. `.status.allocatable`,
+    /// `.metadata.labels['app.kubernetes.io/name']`, `.spec.containers[0].image`
+    /// or `.status.conditions[?(@.type=="Ready")].status`. Each row maps a path
+    /// to its value, `null` where that item has none. Wildcards `[*]`, slices,
+    /// `..` and filters other than one `==` are not supported: ask for the
+    /// parent, e.g. `.spec.containers`. At most 32 paths.
+    #[serde(default)]
+    pub fields: Vec<String>,
+}
+
+/// The selectors a caller gave, an empty one meaning none.
+fn list_params(input: &ListResourceIn) -> ListParams {
+    let given = |s: &Option<String>| s.as_deref().filter(|s| !s.is_empty()).map(String::from);
+    ListParams {
+        label_selector: given(&input.label_selector),
+        field_selector: given(&input.field_selector),
+        ..ListParams::default()
+    }
+}
+
+/// One row of `listResource`, carrying the requested `fields` when there
+/// are any — read from the readable object, so a Secret's values never ride
+/// along — and the bare row the UI lists by when there are none.
+fn resource_row(
+    o: DynamicObject,
+    ar: &ApiResource,
+    fields: &[String],
+) -> Result<ResourceRow, CapabilityError> {
+    let created = o.metadata.creation_timestamp.as_ref();
+    let mut row = ResourceRow {
+        name: o.metadata.name.clone().unwrap_or_default(),
+        namespace: o.metadata.namespace.clone().unwrap_or_default(),
+        created: crate::creation_rfc3339(created),
+        age: crate::humanize_age(created),
+        created_at: crate::creation_timestamp_iso(created),
+        fields: None,
+    };
+    if !fields.is_empty() {
+        row.fields = Some(project(&readable_object(o, ar)?, fields));
+    }
+    Ok(row)
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
@@ -463,6 +654,10 @@ pub struct ResourceRow {
     /// age live at render time. Empty when the resource carries none.
     #[serde(rename = "createdAt")]
     pub created_at: String,
+    /// What `fields` asked for, keyed by path: `null` where this item has
+    /// nothing there. Absent when the caller asked for no fields.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fields: Option<BTreeMap<String, serde_json::Value>>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -470,15 +665,22 @@ pub struct ListResourceOut {
     pub items: Vec<ResourceRow>,
 }
 
-/// `k8s.listResource` — list any supported kind generically (name + namespace).
+/// `k8s.listResource` — list any supported kind generically: name and
+/// namespace, filtered by selectors, plus the `fields` a caller names.
 pub fn list_resource_capability(cache: Arc<ClientCache>) -> Capability {
     Capability::typed::<ListResourceIn, ListResourceOut, _, _>(
         "k8s.listResource",
-        "list any supported resource kind (name + namespace)",
+        "list any supported resource kind (name + namespace), optionally filtered by \
+         `labelSelector`/`fieldSelector`. Pass `fields` (kubectl-style JSONPath such as \
+         .status.allocatable or .spec.taints) to get those paths for every item in one call, \
+         keyed by path in each row's `fields`, with null where an item has none. Prefer this \
+         over one getObject call per item when a summary tool lacks a field you need.",
         Annotations::READ_ONLY,
         move |input: ListResourceIn| {
             let cache = cache.clone();
             async move {
+                check_fields(&input.fields)?;
+                check_selectors(&input)?;
                 let (gvk, namespaced) = gvk_for(&input.kind).ok_or_else(|| {
                     CapabilityError::Handler(format!("unsupported kind: {}", input.kind))
                 })?;
@@ -494,24 +696,15 @@ pub fn list_resource_capability(cache: Arc<ClientCache>) -> Capability {
                 } else {
                     Api::all_with(client, &ar)
                 };
-                let list =
-                    tokio::time::timeout(request_timeout(), api.list(&ListParams::default()))
-                        .await
-                        .map_err(|_| CapabilityError::Handler("list resource timed out".into()))?
-                        .map_err(|e| CapabilityError::Handler(e.to_string()))?;
+                let list = tokio::time::timeout(request_timeout(), api.list(&list_params(&input)))
+                    .await
+                    .map_err(|_| CapabilityError::Handler("list resource timed out".into()))?
+                    .map_err(|e| CapabilityError::Handler(e.to_string()))?;
                 let items = list
                     .items
                     .into_iter()
-                    .map(|o| ResourceRow {
-                        name: o.metadata.name.unwrap_or_default(),
-                        namespace: o.metadata.namespace.unwrap_or_default(),
-                        created: crate::creation_rfc3339(o.metadata.creation_timestamp.as_ref()),
-                        age: crate::humanize_age(o.metadata.creation_timestamp.as_ref()),
-                        created_at: crate::creation_timestamp_iso(
-                            o.metadata.creation_timestamp.as_ref(),
-                        ),
-                    })
-                    .collect();
+                    .map(|o| resource_row(o, &ar, &input.fields))
+                    .collect::<Result<_, _>>()?;
                 Ok(ListResourceOut { items })
             }
         },
@@ -818,12 +1011,9 @@ pub fn apply_manifest_capability(cache: Arc<ClientCache>) -> Capability {
     Capability::typed::<ApplyIn, ApplyOut, _, _>(
         "k8s.applyManifest",
         "server-side apply resource manifests (YAML, multi-doc); creates or updates",
-        Annotations {
-            read_only: false,
-            destructive: false,
-            requires_confirm: true,
-            sensitive: false,
-        },
+        Annotations::MUTATING.with_confirm(
+            "Apply these manifests[ in cluster {cluster}]? Existing objects are updated in place.",
+        ),
         move |input: ApplyIn| {
             let cache = cache.clone();
             async move {
@@ -1121,11 +1311,12 @@ pub fn diff_manifest_capability(cache: Arc<ClientCache>) -> Capability {
     Capability::typed::<DiffIn, DiffOut, _, _>(
         "k8s.diffManifest",
         "diff a manifest against the cluster via server dry-run apply (per document)",
+        // Sensitive but deliberately ungated: a server dry-run changes nothing,
+        // so it stays `Low` and authors no confirmation text. `sensitive` here
+        // is a redaction flag for the audit log, not a safety class.
         Annotations {
-            read_only: true,
-            destructive: false,
-            requires_confirm: false,
             sensitive: true,
+            ..Annotations::READ_ONLY
         },
         move |input: DiffIn| {
             let cache = cache.clone();
@@ -1346,6 +1537,117 @@ mod tests {
         assert!(cap.annotations.read_only);
     }
 
+    /// Build a fetched Secret as the API server hands one back: base64 `data`,
+    /// plaintext `stringData`, and the whole applied manifest echoed into the
+    /// annotation `kubectl` writes.
+    fn fetched_secret() -> (ApiResource, DynamicObject) {
+        let (gvk, _) = gvk_for("Secret").expect("Secret is a supported kind");
+        let ar = ApiResource::from_gvk(&gvk);
+        let mut obj = DynamicObject::new("db", &ar).within("team");
+        obj.metadata.annotations = Some(std::collections::BTreeMap::from([(
+            "kubectl.kubernetes.io/last-applied-configuration".to_string(),
+            r#"{"kind":"Secret","data":{"password":"aHVudGVyMg=="}}"#.to_string(),
+        )]));
+        obj.data = serde_json::json!({
+            "type": "Opaque",
+            "data": { "password": "aHVudGVyMg==" },
+            "stringData": { "plain": "hunter2" },
+        });
+        (ar, obj)
+    }
+
+    /// PR #661 review (CodeRabbit, CWE-200). `k8s.getObject` ran
+    /// `redact_secret_data`; `k8s.getManifest` — the *other* ungated reader,
+    /// and the one an MCP client reaches for — serialized the fetched object
+    /// straight to YAML. `docs/MCP.md` and `redact_secret_data`'s own doc
+    /// comment both claimed it ran the redactor. It did not, so every Secret
+    /// value and every annotation came back in the clear outside the
+    /// consent-gated `k8s.getSecret` path.
+    #[test]
+    fn get_manifest_redacts_a_secrets_values_and_annotations() {
+        let (ar, obj) = fetched_secret();
+        let yaml = manifest_yaml(&obj, &ar).expect("serializes");
+        assert!(
+            !yaml.contains("aHVudGVyMg=="),
+            "the base64 `data` value leaked: {yaml}"
+        );
+        assert!(
+            !yaml.contains("hunter2"),
+            "the plaintext `stringData` value leaked: {yaml}"
+        );
+        // Keys survive so the reader still sees which fields a Secret has —
+        // the same trade `k8s.getObject` and the diff path already make.
+        assert!(yaml.contains("password"), "keys must survive: {yaml}");
+        assert!(yaml.contains("plain"), "keys must survive: {yaml}");
+    }
+
+    /// PR #661 follow-up review. The test above drives `manifest_yaml`, so it
+    /// would still pass if `get_manifest_capability` stopped calling it and
+    /// serialized the fetched object itself — which is the leak this PR
+    /// closes, arriving back by the door it came in. This one drives the
+    /// capability end to end against a fake API server and asserts on what
+    /// `ManifestOut` actually carries.
+    #[tokio::test]
+    async fn the_get_manifest_handler_never_returns_a_secrets_plaintext() {
+        let served = serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": {
+                "name": "db",
+                "namespace": "team",
+                "annotations": {
+                    "kubectl.kubernetes.io/last-applied-configuration":
+                        r#"{"kind":"Secret","data":{"password":"aHVudGVyMg=="}}"#,
+                },
+            },
+            "type": "Opaque",
+            "data": { "password": "aHVudGVyMg==" },
+            "stringData": { "plain": "hunter2" },
+        });
+        let (client, _uris) =
+            crate::list_cap::test_support::mock_slow_pages(vec![served], std::time::Duration::ZERO);
+        let cache = ClientCache::new(PathBuf::from("/x"));
+        cache.preload("fake", client).await;
+        let capability = get_manifest_capability(cache);
+
+        let out = (capability.handler)(serde_json::json!({
+            "context": "fake", "kind": "Secret", "namespace": "team", "name": "db"
+        }))
+        .await
+        .expect("the fake API server answers");
+        let yaml = out["yaml"].as_str().expect("the capability returns YAML");
+
+        assert!(
+            !yaml.contains("aHVudGVyMg=="),
+            "the base64 `data` value left the handler: {yaml}"
+        );
+        assert!(
+            !yaml.contains("hunter2"),
+            "the plaintext `stringData` value left the handler: {yaml}"
+        );
+        assert!(yaml.contains("password"), "keys must survive: {yaml}");
+        assert!(yaml.contains("plain"), "keys must survive: {yaml}");
+        assert!(
+            yaml.contains("last-applied-configuration"),
+            "the annotation key survives, only its value is blanked: {yaml}"
+        );
+    }
+
+    /// The redactor runs for core-group `Secret` and nothing else: a ConfigMap
+    /// carries no secret material and its manifest must come back byte for
+    /// byte as it always has.
+    #[test]
+    fn get_manifest_leaves_a_non_secret_manifest_exactly_as_serialized() {
+        let (gvk, _) = gvk_for("ConfigMap").expect("ConfigMap is a supported kind");
+        let ar = ApiResource::from_gvk(&gvk);
+        let mut obj = DynamicObject::new("app", &ar).within("team");
+        obj.data = serde_json::json!({ "data": { "greeting": "hello" } });
+        assert_eq!(
+            manifest_yaml(&obj, &ar).expect("serializes"),
+            serde_yaml::to_string(&obj).expect("serializes"),
+        );
+    }
+
     #[test]
     fn splits_multiple_documents_skipping_empty() {
         let yaml = "\
@@ -1554,6 +1856,107 @@ metadata:
         assert_eq!(cap.id, "k8s.diffManifest");
         assert!(cap.annotations.read_only);
         assert!(cap.annotations.sensitive);
+    }
+
+    /// The finding on #661: blanking `data` left the same base64 map visible
+    /// in `kubectl.kubernetes.io/last-applied-configuration`, which an
+    /// `apply`-managed Secret carries in full. A server dry-run apply returns
+    /// the merged object, so the LIVE annotation comes back on the proposed
+    /// side too — both sides have to be clean.
+    ///
+    /// Asserted here as well as in `secrets.rs` because this is the reader the
+    /// finding was filed against: the redactor being right is one fact, and
+    /// the diff path running it over both documents is another.
+    #[test]
+    fn diff_never_renders_secret_values_hidden_in_an_annotation() {
+        let applied = serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": { "name": "web-tls", "namespace": "prod" },
+            "data": { "token": "U0VDUkVU", "tls.key": "TU9SRQ==" }
+        })
+        .to_string();
+        let live = serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": {
+                "name": "web-tls",
+                "namespace": "prod",
+                "resourceVersion": "12",
+                "annotations": { "kubectl.kubernetes.io/last-applied-configuration": applied }
+            },
+            "data": { "token": "U0VDUkVU", "tls.key": "TU9SRQ==" }
+        });
+
+        let doc = diff_document(
+            "Secret".into(),
+            "web-tls".into(),
+            Some("prod".into()),
+            true,
+            Some("12".into()),
+            live.clone(),
+            live,
+            true,
+        )
+        .unwrap();
+
+        // Every rendered cell, both sides: the rows ARE what the panel draws.
+        let rendered: String = doc
+            .rows
+            .iter()
+            .flat_map(|r| [r.left.clone(), r.right.clone()])
+            .flatten()
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !rendered.contains("U0VDUkVU"),
+            "leaked a Secret value:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("TU9SRQ=="),
+            "leaked a Secret value:\n{rendered}"
+        );
+        // The key still names the controller that wrote it — the reader learns
+        // the Secret is apply-managed without learning what is in it.
+        assert!(rendered.contains("kubectl.kubernetes.io/last-applied-configuration"));
+        assert!(rendered.contains("token"), "key names survive: {rendered}");
+    }
+
+    /// Where the new rule stops. The SAME annotation is blanked on a Secret
+    /// and kept on a ConfigMap, asserted together because either half alone
+    /// says nothing: the ConfigMap side holds on the unredacted code this
+    /// replaced, and the Secret side would hold on a redactor that blanked
+    /// every kind's annotations and hid real changes in the one panel a
+    /// reader consults before applying.
+    #[test]
+    fn diff_blanks_an_annotation_on_a_secret_and_leaves_other_kinds_alone() {
+        let annotated = |kind: &str| {
+            serde_json::json!({
+                "kind": kind,
+                "metadata": { "name": "app", "annotations": { "note": "hunter2" } },
+                "data": { "key": "value" }
+            })
+        };
+
+        let mut config_map = annotated("ConfigMap");
+        normalize_for_diff(&mut config_map, false);
+        assert_eq!(
+            config_map["metadata"]["annotations"]["note"],
+            serde_json::json!("hunter2")
+        );
+        assert_eq!(config_map["data"]["key"], serde_json::json!("value"));
+
+        let mut secret = annotated("Secret");
+        normalize_for_diff(&mut secret, true);
+        assert_eq!(
+            secret["metadata"]["annotations"]["note"],
+            serde_json::json!(""),
+            "a Secret's annotation values are blanked, keys kept"
+        );
+        assert!(secret["metadata"]["annotations"]
+            .as_object()
+            .unwrap()
+            .contains_key("note"));
     }
 
     #[test]
@@ -2246,6 +2649,34 @@ metadata:
         let (gvk, ns) = gvk_for("MutatingWebhookConfiguration").unwrap();
         assert_eq!(gvk.group, "admissionregistration.k8s.io");
         assert!(!ns);
+
+        assert_eq!(
+            gvk_for("horizontalpodautoscalers").unwrap().0.kind,
+            "HorizontalPodAutoscaler"
+        );
+        assert_eq!(
+            gvk_for("poddisruptionbudgets").unwrap().0.kind,
+            "PodDisruptionBudget"
+        );
+        assert_eq!(gvk_for("priorityclasses").unwrap().0.kind, "PriorityClass");
+        assert_eq!(gvk_for("pc").unwrap().0.kind, "PriorityClass");
+        assert_eq!(gvk_for("runtimeclasses").unwrap().0.kind, "RuntimeClass");
+        assert_eq!(
+            gvk_for("mutatingwebhookconfigurations").unwrap().0.kind,
+            "MutatingWebhookConfiguration"
+        );
+        assert_eq!(
+            gvk_for("mwc").unwrap().0.kind,
+            "MutatingWebhookConfiguration"
+        );
+        assert_eq!(
+            gvk_for("validatingwebhookconfigurations").unwrap().0.kind,
+            "ValidatingWebhookConfiguration"
+        );
+        assert_eq!(
+            gvk_for("vwc").unwrap().0.kind,
+            "ValidatingWebhookConfiguration"
+        );
     }
 
     // -- resolve_api_resource --------------------------------------------------
@@ -2299,6 +2730,241 @@ metadata:
         };
         let (_, namespaced) = resolve_api_resource(&input).unwrap();
         assert!(!namespaced);
+    }
+
+    // -- listResource / getObject: selectors and projected fields ---------------
+
+    /// The payload an MCP client sends, spelled the way the tool schema
+    /// advertises it. The snake_case spelling must not quietly fill the
+    /// field: an ignored selector returns the whole, unfiltered list as if it
+    /// were the answer.
+    #[test]
+    fn list_resource_in_reads_the_callers_camel_case_selectors_and_fields() {
+        let input: ListResourceIn = serde_json::from_value(serde_json::json!({
+            "context": "c", "kind": "Pod", "namespace": "prod",
+            "labelSelector": "app=web", "fieldSelector": "spec.nodeName=worker-1",
+            "fields": [".spec.nodeName", ".status.phase"],
+        }))
+        .unwrap();
+        assert_eq!(input.label_selector.as_deref(), Some("app=web"));
+        assert_eq!(input.field_selector.as_deref(), Some("spec.nodeName=worker-1"));
+        assert_eq!(input.fields, [".spec.nodeName", ".status.phase"]);
+
+        let snake: ListResourceIn = serde_json::from_value(serde_json::json!({
+            "context": "c", "kind": "Pod", "label_selector": "app=web",
+        }))
+        .unwrap();
+        assert_eq!(snake.label_selector, None);
+        assert!(snake.fields.is_empty());
+    }
+
+    #[test]
+    fn list_params_carry_the_selectors_and_skip_empty_ones() {
+        let input: ListResourceIn = serde_json::from_value(serde_json::json!({
+            "context": "c", "kind": "Pod",
+            "labelSelector": "app=web", "fieldSelector": "",
+        }))
+        .unwrap();
+        let lp = list_params(&input);
+        assert_eq!(lp.label_selector.as_deref(), Some("app=web"));
+        assert_eq!(lp.field_selector, None);
+    }
+
+    /// A path the walker cannot read resolves to nothing on every item, and a
+    /// column of nulls reads as "none of them have it". Refused up front, so
+    /// a malformed request is an error and not an answer about the cluster.
+    #[test]
+    fn check_fields_refuses_paths_that_could_only_resolve_to_nothing() {
+        for bad in [
+            "/status/allocatable",
+            "{.metadata.name}",
+            "status",
+            "",
+            ".spec.ports[0",
+            ".a][",
+            ".spec.containers[*].image",
+            "..image",
+            ".status.conditions[?(@.type==\"Ready\"&&@.status==\"True\")].status",
+        ] {
+            assert!(
+                matches!(check_fields(&[bad.to_string()]), Err(CapabilityError::InvalidInput(_))),
+                "{bad:?} must be refused"
+            );
+        }
+        let good = [
+            ".status.allocatable",
+            ".metadata.labels['node.kubernetes.io/instance-type']",
+            ".status.conditions[?(@.type==\"Ready\")].status",
+        ]
+        .map(String::from);
+        assert!(check_fields(&good).is_ok());
+        assert!(check_fields(&[".".to_string()]).is_ok(), "root is a path");
+    }
+
+    /// Every path is walked once per item, so the count and length a caller
+    /// may send are bounded, like every other caller-supplied size (#633).
+    #[test]
+    fn check_fields_bounds_how_many_paths_and_how_long() {
+        let at_limit: Vec<String> = (0..MAX_FIELDS).map(|i| format!(".a{i}")).collect();
+        assert!(check_fields(&at_limit).is_ok());
+        let over: Vec<String> = (0..=MAX_FIELDS).map(|i| format!(".a{i}")).collect();
+        assert!(matches!(check_fields(&over), Err(CapabilityError::InvalidInput(_))));
+        let long = format!(".{}", "a".repeat(MAX_FIELD_CHARS));
+        assert!(matches!(check_fields(&[long]), Err(CapabilityError::InvalidInput(_))));
+    }
+
+    #[test]
+    fn selectors_longer_than_the_bound_are_refused() {
+        let input = |label: String| -> ListResourceIn {
+            serde_json::from_value(serde_json::json!({
+                "context": "c", "kind": "Pod", "labelSelector": label,
+            }))
+            .unwrap()
+        };
+        assert!(check_selectors(&input("a".repeat(MAX_SELECTOR_CHARS))).is_ok());
+        assert!(matches!(
+            check_selectors(&input("a".repeat(MAX_SELECTOR_CHARS + 1))),
+            Err(CapabilityError::InvalidInput(_))
+        ));
+    }
+
+    /// `tools/list` hands an MCP client the input schema, whose property
+    /// descriptions come from these doc comments: the `fields` argument has
+    /// to explain its own syntax there, not point at a Rust constant the
+    /// client never sees.
+    #[test]
+    fn the_fields_argument_explains_its_syntax_to_an_mcp_client() {
+        for schema in [
+            serde_json::to_value(schemars::schema_for!(ListResourceIn)).unwrap(),
+            serde_json::to_value(schemars::schema_for!(GetObjectIn)).unwrap(),
+        ] {
+            let text = schema["properties"]["fields"]["description"].as_str().unwrap();
+            assert!(text.contains(".status.allocatable"), "{text}");
+            assert!(text.contains("[?(@.type"), "{text}");
+            assert!(text.contains("[*]"), "says wildcards are unsupported: {text}");
+            assert!(!text.contains("FIELDS_HELP"), "{text}");
+        }
+    }
+
+    fn node_object() -> DynamicObject {
+        let (gvk, _) = gvk_for("Node").unwrap();
+        let mut node = DynamicObject::new("worker-1", &ApiResource::from_gvk(&gvk)).data(
+            serde_json::json!({
+                "status": { "allocatable": { "cpu": "4", "example.com/fpga": "2" } },
+            }),
+        );
+        node.metadata.managed_fields = Some(vec![Default::default()]);
+        node
+    }
+
+    #[test]
+    fn a_row_carries_each_requested_path_and_null_where_the_item_has_none() {
+        let (gvk, _) = gvk_for("Node").unwrap();
+        let fields = [".status.allocatable", ".spec.taints"].map(String::from);
+        let row = resource_row(node_object(), &ApiResource::from_gvk(&gvk), &fields).unwrap();
+        assert_eq!(row.name, "worker-1");
+        let projected = row.fields.unwrap();
+        assert_eq!(
+            projected[".status.allocatable"],
+            serde_json::json!({ "cpu": "4", "example.com/fpga": "2" })
+        );
+        assert_eq!(projected[".spec.taints"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn a_row_without_fields_keeps_the_shape_the_ui_reads() {
+        let (gvk, _) = gvk_for("Node").unwrap();
+        let row = resource_row(node_object(), &ApiResource::from_gvk(&gvk), &[]).unwrap();
+        assert_eq!(row.fields, None);
+        assert!(serde_json::to_value(&row).unwrap().get("fields").is_none());
+    }
+
+    #[test]
+    fn projected_metadata_leaves_managed_fields_behind() {
+        let (gvk, _) = gvk_for("Node").unwrap();
+        let fields = [".metadata".to_string()];
+        let row = resource_row(node_object(), &ApiResource::from_gvk(&gvk), &fields).unwrap();
+        let projected = row.fields.unwrap();
+        assert_eq!(projected[".metadata"]["name"], "worker-1");
+        assert!(projected[".metadata"].get("managedFields").is_none());
+    }
+
+    fn secret_object() -> (DynamicObject, ApiResource) {
+        let (gvk, _) = gvk_for("Secret").unwrap();
+        let ar = ApiResource::from_gvk(&gvk);
+        let mut secret = DynamicObject::new("db", &ar)
+            .within("prod")
+            .data(serde_json::json!({ "data": { "password": "aHVudGVyMg==" } }));
+        secret.metadata.annotations = Some(
+            [("note".to_string(), "hunter2".to_string())].into_iter().collect(),
+        );
+        (secret, ar)
+    }
+
+    /// `listResource` reads Secrets without consent, so a projected `.data`
+    /// must arrive blanked like `getObject`'s does — the consent-gated
+    /// `k8s.getSecret` stays the only way to the values.
+    #[test]
+    fn a_secrets_values_never_leave_through_projected_fields() {
+        let (secret, ar) = secret_object();
+        let fields = [".data", ".metadata.annotations", ".data.password"].map(String::from);
+        let row = serde_json::to_string(&resource_row(secret, &ar, &fields).unwrap()).unwrap();
+        assert!(!row.contains("aHVudGVyMg=="), "{row}");
+        assert!(!row.contains("hunter2"), "{row}");
+        assert!(row.contains("password"), "the key stays, only the value goes: {row}");
+    }
+
+    #[test]
+    fn get_objects_projection_runs_after_the_secret_is_blanked() {
+        let (secret, ar) = secret_object();
+        let fields = [".data.password".to_string()];
+        let out = serde_json::to_string(&object_out(secret, &ar, &fields).unwrap()).unwrap();
+        assert!(!out.contains("aHVudGVyMg=="), "{out}");
+
+        let (secret, ar) = secret_object();
+        let whole = serde_json::to_string(&object_out(secret, &ar, &[]).unwrap()).unwrap();
+        assert!(!whole.contains("aHVudGVyMg==") && !whole.contains("hunter2"), "{whole}");
+    }
+
+    #[test]
+    fn get_object_with_fields_returns_only_those_paths() {
+        let (gvk, _) = gvk_for("Node").unwrap();
+        let fields = [".status.allocatable".to_string()];
+        let out = object_out(node_object(), &ApiResource::from_gvk(&gvk), &fields).unwrap();
+        assert_eq!(
+            out.object,
+            serde_json::json!({ ".status.allocatable": { "cpu": "4", "example.com/fpga": "2" } })
+        );
+    }
+
+    /// `getObject` takes its target flat, beside `fields` — the shape the
+    /// desktop wrapper already sends — and its tool schema lists every
+    /// argument as a plain property, which is what an MCP client reads.
+    #[test]
+    fn get_object_in_takes_the_target_flat_beside_fields() {
+        let input: GetObjectIn = serde_json::from_value(serde_json::json!({
+            "context": "c", "kind": "Node", "name": "worker-1",
+            "fields": [".status.allocatable"],
+        }))
+        .unwrap();
+        assert_eq!(input.target.name, "worker-1");
+        assert_eq!(input.fields, [".status.allocatable"]);
+
+        let schema = serde_json::to_value(schemars::schema_for!(GetObjectIn)).unwrap();
+        for property in ["context", "kind", "namespace", "name", "group", "fields"] {
+            assert!(
+                schema["properties"].get(property).is_some(),
+                "{property} missing from {schema}"
+            );
+        }
+        let required: Vec<&str> = schema["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert!(required.contains(&"context") && required.contains(&"name"), "{schema}");
+        assert!(!required.contains(&"fields"), "{schema}");
     }
 
     #[test]

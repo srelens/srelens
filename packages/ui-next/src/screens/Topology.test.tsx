@@ -39,7 +39,7 @@ const workspace = vi.hoisted(() => ({ scoped: [] as string[], setNamespaces: vi.
 vi.mock("../lib/workspace", async (orig) => ({
   ...(await orig<typeof import("../lib/workspace")>()),
   useNamespaces: () => workspace.scoped,
-  setNamespaces: workspace.setNamespaces,
+  useSetNamespaces: () => workspace.setNamespaces,
 }));
 
 vi.mock("../lib/clusters", async (orig) => ({
@@ -906,10 +906,9 @@ describe("Topology", () => {
     expect(screen.queryByText(/Nothing to draw/)).toBeNull();
   });
 
-  it("writes the namespace choice to the workspace, not to itself", async () => {
-    // The selection is shared: narrowing here narrows the resource lists and
-    // the events screen too, and a picker with private state would have made
-    // this the one screen where the choice did not travel.
+  it("writes the namespace choice to its tab's selection, not to itself", async () => {
+    // Through the tab's store rather than component state, so it persists with
+    // the tab like every other list's selection.
     render(<Topology />);
     await userEvent.click(await screen.findByRole("button", { name: "Deployment checkout-api" }));
     expect(

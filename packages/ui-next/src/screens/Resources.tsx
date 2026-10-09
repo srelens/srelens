@@ -1,7 +1,9 @@
 import { ContextLabel } from "../lib/contextLabel";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
+  describeError,
   listCrds,
+  namespacePhrase,
   rowInSelection,
   watchNamespaceForSelection,
   type ClusterContext,
@@ -30,6 +32,7 @@ import { useHiddenColumns } from "../lib/columnPrefs";
 import { detailRoute, newRoute, parseDetailRoute } from "../lib/detailRoute";
 import { customDescriptor } from "../lib/kinds/custom";
 import { descriptorFor } from "../lib/kinds/descriptors";
+import { addNamespace, useRowRefocus, withNamespaceSelect } from "../lib/kinds/namespaceCell";
 import { withRowAffordances } from "../lib/kinds/rowAffordances";
 import { rowKey, type KindDescriptor, type ListRow } from "../lib/kinds/types";
 import { clampPeekWidth, savePeekWidth, setPeekWidth, usePeekBounds, usePeekWidth } from "../lib/peekWidth";
@@ -37,13 +40,16 @@ import { useResourceList } from "../lib/resourceList";
 import { describe, isBuiltInKind } from "../lib/routes";
 import { openTab, useTabs } from "../lib/tabsStore";
 import { useResource } from "../lib/useResource";
-import { setNamespaces, useNamespaces } from "../lib/workspace";
-import { FailureAlert, FailureState } from "../lib/errorCopy";
+import { useNamespaces, useSetNamespaces } from "../lib/workspace";
+import { FailureState, NamespaceFailuresAlert, StaleListAlert } from "../lib/errorCopy";
+import { useExtensions } from "../extensions/inventoryStore";
+import { qualifiedTableKind, useResolvedColumns } from "../extensions/useResolvedColumns";
 import { AboutKind } from "./crd/AboutKind";
 import { ResourceDetailView } from "./detail/ResourceDetailView";
 import { ResourceTabView } from "./detail/ResourceTabView";
 import { ResourceBulk } from "./ResourceBulk";
 import { useRowMenu } from "./ResourceMenu";
+import { ListCount } from "./ListCount";
 import {
   NamespaceErrorAlert,
   NamespacePicker,
@@ -162,22 +168,34 @@ function KindList({
   }, [builtIn, slug, crd]);
 
   const selection = useNamespaces(context.stableId);
+  const setNamespaces = useSetNamespaces();
   const { namespaces, scope, error: namespaceError } = useNamespaceOptions(name, files);
 
   // A namespace-restricted credential has one namespace and no way to ask for
-  // another. Written to the workspace store rather than held here, so every
-  // screen looking at this cluster follows the same scope.
+  // another. Written to this tab's selection, so the picker shows the scope.
   useEffect(() => {
     if (scope) setNamespaces(context.stableId, [scope]);
-  }, [scope, context.stableId]);
+  }, [scope, context.stableId, setNamespaces]);
 
   const clusterScoped = descriptor?.scope === "cluster";
-  // One selected namespace is watched directly; none or several are watched
-  // across the cluster and narrowed below, which is core's own rule.
+  // Each selected namespace is listed on its own (#688); none is "all
+  // namespaces". A cluster-scoped kind has no namespace to narrow by.
+  const list = useResourceList<ListRow>(name, slug, descriptor, clusterScoped ? [] : selection, files);
+  // The one namespace an app column is told the table is scoped to, or ""
+  // for several — its contract is a single namespace, not the list's scopes.
   const namespace = clusterScoped ? "" : watchNamespaceForSelection(selection);
-  const list = useResourceList<ListRow>(name, slug, descriptor, namespace, files);
 
-  const allColumns = descriptor?.columns ?? NO_COLUMNS;
+  const rows = useMemo(
+    () => clusterScoped ? list.rows : list.rows.filter((row) => rowInSelection(row.namespace ?? "", selection)),
+    [list.rows, clusterScoped, selection],
+  );
+  const inventory = useExtensions();
+  const appColumns = useResolvedColumns({
+    plugins: inventory.data?.plugins ?? [], context: name, contextId: context.key, namespace,
+    kind: qualifiedTableKind(descriptor?.k8sKind ?? "", descriptor?.group), rows,
+  });
+
+  const allColumns = useMemo(() => [...(descriptor?.columns ?? NO_COLUMNS), ...appColumns.columns], [descriptor, appColumns.columns]);
   const defaultHidden = useMemo(() => defaultHiddenKeys(allColumns), [allColumns]);
   const hidden = useHiddenColumns(slug, defaultHidden);
   const columns = useMemo(
@@ -191,13 +209,28 @@ function KindList({
   // what `filterTableData` searches. `flagged` is the only per-kind
   // knowledge either affordance needs, and most kinds have none; with no
   // descriptor yet, columns pass through undecorated, same as before.
-  const renderedColumns = useMemo(
-    () =>
-      descriptor
-        ? withRowAffordances(columns, (row) => descriptor.flagged?.(row) ?? false, ask)
-        : columns,
-    [columns, descriptor, ask],
+  //
+  // And, under them, the Namespace column's values as buttons that add the
+  // namespace to this tab's selection (#821) — the same write the picker in
+  // the filter bar makes. Withheld from a namespace-scoped credential, which
+  // has the one namespace and no way to ask for another.
+  // The list reloads under the new selection, which takes the table — and
+  // the reader's keyboard focus — away; `refocus` puts it back on the row.
+  const refocus = useRowRefocus();
+  const rememberRow = refocus.remember;
+  const addToSelection = useCallback(
+    (namespace: string, row: ListRow) => {
+      rememberRow(rowKey(row));
+      setNamespaces(context.stableId, addNamespace(selection, namespace));
+    },
+    [setNamespaces, context.stableId, selection, rememberRow],
   );
+  const renderedColumns = useMemo(() => {
+    const selectable = withNamespaceSelect(columns, selection, scope ? undefined : addToSelection);
+    return descriptor
+      ? withRowAffordances(selectable, (row) => descriptor.flagged?.(row) ?? false, ask)
+      : selectable;
+  }, [columns, descriptor, ask, selection, scope, addToSelection]);
 
   // Sort, filter text and filter column live on the tab — see
   // `useResourceTabView`'s own comment for why, and why `filterKey` is
@@ -214,13 +247,6 @@ function KindList({
     setRegex,
   } = useResourceTabView(route, columns);
 
-  const rows = useMemo(
-    () =>
-      clusterScoped
-        ? list.rows
-        : list.rows.filter((row) => rowInSelection(row.namespace ?? "", selection)),
-    [list.rows, clusterScoped, selection],
-  );
   const filtered = useMemo(
     () => filterTableData(rows, columns, filter, filterKey, regex),
     [rows, columns, filter, filterKey, regex],
@@ -403,12 +429,18 @@ function KindList({
    */
   const listAndPeek = (
     <div ref={listRow.ref} className="flex min-h-0 flex-1">
-      <div className="scroll min-h-0 min-w-0 flex-1">
+      <div ref={refocus.scope} className="scroll min-h-0 min-w-0 flex-1">
         {list.status === "loading" ? (
           <LoadingState label={`Loading ${lower}`} />
         ) : list.status === "error" ? (
           <FailureState
-            title={`Could not list ${lower} on ${name}`}
+            // Several namespaces, some refused and the rest empty: say which were
+          // refused (#688) — neither "none" nor a failure of the whole cluster.
+          title={
+            list.namespaceFailures.length > 0
+              ? `Could not list ${lower} in ${namespacePhrase(list.namespaceFailures.map((f) => f.namespace))}`
+              : `Could not list ${lower} on ${name}`
+          }
             error={list.error}
             onRetry={list.reload}
           />
@@ -490,6 +522,14 @@ function KindList({
       fill
       actions={
         <>
+          {/* The list's own size, and how much of it the filter is showing
+              (#402). Only once the list has answered: while it is loading or
+              refused there is no number, and `0 items` would be a wrong one a
+              reader believes. Both figures are the table's — `rows` is what it
+              holds for the namespaces selected, `filtered` what it draws. */}
+          {showRows && (
+            <ListCount total={rows.length} shown={filtered.length} truncated={list.truncated} noun={lower} />
+          )}
           {descriptor.source === "watch" && (
             <LiveSignal
               // The label carries the meaning; the tone only colours it.
@@ -543,6 +583,25 @@ function KindList({
 
       {!clusterScoped && <NamespaceErrorAlert error={namespaceError} />}
 
+      {appColumns.errors.map((error) => (
+        <Alert key={error.id} tone="warn" title={`Couldn’t read ${error.title} columns`} className="mx-3 mt-3 mb-3">
+          {describeError(error.message, { domain: "cluster" }).detail}{" "}
+          <Button variant="secondary" onClick={appColumns.reload}>Retry columns</Button>
+        </Alert>
+      ))}
+      {/* A joined app column follows its reader's kind (#566); say when it cannot. */}
+      {appColumns.live.state === "reconnecting" && (
+        <Alert tone="warn" title="App columns may be out of date" className="mx-3 mt-3 mb-3">
+          Reconnecting to the cluster ({appColumns.live.message}); app column values are as of the last read until it reconnects.
+        </Alert>
+      )}
+      {appColumns.live.state === "stopped" && (
+        <Alert tone="warn" title="App columns are not live" className="mx-3 mt-3 mb-3">
+          {appColumns.live.message} App column values are as of the last read.{" "}
+          <Button variant="secondary" onClick={appColumns.reload}>Read columns again</Button>
+        </Alert>
+      )}
+
       {!clusterScoped && (
         <StaleSelectionAlert
           selection={selection}
@@ -551,7 +610,12 @@ function KindList({
         />
       )}
 
-      {showRows && list.error && (
+      {showRows && !list.stale && (
+        // Several namespaces, some refused (#688): the rows are live, the
+        // named namespaces are simply missing — not the stale case below.
+        <NamespaceFailuresAlert what={lower} failures={list.namespaceFailures} className="mx-3 mt-3 mb-3" />
+      )}
+      {showRows && list.stale && (
         // Rows and an error together: the last good list is still on screen
         // and is no longer being refreshed. Emptying the table would throw
         // away the only information the reader has. Pinned above the
@@ -559,7 +623,7 @@ function KindList({
         // rows are stale" warning the reader scrolls past no longer warns
         // anyone. The table runs flush to the panel, so the alert carries
         // its own inset rather than borrowing the container's.
-        <FailureAlert title={`These ${lower} are stale`} error={list.error} className="mx-3 mt-3 mb-3" />
+        <StaleListAlert what={lower} error={list.error} failures={list.namespaceFailures} className="mx-3 mt-3 mb-3" />
       )}
       {showRows && list.truncated && (
         <Alert
@@ -577,14 +641,10 @@ function KindList({
         <SideRail
           head="About this kind"
           width={CRD_RAIL_WIDTH}
-          // The count is what the TABLE beside it holds — narrowed by the
-          // namespace selection, not a cluster-wide total, because no such
-          // total is available without a second call and a number that
-          // disagreed with the rows under it would be worse than a narrow
-          // one. It is withheld entirely until the list has answered:
-          // `AboutKind` drops the row rather than drawing `Objects 0`, which
-          // is a wrong number a reader would believe.
-          rail={<AboutKind crd={crd} context={name} objects={showRows ? rows.length : undefined} />}
+          // No object count here any more: it is in the header, for every
+          // kind, and the same figure in two places on one screen is two
+          // things to keep agreeing (#402).
+          rail={<AboutKind crd={crd} context={name} />}
         >
           {/* The left pane's own head, as the design words it. `crd.kind` again
               — the slug is a plural DNS name and reads as one. */}

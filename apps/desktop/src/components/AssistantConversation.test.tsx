@@ -23,6 +23,14 @@ const tauriEvent = vi.hoisted(() => ({
   listen: vi.fn((_channel: string, _handler: unknown) => Promise.resolve(() => {})),
 }));
 vi.mock("@tauri-apps/api/event", () => tauriEvent);
+/** The host's installed inventory, which is where the requester line is read from (#552). */
+const { inventory } = vi.hoisted(() => ({
+  inventory: vi.fn(async () => ({ schemaVersion: 1, nextRevision: 1, plugins: [] as unknown[] })),
+}));
+vi.mock("@srelens/core/lib/extensions", async (orig) => ({
+  ...(await orig<typeof import("@srelens/core/lib/extensions")>()),
+  listExtensions: inventory,
+}));
 
 // jsdom is a plain browser, i.e. web mode: `isTauri()` looks for
 // `window.__TAURI_INTERNALS__` and finds nothing. The consent subscriptions
@@ -1666,5 +1674,172 @@ describe("AssistantConversation agent persistence", () => {
     await openHistory();
     fireEvent.click(await screen.findByText("Old"));
     await waitFor(() => expect(trigger.textContent).toMatch(/codex/i));
+  });
+});
+
+/**
+ * #548. The inline card is the same `mcp://confirm-request` the modal answers,
+ * drawn beside the turn that triggered it — so it has to ask the same question.
+ * It used to say only "<tool> wants to run", which is the same sentence for an
+ * Argo CD status refresh and a node drain. The backend now renders the host's
+ * own sentence for the call and sends the impact level beside it, and the card
+ * carries both.
+ */
+describe("the inline confirmation card's host metadata (#548)", () => {
+  const marker = window as unknown as Record<string, unknown>;
+
+  afterEach(() => {
+    delete marker.__TAURI_INTERNALS__;
+  });
+
+  /** Hands the component a `mcp://confirm-request` the way the backend emits it. */
+  async function ask(payload: Record<string, unknown>) {
+    const subscription = tauriEvent.listen.mock.calls.find((c) => c[0] === "mcp://confirm-request");
+    const handler = subscription?.[1] as (event: { payload: unknown }) => void;
+    expect(handler).toBeTruthy();
+    await act(async () => {
+      handler({ payload });
+    });
+  }
+
+  it("leads with the host's sentence and names the impact", async () => {
+    marker.__TAURI_INTERNALS__ = {};
+    render(<AssistantConversation />);
+    await ask({
+      id: "c1",
+      tool: "k8s.drainNode",
+      args: { context: "prod", name: "node-7" },
+      prompt: "Drain node-7 in cluster prod?",
+      impact: "high",
+    });
+    const card = (await screen.findByRole("button", { name: /^approve$/i })).closest("div")
+      ?.parentElement as HTMLElement;
+    expect(within(card).getByText("Drain node-7 in cluster prod?")).toBeTruthy();
+    expect(within(card).getByText(/high impact/i)).toBeTruthy();
+    // The call itself still travels: the sentence says what it does, the tool
+    // id says exactly which call is being approved.
+    expect(within(card).getByText("k8s.drainNode")).toBeTruthy();
+  });
+
+  /**
+   * No template is not a hole. A capability the host wrote no wording for, or
+   * one whose template names a field this call has no value for, arrives with
+   * no `prompt` — and the card shows what it always showed, with the level
+   * still named. Half a sentence over an Approve button is worse than none.
+   */
+  it("still names the impact when the host authored no sentence", async () => {
+    marker.__TAURI_INTERNALS__ = {};
+    render(<AssistantConversation />);
+    await ask({ id: "c2", tool: "toolbox.installHelm", args: { version: "3.16" }, impact: "medium" });
+    const card = (await screen.findByRole("button", { name: /^approve$/i })).closest("div")
+      ?.parentElement as HTMLElement;
+    expect(within(card).getByText(/medium impact/i)).toBeTruthy();
+    expect(within(card).getByText("toolbox.installHelm")).toBeTruthy();
+    expect(card.textContent).not.toMatch(/undefined|null/);
+  });
+
+  // ---- #552: a smaller frame, not a smaller question ---------------------
+
+  /**
+   * The card is the modal's question in the transcript's width. Before #552
+   * it was a different question: it drew the level as `· high impact` beside
+   * the tool id rather than as a badge, and it named no cluster at all — so a
+   * reader answering on the card was answering with less than a reader
+   * answering on the modal.
+   */
+  it("names the cluster and the object, exactly as the modal does", async () => {
+    marker.__TAURI_INTERNALS__ = {};
+    render(<AssistantConversation />);
+    await ask({
+      id: "c3",
+      tool: "extensions.action",
+      args: { resource: { context: "prod", namespace: "team", name: "api" } },
+      prompt: "Suspend HelmRelease team/api in cluster prod?",
+      impact: "high",
+      target: { cluster: "prod", namespace: "team", name: "api", kind: "HelmRelease" },
+    });
+    expect((await screen.findByTestId("host-confirm-question")).textContent).toBe(
+      "Suspend HelmRelease team/api in cluster prod?",
+    );
+    expect(screen.getByTestId("host-confirm-impact").textContent).toBe("High impact");
+    expect(screen.getByTestId("host-confirm-cluster").textContent).toBe("prod");
+    expect(screen.getByTestId("host-confirm-target").textContent).toBe("team/api");
+  });
+
+  /**
+   * An MCP caller is a bearer token, not an app: nothing authenticates it as
+   * the app its arguments name, so the card vouches for no requester however
+   * the payload claims one — and does not go looking in the inventory for a
+   * name to print.
+   */
+  it("names no app on an agent's call, however the payload claims one", async () => {
+    inventory.mockResolvedValue({
+      schemaVersion: 1,
+      nextRevision: 1,
+      plugins: [
+        {
+          manifest: {
+            id: "org.srelens.flux",
+            name: "Flux Tools",
+            version: "1.0.0",
+            srelensApiVersion: "1",
+            kind: "declarative",
+            permissions: [],
+            capabilities: [],
+            contributions: { pages: [], detailTabs: [], detailLinks: [] },
+          },
+          enabled: true,
+          revision: 2,
+          grants: [],
+          settings: {},
+          source: "local",
+          installedAt: 0,
+          history: [],
+          signatureProof: { manifest: "{}", signature: [1] },
+        },
+      ],
+    });
+    marker.__TAURI_INTERNALS__ = {};
+    render(<AssistantConversation />);
+    await ask({
+      id: "c4",
+      tool: "extensions.action",
+      args: { resource: { id: "org.srelens.flux", revision: 2 } },
+      prompt: "Suspend HelmRelease team/api?",
+      impact: "high",
+      target: { name: "api", app: { id: "org.srelens.flux", revision: 2 } },
+    });
+    expect((await screen.findByTestId("host-confirm-question")).textContent).toBe(
+      "Suspend HelmRelease team/api?",
+    );
+    await waitFor(() => expect(inventory).not.toHaveBeenCalled());
+    expect(screen.queryByTestId("host-confirm-requester")).toBeNull();
+    expect(document.body.textContent).not.toContain("Flux Tools");
+  });
+
+  /**
+   * `listen<ConfirmRequest>` is an annotation, not a check. A `target.cluster`
+   * arriving as a number used to reach `boundedPlainText`, where `.replace` is
+   * not a function — the transcript threw instead of drawing the card the
+   * backend is blocking on.
+   */
+  it("renders a card rather than throwing on a malformed target", async () => {
+    marker.__TAURI_INTERNALS__ = {};
+    render(<AssistantConversation />);
+    await ask({
+      id: "c5",
+      tool: "extensions.action",
+      args: {},
+      prompt: "Suspend HelmRelease team/api?",
+      impact: "high",
+      target: { cluster: 7, name: { evil: true } },
+    });
+    expect((await screen.findByTestId("host-confirm-question")).textContent).toBe(
+      "Suspend HelmRelease team/api?",
+    );
+    expect(screen.queryByTestId("host-confirm-cluster")).toBeNull();
+    expect(screen.queryByTestId("host-confirm-target")).toBeNull();
+    expect(document.body.textContent).not.toMatch(/\[object Object\]/);
+    expect(screen.getByRole("button", { name: /^approve$/i })).toBeTruthy();
   });
 });

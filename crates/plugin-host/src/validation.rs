@@ -43,6 +43,9 @@ pub enum ValidationCode {
     UnresolvedPage,
     #[serde(rename = "EXTENSION_INVALID_KIND")]
     InvalidKind,
+    /// The host's administrator policy refuses the app (#578).
+    #[serde(rename = "EXTENSION_POLICY_REFUSED")]
+    PolicyRefused,
 }
 
 impl ValidationCode {
@@ -64,6 +67,7 @@ impl ValidationCode {
         Self::UnresolvedCapability,
         Self::UnresolvedPage,
         Self::InvalidKind,
+        Self::PolicyRefused,
     ];
 
     /// The wire name, as serialized.
@@ -86,6 +90,7 @@ impl ValidationCode {
             Self::UnresolvedCapability => "EXTENSION_UNRESOLVED_CAPABILITY",
             Self::UnresolvedPage => "EXTENSION_UNRESOLVED_PAGE",
             Self::InvalidKind => "EXTENSION_INVALID_KIND",
+            Self::PolicyRefused => "EXTENSION_POLICY_REFUSED",
         }
     }
 }
@@ -115,17 +120,10 @@ impl ValidationError {
 }
 
 /// `text` with control and format characters written as `\u{…}` escapes.
-fn shown(text: &str) -> String {
-    text.chars()
-        .map(|c| {
-            if c.is_control() || crate::manifest::is_format_character(c) {
-                format!("\\u{{{:x}}}", c as u32)
-            } else {
-                c.to_string()
-            }
-        })
-        .collect()
-}
+///
+/// The rule lives in `srelens-capability` because a confirmation sentence
+/// escapes its substituted values the same way and for the same reason (#661).
+use srelens_capability::escape_invisible as shown;
 
 impl fmt::Display for ValidationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

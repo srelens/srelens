@@ -51,6 +51,14 @@ function parseView(v: unknown): Tab["view"] | undefined {
   return view;
 }
 
+/** Per-cluster namespace selections; one malformed cluster entry costs that entry alone. */
+function parseNamespaces(v: unknown): Tab["namespaces"] | undefined {
+  if (!isRecord(v)) return undefined;
+  return Object.fromEntries(
+    Object.entries(v).filter((entry): entry is [string, string[]] => Array.isArray(entry[1]) && entry[1].every(isString)),
+  );
+}
+
 function parseTab(v: unknown): Tab | null {
   if (!isRecord(v) || !isString(v.id) || !isString(v.route) || !isString(v.title) || !isString(v.kind)) return null;
   const tab: Tab = { id: v.id, route: v.route, title: v.title, kind: v.kind as Tab["kind"] };
@@ -67,6 +75,8 @@ function parseTab(v: unknown): Tab | null {
   if (v.pinned === true) tab.pinned = true;
   const view = parseView(v.view);
   if (view !== undefined) tab.view = view;
+  const namespaces = parseNamespaces(v.namespaces);
+  if (namespaces !== undefined) tab.namespaces = namespaces;
   return tab;
 }
 

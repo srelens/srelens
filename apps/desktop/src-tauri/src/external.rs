@@ -16,10 +16,10 @@ use tauri_plugin_opener::OpenerExt;
 
 /// Open `url` in the default browser.
 ///
-/// The frontend only ever calls this with an address srelens itself built from
-/// a live forward, and [`checked_http_url`] is what keeps that true from this
-/// side as well: this must not become a way for a string that arrived from a
-/// cluster to reach the OS's URL handlers.
+/// Frontend callers supply a host-built live-forward address or a strictly
+/// normalized native-component link following an explicit user click.
+/// [`checked_http_url`] independently restricts the OS handoff to HTTP(S);
+/// it does not establish the provenance of a caller's URL.
 #[tauri::command]
 pub async fn open_external<R: Runtime>(app: AppHandle<R>, url: String) -> Result<(), String> {
     let url = checked_http_url(&url)?;

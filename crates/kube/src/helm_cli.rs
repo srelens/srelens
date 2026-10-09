@@ -10,26 +10,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use srelens_capability::{Annotations, Capability, CapabilityError};
 
-/// Find `program` on the `PATH`-style `path_var`; first existing candidate wins.
-/// `is_file` is injected so this is unit-testable without touching the disk.
-pub(crate) fn resolve_on_path(
-    program: &str,
-    path_var: &str,
-    is_file: impl Fn(&Path) -> bool,
-) -> Option<PathBuf> {
-    for dir in std::env::split_paths(path_var) {
-        let candidate = dir.join(program);
-        if is_file(&candidate) {
-            return Some(candidate);
-        }
-    }
-    None
-}
-
 /// Locate the user's `helm` on PATH, with a friendly error when it's missing.
 pub fn helm_binary() -> Result<PathBuf, String> {
-    let path = std::env::var_os("PATH").unwrap_or_default();
-    resolve_on_path("helm", &path.to_string_lossy(), |p| p.is_file())
+    crate::path_lookup::find_on_path("helm")
         .ok_or_else(|| "helm not found on PATH — install Helm to manage releases".to_string())
 }
 
@@ -278,12 +261,8 @@ pub async fn run_helm_local(args: &[String]) -> Result<String, String> {
     classify_output(&run)
 }
 
-const CONFIRM: Annotations = Annotations {
-    read_only: false,
-    destructive: false,
-    requires_confirm: true,
-    sensitive: false,
-};
+const CONFIRM: Annotations = Annotations::MUTATING
+    .with_confirm("Allow this Helm operation[ on {resource}][ in cluster {cluster}]?");
 
 #[derive(Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -812,17 +791,6 @@ mod tests {
             CapabilityError::Handler(msg) => assert!(msg.contains("repo url")),
             other => panic!("expected Handler error, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn resolves_program_in_second_path_dir() {
-        let found = resolve_on_path("helm", "/nope:/bin", |p| p == Path::new("/bin/helm"));
-        assert_eq!(found, Some(PathBuf::from("/bin/helm")));
-    }
-
-    #[test]
-    fn resolve_returns_none_when_absent() {
-        assert_eq!(resolve_on_path("helm", "/a:/b", |_| false), None);
     }
 
     #[test]

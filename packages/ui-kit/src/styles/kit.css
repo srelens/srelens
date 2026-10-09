@@ -8,7 +8,7 @@
   html { font-size: 16px; }
 
   body {
-    background: var(--canvas);
+    background: var(--ground);
     color: var(--ink);
     font-family: var(--font-sans);
     -webkit-font-smoothing: antialiased;
@@ -45,7 +45,7 @@
 @layer components {
   /* --- surfaces ------------------------------------------------ */
   .card {
-    background: var(--surface);
+    background: var(--ground-surface);
     border: 1px solid var(--rule);
     border-radius: var(--radius-card);
     box-shadow: var(--shadow-lift);
@@ -200,7 +200,12 @@
   .btn[data-size="icon"] { width: 28px; height: 26px; }
   .btn[data-size="icon-lg"] { width: 32px; height: 30px; }
 
-  .btn:disabled, .icon-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  /* `aria-disabled` looks the same as `disabled` and stays focusable, which
+     is what a control that must also explain itself needs: a keyboard and a
+     screen reader can reach it and read the reason. The caller ignores the
+     click; the appearance is the kit's. */
+  .btn:disabled, .icon-btn:disabled,
+  .btn[aria-disabled="true"], .icon-btn[aria-disabled="true"] { opacity: 0.5; cursor: not-allowed; }
 
   /* --- badges --------------------------------------------------- */
   .badge {
@@ -225,7 +230,7 @@
     top: 0;
     z-index: 1;
     padding: 0.35rem 0.7rem;
-    background: var(--surface);
+    background: var(--ground-cover);
     border-bottom: 1px solid var(--rule);
     font-size: var(--text-meta);
     font-weight: 600;
@@ -461,7 +466,9 @@
     box-shadow: 0 1px 2px rgba(20, 18, 25, 0.08);
   }
   [data-theme="dark"] .seg-btn[data-on="true"],
-  [data-theme="dark"] .seg-btn[data-active="true"] { box-shadow: none; background: var(--surface-raised); }
+  [data-theme="dark"] .seg-btn[data-active="true"],
+  [data-theme="glass"] .seg-btn[data-on="true"],
+  [data-theme="glass"] .seg-btn[data-active="true"] { box-shadow: none; background: var(--surface-raised); }
   /* Five panes of a resource detail do not fit a 260px peek. The control
      carries its own overflow rather than pushing the pane sideways, and hides
      the bar for the same reason the window's tab strip does: inside a control
@@ -664,7 +671,21 @@
     overflow: hidden;
   }
   [data-theme="dark"] .popover,
-  [data-theme="midnight"] .popover { box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6); }
+  [data-theme="midnight"] .popover,
+  [data-theme="glass"] .popover { box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6); }
+
+  /* Glass, see-through: the floating layers are dark glass too, blurring
+     what is under them rather than hiding it behind a solid grey slab — which
+     on a black sheet is the one thing that would look out of place. Only
+     under `[data-opacity]`; at rest Glass is a solid theme and these stay
+     solid. Dark and Midnight keep solid furniture, by design. */
+  [data-theme="glass"][data-opacity] .popover,
+  [data-theme="glass"][data-opacity] .ctx-menu {
+    background: rgba(18, 18, 20, 0.78);
+    -webkit-backdrop-filter: blur(30px);
+    backdrop-filter: blur(30px);
+    border-color: rgba(255, 255, 255, 0.14);
+  }
 
   .tip { position: relative; display: inline-flex; }
   .tip::after {
@@ -685,6 +706,42 @@
     z-index: 50;
   }
   .tip:hover::after, .tip:focus-within::after { opacity: 1; }
+
+  /* --- a blocked action's reason ----------------------------------
+     `ActionBar` points a blocked control's `aria-describedby` at this
+     element, so it has to stay in the accessibility tree: clipped out of
+     sight, never `display: none`, which would leave the description pointing
+     at nothing. Focus inside the slot brings it on screen. The `title` on the
+     control covers a mouse and only ever draws on hover. (#670) */
+  .action-slot { position: relative; display: inline-flex; }
+  .action-reason {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+    border: 0;
+  }
+  /* Menu reasons stay in the flow under their row. Bar buttons use Tooltip,
+     whose portal and collision handling keep footer reasons inside the view. */
+  .action-slot[data-in="menu"] { display: block; }
+  .action-slot[data-in="menu"]:focus-within .action-reason {
+    position: static;
+    display: block;
+    width: auto;
+    height: auto;
+    margin: 0;
+    padding: 0 0.5rem 0.375rem;
+    overflow: visible;
+    clip-path: none;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    color: var(--ink-soft);
+    font-size: 0.75rem;
+  }
 
   .skeleton {
     display: inline-block;
@@ -719,7 +776,7 @@
   /* --- panes ------------------------------------------------------
      Desktop layout is flush regions divided by hairlines, each scrolling
      on its own. No gutters, no floating cards, no page scroll. */
-  .panes { display: flex; min-height: 0; flex: 1; background: var(--surface); }
+  .panes { display: flex; min-height: 0; flex: 1; background: var(--ground-surface); }
   .pane {
     display: flex;
     flex-direction: column;
@@ -735,7 +792,7 @@
     height: var(--pane-head-h);
     flex-shrink: 0;
     padding: 0 0.6rem;
-    background: var(--surface-sunk);
+    background: var(--ground-sunk);
     border-bottom: 1px solid var(--rule);
     font-size: 0.625rem;
     font-weight: 600;
@@ -764,7 +821,7 @@
     flex-direction: column;
     flex-shrink: 0;
     min-height: 0;
-    background: var(--surface);
+    background: var(--ground-surface);
     border-left: 1px solid var(--rule);
   }
   .side-rail-body { flex: 1; min-height: 0; overflow: auto; }
@@ -1145,7 +1202,7 @@
     align-items: center;
     height: 32px;
     flex-shrink: 0;
-    background: var(--canvas-deep);
+    background: var(--ground-deep);
     border-bottom: 1px solid var(--rule);
     -webkit-app-region: drag;
   }
@@ -1166,6 +1223,29 @@
     -webkit-app-region: no-drag;
   }
   .icon-btn:hover { background: var(--field); color: var(--ink); }
+
+  /* A control that acts on a heading's own text — copy the name — drawn right
+     after it and kept out of sight until the reader reaches for it: a glyph
+     permanently beside every subject's name is a second thing to read on the
+     largest line of the pane.
+
+     Three ways in, because the pointer is only one of them: the row hovered,
+     focus anywhere in the row (so a keyboard reader tabbing onto the control
+     sees what they landed on), and the moment after a copy, when the check
+     must stay up even though the pointer has already left.
+
+     `opacity`, not `display` or `visibility`: the control keeps its place, so
+     the name does not shift when it appears, and it stays in the tab order.
+
+     A device with no hover has no way to ask for it, so there it is simply
+     shown. */
+  .name-action { display: inline-flex; flex-shrink: 0; opacity: 0; }
+  .name-row:hover .name-action,
+  .name-row:focus-within .name-action,
+  .name-action:has(.copy-ok) { opacity: 1; }
+  @media (hover: none) {
+    .name-action { opacity: 1; }
+  }
 
   /* The same chrome as `.icon-btn`, sized by its CONTENT.
      `.icon-btn` is `width: 24px` — a box for a glyph — and the dock's `clear`
@@ -1204,7 +1284,7 @@
     align-items: stretch;
     height: 33px;
     flex-shrink: 0;
-    background: var(--canvas-deep);
+    background: var(--ground-deep);
     border-bottom: 1px solid var(--rule);
     /* Tabs have a 108px minimum and flex items do not shrink past it, so three
        of them need 324px — more than a Drawer at its 320px minimum can give.
@@ -1274,7 +1354,7 @@
   }
   .tab:hover { background: var(--field); }
   .tab[data-active="true"] {
-    background: var(--surface);
+    background: var(--ground-surface);
     color: var(--ink);
     margin-bottom: -1px;
     padding-bottom: 1px;
@@ -1288,7 +1368,24 @@
     background: var(--accent);
   }
   .tab[data-preview="true"] { font-style: italic; }
+  /* Who gives way when a tab is narrow: the cluster, not the title.
+
+     Both were plain flex items shrinking in proportion to their own width, and
+     the cluster's name is usually the longer of the two, in a wider face — so
+     at the 108px minimum it kept most of the row and the title was cut to a
+     letter: `N.`, `E.`, `J.` across a full strip, each beside a legible
+     `kind-s…`. A strip of thirteen such tabs fits its bar exactly, so there is
+     nothing for the scroll controls to scroll to either, and the reader is
+     left with tabs they cannot tell apart and arrows that do nothing (#828).
+
+     The title is what tells one tab from the next; the cluster is the same
+     word on most of them and is in the tab's tooltip in full. So the cluster
+     shrinks first — by a factor large enough that it is gone before the title
+     loses a character — and only then does the title truncate. */
+  .tab-title { flex: 0 1 auto; min-width: 0; }
   .tab-sub {
+    flex: 1 1 0;
+    min-width: 0;
     font-family: var(--font-mono);
     font-size: var(--text-meta);
     letter-spacing: 0.02em;
@@ -1365,7 +1462,7 @@
     min-height: 34px;
     flex-shrink: 0;
     padding: 0 0.6rem;
-    background: var(--surface);
+    background: var(--ground-surface);
     border-bottom: 1px solid var(--rule);
   }
   .toolbar-title {
@@ -1380,7 +1477,7 @@
     height: 22px;
     flex-shrink: 0;
     padding: 0 0.4rem;
-    background: var(--canvas-deep);
+    background: var(--ground-deep);
     border-top: 1px solid var(--rule);
     /* MEASURED at the window's own 960px minimum (`minWidth` in
        apps/desktop/src-tauri/tauri.conf.json), with every readout the strip can
@@ -1456,7 +1553,8 @@
     background: var(--surface-raised);
     box-shadow: 0 10px 34px rgba(20, 18, 25, 0.16), 0 1px 2px rgba(20, 18, 25, 0.08);
   }
-  [data-theme="dark"] .ctx-menu { box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6); }
+  [data-theme="dark"] .ctx-menu,
+  [data-theme="glass"] .ctx-menu { box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6); }
   .ctx-item {
     display: flex;
     align-items: center;
@@ -1481,7 +1579,7 @@
   /* --- docked console --------------------------------------------- */
   .console-dock {
     flex-shrink: 0;
-    background: var(--surface);
+    background: var(--ground-surface);
     border-top: 1px solid var(--rule);
   }
 
@@ -1492,7 +1590,8 @@
     border-radius: 12px;
     box-shadow: 0 8px 30px rgba(20, 18, 25, 0.09), 0 1px 2px rgba(20, 18, 25, 0.05);
   }
-  [data-theme="dark"] .console-shell {
+  [data-theme="dark"] .console-shell,
+  [data-theme="glass"] .console-shell {
     box-shadow: 0 10px 40px rgba(0, 0, 0, 0.55);
   }
   .console-input {
@@ -1576,6 +1675,34 @@
   @media (prefers-reduced-motion: reduce) {
     .copy-ok { transition: none; }
   }
+
+  /* --- Copy, over the corner of a code pane ----------------------
+
+     A read-only manifest is something a reader opens in order to take it
+     away, and until #656 the only route was a chord the browser refuses to
+     aim at a `contenteditable`. The chord works now; this is the half of the
+     answer that can be seen.
+
+     It sits OVER the document rather than in a strip above it. The pane fills
+     its region edge to edge (see "panes"), so a header added on top of it
+     costs a line of YAML on every surface that shows one — including the
+     drawer, where the manifest already has the least room to read in. The
+     corner it covers holds the right-hand end of `apiVersion: v1`, which is
+     nowhere near it.
+
+     Opaque, not faded back until hovered: a control that is invisible until
+     the pointer is already on it is not an affordance, and fading it would
+     take the contrast the theme guarantees away from the reader who most
+     needs it. */
+  .code-copy {
+    position: absolute;
+    top: 0.375rem;
+    right: 0.75rem;
+    z-index: 1;
+    background: var(--surface);
+    border-color: var(--rule);
+  }
+  .code-copy:hover { background: var(--field); border-color: var(--rule-strong); }
 
   .scroll { overflow: auto; scrollbar-gutter: stable; }
 }

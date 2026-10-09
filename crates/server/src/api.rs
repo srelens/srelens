@@ -29,20 +29,35 @@ use crate::AppState;
 /// caller-named host, user, port and server-side `identityFile`: on the web that
 /// hands every user the container's SSH identity against any reachable machine,
 /// and `nodeServiceRestart` has no consent prompt there, so all four are denied.
+///
+/// Apps (`extensions.*`) are not here (#515). Each user's registry reads and
+/// writes only that user's own inventory, a row of the server database
+/// (`app_inventory.rs`), and reads an app catalog only the server writes
+/// (`SharedCatalog`). Every call on this route is a signed-in user's own
+/// request: the web host runs no MCP server and no agent, so nothing here
+/// answers a consent prompt on anyone's behalf.
 pub const WEB_DENIED_CAPABILITIES: &[&str] = &[
-    "extensions.configure",
-    "extensions.catalog",
-    "extensions.catalogManifest",
-    "extensions.validate",
-    "extensions.list",
-    "extensions.read",
-    "extensions.resource",
-    "extensions.action",
-    // The host GitOps write. On the web no installed app scopes it to a resource
-    // and there is no consent prompt (#374), so a caller could name any allowlisted
-    // kind directly. `k8s.getCustomResource` stays allowed: it is a read under the
-    // user's own kubeconfig and RBAC, like every other custom-resource read.
-    "k8s.gitOpsAction",
+    // An app's secret settings (#543) are kept by the desktop vault; the web
+    // host has no per-user secret store yet (#522), so a set is refused here
+    // rather than kept anywhere else. A web user's registry is built with no
+    // store, so `extensions.list` reports secrets as unavailable there too.
+    "extension.secretStore",
+    // The host action primitives (#549). What makes one safe is an installed
+    // app's manifest fixing the kind and the template, and a person confirming
+    // the request. A declared action reaches its primitive only through
+    // `extensions.action`: the user's own installed app, the exact
+    // group/kind/plural it binds, its revision and grants rechecked on the call,
+    // UID/resourceVersion preconditions, and the host confirmation the app's
+    // screen shows first. Called directly, a primitive would let the caller name
+    // the kind and the patch itself, so they stay denied here.
+    // `k8s.getCustomResource` stays allowed: it is a read under the user's own
+    // kubeconfig and RBAC, like every other custom-resource read.
+    "k8s.annotate",
+    "k8s.setFields",
+    "k8s.setStatusCondition",
+    "k8s.mergePatch",
+    "k8s.requestRolloutRestart",
+    "k8s.requestCordonNode",
     "k8s.deleteContext",
     "k8s.helmRepoAdd",
     "k8s.helmRepoUpdate",
@@ -56,7 +71,18 @@ pub const WEB_DENIED_CAPABILITIES: &[&str] = &[
     "toolbox.installPlugin",
     "toolbox.upgradePlugin",
     "toolbox.removePlugin",
+    // Uses the process-wide GitHub token (GITHUB_TOKEN / GH_TOKEN) on the host;
+    // unsafe on a multi-user shared web container.
+    "github.rolloutCause",
 ];
+
+/// Installed apps' operations, `plugin/<id>/<operation>` (#574), are MCP tools, and
+/// the web host runs no MCP server. A web user reaches their apps only through the
+/// `extensions.*` capabilities, whose writes stop at the host confirmation the app's
+/// screen shows. An app's tool that needs consent would have nobody to ask here
+/// (#374, #512), so it is never served, let alone approved; none is in a web user's
+/// registry, and this refuses one before dispatch should one ever be.
+pub const WEB_DENIED_PREFIX: &str = "plugin/";
 
 /// Invoke a capability by id. The request body is the capability's input JSON;
 /// an empty body means null input. Unknown id → 404, invalid input (or a body
@@ -76,7 +102,7 @@ pub async fn invoke_capability(
     headers: axum::http::HeaderMap,
     body: Bytes,
 ) -> Response {
-    if WEB_DENIED_CAPABILITIES.contains(&id.as_str()) {
+    if WEB_DENIED_CAPABILITIES.contains(&id.as_str()) || id.starts_with(WEB_DENIED_PREFIX) {
         return error_response(
             StatusCode::BAD_REQUEST,
             "capability not available in web mode",
@@ -190,7 +216,7 @@ fn error_response(status: StatusCode, message: &str) -> Response {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use crate::{router, AppState};
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
@@ -445,28 +471,464 @@ mod tests {
         let (status, body) = post("/api/capability/k8s.deleteContext", Body::empty()).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(body["error"], json!("capability not available in web mode"));
+
+        let (status, body) = post("/api/capability/github.rolloutCause", Body::empty()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], json!("capability not available in web mode"));
     }
 
+    /// Apps are per user on the web (#515), so none of their capabilities is
+    /// refused before dispatch: each reaches it (404 in the test registry).
     #[tokio::test]
-    async fn local_extension_inventory_and_execution_are_denied_on_web() {
-        for id in ["extensions.resource", "extensions.action", "extensions.catalog", "extensions.catalogManifest", "extensions.validate", "extensions.list", "extensions.configure", "extensions.read"] {
-            let (status, body) = post(&format!("/api/capability/{id}"), Body::empty()).await;
-            assert_eq!(status, StatusCode::BAD_REQUEST, "{id}");
-            assert_eq!(body["error"], json!("capability not available in web mode"), "{id}");
+    async fn app_capabilities_reach_dispatch_on_web() {
+        assert!(!super::WEB_DENIED_CAPABILITIES
+            .iter()
+            .any(|id| id.starts_with("extensions.")));
+        for id in [
+            "extensions.resource",
+            "extensions.action",
+            "extensions.catalog",
+            "extensions.catalogManifest",
+            "extensions.validate",
+            "extensions.list",
+            "extensions.configure",
+            "extensions.read",
+            "extensions.resolveColumns",
+            "extensions.resolveCards",
+            "extensions.resolvePanels",
+            "extensions.resolveLinks",
+            "extensions.resolveReverseLinks",
+            "extensions.streams",
+            "extensions.pods",
+            "extensions.inspect",
+            "extensions.logs",
+            "extensions.queryProvider",
+        ] {
+            let (status, _) = post(&format!("/api/capability/{id}"), Body::from("{}")).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{id}");
         }
     }
 
+    /// An app's operations are MCP tools (#574), and the web host serves none: an
+    /// installed app adds no `plugin/…` capability to its user's registry, and one
+    /// named on this route, spelled as axum decodes it, is refused before dispatch.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_apps_operations_are_never_served_on_the_web() {
+        let state = apps_state().await;
+        let (alice_id, alice) = sign_in(&state, "alice").await;
+        let (status, _) = call(
+            &state,
+            &alice,
+            "extensions.configure",
+            json!({"action": "install", "manifest": local_app(),
+                "grants": ["k8s.listCustomResource"]}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        // The registry her calls are dispatched to, with the app installed in it.
+        let env = state
+            .user_envs
+            .env_for(&state.db, &state.master_key, alice_id)
+            .await
+            .unwrap();
+        let (status, listed) = call(&state, &alice, "extensions.list", json!({})).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(apps(&listed), ["org.example.argocd"]);
+        assert!(!env
+            .registry
+            .ids()
+            .iter()
+            .any(|id| id.starts_with(super::WEB_DENIED_PREFIX)));
+        for id in [
+            "plugin%2Forg.example.argocd%2Fapplications",
+            "plugin%2Forg.example.argocd%2Fsync",
+        ] {
+            let (status, body) = call(&state, &alice, id, json!({"context": "prod"})).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{id}");
+            assert_eq!(body["error"], json!("capability not available in web mode"));
+        }
+    }
+
+    /// A server whose users get the registry `srelens-server` builds for them (#515).
+    pub(crate) async fn apps_state() -> AppState {
+        // The test root, whose catalog these tests can sign: this crate's build pins what a
+        // release pins, and nothing a test holds is signed by that (#559).
+        let trust = srelens_registry::TrustRoot::from_signed_documents(
+            include_bytes!("../../registry/tests/fixtures/trust/root.json"),
+            include_bytes!("../../registry/tests/fixtures/trust/publishers.json"),
+        )
+        .expect("the test root verifies");
+        AppState::for_tests_with_catalog_trust(
+            Arc::new(srelens_registry::build_registry_for_user),
+            trust,
+        )
+        .await
+    }
+
+    pub(crate) async fn sign_in(state: &AppState, sub: &str) -> (i64, String) {
+        let user = state
+            .db
+            .upsert_user("dev", sub, &format!("{sub}@example.com"), sub, 1)
+            .await
+            .unwrap();
+        let token = state
+            .db
+            .create_session(user.id, crate::unix_now())
+            .await
+            .unwrap();
+        (user.id, format!("srelens_session={token}"))
+    }
+
+    pub(crate) async fn call(
+        state: &AppState,
+        cookie: &str,
+        id: &str,
+        input: Value,
+    ) -> (StatusCode, Value) {
+        let resp = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/capability/{id}"))
+                    .header("content-type", "application/json")
+                    .header("cookie", cookie)
+                    .header("x-srelens-csrf", "1")
+                    .body(Body::from(input.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), 4 * 1024 * 1024)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    /// A local, unsigned, read-only app: the registry's own test manifest, at the API
+    /// its fixtures use (`settings` needs 0.4, #709).
+    pub(crate) fn local_app() -> String {
+        let source = include_str!("../../registry/tests/fixtures/argocd-manifest.json")
+            .replace("\"org.srelens.argocd\"", "\"org.example.argocd\"")
+            .replace("\"^0.1\"", "\"^0.4\"");
+        let manifest: Value = serde_json::from_str(&source).unwrap();
+        manifest.to_string()
+    }
+
+    fn apps(listed: &Value) -> Vec<&str> {
+        listed["plugins"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|app| app["manifest"]["id"].as_str().unwrap())
+            .collect()
+    }
+
+    /// Two users of one server keep separate app inventories (#515): what one
+    /// installs the other neither lists, reads, inspects, nor changes.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn two_users_see_only_their_own_apps() {
+        let state = apps_state().await;
+        let (alice_id, alice) = sign_in(&state, "alice").await;
+        let (_, bob) = sign_in(&state, "bob").await;
+
+        let install = json!({"action": "install", "manifest": local_app(),
+            "grants": ["k8s.listCustomResource"]});
+        let (status, installed) = call(&state, &alice, "extensions.configure", install).await;
+        assert_eq!(status, StatusCode::OK, "{installed}");
+        assert_eq!(apps(&installed), ["org.example.argocd"]);
+        let app = &installed["plugins"][0];
+        let (revision, reader) = (
+            app["revision"].clone(),
+            app["manifest"]["capabilities"][0]["name"].clone(),
+        );
+
+        let (status, listed) = call(&state, &bob, "extensions.list", json!({})).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(apps(&listed).is_empty(), "{listed}");
+
+        // Naming alice's app and revision gets bob nothing: his inventory has no such app.
+        let selection = json!({"id": "org.example.argocd", "revision": revision,
+            "capability": reader, "context": "prod", "namespace": "team", "name": "app"});
+        let (status, refused) = call(&state, &bob, "extensions.resource", selection.clone()).await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert!(
+            refused["error"]
+                .as_str()
+                .unwrap()
+                .contains("disabled, removed or updated"),
+            "{refused}"
+        );
+        let mut read = selection.clone();
+        read.as_object_mut().unwrap().remove("name");
+        let (status, refused) = call(&state, &bob, "extensions.read", read).await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert!(
+            refused["error"]
+                .as_str()
+                .unwrap()
+                .contains("disabled, removed or updated"),
+            "{refused}"
+        );
+        let action =
+            json!({"resource": selection, "action": "sync", "uid": "u", "resourceVersion": "1"});
+        let (status, refused) = call(&state, &bob, "extensions.action", action).await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert!(
+            refused["error"]
+                .as_str()
+                .unwrap()
+                .contains("disabled, removed or updated"),
+            "{refused}"
+        );
+        for change in [
+            json!({"action": "remove", "id": "org.example.argocd"}),
+            json!({"action": "enable", "id": "org.example.argocd", "enabled": false}),
+        ] {
+            let (status, refused) = call(&state, &bob, "extensions.configure", change).await;
+            assert_eq!(status, StatusCode::BAD_GATEWAY);
+            assert!(
+                refused["error"].as_str().unwrap().contains("not installed"),
+                "{refused}"
+            );
+        }
+        // A settings row is not an inventory: /api/settings cannot place one.
+        let resp = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/settings/extension_inventories")
+                    .header("content-type", "application/json")
+                    .header("cookie", &bob)
+                    .header("x-srelens-csrf", "1")
+                    .body(Body::from(installed.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let (_, listed) = call(&state, &bob, "extensions.list", json!({})).await;
+        assert!(apps(&listed).is_empty(), "{listed}");
+
+        // Alice's app is untouched, and outlives her environment: rebuilding it wipes
+        // her runtime files, not her inventory.
+        state.user_envs.invalidate(alice_id);
+        let (status, listed) = call(&state, &alice, "extensions.list", json!({})).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(apps(&listed), ["org.example.argocd"]);
+        assert_eq!(listed["plugins"][0]["enabled"], json!(true));
+    }
+
+    /// An app that declares a secret setting installs on the web, but the web host
+    /// keeps no app secrets yet (#522): the user's registry has no secret store and
+    /// no `extension.secretStore`, the list says so, and its other settings still save.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn apps_with_secret_settings_install_on_the_web_and_keep_no_secret() {
+        let state = apps_state().await;
+        let (erin_id, erin) = sign_in(&state, "erin").await;
+        let mut manifest: Value = serde_json::from_str(&local_app()).unwrap();
+        manifest["settings"] =
+            json!([{"id": "token", "type": "secret-reference", "title": "Token"}]);
+        manifest["permissions"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!("extension.secretStore"));
+        let grants = manifest["permissions"].clone();
+        let install =
+            json!({"action": "install", "manifest": manifest.to_string(), "grants": grants});
+        let (status, installed) = call(&state, &erin, "extensions.configure", install).await;
+        assert_eq!(status, StatusCode::OK, "{installed}");
+
+        let (_, listed) = call(&state, &erin, "extensions.list", json!({})).await;
+        assert_eq!(listed["secretStore"]["available"], json!(false), "{listed}");
+        let env = state
+            .user_envs
+            .env_for(&state.db, &state.master_key, erin_id)
+            .await
+            .unwrap();
+        assert!(env.registry.get("extension.secretStore").is_none());
+        let (status, refused) = call(
+            &state,
+            &erin,
+            "extension.secretStore",
+            json!({"action": "set", "id": "org.example.argocd", "setting": "token", "secret": "s"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            refused["error"],
+            json!("capability not available in web mode")
+        );
+
+        let reset = json!({"action": "settings", "id": "org.example.argocd", "settings": {}});
+        let (status, saved) = call(&state, &erin, "extensions.configure", reset).await;
+        assert_eq!(status, StatusCode::OK, "{saved}");
+    }
+
+    /// The catalog is read without any kubeconfig, from the one cache the server
+    /// shares between its users and refreshes itself (#515).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_catalog_is_read_without_a_kubeconfig() {
+        let state = apps_state().await;
+        let (user_id, carol) = sign_in(&state, "carol").await;
+        assert!(state.db.list_kubeconfigs(user_id).await.unwrap().is_empty());
+
+        let (status, refused) = call(
+            &state,
+            &carol,
+            "extensions.catalog",
+            json!({"refresh": true}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert!(
+            refused["error"]
+                .as_str()
+                .unwrap()
+                .contains("has not refreshed the shared catalog"),
+            "{refused}"
+        );
+
+        let catalog = state.user_envs.catalog().clone();
+        tokio::task::spawn_blocking(move || {
+            catalog.refresh_if_stale_with(|| {
+                Ok(
+                    include_bytes!("../../registry/tests/fixtures/extension-catalog.signed.json")
+                        .to_vec(),
+                )
+            })
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        let (_, dave) = sign_in(&state, "dave").await;
+        for cookie in [&carol, &dave] {
+            let (status, snapshot) = call(
+                &state,
+                cookie,
+                "extensions.catalog",
+                json!({"refresh": true}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{snapshot}");
+            assert_eq!(snapshot["stale"], json!(false));
+            assert_eq!(
+                snapshot["catalog"]["extensions"].as_array().unwrap().len(),
+                2
+            );
+        }
+    }
+
+    /// A kubeconfig whose one context, cluster and user are all named `name`.
+    fn kubeconfig(name: &str) -> String {
+        format!(
+            "apiVersion: v1\nkind: Config\nclusters:\n- name: {name}\n  cluster: {{server: https://127.0.0.1:1}}\nusers:\n- name: {name}\n  user: {{token: t}}\ncontexts:\n- name: {name}\n  context: {{cluster: {name}, user: {name}}}\n"
+        )
+    }
+
+    fn context_names(listed: &Value) -> Vec<&str> {
+        listed["contexts"]
+            .as_array()
+            .expect("contexts")
+            .iter()
+            .map(|c| c["name"].as_str().expect("name"))
+            .collect()
+    }
+
+    /// Every user's registry runs in one process as one UID, and each user's
+    /// kubeconfigs are materialized at a predictable path
+    /// (`<data>/runtime/users/<id>/kc-<row id>.yaml`). One user naming another's
+    /// file must neither list it nor put it in their client cache, where every
+    /// later capability would resolve its contexts — with its credentials.
     #[tokio::test]
-    async fn gitops_writes_are_denied_on_web_but_custom_resource_reads_are_not() {
-        // No app binding scopes the host GitOps write on the web and there is no
-        // web consent prompt, so it is denied outright.
-        let (status, body) = post("/api/capability/k8s.gitOpsAction", Body::empty()).await;
+    async fn web_list_contexts_never_reads_a_caller_named_kubeconfig() {
+        let state = apps_state().await;
+        let (alice_id, alice) = sign_in(&state, "alice").await;
+        let (bob_id, _) = sign_in(&state, "bob").await;
+        for (user_id, name) in [(alice_id, "alices"), (bob_id, "bobs")] {
+            state
+                .db
+                .put_kubeconfig(user_id, name, &state.master_key, &kubeconfig(name), 1)
+                .await
+                .unwrap();
+        }
+        let bobs_env = state
+            .user_envs
+            .env_for(&state.db, &state.master_key, bob_id)
+            .await
+            .unwrap();
+
+        let (status, refused) = call(
+            &state,
+            &alice,
+            "k8s.listContexts",
+            json!({ "paths": bobs_env.paths }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+        assert!(!refused.to_string().contains("bobs"), "{refused}");
+
+        let alices_env = state
+            .user_envs
+            .env_for(&state.db, &state.master_key, alice_id)
+            .await
+            .unwrap();
+        assert_eq!(alices_env.cache.paths().await, alices_env.paths);
+
+        // What the web app sends, and what an MCP-style caller sends: both list
+        // the user's own contexts, and only those.
+        for input in [json!({ "paths": [] }), json!({})] {
+            let (status, listed) = call(&state, &alice, "k8s.listContexts", input.clone()).await;
+            assert_eq!(status, StatusCode::OK, "{input}: {listed}");
+            assert_eq!(context_names(&listed), ["alices"], "{input}");
+        }
+    }
+
+    /// #543. Keeping an app's secret needs a store the web host does not have
+    /// (per-user storage is #522's), so a set is refused before dispatch —
+    /// never answered by something that would keep the value somewhere else —
+    /// and the refusal does not repeat it.
+    #[tokio::test]
+    async fn app_secret_storage_is_refused_on_web_before_dispatch() {
+        let secret = "web-must-not-keep-this-7f3a";
+        let (status, body) = post(
+            "/api/capability/extension.secretStore",
+            Body::from(
+                json!({"action":"set","id":"org.example.app","setting":"token","secret":secret})
+                    .to_string(),
+            ),
+        )
+        .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(body["error"], json!("capability not available in web mode"));
+        assert!(!body.to_string().contains(secret));
+    }
+
+    #[tokio::test]
+    async fn removed_gitops_endpoint_is_absent_and_custom_resource_reads_are_not_denied() {
+        // The retired endpoint has no handler and no compatibility shim.
+        let (status, _) = post("/api/capability/k8s.gitOpsAction", Body::empty()).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
         // A read under the user's own kubeconfig and RBAC stays available: it reaches
         // dispatch (404 in the test registry) instead of being denied.
         let (status, _) = post("/api/capability/k8s.getCustomResource", Body::empty()).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    /// The same reasoning covers #549's action primitives: on the web no
+    /// installed app scopes one to a kind and there is no consent prompt, so a
+    /// caller could name any kind and any template directly.
+    #[tokio::test]
+    async fn host_action_primitives_are_denied_on_web() {
+        for id in srelens_kube::action_primitives::PRIMITIVES {
+            let (status, body) = post(&format!("/api/capability/{id}"), Body::empty()).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{id}");
+            assert_eq!(
+                body["error"],
+                json!("capability not available in web mode"),
+                "{id}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -497,7 +959,11 @@ mod tests {
         ] {
             let (status, body) = post(&format!("/api/capability/{id}"), Body::empty()).await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "{id} must be denied");
-            assert_eq!(body["error"], json!("capability not available in web mode"), "{id}");
+            assert_eq!(
+                body["error"],
+                json!("capability not available in web mode"),
+                "{id}"
+            );
         }
     }
 
@@ -506,7 +972,11 @@ mod tests {
         for id in ["k8s.helmRepoAdd", "k8s.helmRepoUpdate"] {
             let (status, body) = post(&format!("/api/capability/{id}"), Body::empty()).await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "{id} must be denied");
-            assert_eq!(body["error"], json!("capability not available in web mode"), "{id}");
+            assert_eq!(
+                body["error"],
+                json!("capability not available in web mode"),
+                "{id}"
+            );
         }
     }
 
@@ -522,7 +992,11 @@ mod tests {
         ] {
             let (status, body) = post(&format!("/api/capability/{id}"), Body::empty()).await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "{id} must be denied");
-            assert_eq!(body["error"], json!("capability not available in web mode"), "{id}");
+            assert_eq!(
+                body["error"],
+                json!("capability not available in web mode"),
+                "{id}"
+            );
         }
     }
 

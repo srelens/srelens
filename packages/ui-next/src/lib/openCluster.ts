@@ -40,6 +40,21 @@ export function reconnectCluster(context: ClusterContext): void {
  * acting on a stale copy of the cluster list.
  */
 export function openCluster(context: ClusterContext): void {
+  openOnCluster(context, "/overview");
+}
+
+/**
+ * {@link openCluster}, landing on `route` rather than on the overview.
+ *
+ * For a route about ONE cluster's object, a resource's detail above all: no tab
+ * carries a cluster of its own, and every cluster-scoped screen reads the one
+ * in focus (see `setActiveCluster`). So opening the route is not enough. The
+ * cluster it is about has to be the one in focus as well, or the screen reads
+ * whichever cluster the rail was already on, and a detail route shows that
+ * cluster's object of the same name. A `srelens://` link is exactly that case:
+ * it names its own cluster, whatever the rail shows.
+ */
+export function openOnCluster(context: ClusterContext, route: string): void {
   const workspace = currentWorkspace();
   const id = context.stableId;
   if (!workspace.clusters.includes(id)) {
@@ -51,8 +66,8 @@ export function openCluster(context: ClusterContext): void {
   // `watchResource` — are all in terms of the context name. `setActiveCluster`
   // relabels every cluster-scoped tab with it, because the screens behind those
   // tabs have all just started rendering this cluster; `openTab` relabels the
-  // `/overview` tab it may be reusing. Both live in the store, at the point
-  // each decision is made, rather than here — see their own notes.
+  // tab it may be reusing. Both live in the store, at the point each decision
+  // is made, rather than here — see their own notes.
   setActiveCluster(id, context.name);
-  openTab("/overview", { clusterName: context.name });
+  openTab(route, { clusterName: context.name });
 }

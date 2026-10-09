@@ -60,6 +60,21 @@ impl<'de> Visitor<'de> for SignatureVisitor {
     }
 }
 
+/// Decodes an optional `keyId` (#559): a key's ID is 64 lowercase hexadecimal characters,
+/// and anything else is refused as it is read.
+pub(super) fn key_id<'de, D: Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+    let key_id = Option::<String>::deserialize(d)?;
+    if key_id
+        .as_deref()
+        .is_some_and(|id| !super::trust::is_key_id(id))
+    {
+        return Err(de::Error::custom(
+            "keyId must be 64 lowercase hexadecimal characters",
+        ));
+    }
+    Ok(key_id)
+}
+
 /// Decodes manifest text, refusing more than [`MAX_MANIFEST_BYTES`] before it is decoded.
 pub(super) fn manifest<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
     let text = String::deserialize(d)?;
@@ -67,6 +82,45 @@ pub(super) fn manifest<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Err
         return Err(de::Error::custom(format_args!(
             "manifest exceeds {} KiB ({MAX_MANIFEST_BYTES} bytes)",
             MAX_MANIFEST_BYTES / 1024
+        )));
+    }
+    Ok(text)
+}
+
+/// Decodes a package file sent as base64 (#562), refusing text that could decode to more
+/// than [`MAX_PACKAGE_BYTES`] before decoding it.
+///
+/// [`MAX_PACKAGE_BYTES`]: super::package::MAX_PACKAGE_BYTES
+pub(super) fn package<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+    use base64::Engine as _;
+    const MOST: usize = super::package::MAX_PACKAGE_BYTES;
+    let too_large =
+        || de::Error::custom(format_args!("package exceeds {} MiB", MOST / (1024 * 1024)));
+    let text = <std::borrow::Cow<'de, str>>::deserialize(d)?;
+    // Padding makes a few lengths past the limit encode as long as the limit does, so the
+    // decoded length is checked too.
+    if text.len() > MOST.div_ceil(3) * 4 {
+        return Err(too_large());
+    }
+    let package = base64::engine::general_purpose::STANDARD
+        .decode(text.as_bytes())
+        .map_err(|e| de::Error::custom(format_args!("package is not base64: {e}")))?;
+    if package.len() > MOST {
+        return Err(too_large());
+    }
+    Ok(package)
+}
+
+/// Decodes an optional digest list, refusing one over [`MAX_DIGESTS_BYTES`].
+///
+/// [`MAX_DIGESTS_BYTES`]: super::package::MAX_DIGESTS_BYTES
+pub(super) fn digests<'de, D: Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+    const MOST: usize = super::package::MAX_DIGESTS_BYTES;
+    let text = Option::<String>::deserialize(d)?;
+    if text.as_ref().is_some_and(|text| text.len() > MOST) {
+        return Err(de::Error::custom(format_args!(
+            "digests exceed {} KiB ({MOST} bytes)",
+            MOST / 1024
         )));
     }
     Ok(text)
@@ -128,6 +182,54 @@ mod tests {
             );
         }
         assert!(decode(json!({"signature": [256]})).is_err());
+    }
+
+    #[test]
+    fn a_package_is_base64_within_its_limit_and_a_digest_list_within_its_own() {
+        use base64::Engine as _;
+        #[derive(Deserialize)]
+        struct P {
+            #[serde(deserialize_with = "package")]
+            package: Vec<u8>,
+        }
+        #[derive(Deserialize)]
+        struct V {
+            #[serde(default, deserialize_with = "digests")]
+            digests: Option<String>,
+        }
+        let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+        let decode = |v: Value| serde_json::from_value::<P>(v).map(|p| p.package);
+        assert_eq!(
+            decode(json!({"package": encode(b"\x1f\x8b")})).unwrap(),
+            b"\x1f\x8b"
+        );
+        let most = super::super::package::MAX_PACKAGE_BYTES;
+        let at_limit = encode(&vec![0; most]);
+        assert_eq!(decode(json!({"package": at_limit})).unwrap().len(), most);
+        for over in [most + 1, most + 3, most + 4] {
+            let refused = decode(json!({"package": encode(&vec![0; over])})).map(|p| p.len());
+            assert!(
+                refused
+                    .as_ref()
+                    .is_err_and(|e| e.to_string().contains("package exceeds 512 MiB")),
+                "{over} bytes: {refused:?}"
+            );
+        }
+        assert!(decode(json!({"package": "not base64!"}))
+            .unwrap_err()
+            .to_string()
+            .contains("not base64"));
+        // The wrapper sends a string; an array of numbers is refused, not decoded.
+        assert!(decode(json!({"package": [31, 139]})).is_err());
+
+        let digests = |v: Value| serde_json::from_value::<V>(v).map(|v| v.digests);
+        assert_eq!(digests(json!({})).unwrap(), None);
+        let most = super::super::package::MAX_DIGESTS_BYTES;
+        assert!(digests(json!({"digests": "x".repeat(most)})).is_ok());
+        assert!(digests(json!({"digests": "x".repeat(most + 1)}))
+            .unwrap_err()
+            .to_string()
+            .contains("digests exceed 64 KiB"));
     }
 
     #[test]

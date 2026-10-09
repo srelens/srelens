@@ -1,4 +1,4 @@
-import { settingsStorage, flushSettingsWrites, isApplePlatform, isTauri, K8S_KIND, type ResourceKind } from "@srelens/core";
+import { settingsStorage, flushSettingsWrites, applyWindowBlur, isApplePlatform, isTauri, K8S_KIND, type ResourceKind } from "@srelens/core";
 // theme.ts imports only settingsStorage, so this does not drag the classic
 // stylesheet into the new design's chunk.
 import { applyTheme, getInitialTheme, resolvedThemeMode } from "./ui/theme";
@@ -110,6 +110,12 @@ export async function switchDesign(design: Design): Promise<SwitchResult> {
     return { ok: false, reason: "The settings backend could not save the design preference." };
   }
   if (design === "classic" && isTauri() && drawsOwnChrome()) {
+    // The blur behind a see-through window goes too: the native window keeps
+    // it across the reload, and classic paints an opaque page and never syncs
+    // it, so it would run unseen for as long as classic stays up. Awaited so
+    // the reload does not race the host. It never rejects, and a refusal is
+    // logged there and does not stop the switch. (#855 review)
+    await applyWindowBlur(false);
     try {
       // Leaving the new design means handing the system titlebar back: classic
       // renders under the real decorations, and an overlay left behind would
@@ -182,7 +188,7 @@ function applyNextThemeAttribute(): void {
  * and the stylesheet ever disagree. A theme added to `tokens.css` fails that
  * test rather than quietly being treated as light here.
  */
-export const DARK_NEXT_THEMES: ReadonlySet<string> = new Set(["dark", "midnight"]);
+export const DARK_NEXT_THEMES: ReadonlySet<string> = new Set(["dark", "midnight", "glass"]);
 
 /**
  * The lightness of the theme the reader can actually SEE.

@@ -1,5 +1,8 @@
 //! Bridges the capability registry to the Model Context Protocol.
 
+mod agent_text;
+#[cfg(test)]
+mod app_tools_tests;
 pub mod audit;
 pub mod auth;
 pub mod completeness;
@@ -14,6 +17,35 @@ use std::sync::Arc;
 
 use srelens_capability::{CapabilityError, Registry};
 use serde_json::Value;
+
+/// Every installed app's tool is `plugin/<app id>/<operation>` (#574).
+pub const APP_TOOL_PREFIX: &str = "plugin/";
+
+/// The tools installed apps add (#574): readers, declared actions and sidecar
+/// operations, which come and go while the server runs.
+///
+/// Each snapshot is a registry of its own. When the apps change, the source
+/// builds a new one and revokes the handlers of the one it replaces, so a
+/// caller still holding an older snapshot can see its tools but not run them.
+#[async_trait::async_trait]
+pub trait ToolSource: Send + Sync {
+    /// The snapshot as it stands now, after catching up with any change the
+    /// source has not seen yet — including one another process made.
+    async fn tools(&self) -> Arc<Registry>;
+    /// The snapshot last built, without catching up.
+    fn current(&self) -> Arc<Registry>;
+    /// Changes every time the snapshot does: what a session that can push
+    /// sends `notifications/tools/list_changed` on.
+    fn changes(&self) -> tokio::sync::watch::Receiver<u64>;
+    /// How often such a session asks [`ToolSource::tools`] unprompted, so a
+    /// change another process made reaches its client too.
+    fn poll_interval(&self) -> std::time::Duration;
+}
+
+/// The notification that tells a client to list the tools again.
+pub fn tools_list_changed_notification() -> Value {
+    serde_json::json!({ "jsonrpc": "2.0", "method": "notifications/tools/list_changed" })
+}
 
 /// The largest JSON-RPC request either transport accepts, in bytes: one stdio line
 /// (without its `\n` or `\r\n` ending) or one HTTP request body. 4 MiB leaves room for the largest
@@ -53,19 +85,55 @@ impl Transport {
     }
 }
 
+/// An MCP request is one of the two sources the audit trail knows about; the
+/// other is the desktop UI, which never reaches this crate.
+impl From<Transport> for crate::audit::Source {
+    fn from(t: Transport) -> Self {
+        match t {
+            Transport::Stdio => crate::audit::Source::McpStdio,
+            Transport::Http => crate::audit::Source::McpHttp,
+        }
+    }
+}
+
+/// `registry` without its UI-only capabilities (`Capability::ui_only`, #575).
+/// Dropped where the server takes its registry, so that no path through it —
+/// listing, calling, auditing, consent — can reach one.
+fn without_ui_only(registry: Arc<Registry>) -> Arc<Registry> {
+    if !registry.entries().any(|capability| capability.ui_only) {
+        return registry;
+    }
+    let mut offered = (*registry).clone();
+    let hidden: Vec<String> = offered
+        .entries()
+        .filter(|capability| capability.ui_only)
+        .map(|capability| capability.id.clone())
+        .collect();
+    for id in hidden {
+        offered.unregister(&id);
+    }
+    Arc::new(offered)
+}
+
 pub struct McpServer {
     registry: Arc<Registry>,
+    /// Installed apps' tools, when the host has any (#574).
+    app_tools: Option<Arc<dyn ToolSource>>,
     confirm_policy: Arc<dyn crate::policy::ConfirmPolicy>,
     audit: Arc<dyn crate::audit::AuditSink>,
     prompts: crate::prompts::PromptLibrary,
     kind_resolver: std::sync::Arc<dyn crate::resources::KindResolver>,
     watcher: std::sync::Arc<dyn crate::resources::ObjectWatcher>,
+    /// The per-chat tokens the HTTP transport accepts beside the Settings
+    /// token, each naming the chat it was minted for (#393).
+    caller_tokens: crate::auth::CallerTokens,
 }
 
 impl McpServer {
     pub fn new(registry: Arc<Registry>) -> Self {
         Self {
-            registry,
+            registry: without_ui_only(registry),
+            app_tools: None,
             // Fail closed: a host that wires nothing permits nothing.
             confirm_policy: Arc::new(crate::policy::AlwaysDeny),
             audit: Arc::new(crate::audit::NoopAudit),
@@ -77,6 +145,66 @@ impl McpServer {
             // Fail closed: refuse subscriptions rather than accept ones that
             // will never fire.
             watcher: std::sync::Arc::new(crate::resources::NoWatcher),
+            // None live until a host mints one for a chat it launches.
+            caller_tokens: crate::auth::CallerTokens::default(),
+        }
+    }
+
+    /// Accept tokens from `tokens` as the chats they were minted for (#393).
+    /// A host shares one set between the server and whatever launches its
+    /// agents, so a token minted for a turn is one this server recognises.
+    pub fn with_caller_tokens(mut self, tokens: crate::auth::CallerTokens) -> Self {
+        self.caller_tokens = tokens;
+        self
+    }
+
+    pub fn caller_tokens(&self) -> &crate::auth::CallerTokens {
+        &self.caller_tokens
+    }
+
+    /// Serve installed apps' tools beside the host's own (#574), and tell
+    /// clients when they change.
+    pub fn with_app_tools(mut self, tools: Arc<dyn ToolSource>) -> Self {
+        self.app_tools = Some(tools);
+        self
+    }
+
+    pub fn app_tools(&self) -> Option<&Arc<dyn ToolSource>> {
+        self.app_tools.as_ref()
+    }
+
+    /// Whether `name` is an app's tool rather than one of the host's.
+    fn is_app_tool(&self, name: &str) -> bool {
+        self.app_tools.is_some()
+            && name.starts_with(APP_TOOL_PREFIX)
+            && self.registry.get(name).is_none()
+    }
+
+    /// The registry that holds `name` now, without catching up: the host's
+    /// own, or the app tools as last built.
+    fn holding(&self, name: &str) -> Arc<Registry> {
+        match &self.app_tools {
+            Some(tools) if self.is_app_tool(name) => tools.current(),
+            _ => self.registry.clone(),
+        }
+    }
+
+    /// The registry one call of `name` is decided and run against, after the
+    /// app tools have caught up. A call holds it from its consent to its end:
+    /// if the app changes in between, this snapshot's handler is revoked and
+    /// the call refused, rather than run as a newer version of the tool the
+    /// person was never asked about.
+    pub async fn resolve(&self, name: &str) -> Arc<Registry> {
+        match &self.app_tools {
+            Some(tools) if self.is_app_tool(name) => tools.tools().await,
+            _ => self.registry.clone(),
+        }
+    }
+
+    /// Let the app tools catch up with any change they have not seen.
+    pub async fn refresh_app_tools(&self) {
+        if let Some(tools) = &self.app_tools {
+            tools.tools().await;
         }
     }
 
@@ -134,29 +262,81 @@ impl McpServer {
     /// Whether a tool reads sensitive material, so the audit log can redact
     /// its arguments wholesale.
     pub fn is_sensitive(&self, name: &str) -> bool {
-        self.registry
+        Self::is_sensitive_in(&self.holding(name), name)
+    }
+
+    /// [`McpServer::is_sensitive`], in the registry one call resolved to.
+    pub fn is_sensitive_in(registry: &Registry, name: &str) -> bool {
+        registry
             .get(name)
             .map(|c| c.annotations.sensitive)
             .unwrap_or(false)
     }
 
+    /// The host's tools, then the app tools as last built (#574).
     pub fn list_tools(&self) -> Vec<ToolDescriptor> {
-        self.registry
+        let describe = |cap: &srelens_capability::Capability| ToolDescriptor {
+            name: cap.id.clone(),
+            description: cap.summary.clone(),
+            input_schema: cap.input_schema.clone(),
+            read_only: cap.annotations.read_only,
+            destructive: cap.annotations.destructive,
+        };
+        let mut tools: Vec<ToolDescriptor> = self
+            .registry
             .ids()
             .into_iter()
             .filter_map(|id| self.registry.get(id))
-            .map(|cap| ToolDescriptor {
-                name: cap.id.clone(),
-                description: cap.summary.clone(),
-                input_schema: cap.input_schema.clone(),
-                read_only: cap.annotations.read_only,
-                destructive: cap.annotations.destructive,
-            })
-            .collect()
+            .map(describe)
+            .collect();
+        if let Some(apps) = &self.app_tools {
+            let apps = apps.current();
+            tools.extend(
+                apps.ids()
+                    .into_iter()
+                    .filter(|id| self.is_app_tool(id))
+                    .filter_map(|id| apps.get(id))
+                    .map(describe),
+            );
+        }
+        tools
     }
 
     pub async fn call_tool(&self, name: &str, args: Value) -> Result<Value, CapabilityError> {
-        self.registry.invoke(name, args).await
+        self.resolve(name).await.invoke(name, args).await
+    }
+
+    /// Call a tool and let the registry write the audit record for it.
+    ///
+    /// `handle_request` used to build the record itself, which is why the
+    /// desktop bridge had none: two call sites, one of them forgotten. The
+    /// registry is where both surfaces meet, so it does the recording and this
+    /// only supplies what MCP knows and it does not — which transport the call
+    /// came in on, and what the consent policy decided.
+    pub async fn call_tool_audited(
+        &self,
+        name: &str,
+        args: Value,
+        transport: Transport,
+        decision: &'static str,
+    ) -> Result<Value, CapabilityError> {
+        let registry = self.resolve(name).await;
+        self.call_tool_audited_in(&registry, name, args, transport, decision)
+            .await
+    }
+
+    /// [`McpServer::call_tool_audited`], in the registry the call resolved to.
+    pub async fn call_tool_audited_in(
+        &self,
+        registry: &Registry,
+        name: &str,
+        args: Value,
+        transport: Transport,
+        decision: &'static str,
+    ) -> Result<Value, CapabilityError> {
+        registry
+            .invoke_audited(name, args, self.audit.as_ref(), transport.into(), decision)
+            .await
     }
 
     /// Whether a tool should be consent-gated over remote transports: it
@@ -177,7 +357,12 @@ impl McpServer {
     /// (its output can echo Secret data, so the audit log redacts it) but
     /// isn't gated at all.
     pub fn consent_kind(&self, name: &str) -> Option<crate::policy::ConsentKind> {
-        let cap = self.registry.get(name)?;
+        Self::consent_kind_in(&self.holding(name), name)
+    }
+
+    /// [`McpServer::consent_kind`], in the registry one call resolved to.
+    pub fn consent_kind_in(registry: &Registry, name: &str) -> Option<crate::policy::ConsentKind> {
+        let cap = registry.get(name)?;
         if !(cap.annotations.requires_confirm || cap.annotations.destructive) {
             return None;
         }
@@ -185,6 +370,38 @@ impl McpServer {
             crate::policy::ConsentKind::SensitiveRead
         } else {
             crate::policy::ConsentKind::Destructive
+        })
+    }
+
+    /// The whole gated call, for a policy to decide on: the kind, the host's
+    /// impact level and the host's confirmation sentence rendered against
+    /// these arguments. `None` when the tool is not gated at all.
+    ///
+    /// Rendered here rather than in each policy so every surface — the GUI
+    /// prompt, the headless denial, the host confirmation (#552) — shows one
+    /// sentence, written once, in the host.
+    pub fn consent_request(&self, name: &str, args: &Value) -> Option<crate::policy::ConsentRequest> {
+        Self::consent_request_in(&self.holding(name), name, args)
+    }
+
+    /// [`McpServer::consent_request`], in the registry one call resolved to:
+    /// an app's tool is asked about under the annotations of the snapshot the
+    /// call will run in.
+    pub fn consent_request_in(
+        registry: &Registry,
+        name: &str,
+        args: &Value,
+    ) -> Option<crate::policy::ConsentRequest> {
+        let kind = Self::consent_kind_in(registry, name)?;
+        let annotations = registry.get(name)?.annotations;
+        Some(crate::policy::ConsentRequest {
+            tool: name.to_string(),
+            args: args.clone(),
+            kind,
+            impact: annotations.impact,
+            confirm_text: annotations.confirm_text(args),
+            // The transport fills this in; the registry cannot know it.
+            caller: None,
         })
     }
 }
@@ -222,6 +439,53 @@ mod tests {
         );
     }
 
+    /// PR #661 review (CodeRabbit, CWE-451). Three surfaces — the desktop
+    /// modal, the assistant card and `AgentConsent` — render
+    /// `ConsentRequest::prompt()` as text, so whatever reaches `confirm_text`
+    /// is what a person reads before approving. The sanitising lives in
+    /// `confirm_fields`; this pins it at the boundary those surfaces actually
+    /// read from, and pins the other half of the trade: the caller's whole
+    /// untouched value still arrives in `args`, which the dialogs show
+    /// beneath the question.
+    #[tokio::test]
+    async fn a_hostile_name_reaches_the_policy_sanitised_in_the_sentence_and_whole_in_the_args() {
+        let long = "z".repeat(400);
+        let name = format!("api\u{202E}{long}");
+        let mut reg = Registry::new();
+        let mut cap = Capability::read_only("k8s.deleteResource", "deletes", |_| async {
+            Ok(json!({}))
+        });
+        cap.annotations = srelens_capability::Annotations::DESTRUCTIVE;
+        reg.register(cap);
+        let server = McpServer::new(Arc::new(reg));
+
+        let request = server
+            .consent_request(
+                "k8s.deleteResource",
+                &json!({ "context": "prod", "kind": "Pod", "name": name }),
+            )
+            .expect("a destructive tool is gated");
+        let prompt = request.prompt();
+
+        assert!(
+            !prompt.contains('\u{202E}'),
+            "the override reached the question: {prompt:?}"
+        );
+        assert!(
+            prompt.chars().count() < 200,
+            "the question must stay readable, got {} chars",
+            prompt.chars().count()
+        );
+        assert!(
+            prompt.ends_with("in cluster prod?"),
+            "the question must survive the name: {prompt:?}"
+        );
+        assert_eq!(
+            request.args["name"], name,
+            "the caller's whole value still reaches the arguments block"
+        );
+    }
+
     #[test]
     fn list_tools_mirrors_registry() {
         let server = McpServer::new(registry_with_ping());
@@ -236,6 +500,40 @@ mod tests {
         let server = McpServer::new(registry_with_ping());
         let out = server.call_tool("ping", json!("hi")).await.unwrap();
         assert_eq!(out, json!({ "echo": "hi" }));
+    }
+
+    /// An app's logs and runtime metrics are for srelens's own UI (#575): an
+    /// agent's context goes to its LLM provider, and a sidecar's stderr is text
+    /// a third party wrote. So a UI-only capability is neither a tool nor
+    /// callable as one, on any path the server has.
+    #[tokio::test]
+    async fn a_ui_only_capability_is_neither_listed_nor_callable() {
+        let mut reg = Registry::new();
+        reg.register(Capability::read_only("ping", "health check", |v| async move {
+            Ok(json!({ "echo": v }))
+        }));
+        reg.register(
+            Capability::read_only("app.logs", "an app's log", |_| async {
+                Ok(json!({"lines": ["srelens: the extension is running"]}))
+            })
+            .only_in_the_ui(),
+        );
+        let server = McpServer::new(Arc::new(reg));
+
+        let names: Vec<String> = server.list_tools().into_iter().map(|t| t.name).collect();
+        assert_eq!(names, ["ping"]);
+        assert!(matches!(
+            server.call_tool("app.logs", json!({})).await,
+            Err(CapabilityError::NotFound(_))
+        ));
+        assert!(matches!(
+            server
+                .call_tool_audited("app.logs", json!({}), Transport::Http, "auto")
+                .await,
+            Err(CapabilityError::NotFound(_))
+        ));
+        assert!(!server.is_sensitive("app.logs"));
+        assert_eq!(server.consent_kind("app.logs"), None);
     }
 
     /// The vulnerability this closes: a `SENSITIVE_READ` capability like
@@ -319,12 +617,8 @@ mod tests {
         let mut cap = Capability::read_only("k8s.updateConfigData", "writes a Secret", |_| async {
             Ok(json!({}))
         });
-        cap.annotations = srelens_capability::Annotations {
-            read_only: false,
-            destructive: false,
-            requires_confirm: true,
-            sensitive: true,
-        };
+        cap.annotations =
+            srelens_capability::Annotations { sensitive: true, ..srelens_capability::Annotations::MUTATING };
         reg.register(cap);
         let server = McpServer::new(Arc::new(reg));
 
@@ -362,10 +656,8 @@ mod tests {
             Ok(json!({}))
         });
         cap.annotations = srelens_capability::Annotations {
-            read_only: true,
-            destructive: false,
-            requires_confirm: false,
             sensitive: true,
+            ..srelens_capability::Annotations::READ_ONLY
         };
         reg.register(cap);
         let server = McpServer::new(Arc::new(reg));

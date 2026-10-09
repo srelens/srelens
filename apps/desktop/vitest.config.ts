@@ -9,6 +9,7 @@ export default defineConfig({
     /** 15s, not vitest's 5s default — see `vitest.shared.ts` for why. */
     testTimeout: TEST_TIMEOUT_MS,
     execArgv: TEST_EXEC_ARGV,
-    setupFiles: ["./src/test-setup.ts"],
+    /** No real WebSocket in a test — see `vitest.offline-websocket.ts` for why. */
+    setupFiles: ["../../vitest.offline-websocket.ts", "./src/test-setup.ts"],
   },
 });

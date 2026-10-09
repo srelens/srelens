@@ -151,15 +151,118 @@ fn version_printer_columns(version: &serde_json::Value) -> Vec<PrinterColumn> {
 ///
 /// Anything absent, null, or not a scalar renders empty — an empty cell reads
 /// better than a blob of JSON.
-fn resolve_json_path(value: &serde_json::Value, path: &str) -> String {
+/// Restricted scalar projection shared by CRD printer columns and host-owned app columns.
+pub fn resolve_json_path(value: &serde_json::Value, path: &str) -> String {
+    match json_path_value(value, path) {
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(serde_json::Value::Number(n)) => n.to_string(),
+        Some(serde_json::Value::Bool(b)) => b.to_string(),
+        _ => String::new(),
+    }
+}
+
+/// Why `path` is outside the grammar [`json_path_value`] reads, or `None`
+/// when it is in. For a path taken from a caller: the walker reads anything
+/// it does not recognise as a key, so `[*]` or `..` would silently resolve to
+/// nothing and a present field would be reported absent. Root `.` is in.
+pub fn json_path_problem(path: &str) -> Option<&'static str> {
+    let Some(mut rest) = path.strip_prefix('.') else {
+        return Some("must start with '.'");
+    };
+    if rest.starts_with('.') {
+        return Some("uses '..', which is not supported");
+    }
+    while !rest.is_empty() {
+        if let Some(open) = rest.strip_prefix('[') {
+            let Some(close) = open.find(']') else {
+                return Some("has an unclosed '['");
+            };
+            let inner = open[..close].trim();
+            let quoted = inner.len() >= 2
+                && ((inner.starts_with('\'') && inner.ends_with('\''))
+                    || (inner.starts_with('"') && inner.ends_with('"')));
+            if !(quoted || single_equality(inner) || inner.parse::<usize>().is_ok()) {
+                return Some(
+                    "uses a bracket other than [0], ['key'] or one [?(@.field==\"value\")]; \
+                     wildcards [*], slices, negative indexes and composite or non-equality \
+                     filters are not supported",
+                );
+            }
+            rest = &open[close + 1..];
+        } else {
+            let mut end = rest.len();
+            let mut chars = rest.char_indices();
+            while let Some((index, ch)) = chars.next() {
+                match ch {
+                    '\\' => {
+                        if chars.next().is_none() {
+                            return Some("ends with an unfinished '\\' escape");
+                        }
+                    }
+                    '.' | '[' => {
+                        end = index;
+                        break;
+                    }
+                    ']' => return Some("has a ']' with no '['"),
+                    _ => {}
+                }
+            }
+            rest = &rest[end..];
+        }
+        if let Some(after) = rest.strip_prefix('.') {
+            if after.is_empty() {
+                return Some("ends with '.'");
+            }
+            if after.starts_with('.') {
+                return Some("uses '..', which is not supported");
+            }
+            rest = after;
+        }
+    }
+    None
+}
+
+/// `?(@.field==literal)` with one field and one literal — the only predicate
+/// `Segment::bracket` evaluates. It splits at the first `==`, so a composite
+/// (`&&`, `||`) would compare against the rest of the expression. The field
+/// is read as a path, escapes included, so it is checked as one.
+fn single_equality(inner: &str) -> bool {
+    let Some(expression) = inner.strip_prefix("?(").and_then(|e| e.strip_suffix(')')) else {
+        return false;
+    };
+    let Some((field, literal)) = expression.split_once("==") else {
+        return false;
+    };
+    let (field, literal) = (field.trim(), literal.trim());
+    let plain = |c: char| c.is_ascii_alphanumeric() || "._-/".contains(c);
+    let quoted_with = |q: char| {
+        literal.len() >= 2
+            && literal.starts_with(q)
+            && literal.ends_with(q)
+            && !literal[1..literal.len() - 1].contains(q)
+    };
+    let literal_ok = quoted_with('"')
+        || quoted_with('\'')
+        || (!literal.is_empty() && literal.chars().all(plain));
+    let operator = |c: char| c.is_whitespace() || "&|!<>=()".contains(c);
+    let field_ok = field
+        .strip_prefix('@')
+        .is_some_and(|f| !f.contains(operator) && json_path_problem(f).is_none());
+    field_ok && literal_ok
+}
+
+/// The value a [`resolve_json_path`] path lands on, unrendered — a map or a
+/// list as well as a scalar. `None` when the path is absent or malformed.
+pub fn json_path_value<'v>(
+    value: &'v serde_json::Value,
+    path: &str,
+) -> Option<&'v serde_json::Value> {
     let mut current = value;
     let mut rest = path.trim_start_matches('.');
     while !rest.is_empty() {
         let (segment, remainder) = match rest.strip_prefix('[') {
             Some(open) => {
-                let Some(close) = open.find(']') else {
-                    return String::new();
-                };
+                let close = open.find(']')?;
                 (
                     Segment::bracket(&open[..close]),
                     open[close + 1..].trim_start_matches('.'),
@@ -189,18 +292,10 @@ fn resolve_json_path(value: &serde_json::Value, path: &str) -> String {
                 (Segment::Key(key), rest[end..].trim_start_matches('.'))
             }
         };
-        let Some(next) = segment.apply(current) else {
-            return String::new();
-        };
-        current = next;
+        current = segment.apply(current)?;
         rest = remainder;
     }
-    match current {
-        serde_json::Value::String(s) => s.clone(),
-        serde_json::Value::Number(n) => n.to_string(),
-        serde_json::Value::Bool(b) => b.to_string(),
-        _ => String::new(),
-    }
+    Some(current)
 }
 
 /// One step of a CRD jsonPath.
@@ -383,6 +478,12 @@ pub struct ListCustomIn {
     /// Callers that omit these get just name/namespace/age, as before.
     #[serde(default)]
     pub printer_columns: Vec<PrinterColumn>,
+    /// An app's status rules for this kind (#541), bound by the host from the
+    /// manifest's `statusResolvers`; each row then carries its `status`.
+    /// Evaluated here because this is where the whole object is: the rows
+    /// that leave are summaries.
+    #[serde(default)]
+    pub status_rules: Vec<srelens_capability::status::StatusRule>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
@@ -402,6 +503,9 @@ pub struct CustomRow {
     /// information -- `type: date`, where timestamps 65 and 115 minutes old both
     /// render "1h" and would otherwise tie. Empty where the text sorts fine.
     pub sort_keys: Vec<String>,
+    /// The resolved status, when the request carried status rules.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<srelens_capability::status::ResolvedStatus>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -469,6 +573,24 @@ pub async fn custom_resource_serves(
     version: &str,
     plural: &str,
 ) -> Result<bool, String> {
+    Ok(
+        custom_resource_first_served(client, group, &[version.to_owned()], plural)
+            .await?
+            .is_some(),
+    )
+}
+
+/// The first of `versions`, in their order, that a CustomResourceDefinition named
+/// `{plural}.{group}` serves for that group and plural: how an app reader that accepts
+/// several versions picks one on this cluster (#547). One lookup answers the whole list.
+/// `Ok(None)` means only that the API server answered and no such CRD serves any of them;
+/// a failed lookup is an error, never an absence.
+pub async fn custom_resource_first_served(
+    client: kube::Client,
+    group: &str,
+    versions: &[String],
+    plural: &str,
+) -> Result<Option<String>, String> {
     let ar = ApiResource::from_gvk(&GroupVersionKind::gvk(
         "apiextensions.k8s.io",
         "v1",
@@ -479,7 +601,20 @@ pub async fn custom_resource_serves(
         .await
         .map_err(|_| "CustomResourceDefinition lookup timed out".to_string())?
         .map_err(|e| e.to_string())?;
-    Ok(found.is_some_and(|crd| crd_serves(&crd.data["spec"], group, version, plural)))
+    Ok(found.and_then(|crd| first_served(&crd.data["spec"], group, versions, plural)))
+}
+
+/// The first of `versions` a CRD `spec` serves for this group and plural.
+fn first_served(
+    spec: &serde_json::Value,
+    group: &str,
+    versions: &[String],
+    plural: &str,
+) -> Option<String> {
+    versions
+        .iter()
+        .find(|version| crd_serves(spec, group, version, plural))
+        .cloned()
 }
 /// Whether a CRD `spec` declares this group and plural and serves this version.
 fn crd_serves(spec: &serde_json::Value, group: &str, version: &str, plural: &str) -> bool {
@@ -515,6 +650,20 @@ pub fn list_custom_resource_capability(cache: Arc<ClientCache>) -> Capability {
         move |input: ListCustomIn| {
             let cache = cache.clone();
             async move {
+                // Checked before the cluster is asked: a rule list the host
+                // would refuse at install is a bad request, not a column of
+                // "Unknown" rows that look like an answer.
+                if !input.status_rules.is_empty() {
+                    if let Some((path, why)) =
+                        srelens_capability::status::rule_problems(&input.status_rules)
+                            .into_iter()
+                            .next()
+                    {
+                        return Err(CapabilityError::InvalidInput(format!(
+                            "statusRules: {path}: {why}"
+                        )));
+                    }
+                }
                 let client = cache
                     .get(&input.context)
                     .await
@@ -555,15 +704,24 @@ pub fn list_custom_resource_capability(cache: Arc<ClientCache>) -> Capability {
                 let items = objects
                     .into_iter()
                     .map(|o| {
-                        let (values, sort_keys) = if columns.is_empty() {
-                            (Vec::new(), Vec::new())
-                        } else {
-                            let object = whole_object(&o);
-                            columns
+                        let object = (!columns.is_empty() || !input.status_rules.is_empty())
+                            .then(|| whole_object(&o));
+                        let (values, sort_keys) = match &object {
+                            Some(object) if !columns.is_empty() => columns
                                 .iter()
-                                .map(|c| (render_column(&object, c), column_sort_key(&object, c)))
-                                .unzip()
+                                .map(|c| (render_column(object, c), column_sort_key(object, c)))
+                                .unzip(),
+                            _ => (Vec::new(), Vec::new()),
                         };
+                        let status = object
+                            .as_ref()
+                            .filter(|_| !input.status_rules.is_empty())
+                            .map(|object| {
+                                srelens_capability::status::resolve_status(
+                                    &input.status_rules,
+                                    object,
+                                )
+                            });
                         CustomRow {
                             name: o.metadata.name.clone().unwrap_or_default(),
                             namespace: o.metadata.namespace.clone().unwrap_or_default(),
@@ -573,6 +731,7 @@ pub fn list_custom_resource_capability(cache: Arc<ClientCache>) -> Capability {
                             age: crate::humanize_age(o.metadata.creation_timestamp.as_ref()),
                             columns: values,
                             sort_keys,
+                            status,
                         }
                     })
                     .collect();
@@ -585,6 +744,143 @@ pub fn list_custom_resource_capability(cache: Arc<ClientCache>) -> Capability {
             }
         },
     )
+}
+
+/// Host-only join read. Raw resources stay in the broker and only resolved scalar cells
+/// leave `extensions.resolveColumns`; an app's reader capability still returns summaries.
+pub async fn list_custom_resource_join_objects(
+    cache: &ClientCache,
+    context: &str,
+    namespace: &str,
+    group: &str,
+    version: &str,
+    kind: &str,
+    plural: &str,
+    namespaced: bool,
+) -> Result<(Vec<serde_json::Value>, bool), CapabilityError> {
+    let client = cache.get(context).await.map_err(CapabilityError::Handler)?;
+    let ar = custom_api_resource(group, version, kind, plural);
+    let api: Api<DynamicObject> = if namespaced && !namespace.is_empty() {
+        Api::namespaced_with(client, namespace, &ar)
+    } else {
+        Api::all_with(client, &ar)
+    };
+    let (objects, truncated) = crate::list_cap::list_capped(&api, ListParams::default())
+        .await
+        .map_err(|error| error.into_capability_error("list joined custom resources"))?;
+    Ok((objects.iter().map(whole_object).collect(), truncated))
+}
+
+/// Host-only read of a built-in kind's row metadata, for app badges (#541).
+///
+/// `kind` is qualified (`apps/Deployment`, `/Pod`) and must be a built-in kind
+/// this host knows in exactly that group. Only identity, labels, annotations
+/// and owner references are kept: a badge without a join reads its row's
+/// metadata and nothing else, so an app never reaches a spec or a status it
+/// holds no reader for. Secrets are refused outright — their annotation values
+/// are redacted on every ungated read, and a badge must not become a way
+/// around that.
+pub async fn list_builtin_metadata(
+    cache: &ClientCache,
+    context: &str,
+    namespace: &str,
+    kind: &str,
+) -> Result<(Vec<serde_json::Value>, bool), CapabilityError> {
+    let refuse = |why: &str| Err(CapabilityError::InvalidInput(format!("{kind}: {why}")));
+    let Some((group, name)) = kind.split_once('/') else {
+        return refuse("qualify a kind with its API group");
+    };
+    if group.is_empty() && name == "Secret" {
+        return refuse("Secret metadata is never read for an app");
+    }
+    let Some((gvk, namespaced)) = crate::manifest::gvk_for(name) else {
+        return refuse("not a built-in kind this host reads");
+    };
+    if gvk.group != group || gvk.kind != name {
+        return refuse("not a built-in kind this host reads");
+    }
+    let client = cache.get(context).await.map_err(CapabilityError::Handler)?;
+    let resource = ApiResource::from_gvk(&gvk);
+    let api: Api<DynamicObject> = if namespaced && !namespace.is_empty() {
+        Api::namespaced_with(client, namespace, &resource)
+    } else {
+        Api::all_with(client, &resource)
+    };
+    let (objects, truncated) = crate::list_cap::list_capped(&api, ListParams::default())
+        .await
+        .map_err(|error| error.into_capability_error("list built-in resource metadata"))?;
+    let metadata = objects
+        .iter()
+        .map(|object| metadata_of(&resource, &object.metadata, true))
+        .collect();
+    Ok((metadata, truncated))
+}
+
+/// What the host keeps of one built-in object's metadata for an app: identity,
+/// labels, owner references and, when `annotations`, annotations. Never
+/// managed fields, whose `fieldsV1` names every key a Secret holds.
+fn metadata_of(
+    resource: &ApiResource,
+    meta: &kube::api::ObjectMeta,
+    annotations: bool,
+) -> serde_json::Value {
+    // The kind's identity is the host's own, from the GVK it listed, so a
+    // rule can check a reference against the very object.
+    let mut metadata = serde_json::json!({
+        "name": meta.name,
+        "namespace": meta.namespace,
+        "uid": meta.uid,
+        "labels": meta.labels,
+        "ownerReferences": meta.owner_references,
+    });
+    if annotations {
+        metadata["annotations"] = serde_json::json!(meta.annotations);
+    }
+    serde_json::json!({"apiVersion": resource.api_version, "kind": resource.kind, "metadata": metadata})
+}
+
+/// Host-only read of a built-in kind's metadata for resource links (#728): the
+/// target a link names, or the resources whose links name one.
+///
+/// `kind` is qualified and must be a built-in kind this host knows in exactly
+/// that group. The API server is asked for metadata only
+/// (`PartialObjectMetadataList`), so no spec or status is sent, and a
+/// Secret's values never leave it — a link reads a Secret's identity, labels
+/// and owner references, and not its annotations, which the host redacts on
+/// every ungated read. What the host keeps is [`metadata_of`], whatever the
+/// server answered.
+pub async fn list_builtin_link_metadata(
+    cache: &ClientCache,
+    context: &str,
+    namespace: &str,
+    kind: &str,
+) -> Result<(Vec<serde_json::Value>, bool), CapabilityError> {
+    let refuse = |why: &str| Err(CapabilityError::InvalidInput(format!("{kind}: {why}")));
+    let Some((group, name)) = kind.split_once('/') else {
+        return refuse("qualify a kind with its API group");
+    };
+    let Some((gvk, namespaced)) = crate::manifest::gvk_for(name) else {
+        return refuse("not a built-in kind this host reads");
+    };
+    if gvk.group != group || gvk.kind != name {
+        return refuse("not a built-in kind this host reads");
+    }
+    let secret = group.is_empty() && name == "Secret";
+    let client = cache.get(context).await.map_err(CapabilityError::Handler)?;
+    let resource = ApiResource::from_gvk(&gvk);
+    let api: Api<DynamicObject> = if namespaced && !namespace.is_empty() {
+        Api::namespaced_with(client, namespace, &resource)
+    } else {
+        Api::all_with(client, &resource)
+    };
+    let (objects, truncated) = crate::list_cap::list_metadata_capped(&api, ListParams::default())
+        .await
+        .map_err(|error| error.into_capability_error("list built-in resource metadata"))?;
+    let metadata = objects
+        .iter()
+        .map(|object| metadata_of(&resource, &object.metadata, !secret))
+        .collect();
+    Ok((metadata, truncated))
 }
 
 #[cfg(test)]
@@ -776,6 +1072,90 @@ mod tests {
         // kubectl renders arrays/objects poorly; an empty cell beats noise.
         assert_eq!(resolve_json_path(&obj(), ".status.conditions"), "");
         assert_eq!(resolve_json_path(&obj(), ".spec"), "");
+    }
+
+    /// The same walk, handing back the JSON it lands on — a whole map or list
+    /// as well as a scalar — for callers that project fields rather than
+    /// render a cell.
+    #[test]
+    fn json_path_value_returns_the_subtree_and_none_when_absent() {
+        assert_eq!(
+            json_path_value(&obj(), ".spec"),
+            Some(&serde_json::json!({ "version": "4.1.2", "nodes": 3, "paused": false }))
+        );
+        assert_eq!(
+            json_path_value(&obj(), ".metadata.labels['app.kubernetes.io/name']"),
+            Some(&serde_json::json!("cassandra"))
+        );
+        assert_eq!(
+            json_path_value(&fluxish(), ".status.conditions[?(@.type==\"Ready\")]"),
+            Some(&fluxish()["status"]["conditions"][1])
+        );
+        assert_eq!(json_path_value(&obj(), ".status.nope"), None);
+        assert_eq!(json_path_value(&obj(), ".spec.ports[0"), None);
+    }
+
+    /// A filter's field is itself a path, escapes included — the walker reads
+    /// it with `resolve_json_path` — so the check takes one too.
+    #[test]
+    fn a_filter_on_an_escaped_key_is_read_and_accepted() {
+        let pod = serde_json::json!({ "spec": { "containers": [
+            { "name": "web", "resources": { "limits": { "cpu": "1" } } },
+            { "name": "trainer", "resources": { "limits": { "nvidia.com/gpu": "1" } } },
+        ]}});
+        let path = r#".spec.containers[?(@.resources.limits.nvidia\.com/gpu=="1")].name"#;
+        assert_eq!(json_path_value(&pod, path), Some(&serde_json::json!("trainer")));
+        assert_eq!(json_path_problem(path), None);
+    }
+
+    /// A path from outside must be one the walker can read, or a present
+    /// field comes back as absent. Every form the walker tests above read is
+    /// in; kubectl forms it does not implement are out, not read as keys.
+    #[test]
+    fn json_path_problem_accepts_what_the_walker_reads_and_refuses_the_rest() {
+        for good in [
+            ".",
+            ".status.health",
+            r".metadata.labels.app\.kubernetes\.io/name",
+            ".metadata.labels['app.kubernetes.io/name']",
+            ".metadata.labels[\"app.kubernetes.io/name\"]",
+            ".status.conditions[?(@.type==\"Ready\")].status",
+            ".status.conditions[?(@.type == 'Stalled')].status",
+            ".status.conditions[?(@.type==Ready)].status",
+            r#".spec.containers[?(@.resources.limits.nvidia\.com/gpu=="1")].name"#,
+            ".spec.ports[1].port",
+        ] {
+            assert_eq!(json_path_problem(good), None, "{good:?}");
+        }
+        for bad in [
+            "status",
+            "/status/allocatable",
+            "{.metadata.name}",
+            "",
+            ".spec.ports[0",
+            ".a][",
+            ".a]",
+            ".spec.containers[*].image",
+            ".spec.containers[-1]",
+            ".spec.containers[0:2]",
+            ".spec.containers[name]",
+            ".status.conditions[?(@.count>1)]",
+            "..image",
+            ".spec..image",
+            // The walker splits at the first `==`, so a composite predicate
+            // would compare against `Ready"&&@.status=="True` and match nothing.
+            ".status.conditions[?(@.type==\"Ready\"&&@.status==\"True\")].status",
+            ".status.conditions[?(@.type==\"Ready\" || @.type==\"Stalled\")]",
+            ".status.conditions[?(@.type!=\"Ready\")]",
+            ".status.conditions[?(@.type && @.status==\"True\")]",
+            ".status.conditions[?(@.type==\"Ready\"&&@.status==True)]",
+            // An unfinished suffix the walker would drop, reading another path.
+            r".metadata.name\",
+            ".metadata.",
+            ".spec.ports[0].",
+        ] {
+            assert!(json_path_problem(bad).is_some(), "{bad:?} must be refused");
+        }
     }
 
     fn spec_with_columns() -> serde_json::Value {
@@ -1045,6 +1425,354 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn join_list_scopes_requests_and_reconstructs_complete_custom_resources() {
+        let object = serde_json::json!({"apiVersion":"example.io/v1","kind":"Widget",
+            "metadata":{"name":"report","namespace":"team","labels":{"target":"api"}},
+            "report":{"critical":3}});
+        let page = serde_json::json!({"apiVersion":"example.io/v1","kind":"WidgetList",
+            "metadata":{},"items":[object]});
+        for (namespace, namespaced, expected_path) in [
+            ("team", true, "/apis/example.io/v1/namespaces/team/widgets"),
+            ("team", false, "/apis/example.io/v1/widgets"),
+        ] {
+            let (client, uris) = crate::list_cap::test_support::mock_slow_pages(
+                vec![page.clone()],
+                std::time::Duration::ZERO,
+            );
+            let cache = ClientCache::new_many(vec![]);
+            cache.preload("fake", client).await;
+            let (objects, truncated) = list_custom_resource_join_objects(
+                &cache,
+                "fake",
+                namespace,
+                "example.io",
+                "v1",
+                "Widget",
+                "widgets",
+                namespaced,
+            )
+            .await
+            .unwrap();
+            assert!(!truncated);
+            assert_eq!(objects.len(), 1);
+            assert_eq!(objects[0]["apiVersion"], "example.io/v1");
+            assert_eq!(objects[0]["kind"], "Widget");
+            assert_eq!(objects[0]["metadata"]["labels"]["target"], "api");
+            assert_eq!(objects[0]["report"]["critical"], 3);
+            assert!(uris.lock().unwrap()[0].starts_with(expected_path));
+        }
+    }
+
+    /// Three Flux Kustomizations as the API server lists them.
+    fn kustomization_page() -> serde_json::Value {
+        let item = |name: &str, suspend: bool, ready: &str, message: &str| {
+            serde_json::json!({"apiVersion":"kustomize.toolkit.fluxcd.io/v1","kind":"Kustomization",
+                "metadata":{"name":name,"namespace":"flux-system"},
+                "spec":{"suspend":suspend},
+                "status":{"conditions":[{"type":"Ready","status":ready,"message":message}]}})
+        };
+        serde_json::json!({"apiVersion":"kustomize.toolkit.fluxcd.io/v1","kind":"KustomizationList",
+        "metadata":{},"items":[
+            item("apps", false, "True", "Applied revision: main@sha1:abc"),
+            item("infra", true, "True", "Applied"),
+            item("broken", false, "False", "kustomize build failed"),
+        ]})
+    }
+
+    /// The payload `extensions.read` sends once the host has bound a
+    /// resolver's rules: the caller's camelCase spelling.
+    fn kustomizations_with_rules() -> serde_json::Value {
+        serde_json::json!({
+            "context":"fake","group":"kustomize.toolkit.fluxcd.io","version":"v1",
+            "plural":"kustomizations","kind":"Kustomization","namespaced":true,"namespace":"flux-system",
+            "statusRules":[
+                {"when":[{"jsonPath":".spec.suspend","equals":true}],"status":"suspended","label":"Suspended"},
+                {"when":[{"jsonPath":".status.conditions[?(@.type==\"Ready\")].status","equals":"True"}],
+                 "status":"healthy","label":"Ready"},
+                {"when":[{"jsonPath":".status.conditions[?(@.type==\"Ready\")].status","equals":"False"}],
+                 "status":"error","label":"Not ready","reason":".status.conditions[?(@.type==\"Ready\")].message"}
+            ]
+        })
+    }
+
+    #[tokio::test]
+    async fn a_list_with_status_rules_resolves_each_row_against_the_whole_object() {
+        let (client, _) = crate::list_cap::test_support::mock_slow_pages(
+            vec![kustomization_page()],
+            std::time::Duration::ZERO,
+        );
+        let cache = ClientCache::new_many(vec![]);
+        cache.preload("fake", client).await;
+        let list = list_custom_resource_capability(cache);
+        let out = (list.handler)(kustomizations_with_rules()).await.unwrap();
+        let statuses: Vec<_> = out["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["status"].clone())
+            .collect();
+        assert_eq!(
+            statuses,
+            vec![
+                serde_json::json!({"status":"healthy","label":"Ready"}),
+                serde_json::json!({"status":"suspended","label":"Suspended"}),
+                serde_json::json!({"status":"error","label":"Not ready","reason":"kustomize build failed"}),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_list_without_status_rules_carries_no_status() {
+        let (client, _) = crate::list_cap::test_support::mock_slow_pages(
+            vec![kustomization_page()],
+            std::time::Duration::ZERO,
+        );
+        let cache = ClientCache::new_many(vec![]);
+        cache.preload("fake", client).await;
+        let mut payload = kustomizations_with_rules();
+        payload.as_object_mut().unwrap().remove("statusRules");
+        let out = (list_custom_resource_capability(cache).handler)(payload)
+            .await
+            .unwrap();
+        assert!(out["items"][0].get("status").is_none(), "{out}");
+    }
+
+    #[tokio::test]
+    async fn status_rules_the_host_would_refuse_are_invalid_input_not_unknown_rows() {
+        let cache = ClientCache::new_many(vec![]);
+        let mut payload = kustomizations_with_rules();
+        payload["statusRules"][0]["when"][0]["jsonPath"] = serde_json::json!(".spec.*");
+        let error = (list_custom_resource_capability(cache).handler)(payload)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, CapabilityError::InvalidInput(_)), "{error}");
+    }
+
+    #[tokio::test]
+    async fn builtin_metadata_is_read_for_a_qualified_kind_and_nothing_else_of_it_is_kept() {
+        let page = serde_json::json!({"apiVersion":"apps/v1","kind":"DeploymentList","metadata":{},
+            "items":[{"apiVersion":"apps/v1","kind":"Deployment",
+                "metadata":{"name":"api","namespace":"team","uid":"u1",
+                    "labels":{"kustomize.toolkit.fluxcd.io/name":"apps"},
+                    "annotations":{"argocd.argoproj.io/tracking-id":"guestbook:apps/Deployment:team/api"}},
+                "spec":{"replicas":3,"template":{"spec":{"containers":[{"name":"api","image":"x"}]}}},
+                "status":{"readyReplicas":3}}]});
+        let (client, uris) =
+            crate::list_cap::test_support::mock_slow_pages(vec![page], std::time::Duration::ZERO);
+        let cache = ClientCache::new_many(vec![]);
+        cache.preload("fake", client).await;
+        let (objects, truncated) = list_builtin_metadata(&cache, "fake", "team", "apps/Deployment")
+            .await
+            .unwrap();
+        assert!(!truncated);
+        assert_eq!(
+            uris.lock().unwrap()[0].split('?').next(),
+            Some("/apis/apps/v1/namespaces/team/deployments")
+        );
+        assert_eq!(objects.len(), 1);
+        assert_eq!(
+            objects[0]["metadata"]["labels"]["kustomize.toolkit.fluxcd.io/name"],
+            "apps"
+        );
+        assert_eq!(objects[0]["metadata"]["uid"], "u1");
+        // The object's own identity, so a rule can hold a reference against
+        // the resource it sits on (an Argo CD tracking id, #541 review).
+        assert_eq!(objects[0]["apiVersion"], "apps/v1");
+        assert_eq!(objects[0]["kind"], "Deployment");
+        assert!(
+            objects[0].get("spec").is_none() && objects[0].get("status").is_none(),
+            "{}",
+            objects[0]
+        );
+    }
+
+    #[tokio::test]
+    async fn builtin_metadata_refuses_secrets_unknown_kinds_and_a_group_that_does_not_match() {
+        let cache = ClientCache::new_many(vec![]);
+        for kind in [
+            "/Secret",
+            "acme.io/Widget",
+            "acme.io/Deployment",
+            "Deployment",
+            "/Nope",
+        ] {
+            let error = list_builtin_metadata(&cache, "fake", "team", kind)
+                .await
+                .err()
+                .unwrap_or_else(|| panic!("{kind} must be refused"));
+            assert!(
+                matches!(error, CapabilityError::InvalidInput(_)),
+                "{kind}: {error}"
+            );
+        }
+    }
+
+    /// A Secret list as a server that ignored the metadata-only request would send it:
+    /// whole objects, values and all.
+    fn secret_list_page() -> serde_json::Value {
+        serde_json::json!({"apiVersion":"v1","kind":"SecretList","metadata":{},
+            "items":[{"apiVersion":"v1","kind":"Secret",
+                "metadata":{"name":"db","namespace":"team","uid":"u-db",
+                    "labels":{"app.kubernetes.io/name":"api"},
+                    "annotations":{"note":"hunter2",
+                        "kubectl.kubernetes.io/last-applied-configuration":
+                            "{\"data\":{\"password\":\"aHVudGVyMg==\"}}"},
+                    "ownerReferences":[{"apiVersion":"external-secrets.io/v1beta1",
+                        "kind":"ExternalSecret","name":"db","uid":"u-es"}],
+                    "managedFields":[{"manager":"kubectl","fieldsV1":{"f:data":{"f:password":{}}}}]},
+                "data":{"password":"aHVudGVyMg=="},
+                "stringData":{"password":"hunter2"},
+                "type":"Opaque"}]})
+    }
+
+    #[tokio::test]
+    async fn link_metadata_asks_for_metadata_only_and_keeps_no_secret_value() {
+        let (client, seen) = crate::test_support::fake_api(|_| secret_list_page());
+        let cache = ClientCache::new_many(vec![]);
+        cache.preload("fake", client).await;
+        let (objects, truncated) = list_builtin_link_metadata(&cache, "fake", "team", "/Secret")
+            .await
+            .unwrap();
+        assert!(!truncated);
+        let request = &seen.lock().unwrap()[0];
+        assert_eq!(request.path, "/api/v1/namespaces/team/secrets");
+        // The API server is asked for metadata alone: it never sends a value.
+        assert!(
+            request.accept.contains("as=PartialObjectMetadataList"),
+            "{}",
+            request.accept
+        );
+        // And had it sent them, none leaves: no data, no stringData, no annotation.
+        let text = serde_json::to_string(&objects).unwrap();
+        for secret in [
+            "hunter2",
+            "aHVudGVyMg==",
+            "password",
+            "last-applied",
+            "note",
+        ] {
+            assert!(!text.contains(secret), "{secret} in {text}");
+        }
+        // What a link needs is kept: identity, labels and owner references.
+        assert_eq!(objects.len(), 1);
+        let metadata = &objects[0]["metadata"];
+        assert_eq!(metadata["name"], "db");
+        assert_eq!(metadata["namespace"], "team");
+        assert_eq!(metadata["uid"], "u-db");
+        assert_eq!(metadata["labels"]["app.kubernetes.io/name"], "api");
+        assert_eq!(metadata["ownerReferences"][0]["uid"], "u-es");
+        assert_eq!(objects[0]["apiVersion"], "v1");
+        assert_eq!(objects[0]["kind"], "Secret");
+    }
+
+    #[tokio::test]
+    async fn link_metadata_keeps_the_annotations_of_any_kind_but_a_secret() {
+        let (client, seen) = crate::test_support::fake_api(|_| {
+            serde_json::json!({"apiVersion":"v1","kind":"ServiceList","metadata":{},
+                "items":[{"apiVersion":"v1","kind":"Service","metadata":{"name":"api",
+                    "namespace":"team","annotations":{"example.io/owner":"web"}},
+                    "spec":{"clusterIP":"10.0.0.1"}}]})
+        });
+        let cache = ClientCache::new_many(vec![]);
+        cache.preload("fake", client).await;
+        let (objects, _) = list_builtin_link_metadata(&cache, "fake", "", "/Service")
+            .await
+            .unwrap();
+        assert_eq!(seen.lock().unwrap()[0].path, "/api/v1/services");
+        assert_eq!(
+            objects[0]["metadata"]["annotations"]["example.io/owner"],
+            "web"
+        );
+        assert!(objects[0].get("spec").is_none(), "{}", objects[0]);
+    }
+
+    #[tokio::test]
+    async fn link_metadata_refuses_a_kind_this_host_does_not_read_in_that_group() {
+        let cache = ClientCache::new_many(vec![]);
+        for kind in [
+            "acme.io/Widget",
+            "acme.io/Secret",
+            "Deployment",
+            "/Nope",
+            "apps/Service",
+        ] {
+            let error = list_builtin_link_metadata(&cache, "fake", "team", kind)
+                .await
+                .err()
+                .unwrap_or_else(|| panic!("{kind} must be refused"));
+            assert!(
+                matches!(error, CapabilityError::InvalidInput(_)),
+                "{kind}: {error}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn join_list_reports_truncation_at_the_shared_list_cap() {
+        let page = |start: usize, next: Option<&str>| {
+            serde_json::json!({
+                "apiVersion":"example.io/v1","kind":"WidgetList",
+                "metadata":{"continue":next},
+                "items":(start..start+500).map(|i| serde_json::json!({
+                    "apiVersion":"example.io/v1","kind":"Widget","metadata":{"name":format!("w{i}")}
+                })).collect::<Vec<_>>(),
+            })
+        };
+        let (client, uris) = crate::list_cap::test_support::mock_slow_pages(
+            vec![
+                page(0, Some("p2")),
+                page(500, Some("p3")),
+                page(1000, Some("p4")),
+                page(1500, Some("p5")),
+            ],
+            std::time::Duration::ZERO,
+        );
+        let cache = ClientCache::new_many(vec![]);
+        cache.preload("fake", client).await;
+        let (objects, truncated) = list_custom_resource_join_objects(
+            &cache,
+            "fake",
+            "",
+            "example.io",
+            "v1",
+            "Widget",
+            "widgets",
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(objects.len(), crate::list_cap::APP_LIST_CAP);
+        assert!(truncated);
+        assert_eq!(uris.lock().unwrap().len(), 4);
+    }
+
+    #[tokio::test]
+    async fn join_list_preserves_api_failure_as_an_error() {
+        let (client, paths) = answering(403);
+        let cache = ClientCache::new_many(vec![]);
+        cache.preload("fake", client).await;
+        let error = list_custom_resource_join_objects(
+            &cache,
+            "fake",
+            "team",
+            "example.io",
+            "v1",
+            "Widget",
+            "widgets",
+            true,
+        )
+        .await
+        .err()
+        .expect("Forbidden must not become an empty list");
+        assert!(matches!(error, CapabilityError::Handler(_)));
+        assert!(error.to_string().contains("Forbidden"), "{error}");
+        assert_eq!(
+            paths.lock().unwrap()[0],
+            "/apis/example.io/v1/namespaces/team/widgets"
+        );
+    }
+
+    #[tokio::test]
     async fn a_crd_lookup_checks_the_served_version_and_tells_absence_from_failure() {
         let (client, paths) = answering(200);
         assert_eq!(
@@ -1077,6 +1805,85 @@ mod tests {
             custom_resource_serves(client, "argoproj.io", "v1alpha1", "applications")
                 .await
                 .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn one_crd_lookup_answers_the_first_listed_version_it_serves() {
+        let listed = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+        let (client, paths) = answering(200);
+        assert_eq!(
+            custom_resource_first_served(
+                client,
+                "argoproj.io",
+                &listed(&["v1", "v1beta1", "v1alpha1"]),
+                "applications"
+            )
+            .await,
+            Ok(Some("v1alpha1".to_owned()))
+        );
+        // The whole list is answered from one lookup of the CRD.
+        assert_eq!(
+            paths.lock().unwrap().as_slice(),
+            ["/apis/apiextensions.k8s.io/v1/customresourcedefinitions/applications.argoproj.io"]
+        );
+        // Listed but not served — v1beta1 is declared unserved — is no answer.
+        let (client, _) = answering(200);
+        assert_eq!(
+            custom_resource_first_served(
+                client,
+                "argoproj.io",
+                &listed(&["v1", "v1beta1"]),
+                "applications"
+            )
+            .await,
+            Ok(None)
+        );
+        let (client, _) = answering(404);
+        assert_eq!(
+            custom_resource_first_served(
+                client,
+                "argoproj.io",
+                &listed(&["v1alpha1"]),
+                "applications"
+            )
+            .await,
+            Ok(None)
+        );
+        // Forbidden is a failed lookup, never "serves none of them".
+        let (client, _) = answering(403);
+        assert!(custom_resource_first_served(
+            client,
+            "argoproj.io",
+            &listed(&["v1alpha1"]),
+            "applications"
+        )
+        .await
+        .is_err());
+    }
+
+    #[test]
+    fn the_first_served_version_follows_the_listed_order_not_the_crds() {
+        let spec = serde_json::json!({"group":"helm.toolkit.fluxcd.io","names":{"plural":"helmreleases"},
+            "versions":[{"name":"v2beta1","served":true},{"name":"v2beta2","served":true},
+                {"name":"v2","served":true}]});
+        let first = |names: &[&str]| {
+            let names: Vec<String> = names.iter().map(|n| n.to_string()).collect();
+            first_served(&spec, "helm.toolkit.fluxcd.io", &names, "helmreleases")
+        };
+        assert_eq!(first(&["v2", "v2beta2"]).as_deref(), Some("v2"));
+        assert_eq!(first(&["v2beta2", "v2"]).as_deref(), Some("v2beta2"));
+        assert_eq!(first(&["v3", "v2beta2"]).as_deref(), Some("v2beta2"));
+        assert_eq!(first(&["v3"]), None);
+        assert_eq!(first(&[]), None);
+        assert_eq!(
+            first_served(
+                &spec,
+                "helm.toolkit.fluxcd.io",
+                &["v2".into()],
+                "kustomizations"
+            ),
+            None
         );
     }
 

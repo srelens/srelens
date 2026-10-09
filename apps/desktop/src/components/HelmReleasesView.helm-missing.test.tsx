@@ -3,6 +3,7 @@ import { render, screen, waitFor } from "@testing-library/react";
 
 vi.mock("@srelens/core/lib/helm", () => ({
   listHelmReleases: vi.fn().mockResolvedValue({ releases: [] }),
+  listHelmReleasesIn: vi.fn().mockResolvedValue({ releases: [], failures: [] }),
   getHelmRelease: vi.fn().mockResolvedValue({ release: null }),
   helmVersion: vi.fn().mockResolvedValue({ error: "helm not found on PATH" }),
   helmRepoUpdate: vi.fn(),

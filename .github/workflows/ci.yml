@@ -76,6 +76,11 @@ jobs:
         # which (#31) — a wrong bucket silently publishes a bogus comparison.
         # Pure unit tests: no network, so they run on every PR.
         run: node --test scripts/perf/size-baseline.test.mjs
+      - name: Trust signing script tests
+        # What scripts/extensions/trust.mjs refuses to sign (#559): a root below its
+        # threshold, or a catalog missing its entries, which every host would refuse or
+        # publish as empty. Fresh keys, no network.
+        run: node --test scripts/extensions/trust.test.mjs
 
   backend:
     name: backend
@@ -120,12 +125,12 @@ jobs:
       # Pinned by SHA, so `toolchain` has to be explicit: this action reads the
       # ref it was called by to decide which toolchain to install, and a SHA
       # names no channel.
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # v1
         with:
           toolchain: stable
           components: llvm-tools-preview
       # Same reason: pinned, so the tool comes from an input rather than the tag.
-      - uses: taiki-e/install-action@9534c84618278caac52cb373bb164ed464dbd8af # v2
+      - uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2
         with:
           tool: cargo-llvm-cov
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -169,6 +174,294 @@ jobs:
         run: >-
           cargo llvm-cov report --summary-only --fail-under-lines 85
           --ignore-filename-regex 'apps/desktop/src-tauri/src/(lib|main)\.rs|crates/server/src/bin/|apps/tui/src/main[.]rs'
+
+  # The extension platform's performance budgets (#581), measured where the
+  # roadmap's targets mean something and published so they can be tracked.
+  #
+  # The same tests already run in `frontend` and `backend`, and hold every
+  # count and a generous time ceiling there. But `backend` is a debug build
+  # under coverage instrumentation, several times slower than what the
+  # targets describe (a broker call's own overhead with 50 apps installed:
+  # ~30 ms debug, ~5 ms release on one developer machine), so its timings say
+  # little. This job runs the host suite again as a release build and the
+  # client suite in Vitest, both without coverage (the client's figures are
+  # Node with jsdom, not a production bundle in the WebView), checks that each
+  # wrote reports, and uploads one JSON file per measurement: the median, the
+  # spread, the target and whether it was met. It needs no cluster and no
+  # system libraries — the registry crate is Tauri-free.
+  #
+  # Informational: nothing here is a required check (dev has none), and a
+  # time over its target is reported, not failed. It fails only on a broken
+  # count or a time past its ceiling, as the other jobs would.
+  extension-budgets:
+    name: extension budgets (release)
+    runs-on: ubuntu-22.04
+    # Reads the checkout and nothing else; uploading an artifact needs no scope.
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # No `version:` — `pnpm/action-setup` reads `packageManager` from
+      # package.json, as in the jobs above.
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # v1
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Host budgets, release build
+        env:
+          SRELENS_PERF_REPORT_DIR: ${{ runner.temp }}/extension-budgets
+        # One thread: the timed sections already take turns, and so the
+        # fifty-app installs that set them up do not compete with them either.
+        run: cargo test --release -p srelens-registry --lib budget_tests -- --test-threads=1 --nocapture
+      - name: Client budgets, without coverage
+        if: ${{ !cancelled() }}
+        env:
+          SRELENS_PERF_REPORT_DIR: ${{ runner.temp }}/extension-budgets
+        run: pnpm exec vitest run packages/ui-next/src/extensions/extensionBudgets.test.tsx
+      - name: Check both suites reported
+        if: ${{ !cancelled() }}
+        # A test filter that matches nothing passes having measured nothing:
+        # renaming `budget_tests` would leave the host step green and empty.
+        # Each suite must have written at least one report.
+        env:
+          REPORTS: ${{ runner.temp }}/extension-budgets
+        run: |
+          for suite in rust ts; do
+            if ! ls "$REPORTS/$suite"-*.json >/dev/null 2>&1; then
+              echo "::error::No $suite-*.json budget report was written; did a test filter stop matching?"
+              exit 1
+            fi
+          done
+          ls "$REPORTS"
+      - name: Upload the budget reports
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: extension-budgets
+          path: ${{ runner.temp }}/extension-budgets
+          if-no-files-found: error
+
+  # The Go sidecar SDK (sdk/go) and its example. The generated protocol file
+  # must be what the committed schema generates, the code gofmt'd and vetted,
+  # and the tests must pass under the race detector (which needs cgo, so it
+  # runs here and not on a Windows machine without a C compiler). The
+  # example's end-to-end runs are in sandbox-conformance, which has the
+  # supervisor and the sandbox.
+  go:
+    name: go sdk
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: sdk/go/go.mod
+          cache-dependency-path: |
+            sdk/go/go.sum
+            sdk/examples/hello-world/go/go.sum
+      - name: The generated protocol file is current
+        working-directory: sdk/go
+        run: |
+          go generate ./...
+          git diff --exit-code
+      - name: Format and vet
+        run: |
+          for module in sdk/go sdk/examples/hello-world/go; do
+            unformatted=$(cd "$module" && gofmt -l .)
+            if [ -n "$unformatted" ]; then
+              echo "::error::gofmt would change, in $module: $unformatted"
+              exit 1
+            fi
+            (cd "$module" && go vet ./...)
+          done
+      - name: Tests, with the race detector
+        run: |
+          (cd sdk/go && go test -race -cover ./...)
+          (cd sdk/examples/hello-world/go && go test -race ./...)
+
+  # The sidecar sandbox conformance suite (#572): the #571 spike's seven
+  # checks, and two for what it left open (the host's environment, Unix
+  # sockets), run against the production sandbox backend through the real
+  # supervisor and launcher (crates/plugin-host/tests/sandbox_conformance.rs).
+  # Those tests are #[ignore]d everywhere else: they need an OS sandbox, a
+  # network for their positive controls and, on Linux, a delegated cgroup:
+  # the scope srelens asks the runner user's systemd manager for, which this
+  # job starts, and for the SDK examples a subtree it delegates by hand. It
+  # is also the only place the Windows backend is
+  # compiled at all, so the other sidecar suites run on Windows here too.
+  #
+  # Not macOS: GitHub's macOS runners are older than macOS 27, the one version
+  # the Seatbelt profile was verified on. Executable apps now use the
+  # host watchdog on macOS (#713), checked with Seatbelt on macOS 27.0.1. The
+  # suite runs there by hand, and its header says how; `macos-watchdog` below
+  # runs the watchdog itself, without Seatbelt.
+  sandbox-conformance:
+    name: sandbox conformance (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # v1
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: sdk/go/go.mod
+          cache-dependency-path: |
+            sdk/go/go.sum
+            sdk/examples/hello-world/go/go.sum
+      - name: Build the suites
+        run: cargo test -p srelens-plugin-host -p srelens-sidecar-hello-world --no-run
+      # The Rust SDK as a sidecar author builds it: the protocol crate without
+      # its `schema` feature. The feature is on only for builds with test
+      # targets (`cargo test`, `clippy --all-targets`, `llvm-cov`), which take
+      # it from the tests' dev-dependencies. This step builds the SDK crates
+      # and the example with it off, and denies warnings in the protocol lib
+      # with it off, so an item only the schema reads cannot be left ungated.
+      # The tree check (`dependencies.rs`, no schemars in what an author
+      # builds) runs in `backend` and in the Windows step below.
+      - name: The Rust SDK without the schema feature
+        if: runner.os == 'Linux'
+        run: |
+          cargo build --locked -p srelens-sidecar -p srelens-sidecar-hello-world
+          cargo rustc --locked -p srelens-sidecar-protocol --lib -- -D warnings
+      - name: Build the Go example
+        shell: bash
+        run: go build -C sdk/examples/hello-world/go -o "../../../../target/hello-world-go${{ runner.os == 'Windows' && '.exe' || '' }}" .
+      # The path srelens takes on a desktop (sandbox/systemd.rs): it asks the
+      # user's systemd manager for a delegated scope holding itself. A desktop
+      # login starts that manager; a runner does not, so lingering starts it
+      # here, with its session bus.
+      - name: Start a systemd user manager
+        if: runner.os == 'Linux'
+        run: |
+          uname -r
+          systemctl --version | head -1
+          dpkg -s dbus-user-session > /dev/null 2>&1 || {
+            # The runner image's own repos, dropped as in `backend`: an outage
+            # in one fails `apt-get update`, and this uses neither.
+            sudo rm -f /etc/apt/sources.list.d/google-chrome.* \
+                       /etc/apt/sources.list.d/microsoft-prod.*
+            sudo apt-get update && sudo apt-get install -y dbus-user-session
+          }
+          uid="$(id -u)"
+          sudo loginctl enable-linger "$(id -un)"
+          for _ in $(seq 1 50); do
+            systemctl is-active --quiet "user@$uid.service" && test -S "/run/user/$uid/bus" && break
+            sleep 0.2
+          done
+          systemctl is-active "user@$uid.service"
+          test -S "/run/user/$uid/bus" || { echo "::error::no session bus at /run/user/$uid/bus"; exit 1; }
+          cat "/sys/fs/cgroup/user.slice/user-$uid.slice/user@$uid.service/cgroup.controllers"
+          echo "XDG_RUNTIME_DIR=/run/user/$uid" >> "$GITHUB_ENV"
+          echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$uid/bus" >> "$GITHUB_ENV"
+      # No cgroup named: each test process asks systemd for its own scope, as
+      # srelens does.
+      - name: Conformance, in a scope srelens asks systemd for
+        if: runner.os == 'Linux'
+        run: |
+          cargo test -p srelens-plugin-host --lib sandbox::systemd -- --ignored --nocapture
+          cargo test -p srelens-plugin-host --test sandbox_conformance -- --ignored --test-threads=1 --nocapture
+      # The other path, for a system without a systemd user session: a cgroup
+      # v2 subtree the runner's user owns, with the memory and cpu controllers
+      # enabled for its children, named in SRELENS_SANDBOX_CGROUP_ROOT. cgroup
+      # v2 lets a process move another only between cgroups under one it may
+      # write, so the test run itself goes into a leaf of the subtree (the next
+      # step), and each sidecar's launcher moves itself into a sibling.
+      - name: Delegate a cgroup
+        if: runner.os == 'Linux'
+        run: |
+          sudo mkdir -p /sys/fs/cgroup/srelens-ci/host
+          sudo chown -R "$(id -u):$(id -g)" /sys/fs/cgroup/srelens-ci
+          for controller in memory cpu; do
+            grep -qw "$controller" /sys/fs/cgroup/cgroup.subtree_control \
+              || echo "+$controller" | sudo tee /sys/fs/cgroup/cgroup.subtree_control
+          done
+      - name: The SDK examples, in a cgroup delegated by hand
+        if: runner.os == 'Linux'
+        env:
+          SRELENS_SANDBOX_CGROUP_ROOT: /sys/fs/cgroup/srelens-ci
+        run: |
+          echo $$ | sudo tee /sys/fs/cgroup/srelens-ci/host/cgroup.procs
+          echo "+memory +cpu" > /sys/fs/cgroup/srelens-ci/cgroup.subtree_control
+          SRELENS_SANDBOX_LAUNCHER="$PWD/target/debug/srelens-sandbox-launch" \
+          SRELENS_HELLO_WORLD_GO="$PWD/target/hello-world-go" \
+            cargo test -p srelens-sidecar-hello-world --test sandboxed --test supervised -- --ignored --test-threads=1 --nocapture
+      # One thread, and the AppContainer profile's cleanup is the test that
+      # sorts last.
+      - name: Conformance
+        if: runner.os == 'Windows'
+        run: cargo test -p srelens-plugin-host --test sandbox_conformance -- --ignored --test-threads=1 --nocapture
+      # The Rust and Go examples, unconfined and in the AppContainer: every
+      # ignored case of both suites.
+      - name: The SDK examples, unconfined and in the sandbox
+        if: runner.os == 'Windows'
+        run: |
+          $env:SRELENS_HELLO_WORLD_GO = "$PWD\target\hello-world-go.exe"
+          cargo test -p srelens-sidecar-hello-world --test sandboxed --test supervised -- --ignored --test-threads=1 --nocapture
+      # bash, not the default PowerShell, which fails a step only on its last
+      # command's exit status.
+      - name: The other sidecar suites
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          cargo test -p srelens-plugin-host --lib sidecar
+          cargo test -p srelens-plugin-host --test sidecar --test sidecar_process
+          cargo test -p srelens-sidecar -p srelens-sidecar-hello-world
+      # Not a sidecar suite: the one Windows runner is here. Kubeconfig exec
+      # plugins must start without a console window, or a release build of
+      # the desktop opens one per token fetch (#775). The test pins that the
+      # variable the desktop sets is the one kube-rs reads; Linux skips it.
+      - name: Exec plugins start without a console window
+        if: runner.os == 'Windows'
+        run: cargo test -p srelens-kube --test exec_plugin_console
+
+  # The macOS memory and CPU watchdog (#713) on a real process. It does not
+  # depend on Seatbelt, so it runs on the runners' older macOS: its policy
+  # and its loop, and tests/macos_watchdog.rs, which holds the probe to
+  # 128 MiB and 0.25 CPUs and prints how far a hold overshot. It also builds
+  # the conformance suite, whose checks 5 and 6 run with Seatbelt by hand on a
+  # macOS 27 Mac (docs/extensions/testing.md records the measurements).
+  macos-watchdog:
+    name: macOS watchdog
+    runs-on: macos-latest
+    # A hang stops here, not at the 6-hour default.
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      # It only builds and runs tests, so the token need not stay in
+      # .git/config while the repository's code runs.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # v1
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # One thread for the integration test, so its other tests (the 512 MiB
+      # hold, the memory reading) do not compete with the CPU test for the
+      # runner's cores. The CPU test's control and its throttled burn already
+      # run one after the other.
+      - name: The watchdog
+        run: |
+          sw_vers
+          cargo test -p srelens-plugin-host --test sandbox_conformance --no-run
+          cargo test -p srelens-plugin-host --lib sidecar::sandbox
+          cargo test -p srelens-plugin-host --test macos_watchdog -- --test-threads=1 --nocapture
 
   # The WebDriver smoke suite (issue #30): the REAL built app — WebView and
   # all — driven through tauri-driver against a kind cluster. This is the
@@ -214,7 +507,7 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # v1
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -288,13 +581,38 @@ jobs:
               sh /tmp/install/test.sh
             '
 
+  # The check release.yml runs over the Linux bundles before it publishes them
+  # (packaging/linux/check-launcher.sh): its own tests, over fixture packages,
+  # since nothing builds the bundles before a release.
+  linux-bundle-check:
+    name: linux bundle check
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    steps:
+      # It only runs the repository's scripts, so the token need not stay in
+      # .git/config while they run.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install rpm
+        run: |
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.* \
+                     /etc/apt/sources.list.d/microsoft-prod.*
+          sudo apt-get update
+          sudo apt-get install -y rpm
+      - name: Lint
+        run: shellcheck -s sh packaging/linux/check-launcher.sh packaging/linux/test.sh
+      - name: Test
+        run: sh packaging/linux/test.sh
+
   docker:
     name: docker image
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Set up Buildx
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       # Until now nothing but the release workflow ever built this file, and
       # two dev releases shipped no container image before anyone noticed. Two
       # separate breaks were waiting in it, one per stage: a pnpm version the
@@ -307,7 +625,7 @@ jobs:
       # before a release depends on it. The layer cache carries the Rust stage
       # across runs that do not touch it.
       - name: Build the image
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           push: false

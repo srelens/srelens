@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach, onTestFinished } from "vitest";
 import { render, screen, fireEvent, act, waitFor } from "@testing-library/react";
 import React from "react";
 
@@ -18,6 +18,9 @@ const tauri = vi.hoisted(() => {
     handlers,
     windowClose,
     windowDestroy,
+    // Undefined unless a test names it: every test written before the deep-link
+    // block ran with no label at all, and keeps doing so.
+    windowLabel: undefined as string | undefined,
     closeRequestedHandler: null as null | ((event: { preventDefault: () => void }) => unknown),
     listen: vi.fn((name: string, cb: (e: { payload: unknown }) => void) => {
       handlers.set(name, cb);
@@ -28,6 +31,7 @@ const tauri = vi.hoisted(() => {
 vi.mock("@tauri-apps/api/event", () => ({ listen: tauri.listen }));
 vi.mock("@tauri-apps/api/window", () => ({
   getCurrentWindow: () => ({
+    label: tauri.windowLabel,
     close: tauri.windowClose,
     destroy: tauri.windowDestroy,
     // Capture the handler so a test can drive the close-request path.
@@ -48,6 +52,24 @@ vi.mock("@srelens/core/lib/updater", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@srelens/core/lib/updater")>()),
   checkForUpdate: checkForUpdateMock,
 }));
+// What the backend's deep-link queue holds, handed out once per drain the way
+// `take_pending_deep_links` drains it. Every other command goes to the real
+// transport, as it did before this mock existed.
+const deepLinks = vi.hoisted(() => ({ queue: [] as string[] }));
+vi.mock("@srelens/core/transport", async (importOriginal) => {
+  const real = await importOriginal<typeof import("@srelens/core/transport")>();
+  return {
+    ...real,
+    invokeCommand: async <T,>(command: string, args?: Record<string, unknown>): Promise<T> => {
+      if (command !== "take_pending_deep_links") return real.invokeCommand<T>(command, args);
+      const drained = deepLinks.queue;
+      deepLinks.queue = [];
+      return drained as T;
+    },
+  };
+});
+const hostNotices = vi.hoisted(() => ({ listen: vi.fn(() => () => {}) }));
+vi.mock("@srelens/core/lib/hostNotices", () => ({ listenForHostNotices: hostNotices.listen }));
 vi.mock("@srelens/core/lib/notify", () => ({
   notify: { success: vi.fn(), error: vi.fn(), info: vi.fn(), updateAvailable: notifyUpdateAvailableMock },
 }));
@@ -128,6 +150,8 @@ vi.mock("./components/ResourceBrowser", () => ({
     onOpenEdit,
     onOpenNew,
     onNamespaceChange,
+    onOpenTerminal,
+    initialNamespace,
   }: {
     context: string;
     kind: string;
@@ -137,9 +161,17 @@ vi.mock("./components/ResourceBrowser", () => ({
     onOpenEdit?: (kind: string, namespace: string | null, name: string) => void;
     onOpenNew?: (initialKind?: string) => void;
     onNamespaceChange?: (namespace: string) => void;
+    onOpenTerminal?: (s: {
+      context: string;
+      namespace: string;
+      pod: string;
+      deleteOnClose?: { context: string; namespace: string; pod: string };
+    }) => void;
+    initialNamespace?: string;
   }) => (
     <div data-testid="browser">
       {context}:{kind}
+      <span data-testid="browser-namespace">{initialNamespace ?? ""}</span>
       <span data-testid="browser-query">{query ?? ""}</span>
       <button onClick={() => onViewChange?.({ query: "nginx" })}>set-query</button>
       <button
@@ -151,6 +183,18 @@ vi.mock("./components/ResourceBrowser", () => ({
       <button onClick={() => onOpenNew?.("Secret")}>new-secret</button>
       <button onClick={() => onNamespaceChange?.("team-a")}>use-team-a</button>
       <button onClick={() => onOpenNew?.("ConfigMap")}>new-config-map</button>
+      <button
+        onClick={() =>
+          onOpenTerminal?.({
+            context,
+            namespace: "default",
+            pod: "srelens-node-debug-x1",
+            deleteOnClose: { context, namespace: "default", pod: "srelens-node-debug-x1" },
+          })
+        }
+      >
+        open-node-shell
+      </button>
     </div>
   ),
 }));
@@ -160,9 +204,27 @@ vi.mock("./components/SettingsView", () => ({
 // The dock hosts xterm, which is dynamically imported and has no place in
 // jsdom; these tests only care about whether it is mounted and with what.
 vi.mock("./components/Dock", () => ({
-  Dock: ({ sessions }: { sessions: Array<{ kind: string; context: string }> }) => (
-    <div data-testid="dock">{sessions.map((s) => `${s.kind}:${s.context}`).join(",")}</div>
+  Dock: ({
+    sessions,
+    onCloseTab,
+  }: {
+    sessions: Array<{ id: number; kind: string; context: string }>;
+    onCloseTab?: (id: number) => void;
+  }) => (
+    <>
+      <div data-testid="dock">{sessions.map((s) => `${s.kind}:${s.context}`).join(",")}</div>
+      {sessions.map((s) => (
+        <button key={s.id} onClick={() => onCloseTab?.(s.id)}>
+          close-dock-{s.id}
+        </button>
+      ))}
+    </>
   ),
+}));
+const { deletePodMock } = vi.hoisted(() => ({ deletePodMock: vi.fn(async () => ({})) }));
+vi.mock("@srelens/core/lib/workloads", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@srelens/core/lib/workloads")>()),
+  deletePod: deletePodMock,
 }));
 // The host shell is desktop-only, and `isWeb` is decided once at import time,
 // so it has to be replaced rather than set up per test. `isTauri` is left real:
@@ -361,6 +423,26 @@ describe("App", () => {
     fireEvent.click(screen.getByText("use-team-a"));
     fireEvent.click(screen.getByText("new-config-map"));
     expect(screen.getByTestId("new-resource-namespace").textContent).toBe("team-a");
+  });
+
+  it("keeps a namespace change in its own tab — another tab on the same cluster does not follow", () => {
+    render(<App />);
+    fireEvent.click(screen.getByText("open-kind-dev"));
+    fireEvent.click(screen.getByText("nav-services"));
+    expect(screen.getByTestId("browser-namespace").textContent).toBe("");
+    // A second resource-list tab on the same cluster: following a linked pod
+    // opens the Pods list, scoped to that pod's namespace.
+    fireEvent.click(screen.getByText("linked-pod"));
+    expect(screen.getByTestId("browser").textContent).toContain("kind-dev:pods");
+    fireEvent.click(screen.getByText("use-team-a"));
+    expect(screen.getByTestId("browser-namespace").textContent).toBe("team-a");
+
+    fireEvent.click(screen.getByRole("tab", { name: /Services · kind-dev/ }));
+    expect(screen.getByTestId("browser").textContent).toContain("kind-dev:services");
+    expect(screen.getByTestId("browser-namespace").textContent).toBe("");
+
+    fireEvent.click(screen.getByRole("tab", { name: /Pods · kind-dev/ }));
+    expect(screen.getByTestId("browser-namespace").textContent).toBe("team-a");
   });
 
   it("keeps new-resource YAML in its tab while another tab is active (#403)", () => {
@@ -823,4 +905,216 @@ it("retains each classic app tab namespace across tab switches",()=>{
  expect(screen.getByTestId("app-namespace").textContent).toBe("");
  fireEvent.click(screen.getByRole("tab",{name:/kustomizations · kind-dev/}));
  expect(screen.getByTestId("app-namespace").textContent).toBe("flux-system");
+});
+
+// #735: a helm operation outlives the window that started it, and the desktop
+// host broadcasts how it ended to every window. Classic listens for that from
+// the moment it mounts, and lets go when it unmounts.
+it("shows what the desktop host reports, and lets it go on unmount", () => {
+  const release = vi.fn();
+  hostNotices.listen.mockReset().mockReturnValue(release);
+  (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__ = {};
+  try {
+    const { unmount } = render(<App />);
+    expect(hostNotices.listen).toHaveBeenCalledTimes(1);
+    unmount();
+    expect(release).toHaveBeenCalledTimes(1);
+  } finally {
+    delete (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__;
+  }
+});
+
+// #734: a node shell's debug pod is privileged, and on desktop the host now
+// deletes it — when its shell ends, its window closes or reloads, or srelens
+// quits — so the page must not delete it as well. The web host has no such
+// cleanup, so there the page still does.
+describe("closing a node shell's dock tab", () => {
+  beforeEach(() => deletePodMock.mockClear());
+
+  function openAndCloseANodeShell() {
+    render(<App />);
+    fireEvent.click(screen.getByText("open-kind-dev"));
+    fireEvent.click(screen.getByText("nav-services"));
+    fireEvent.click(screen.getByText("open-node-shell"));
+    fireEvent.click(screen.getByText(/^close-dock-/));
+  }
+
+  it("leaves the debug pod to the desktop host", () => {
+    (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__ = {};
+    try {
+      openAndCloseANodeShell();
+      expect(deletePodMock).not.toHaveBeenCalled();
+    } finally {
+      delete (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__;
+    }
+  });
+
+  it("still deletes it on the web, where no host does", () => {
+    openAndCloseANodeShell();
+    expect(deletePodMock).toHaveBeenCalledWith("kind-dev", "default", "srelens-node-debug-x1");
+  });
+});
+
+// Classic's half of #36/#370: drained on the main desktop window, judged
+// against the listed contexts, then routed — or refused with a reason. Both
+// designs share the rule set (`checkDeepLink` in core), so these pin what
+// classic does with each outcome rather than the rules themselves.
+describe("srelens:// deep links", () => {
+  beforeEach(() => {
+    (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__ = {};
+    tauri.windowLabel = "main";
+    deepLinks.queue = [];
+    vi.mocked(notify.error).mockClear();
+  });
+  afterEach(() => {
+    delete (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__;
+    tauri.windowLabel = undefined;
+    deepLinks.queue = [];
+  });
+
+  it("opens a cluster link on that cluster's Overview", async () => {
+    deepLinks.queue = ["srelens://cluster/prod"];
+    render(<App />);
+    expect((await screen.findByTestId("overview")).textContent).toBe("prod");
+    expect(screen.getByRole("tab", { name: /Overview · prod/ })).toBeDefined();
+  });
+
+  it("opens a resource link in its kind's view, on the link's own cluster", async () => {
+    deepLinks.queue = ["srelens://resource/prod/default/Pod/web-1"];
+    render(<App />);
+    expect((await screen.findByTestId("browser")).textContent).toContain("prod:pods");
+    expect(screen.getByRole("tab", { name: /Pods · prod/ })).toBeDefined();
+  });
+
+  it("opens a link the backend announces after the window is up", async () => {
+    render(<App />);
+    await waitFor(() => expect(tauri.handlers.has("deep-link-pending")).toBe(true));
+    deepLinks.queue = ["srelens://cluster/kind-dev"];
+    act(() => tauri.handlers.get("deep-link-pending")?.({ payload: null }));
+    expect((await screen.findByTestId("overview")).textContent).toBe("kind-dev");
+  });
+
+  it("reports each link it refuses, with the reason, and opens none of them", async () => {
+    deepLinks.queue = [
+      "srelens://evil/prod",
+      "srelens://cluster/staging",
+      "srelens://resource/prod/default/Event/web.17f",
+      "srelens://resource/prod/-/Pod/web-1",
+    ];
+    render(<App />);
+    await waitFor(() => expect(notify.error).toHaveBeenCalledTimes(4));
+    expect(vi.mocked(notify.error).mock.calls).toEqual([
+      ["Couldn't open that link", "It isn't a link srelens understands."],
+      ["Couldn't open that link", 'No kube context named "staging".'],
+      ["Couldn't open that link", "srelens can't open a Event directly."],
+      ["Couldn't open that link", "Pod is namespaced, so the link needs a namespace."],
+    ]);
+    expect(screen.queryByTestId("overview")).toBeNull();
+    expect(screen.queryByTestId("browser")).toBeNull();
+  });
+
+  /**
+   * #855: a listing that failed has not said a context is missing. The links
+   * naming one it did not return wait, one notice says why, and the re-list
+   * that follows a fixed kubeconfig opens them.
+   */
+  it("holds links while the context listing has failed, says why once, and opens them when it recovers", async () => {
+    // Every listing until the fix, not just the next one: the landing page
+    // lists too, and its effect runs before App's.
+    listContextsMock.mockResolvedValue({
+      contexts: [context("kind-dev")],
+      error: "open /home/dana/.kube/prod: permission denied",
+    });
+    // kind-dev is in the partial list and opens now; prod's two links wait.
+    deepLinks.queue = [
+      "srelens://cluster/prod",
+      "srelens://cluster/kind-dev",
+      "srelens://resource/prod/default/Pod/web-1",
+    ];
+    render(<App />);
+    expect((await screen.findByTestId("overview")).textContent).toBe("kind-dev");
+    expect(vi.mocked(notify.error).mock.calls).toEqual([
+      [
+        "That link will be checked once the contexts load",
+        "The kube contexts could not be listed. open /home/dana/.kube/prod: permission denied",
+      ],
+    ]);
+    expect(screen.queryByRole("tab", { name: /· prod/ })).toBeNull();
+
+    // Another link while the listing is still failing joins the wait without a
+    // second notice: the reader has already been told why.
+    deepLinks.queue = ["srelens://resource/prod/default/Service/web"];
+    await act(async () => tauri.handlers.get("deep-link-pending")?.({ payload: null }));
+    await waitFor(() => expect(deepLinks.queue).toEqual([]));
+    await act(async () => {});
+    expect(notify.error).toHaveBeenCalledTimes(1);
+
+    // The kubeconfig is readable again: the backend's watcher says so, and the
+    // re-list answers cleanly with both contexts.
+    listContextsMock.mockResolvedValue({ contexts: [context("kind-dev"), context("prod")] });
+    await waitFor(() => expect(tauri.handlers.has("kubeconfig-changed")).toBe(true));
+    act(() => tauri.handlers.get("kubeconfig-changed")?.({ payload: null }));
+    expect(await screen.findByRole("tab", { name: /Overview · prod/ })).toBeDefined();
+    expect(screen.getByRole("tab", { name: /Pods · prod/ })).toBeDefined();
+    expect(screen.getByRole("tab", { name: /Services · prod/ })).toBeDefined();
+    expect(notify.error).toHaveBeenCalledTimes(1);
+
+    // A later failure is a new one, and is said again.
+    listContextsMock.mockResolvedValue({
+      contexts: [context("kind-dev")],
+      error: "open /home/dana/.kube/prod: permission denied",
+    });
+    const listings = listContextsMock.mock.calls.length;
+    act(() => tauri.handlers.get("kubeconfig-changed")?.({ payload: null }));
+    await waitFor(() => expect(listContextsMock.mock.calls.length).toBeGreaterThan(listings));
+    await act(async () => {});
+    // Nor has it said prod is gone, so prod's tabs stay open (#855 review).
+    expect(screen.getByRole("tab", { name: /Overview · prod/ })).toBeDefined();
+    deepLinks.queue = ["srelens://cluster/prod"];
+    await act(async () => tauri.handlers.get("deep-link-pending")?.({ payload: null }));
+    await waitFor(() => expect(notify.error).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(notify.error).mock.calls[1][0]).toBe("That link will be checked once the contexts load");
+  });
+
+  it("closes a restored tab only once a listing that answered lacks its context, and says so then", async () => {
+    vi.mocked(notify.info).mockClear();
+    onTestFinished(() => localStorage.removeItem("srelens.openTabs"));
+    localStorage.setItem(
+      "srelens.openTabs",
+      JSON.stringify({ tabs: [{ id: 1, cluster: "prod", kind: "overview", namespace: "default" }], activeTabId: 1 }),
+    );
+    listContextsMock.mockResolvedValue({
+      contexts: [context("kind-dev")],
+      error: "open /home/dana/.kube/prod: permission denied",
+    });
+    render(<App />);
+    await waitFor(() => expect(tauri.handlers.has("kubeconfig-changed")).toBe(true));
+    await act(async () => {});
+    expect(screen.getByRole("tab", { name: /Overview · prod/ })).toBeDefined();
+    expect(notify.info).not.toHaveBeenCalled();
+
+    listContextsMock.mockResolvedValue({ contexts: [context("kind-dev")] });
+    act(() => tauri.handlers.get("kubeconfig-changed")?.({ payload: null }));
+    await waitFor(() => expect(screen.queryByRole("tab", { name: /Overview · prod/ })).toBeNull());
+    expect(notify.info).toHaveBeenCalledWith("Closed 1 restored tab", "Their cluster context is no longer available.");
+  });
+
+  it("still refuses at once, while the listing has failed, what no listing can change", async () => {
+    listContextsMock.mockResolvedValue({
+      contexts: [context("kind-dev")],
+      error: "open /home/dana/.kube/prod: permission denied",
+    });
+    deepLinks.queue = [
+      "srelens://evil/prod",
+      "srelens://resource/prod/default/Event/web.17f",
+      "srelens://resource/prod/-/Pod/web-1",
+    ];
+    render(<App />);
+    await waitFor(() => expect(notify.error).toHaveBeenCalledTimes(3));
+    expect(vi.mocked(notify.error).mock.calls).toEqual([
+      ["Couldn't open that link", "It isn't a link srelens understands."],
+      ["Couldn't open that link", "srelens can't open a Event directly."],
+      ["Couldn't open that link", "Pod is namespaced, so the link needs a namespace."],
+    ]);
+  });
 });

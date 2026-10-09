@@ -511,7 +511,7 @@ pub static ALL_THEMES: &[ThemePalette] = &[
 
 static ACTIVE_THEME_IDX: AtomicUsize = AtomicUsize::new(0);
 
-/// SRElens TUI Theme palette and dynamic styling engine
+/// srectl theme palette and dynamic styling engine
 pub struct Theme;
 
 impl Theme {
@@ -717,6 +717,15 @@ pub fn status_style(status: &str) -> Style {
         || lower.contains("backoff")
         || lower.contains("degraded")
         || lower == "false"
+        // kubectl's pod STATUS words for a failure that say neither of the
+        // above: `OOMKilled`, `ErrImagePull`, `ExitCode:1`, `Signal:9`, …
+        || lower.contains("oomkilled")
+        || lower.contains("errimage")
+        || lower.contains("invalidimagename")
+        || lower.contains("exitcode:")
+        || lower.contains("signal:")
+        || lower.contains("evicted")
+        || lower.contains("deadlineexceeded")
     {
         Theme::status_error()
     } else if lower.contains("scaled down")
@@ -730,6 +739,12 @@ pub fn status_style(status: &str) -> Style {
         || lower.contains("warning")
         || lower.contains("schedulingdisabled")
         || lower.contains("cordon")
+        // A pod on its way up: `Init:0/2`, `PodInitializing`,
+        // `SchedulingGated`. A failing init container (`Init:Error`) is
+        // caught above.
+        || lower.starts_with("init:")
+        || lower.contains("podinitializing")
+        || lower.contains("schedulinggated")
     {
         Theme::status_warn()
     } else if lower.contains("running")

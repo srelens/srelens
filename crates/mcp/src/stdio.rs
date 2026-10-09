@@ -44,6 +44,90 @@ fn err(id: Value, code: i64, message: &str) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
 }
 
+/// A failed host preflight is still an attempted mutating tool call. Record the
+/// refusal with the same redaction as the normal audited invocation.
+/// What `extensions.validate` checks before an install is put to the user: the manifest,
+/// grants and signature an `install` carries. A package (#562) is previewed from the
+/// manifest, signature and digest list the host reads from it, never from anything the
+/// caller says about it, and a catalog package must still be the one the caller named.
+async fn install_preview(server: &McpServer, args: &Value) -> Result<Value, String> {
+    let review = match args["action"].as_str() {
+        Some("installPackage") => {
+            server
+                .call_tool(
+                    "extensions.packageManifest",
+                    json!({"package": args["package"]}),
+                )
+                .await
+        }
+        Some("installCatalogPackage") => {
+            server
+                .call_tool(
+                    "extensions.catalogManifest",
+                    json!({"id": args["id"], "sha256": args["sha256"]}),
+                )
+                .await
+        }
+        _ => {
+            let mut preview = json!({"manifest": args["manifest"], "grants": args["grants"]});
+            // The signature and the key it names (#559), so the preview checks the install
+            // exactly as it will run.
+            for field in ["signature", "keyId"] {
+                if let Some(value) = args.get(field) {
+                    preview[field] = value.clone();
+                }
+            }
+            return Ok(preview);
+        }
+    }
+    .map_err(|error| error.to_string())?;
+    let package = review
+        .get("package")
+        .filter(|package| package.is_object())
+        .ok_or("the host returned no package to review")?;
+    if args["action"] == "installCatalogPackage" && package["sha256"] != args["packageSha256"] {
+        return Err("the catalog release changed; review it again".into());
+    }
+    let mut preview = json!({
+        "manifest": review["manifest"],
+        "grants": args["grants"],
+        "digests": package["digests"],
+    });
+    if review["signature"].is_array() {
+        preview["signature"] = review["signature"].clone();
+        if review["keyId"].is_string() {
+            preview["keyId"] = review["keyId"].clone();
+        }
+    }
+    Ok(preview)
+}
+
+fn rejected_tool_call(
+    server: &McpServer,
+    id: Value,
+    transport: Transport,
+    name: &str,
+    args: &Value,
+    sensitive: bool,
+    message: String,
+) -> Value {
+    let redacted_args = crate::audit::redact(args, sensitive);
+    let (app, cluster, resource) = crate::audit::describe_call_target(name, args, &redacted_args);
+    server.audit().record(crate::audit::AuditRecord {
+        result_bytes: None,
+        source: transport.into(),
+        tool: name.to_string(),
+        app,
+        cluster,
+        resource,
+        error: Some(crate::audit::redact_call_error(name, &message, args, &redacted_args)),
+        args: redacted_args,
+        decision: "auto",
+        outcome: crate::audit::OUTCOME_REJECTED,
+    });
+    ok(id, json!({"content":[{"type":"text","text":message}],"isError":true}))
+}
+
 /// A `notifications/resources/updated` message. Carries only the URI — the
 /// client re-reads to get content, which is what MCP specifies and what lets a
 /// summary-level watch back a manifest subscription.
@@ -55,12 +139,27 @@ pub fn subscription_notification(uri: &str) -> Value {
     })
 }
 
-/// Handle a single JSON-RPC request. Returns `None` for notifications (no id),
-/// which must not produce a response.
+/// [`handle_request_as`] for a request nobody can be named for: the stdio
+/// transport, an in-process call with no chat behind it, and tests.
 pub async fn handle_request(
     server: &McpServer,
     req: &Value,
     transport: Transport,
+) -> Option<Value> {
+    handle_request_as(server, req, transport, None).await
+}
+
+/// Handle a single JSON-RPC request. Returns `None` for notifications (no id),
+/// which must not produce a response.
+///
+/// `caller` is who the transport authenticated the request as (#393) — never
+/// anything read from the request itself — and it reaches the consent policy
+/// with a gated call.
+pub async fn handle_request_as(
+    server: &McpServer,
+    req: &Value,
+    transport: Transport,
+    caller: Option<crate::policy::Caller>,
 ) -> Option<Value> {
     let method = req.get("method").and_then(Value::as_str).unwrap_or("");
     let id = req.get("id").cloned();
@@ -74,6 +173,13 @@ pub async fn handle_request(
             let version = requested
                 .filter(|v| SUPPORTED_PROTOCOL_VERSIONS.contains(v))
                 .unwrap_or(PROTOCOL_VERSION);
+            // Installed apps' tools come and go while the server runs (#574); a
+            // server that has them says so, and sends `tools/list_changed`.
+            let tools = if server.app_tools().is_some() {
+                json!({ "listChanged": true })
+            } else {
+                json!({})
+            };
             Some(ok(
             id?,
             json!({
@@ -84,7 +190,7 @@ pub async fn handle_request(
                 // the resource list is two fixed entries plus templates and
                 // never changes at runtime.
                 "capabilities": {
-                    "tools": {},
+                    "tools": tools,
                     "prompts": {},
                     "resources": {
                         "subscribe": true,
@@ -98,6 +204,8 @@ pub async fn handle_request(
         "ping" => Some(ok(id?, json!({}))),
         "notifications/initialized" | "initialized" => None,
         "tools/list" => {
+            // The apps as they are now, including a change another process made.
+            server.refresh_app_tools().await;
             let tools: Vec<Value> = server
                 .list_tools()
                 .into_iter()
@@ -150,21 +258,69 @@ pub async fn handle_request(
                 .cloned()
                 .unwrap_or_else(|| json!({}));
 
-            let sensitive = server.is_sensitive(name);
+            // One registry for the whole call, consent included: an app's tool
+            // is asked about and run in the same snapshot (#574).
+            let registry = server.resolve(name).await;
+            let sensitive = McpServer::is_sensitive_in(&registry, name);
             let mut decision = "auto";
 
-            if let Some(kind) = server.consent_kind(name) {
+            if let Some(mut request) = McpServer::consent_request_in(&registry, name, &raw_args) {
+                // From the transport, never the arguments (#393).
+                request.caller = caller.clone();
+                if name == "extensions.configure"
+                    && matches!(
+                        args["action"].as_str(),
+                        Some("install" | "installPackage" | "installCatalogPackage")
+                    )
+                {
+                    // The host previews the exact manifest and current installed revision.
+                    // Caller-supplied prose or revision is never used for consent.
+                    let preview_args = match install_preview(server, &args).await {
+                        Ok(preview_args) => preview_args,
+                        Err(error) => return Some(rejected_tool_call(server, id?, transport, name, &args, sensitive, format!("Could not review app access: {error}"))),
+                    };
+                    let preview = match server.call_tool("extensions.validate", preview_args).await {
+                        Ok(value) => value,
+                        Err(error) => return Some(rejected_tool_call(server, id?, transport, name, &args, sensitive, format!("Could not review app access: {error}"))),
+                    };
+                    if preview["errors"].as_array().is_none_or(|errors| !errors.is_empty()) {
+                        return Some(rejected_tool_call(server, id?, transport, name, &args, sensitive, format!("App validation failed: {}", preview["errors"])));
+                    }
+                    let Some(diff) = preview.get("permissionDiff") else {
+                        return Some(rejected_tool_call(server, id?, transport, name, &args, sensitive, "Could not review app access: host returned no permission diff".into()));
+                    };
+                    if let Some(revision) = diff["previousRevision"].as_u64() {
+                        args["reviewedRevision"] = json!(revision);
+                    } else if let Some(object) = args.as_object_mut() {
+                        object.remove("reviewedRevision");
+                    }
+                    let describe = |field: &str| diff[field].as_array().map(|items| items.iter().filter_map(Value::as_str)
+                        .map(|item| item.chars().flat_map(char::escape_default).collect::<String>())
+                        .collect::<Vec<_>>().join(", ")).unwrap_or_default();
+                    let unchanged = diff["unchanged"].as_array().map_or(0, Vec::len);
+                    request.confirm_text = Some(format!(
+                        "Install app with access changes? Added: {}. Removed: {}. {unchanged} unchanged access item{}.",
+                        describe("added"), describe("removed"),
+                        if unchanged == 1 { "" } else { "s" }
+                    ));
+                }
                 if let crate::policy::Decision::Denied(reason) =
-                    server.confirm_policy().confirm(name, &raw_args, kind).await
+                    server.confirm_policy().confirm(&request).await
                 {
                     let redacted_args = crate::audit::redact(&args, sensitive);
+                    let (app, cluster, resource) = crate::audit::describe_call_target(name, &args, &redacted_args);
                     server.audit().record(crate::audit::AuditRecord {
-                        transport,
+                        result_bytes: None,
+                        source: transport.into(),
                         tool: name.to_string(),
-                        error: Some(crate::audit::redact_error(&reason, &args, &redacted_args)),
+                        app,
+                        cluster,
+                        resource,
+                        error: Some(crate::audit::redact_call_error(name, &reason, &args, &redacted_args)),
                         args: redacted_args,
                         decision: "denied",
-                        outcome: "error",
+                        // Nothing ran: the refusal is the whole event.
+                        outcome: crate::audit::OUTCOME_REJECTED,
                     });
                     // A result, not a transport error, so the agent can adapt.
                     // `_meta` (reserved by MCP for exactly this) marks the
@@ -185,27 +341,24 @@ pub async fn handle_request(
                 decision = "approved";
             }
 
-            let called = server.call_tool(name, args.clone()).await;
-            // The error is scrubbed against the same redaction: a refused
+            // The registry records it: redaction, the error scrub (a refused
             // argument is echoed by the refusal, and the log must not learn
-            // from the message what it was denied from the arguments.
-            let redacted_args = crate::audit::redact(&args, sensitive);
-            server.audit().record(crate::audit::AuditRecord {
-                transport,
-                tool: name.to_string(),
-                error: called
-                    .as_ref()
-                    .err()
-                    .map(|e| crate::audit::redact_error(&e.to_string(), &args, &redacted_args)),
-                args: redacted_args,
-                decision,
-                outcome: if called.is_ok() { "ok" } else { "error" },
-            });
+            // from the message what it was denied from the arguments) and the
+            // outcome all live there, so a UI-sourced call of the same
+            // capability lands in the trail in the identical shape (#555).
+            let called = server
+                .call_tool_audited_in(&registry, name, args, transport, decision)
+                .await;
             let result = match called {
-                Ok(v) => json!({
-                    "content": [{ "type": "text", "text": v.to_string() }],
-                    "isError": false
-                }),
+                // Trimmed, and a read too large for the agent refused (`agent_text`).
+                Ok(v) => {
+                    let read_only = registry.get(name).is_some_and(|c| c.annotations.read_only);
+                    let (text, is_error) = match crate::agent_text::render(v, read_only) {
+                        Ok(text) => (text, false),
+                        Err(refusal) => (refusal, true),
+                    };
+                    json!({ "content": [{ "type": "text", "text": text }], "isError": is_error })
+                }
                 Err(e) => json!({
                     "content": [{ "type": "text", "text": e.to_string() }],
                     "isError": true
@@ -322,11 +475,10 @@ pub async fn handle_request(
             } else {
                 let capability_id =
                     read.capability.capability_id().expect("the None arm returned above");
-                // `McpServer::call_tool` is a bare registry invocation with no
-                // gating or auditing of its own — that lives in the
-                // `tools/call` arm, wrapped around the same call. This arm
-                // reproduces both here so a resource read leaves the same
-                // audit trail as the identical read via `tools/call`.
+                // The gate is reproduced here so a resource read leaves the
+                // same audit trail as the identical read via `tools/call`;
+                // the recording of the call itself is the registry's, through
+                // `call_tool_audited`.
                 if server.consent_kind(capability_id).is_some() {
                     // Unreachable today: `plan_read` only ever names the
                     // unconditionally-read-only capabilities in the
@@ -339,33 +491,27 @@ pub async fn handle_request(
                     let message = format!(
                         "{capability_id} is consent-gated and must be called as a tool, not read as a resource"
                     );
+                    let redacted_args =
+                        crate::audit::redact(&read.args, server.is_sensitive(capability_id));
+                    let (app, cluster, resource) = crate::audit::describe_target(&redacted_args);
                     server.audit().record(crate::audit::AuditRecord {
-                        transport,
+                        result_bytes: None,
+                        source: transport.into(),
                         tool: capability_id.to_string(),
-                        args: crate::audit::redact(
-                            &read.args,
-                            server.is_sensitive(capability_id),
-                        ),
+                        app,
+                        cluster,
+                        resource,
+                        args: redacted_args,
                         decision: "denied",
-                        outcome: "error",
+                        outcome: crate::audit::OUTCOME_REJECTED,
                         error: Some(message.clone()),
                     });
                     return Some(err(id?, -32602, &message));
                 }
 
-                let sensitive = server.is_sensitive(capability_id);
-                let redacted_args = crate::audit::redact(&read.args, sensitive);
-                let called = server.call_tool(capability_id, read.args.clone()).await;
-                server.audit().record(crate::audit::AuditRecord {
-                    transport,
-                    tool: capability_id.to_string(),
-                    error: called.as_ref().err().map(|e| {
-                        crate::audit::redact_error(&e.to_string(), &read.args, &redacted_args)
-                    }),
-                    args: redacted_args,
-                    decision: "auto",
-                    outcome: if called.is_ok() { "ok" } else { "error" },
-                });
+                let called = server
+                    .call_tool_audited(capability_id, read.args, transport, "auto")
+                    .await;
 
                 match called {
                     Ok(v) => match &v {
@@ -427,11 +573,15 @@ pub(crate) fn handle_subscription(
         Ok(u) => u,
         Err(message) => {
             server.audit().record(crate::audit::AuditRecord {
-                transport,
+                result_bytes: None,
+                source: transport.into(),
+                app: None,
+                cluster: None,
+                resource: None,
                 tool: method.to_string(),
                 args: crate::audit::redact(&json!({"uri": uri_str}), false),
                 decision: "auto",
-                outcome: "error",
+                outcome: crate::audit::OUTCOME_REJECTED,
                 error: Some(message.clone()),
             });
             return Some(err(id, -32602, &message));
@@ -443,11 +593,15 @@ pub(crate) fn handle_subscription(
     if method == "resources/unsubscribe" {
         subs.remove(&canonical);
         server.audit().record(crate::audit::AuditRecord {
-            transport,
+            result_bytes: None,
+            source: transport.into(),
+            app: None,
+            cluster: None,
+            resource: None,
             tool: method.to_string(),
             args: crate::audit::redact(&json!({"uri": uri_str}), false),
             decision: "auto",
-            outcome: "ok",
+            outcome: crate::audit::OUTCOME_OK,
             error: None,
         });
         return Some(ok(id, json!({})));
@@ -455,11 +609,15 @@ pub(crate) fn handle_subscription(
 
     if let Err(message) = crate::resources::is_subscribable(&uri) {
         server.audit().record(crate::audit::AuditRecord {
-            transport,
+            result_bytes: None,
+            source: transport.into(),
+            app: None,
+            cluster: None,
+            resource: None,
             tool: method.to_string(),
             args: crate::audit::redact(&json!({"uri": uri_str}), false),
             decision: "auto",
-            outcome: "error",
+            outcome: crate::audit::OUTCOME_REJECTED,
             error: Some(message.clone()),
         });
         return Some(err(id, -32602, &message));
@@ -474,11 +632,15 @@ pub(crate) fn handle_subscription(
     // eventual read agree on what's addressable.
     if let Err(message) = crate::resources::plan_read(&uri, server.kind_resolver().as_ref()) {
         server.audit().record(crate::audit::AuditRecord {
-            transport,
+            result_bytes: None,
+            source: transport.into(),
+            app: None,
+            cluster: None,
+            resource: None,
             tool: method.to_string(),
             args: crate::audit::redact(&json!({"uri": uri_str}), false),
             decision: "auto",
-            outcome: "error",
+            outcome: crate::audit::OUTCOME_REJECTED,
             error: Some(message.clone()),
         });
         return Some(err(id, -32602, &message));
@@ -552,11 +714,15 @@ pub(crate) fn handle_subscription(
         Ok(h) => h,
         Err(message) => {
             server.audit().record(crate::audit::AuditRecord {
-                transport,
+                result_bytes: None,
+                source: transport.into(),
+                app: None,
+                cluster: None,
+                resource: None,
                 tool: method.to_string(),
                 args: crate::audit::redact(&json!({"uri": uri_str}), false),
                 decision: "auto",
-                outcome: "error",
+                outcome: crate::audit::OUTCOME_REJECTED,
                 error: Some(message.clone()),
             });
             return Some(err(id, -32602, &message));
@@ -572,11 +738,16 @@ pub(crate) fn handle_subscription(
         handle.abort();
         let message = format!("the watch ended immediately: {reason}");
         server.audit().record(crate::audit::AuditRecord {
-            transport,
+            result_bytes: None,
+            source: transport.into(),
+            app: None,
+            cluster: None,
+            resource: None,
             tool: method.to_string(),
             args: crate::audit::redact(&json!({"uri": uri_str}), false),
             decision: "auto",
-            outcome: "error",
+            // The subscribe was accepted; the watch behind it died.
+            outcome: crate::audit::OUTCOME_FAILED,
             error: Some(message.clone()),
         });
         return Some(err(id, -32603, &message));
@@ -585,11 +756,15 @@ pub(crate) fn handle_subscription(
         Ok(generation) => generation,
         Err(message) => {
             server.audit().record(crate::audit::AuditRecord {
-                transport,
+                result_bytes: None,
+                source: transport.into(),
+                app: None,
+                cluster: None,
+                resource: None,
                 tool: method.to_string(),
                 args: crate::audit::redact(&json!({"uri": uri_str}), false),
                 decision: "auto",
-                outcome: "error",
+                outcome: crate::audit::OUTCOME_REJECTED,
                 error: Some(message.clone()),
             });
             return Some(err(id, -32602, &message));
@@ -607,21 +782,30 @@ pub(crate) fn handle_subscription(
         subs.remove_if(&canonical, generation);
         let message = format!("the watch ended immediately: {reason}");
         server.audit().record(crate::audit::AuditRecord {
-            transport,
+            result_bytes: None,
+            source: transport.into(),
+            app: None,
+            cluster: None,
+            resource: None,
             tool: method.to_string(),
             args: crate::audit::redact(&json!({"uri": uri_str}), false),
             decision: "auto",
-            outcome: "error",
+            // The subscribe was accepted; the watch behind it died.
+            outcome: crate::audit::OUTCOME_FAILED,
             error: Some(message.clone()),
         });
         return Some(err(id, -32603, &message));
     }
     server.audit().record(crate::audit::AuditRecord {
-        transport,
+        result_bytes: None,
+        source: transport.into(),
+        app: None,
+        cluster: None,
+        resource: None,
         tool: method.to_string(),
         args: crate::audit::redact(&json!({"uri": uri_str}), false),
         decision: "auto",
-        outcome: "ok",
+        outcome: crate::audit::OUTCOME_OK,
         error: None,
     });
     Some(ok(id, json!({})))
@@ -677,6 +861,15 @@ where
     W: AsyncWrite + Unpin,
 {
     let mut lines = BoundedLines::new(reader, crate::MAX_REQUEST_BYTES);
+    // Installed apps' tools (#574): told of every change this process makes, and
+    // asked every so often, for the ones another process makes.
+    let mut tool_changes = server.app_tools().map(|tools| tools.changes());
+    let mut tool_poll = server.app_tools().map(|tools| {
+        let period = tools.poll_interval();
+        let mut poll = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+        poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        poll
+    });
 
     loop {
         tokio::select! {
@@ -700,6 +893,7 @@ where
                     // whatever is already pending before leaving. No wakeup
                     // token is needed here — the dirty set is read directly.
                     drain_notifications(writer, dirty).await?;
+                    drain_tool_changes(writer, &mut tool_changes).await?;
                     return Ok(());
                 };
                 let line = match line {
@@ -708,6 +902,7 @@ where
                         // The request was discarded unread, so its id is unknown.
                         write_line(writer, &request_too_large(lines.max)).await?;
                         drain_notifications(writer, dirty).await?;
+                        drain_tool_changes(writer, &mut tool_changes).await?;
                         continue;
                     }
                 };
@@ -739,6 +934,9 @@ where
                 // response is written before any notification a concurrent
                 // watch queued during its handling.
                 drain_notifications(writer, dirty).await?;
+                // The same for the tools: a request that installed an app is
+                // answered before the client hears the list changed.
+                drain_tool_changes(writer, &mut tool_changes).await?;
             }
 
             Some(()) = wake_rx.recv() => {
@@ -747,8 +945,51 @@ where
                 // rather than the channel.
                 drain_notifications(writer, dirty).await?;
             }
+
+            changed = async {
+                match tool_changes.as_mut() {
+                    Some(changes) => changes.changed().await.is_ok(),
+                    None => std::future::pending().await,
+                }
+            } => {
+                if changed {
+                    write_line(writer, &crate::tools_list_changed_notification()).await?;
+                } else {
+                    // The source is gone; nothing will change again.
+                    tool_changes = None;
+                }
+            }
+
+            _ = async {
+                match tool_poll.as_mut() {
+                    Some(poll) => poll.tick().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                // A change found here arrives on `tool_changes` like any other.
+                server.refresh_app_tools().await;
+            }
         }
     }
+}
+
+/// Write `notifications/tools/list_changed` once if the app tools changed since the
+/// client was last told, however many times they did.
+async fn drain_tool_changes<W>(
+    writer: &mut W,
+    changes: &mut Option<tokio::sync::watch::Receiver<u64>>,
+) -> std::io::Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    let Some(changes) = changes.as_mut() else {
+        return Ok(());
+    };
+    if changes.has_changed().unwrap_or(false) {
+        changes.borrow_and_update();
+        write_line(writer, &crate::tools_list_changed_notification()).await?;
+    }
+    Ok(())
 }
 
 /// Write one notification per URI currently in the dirty set, then clear it,
@@ -953,6 +1194,61 @@ mod tests {
         assert!(text.contains("echo"));
     }
 
+    /// Where every tool result becomes text: a Node's noise is trimmed, a read
+    /// too large for the agent is refused, and a mutation's answer of the same
+    /// size is sent, because the change happened either way.
+    #[tokio::test]
+    async fn tools_call_trims_a_node_and_refuses_only_an_over_limit_read() {
+        use srelens_capability::Annotations;
+        struct Yes;
+        #[async_trait::async_trait]
+        impl crate::policy::ConfirmPolicy for Yes {
+            async fn confirm(&self, _: &crate::policy::ConsentRequest) -> crate::policy::Decision {
+                crate::policy::Decision::Approved
+            }
+        }
+        let big = || json!({ "data": "x".repeat(crate::agent_text::MAX_RESULT_BYTES) });
+        let mut reg = Registry::new();
+        reg.register(Capability::read_only("node", "a node", |_| async {
+            Ok(json!({
+                "apiVersion": "v1",
+                "kind": "Node",
+                "metadata": { "name": "n1", "managedFields": [{ "manager": "kubelet" }] },
+                "status": { "allocatable": { "cpu": "4" }, "images": [{ "names": ["a"] }] }
+            }))
+        }));
+        reg.register(Capability::read_only("bigRead", "a big read", move |_| async move { Ok(big()) }));
+        let mut write = Capability::read_only("bigWrite", "a big write", move |_| async move { Ok(big()) });
+        write.annotations = Annotations::MUTATING;
+        reg.register(write);
+        let server = &McpServer::new(Arc::new(reg)).with_policy(Arc::new(Yes));
+        let call = |name: &'static str| async move {
+            handle_request(
+                server,
+                &json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":{}}}),
+                Transport::Stdio,
+            )
+            .await
+            .unwrap()["result"]
+                .clone()
+        };
+
+        let node = call("node").await;
+        assert_eq!(node["isError"], false, "{node}");
+        let node: Value = serde_json::from_str(node["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert!(node["metadata"].get("managedFields").is_none(), "{node}");
+        assert!(node["status"]["images"].as_str().unwrap().contains("k8s.getManifest"));
+        assert_eq!(node["status"]["allocatable"]["cpu"], "4");
+
+        let read = call("bigRead").await;
+        assert_eq!(read["isError"], true, "a read over the limit is refused");
+        assert!(read["content"][0]["text"].as_str().unwrap().contains("narrow"), "{read}");
+
+        let write = call("bigWrite").await;
+        assert_eq!(write["isError"], false, "a mutation's answer is sent whatever its size");
+        assert!(write["content"][0]["text"].as_str().unwrap().len() > crate::agent_text::MAX_RESULT_BYTES);
+    }
+
     fn server_with_destructive() -> McpServer {
         use srelens_capability::{Annotations, Capability};
         let mut reg = Registry::new();
@@ -1045,19 +1341,25 @@ mod tests {
         // Captures what each side actually received, rather than trusting
         // that "the tool ran" and "the policy approved" implies either saw
         // the right shape of arguments.
-        let policy_saw: Arc<Mutex<Option<Value>>> = Arc::new(Mutex::new(None));
+        //
+        // The policy records the *whole* `ConsentRequest`, not just its
+        // arguments (PR #661 review): `impact` and `confirm_text` are the
+        // host metadata #548 added, and recording only `args` would still
+        // pass if `consent_request` hard-coded a level or dropped the
+        // sentence on the floor. The capability below therefore carries a
+        // level and wording no preset would produce by accident.
+        let policy_saw: Arc<Mutex<Option<crate::policy::ConsentRequest>>> =
+            Arc::new(Mutex::new(None));
         let tool_saw: Arc<Mutex<Option<Value>>> = Arc::new(Mutex::new(None));
 
-        struct Yes(Arc<Mutex<Option<Value>>>);
+        struct Yes(Arc<Mutex<Option<crate::policy::ConsentRequest>>>);
         #[async_trait::async_trait]
         impl crate::policy::ConfirmPolicy for Yes {
             async fn confirm(
                 &self,
-                _t: &str,
-                a: &serde_json::Value,
-                _kind: crate::policy::ConsentKind,
+                request: &crate::policy::ConsentRequest,
             ) -> crate::policy::Decision {
-                *self.0.lock().unwrap() = Some(a.clone());
+                *self.0.lock().unwrap() = Some(request.clone());
                 crate::policy::Decision::Approved
             }
         }
@@ -1073,7 +1375,9 @@ mod tests {
                 }
             })
         };
-        cap.annotations = Annotations::DESTRUCTIVE;
+        cap.annotations = Annotations::MUTATING
+            .with_impact(srelens_capability::Impact::High)
+            .with_confirm("Recycle {resource} in cluster {cluster}?");
         reg.register(cap);
         let server =
             McpServer::new(Arc::new(reg)).with_policy(Arc::new(Yes(policy_saw.clone())));
@@ -1082,7 +1386,13 @@ mod tests {
             &server,
             &json!({
                 "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-                "params": { "name": "danger", "arguments": { "_confirm": true } }
+                "params": { "name": "danger", "arguments": {
+                    "_confirm": true,
+                    "context": "cluster/prod",
+                    "kind": "Deployment",
+                    "namespace": "team",
+                    "name": "api"
+                } }
             }),
             Transport::Http,
         )
@@ -1098,9 +1408,24 @@ mod tests {
 
         let seen_by_policy = policy_saw.lock().unwrap().clone().expect("policy consulted");
         assert_eq!(
-            seen_by_policy.get("_confirm"),
+            seen_by_policy.args.get("_confirm"),
             Some(&json!(true)),
-            "policy must see _confirm, got {seen_by_policy}"
+            "policy must see _confirm, got {:?}",
+            seen_by_policy.args
+        );
+        assert_eq!(seen_by_policy.tool, "danger");
+        assert_eq!(seen_by_policy.kind, crate::policy::ConsentKind::Destructive);
+        assert_eq!(
+            seen_by_policy.impact,
+            srelens_capability::Impact::High,
+            "the policy gets the capability's own level, not one inferred \
+             from its kind"
+        );
+        assert_eq!(
+            seen_by_policy.confirm_text.as_deref(),
+            Some("Recycle Deployment team/api in cluster cluster/prod?"),
+            "the policy gets the host's sentence, rendered against these \
+             arguments"
         );
     }
 
@@ -1119,6 +1444,218 @@ mod tests {
         .await
         .expect("response");
         assert_eq!(resp["result"]["isError"], json!(false), "got {resp}");
+    }
+
+    #[tokio::test]
+    async fn extension_update_consent_uses_host_diff_and_executes_reviewed_revision() {
+        use srelens_capability::Annotations;
+        use std::sync::Mutex;
+        struct Yes(Arc<Mutex<Option<crate::policy::ConsentRequest>>>);
+        #[async_trait::async_trait]
+        impl crate::policy::ConfirmPolicy for Yes {
+            async fn confirm(&self, request: &crate::policy::ConsentRequest) -> crate::policy::Decision {
+                *self.0.lock().unwrap() = Some(request.clone());
+                crate::policy::Decision::Approved
+            }
+        }
+        let seen = Arc::new(Mutex::new(None));
+        let executed = Arc::new(Mutex::new(None));
+        let mut reg = Registry::new();
+        reg.register(Capability::read_only("extensions.validate", "preview", |_| async {
+            Ok(json!({"errors":[],"permissionDiff":{"previousRevision":7,"added":["Action k8s.annotate on Deployment"],"removed":["Read k8s.listEvents on Pod"],"unchanged":["Grant k8s.listCustomResource"]}}))
+        }));
+        let capture = executed.clone();
+        let mut configure = Capability::read_only("extensions.configure", "configure", move |args| {
+            let capture = capture.clone();
+            async move { *capture.lock().unwrap() = Some(args); Ok(json!({"done":true})) }
+        });
+        configure.annotations = Annotations::MUTATING;
+        reg.register(configure);
+        let server = McpServer::new(Arc::new(reg)).with_policy(Arc::new(Yes(seen.clone())));
+        let response = handle_request(&server, &json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"extensions.configure","arguments":{"action":"install","manifest":"{}","grants":[],"reviewedRevision":999}}}), Transport::Stdio).await.unwrap();
+        assert_eq!(response["result"]["isError"], false);
+        let prompt = seen.lock().unwrap().clone().unwrap().prompt();
+        assert!(prompt.contains("Action k8s.annotate on Deployment"), "{prompt}");
+        assert!(prompt.contains("Read k8s.listEvents on Pod"), "{prompt}");
+        assert!(prompt.contains("1 unchanged access item"), "{prompt}");
+        assert!(!prompt.contains("Grant k8s.listCustomResource"), "{prompt}");
+        assert_eq!(executed.lock().unwrap().as_ref().unwrap()["reviewedRevision"], 7);
+    }
+
+    /// The consent preview validates the signature and the key it names (#559), so it
+    /// cannot pass an install that then fails on its key, or the other way round.
+    #[tokio::test]
+    async fn extension_install_preview_checks_the_signature_and_key_the_install_names() {
+        use srelens_capability::Annotations;
+        use std::sync::Mutex;
+        struct Yes;
+        #[async_trait::async_trait]
+        impl crate::policy::ConfirmPolicy for Yes {
+            async fn confirm(&self, _: &crate::policy::ConsentRequest) -> crate::policy::Decision {
+                crate::policy::Decision::Approved
+            }
+        }
+        let previewed = Arc::new(Mutex::new(None));
+        let mut reg = Registry::new();
+        let capture = previewed.clone();
+        reg.register(Capability::read_only("extensions.validate", "preview", move |args| {
+            let capture = capture.clone();
+            async move {
+                *capture.lock().unwrap() = Some(args);
+                Ok(json!({"errors":[],"permissionDiff":{"previousRevision":null,"added":[],"removed":[],"unchanged":[]}}))
+            }
+        }));
+        let mut configure = Capability::read_only("extensions.configure", "configure", |_| async {
+            Ok(json!({"done":true}))
+        });
+        configure.annotations = Annotations::MUTATING;
+        reg.register(configure);
+        let server = McpServer::new(Arc::new(reg)).with_policy(Arc::new(Yes));
+        let key_id = "ab".repeat(32);
+        let response = handle_request(&server, &json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"extensions.configure","arguments":{"action":"install","manifest":"{}","grants":[],"signature":[1,2,3],"keyId":key_id}}}), Transport::Stdio).await.unwrap();
+        assert_eq!(response["result"]["isError"], false, "{response}");
+        let previewed = previewed.lock().unwrap().clone().unwrap();
+        assert_eq!(previewed["signature"], json!([1, 2, 3]));
+        assert_eq!(previewed["keyId"], json!(key_id));
+    }
+
+    /// A package install over MCP (#562) is previewed as `install` is: from the manifest,
+    /// signature and digest list the host reads from the package itself, with the access
+    /// changes in the prompt and the reviewed revision the host's.
+    #[tokio::test]
+    async fn package_installs_preview_what_the_host_reads_from_the_package() {
+        use srelens_capability::Annotations;
+        use std::sync::Mutex;
+        struct Yes(Arc<Mutex<Option<crate::policy::ConsentRequest>>>);
+        #[async_trait::async_trait]
+        impl crate::policy::ConfirmPolicy for Yes {
+            async fn confirm(
+                &self,
+                request: &crate::policy::ConsentRequest,
+            ) -> crate::policy::Decision {
+                *self.0.lock().unwrap() = Some(request.clone());
+                crate::policy::Decision::Approved
+            }
+        }
+        let review = json!({"manifest": "{\"id\":\"org.example.packaged\"}", "signature": [7, 7],
+            "package": {"sha256": "ab", "digests": "{\"format\":\"srelens-extension-package\"}", "files": []}});
+        let previewed = Arc::new(Mutex::new(Vec::new()));
+        let executed = Arc::new(Mutex::new(None));
+        let mut reg = Registry::new();
+        for tool in ["extensions.packageManifest", "extensions.catalogManifest"] {
+            let review = review.clone();
+            reg.register(Capability::read_only(tool, "review", move |_| {
+                let review = review.clone();
+                async move { Ok(review) }
+            }));
+        }
+        let capture = previewed.clone();
+        reg.register(Capability::read_only("extensions.validate", "preview", move |args| {
+            let capture = capture.clone();
+            async move {
+                capture.lock().unwrap().push(args);
+                Ok(json!({"errors":[],"permissionDiff":{"previousRevision":4,"added":["Grant k8s.listCustomResource"],"removed":[],"unchanged":[]}}))
+            }
+        }));
+        let capture = executed.clone();
+        let mut configure =
+            Capability::read_only("extensions.configure", "configure", move |args| {
+                let capture = capture.clone();
+                async move {
+                    *capture.lock().unwrap() = Some(args);
+                    Ok(json!({"done":true}))
+                }
+            });
+        configure.annotations = Annotations::MUTATING;
+        reg.register(configure);
+        let seen = Arc::new(Mutex::new(None));
+        let server = McpServer::new(Arc::new(reg)).with_policy(Arc::new(Yes(seen.clone())));
+        let call = |arguments: Value| json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"extensions.configure","arguments":arguments}});
+        for arguments in [
+            json!({"action":"installPackage","package":"H4sI","grants":["k8s.listCustomResource"],"reviewedRevision":99}),
+            json!({"action":"installCatalogPackage","id":"org.example.packaged","sha256":"cd","packageSha256":"ab","grants":["k8s.listCustomResource"]}),
+        ] {
+            let response = handle_request(&server, &call(arguments.clone()), Transport::Stdio)
+                .await
+                .unwrap();
+            assert_eq!(response["result"]["isError"], false, "{response}");
+            let preview = previewed.lock().unwrap().pop().unwrap();
+            assert_eq!(
+                preview,
+                json!({"manifest": review["manifest"], "grants": ["k8s.listCustomResource"],
+                "signature": [7, 7], "digests": review["package"]["digests"]})
+            );
+            let prompt = seen.lock().unwrap().take().unwrap().prompt();
+            assert!(
+                prompt.contains("Added: Grant k8s.listCustomResource"),
+                "{prompt}"
+            );
+            assert_eq!(
+                executed.lock().unwrap().take().unwrap()["reviewedRevision"],
+                4
+            );
+        }
+        // A catalog package other than the one the catalog lists now is refused unrun.
+        let response = handle_request(
+            &server,
+            &call(
+                json!({"action":"installCatalogPackage","id":"org.example.packaged",
+            "sha256":"cd","packageSha256":"stale","grants":[]}),
+            ),
+            Transport::Stdio,
+        )
+        .await
+        .unwrap();
+        assert_eq!(response["result"]["isError"], true);
+        assert!(
+            response.to_string().contains("catalog release changed"),
+            "{response}"
+        );
+        assert!(executed.lock().unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn rejected_extension_preview_is_audited_without_running_install() {
+        use srelens_capability::Annotations;
+        use std::sync::Mutex;
+        struct Spy {
+            records: Mutex<Vec<crate::audit::AuditRecord>>,
+            log: crate::audit::JsonlAuditLog,
+        }
+        impl crate::audit::AuditSink for Spy {
+            fn record(&self, record: crate::audit::AuditRecord) {
+                <crate::audit::JsonlAuditLog as crate::audit::AuditSink>::record(&self.log, record.clone());
+                self.records.lock().unwrap().push(record);
+            }
+        }
+        let mut reg = Registry::new();
+        reg.register(Capability::read_only("extensions.validate", "preview", |_| async {
+            Ok(json!({"errors":[{"code":"EXTENSION_INVALID_VALUE","path":"manifest","message":"invalid credential hunter2"}]}))
+        }));
+        let mut configure = Capability::read_only("extensions.configure", "configure", |_| async {
+            panic!("install must not run after a failed preview");
+            #[allow(unreachable_code)]
+            Ok(json!({}))
+        });
+        configure.annotations = Annotations::MUTATING;
+        reg.register(configure);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit.jsonl");
+        let spy = Arc::new(Spy {
+            records: Mutex::new(Vec::new()),
+            log: crate::audit::JsonlAuditLog::new(path.clone(), 1024 * 1024),
+        });
+        let server = McpServer::new(Arc::new(reg)).with_audit(spy.clone());
+        let response = handle_request(&server, &json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"extensions.configure","arguments":{"action":"install","manifest":"{\"id\":\"org.example.app\",\"credential\":\"hunter2\"}","grants":[]}}}), Transport::Http).await.unwrap();
+        assert_eq!(response["result"]["isError"], true);
+        let records = spy.records.lock().unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].outcome, crate::audit::OUTCOME_REJECTED);
+        assert_eq!(records[0].tool, "extensions.configure");
+        assert_eq!(records[0].args["manifest"], "<redacted>");
+        assert_eq!(records[0].resource.as_deref(), Some("org.example.app"));
+        assert!(!records[0].error.as_deref().unwrap_or("").contains("hunter2"));
+        assert!(!std::fs::read_to_string(path).unwrap().contains("hunter2"));
     }
 
     #[tokio::test]
@@ -1244,9 +1781,7 @@ mod tests {
         impl crate::policy::ConfirmPolicy for Approve {
             async fn confirm(
                 &self,
-                _t: &str,
-                _a: &serde_json::Value,
-                _kind: crate::policy::ConsentKind,
+                _request: &crate::policy::ConsentRequest,
             ) -> crate::policy::Decision {
                 crate::policy::Decision::Approved
             }
@@ -1292,7 +1827,7 @@ mod tests {
         assert_eq!(seen.len(), 1, "expected one audit record, got {seen:?}");
         let rec = &seen[0];
         assert_eq!(rec.decision, "approved");
-        assert_eq!(rec.outcome, "error");
+        assert_eq!(rec.outcome, crate::audit::OUTCOME_REJECTED);
         let error = rec.error.as_deref().expect("the refusal is recorded");
         assert!(
             error.contains("expected a map"),
@@ -1323,9 +1858,7 @@ mod tests {
         impl crate::policy::ConfirmPolicy for AlwaysApprove {
             async fn confirm(
                 &self,
-                _tool: &str,
-                _args: &Value,
-                _kind: crate::policy::ConsentKind,
+                _request: &crate::policy::ConsentRequest,
             ) -> crate::policy::Decision {
                 crate::policy::Decision::Approved
             }
@@ -2759,10 +3292,10 @@ mod tests {
 
         let seen = spy.0.lock().unwrap().clone();
         assert_eq!(seen.len(), 1, "expected one audit record, got {seen:?}");
-        assert_eq!(seen[0].transport, crate::Transport::Stdio);
+        assert_eq!(seen[0].source, crate::audit::Source::McpStdio);
         assert_eq!(seen[0].tool, "resources/subscribe");
         assert_eq!(seen[0].decision, "auto");
-        assert_eq!(seen[0].outcome, "ok");
+        assert_eq!(seen[0].outcome, crate::audit::OUTCOME_OK);
         assert_eq!(seen[0].args, json!({"uri": "k8s://c/ns/Pod/web-0"}));
         assert!(seen[0].error.is_none(), "a success carries no error");
     }
@@ -2789,7 +3322,7 @@ mod tests {
         assert_eq!(seen.len(), 1, "expected one audit record, got {seen:?}");
         assert_eq!(seen[0].tool, "resources/subscribe");
         assert_eq!(seen[0].decision, "auto");
-        assert_eq!(seen[0].outcome, "error");
+        assert_eq!(seen[0].outcome, crate::audit::OUTCOME_REJECTED);
         assert_eq!(seen[0].args, json!({"uri": "k8s://catalog"}));
         let message = seen[0].error.as_deref().unwrap_or_default();
         assert!(message.contains("static"), "the reason must survive, got: {message}");
@@ -2814,7 +3347,7 @@ mod tests {
 
         let seen = spy.0.lock().unwrap().clone();
         assert_eq!(seen.len(), 1, "expected one audit record, got {seen:?}");
-        assert_eq!(seen[0].outcome, "error");
+        assert_eq!(seen[0].outcome, crate::audit::OUTCOME_REJECTED);
         let message = seen[0].error.as_deref().unwrap_or_default();
         assert!(
             message.contains("not addressable"),
@@ -2863,7 +3396,7 @@ mod tests {
 
         let seen = spy.0.lock().unwrap().clone();
         assert_eq!(seen.len(), 1, "expected one audit record, got {seen:?}");
-        assert_eq!(seen[0].outcome, "error");
+        assert_eq!(seen[0].outcome, crate::audit::OUTCOME_REJECTED);
         let message = seen[0].error.as_deref().unwrap_or_default();
         assert!(message.contains("refused"), "the reason must survive, got: {message}");
     }
@@ -2891,7 +3424,7 @@ mod tests {
 
         let seen = spy.0.lock().unwrap().clone();
         assert_eq!(seen.len(), 1, "expected one audit record, got {seen:?}");
-        assert_eq!(seen[0].outcome, "error");
+        assert_eq!(seen[0].outcome, crate::audit::OUTCOME_REJECTED);
         let message = seen[0].error.as_deref().unwrap_or_default();
         assert!(message.contains("too many"), "the reason must survive, got: {message}");
     }
@@ -2913,11 +3446,50 @@ mod tests {
 
         let seen = spy.0.lock().unwrap().clone();
         assert_eq!(seen.len(), 1, "expected one audit record, got {seen:?}");
-        assert_eq!(seen[0].transport, crate::Transport::Stdio);
+        assert_eq!(seen[0].source, crate::audit::Source::McpStdio);
         assert_eq!(seen[0].tool, "resources/unsubscribe");
         assert_eq!(seen[0].decision, "auto");
-        assert_eq!(seen[0].outcome, "ok");
+        assert_eq!(seen[0].outcome, crate::audit::OUTCOME_OK);
         assert_eq!(seen[0].args, json!({"uri": "k8s://c/ns/Pod/web-0"}));
         assert!(seen[0].error.is_none(), "an unsubscribe carries no error");
+    }
+
+    /// #393: the policy is told which of srelens's own chats raised a gated
+    /// call, from what the transport authenticated, never from the call's own
+    /// arguments, which here try to claim a caller and must be ignored.
+    #[tokio::test]
+    async fn the_policy_is_told_which_chat_raised_the_call() {
+        use std::sync::Mutex;
+        struct Saw(Arc<Mutex<Option<crate::policy::ConsentRequest>>>);
+        #[async_trait::async_trait]
+        impl crate::policy::ConfirmPolicy for Saw {
+            async fn confirm(&self, request: &crate::policy::ConsentRequest) -> crate::policy::Decision {
+                *self.0.lock().unwrap() = Some(request.clone());
+                crate::policy::Decision::Approved
+            }
+        }
+        let saw: Arc<Mutex<Option<crate::policy::ConsentRequest>>> = Arc::new(Mutex::new(None));
+        let mut reg = Registry::new();
+        let mut cap = Capability::read_only("danger", "destructive", |_| async { Ok(json!({})) });
+        cap.annotations = srelens_capability::Annotations::MUTATING;
+        reg.register(cap);
+        let server = McpServer::new(Arc::new(reg)).with_policy(Arc::new(Saw(saw.clone())));
+        let call = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "danger", "arguments": {"caller": "chat:forged"}}});
+
+        handle_request_as(&server, &call, Transport::Http, Some(crate::policy::Caller::Chat("sess-7".into())))
+            .await
+            .expect("response");
+        assert_eq!(
+            saw.lock().unwrap().as_ref().expect("policy asked").caller,
+            Some(crate::policy::Caller::Chat("sess-7".into()))
+        );
+
+        handle_request(&server, &call, Transport::Http).await.expect("response");
+        assert_eq!(
+            saw.lock().unwrap().as_ref().expect("policy asked").caller,
+            None,
+            "a call nobody vouched for has no caller, whatever its arguments say"
+        );
     }
 }

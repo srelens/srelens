@@ -1,7 +1,19 @@
-import { useContext, useState } from "react";
+import { useContext, useState, type ReactNode } from "react";
+import {
+  CAPABILITY_CATALOG,
+  NETWORK_HTTP,
+  POD_EXEC,
+  POD_FORWARD,
+  POD_LOGS,
+  POD_TARGETS,
+  networkHosts,
+  podNamespaces,
+  renderConfirmTemplate,
+} from "@srelens/core";
 import { CodeEditor } from "@srelens/ui-kit";
 import { ExtensionControls } from "./ExtensionControls";
-import { escapeFormatCharacters, plainText } from "./displayText";
+import { commandArgument, escapeFormatCharacters, plainText } from "./displayText";
+import { HostText, settingReference, settingTitle } from "./networkText";
 
 // The review reads the manifest as parsed JSON, not as the checked `ExtensionManifest` type:
 // it is drawn only once the host has accepted it, but nothing here may throw on a shape the
@@ -16,6 +28,7 @@ const show = (value: unknown): string =>
 
 const CUSTOM_RESOURCE = "k8s.listCustomResource";
 const EVENTS = "k8s.listEvents";
+const SECRET_STORE = "extension.secretStore";
 /** The arguments a custom-resource reader's row names in their own cells. */
 const RESOURCE_FIELDS: Array<[key: string, label: string]> = [
   ["group", "API group"],
@@ -29,6 +42,10 @@ interface Binding {
   name: string;
   title: string;
   target: string;
+  /** A custom-resource reader's accepted API versions, most preferred first (#547). */
+  versions: unknown[];
+  /** Per listed version, each path the app reads mapped to the one read there instead. */
+  overrides: Fields;
   arguments: Fields;
   inputs: unknown[];
 }
@@ -40,10 +57,50 @@ function bindingsOf(manifest: unknown): Binding[] {
       name: typeof binding.name === "string" ? binding.name : "",
       title: typeof binding.title === "string" ? binding.title : "",
       target: typeof binding.target === "string" ? binding.target : "",
+      versions: items(binding.versions),
+      overrides: fields(binding.jsonPathOverrides),
       arguments: fields(binding.arguments),
       inputs: items(binding.inputs),
     };
   });
+}
+
+/** A reader's version cell: the one it fixes, or each it accepts in the order tried. */
+function Versions({ binding }: { binding: Binding }) {
+  const args = binding.arguments;
+  if (binding.versions.length === 0)
+    return <>{"version" in args ? <code>{show(args.version)}</code> : "Not set"}</>;
+  return (
+    <>
+      {binding.versions.map((version, index) => (
+        <span key={index}>
+          {index > 0 && ", "}
+          <code>{show(version)}</code>
+        </span>
+      ))}{" "}
+      (first served)
+    </>
+  );
+}
+
+/** Each path a reader reads elsewhere at one of its versions, as `version: path → path`. */
+const overridesOf = (binding: Binding) =>
+  Object.entries(binding.overrides).flatMap(([version, paths]) =>
+    Object.entries(fields(paths)).map(([from, to]) => [version, from, to] as const),
+  );
+
+function Overrides({ binding }: { binding: Binding }) {
+  const overrides = overridesOf(binding);
+  if (overrides.length === 0) return <>None</>;
+  return (
+    <ul aria-label={`${plainText(binding.name)} path overrides`}>
+      {overrides.map(([version, from, to], position) => (
+        <li key={position}>
+          At <code>{show(version)}</code>, <code>{show(from)}</code> is read from <code>{show(to)}</code>
+        </li>
+      ))}
+    </ul>
+  );
 }
 
 /** The dashboards that show a binding's events, and the API groups each filters them on. */
@@ -86,6 +143,7 @@ function CustomResourceReaders({ bindings }: { bindings: Binding[] }) {
     Object.entries(binding.arguments).filter(([key]) => !RESOURCE_KEYS.includes(key)),
   );
   const anyExtra = extra.some((values) => values.length > 0);
+  const anyOverrides = bindings.some((binding) => overridesOf(binding).length > 0);
   return (
     <div className="extension-binding-table">
       <table aria-label="Custom resources read">
@@ -99,6 +157,7 @@ function CustomResourceReaders({ bindings }: { bindings: Binding[] }) {
             ))}
             <th scope="col">Scope</th>
             <th scope="col">Printer columns</th>
+            {anyOverrides && <th scope="col">Path overrides</th>}
             {anyExtra && <th scope="col">Other fixed arguments</th>}
           </tr>
         </thead>
@@ -111,7 +170,15 @@ function CustomResourceReaders({ bindings }: { bindings: Binding[] }) {
               <tr key={`${index}:${binding.name}`} aria-label={`Binding ${name}`}>
                 <th scope="row">{label(binding)}</th>
                 {RESOURCE_FIELDS.map(([key]) => (
-                  <td key={key}>{key in args ? <code>{show(args[key])}</code> : "Not set"}</td>
+                  <td key={key}>
+                    {key === "version" ? (
+                      <Versions binding={binding} />
+                    ) : key in args ? (
+                      <code>{show(args[key])}</code>
+                    ) : (
+                      "Not set"
+                    )}
+                  </td>
                 ))}
                 <td>
                   {args.namespaced === true
@@ -147,6 +214,11 @@ function CustomResourceReaders({ bindings }: { bindings: Binding[] }) {
                     </details>
                   )}
                 </td>
+                {anyOverrides && (
+                  <td>
+                    <Overrides binding={binding} />
+                  </td>
+                )}
                 {anyExtra && (
                   <td>
                     <Arguments values={extra[index]} />
@@ -212,6 +284,268 @@ function OtherReaders({ bindings }: { bindings: Binding[] }) {
   );
 }
 
+/** A request's URL: the setting it is saved in, or the URL as written. */
+function RequestUrl({ manifest, url }: { manifest: unknown; url: unknown }) {
+  const id = settingReference(url);
+  return id ? <>the URL saved in {settingTitle(manifest, id)}</> : <code>{show(url)}</code>;
+}
+
+/** Items joined by commas. */
+const listed = (items: ReactNode[]) =>
+  items.map((item, index) => (
+    <span key={index}>
+      {index > 0 && ", "}
+      {item}
+    </span>
+  ));
+
+/** The provider lists (#569), what each is called, and the parameters the host sets on its request. */
+const PROVIDER_LISTS = [
+  { list: "metricProviders", what: "Metric provider", language: "PromQL", sets: ["query", "start", "end", "step"], polls: false },
+  { list: "logProviders", what: "Log provider", language: "LogQL", sets: ["query", "start", "end", "limit", "direction"], polls: true },
+  { list: "traceProviders", what: "Trace provider", language: "TraceQL", sets: ["q", "start", "end", "limit"], polls: false },
+] as const;
+
+/** "a, b and c". */
+const inWords = (words: readonly string[]) =>
+  words.length < 2 ? words.join("") : `${words.slice(0, -1).join(", ")} and ${words[words.length - 1]}`;
+
+/**
+ * The providers that send their query through `binding` (#569): each one's whole
+ * template, as the manifest writes it, and what the host adds to it. A log provider
+ * is asked again while a view follows it, and says so, since that is a request on a
+ * timer to another system.
+ */
+function Providers({ manifest, binding }: { manifest: unknown; binding: Binding }) {
+  const contributions = fields(fields(manifest).contributions);
+  const through = PROVIDER_LISTS.flatMap((kind) =>
+    items(contributions[kind.list])
+      .map(fields)
+      .filter((provider) => provider.capability === binding.name)
+      .map((provider) => ({ kind, provider })),
+  );
+  if (through.length === 0) return null;
+  return (
+    <ul className="extension-binding-readers" aria-label={`Providers that query through ${label(binding)}`}>
+      {through.map(({ kind, provider }, index) => (
+        <li key={index}>
+          {kind.what} <strong>{show(provider.title ?? provider.id)}</strong>, {kind.language}, for{" "}
+          {show(items(provider.forKinds).join(", "))}: <code>{show(provider.query)}</code>. The host binds each{" "}
+          <code>{"${…}"}</code> for the view it is shown in, and sets {inWords(kind.sets)}
+          {kind.polls && "; asked again every 5 s while a log view follows it"}.
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+/**
+ * `network.http` (#568): where the app may reach, then what each request sends. The
+ * hosts are the grant's scope, and a secret header is named by the setting that keeps
+ * it; the value is never in the manifest.
+ */
+function NetworkRequests({ bindings, manifest }: { bindings: Binding[]; manifest: unknown }) {
+  const hosts = networkHosts(manifest);
+  return (
+    <>
+      <p className="extension-message">
+        May reach, over HTTPS only (plain HTTP to this computer only if you allow it in the app's details):
+      </p>
+      <ul className="extension-network-hosts" aria-label="Hosts network.http may reach">
+        {hosts.map((host, index) => (
+          <li key={index}>
+            <HostText manifest={manifest} host={host} />
+          </li>
+        ))}
+      </ul>
+      <ul className="extension-binding-readers">
+        {bindings.map((binding, index) => {
+          const args = binding.arguments;
+          const query = Object.entries(fields(args.query));
+          const headers = Object.entries(fields(args.headers));
+          const secrets = Object.entries(fields(args.secretHeaders)).map(([name, entry]) => {
+            const header = fields(entry);
+            const prefix = typeof header.prefix === "string" && header.prefix ? header.prefix : null;
+            return (
+              <>
+                secret {settingTitle(manifest, String(header.secret ?? ""))} as the <code>{plainText(name)}</code> header
+                {/* Quoted, so a trailing space shows. */}
+                {prefix !== null && (
+                  <>
+                    , after <code>{plainText(JSON.stringify(prefix))}</code>
+                  </>
+                )}
+              </>
+            );
+          });
+          return (
+            <li key={`${index}:${binding.name}`} aria-label={`Binding ${plainText(binding.name)}`}>
+              <strong>{label(binding)}</strong>: GET <RequestUrl manifest={manifest} url={args.url} />
+              {typeof args.path === "string" && (
+                <>
+                  , path <code>{show(args.path)}</code>
+                </>
+              )}
+              {query.length > 0 && (
+                <>
+                  , query{" "}
+                  {listed(query.map(([key, value]) => <code>{`${plainText(key)}=${show(value)}`}</code>))}
+                </>
+              )}
+              {headers.length > 0 && (
+                <>
+                  ; {headers.length === 1 ? "header" : "headers"}{" "}
+                  {listed(headers.map(([key, value]) => <code>{`${plainText(key)}: ${show(value)}`}</code>))}
+                </>
+              )}
+              {secrets.length > 0 && <>; sends {listed(secrets)}</>}.
+              <Providers manifest={manifest} binding={binding} />
+            </li>
+          );
+        })}
+      </ul>
+    </>
+  );
+}
+
+/**
+ * The host's own facts for the pod capabilities (#567). They are the broker's alone
+ * and not in the capability catalog, so they are stated here as the host declares them
+ * (`EXEC_ANNOTATIONS`, `FORWARD_ANNOTATIONS` in `crates/registry/src/extensions/pods.rs`).
+ */
+/** `k8s.exec`'s confirmation template, as the host declares it (`EXEC_ANNOTATIONS.confirm`). */
+export const EXEC_CONFIRM = "Run this app's command[ in {resource}][ in cluster {cluster}]?";
+export const POD_FACTS: Record<string, string> = {
+  [POD_LOGS]: "Read-only · low impact",
+  [POD_EXEC]: "Sensitive · high impact · confirmed on every run",
+  [POD_FORWARD]: "Read-only · medium impact · opens a port on this computer while the view is open",
+};
+
+/** The built-in kinds a pod scope's reader may list, by the reader's target (#567). */
+const WORKLOAD_KINDS: Record<string, string> = {
+  "k8s.listDeployments": "Deployment",
+  "k8s.listStatefulSets": "StatefulSet",
+  "k8s.listDaemonSets": "DaemonSet",
+};
+
+/**
+ * Whose pods a pod binding reaches (#567): each object of a reader's kind selects its
+ * own, by its selector — where Kubernetes keeps it for a built-in workload, where the
+ * binding says for a custom resource — or any pod in a granted namespace.
+ */
+function podScope(binding: Binding, bindings: Binding[]): ReactNode {
+  const resource = binding.arguments.resource;
+  if (resource === undefined) return <>any pod in a namespace above</>;
+  const reader = bindings.find((candidate) => candidate.name === resource);
+  if (!reader) return <>the pods of <code>{show(resource)}</code>, which this manifest does not declare</>;
+  const kind = WORKLOAD_KINDS[reader.target] ?? (typeof reader.arguments.kind === "string" ? reader.arguments.kind : reader.target);
+  const at = binding.arguments.selector;
+  return (
+    <>
+      pods selected by each {plainText(kind)} {label(reader)} lists
+      {at !== undefined && (
+        <>
+          , read at <code>{show(at)}</code>
+        </>
+      )}
+    </>
+  );
+}
+
+const containerOf = (binding: Binding): ReactNode =>
+  typeof binding.arguments.container === "string" ? (
+    <>
+      container <code>{plainText(binding.arguments.container)}</code> of{" "}
+    </>
+  ) : null;
+
+/**
+ * Logs, exec and port-forwards (#567): whose pods each binding reaches, and exactly
+ * what it does there — the command an exec binding runs, argument by argument, and the
+ * port a forward opens. Namespaces the permission grants are listed first, as
+ * `network.http`'s hosts are.
+ */
+function PodBindings({ target, bindings, all, manifest }: { target: string; bindings: Binding[]; all: Binding[]; manifest: unknown }) {
+  const namespaces = podNamespaces(manifest, target);
+  return (
+    <>
+      {namespaces.length > 0 && (
+        <>
+          <p className="extension-message">May reach any pod in these namespaces:</p>
+          <ul className="extension-network-hosts" aria-label={`Namespaces ${plainText(target)} may reach`}>
+            {namespaces.map((namespace, index) => (
+              <li key={index}>
+                <code>{plainText(namespace)}</code>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+      <ul className="extension-binding-readers">
+        {bindings.map((binding, index) => {
+          const args = binding.arguments;
+          const port = typeof args.port === "number" ? args.port : show(args.port);
+          const command = items(args.command).map((argument) => commandArgument(String(argument)));
+          return (
+            <li key={`${index}:${binding.name}`} aria-label={`Binding ${plainText(binding.name)}`}>
+              <strong>{label(binding)}</strong>:{" "}
+              {target === POD_LOGS && (
+                <>
+                  streams the logs of {containerOf(binding)}
+                  {podScope(binding, all)}.
+                </>
+              )}
+              {target === POD_EXEC && (
+                <>
+                  runs <code className="extension-command">{command.join(" ")}</code> in {containerOf(binding)}
+                  {podScope(binding, all)}. You confirm every run, with its pod, container and command.
+                </>
+              )}
+              {target === POD_FORWARD && (
+                <>
+                  forwards port <code>{port}</code>
+                  {args.service === true ? " through a Service to " : " of "}
+                  {podScope(binding, all)} to a port on this computer the host picks, while the view that opened it is
+                  open.
+                </>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+      <p className="extension-message">{POD_FACTS[target]}</p>
+    </>
+  );
+}
+
+/**
+ * `extension.secretStore` (#543): not bound to anything, so what it grants is
+ * which of the app's settings the host keeps as secrets, plus the host's own
+ * metadata for the permission (#548) — read from the capability catalog,
+ * never from the manifest.
+ */
+function SecretStore({ manifest }: { manifest: unknown }) {
+  const secrets = items(fields(manifest).settings)
+    .map(fields)
+    .filter((setting) => setting.type === "secret-reference")
+    .map((setting) => show(setting.title ?? setting.id));
+  const fact = CAPABILITY_CATALOG.find((capability) => capability.id === SECRET_STORE);
+  const asks = fact?.confirm ? renderConfirmTemplate(fact.confirm, {}) : null;
+  return (
+    <p className="extension-message">
+      Keeps these secret settings in srelens's encrypted secrets vault: {secrets.length ? secrets.join(", ") : "none"}. The app
+      never reads them; the host uses one only where a host capability declares a place for it.
+      {fact && (
+        <>
+          {" "}
+          {[fact.sensitive && "Sensitive", `${fact.impact} impact`].filter(Boolean).join(" · ")}
+          {asks && <> · asks “{asks}”</>}
+        </>
+      )}
+    </p>
+  );
+}
+
 /**
  * What each requested permission is bound to: for a custom-resource reader its group,
  * version, kind, plural, scope and printer columns; for an event reader the API groups its
@@ -230,12 +564,18 @@ export function ExtensionBindings({ manifest, permissions }: { manifest: unknown
           return (
             <li key={target} aria-label={`${plainText(target)} bindings`}>
               <code>{plainText(target)}</code>
-              {bound.length === 0 ? (
+              {target === SECRET_STORE ? (
+                <SecretStore manifest={manifest} />
+              ) : bound.length === 0 ? (
                 <p className="extension-message">No binding uses this permission.</p>
               ) : target === CUSTOM_RESOURCE ? (
                 <CustomResourceReaders bindings={bound} />
               ) : target === EVENTS ? (
                 <EventReaders bindings={bound} manifest={manifest} />
+              ) : target === NETWORK_HTTP ? (
+                <NetworkRequests bindings={bound} manifest={manifest} />
+              ) : POD_TARGETS.includes(target) ? (
+                <PodBindings target={target} bindings={bound} all={bindings} manifest={manifest} />
               ) : (
                 <OtherReaders bindings={bound} />
               )}
@@ -265,6 +605,7 @@ export function ReviewManifest({ text }: { text: string }) {
           value={escapeFormatCharacters(text)}
           readOnly
           language="none"
+          copy
           ariaLabel="Manifest under review"
           minHeight={160}
           maxHeight={360}

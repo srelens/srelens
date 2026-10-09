@@ -28,10 +28,10 @@ use srelens_llm::ProviderConfig;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
 
-use srelens_tui::agent::{
+use srectl::agent::{
     build_mcp_server, run_boxed_cursor_turn, run_native_agent_turn, McpToolInvoker,
 };
-use srelens_tui::event::AppEvent;
+use srectl::event::AppEvent;
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -117,6 +117,7 @@ async fn boxed_turn_against_missing_binary(
         "why is the api pod restarting?".into(),
         context.to_string(),
         "payments".into(),
+        None,
         ClientCache::new(PathBuf::from("/nonexistent")),
         vec![],
         tx,
@@ -148,6 +149,7 @@ async fn a_native_turn_that_never_gets_a_reply_times_out_and_still_reports_usage
         "how are the pods?".into(),
         "kind-dev".into(),
         "payments".into(),
+        None,
         tx,
         1,
     )

@@ -1,0 +1,39 @@
+{
+  "id": "org.example.packaged",
+  "name": "Packaged example",
+  "version": "1.0.0",
+  "srelensApiVersion": "^0.4",
+  "kind": "declarative",
+  "permissions": [
+    "k8s.listCustomResource"
+  ],
+  "capabilities": [
+    {
+      "name": "applications",
+      "title": "List Applications",
+      "target": "k8s.listCustomResource",
+      "arguments": {
+        "group": "argoproj.io",
+        "version": "v1alpha1",
+        "plural": "applications",
+        "kind": "Application",
+        "namespaced": true
+      },
+      "inputs": [
+        "context",
+        "namespace"
+      ]
+    }
+  ],
+  "contributions": {
+    "pages": [
+      {
+        "id": "applications",
+        "title": "Applications",
+        "capability": "applications"
+      }
+    ],
+    "detailTabs": [],
+    "detailLinks": []
+  }
+}

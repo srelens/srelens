@@ -1,4 +1,5 @@
-import { parseExtensionRoute } from "@srelens/core";
+import { parseExtensionRoute, parseExtensionOperationRoute } from "@srelens/core";
+import { ExtensionOperation } from "../screens/ExtensionOperation";
 import { ExtensionPage } from "../screens/ExtensionPage";
 import type { ComponentType } from "react";
 import { K8S_KIND, RESOURCE_LABELS, type ResourceKind } from "@srelens/core";
@@ -119,8 +120,17 @@ function decodedSegment(raw: string): string {
  * passed in by whoever knows it; the mock hard-coded "prod-eu".
  */
 export function describe(route: string, clusterName?: string): RouteInfo {
+  const operation = parseExtensionOperationRoute(route);
+  if (operation) {
+    const title = operation.operation.replace(/[-_]/g, " ").replace(/^./, c => c.toUpperCase());
+    const subject = operation.params?.reportId ?? operation.params?.image ?? operation.params?.namespace;
+    return { route, title: subject ? `${title} · ${subject}` : title, sub: clusterName ?? operation.contextKey, kind: "resource" };
+  }
   const extension = parseExtensionRoute(route);
-  if (extension) return { route, title: extension.resourceName ?? extension.page, sub: extension.clusterId ? clusterName ?? extension.context : extension.context, kind: "resource" };
+  // A route that names its cluster by key or stable ID is labelled with the cluster's name;
+  // a legacy one already carries the name.
+  const named = extension && extension.contextKey === undefined && extension.clusterId === undefined;
+  if (extension) return { route, title: extension.resourceName ?? extension.page, sub: named ? extension.context : clusterName ?? extension.context, kind: "resource" };
   const sub = clusterName || undefined;
   if (route.startsWith("/resources/")) {
     const [, , rawName, suffix] = route.split("/");
@@ -365,6 +375,7 @@ const SCREENS: Record<string, ScreenComponent> = Object.assign(Object.create(nul
 const PREFIXED: ReadonlyArray<[string, ScreenComponent]> = [["/k/", Resources]];
 
 export function screenFor(route: string): ScreenComponent | null {
+  if (parseExtensionOperationRoute(route)) return ExtensionOperation;
   if (parseExtensionRoute(route)) return ExtensionPage;
   // `hasOwnProperty.call` as well as the null prototype: the table is the one
   // thing standing between an arbitrary route string and something rendered as

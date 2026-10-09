@@ -1,15 +1,18 @@
 import { useEffect } from "react";
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import fluxManifest from "../../../../examples/extensions/flux.json";
+import { takeExtensionAction } from "../extensions/actionRequests";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Console } from "./Console";
+import { invalidateAgentInventory } from "../lib/agentInventory";
 import { ConsoleProvider, useConsole } from "../console";
-import { resetContexts, setContexts } from "../lib/clusters";
+import { pinContextKey, resetContexts, setContexts } from "../lib/clusters";
 import { defaultState } from "../lib/tabs";
 import { logsRoute } from "../screens/Logs";
 import * as tabsStore from "../lib/tabsStore";
 import { lockWorkspace, resetLock, __setKnownVaultMode } from "./LockGate";
-import type { ClusterContext } from "@srelens/core";
+import { extensionClusterResourceRoute, extensionClusterRoute, type ClusterContext } from "@srelens/core";
 
 const {
   useAgentRun,
@@ -86,6 +89,13 @@ vi.mock("@srelens/core", async (orig) => ({
   isApplePlatform,
 }));
 
+// Installed apps, for the palette's app commands (#544). Empty unless a test fills it.
+const installed = vi.hoisted(() => ({ plugins: [] as unknown[] }));
+vi.mock("../extensions/inventoryStore", async (orig) => ({
+  ...(await orig<typeof import("../extensions/inventoryStore")>()),
+  useExtensions: () => ({ status: "ready", data: { schemaVersion: 1, nextRevision: 2, plugins: installed.plugins }, reload: () => {} }),
+}));
+
 /** The store's shape, defaulted to idle-and-empty — every test overrides only
  *  the fields it cares about, the same convention `Composer.test.tsx` uses
  *  for the same store. */
@@ -130,6 +140,7 @@ const ctx = (stableId: string, name = stableId): ClusterContext => ({
   name,
   stableId,
   key: stableId,
+  pinnedId: `srelens-context:/work/${stableId}`,
   cluster: name,
   server: "",
   isCurrent: false,
@@ -1551,6 +1562,209 @@ describe("Console — header details", () => {
       setup();
       await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
       expect(screen.queryByRole("button", { name: /codex/i })).toBeNull();
+    });
+  });
+
+  /**
+   * #396. The picker read `listAgents` once, at mount, and the dock stays
+   * mounted across every tab — so a key configured in Settings › Agent & MCP
+   * never reached it. The native agent stayed missing from a dock that was
+   * already open, and one whose key was cleared stayed offered.
+   */
+  describe("when the agent inventory changes after the dock mounted (#396)", () => {
+    const CLAUDE = { kind: "claude", label: "Claude Code", available: true, gated: false, path: "/c", version: "1", installUrl: "" };
+    const NATIVE_KEYED = { kind: "srelens", label: "srelens", available: true, gated: false, path: null, version: null, installUrl: "" };
+    const NATIVE_UNKEYED = { ...NATIVE_KEYED, available: false };
+
+    it("offers the native agent once its key is configured", async () => {
+      const user = userEvent.setup();
+      listAgents.mockResolvedValue([CLAUDE, NATIVE_UNKEYED]);
+      setup();
+      await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
+      await user.click(await screen.findByRole("button", { name: /claude code/i }));
+      expect(screen.queryByRole("option", { name: /srelens/i })).toBeNull();
+      await user.keyboard("{Escape}");
+
+      listAgents.mockResolvedValue([CLAUDE, NATIVE_KEYED]);
+      act(() => invalidateAgentInventory());
+
+      await user.click(await screen.findByRole("button", { name: /claude code/i }));
+      expect(await screen.findByRole("option", { name: /srelens/i })).toBeTruthy();
+    });
+
+    it("stops offering the native agent once its key is cleared", async () => {
+      const user = userEvent.setup();
+      useRun.mockReturnValue({ ...runState(), agentKind: "srelens" });
+      listAgents.mockResolvedValue([NATIVE_KEYED]);
+      setup();
+      await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
+      expect(await screen.findByRole("button", { name: /srelens/i })).toBeTruthy();
+
+      listAgents.mockResolvedValue([NATIVE_UNKEYED]);
+      act(() => invalidateAgentInventory());
+
+      await waitFor(() => expect(screen.queryByRole("button", { name: /srelens/i })).toBeNull());
+    });
+
+    it("keeps the list it has while the re-read is in flight, rather than flickering the picker away", async () => {
+      const user = userEvent.setup();
+      setup();
+      await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
+      expect(await screen.findByRole("button", { name: /claude code/i })).toBeTruthy();
+
+      const readsBefore = listAgents.mock.calls.length;
+      listAgents.mockReturnValue(new Promise(() => {}));
+      act(() => invalidateAgentInventory());
+
+      // The re-read must actually have started — otherwise a dock that ignored
+      // the invalidation entirely would keep its picker and pass this test.
+      await waitFor(() => expect(listAgents).toHaveBeenCalledTimes(readsBefore + 1));
+      expect(screen.getByRole("button", { name: /claude code/i })).toBeTruthy();
+    });
+
+    it("points the picker at the agent the next question will go to, once the chosen one is no longer offered", async () => {
+      // `askAgent` falls back to the first agent offered when the chosen one
+      // is not, so a picker left on "Agent" with nothing selected hid where a
+      // question would actually go (PR #792 review).
+      const user = userEvent.setup();
+      useRun.mockReturnValue({ ...runState(), agentKind: "srelens" });
+      listAgents.mockResolvedValue([CLAUDE, NATIVE_KEYED]);
+      setup();
+      await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
+      expect(await screen.findByRole("button", { name: /^srelens/i })).toBeTruthy();
+
+      listAgents.mockResolvedValue([CLAUDE, NATIVE_UNKEYED]);
+      act(() => invalidateAgentInventory());
+
+      expect(await screen.findByRole("button", { name: /claude code/i })).toBeTruthy();
+    });
+
+    it("says the agent list could not be read, rather than looking like nothing is installed, and reads it again on Retry", async () => {
+      const user = userEvent.setup();
+      listAgents.mockRejectedValue(new Error("agent_list failed: PATH unreadable"));
+      setup();
+      await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
+      expect(await screen.findByText(/agents could not be listed/i)).toBeTruthy();
+      expect(screen.getByText(/PATH unreadable/)).toBeTruthy();
+
+      listAgents.mockResolvedValue([CLAUDE]);
+      await user.click(screen.getByRole("button", { name: "Retry" }));
+
+      expect(await screen.findByRole("button", { name: /claude code/i })).toBeTruthy();
+      expect(screen.queryByText(/agents could not be listed/i)).toBeNull();
+    });
+
+    it("describes a timed-out agent list as a local failure, not the cluster's (PR #792 review)", async () => {
+      const user = userEvent.setup();
+      listAgents.mockRejectedValue(new Error("agent_list timed out"));
+      setup();
+      await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
+
+      expect(await screen.findByText(/local operation didn't finish in time/i)).toBeTruthy();
+      expect(screen.queryByText(/Kubernetes API server/i)).toBeNull();
+    });
+
+    it("says a retry is under way, and offers no second Retry while it reads (PR #792 review)", async () => {
+      const user = userEvent.setup();
+      listAgents.mockRejectedValue(new Error("agent_list failed"));
+      setup();
+      await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
+      await user.click(await screen.findByRole("button", { name: "Retry" }));
+
+      listAgents.mockReturnValue(new Promise(() => {}));
+      // The click above started the read with the rejecting mock; hold the
+      // NEXT one open and retry again, as a reader would on a slow machine.
+      expect(await screen.findByText(/agents could not be listed/i)).toBeTruthy();
+      await user.click(screen.getByRole("button", { name: "Retry" }));
+
+      expect(await screen.findByText(/listing agents again/i)).toBeTruthy();
+      expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+    });
+
+    it("drops the list when the re-read fails, rather than offering what it can no longer vouch for", async () => {
+      const user = userEvent.setup();
+      setup();
+      await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
+      expect(await screen.findByRole("button", { name: /claude code/i })).toBeTruthy();
+
+      listAgents.mockRejectedValue(new Error("agent_list failed"));
+      act(() => invalidateAgentInventory());
+
+      await waitFor(() => expect(screen.queryByRole("button", { name: /claude code/i })).toBeNull());
+    });
+  });
+});
+
+describe("app commands in the palette (#544)", () => {
+  const flux = { id: fluxManifest.id, name: fluxManifest.name };
+  const plugin = { manifest: fluxManifest, enabled: true, revision: 1, grants: [], settings: {}, source: "local", installedAt: 0, history: [] };
+  beforeEach(() => {
+    setContexts([HARNESS_CTX]);
+    installed.plugins = [plugin];
+  });
+  afterEach(() => {
+    installed.plugins = [];
+    takeExtensionAction(helmReleaseSelection);
+  });
+  // The resource tab asks the host by the cluster's pinned ID, so its review is asked for by that.
+  const helmReleaseSelection = { id: flux.id, revision: 1, capability: "helmreleases", context: "srelens-context:/work/prod-eu-id", namespace: "team", name: "web" };
+
+  it("lists an installed app's pages under Apps and opens one on the cluster in focus", async () => {
+    const user = userEvent.setup();
+    setup();
+    await user.type(screen.getByRole("textbox", { name: "Console prompt" }), "/flux: open");
+    expect(await screen.findByText("Apps")).toBeTruthy();
+    expect(screen.getByText("Flux: Open Helm releases")).toBeTruthy();
+    await user.type(screen.getByRole("textbox", { name: "Console prompt" }), " helm{Enter}");
+    const route = extensionClusterRoute("prod-eu-id", flux.id, "helmreleases");
+    expect(tabsStore.currentWorkspace().tabs.some((t) => t.route === route)).toBe(true);
+    expect(askAgent).not.toHaveBeenCalled();
+  });
+
+  it("offers nothing from an app that is disabled", async () => {
+    installed.plugins = [{ ...plugin, enabled: false }];
+    const user = userEvent.setup();
+    setup();
+    await user.type(screen.getByRole("textbox", { name: "Console prompt" }), "/flux");
+    expect(await screen.findByText("No command matches. Press ⏎ to ask the agent instead.")).toBeTruthy();
+  });
+
+  it("on a Helm release, asks its tab for the host review rather than writing", async () => {
+    const route = extensionClusterResourceRoute("prod-eu-id", flux.id, "helmreleases", "team", "web");
+    tabsStore.openTab(route);
+    const user = userEvent.setup();
+    setup();
+    await user.type(screen.getByRole("textbox", { name: "Console prompt" }), "/reconcile helm{Enter}");
+    expect(takeExtensionAction(helmReleaseSelection)).toBe("helmreleases-reconcile");
+    expect(askAgent).not.toHaveBeenCalled();
+  });
+
+  describe("on two contexts that share a stable ID (#695)", () => {
+    // `/kube/a` declaring `b#c` and `/kube/a#b` declaring `c`; this window was opened for `c`.
+    const first = { ...ctx("/kube/a#b#c", "b#c"), key: "/kube/a#b%23c", pinnedId: "srelens-context:/kube/a#b%23c" };
+    const second = { ...ctx("/kube/a#b#c", "c"), key: "/kube/a%23b#c", pinnedId: "srelens-context:/kube/a%23b#c" };
+    beforeEach(() => {
+      setContexts([first, second]);
+      tabsStore.setState(defaultState([first, second]));
+      pinContextKey(second.key);
+    });
+    afterEach(() => pinContextKey(null));
+
+    it("opens a page on the context this window is for, not the first of the two", async () => {
+      const user = userEvent.setup();
+      setup();
+      await user.type(screen.getByRole("textbox", { name: "Console prompt" }), "/flux: open helm{Enter}");
+      const tab = tabsStore.currentWorkspace().tabs.find((t) => t.route === "/extension-contexts/%2Fkube%2Fa%2523b%23c/org.srelens.flux/helmreleases/");
+      expect(tab?.sub).toBe("c");
+    });
+
+    it("asks a resource tab's review by the pinned ID of the context its route names", async () => {
+      tabsStore.openTab(extensionClusterResourceRoute(first.key, flux.id, "helmreleases", "team", "web"));
+      const user = userEvent.setup();
+      setup();
+      await user.type(screen.getByRole("textbox", { name: "Console prompt" }), "/reconcile helm{Enter}");
+      expect(takeExtensionAction({ ...helmReleaseSelection, context: "srelens-context:/kube/a%23b#c" })).toBeNull();
+      expect(takeExtensionAction({ ...helmReleaseSelection, context: "srelens-context:/kube/a#b%23c" })).toBe("helmreleases-reconcile");
     });
   });
 });

@@ -1,8 +1,9 @@
 import { act, render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { beforeEach, expect, it, vi } from "vitest";
+const host = vi.hoisted(() => ({ tauri: true }));
 vi.mock("@srelens/core", async (original) => ({
   ...(await original<typeof import("@srelens/core")>()),
-  isTauri: () => true,
+  isTauri: () => host.tauri,
   listExtensions: vi.fn(),
   configureExtensions: vi.fn(),
   readExtension: vi.fn(),
@@ -29,6 +30,7 @@ const plugin = {
 } as InstalledExtension;
 beforeEach(() => {
   vi.clearAllMocks();
+  host.tauri = true;
   vi.mocked(listExtensions).mockResolvedValue({
     schemaVersion: 1,
     nextRevision: 2,
@@ -37,10 +39,15 @@ beforeEach(() => {
   vi.mocked(readExtension).mockResolvedValue({ items: [] });
 });
 it("opens backend-owned app settings through classic controls", async () => {
+  vi.mocked(listExtensions).mockResolvedValue({
+    schemaVersion: 1,
+    nextRevision: 2,
+    plugins: [{ ...plugin, manifest: { ...plugin.manifest, settings: [{ id: "team", type: "string", title: "Team" }] } }],
+  });
   render(<ExtensionManager />);
-  fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
-  fireEvent.change(screen.getByLabelText("App settings (JSON object)"), {
-    target: { value: '{"team":"classic"}' },
+  fireEvent.click(await screen.findByRole("button", { name: `Settings for ${manifest.name}` }));
+  fireEvent.change(screen.getByRole("textbox", { name: "Team" }), {
+    target: { value: "classic" },
   });
   fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
   await waitFor(() =>
@@ -85,6 +92,30 @@ it("opens native app pages from classic's connected-cluster navigation without a
   fireEvent.click(await screen.findByRole("button",{name:"Open Applications"}));
   expect(open).toHaveBeenCalledWith("cluster/a",manifest.id,manifest.contributions.pages[0].id);
   expect(screen.queryByText("Choose a cluster")).toBeNull();
+});
+
+const packageIcon = `data:image/svg+xml;base64,${btoa("<svg xmlns=\"http://www.w3.org/2000/svg\"/>")}`;
+it("draws an installed package's logo on its app in classic's navigation (#562)", async () => {
+  vi.mocked(listExtensions).mockResolvedValue({ schemaVersion: 1, nextRevision: 2, plugins: [{ ...plugin, icon: packageIcon }] });
+  const { ClassicAppsNav } = await import("./Extensions");
+  const { container } = render(<ClassicAppsNav context="cluster/a" onOpen={vi.fn()} />);
+  fireEvent.click(await screen.findByText("Apps"));
+  await screen.findByRole("button", { name: "Open Applications" });
+  const logo = container.querySelector("[data-extension-logo]");
+  expect(logo?.getAttribute("data-extension-logo")).toBe("package");
+  expect(logo?.querySelector("image")?.getAttribute("href")).toBe(packageIcon);
+});
+
+/** The web server keeps each user's own apps (#515), so classic's app tabs open there too. */
+it("opens app pages from classic's cluster navigation on the web", async () => {
+  host.tauri = false;
+  const {ClassicAppsNav}=await import("./Extensions");
+  const open=vi.fn();
+  render(<ClassicAppsNav context="cluster/a" onOpen={open}/>);
+  fireEvent.click(await screen.findByText("Apps"));
+  fireEvent.click(await screen.findByRole("button",{name:"Open Applications"}));
+  expect(open).toHaveBeenCalledWith("cluster/a",manifest.id,manifest.contributions.pages[0].id);
+  expect(listExtensions).toHaveBeenCalled();
 });
 
 /** The contexts both clusters tests list: names are presentation, stable IDs are identity. */
@@ -207,6 +238,28 @@ it("opens a limited app on the chosen one of two clusters sharing a stable ID, b
   unmount();
   render(<ClassicAppPage context="b#c" id={manifest.id} page={manifest.contributions.pages[0].id} onPage={vi.fn()} />);
   await waitFor(() => expect(screen.queryByText(/not enabled for this cluster|Loading app/)).toBeNull());
+});
+it("says it cannot tell which cluster a name means when the name is also another context's pinned ID", async () => {
+  // A context literally named after another's pinned ID: the host's find_context refuses the
+  // string, so which one this page is for is not known, and "not enabled" would be a guess.
+  vi.mocked(listContexts).mockResolvedValue({
+    contexts: [
+      { name: "c", stableId: "/kube/a#b#c", key: "/kube/a%23b#c", pinnedId: "srelens-context:/kube/a%23b#c" },
+      { name: "srelens-context:/kube/a%23b#c", stableId: "/kube/x#srelens-context:/kube/a%23b#c",
+        key: "/kube/x#srelens-context:/kube/a%2523b%23c", pinnedId: "srelens-context:/kube/x#srelens-context:/kube/a%2523b%23c" },
+    ],
+  } as any);
+  vi.mocked(listExtensions).mockResolvedValue({
+    schemaVersion: 1,
+    nextRevision: 2,
+    plugins: [{ ...plugin, contexts: ["/kube/x#srelens-context:/kube/a%2523b%23c"] }],
+  });
+  const { ClassicAppPage } = await import("./Extensions");
+  render(<ClassicAppPage context="srelens-context:/kube/a%23b#c" id={manifest.id} page={manifest.contributions.pages[0].id} onPage={vi.fn()} />);
+  // Which of the two the page was opened for is not known, so the message names neither.
+  expect(await screen.findByText(/^One context is named after another's ID, so this page cannot tell which one it is for\./)).toBeTruthy();
+  expect(screen.queryByText(/not enabled for this cluster/)).toBeNull();
+  expect(readExtension).not.toHaveBeenCalled();
 });
 it("says the cluster is gone rather than that a limited app is not enabled", async () => {
   vi.mocked(listContexts).mockResolvedValue({

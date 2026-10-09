@@ -59,6 +59,10 @@ export function EditResourceTab({
       onYamlChange={onDraftChange}
       ariaLabel="Edit resource YAML"
       fill
+      // Safe to offer here: `loadEditableManifest` routes a Secret through the
+      // consent-gated `getSecret`, so whatever is on screen is material the
+      // reader has already been shown deliberately.
+      copy
       headerLabel={`Edit ${kind}/${name}`}
       applyLabel="Apply"
       applyingLabel="Applying…"

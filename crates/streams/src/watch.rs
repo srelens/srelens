@@ -45,7 +45,34 @@ macro_rules! dispatch_watch {
                     .await
                 }
             )+
-            other => Err(format!("kind not watchable: {other}")),
+            other => {
+                if let Some((gvk, namespaced)) = srelens_kube::manifest::gvk_for(other) {
+                    let target = srelens_kube::watch::CustomWatchTarget {
+                        group: gvk.group,
+                        version: gvk.version,
+                        kind: gvk.kind,
+                        plural: other.to_string(),
+                        namespaced,
+                    };
+                    let (rows_sink, rows_ch) = ($sink.clone(), $channel.clone());
+                    let (st_sink, st_ch) = ($sink.clone(), $channel.clone());
+                    srelens_kube::watch::watch_custom_resource(
+                        $cache,
+                        $context,
+                        $namespace,
+                        target,
+                        move |rows| {
+                            rows_sink.emit(&rows_ch, serde_json::Value::Array(rows));
+                        },
+                        move |st: srelens_kube::watch::WatchStatus| {
+                            st_sink.emit(&st_ch, serde_json::json!({ "status": st.as_str() }));
+                        },
+                    )
+                    .await
+                } else {
+                    Err(format!("kind not watchable: {other}"))
+                }
+            }
         }
     };
 }
@@ -131,9 +158,9 @@ impl WatchManager {
                 "events" => srelens_kube::watch::watch_events,
             );
             if let Err(msg) = result {
-                eprintln!("resource watch error: {msg}");
                 // Surface the failure on the same channel so a permanent
-                // (403/401) error stops the perpetual "Loading" state.
+                // (403/401/404) error stops the perpetual "Loading" state without
+                // polluting the raw terminal stream with unbuffered stderr prints.
                 sink.emit(&emit_channel, serde_json::json!({ "error": msg }));
             }
         });
@@ -181,7 +208,6 @@ impl WatchManager {
             )
             .await;
             if let Err(msg) = result {
-                eprintln!("custom resource watch error: {msg}");
                 sink.emit(&emit_channel, serde_json::json!({ "error": msg }));
             }
         });
@@ -292,5 +318,83 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
         panic!("error event never arrived on the sink for custom resource watch");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn start_recognized_omitted_kind_uses_custom_watch() {
+        let manager = WatchManager::new(ClientCache::new_many(vec![]));
+        let sink = Arc::new(TestSink::default());
+        let channel = manager
+            .start(
+                sink.clone(),
+                "ctx".into(),
+                "default".into(),
+                "horizontalpodautoscalers".into(),
+                "watch:hpa:1".into(),
+                vec![],
+            )
+            .await
+            .expect("recognized omitted kind routes to custom watch");
+        assert_eq!(channel, "watch:hpa:1");
+
+        for _ in 0..50 {
+            if let Some(err_val) = sink
+                .payloads_for("watch:hpa:1")
+                .iter()
+                .find_map(|v| v.get("error").and_then(|e| e.as_str()))
+            {
+                assert!(
+                    !err_val.contains("kind not watchable"),
+                    "should have routed to custom watch, but got unwatchable error: {err_val}"
+                );
+                assert!(
+                    err_val.contains("ctx") || err_val.contains("context"),
+                    "expected custom watch client failure for context 'ctx', got: {err_val}"
+                );
+                manager.stop("watch:hpa:1");
+                assert!(!manager.has_channel("watch:hpa:1"));
+                manager.shutdown_all();
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("error event never arrived on the sink for recognized omitted kind watch");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn start_unrecognized_kind_fails_with_kind_not_watchable() {
+        let manager = WatchManager::new(ClientCache::new_many(vec![]));
+        let sink = Arc::new(TestSink::default());
+        let channel = manager
+            .start(
+                sink.clone(),
+                "ctx".into(),
+                "default".into(),
+                "completely_unknown_kind".into(),
+                "watch:unknown:1".into(),
+                vec![],
+            )
+            .await
+            .expect("start returns channel even for unknown kind");
+        assert_eq!(channel, "watch:unknown:1");
+
+        for _ in 0..50 {
+            if let Some(err_val) = sink
+                .payloads_for("watch:unknown:1")
+                .iter()
+                .find_map(|v| v.get("error").and_then(|e| e.as_str()))
+            {
+                assert_eq!(
+                    err_val, "kind not watchable: completely_unknown_kind",
+                    "unrecognized kinds must fail with kind not watchable"
+                );
+                manager.stop("watch:unknown:1");
+                assert!(!manager.has_channel("watch:unknown:1"));
+                manager.shutdown_all();
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("error event never arrived on the sink for unknown kind watch");
     }
 }

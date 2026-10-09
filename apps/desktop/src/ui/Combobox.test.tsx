@@ -36,4 +36,18 @@ describe("Combobox", () => {
     render(<Combobox value="" onValueChange={vi.fn()} options={options} ariaLabel="Namespace" />);
     expect(screen.getByRole("combobox", { name: "Namespace" }).textContent).toContain("All namespaces");
   });
+
+  it("carries a form field's invalid, required and description state on its trigger", () => {
+    render(
+      <>
+        <p id="help">Pick one</p>
+        <Combobox value="" onValueChange={vi.fn()} options={options} ariaLabel="Mode"
+          ariaInvalid ariaRequired ariaDescribedBy="help" />
+      </>,
+    );
+    const trigger = screen.getByRole("combobox", { name: "Mode" });
+    expect(trigger.getAttribute("aria-invalid")).toBe("true");
+    expect(trigger.getAttribute("aria-required")).toBe("true");
+    expect(trigger.getAttribute("aria-describedby")).toBe("help");
+  });
 });

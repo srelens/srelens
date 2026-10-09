@@ -10,6 +10,11 @@ export interface ClusterContext {
    *  file and the name, so no two contexts share it (`a` + `b#c` and `a#b` + `c` share a
    *  stable ID). Kept separate from `stableId`, which is persisted elsewhere and cannot change. */
   key: string;
+  /** What an app page asks the host by (#695): the reserved `srelens-context:` form, which names
+   *  this context alone and is never read as a name or another context's ID. It carries the
+   *  kubeconfig path made absolute by the host, so it is never persisted — routes carry `key`.
+   *  Absent when that path cannot be made absolute; the host refuses such a context's apps. */
+  pinnedId?: string;
   cluster: string;
   server: string;
   isCurrent: boolean;

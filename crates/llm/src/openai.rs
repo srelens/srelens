@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 
 use serde_json::{json, Value};
 
-use crate::types::{StopReason, StreamItem, ToolCall, ToolDef, Turn};
+use crate::types::{StopReason, StreamItem, TokenUsage, ToolCall, ToolDef, Turn};
 
 /// Build the JSON body for `POST /v1/chat/completions` with `stream: true`.
 pub fn build_request(model: &str, system: &str, turns: &[Turn], tools: &[ToolDef]) -> Value {
@@ -18,6 +18,7 @@ pub fn build_request(model: &str, system: &str, turns: &[Turn], tools: &[ToolDef
     let mut body = json!({
         "model": model,
         "stream": true,
+        "stream_options": { "include_usage": true },
         "messages": messages,
     });
     if !tools.is_empty() {
@@ -42,7 +43,11 @@ fn append_turn(messages: &mut Vec<Value>, turn: &Turn) {
         Turn::Assistant { text, tool_calls } => {
             let mut msg = json!({ "role": "assistant" });
             // OpenAI wants `content: null` (not "") when the turn is only tool calls.
-            msg["content"] = if text.is_empty() { Value::Null } else { json!(text) };
+            msg["content"] = if text.is_empty() {
+                Value::Null
+            } else {
+                json!(text)
+            };
             if !tool_calls.is_empty() {
                 msg["tool_calls"] = json!(tool_calls
                     .iter()
@@ -63,7 +68,11 @@ fn append_turn(messages: &mut Vec<Value>, turn: &Turn) {
             for o in outcomes {
                 // OpenAI tool messages have no error flag; mark failures inline
                 // so the model still sees that the call failed.
-                let content = if o.is_error { format!("Error: {}", o.content) } else { o.content.clone() };
+                let content = if o.is_error {
+                    format!("Error: {}", o.content)
+                } else {
+                    o.content.clone()
+                };
                 messages.push(json!({ "role": "tool", "tool_call_id": o.id, "content": content }));
             }
         }
@@ -101,18 +110,55 @@ impl Stream {
         }
         if data == "[DONE]" {
             // A stream that ended without a `finish_reason` still closes cleanly.
-            return if self.done { Vec::new() } else { self.finish(StopReason::EndTurn) };
+            return if self.done {
+                Vec::new()
+            } else {
+                self.finish(StopReason::EndTurn)
+            };
         }
         let Ok(v) = serde_json::from_str::<Value>(data) else {
             return Vec::new();
         };
-        if let Some(msg) = v.get("error").and_then(|e| e.get("message")).and_then(Value::as_str) {
+        if let Some(msg) = v
+            .get("error")
+            .and_then(|e| e.get("message"))
+            .and_then(Value::as_str)
+        {
             return vec![StreamItem::Error(msg.to_string())];
         }
-        let Some(choice) = v.get("choices").and_then(|c| c.get(0)) else {
-            return Vec::new();
-        };
         let mut out = Vec::new();
+        if let Some(usage) = v.get("usage").and_then(Value::as_object) {
+            let prompt = usage
+                .get("prompt_tokens")
+                .and_then(Value::as_u64)
+                .unwrap_or(0) as usize;
+            let completion = usage
+                .get("completion_tokens")
+                .and_then(Value::as_u64)
+                .unwrap_or(0) as usize;
+            let cached = usage
+                .get("prompt_tokens_details")
+                .and_then(|d| d.get("cached_tokens"))
+                .and_then(Value::as_u64)
+                .or_else(|| usage.get("cached_tokens").and_then(Value::as_u64))
+                .unwrap_or(0) as usize;
+            let total = usage
+                .get("total_tokens")
+                .and_then(Value::as_u64)
+                .map(|n| n as usize)
+                .unwrap_or(prompt + completion);
+            if prompt > 0 || completion > 0 || total > 0 {
+                out.push(StreamItem::Usage(TokenUsage {
+                    prompt_tokens: prompt,
+                    completion_tokens: completion,
+                    cached_tokens: cached,
+                    total_tokens: total,
+                }));
+            }
+        }
+        let Some(choice) = v.get("choices").and_then(|c| c.get(0)) else {
+            return out;
+        };
         if let Some(delta) = choice.get("delta") {
             if let Some(text) = delta.get("content").and_then(Value::as_str) {
                 if !text.is_empty() {
@@ -143,7 +189,9 @@ impl Stream {
                 other => {
                     if !self.done {
                         self.done = true;
-                        out.push(StreamItem::Error(format!("the provider stopped generating: {other}")));
+                        out.push(StreamItem::Error(format!(
+                            "the provider stopped generating: {other}"
+                        )));
                     }
                 }
             }
@@ -224,7 +272,12 @@ mod tests {
 
     #[test]
     fn request_puts_the_system_prompt_first_and_maps_tools_to_functions() {
-        let req = build_request("gpt-5", "sys", &[Turn::User("hi".into())], &[tool("k8s_listPods")]);
+        let req = build_request(
+            "gpt-5",
+            "sys",
+            &[Turn::User("hi".into())],
+            &[tool("k8s_listPods")],
+        );
         assert_eq!(req["model"], "gpt-5");
         assert_eq!(req["stream"], true);
         assert_eq!(req["messages"][0]["role"], "system");
@@ -243,14 +296,17 @@ mod tests {
     }
 
     #[test]
-    fn assistant_tool_calls_serialize_arguments_as_a_json_string_and_tool_results_are_tool_messages() {
+    fn assistant_tool_calls_serialize_arguments_as_a_json_string_and_tool_results_are_tool_messages(
+    ) {
         let turns = vec![
             Turn::Assistant {
                 text: String::new(),
                 tool_calls: vec![ToolCall {
                     id: "call_1".into(),
                     name: "k8s_scale".into(),
-                    arguments: json!({ "replicas": 3 }), thought_signature: None }],
+                    arguments: json!({ "replicas": 3 }),
+                    thought_signature: None,
+                }],
             },
             Turn::ToolResults(vec![ToolOutcome {
                 id: "call_1".into(),
@@ -266,7 +322,10 @@ mod tests {
         assert_eq!(assistant["tool_calls"][0]["id"], "call_1");
         assert_eq!(assistant["tool_calls"][0]["type"], "function");
         // arguments is a JSON string, not an object.
-        assert_eq!(assistant["tool_calls"][0]["function"]["arguments"], "{\"replicas\":3}");
+        assert_eq!(
+            assistant["tool_calls"][0]["function"]["arguments"],
+            "{\"replicas\":3}"
+        );
         let tool_msg = &req["messages"][2];
         assert_eq!(tool_msg["role"], "tool");
         assert_eq!(tool_msg["tool_call_id"], "call_1");
@@ -320,7 +379,8 @@ mod tests {
             items,
             vec![
                 StreamItem::Error(
-                    "the model produced malformed arguments for tool `k8s_scale`; not running it".into()
+                    "the model produced malformed arguments for tool `k8s_scale`; not running it"
+                        .into()
                 ),
                 StreamItem::Done(StopReason::ToolUse),
             ]
@@ -343,7 +403,9 @@ mod tests {
                 StreamItem::ToolCall(ToolCall {
                     id: "call_1".into(),
                     name: "k8s_scale".into(),
-                    arguments: json!({ "replicas": 2 }), thought_signature: None }),
+                    arguments: json!({ "replicas": 2 }),
+                    thought_signature: None
+                }),
                 StreamItem::Done(StopReason::ToolUse),
             ]
         );
@@ -372,7 +434,9 @@ mod tests {
         let mut s3 = Stream::new();
         assert_eq!(
             s3.push(r#"{"choices":[{"delta":{},"finish_reason":"content_filter"}]}"#),
-            vec![StreamItem::Error("the provider stopped generating: content_filter".into())]
+            vec![StreamItem::Error(
+                "the provider stopped generating: content_filter".into()
+            )]
         );
         assert!(s3.push("[DONE]").is_empty());
     }
@@ -381,7 +445,32 @@ mod tests {
     fn a_done_sentinel_without_a_finish_reason_still_closes_the_turn() {
         let mut s = Stream::new();
         s.push(r#"{"choices":[{"delta":{"content":"hi"}}]}"#);
-        assert_eq!(s.push("[DONE]"), vec![StreamItem::Done(StopReason::EndTurn)]);
+        assert_eq!(
+            s.push("[DONE]"),
+            vec![StreamItem::Done(StopReason::EndTurn)]
+        );
+    }
+
+    #[test]
+    fn stream_parses_usage_chunk() {
+        let mut s = Stream::new();
+        let items = s.push(r#"{"choices":[],"usage":{"prompt_tokens":1234,"completion_tokens":56,"total_tokens":1290,"prompt_tokens_details":{"cached_tokens":128}}}"#);
+        assert_eq!(
+            items,
+            vec![StreamItem::Usage(TokenUsage {
+                prompt_tokens: 1234,
+                completion_tokens: 56,
+                cached_tokens: 128,
+                total_tokens: 1290,
+            })]
+        );
+    }
+
+    #[test]
+    fn stream_ignores_null_usage_chunk() {
+        let mut s = Stream::new();
+        let items = s.push(r#"{"choices":[{"delta":{"content":"hello"}}],"usage":null}"#);
+        assert_eq!(items, vec![StreamItem::Text("hello".into())]);
     }
 
     #[test]

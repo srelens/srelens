@@ -60,20 +60,20 @@ just Linux — is being enabled; see
 > "Windows protected your PC" prompt. Click **More info → Run anyway** to
 > proceed. Signed installers will remove this step in a future release.
 
-## Terminal UI (`srelens-tui`)
+## Terminal UI (`srectl`)
 
 The terminal UI ships as one self-contained binary, separate from the desktop
 app and with nothing to install. Every release carries an archive per platform:
 
 | Platform | Asset |
 | --- | --- |
-| Linux x86-64 | `srelens-tui-<version>-x86_64-unknown-linux-gnu.tar.gz` |
-| Linux x86-64, static | `srelens-tui-<version>-x86_64-unknown-linux-musl.tar.gz` |
-| Linux arm64 | `srelens-tui-<version>-aarch64-unknown-linux-gnu.tar.gz` |
-| Linux arm64, static | `srelens-tui-<version>-aarch64-unknown-linux-musl.tar.gz` |
-| macOS Apple Silicon | `srelens-tui-<version>-aarch64-apple-darwin.tar.gz` |
-| macOS Intel | `srelens-tui-<version>-x86_64-apple-darwin.tar.gz` |
-| Windows x86-64 | `srelens-tui-<version>-x86_64-pc-windows-msvc.zip` |
+| Linux x86-64 | `srectl-<version>-x86_64-unknown-linux-gnu.tar.gz` |
+| Linux x86-64, static | `srectl-<version>-x86_64-unknown-linux-musl.tar.gz` |
+| Linux arm64 | `srectl-<version>-aarch64-unknown-linux-gnu.tar.gz` |
+| Linux arm64, static | `srectl-<version>-aarch64-unknown-linux-musl.tar.gz` |
+| macOS Apple Silicon | `srectl-<version>-aarch64-apple-darwin.tar.gz` |
+| macOS Intel | `srectl-<version>-x86_64-apple-darwin.tar.gz` |
+| Windows x86-64 | `srectl-<version>-x86_64-pc-windows-msvc.zip` |
 
 Take the **musl** build if your distribution is Alpine, or if the glibc build
 reports a version error — it is statically linked and depends on nothing on the
@@ -108,7 +108,7 @@ Two steps rather than `curl … | sh` for a reason worth knowing: a pipeline
 reports the status of its *last* command. If the download fails — a 404, a
 TLS error, an outage — `sh` reads an empty script, does nothing, and exits
 0, so the whole line succeeds having installed nothing. Anything automated
-around it then carries on as though `srelens-tui` were there.
+around it then carries on as though `srectl` were there.
 
 ```
 curl … | sh                       -> pipeline exit=0   (installed nothing)
@@ -163,31 +163,31 @@ short, and
 that URL serves.
 
 A copy installed this way is yours rather than a package manager's, so
-`srelens-tui update` will replace it in place.
+`srectl update` will replace it in place.
 
 **Homebrew** is the shortest path on macOS, and works on Linux too:
 
 ```bash
-brew install srelens/tap/srelens-tui
+brew install srelens/tap/srectl
 ```
 
 It installs the same prebuilt archive listed above rather than compiling,
-and `brew upgrade srelens-tui` moves it forward. Homebrew then owns the
-copy, so `srelens-tui update` will decline to replace it and point you back
+and `brew upgrade srectl` moves it forward. Homebrew then owns the
+copy, so `srectl update` will decline to replace it and point you back
 at `brew` — writing over a file Homebrew tracks would leave its database
 describing a version that is no longer there.
 
 **Or by hand, on Linux and macOS.** Extract and put it on your `PATH`:
 
 ```bash
-tar -xzf srelens-tui-<version>-<target>.tar.gz
-chmod +x srelens-tui
-sudo mv srelens-tui /usr/local/bin/
-srelens-tui --version
+tar -xzf srectl-<version>-<target>.tar.gz
+chmod +x srectl
+sudo mv srectl /usr/local/bin/
+srectl --version
 ```
 
-**Windows.** Extract the `.zip` and move `srelens-tui.exe` somewhere on your
-`PATH`, then run `srelens-tui --version` in a terminal. Windows may warn that
+**Windows.** Extract the `.zip` and move `srectl.exe` somewhere on your
+`PATH`, then run `srectl --version` in a terminal. Windows may warn that
 the file came from the internet, for the same reason the desktop installer
 does: code signing is on the roadmap ([#32]).
 
@@ -205,36 +205,36 @@ macOS refuses the binary, either reconnect and try again or clear the
 quarantine flag yourself:
 
 ```bash
-xattr -d com.apple.quarantine ./srelens-tui
+xattr -d com.apple.quarantine ./srectl
 ```
 
 Most people never see this at all: extracting a `.tar.gz` with `tar` in a
 terminal does not mark the contents as quarantined in the first place.
 
 **Checking the download.** Each release lists the SHA-256 of every TUI archive
-in `srelens-tui-<version>-SHA256SUMS.txt`. Download it next to the archive and
+in `srectl-<version>-SHA256SUMS.txt`. Download it next to the archive and
 check the one file you took. The tool differs per platform — `sha256sum` is GNU
 coreutils, so it is absent on a stock macOS and on Windows.
 
 Linux:
 
 ```bash
-sha256sum -c --ignore-missing srelens-tui-<version>-SHA256SUMS.txt
+sha256sum -c --ignore-missing srectl-<version>-SHA256SUMS.txt
 ```
 
 macOS (`shasum` ships with the system; `-c -` reads the one line you pass it,
 and `--ignore-missing` does not exist here):
 
 ```bash
-grep "srelens-tui-<version>-<target>.tar.gz$" \
-  srelens-tui-<version>-SHA256SUMS.txt | shasum -a 256 -c -
+grep "srectl-<version>-<target>.tar.gz$" \
+  srectl-<version>-SHA256SUMS.txt | shasum -a 256 -c -
 ```
 
 Windows (PowerShell):
 
 ```powershell
-$archive = "srelens-tui-<version>-x86_64-pc-windows-msvc.zip"
-$expected = (Select-String -Path "srelens-tui-<version>-SHA256SUMS.txt" -Pattern ([regex]::Escape($archive))).Line.Split(" ")[0]
+$archive = "srectl-<version>-x86_64-pc-windows-msvc.zip"
+$expected = (Select-String -Path "srectl-<version>-SHA256SUMS.txt" -Pattern ([regex]::Escape($archive))).Line.Split(" ")[0]
 $actual = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLower()
 if ($expected -eq $actual) { "OK" } else { "MISMATCH — do not run this file" }
 ```
@@ -247,31 +247,38 @@ unchanged.
 **Keeping it current.** The binary updates itself:
 
 ```bash
-srelens-tui update --check   # what is available, without changing anything
-srelens-tui update           # download it and replace this binary
+srectl update --check   # what is available, without changing anything
+srectl update           # download it and replace this binary
 ```
 
-It only ever replaces the binary you ran it from. Before writing anything it
-checks the download against the SHA-256 the release published, so a corrupted
-or truncated archive is refused and the copy you already have is left alone.
-The last step is a rename, so an interrupted update cannot leave a
-half-written binary on your `PATH`.
+It only ever replaces the binary you ran it from. It writes nothing until two
+checks pass:
 
-> **What that check does and does not prove.** It proves the file arrived
-> intact. It does not prove who built it: the checksum file lives on the same
-> release as the archive, so anyone able to replace one could replace both.
-> Verifying the GPG signature against a pinned key would close that, and is
-> tracked in [#448]. If that distinction matters to you, install by hand and
-> check the signature as described under
-> [Verifying a download](#verifying-a-download).
+1. **The checksum file is signed by a srelens release key.** The release's
+   `srectl-<version>-SHA256SUMS.txt.asc` must be a good signature by a key
+   from [`KEYS`](../KEYS), compiled into the binary you are running. The key
+   must be neither revoked nor expired. That is the same key the table under
+   [Verifying a download](#verifying-a-download) lists. It proves who built
+   the release, which a checksum alone cannot: anyone able to replace an
+   archive could replace the checksum file next to it, but not sign it.
+2. **The download matches that checksum file.** A corrupted or truncated
+   archive is refused.
 
-[#448]: https://github.com/srelens/srelens/issues/448
+If either fails, the copy you already have is left alone. When the update
+succeeds, it prints the fingerprint of the key that signed the release. The
+last step is a rename, so an interrupted update cannot leave a half-written
+binary on your `PATH`.
+
+The keys are the ones in `KEYS` when your binary was built. A binary older than
+a key rotation cannot verify releases signed by the new key and will refuse
+them. Install by hand once, checking the signature as described under
+[Verifying a download](#verifying-a-download).
 
 **Channels.** The same two the desktop app offers under Settings → Updates:
 
 ```bash
-srelens-tui update --channel stable   # released versions
-srelens-tui update --channel dev      # rolling pre-releases, cut daily
+srectl update --channel stable   # released versions
+srectl update --channel dev      # rolling pre-releases, cut daily
 ```
 
 Without the flag it stays on the channel your binary came from — a
@@ -279,6 +286,12 @@ pre-release version means a dev build, anything else means stable — so
 updating never moves you between channels by accident. Pass the flag to
 switch; the choice is not remembered, so the next plain `update` goes back to
 following the binary you are then running.
+
+The dev channel installs signed builds only. Dev pre-releases go public before
+they are signed, and signing them is best-effort, so the newest one may not be
+signed yet. `update` passes over it for the newest pre-release that is signed.
+A stable release goes public only once it is signed, so a stable release
+without a signature is refused outright.
 
 Two cases where it declines rather than acting, both on purpose:
 
@@ -293,17 +306,17 @@ Two cases where it declines rather than acting, both on purpose:
 A musl build updates to a musl build, since that binary exists precisely
 because the host cannot run the glibc one.
 
-Run `srelens-tui --help` for the full set of flags. `srelens-tui info` lists
+Run `srectl --help` for the full set of flags. `srectl info` lists
 the contexts found in your kubeconfig with the cluster and server each names —
 it reads the file and does not contact any cluster, so it tells you what is
-configured, not what is reachable. `srelens-tui toolbox` reports whether
+configured, not what is reachable. `srectl toolbox` reports whether
 `kubectl`, `helm` and `krew` are on your `PATH`.
 
 > **Windows: anything that looks for another program on your `PATH` may not
 > find it.** Executable lookup is Unix-shaped in several places — it shells out
 > to `which`, which Windows does not have, and the in-process fallback matches
 > a bare program name without consulting `PATHEXT`, so it never sees
-> `kubectl.exe` or `helm.exe`. What that affects: `srelens-tui toolbox` reports
+> `kubectl.exe` or `helm.exe`. What that affects: `srectl toolbox` reports
 > every tool as missing, Helm operations may report Helm as absent, and the
 > Cursor AI provider may not find its binary. Browsing clusters, logs, YAML and
 > everything else that talks to the API server is unaffected. Tracked in

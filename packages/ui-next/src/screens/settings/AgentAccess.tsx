@@ -96,7 +96,7 @@ import { Panel, SubHead, Switch } from "@srelens/ui-kit";
 export function AgentAccess() {
   // `isTauri()` rather than the catalog wholesale: a web build does not
   // register the host settings capabilities
-  // (`web_registry_omits_host_desktop_settings`, `crates/registry/src/lib.rs`),
+  // (`a_web_users_registry_has_apps_but_no_desktop_settings`, `crates/registry/src/lib.rs`),
   // and naming an id the running build has no entry for would be this pane
   // inventing one again — one instead of six.
   const gated = useMemo(() => gatedCapabilityIds(isTauri() ? "desktop" : "web"), []);

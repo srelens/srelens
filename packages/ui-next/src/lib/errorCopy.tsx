@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { describeError, type ErrorDomain } from "@srelens/core";
+import { describeError, describeForbidden, forbiddenSentence, namespacePhrase, parseForbidden, type ErrorDomain } from "@srelens/core";
 import { Alert, ErrorState, RawError, type Tone } from "@srelens/ui-kit";
 
 /**
@@ -73,8 +73,31 @@ export function friendly(error: unknown, domain: ErrorDomain = "cluster"): Frien
 export function summarise(errors: string[]): { detail: string; raw: string | undefined } {
   // Do not hand `friendly` straight to map: its second parameter is a domain,
   // while Array.map's second callback argument is the numeric index.
-  const copies = errors.filter((e) => e !== "").map((error) => friendly(error));
-  const details = [...new Set(copies.map((c) => c.detail))];
+  const reasons = errors.filter((e) => e !== "");
+  const copies = reasons.map((error) => friendly(error));
+  // A 403 names the resource it refused, so one RoleBinding denying five kinds
+  // classifies as five different sentences, which dedupe on the text cannot
+  // collapse. Grouped on the parse instead: one sentence per verb and place,
+  // naming every resource, in the position its first refusal held (#701).
+  const refused = new Map<string, { verb: string; where: string; resources: string[] }>();
+  const slots = copies.map((copy, i) => {
+    // Only where the classification itself said the parsed sentence — never
+    // re-reading a message it classified as something else.
+    const parts = parseForbidden(reasons[i]);
+    if (!parts || copy.detail !== describeForbidden(reasons[i])) return copy.detail;
+    const key = `${parts.verb}\u0000${parts.where}`;
+    const group = refused.get(key) ?? { verb: parts.verb, where: parts.where, resources: [] };
+    if (!group.resources.includes(parts.resource)) group.resources.push(parts.resource);
+    refused.set(key, group);
+    return group;
+  });
+  const details = [
+    ...new Set(
+      slots.map((slot) =>
+        typeof slot === "string" ? slot : forbiddenSentence(slot.verb, slot.resources, slot.where),
+      ),
+    ),
+  ];
   // The originals are kept apart by a blank line rather than the separator the
   // sentences use: each one is a struct that already contains punctuation, and
   // running two together makes a third thing that is neither.
@@ -91,6 +114,12 @@ export interface FailureStateProps {
    * should do, and what classic's call sites all do.
    */
   title?: ReactNode;
+  /**
+   * The failure — or several, as a list of messages, when one content area is
+   * fed by several calls that all refused. A list is said through
+   * {@link summarise}, so one refusal behind five calls reads once — and,
+   * like `summarise`, classified as cluster failures whatever `domain` says.
+   */
   error: unknown;
   /** What the failing operation contacted; cluster preserves the default copy. */
   domain?: ErrorDomain;
@@ -102,6 +131,15 @@ export interface FailureStateProps {
 
 /** A content area whose load failed, said in words the reader can act on. */
 export function FailureState({ title, error, domain, ...rest }: FailureStateProps) {
+  if (Array.isArray(error)) {
+    const errors = error.map(String);
+    const { detail, raw } = summarise(errors);
+    // The classification's headline only when every reason shares it: two
+    // different failures under one of their titles would claim too little.
+    const titles = [...new Set(errors.filter((e) => e !== "").map((e) => friendly(e).title))];
+    const fallback = titles.length === 1 ? titles[0] : friendly("").title;
+    return <ErrorState title={title ?? fallback} detail={detail} raw={raw} {...rest} />;
+  }
   const copy = friendly(error, domain);
   return <ErrorState title={title ?? copy.title} detail={copy.detail} raw={copy.raw} {...rest} />;
 }
@@ -143,6 +181,81 @@ export function FailureAlert({
     <Alert tone={tone} title={title} className={className}>
       {copy.detail}
       <RawError text={copy.raw ?? ""} className="mt-1" />
+    </Alert>
+  );
+}
+
+/**
+ * Some of a multi-namespace view's namespaces could not be listed (#688).
+ *
+ * Not a stale banner: the rows under it are live, and the ones it names were
+ * never there. It says WHICH namespaces are missing, because "Access denied"
+ * over a list of team-a's pods reads as though team-a had been refused.
+ */
+export function NamespaceFailuresAlert({
+  what,
+  failures,
+  className,
+}: {
+  /** The plural noun of what was listed — "pods", "events". */
+  what: string;
+  failures: Array<{ namespace: string; error: string }>;
+  className?: string;
+}) {
+  if (failures.length === 0) return null;
+  const copy = summarise(failures.map((f) => f.error));
+  return (
+    <Alert
+      tone="warn"
+      // Deduped: a grouped banner carries one failure per kind, and two kinds
+      // refused in one namespace are still one namespace.
+      title={`Could not list ${what} in ${namespacePhrase([...new Set(failures.map((f) => f.namespace))])}`}
+      className={className}
+    >
+      {copy.detail}
+      <RawError text={copy.raw ?? ""} className="mt-1" />
+    </Alert>
+  );
+}
+
+/**
+ * The rows on screen are the last good list and are no longer refreshing.
+ *
+ * One scope: its reason, exactly as {@link FailureAlert} says it. Several:
+ * every failed namespace with its OWN reason, one line each — two namespaces
+ * can go stale for different reasons (one refused, one unreachable), and the
+ * first reason alone would say the other's failure was the same (#688).
+ */
+export function StaleListAlert({
+  what,
+  error,
+  failures,
+  className,
+}: {
+  /** The plural noun of what was listed — "pods", "events". */
+  what: string;
+  error: unknown;
+  failures: Array<{ namespace: string; error: string }>;
+  className?: string;
+}) {
+  if (failures.length === 0) {
+    return <FailureAlert title={`These ${what} are stale`} error={error} className={className} />;
+  }
+  const copies = failures.map((f) => ({ namespace: f.namespace, ...friendly(f.error) }));
+  // The list's own reason, when it is none of the namespaces' — the watch
+  // could not start at all. Said first and unattributed: it is nobody's.
+  const own = failures.some((f) => f.error === error) ? undefined : friendly(error);
+  const raw = [
+    ...(own?.raw !== undefined ? [own.raw] : []),
+    ...copies.filter((c) => c.raw !== undefined).map((c) => `${c.namespace}: ${c.raw}`),
+  ].join("\n\n");
+  return (
+    <Alert tone="warn" title={`These ${what} are stale`} className={className}>
+      {own && <div>{own.detail}</div>}
+      {copies.map((c) => (
+        <div key={c.namespace}>{`${c.namespace}: ${c.detail}`}</div>
+      ))}
+      <RawError text={raw} className="mt-1" />
     </Alert>
   );
 }

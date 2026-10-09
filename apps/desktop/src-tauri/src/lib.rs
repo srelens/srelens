@@ -6,16 +6,23 @@ mod assistant_history;
 mod assistant_prompts;
 mod assistant_skills;
 mod bridge;
+pub mod bundle;
+mod bundle_cmd;
 pub mod capabilities;
+mod exec_plugin_console;
+pub mod extension_secrets;
 mod cluster_oidc;
 mod cluster_oidc_cmd;
 mod llm_agent;
 mod llm_config;
 mod exec;
+mod extension_streams;
 mod external;
 mod files;
 mod forward;
 mod helm;
+mod host_notice;
+mod node_shells;
 mod logs;
 mod mcp;
 mod mcp_confirm;
@@ -31,9 +38,12 @@ mod toolbox;
 mod updater;
 mod watch;
 mod window;
+mod window_blur;
+mod window_streams;
 
 use app_log::{app_log_path, read_app_log, reveal_app_log};
-use bridge::{invoke_capability, AppRegistry};
+use bridge::{invoke_capability, AppAudit, AppRegistry};
+use bundle_cmd::{bundle_export, bundle_import, bundle_pick_file, bundle_preview};
 use exec::{exec_close, exec_input, exec_resize, start_pod_exec};
 use external::open_external;
 use files::{pick_kubeconfig_files, save_pasted_kubeconfig, save_text_file};
@@ -61,9 +71,10 @@ use updater::{update_check, update_install};
 use watch::{start_resource_watch, stop_watch};
 
 pub use appimage::gio_module_dir_for_appimage;
+pub use exec_plugin_console::hide_exec_plugin_windows;
 pub use capabilities::{
-    build_registry, build_registry_with_paths, build_registry_with_paths_and_settings,
-    default_settings_path,
+    build_registry, build_registry_for_user, build_registry_with_paths,
+    build_registry_with_paths_and_settings, default_settings_path,
 };
 
 /// Size the main window to a comfortable default, clamped to the screen it
@@ -271,8 +282,17 @@ pub fn run() {
     // One shared client cache: request/response capabilities AND live watches
     // reuse the same authenticated kube-rs clients.
     let cache = ClientCache::new_many(capabilities::all_kubeconfig_paths());
-    let registry = capabilities::build_registry_with(cache.clone());
-
+    // Apps' secrets (#543) live in the vault `setup` opens below; the store
+    // is handed to the registry now and the vault attached to it there.
+    let extension_secrets =
+        std::sync::Arc::new(extension_secrets::VaultSecretStore::attached_later());
+    let (registry, app_streams) = registry_and_app_streams_for(
+        cache.clone(),
+        capabilities::default_kubeconfig_paths(),
+        capabilities::default_settings_path(),
+        extension_secrets.clone(),
+    );
+    let setup_secrets = extension_secrets.clone();
     // single-instance is registered BEFORE every other plugin, as the plugin
     // requires: it has to claim the lock and hand a second launch's argv over
     // before anything else initializes. Its `deep-link` feature forwards those
@@ -302,8 +322,11 @@ pub fn run() {
 
     let watcher_cache = cache.clone();
     let oidc_cache = cache.clone();
+    let inventory_streams = app_streams.clone();
     builder
         .setup(move |app| {
+            // Every inventory write reaches the window as an event (#566).
+            extension_streams::listen_inventory(&inventory_streams, app.handle());
             // Application logging: always write a rotating file to the OS log
             // directory so the Settings "Application logs" view (and post-hoc
             // debugging of a shipped build) has something to read; mirror to
@@ -409,11 +432,16 @@ pub fn run() {
                         log::warn!("could not create MCP config dir {}: {e}", dir.display());
                     }
                     let vault = std::sync::Arc::new(vault::Vault::open(&dir));
+                    // The same instance the unlock commands act on, so
+                    // unlocking the vault makes apps' secrets available.
+                    setup_secrets.attach(vault.clone());
                     let token_store: std::sync::Arc<dyn srelens_mcp::auth::TokenStore> =
                         std::sync::Arc::new(vault::VaultTokenStore(vault.clone()));
                     app.manage(token_store);
                     app.manage(vault);
-                    app.manage(McpAuditPath(dir.join("audit.jsonl")));
+                    let audit_path = dir.join("audit.jsonl");
+                    app.manage(McpAuditPath(audit_path.clone()));
+                    app.manage(app_audit(Some(&audit_path)));
 
                     let prompts_dir = dir.join("prompts");
                     if let Err(e) = std::fs::create_dir_all(&prompts_dir) {
@@ -426,11 +454,26 @@ pub fn run() {
                 }
                 Err(e) => log::warn!("MCP config dir unavailable: {e}"),
             }
+            // `manage` does not replace, so this only lands when the branch
+            // above did not — see `app_audit` for why the absent case is a
+            // no-op sink rather than a refusal.
+            if app.try_state::<AppAudit>().is_none() {
+                app.manage(app_audit(None));
+            }
             app.manage(std::sync::Arc::new(mcp_confirm::Pending::default()));
+            extension_streams::serve_native_broker(app.handle());
 
             Ok(())
         })
         .manage(AppRegistry(registry))
+        .manage(ExtensionSecrets(extension_secrets))
+        .manage(extension_streams::AppExtensionStreams(app_streams))
+        // Which window opened each stream, so a window that closes or reloads
+        // ends exactly its own (#700).
+        .manage(window_streams::WindowStreams::default())
+        // The debug pod each node shell runs in, which the host deletes (#734).
+        .manage(node_shells::NodeShells::default())
+        .on_window_event(window_streams::on_window_event)
         // The cache itself, for commands that need the live kubeconfig paths
         // (overview_snapshot resolves context → cluster identity from them).
         .manage(cache.clone())
@@ -443,6 +486,9 @@ pub fn run() {
         .manage(LogStreamManager::new(cache))
         .manage(TerminalManager::new())
         .manage(HelmManager::new())
+        // Which helm operations are still running, so one whose window goes
+        // runs on and is reported rather than killed (#735).
+        .manage(helm::HelmOps::default())
         .invoke_handler(tauri::generate_handler![
             deep_link::take_pending_deep_links,
             assistant::agent_list,
@@ -469,8 +515,13 @@ pub fn run() {
             assistant_skills::skill_save,
             assistant_skills::skill_delete,
             invoke_capability,
+            bridge::invoke_package_capability,
             start_resource_watch,
             stop_watch,
+            extension_streams::extension_stream_open,
+            extension_streams::extension_stream_cancel,
+            extension_streams::extension_stream_close_view,
+            window_streams::window_streams_reset,
             start_pod_exec,
             exec_input,
             exec_resize,
@@ -484,6 +535,10 @@ pub fn run() {
             open_external,
             pick_kubeconfig_files,
             save_pasted_kubeconfig,
+            bundle_export,
+            bundle_pick_file,
+            bundle_preview,
+            bundle_import,
             start_tool_install,
             update_check,
             update_install,
@@ -525,7 +580,206 @@ pub fn run() {
             cluster_oidc_cmd::cluster_logout,
             cluster_oidc_cmd::list_clusters,
             window::open_context_window,
+            window_blur::set_window_blur,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while running tauri application")
+        .run(|app, event| {
+            // srelens is quitting: the last chance to delete the node debug
+            // pods still on a node (#734). Bounded, so a cluster that does not
+            // answer cannot hold the app open; what is left is in the log.
+            if let tauri::RunEvent::Exit = event {
+                let (done, finished) = std::sync::mpsc::channel();
+                let app = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    node_shells::delete_all(&app).await;
+                    let _ = done.send(());
+                });
+                let deadline =
+                    node_shells::quit_deadline(srelens_kube::connect::request_timeout());
+                if finished.recv_timeout(deadline).is_err() {
+                    log::warn!("quit before every node debug pod was deleted");
+                }
+            }
+        });
+}
+
+/// The store apps' secret settings are kept in (#543), shared by every
+/// registry this process builds: the UI bridge's and the in-app MCP server's.
+pub struct ExtensionSecrets(pub std::sync::Arc<extension_secrets::VaultSecretStore>);
+
+/// A desktop registry whose apps keep their secrets in `secrets` — the vault
+/// behind the OS keychain. The GUI, the in-app MCP server and both headless
+/// MCP modes build theirs through this, so no surface quietly has no store.
+///
+/// **One inventory per vault.** After every inventory change the registry
+/// deletes each app secret the inventory at `settings_path` does not
+/// reference (#543). Every caller today pairs the default settings path with
+/// the vault under the same config dir (`dirs::config_dir()` in `main.rs`,
+/// `app_config_dir()` here), so they agree. A registry that paired this vault
+/// with another inventory — a profile, a settings override, a test pointed at
+/// the real vault — would delete every other app's secrets on its first
+/// change. Give such a build its own vault.
+pub fn registry_for(
+    cache: std::sync::Arc<ClientCache>,
+    kubeconfig_paths: Vec<std::path::PathBuf>,
+    settings_path: Option<std::path::PathBuf>,
+    secrets: std::sync::Arc<extension_secrets::VaultSecretStore>,
+) -> srelens_capability::Registry {
+    registry_and_app_streams_for(cache, kubeconfig_paths, settings_path, secrets).0
+}
+
+/// [`registry_for`], for an MCP server: the registry, and installed apps' operations as
+/// tools (#574) to serve beside it with `McpServer::with_app_tools`. `None` when there is
+/// no settings path, so no apps either.
+pub fn mcp_registry_for(
+    cache: std::sync::Arc<ClientCache>,
+    kubeconfig_paths: Vec<std::path::PathBuf>,
+    settings_path: Option<std::path::PathBuf>,
+    secrets: std::sync::Arc<extension_secrets::VaultSecretStore>,
+) -> (
+    srelens_capability::Registry,
+    Option<std::sync::Arc<srelens_registry::AppTools>>,
+) {
+    let (registry, streams) =
+        registry_and_app_streams_for(cache, kubeconfig_paths, settings_path, secrets);
+    (registry, streams.map(|streams| streams.app_tools()))
+}
+
+/// [`registry_for`], plus the app streams (#565) the GUI opens streams through.
+pub fn registry_and_app_streams_for(
+    cache: std::sync::Arc<ClientCache>,
+    kubeconfig_paths: Vec<std::path::PathBuf>,
+    settings_path: Option<std::path::PathBuf>,
+    secrets: std::sync::Arc<extension_secrets::VaultSecretStore>,
+) -> (
+    srelens_capability::Registry,
+    Option<std::sync::Arc<srelens_registry::ExtensionStreams>>,
+) {
+    srelens_registry::build_registry_app_streams_and_secrets(
+        cache,
+        kubeconfig_paths,
+        settings_path,
+        secrets,
+    )
+}
+
+/// The sink the app writes its capability trail to.
+///
+/// **ONE sink, and the UI bridge writes to it too (#555).** Not a second log
+/// beside the MCP one: an operator asking what happened to a cluster should
+/// not have to know whether they clicked it or an agent called it, and two
+/// files in two formats would make the Settings pane pick one. Same 5 MB cap
+/// and single rotation the MCP server wires in `mcp.rs`, which resolves THIS
+/// sink rather than building its own; the trail never leaves this machine.
+///
+/// `None` — no resolvable app config dir — **fails open**. There is nowhere
+/// to write a trail, and refusing `invoke_capability` for want of one would
+/// take the whole app down with it, so the sink is still there and records
+/// nothing. A capability call is not blocked by the bookkeeping around it,
+/// which is the same posture `JsonlAuditLog::record` takes towards I/O
+/// errors.
+///
+/// A function rather than two inline `manage` calls because which sink the
+/// app ends up with is a decision with a wrong answer in both directions,
+/// and `setup` cannot be called from a test.
+fn app_audit(audit_path: Option<&std::path::Path>) -> AppAudit {
+    match audit_path {
+        Some(path) => AppAudit(std::sync::Arc::new(srelens_mcp::audit::JsonlAuditLog::new(
+            path.to_path_buf(),
+            5 * 1024 * 1024,
+        ))),
+        None => AppAudit(std::sync::Arc::new(srelens_mcp::audit::NoopAudit)),
+    }
+}
+
+#[cfg(test)]
+mod secret_wiring_tests {
+    use super::*;
+
+    /// #543. The registry is built before `setup` opens the vault, so the app
+    /// hands it a store the vault is attached to afterwards — the SAME vault
+    /// the password and biometric unlock act on. Until then apps are told the
+    /// store is not open, never that a secret was kept somewhere else.
+    #[tokio::test]
+    async fn the_apps_registry_follows_the_vault_attached_after_it_was_built() {
+        let dir = std::env::temp_dir().join(format!("srelens-543-wiring-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = std::sync::Arc::new(extension_secrets::VaultSecretStore::attached_later());
+        let registry = registry_for(
+            ClientCache::new_many(vec![]),
+            vec![],
+            Some(dir.join("settings.json")),
+            store.clone(),
+        );
+        let listed = registry.invoke("extensions.list", serde_json::json!({})).await.unwrap();
+        assert_eq!(listed["secretStore"]["available"], false);
+        assert!(listed["secretStore"]["reason"].as_str().unwrap().contains("not open"));
+
+        store.attach(std::sync::Arc::new(vault::Vault::with_backend(
+            &dir.join("mcp"),
+            Box::new(vault::test_support::MemKeychain::empty()),
+        )));
+        let listed = registry.invoke("extensions.list", serde_json::json!({})).await.unwrap();
+        assert_eq!(listed["secretStore"], serde_json::json!({"available": true}));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod audit_wiring_tests {
+    use super::*;
+    use srelens_capability::audit::{AuditRecord, Source};
+
+    fn a_record() -> AuditRecord {
+        AuditRecord {
+            result_bytes: None,
+            source: Source::Ui,
+            tool: "k8s.deletePod".into(),
+            args: serde_json::json!({ "name": "web-0" }),
+            app: None,
+            cluster: None,
+            resource: None,
+            decision: "approved",
+            outcome: srelens_capability::audit::OUTCOME_OK,
+            error: None,
+        }
+    }
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("srelens-pr660-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// With a config dir there is somewhere to put the trail, and #555 means
+    /// a click in the app lands in it exactly as an agent's call does.
+    #[test]
+    fn a_config_dir_gets_a_trail_on_disk() {
+        let dir = scratch("withdir");
+        let path = dir.join("audit.jsonl");
+
+        app_audit(Some(&path)).0.record(a_record());
+
+        let body = std::fs::read_to_string(&path).expect("the trail must exist");
+        assert_eq!(body.lines().count(), 1);
+        assert!(body.contains("k8s.deletePod"), "unexpected line: {body}");
+    }
+
+    /// Fail OPEN, not closed: with no config dir there is nowhere to write a
+    /// trail, and refusing `invoke_capability` for want of one would take the
+    /// whole app down with it. The sink still exists — `invoke_capability`
+    /// takes it as managed state and would error without it — and it writes
+    /// nothing.
+    #[test]
+    fn no_config_dir_still_gets_a_sink_that_writes_nothing() {
+        let dir = scratch("nodir");
+
+        app_audit(None).0.record(a_record());
+
+        let left: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().collect();
+        assert!(left.is_empty(), "nothing may be written: {left:?}");
+    }
 }

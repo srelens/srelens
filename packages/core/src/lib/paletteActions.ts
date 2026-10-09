@@ -9,6 +9,7 @@ import {
   createNodeDebugPod,
 } from "./actions";
 import { deletePod, evictPod } from "./workloads";
+import type { ExtensionManifest } from "./extensions";
 
 /** Target resource a palette action runs against. */
 export interface PaletteActionCtx {
@@ -165,4 +166,56 @@ export function actionsForKind(kind: ResourceKind): PaletteAction[] {
 /** Distinct backend capability ids this registry covers. */
 export function paletteActionCapabilityIds(): Set<string> {
   return new Set(PALETTE_ACTIONS.map((a) => a.capabilityId));
+}
+
+/** An installed app as the palette reads it: its ID, the host's name for it, and its manifest. */
+export interface PaletteApp {
+  id: string;
+  /** What the host calls the app on screen — never a string the command chooses. */
+  name: string;
+  manifest: ExtensionManifest;
+}
+
+/** One app-contributed palette entry (#544), before a surface binds it to navigation. */
+export interface AppPaletteCommand {
+  /** `<app id>/<command id>`: unique across apps, which command ids alone are not. */
+  id: string;
+  /** `<app name>: <title>`, so an app's command never reads as the host's own. */
+  label: string;
+  target: { kind: "page"; page: string } | { kind: "action"; action: string };
+  /** Set for an action command: the one capability it reaches, and only through the host confirmation. */
+  capabilityId?: "extensions.action";
+}
+
+/**
+ * The palette entries an app contributes, for the resource the reader has open.
+ *
+ * `subject` is the reader binding (`capability`) of the app resource open in the
+ * active tab, or `null`. A page command is offered everywhere. An action command
+ * is offered only on a resource that binding lists, whose qualified kind the
+ * command's `forKinds` names. The host validated both at install; they are
+ * checked again here so a stored manifest that drifted draws nothing rather
+ * than a command that cannot run. A command naming an undeclared page or
+ * action is dropped the same way, never drawn as a dead entry.
+ */
+export function appPaletteCommands(app: PaletteApp, subject: { capability: string } | null): AppPaletteCommand[] {
+  const { manifest } = app;
+  const out: AppPaletteCommand[] = [];
+  for (const command of manifest.contributions.commands ?? []) {
+    const base = { id: `${app.id}/${command.id}`, label: `${app.name}: ${command.title}` };
+    if ("page" in command.target) {
+      const page = command.target.page;
+      if (manifest.contributions.pages.some((p) => p.id === page)) out.push({ ...base, target: { kind: "page", page } });
+      continue;
+    }
+    const name = command.target.action;
+    const action = manifest.actions?.find((a) => a.name === name);
+    if (!action || !subject || action.resource !== subject.capability) continue;
+    const reader = manifest.capabilities.find((c) => c.name === action.resource);
+    const { group, kind } = reader?.arguments ?? {};
+    if (typeof group !== "string" || typeof kind !== "string") continue;
+    if (!(command.forKinds ?? []).includes(`${group}/${kind}`)) continue;
+    out.push({ ...base, target: { kind: "action", action: name }, capabilityId: "extensions.action" });
+  }
+  return out;
 }

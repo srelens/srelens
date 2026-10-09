@@ -1,0 +1,14 @@
+# The handshake, as srelens 0.15 writes it
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"apiVersions":["0.1.0"],"host":{"name":"srelens","version":"0.15.0"},"limits":{"requestTimeoutMs":30000,"maxConcurrentRequests":8,"maxStreams":5,"memoryBytes":268435456,"cpus":1.0,"dataBytes":1073741824,"dataEntries":100000},"dataDirectory":"/home/me/.config/srelens/extensions/data/0123456789abcdef0123456789abcdef"}}
+{"jsonrpc":"2.0","id":2,"method":"activate","params":{}}
+{"jsonrpc":"2.0","id":3,"method":"health","params":{}}
+# An app operation, named as the manifest declares it
+{"jsonrpc":"2.0","id":4,"method":"scan","params":{"image":"nginx:1.27"}}
+{"jsonrpc":"2.0","id":5,"method":"stream/open","params":{"stream":1,"method":"watch","params":{"namespace":"team"}}}
+{"jsonrpc":"2.0","method":"stream/cancel","params":{"stream":1}}
+{"jsonrpc":"2.0","method":"$/cancelRequest","params":{"id":4}}
+# Answers to the sidecar's own calls keep its ids
+{"jsonrpc":"2.0","id":"c-1","result":{"rows":[{"name":"web"}]}}
+{"jsonrpc":"2.0","id":7,"error":{"code":-32002,"message":"The person declined the action"}}
+{"jsonrpc":"2.0","id":6,"method":"deactivate","params":{}}
+{"jsonrpc":"2.0","id":7,"method":"shutdown","params":{}}

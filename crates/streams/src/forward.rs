@@ -985,11 +985,17 @@ mod tests {
         );
     }
 
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test(start_paused = true)]
     async fn a_busy_tunnel_reports_on_the_tick_not_on_every_packet() {
         // A per-packet event would flood the channel; the timer is the whole
         // point. 40 writes spread over roughly two ticks must coalesce into
         // roughly two reports.
+        //
+        // The clock is paused so "roughly two ticks" is what the writes
+        // actually span. On the wall clock a 1 ms sleep costs 2 ms or more,
+        // and under a loaded workspace run 40 of them stretched past five
+        // ticks — one report per tick they covered — and failed the bound
+        // below. Paused, each sleep advances exactly 1 ms.
         let sink = Arc::new(TestSink::default());
         let traffic = Arc::new(forward::TrafficCounter::default());
         let reporter = spawn_reporter(sink.clone(), "forward:traffic:3", traffic.clone());

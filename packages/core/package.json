@@ -20,6 +20,7 @@
     "@peculiar/x509": "^2.0.0",
     "@tauri-apps/api": "^2.0.0",
     "@tauri-apps/plugin-process": "^2.3.1",
+    "ajv": "8.20.0",
     "reflect-metadata": "^0.2.2",
     "yaml": "^2.9.0"
   },
@@ -28,7 +29,6 @@
     "@types/node": "^26.1.1",
     "@types/react": "^19.2.17",
     "@vitest/coverage-v8": "^4.1.11",
-    "ajv": "8.20.0",
     "jsdom": "^24.0.0",
     "react": "19.2.7",
     "react-dom": "19.2.7",

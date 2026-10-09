@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 fn manifest() -> Value {
     json!({
-        "id":"org.example.gitops", "name":"GitOps", "version":"0.1.0", "srelensApiVersion":"^0.1",
+        "id":"org.example.gitops", "name":"GitOps", "version":"0.1.0", "srelensApiVersion":"^0.3",
         "kind":"declarative", "permissions":["k8s.listCustomResource"],
         "capabilities":[{"name":"applications","title":"List applications", "target":"k8s.listCustomResource",
             "arguments":{"group":"argoproj.io"},"inputs":["context","namespace"]}],
@@ -138,6 +138,60 @@ fn plugin_cannot_downgrade_core_consent_annotations() {
     }
 }
 
+/// The same rule over the metadata #548 adds. `plugin_cannot_downgrade_core_consent_annotations`
+/// above compares whole rows, so it would pass even if `impact` and `confirm`
+/// were dropped from both sides; this names them.
+///
+/// The level is the field an extension would most like to soften — it is the
+/// one a confirming surface renders as "how alarmed should you be" — and the
+/// wording is the one it would most like to own.
+#[test]
+fn a_binding_carries_the_hosts_level_and_the_hosts_words() {
+    use srelens_capability::Impact;
+    let mut reg = core();
+    let mut cap = reg.get("k8s.listCustomResource").unwrap().clone();
+    cap.annotations = Annotations::DESTRUCTIVE.with_confirm("Drain[ {resource}]?");
+    reg.register(cap);
+    let host = PluginHost::new(Arc::new(reg.clone()));
+    let _installed = host
+        .register(
+            &mut reg,
+            Manifest::parse(&manifest().to_string()).unwrap(),
+            &["k8s.listCustomResource".into()],
+        )
+        .unwrap();
+    let bound = reg.get("plugin/org.example.gitops/applications").unwrap();
+    assert_eq!(bound.annotations.impact, Impact::High);
+    assert_eq!(bound.annotations.confirm, Some("Drain[ {resource}]?"));
+}
+
+/// And the gate closes over a host row that forgot it: a capability that
+/// mutates but was registered ungated comes out of the broker gated AND at a
+/// level that matches, rather than gated at `low` — which would read to a
+/// confirming surface as "stop the user for something that changes nothing".
+#[test]
+fn a_binding_of_an_ungated_host_row_is_gated_and_levelled() {
+    use srelens_capability::Impact;
+    let mut reg = core();
+    let mut cap = reg.get("k8s.listCustomResource").unwrap().clone();
+    cap.annotations = Annotations {
+        read_only: false,
+        ..Annotations::READ_ONLY
+    };
+    reg.register(cap);
+    let host = PluginHost::new(Arc::new(reg.clone()));
+    let _installed = host
+        .register(
+            &mut reg,
+            Manifest::parse(&manifest().to_string()).unwrap(),
+            &["k8s.listCustomResource".into()],
+        )
+        .unwrap();
+    let bound = reg.get("plugin/org.example.gitops/applications").unwrap();
+    assert!(bound.annotations.requires_confirm);
+    assert_eq!(bound.annotations.impact, Impact::Medium);
+}
+
 #[tokio::test]
 async fn mcp_transport_requires_real_consent_before_dispatch() {
     use srelens_mcp::{policy::FlagGated, stdio::handle_request, Transport};
@@ -180,18 +234,202 @@ fn gitops_examples_bind_to_the_real_host_contract() {
         include_str!("../../../examples/extensions/argocd.json"),
         include_str!("../../../examples/extensions/flux.json"),
     ] {
-        let manifest = Manifest::parse(source).unwrap();
-        let count = manifest.capabilities.len();
-        let grants = manifest.permissions.clone();
-        let mut reg = Registry::new();
-        let _installed = host.register(&mut reg, manifest, &grants).unwrap();
-        assert_eq!(reg.ids().len(), count);
-        for cap in reg.entries() {
-            assert!(cap.annotations.read_only);
-            assert!(cap.input_schema["properties"].get("group").is_none());
-            assert!(cap.input_schema["properties"].get("context").is_some());
+        let parsed = Manifest::parse(source).unwrap();
+        // A reader that lists versions is registered once a cluster resolves it to one
+        // (#547): every listed version binds to the real contract.
+        let most = parsed
+            .capabilities
+            .iter()
+            .map(|b| b.versions.len())
+            .max()
+            .unwrap_or(0)
+            .max(1);
+        for choice in 0..most {
+            let mut manifest = parsed.clone();
+            for binding in parsed
+                .capabilities
+                .iter()
+                .filter(|b| !b.versions.is_empty())
+            {
+                let version = &binding.versions[choice.min(binding.versions.len() - 1)];
+                manifest = manifest.at_version(&binding.name, version).unwrap();
+            }
+            let readers: std::collections::BTreeSet<_> = manifest
+                .capabilities
+                .iter()
+                .map(|binding| format!("plugin/{}/{}", manifest.id, binding.name))
+                .collect();
+            let count = manifest.capabilities.len() + manifest.actions.len();
+            let grants = manifest.permission_names();
+            let mut reg = Registry::new();
+            let _installed = host.register(&mut reg, manifest, &grants).unwrap();
+            assert_eq!(reg.ids().len(), count);
+            for cap in reg.entries() {
+                assert_eq!(cap.annotations.read_only, readers.contains(&cap.id));
+                if !cap.annotations.read_only {
+                    assert!(cap.annotations.requires_confirm);
+                }
+                assert!(cap.input_schema["properties"].get("group").is_none());
+                assert!(cap.input_schema["properties"].get("context").is_some());
+            }
         }
     }
+}
+
+#[test]
+fn gitops_examples_declare_curated_inspector_panels() {
+    let flux = Manifest::parse(include_str!("../../../examples/extensions/flux.json")).unwrap();
+    let argo = Manifest::parse(include_str!("../../../examples/extensions/argocd.json")).unwrap();
+    for kind in [
+        "kustomize.toolkit.fluxcd.io/Kustomization",
+        "helm.toolkit.fluxcd.io/HelmRelease",
+    ] {
+        assert!(
+            flux.contributions
+                .detail_panels
+                .iter()
+                .any(|panel| panel.for_kinds.iter().any(|candidate| candidate == kind)),
+            "missing Flux panel for {kind}"
+        );
+    }
+    assert!(argo.contributions.detail_panels.iter().any(|panel| panel
+        .for_kinds
+        .contains(&"argoproj.io/Application".to_owned())));
+}
+
+#[test]
+fn the_gitops_examples_resolve_status_with_rules_and_badge_workloads() {
+    use srelens_capability::status::{first_match, resolve_status, NormalizedStatus as S};
+    let flux = Manifest::parse(include_str!("../../../examples/extensions/flux.json")).unwrap();
+    let argo = Manifest::parse(include_str!("../../../examples/extensions/argocd.json")).unwrap();
+    for manifest in [&flux, &argo] {
+        // Migrated: no page counts by printer-column index any more, and
+        // every custom-resource reader's kind has a resolver.
+        assert!(manifest
+            .contributions
+            .pages
+            .iter()
+            .all(|page| page.status_columns.is_none()));
+        for binding in &manifest.capabilities {
+            if let Some(kind) = Manifest::reader_kind(binding) {
+                assert!(
+                    manifest.status_rules_for(&kind).is_some(),
+                    "{} has no resolver for {kind}",
+                    manifest.id
+                );
+            }
+        }
+    }
+    let flux_rules = flux
+        .status_rules_for("helm.toolkit.fluxcd.io/HelmRelease")
+        .unwrap();
+    let ready = |status: &str, message: &str| {
+        json!({"spec":{},"status":{"conditions":[
+            {"type":"Reconciling","status":"False","message":"idle"},
+            {"type":"Ready","status":status,"message":message}]}})
+    };
+    let resolved = |rules, object: Value| {
+        let got = resolve_status(rules, &object);
+        (got.status, got.label, got.reason)
+    };
+    assert_eq!(
+        resolved(
+            flux_rules,
+            ready("True", "Release reconciliation succeeded")
+        ),
+        (S::Healthy, "Ready".into(), None)
+    );
+    assert_eq!(
+        resolved(flux_rules, ready("False", "install retries exhausted")),
+        (
+            S::Error,
+            "Not ready".into(),
+            Some("install retries exhausted".into())
+        )
+    );
+    let mut suspended = ready("True", "ok");
+    suspended["spec"]["suspend"] = json!(true);
+    assert_eq!(resolved(flux_rules, suspended).0, S::Suspended);
+    assert_eq!(resolved(flux_rules, json!({})).0, S::Unknown);
+
+    let argo_rules = argo.status_rules_for("argoproj.io/Application").unwrap();
+    let app = |health: &str, sync: &str| {
+        json!({"status":{"health":{"status":health,"message":"waiting for rollout"},
+            "sync":{"status":sync,"revision":"abc123"}}})
+    };
+    assert_eq!(resolved(argo_rules, app("Healthy", "Synced")).0, S::Healthy);
+    assert_eq!(
+        resolved(argo_rules, app("Healthy", "OutOfSync")),
+        (S::Warning, "Out of sync".into(), Some("abc123".into()))
+    );
+    assert_eq!(resolved(argo_rules, app("Degraded", "Synced")).0, S::Error);
+    assert_eq!(
+        resolved(argo_rules, app("Progressing", "Synced")).0,
+        S::Progressing
+    );
+    assert_eq!(
+        resolved(argo_rules, app("Suspended", "Synced")).0,
+        S::Suspended
+    );
+
+    // GitOps ownership on built-in workloads: the exit criterion of #517.
+    // Shaped as the host's metadata read hands a Deployment `team/guestbook`
+    // to a direct badge: its identity plus the metadata the rule may read.
+    let owned_named = |manifest: &Manifest, name: &str, metadata: Value| {
+        let badge = &manifest.contributions.badges[0];
+        assert!(badge.for_kinds.iter().any(|kind| kind == "apps/Deployment"));
+        assert!(badge.join.is_none());
+        let mut metadata = metadata;
+        metadata["name"] = json!(name);
+        metadata["namespace"] = json!("team");
+        let object = json!({"apiVersion": "apps/v1", "kind": "Deployment", "metadata": metadata});
+        first_match(&badge.rules, &object).map(|b| (b.label, b.reason))
+    };
+    let owned = |manifest: &Manifest, metadata: Value| owned_named(manifest, "guestbook", metadata);
+    // A tracking id copied onto another workload names `team/guestbook`, not
+    // `team/clone`: Argo CD does not own `clone`, so it gets no badge.
+    assert_eq!(
+        owned_named(
+            &argo,
+            "clone",
+            json!({"annotations":{"argocd.argoproj.io/tracking-id":"guestbook:apps/Deployment:team/guestbook"}})
+        ),
+        None
+    );
+    assert_eq!(
+        owned(
+            &flux,
+            json!({"labels":{"kustomize.toolkit.fluxcd.io/name":"apps"}})
+        ),
+        Some(("Flux".into(), Some("apps".into())))
+    );
+    assert_eq!(
+        owned(
+            &flux,
+            json!({"labels":{"helm.toolkit.fluxcd.io/name":"podinfo"}})
+        ),
+        Some(("Flux".into(), Some("podinfo".into())))
+    );
+    assert_eq!(
+        owned(
+            &argo,
+            json!({"annotations":{"argocd.argoproj.io/tracking-id":"guestbook:apps/Deployment:team/guestbook"}})
+        ),
+        Some((
+            "Argo CD".into(),
+            Some("guestbook:apps/Deployment:team/guestbook".into())
+        ))
+    );
+    // `app.kubernetes.io/instance` alone is Helm's label too; it is not
+    // ownership by Argo CD.
+    assert_eq!(
+        owned(
+            &argo,
+            json!({"labels":{"app.kubernetes.io/instance":"guestbook"}})
+        ),
+        None
+    );
+    assert_eq!(owned(&flux, json!({})), None);
 }
 
 #[test]
@@ -293,6 +531,19 @@ fn manifest_wire_contract_and_contribution_identity_are_strict() {
 }
 
 #[test]
+fn host_accepts_api_03_and_rejects_retired_api_lines() {
+    let mut value = manifest();
+    value["srelensApiVersion"] = json!("^0.3");
+    Manifest::parse(&value.to_string()).unwrap();
+    for retired in ["^0.1", "^0.2"] {
+        value["srelensApiVersion"] = json!(retired);
+        let error = Manifest::parse(&value.to_string()).unwrap_err().to_string();
+        assert!(error.contains(&format!("requires API {retired}")), "{error}");
+        assert!(error.contains("host supports 0.3.0"), "{error}");
+    }
+}
+
+#[test]
 fn api_ranges_negotiate_against_every_supported_version() {
     use srelens_plugin_host::{negotiate_api_version_in, SUPPORTED_API_VERSIONS};
     let req = |range: &str| semver::VersionReq::parse(range).unwrap();
@@ -320,7 +571,7 @@ fn api_ranges_negotiate_against_every_supported_version() {
 fn a_manifest_for_a_newer_api_is_told_the_version_it_needs_not_an_unknown_field() {
     let mut newer = manifest();
     newer["srelensApiVersion"] = json!("^0.9");
-    newer["contributions"]["dashboardCards"] = json!([]);
+    newer["contributions"]["notYetAContribution"] = json!([]);
     let error = Manifest::parse(&newer.to_string()).unwrap_err().to_string();
     assert!(error.contains("requires API ^0.9"), "{error}");
     assert!(
@@ -328,7 +579,7 @@ fn a_manifest_for_a_newer_api_is_told_the_version_it_needs_not_an_unknown_field(
         "{error}"
     );
     // A supported range still gets the strict schema.
-    newer["srelensApiVersion"] = json!("^0.1");
+    newer["srelensApiVersion"] = json!("^0.3");
     assert!(Manifest::parse(&newer.to_string())
         .unwrap_err()
         .to_string()
@@ -348,17 +599,20 @@ fn fields_must_exist_in_every_api_version_the_range_admits() {
             path: "contributions.dashboardCards",
             introduced: "0.2.0",
             removed: None,
+            form: None,
         },
         ApiField {
             path: "contributions.pages[].badges",
             introduced: "0.2.0",
             removed: None,
+            form: None,
         },
         // A 0.1 field a later line removed; a rename is this plus an addition.
         ApiField {
             path: "contributions.detailLinks",
             introduced: "0.1.0",
             removed: Some("0.2.0"),
+            form: None,
         },
     ];
     let with_detail_link = || {
@@ -438,6 +692,7 @@ fn stored_manifests_are_rechecked_against_the_hosts_api_fields() {
         path: "contributions.detailLinks",
         introduced: "0.1.0",
         removed: Some("0.3.0"),
+        form: None,
     }];
     assert!(stored
         .check_api_fields(&["0.1.0", "0.2.0"], &fields)

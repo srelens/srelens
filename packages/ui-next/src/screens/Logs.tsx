@@ -9,13 +9,12 @@ import {
 } from "react";
 import {
   absoluteTimestamp,
-  isTauri,
+  describeStreamEnd,
   logConnectionStatus,
   logLineHealth,
   listResource,
   logLineLevel,
   podLogs,
-  saveTextFile,
   type HealthKind,
   type LogConnectionVerdict,
   type LogLine as StreamLine,
@@ -40,11 +39,13 @@ import {
   toneWash,
 } from "@srelens/ui-kit";
 import { useConsole } from "../console";
+import { useLogProviderSource, useLogProviders } from "../extensions/logProviders";
 import { useActiveContext } from "../lib/clusters";
 import { FailureAlert, FailureState } from "../lib/errorCopy";
 import { Icons } from "../lib/icons";
 import { useLogStream, type LogStreamStatus } from "../lib/logStream";
 import { groupNumber } from "../lib/numbers";
+import { saveOrDownload } from "../lib/saveOrDownload";
 import {
   resolveLogSubject,
   type LogSubject,
@@ -150,6 +151,28 @@ const TAIL_LINES = 1000;
 /** Stands for "every container", as a select value that cannot be a name. */
 const ALL_CONTAINERS = "";
 
+/** The source picker's value for the cluster's own logs; a provider's is `<app>/<provider>`, which has a dot. */
+const KUBERNETES_SOURCE = "kubernetes";
+
+/**
+ * How far back "all" reaches for a log provider (#569): the longest history the host
+ * asks one for. The cluster keeps what a container still has; a log backend keeps far
+ * more, so "all" of it is not a query anyone could wait for.
+ */
+const PROVIDER_ALL_SECONDS = 7 * 24 * 3600;
+
+/** The qualified kind a log provider is declared for (#569), from the route's kind. */
+function providerKind(kind: string): string | undefined {
+  return (
+    {
+      pod: "/Pod",
+      deployment: "apps/Deployment",
+      statefulset: "apps/StatefulSet",
+      daemonset: "apps/DaemonSet",
+    } as Record<string, string>
+  )[kind.toLowerCase()];
+}
+
 /** How near the bottom still counts as being at it, in pixels. Classic's 48. */
 const STICK_SLACK = 48;
 
@@ -213,34 +236,6 @@ function connectionLabel(
 }
 
 /**
- * Save `content` to `filename`: through the native save dialog in the desktop
- * shell, and as a browser download in web mode.
- *
- * Both halves are needed, and neither works in the other's place — a Tauri
- * webview does not prompt on `<a download>`, and a browser has no
- * `save_text_file` command to invoke. Classic reached the same conclusion
- * (`apps/desktop/src/components/LogsView.tsx`); this is that decision written
- * where the new screen can use it, not a second policy.
- */
-async function saveOrDownload(
-  filename: string,
-  content: string,
-): Promise<void> {
-  if (isTauri()) {
-    await saveTextFile(filename, content);
-    return;
-  }
-  const url = URL.createObjectURL(new Blob([content], { type: "text/plain" }));
-  const anchor = document.createElement("a");
-  anchor.href = url;
-  anchor.download = filename;
-  document.body.appendChild(anchor);
-  anchor.click();
-  anchor.remove();
-  URL.revokeObjectURL(url);
-}
-
-/**
  * `2026-08-24T14:07:41.208123456Z ` — what the backend prefixes each line with
  * when a stream is opened with `timestamps: true`, which this screen always is
  * because the design gives the time its own column.
@@ -297,6 +292,12 @@ interface Row {
   message: string;
   /** The line exactly as it arrived, stamp and all — what an export writes. */
   raw: string;
+  /**
+   * The host cut the line at its limit and `raw` is its start (#747). Said
+   * beside the line, never written into it, so the filter and an export read
+   * what the container wrote.
+   */
+  truncated: boolean;
   /** Lower-cased message + severity word, which is what the filter matches. */
   haystack: string;
 }
@@ -364,6 +365,7 @@ function toRow(line: StreamLine, byLabel: ReadonlyMap<string, LogTarget>): Row {
     health,
     message,
     raw: line.text,
+    truncated: line.truncated === true,
     haystack: `${message} ${health}`.toLowerCase(),
   };
 }
@@ -721,6 +723,7 @@ function LogsSubject({
     <LogsStream
       context={context}
       clusterName={clusterName}
+      kind={kind}
       namespace={namespace}
       name={name}
       targets={resolution.targets}
@@ -739,6 +742,7 @@ function LogsSubject({
 function LogsStream({
   context,
   clusterName,
+  kind,
   namespace,
   name,
   targets,
@@ -747,6 +751,7 @@ function LogsStream({
 }: {
   context: string;
   clusterName: string;
+  kind: string;
   namespace: string;
   name: string;
   targets: LogTarget[];
@@ -791,14 +796,58 @@ function LogsStream({
    */
   const stickRef = useRef(true);
 
+  /**
+   * Where the lines come from (#569): the cluster, or one of the installed apps'
+   * log providers for this kind. The picker is drawn only when there is a choice.
+   * A provider's lines carry `pod/container` from its own labels, so the rail and
+   * the container filter read them as they read the cluster's.
+   */
+  const resourceKind = providerKind(kind);
+  const offered = useLogProviders(context, resourceKind);
+  const providers = offered.choices;
+  const [picked, setPicked] = useState<{ key: string; label: string } | null>(null);
+  /** The provider that stopped being offered while followed, named until the next choice. */
+  const [lost, setLost] = useState<string | null>(null);
+  const chosen = picked ? providers.find((p) => p.key === picked.key) : undefined;
+  // Only a current list says a provider is gone; until one answers, the last list is
+  // followed. A gone provider is let go of, so it does not come back unasked.
+  if (picked && !chosen && offered.status === "ready") {
+    setPicked(null);
+    setLost(picked.label);
+  }
+  const provider = useLogProviderSource(chosen, { context, namespace, resourceKind: resourceKind ?? "", name });
+  const chooseSource = useCallback(
+    (key: string) => {
+      const next = providers.find((p) => p.key === key);
+      setPicked(next ? { key: next.key, label: next.label } : null);
+      setLost(null);
+      // A previous instance is the cluster's to hand back, never a provider's.
+      if (next) setPrevious(false);
+    },
+    [providers],
+  );
+
   const sinceSeconds = SINCE.find((s) => s.value === since)?.seconds;
-  const stream = useLogStream(context, namespace, targets, {
+  const stream = useLogStream(context, namespace, provider.targets ?? targets, {
     // Always on: the design gives the time its own column, so the stamp is not
     // an option the reader turns on — it is where the first column comes from.
     timestamps: true,
-    sinceSeconds,
+    sinceSeconds: chosen ? (sinceSeconds ?? PROVIDER_ALL_SECONDS) : sinceSeconds,
     tailLines: TAIL_LINES,
+    source: provider.source,
   });
+  /**
+   * The restarts the "Scrollback cleared" notice is not about. That notice says a
+   * change of window reopened the stream and nothing already sent comes back. A change
+   * of source (a choice, a provider no longer offered, Follow again) reopens it with
+   * the new source's own history, so the restart it causes is marked as seen.
+   */
+  const sourceKey = provider.source?.key;
+  const [sourceSeen, setSourceSeen] = useState(sourceKey);
+  if (sourceSeen !== sourceKey) {
+    setSourceSeen(sourceKey);
+    setSeenRestart(stream.restartCount + 1);
+  }
 
   const byLabel = useMemo(() => indexTargets(targets), [targets]);
   const liveRows = useMemo(
@@ -1049,11 +1098,18 @@ function LogsStream({
     measure();
   }
 
-  const signal = connectionSignal(stream.status, stream.paused);
+  // A provider's stream that ended sends no more statuses, so the hook's last one
+  // would go on saying it follows: the ending is what the readout says instead.
+  const ended = chosen ? provider.end : null;
+  const signal = ended
+    ? logConnectionStatus(ended.type === "error" ? "error" : "completed")
+    : connectionSignal(stream.status, stream.paused);
   /** Whether new lines are arriving in THIS pane. A snapshot is not followed,
    *  however healthy the connection underneath it is. */
-  const following = !previous && !stream.paused;
-  const restarted = stream.restartCount > seenRestart;
+  const following = !previous && !stream.paused && !ended;
+  // A provider sends its history again on every restart, so none of its restarts
+  // cleared anything; the notice is about the cluster's own stream alone.
+  const restarted = !chosen && stream.restartCount > seenRestart;
   const window_ = computeLogWindow({
     total: filtered.length,
     scrollTop: metrics.scrollTop,
@@ -1064,7 +1120,7 @@ function LogsStream({
   const drawn = window_.virtualized
     ? filtered.slice(window_.start, window_.end)
     : filtered;
-  const windowLabel = since === "all" ? "" : ` in the last ${since}`;
+  const windowLabel = since !== "all" ? ` in the last ${since}` : chosen ? " in the last 7 days" : "";
 
   /** A corpse that refused, while others answered — a banner over lines that
    *  are still there, rather than a card in place of them. */
@@ -1142,7 +1198,8 @@ function LogsStream({
             variant="secondary"
             size="sm"
             onClick={stream.togglePause}
-            disabled={previous}
+            // An ended stream has nothing to pause; Follow again, by its notice, opens it.
+            disabled={previous || ended !== null}
             aria-label={previous ? `Follow — ${NO_FOLLOWING.toLowerCase()}` : undefined}
           >
             {following ? (
@@ -1184,6 +1241,25 @@ function LogsStream({
           label="Filter lines"
           placeholder="Filter lines"
         >
+          {providers.length > 0 && (
+            <div className="flex items-center gap-1.5">
+              {/* "from", not "source": the rail's Sources are the pods, and one
+                  word must not name two things on one screen. */}
+              <Eyebrow>from</Eyebrow>
+              <Select
+                value={chosen ? chosen.key : KUBERNETES_SOURCE}
+                onValueChange={chooseSource}
+                options={[
+                  { value: KUBERNETES_SOURCE, label: "Kubernetes" },
+                  ...providers.map((p) => ({ value: p.key, label: p.label })),
+                ]}
+                // The snapshot of a terminated container is the cluster's; a
+                // provider is a source of the live tail.
+                disabled={previous}
+                aria-label="Logs from"
+              />
+            </div>
+          )}
           <div className="flex items-center gap-1.5">
             <Eyebrow>since</Eyebrow>
             <Select
@@ -1215,25 +1291,29 @@ function LogsStream({
           )}
           {/* The design's rotate-ccw toggle. Warn-tinted while on, from the
               same tokens the banner under it uses — a pane showing something
-              other than the live stream must not look like one that is. */}
-          <Button
-            variant="secondary"
-            size="xs"
-            aria-pressed={previous}
-            onClick={() => setPrevious((p) => !p)}
-            style={
-              previous
-                ? {
-                    borderColor: toneColor("warn"),
-                    color: toneColor("warn"),
-                    background: toneWash("warn"),
-                  }
-                : undefined
-            }
-          >
-            <Icons.revert size={12} aria-hidden="true" />
-            Previous instance
-          </Button>
+              other than the live stream must not look like one that is. Not
+              drawn for a provider: a terminated container's buffer is the
+              cluster's, and a log backend has no "previous instance". */}
+          {!chosen && (
+            <Button
+              variant="secondary"
+              size="xs"
+              aria-pressed={previous}
+              onClick={() => setPrevious((p) => !p)}
+              style={
+                previous
+                  ? {
+                      borderColor: toneColor("warn"),
+                      color: toneColor("warn"),
+                      background: toneWash("warn"),
+                    }
+                  : undefined
+              }
+            >
+              <Icons.revert size={12} aria-hidden="true" />
+              Previous instance
+            </Button>
+          )}
           <Button
             variant="secondary"
             size="xs"
@@ -1262,7 +1342,7 @@ function LogsStream({
             <LiveSignal
               label={connectionLabel(
                 signal,
-                stream.liveTargets,
+                ended ? 0 : stream.liveTargets,
                 stream.totalTargets,
                 stream.completedTargets,
               )}
@@ -1271,6 +1351,46 @@ function LogsStream({
           )}
         </FilterBar>
 
+        {offered.status === "error" && (
+          // The list the picker is drawn from could not be read again: what it
+          // offers may be out of date, and an app that stopped providing logs
+          // is not known to have.
+          <FailureAlert
+            title="Could not check which apps provide logs here"
+            error={offered.error}
+            domain="local"
+            className="mx-3 mt-3"
+          />
+        )}
+        {lost && !chosen && (
+          // The choice was made from a list that has since changed: say so
+          // rather than quietly draw the cluster's lines under the old name.
+          <Alert
+            tone="warn"
+            title={`${lost} is no longer offered for this ${kind}`}
+            className="mx-3 mt-3"
+          >
+            The app that provides it was disabled or removed, or is no longer
+            enabled for this cluster. Following Kubernetes instead.
+          </Alert>
+        )}
+        {chosen && provider.end && (
+          // A provider's stream ends only with a reason, and a failure is not
+          // an ending: `describeStreamEnd` words the two differently.
+          <Alert
+            tone={provider.end.type === "error" ? "sev" : "info"}
+            title={describeStreamEnd(provider.end)}
+            className="mx-3 mt-3"
+          >
+            <Button
+              variant="secondary"
+              size="xs"
+              onClick={provider.retry}
+            >
+              Follow again
+            </Button>
+          </Alert>
+        )}
         {previous && terminated.length > 0 && (
           // Directly under the filter bar, as the design places it: what is
           // being read, and why nothing is arriving.
@@ -1351,7 +1471,13 @@ function LogsStream({
               // and under the rail on a real cluster.
               className="whitespace-normal"
               title="Nothing has been logged yet"
-              hint={`srelens is following ${targets.length} container${targets.length === 1 ? "" : "s"} across ${podCount(targets)}; none of them has written a line${windowLabel}.`}
+              hint={
+                chosen && ended
+                  ? `${chosen.label} sent no line${windowLabel} before its stream ended.`
+                  : chosen
+                    ? `srelens is following ${name} through ${chosen.label}; it has sent no line${windowLabel}.`
+                    : `srelens is following ${targets.length} container${targets.length === 1 ? "" : "s"} across ${podCount(targets)}; none of them has written a line${windowLabel}.`
+              }
             />
           ) : filtered.length === 0 ? (
             // Deliberately not the sentence above it. "Nothing yet" and "nothing
@@ -1400,7 +1526,19 @@ function LogsStream({
                   // screen; an override belongs to a line singled out for some
                   // reason OTHER than its level, and none is.
                   level={row.level}
-                  message={row.message}
+                  // A cut line says so at its end, in the message's own flow: the
+                  // trailing slot sits beside the message box, and with Wrap off a
+                  // long message runs past that box and under it.
+                  message={
+                    row.truncated ? (
+                      <>
+                        {row.message}
+                        <span className="text-faint"> [line cut: too long]</span>
+                      </>
+                    ) : (
+                      row.message
+                    )
+                  }
                 />
               ))}
               {window_.bottomPad > 0 && (

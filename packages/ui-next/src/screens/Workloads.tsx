@@ -1,10 +1,9 @@
 import { ContextLabel } from "../lib/contextLabel";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ageSortValue,
   podStatus,
   rowInSelection,
-  watchNamespaceForSelection,
   type ClusterContext,
   type CronJobSummary,
   type DaemonSetSummary,
@@ -34,7 +33,7 @@ import { useConsole } from "../console";
 import { getKubeconfigFiles, useActiveContext } from "../lib/clusters";
 import { useHiddenColumns } from "../lib/columnPrefs";
 import { detailRoute, newRoute } from "../lib/detailRoute";
-import { FailureAlert } from "../lib/errorCopy";
+import { FailureAlert, FailureState, NamespaceFailuresAlert, StaleListAlert } from "../lib/errorCopy";
 import {
   cronJobVerdict,
   daemonSetVerdict,
@@ -45,12 +44,13 @@ import {
   type PodRow,
 } from "../lib/kinds/columns";
 import { descriptorFor } from "../lib/kinds/descriptors";
+import { addNamespace, useRowRefocus, withNamespaceSelect } from "../lib/kinds/namespaceCell";
 import { withRowAffordances } from "../lib/kinds/rowAffordances";
 import type { ListRow } from "../lib/kinds/types";
 import { useResourceList, type ResourceList } from "../lib/resourceList";
 import { describe } from "../lib/routes";
 import { openTab, useTabs } from "../lib/tabsStore";
-import { setNamespaces, useNamespaces } from "../lib/workspace";
+import { useNamespaces, useSetNamespaces } from "../lib/workspace";
 import { useRowMenu } from "./ResourceMenu";
 import {
   NamespaceErrorAlert,
@@ -195,6 +195,9 @@ function fromCronJob(row: ListRow): WorkloadRow {
  * answered by a subset of rows — the rest render an em dash rather than
  * being flattened away, per the controller ruling.
  */
+/** One row's identity in the union table: two kinds may share a name. */
+const workloadRowKey = (row: WorkloadRow) => `${row.kind}/${row.namespace ?? ""}/${row.name}`;
+
 const UNION_COLUMNS: Column<WorkloadRow>[] = [
   { key: "name", header: "Name", sortable: true },
   { key: "kind", header: "Kind", sortable: true },
@@ -263,11 +266,90 @@ export function Workloads({ route }: { route: string }) {
 
 /** One entry per fixed watch, bundled after the hooks below run — never used
  *  to decide *how many* hooks to call, only to summarize their results. */
+/** "pods", "pods and cronjobs", "pods, jobs and cronjobs". */
+function wordList(words: string[], conjunction = "and"): string {
+  return words.length < 2 ? (words[0] ?? "") : `${words.slice(0, -1).join(", ")} ${conjunction} ${words.at(-1)}`;
+}
+
+const capitalise = (s: string) => s.charAt(0).toLocaleUpperCase() + s.slice(1);
+
 interface KindEntry {
   key: string;
   label: string;
   list: ResourceList<ListRow>;
   toRow: (row: ListRow) => WorkloadRow;
+}
+
+/**
+ * Whether a kind's rows are the whole answer for the namespaces in view:
+ * listed everywhere, not refused anywhere, not a stale last reading. Only
+ * these may be called empty (#703).
+ */
+function fullyListed(k: KindEntry): boolean {
+  return (
+    (k.list.status === "ready" || k.list.status === "empty") &&
+    k.list.namespaceFailures.length === 0 &&
+    !k.list.stale
+  );
+}
+
+/**
+ * Nothing answered for this kind, in any namespace in view. With several
+ * namespaces selected a kind is status "error" as soon as it has no rows and
+ * any namespace refused it, so the per-namespace failures have to cover the
+ * whole selection before "nothing answered" is true.
+ */
+function refusedEverywhere(k: KindEntry, scopeCount: number): boolean {
+  if (k.list.status !== "error") return false;
+  const refused = new Set(k.list.namespaceFailures.map((f) => f.namespace));
+  return refused.size === 0 || refused.size >= scopeCount;
+}
+
+/**
+ * The empty table's copy, claiming an absence only for the kinds in view that
+ * were fully listed (#703). The rest are said for what they are: not fully
+ * listed (the banners above say why), or not answered yet. "Workloads" rather
+ * than five nouns when it is all of them.
+ *
+ * The filtered case too: a kind that was never listed was never searched, so
+ * "no workloads match this filter" is only true of the rows that were.
+ */
+function workloadsEmptyCopy(
+  inView: KindEntry[],
+  allKinds: number,
+  count: number,
+  noun: string,
+  clusterName: string,
+): { emptyText: string; emptyHint: string } {
+  const suffix = " in the namespaces you are looking at";
+  if (inView.every(fullyListed)) return emptyTableCopy(count, noun, clusterName, suffix);
+
+  const nouns = (ks: KindEntry[], conjunction?: string) =>
+    ks.length === allKinds ? "workloads" : wordList(ks.map((k) => `${k.label.toLocaleLowerCase()}s`), conjunction);
+  const listed = inView.filter(fullyListed);
+  const pending = inView.filter((k) => k.list.status === "loading");
+  const partly = inView.filter((k) => !fullyListed(k) && k.list.status !== "loading");
+  const filtered = count > 0;
+
+  const hint = [
+    filtered
+      ? `Clear the filter to see all ${count} that were listed.`
+      : listed.length > 0
+        ? `${clusterName} has none${suffix}.`
+        : "",
+    partly.length > 0
+      ? `${capitalise(nouns(partly))} could not be fully listed, so ${filtered ? "some may match" : "there may be some"} — see above.`
+      : "",
+    pending.length > 0 ? `${capitalise(nouns(pending))} are still being listed.` : "",
+  ];
+  return {
+    emptyText: filtered
+      ? `No listed ${noun} match this filter`
+      : listed.length > 0
+        ? `No ${nouns(listed, "or")}`
+        : `No ${noun} to show`,
+    emptyHint: hint.filter((h) => h !== "").join(" "),
+  };
 }
 
 function WorkloadList({
@@ -284,12 +366,12 @@ function WorkloadList({
   const { ask } = useConsole();
 
   const selection = useNamespaces(context.stableId);
+  const setNamespaces = useSetNamespaces();
   const { namespaces, scope, error: namespaceError } = useNamespaceOptions(name, files);
-  // A namespace-restricted credential watches its one namespace directly;
-  // every workload kind here is namespaced, so there is no cluster-scoped
-  // branch to take (unlike `KindList`, which serves cluster-scoped kinds
-  // too).
-  const namespaceFilter = watchNamespaceForSelection(selection);
+  // Every workload kind here is namespaced, so the selection is handed to
+  // the watches as it stands: each selected namespace is watched on its own
+  // (#688), none is "all namespaces". No cluster-scoped branch to take
+  // (unlike `KindList`, which serves cluster-scoped kinds too).
 
   // Five watches at five fixed call sites — never a loop over a filtered
   // array, never conditional on the segment control. A hook count that
@@ -300,11 +382,11 @@ function WorkloadList({
   const daemonSetsDescriptor = descriptorFor("daemonsets");
   const podsDescriptor = descriptorFor("pods");
   const cronJobsDescriptor = descriptorFor("cronjobs");
-  const deploymentsList = useResourceList<ListRow>(name, "deployments", deploymentsDescriptor, namespaceFilter, files);
-  const statefulSetsList = useResourceList<ListRow>(name, "statefulsets", statefulSetsDescriptor, namespaceFilter, files);
-  const daemonSetsList = useResourceList<ListRow>(name, "daemonsets", daemonSetsDescriptor, namespaceFilter, files);
-  const podsList = useResourceList<ListRow>(name, "pods", podsDescriptor, namespaceFilter, files);
-  const cronJobsList = useResourceList<ListRow>(name, "cronjobs", cronJobsDescriptor, namespaceFilter, files);
+  const deploymentsList = useResourceList<ListRow>(name, "deployments", deploymentsDescriptor, selection, files);
+  const statefulSetsList = useResourceList<ListRow>(name, "statefulsets", statefulSetsDescriptor, selection, files);
+  const daemonSetsList = useResourceList<ListRow>(name, "daemonsets", daemonSetsDescriptor, selection, files);
+  const podsList = useResourceList<ListRow>(name, "pods", podsDescriptor, selection, files);
+  const cronJobsList = useResourceList<ListRow>(name, "cronjobs", cronJobsDescriptor, selection, files);
 
   // `useRowMenu` is itself a hook — five fixed calls for the same reason the
   // five watches above are five fixed calls, one per kind's own descriptor
@@ -363,7 +445,7 @@ function WorkloadList({
   // for another — same rule `KindList` follows.
   useEffect(() => {
     if (scope) setNamespaces(context.stableId, [scope]);
-  }, [scope, context.stableId]);
+  }, [scope, context.stableId, setNamespaces]);
 
   // Plain data after the fixed hooks above, not another hook: summarizing
   // five results into a table is not itself something React needs to track
@@ -403,9 +485,25 @@ function WorkloadList({
     () => UNION_COLUMNS.filter((column) => column.key === NAME_KEY || !hidden.has(column.key)),
     [hidden],
   );
+  // The Namespace column's values add to this tab's selection, as they do on
+  // a kind's own list (#821) — see `withNamespaceSelect`.
+  const refocus = useRowRefocus();
+  const rememberRow = refocus.remember;
+  const addToSelection = useCallback(
+    (namespace: string, row: WorkloadRow) => {
+      rememberRow(workloadRowKey(row));
+      setNamespaces(context.stableId, addNamespace(selection, namespace));
+    },
+    [setNamespaces, context.stableId, selection, rememberRow],
+  );
   const renderedColumns = useMemo(
-    () => withRowAffordances(columns, (row) => row.flagged, ask),
-    [columns, ask],
+    () =>
+      withRowAffordances(
+        withNamespaceSelect(columns, selection, scope ? undefined : addToSelection),
+        (row) => row.flagged,
+        ask,
+      ),
+    [columns, ask, selection, scope, addToSelection],
   );
 
   const {
@@ -436,9 +534,53 @@ function WorkloadList({
   // Five watches means five ways to fail — a kind whose watch errored with
   // nothing cached contributes no rows and gets its own banner; the four
   // that answered stay on screen and keep being sorted and filtered with it.
-  const failed = kinds.filter((k) => k.list.status === "error");
-  const stale = kinds.filter((k) => k.list.status !== "error" && k.list.error);
+  //
+  // With several namespaces selected, a failure is per namespace (#688): the
+  // namespaces that answered are live rows, not stale ones, so those kinds
+  // get a banner naming what is missing instead of either card below.
+  const partial = kinds.filter((k) => k.list.namespaceFailures.length > 0 && !k.list.stale);
+  const failed = kinds.filter((k) => k.list.status === "error" && k.list.namespaceFailures.length === 0);
+  const stale = kinds.filter((k) => k.list.status !== "error" && k.list.stale);
+  // Unless none of them did (#701). Then nothing answered, so an empty table
+  // under five banners would claim these namespaces have no workloads — which
+  // the app does not know — and five banners for what is usually one refusal
+  // is a wall. One failure state instead, its reasons said once.
+  //
+  // Read off `status`, not the `failed` bucket: with several namespaces
+  // selected, a kind refused in every one is an error that also carries
+  // per-namespace failures, and sits in `partial`. Its reasons are those
+  // failures, every one of them, since `error` is only the first. And every
+  // namespace, not some (#703): one that answered empty was listed, and that
+  // is the table's to say, under the refused namespace's banner.
+  const scopeCount = selection.length === 0 ? 1 : new Set(selection).size;
+  const allFailed = kinds.every((k) => refusedEverywhere(k, scopeCount));
+  const allFailedReasons = kinds.flatMap((k) =>
+    k.list.namespaceFailures.length > 0 ? k.list.namespaceFailures.map((f) => f.error) : [k.list.error ?? ""],
+  );
   const anyReconnecting = kinds.some((k) => k.list.watch !== "live");
+
+  // One banner per distinct set of refused namespaces, naming the kinds it
+  // covers — "workloads" when it is all five. A namespace the reader cannot
+  // read refuses every kind in it, and five stacked banners saying so is a
+  // wall over the table, not five problems.
+  const partialGroups = useMemo(() => {
+    const groups = new Map<string, { what: string[]; failures: KindEntry["list"]["namespaceFailures"] }>();
+    for (const k of partial) {
+      const id = k.list.namespaceFailures.map((f) => f.namespace).join(",");
+      // Every kind's failures, not the first kind's: two kinds refused in one
+      // namespace can be refused for different reasons.
+      const group = groups.get(id) ?? { what: [], failures: [] };
+      group.what.push(`${k.label.toLocaleLowerCase()}s`);
+      group.failures.push(...k.list.namespaceFailures);
+      groups.set(id, group);
+    }
+    return [...groups].map(([id, g]) => ({
+      id,
+      what: g.what.length === kinds.length ? "workloads" : wordList(g.what),
+      failures: g.failures,
+    }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [deploymentsList, statefulSetsList, daemonSetsList, podsList, cronJobsList]);
 
   const lower = title.toLocaleLowerCase();
   const segmentLower = segment === "All" ? lower : `${segment.toLocaleLowerCase()}s`;
@@ -496,8 +638,20 @@ function WorkloadList({
       />
 
       {allLoading ? (
-        <div className="scroll min-h-0 flex-1">
+        // `refocus.scope` on every state of this region, not only the table:
+        // it marks where the table IS, and while the lists reload this is
+        // what stands there. A click on it is not the reader moving on, and
+        // must not be taken for one — see `useRowRefocus`.
+        <div ref={refocus.scope} className="scroll min-h-0 flex-1">
           <LoadingState label={`Loading ${lower}`} />
+        </div>
+      ) : allFailed ? (
+        <div ref={refocus.scope} className="scroll min-h-0 flex-1">
+          <FailureState
+            title={`Could not list ${lower} on ${name}`}
+            error={allFailedReasons}
+            onRetry={() => kinds.forEach((k) => k.list.reload())}
+          />
         </div>
       ) : (
         <>
@@ -505,6 +659,9 @@ function WorkloadList({
               review) — a reader who scrolls the table must still see a kind
               that failed or went stale; a banner that scrolls away with the
               rows no longer warns anyone. */}
+          {partialGroups.map((g) => (
+            <NamespaceFailuresAlert key={g.id} what={g.what} failures={g.failures} className="mx-3 mt-3 mb-3" />
+          ))}
           {failed.map((k) => (
             <FailureAlert
               key={k.key}
@@ -514,18 +671,19 @@ function WorkloadList({
             />
           ))}
           {stale.map((k) => (
-            <FailureAlert
+            <StaleListAlert
               key={k.key}
-              title={`These ${k.label.toLocaleLowerCase()}s are stale`}
+              what={`${k.label.toLocaleLowerCase()}s`}
               error={k.list.error}
+              failures={k.list.namespaceFailures}
               className="mx-3 mt-3 mb-3"
             />
           ))}
-          <div className="scroll min-h-0 flex-1">
+          <div ref={refocus.scope} className="scroll min-h-0 flex-1">
             <Table
               columns={renderedColumns}
               data={filtered}
-              getRowKey={(row) => `${row.kind}/${row.namespace ?? ""}/${row.name}`}
+              getRowKey={workloadRowKey}
               sort={sort}
               onSortChange={setSort}
               activeFilterKey={filterKey}
@@ -535,7 +693,13 @@ function WorkloadList({
               }
               rowMenu={rowMenuItems}
               rowMenuLabel={`${title} actions`}
-              {...emptyTableCopy(segmented.length, segmentLower, name, " in the namespaces you are looking at")}
+              {...workloadsEmptyCopy(
+                segment === "All" ? kinds : kinds.filter((k) => k.label === segment),
+                kinds.length,
+                segmented.length,
+                segmentLower,
+                name,
+              )}
             />
           </div>
         </>

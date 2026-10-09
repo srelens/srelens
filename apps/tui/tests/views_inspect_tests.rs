@@ -17,16 +17,16 @@ use ratatui::{Frame, Terminal};
 use srelens_kube::node_inspector::{
     NodeConditionInfo, NodeInspectorDetails, NodePodItem, NodeTaintInfo,
 };
-use srelens_tui::ai_config::{AiProvider, AiSettings};
-use srelens_tui::theme::Theme;
-use srelens_tui::views::node_inspector_view::{render_node_inspector_view, NodeInspectorState};
-use srelens_tui::views::overview_view::{
+use srectl::ai_config::{AiProvider, AiSettings};
+use srectl::theme::Theme;
+use srectl::views::node_inspector_view::{render_node_inspector_view, NodeInspectorState};
+use srectl::views::overview_view::{
     render_overview_view, ClusterOverviewData, OverviewViewState,
 };
-use srelens_tui::views::settings_view::{render_settings_view, SettingField, SettingsViewState};
-use srelens_tui::views::tui_config_view::{render_tui_config_view, TuiConfigViewState};
-use srelens_tui::views::yaml_view::{render_yaml_view, YamlViewState};
-use srelens_tui::{CommandPopupDensity, TuiConfig};
+use srectl::views::settings_view::{render_settings_view, SettingField, SettingsViewState};
+use srectl::views::tui_config_view::{render_tui_config_view, TuiConfigViewState};
+use srectl::views::yaml_view::{render_yaml_view, YamlViewState};
+use srectl::{CommandPopupDensity, TuiConfig};
 
 /// Render one frame and hand back the raw buffer, for the few assertions that
 /// need a cell's style rather than its text.
@@ -112,6 +112,11 @@ fn node_details(name: &str) -> NodeInspectorDetails {
         gpu_requests_count: 0,
         gpu_memory_total_mib: None,
         gpu_memory_requests_mib: 0,
+        is_virtual_gpu: false,
+        physical_gpu_count: 0,
+        physical_gpu_memory_total_mib: None,
+        virtual_gpu_count: None,
+        virtual_gpu_memory_total_mib: None,
         conditions: vec![NodeConditionInfo {
             type_: "Ready".to_string(),
             status: "True".to_string(),
@@ -341,6 +346,7 @@ fn node_inspector_header_shows_status_role_type_kubelet_os_kernel_and_runtime() 
 
 #[test]
 fn node_inspector_header_shows_cordon_badge_gpu_model_zone_pool_and_ip() {
+    let _theme = common::theme::lock();
     let mut details = node_details("gpu-node");
     details.status = "NotReady".to_string();
     details.unschedulable = true;
@@ -383,7 +389,7 @@ fn node_inspector_gpu_model_falls_back_to_a_generic_label() {
     let state = node_state(details);
     let text = render_node(160, 40, &state);
     assert!(text.contains("GPU Accelerator]"), "{text}");
-    assert!(text.contains("GPU: 0/1 (0%)"), "{text}");
+    assert!(text.contains("GPU (Alloc): 0/1 (0%)"), "{text}");
 }
 
 #[test]
@@ -414,8 +420,11 @@ fn node_inspector_footer_lists_every_shortcut_with_the_cordon_hint() {
 fn node_inspector_gauges_show_cpu_memory_and_pod_percentages_without_a_gpu() {
     let state = node_state(node_details("node-1"));
     let text = render_node(120, 40, &state);
-    assert!(text.contains("CPU: 2.5/7.8 Cores (32%)"), "{text}");
-    assert!(text.contains("Memory: 13.7/30.3 GiB (45%)"), "{text}");
+    assert!(text.contains("CPU (Alloc): 2.5/7.8 Cores (32%)"), "{text}");
+    assert!(
+        text.contains("Memory (Alloc): 13.7/30.3 GiB (45%)"),
+        "{text}"
+    );
     assert!(text.contains("Pods: 2/110 (2%)"), "{text}");
     assert!(!text.contains("VRAM"), "{text}");
     assert!(!text.contains("Slices"), "{text}");
@@ -430,14 +439,15 @@ fn node_inspector_gauges_report_zero_when_allocatable_is_zero() {
     details.pods_count = 3;
     let state = node_state(details);
     let text = render_node(120, 40, &state);
-    assert!(text.contains("CPU: 2.5/0.0 Cores (0%)"), "{text}");
-    assert!(text.contains("Memory: 13.7/0.0 GiB (0%)"), "{text}");
+    assert!(text.contains("CPU (Alloc): 2.5/0.0 Cores (0%)"), "{text}");
+    assert!(text.contains("Memory (Alloc): 13.7/0.0 GiB (0%)"), "{text}");
     // pods_allocatable is floored to 1 so the ratio does not divide by zero.
     assert!(text.contains("Pods: 3/0 (300%)"), "{text}");
 }
 
 #[test]
 fn node_inspector_gauges_go_yellow_then_red_as_pressure_rises() {
+    let _theme = common::theme::lock();
     let mut details = node_details("node-1");
     details.cpu_requests_millicores = 6000; // 77%
     details.mem_requests_mib = 30000; // 97%
@@ -445,9 +455,9 @@ fn node_inspector_gauges_go_yellow_then_red_as_pressure_rises() {
     let state = node_state(details);
     let lines = common::render_lines(160, 40, |f| render_node_inspector_view(f, f.area(), &state));
     let buf = render_buffer(160, 40, |f| render_node_inspector_view(f, f.area(), &state));
-    let title_row = row_of(&lines, "CPU: 6.0/7.8 Cores (77%)");
-    let cpu_x = col(&lines[title_row], "CPU: 6.0");
-    let mem_x = col(&lines[title_row], "Memory: 29.3/30.3 GiB (97%)");
+    let title_row = row_of(&lines, "CPU (Alloc): 6.0/7.8 Cores (77%)");
+    let cpu_x = col(&lines[title_row], "CPU (Alloc): 6.0");
+    let mem_x = col(&lines[title_row], "Memory (Alloc): 29.3/30.3 GiB (97%)");
     let pods_x = col(&lines[title_row], "Pods: 80/110 (73%)");
     // The gauge body sits one row under its title; the filled part carries the fg colour.
     let body = title_row as u16 + 1;
@@ -468,11 +478,122 @@ fn node_inspector_gpu_gauge_prefers_vram_when_memory_requests_are_known() {
     details.gpu_memory_requests_mib = 7168;
     let state = node_state(details);
     let text = render_node(200, 40, &state);
-    assert!(text.contains("Tesla T4: 7.0/15.0 GiB VRAM (47%)"), "{text}");
+    assert!(
+        text.contains("Tesla T4 (Alloc): 7.0/15.0 GiB VRAM (47%)"),
+        "{text}"
+    );
+}
+
+#[test]
+fn node_inspector_gpu_gauge_shows_virtual_gpus_and_total_virtual_vram_for_hami() {
+    let mut details = node_details("gpu-node-hami");
+    details.has_gpu = true;
+    details.is_virtual_gpu = true;
+    details.gpu_model = Some("Tesla T4".to_string());
+    details.physical_gpu_count = 1;
+    details.physical_gpu_memory_total_mib = Some(15360);
+    details.gpu_capacity_count = 10;
+    details.gpu_allocatable_count = 10;
+    details.virtual_gpu_count = Some(10);
+    details.virtual_gpu_memory_total_mib = Some(15360);
+    details.gpu_requests_count = 3;
+    // 1 physical T4 with 10 vGPUs sharing 15 GiB total VRAM
+    details.gpu_memory_total_mib = Some(15360);
+    details.gpu_memory_requests_mib = 15360; // 15 GiB requested
+    let state = node_state(details);
+    let text_wide = render_node(260, 40, &state);
+    // Header card badge with Option 1:
+    assert!(
+        text_wide.contains("1x Tesla T4 (HAMi 10 vGPUs)"),
+        "{text_wide}"
+    );
+    // GPU gauge VRAM allocation showing virtual pool and physical capacity on wide screen:
+    assert!(
+        text_wide.contains("Tesla T4 (Alloc): 15.0/15G (100% HAMi vPool) • 1x 15G Phys"),
+        "{text_wide}"
+    );
+
+    // Ultra-wide GPU gauge showing physical percentage and saturation tag:
+    let text_ultra = render_node(320, 40, &state);
+    assert!(
+        text_ultra
+            .contains("Tesla T4 (Alloc): 15.0/15G (100% HAMi vPool) • 1x 15G Phys (100% [Sat])"),
+        "{text_ultra}"
+    );
+
+    // Compact GPU gauge on narrower screens:
+    let text_compact = render_node(200, 40, &state);
+    assert!(
+        text_compact.contains("Tesla T4 (Alloc): 15.0/15G (100% HAMi pool)"),
+        "{text_compact}"
+    );
+}
+
+#[test]
+fn node_inspector_renders_multi_gpu_physical_multiplier_for_hami_nodes() {
+    let _theme = common::theme::lock();
+    let mut details = node_details("multi-gpu-node");
+    details.has_gpu = true;
+    details.is_virtual_gpu = true;
+    details.gpu_model = Some("Tesla T4".to_string());
+    details.physical_gpu_count = 4;
+    details.physical_gpu_memory_total_mib = Some(61440);
+    details.gpu_capacity_count = 40;
+    details.gpu_allocatable_count = 40;
+    details.virtual_gpu_count = Some(40);
+    details.virtual_gpu_memory_total_mib = Some(61440);
+    details.gpu_requests_count = 4;
+    details.gpu_memory_total_mib = Some(61440);
+    details.gpu_memory_requests_mib = 30720; // 30 GiB requested (50% phys, so not saturated)
+    let state = node_state(details);
+    let text_wide = render_node(260, 40, &state);
+
+    assert!(
+        text_wide.contains("4x Tesla T4 (HAMi 40 vGPUs)"),
+        "{text_wide}"
+    );
+    assert!(
+        text_wide.contains("Tesla T4 (Alloc): 30.0/60G (50% HAMi vPool) • 4x 60G Phys"),
+        "{text_wide}"
+    );
+
+    let text_ultra = render_node(320, 40, &state);
+    assert!(
+        text_ultra.contains("Tesla T4 (Alloc): 30.0/60G (50% HAMi vPool) • 4x 60G Phys (50%)"),
+        "{text_ultra}"
+    );
+}
+
+#[test]
+fn node_inspector_renders_unspecified_physical_gpu_count_without_guessing_multiplier() {
+    let _theme = common::theme::lock();
+    let mut details = node_details("unknown-phys-gpu-node");
+    details.has_gpu = true;
+    details.is_virtual_gpu = true;
+    details.gpu_model = Some("Tesla T4".to_string());
+    details.physical_gpu_count = 0; // Not reported / unknown
+    details.physical_gpu_memory_total_mib = None;
+    details.gpu_capacity_count = 10;
+    details.gpu_allocatable_count = 10;
+    details.virtual_gpu_count = Some(10);
+    details.virtual_gpu_memory_total_mib = Some(15360);
+    details.gpu_requests_count = 2;
+    details.gpu_memory_total_mib = Some(15360);
+    details.gpu_memory_requests_mib = 3072;
+    let state = node_state(details);
+    let text_wide = render_node(260, 40, &state);
+
+    // Inspector badge must not guess "1x":
+    assert!(
+        text_wide.contains("Tesla T4 (HAMi 10 vGPUs)"),
+        "{text_wide}"
+    );
+    assert!(!text_wide.contains("1x Tesla T4"), "{text_wide}");
 }
 
 #[test]
 fn node_inspector_gpu_gauge_counts_slices_when_more_than_one_gpu_is_allocatable() {
+    let _theme = common::theme::lock();
     let mut details = node_details("gpu-node");
     details.has_gpu = true;
     details.gpu_model = Some("A100".to_string());
@@ -481,7 +602,7 @@ fn node_inspector_gpu_gauge_counts_slices_when_more_than_one_gpu_is_allocatable(
     details.gpu_requests_count = 3;
     let state = node_state(details);
     let text = render_node(160, 40, &state);
-    assert!(text.contains("A100: 3/8 Slices (38%)"), "{text}");
+    assert!(text.contains("A100 (Alloc): 3/8 Slices (38%)"), "{text}");
 
     // Over-commit beyond 90% turns the gauge red.
     let mut hot = node_details("gpu-node");
@@ -497,8 +618,8 @@ fn node_inspector_gpu_gauge_counts_slices_when_more_than_one_gpu_is_allocatable(
     let buf = render_buffer(160, 40, |f| {
         render_node_inspector_view(f, f.area(), &hot_state)
     });
-    let row = row_of(&lines, "A100: 4/4 Slices (100%)");
-    let x = col(&lines[row], "A100: 4/4");
+    let row = row_of(&lines, "A100 (Alloc): 4/4 Slices (100%)");
+    let x = col(&lines[row], "A100 (Alloc): 4/4");
     assert_eq!(buf[(x, row as u16 + 1)].fg, Theme::RED);
 }
 
@@ -546,6 +667,7 @@ fn node_inspector_sparklines_only_appear_when_the_terminal_is_tall_enough() {
 
 #[test]
 fn node_inspector_conditions_and_taints_render_or_say_none() {
+    let _theme = common::theme::lock();
     let mut state = node_state(node_details("node-1"));
     let text = render_node(160, 40, &state);
     assert!(text.contains("Health Conditions & Taints"), "{text}");
@@ -612,6 +734,7 @@ fn node_inspector_conditions_and_taints_render_or_say_none() {
 
 #[test]
 fn node_inspector_pods_table_lists_pods_and_marks_the_selected_one() {
+    let _theme = common::theme::lock();
     let mut details = node_details("node-1");
     details.pods = vec![
         {
@@ -734,13 +857,14 @@ fn node_inspector_pods_table_scrolls_to_keep_the_selection_visible() {
         .collect();
     let mut state = node_state(details);
 
-    // Wide/tall: 21 visible rows. Selecting the last pod scrolls down.
+    // Wide/tall. The footer hints wrap onto a second row, so the pod table
+    // shows 20 rows. Selecting the last pod scrolls down.
     state.select_last();
     let text = render_node(120, 40, &state);
     assert!(text.contains("▶ default"), "{text}");
     assert!(text.contains("pod-29"), "{text}");
     assert!(!text.contains("pod-00"), "{text}");
-    assert_eq!(state.last_scroll_offset.get(), 9);
+    assert_eq!(state.last_scroll_offset.get(), 10);
     assert!(state.last_pods_table_rect.get().height > 0);
 
     // A stale scroll offset below the selection snaps back up to it.
@@ -796,8 +920,8 @@ fn render_settings(width: u16, height: u16, state: &SettingsViewState) -> String
 
 #[test]
 fn settings_view_new_selects_the_configured_default_provider() {
-    // `new` loads whatever the machine has on disk; the invariant that holds
-    // regardless is that the cursor starts on the default provider.
+    let _settings = common::env::isolate_settings();
+    // The cursor starts on the default provider loaded from isolated settings.
     let state = SettingsViewState::new();
     assert_eq!(state.current_provider(), state.settings.default_provider);
     assert_eq!(state.selected_field, SettingField::ProviderToggle);
@@ -1053,6 +1177,7 @@ fn settings_view_timeout_edits_are_parsed_and_clamped() {
 
 #[test]
 fn settings_view_renders_the_active_provider_summary_and_every_provider_card() {
+    let _env = common::env::lock();
     let mut state = settings_state();
     state.settings.default_provider = AiProvider::Gemini;
     state.selected_provider_idx = 2;
@@ -1108,6 +1233,9 @@ fn settings_view_renders_the_active_provider_summary_and_every_provider_card() {
 
 #[test]
 fn settings_view_masks_stored_api_keys_and_flags_missing_ones() {
+    let mut env = common::env::lock();
+    env.remove("OPENAI_API_KEY");
+    env.remove("OPENAI_COMPATIBLE_API_KEY");
     let mut state = settings_state();
     state.settings.api_keys.insert(
         "anthropic".to_string(),
@@ -1136,27 +1264,22 @@ fn settings_view_masks_stored_api_keys_and_flags_missing_ones() {
         "{text}"
     );
     assert!(!text.contains("short"), "{text}");
-    // A blank stored key counts as unset. (Guarded: a developer's shell may
-    // export the key, which legitimately takes the env branch instead.)
-    if std::env::var("OPENAI_API_KEY").is_err() {
-        assert!(
-            text.contains("API Key: no key set (press 'e' to set or export OPENAI_API_KEY)"),
-            "{text}"
-        );
-    }
-    if std::env::var("OPENAI_COMPATIBLE_API_KEY").is_err() {
-        assert!(text.contains("API Key: optional (local Ollama)"), "{text}");
-    }
+    // A blank stored key counts as unset, regardless of the developer's shell.
+    assert!(
+        text.contains("API Key: no key set (press 'e' to set or export OPENAI_API_KEY)"),
+        "{text}"
+    );
+    assert!(text.contains("API Key: optional (local Ollama)"), "{text}");
 }
 
 #[test]
 fn settings_view_reports_an_api_key_that_comes_from_the_environment() {
-    // Only this test touches GEMINI_API_KEY, and no other test in this file
-    // asserts on Gemini's key line, so the parallel runner cannot race it.
-    std::env::set_var("GEMINI_API_KEY", "from-env");
+    // Dropping the guard puts back any key the developer's shell exports.
+    let mut env = common::env::lock();
+    env.set("GEMINI_API_KEY", "from-env");
     let state = settings_state();
     let text = render_settings(120, 40, &state);
-    std::env::remove_var("GEMINI_API_KEY");
+    drop(env);
     assert!(
         text.contains("API Key: [env: GEMINI_API_KEY set]"),
         "{text}"
@@ -1169,6 +1292,8 @@ fn settings_view_reports_an_api_key_that_comes_from_the_environment() {
 
 #[test]
 fn settings_view_highlights_the_focused_field_on_the_selected_card() {
+    let _env = common::env::lock();
+    let _theme = common::theme::lock();
     let mut state = settings_state();
     state.selected_provider_idx = 1;
     state.selected_field = SettingField::Model;
@@ -1227,7 +1352,11 @@ fn settings_view_highlights_the_focused_field_on_the_selected_card() {
     let b = render_buffer(120, 40, |f| render_settings_view(f, f.area(), &s));
     let l = common::render_lines(120, 40, |f| render_settings_view(f, f.area(), &s));
     let r = row_of(&l, "4. OpenAI-Compatible / Ollama (Local)") + 3;
-    assert!(l[r].contains("Base URL: http://localhost:11434/v1"), "{}", l[r]);
+    assert!(
+        l[r].contains("Base URL: http://localhost:11434/v1"),
+        "{}",
+        l[r]
+    );
     let bx = col(&l[r], "Base URL:");
     assert_eq!(b[(bx, r as u16)].fg, Theme::YELLOW);
     let vx = col(&l[r], "http://localhost:11434/v1");
@@ -1236,6 +1365,7 @@ fn settings_view_highlights_the_focused_field_on_the_selected_card() {
 
 #[test]
 fn settings_view_renders_base_url_for_openai_compatible_provider() {
+    let _env = common::env::lock();
     let state = settings_state();
     let lines = common::render_lines(120, 40, |f| render_settings_view(f, f.area(), &state));
     let oai_compat_row = row_of(&lines, "4. OpenAI-Compatible / Ollama (Local)");
@@ -1249,6 +1379,7 @@ fn settings_view_renders_base_url_for_openai_compatible_provider() {
 
 #[test]
 fn settings_view_edit_modal_names_the_field_and_shows_the_buffer() {
+    let _env = common::env::lock();
     let mut state = settings_state();
     state.selected_provider_idx = 1;
     state.selected_field = SettingField::Model;
@@ -1315,6 +1446,7 @@ fn settings_view_edit_modal_names_the_field_and_shows_the_buffer() {
 
 #[test]
 fn settings_view_narrow_terminal_still_shows_the_header_and_first_cards() {
+    let _env = common::env::lock();
     let state = settings_state();
     let text = render_settings(60, 20, &state);
     assert!(text.contains("SRElens AI & Assistant Settings"), "{text}");
@@ -1479,6 +1611,7 @@ fn overview_view_before_any_data_shows_placeholders_and_zeroed_gauges() {
 
 #[test]
 fn overview_view_populated_cluster_shows_health_version_nodes_and_gauges() {
+    let _theme = common::theme::lock();
     let state = OverviewViewState::with_data(overview_data());
     let lines = common::render_lines(120, 40, |f| render_overview_view(f, f.area(), &state));
     let text = lines.join("\n");
@@ -1520,6 +1653,7 @@ fn overview_view_populated_cluster_shows_health_version_nodes_and_gauges() {
 
 #[test]
 fn overview_view_prefixes_a_bare_version_with_v_and_uses_small_units_for_small_totals() {
+    let _theme = common::theme::lock();
     let mut data = overview_data();
     data.k8s_version = "1.29.0".to_string();
     data.total_cpu_millicores = 900;
@@ -1881,10 +2015,11 @@ fn yaml_view_scrolling_stays_within_the_document() {
 fn yaml_view_spawn_editor_reports_a_missing_editor_without_running_anything() {
     // Point $EDITOR at a binary that cannot exist so the spawn fails fast.
     // The quoted form also exercises the shlex split.
-    std::env::set_var("EDITOR", "\"srelens-no-such-editor-0x5b\" --wait");
+    let mut env = common::env::lock();
+    env.set("EDITOR", "\"srelens-no-such-editor-0x5b\" --wait");
     let state = yaml_state(POD_YAML);
     let result = state.spawn_editor();
-    std::env::remove_var("EDITOR");
+    drop(env);
     let err = result.expect_err("a nonexistent editor cannot be spawned");
     assert!(
         err.starts_with("Failed to spawn editor '\"srelens-no-such-editor-0x5b\" --wait':"),
@@ -1952,6 +2087,7 @@ fn yaml_view_renders_only_the_visible_window_from_the_scroll_offset() {
 
 #[test]
 fn yaml_view_search_badge_counts_matches_and_highlights_them_in_yellow() {
+    let _theme = common::theme::lock();
     let mut state = yaml_state(POD_YAML);
     state.set_search_query("Nginx");
     // 160 columns keep the whole title, badge included, off the border.
@@ -1998,6 +2134,7 @@ fn yaml_view_search_badge_counts_matches_and_highlights_them_in_yellow() {
 
 #[test]
 fn yaml_view_selection_changes_the_hint_and_shades_the_selected_rows() {
+    let _theme = common::theme::lock();
     let mut state = yaml_state(POD_YAML);
     state.start_selection(2);
     state.update_selection(0);
@@ -2029,6 +2166,7 @@ fn yaml_view_selection_changes_the_hint_and_shades_the_selected_rows() {
 
 #[test]
 fn yaml_view_colours_comments_separators_keys_and_scalar_values() {
+    let _theme = common::theme::lock();
     let state = yaml_state(POD_YAML);
     let lines = common::render_lines(120, 40, |f| render_yaml_view(f, f.area(), &state));
     let buf = render_buffer(120, 40, |f| render_yaml_view(f, f.area(), &state));
@@ -2104,6 +2242,9 @@ fn yaml_view_empty_document_renders_a_bare_frame() {
 
 #[test]
 fn tui_config_view_state_field_navigation_and_adjustments() {
+    // Saves the config and resets the process-wide ArgoCD timeout: keep both
+    // off the reader's real files and away from the other config tests.
+    let _settings = common::env::isolate_settings();
     let mut state = TuiConfigViewState::new();
     assert_eq!(state.selected_field, 0);
 
@@ -2120,19 +2261,30 @@ fn tui_config_view_state_field_navigation_and_adjustments() {
     assert_eq!(state.selected_field, 4);
 
     state.select_next_field();
-    assert_eq!(state.selected_field, 5);
+    assert_eq!(state.selected_field, 5, "Changed SRE Guide Banner");
 
     state.select_next_field();
-    assert_eq!(state.selected_field, 6);
+    assert_eq!(state.selected_field, 6, "ArgoCD Hub Context");
 
     state.select_next_field();
-    assert_eq!(state.selected_field, 0);
+    assert_eq!(state.selected_field, 7, "ArgoCD Hub Kubeconfig");
 
+    state.select_next_field();
+    assert_eq!(state.selected_field, 8, "ArgoCD UI URL");
+
+    state.select_next_field();
+    assert_eq!(state.selected_field, 9, "ArgoCD fetch timeout");
+
+    state.select_next_field();
+    assert_eq!(state.selected_field, 0, "wraps after the last field");
+
+    state.select_prev_field();
+    assert_eq!(state.selected_field, 9, "wraps back to the last field");
+
+    state.select_prev_field();
+    state.select_prev_field();
     state.select_prev_field();
     assert_eq!(state.selected_field, 6);
-
-    state.select_prev_field();
-    assert_eq!(state.selected_field, 5);
 
     let mut config = TuiConfig::default();
     assert_eq!(config.command_popup_max_width, 65);
@@ -2140,10 +2292,11 @@ fn tui_config_view_state_field_navigation_and_adjustments() {
     assert_eq!(config.command_popup_density, CommandPopupDensity::Compact);
     assert!(config.show_feature_banner);
     assert!(config.check_updates);
+    assert!(config.show_changed_guide);
     assert_eq!(config.argo_hub_context, None);
     assert_eq!(config.argo_hub_kubeconfig, None);
 
-    // Selected field 5: ArgoCD Hub Context cycling and editing
+    // Selected field 6: ArgoCD Hub Context cycling and editing
     state.available_contexts = vec!["ctx-mgmt".to_string(), "ctx-prod".to_string()];
     let _ = state.adjust_current(1, &mut config);
     assert_eq!(config.argo_hub_context.as_deref(), Some("ctx-mgmt"));
@@ -2152,7 +2305,7 @@ fn tui_config_view_state_field_navigation_and_adjustments() {
     let _ = state.adjust_current(1, &mut config);
     assert_eq!(config.argo_hub_context, None); // cycled back to None
 
-    // Direct editing of field 5 with cursor movement and insertion
+    // Direct editing of field 6 with cursor movement and insertion
     state.start_editing(&config);
     assert!(state.is_editing);
     assert_eq!(state.cursor_pos(), 0);
@@ -2194,9 +2347,9 @@ fn tui_config_view_state_field_navigation_and_adjustments() {
     let _ = state.clear_current(&mut config);
     assert_eq!(config.argo_hub_context, None);
 
-    // Selected field 6: ArgoCD Hub Kubeconfig Path editing and clearing
+    // Selected field 7: ArgoCD Hub Kubeconfig Path editing and clearing
     state.select_next_field();
-    assert_eq!(state.selected_field, 6);
+    assert_eq!(state.selected_field, 7);
     state.start_editing(&config);
     assert!(state.is_editing);
     state.edit_buffer = "/path/to/custom/kubeconfig".to_string();
@@ -2212,8 +2365,17 @@ fn tui_config_view_state_field_navigation_and_adjustments() {
     let _ = state.clear_current(&mut config);
     assert_eq!(config.argo_hub_kubeconfig, None);
 
-    // Selected field 4: Startup Update Check toggle
+    // Selected field 5: Changed SRE Guide Banner toggle
     state.select_prev_field();
+    state.select_prev_field();
+    assert_eq!(state.selected_field, 5);
+    assert!(config.show_changed_guide);
+    let _ = state.adjust_current(1, &mut config);
+    assert!(!config.show_changed_guide);
+    let _ = state.cycle_current(&mut config);
+    assert!(config.show_changed_guide);
+
+    // Selected field 4: Startup Update Check toggle
     state.select_prev_field();
     assert_eq!(state.selected_field, 4);
     assert!(config.check_updates);
@@ -2225,6 +2387,7 @@ fn tui_config_view_state_field_navigation_and_adjustments() {
     // Selected field 3: Startup Feature Banner toggle
     state.select_prev_field();
     assert_eq!(state.selected_field, 3);
+    assert!(config.show_feature_banner);
     let _ = state.adjust_current(1, &mut config);
     assert!(!config.show_feature_banner);
     let _ = state.cycle_current(&mut config);
@@ -2302,8 +2465,11 @@ fn tui_config_view_renders_cards_and_live_preview_at_wide_and_narrow() {
         command_popup_density: CommandPopupDensity::Compact,
         show_feature_banner: true,
         check_updates: true,
+        show_changed_guide: true,
         argo_hub_context: None,
         argo_hub_kubeconfig: None,
+        argo_ui_url: None,
+        argo_timeout_secs: None,
         update_available: None,
     };
 
@@ -2334,14 +2500,11 @@ fn tui_config_view_renders_cards_and_live_preview_at_wide_and_narrow() {
         full.contains("Startup Update Check"),
         "has startup update check setting card"
     );
-    assert!(
-        full.contains("ArgoCD Hub Context"),
-        "has hub context setting card"
-    );
-    assert!(
-        full.contains("ArgoCD Hub Kubeconfig Path"),
-        "has hub kubeconfig setting card"
-    );
+    assert!(full.contains("ArgoCD (:argo)"), "has the ArgoCD group box");
+    assert!(full.contains("Hub Context"), "has hub context row");
+    assert!(full.contains("Hub Kubeconfig"), "has hub kubeconfig row");
+    assert!(full.contains("UI URL"), "has UI URL row");
+    assert!(full.contains("Fetch Timeout"), "has fetch timeout row");
     assert!(full.contains("80 cols"), "shows configured width");
     assert!(full.contains("8 rows"), "shows configured visible rows");
     assert!(
@@ -2363,13 +2526,13 @@ fn tui_config_view_renders_cards_and_live_preview_at_wide_and_narrow() {
         "shows banner preview title"
     );
     assert!(
-        banner_full.contains("Welcome to SRElens"),
+        banner_full.contains("Welcome to srectl"),
         "shows banner contents in preview"
     );
 
     // Startup update check preview when selected_field == 4
     let mut update_state = TuiConfigViewState::new();
-    update_state.selected_field = 4;
+    update_state.selected_field = srectl::views::tui_config_view::FIELD_STARTUP_UPDATES;
     let update_lines = common::render_lines(120, 30, |f| {
         render_tui_config_view(f, f.area(), &update_state, &config)
     });
@@ -2383,9 +2546,25 @@ fn tui_config_view_renders_cards_and_live_preview_at_wide_and_narrow() {
         "shows header indicator preview"
     );
 
-    // ArgoCD GitOps Live Preview when selected_field == 5
+    // Changed Guide preview when selected_field == FIELD_CHANGED_GUIDE
+    let mut guide_state = TuiConfigViewState::new();
+    guide_state.selected_field = srectl::views::tui_config_view::FIELD_CHANGED_GUIDE;
+    let guide_lines = common::render_lines(120, 30, |f| {
+        render_tui_config_view(f, f.area(), &guide_state, &config)
+    });
+    let guide_full = guide_lines.join("\n");
+    assert!(
+        guide_full.contains("Live Preview: Changed SRE Triage Guide"),
+        "shows guide preview title: {guide_full}"
+    );
+    assert!(
+        guide_full.contains("SRE Scope & Triage Guide"),
+        "shows guide banner content: {guide_full}"
+    );
+
+    // ArgoCD GitOps Live Preview when selected_field == FIELD_ARGO_HUB_CONTEXT
     let mut argo_state = TuiConfigViewState::new();
-    argo_state.selected_field = 5;
+    argo_state.selected_field = srectl::views::tui_config_view::FIELD_ARGO_HUB_CONTEXT;
     argo_state.available_contexts = vec!["ctx-mgmt".to_string(), "ctx-worker".to_string()];
     let argo_lines = common::render_lines(120, 30, |f| {
         render_tui_config_view(f, f.area(), &argo_state, &config)
@@ -2403,7 +2582,7 @@ fn tui_config_view_renders_cards_and_live_preview_at_wide_and_narrow() {
 
     // Edit modal dialog when is_editing == true
     let mut edit_state = TuiConfigViewState::new();
-    edit_state.selected_field = 5;
+    edit_state.selected_field = srectl::views::tui_config_view::FIELD_ARGO_HUB_CONTEXT;
     edit_state.is_editing = true;
     edit_state.edit_buffer = "my-argo-hub".to_string();
     edit_state.edit_cursor = "my-argo-hub".chars().count();
@@ -2429,4 +2608,440 @@ fn tui_config_view_renders_cards_and_live_preview_at_wide_and_narrow() {
     assert!(narrow_full.contains("Command Popup Max Width"));
     assert!(narrow_full.contains("Command Popup Text Size"));
     assert!(narrow_full.contains("Startup Feature Banner"));
+}
+
+fn config_render(state: &TuiConfigViewState, config: &TuiConfig) -> String {
+    common::render_lines(140, 40, |f| {
+        render_tui_config_view(f, f.area(), state, config)
+    })
+    .join("\n")
+}
+
+#[test]
+fn tui_config_argo_box_shows_each_setting_and_marks_the_selected_one() {
+    let _settings = common::env::isolate_settings();
+    use srectl::views::tui_config_view::{FIELD_ARGO_TIMEOUT, FIELD_ARGO_UI_URL};
+    let config = TuiConfig {
+        argo_hub_context: Some("hub-prod".to_string()),
+        argo_ui_url: Some("https://argocd.example.com".to_string()),
+        argo_timeout_secs: Some(30),
+        ..TuiConfig::default()
+    };
+    let mut state = TuiConfigViewState::new();
+
+    let unselected = config_render(&state, &config);
+    assert!(
+        unselected.contains("Hub Context    hub-prod"),
+        "{unselected}"
+    );
+    assert!(unselected.contains("UI URL         https://argocd.example.com"));
+    assert!(unselected.contains("Fetch Timeout  30s"));
+    assert!(unselected.contains("j/k to select an ArgoCD setting"));
+
+    state.selected_field = FIELD_ARGO_UI_URL;
+    let url = config_render(&state, &config);
+    assert!(url.contains("▶ UI URL"), "{url}");
+    assert!(url.contains("e/Enter Edit · c Clear"));
+    // The preview names the link `a` will open and what the timeout covers.
+    assert!(
+        url.contains("UI Link:       https://argocd.example.com/applications/<application>"),
+        "{url}"
+    );
+    assert!(url.contains("Fetch Timeout: 30s"));
+    assert!(
+        url.contains("Opened by a in an :argo app's details."),
+        "{url}"
+    );
+    assert!(
+        url.contains("Bounds list and detail reads; never cuts off a sync."),
+        "{url}"
+    );
+
+    state.selected_field = FIELD_ARGO_TIMEOUT;
+    let timeout = config_render(&state, &config);
+    assert!(timeout.contains("▶ Fetch Timeout"));
+    assert!(timeout.contains("h/l Change · c Reset to inherit"));
+
+    // Unset values say what being unset means.
+    let empty = config_render(&state, &TuiConfig::default());
+    assert!(
+        empty.contains("not set (a in app details is off)"),
+        "{empty}"
+    );
+    assert!(empty.contains("inherit (8s request timeout)"));
+}
+
+#[test]
+fn tui_config_argo_ui_url_is_validated_before_it_is_saved() {
+    let _settings = common::env::isolate_settings();
+    use srectl::views::tui_config_view::FIELD_ARGO_UI_URL;
+    let mut config = TuiConfig::default();
+    let mut state = TuiConfigViewState::new();
+    state.selected_field = FIELD_ARGO_UI_URL;
+    assert!(state.is_text_field());
+
+    // Not a URL: rejected, nothing changes, the modal stays open to fix it.
+    state.start_editing(&config);
+    state.insert_str("argo.local");
+    let err = state.finish_editing(&mut config).unwrap_err();
+    assert!(err.contains("https://"), "{err}");
+    assert!(state.is_editing, "still editing after a rejected value");
+    assert_eq!(config.argo_ui_url, None);
+
+    let editing = config_render(&state, &config);
+    assert!(editing.contains("Edit ArgoCD UI URL"));
+    assert!(editing.contains("Base URL of the ArgoCD web UI"));
+
+    // A URL: saved without its trailing slash.
+    state.clear_input();
+    state.insert_str("https://argocd.example.com/");
+    state.finish_editing(&mut config).unwrap();
+    assert!(!state.is_editing);
+    assert_eq!(
+        config.argo_ui_url.as_deref(),
+        Some("https://argocd.example.com")
+    );
+    let saved = std::fs::read_to_string(TuiConfig::config_file_path()).unwrap();
+    assert!(
+        saved.contains(r#""argoUiUrl": "https://argocd.example.com""#),
+        "{saved}"
+    );
+
+    // `c` clears it.
+    assert!(state.is_clearable_field());
+    state.clear_current(&mut config).unwrap();
+    assert_eq!(config.argo_ui_url, None);
+}
+
+#[test]
+fn tui_config_argo_timeout_steps_and_applies_to_argo_reads() {
+    let _settings = common::env::isolate_settings();
+    use srectl::views::tui_config_view::FIELD_ARGO_TIMEOUT;
+    let mut config = TuiConfig::default();
+    let mut state = TuiConfigViewState::new();
+    state.selected_field = FIELD_ARGO_TIMEOUT;
+    assert!(!state.is_text_field(), "stepped, not typed");
+    let request = srelens_kube::connect::request_timeout();
+
+    state.adjust_current(1, &mut config).unwrap();
+    assert_eq!(config.argo_timeout_secs, Some(5));
+    assert_eq!(
+        srelens_kube::argo::argo_timeout(),
+        std::time::Duration::from_secs(5)
+    );
+
+    state.adjust_current(1, &mut config).unwrap();
+    assert_eq!(config.argo_timeout_secs, Some(10));
+    assert_eq!(
+        srelens_kube::argo::argo_timeout(),
+        std::time::Duration::from_secs(10)
+    );
+
+    // Space/Enter walk forward too, wrapping from the maximum to inherit.
+    config.argo_timeout_secs = Some(120);
+    state.cycle_current(&mut config).unwrap();
+    assert_eq!(config.argo_timeout_secs, None);
+    assert_eq!(srelens_kube::argo::argo_timeout(), request);
+
+    state.adjust_current(1, &mut config).unwrap();
+    state.clear_current(&mut config).unwrap();
+    assert_eq!(config.argo_timeout_secs, None, "c resets to inherit");
+    assert_eq!(srelens_kube::argo::argo_timeout(), request);
+}
+
+fn render_gpu(
+    width: u16,
+    height: u16,
+    state: &srectl::views::gpu_view::GpuViewState,
+) -> String {
+    common::render_text(width, height, |f| {
+        srectl::views::gpu_view::render(f, f.area(), state)
+    })
+}
+
+#[test]
+fn gpu_view_renders_hami_virtual_gpus_with_dual_reality() {
+    let _theme = common::theme::lock();
+    let node = srelens_kube::gpu_info::GpuNodeInfo {
+        name: "gpu-node-hami".to_string(),
+        status: "Ready".to_string(),
+        unschedulable: false,
+        roles: "worker".to_string(),
+        instance_type: "g4dn.xlarge".to_string(),
+        gpu_model: Some("Tesla T4".to_string()),
+        gpu_driver_version: Some("535.129.03".to_string()),
+        gpu_cuda_version: Some("12.2".to_string()),
+        gpu_capacity: 10,
+        gpu_allocatable: 10,
+        gpu_requests: 3,
+        vram_per_gpu_mib: Some(15360),
+        vram_capacity_total_mib: Some(15360),
+        vram_requests_total_mib: 15360,
+        pods: vec![srelens_kube::gpu_info::GpuPodItem {
+            name: "test-pod-0".to_string(),
+            namespace: "default".to_string(),
+            phase: "Running".to_string(),
+            gpu_requests: 3,
+            vram_requests_mib: 15360,
+            ready_containers: "1/1".to_string(),
+            restarts: 0,
+            age: "10m".to_string(),
+            containers: vec!["worker".to_string()],
+        }],
+        is_virtual_gpu: true,
+        physical_gpu_count: 1,
+        physical_vram_total_mib: Some(15360),
+    };
+
+    let info = srelens_kube::gpu_info::GpuClusterInfo {
+        nodes: vec![node],
+        total_gpu_nodes: 1,
+        total_gpus: 10,
+        total_allocated_gpus: 3,
+        total_vram_mib: 15360,
+        total_allocated_vram_mib: 15360,
+        total_gpu_pods: 1,
+    };
+
+    let mut state = srectl::views::gpu_view::GpuViewState::new();
+    state.set_info(info);
+
+    let text = render_gpu(160, 40, &state);
+
+    // Left table:
+    assert!(text.contains("3/10v"), "{text}");
+    assert!(text.contains("15/15G(v)"), "{text}");
+
+    // Right details header:
+    assert!(text.contains("1x Tesla T4 (HAMi 10 vGPUs)"), "{text}");
+
+    // Gauges:
+    assert!(text.contains("vGPUs (Alloc): 3 / 10 (30%)"), "{text}");
+    assert!(
+        text.contains("Physical VRAM (Alloc): 15 GiB / 15 GiB (100.0%)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("Virtual Pool: 15 GiB / 15 GiB vVRAM"),
+        "{text}"
+    );
+
+    // Summary footer:
+    assert!(text.contains("Available vGPUs: "), "{text}");
+    assert!(text.contains("Available vVRAM: "), "{text}");
+
+    // Pods table:
+    assert!(text.contains("test-pod-0"), "{text}");
+
+    // Legend on bottom border:
+    assert!(text.contains("v: Virtual GPUs detected (HAMi)"), "{text}");
+}
+
+#[test]
+fn gpu_view_renders_unspecified_physical_gpu_count_without_guessing_multiplier() {
+    let _theme = common::theme::lock();
+    let node = srelens_kube::gpu_info::GpuNodeInfo {
+        name: "gpu-node-unspecified-phys".to_string(),
+        status: "Ready".to_string(),
+        unschedulable: false,
+        roles: "worker".to_string(),
+        instance_type: "g4dn.xlarge".to_string(),
+        gpu_model: Some("Tesla T4".to_string()),
+        gpu_driver_version: Some("535.129.03".to_string()),
+        gpu_cuda_version: Some("12.2".to_string()),
+        gpu_capacity: 10,
+        gpu_allocatable: 10,
+        gpu_requests: 0,
+        vram_per_gpu_mib: Some(15360),
+        vram_capacity_total_mib: Some(15360),
+        vram_requests_total_mib: 0,
+        pods: vec![],
+        is_virtual_gpu: true,
+        physical_gpu_count: 0, // Unreported physical GPU count
+        physical_vram_total_mib: None,
+    };
+    let info = srelens_kube::gpu_info::GpuClusterInfo {
+        nodes: vec![node],
+        total_gpu_nodes: 1,
+        total_gpus: 10,
+        total_allocated_gpus: 0,
+        total_vram_mib: 15360,
+        total_allocated_vram_mib: 0,
+        total_gpu_pods: 0,
+    };
+    let mut state = srectl::views::gpu_view::GpuViewState::new();
+    state.set_info(info);
+
+    let text = render_gpu(160, 40, &state);
+    // Header must not guess "1x":
+    assert!(text.contains("Model: Tesla T4 (HAMi 10 vGPUs)"), "{text}");
+    assert!(!text.contains("1x Tesla T4"), "{text}");
+}
+
+#[test]
+fn gpu_view_renders_hami_empty_node_free_message() {
+    let _theme = common::theme::lock();
+    let node = srelens_kube::gpu_info::GpuNodeInfo {
+        name: "gpu-node-hami".to_string(),
+        status: "Ready".to_string(),
+        unschedulable: false,
+        roles: "worker".to_string(),
+        instance_type: "g4dn.xlarge".to_string(),
+        gpu_model: Some("Tesla T4".to_string()),
+        gpu_driver_version: Some("535.129.03".to_string()),
+        gpu_cuda_version: Some("12.2".to_string()),
+        gpu_capacity: 10,
+        gpu_allocatable: 10,
+        gpu_requests: 0,
+        vram_per_gpu_mib: Some(15360),
+        vram_capacity_total_mib: Some(15360),
+        vram_requests_total_mib: 0,
+        pods: vec![],
+        is_virtual_gpu: true,
+        physical_gpu_count: 1,
+        physical_vram_total_mib: Some(15360),
+    };
+
+    let info = srelens_kube::gpu_info::GpuClusterInfo {
+        nodes: vec![node],
+        total_gpu_nodes: 1,
+        total_gpus: 10,
+        total_allocated_gpus: 0,
+        total_vram_mib: 15360,
+        total_allocated_vram_mib: 0,
+        total_gpu_pods: 0,
+    };
+
+    let mut state = srectl::views::gpu_view::GpuViewState::new();
+    state.set_info(info);
+
+    let text = render_gpu(160, 40, &state);
+    assert!(
+        text.contains("All 10 vGPUs (15 GiB vVRAM) are free and ready to accept workloads."),
+        "{text}"
+    );
+}
+
+#[test]
+fn gpu_view_renders_compact_vram_gauge_on_narrow_terminal() {
+    let _theme = common::theme::lock();
+    let mut node = srelens_kube::gpu_info::GpuNodeInfo {
+        name: "gpu-node-hami".to_string(),
+        status: "Ready".to_string(),
+        unschedulable: false,
+        roles: "worker".to_string(),
+        instance_type: "g4dn.xlarge".to_string(),
+        gpu_model: Some("Tesla T4".to_string()),
+        gpu_driver_version: Some("535.129.03".to_string()),
+        gpu_cuda_version: Some("12.2".to_string()),
+        gpu_capacity: 10,
+        gpu_allocatable: 10,
+        gpu_requests: 3,
+        vram_per_gpu_mib: Some(15360),
+        vram_capacity_total_mib: Some(15360),
+        vram_requests_total_mib: 15360,
+        pods: vec![],
+        is_virtual_gpu: true,
+        physical_gpu_count: 1,
+        physical_vram_total_mib: Some(15360),
+    };
+
+    let info = srelens_kube::gpu_info::GpuClusterInfo {
+        nodes: vec![node.clone()],
+        total_gpu_nodes: 1,
+        total_gpus: 10,
+        total_allocated_gpus: 3,
+        total_vram_mib: 15360,
+        total_allocated_vram_mib: 15360,
+        total_gpu_pods: 0,
+    };
+
+    let mut state = srectl::views::gpu_view::GpuViewState::new();
+    state.set_info(info);
+
+    // Terminal width 85: right pane will be around 41 cols (< 50)
+    let text_narrow = render_gpu(85, 30, &state);
+    assert!(
+        text_narrow.contains("Phys: 15/15G (100%) • vPool: 15/15G"),
+        "{text_narrow}"
+    );
+
+    // Verify small request (e.g. 512 MiB = 0.5 GiB) is not rounded down to 0G:
+    node.vram_requests_total_mib = 512;
+    let mut small_state = srectl::views::gpu_view::GpuViewState::new();
+    small_state.set_info(srelens_kube::gpu_info::GpuClusterInfo {
+        nodes: vec![node.clone()],
+        total_gpu_nodes: 1,
+        total_gpus: 10,
+        total_allocated_gpus: 1,
+        total_vram_mib: 15360,
+        total_allocated_vram_mib: 512,
+        total_gpu_pods: 0,
+    });
+    let text_small = render_gpu(85, 30, &small_state);
+    assert!(
+        text_small.contains("Phys: 0.5/15G (3%) • vPool: 0.5/15G"),
+        "{text_small}"
+    );
+
+    // Verify fractional request >= 10 GiB (e.g. 10752 MiB = 10.5 GiB) preserves .5 decimal precision:
+    node.vram_requests_total_mib = 10752;
+    let mut frac_state = srectl::views::gpu_view::GpuViewState::new();
+    frac_state.set_info(srelens_kube::gpu_info::GpuClusterInfo {
+        nodes: vec![node.clone()],
+        total_gpu_nodes: 1,
+        total_gpus: 10,
+        total_allocated_gpus: 1,
+        total_vram_mib: 15360,
+        total_allocated_vram_mib: 10752,
+        total_gpu_pods: 0,
+    });
+    let text_frac = render_gpu(85, 30, &frac_state);
+    assert!(
+        text_frac.contains("Phys: 10.5/15G (70%) • vPool: 10.5/15G"),
+        "{text_frac}"
+    );
+
+    // Verify sub-0.1 GiB request (e.g. 51 MiB) renders as 0.05G without rounding to 0G:
+    node.vram_requests_total_mib = 51;
+    let mut tiny_state = srectl::views::gpu_view::GpuViewState::new();
+    tiny_state.set_info(srelens_kube::gpu_info::GpuClusterInfo {
+        nodes: vec![node.clone()],
+        total_gpu_nodes: 1,
+        total_gpus: 10,
+        total_allocated_gpus: 1,
+        total_vram_mib: 15360,
+        total_allocated_vram_mib: 51,
+        total_gpu_pods: 0,
+    });
+    let text_tiny = render_gpu(85, 30, &tiny_state);
+    assert!(
+        text_tiny.contains("Phys: 0.05/15G (0%) • vPool: 0.05/15G"),
+        "{text_tiny}"
+    );
+
+    // Verify near-1 GiB fractional request (1000 MiB) renders as 1.0G without rounding to integer 1G:
+    node.vram_requests_total_mib = 1000;
+    let mut near_one_state = srectl::views::gpu_view::GpuViewState::new();
+    near_one_state.set_info(srelens_kube::gpu_info::GpuClusterInfo {
+        nodes: vec![node],
+        total_gpu_nodes: 1,
+        total_gpus: 10,
+        total_allocated_gpus: 1,
+        total_vram_mib: 15360,
+        total_allocated_vram_mib: 1000,
+        total_gpu_pods: 0,
+    });
+    let text_near_one = render_gpu(85, 30, &near_one_state);
+    assert!(
+        text_near_one.contains("Phys: 1.0/15G (7%) • vPool: 1.0/15G"),
+        "{text_near_one}"
+    );
+
+    // Terminal width 110: right pane will be around 64 cols (< 70)
+    let text_mid = render_gpu(110, 30, &state);
+    assert!(
+        text_mid.contains("Phys: 15 GiB/15 GiB (100%) • vPool: 15 GiB/15 GiB"),
+        "{text_mid}"
+    );
 }

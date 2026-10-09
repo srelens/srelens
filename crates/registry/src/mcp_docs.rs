@@ -110,7 +110,7 @@ const SAFETY_ORDER: [SafetyClass; 4] = [
 pub fn render_prompts() -> String {
     let lib = srelens_mcp::prompts::PromptLibrary::new(None);
     let specs = lib.list();
-    let mut out = format!("## Prompts ({})\n\n", specs.len());
+    let mut out = format!("## Prompts\n\n{} built-in prompts:\n\n", specs.len());
     out.push_str("| Prompt | Description | Arguments |\n| --- | --- | --- |\n");
     for spec in specs {
         let args: Vec<String> = spec
@@ -142,12 +142,10 @@ pub fn render_resources() -> String {
     let fixed = srelens_mcp::resources::fixed_resources();
     let templates = srelens_mcp::resources::templates();
     let mut out = format!(
-        "## Resources ({} fixed, {} templates)\n\n",
-        fixed.len(),
-        templates.len()
+        "## Resources\n\n`resources/list` returns only these {} fixed resources:\n\n\
+         | URI | Description |\n| --- | --- |\n",
+        fixed.len()
     );
-
-    out.push_str("`resources/list` returns only these two:\n\n| URI | Description |\n| --- | --- |\n");
     for r in &fixed {
         // These are internally-produced values, so a missing key is a bug in this repo.
         let uri = r["uri"]
@@ -159,10 +157,12 @@ pub fn render_resources() -> String {
         out.push_str(&format!("| `{}` | {} |\n", uri, description));
     }
 
-    out.push_str(
-        "\nObject addressing is discovered through `resources/templates/list`:\n\n\
+    out.push_str(&format!(
+        "\nObject addressing is discovered through `resources/templates/list`, which \
+         returns these {} URI templates:\n\n\
          | URI template | Description |\n| --- | --- |\n",
-    );
+        templates.len()
+    ));
     for t in &templates {
         // These are internally-produced values, so a missing key is a bug in this repo.
         let uri_template = t["uriTemplate"]
@@ -230,6 +230,71 @@ pub mod tests_support {
         }
         out
     }
+
+    /// The anchor GitHub gives a heading: lowercased, punctuation dropped,
+    /// every space a hyphen and nothing collapsed. `## Prompts (4)` is
+    /// `prompts-4`; `### Kubernetes — read-only (55)` is
+    /// `kubernetes--read-only-55`. Backticks are punctuation, so a code span
+    /// contributes its text.
+    pub fn github_slug(heading: &str) -> String {
+        heading
+            .trim()
+            .to_lowercase()
+            .chars()
+            .filter_map(|c| match c {
+                ' ' => Some('-'),
+                c if c.is_alphanumeric() || c == '-' || c == '_' => Some(c),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Every heading anchor on a page. A `#` line GitHub renders as code is
+    /// not a heading: one inside a ```` ``` ```` or `~~~` fence (closed only by
+    /// the same character, at least as many times), or one indented four
+    /// spaces or a tab. That indent makes a fence marker code as well, so it
+    /// neither opens nor closes a fence. A repeated heading gets `-1`, `-2`, …
+    /// the way GitHub numbers them.
+    pub fn heading_anchors(md: &str) -> std::collections::BTreeSet<String> {
+        let mut anchors = std::collections::BTreeSet::new();
+        let mut seen = std::collections::BTreeMap::<String, usize>::new();
+        let mut fence: Option<(char, usize)> = None;
+        for line in md.lines() {
+            let trimmed = line.trim_start();
+            let indent = &line[..line.len() - trimmed.len()];
+            let code_indent = indent.len() > 3 || indent.contains('\t');
+            let marker = trimmed.chars().next().filter(|c| *c == '`' || *c == '~');
+            if let Some(c) = marker.filter(|_| !code_indent) {
+                let run = trimmed.chars().take_while(|&x| x == c).count();
+                match fence {
+                    None if run >= 3 => {
+                        fence = Some((c, run));
+                        continue;
+                    }
+                    Some((open, len))
+                        if open == c && run >= len && trimmed[run..].trim().is_empty() =>
+                    {
+                        fence = None;
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
+            if fence.is_some() || code_indent {
+                continue;
+            }
+            let level = trimmed.chars().take_while(|&c| c == '#').count();
+            let text = &trimmed[level..];
+            if !(1..=6).contains(&level) || !(text.is_empty() || text.starts_with(' ')) {
+                continue;
+            }
+            let slug = github_slug(text.trim_end().trim_end_matches('#'));
+            let n = seen.entry(slug.clone()).or_default();
+            anchors.insert(if *n == 0 { slug } else { format!("{slug}-{n}") });
+            *n += 1;
+        }
+        anchors
+    }
 }
 
 /// Paste-ready client configs.
@@ -290,22 +355,42 @@ pub fn render_client_configs() -> String {
 /// table sorted by id. Empty combinations are skipped rather than rendered as
 /// an empty table.
 pub fn render_tools(reg: &srelens_capability::Registry) -> String {
+    // What MCP offers: without the UI-only capabilities (#575), as
+    // `McpServer::new` drops them.
+    let mut reg = reg.clone();
+    let hidden: Vec<String> = reg
+        .entries()
+        .filter(|cap| cap.ui_only)
+        .map(|cap| cap.id.clone())
+        .collect();
+    for id in hidden {
+        reg.unregister(&id);
+    }
+    let reg = &reg;
     let mut out = String::new();
-    out.push_str(&format!("## Tools ({})\n\n", reg.ids().len()));
+    out.push_str(&format!(
+        "## Tools\n\n{} tools, grouped by area and then by how a call is gated. ",
+        reg.ids().len()
+    ));
     out.push_str(
         "Argument schemas are not reproduced here — call `tools/list` for those, \
-         which cannot go stale.\n\n",
+         which cannot go stale.\n\n\
+         **Impact** is how much a successful call disturbs — `low`, `medium` or \
+         `high` — and is a different question from the section heading, which is \
+         how the call is gated. A capability that accepts several named \
+         operations carries the highest level any of them reaches; the \
+         per-operation level travels with the resource.\n\n",
     );
 
     for a in Area::all() {
         for safety in SAFETY_ORDER {
-            let mut rows: Vec<(&str, &str)> = reg
+            let mut rows: Vec<(&str, &str, &str)> = reg
                 .ids()
                 .into_iter()
                 .filter(|id| area(id) == a)
                 .filter_map(|id| reg.get(id).map(|cap| (id, cap)))
                 .filter(|(_, cap)| classify(&cap.annotations) == safety)
-                .map(|(id, cap)| (id, cap.summary.as_str()))
+                .map(|(id, cap)| (id, cap.summary.as_str(), cap.annotations.impact.as_str()))
                 .collect();
             if rows.is_empty() {
                 continue;
@@ -314,20 +399,120 @@ pub fn render_tools(reg: &srelens_capability::Registry) -> String {
             // defensive: if the type ever changes to HashMap or if filtering scrambles order,
             // the sort becomes load-bearing. Without it, the published catalog would be
             // silently out of order.
-            rows.sort_unstable_by_key(|(id, _)| *id);
+            rows.sort_unstable_by_key(|(id, _, _)| *id);
 
             out.push_str(&format!(
-                "### {} — {} ({})\n\n| Tool | Summary |\n| --- | --- |\n",
+                "### {} — {} ({})\n\n| Tool | Impact | Summary |\n| --- | --- | --- |\n",
                 a.label(),
                 safety.label(),
                 rows.len()
             ));
-            for (id, summary) in rows {
-                out.push_str(&format!("| `{id}` | {summary} |\n"));
+            for (id, summary, impact) in rows {
+                out.push_str(&format!("| `{id}` | {impact} | {summary} |\n"));
             }
             out.push('\n');
         }
     }
+    out
+}
+
+/// The host readers an app's reader binding may target, in the order the page lists
+/// them: `validate_app`'s set in `extensions.rs`, which a test holds this to.
+const APP_READER_TARGETS: &[&str] = &[
+    "k8s.listCustomResource",
+    "k8s.listEvents",
+    "k8s.listDeployments",
+    "k8s.listStatefulSets",
+    "k8s.listDaemonSets",
+    "k8s.listWorkloadImages",
+    "k8s.listNodes",
+    srelens_plugin_host::NETWORK_HTTP,
+];
+
+/// The tools installed apps add (#574). Which ones there are depends on what a person
+/// installed, so the page gives the rules instead, and the row each kind of tool
+/// inherits, rendered from the live host rows so it cannot drift from them.
+pub fn render_app_tools(reg: &srelens_capability::Registry) -> String {
+    let mut out = String::from("## App tools\n\n");
+    out.push_str(
+        "Every installed app that is on adds its operations as tools named \
+         `plugin/<app id>/<operation>`: each reader binding, each declared action and, \
+         for an executable app, each ordinary operation its sidecar answers. Streaming \
+         operations use owned native streams and are not ordinary request tools. A pod binding (logs, \
+         exec, a port-forward) is a session an app's view opens, not a tool. Which tools \
+         there are depends on what is installed, so `tools/list` is the list: a server \
+         with app tools advertises `tools.listChanged`, and sends \
+         `notifications/tools/list_changed` whenever an app is installed, updated, rolled \
+         back, enabled, disabled, blocked or removed. A change another srelens process \
+         made is noticed the next time the tools are listed or called, or by a session \
+         that can be pushed to within a few seconds.\n\n\
+         A tool's schema and its gate are the host's, never the app's. A reader takes \
+         `context` and, when it takes one, `namespace`; an action takes `context`, \
+         `namespace`, `name`, `uid` and `resourceVersion`; a sidecar operation takes the \
+         typed inputs it declares, each held to its type and length before the sidecar \
+         sees it. Readers and actions run through the same broker paths as \
+         `extensions.read` and `extensions.action`, and a gated tool asks the same \
+         consent as any other gated tool. When an app changes, the tools it had are \
+         withdrawn: a caller still holding them is refused.\n\n",
+    );
+    out.push_str(
+        "| An app's | Host capability behind it | Gated as | Impact |\n| --- | --- | --- | --- |\n",
+    );
+    let network = crate::extensions::network::capability();
+    let mut row = |kind: &str, target: &str, host: Annotations| {
+        let tool = Annotations::for_binding(host, Annotations::WEAKEST);
+        out.push_str(&format!(
+            "| {kind} | {target} | {} | {} |\n",
+            classify(&tool).label(),
+            tool.impact.as_str()
+        ));
+    };
+    for target in APP_READER_TARGETS {
+        let host = if *target == srelens_plugin_host::NETWORK_HTTP {
+            network.annotations
+        } else {
+            reg.get(target)
+                .unwrap_or_else(|| panic!("{target} is not a host capability"))
+                .annotations
+        };
+        row("reader", &format!("`{target}`"), host);
+    }
+    for primitive in srelens_kube::action_primitives::PRIMITIVES {
+        let host = reg
+            .get(primitive)
+            .unwrap_or_else(|| panic!("{primitive} is not a host capability"))
+            .annotations;
+        row("declared action", &format!("`{primitive}`"), host);
+    }
+    let reads = srelens_plugin_host::SIDECAR_OPERATION;
+    out.push_str(&format!(
+        "| sidecar operation, of an app that declares no action | its app's readers, through the broker | {} | {} |\n",
+        classify(&reads).label(),
+        reads.impact.as_str()
+    ));
+    // The weakest primitive gives the floor; the row is at least that, and at least
+    // the level of whichever action the app declares.
+    let writes = srelens_plugin_host::sidecar_operation_annotations(
+        srelens_kube::action_primitives::PRIMITIVES
+            .iter()
+            .filter_map(|primitive| reg.get(primitive).map(|c| c.annotations))
+            .min_by_key(|annotations| annotations.impact),
+    );
+    out.push_str(&format!(
+        "| sidecar operation, of an app that declares actions | its app's readers and declared actions, through the broker | {} | at least {}, and at least its highest action's |\n\n",
+        classify(&writes).label(),
+        writes.impact.as_str()
+    ));
+    out.push_str(
+        "An executable app's sidecar reaches the host only through the broker \
+         ([#573](https://github.com/srelens/srelens/issues/573)): what its app's readers read, \
+         and its app's declared actions. So an operation of an app that declares none is not \
+         gated: it can change nothing outside its sandbox. One of an app that declares actions \
+         is gated as the strongest of them, and each write the sidecar then asks for is put to \
+         a person again, naming the app; where nobody can be asked, headless, it is refused. \
+         Either way an operation's arguments are the app's own vocabulary, so the audit log \
+         redacts them whole.\n\n",
+    );
     out
 }
 
@@ -341,7 +526,9 @@ pub fn render_catalog() -> String {
          registry so it cannot drift. Written for someone wiring an agent to \
          srelens; the narrative reference is [MCP.md](MCP.md).\n\n",
     );
-    out.push_str(&render_tools(&crate::build_registry()));
+    let reg = crate::build_registry();
+    out.push_str(&render_tools(&reg));
+    out.push_str(&render_app_tools(&reg));
     out.push_str(&render_prompts());
     out.push_str(&render_resources());
     out.push_str(&render_client_configs());
@@ -550,16 +737,21 @@ mod tests {
         assert!(md.contains("| `k8s.listPods` |"), "got:\n{md}");
     }
 
-    /// Every tool appears exactly once across all sections. Renders the id in
+    /// Every tool appears exactly once across all sections, and a UI-only
+    /// capability (#575), which is not a tool, not at all. Renders the id in
     /// backticks inside a table cell, so counting that exact pattern counts rows.
     #[test]
     fn every_tool_appears_exactly_once() {
         let reg = crate::build_registry();
         let md = render_tools(&reg);
-        for id in reg.ids() {
+        for capability in reg.entries() {
+            let id = &capability.id;
             let cell = format!("| `{id}` |");
-            assert_eq!(md.matches(&cell).count(), 1, "{id} should appear exactly once");
+            let want = if capability.ui_only { 0 } else { 1 };
+            assert_eq!(md.matches(&cell).count(), want, "{id} should appear {want} times");
         }
+        let tools = reg.entries().filter(|capability| !capability.ui_only).count();
+        assert!(md.contains(&format!("{tools} tools, grouped")), "the count is of tools");
     }
 
     /// `diffManifest` is sensitive but un-gated, so it must render under
@@ -957,15 +1149,112 @@ mod tests {
         }
     }
 
+    /// Every reader target the page lists is one an app may bind, and every one an app
+    /// may bind is listed: the page's table is `validate_app`'s set.
+    #[test]
+    fn the_app_tools_table_lists_exactly_the_readers_an_app_may_bind() {
+        let core = crate::extensions::tests::fake_core();
+        let accepted = |target: &str| {
+            let permission = if target == srelens_plugin_host::NETWORK_HTTP {
+                serde_json::json!({"capability": target, "hosts": ["api.github.com"]})
+            } else {
+                serde_json::json!(target)
+            };
+            let arguments = match target {
+                "k8s.listCustomResource" => serde_json::json!({"group":"argoproj.io",
+                    "version":"v1alpha1","plural":"applications","kind":"Application","namespaced":true}),
+                "network.http" => serde_json::json!({"url":"https://api.github.com","path":"/"}),
+                "k8s.listWorkloadImages" => serde_json::json!({"kind":"Deployment"}),
+                _ => serde_json::json!({}),
+            };
+            let inputs: Vec<&str> = match target {
+                "network.http" => vec![],
+                "k8s.listNodes" => vec!["context"],
+                _ => vec!["context", "namespace"],
+            };
+            let api = if target == "k8s.listWorkloadImages" { "^0.8" } else { "^0.5" };
+            let manifest = serde_json::json!({
+                "id":"org.example.reader","name":"Reader","version":"0.1.0","srelensApiVersion":api,
+                "kind":"declarative","permissions":[permission],
+                "capabilities":[{"name":"read","title":"Read","target":target,
+                    "arguments":arguments,"inputs":inputs}],
+                "contributions":{"pages":[],"detailTabs":[],"detailLinks":[]}
+            });
+            let manifest = srelens_plugin_host::Manifest::parse(&manifest.to_string()).unwrap();
+            crate::extensions::validate_app_for_tests(&manifest, core.clone())
+        };
+        for target in APP_READER_TARGETS {
+            if let Err(why) = accepted(target) {
+                panic!("{target} is listed but an app may not bind it: {why}");
+            }
+        }
+        for id in core.ids() {
+            if !APP_READER_TARGETS.contains(&id)
+                && core.get(id).is_some_and(|c| c.annotations.read_only)
+                && !srelens_plugin_host::is_pod_target(id)
+            {
+                assert!(accepted(id).is_err(), "{id} is a reader an app may bind, and the page omits it");
+            }
+        }
+    }
+
     #[test]
     fn the_page_opens_with_a_do_not_edit_header_and_carries_every_section() {
         let md = render_catalog();
         assert!(md.starts_with("<!-- GENERATED FILE"), "got:\n{}", &md[..200.min(md.len())]);
         assert!(md.contains("UPDATE_CATALOG=1"), "the header must name the fix command");
-        assert!(md.contains("## Tools ("));
-        assert!(md.contains("## Prompts ("));
-        assert!(md.contains("## Resources ("));
-        assert!(md.contains("## Client configuration"));
+        assert!(md.contains("\n## Tools\n"));
+        assert!(md.contains("\n## App tools\n"));
+        assert!(md.contains("\n## Prompts\n"));
+        assert!(md.contains("\n## Resources\n"));
+        assert!(md.contains("\n## Client configuration\n"));
         assert!(md.ends_with('\n'), "must end with a newline");
+    }
+
+    /// A section heading is a link target — MCP.md links to three of them —
+    /// and GitHub builds the anchor from the heading text. A count in the
+    /// heading puts the count in the anchor: `## Prompts (4)` is
+    /// `#prompts-4`, so `mcp-catalog.md#prompts` went nowhere, and a link
+    /// pinned to `#prompts-4` would break on the next prompt added. Counts
+    /// belong in the section body.
+    #[test]
+    fn section_headings_carry_no_count() {
+        for heading in render_catalog().lines().filter(|l| l.starts_with("## ")) {
+            assert!(
+                !heading.contains(|c: char| c.is_ascii_digit()),
+                "{heading:?} carries a count, which changes its anchor whenever the count does"
+            );
+        }
+    }
+
+    #[test]
+    fn github_slugs_match_what_github_renders() {
+        use tests_support::{github_slug, heading_anchors};
+        assert_eq!(github_slug("Prompts (4)"), "prompts-4");
+        assert_eq!(
+            github_slug("Resources (2 fixed, 4 templates)"),
+            "resources-2-fixed-4-templates"
+        );
+        assert_eq!(
+            github_slug("Kubernetes — read-only (55)"),
+            "kubernetes--read-only-55"
+        );
+        assert_eq!(github_slug("The `k8s://` scheme"), "the-k8s-scheme");
+
+        let md = "# Title\n\n```bash\n# a comment\n```\n\n## Setup\n\n## Setup\n\n#hashtag\n";
+        let got: Vec<String> = heading_anchors(md).into_iter().collect();
+        assert_eq!(got, ["setup", "setup-1", "title"]);
+
+        // Everything GitHub renders as code: a tilde fence, a backtick line
+        // inside one (which does not close it), and four-space or tab indent.
+        let md = "~~~md\n## Tilde\n```\n## Still tilde\n~~~\n\n    ## Indented\n\n\t## Tabbed\n\n   ## Three spaces\n";
+        let got: Vec<String> = heading_anchors(md).into_iter().collect();
+        assert_eq!(got, ["three-spaces"]);
+
+        // A fence marker indented four spaces is code too: it neither closes
+        // the open fence around `Ghost` nor opens one around `Real`.
+        let md = "```\n    ```\n## Ghost\n```\n\n    ~~~\n## Real\n";
+        let got: Vec<String> = heading_anchors(md).into_iter().collect();
+        assert_eq!(got, ["real"]);
     }
 }

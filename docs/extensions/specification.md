@@ -12,23 +12,63 @@ Tracking: [#163](https://github.com/srelens/srelens/issues/163). Field reference
 ## Scope
 
 - **Hosts.** Apps run in the desktop app, whose extension capabilities are also exposed
-  over MCP. The web host refuses every `extensions.*` capability.
+  over MCP, and on the web host, where each signed-in user has their own inventory
+  ([capabilities.md](capabilities.md#web-host)).
 - **The terminal UI is out of scope for extension API 1.0.** The TUI neither loads nor
   renders apps, and nothing in this specification applies to it.
 - **Clusters.** An app is installed for the whole application. It may be limited to
   chosen kubeconfig contexts; on the others it is hidden and the host refuses its reads
   and actions.
 
+## Unsigned-app policy
+
+Settings → Apps stores **Allow unsigned apps to modify clusters and run code**
+(`allowUnsignedApps`) in the extension inventory. It is **off by default**.
+
+- Read-only declarative apps from any source, including unsigned local and catalog
+  manifests, need their normal permission grants only.
+- An app declaring any write action needs either a cryptographically verified
+  publisher signature or this setting. Source labels, catalog membership, repository
+  URLs, app IDs, and granted permission strings do not establish publisher trust.
+  Signature proofs are checked again whenever installed apps are loaded.
+- Install, update, enable, and rollback enforce the policy in the host. A permission
+  review alone cannot authorize an unsigned writer. Validation reports the setting
+  needed before installation.
+- Turning the setting off disables affected apps without uninstalling them or
+  removing their grants, settings, cluster scope, or version history. Apps shows the
+  reason in `policyBlocked`, separate from a failed-signature `quarantined` reason.
+  Turning the setting back on does not re-enable apps: enable each app explicitly.
+- Every new read, resource inspection, or action through the broker checks the latest
+  inventory, including calls through registrations created before the setting changed.
+  Calls already admitted may finish. The generic `PluginHost` binding primitive is
+  used by the trusted installer; production invocation passes through this broker.
+- Existing inventories without `allowUnsignedApps` migrate to false. Legacy
+  `developerMode: true` does not grant the new permission. Legacy disabled entries
+  remain disabled. The next atomic save persists the policy; transient denial reasons
+  are recomputed, never trusted from disk.
+- Every executable app ([API 0.6](#060)) without a verified publisher requires the same
+  setting, even if it declares no writes: it runs code on this computer, sandboxed or
+  not. The host decides which apps need it by an exhaustive match on the manifest
+  kind (`needs_unsigned_policy` in `crates/registry/src/extensions.rs`), so a new kind
+  cannot be added without deciding. Validation reports the setting at `kind`. The
+  setting never admits code on its own: an executable app still installs only from a
+  package, and its sidecar still runs only in the OS sandbox.
+
+The configuration payload is
+`{"action":"unsignedApps","allowUnsignedApps":true}` through the existing
+confirm-gated `extensions.configure` capability. The setting never replaces normal
+permission grants, action confirmation, cluster scoping, or manifest validation.
+
 ## Terms
 
 - **Extension API version**: the version of this contract, in SemVer form
-  (`0.1.0`). It is independent of the srelens app version and of each app's own
+  (`0.3.0`). It is independent of the srelens app version and of each app's own
   `version`.
 - **Supported set**: the API versions a host implements, listed oldest first in
   `SUPPORTED_API_VERSIONS` (`crates/plugin-host/src/manifest.rs`). The catalog
   reports it as `hostApiVersions`.
 - **API range**: a manifest's `srelensApiVersion`, a SemVer requirement in Cargo
-  syntax, such as `^0.1` or `>=0.1, <0.3`.
+  syntax, such as `^0.3` or `>=0.3, <0.4`.
 - **Negotiated version**: the highest supported version the range matches. The host
   treats the app as written for that version.
 
@@ -43,7 +83,7 @@ Tracking: [#163](https://github.com/srelens/srelens/issues/163). Field reference
    version is not removed. It is quarantined: disabled, with the reason shown in
    Settings → Apps, until it is updated or removed.
 3. **Choosing a range.** Target the API line you tested against with a caret range:
-   `^0.1` before 1.0, `^1.2` after. Under SemVer caret rules a `0.x` range pins its
+   `^0.5` before 1.0, `^1.2` after. Under SemVer caret rules a `0.x` range pins its
    minor version, so `^0.1` does not match `0.2.0`. That is deliberate: each `0.MINOR`
    is its own compatibility line.
 4. **New API versions.** Before 1.0, any manifest-visible change (a new field, a new
@@ -51,15 +91,20 @@ Tracking: [#163](https://github.com/srelens/srelens/issues/163). Field reference
    `0.MINOR` version. A `0.MINOR.PATCH` bump is for clarifications that do not change
    which manifests validate. From 1.0: MAJOR for breaking changes, MINOR for
    additive ones, PATCH for fixes.
-5. **Keeping old versions.** Adding a version to the supported set never removes an
-   older one. An API version stays supported for **at least two srelens minor
-   releases** after the release that ships its successor. For example, if API 0.2
-   ships in srelens 0.10, API 0.1 remains supported through at least srelens 0.12.
-   Retiring a version is announced in the [API changelog](#api-changelog) at least
-   one srelens release before it happens.
+5. **Current supported lines.** This host implements **API 0.3, API 0.4, API 0.5,
+   API 0.6 and API 0.7**. A `^0.3` manifest is served under 0.3 and may use only what 0.3 has; a
+   `^0.4` one may also use what [0.4 added](#040), a `^0.5` one what [0.5 added](#050),
+   a `^0.6` one what [0.6 added](#060),
+   and a `^0.7` one what [0.7 added](#070). API 0.1 and API 0.2 are not supported. Existing
+   installations targeting a retired line are quarantined until replaced by a
+   compatible manifest. Official manifests must receive a new version and publisher
+   signature; editing an installed signed manifest invalidates its proof. Before 1.0 a
+   line can be retired sooner than the window in [Deprecation](#deprecation), as these
+   two were.
 6. **API 1.0.** The API is frozen as 1.0 when the cert-manager declarative milestone
-   ([#582](https://github.com/srelens/srelens/issues/582)) passes. After that, the 1.x
-   line only grows additively.
+   ([#582](https://github.com/srelens/srelens/issues/582)) passes. Until then the newest
+   line, API 0.7, is a preview. After that, the 1.x line only grows additively, and a line
+   is retired only after the window in [Deprecation](#deprecation).
 
 ## Compatibility rules
 
@@ -70,7 +115,7 @@ accepted and still means the same thing. Anything else is **breaking**.
 |---|---|
 | New optional manifest field or new contribution type | Additive. Needs a new API minor; manifests that use it must require that minor. |
 | New host capability allowed as a binding target | Additive. Needs a new API minor. |
-| New host behaviour for existing manifests, with no manifest change (for example host-rendered resource inspection) | Additive. No API bump, but it must be recorded in the changelog and must not reject or reinterpret any accepted manifest. |
+| New host behaviour for existing manifests, with no manifest change (for example host-rendered resource inspection) | Additive. No API bump, but it must be recorded in the [API changelog](#api-changelog) and must not reject or reinterpret any accepted manifest. |
 | New optional field in a capability's output | Additive. |
 | Removing or renaming a field, making an optional field required, or narrowing accepted values | Breaking. |
 | Changing what an existing field means | Breaking. |
@@ -84,35 +129,74 @@ Why a new field needs a new minor even though it is optional: manifests are stri
 (see below), so a host that predates the field would reject it. Requiring the minor
 turns that into a clear "requires API 0.x" message.
 
-The host enforces this for fields. `API_FIELDS` in `crates/plugin-host/src/manifest.rs`
-lists every manifest field added or removed after API 0.1, with the API versions it is
-available in. A rename is a removal plus an addition.
+There is no pre-1.0 exception to this. There was one: the fields listed under
+[0.4.0](#040) were first added to API 0.3 in place while the extension platform was
+being built ([#517](https://github.com/srelens/srelens/issues/517)), and srelens builds
+implementing 0.3 with none or only some of them had already been published. A signed
+release using them under `^0.3` would have been offered by those hosts and then failed
+to parse on an unknown field. They moved to API 0.4 before any signed release used them
+([#709](https://github.com/srelens/srelens/issues/709)), and the exception is retired.
+It stays retired: a line is closed to additions once any published srelens build
+implements it, a prerelease included. Builds implementing API 0.4 were published (the
+pre-releases `0.15.1-186` and `0.15.1-187`, with `network.http`, #568, the last thing
+added to it), so what [#728](https://github.com/srelens/srelens/issues/728) added to
+resource links, and the logs, exec and port-forwards of
+[#567](https://github.com/srelens/srelens/issues/567), are [API 0.5](#050), not additions
+to 0.4 in place. Builds implementing API 0.6 were published in turn (the pre-releases
+`0.15.1-192` and later), so the metric, log and trace providers of
+[#569](https://github.com/srelens/srelens/issues/569) are [API 0.7](#070).
+
+The host enforces this. `API_FIELDS` in `crates/plugin-host/src/manifest.rs` lists every
+field whose availability differs across supported API lines, and every *form* of value
+that a later line admits in a field all of them have — API 0.4's predicate path filter
+in `actions[].preconditions` and `actions[].availableWhen`, which API 0.3 already had
+without it. A rename is a removal plus an addition. The schema file of each older
+supported line is kept as it was when the next line was cut
+(`schemas/extension-manifest.v0.3.json`, `schemas/extension-manifest.v0.4.json`), and CI
+fails when the host's contract has a field that file lacks and `API_FIELDS` does not
+list. A new allowed capability target is a form entry too: API 0.5's pod targets in
+`capabilities[].target`, a field every line has.
 
 A manifest may use a field only if the field is available in every supported API
-version its range admits, not just the one it negotiates to. Otherwise it is rejected,
-even by a host that knows the field. That covers a field a later line added, one a later
-line removed or renamed, and a range that spans several lines: `>=0.1, <0.3` claims 0.1
-hosts, so it may not use a 0.2-only field. Otherwise the manifest would install on some
-hosts and fail on others that still match its range.
+version its range admits, not just the one it negotiates to. Otherwise it is rejected
+with `EXTENSION_API_INCOMPATIBLE`, even by a host that knows the field, for example
+"`contributions.commands` requires API 0.4.0, but this manifest's srelensApiVersion
+admits API 0.3.0". That covers a field a later line added, one a later line removed or
+renamed, and a range that spans several lines: `>=0.3, <0.5` claims 0.3 hosts, so it
+may not use a 0.4 field. Otherwise the manifest would install on some hosts and fail on
+others that still match its range.
 
 The check runs at installation and again every time the inventory is loaded. An
 installed app that uses a field a newer host's supported versions no longer admit is
-quarantined rather than left enabled. A field that is null or an empty list or object
-does not count as used.
+quarantined rather than left enabled. So is an app installed by a build that accepted a
+0.4 field under `^0.3`: it is quarantined with that message until it is updated to a
+release that requires `^0.4`. A field that is null or an empty list or object does not
+count as used.
 
 A change that narrows the values a field accepts, rather than adding or removing the
-field, must add a check keyed on the negotiated API version in the same change.
+field, must add a check keyed on the negotiated API version in the same change. A change
+that widens them is a new API minor with an `API_FIELDS` form entry, as the path filter
+was.
+
+**Published 0.3 releases stay installable.** The signed releases published on the 0.3
+line, Argo CD 0.3.0 and Flux 0.4.0, use none of the 0.4 fields, so this host installs
+and reverifies them unchanged; the registry's tests pin their exact bytes and
+signatures. The condition filter Flux 0.4.0 writes in `arguments.printerColumns` is not
+the 0.4 predicate filter: printer columns evaluated that form before API 0.4. Their
+successors require `^0.4`, so a host that implements only 0.3 lists them as incompatible
+instead of offering them.
 
 ## Deprecation
 
-- A deprecated field or contribution is listed in the changelog with its replacement
+- A deprecated field or contribution is listed in the [API changelog](#api-changelog) with its replacement
   and the earliest API version that may remove it.
 - It keeps working unchanged in every API version that supports it. Once structured
   validation errors exist ([#533](https://github.com/srelens/srelens/issues/533)),
   using it produces a warning.
-- It is removed only in a new API line, and only after the retirement window in
-  [Versioning](#versioning): at least two srelens minor releases, and never before its
-  replacement has shipped.
+- It is removed only in a new API line, and never before its replacement has shipped.
+  From API 1.0, it is also removed only after a retirement window of at least two
+  srelens minor releases. Before 1.0 there is no such window: a line can be retired
+  sooner, as API 0.1 and API 0.2 were ([Versioning](#versioning)).
 
 Deprecated or planned:
 
@@ -123,6 +207,11 @@ Deprecated or planned:
   extensions went live ([#537](https://github.com/srelens/srelens/issues/537)) and will
   name declared mutations ([#549](https://github.com/srelens/srelens/issues/549)). Until
   then a manifest that uses it is rejected as an unknown field.
+- `pages[].statusColumns` is deprecated in favour of `contributions.statusResolvers`
+  ([#541](https://github.com/srelens/srelens/issues/541)), which API 0.4 adds. It keeps
+  working unchanged on the 0.3 and 0.4 lines — its indices are validated and dashboards
+  still count by it — and the earliest version that may remove it is the next API line,
+  0.5.
 
 ## Unknown fields
 
@@ -175,7 +264,8 @@ list, and the [developer harness](testing.md#developer-harness) prints one per l
 | `EXTENSION_INVALID_BINDING` | A binding's arguments or inputs break its target's rules. |
 | `EXTENSION_UNRESOLVED_CAPABILITY` | A contribution or dashboard names a capability the manifest does not declare. |
 | `EXTENSION_UNRESOLVED_PAGE` | A dashboard names a page the manifest does not declare. |
-| `EXTENSION_INVALID_KIND` | The manifest `kind` is not `declarative`, or a `forKinds` entry is not a qualified Kubernetes kind. |
+| `EXTENSION_INVALID_KIND` | The manifest `kind` is not `declarative` or `executable`, `kind` and `sidecar` disagree, an executable app is installed without the package that carries its binaries, or a `forKinds` entry is not a qualified Kubernetes kind. |
+| `EXTENSION_POLICY_REFUSED` | The host's administrator policy does not allow the app: its ID, its publisher or lack of a signature, a capability it requests, or its write actions. Only a host with a policy reports it, such as a web server whose operator set one ([WEB.md](../WEB.md#extension-policy)). |
 
 ## Identifiers
 
@@ -183,15 +273,18 @@ list, and the [developer harness](testing.md#developer-harness) prints one per l
   characters from `A–Z`, `a–z`, `0–9` and `-`, and at most 128 characters in total.
   Catalog entries additionally require lowercase, so use lowercase everywhere. Use a
   domain you control, for example `io.example.cert-manager`.
-- **Reserved namespaces.** IDs under `org.srelens.` install only with the srelens
-  publisher signature. A local, unsigned manifest cannot use one, and cannot replace
-  a signed installation. See [distribution.md](distribution.md). Namespaces for other
-  verified publishers are planned in
-  [#559](https://github.com/srelens/srelens/issues/559).
+- **Reserved namespaces.** The signed catalog delegates namespaces to publishers, and
+  an ID in one installs only with that publisher's signature: IDs under `org.srelens.`
+  with the srelens signature, and a third party's with its own. A local, unsigned
+  manifest cannot use one, and cannot replace a signed installation. See
+  [distribution.md](distribution.md#signed-releases-and-publishers) and
+  [trust.md](trust.md).
 - **Collisions between apps.** One installed app per ID. Installing an ID that is
   already installed is an explicit replacement after permission review. It keeps the
   app's settings and assigns a new revision.
-- **Names inside a manifest.** Capability `name`s are unique. Contribution `id`s are
+- **Names inside a manifest.** Capability `name`s are unique, and an action's `name`
+  and a sidecar operation's share that space, since all three become
+  `plugin/<id>/<name>`. Contribution `id`s are
   unique across `pages`, `detailTabs` and `detailLinks`. Both use `A–Z`, `a–z`, `0–9`
   and `-`, up to 64 characters.
 - **Names, titles and groups.** The app `name`, every `title` and a page `group` are
@@ -220,6 +313,256 @@ list, and the [developer harness](testing.md#developer-harness) prints one per l
 
 ## API changelog
 
+### 0.8.0
+
+Executable operations may declare native `view` metadata (`autoRun`, `stream`, `hidden`). The host provides pinned operation routes, tables, namespace selection, retry, pagination and owned cancellable streams. A stream cannot start automatically. The kind-bound `k8s.listWorkloadImages` reader returns regular/init-container images for Deployments, StatefulSets or DaemonSets. The schema for this line is `schemas/extension-manifest.v0.8.json`; older line schemas remain frozen. The executable-only `k8s.runJob` binding also requires API `^0.8`; it fixes a digest-pinned scanner image, command, scalar argument slots and bounded namespace read rules. Sidecar protocol 0.2.0 adds binding availability, scoped Job execution and paged reads; the host refuses these additions under protocol 0.1.0. Runtime Job values cannot start with `-`, so callers cannot substitute command-line options.
+
+### 0.7.0
+
+Dashboard predicates may use a whole-value settings reference in `within` (#582).
+It must name a declared `select` with a default, whose every option is a positive,
+bounded duration. Counts and their linked resource lists resolve the same saved
+choice. The reference changes only the duration, not the reader, path or target.
+A manifest using this form must admit only API 0.7 or later; literal durations
+retain their existing meaning on older lines. The schema for this line is
+`schemas/extension-manifest.v0.7.json`; the 0.6 schema remains frozen.
+
+Also new in this line ([#569](https://github.com/srelens/srelens/issues/569)):
+
+- **Providers.** `contributions.metricProviders`, `logProviders` and `traceProviders`
+  declare a PromQL, LogQL or TraceQL template that one of the app's `network.http`
+  bindings sends, for the workload and pod kinds in `forKinds`. The host binds
+  `${cluster}`, `${namespace}`, `${workload}` and `${pod}` — each only inside a
+  double-quoted string, with `\` and `"` escaped and the value held to a name's
+  characters, and in a regex matcher only as `${name:regex}`, which quotes RE2
+  metacharacters first — and a metric provider's `${range}` and `${step}`, and sets the
+  query and time range as the language's HTTP parameters, which the binding may not.
+  It reads a Prometheus range query into the timeseries chart (at most 8 series), a
+  Loki range query into log lines, and a Tempo search into a list of traces (at most
+  50). Each list is gated in `API_FIELDS`, so a `^0.6` manifest that declares a
+  provider is told it requires API 0.7. The new read-only capability
+  `extensions.queryProvider` runs one query; the `logProvider` stream source follows a
+  log provider, asking again every 5 seconds while its view is open. See
+  [Metric, log and trace providers](manifest.md#metric-log-and-trace-providers).
+- The reference providers are `examples/extensions/prometheus.json` and `loki.json`,
+  0.1.0 on `^0.7`. Publishing them is a separate signed release and catalog update.
+
+### 0.6.0
+
+New in this line ([#574](https://github.com/srelens/srelens/issues/574)). API 0.6 is a
+preview until API 1.0, and so are executable apps
+([where they run](manifest.md#where-executable-apps-run)):
+
+- **Executable apps.** `kind` may be `executable`, for an app that also runs a
+  **sidecar**: `sidecar.binaries` names the binary for each platform it ships for, a file
+  directly under `bin/<platform>/` in its package, and `sidecar.operations` declares
+  each request the sidecar answers, with typed inputs (`string`, `integer`, `number`,
+  `boolean`) and, for a string, a `maxLength`. `sidecar` is present exactly when the
+  kind is `executable`. An executable app may declare no capabilities at all. See
+  [Executable apps](manifest.md#executable-apps).
+- An operation's name shares the `plugin/<id>/<name>` space with capabilities and
+  actions, and may not be one of the sidecar protocol's own methods.
+- `API_FIELDS` gates both: the kind as a form of `kind`, a field every line has, and
+  `sidecar` as a field. A `^0.5` manifest of kind `executable` is refused with
+  `EXTENSION_API_INCOMPATIBLE`, "the executable kind in `kind` requires API 0.6.0". The
+  kind is a line of its own rather than an addition to 0.5, so no host that implements
+  0.5 meets it as a kind it cannot parse.
+- An executable app installs only from a package carrying exactly the binaries it names,
+  needs a verified publisher or the unsigned-app setting even without writes, and runs
+  its sidecar only in the OS sandbox, starting on its first operation call. Its sidecar
+  reaches the host only through the broker (#573): an operation of an app that declares
+  no action is read-only and not gated, and one of an app that declares actions is gated
+  as the strongest of them, each write it asks for confirmed again, naming the app. See
+  [What the host holds a sidecar to](manifest.md#what-the-host-holds-a-sidecar-to).
+- The host supports API 0.3, 0.4, 0.5 and 0.6, and `extensions.catalog` reports all
+  four in `hostApiVersions`.
+- The manifest JSON Schema for this line is `schemas/extension-manifest.v0.6.json`.
+  `schemas/extension-manifest.v0.5.json` is the 0.5 contract, frozen as it was when 0.6
+  was cut.
+
+For existing manifests, with no manifest change (additive host behaviour):
+
+- Every installed app's readers and declared actions are MCP tools,
+  `plugin/<id>/<name>`, beside its sidecar operations, and a server with them sends
+  `notifications/tools/list_changed` as apps are installed, changed or removed. They
+  run through the same broker paths as `extensions.read` and `extensions.action`. See
+  [Installed apps' tools](../MCP.md#installed-apps-tools).
+
+### 0.5.0
+
+New in this line ([#728](https://github.com/srelens/srelens/issues/728), [#567](https://github.com/srelens/srelens/issues/567)):
+
+- A resource link's `to` may name a built-in kind the host lists, such as `/Service`,
+  `/Secret` or `/Namespace`, as well as a kind a declared reader lists. The host looks
+  a built-in target up in the kind's metadata, requested as a
+  `PartialObjectMetadataList` so no spec, status or Secret value is sent, and keeps of a
+  Secret only its name, namespace, uid, labels and owner references. The resolved link's
+  `capability` is empty for a built-in target. `API_FIELDS` gates the form: a `^0.4`
+  manifest whose link names a built-in kind no reader of it lists is refused with
+  `EXTENSION_API_INCOMPATIBLE`; one naming a reader's kind means what it did.
+- A link may match by `path`: the predicate grammar plus `[*]`, validated at install,
+  read on the `from` resource through the declared reader of `from` (never `/Secret`),
+  and subject to that reader's `jsonPathOverrides`. Each value is the target's name or
+  an object reference; a reference to another kind or group is not the link's. See
+  [`resourceLinks`](manifest.md#resourcelinks).
+- **Pod bindings.** Three targets reach the pods of a workload an app knows about:
+  `k8s.streamLogs` follows a container's logs, `k8s.exec` runs a command the manifest
+  fixes, and `k8s.portForward` forwards a local port the host picks to a pod's port, or
+  through a Service. Each is scoped by `resource` — a Deployment, StatefulSet or
+  DaemonSet reader, or a namespaced custom-resource reader with the `selector` path its
+  objects keep their pod selector at — so it reaches only the pods one object's own
+  selector selects; or by the namespaces its permission grants. A pod binding declares
+  no inputs. An exec `command` is 1–32 literal arguments, run without a shell, and may
+  not start a shell. The targets are gated as a form of `capabilities[].target`, so a
+  `^0.4` manifest binding one is told it requires API 0.5.
+- **Namespace grants.** `{"capability": "k8s.streamLogs", "namespaces": [...]}` grants a
+  pod capability 1–16 namespaces, any of whose pods a binding without `resource` may
+  reach. `permissions[].namespaces` requires API 0.5. From this line a scoped entry's
+  `hosts` is optional in the schema; the host still requires it for `network.http` and
+  refuses it on anything else.
+- The pod sources `logs`, `exec` and `portForward` run as app streams (#565), each held
+  to its binding's scope on every open. `exec` runs only when the view sends back what
+  the host confirmation named — pod, container and exact command — and is sensitive and
+  `high` impact; an unsigned app that binds it needs the unsigned-app setting. Exec and
+  port-forward sessions are audited. `extensions.pods` lists the pods a binding may
+  reach. See [Logs, exec and port-forwards](manifest.md#logs-exec-and-port-forwards) and
+  [streams.md](streams.md#pod-sources).
+- The host supports API 0.3, 0.4 and 0.5, and `extensions.catalog` reports all three in
+  `hostApiVersions`. A host on the 0.4 line lists a `^0.5` release as incompatible
+  rather than offering it.
+- The manifest JSON Schema for this line is `schemas/extension-manifest.v0.5.json`.
+  `schemas/extension-manifest.v0.4.json` is the 0.4 contract, without these fields,
+  frozen as it was when 0.5 was cut.
+- The Flux example is 0.6.0, requires `^0.5` and names `extension-manifest.v0.5.json`:
+  its Kustomizations reference their GitRepository, OCIRepository or Bucket through
+  `.spec.sourceRef`, their target Namespace and ServiceAccount, and a HelmRelease its
+  HelmRepository through `.spec.chart.spec.sourceRef`. The Argo CD example uses nothing
+  0.5 added and stays 0.4.0 on `^0.4`. Publishing the Flux example requires a fresh
+  signed external release and a catalog update; the published release bytes, and their
+  signatures, are unchanged.
+
+For existing manifests, with no manifest change (additive host behaviour):
+
+- The Inspector of a resource of a link's `to` kind shows the link read the other way
+  round, through the new read-only capability `extensions.resolveReverseLinks`: the
+  resources of `from` whose link names it, from the same lists and snapshot cache the
+  other contributions use, capped at 2,000 objects, with the cut reported as
+  `truncated` and resources the link could not be read on counted as `unreadable`. An
+  API 0.4 manifest's links get it too. The forward output (`extensions.resolveLinks`)
+  keeps its shape, so the edges a topology draws (#524) are the same either way.
+
+### 0.4.0
+
+New in this line:
+
+- Apps may reach systems outside the cluster through the brokered `network.http`
+  capability, granted as `{"capability": "network.http", "hosts": [...]}`: host names,
+  `host:port`, one-label subdomain wildcards, IP addresses, or `${settings.<id>}` for a
+  `url` setting's saved value (#568). `permissions[].hosts` requires API 0.4, so a `^0.3`
+  manifest using it is told so; a plain `"network.http"` entry and `hosts` on any other
+  capability are refused. A `network.http` binding is one fixed GET (`url`, `path`,
+  `query`, `headers`, `secretHeaders`) with no inputs. The host sends it through
+  `extensions.read`: HTTPS only, plain HTTP only to this computer and only when a person
+  allows it for the app (`extensions.configure` `loopbackHttp`), every redirect checked
+  against the allowlist again, a secret-carrying request never redirected to another
+  origin, 20 s and 4 MiB at most. `secretHeaders` puts one of the app's
+  `secret-reference` settings into a header by reference (#543). The access review lists
+  the hosts. See [Network requests](manifest.md#network-requests).
+
+Everything below was first added to API 0.3 in place, and moved to this line before
+any signed release used it (#709). A manifest that uses any of it requires `^0.4`.
+Under a range that admits 0.3 it is refused with `EXTENSION_API_INCOMPATIBLE` at
+`srelensApiVersion`, naming the field and the version it needs, rather than as an
+unknown field. A 0.4 manifest may use everything 0.3 has, with the same meaning.
+
+- Table columns on native resource lists may declare `joins` over a granted
+  custom-resource reader and `tableColumns` with a row or joined `jsonPath`.
+  `extensions.resolveColumns` batches up to 1,000 rows per request and reports
+  failed reads explicitly (#538). See [Manifest reference](manifest.md#table-columns-and-joins).
+- Apps may declare `detailPanels` with fields and conditions for matching
+  resources. `extensions.resolvePanels` rechecks the installed app's revision,
+  grants and cluster scope (#539). See the
+  [manifest reference](manifest.md#detailpanels).
+- Apps may declare `statusResolvers` for their custom-resource kinds and `badges` on
+  built-in kinds, as first-hit rules resolving to six normalized statuses with a
+  required word (#541). A badge reads its row's metadata or a declared join. The
+  predicate path grammar gains one filter form, `[?(@.key=="text")]`, selecting the
+  first matching element, which an action's `preconditions` and `availableWhen` may
+  also use. `statusColumns` is deprecated. See the
+  [manifest reference](manifest.md#status-resolvers-and-badges).
+- The cluster overview draws `dashboardCards` (`count`, `countByStatus`, `metric`,
+  `list`) over a granted custom-resource reader, with `equals`, `absent`, and date
+  `within` / `before` predicates. `extensions.resolveCards` answers one app's cards per
+  request, each with a figure or the reason it has none, and `extensions.read` takes a
+  `card` to show a card's target page narrowed to what it counted (#540). See
+  [Manifest reference](manifest.md#dashboard-cards).
+- Apps may declare typed `settings` (`string`, `number`, `boolean`, `select`,
+  `multi-select`, `url`, `namespace-selector`, `cluster-selector`, `secret-reference`),
+  drawn as a host form in Settings → Apps and checked by the host on every save. A
+  setting fills a binding argument as `"${settings.<id>}"` only where the host
+  capability marks the argument settable (`k8s.annotate`'s `value`,
+  `k8s.setStatusCondition`'s `message`), and is checked at install, on save and on
+  every request. A `secret-reference` value never enters the inventory (#542): it is
+  kept, write-only, in srelens's encrypted secrets vault through
+  `extension.secretStore`, which an app declaring one must request as a permission
+  (#543). An installed app's settings are held to its manifest's declarations, so
+  values saved as free-form JSON by an earlier host that the manifest does not declare
+  are refused on the next save. See [Manifest reference](manifest.md#settings) and
+  [Secret settings](manifest.md#secret-settings).
+- Apps may declare `commands` for the new design's command palette: open a declared
+  page, or open the host confirmation for a declared action on a resource of the
+  action's kind (#544). See the [manifest reference](manifest.md#commands).
+- A custom-resource reader may list `versions` in preference order instead of one
+  `arguments.version`, with optional per-version `jsonPathOverrides`. Each cluster reads
+  the first listed version its CRD serves, through that version's paths, for every read,
+  action and contribution, and a cluster serving none is refused (#547). A binding that
+  fixes `arguments.version` means what it did before. See
+  [Several served versions](manifest.md#several-served-versions).
+- Apps may declare `resourceLinks` from one qualified kind to another their
+  readers list, with a relation (`ownedBy`, `managedBy`, `exposedBy`,
+  `references`) and a join-style match read on the linked-from resource (#545).
+  `extensions.resolveLinks` rechecks the installed app's revision, grants and
+  cluster scope; the Inspector shows the result as a Related section. See the
+  [manifest reference](manifest.md#resourcelinks).
+- The catalog is signed (#559). Hosts read `catalog.signed.json`, catalog
+  `schemaVersion` 2, verified against the root they pin, and refuse one that is unsigned,
+  expired or older than the last they verified. The catalog delegates app ID namespaces to
+  publishers, whose keys sign their releases; a release signature may name its key, and
+  `extensions.validate` and `extensions.configure` accept it as `keyId`. Installed apps
+  report who signed them as `signedBy`. Manifests are unchanged, and the signed 0.3
+  releases keep installing. See [trust.md](trust.md).
+- The host supports API 0.3 and 0.4, and `extensions.catalog` reports both in
+  `hostApiVersions` (#709). The signed 0.3 releases keep installing; see
+  [Compatibility rules](#compatibility-rules).
+- The manifest JSON Schema for this line is `schemas/extension-manifest.v0.4.json`.
+  `schemas/extension-manifest.v0.3.json` is the 0.3 contract, without these fields.
+- The examples written for this line are Flux 0.5.0 and Argo CD 0.4.0, requiring `^0.4`
+  and naming `schemas/extension-manifest.v0.4.json`. Argo CD 0.4.0 is still the current
+  example; Flux moved to [0.5](#050). Publishing them requires fresh signed
+  external releases and a catalog update; existing signed release bytes stay unchanged.
+  The Flux example reads HelmReleases at `v2` or `v2beta2` and OCIRepositories at `v1`
+  or `v1beta2` (#547).
+
+### 0.3.0
+
+- Unsigned apps declaring write actions require the default-off inventory policy
+  described above (#558). Turning it off disables affected installations without
+  removing them; normal read-only declarative permission grants are unchanged.
+- API 0.1 and 0.2 are retired: their manifests are incompatible.
+- Flux and Argo CD actions are declared by manifests, with their target reader,
+  primitive write binding, confirmation metadata and availability predicates.
+  The host no longer supplies a controller-specific action menu.
+- The signed releases on this line are Argo CD 0.3.0 and Flux 0.4.0, requiring `^0.3`
+  and naming `schemas/extension-manifest.v0.3.json`.
+- App pages, dashboard card targets, palette page commands and Related links route by
+  context key (`/extension-contexts/<key>/…`) and ask the host by the context's pinned
+  ID, which `k8s.listContexts` now reports as `pinnedId`. So two contexts that share a
+  stable ID open two tabs, each reading its own cluster. A context listed without a
+  pinned ID (its kubeconfig path cannot be made absolute) says its apps cannot be opened.
+  A route opened before (`/extension-clusters/<stableId>/…`) still opens while one context
+  carries that ID, and says so when two do. Every app receives this; no manifest changes
+  (#695).
+
 ### 0.1.0
 
 The only supported API version. Apart from one pre-release rename (#537) and one
@@ -242,7 +585,7 @@ update.
   - An app that fails re-verification is quarantined individually.
   - Catalog metadata tolerates unknown fields.
 - **#529:**
-  - GitOps actions are offered only for the API versions listed in [capabilities.md](capabilities.md#host-gitops-actions).
+  - GitOps actions are offered only for the API versions listed in [capabilities.md](capabilities.md#declared-gitops-actions).
   - A Suspend of a suspended resource, or a Resume of one that is not suspended, is refused.
   - Resource events are newest first across every page read (up to 10 pages), ranking a recurring series by its latest occurrence, and capped at 100. `eventsTruncated`, `eventsPartial` and `eventsRead` say what was left out and how much was read.
   - An accepted action refreshes every open list, dashboard and detail view of that resource.
@@ -287,8 +630,22 @@ update.
   - A catalog entry's `repository` is matched against the trusted-publisher table case-insensitively, as GitHub resolves owner and repository names. An entry whose repository is `https://github.com/SRELENS/…` must carry the srelens signature, exactly as the lowercase form must.
   - A lookalike owner such as `srelensx` is a different repository, and its entries stay ordinary unsigned third-party apps.
   - The release asset URL must still equal the pinned repository's `v<version>/manifest.json`, so an official entry writes it in the pinned form.
+  - Superseded by #559, which removed the trusted-publisher table: a delegated namespace, not a repository, decides who signs a release (see 0.4.0).
 - **#601:** security fix.
   - A `k8s.listCustomResource` binding's `group` must be shaped like a CustomResourceDefinition group. A group without a dot (`apps`, `batch`, `policy`) or with an empty label is refused with `EXTENSION_INVALID_BINDING` at `capabilities[i].arguments.group`, by `extensions.validate`, install and rollback. Dotted groups under `k8s.io` are accepted here, since some, such as `gateway.networking.k8s.io`, are CRD groups.
   - An installed app whose binding breaks the rule fails re-verification and is quarantined.
   - `extensions.read`, `extensions.resource` and `extensions.action` confirm, before dispatching, that a CustomResourceDefinition named `{plural}.{group}` declares that group and plural and serves the bound `version` on the cluster, and refuse the call when none does. That covers dotted built-in groups such as `networking.k8s.io`, aggregated APIs, and a version of a CRD's group and plural that the CRD does not serve. A lookup that fails refuses the call with the reason, not as a missing CRD. `k8s.listCustomResource` itself is unchanged.
   - This narrows accepted values within API 0.1, which [Compatibility rules](#compatibility-rules) classify as breaking. The exception is made because such a binding exposed built-in objects, such as a Deployment's environment, under a permission that reads as custom resources only. The Flux and Argo CD releases are unaffected.
+- **#549:** declared actions.
+  - A manifest may declare up to 32 `actions`, each naming a host action primitive (`k8s.annotate`, `k8s.setFields`, `k8s.setStatusCondition`, `k8s.mergePatch`) and the reader binding whose kind it acts on. See [Declared actions](manifest.md#declared-actions). An existing manifest that declares none is unaffected, and the field is left out of the stored form when empty, so a signed manifest still verifies.
+  - The host fills in the kind from that reader binding and fixes the inputs to `context`, `namespace`, `name`, `uid` and `resourceVersion`. An action that binds either is refused with `EXTENSION_INVALID_BINDING`, one that names an undeclared reader with `EXTENSION_UNRESOLVED_CAPABILITY`, and one that binds anything other than a primitive with `EXTENSION_UNSUPPORTED_TARGET`. An action's `name` shares the capability name space, so a repeat is `EXTENSION_DUPLICATE_IDENTIFIER`.
+  - Each primitive re-reads the object, refuses a UID or `resourceVersion` that has moved and an object being deleted, pins its patch to both, and reports the request as accepted rather than as done. `$now` and `$uuid` are the only substitutions; any other `$` value is refused. `k8s.mergePatch` also enforces a host deny-list (`metadata.finalizers`, `ownerReferences`, `managedFields`, `uid`, `resourceVersion`, `status`, a Secret's values, and RBAC kinds).
+  - Every rule above is applied when a manifest is validated, installed and reverified, and again on the way to the cluster.
+  - All four primitives are refused on the web host, as `k8s.gitOpsAction` is, because nothing there scopes them to a kind and there is no confirmation.
+  - Migrating the core Flux and Argo CD actions into manifests ([#551](https://github.com/srelens/srelens/issues/551)) and the host-owned confirmation ([#552](https://github.com/srelens/srelens/issues/552)) are not in this release. `extensions.action` and the host's own `supported_actions` table are unchanged.
+- **#550:** declarative preconditions and availability.
+  - A declared action may carry `preconditions` and `availableWhen`, each up to 8 predicates over the object, with the operators `equals`, `notEquals`, `present` and `absent` against a literal, addressed by a bounded JSONPath subset. See [Preconditions and availability](manifest.md#preconditions-and-availability). An action that declares neither behaves as before, and both are left out of the stored form when empty, so a signed manifest still verifies.
+  - `preconditions` are evaluated by the host against the fresh read each primitive already performs, after the host's own guards and before the patch. One that does not hold refuses the request with the declared `reason`, escaped, framed by the host's own words. A malformed path, an unknown or repeated operator, a non-literal comparand and a missing `reason` are refused with `EXTENSION_INVALID_BINDING` when the manifest is validated, installed and reverified, and again on the way to the cluster.
+  - `availableWhen` decides whether a control is offered and is not a guard: the host enforces nothing from it. Declaring a condition there and not in `preconditions` means the write is still accepted when the surface is out of date.
+  - The host's guards are unchanged and unreachable from a manifest: an object being deleted, and a `uid` or `resourceVersion` that has moved, are refused before any declared predicate is read. A predicate can only add a refusal.
+  - Binding `preconditions` or `availableWhen` inside an action's `arguments` is refused with `EXTENSION_INVALID_BINDING`; they are declared in the action's own fields.

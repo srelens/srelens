@@ -1,6 +1,5 @@
-use srelens_tui::app::App;
-use srelens_tui::event::AppEvent;
-use srelens_tui::ui::dialogs::Modal;
+use srectl::event::AppEvent;
+use srectl::ui::dialogs::Modal;
 use tokio::sync::mpsc::unbounded_channel;
 
 mod common;
@@ -25,43 +24,19 @@ users:
     token: fake-token-123
 "#;
 
-static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-struct EnvVarGuard {
-    name: &'static str,
-    previous: Option<std::ffi::OsString>,
-}
-
-impl EnvVarGuard {
-    fn set(name: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
-        let previous = std::env::var_os(name);
-        std::env::set_var(name, value);
-        Self { name, previous }
-    }
-}
-
-impl Drop for EnvVarGuard {
-    fn drop(&mut self) {
-        match &self.previous {
-            Some(value) => std::env::set_var(self.name, value),
-            None => std::env::remove_var(self.name),
-        }
-    }
-}
-
 #[tokio::test]
 async fn test_import_kubeconfig_from_yaml_content() {
-    let _lock = ENV_LOCK.lock().await;
+    let mut env = common::env::lock();
     let (tx, _rx) = unbounded_channel::<AppEvent>();
     let temp = tempfile::tempdir().unwrap();
     let managed_dir = temp.path().join("managed_configs");
     std::fs::create_dir_all(&managed_dir).unwrap();
-    let _guard = EnvVarGuard::set("SRELENS_KUBECONFIG_DIR", &managed_dir);
+    env.set("SRELENS_KUBECONFIG_DIR", &managed_dir);
 
     let initial_config = temp.path().join("config");
     std::fs::write(&initial_config, VALID_KUBECONFIG_YAML).unwrap();
 
-    let mut app = App::new(None, None, false, None, vec![initial_config.clone()], tx)
+    let mut app = common::theme::new_app(None, None, false, None, vec![initial_config.clone()], tx)
         .await
         .unwrap();
 
@@ -118,17 +93,17 @@ users:
 
 #[tokio::test]
 async fn test_import_kubeconfig_from_file_path() {
-    let _lock = ENV_LOCK.lock().await;
+    let mut env = common::env::lock();
     let (tx, _rx) = unbounded_channel::<AppEvent>();
     let temp = tempfile::tempdir().unwrap();
     let managed_dir = temp.path().join("managed_configs");
     std::fs::create_dir_all(&managed_dir).unwrap();
-    let _guard = EnvVarGuard::set("SRELENS_KUBECONFIG_DIR", &managed_dir);
+    env.set("SRELENS_KUBECONFIG_DIR", &managed_dir);
 
     let initial_config = temp.path().join("config");
     std::fs::write(&initial_config, VALID_KUBECONFIG_YAML).unwrap();
 
-    let mut app = App::new(None, None, false, None, vec![initial_config.clone()], tx)
+    let mut app = common::theme::new_app(None, None, false, None, vec![initial_config.clone()], tx)
         .await
         .unwrap();
 
@@ -187,12 +162,13 @@ users:
 
 #[tokio::test]
 async fn test_add_cluster_modal_bracketed_paste() {
+    let _settings = common::env::isolate_settings();
     let (tx, _rx) = unbounded_channel::<AppEvent>();
     let temp = tempfile::tempdir().unwrap();
     let initial_config = temp.path().join("config");
     std::fs::write(&initial_config, VALID_KUBECONFIG_YAML).unwrap();
 
-    let mut app = App::new(None, None, false, None, vec![initial_config.clone()], tx)
+    let mut app = common::theme::new_app(None, None, false, None, vec![initial_config.clone()], tx)
         .await
         .unwrap();
 
@@ -223,12 +199,13 @@ async fn test_add_cluster_modal_bracketed_paste() {
 
 #[tokio::test]
 async fn test_add_cluster_modal_oversized_paste() {
+    let _settings = common::env::isolate_settings();
     let (tx, _rx) = unbounded_channel::<AppEvent>();
     let temp = tempfile::tempdir().unwrap();
     let initial_config = temp.path().join("config");
     std::fs::write(&initial_config, VALID_KUBECONFIG_YAML).unwrap();
 
-    let mut app = App::new(None, None, false, None, vec![initial_config.clone()], tx)
+    let mut app = common::theme::new_app(None, None, false, None, vec![initial_config.clone()], tx)
         .await
         .unwrap();
 
@@ -269,7 +246,7 @@ fn test_render_add_cluster_modal() {
     };
 
     let rendered = common::render_text(100, 30, |f| {
-        srelens_tui::ui::dialogs::render_modal(f, f.area(), &modal);
+        srectl::ui::dialogs::render_modal(f, f.area(), &modal);
     });
 
     assert!(rendered.contains("Import Cluster / Kubeconfig"));
@@ -288,7 +265,7 @@ fn test_render_add_cluster_modal_with_error() {
     };
 
     let rendered = common::render_text(100, 30, |f| {
-        srelens_tui::ui::dialogs::render_modal(f, f.area(), &modal);
+        srectl::ui::dialogs::render_modal(f, f.area(), &modal);
     });
 
     assert!(rendered.contains("Import Cluster / Kubeconfig"));
@@ -312,8 +289,8 @@ fn test_resolve_import_command_and_aliases() {
 
     for cmd in cases {
         assert_eq!(
-            srelens_tui::commands::resolve_command(cmd),
-            Some(srelens_tui::commands::CommandTarget::AddCluster),
+            srectl::commands::resolve_command(cmd),
+            Some(srectl::commands::CommandTarget::AddCluster),
             "command '{}' must resolve to CommandTarget::AddCluster",
             cmd
         );
@@ -322,8 +299,8 @@ fn test_resolve_import_command_and_aliases() {
 
 #[test]
 fn test_import_deep_link_parse_and_to_url() {
-    use srelens_tui::commands::CommandTarget;
-    use srelens_tui::deep_link::DeepLink;
+    use srectl::commands::CommandTarget;
+    use srectl::deep_link::DeepLink;
 
     // 1. Parsing standard view deep link
     let parsed = DeepLink::parse("srelens://view/_/_/import").unwrap();
@@ -385,6 +362,7 @@ fn test_import_deep_link_parse_and_to_url() {
 
 #[tokio::test]
 async fn test_execute_colon_command_import_and_aliases() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
 
     // Execute :import
@@ -417,6 +395,7 @@ async fn test_execute_colon_command_import_and_aliases() {
 
 #[tokio::test]
 async fn test_context_picker_shortcuts_open_add_cluster_modal() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
 
     // Open context picker
@@ -444,6 +423,7 @@ async fn test_context_picker_shortcuts_open_add_cluster_modal() {
 
 #[tokio::test]
 async fn test_add_cluster_modal_key_editing_and_navigation() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
 
     // Open modal directly
@@ -516,17 +496,17 @@ async fn test_add_cluster_modal_key_editing_and_navigation() {
 
 #[tokio::test]
 async fn test_add_cluster_modal_submit_flow() {
-    let _lock = ENV_LOCK.lock().await;
+    let mut env = common::env::lock();
     let (tx, _rx) = unbounded_channel::<AppEvent>();
     let temp = tempfile::tempdir().unwrap();
     let managed_dir = temp.path().join("managed_configs");
     std::fs::create_dir_all(&managed_dir).unwrap();
-    let _guard = EnvVarGuard::set("SRELENS_KUBECONFIG_DIR", &managed_dir);
+    env.set("SRELENS_KUBECONFIG_DIR", &managed_dir);
 
     let initial_config = temp.path().join("config");
     std::fs::write(&initial_config, VALID_KUBECONFIG_YAML).unwrap();
 
-    let mut app = App::new(None, None, false, None, vec![initial_config.clone()], tx)
+    let mut app = common::theme::new_app(None, None, false, None, vec![initial_config.clone()], tx)
         .await
         .unwrap();
 
@@ -579,17 +559,17 @@ users:
 
 #[tokio::test]
 async fn test_same_context_import_refreshes_metadata_and_reconnects() {
-    let _lock = ENV_LOCK.lock().await;
+    let mut env = common::env::lock();
     let (tx, _rx) = unbounded_channel::<AppEvent>();
     let temp = tempfile::tempdir().unwrap();
     let managed_dir = temp.path().join("managed_configs");
     std::fs::create_dir_all(&managed_dir).unwrap();
-    let _guard = EnvVarGuard::set("SRELENS_KUBECONFIG_DIR", &managed_dir);
+    env.set("SRELENS_KUBECONFIG_DIR", &managed_dir);
 
     let initial_config = temp.path().join("config");
     std::fs::write(&initial_config, VALID_KUBECONFIG_YAML).unwrap();
 
-    let mut app = App::new(None, None, false, None, vec![initial_config.clone()], tx)
+    let mut app = common::theme::new_app(None, None, false, None, vec![initial_config.clone()], tx)
         .await
         .unwrap();
 

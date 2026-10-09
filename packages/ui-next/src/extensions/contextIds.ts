@@ -2,20 +2,23 @@ import { useSyncExternalStore } from "react";
 import { KUBECONFIG_FILES_CHANGED, listContexts, getLiveKubeconfigFiles } from "@srelens/core";
 
 /**
- * The key of each kubeconfig context, by display name, for per-cluster app scope.
+ * The key of each kubeconfig context, by display name or pinned ID, for per-cluster app scope.
  *
  * A context's name is presentation only: it gains a `file/` prefix as soon as another
  * kubeconfig declares the same name, so anything kept per context keys on the context key
- * (#265). Both desktop designs render app surfaces with only a context name, so they look
- * the ID up here rather than each threading it through. One listing per window, refreshed
- * on focus. The host enforces scope on every read and action; this only decides what to show.
+ * (#265). App surfaces are handed only the string they ask the host by: a display name in the
+ * Inspector and the classic design, a pinned ID on the new design's app pages (#695). They
+ * look the key up here rather than each threading it through. One listing per window,
+ * refreshed on focus. The host enforces scope on every read and action; this only decides
+ * what to show.
  *
  * A listing that fails keeps the IDs already known and records why, so a caller can tell
  * "not enabled for this cluster" from "the clusters could not be listed".
  */
+type Listed = { name: string; key: string; pinnedId?: string };
 type ContextIds = {
   /** Undefined until a listing has answered. */
-  ids?: ReadonlyMap<string, string>;
+  contexts?: readonly Listed[];
   /** Why the latest listing failed, when it did. */
   error?: string;
 };
@@ -25,7 +28,7 @@ let stop: (() => void) | undefined;
 /** The latest listing started. Refreshes can overlap (a focus during a Retry), and an older one answering last must not replace a newer answer. */
 let generation = 0;
 
-const snapshotKey = ({ ids, error }: ContextIds) => JSON.stringify([ids ? [...ids] : null, error ?? null]);
+const snapshotKey = ({ contexts, error }: ContextIds) => JSON.stringify([contexts ?? null, error ?? null]);
 
 /** List the contexts again. */
 export async function refreshContextIds() {
@@ -39,7 +42,7 @@ export async function refreshContextIds() {
   if (!listeners.size || started !== generation) return;
   const listed = outcome?.contexts ?? (outcome?.error ? undefined : []);
   const next: ContextIds = {
-    ids: listed ? new Map(listed.map((context) => [context.name, context.key])) : state.ids,
+    contexts: listed ? listed.map(({ name, key, pinnedId }) => ({ name, key, pinnedId })) : state.contexts,
     error: outcome?.error || undefined,
   };
   if (snapshotKey(next) !== snapshotKey(state)) {
@@ -76,29 +79,60 @@ function subscribe(listener: () => void) {
 
 const getState = () => state;
 
-/** The key of the context named `name`, or undefined until the contexts are listed. */
-export function useContextId(name: string): string | undefined {
-  return useSyncExternalStore(subscribe, getState, getState).ids?.get(name);
+/**
+ * The context `context` names: by display name, or by the pinned ID an app page asks the host
+ * by. Never by stable ID, which two contexts can share (#623). A string that is one context's
+ * name and another's pinned ID names neither, as the host's `find_context` finds neither.
+ */
+function lookUp(contexts: readonly Listed[], context: string): ContextLookup {
+  const named = contexts.find((listed) => listed.name === context);
+  const pinned = contexts.find((listed) => listed.pinnedId === context);
+  if (named && pinned && named.key !== pinned.key) return { status: "ambiguous" };
+  const found = named ?? pinned;
+  return found ? { status: "found", id: found.key } : { status: "missing" };
 }
 
-/** What an app page says when its route's cluster shares a stable ID with another (the route cannot say which). */
-export const SHARED_CONTEXT_ID_MESSAGE =
-  "This cluster shares its ID with another context, so this page cannot tell which one it is for. Rename one of them in your kubeconfig files.";
+/** The key of the context `context` names, or undefined until the contexts are listed. */
+export function useContextId(context: string): string | undefined {
+  const { contexts } = useSyncExternalStore(subscribe, getState, getState);
+  const lookup = contexts && lookUp(contexts, context);
+  return lookup?.status === "found" ? lookup.id : undefined;
+}
 
 /**
- * The context named `name`: found; still being listed; not found because the listing
- * failed; or missing from a listing that worked.
+ * What an app page says when its route, from a tab opened before #695, names a stable ID two
+ * contexts share: the route cannot say which. Opened again, it names the context by key.
+ */
+export const SHARED_CONTEXT_ID_MESSAGE =
+  "This tab names its cluster by an ID that two contexts share, so it cannot tell which one it is for. Open the page again from that cluster's sidebar.";
+
+/** What an app surface says when the host lists its cluster without a pinned ID to ask it by. */
+export const NO_PINNED_ID_MESSAGE =
+  "This cluster's kubeconfig path cannot be made absolute, so its apps cannot be opened here. Manage your kubeconfig files in Settings → Contexts.";
+
+/**
+ * The context `context` names: found; still being listed; not found because the listing
+ * failed; missing from a listing that worked; or ambiguous, one context's name and another's
+ * pinned ID, so neither.
  */
 export type ContextLookup =
   | { status: "found"; id: string }
   | { status: "loading" }
   | { status: "failed"; error: string }
-  | { status: "missing" };
+  | { status: "missing" }
+  | { status: "ambiguous" };
 
-export function useContextLookup(name: string): ContextLookup {
-  const { ids, error } = useSyncExternalStore(subscribe, getState, getState);
-  const id = ids?.get(name);
-  if (id !== undefined) return { status: "found", id };
+export function useContextLookup(context: string): ContextLookup {
+  const { contexts, error } = useSyncExternalStore(subscribe, getState, getState);
+  const lookup = contexts && lookUp(contexts, context);
+  if (lookup && lookup.status !== "missing") return lookup;
   if (error) return { status: "failed", error };
-  return ids ? { status: "missing" } : { status: "loading" };
+  return lookup ?? { status: "loading" };
 }
+
+/**
+ * What an app surface says when the string it was handed is one context's name and another's
+ * pinned ID. Which of the two it was opened for is not known, so the message names neither.
+ */
+export const AMBIGUOUS_CONTEXT_MESSAGE =
+  "One context is named after another's ID, so this page cannot tell which one it is for. Rename one of them in your kubeconfig files.";

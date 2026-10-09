@@ -6,6 +6,8 @@ license.workspace = true
 
 [dependencies]
 srelens-capability = { path = "../capability" }
+# The sidecar wire's constants and message types, shared with the SDKs (#576).
+srelens-sidecar-protocol = { path = "../../sdk/protocol" }
 serde = { version = "1", features = ["derive"] }
 # float_roundtrip: without it serde_json reads about a third of doubles back one step
 # off, so a manifest argument changed each time a manifest was stored and read, and a
@@ -14,6 +16,53 @@ serde_json = { version = "1", features = ["float_roundtrip"] }
 serde_path_to_error = "0.1"
 schemars = "0.8"
 semver = "1"
+# A `url` setting (#542) is parsed, not pattern-matched, so a scheme or
+# credentials in it cannot hide behind unusual spelling. Already in the
+# workspace through srelens-capability.
+url = "2"
+# Redacting an app's log lines (#575): matching is linear in the line, so a
+# line a sidecar writes cannot make it slow. Already in the lockfile.
+regex = "1"
+# The sidecar supervisor (#572): child processes, their pipes, timers and the
+# channels between them. `fs` adapts the Windows backend's anonymous pipes,
+# which tokio has no async type for.
+tokio = { version = "1", features = ["rt", "sync", "time", "io-util", "process", "macros", "fs"] }
+# A sidecar's data directory (#573) is named by a digest of its app ID, as its
+# Windows AppContainer profile is. Already in the lockfile.
+sha2 = "0.10"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# The Linux sandbox layers the #571 spike chose, applied by the trusted launcher
+# (`src/bin/srelens-sandbox-launch.rs`): Landlock for the filesystem and TCP,
+# a seccomp filter for sockets, io_uring and new processes. The cgroup is plain
+# files and needs no crate.
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock = "0.4"
+seccompiler = "0.5"
+# Asks the systemd user manager for the delegated scope Linux sidecars' cgroups
+# go in (`sandbox/systemd.rs`): the blocking API, on the async-io runtime zbus
+# defaults to, named so a change of defaults cannot drop either. Already in the
+# lockfile through the desktop's Tauri plugins.
+zbus = { version = "5", default-features = false, features = ["async-io", "blocking-api"] }
+
+# The Windows backend the spike chose: an AppContainer inside a Job Object.
+# The version the spike ran against, already in the lockfile.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Security_Authorization",
+  "Win32_Security_Isolation",
+  # CoTaskMemFree, for the path GetAppContainerFolderPath returns (#573).
+  "Win32_System_Com",
+  "Win32_System_JobObjects",
+  "Win32_System_Pipes",
+  # K32GetProcessMemoryInfo, for a sidecar's memory in the Inspector (#753).
+  "Win32_System_ProcessStatus",
+  "Win32_System_Threading",
+] }
 
 [features]
 # Exposes `srelens_plugin_host::fuzzing` to the fuzz targets in `fuzz/` and to
@@ -23,5 +72,12 @@ fuzzing = []
 [dev-dependencies]
 srelens-registry = { path = "../registry" }
 srelens-mcp = { path = "../mcp" }
-tokio = { version = "1", features = ["macros", "rt", "io-std"] }
+tokio = { version = "1", features = ["macros", "rt", "io-std", "test-util"] }
+tempfile = "3"
 proptest = { version = "1", default-features = false, features = ["std"] }
+# The protocol's schema is generated only with its `schema` feature, off by
+# default for sidecar authors; the broker's tests and `tests/sidecar` read it.
+srelens-sidecar-protocol = { path = "../../sdk/protocol", features = ["schema"] }
+# Holds what srelens writes, and the broker's `host/*` checks, to the committed
+# sidecar protocol schema (#576). No default features: see sdk/protocol/Cargo.toml.
+jsonschema = { version = "0.58", default-features = false }

@@ -37,7 +37,11 @@ log = "0.4"
 # resolver's formula directly (see `mcp_token_path` in main.rs) so the CLI and
 # the GUI resolve to the same config dir and share one token file.
 dirs = "6"
-tauri = { version = "2.11.3", features = [] }
+# `macos-private-api` is what lets a macOS window be created transparent — the
+# Appearance pane's window opacity needs something to show through. It must
+# agree with `app.macOSPrivateApi` in tauri.conf.json: tauri-build fails the
+# build when one is set without the other. A no-op off macOS.
+tauri = { version = "2.11.3", features = ["macos-private-api"] }
 tauri-plugin-log = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
@@ -103,6 +107,12 @@ tauri-plugin-window-state = "2"
 # resolves the user's login-shell PATH at startup. No-op on Windows.
 fix-path-env = { git = "https://github.com/tauri-apps/fix-path-env-rs" }
 
+# The blur behind a see-through window (`window_blur.rs`) asks the NSWindow for
+# its window number, which is one Objective-C message. Already in the tree
+# under Tauri at this version; named here because this crate now sends it.
+[target."cfg(target_os = \"macos\")".dependencies]
+objc2 = "0.6"
+
 [dev-dependencies]
 # The "test" feature unlocks tauri::test::mock_app — the unit suites drive
 # the command shims (exec, forward, logs, watch, bridge, files) through a
@@ -114,3 +124,5 @@ futures = "0.3"
 # issue #30) — drives the real built app through tauri-driver. Dev-only; the
 # shipping binary never links it.
 thirtyfour = "0.32"
+# Throwaway inventories for the app-stream command tests (extension_streams.rs).
+tempfile = "3"

@@ -1,7 +1,7 @@
 name: Fuzz
 
 # The parsers that take extension input from outside the host -- manifests, the catalog,
-# publisher signatures and the stored inventory -- under cargo-fuzz (#580). `cargo test`
+# publisher signatures, packages (#562) and the stored inventory -- under cargo-fuzz (#580). `cargo test`
 # already holds the same properties over a fixed set of cases on every change, on stable
 # and on every platform. This keeps looking for inputs that break them, with coverage
 # guidance, which is what needs nightly and libFuzzer and so cannot live in the backend job.
@@ -57,10 +57,10 @@ jobs:
       # Pinned by SHA, so `toolchain` has to be explicit, as in ci.yml. libFuzzer's
       # sanitizer flags are nightly-only, and rust-toolchain.toml pins the repository to
       # stable, so every cargo call below says `+nightly`.
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # v1
         with:
           toolchain: nightly
-      - uses: taiki-e/install-action@9534c84618278caac52cb373bb164ed464dbd8af # v2
+      - uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2
         with:
           tool: cargo-fuzz
       # fuzz/ is its own workspace and commits no lockfile. Starting from the workspace's
@@ -78,7 +78,7 @@ jobs:
         # Every target runs even after one finds a crash, so one bug does not hide another.
         run: |
           status=0
-          for target in manifest catalog signed-manifest inventory; do
+          for target in manifest catalog signed-manifest inventory package signed-catalog trust-metadata; do
             echo "::group::$target"
             cargo +nightly fuzz run --target "$FUZZ_TARGET_TRIPLE" "$target" -- \
               -dict=fuzz/extensions.dict \

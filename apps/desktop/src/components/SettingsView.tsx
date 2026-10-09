@@ -27,6 +27,7 @@ import {
   Plug,
   Bot,
   Shield,
+  Archive,
   ScrollText,
   Trash2,
 } from "lucide-react";
@@ -74,6 +75,7 @@ import { ContextAvatar, CONTEXT_LOGO_OPTIONS } from "./ContextAvatar";
 import { McpSettingsSection } from "./McpSettingsSection";
 import { AssistantSettingsSection } from "./AssistantSettingsSection";
 import { SecuritySettingsSection } from "./SecuritySettingsSection";
+import { BackupSettingsSection } from "./BackupSettingsSection";
 import { AppearanceSettingsSection } from "./AppearanceSettingsSection";
 import { AppLogView } from "./AppLogView";
 import { pickKubeconfigFiles, savePastedKubeconfig } from "@srelens/core";
@@ -100,6 +102,7 @@ export type SettingsSection =
   | "mcp"
   | "assistant"
   | "security"
+  | "backup"
   | "logs"
   | "extensions"
   | "updates";
@@ -131,8 +134,9 @@ const SETTINGS_SECTIONS: Array<{
   { id: "mcp", label: "MCP", description: "Agent access and client config", icon: Plug },
   { id: "assistant", label: "Assistant", description: "srelens agent API keys and model", icon: Bot },
   { id: "security", label: "Security", description: "Master password and biometric unlock", icon: Shield },
+  { id: "backup", label: "Backup", description: "Move this setup to another machine", icon: Archive },
   { id: "logs", label: "Application logs", description: "Diagnostics and log file", icon: ScrollText },
-  { id: "extensions", label: "Apps", description: "Local apps and permissions", icon: Plug },
+  { id: "extensions", label: "Apps", description: "Installed apps and permissions", icon: Plug },
   { id: "updates", label: "Updates", description: "App version and updates", icon: Download },
 ];
 
@@ -193,7 +197,17 @@ export function SettingsView({
   const visibleSections = isTauri()
     ? SETTINGS_SECTIONS
     : SETTINGS_SECTIONS.filter(
-        (s) => s.id !== "mcp" && s.id !== "assistant" && s.id !== "security" && s.id !== "updates" && s.id !== "extensions",
+        // Backup joins them: a bundle is built from the desktop's config
+        // directory and its local kubeconfig files, neither of which the web
+        // build has — leaving the entry would open a pane whose every button
+        // fails.
+        (s) =>
+          s.id !== "mcp" &&
+          s.id !== "assistant" &&
+          s.id !== "security" &&
+          s.id !== "backup" &&
+          s.id !== "updates",
+        // Apps stays: the web server keeps each user's own apps (#515).
       );
 
   const [section, setSection] = useState<SettingsSection>(initialSection);
@@ -1098,6 +1112,15 @@ export function SettingsView({
             </SectionPanel>
           )}
 
+          {section === "backup" && isTauri() && (
+            <SectionPanel
+              title="Backup"
+              description="Export this setup as one encrypted file, and import it on another machine."
+            >
+              <BackupSettingsSection />
+            </SectionPanel>
+          )}
+
           {section === "logs" && (
             <SectionPanel
               title="Application logs"
@@ -1107,7 +1130,7 @@ export function SettingsView({
             </SectionPanel>
           )}
 
-          {section === "extensions" && isTauri() && <ExtensionManager />}
+          {section === "extensions" && <ExtensionManager />}
           {section === "updates" && isTauri() && (
             <SectionPanel title="Updates" description="Check for and install new versions of srelens.">
               <div className="fl-settings-update">

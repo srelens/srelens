@@ -1,4 +1,4 @@
-//! Tests for `srelens-tui update`.
+//! Tests for `srectl update`.
 //!
 //! No stable release carries the TUI archives yet — #444 only just landed — so
 //! the download-verify-replace path cannot be proven against a real release.
@@ -8,11 +8,13 @@
 
 use std::path::{Path, PathBuf};
 
-use srelens_tui::self_update::{
-    apply, asset_name, asset_url, checksum_for, extract_binary, is_newer, package_manager_for,
-    parse_latest_version, parse_newest_version, plan, replace_running_binary, sums_name,
-    triple_for, verify_sha256, Channel, Check, Plan, UpdateError, LATEST_RELEASE_URL, RELEASES_URL,
+use srectl::self_update::{
+    apply, apply_with_keys, asset_name, asset_url, checksum_for, extract_binary, is_newer,
+    package_manager_for, parse_latest_version, parse_newest_version, plan, replace_running_binary,
+    sums_name, sums_signature_name, triple_for, verify_sha256, Channel, Check, Plan, UpdateError,
+    LATEST_RELEASE_URL, RELEASES_URL,
 };
+use srectl::update_signature::SignatureProblem;
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -61,9 +63,20 @@ fn here() -> &'static str {
     .expect("this platform has a release target")
 }
 
-/// The two asset names a release must carry for `version` to be installable
-/// here, as the GitHub API would list them.
+/// The asset names a release must carry for `version` to be installable
+/// here, as the GitHub API would list them: the archive, the checksum file,
+/// and the checksum file's signature.
 fn assets_for(version: &str) -> String {
+    format!(
+        r#"[{{"name":"{}"}},{{"name":"{}"}},{{"name":"{}"}}]"#,
+        asset_name(version, here()),
+        sums_name(version),
+        sums_signature_name(version)
+    )
+}
+
+/// The same release before signing reached it: archive and checksums only.
+fn unsigned_assets_for(version: &str) -> String {
     format!(
         r#"[{{"name":"{}"}},{{"name":"{}"}}]"#,
         asset_name(version, here()),
@@ -102,9 +115,9 @@ fn release_json(tag: &str) -> Vec<u8> {
 /// The binary name inside an archive for the platform under test.
 fn bin_name() -> &'static str {
     if cfg!(windows) {
-        "srelens-tui.exe"
+        "srectl.exe"
     } else {
-        "srelens-tui"
+        "srectl"
     }
 }
 
@@ -194,18 +207,18 @@ fn a_musl_binary_updates_to_a_musl_archive() {
 fn asset_names_match_what_the_release_workflow_publishes() {
     assert_eq!(
         asset_name("1.2.3", "x86_64-unknown-linux-gnu"),
-        "srelens-tui-1.2.3-x86_64-unknown-linux-gnu.tar.gz"
+        "srectl-1.2.3-x86_64-unknown-linux-gnu.tar.gz"
     );
     // Windows is a zip, never a bare exe — size-baseline.mjs treats any .exe
     // as a desktop installer.
     assert_eq!(
         asset_name("1.2.3", "x86_64-pc-windows-msvc"),
-        "srelens-tui-1.2.3-x86_64-pc-windows-msvc.zip"
+        "srectl-1.2.3-x86_64-pc-windows-msvc.zip"
     );
-    assert_eq!(sums_name("1.2.3"), "srelens-tui-1.2.3-SHA256SUMS.txt");
+    assert_eq!(sums_name("1.2.3"), "srectl-1.2.3-SHA256SUMS.txt");
     assert_eq!(
-        asset_url("1.2.3", "srelens-tui-1.2.3-SHA256SUMS.txt"),
-        "https://github.com/srelens/srelens/releases/download/srelens-v1.2.3/srelens-tui-1.2.3-SHA256SUMS.txt"
+        asset_url("1.2.3", "srectl-1.2.3-SHA256SUMS.txt"),
+        "https://github.com/srelens/srelens/releases/download/srelens-v1.2.3/srectl-1.2.3-SHA256SUMS.txt"
     );
 }
 
@@ -606,6 +619,43 @@ fn a_release_missing_only_the_checksum_file_is_also_passed_over() {
     ));
 }
 
+/// Dev pre-releases are public before `sign-artifacts` runs, and signing
+/// them is best-effort, so an unsigned one is expected rather than suspicious.
+/// It is passed over, as an incomplete one is, for the newest that IS signed:
+/// the dev channel installs signed builds only.
+#[test]
+fn the_dev_channel_passes_over_a_release_whose_checksums_are_not_signed() {
+    let body = format!(
+        r#"[
+        {{"tag_name":"srelens-v0.8.1-152","prerelease":true,"assets":{}}},
+        {{"tag_name":"srelens-v0.8.1-150","prerelease":true,"assets":{}}}
+    ]"#,
+        unsigned_assets_for("0.8.1-152"),
+        assets_for("0.8.1-150")
+    );
+    assert_eq!(
+        parse_newest_version(body.as_bytes(), here()).unwrap(),
+        "0.8.1-150"
+    );
+}
+
+/// A stable release is published only after signing succeeds, so one without
+/// a signature is not a release to wait out. It is refused, by name.
+#[test]
+fn a_stable_release_whose_checksums_are_not_signed_is_refused_by_name() {
+    let body = format!(
+        r#"{{"tag_name":"srelens-v0.9.0","prerelease":false,"assets":{}}}"#,
+        unsigned_assets_for("0.9.0")
+    );
+    match parse_latest_version(body.as_bytes(), here()) {
+        Err(UpdateError::BadRelease(why)) => {
+            assert!(why.contains("srelens-v0.9.0"), "{why}");
+            assert!(why.contains("signature"), "{why}");
+        }
+        other => panic!("expected the unsigned release to be refused, got {other:?}"),
+    }
+}
+
 /// On stable there is nothing to fall back to, so the same situation is
 /// reported instead of skipped — a named reason now beats a 404 later.
 #[test]
@@ -629,7 +679,7 @@ fn a_stable_release_without_a_build_for_this_platform_says_so() {
 #[test]
 fn a_checksum_is_found_in_either_sha256sum_format() {
     let hash = "a".repeat(64);
-    let asset = "srelens-tui-1.2.3-x86_64-unknown-linux-gnu.tar.gz";
+    let asset = "srectl-1.2.3-x86_64-unknown-linux-gnu.tar.gz";
     let gnu = format!("{hash}  {asset}\n{}  other.tar.gz\n", "b".repeat(64));
     let binary_mode = format!("{hash} *{asset}\n");
 
@@ -641,7 +691,7 @@ fn a_checksum_is_found_in_either_sha256sum_format() {
 fn a_checksum_file_that_does_not_list_the_asset_is_refused() {
     let sums = format!("{}  some-other-file.tar.gz\n", "a".repeat(64));
     assert!(matches!(
-        checksum_for(&sums, "srelens-tui-1.2.3-x86_64-apple-darwin.tar.gz"),
+        checksum_for(&sums, "srectl-1.2.3-x86_64-apple-darwin.tar.gz"),
         Err(UpdateError::ChecksumMissing { .. })
     ));
     // A line for the right asset carrying something that is not a hash is the
@@ -674,25 +724,22 @@ fn verification_accepts_the_published_hash_and_rejects_any_other() {
 
 #[test]
 fn the_binary_is_pulled_out_of_a_tarball_stored_at_the_root() {
-    let archive = targz("srelens-tui", b"ELF-ish");
-    let got = extract_binary(
-        &archive,
-        "srelens-tui-1.2.3-x86_64-unknown-linux-gnu.tar.gz",
-    );
+    let archive = targz("srectl", b"ELF-ish");
+    let got = extract_binary(&archive, "srectl-1.2.3-x86_64-unknown-linux-gnu.tar.gz");
     assert_eq!(got.unwrap(), b"ELF-ish");
 }
 
 #[test]
 fn the_binary_is_pulled_out_of_a_zip() {
-    let archive = zip_with("srelens-tui.exe", b"MZ-ish");
-    let got = extract_binary(&archive, "srelens-tui-1.2.3-x86_64-pc-windows-msvc.zip");
+    let archive = zip_with("srectl.exe", b"MZ-ish");
+    let got = extract_binary(&archive, "srectl-1.2.3-x86_64-pc-windows-msvc.zip");
     assert_eq!(got.unwrap(), b"MZ-ish");
 }
 
 #[test]
 fn an_archive_without_the_binary_is_an_error_naming_the_asset() {
     let archive = targz("README", b"nope");
-    let asset = "srelens-tui-1.2.3-x86_64-unknown-linux-gnu.tar.gz";
+    let asset = "srectl-1.2.3-x86_64-unknown-linux-gnu.tar.gz";
     match extract_binary(&archive, asset) {
         Err(UpdateError::BinaryMissing { asset: named }) => assert_eq!(named, asset),
         other => panic!("expected BinaryMissing, got {other:?}"),
@@ -743,17 +790,17 @@ fn an_unparseable_version_never_triggers_an_update() {
 #[test]
 fn a_binary_a_package_manager_owns_is_recognised() {
     for (path, manager) in [
-        ("/opt/homebrew/bin/srelens-tui", "Homebrew"),
+        ("/opt/homebrew/bin/srectl", "Homebrew"),
         (
-            "/usr/local/Cellar/srelens-tui/1.0.0/bin/srelens-tui",
+            "/usr/local/Cellar/srectl/1.0.0/bin/srectl",
             "Homebrew",
         ),
         (
-            "/usr/bin/srelens-tui",
+            "/usr/bin/srectl",
             "your distribution's package manager",
         ),
-        ("/snap/srelens/current/bin/srelens-tui", "snap"),
-        ("/nix/store/abc-srelens/bin/srelens-tui", "Nix"),
+        ("/snap/srelens/current/bin/srectl", "snap"),
+        ("/nix/store/abc-srelens/bin/srectl", "Nix"),
     ] {
         assert_eq!(
             package_manager_for(Path::new(path)),
@@ -772,20 +819,20 @@ fn a_binary_a_package_manager_owns_is_recognised() {
 fn a_windows_package_manager_is_recognised_at_any_depth_and_any_case() {
     for (path, manager) in [
         (
-            r"C:\ProgramData\chocolatey\bin\srelens-tui.exe",
+            r"C:\ProgramData\chocolatey\bin\srectl.exe",
             "Chocolatey",
         ),
         (
-            r"C:\PROGRAMDATA\CHOCOLATEY\bin\srelens-tui.exe",
+            r"C:\PROGRAMDATA\CHOCOLATEY\bin\srectl.exe",
             "Chocolatey",
         ),
         (
-            r"C:\Users\me\Scoop\Apps\srelens-tui\current\srelens-tui.exe",
+            r"C:\Users\me\Scoop\Apps\srectl\current\srectl.exe",
             "Scoop",
         ),
-        (r"C:\Users\me\scoop\shims\srelens-tui.exe", "Scoop"),
+        (r"C:\Users\me\scoop\shims\srectl.exe", "Scoop"),
         (
-            r"C:\Users\me\AppData\Local\Microsoft\WinGet\Packages\x\srelens-tui.exe",
+            r"C:\Users\me\AppData\Local\Microsoft\WinGet\Packages\x\srectl.exe",
             "winget",
         ),
     ] {
@@ -803,15 +850,15 @@ fn a_windows_package_manager_is_recognised_at_any_depth_and_any_case() {
 #[test]
 fn windows_package_markers_do_not_apply_on_unix() {
     for path in [
-        "/home/me/scoop/apps/demo/srelens-tui",
-        "/home/me/scoop/shims/srelens-tui",
-        "/opt/chocolatey/srelens-tui",
+        "/home/me/scoop/apps/demo/srectl",
+        "/home/me/scoop/shims/srectl",
+        "/opt/chocolatey/srectl",
     ] {
         assert_eq!(package_manager_for(Path::new(path)), None, "{path}");
     }
 }
 
-/// The layouts `brew install srelens/tap/srelens-tui` actually produces.
+/// The layouts `brew install srelens/tap/srectl` actually produces.
 ///
 /// Homebrew installs into `<prefix>/Cellar/<formula>/<version>/bin` and links
 /// that into `<prefix>/bin`, so what `apply` checks is the resolved Cellar
@@ -820,11 +867,11 @@ fn windows_package_markers_do_not_apply_on_unix() {
 #[test]
 fn a_homebrew_install_is_recognised_on_both_prefixes() {
     for path in [
-        "/opt/homebrew/Cellar/srelens-tui/1.2.3/bin/srelens-tui",
-        "/usr/local/Cellar/srelens-tui/1.2.3/bin/srelens-tui",
-        "/home/linuxbrew/.linuxbrew/Cellar/srelens-tui/1.2.3/bin/srelens-tui",
-        "/opt/homebrew/bin/srelens-tui",
-        "/home/linuxbrew/.linuxbrew/bin/srelens-tui",
+        "/opt/homebrew/Cellar/srectl/1.2.3/bin/srectl",
+        "/usr/local/Cellar/srectl/1.2.3/bin/srectl",
+        "/home/linuxbrew/.linuxbrew/Cellar/srectl/1.2.3/bin/srectl",
+        "/opt/homebrew/bin/srectl",
+        "/home/linuxbrew/.linuxbrew/bin/srectl",
     ] {
         assert_eq!(
             package_manager_for(Path::new(path)),
@@ -836,7 +883,7 @@ fn a_homebrew_install_is_recognised_on_both_prefixes() {
     // The hand-install location, which shares a prefix with Intel Homebrew
     // and must not be mistaken for it.
     assert_eq!(
-        package_manager_for(Path::new("/usr/local/bin/srelens-tui")),
+        package_manager_for(Path::new("/usr/local/bin/srectl")),
         None
     );
 }
@@ -850,17 +897,17 @@ fn a_homebrew_install_is_recognised_on_both_prefixes() {
 #[test]
 fn a_package_root_buried_inside_another_path_is_not_its_owner() {
     for path in [
-        "/home/me/rootfs/usr/bin/srelens-tui",
-        "/home/me/containers/alpine/usr/bin/srelens-tui",
-        "/tmp/extract/snap/srelens-tui",
-        "/home/me/backup/nix/store/srelens-tui",
+        "/home/me/rootfs/usr/bin/srectl",
+        "/home/me/containers/alpine/usr/bin/srectl",
+        "/tmp/extract/snap/srectl",
+        "/home/me/backup/nix/store/srectl",
     ] {
         assert_eq!(package_manager_for(Path::new(path)), None, "{path}");
     }
 
     // The same markers at the front still count.
     assert_eq!(
-        package_manager_for(Path::new("/usr/bin/srelens-tui")),
+        package_manager_for(Path::new("/usr/bin/srectl")),
         Some("your distribution's package manager")
     );
 }
@@ -869,8 +916,8 @@ fn a_package_root_buried_inside_another_path_is_not_its_owner() {
 /// different directory and not the package manager's.
 #[test]
 fn a_unix_root_is_matched_case_sensitively() {
-    assert_eq!(package_manager_for(Path::new("/USR/BIN/srelens-tui")), None);
-    assert_eq!(package_manager_for(Path::new("/Snap/srelens-tui")), None);
+    assert_eq!(package_manager_for(Path::new("/USR/BIN/srectl")), None);
+    assert_eq!(package_manager_for(Path::new("/Snap/srectl")), None);
 }
 
 /// The locations the install guide tells people to use by hand. Reporting one
@@ -878,10 +925,10 @@ fn a_unix_root_is_matched_case_sensitively() {
 #[test]
 fn a_hand_installed_binary_is_not_mistaken_for_a_managed_one() {
     for path in [
-        "/usr/local/bin/srelens-tui",
-        "/home/me/.local/bin/srelens-tui",
-        "/home/me/bin/srelens-tui",
-        r"C:\Users\me\bin\srelens-tui.exe",
+        "/usr/local/bin/srectl",
+        "/home/me/.local/bin/srectl",
+        "/home/me/bin/srectl",
+        r"C:\Users\me\bin\srectl.exe",
     ] {
         assert_eq!(package_manager_for(Path::new(path)), None, "{path}");
     }
@@ -902,7 +949,7 @@ fn being_up_to_date_is_a_quiet_success_not_an_error() {
             "1.0.0",
             Channel::Stable,
             false,
-            PathBuf::from("/tmp/srelens-tui"),
+            PathBuf::from("/tmp/srectl"),
             &fetch
         )
         .unwrap(),
@@ -925,7 +972,7 @@ fn a_build_ahead_of_stable_is_not_reported_as_up_to_date() {
             "0.8.1-152",
             Channel::Stable,
             false,
-            PathBuf::from("/tmp/srelens-tui"),
+            PathBuf::from("/tmp/srectl"),
             &fetch
         )
         .unwrap(),
@@ -943,7 +990,7 @@ fn a_build_ahead_of_stable_is_not_reported_as_up_to_date() {
             "0.8.0-7",
             Channel::Stable,
             false,
-            PathBuf::from("/tmp/srelens-tui"),
+            PathBuf::from("/tmp/srectl"),
             &fetch
         )
         .unwrap(),
@@ -962,7 +1009,7 @@ fn an_unparseable_current_version_is_not_claimed_to_be_ahead() {
             "nightly",
             Channel::Stable,
             false,
-            PathBuf::from("/tmp/srelens-tui"),
+            PathBuf::from("/tmp/srectl"),
             &fetch
         )
         .unwrap(),
@@ -980,7 +1027,7 @@ fn a_newer_release_plans_urls_under_its_own_tag() {
         "1.0.0",
         Channel::Stable,
         false,
-        PathBuf::from("/tmp/srelens-tui"),
+        PathBuf::from("/tmp/srectl"),
         &fetch,
     )
     .unwrap()
@@ -997,9 +1044,135 @@ fn a_newer_release_plans_urls_under_its_own_tag() {
         plan.archive_url
     );
     assert!(
-        plan.sums_url.ends_with("srelens-tui-2.0.0-SHA256SUMS.txt"),
+        plan.sums_url.ends_with("srectl-2.0.0-SHA256SUMS.txt"),
         "{}",
         plan.sums_url
+    );
+}
+
+/// The bridge release is still published as `srelens-tui`. Checking for an
+/// update from that same version finds no `srectl` archive and is not a
+/// failure: there is nothing newer to install.
+#[test]
+fn a_release_that_still_publishes_srelens_tui_is_current() {
+    let fetch = |_: &str| -> Result<Vec<u8>, UpdateError> {
+        Ok(br#"{"tag_name":"srelens-v1.2.0","prerelease":false,"assets":[{"name":"srelens-tui-1.2.0-SHA256SUMS.txt"}]}"#.to_vec())
+    };
+    assert_eq!(
+        plan(
+            "1.2.0",
+            Channel::Stable,
+            false,
+            PathBuf::from("/tmp/srelens-tui"),
+            &fetch
+        )
+        .unwrap(),
+        Check::UpToDate {
+            channel: Channel::Stable,
+            latest: "1.2.0".into()
+        }
+    );
+}
+
+/// A newer tag that also lacks a `srectl` archive is a release we could not
+/// take, not a claim that this build is the latest.
+#[test]
+fn a_newer_release_without_srectl_is_still_an_error() {
+    let fetch = |_: &str| -> Result<Vec<u8>, UpdateError> {
+        Ok(br#"{"tag_name":"srelens-v2.0.0","prerelease":false,"assets":[{"name":"srelens-tui-2.0.0-SHA256SUMS.txt"}]}"#.to_vec())
+    };
+    let err = plan(
+        "1.2.0",
+        Channel::Stable,
+        false,
+        PathBuf::from("/tmp/srelens-tui"),
+        &fetch,
+    )
+    .unwrap_err();
+    let UpdateError::BadRelease(message) = err else {
+        panic!("expected the missing build to be reported, got {err:?}");
+    };
+    assert!(message.contains("carries no srectl build"), "{message}");
+}
+
+#[test]
+fn a_newer_dev_release_without_srectl_is_still_an_error() {
+    let fetch = |_: &str| -> Result<Vec<u8>, UpdateError> {
+        let body = format!(
+            r#"[
+            {{"tag_name":"srelens-v2.0.0-dev.1","prerelease":true,"assets":[{{"name":"srelens-tui-2.0.0-dev.1-SHA256SUMS.txt"}}]}}
+        ]"#
+        );
+        Ok(body.into_bytes())
+    };
+    let err = plan(
+        "1.2.0-dev.1",
+        Channel::Dev,
+        false,
+        PathBuf::from("/tmp/srelens-tui"),
+        &fetch,
+    )
+    .unwrap_err();
+    let UpdateError::BadRelease(message) = err else {
+        panic!("expected the missing build to be reported, got {err:?}");
+    };
+    assert!(
+        message.contains("release srelens-v2.0.0-dev.1 carries no srectl build"),
+        "{message}"
+    );
+}
+
+#[test]
+fn a_newer_dev_release_without_signature_is_still_an_error() {
+    let fetch = |_: &str| -> Result<Vec<u8>, UpdateError> {
+        let body = format!(
+            r#"[
+            {{"tag_name":"srelens-v2.0.0-dev.1","prerelease":true,"assets":{}}}
+        ]"#,
+            unsigned_assets_for("2.0.0-dev.1")
+        );
+        Ok(body.into_bytes())
+    };
+    let err = plan(
+        "1.2.0-dev.1",
+        Channel::Dev,
+        false,
+        PathBuf::from("/tmp/srelens-tui"),
+        &fetch,
+    )
+    .unwrap_err();
+    let UpdateError::BadRelease(message) = err else {
+        panic!("expected the missing signature to be reported, got {err:?}");
+    };
+    assert!(
+        message.contains("release srelens-v2.0.0-dev.1 is not signed"),
+        "{message}"
+    );
+}
+
+#[test]
+fn a_dev_release_that_still_publishes_srelens_tui_at_same_version_is_current() {
+    let fetch = |_: &str| -> Result<Vec<u8>, UpdateError> {
+        let body = format!(
+            r#"[
+            {{"tag_name":"srelens-v1.2.0-dev.1","prerelease":true,"assets":[{{"name":"srelens-tui-1.2.0-dev.1-SHA256SUMS.txt"}}]}}
+        ]"#
+        );
+        Ok(body.into_bytes())
+    };
+    assert_eq!(
+        plan(
+            "1.2.0-dev.1",
+            Channel::Dev,
+            false,
+            PathBuf::from("/tmp/srelens-tui"),
+            &fetch
+        )
+        .unwrap(),
+        Check::UpToDate {
+            channel: Channel::Dev,
+            latest: "1.2.0-dev.1".into()
+        }
     );
 }
 
@@ -1013,7 +1186,7 @@ fn a_failed_release_lookup_is_reported_rather_than_swallowed() {
             "1.0.0",
             Channel::Stable,
             false,
-            PathBuf::from("/tmp/srelens-tui"),
+            PathBuf::from("/tmp/srectl"),
             &fetch
         ),
         Err(UpdateError::Download(_))
@@ -1024,12 +1197,105 @@ fn a_failed_release_lookup_is_reported_rather_than_swallowed() {
 // Applying — the part no release can exercise yet
 // ---------------------------------------------------------------------------
 
-/// Build a plan whose target is a real file in `dir`, plus a fetch that serves
-/// a matching archive and checksum file.
-fn staged(
-    dir: &Path,
-    body: &'static [u8],
-) -> (Plan, impl Fn(&str) -> Result<Vec<u8>, UpdateError>) {
+/// A signing key made for one test, standing in for the release key, which
+/// no test can sign with.
+struct TestKey(pgp::composed::SignedSecretKey);
+
+impl TestKey {
+    fn new() -> Self {
+        let mut params = pgp::composed::SecretKeyParamsBuilder::default();
+        params
+            .key_type(pgp::composed::KeyType::Ed25519Legacy)
+            .can_sign(true)
+            .can_certify(true)
+            .primary_user_id("srelens update test key <test@test.invalid>".into());
+        let key = params
+            .build()
+            .expect("key parameters")
+            .generate(rand::thread_rng())
+            .expect("a test key");
+        Self(key)
+    }
+
+    /// The public half, armored the way `KEYS` holds it.
+    fn public(&self) -> String {
+        self.0
+            .to_public_key()
+            .to_armored_string(Default::default())
+            .expect("armor the public key")
+    }
+
+    fn fingerprint(&self) -> String {
+        use pgp::types::KeyDetails;
+        format!("{:X}", self.0.fingerprint())
+    }
+
+    /// A detached binary signature over `data`, armored, as `sign-artifacts`
+    /// writes it with `gpg --armor --detach-sign`.
+    fn sign(&self, data: &[u8]) -> Vec<u8> {
+        pgp::composed::DetachedSignature::sign_binary_data(
+            rand::thread_rng(),
+            &self.0.primary_key,
+            &pgp::types::Password::empty(),
+            pgp::crypto::hash::HashAlgorithm::Sha256,
+            data,
+        )
+        .expect("sign")
+        .to_armored_bytes(Default::default())
+        .expect("armor the signature")
+    }
+}
+
+/// A release an update can be applied from, served without the network: the
+/// archive, its checksum file, and that file's signature by `key`.
+struct Release {
+    plan: Plan,
+    archive: Vec<u8>,
+    sums: Vec<u8>,
+    signature: Vec<u8>,
+    key: TestKey,
+    /// Every URL the update asked for, in order.
+    asked: std::cell::RefCell<Vec<String>>,
+}
+
+impl Release {
+    /// The fetch an update makes, answered from this release.
+    fn fetch(&self, url: &str) -> Result<Vec<u8>, UpdateError> {
+        self.asked.borrow_mut().push(url.to_string());
+        if url == self.plan.sums_url {
+            Ok(self.sums.clone())
+        } else if url == self.plan.sums_signature_url {
+            Ok(self.signature.clone())
+        } else if url == self.plan.archive_url {
+            Ok(self.archive.clone())
+        } else {
+            Err(UpdateError::Download(format!("404 Not Found for {url}")))
+        }
+    }
+
+    fn asked_for(&self, url: &str) -> bool {
+        self.asked.borrow().iter().any(|asked| asked == url)
+    }
+
+    /// The keys a build trusts when the key that signed this release is the
+    /// release key.
+    fn trusted_keys(&self) -> String {
+        self.key.public()
+    }
+
+    /// Replace the checksum file, signed by the same key, as a release that
+    /// really published it would be.
+    fn with_signed_sums(mut self, sums: Vec<u8>) -> Self {
+        self.signature = self.key.sign(&sums);
+        self.sums = sums;
+        self
+    }
+}
+
+/// Build a release whose plan targets a real file in `dir`, carrying an
+/// archive of `body`, a checksum file that matches it, and that file's
+/// signature.
+fn staged(dir: &Path, body: &'static [u8]) -> Release {
     let triple = triple_for(
         std::env::consts::OS,
         std::env::consts::ARCH,
@@ -1041,33 +1307,45 @@ fn staged(
     std::fs::write(&target, b"the old binary").expect("seed the installed binary");
 
     let archive = archive_for(&asset, body);
-    let sums = format!("{}  {}\n", sha256_hex(&archive), asset);
+    let sums = format!("{}  {}\n", sha256_hex(&archive), asset).into_bytes();
+    let key = TestKey::new();
     let plan = Plan {
         current: "1.0.0".into(),
         latest: "2.0.0".into(),
         archive_url: asset_url("2.0.0", &asset),
         sums_url: asset_url("2.0.0", &sums_name("2.0.0")),
+        sums_signature_url: asset_url("2.0.0", &sums_signature_name("2.0.0")),
         asset,
         target,
     };
-    let sums_url = plan.sums_url.clone();
-    let fetch = move |url: &str| -> Result<Vec<u8>, UpdateError> {
-        if url == sums_url {
-            Ok(sums.clone().into_bytes())
-        } else {
-            Ok(archive.clone())
-        }
-    };
-    (plan, fetch)
+    Release {
+        plan,
+        archive,
+        signature: key.sign(&sums),
+        sums,
+        key,
+        asked: Default::default(),
+    }
 }
 
 #[test]
 fn a_verified_download_replaces_the_installed_binary() {
     let dir = tempfile::tempdir().unwrap();
-    let (plan, fetch) = staged(dir.path(), b"the new binary");
+    let release = staged(dir.path(), b"the new binary");
 
-    apply(&plan, &fetch).expect("the update applies");
+    let signer = apply_with_keys(
+        &release.plan,
+        &|url: &str| release.fetch(url),
+        &release.trusted_keys(),
+    )
+    .expect("the update applies");
 
+    assert_eq!(
+        signer,
+        release.key.fingerprint(),
+        "it says which key vouched for the release"
+    );
+    let plan = &release.plan;
     assert_eq!(
         std::fs::read(&plan.target).unwrap(),
         b"the new binary",
@@ -1088,42 +1366,204 @@ fn a_verified_download_replaces_the_installed_binary() {
 #[test]
 fn a_download_that_fails_verification_leaves_the_old_binary_in_place() {
     let dir = tempfile::tempdir().unwrap();
-    let (plan, _) = staged(dir.path(), b"unused");
-    let asset = plan.asset.clone();
-    let sums_url = plan.sums_url.clone();
-    // The checksum file names a hash the archive does not have — what a
-    // substituted or truncated download looks like.
-    let fetch = move |url: &str| -> Result<Vec<u8>, UpdateError> {
-        if url == sums_url {
-            Ok(format!("{}  {}\n", "a".repeat(64), asset).into_bytes())
-        } else {
-            Ok(archive_for(&asset, b"tampered"))
-        }
-    };
+    let release = staged(dir.path(), b"unused");
+    // A signed checksum file naming a hash the archive does not have: what a
+    // truncated or corrupted download looks like.
+    let sums = format!("{}  {}\n", "a".repeat(64), release.plan.asset).into_bytes();
+    let release = release.with_signed_sums(sums);
 
-    match apply(&plan, &fetch) {
+    match apply_with_keys(
+        &release.plan,
+        &|url: &str| release.fetch(url),
+        &release.trusted_keys(),
+    ) {
         Err(UpdateError::ChecksumMismatch { .. }) => {}
         other => panic!("expected a checksum mismatch, got {other:?}"),
     }
     assert_eq!(
-        std::fs::read(&plan.target).unwrap(),
+        std::fs::read(&release.plan.target).unwrap(),
         b"the old binary",
         "the installed binary must be untouched"
+    );
+}
+
+/// The case the checksum alone could not catch (#448): someone able to
+/// replace release assets replaces the archive AND the checksum file, so the
+/// two agree. Only the signature over the checksum file tells them apart.
+#[test]
+fn a_checksum_file_changed_after_it_was_signed_is_refused_before_the_archive_is_fetched() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut release = staged(dir.path(), b"the genuine binary");
+    let substitute = archive_for(&release.plan.asset, b"someone else's binary");
+    release.sums = format!("{}  {}\n", sha256_hex(&substitute), release.plan.asset).into_bytes();
+    release.archive = substitute;
+
+    match apply_with_keys(
+        &release.plan,
+        &|url: &str| release.fetch(url),
+        &release.trusted_keys(),
+    ) {
+        Err(UpdateError::Unverified { why, .. }) => assert_eq!(why, SignatureProblem::Mismatch),
+        other => panic!("expected the checksums to fail their signature, got {other:?}"),
+    }
+    assert!(
+        !release.asked_for(&release.plan.archive_url),
+        "nothing past the checksums is downloaded once they fail"
+    );
+    assert_eq!(
+        std::fs::read(&release.plan.target).unwrap(),
+        b"the old binary"
+    );
+}
+
+/// A signature is only as good as the key behind it: one this build does not
+/// trust is no better than none.
+#[test]
+fn checksums_signed_by_a_key_this_build_does_not_trust_are_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let release = staged(dir.path(), b"unused");
+    let someone_else = TestKey::new();
+
+    match apply_with_keys(
+        &release.plan,
+        &|url: &str| release.fetch(url),
+        &someone_else.public(),
+    ) {
+        Err(UpdateError::Unverified { why, .. }) => {
+            assert_eq!(why, SignatureProblem::UnknownSigner)
+        }
+        other => panic!("expected an untrusted signer, got {other:?}"),
+    }
+    assert!(!release.asked_for(&release.plan.archive_url));
+    assert_eq!(
+        std::fs::read(&release.plan.target).unwrap(),
+        b"the old binary"
+    );
+}
+
+/// `apply` is what the command runs, so it must trust the keys compiled in
+/// from `KEYS` and nothing else, not whatever key a test or a release offers.
+#[test]
+fn a_plain_apply_trusts_only_the_keys_compiled_in() {
+    let dir = tempfile::tempdir().unwrap();
+    let release = staged(dir.path(), b"unused");
+
+    match apply(&release.plan, &|url: &str| release.fetch(url)) {
+        Err(UpdateError::Unverified { why, .. }) => {
+            assert_eq!(why, SignatureProblem::UnknownSigner)
+        }
+        other => panic!("expected the test key to be untrusted, got {other:?}"),
+    }
+    assert_eq!(
+        std::fs::read(&release.plan.target).unwrap(),
+        b"the old binary"
     );
 }
 
 #[test]
 fn a_binary_a_package_manager_owns_is_refused_before_anything_is_downloaded() {
     let dir = tempfile::tempdir().unwrap();
-    let (mut plan, _) = staged(dir.path(), b"unused");
-    plan.target = PathBuf::from("/opt/homebrew/bin").join(bin_name());
+    let mut release = staged(dir.path(), b"unused");
+    release.plan.target = PathBuf::from("/opt/homebrew/bin").join(bin_name());
     let fetch = |_: &str| -> Result<Vec<u8>, UpdateError> {
         panic!("nothing should be downloaded for a package-managed binary")
     };
 
-    match apply(&plan, &fetch) {
+    match apply(&release.plan, &fetch) {
         Err(UpdateError::PackageManaged { manager, .. }) => assert_eq!(manager, "Homebrew"),
         other => panic!("expected PackageManaged, got {other:?}"),
+    }
+}
+
+/// Add one entry to `dir`'s ACL with `icacls`, so the check reads a real
+/// Windows ACL rather than a model of one. Principals are given by SID
+/// (`*S-1-1-0` is Everyone), which no display language can rename.
+#[cfg(windows)]
+fn grant(dir: &Path, entry: &str) {
+    let out = std::process::Command::new("icacls")
+        .arg(dir)
+        .args(["/grant", entry])
+        .output()
+        .expect("icacls runs");
+    assert!(
+        out.status.success(),
+        "icacls /grant {entry}: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+/// The Windows half of the unsafe-directory refusal (#450). A directory whose
+/// ACL lets everyone with an account put a file at a name, or take the
+/// directory over, is refused before anything is downloaded, as a
+/// world-writable one is on Unix. Adding a file is enough on its own: the
+/// update renames the running binary aside before renaming the new one in,
+/// and between the two the name is free for anyone who can create it.
+#[cfg(windows)]
+#[test]
+fn a_windows_directory_anyone_can_write_to_is_refused_before_anything_is_downloaded() {
+    for entry in [
+        // Everyone: Modify.
+        "*S-1-1-0:(M)",
+        // Authenticated Users: create files, and nothing else.
+        "*S-1-5-11:(WD)",
+        // BUILTIN\Users: rewrite the ACL, and so grant itself the rest.
+        "*S-1-5-32-545:(WDAC)",
+        // `C:\`'s own: Modify for Authenticated Users on whatever is created
+        // inside. The staged binary inherits it, so anyone could rewrite it
+        // between its read-back and the rename, and the installed one after.
+        "*S-1-5-11:(OI)(CI)(IO)(M)",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let release = staged(dir.path(), b"unused");
+        grant(dir.path(), entry);
+        let fetch = |_: &str| -> Result<Vec<u8>, UpdateError> {
+            panic!("{entry}: nothing should be downloaded into a directory anyone can write to")
+        };
+
+        match apply(&release.plan, &fetch) {
+            Err(UpdateError::UnsafeDirectory { path }) => assert_eq!(path, dir.path(), "{entry}"),
+            other => panic!("{entry}: expected UnsafeDirectory, got {other:?}"),
+        }
+    }
+}
+
+/// The ordinary places, and the entries Windows puts on them, are not
+/// refused: a refusal there would stop people updating without protecting
+/// anyone.
+#[cfg(windows)]
+#[test]
+fn the_ordinary_windows_install_directories_are_not_refused() {
+    for entry in [
+        // As fresh from %TEMP%: the user, SYSTEM and Administrators.
+        None,
+        // `C:\`'s own entry: Authenticated Users may create FOLDERS there.
+        // A folder planted at the binary's name breaks the update but
+        // cannot be run.
+        Some("*S-1-5-11:(AD)"),
+        // Modify for Authenticated Users on the FOLDERS created inside later,
+        // (CI)(IO): it reaches neither this directory nor the files the
+        // update creates in it.
+        Some("*S-1-5-11:(CI)(IO)(M)"),
+        // A named group someone chose to trust, the counterpart of a
+        // group-writable directory on Unix: Backup Operators.
+        Some("*S-1-5-32-551:(M)"),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let release = staged(dir.path(), b"unused");
+        if let Some(entry) = entry {
+            grant(dir.path(), entry);
+        }
+        // Reaching the download is the proof the directory was accepted.
+        let fetch = |_: &str| -> Result<Vec<u8>, UpdateError> {
+            Err(UpdateError::Download(
+                "stopped at the first download".into(),
+            ))
+        };
+
+        match apply(&release.plan, &fetch) {
+            Err(UpdateError::Download(_)) => {}
+            other => panic!("{entry:?}: expected to reach the download, got {other:?}"),
+        }
     }
 }
 
@@ -1153,4 +1593,19 @@ fn the_installed_binary_is_executable() {
     replace_running_binary(&target, b"new").expect("replace");
     let mode = std::fs::metadata(&target).unwrap().permissions().mode();
     assert_eq!(mode & 0o111, 0o111, "mode was {mode:o} — not executable");
+}
+
+/// What `update` guarantees has to be stated where someone running it sees
+/// it, not only in the install guide (#448): `update --help`.
+#[test]
+fn update_help_says_what_is_verified_before_installing() {
+    use clap::CommandFactory;
+    let mut cli = srectl::Cli::command();
+    let help = cli
+        .find_subcommand_mut("update")
+        .expect("an update subcommand")
+        .render_long_help()
+        .to_string();
+    assert!(help.contains("signed"), "{help}");
+    assert!(help.contains("KEYS"), "{help}");
 }

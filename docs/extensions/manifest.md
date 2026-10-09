@@ -3,23 +3,32 @@
 Every app is one JSON manifest. The rules for versioning, identifiers and unknown
 fields are normative and live in [specification.md](specification.md); this page is
 the field reference. Complete examples: [argocd.json](../../examples/extensions/argocd.json)
-and [flux.json](../../examples/extensions/flux.json).
+and [flux.json](../../examples/extensions/flux.json), and the reference providers
+[prometheus.json](../../examples/extensions/prometheus.json) and
+[loki.json](../../examples/extensions/loki.json).
 
 ## JSON Schema
 
-The schema for API 0.1 is committed at
-[`schemas/extension-manifest.v0.1.json`](../../schemas/extension-manifest.v0.1.json).
+The schema for API 0.7 is committed at
+[`schemas/extension-manifest.v0.7.json`](../../schemas/extension-manifest.v0.7.json).
 Point your editor at it by naming it in the manifest:
 
 ```json
 {
-  "$schema": "https://raw.githubusercontent.com/srelens/srelens/main/schemas/extension-manifest.v0.1.json",
+  "$schema": "https://raw.githubusercontent.com/srelens/srelens/main/schemas/extension-manifest.v0.7.json",
   "id": "io.example.cert-manager"
 }
 ```
 
 The file is generated from the host's `Manifest` type, and `cargo test` fails when the
-two differ. After changing a manifest field, regenerate it with:
+two differ. [`schemas/extension-manifest.v0.6.json`](../../schemas/extension-manifest.v0.6.json),
+[`schemas/extension-manifest.v0.5.json`](../../schemas/extension-manifest.v0.5.json),
+[`schemas/extension-manifest.v0.4.json`](../../schemas/extension-manifest.v0.4.json)
+and [`schemas/extension-manifest.v0.3.json`](../../schemas/extension-manifest.v0.3.json)
+are the API 0.6, 0.5, 0.4 and 0.3 contracts, each kept as it was when the next line was cut,
+for manifests that still require `^0.6`, `^0.5`, `^0.4` or `^0.3`; name the one your range
+negotiates to.
+After changing a manifest field, regenerate the newest file with:
 
 ```sh
 UPDATE_CATALOG=1 cargo test -p srelens-plugin-host --test schema
@@ -38,11 +47,14 @@ before publishing.
 | `id` | Yes | Reverse-domain identifier. See [Identifiers](specification.md#identifiers). |
 | `name` | Yes | Display name, 1–120 characters, with no control characters and no bidirectional or invisible format characters. See [Identifiers](specification.md#identifiers). |
 | `version` | Yes | The app's own SemVer version. |
-| `srelensApiVersion` | Yes | A SemVer range of extension API versions, for example `^0.1`. See [Versioning](specification.md#versioning). |
-| `kind` | Yes | `declarative`. No other kind is accepted. |
-| `permissions` | Yes | The exact host capability IDs the bindings use. |
-| `capabilities` | Yes | 1–32 bindings, below. |
-| `contributions` | Yes | `pages`, `detailTabs` and `detailLinks`, below. |
+| `srelensApiVersion` | Yes | A SemVer range of extension API versions, for example `^0.7`. Each field or value form marked **API 0.x** needs a range that admits only that version or later; see [Versioning](specification.md#versioning). |
+| `kind` | Yes | `declarative`, or (**API 0.6**) `executable` for an app that also runs a sidecar; see [Executable apps](#executable-apps). |
+| `permissions` | Yes | The exact host capability IDs the bindings use. `network.http` is written `{ "capability": "network.http", "hosts": [...] }` (API 0.4); see [Network requests](#network-requests). A pod capability may be written `{ "capability": "k8s.streamLogs", "namespaces": [...] }` (API 0.5); see [Logs, exec and port-forwards](#logs-exec-and-port-forwards). |
+| `capabilities` | Yes | 1–32 bindings, below; 0–32 for an executable app, which may do all its work in its sidecar. |
+| `actions` | No | Up to 32 declared mutations, below. |
+| `settings` | No | **API 0.4.** Up to 32 typed settings, drawn as a host form. See [Settings](#settings). |
+| `sidecar` | For `executable` | **API 0.6.** The binaries an executable app runs and the operations they answer. Present exactly when `kind` is `executable`. See [Executable apps](#executable-apps). |
+| `contributions` | Yes | `pages`, `detailTabs`, `detailLinks`, and optional `joins`, `tableColumns`, `detailPanels`, `statusResolvers`, `badges`, `dashboardCards`, `commands` and `resourceLinks` (all **API 0.4**), below. |
 
 Unknown fields are errors at every level. A manifest is at most 256 KiB.
 
@@ -55,6 +67,8 @@ Each entry in `capabilities` binds a local operation to a trusted host capabilit
 | `name` | Local operation name, unique within the manifest. Addressed as `plugin/<id>/<name>`. |
 | `title` | Display title, held to the same rules as `name`. |
 | `target` | The host capability ID. It cannot start with `plugin/`; apps cannot call other apps. |
+| `versions` | **API 0.4.** Optional, `k8s.listCustomResource` only: the API versions the reader accepts, most preferred first, instead of one `arguments.version`. See [Several served versions](#several-served-versions). |
+| `jsonPathOverrides` | **API 0.4.** Optional, with `versions`: per listed version, the paths read differently at that version. See [Several served versions](#several-served-versions). |
 | `arguments` | Fixed arguments, merged into every call. Callers cannot override them. A `k8s.listCustomResource` binding may declare at most 32 `printerColumns`. |
 | `inputs` | The argument names a caller may supply. They cannot overlap with `arguments`. |
 
@@ -62,10 +76,236 @@ Every required argument of the target must come from `arguments` or `inputs`, an
 target's own handler validates the values. `permissions` must name exactly the set of
 targets used.
 
+### Several served versions
+
+A custom-resource reader fixes one API version in `arguments.version`, or lists several
+in `versions`, most preferred first. It never does both: a binding with `versions` and
+`arguments.version` is refused at `capabilities[i].versions` ([#547](https://github.com/srelens/srelens/issues/547)).
+
+```json
+{
+  "name": "helmreleases",
+  "title": "List Helm releases",
+  "target": "k8s.listCustomResource",
+  "versions": ["v2", "v2beta2"],
+  "jsonPathOverrides": {
+    "v2beta2": { ".status.history[0].chartVersion": ".status.lastAttemptedRevision" }
+  },
+  "arguments": { "group": "helm.toolkit.fluxcd.io", "plural": "helmreleases",
+                 "kind": "HelmRelease", "namespaced": true },
+  "inputs": ["context", "namespace"]
+}
+```
+
+The override is illustrative. It is accepted only if the manifest reads
+`.status.history[0].chartVersion` from HelmReleases somewhere, for example in a printer
+column or a status rule.
+
+- **Resolution.** On each cluster, every read, inspection and action looks up the
+  CustomResourceDefinition `{plural}.{group}` and uses the first listed version it serves.
+  The CRD's own version order does not matter. Resolution is per cluster: two clusters
+  can read the same app at different versions. It is not cached. The lookup is the one
+  the host already makes on every call, so a cluster that starts or stops serving a
+  version is followed on the next call. The five-second snapshot that joins and
+  dashboard cards share is keyed by the resolved version as well.
+- **Fail closed.** A cluster that serves none of the listed versions is refused, and the
+  requirements page shows *Required version unavailable*. For the example above the
+  refusal reads
+  `No CustomResourceDefinition helmreleases.helm.toolkit.fluxcd.io serving any of v2, v2beta2 on this cluster; an app reads only custom resources`.
+  A binding that fixes one version is told `serving v2` instead of `serving any of …`.
+  The host never reads a version the binding does not list.
+- **Everything that reads the objects uses the resolved version.** That covers the
+  list and its printer columns and status resolver, the Inspector's object read, a
+  declared action's fresh read, patch and `preconditions`, `availableWhen`, joined
+  table columns and badges, detail panels, and dashboard cards and their target pages.
+  The UID and `resourceVersion` an action pins are the same at every version of an
+  object.
+- **`jsonPathOverrides`** maps, for one listed version, a path the manifest reads
+  the binding's objects through to the path to read at that version. It applies
+  everywhere that path is read for this binding: printer columns, the kind's status
+  resolver, declared action predicates, joined columns, badges and panel fields, a panel
+  on the kind itself, and cards over the reader. At install, `jsonPathOverrides` names
+  at most 8 versions, as `versions` lists at most 8, and each must be a listed version,
+  with at most 32 paths per version and only paths the binding is actually read through.
+  A binding past either limit, or a manifest past 32 capabilities, is refused without its
+  overrides being checked one by one. The replacement must also be a valid path wherever
+  it replaces one: for example, a status rule condition's path has no wildcard. An
+  override cannot rewrite a declaration that also reads another kind, such as a status
+  resolver whose `forKinds` lists several kinds; give the kind its own resolver or panel.
+- A detail panel with no join reads the resource it is shown for at that resource's own
+  `apiVersion`. For a kind whose reader lists versions, its fields read that version's
+  paths. A resource read at a version the reader does not list shows an error on those
+  fields instead of values.
+- An action on the reader is bound only once a cluster has resolved the version, so the
+  host never writes through a version it did not check.
+- Adding a version, or changing an override, changes what the app reads. The permission
+  review lists both, and an update shows them as a permission change.
+
 The author cannot supply a handler, JavaScript, a schema or safety annotations.
 Annotations come from the host: mutations, destructive operations and sensitive reads
-cannot lose their confirmation requirement. Fixed arguments are excluded from the
-public input schema.
+cannot lose their confirmation requirement, and neither the impact level nor the
+confirmation wording can be lowered or replaced — see
+[Host-defined capability metadata](capabilities.md#host-defined-capability-metadata).
+Fixed arguments are excluded from the public input schema.
+
+## Declared actions
+
+An app never sends a Kubernetes request. Each entry in `actions` names one **host
+action primitive** and the reader binding whose kind it acts on, and the host builds
+the request:
+
+| Field | Meaning |
+|---|---|
+| `name` | Local action name, unique across `capabilities` and `actions`. Addressed as `plugin/<id>/<name>`. |
+| `title` | Display title, held to the same rules as a binding's. |
+| `target` | A host action primitive: `k8s.annotate`, `k8s.setFields`, `k8s.setStatusCondition`, `k8s.mergePatch`, `k8s.requestRolloutRestart` or `k8s.requestCordonNode`. |
+| `resource` | The `name` of a reader binding in `capabilities`. The action acts on that binding's kind and on no other. |
+| `arguments` | What the action writes, fixed here. |
+
+```json
+"actions": [{
+  "name": "reconcile",
+  "title": "Reconcile",
+  "target": "k8s.annotate",
+  "resource": "helmreleases",
+  "arguments": { "key": "reconcile.fluxcd.io/requestedAt", "value": "$now" }
+}]
+```
+
+The host fills in `group`, `version`, `plural`, `kind` and `namespaced` from the reader
+binding `resource` names, and fixes the inputs to `context`, `namespace`, `name`, `uid`
+and `resourceVersion` — the object the operator reviewed. An action that binds any of
+those itself is rejected, and so is one whose reader does not fix its kind: there is no
+field in which an app can name a kind it holds no granted reader for. `permissions`
+names the primitive like any other host capability, and the user grants it.
+
+Every primitive re-reads the object, refuses a UID or `resourceVersion` that has moved
+on and an object that is being deleted, pins its patch to both, and reports
+`{"requested": true}` — the API server accepted the request, which is not a claim that
+the controller has done anything.
+
+| Primitive | Arguments | Writes |
+|---|---|---|
+| `k8s.annotate` | `key`, `value` | One annotation. |
+| `k8s.setFields` | `fields` | RFC 6901 pointers under `/spec` (at most 16, at most 8 segments deep, none inside another), each set to a fixed value. |
+| `k8s.setStatusCondition` | `conditionType`, `conditionStatus`, `reason`, `message?` | One condition, through the **status subresource**, carrying over the conditions it does not own. `conditionStatus` is `True`, `False` or `Unknown`, and `lastTransitionTime` moves only when the status changes. |
+| `k8s.mergePatch` | `patch` | A fixed JSON merge patch, past the deny-list below. |
+| `k8s.requestRolloutRestart` | none | The pod template's `kubectl.kubernetes.io/restartedAt` annotation, set to the request time, on a Deployment, StatefulSet or DaemonSet. See [Built-in operational action bindings](#built-in-operational-action-bindings). |
+| `k8s.requestCordonNode` | `unschedulable` | A Node's `spec.unschedulable`: `true` to cordon, `false` to uncordon. See [Built-in operational action bindings](#built-in-operational-action-bindings). |
+
+`k8s.setFields` writes **object fields**, and writes a list by naming the list
+(`"/spec/ignore": ["a", "b"]`). A pointer that reaches *through* a list —
+`/spec/containers/0/image` — is refused against the object the host just read,
+because a merge patch replaces a value of a different shape rather than merging into
+it, and on a field with no schema that would rewrite the whole list as an object. A
+numeric or `-` segment is still a legal object key and is accepted as one; only the
+live object decides.
+
+A string value is a **literal**, except for the two tokens the host substitutes per
+request: `$now` (RFC 3339, nanoseconds, UTC) and `$uuid`. Any other `$`-prefixed string
+is rejected rather than written through, because an app that asked for `$timestamp`
+meant a timestamp. A bound template is at most 8 KiB.
+
+`k8s.mergePatch` may not write `metadata.finalizers`, `metadata.ownerReferences`,
+`metadata.managedFields`, `metadata.uid`, `metadata.resourceVersion` or `status`, may
+not write a Secret's `data` or `stringData`, and may not target an RBAC kind (`Role`,
+`ClusterRole`, `RoleBinding`, `ClusterRoleBinding`, or anything in
+`rbac.authorization.k8s.io`). The host applies the same rules when the manifest is
+installed, when a stored app is reverified, and on the way to the cluster.
+
+### Preconditions and availability
+
+An action may declare what must be true of the object, as predicates the host
+evaluates rather than words in a description:
+
+| Field | Meaning |
+|---|---|
+| `preconditions` | Checked by the host against its own fresh read of the object, before the patch. One that does not hold refuses the request, and the operator is told its `reason`. |
+| `availableWhen` | Checked by the surface, against the object it is already showing, to decide whether the control is offered. The `reason` is the disabled control's tooltip. |
+
+Each list holds at most 8 predicates, and each predicate is one question about one
+value:
+
+```json
+"preconditions": [
+  { "jsonPath": ".spec.suspend", "notEquals": true,
+    "reason": "Resume this resource before requesting reconciliation" }
+]
+```
+
+| Field | Meaning |
+|---|---|
+| `jsonPath` | The value to ask about. An optional leading `$`, then `.key`, `['key']`, `["key"]`, `[0]`, and, from **API 0.4**, one filter form, `[?(@.key=="text")]` (either quote), at most 8 segments and 256 characters. The filter selects the **first** element of a list whose plain `key` holds exactly the string `text` — the element a Kubernetes printer column shows for the same path — so `.status.conditions[?(@.type=="Ready")].status` reads the Ready condition wherever it sits in the list. A filter that matches nothing is an unset field, as `.status.missing` is. No wildcard, other filter, recursive descent or function — each addresses a *set* of values, and "does this hold" over a set is a different question. |
+| `equals` / `notEquals` | The value must (not) be this string, number or boolean **literal**. An object or a list is not a comparand. A field nobody set is not equal to anything, so `notEquals` holds when it is absent. |
+| `present` / `absent` | Written `true`. The value must be set, or unset. `null` counts as unset, which is also why `null` is not a comparand: write `absent: true`. |
+| `reason` | Required, at most 200 characters. Shown to the operator, so it says what to do next. |
+
+Exactly one operator per predicate. Both lists are checked when the app is installed
+and each time a stored app is reverified, and `preconditions` are checked again on the
+way to the cluster — one statement of each rule, in
+`crates/capability/src/predicate.rs`, run from both ends.
+
+Two things these cannot do:
+
+- **They cannot remove a host guard.** An object that is being deleted, and a `uid` or
+  `resourceVersion` that has moved on since the operator reviewed it, are refused
+  before any declared predicate is evaluated. A predicate can only add a refusal.
+- **`availableWhen` does not enforce.** A surface can be seconds out of date; the
+  host's own read cannot. A condition that must hold when the write lands belongs in
+  `preconditions`, and an app that means both writes both.
+
+The `reason` is an app's text shown in the host's UI, so the host escapes it before
+drawing it and frames its own refusal around it.
+
+The host-owned confirmation dialog
+([#552](https://github.com/srelens/srelens/issues/552)) is not part of this API version
+yet, and the Flux and Argo CD actions in core still come from the host's own table
+until [#551](https://github.com/srelens/srelens/issues/551) moves them into manifests.
+
+## Built-in operational action bindings
+
+Four existing summary readers can scope operational actions. Their `arguments`
+must be empty: the host derives the exact API group, version, plural, kind and
+scope from the reader target.
+
+| Reader | Inputs | Allowed action | Fixed action arguments | Impact |
+|---|---|---|---|---|
+| `k8s.listDeployments` | `context`, `namespace` | `k8s.requestRolloutRestart` | `{}` | High |
+| `k8s.listStatefulSets` | `context`, `namespace` | `k8s.requestRolloutRestart` | `{}` | High |
+| `k8s.listDaemonSets` | `context`, `namespace` | `k8s.requestRolloutRestart` | `{}` | High |
+| `k8s.listNodes` | `context` | `k8s.requestCordonNode` | `{"unschedulable": true}` to cordon, `false` to uncordon | Medium |
+
+Grant both the reader and action target. For example:
+
+```json
+"capabilities": [{
+  "name": "deployments", "title": "Deployments", "target": "k8s.listDeployments",
+  "arguments": {}, "inputs": ["context", "namespace"]
+}],
+"actions": [{
+  "name": "restart", "title": "Restart", "target": "k8s.requestRolloutRestart",
+  "resource": "deployments", "arguments": {}
+}]
+```
+
+The reviewing host supplies `context`, `namespace`, `name`, `uid` and
+`resourceVersion`; use an empty namespace for Nodes. Each request freshly reads
+the object, refuses a changed or deleting object and unmet `preconditions`, and
+pins its patch to the reviewed UID and resource version. Success means
+`{"requested": true}`, not that rollout has finished. Host confirmation and
+impact annotations are inherited by the registered app action.
+
+These adapters share patch construction with `k8s.rolloutRestart` and
+`k8s.cordonNode`. They have separate capability IDs because those interactive
+operations do not accept a reviewed object identity. Apps cannot bind the
+interactive operations. General annotation, field, status and merge-patch writes
+remain unavailable on built-in reader bindings. Drain remains deferred: cordon
+never evicts pods.
+
+Built-in readers return their existing summary formats. They do not provide
+whole objects, and cannot back the custom-resource table or detail contributions.
+This contract adds action bindings, not a built-in resource screen. Custom-resource
+bindings still require a real CRD; an app cannot disguise a built-in kind as one.
 
 ## Contributions
 
@@ -78,8 +318,8 @@ contribution names a declared capability.
 |---|---|
 | `id`, `title`, `capability` | Identity, navigation label, and the binding that lists the page's resources. |
 | `group` | Optional navigation group label, held to the same rules as `name`. |
-| `statusColumns` | Optional `{ ready, suspended?, progressing? }`: zero-based indices into the binding's `printerColumns`, each below 64. |
-| `dashboard` | Optional `{ pages, events? }`. `pages` references 1–12 resource pages that have `statusColumns` and are not dashboards. `events` is `{ capability, apiGroups }`, where `capability` binds `k8s.listEvents` and `apiGroups` lists 1–32 dotted groups. |
+| `statusColumns` | **Deprecated** in favour of [`statusResolvers`](#status-resolvers-and-badges); still accepted on the 0.3 and 0.4 lines. Optional `{ ready, suspended?, progressing? }`: zero-based indices into the binding's `printerColumns`, each below 64. |
+| `dashboard` | Optional `{ pages, events? }`. `pages` references 1–12 resource pages that are not dashboards and whose binding's kind has a status resolver (or, deprecated, that have `statusColumns`). `events` is `{ capability, apiGroups }`, where `capability` binds `k8s.listEvents` and `apiGroups` lists 1–32 dotted groups. |
 
 ### `detailTabs` and `detailLinks`
 
@@ -97,15 +337,1057 @@ writes to the cluster.
 mutations ([#549](https://github.com/srelens/srelens/issues/549)), and a manifest that
 uses it now is rejected as an unknown field.
 
+### Table columns and joins
+
+An app can add host-rendered cells to built-in lists and its own resource lists:
+
+```json
+"joins": [{
+  "id": "vulns", "capability": "reports",
+  "match": { "label": "trivy-operator.resource.name", "kindLabel": "trivy-operator.resource.kind" }
+}],
+"tableColumns": [{
+  "id": "critical", "title": "Critical CVEs", "forKinds": ["apps/Deployment"],
+  "source": { "join": "vulns", "jsonPath": ".report.summary.criticalCount" },
+  "format": "number", "sortable": true, "filterable": true
+}]
+```
+
+`joins` has at most 16 entries. Each names a declared `k8s.listCustomResource`
+reader and one match: a metadata `label`, `annotation`, `ownerReference`, or
+resource `name`. `kindLabel` is optional alongside `label`. Joined resources
+are listed once per cluster and namespace, then indexed against each table row's
+namespace and name; owner references use the row UID when it is present.
+
+`tableColumns` has at most 32 entries. Each has a unique `id`, a `title`, 1–32
+group-qualified `forKinds`, a `source`, and a `format` (`text`, `number`,
+`status`, `badge`, `date`, or `duration`). A source is a scalar `jsonPath`
+on the summary row, or one with a declared `join`. `sortable` and `filterable`
+are optional and off by default. A path starts with `.` and is at most 256
+characters; a resolved cell is at most 1,024 bytes. Values that are absent
+render `—`. A failed join read shows the reason and a retry, rather than an
+empty cell. A row field outside a column's top-level JSONPath key is not sent
+to the resolver. If multiple joined resources match one row, that cell shows
+the reason instead of choosing an arbitrary resource; other cells still resolve.
+A scalar over 1,024 bytes is also reported on its cell. The host resolves up to
+1,000 rows in one call and caches each joined list for five seconds, sharing an
+in-flight read. A joined list beyond 2,000 objects fails as incomplete.
+
+### Status resolvers and badges
+
+An app says what status its custom resources have, and puts words on built-in rows
+(#541):
+
+```json
+"statusResolvers": [{ "forKinds": ["helm.toolkit.fluxcd.io/HelmRelease"], "rules": [
+  { "when": [{ "jsonPath": ".spec.suspend", "equals": true }], "status": "suspended", "label": "Suspended" },
+  { "when": [{ "jsonPath": ".status.conditions[?(@.type==\"Ready\")].status", "equals": "True" }],
+    "status": "healthy", "label": "Ready" },
+  { "when": [], "status": "unknown", "label": "Unknown" }
+]}],
+"badges": [{ "id": "flux-managed", "forKinds": ["apps/Deployment"], "rules": [
+  { "when": [{ "jsonPath": ".metadata.labels['kustomize.toolkit.fluxcd.io/name']", "present": true }],
+    "status": "healthy", "label": "Flux",
+    "reason": ".metadata.labels['kustomize.toolkit.fluxcd.io/name']" }
+]}]
+```
+
+A **rule** holds when every condition in `when` holds; an empty `when` always holds,
+which is how a last catch-all rule is written. Rules match **first-hit**: the first
+rule that holds is the answer, whatever later rules say. Each list has 1–16 rules and
+each rule at most 8 conditions.
+
+| Field | Meaning |
+|---|---|
+| `when` | Conditions: a [predicate](#preconditions-and-availability) without `reason` — the same operators, the same path grammar (including the one filter form), evaluated by the same code — plus one operator of its own, `selfReference` (below). |
+| `status` | One of `healthy`, `warning`, `error`, `progressing`, `suspended`, `unknown`. |
+| `label` | Required: 1–40 characters, no control or invisible format characters. The word shown. Colour is never the only signal, so a status or badge always carries its word. |
+| `reason` | Optional path whose scalar value is shown as the reason (a condition's `message`, a label's value). At most 200 characters are shown; objects, lists and empty strings are no reason. |
+
+An ownership claim must not be copyable. A condition otherwise compares against a
+literal, so it cannot say "this annotation names the resource it is on". Instead
+`selfReference` names a reference format the host checks against the object the rule
+reads:
+
+```json
+{ "jsonPath": ".metadata.annotations['argocd.argoproj.io/tracking-id']",
+  "selfReference": "argocd-tracking-id" }
+```
+
+`argocd-tracking-id` is Argo CD's `<app>:<group>/<kind>:<namespace>/<name>`, parsed as
+Argo CD parses it. The condition holds only when the group, kind and name equal the
+object's own, and the namespace does too unless the object is cluster-scoped: Argo CD's
+own rule for a tracking id that references its resource. A tracking id copied onto
+another resource names that other resource, which Argo CD does not treat as owned, so
+the badge does not either. `selfReference` is one operator among `equals`, `notEquals`,
+`present` and `absent`, and exists only in status rules. The host adds the listed
+kind's `apiVersion` and `kind` to a direct badge's metadata so the comparison has the
+object's identity.
+
+`statusResolvers` (at most 16) name 1–32 `forKinds`, each the `group/Kind` of a
+declared `k8s.listCustomResource` reader, and each kind has one resolver. The host
+evaluates the rules on the whole object as it lists it — `extensions.read` binds them
+to the reader as `statusRules` — and returns each row's `status`. When no rule holds
+the host says `unknown`. The app's own tables show a **Status** column, and app
+dashboards count by these six statuses. A binding may not fix `statusRules` itself.
+
+`badges` (at most 16) have a unique `id` and 1–32 `forKinds`, each a built-in kind
+the host lists in exactly that group (`apps/Deployment`, `/Pod`); `/Secret` is refused.
+Without a `join`, the rules read the row's own **metadata only**: every path in `when`
+and `reason` starts with `.metadata`, and the host lists just the kind's names,
+labels, annotations and owner references (up to 2,000 per namespace, cached five
+seconds). With a declared `join`, the rules read the joined resource, through the same
+index a joined table column uses. When no rule holds there is no badge. A row the
+host's metadata read does not contain, or a join that matches more than one resource,
+shows *Couldn't read* on that badge rather than no badge; a failed read fails the
+table's batch with a retry. Badges are resolved in the same `extensions.resolveColumns`
+call as table columns.
+
+Labels and reasons are app and cluster text: the host escapes control and format
+characters and draws them as text.
+
+### `detailPanels`
+
+An app can add native sections after the Inspector's host sections for a
+matching built-in or custom resource:
+
+```json
+"detailPanels": [{
+  "id": "certificate", "title": "Certificate", "forKinds": ["cert-manager.io/Certificate"],
+  "sections": [
+    {"type": "fields", "fields": [
+      {"label": "Not after", "jsonPath": ".status.notAfter", "format": "date"},
+      {"label": "Issuer", "jsonPath": ".spec.issuerRef.name"}
+    ]},
+    {"type": "conditions", "jsonPath": ".status.conditions"}
+  ]
+}]
+```
+
+At most 16 panels may be declared, each with a unique `id`, a valid `title`,
+1–32 group-qualified `forKinds`, and 1–8 sections. A `fields` section holds
+1–32 labelled scalar paths; each may use a declared `join` and one of the
+table-column formats. A missing scalar renders `—`; an oversized scalar or an
+ambiguous join shows its reason on that field. A `conditions` section reads at
+most 1,000 conditions from plain dot-separated object keys, and may also use
+a declared join. Invalid condition data and failed joined reads show an error
+with Retry. Paths are validated when the app is installed, and the host
+rechecks its revision, grants and cluster scope on every resolution.
+
+### Dashboard cards
+
+An app can put host-drawn figures on the cluster overview:
+
+```json
+"dashboardCards": [{
+  "id": "expiring", "title": "Certificates expiring soon", "size": "s",
+  "type": "count", "source": "certificates",
+  "predicate": { "jsonPath": ".status.notAfter", "within": "14d" },
+  "target": { "page": "certificates" }
+}]
+```
+
+`dashboardCards` has at most 16 entries. Each has a unique `id`, a `title`, a
+`size` (`s`, `m` or `l`), a `type`, and a `source`: the name of a declared
+`k8s.listCustomResource` binding. The app supplies data only; the host draws
+every card, and its title and values render as plain text.
+
+| `type` | Shows | Extra field |
+|---|---|---|
+| `count` | How many of the source's objects the predicate holds for. | — |
+| `countByStatus` | Those objects counted by the status the app's status resolvers give them. | — |
+| `metric` | One number reduced from those objects. | `metric`: `{ "jsonPath", "aggregate": "sum" \| "min" \| "max" }`, required |
+| `list` | The first rows of those objects, by namespace and name. | `list`: `{ "jsonPath"?, "order"?: "asc" \| "desc", "limit"?: 1–10 }` |
+
+`metric` is refused on every other type, and so is `list`. A list with no
+`limit` shows 3, 5 or 10 rows by size. With a `jsonPath` it shows that value
+beside each row and orders by it, numbers numerically, missing values last.
+A metric counts only JSON numbers: a matching object without the value is
+skipped, and one whose value is not a number fails the card and names the
+object. A sum of nothing is `0`; a minimum or maximum of nothing is no value.
+
+`predicate` is optional; without it a card counts every object. It has one
+`jsonPath`, in the bounded grammar action predicates use, and exactly one
+operator:
+
+| Operator | Holds when the value at `jsonPath` |
+|---|---|
+| `equals` | is this string, number or boolean. |
+| `absent: true` | is unset or null. |
+| `within` | is an RFC 3339 timestamp within this duration of now: `"14d"` is from now until 14 days ahead, `"-1h"` the last hour. |
+| `before` | is an RFC 3339 timestamp earlier than now plus this duration: `"14d"` includes everything already past, `"0d"` is only the past. |
+
+A duration is a whole number of one unit, `s`, `m`, `h`, `d` or `w`, with an
+optional leading `-`, at most 3650 days either way. A `within` window of zero
+is refused. A value that is not an RFC 3339 timestamp never satisfies a date
+operator. A path the host cannot evaluate is refused at install, and never
+holds, so a typo cannot count every object.
+
+`target` is optional. Its `page` must be a declared page, not a dashboard, whose
+`capability` is the card's `source`. The card's title then opens that page
+showing only the objects the card counted, on the same cluster and namespace
+selection, with a way back to the whole list.
+
+The host answers every card an app declares in one call, reading each source
+once through the five-second snapshot table columns use. Cards follow the
+overview's namespace selection: one selected namespace is read directly, and
+none or several read every namespace and keep the selected ones. A
+cluster-scoped source ignores the selection. A card whose source cannot be read
+shows the reason and a retry instead of a figure, as does one whose source
+reached the 2,000-object read limit.
+
+A `countByStatus` card counts its objects by the
+[status resolver](#status-resolvers-and-badges) for its source's kind: each object
+takes the label of the first rule that holds, or *Unknown*, the same word its badge
+shows on the app's list. A `countByStatus` card over a reader whose kind has no
+`statusResolvers` entry, or whose reader does not fix `group` and `kind`, is refused
+at install at `contributions.dashboardCards[i].type`. It never counts by
+`statusColumns`.
+
+From **API 0.7**, `within` may be the whole value
+`"${settings.<id>}"` (for example `"${settings.expiryWindow}"`), naming a declared
+`select` setting with a default.
+Every option must be a positive duration under the same bounded grammar.
+The host uses the saved choice, or the default, for both the count and its
+linked page's filter. Invalid stored values show an error, never a zero count.
+Only this duration is settable: the card's source, path and target remain fixed.
+
+### `commands`
+
+Entries in the new design's command palette (#544). The host shows each as
+`<app name>: <title>`, so an app's command never reads as the host's own.
+
+```json
+"commands": [
+  { "id": "open-helmreleases", "title": "Open Helm releases", "target": { "page": "helmreleases" } },
+  { "id": "reconcile", "title": "Reconcile Helm release", "target": { "action": "helmreleases-reconcile" },
+    "forKinds": ["helm.toolkit.fluxcd.io/HelmRelease"] }
+]
+```
+
+| Field | Meaning |
+|---|---|
+| `id` | Unique among commands: 1–64 ASCII letters, digits and `-`. |
+| `title` | Label shown after the app name, held to the rules for `name`. |
+| `target` | Exactly one of `{ "page": <page id> }` or `{ "action": <declared action name> }`. |
+| `forKinds` | Action commands only, and required there: the group-qualified kind of the `k8s.listCustomResource` reader the action acts on. |
+
+At most 32 commands. A page command opens the page on the cluster in focus. An
+action command is offered only while one of the app's resources of that kind is
+open in its own tab, and running it opens that tab's host confirmation — the same
+review the action's button opens. It never writes on its own.
+
+Validation reports, at the field that has to change: an undeclared page
+(`EXTENSION_UNRESOLVED_PAGE` at `target.page`), an undeclared action
+(`EXTENSION_UNRESOLVED_CAPABILITY` at `target.action`), an action on a reader other
+than a custom-resource reader, or on one no page lists (`EXTENSION_INVALID_BINDING`
+at `target.action`), `forKinds` on a page command (`EXTENSION_INVALID_BINDING`),
+a kind the action does not act on (`EXTENSION_INVALID_BINDING` at `forKinds[i]`),
+and the usual identifier, label, count, kind and duplicate rules.
+
+### `resourceLinks`
+
+An app can say how a resource of one kind relates to resources of another: a
+Deployment is managed by an Argo CD Application, or by a Flux Kustomization; a
+Kustomization references its GitRepository; an HTTPRoute sends traffic to a
+Service. The Inspector shows these as a **Related** section of links, on both
+ends: the resource a link is read from shows its targets, and each target shows
+the resources whose links name it. The resolved links are edges (`from`,
+`relation`, targets) a topology view can draw too.
+
+```json
+"resourceLinks": [
+  { "id": "argocd-owner", "from": "apps/Deployment", "to": "argoproj.io/Application",
+    "relation": "managedBy",
+    "match": { "annotation": "argocd.argoproj.io/tracking-id", "parse": "argocd-tracking-id",
+               "defaultNamespace": "argocd" } },
+  { "id": "kustomization", "from": "apps/Deployment", "to": "kustomize.toolkit.fluxcd.io/Kustomization",
+    "relation": "managedBy",
+    "match": { "label": "kustomize.toolkit.fluxcd.io/name",
+               "namespaceLabel": "kustomize.toolkit.fluxcd.io/namespace" } },
+  { "id": "git-source", "from": "kustomize.toolkit.fluxcd.io/Kustomization",
+    "to": "source.toolkit.fluxcd.io/GitRepository", "relation": "references",
+    "match": { "path": ".spec.sourceRef" } },
+  { "id": "backends", "from": "gateway.networking.k8s.io/HTTPRoute", "to": "/Service",
+    "relation": "references", "match": { "path": ".spec.rules[*].backendRefs[*]" } }
+]
+```
+
+| Field | Rule |
+| --- | --- |
+| `id` | 1–64 letters, digits and `-`; unique among the app's links. |
+| `from` | The group-qualified kind the link is read from (`apps/Deployment`, `/Pod`). Built-in or custom. |
+| `to` | The group-qualified kind of the target: one a declared `k8s.listCustomResource` reader lists, or (**API 0.5**) a [built-in kind](#built-in-targets) the host lists. That list is where the host looks the target up, so it can say whether it exists. The Inspector opens an app's kind only when one of the app's `pages` is backed by that reader, and a built-in kind in its own Inspector; otherwise it names the target as text. |
+| `relation` | `ownedBy`, `managedBy`, `exposedBy` or `references` — what `from` is to `to`. |
+| `match` | Exactly one of `label`, `ownerReference`, `annotation`, `name` and (**API 0.5**) `path`. |
+
+`match` uses a join's selectors, read the other way round: a join indexes the
+listed resources by a key that names the row, while a link reads the key on
+the resource being inspected, and that key names the target. The target is
+then found by name through the same index a join uses.
+
+- `label`: the label's value is the target's name. `namespaceLabel` names the
+  label holding its namespace; without it the target is in the resource's own
+  namespace. A set name label with an unset namespace label is an error, not
+  "no link".
+- `ownerReference: true`: each owner reference whose API group and kind are
+  `to`'s. An owner whose uid no longer matches is shown as not found. A
+  resource with more than 64 owner references is reported as a failure on the
+  link rather than read.
+- `annotation`: the annotation's value is the target's name — or, with
+  `parse`, a reference in a host-known format. `argocd-tracking-id` is the only
+  one, and it requires `to` to be `argoproj.io/Application`: it counts only
+  when it names the resource it is on (a copied id is not
+  ownership), and its application part is the target. `<namespace>_<name>`
+  names its own namespace. A bare name is an application in Argo CD's own
+  namespace, which the id does not say, so declare it as `defaultNamespace`
+  (for example `"argocd"`, a namespace name, allowed only beside this `parse`):
+  the target is then looked up in that namespace alone, and a same-named
+  Application elsewhere is not it. Without `defaultNamespace` a bare name is
+  never searched for across namespaces: the Inspector names it as plain text,
+  *namespace unknown*, and never calls it found or missing. A Secret's
+  annotation values are redacted on every read, so a link from `/Secret` may not
+  match by annotation.
+- `name: true`: the target has the resource's own name and namespace. Not
+  allowed from a kind to itself.
+- `path` (**API 0.5**): a path on the resource whose values name the target, in
+  the [predicate grammar](#preconditions-and-availability) plus `[*]`, which
+  reads every element of a list: `.spec.sourceRef`,
+  `.spec.rules[*].backendRefs[*]`. Each value is the target's name, or an object
+  reference with a `name` and, optionally, a `namespace`, a `kind`, and a
+  `group` or an `apiVersion`. A reference whose `kind` or group is not `to`'s is
+  some other link's and is skipped — a Flux `sourceRef` to an OCIRepository, a
+  Gateway API backend that is a ServiceImport — so one path can serve several
+  links, one per kind. Without a `namespace` the target is in the resource's
+  own. An unset field, a null and an empty name are no reference; a list read
+  without `[*]`, a number, or a reference with no `name` is a failure on the
+  link. A path may reach at most 256 values. The path is checked at install. The
+  host reads it on the resource as **its own read** through the app's reader of
+  `from` — the Inspector sends only identity and metadata — so `from` must be a
+  kind a declared `k8s.listCustomResource` reader lists, never `/Secret`. It is
+  one of that reader's paths, so a version's `jsonPathOverrides` may rewrite it
+  ([Several served versions](#several-served-versions)). A path may link a kind
+  to itself (`.spec.dependsOn[*]`).
+
+A cluster-scoped resource (a Namespace, a Node) has no namespace of its own, so a
+target it names without one is found by name: in a cluster-scoped kind directly,
+and in a namespaced kind across namespaces, reported as ambiguous if more than
+one has that name.
+
+At most 32 links may be declared. Each resolution rechecks the installed
+revision, grants and cluster scope. A resource that names no target shows no
+link; a target the resource names but the cluster does not have is listed as
+not found; a failed list, an ambiguous name, or a target list that reached its
+2,000-object limit is shown as a failure with its reason and a Retry — never as
+"No related resources" or "not found".
+
+#### Built-in targets
+
+**API 0.5.** `to` may name a Kubernetes built-in kind the host lists: `/Pod`,
+`/Service`, `/Endpoints`, `/ConfigMap`, `/Secret`, `/ServiceAccount`,
+`/PersistentVolumeClaim`, `/PersistentVolume`, `/ResourceQuota`, `/LimitRange`,
+`/Namespace`, `/Node`, `apps/Deployment`, `apps/StatefulSet`, `apps/DaemonSet`,
+`apps/ReplicaSet`, `batch/Job`, `batch/CronJob`,
+`autoscaling/HorizontalPodAutoscaler`, `policy/PodDisruptionBudget`,
+`networking.k8s.io/Ingress`, `networking.k8s.io/IngressClass`,
+`networking.k8s.io/NetworkPolicy`, `discovery.k8s.io/EndpointSlice`, the four
+`rbac.authorization.k8s.io` kinds, `storage.k8s.io/StorageClass`,
+`scheduling.k8s.io/PriorityClass`, `node.k8s.io/RuntimeClass`,
+`coordination.k8s.io/Lease`, and the two `admissionregistration.k8s.io` webhook
+configurations. An Event is a record about a resource and is not a target.
+No permission is declared for it: the host lists the kind's **metadata only**
+(a `PartialObjectMetadataList` request, so no spec or status is sent), under
+the user's own RBAC. The resolved link's `capability` is empty, and the target
+opens in the host's own Inspector — only when the rail shows the cluster the
+Inspector is for, because that Inspector follows the rail.
+
+A **Secret** target is found by identity alone. Its values never leave the API
+server, and the host keeps a Secret's name, namespace, uid, labels and owner
+references, never its annotations, which it redacts on every ungated read. An
+ExternalSecret's `spec.target.name`, for example, links it to the Secret it
+writes:
+
+```json
+{ "id": "target", "from": "external-secrets.io/ExternalSecret", "to": "/Secret",
+  "relation": "references", "match": { "path": ".spec.target.name" } }
+```
+
+A link to a kind a reader lists means what it did in API 0.4, whatever the
+kind's name.
+
+#### The target's view
+
+The Inspector of a resource of a link's `to` kind shows the same declarations
+read the other way round (`extensions.resolveReverseLinks`): the resources of
+`from` whose link names this one, grouped under the relation as it reads from
+the target — **Owns**, **Manages**, **Exposes**, **Referenced by**. No manifest
+change asks for it; an API 0.4 app's links get it too.
+
+- The host lists `from` — through the app's reader, or as a built-in kind's
+  metadata, as above — and reads each resource's link exactly as the forward
+  link reads it. The list is shared with joins, columns, panels and cards through
+  the same five-second snapshot.
+- It lists one namespace, the target's, when the link can only name a target
+  beside the resource it is read from: a `label` without `namespaceLabel`, an
+  `annotation` without `parse`, `ownerReference` and `name`, when both kinds are
+  namespaced. A `namespaceLabel`, an Argo CD tracking id or a `path` may name a
+  target in any namespace, and a cluster-scoped target is named from every
+  namespace, so those list the cluster.
+- The list stops at 2,000 objects. When it does, the link says so
+  (`truncated`): the sources shown are those found among what was read, and
+  there may be more.
+- A resource whose link cannot be read — a name label with its namespace label
+  unset, a path that holds a list — is counted and described (`unreadable`),
+  not dropped and not listed.
+- An owner reference counts only when its uid is the target's. A reference that
+  leaves the namespace unsaid (a bare Argo CD name without `defaultNamespace`,
+  a cluster-scoped resource's label) is listed with why it may mean a namesake.
+- A `from` the host cannot list — a custom kind no declared reader lists — is a
+  failure on that link, never "nothing refers to this".
+
+## Settings
+
+An app declares its settings, and the host draws them as a form in Settings → Apps
+(#542):
+
+```json
+"settings": [
+  { "id": "prometheusUrl", "type": "url", "title": "Prometheus URL", "required": true },
+  { "id": "expiryWindowDays", "type": "number", "title": "Warn before expiry (days)", "default": 14, "minimum": 1, "integer": true },
+  { "id": "refreshMode", "type": "select", "title": "Refresh mode", "default": "normal",
+    "options": [{ "value": "normal", "label": "Normal" }, { "value": "hard", "label": "Hard" }] },
+  { "id": "token", "type": "secret-reference", "title": "API token" }
+]
+```
+
+| Field | Required | Meaning |
+|---|---|---|
+| `id` | Yes | 1–64 letters, digits and `-`, unique among the app's settings. |
+| `type` | Yes | One of the types below. |
+| `title` | Yes | The field's label: 1–120 characters, no control or format characters. Drawn as plain text. |
+| `description` | No | Help under the field: 1–500 characters, no control or format characters. Drawn as plain text. |
+| `required` | No | A save must give it a value. Not allowed beside `default`, which makes a setting never missing. |
+| `default` | No | The value in effect while none is saved. Checked against the setting's own rules. Not allowed on `secret-reference`. |
+| `options` | `select`, `multi-select` | 1–64 `{ "value", "label" }` entries with unique values. Refused on other types. |
+| `minimum`, `maximum`, `integer` | `number` only | Bounds, and whether only whole numbers are taken. |
+| `maxLength` | `string` only | 1–4096 characters; 1024 when absent. |
+
+| Type | A value is |
+|---|---|
+| `string` | One line of at most `maxLength` characters, with no control or format characters. |
+| `number` | A JSON number within the bounds, and whole when `integer`. |
+| `boolean` | `true` or `false`. |
+| `select` | One of the option values. |
+| `multi-select` | A list of option values, each at most once. |
+| `url` | An `http` or `https` URL with a host and no user name or password. Put credentials in a `secret-reference`. |
+| `namespace-selector` | A Kubernetes namespace name. The form lists the namespaces of a cluster the person chooses. |
+| `cluster-selector` | A kubeconfig context, saved by its key (`ClusterContext.key`), the identity app cluster scope uses. |
+| `secret-reference` | Never a value. The host's secret store keeps the secret; the inventory holds only its reference, `{"secretRef": "<app id>/<setting id>"}`, written by that store. See [Secret settings](#secret-settings). |
+
+The host holds every save to these rules, whatever the form allowed. A save
+(`extensions.configure` with `action: "settings"`) is refused, with each problem at
+`settings.<id>`, if it names an undeclared setting, gives a value the setting refuses,
+leaves out a required one, or sends anything at all for a `secret-reference` — its
+reference included. A cleared field is left out, so the setting falls back to its
+default. No refusal repeats the value it refused.
+
+### Interpolating a setting
+
+A setting can fill a binding argument, written as the whole value
+`"${settings.<id>}"`, only where the host capability behind the binding marks that
+argument as settable, and only with a setting of a type the argument takes:
+
+| Capability | Argument | Setting types |
+|---|---|---|
+| `k8s.annotate` | `value` | `string`, `select` |
+| `k8s.setStatusCondition` | `message` | `string`, `select` |
+| `network.http` | `url` | `url` |
+
+Nothing else is settable. Every other argument decides what a request reads or where
+a write lands, which is the access a person reviewed at install, so a setting cannot
+move it. An interpolated setting must be `required` or have a `default`, so the argument
+always has a value. A `secret-reference` is never interpolated.
+
+`${settings.` anywhere else is refused at install at the path that holds it: in any
+other argument, in a nested value or key of an argument, embedded in longer text
+(`"v-${settings.mode}"`), or anywhere outside `capabilities[i].arguments`,
+`actions[i].arguments` and a `network.http` permission's `hosts`, where a host may name
+a `url` setting ([Hosts](#hosts)).
+
+The same check (`PluginHost::interpolate`) runs three times:
+
+- **At install**, it checks the position and the type. The capability's own rules for a
+  binding then check the rest of the binding with a stand-in in the setting's place.
+- **On save**, the new values are put in place in every binding that uses them and
+  checked by that capability's own rules. A value its declaration allows but the
+  capability refuses, such as `$bogus` for `k8s.annotate`, is refused when saved, at
+  `actions[i].arguments`.
+- **On every request**, the value saved at that moment, or the default, is checked
+  against its declaration again and then by the capability's rules. A stored value that
+  no longer fits, such as one from a hand-edited inventory, refuses the request and
+  names the setting.
+
+The access review lists the declaration of each setting an action or reader
+interpolates, so an update that lets a setting write another value shows as changed
+access.
+
+API 0.7 also permits a duration `select` in a dashboard predicate's `within`,
+under the narrower rules in [Dashboard cards](#dashboard-cards).
+
+### Secret settings
+
+A `secret-reference` setting is kept by the host's secret store (#543). On the desktop
+that is srelens's encrypted secrets vault (`secrets.enc`), whose one master key is held
+by the OS keychain or derived from the master password; the app secret is one more
+entry in it, beside the MCP token and the provider API keys, keyed by
+`<app id>/<setting id>`. The inventory holds only the reference.
+
+- **Permission.** A manifest installed or updated now that declares a
+  `secret-reference` setting lists `extension.secretStore` in `permissions`, and one
+  that declares none may not (`EXTENSION_PERMISSION_MISMATCH`). It is granted at install
+  like any other permission and is never a binding target
+  (`EXTENSION_UNSUPPORTED_TARGET`). The install and update review names it, the secret
+  settings it covers, and the host's metadata for it: sensitive, `medium` impact, and its
+  confirmation wording.
+- **Migration.** Secret settings shipped before the permission existed (#542, in the
+  pre-release `srelens-v0.15.1-185`), so an app installed then may declare one without
+  requesting `extension.secretStore`. That build wrote it under `^0.3`, and `settings`
+  is an API 0.4 field ([#709](https://github.com/srelens/srelens/issues/709)), so this
+  host quarantines it with "`settings` requires API 0.4.0" until it is updated to a
+  release that requires `^0.4`, and requests the permission. A `^0.4` app without the
+  permission is not quarantined: it keeps working, and its secret settings cannot be
+  set, with the form saying the app was not granted the permission, until it is
+  reinstalled or updated to a version that requests it.
+- **Write-only.** Settings → Apps sets, replaces and clears a secret, and shows whether
+  it is set. Nothing returns the value: not `extensions.list`, not the capability's own
+  answer (`{"set": true}`), not an error, not the audit log, not an MCP response or
+  consent prompt, not exported settings or the settings bundle. The consent prompt shows
+  only the action, and the app and setting when they name an installed app's declared
+  secret; anything else the call carried is left out.
+- **Fails closed.** A secret is stored only while the vault's key is held by the OS
+  keychain (or its biometric gate) or derived from the master password, and the vault is
+  unlocked. When the vault's key is only in a plain file beside it (no keychain and no
+  master password), the vault is locked, or there is no store at all, a set is refused
+  with the reason, which Settings → Apps shows beside the field. Nothing is ever written
+  in plain text instead.
+- **Deleted with the app.** Removing the app, or an update or rollback that no longer
+  declares the setting as a secret, deletes the secret. The inventory is the source of
+  truth and the store follows it: after every inventory change the host deletes each
+  stored secret no app references. A delete the store cannot make at that moment (a
+  locked vault) leaves the secret unreferenced, where nothing can reach it, and the next
+  change deletes it. **Reset** in Settings → Apps clears the app's secrets explicitly
+  (`extension.secretStore` with `clear` and no setting) before it resets the other
+  settings; a settings save through `extensions.configure` on its own keeps them.
+- **Where it is used.** The host injects a secret only into an argument a host capability
+  declares as a secret slot, and only for an app granted `extension.secretStore`
+  (`PluginHost::inject_secret`). The one slot is a `network.http` request's
+  `secretHeaders` (#568): see [Network requests](#network-requests). A declarative app
+  never sees the value, and a `secret-reference` is never interpolated.
+- **Web.** The web host keeps no app secrets yet (#522): a web user's registry has no
+  secret store, so `extension.secretStore` is not registered there, and it is refused
+  before dispatch too. Apps with secret settings still install; those settings stay unset.
+
+### When the manifest changes
+
+An update or a rollback keeps only the saved values the new manifest still declares and
+still accepts. A string setting that becomes a `secret-reference` loses its plaintext
+rather than keeping it under a secret's name, and a secret that becomes a string does not
+turn its reference into a value; the stored secret itself is deleted, as it is when a
+secret setting is dropped. A required setting left without a value makes the
+requests that interpolate it fail, naming the setting, until one is saved.
+
+## Network requests
+
+API 0.4. An app reaches a system outside the cluster — Prometheus, Grafana, GitHub —
+only through `network.http` (#568), and only the hosts it was granted. It never opens a
+connection itself: the host sends each request, and holds it to the allowlist below.
+
+```json
+"permissions": [
+  { "capability": "network.http", "hosts": ["${settings.prometheusUrl}", "api.github.com"] },
+  "extension.secretStore"
+],
+"settings": [
+  { "id": "prometheusUrl", "type": "url", "title": "Prometheus URL", "required": true },
+  { "id": "token", "type": "secret-reference", "title": "API token" }
+],
+"capabilities": [
+  { "name": "up", "title": "Targets up", "target": "network.http", "inputs": [],
+    "arguments": {
+      "url": "${settings.prometheusUrl}", "path": "/api/v1/query", "query": { "query": "up" },
+      "headers": { "Accept": "application/json" },
+      "secretHeaders": { "Authorization": { "secret": "token", "prefix": "Bearer " } } } }
+]
+```
+
+### Hosts
+
+`network.http` is the one permission written as an object, and it always is: a plain
+`"network.http"` is refused, and so is `hosts` on any other capability. It lists 1–16
+hosts, each once:
+
+| Entry | Reaches |
+|---|---|
+| `api.github.com` | That host, at the default port of the request's scheme. |
+| `prometheus.internal:9090` | That host, at that port only. |
+| `*.grafana.net` | Exactly one label before `grafana.net` (`myorg.grafana.net`, not `a.b.grafana.net` or `grafana.net`), as a certificate wildcard does. The wildcard is the whole leftmost label and needs two labels after it, so `*.com`, `api.*.com` and `foo*.bar.com` are refused. |
+| `127.0.0.1`, `[::1]:9090` | That IP address, at the default or the named port. |
+| `${settings.<id>}` | The host and port of the URL saved in that `url` setting (or its default), read again on every request. While the setting has no value it reaches nothing. |
+
+A literal entry is lowercase ASCII (write an internationalized name as punycode), with
+no scheme, path or trailing dot. A setting reference is the whole entry and names a
+declared `url` setting. Problems are reported at `permissions[i].hosts[j]`.
+
+### A request
+
+A `network.http` binding is one fixed GET. It takes no `inputs`: a
+[provider](#metric-log-and-trace-providers) (API 0.7) that sends its query through the
+binding adds only the query and time range the host binds, as parameters the host sets.
+
+| Argument | Meaning |
+|---|---|
+| `url` | Required. `https://…`, or `http://` to this computer (below). May be `"${settings.<id>}"` for a `url` setting. A literal URL must be on the app's own hosts. |
+| `path` | Appended to the URL's path. Starts with `/`, at most 2048 characters, with no `.` or `..` segment (encoded ones included), query, fragment, backslash or space. |
+| `query` | Up to 32 parameters, added to the URL's own. |
+| `headers` | Literal headers. `Authorization` and `Cookie` are refused here, since a manifest is public, and so are the headers the host sets itself (`Host`, `Content-Length`, `Connection`, `Proxy-*` and the like). |
+| `secretHeaders` | Headers filled from secrets: `{ "<Header>": { "secret": "<setting id>", "prefix": "Bearer " } }`. The setting is a declared `secret-reference`; `prefix` is up to 32 printable ASCII characters. |
+
+Up to 32 headers in all, and a request URL of at most 8 KiB.
+
+### What the host holds a request to
+
+On every request, before anything is sent and again at every redirect:
+
+- **HTTPS only.** Plain `http` reaches only this computer (`localhost`, `127.0.0.0/8`,
+  `::1`), and only once a person turns on **Allow plain HTTP to this computer
+  (loopback)** in the app's details in Settings → Apps — for a service with no HTTPS,
+  such as a Prometheus behind `kubectl port-forward`. It is off for every app until then,
+  and it is per app, so allowing it for one does not let another reach a local service.
+- **The allowlist.** The URL's host and port must match an entry, resolved from the
+  manifest and the app's saved settings at that moment.
+- **Redirects.** Each one is checked against both rules again, at most four. A request
+  carrying a secret header follows no redirect to another origin (scheme, host and
+  port), since a server can redirect anywhere and a header is not tied to where it
+  goes.
+- **Limits.** 10 s to connect, 20 s for the whole request, 4 MiB of response.
+- **Secrets last.** The secret for each `secretHeaders` entry is read from the host's
+  secret store only after the request has passed every rule above, and only through
+  `PluginHost::inject_secret`: the app must be granted `extension.secretStore`, and the
+  setting must hold the host's own reference for it. The value goes into a sensitive
+  header and nowhere else.
+
+The answer is `{ "status", "contentType", "body" }`: the body parsed when the server says
+it is JSON, as text otherwise. A status outside 2xx is an error that names it. No error
+repeats the URL, its host or a secret; a URL may be a setting's value.
+
+**On the web, only under the operator's ceiling.** On the web host a request leaves from
+the shared server. So a web user's registry has `network.http` only when the server's
+extension policy lists hosts in `networkCeiling`, and each request must then go to a
+host both this list and the ceiling allow, over HTTPS. Otherwise an app that binds it
+is refused there (`EXTENSION_UNSUPPORTED_TARGET`); see
+[capabilities.md](capabilities.md#web-host) and [WEB.md](../WEB.md#extension-policy).
+
+`extensions.read` sends a request, with every check an app read makes: the app enabled,
+at the revision the view knows, on a cluster it is enabled for, with its grants. A read
+stream (`extensions.streams`) refuses a `network.http` binding, so nothing calls another
+system on a timer. The one exception is a [log provider](#log-providers) the log view
+follows: the host asks it again every 5 seconds while the view is open, at an interval
+the app cannot set.
+
+## Metric, log and trace providers
+
+API 0.7 ([#569](https://github.com/srelens/srelens/issues/569)). A provider is a query
+template that one of the app's `network.http` bindings sends: a PromQL range query drawn
+as a chart on a workload's or a pod's overview, a LogQL query the log view can follow as
+a source beside Kubernetes, or a TraceQL search listed on an overview. The app writes the
+template. The host binds the view's cluster, namespace, workload or pod and time range
+into it, sends it through the binding with every rule [a request](#what-the-host-holds-a-request-to)
+is held to, reads the answer, and draws it itself. A provider supplies data, never markup.
+
+```json
+"permissions": [{ "capability": "network.http", "hosts": ["${settings.prometheusUrl}"] }],
+"settings": [{ "id": "prometheusUrl", "type": "url", "title": "Prometheus URL", "required": true }],
+"capabilities": [
+  { "name": "rangeQuery", "title": "Prometheus range query", "target": "network.http", "inputs": [],
+    "arguments": { "url": "${settings.prometheusUrl}", "path": "/api/v1/query_range" } }
+],
+"contributions": {
+  "metricProviders": [
+    { "id": "cpu", "title": "CPU by pod", "capability": "rangeQuery", "language": "promql",
+      "forKinds": ["apps/Deployment", "apps/StatefulSet", "apps/DaemonSet"], "unit": "cores",
+      "query": "sum by (pod) (rate(container_cpu_usage_seconds_total{namespace=\"${namespace}\", pod=~\"${workload:regex}-.+\"}[5m]))" }
+  ]
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `id` | 1–64 letters, digits and `-`, unique across all three lists. |
+| `title` | 1–120 characters, no control or format characters. The panel's or the source's name. |
+| `capability` | A `network.http` binding in `capabilities`. Its `path` is the endpoint: `/api/v1/query_range`, `/loki/api/v1/query_range`, `/api/search`. |
+| `language` | `promql` in `metricProviders`, `logql` in `logProviders`, `traceql` in `traceProviders`. |
+| `forKinds` | 1–4 of `apps/Deployment`, `apps/StatefulSet`, `apps/DaemonSet` and `/Pod`, each once: where the provider is shown. |
+| `query` | The template, 1–2048 characters on one line. See below. |
+| `unit` | Metric providers only: `number`, `percent`, `ratio`, `bytes`, `bytesPerSecond`, `seconds`, `cores` or `perSecond`. |
+
+Each list holds at most 16 providers.
+
+### Variables
+
+| Variable | Is | Known on |
+|---|---|---|
+| `${cluster}` | The kubeconfig context's name, as its file declares it. | Every kind. |
+| `${namespace}` | The view's namespace. | Every kind. |
+| `${workload}` | The Deployment, StatefulSet or DaemonSet the view shows. | The three workload kinds. |
+| `${pod}` | The Pod the view shows. | `/Pod`. |
+| `${range}` | The panel's whole time range, as a duration: `3600s`. | Metric providers. |
+| `${step}` | The panel's resolution, as a duration: `15s`. | Metric providers. |
+
+A variable must be known on every kind in `forKinds`, so `${pod}` needs `forKinds` to be
+`["/Pod"]` alone, and `${workload}` is refused beside `/Pod`.
+
+**Where a variable may stand.** The host reads the template the way the language reads
+its strings, and a name — `cluster`, `namespace`, `workload`, `pod` — may stand only
+inside a double-quoted string: `namespace="${namespace}"`. In a regex matcher's string
+(after `=~`, `!~` or `|~`, and an `or` alternative of a LogQL line filter such as
+`|~ "error" or "${pod:regex}"`) it is written `${name:regex}`, which escapes the value's RE2
+metacharacters first, so `pod=~"${workload:regex}-.+"` matches a workload named `api.v2`
+literally and a cluster named `.*` matches only that name; `${name:regex}` anywhere else
+is refused. The host escapes `\` and `"` as it inserts every value, so with each backslash
+doubled a value can neither end its string nor begin one of the languages' other escape
+sequences, such as `\n`, and it holds each value to what it can be: a namespace, workload
+or pod is a Kubernetes name, and a cluster's name is 1–1024 letters, digits and
+`._:/@+-` — what kubeconfig context names carry, from `kind-dev` to an EKS ARN. A value
+outside that is refused rather than sent, so no value can end its string, start a
+comment or open a template inside one (LogQL's `line_format`): a context named
+`prod"} or vector(1) #` never reaches a query. `${range}` and `${step}` are the host's
+own durations and stand outside strings: `[${range}]`.
+
+Refused at install, at `contributions.<list>[i].query`: a name outside a double-quoted
+string (bare, in a raw string between backticks, or in a PromQL single-quoted string); a
+duration inside a string; an unknown variable or format; a name in a regex matcher
+without `:regex`, or `:regex` outside one; a comment — `#`, or `/* */` and `//`, which
+LogQL's and TraceQL's lexers skip, quotes and all; a control character or a line or
+paragraph separator; an unclosed string; a
+string delimiter the language lacks (LogQL has no single-quoted string, and TraceQL
+strings are double-quoted only); and `${settings.…}`, since a setting never reaches a
+query.
+
+The values are checked on every query, as above.
+
+### What the host sends and reads
+
+The host adds these parameters after the binding's own, which may not set them:
+
+| Language | Endpoint | Parameters the host sets | Read as |
+|---|---|---|---|
+| PromQL | Prometheus `query_range` | `query`, `start`, `end`, `step` (seconds) | The [timeseries chart](native-components.md#timeseries): one series per result, named by its labels. |
+| LogQL | Loki `query_range` | `query`, `start`, `end` (nanoseconds), `limit`, `direction` | Log lines, oldest first, each tagged `pod/container` from its stream's labels. |
+| TraceQL | Tempo `search` | `q`, `start`, `end` (seconds), `limit` | Traces, newest first: ID, root service, root operation, start and duration. |
+
+- **Metrics.** A range of 5 minutes to 7 days, rounded up to whole steps and ending at
+  the last whole step, so both ends are on it; the step is at least 15 seconds and makes
+  at most 251 points. A sample lands on the step nearest it, within half a step, so a
+  query frontend that evaluates a little off the asked start still draws. At most 8 series: more is refused
+  with a request to aggregate them, never cut. A sample that is not a finite number
+  (`NaN`, `+Inf`) is a gap. A query that matches nothing is a chart that says no data
+  was reported.
+- **Logs.** At most 1,000 lines a query, or a follow's history of up to 5,000 (its
+  `tailLines`), and a line past 16 KiB is cut and marked. An answer past the 4 MiB limit
+  is asked again for half as many lines, down to 10.
+- **Traces.** At most 50; the host asks for 51, so a search that finds more says so.
+  An answer with an `error` is refused with it, and one with neither `traces` nor
+  Tempo's `metrics` is refused, never read as a search that found nothing.
+- **Failures.** A status outside 2xx is refused with the server's own reason quoted —
+  a JSON body's `error`, as Prometheus explains a bad query, or the text Loki and Tempo
+  send — cut to 300 characters and scrubbed of the URL, its host, any secret header's
+  value, and each path segment and query value (as sent and decoded) of 8 or more
+  characters the binding's URL carries (a `url` setting may hold a token there; the query and time range the host adds
+  are kept, so a reason that quotes the query still reads). A reason that holds a secret too short to replace (under 4 characters) is left
+  out, and a 2xx answer's `status: "error"` text is scrubbed the same way. An answer
+  that is not the language's (a login page, a metric query's matrix
+  where lines were expected) is refused with why. The 4 MiB limit, timeouts and status
+  rules are `network.http`'s; a 408, 429 or 5xx is one nothing answered.
+
+`extensions.queryProvider` runs one query of a metric, log or trace provider for a
+resource; see [capabilities.md](capabilities.md). Its input is held to what each field
+can be before anything is looked up, and no refusal repeats it: an app ID, a provider
+ID of 1–64 letters, digits and `-`, a context name of at most 1,024 characters, and
+Kubernetes names. On the web host it answers only under
+the operator's network ceiling, as every `network.http` request there does, and a log
+provider's follow is an app stream, which the web host does not run yet.
+
+### Log providers
+
+A log provider is a source of the log view (`/logs/<kind>/<namespace>/<name>`) for each
+kind in `forKinds`. The view follows it as the `logProvider` stream source
+([streams.md](streams.md#logprovider)): the history the view asks for (its tail length
+and how far back), then a query every 5 seconds for what is newer than the last line it
+sent, for as long as the view is open. Closing the view, or choosing another source, ends
+it.
+
+### What to write
+
+The labels a query matches are the backend's, not Kubernetes': the reference manifests
+assume a collector that labels series and streams with `namespace`, `pod` and
+`container`, as the common Kubernetes scrape and log configurations do. A workload's
+pods are matched by name, `pod=~"${workload:regex}-.+"`, which also matches the pods of
+a workload whose name starts with this one's and a `-`. A backend that needs a
+credential takes it through the binding's `secretHeaders`, such as `Authorization` after
+`Bearer `, and a multi-tenant Loki's `X-Scope-OrgID` is a literal header.
+
+## Logs, exec and port-forwards
+
+API 0.5 ([#567](https://github.com/srelens/srelens/issues/567)). Three **pod bindings**
+reach the pods of a workload an app knows about, for troubleshooting: follow a
+container's logs, run a command the manifest fixes, or forward a port. Each is a
+binding like any other — its target is its permission — but it never names a pod.
+It names **where its pods come from**, and the host holds every session to that.
+
+```json
+"permissions": [
+  "k8s.listDeployments",
+  { "capability": "k8s.streamLogs", "namespaces": ["cert-manager"] },
+  "k8s.exec", "k8s.portForward"
+],
+"capabilities": [
+  { "name": "controllers", "title": "Controllers", "target": "k8s.listDeployments",
+    "inputs": ["context", "namespace"], "arguments": {} },
+  { "name": "controllerLogs", "title": "Controller logs", "target": "k8s.streamLogs",
+    "inputs": [], "arguments": { "resource": "controllers" } },
+  { "name": "namespaceLogs", "title": "Logs in cert-manager", "target": "k8s.streamLogs",
+    "inputs": [], "arguments": {} },
+  { "name": "status", "title": "cmctl status", "target": "k8s.exec", "inputs": [],
+    "arguments": { "resource": "controllers", "container": "cert-manager-controller",
+                   "command": ["cmctl", "status", "certificate", "--all-namespaces"] } },
+  { "name": "metrics", "title": "Controller metrics", "target": "k8s.portForward", "inputs": [],
+    "arguments": { "resource": "controllers", "port": 9402 } }
+]
+```
+
+| Target | Does | Arguments |
+|---|---|---|
+| `k8s.streamLogs` | Follows one container's logs, as an app stream. | Scope; optional `container`. |
+| `k8s.exec` | Runs `command` once in a container, with no stdin and no terminal, after the host confirmation. | Scope; `command`; optional `container`. |
+| `k8s.portForward` | Listens on a port of this computer the host picks, and forwards each connection to `port` of a pod in scope, for as long as the view that opened it is open. | Scope; `port`; optional `service`. |
+
+A pod binding declares no `inputs`: the host supplies the cluster, the object, and the
+pod and container the person picks. Unknown arguments are refused.
+
+### Scope
+
+Exactly one of:
+
+- **`resource`**: a reader binding in the same manifest whose objects select pods — a
+  `k8s.listDeployments`, `k8s.listStatefulSets` or `k8s.listDaemonSets` reader, or a
+  namespaced `k8s.listCustomResource` reader. The view names one object of that kind;
+  the host reads it, with the user's credentials, and takes **its own label selector**:
+  `.spec.selector` for a built-in workload (the binding may not say otherwise), and the
+  path the binding names in `selector` for a custom resource — plain dot-separated keys,
+  for example `.spec.selector`. The selector may be a `matchLabels`/`matchExpressions`
+  selector or a plain map of labels. Only pods it selects, in the object's namespace, are
+  in scope. An object with no selector there, or one that selects every pod, is no scope.
+- **no `resource`**: the namespaces the binding's permission grants,
+  `{"capability": "k8s.streamLogs", "namespaces": ["cert-manager"]}` — 1–16 namespace
+  names, each once. Any pod in one of them is in scope. Only the three pod capabilities
+  are granted namespaces, and a namespace is a name, never a setting.
+
+The host matches every pod itself, on every open: it reads the pod the view names and
+checks its namespace and labels against the scope, rather than trusting what the
+cluster answered to a query. A Node, an Event reader, or another pod binding is no
+scope, and neither is a cluster-scoped custom resource.
+
+### Commands
+
+`command` is the program and its arguments, 1–32 of them, each 1–1024 characters with
+no control or invisible format characters. The host runs it as written, without a
+shell, so there is no quoting, globbing or expansion, and it reads no setting: what the
+person reviewed at install is what runs. The program may not be a shell (`sh`, `bash`,
+`ash`, `dash`, `zsh`, `ksh`, `mksh`, `csh`, `tcsh`, `fish`, `pwsh`, by any path), because
+`sh -c` would turn the reviewed command into whatever its script says. Nor may it be a
+program that runs the program named after it — `env`, `busybox`, `toybox`, `nice`,
+`nohup`, `timeout`, `setsid`, `stdbuf` or `xargs` — when a shell's name is any later
+argument, or when an option splits one argument into a command line (`env -S`,
+`--split-string`). After such a wrapper the rule is coarse on purpose: the host does not
+parse each wrapper's options to find the program it runs, so a nested wrapper or an
+unfamiliar option cannot hide a shell, and a wrapped command whose own arguments merely
+name one (`env -u sh cmctl …`) is refused too. Drop the wrapper, and only the program is
+read. That is a guard against the obvious, not a sandbox: the review, which shows the
+exact command, is the control, and so is the confirmation before every run.
+
+`k8s.exec` is **sensitive** and `high` impact. Every session needs the host confirmation
+(#552), which names the cluster, the pod, the container and the exact command, and the
+app that asked; the host refuses a session unless the view sends back exactly what that
+confirmation named. An unsigned app that binds `k8s.exec` needs **Allow unsigned apps to
+modify clusters and run code**, as one that declares actions does.
+
+A session ends when its command exits, after 300 seconds, after 1 MiB of output, or when
+its view closes. Ending one closes its connection to the cluster; a command that ignores
+its closed output may run on in the container until it exits.
+
+### Port-forwards
+
+`port` is the remote port, 1–65535. Without `service`, it is the pod's port and the view
+names a pod in scope. With `"service": true`, it is a Service's port and the view names a
+Service in the scope's namespace: the host resolves it to a running pod the Service
+selects **that the scope admits**, at the Service's target port. A Service only names a
+pod here; it never widens the scope. The host picks the local port, on `127.0.0.1` only,
+and says which. The forward ends when the view that opened it closes, the app is
+disabled, updated or removed, or its pod leaves the scope; a forward to a pod ends when
+the pod stops running, and one through a Service follows the Service to another pod in
+scope.
+
+The frames each source sends are in [streams.md](streams.md#logs).
+
+## Executable apps
+
+**API 0.6, preview** ([#574](https://github.com/srelens/srelens/issues/574)). An app of kind
+`executable` also runs a **sidecar**: a program it ships, which srelens starts in the
+operating system's sandbox and talks JSON-RPC to over stdio
+([sidecar-protocol.md](sidecar-protocol.md)). It has no kubeconfig, no network, no
+environment of srelens's and one writable directory. It reaches the host only through
+the broker ([#573](https://github.com/srelens/srelens/issues/573)): what the app's
+readers read, and the app's declared actions, each put to a person first. An
+executable app may declare everything a declarative one does as well. Executable apps are
+a preview: see [where they run](#where-executable-apps-run).
+
+```json
+{
+  "$schema": "https://raw.githubusercontent.com/srelens/srelens/main/schemas/extension-manifest.v0.6.json",
+  "id": "io.example.scanner",
+  "name": "Image scanner",
+  "version": "1.0.0",
+  "srelensApiVersion": "^0.6",
+  "kind": "executable",
+  "permissions": [],
+  "capabilities": [],
+  "sidecar": {
+    "binaries": {
+      "linux-amd64": "bin/linux-amd64/scanner",
+      "windows-amd64": "bin/windows-amd64/scanner.exe"
+    },
+    "operations": [
+      {
+        "name": "scan",
+        "title": "Scan an image",
+        "inputs": [
+          { "name": "image", "title": "Image reference", "type": "string", "required": true, "maxLength": 512 },
+          { "name": "fixable", "type": "boolean" }
+        ]
+      }
+    ]
+  },
+  "contributions": { "pages": [], "detailTabs": [], "detailLinks": [] }
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `binaries` | The binary run on each platform: `darwin-arm64`, `darwin-amd64`, `linux-amd64`, `linux-arm64` or `windows-amd64`, each a file directly under `bin/<platform>/` in the app's package. At least one. A platform left out does not run the app. |
+| `operations` | 1–32 requests the sidecar answers. |
+| `operations[].name` | Unique across `capabilities`, `actions` and `operations`, 1–64 letters, digits and `-`, and not one of the protocol's own methods (`initialize`, `activate`, `deactivate`, `health`, `shutdown`). Addressed as `plugin/<id>/<name>`. |
+| `operations[].title` | 1–120 characters, as every title. |
+| `operations[].inputs` | Up to 16 inputs, each `{ name, title?, type, required?, maxLength? }`. `type` is `string`, `integer`, `number` or `boolean`. `maxLength` is for a string: 1–65536 bytes, default 1024. |
+
+### Where executable apps run
+
+Executable apps are a preview, and so is API 0.6, until the API is frozen as 1.0
+([specification.md](specification.md#versioning)).
+
+- **Windows:** out of the box.
+- **Linux:** out of the box on a systemd desktop whose kernel has Landlock. The deb, rpm,
+  AppImage and AUR packages ship the launcher `srelens-sandbox-launch` beside `srelens`. At
+  its first sidecar start, srelens asks your systemd user manager for a delegated scope,
+  `app-srelens-<pid>.scope`, moves itself into the scope's `host/` leaf, and gives each
+  sidecar a cgroup beside it with its memory and CPU limits. That needs the `memory` and
+  `cpu` controllers delegated to your session. systemd 252 and later delegate both, but
+  systemd before 252 (Ubuntu 22.04) and the RHEL 9 family leave out `cpu`. There, add it:
+
+  ```sh
+  sudo mkdir -p /etc/systemd/system/user@.service.d
+  printf '[Service]\nDelegate=pids memory cpu\n' | sudo tee /etc/systemd/system/user@.service.d/delegate.conf
+  sudo systemctl daemon-reload
+  ```
+
+  then log out and in again. Without systemd, or in a container, name both pieces yourself:
+  `SRELENS_SANDBOX_LAUNCHER` for a launcher built with
+  `cargo build --release -p srelens-plugin-host --bin srelens-sandbox-launch`, and
+  `SRELENS_SANDBOX_CGROUP_ROOT` for a cgroup v2 directory delegated to you, with `memory`
+  and `cpu` enabled for its children and srelens running in a leaf of it. A process can
+  move another only between cgroups under one it may write, and each sidecar's launcher
+  moves itself into a new sibling of that leaf. The `sandbox-conformance` job in
+  [ci.yml](../../.github/workflows/ci.yml) runs both setups on a runner.
+- **macOS:** Seatbelt isolation with host-enforced memory and CPU limits. The
+  watchdog bounds sustained use; a burst between readings can exceed a limit
+  ([sandbox guarantees](sidecar-protocol.md#sandbox)).
+  It needs `srelens-sandbox-launch` beside the desktop binary, or its absolute path
+  in `SRELENS_SANDBOX_LAUNCHER`. For local development, build it with
+  `cargo build -p srelens-plugin-host --bin srelens-sandbox-launch` before `pnpm dev`.
+- **The web host:** it refuses to install an executable app. Its extension policy does not
+  allow one: `allowExecutableApps` must stay `false`, and an app that fails a policy rule
+  is refused as a whole ([the policy table](../WEB.md#extension-policy)). It also keeps no
+  files for an app's package.
+
+On a desktop OS where a sidecar cannot run, the app installs, and srelens refuses to start
+its sidecar and says what is missing; it never starts a sidecar unconfined.
+
+### What the host holds a sidecar to
+
+- **It installs from a package.** An executable app installs only from a
+  `.srelens-extension` package ([packages.md](packages.md)) carrying exactly the
+  binaries its `binaries` names: a named binary missing from the package, or a binary
+  the package carries that the manifest does not name, is refused. A pasted or
+  single-file manifest of this kind is refused, and so is any install on a host that
+  keeps no files for its apps, such as the web host.
+- **It needs a publisher or the setting.** An unsigned executable app needs
+  **Allow unsigned apps to modify clusters and run code**, whether or not it writes
+  ([specification.md](specification.md#unsigned-app-policy)).
+- **It starts on first use.** The sidecar starts when one of its operations is first
+  called in a process, not at install. Before it starts, its binary is checked against
+  the digest list its package was unpacked with; one changed on disk since is refused,
+  not run. It stops when the app is disabled, updated, rolled back, blocked or removed,
+  and when srelens exits. Its one writable directory, its app's data directory under
+  `*.extensions.data/` beside the inventory, goes with the app when it is removed
+  ([sidecar-protocol.md](sidecar-protocol.md#data-directory)).
+- **It runs only in a sandbox.** Linux and Windows run sidecars in the backends
+  [sidecar-protocol.md](sidecar-protocol.md#sandbox) describes. On Linux the sandbox
+  launcher is found beside the srelens binary or at `SRELENS_SANDBOX_LAUNCHER`, and the
+  cgroup is the scope srelens asks systemd for, or the directory
+  `SRELENS_SANDBOX_CGROUP_ROOT` names; without them srelens refuses to start its sidecar
+  and says what is missing and how to add it.
+  On macOS the same launcher applies Seatbelt and the host watchdog limits memory
+  and CPU ([#713](https://github.com/srelens/srelens/issues/713)); a burst between
+  readings can exceed a limit.
+- **Its input is the host's to check.** Every call is held to the operation's declared
+  inputs before the sidecar sees it: no field it does not declare, every required one
+  present, each of its type, each string within its `maxLength`, and the whole call
+  within 256 KiB. The sidecar receives the checked object as the request's `params`.
+
+Each operation is an MCP tool, `plugin/<id>/<name>`, alongside the app's readers and
+actions. For an app that declares no action it is read-only and not gated, since the
+sidecar can change nothing outside its sandbox. For one that declares actions it is
+gated as the strongest of them, because the sidecar may ask the broker to run them;
+each such write is then confirmed again, naming the app. Either way it is sensitive,
+so the audit log redacts its arguments whole ([MCP.md](../MCP.md#installed-apps-tools)).
+
 ## Rules the desktop app adds
 
 The desktop app accepts a narrower surface than the developer broker:
 
-- Targets are `k8s.listCustomResource` or `k8s.listEvents`, and the target must be
-  read-only with no confirmation, sensitive or destructive annotation.
-- Inputs are only `context` and `namespace`.
+- Targets are `k8s.listCustomResource`, `k8s.listEvents`, the built-in workload and
+  node summary readers, `network.http`, or a pod capability (`k8s.streamLogs`,
+  `k8s.exec`, `k8s.portForward`). A provider sends its query through a `network.http`
+  binding, so an app with providers is refused wherever `network.http` is (on the web,
+  without the operator's network ceiling).
+  A reader target must be read-only with no
+  confirmation, sensitive or destructive annotation; `network.http` and the pod
+  capabilities are held to [their](#network-requests) [own](#logs-exec-and-port-forwards)
+  rules.
+- A reader's inputs are only `context` and `namespace`; a `network.http` binding and a
+  pod binding take none.
 - A `k8s.listCustomResource` binding fixes a non-empty `group`, `version`, `plural`
-  and `kind` (letters, digits, `.` and `-`) and a boolean `namespaced`. It must accept
+  and `kind` (letters, digits, `.` and `-`) and a boolean `namespaced`, or lists
+  `versions` held to the same characters instead of fixing `version`. It must accept
   `context`, may not fix `context` or `namespace`, and a namespaced binding must accept
   `namespace`.
 - That `group` must be shaped like a CustomResourceDefinition group: dot-separated labels
@@ -113,19 +1395,24 @@ The desktop app accepts a narrower surface than the developer broker:
   and `batch` are refused. The problem is reported at `capabilities[i].arguments.group`,
   and an installed app that breaks the rule is quarantined when the inventory loads.
   Every read, inspection and action also checks that a CustomResourceDefinition named
-  `{plural}.{group}` serves the bound `version` on the cluster, and is refused when none
-  does. That refuses dotted built-in groups such as `networking.k8s.io` and aggregated
-  APIs.
+  `{plural}.{group}` serves the bound `version`, or one of the listed `versions`, on the
+  cluster, and is refused when none does. That refuses dotted built-in groups such as
+  `networking.k8s.io` and aggregated APIs.
 - A `k8s.listEvents` binding has no fixed arguments and accepts both `context` and
   `namespace`.
 - Every page, detail tab and detail link references a `k8s.listCustomResource` binding.
 - `statusColumns` indices point at declared `printerColumns`.
+- A `k8s.listCustomResource` binding does not fix `statusRules`; the host binds them
+  from `statusResolvers`.
+- Badge `forKinds` are built-in kinds this host lists, in exactly their API group, and
+  never `/Secret`.
 
 Settings → Apps checks these rules together with the manifest's own before it offers
 to install, and lists every problem with its path. See
 [Validation errors](specification.md#validation-errors).
 
-The examples bind `argoproj.io/v1alpha1` Applications and Flux's
-`kustomize.toolkit.fluxcd.io/v1` Kustomizations and `helm.toolkit.fluxcd.io/v2`
-HelmReleases. The cluster must serve those versions; see
+The examples bind `argoproj.io/v1alpha1` Applications, Flux's
+`kustomize.toolkit.fluxcd.io/v1` Kustomizations, `helm.toolkit.fluxcd.io` HelmReleases at
+`v2` or `v2beta2`, and `source.toolkit.fluxcd.io` OCIRepositories at `v1` or `v1beta2`.
+The cluster must serve one of each binding's versions; see
 [requirement checks](ui-contributions.md#requirement-checks).

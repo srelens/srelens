@@ -9,6 +9,9 @@
 // any web page can ask the OS to open one, so it is validated rather than
 // trusted.
 
+import { describeError } from "./errors";
+import { isClusterScopedKind, isNavigableResourceKind } from "./resourceNavigation";
+
 /** A parsed, validated deep-link destination. */
 export type DeepLinkTarget =
   | { route: "cluster"; context: string }
@@ -90,6 +93,86 @@ export function parseDeepLink(url: string): DeepLinkTarget | null {
   }
 
   return null;
+}
+
+/** The title on a refused link's notice, in both designs. */
+export const DEEP_LINK_REFUSED = "Couldn't open that link";
+
+/** The title on a held link's notice, in both designs. */
+const DEEP_LINK_HELD = "That link will be checked once the contexts load";
+
+/**
+ * A link that can be opened; the sentence that says why it cannot; or `held`,
+ * for a link whose context a failed listing did not return and so cannot yet
+ * be judged.
+ */
+export type DeepLinkCheck =
+  | { ok: true; target: DeepLinkTarget }
+  | { ok: false; reason: string; held?: undefined }
+  | { ok: false; held: true };
+
+/**
+ * Decide whether a link can be opened against the contexts this machine lists,
+ * and say why not when it cannot.
+ *
+ * Both designs judge a link by this one rule set, so a link that one refuses
+ * the other cannot open, and the reader sees the same sentence in either. It
+ * takes context NAMES because a link names its context the way a kubeconfig
+ * does, and is matched exactly: context names are case-sensitive.
+ *
+ * Call it only once the contexts have been listed. A link judged against an
+ * empty list during a cold start would be refused as naming a context that
+ * does not exist.
+ *
+ * **A listing that failed has not said a context is missing** (#855). It may
+ * have refused outright, or come back partial with a reason: either way the
+ * context a link names may be perfectly present behind an unreadable file or a
+ * dropped connection. So with `listingFailed`, a link naming a context the list
+ * lacks is `held` for the caller to judge again once the contexts reload,
+ * rather than refused with a claim about the cluster that nobody has made.
+ * What no listing can change is still refused at once: a link that does not
+ * parse, a kind with no detail view, a namespaced kind given `-`.
+ */
+export function checkDeepLink(
+  url: string,
+  contextNames: readonly string[],
+  { listingFailed = false }: { listingFailed?: boolean } = {},
+): DeepLinkCheck {
+  const target = parseDeepLink(url);
+  if (!target) return { ok: false, reason: "It isn't a link srelens understands." };
+  const listed = contextNames.includes(target.context);
+  if (!listed && !listingFailed) {
+    return { ok: false, reason: `No kube context named "${target.context}".` };
+  }
+  if (target.route === "resource") {
+    // `K8S_KIND` alone is too permissive: Events have a list view but no
+    // detail, so such a link would quietly land on the list instead of the
+    // object it named.
+    if (!isNavigableResourceKind(target.kind)) {
+      return { ok: false, reason: `srelens can't open a ${target.kind} directly.` };
+    }
+    // "-" means cluster-scoped. Allowing it for a namespaced kind would search
+    // every namespace and open whichever matching name came back first: a link
+    // that silently opens the wrong object.
+    if (!isClusterScopedKind(target.kind) && target.namespace === null) {
+      return { ok: false, reason: `${target.kind} is namespaced, so the link needs a namespace.` };
+    }
+  }
+  if (!listed) return { ok: false, held: true };
+  return { ok: true, target };
+}
+
+/**
+ * The one notice for links held behind a failed listing: what the listing
+ * failed with, through `describeError` like every other failure, and that the
+ * links will be checked once the contexts load. Checked, not opened: a listing
+ * that answers may still lack the context, and the link is refused then.
+ */
+export function deepLinkHeldNotice(listingError: string): { title: string; detail: string } {
+  return {
+    title: DEEP_LINK_HELD,
+    detail: `The kube contexts could not be listed. ${describeError(listingError).detail}`,
+  };
 }
 
 /**

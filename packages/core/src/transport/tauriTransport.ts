@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getVersion } from "@tauri-apps/api/app";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
@@ -9,6 +9,14 @@ import { parseClusterLoginRequired, requestClusterLogin } from "../lib/clusterLo
 /** Request/response to a backend capability. */
 export async function invokeCapability<T>(id: string, input: unknown = null): Promise<T> {
   try {
+    if ((id === "extensions.packageManifest" || id === "extensions.configure")
+      && input !== null && typeof input === "object" && "package" in input
+      && input.package instanceof Uint8Array) {
+      const { package: packageBytes, ...metadata } = input;
+      return await invoke<T>("invoke_package_capability", packageBytes, {
+        headers: { "x-srelens-package-input": JSON.stringify({ id, input: metadata }) },
+      });
+    }
     return await invoke<T>("invoke_capability", { id, input });
   } catch (e) {
     const login = parseClusterLoginRequired(e);
@@ -20,13 +28,115 @@ export async function invokeCapability<T>(id: string, input: unknown = null): Pr
   }
 }
 
-/** Invoke a raw Tauri command (for streaming primitives like watches). */
+/**
+ * The commands that open a stream on a channel of the page's own (#733): each
+ * is passed `onEvent`, and the host sends the stream's frames on it.
+ */
+const STREAMS_ON_A_CHANNEL = new Set(["start_resource_watch", "start_pod_exec", "extension_stream_open"]);
+
+/**
+ * The commands that open something the calling window owns (#700, #735). The
+ * host ends a window's streams when it closes; a reload keeps the window and
+ * loses the page, so the new page asks the host to end what the old one held —
+ * and none of these may run before that, or the reset would end the new page's
+ * stream as well. Log streams, port-forwards, terminals and helm operations
+ * broadcast their output on events instead, so they wait without a channel.
+ */
+const OPENS_A_STREAM = new Set([
+  ...STREAMS_ON_A_CHANNEL,
+  "start_log_stream",
+  "start_port_forward",
+  "start_terminal",
+  "start_helm_op",
+]);
+
+let windowReset: Promise<void> | null = null;
+
+/**
+ * End every stream this window held before this page loaded: once a page, and
+ * before its first stream opens. Called as the transport loads, and awaited by
+ * every command that opens a stream. The host reads the window from the call
+ * itself, so a page can only ever end its own window's streams.
+ *
+ * Opens that arrive during one attempt share it. A failed attempt rejects them
+ * all and is forgotten, so the next open tries again; a successful one is
+ * never repeated, since a second reset would end this page's own streams.
+ */
+export function resetWindowStreams(): Promise<void> {
+  if (!windowReset) {
+    const attempt: Promise<void> = invoke("window_streams_reset").then(
+      () => {},
+      (e: unknown) => {
+        if (windowReset === attempt) windowReset = null;
+        console.warn("srelens: could not end this window's streams from before the reload", e);
+        throw e;
+      },
+    );
+    windowReset = attempt;
+  }
+  return windowReset;
+}
+
+/** One frame of a stream, as the host sends it on the opener's channel. */
+interface StreamFrame {
+  event: string;
+  payload: unknown;
+}
+
+/**
+ * This page's subscriptions, by event name. A stream's frames arrive on the
+ * channel passed with its open, not as events (#733), and are handed out here.
+ */
+const subscriptions = new Map<string, Set<(payload: unknown) => void>>();
+
+function hold(channel: string, handler: (payload: unknown) => void): () => void {
+  let handlers = subscriptions.get(channel);
+  if (!handlers) subscriptions.set(channel, (handlers = new Set()));
+  handlers.add(handler);
+  return () => {
+    handlers.delete(handler);
+    if (handlers.size === 0 && subscriptions.get(channel) === handlers) subscriptions.delete(channel);
+  };
+}
+
+function deliver({ event, payload }: StreamFrame): void {
+  for (const handler of [...(subscriptions.get(event) ?? [])]) handler(payload);
+}
+
+/**
+ * Invoke a raw Tauri command (for streaming primitives like watches). A
+ * command that opens a stream fails closed: until the old page's streams are
+ * ended, it is not sent, so it can never be ended by a later reset either.
+ *
+ * A command that opens a stream is also passed `onEvent`, a channel of its
+ * own. The host sends the stream's frames on it, and Tauri answers a channel
+ * only in the page that made the call, so no other window receives them
+ * (#733). Each open needs its own: Tauri numbers a channel's messages from
+ * the host end and closes it when that stream ends.
+ */
 export async function invokeCommand<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+  if (OPENS_A_STREAM.has(command)) {
+    try {
+      await resetWindowStreams();
+    } catch (e) {
+      const reason = e instanceof Error ? e.message : String(e);
+      throw new Error(
+        `Not opened: srelens could not end this window's streams from before the reload (${reason}). Try again.`,
+      );
+    }
+    if (STREAMS_ON_A_CHANNEL.has(command)) {
+      return invoke<T>(command, { ...args, onEvent: new Channel<StreamFrame>(deliver) });
+    }
+  }
   return invoke<T>(command, args);
 }
 
-/** Subscribe to a broadcast event (mirrors ipcRendererOn / broadcastMessage). */
+/**
+ * Subscribe to an event: a broadcast (mirrors ipcRendererOn /
+ * broadcastMessage), or the frames of a stream this page opens on `channel`.
+ */
 export function on(channel: string, handler: (payload: unknown) => void): () => void {
+  const release = hold(channel, handler);
   const unlistenPromise = listen(channel, (event) => handler(event.payload));
   let disposed = false;
   unlistenPromise.then((un) => {
@@ -34,6 +144,7 @@ export function on(channel: string, handler: (payload: unknown) => void): () => 
   });
   return () => {
     disposed = true;
+    release();
     unlistenPromise.then((un) => un());
   };
 }
@@ -47,7 +158,17 @@ export async function subscribe(
   channel: string,
   handler: (payload: unknown) => void,
 ): Promise<() => void> {
-  return listen(channel, (event) => handler(event.payload));
+  const release = hold(channel, handler);
+  try {
+    const unlisten = await listen(channel, (event) => handler(event.payload));
+    return () => {
+      release();
+      unlisten();
+    };
+  } catch (e) {
+    release();
+    throw e;
+  }
 }
 
 /** Restart the app (used after an update is installed). */
@@ -63,6 +184,21 @@ export async function appVersion(): Promise<string> {
 /** Set the webview's native zoom level (1 = 100%) — the #237 interface scale. */
 export async function setWebviewZoom(factor: number): Promise<void> {
   await getCurrentWebview().setZoom(factor);
+}
+
+/**
+ * Blur what is behind this window, or stop — the backdrop for a see-through
+ * dark theme. macOS only in effect: the window is created transparent there
+ * (`tauri.macos.conf.json`), and without that there is nothing behind the
+ * webview to blur. The host answers `Ok` and does nothing elsewhere.
+ *
+ * The host's `set_window_blur` rather than the window API's `setEffects`:
+ * every effect that API offers on macOS is a system material, and a material
+ * brings a tint of its own — the first cut used `hudWindow` and the "black
+ * glass" came out grey. The command asks the window server for the blur alone.
+ */
+export async function setWindowBlur(on: boolean): Promise<void> {
+  await invoke("set_window_blur", { on });
 }
 
 /**
@@ -173,4 +309,3 @@ export function currentWindowLabel(): string {
     return "main";
   }
 }
-

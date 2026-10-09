@@ -22,8 +22,8 @@ vi.mock("@tauri-apps/api/window", () => ({
   }),
 }));
 
-import { invokeCapability, invokeCommand, on, relaunchApp, appVersion, onWindowCloseRequested, currentWindowLabel } from "./tauriTransport";
-import { currentWindowLabel as webWindowLabel } from "./webTransport";
+import { invokeCapability, invokeCommand, on, relaunchApp, appVersion, onWindowCloseRequested, currentWindowLabel, setWindowBlur } from "./tauriTransport";
+import { currentWindowLabel as webWindowLabel, setWindowBlur as webSetWindowBlur } from "./webTransport";
 
 beforeEach(() => {
   invokeMock.mockReset();
@@ -33,6 +33,26 @@ beforeEach(() => {
   onCloseRequestedMock.mockReset();
   windowDestroyMock.mockReset();
   windowCloseMock.mockReset();
+});
+
+describe("setWindowBlur", () => {
+  it("asks the host to blur behind this window, and to stop", async () => {
+    // The host's own command rather than the window API's `setEffects`: every
+    // effect that API offers on macOS is a system MATERIAL, which lays its own
+    // grey tint under the page. The theme supplies the tint; what it needs
+    // from the window is the blur and nothing else.
+    await setWindowBlur(true);
+    await setWindowBlur(false);
+    expect(invokeMock.mock.calls).toEqual([
+      ["set_window_blur", { on: true }],
+      ["set_window_blur", { on: false }],
+    ]);
+  });
+
+  it("does nothing on the web, which has no window to dress", async () => {
+    await expect(webSetWindowBlur(true)).resolves.toBeUndefined();
+    expect(invokeMock).not.toHaveBeenCalled();
+  });
 });
 
 /** Register a close interceptor and hand back the listener Tauri would call. */

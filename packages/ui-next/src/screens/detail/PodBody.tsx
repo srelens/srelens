@@ -36,6 +36,7 @@ import { ForwardAction } from "../forwards/ForwardAction";
 import { Section } from "./Section";
 import { ConditionsSection, StringList } from "./sections";
 import type { DetailFact, FactsFor } from "./facts";
+import { NodeLink } from "../../lib/nodeLink";
 
 /**
  * Kubernetes' own labels for a pod volume's source kind, keyed on which field
@@ -186,7 +187,7 @@ export const podFacts: FactsFor = ({ object }) => {
   }
   if (reason) facts.push({ label: "Reason", value: reason });
   if (message) facts.push({ label: "Message", value: message });
-  if (nodeName) facts.push({ label: "Node", value: nodeName, mono: true });
+  if (nodeName) facts.push({ label: "Node", value: <NodeLink name={nodeName} />, mono: true });
   if (podIP) facts.push({ label: "Pod IP", value: podIP, mono: true });
   if (podIPs.length > 0) facts.push({ label: "Pod IPs", value: <StringList items={podIPs} /> });
   if (qosClass) facts.push({ label: "QoS class", value: qosClass });
@@ -238,7 +239,11 @@ function SchedulingSection({ object }: { object: K8sObject }) {
 
   return (
     <Section title="Scheduling">
-      <KV k="Node" v={spec.nodeName ? str(spec.nodeName) : "Not scheduled"} mono={!!spec.nodeName} />
+      <KV
+        k="Node"
+        v={spec.nodeName ? <NodeLink name={str(spec.nodeName)} /> : "Not scheduled"}
+        mono={!!spec.nodeName}
+      />
       {Object.keys(nodeSelector).length > 0 && (
         <KV k="Node selector" v={<PairList pairs={Object.entries(nodeSelector)} breakValues />} />
       )}

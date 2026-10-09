@@ -18,7 +18,7 @@ import {
   StaleSelectionAlert,
 } from "./resourceShell";
 import { FailureAlert } from "../lib/errorCopy";
-import { setNamespaces, useNamespaces } from "../lib/workspace";
+import { useNamespaces, useSetNamespaces } from "../lib/workspace";
 import { useResource } from "../lib/useResource";
 import {
   FLOW_ANIMATION_LIMIT,
@@ -111,13 +111,13 @@ function TopologyGraph({ context }: { context: ClusterContext }) {
   );
 
   /**
-   * The reader's namespace selection — the workspace's, not this screen's.
+   * The reader's namespace selection — this tab's, per cluster.
    *
-   * One selection per cluster, shared by every screen looking at it: narrowing
-   * to `payments` here narrows the resource lists and the events screen too,
-   * and arriving from one of those lands on what they were already looking at.
+   * Narrowing to `payments` here narrows this tab and nothing else: another
+   * tab on the same cluster keeps its own selection.
    */
   const scoped = useNamespaces(cluster?.stableId);
+  const setNamespaces = useSetNamespaces();
 
   /**
    * A metrics backend, if the cluster already runs one.
@@ -631,7 +631,7 @@ function Canvas({
             <circle cx={1} cy={1} r={1} className="fill-rule-strong" opacity={0.55} />
           </pattern>
         </defs>
-        <rect width="100%" height="100%" className="fill-canvas" />
+        <rect width="100%" height="100%" className="fill-[var(--ground-canvas)]" />
         <rect width="100%" height="100%" fill="url(#topo-grid)" />
       </svg>
       {/* The graph, drawn once at 1:1 and moved as a texture — see `apply`. */}

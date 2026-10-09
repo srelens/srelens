@@ -19,7 +19,7 @@ it("browses on demand, searches, and reviews exact verified bytes before any ins
   expect(screen.getByText("No matching apps.")).toBeTruthy();
   fireEvent.change(screen.getByLabelText("Find an app"), { target: { value: "flux" } });
   fireEvent.click(screen.getByText("Review installation"));
-  await waitFor(() => expect(review).toHaveBeenCalledWith('{"name":"Flux","permissions":[]}', undefined));
+  await waitFor(() => expect(review).toHaveBeenCalledWith({ manifest: '{"name":"Flux","permissions":[]}' }, { id: entry.id, sha256: "abc" }));
   expect(reviewCatalogExtension).toHaveBeenCalledWith(entry.id, "abc");
 });
 it("shows cached refresh failures and keeps incompatible releases disabled", async () => {
@@ -53,10 +53,43 @@ it("reports a first-load failure with retry, not an empty catalog", async () => 
   expect(await screen.findByText("Flux")).toBeTruthy();
 });
 
-it("passes the backend-verified signature into installation review",async()=>{
+it("does not open a review that a newer one replaced while the release downloaded (#562)", async () => {
+  const review = vi.fn();
+  vi.mocked(reviewCatalogExtension).mockResolvedValue({ manifest: '{"name":"Flux","permissions":[]}' });
+  let latest = false;
+  const onReviewStart = vi.fn(() => () => latest);
+  render(<ExtensionCatalog onReview={review} onReviewStart={onReviewStart} installed={[]} autoLoad />);
+  fireEvent.click(await screen.findByText("Review installation"));
+  await waitFor(() => expect(reviewCatalogExtension).toHaveBeenCalledTimes(1));
+  await waitFor(() => expect(screen.queryByText("Loading…")).toBeNull());
+  expect(onReviewStart).toHaveBeenCalledTimes(1);
+  expect(review).not.toHaveBeenCalled();
+  latest = true;
+  fireEvent.click(screen.getByText("Review installation"));
+  await waitFor(() => expect(review).toHaveBeenCalledWith({ manifest: '{"name":"Flux","permissions":[]}' }, { id: entry.id, sha256: "abc" }));
+});
+
+it("passes the backend-verified signature and the key it names into installation review",async()=>{
  const review=vi.fn();
- vi.mocked(reviewCatalogExtension).mockResolvedValue({manifest:'{"name":"Flux","permissions":[]}',signature:[1,2,3]});
+ const keyId="ab".repeat(32);
+ vi.mocked(reviewCatalogExtension).mockResolvedValue({manifest:'{"name":"Flux","permissions":[]}',signature:[1,2,3],keyId});
  render(<ExtensionCatalog onReview={review} installed={[]} autoLoad/>);
  fireEvent.click(await screen.findByText("Review installation"));
- await waitFor(()=>expect(review).toHaveBeenCalledWith('{"name":"Flux","permissions":[]}',[1,2,3]));
+ await waitFor(()=>expect(review).toHaveBeenCalledWith({manifest:'{"name":"Flux","permissions":[]}',signature:[1,2,3],keyId},{id:entry.id,sha256:"abc"}));
+});
+
+/** On the web the catalog is the server's shared copy (#515): a Refresh there reads it, never fetches. */
+it("says on the web that the server keeps and fetches the one shared catalog", async () => {
+  const shared = /one catalog for everyone who signs in/;
+  render(<ExtensionCatalog onReview={vi.fn()} installed={[]} autoLoad />);
+  expect(await screen.findByText(shared)).toBeTruthy();
+  (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__ = {};
+  try {
+    const { unmount } = render(<ExtensionCatalog onReview={vi.fn()} installed={[]} autoLoad />);
+    await waitFor(() => expect(screen.getAllByText("Flux")).toHaveLength(2));
+    expect(screen.getAllByText(shared)).toHaveLength(1);
+    unmount();
+  } finally {
+    delete (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__;
+  }
 });

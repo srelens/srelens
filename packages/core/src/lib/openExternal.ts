@@ -58,8 +58,10 @@ export function browsable(address: string): string {
  * Open `url` in the reader's default browser.
  *
  * **Only ever pass an address srelens itself built** — a live forward's, via
- * `forwardAddress` and {@link browsable}. Never a string that arrived from a
- * cluster.
+ * `forwardAddress` and {@link browsable}, or an Ingress rule's, via
+ * `ingressRuleAddress`, which assembles one from a host it has checked is a
+ * DNS name, a scheme it chose and a path it encoded. Never a string that
+ * arrived from a cluster as it arrived.
  *
  * Rejects anything that is not an absolute http(s) URL, on BOTH platforms, so
  * the refusal is the same wherever it is read: the Rust command applies the

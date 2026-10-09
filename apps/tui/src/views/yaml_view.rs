@@ -18,6 +18,9 @@ pub struct YamlViewState {
     /// when the row knew which CRD it came from. `None` is a view that
     /// resolved its kind by name.
     pub pinned_api_version: Option<String>,
+    /// Why the live manifest could not be fetched. Set, the view shows the
+    /// reason and editing is refused: there is no manifest to edit.
+    pub load_error: Option<String>,
     pub yaml_content: String,
     pub original_yaml: String,
     pub lines: Vec<String>,
@@ -49,6 +52,7 @@ impl YamlViewState {
             resource_kind: kind,
             namespace,
             pinned_api_version: None,
+            load_error: None,
             original_yaml: yaml_content.clone(),
             yaml_content,
             lines,

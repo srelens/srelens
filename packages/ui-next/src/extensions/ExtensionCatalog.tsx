@@ -1,12 +1,19 @@
 import { ExtensionLogo } from "./ExtensionLogo";
 import { useContext, useEffect, useRef, useState } from "react";
-import { listExtensionCatalog, reviewCatalogExtension, openExternal, type ExtensionCatalogSnapshot, type InstalledExtension } from "@srelens/core";
+import { isTauri, listExtensionCatalog, reviewCatalogExtension, openExternal, type ExtensionCatalogSnapshot, type ExtensionReview, type InstalledExtension } from "@srelens/core";
 import { ExtensionControls } from "./ExtensionControls";
 
-export function ExtensionCatalog({ installed, onReview, autoLoad = false }: {
+export function ExtensionCatalog({ installed, onReview, onReviewStart, autoLoad = false }: {
   autoLoad?: boolean;
   installed: InstalledExtension[];
-  onReview: (manifest: string, signature?: number[]) => void;
+  /**
+   * Called as a review starts; what it returns says, once the release has downloaded,
+   * whether this is still the review most recently started from anywhere. A stale one is
+   * not passed to `onReview`.
+   */
+  onReviewStart?: () => () => boolean;
+  /** The host-verified review, and the release it is of, which a package install names again. */
+  onReview: (review: ExtensionReview, release: { id: string; sha256: string }) => void;
 }) {
   const { Button } = useContext(ExtensionControls);
   const [data, setData] = useState<ExtensionCatalogSnapshot>();
@@ -41,15 +48,18 @@ export function ExtensionCatalog({ installed, onReview, autoLoad = false }: {
     {error && <p className="extension-error" role="alert">{error}</p>}
     {data && <>
       <p className="extension-message extension-catalog-meta">{data.stale ? "Cached catalog" : "Catalog checked"} · {new Date(data.fetchedAt * 1000).toLocaleString()} · Host API {data.hostApiVersions.join(", ")}</p>
+      {/* The web server shares one catalog between its users and fetches it itself (#515), so a
+          Refresh here shows its copy rather than fetching one: say so, or the time above reads as wrong. */}
+      {!isTauri() && <p className="extension-message">This server keeps one catalog for everyone who signs in, and fetches it again once a day.</p>}
       {data.error && <p className="extension-warning" role="alert">Refresh failed: {data.error}. Showing the cached catalog.</p>}
-      <p className="extension-message">Official srelens app signatures are verified before installation review. Review permissions before installing.</p>
+      <p className="extension-message">An app whose ID is in a publisher's namespace installs only with that publisher's signature, verified before installation review. Review permissions before installing.</p>
       {entries?.length === 0 && <p className="extension-message">No matching apps.</p>}
       {entries?.map(entry => {
         const current = installed.find(p => p.manifest.id === entry.id);
         const incompatible = data.incompatible.includes(entry.id);
         return <article className="extension-installed extension-catalog-entry" aria-label={entry.name} key={entry.id}>
           <div className="extension-toolbar">
-            <ExtensionLogo id={entry.id} name={entry.name} size={28} />
+            <ExtensionLogo name={entry.name} size={28} />
             <div className="extension-catalog-description">
               <strong>{entry.name}</strong>
               <p>{entry.description}</p>
@@ -59,9 +69,10 @@ export function ExtensionCatalog({ installed, onReview, autoLoad = false }: {
             <Button variant="secondary" disabled={busy} onClick={() => void run(() => openExternal(entry.repository))}>Repository</Button>
             <Button disabled={busy || incompatible} onClick={() => {
               const request = ++generation.current;
+              const current = onReviewStart?.() ?? (() => true);
               void run(async () => {
                 const result = await reviewCatalogExtension(entry.id, entry.release.sha256);
-                if (request === generation.current) onReview(result.manifest, result.signature ?? undefined);
+                if (request === generation.current && current()) onReview(result, { id: entry.id, sha256: entry.release.sha256 });
               });
             }}>{current ? "Review replacement" : "Review installation"}</Button>
           </div>

@@ -18,6 +18,7 @@ import { useDismissOnPause } from "../lib/pausedContext";
 import {
   endSession,
   getSessions,
+  renameSession,
   subscribeSessions,
   terminalFor,
   type TerminalSessionRow,
@@ -70,8 +71,10 @@ const NOT_GATED =
  * place a terminal's defaults are actively wrong here.
  */
 const TERMINAL_TOKENS: Readonly<Partial<Record<keyof ITheme, string>>> = {
-  // §14 draws the transcript as a SUNK surface, not the pane's own.
-  background: "--surface-sunk",
+  // §14 draws the transcript as a SUNK surface, not the pane's own. Named by
+  // its ground token so a see-through window clears it with the rest of the
+  // sheet — a terminal left solid is a slab in the middle of the glass.
+  background: "--ground-sunk",
   foreground: "--ink-soft",
   // §14: "a pulsing accent block cursor sits on the last line".
   cursor: "--accent",
@@ -115,7 +118,9 @@ function terminalDress(root: Element): { theme: ITheme; fontFamily?: string } {
   const theme: Record<string, string> = {};
   for (const [key, token] of Object.entries(TERMINAL_TOKENS)) {
     const value = read(token);
-    if (value) theme[key] = value;
+    // A cleared ground resolves to the keyword, and xterm parses colours
+    // itself: it takes `rgba()` and throws on `transparent`.
+    if (value) theme[key] = value === "transparent" ? "rgba(0, 0, 0, 0)" : value;
   }
   const fontFamily = read(FONT_TOKEN);
   return { theme, fontFamily: fontFamily || undefined };
@@ -143,7 +148,7 @@ function useTokenDress(sessionId: number | null): void {
     };
     dress();
     const observer = new MutationObserver(dress);
-    observer.observe(root, { attributes: true, attributeFilter: ["data-theme"] });
+    observer.observe(root, { attributes: true, attributeFilter: ["data-theme", "data-opacity"] });
     return () => observer.disconnect();
   }, [sessionId]);
 }
@@ -316,6 +321,8 @@ export function Terminals(_props: { route: string }) {
             sessions={sessions}
             activeId={active?.id ?? null}
             onSelect={setPicked}
+            onRename={renameSession}
+            onDetach={endSession}
             // The rail's own door into the menu, pinning the cluster exactly as
             // the toolbar's does above: two doors to one dialog is how the two
             // start disagreeing about which cluster they opened it on.
@@ -368,7 +375,7 @@ export function Terminals(_props: { route: string }) {
                 it the old element stays where it was appended and two
                 transcripts stack in one pane. */}
             <TerminalView key={active.id} sessionId={active.id} />
-            <div className="flex shrink-0 items-center gap-2 border-t border-rule bg-sunk px-2.5 py-1.5">
+            <div className="flex shrink-0 items-center gap-2 border-t border-rule bg-[var(--ground-sunk)] px-2.5 py-1.5">
               {/* Not an `Eyebrow`: that voice is 10px tracked uppercase mono,
                   which is right over a figure and unreadable across a
                   seventy-character sentence. The words are §14's, verbatim;

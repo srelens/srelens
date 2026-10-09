@@ -1,0 +1,22 @@
+# Answers to srelens's requests
+{"jsonrpc":"2.0","id":1,"result":{"apiVersion":"0.1.0","sidecar":{"name":"trivy-scanner","version":"1.2.0"}}}
+{"jsonrpc":"2.0","id":1,"error":{"code":-32001,"message":"No sidecar API version in common","data":{"supported":["1.0.0"]}}}
+{"jsonrpc":"2.0","id":2,"result":{}}
+# Calls to the host, each naming its cluster
+{"jsonrpc":"2.0","id":"c-1","method":"host/read","params":{"context":{"clusterId":"kind-dev","namespace":"team"},"capability":"applications"}}
+{"jsonrpc":"2.0","id":2,"method":"host/resource","params":{"context":{"clusterId":"kind-dev","namespace":null},"capability":"applications","name":"web"}}
+{"jsonrpc":"2.0","id":"c-3","method":"host/action","params":{"context":{"clusterId":"kind-dev","namespace":"team"},"capability":"applications","name":"web","action":"sync","uid":"0b5e5a7c-1d2f-4c3b-9a8e-7f6d5c4b3a21","resourceVersion":"48213"}}
+# Stream frames
+{"jsonrpc":"2.0","method":"stream/data","params":{"stream":1,"data":{"vulnerabilities":3}}}
+{"jsonrpc":"2.0","method":"stream/data","params":{"stream":1,"data":null}}
+{"jsonrpc":"2.0","method":"stream/close","params":{"stream":1}}
+{"jsonrpc":"2.0","method":"stream/error","params":{"stream":2,"message":"The registry did not answer"}}
+{"jsonrpc":"2.0","method":"$/cancelRequest","params":{"id":"c-1"}}
+# A notification from a newer SDK, which srelens ignores
+{"jsonrpc":"2.0","method":"$/progress","params":{"done":3}}
+{"jsonrpc":"2.0","method":"telemetry"}
+# Binding discovery uses an explicit caller context and declared names in protocol 0.2.0.
+{"jsonrpc":"2.0","id":"availability-1","method":"host/bindingAvailability","params":{"context":{"clusterId":"kind-dev","namespace":"team"},"bindings":["vulnerability-reports","sbom-reports"]}}
+
+# A scoped container Job uses only a declared binding and bounded scalar inputs.
+{"jsonrpc":"2.0","id":"scan-1","method":"host/runJob","params":{"context":{"clusterId":"kind-dev","namespace":"team"},"capability":"namespace-job","inputs":{"namespace":"team"}}}

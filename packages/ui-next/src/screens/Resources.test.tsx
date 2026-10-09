@@ -14,17 +14,21 @@ const {
   listCustomResource,
   listNamespaces,
   listNodes,
+  listResource,
   nodeMetrics,
   podMetrics,
   useNamespaceOptions,
   deleteResource,
   getObject,
+  resolveExtensionColumns,
+  extensionInventory,
 } = vi.hoisted(() => ({
   watchResource: vi.fn(),
   listCrds: vi.fn(),
   listCustomResource: vi.fn(),
   listNamespaces: vi.fn(),
   listNodes: vi.fn(),
+  listResource: vi.fn(),
   nodeMetrics: vi.fn(),
   podMetrics: vi.fn(),
   useNamespaceOptions: vi.fn(),
@@ -33,19 +37,31 @@ const {
   // is the only way to say "the peek did not refetch" — a rendered heading
   // looks identical whether or not a second round trip went out.
   getObject: vi.fn(),
+  resolveExtensionColumns: vi.fn(),
+  extensionInventory: { plugins: [] as unknown[] },
+}));
+
+vi.mock("../extensions/inventoryStore", async (original) => ({
+  ...(await original<typeof import("../extensions/inventoryStore")>()),
+  useExtensions: () => ({ status: "ready", data: { schemaVersion: 1, nextRevision: 1, plugins: extensionInventory.plugins }, reload: vi.fn() }),
 }));
 
 vi.mock("@srelens/core", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@srelens/core")>()),
   watchResource: (...a: unknown[]) => watchResource(...a),
+  // Core's own watchNamespaces calls its module-local watchResource, which
+  // the line above cannot reach — route each namespace to the mock instead.
+  watchNamespaces: (await import("@srelens/core/lib/testDoubles")).watchNamespacesVia((...a) => watchResource(...a)),
   listCrds: (...a: unknown[]) => listCrds(...a),
   listCustomResource: (...a: unknown[]) => listCustomResource(...a),
   listNamespaces: (...a: unknown[]) => listNamespaces(...a),
   listNodes: (...a: unknown[]) => listNodes(...a),
+  listResource: (...a: unknown[]) => listResource(...a),
   nodeMetrics: (...a: unknown[]) => nodeMetrics(...a),
   podMetrics: (...a: unknown[]) => podMetrics(...a),
   deleteResource,
   getObject: (...a: unknown[]) => getObject(...a),
+  resolveExtensionColumns: (...a: unknown[]) => resolveExtensionColumns(...a),
 }));
 
 /**
@@ -128,10 +144,11 @@ proto.hasPointerCapture ??= () => false;
 proto.setPointerCapture ??= () => {};
 proto.releasePointerCapture ??= () => {};
 
-import type { ClusterContext, CrdRef, K8sObject } from "@srelens/core";
+import { describeError, type ClusterContext, type CrdRef, type K8sObject } from "@srelens/core";
 import { ResourceDetailScreen, Resources } from "./Resources";
 import { ConsoleProvider, useConsole } from "../console";
 import * as store from "../lib/tabsStore";
+import { TabScope } from "../lib/tabScope";
 import { defaultState } from "../lib/tabs";
 import { resetContexts, setContexts, setKubeconfigFiles } from "../lib/clusters";
 import { hiddenColumns, loadColumnPrefs, toggleColumn } from "../lib/columnPrefs";
@@ -144,7 +161,7 @@ import {
   loadPeekWidth,
 } from "../lib/peekWidth";
 import { resetListCache } from "../lib/resourceList";
-import { getView, resetView, setNamespaces } from "../lib/workspace";
+import { resetView, setNamespaces } from "../lib/workspace";
 
 const CTX: ClusterContext = {
   name: "prod-eu",
@@ -196,6 +213,8 @@ let stop: ReturnType<typeof vi.fn>;
 
 beforeEach(() => {
   vi.clearAllMocks();
+  extensionInventory.plugins = [];
+  resolveExtensionColumns.mockResolvedValue({ columns: [], cells: [] });
   stop = vi.fn();
   asked = [];
   watchResource.mockImplementation(
@@ -287,6 +306,12 @@ function AskPeek() {
  * same `ConsoleProvider` the real shell mounts at the root, since a row's ask
  * chip now reaches `useConsole()`.
  */
+/** The active tab's namespace selection for a cluster — where a screen outside any `TabScope` reads and writes it. */
+const selectionOf = (clusterId: string) => {
+  const w = store.currentWorkspace();
+  return w.tabs.find((t) => t.id === w.activeId)?.namespaces?.[clusterId];
+};
+
 function open(route: string) {
   store.openTab(route);
   return render(
@@ -389,6 +414,10 @@ function openDetailTab(route: string) {
   );
 }
 
+/** What the header's item count reads, or `null` when the header has none. */
+const listCount = () =>
+  document.querySelector('[data-slot="list-count"] [aria-hidden="true"]')?.textContent ?? null;
+
 /** One row of the "About this kind" rail, by its key. */
 const railRow = (rail: HTMLElement, key: string) =>
   Array.from(rail.querySelectorAll("dl.kv"))
@@ -402,6 +431,57 @@ async function openColumns() {
 }
 
 describe("Resources", () => {
+  it("renders a native app column in a built-in list and removes it when the app is disabled", async () => {
+    const app = { enabled: true, revision: 2, manifest: { id: "org.example.security", name: "Security", contributions: {
+      tableColumns: [{ id: "critical", title: "Critical CVEs", forKinds: ["apps/Deployment"],
+        source: { join: "reports", jsonPath: ".report.summary.criticalCount" }, format: "number", sortable: true }],
+    } } };
+    extensionInventory.plugins = [app];
+    resolveExtensionColumns.mockResolvedValue({ columns: app.manifest.contributions.tableColumns,
+      cells: [{ name: "web-1", namespace: "default", values: { critical: "3" } }] });
+    const view = open("/k/deployments");
+    await waitFor(() => expect(resolveExtensionColumns).toHaveBeenCalled());
+    await waitFor(() => expect(headers()).toContain("Critical CVEs"));
+    await waitFor(() => expect(screen.getByText("3")).toBeTruthy());
+    expect(resolveExtensionColumns).toHaveBeenCalledTimes(1);
+    expect(resolveExtensionColumns.mock.calls[0][4]).toBe("apps/Deployment");
+    extensionInventory.plugins = [{ ...app, enabled: false }];
+    view.rerender(<ConsoleProvider><Resources route="/k/deployments" /><AskPeek /></ConsoleProvider>);
+    await waitFor(() => expect(headers()).not.toContain("Critical CVEs"));
+  });
+  it("keeps Pod enrichment rows stable while an app column answer rerenders the table", async () => {
+    const app = { enabled: true, revision: 2, manifest: { id: "org.example.pod", name: "Pod score", contributions: {
+      tableColumns: [{ id: "score", title: "Score", forKinds: ["/Pod"],
+        source: { jsonPath: ".cpu" }, format: "number" }],
+    } } };
+    extensionInventory.plugins = [app];
+    podMetrics.mockResolvedValue({ metrics: [{ name: "web-1", namespace: "default", cpuMillicores: 12, memoryMiB: 64 }] });
+    resolveExtensionColumns.mockResolvedValue({ columns: app.manifest.contributions.tableColumns,
+      cells: [{ name: "web-1", namespace: "default", values: { score: "12" } }] });
+    const view = open("/k/pods");
+    await waitFor(() => expect(headers()).toContain("Score"));
+    await waitFor(() => expect(screen.getByText("12")).toBeTruthy());
+    await waitFor(() => expect(podMetrics).toHaveBeenCalled());
+    const completed = resolveExtensionColumns.mock.calls.length;
+    expect(completed).toBeGreaterThan(0);
+    view.rerender(<ConsoleProvider><Resources route="/k/pods" /><AskPeek /></ConsoleProvider>);
+    await act(async () => { await Promise.resolve(); });
+    expect(resolveExtensionColumns).toHaveBeenCalledTimes(completed);
+  });
+  it("describes a failed app column read and keeps its retry available", async () => {
+    extensionInventory.plugins = [{ enabled: true, revision: 2, manifest: {
+      id: "org.example.security", name: "Security", contributions: { tableColumns: [
+        { id: "critical", title: "Critical CVEs", forKinds: ["apps/Deployment"],
+          source: { join: "reports", jsonPath: ".report.criticalCount" }, format: "number" },
+      ] },
+    } }];
+    resolveExtensionColumns.mockRejectedValue(new Error("handler error: list joined custom resources timed out"));
+    open("/k/deployments");
+    const alert = await screen.findByText("Couldn’t read Security columns");
+    expect(alert.parentElement?.textContent).toContain("didn't respond in time");
+    expect(alert.parentElement?.textContent).not.toContain("handler error:");
+    expect(screen.getByRole("button", { name: "Retry columns" })).toBeTruthy();
+  });
   it("lists a kind's rows under its own title", async () => {
     open("/k/pods");
 
@@ -437,6 +517,68 @@ describe("Resources", () => {
   // Correction 3: an unhealthy row gets a dot before its name, and the dot is
   // never colour alone — a reason rides beside it for anyone who cannot see
   // the colour, the same contract the cluster rail's `unavailable` follows.
+  // #688: the namespace that answered had none, the other was refused — an
+  // error that names the refused namespace, not "no pods" and not a
+  // failure of the whole list.
+  it("names the refused namespace when the one that answered was empty", async () => {
+    store.openTab("/k/pods");
+    setNamespaces(CTX.stableId, ["team-a", "team-b"]);
+    watchResource.mockImplementation(
+      async (
+        _c: string,
+        namespace: string,
+        _k: string,
+        onRows: (rows: unknown[]) => void,
+        _onStatus: unknown,
+        onError: (message: string) => void,
+      ) => {
+        if (namespace === "team-b") onError('pods is forbidden: User "dev" cannot watch resource "pods" in the namespace "team-b"');
+        else onRows([]);
+        return { stop: vi.fn() };
+      },
+    );
+    open("/k/pods");
+
+    expect(await screen.findByText("Could not list pods in team-b")).toBeTruthy();
+    expect(screen.queryByText(/has no pods/)).toBeNull();
+  });
+
+  // Review of #688: a polled list whose every selected namespace fails keeps
+  // the last good rows — which must read as stale, not as live rows under a
+  // "could not list … in team-a and team-b" banner.
+  it("calls the rows stale once every selected namespace's poll has failed", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      let fail = false;
+      // Two namespaces going stale for two different reasons.
+      const reasons: Record<string, string> = {
+        "team-a": 'leases is forbidden: User "dev" cannot list resource "leases" in API group "coordination.k8s.io" in the namespace "team-a"',
+        "team-b": "dial tcp 10.1.2.3:6443: connect: connection refused",
+      };
+      listResource.mockImplementation(async (_c: string, _k: string, ns: string) =>
+        fail ? { error: reasons[ns] } : { items: [{ name: `lock-${ns}`, namespace: ns }] },
+      );
+      store.openTab("/k/leases");
+      setNamespaces(CTX.stableId, ["team-a", "team-b"]);
+      open("/k/leases");
+      expect(await screen.findByText("lock-team-a")).toBeTruthy();
+
+      fail = true;
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5100);
+      });
+
+      expect(await screen.findByText(/are stale/)).toBeTruthy();
+      expect(screen.getByText("lock-team-a")).toBeTruthy();
+      expect(screen.queryByText(/Could not list .* in team-a and team-b/)).toBeNull();
+      // Each namespace with its own reason — not the first one's for both.
+      expect(screen.getByText(`team-a: ${describeError(reasons["team-a"]).detail}`)).toBeTruthy();
+      expect(screen.getByText(`team-b: ${describeError(reasons["team-b"]).detail}`)).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("marks an unhealthy pod's row with a dot that also says so in words", async () => {
     watchResource.mockImplementation(
       async (_c: string, _n: string, _k: string, onRows: (rows: unknown[]) => void) => {
@@ -508,6 +650,8 @@ describe("Resources", () => {
     await waitFor(() => expect(rowNames()).toEqual(["left"]));
     expect(screen.getByText(/Showing the first 1 widget/i)).toBeTruthy();
     expect(screen.getByText(/shared list row cap/i)).toBeTruthy();
+    // And the header does not pass the cap off as a count (#402).
+    expect(listCount()).toBe("1+ items");
   });
 
   it("does not claim a capped list when the custom-resource list failed", async () => {
@@ -537,14 +681,15 @@ describe("Resources", () => {
     expect(railRow(rail, "Scope")).toBe("Namespaced");
     expect(railRow(rail, "Served versions")).toBe("v1, v1beta1");
     expect(railRow(rail, "Storage version")).toBe("v1");
-    expect(railRow(rail, "Objects")).toBe("1");
+    // The count is the header's, not the rail's (#402): one figure, one place.
+    expect(rail.textContent).not.toContain("Objects");
+    expect(listCount()).toBe("1 item");
     expect(within(rail).getByText(/kubectl --context prod-eu get widgets.example.com -A -o wide/)).toBeDefined();
   });
 
   it("counts no objects until the list has answered, rather than saying nought", async () => {
-    // `Objects 0` while the rows are still in flight is not a small number,
-    // it is a wrong one — and it is the number a reader glances at and
-    // believes. The row waits for a count.
+    // `0 items` while the rows are still in flight is not a small number, it
+    // is a wrong one — and it is the number a reader glances at and believes.
     listCrds.mockResolvedValue({ crds: [WIDGETS] });
     listCustomResource.mockReturnValue(new Promise(() => {}));
 
@@ -552,7 +697,7 @@ describe("Resources", () => {
 
     const rail = await screen.findByRole("complementary", { name: "About this kind" });
     expect(railRow(rail, "Kind")).toBe("Widget");
-    expect(rail.textContent).not.toContain("Objects");
+    expect(listCount()).toBeNull();
   });
 
   it("heads the custom list's own pane with the kind, not the slug", async () => {
@@ -769,6 +914,212 @@ describe("Resources", () => {
     expect(await screen.findByRole("combobox", { name: "Namespaces" })).toBeTruthy();
   });
 
+  /**
+   * #821: the namespace a reader wants to narrow by is already on the row that
+   * caught their eye. Clicking it is the picker's own write, made from the
+   * table.
+   */
+  describe("a namespace clicked in the table", () => {
+    const selectionOf = () => store.currentWorkspace().tabs.find((t) => t.route === "/k/pods")!.namespaces;
+
+    it("narrows all namespaces to the one clicked, in this tab's selection and in the watch", async () => {
+      open("/k/pods");
+      await waitFor(() => expect(rowNames()).toEqual(["web-1", "api-7"]));
+      expect(selectionOf()).toBeUndefined();
+
+      await userEvent.click(screen.getByRole("button", { name: "Show only namespace default" }));
+
+      await waitFor(() => expect(selectionOf()).toEqual({ [CTX.stableId]: ["default"] }));
+      // The list is asked for that namespace — the picker's own effect.
+      await waitFor(() =>
+        expect(watchResource.mock.calls.some((call) => call[2] === "pods" && call[1] === "default")).toBe(true),
+      );
+    });
+
+    it("leaves the namespace as plain text once it is selected — there is nothing left to add", async () => {
+      open("/k/pods");
+      await waitFor(() => expect(rowNames()).toEqual(["web-1", "api-7"]));
+
+      await userEvent.click(screen.getByRole("button", { name: "Show only namespace default" }));
+
+      // The list shows the selection's rows only, so every namespace still on
+      // screen is one already selected, and none of them is a control.
+      await waitFor(() => expect(rowNames()).toEqual(["web-1"]));
+      expect(screen.queryByRole("button", { name: /^(Show only|Also show) namespace/ })).toBeNull();
+      expect(selectionOf()).toEqual({ [CTX.stableId]: ["default"] });
+    });
+
+    it("leaves keyboard focus on the row after Enter on the namespace, once the list has narrowed (PR #832 review)", async () => {
+      open("/k/pods");
+      await waitFor(() => expect(rowNames()).toEqual(["web-1", "api-7"]));
+
+      screen.getByRole("button", { name: "Show only namespace default" }).focus();
+      await userEvent.keyboard("{Enter}");
+
+      await waitFor(() => expect(rowNames()).toEqual(["web-1"]));
+      const row = screen.getByText("web-1").closest("tr");
+      expect(document.activeElement).toBe(row);
+    });
+
+    it("does not peek the row the namespace was read off", async () => {
+      open("/k/pods");
+      await waitFor(() => expect(rowNames()).toEqual(["web-1", "api-7"]));
+      const before = detailProps.length;
+
+      await userEvent.click(screen.getByRole("button", { name: "Show only namespace default" }));
+      await waitFor(() => expect(selectionOf()).toEqual({ [CTX.stableId]: ["default"] }));
+
+      expect(detailProps.length).toBe(before);
+    });
+
+    it("offers nothing to click under a credential scoped to one namespace", async () => {
+      useNamespaceOptions.mockReturnValue({ namespaces: ["default"], scope: "default", error: "" });
+      open("/k/pods");
+      // The scope is written to the selection, so only its rows are listed.
+      await waitFor(() => expect(rowNames()).toEqual(["web-1"]));
+
+      expect(screen.queryByRole("button", { name: /^(Show only|Also show) namespace/ })).toBeNull();
+    });
+  });
+
+  /**
+   * #822: from a pod to the node it runs on is one of the commonest steps in
+   * working out why the pod is unwell, and the name was plain text.
+   */
+  describe("a node clicked in the Pods list", () => {
+    const nodeTabs = () =>
+      store.currentWorkspace().tabs.filter((t) => t.route.startsWith("/k/Node/"));
+
+    it("opens that node's detail in a tab on this cluster, and does not peek the pod", async () => {
+      open("/k/pods");
+      await waitFor(() => expect(rowNames()).toEqual(["web-1", "api-7"]));
+      const before = detailProps.length;
+
+      await userEvent.click(screen.getAllByRole("button", { name: "Open node n1" })[0]);
+
+      expect(nodeTabs()).toHaveLength(1);
+      expect(nodeTabs()[0].route.endsWith("/n1")).toBe(true);
+      expect(nodeTabs()[0].sub).toBe("prod-eu");
+      // The pod's row was not what was asked for.
+      expect(detailProps.length).toBe(before);
+    });
+
+    it("leaves a pod with no node yet as a dash, with nothing to open", async () => {
+      watchResource.mockImplementation(async (_c: string, _n: string, _k: string, onRows: (rows: unknown[]) => void) => {
+        onRows([{ ...PODS[0], name: "pending-0", node: "" }]);
+        return { stop };
+      });
+      open("/k/pods");
+      await waitFor(() => expect(rowNames()).toEqual(["pending-0"]));
+
+      expect(screen.queryByRole("button", { name: /^Open node/ })).toBeNull();
+      expect(nodeTabs()).toHaveLength(0);
+    });
+  });
+
+  /**
+   * #839: Pods narrowed to a namespace, then Deployments from the sidebar.
+   * The Deployments tab used to start on "all namespaces" — which a
+   * namespace-scoped credential is refused outright.
+   */
+  it("lists the next kind in the namespaces the reader had narrowed to, not across the cluster", async () => {
+    store.openTab("/k/pods");
+    act(() => setNamespaces(CTX.stableId, ["billing"]));
+
+    // What the sidebar does: open the route, from the Pods tab.
+    open("/k/deployments");
+
+    await waitFor(() =>
+      expect(watchResource.mock.calls.some((call) => call[2] === "deployments" && call[1] === "billing")).toBe(true),
+    );
+    // Never asked for at cluster scope — the listing a scoped credential cannot make.
+    expect(watchResource.mock.calls.some((call) => call[2] === "deployments" && call[1] === "")).toBe(false);
+    // And the picker shows what it is narrowed to.
+    expect((await screen.findByRole("combobox", { name: "Namespaces" })).textContent).toContain("billing");
+  });
+
+  /**
+   * #402 Part B: a list said nothing about its own size, and the filter box
+   * shrank the table with no word on how much it had hidden.
+   */
+  describe("the item count in the header", () => {
+    it("says how many rows the list holds", async () => {
+      open("/k/pods");
+      await waitFor(() => expect(rowNames()).toEqual(["web-1", "api-7"]));
+      expect(listCount()).toBe("2 items");
+    });
+
+    it("becomes filtered over full while the filter hides rows, and goes back when it is cleared", async () => {
+      open("/k/pods");
+      await waitFor(() => expect(rowNames()).toHaveLength(2));
+      const filter = screen.getByRole("searchbox", { name: "Filter pods" });
+
+      await userEvent.type(filter, "web");
+      await waitFor(() => expect(rowNames()).toEqual(["web-1"]));
+      expect(listCount()).toBe("1 / 2");
+      // One element changing its text, not a second line beside the first.
+      expect(document.querySelectorAll('[data-slot="list-count"]')).toHaveLength(1);
+
+      await userEvent.clear(filter);
+      await waitFor(() => expect(rowNames()).toHaveLength(2));
+      expect(listCount()).toBe("2 items");
+    });
+
+    it("says nought of the total when the filter matches nothing", async () => {
+      open("/k/pods");
+      await waitFor(() => expect(rowNames()).toHaveLength(2));
+      await userEvent.type(screen.getByRole("searchbox", { name: "Filter pods" }), "zzz-no-such-pod");
+      await waitFor(() => expect(rowNames()).toEqual([]));
+      expect(listCount()).toBe("0 / 2");
+    });
+
+    it("counts the view, so narrowing the namespaces moves the total", async () => {
+      open("/k/pods");
+      await waitFor(() => expect(listCount()).toBe("2 items"));
+      // The picker's own write: the denominator is the pods in the namespaces
+      // selected, not the pods in the cluster.
+      act(() => setNamespaces(CTX.stableId, ["default"], store.currentWorkspace().activeId));
+      await waitFor(() => expect(rowNames()).toEqual(["web-1"]));
+      expect(listCount()).toBe("1 item");
+    });
+
+    it("has no count while the list is loading", () => {
+      watchResource.mockImplementation(() => new Promise(() => {}));
+      open("/k/pods");
+      expect(listCount()).toBeNull();
+    });
+
+    it("has no count for a list that was refused — never 0 items", async () => {
+      // A refused list and an empty cluster are the same picture and opposite
+      // facts, and zero is the one a reader believes.
+      watchResource.mockImplementation(
+        async (_c: string, _n: string, _k: string, _rows: unknown, _status: unknown, onError: (message: string) => void) => {
+          onError("pods is forbidden");
+          return { stop };
+        },
+      );
+      open("/k/pods");
+      expect(await screen.findByText(/Could not list pods/)).toBeTruthy();
+      expect(listCount()).toBeNull();
+    });
+
+    it("says 0 items for a list that answered with none", async () => {
+      watchResource.mockImplementation(async (_c: string, _n: string, _k: string, onRows: (rows: unknown[]) => void) => {
+        onRows([]);
+        return { stop };
+      });
+      open("/k/pods");
+      await waitFor(() => expect(listCount()).toBe("0 items"));
+    });
+
+    it("is there for a cluster-scoped kind too", async () => {
+      listNodes.mockResolvedValue({ nodes: [{ name: "n1", status: "Ready", roles: "worker", version: "1.30", age: "9d", taints: 0 }] });
+      open("/k/nodes");
+      await waitFor(() => expect(rowNames()).toEqual(["n1"]));
+      expect(listCount()).toBe("1 item");
+    });
+  });
+
   // Zero options while `namespaces` is null reads as "this cluster has no
   // namespaces"; a disabled, spinning stand-in says "not yet" instead.
   it("shows the namespace picker as loading rather than empty before namespaces arrive", async () => {
@@ -809,8 +1160,8 @@ describe("Resources", () => {
 
     open("/k/pods");
 
-    // Written to the workspace store, so every screen on this cluster follows.
-    await waitFor(() => expect(getView().namespaces.prod).toEqual(["team-a"]));
+    // Written to this tab's selection, so the picker shows the scope.
+    await waitFor(() => expect(selectionOf("prod")).toEqual(["team-a"]));
     await waitFor(() =>
       expect(watchResource.mock.calls.some((call) => call[1] === "team-a")).toBe(true),
     );
@@ -818,6 +1169,7 @@ describe("Resources", () => {
 
   it("explains a remembered selection that no longer exists, rather than showing an empty table with no reason", async () => {
     useNamespaceOptions.mockReturnValue({ namespaces: ["default", "billing"], scope: "", error: "" });
+    store.openTab("/k/pods");
     act(() => setNamespaces(CTX.stableId, ["deleted-ns"]));
 
     open("/k/pods");
@@ -828,7 +1180,36 @@ describe("Resources", () => {
     // The alert's dismiss action is the recovery: back to "all namespaces",
     // written through the same store a manual clear would use.
     await userEvent.click(screen.getByRole("button", { name: "Show all namespaces" }));
-    await waitFor(() => expect(getView().namespaces.prod).toEqual([]));
+    await waitFor(() => expect(selectionOf("prod")).toEqual([]));
+  });
+
+  it("keeps a namespace pick in its own tab — another tab on the same cluster does not follow", async () => {
+    useNamespaceOptions.mockReturnValue({ namespaces: ["default", "billing"], scope: "", error: "" });
+    store.openTab("/k/pods");
+    store.openTab("/k/deployments");
+    const tabIdOf = (route: string) => store.currentWorkspace().tabs.find((t) => t.route === route)!.id;
+    const pods = tabIdOf("/k/pods");
+    const deployments = tabIdOf("/k/deployments");
+    // Both mounted at once, each in its own scope — the way `Window` mounts every tab.
+    render(
+      <ConsoleProvider>
+        <div data-testid="pods">
+          <TabScope.Provider value={pods}><Resources route="/k/pods" /></TabScope.Provider>
+        </div>
+        <div data-testid="deployments">
+          <TabScope.Provider value={deployments}><Resources route="/k/deployments" /></TabScope.Provider>
+        </div>
+      </ConsoleProvider>,
+    );
+    const podsPane = within(screen.getByTestId("pods"));
+    await userEvent.click(await podsPane.findByRole("combobox", { name: "Namespaces" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Only billing" }));
+
+    const tab = (id: string) => store.currentWorkspace().tabs.find((t) => t.id === id)!;
+    await waitFor(() => expect(tab(pods).namespaces).toEqual({ [CTX.stableId]: ["billing"] }));
+    expect(tab(deployments).namespaces).toBeUndefined();
+    // And the other tab's watch was never narrowed to it.
+    expect(watchResource.mock.calls.some((call) => call[2] === "deployments" && call[1] === "billing")).toBe(false);
   });
 
   it("does not warn about a selection that is merely empty of this kind right now", async () => {
@@ -977,7 +1358,7 @@ describe("Resources", () => {
     // The fixture's own premise, asserted rather than assumed: neither cluster
     // has a namespace selection, so both are on "all namespaces" and the
     // selection this screen watches cannot change identity below.
-    expect(getView().namespaces).toEqual({});
+    expect(store.currentWorkspace().tabs.every((t) => t.namespaces === undefined)).toBe(true);
 
     await userEvent.click(screen.getByRole("checkbox", { name: "Select default/web-1" }));
     await screen.findByText("1 selected");

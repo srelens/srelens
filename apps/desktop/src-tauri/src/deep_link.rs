@@ -51,8 +51,9 @@ pub fn take_pending_deep_links(pending: tauri::State<'_, PendingDeepLink>) -> Ve
 /// When the reader has closed `main` but left a context window open, Tauri
 /// keeps the process alive with no `main` label at all. Deep links and the
 /// single-instance focus path still need a consumer that drains
-/// `take_pending_deep_links` (only classic `App` on `main` registers that
-/// listener), so recreate `main` rather than nudging into the void.
+/// `take_pending_deep_links` (either design registers that listener, and only
+/// on `main`: classic's `App`, or the new design's `Window` through
+/// `useDeepLinks`), so recreate `main` rather than nudging into the void.
 ///
 /// Creation is scheduled on a worker thread: `WebviewWindowBuilder::build`
 /// deadlocks on Windows when called from a synchronous event handler (the
@@ -71,14 +72,18 @@ pub fn focus_main_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
         if app.get_webview_window("main").is_some() {
             return;
         }
-        let _ = WebviewWindowBuilder::new(&app, "main", WebviewUrl::App("index.html".into()))
-            .title("srelens")
-            .inner_size(1440.0, 900.0)
-            .min_inner_size(960.0, 640.0)
-            .center()
-            // Same as configured main / context windows: keep HTML5 drag-drop.
-            .disable_drag_drop_handler()
-            .build();
+        let _ = crate::window::see_through(WebviewWindowBuilder::new(
+            &app,
+            "main",
+            WebviewUrl::App("index.html".into()),
+        ))
+        .title("srelens")
+        .inner_size(1440.0, 900.0)
+        .min_inner_size(960.0, 640.0)
+        .center()
+        // Same as configured main / context windows: keep HTML5 drag-drop.
+        .disable_drag_drop_handler()
+        .build();
     });
 }
 

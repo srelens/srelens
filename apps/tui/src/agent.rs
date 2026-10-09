@@ -1,12 +1,9 @@
-//! In-process autonomous SRE agent for SRElens TUI.
+//! In-process autonomous SRE agent for srectl.
 //!
 //! Drives srelens's MCP tools directly in-process via `srelens_mcp::stdio::handle_request`
 //! and runs the multi-turn agentic loop (`srelens_llm::agent_loop::run`), emitting streaming
 //! events back into Ratatui's event loop.
 
-use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use srelens_agent::event::AgentEvent;
@@ -14,6 +11,9 @@ use srelens_kube::client_cache::ClientCache;
 use srelens_llm::types::{ToolDef, Turn};
 use srelens_llm::{LlmError, ToolCallResult, ToolInvoker};
 use srelens_mcp::McpServer;
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use crate::event::AppEvent;
 
@@ -34,7 +34,13 @@ impl McpToolInvoker {
 
 fn provider_safe_name(id: &str) -> String {
     id.chars()
-        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '_' | '-') { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '_' | '-') {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -49,9 +55,20 @@ fn assign_alias(aliases: &mut HashMap<String, String>, id: &str) -> String {
 
 fn tool_def_from_json(v: &Value) -> ToolDef {
     ToolDef {
-        name: v.get("name").and_then(Value::as_str).unwrap_or("").to_string(),
-        description: v.get("description").and_then(Value::as_str).unwrap_or("").to_string(),
-        input_schema: v.get("inputSchema").cloned().unwrap_or_else(|| json!({ "type": "object" })),
+        name: v
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        description: v
+            .get("description")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        input_schema: v
+            .get("inputSchema")
+            .cloned()
+            .unwrap_or_else(|| json!({ "type": "object" })),
         read_only: v
             .get("annotations")
             .and_then(|a| a.get("readOnlyHint"))
@@ -64,9 +81,10 @@ fn tool_def_from_json(v: &Value) -> ToolDef {
 impl ToolInvoker for McpToolInvoker {
     async fn list_tools(&self) -> Result<Vec<ToolDef>, LlmError> {
         let req = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" });
-        let resp = srelens_mcp::stdio::handle_request(&self.server, &req, srelens_mcp::Transport::Http)
-            .await
-            .ok_or_else(|| LlmError::Api("tools/list returned no response".into()))?;
+        let resp =
+            srelens_mcp::stdio::handle_request(&self.server, &req, srelens_mcp::Transport::Http)
+                .await
+                .ok_or_else(|| LlmError::Api("tools/list returned no response".into()))?;
         let tools = resp
             .get("result")
             .and_then(|r| r.get("tools"))
@@ -85,22 +103,50 @@ impl ToolInvoker for McpToolInvoker {
     }
 
     async fn call_tool(&self, name: &str, args: &Value) -> Result<ToolCallResult, LlmError> {
-        let real_name = self.aliases.lock().unwrap().get(name).cloned().unwrap_or_else(|| name.to_string());
+        let real_name = {
+            let aliases = self.aliases.lock().unwrap();
+            aliases
+                .get(name)
+                .cloned()
+                .or_else(|| {
+                    let k8s_name = format!("k8s_{name}");
+                    aliases.get(&k8s_name).cloned()
+                })
+                .or_else(|| {
+                    if name.starts_with("k8s_") {
+                        Some(name.replacen('_', ".", 1))
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_else(|| name.to_string())
+        };
         let req = json!({
             "jsonrpc": "2.0",
             "id": 1,
             "method": "tools/call",
             "params": { "name": real_name, "arguments": args },
         });
-        let resp = srelens_mcp::stdio::handle_request(&self.server, &req, srelens_mcp::Transport::Http)
-            .await
-            .ok_or_else(|| LlmError::Api("tools/call returned no response".into()))?;
+        let resp =
+            srelens_mcp::stdio::handle_request(&self.server, &req, srelens_mcp::Transport::Http)
+                .await
+                .ok_or_else(|| LlmError::Api("tools/call returned no response".into()))?;
         if let Some(err) = resp.get("error") {
-            let msg = err.get("message").and_then(Value::as_str).unwrap_or("tool call failed");
-            return Ok(ToolCallResult { content: msg.to_string(), is_error: true, denied: false });
+            let msg = err
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("tool call failed");
+            return Ok(ToolCallResult {
+                content: msg.to_string(),
+                is_error: true,
+                denied: false,
+            });
         }
         let result = resp.get("result");
-        let is_error = result.and_then(|r| r.get("isError")).and_then(Value::as_bool).unwrap_or(false);
+        let is_error = result
+            .and_then(|r| r.get("isError"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         let denied = result
             .and_then(|r| r.get("_meta"))
             .and_then(|m| m.get("srelens/denied"))
@@ -117,20 +163,50 @@ impl ToolInvoker for McpToolInvoker {
                     .join("\n")
             })
             .unwrap_or_default();
-        Ok(ToolCallResult { content, is_error, denied })
+        Ok(ToolCallResult {
+            content,
+            is_error,
+            denied,
+        })
     }
 }
 
-pub fn build_mcp_server(
-    cache: Arc<ClientCache>,
-    kubeconfig_paths: Vec<PathBuf>,
-) -> Arc<McpServer> {
+pub fn build_mcp_server(cache: Arc<ClientCache>, kubeconfig_paths: Vec<PathBuf>) -> Arc<McpServer> {
     let registry = srelens_registry::build_registry_with_paths(cache, kubeconfig_paths);
     let policy = Arc::new(srelens_mcp::policy::FlagGated::new(false, true));
     let server = McpServer::new(Arc::new(registry))
         .with_policy(policy)
         .with_kind_resolver(srelens_registry::kind_resolver());
     Arc::new(server)
+}
+
+pub fn enrich_prompt_with_context(
+    prompt: &str,
+    active_context: &str,
+    active_namespace: &str,
+    argo_hub_context: Option<&str>,
+) -> String {
+    let hub_clause = match argo_hub_context {
+        Some(hub) if !hub.is_empty() && hub != active_context => {
+            format!(
+                ", ArgoCD Hub Context: \"{}\"]\n\
+                [NOTE: In a GitOps Hub-and-Spoke topology, ArgoCD Application CRDs and GitOps controllers reside on the Hub cluster (\"{}\"). When diagnosing ArgoCD applications, sync status, or GitOps rollouts for workloads in cluster \"{}\", query context \"{}\" (e.g. `k8s.listCustomResource` or `k8s.getCustomResource` with group `argoproj.io`, kind `Application`, context \"{}\").",
+                hub, hub, active_context, hub, hub
+            )
+        }
+        _ => String::new(),
+    };
+    if hub_clause.is_empty() {
+        format!(
+            "[Active Kubernetes Context: \"{}\", Namespace: \"{}\"]\n\n{}",
+            active_context, active_namespace, prompt
+        )
+    } else {
+        format!(
+            "[Active Kubernetes Context: \"{}\", Namespace: \"{}\"{}]\n\n{}",
+            active_context, active_namespace, hub_clause, prompt
+        )
+    }
 }
 
 pub async fn run_native_agent_turn(
@@ -140,6 +216,7 @@ pub async fn run_native_agent_turn(
     prompt: String,
     active_context: String,
     active_namespace: String,
+    argo_hub_context: Option<String>,
     event_tx: tokio::sync::mpsc::UnboundedSender<AppEvent>,
     timeout_seconds: u32,
 ) {
@@ -149,9 +226,11 @@ pub async fn run_native_agent_turn(
     let out_chars_clone = out_chars.clone();
     let event_tx_clone = event_tx.clone();
 
-    let enriched_prompt = format!(
-        "[Active Kubernetes Context: \"{}\", Namespace: \"{}\"]\n\n{}",
-        active_context, active_namespace, prompt
+    let enriched_prompt = enrich_prompt_with_context(
+        &prompt,
+        &active_context,
+        &active_namespace,
+        argo_hub_context.as_deref(),
     );
 
     let prior_turns = {
@@ -163,9 +242,15 @@ pub async fn run_native_agent_turn(
     let last_act_clone = last_activity.clone();
     let start_time_copy = start_time;
 
+    let real_usage = Arc::new(std::sync::Mutex::new(None));
+    let real_usage_clone = real_usage.clone();
+
     let ctx_tag = active_context.clone();
     let mut on_event = move |ev: AgentEvent| {
-        last_act_clone.store(start_time_copy.elapsed().as_secs(), std::sync::atomic::Ordering::Relaxed);
+        last_act_clone.store(
+            start_time_copy.elapsed().as_secs(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
         match ev {
             AgentEvent::TextDelta { text } => {
                 out_chars_clone.fetch_add(text.len(), std::sync::atomic::Ordering::Relaxed);
@@ -197,7 +282,7 @@ pub async fn run_native_agent_turn(
                     result: Ok(format!("{}|{}|{}", id, tool, args_preview)),
                 });
             }
-            AgentEvent::ToolResult { id, status } => {
+            AgentEvent::ToolResult { id, status, .. } => {
                 let status_str = match status {
                     srelens_agent::event::ToolStatus::Ok => "ok",
                     srelens_agent::event::ToolStatus::Error => "error",
@@ -207,6 +292,19 @@ pub async fn run_native_agent_turn(
                     title: format!("ai_tool_done:{}", ctx_tag),
                     result: Ok(format!("{}|{}", id, status_str)),
                 });
+            }
+            AgentEvent::Usage {
+                prompt_tokens,
+                completion_tokens,
+                cached_tokens,
+                total_tokens,
+            } => {
+                *real_usage_clone.lock().unwrap() = Some((
+                    prompt_tokens,
+                    completion_tokens,
+                    cached_tokens,
+                    total_tokens,
+                ));
             }
             AgentEvent::TurnDone => {}
             AgentEvent::Error { message } => {
@@ -256,10 +354,15 @@ pub async fn run_native_agent_turn(
     };
 
     let duration_ms = start_time.elapsed().as_millis() as u64;
-    let prompt_est = (prompt.len() + 200) / 4;
-    let comp_est = out_chars.load(std::sync::atomic::Ordering::Relaxed).max(1) / 4;
-    let total_est = prompt_est + comp_est;
-    let payload = format!("{}|{}|{}|{}|{}", prompt_est, comp_est, 0, total_est, duration_ms);
+    let (prompt_tokens, comp_tokens, cached_tokens, total_tokens) = resolve_token_usage(
+        real_usage.lock().unwrap().take(),
+        prompt.len(),
+        out_chars.load(std::sync::atomic::Ordering::Relaxed),
+    );
+    let payload = format!(
+        "{}|{}|{}|{}|{}",
+        prompt_tokens, comp_tokens, cached_tokens, total_tokens, duration_ms
+    );
     let _ = event_tx.send(AppEvent::ActionResult {
         title: format!("ai_usage:{}", active_context),
         result: Ok(payload),
@@ -300,6 +403,7 @@ pub async fn run_boxed_cursor_turn(
     query: String,
     active_ctx: String,
     active_ns: String,
+    argo_hub_context: Option<String>,
     cache: Arc<ClientCache>,
     kubeconfig_paths: Vec<PathBuf>,
     event_tx: tokio::sync::mpsc::UnboundedSender<AppEvent>,
@@ -438,10 +542,8 @@ pub async fn run_boxed_cursor_turn(
     }
 
     // 4. Construct cursor command with boxing flags
-    let prompt_with_context = format!(
-        "[Active Kubernetes Context: \"{}\", Namespace: \"{}\"]\n\n{}",
-        active_ctx, active_ns, query
-    );
+    let prompt_with_context =
+        enrich_prompt_with_context(&query, &active_ctx, &active_ns, argo_hub_context.as_deref());
     let cmd_spec = srelens_agent::adapter::cursor_command(
         &cursor_bin,
         &prompt_with_context,
@@ -454,9 +556,11 @@ pub async fn run_boxed_cursor_turn(
     for (k, v) in &cmd_spec.env {
         cmd.env(k, v);
     }
-    let effective_key = api_key
-        .filter(|k| !k.trim().is_empty())
-        .or_else(|| std::env::var("CURSOR_API_KEY").ok().filter(|k| !k.trim().is_empty()));
+    let effective_key = api_key.filter(|k| !k.trim().is_empty()).or_else(|| {
+        std::env::var("CURSOR_API_KEY")
+            .ok()
+            .filter(|k| !k.trim().is_empty())
+    });
 
     if let Some(ref key) = effective_key {
         cmd.env("CURSOR_API_KEY", key);
@@ -465,7 +569,11 @@ pub async fn run_boxed_cursor_turn(
 
     // Insert --api-key and --model BEFORE the trailing "--" and positional prompt
     let mut final_args = Vec::new();
-    let dash_dash_idx = cmd_spec.args.iter().position(|a| a == "--").unwrap_or(cmd_spec.args.len());
+    let dash_dash_idx = cmd_spec
+        .args
+        .iter()
+        .position(|a| a == "--")
+        .unwrap_or(cmd_spec.args.len());
     for (i, arg) in cmd_spec.args.iter().enumerate() {
         if i == dash_dash_idx {
             if let Some(ref key) = effective_key {
@@ -482,6 +590,7 @@ pub async fn run_boxed_cursor_turn(
     cmd.args(&final_args);
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
+    cmd.kill_on_drop(true);
 
     // 5. Spawn and stream results
     match cmd.spawn() {
@@ -517,7 +626,8 @@ pub async fn run_boxed_cursor_turn(
             if let Some(stdout) = stdout_pipe {
                 use tokio::io::{AsyncBufReadExt, BufReader};
                 let mut reader = BufReader::new(stdout).lines();
-                let inactivity_duration = std::time::Duration::from_secs(timeout_seconds.max(5) as u64);
+                let inactivity_duration =
+                    std::time::Duration::from_secs(timeout_seconds.max(5) as u64);
                 let max_wall_clock = std::time::Duration::from_secs(900); // 15-minute global ceiling
 
                 loop {
@@ -529,9 +639,16 @@ pub async fn run_boxed_cursor_turn(
                         Ok(Ok(Some(line))) => {
                             let trimmed = line.trim();
                             if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
-                                if let Some((prompt_t, comp_t, cached_t, total_t, dur_t)) = crate::app::extract_usage_metrics(&v) {
-                                    let dur_val = dur_t.unwrap_or_else(|| start_time_copy.elapsed().as_millis() as u64);
-                                    let payload = format!("{}|{}|{}|{}|{}", prompt_t, comp_t, cached_t, total_t, dur_val);
+                                if let Some((prompt_t, comp_t, cached_t, total_t, dur_t)) =
+                                    crate::app::extract_usage_metrics(&v)
+                                {
+                                    let dur_val = dur_t.unwrap_or_else(|| {
+                                        start_time_copy.elapsed().as_millis() as u64
+                                    });
+                                    let payload = format!(
+                                        "{}|{}|{}|{}|{}",
+                                        prompt_t, comp_t, cached_t, total_t, dur_val
+                                    );
                                     let _ = event_tx_clone.send(AppEvent::ActionResult {
                                         title: format!("ai_usage:{}", active_ctx_clone),
                                         result: Ok(payload),
@@ -543,28 +660,57 @@ pub async fn run_boxed_cursor_turn(
                                     if t == "thinking" {
                                         let _ = event_tx_clone.send(AppEvent::ActionResult {
                                             title: format!("ai_status:{}", active_ctx_clone),
-                                            result: Ok("Thinking & analyzing cluster query...".to_string()),
+                                            result: Ok(
+                                                "Thinking & analyzing cluster query...".to_string()
+                                            ),
                                         });
                                     } else if t == "tool_call" {
-                                        let subtype = v.get("subtype").and_then(|s| s.as_str()).unwrap_or("");
+                                        let subtype =
+                                            v.get("subtype").and_then(|s| s.as_str()).unwrap_or("");
                                         if subtype == "started" {
-                                            if let Some((id, tool, args)) = crate::app::extract_tool_call_start_info(&v) {
-                                                let _ = event_tx_clone.send(AppEvent::ActionResult {
-                                                    title: format!("ai_status:{}", active_ctx_clone),
-                                                    result: Ok(format!("Executing {} query on cluster...", tool)),
-                                                });
-                                                let _ = event_tx_clone.send(AppEvent::ActionResult {
-                                                    title: format!("ai_tool_start:{}", active_ctx_clone),
-                                                    result: Ok(format!("{}|{}|{}", id, tool, args)),
-                                                });
+                                            if let Some((id, tool, args)) =
+                                                crate::app::extract_tool_call_start_info(&v)
+                                            {
+                                                let _ =
+                                                    event_tx_clone.send(AppEvent::ActionResult {
+                                                        title: format!(
+                                                            "ai_status:{}",
+                                                            active_ctx_clone
+                                                        ),
+                                                        result: Ok(format!(
+                                                            "Executing {} query on cluster...",
+                                                            tool
+                                                        )),
+                                                    });
+                                                let _ =
+                                                    event_tx_clone.send(AppEvent::ActionResult {
+                                                        title: format!(
+                                                            "ai_tool_start:{}",
+                                                            active_ctx_clone
+                                                        ),
+                                                        result: Ok(format!(
+                                                            "{}|{}|{}",
+                                                            id, tool, args
+                                                        )),
+                                                    });
                                             }
                                         } else if subtype == "completed" {
-                                            if let Some((id, is_err)) = crate::app::extract_tool_call_completed_info(&v) {
-                                                let status_str = if is_err { "error" } else { "ok" };
-                                                let _ = event_tx_clone.send(AppEvent::ActionResult {
-                                                    title: format!("ai_tool_done:{}", active_ctx_clone),
-                                                    result: Ok(format!("{}|{}", id, status_str)),
-                                                });
+                                            if let Some((id, is_err)) =
+                                                crate::app::extract_tool_call_completed_info(&v)
+                                            {
+                                                let status_str =
+                                                    if is_err { "error" } else { "ok" };
+                                                let _ =
+                                                    event_tx_clone.send(AppEvent::ActionResult {
+                                                        title: format!(
+                                                            "ai_tool_done:{}",
+                                                            active_ctx_clone
+                                                        ),
+                                                        result: Ok(format!(
+                                                            "{}|{}",
+                                                            id, status_str
+                                                        )),
+                                                    });
                                             }
                                         }
                                     }
@@ -624,7 +770,8 @@ pub async fn run_boxed_cursor_turn(
                     )),
                 });
             } else {
-                let wait_res = tokio::time::timeout(std::time::Duration::from_secs(5), child.wait()).await;
+                let wait_res =
+                    tokio::time::timeout(std::time::Duration::from_secs(5), child.wait()).await;
                 match wait_res {
                     Ok(Ok(status)) => {
                         if !status.success() || (chars_count == 0 && first_error.is_none()) {
@@ -652,7 +799,10 @@ pub async fn run_boxed_cursor_turn(
                     Ok(Err(e)) => {
                         let _ = event_tx.send(AppEvent::ActionResult {
                             title: format!("ai_chunk:{}", active_ctx),
-                            result: Ok(format!("\n[Error: Failed waiting for cursor-agent: {}]", e)),
+                            result: Ok(format!(
+                                "\n[Error: Failed waiting for cursor-agent: {}]",
+                                e
+                            )),
                         });
                     }
                     Err(_) => {
@@ -667,7 +817,10 @@ pub async fn run_boxed_cursor_turn(
                 let prompt_est = (prompt_with_context.len() + 500) / 4;
                 let comp_est = (chars_count / 4).max(1);
                 let total_est = prompt_est + comp_est;
-                let payload = format!("{}|{}|{}|{}|{}", prompt_est, comp_est, 0, total_est, dur_val);
+                let payload = format!(
+                    "{}|{}|{}|{}|{}",
+                    prompt_est, comp_est, 0, total_est, dur_val
+                );
                 let _ = event_tx.send(AppEvent::ActionResult {
                     title: format!("ai_usage:{}", active_ctx),
                     result: Ok(payload),
@@ -692,6 +845,26 @@ pub async fn run_boxed_cursor_turn(
     }
 }
 
+/// Resolve token counts for an assistant turn: prefers provider-reported real usage,
+/// falling back to character-based heuristic estimates if real usage is absent (e.g. timeout).
+pub fn resolve_token_usage(
+    real_usage: Option<(usize, usize, usize, usize)>,
+    prompt_len: usize,
+    output_chars: usize,
+) -> (usize, usize, usize, usize) {
+    if let Some(u) = real_usage {
+        u
+    } else {
+        let prompt_est = (prompt_len + 200) / 4;
+        let comp_est = if output_chars == 0 {
+            0
+        } else {
+            (output_chars / 4).max(1)
+        };
+        (prompt_est, comp_est, 0, prompt_est + comp_est)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -708,7 +881,9 @@ mod tests {
         // Check provider-safe naming
         for t in &tools {
             assert!(
-                t.name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'),
+                t.name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'),
                 "tool name '{}' must be provider safe",
                 t.name
             );
@@ -719,5 +894,57 @@ mod tests {
         let has_list_ns = tools.iter().any(|t| t.name.contains("listNamespaces"));
         assert!(has_list_pods, "should include listPods capability");
         assert!(has_list_ns, "should include listNamespaces capability");
+    }
+
+    #[test]
+    fn test_enrich_prompt_without_argo_hub() {
+        let p = enrich_prompt_with_context("Check pods", "prod-cluster", "default", None);
+        assert_eq!(
+            p,
+            "[Active Kubernetes Context: \"prod-cluster\", Namespace: \"default\"]\n\nCheck pods"
+        );
+    }
+
+    #[test]
+    fn test_enrich_prompt_with_same_argo_hub_as_active_context() {
+        let p = enrich_prompt_with_context("Check pods", "tools", "default", Some("tools"));
+        assert_eq!(
+            p,
+            "[Active Kubernetes Context: \"tools\", Namespace: \"default\"]\n\nCheck pods"
+        );
+    }
+
+    #[test]
+    fn test_enrich_prompt_with_remote_argo_hub_context() {
+        let p = enrich_prompt_with_context(
+            "Where is the argo application?",
+            "spoke-prod",
+            "search",
+            Some("tools-mgmt"),
+        );
+        assert!(p.contains("Active Kubernetes Context: \"spoke-prod\""));
+        assert!(p.contains("ArgoCD Hub Context: \"tools-mgmt\""));
+        assert!(p.contains("spoke-prod"));
+        assert!(p.contains("tools-mgmt"));
+        assert!(p.ends_with("Where is the argo application?"));
+    }
+
+    #[test]
+    fn test_resolve_token_usage_prefers_real_usage() {
+        let real = Some((1200, 350, 800, 1550));
+        let usage = resolve_token_usage(real, 100, 40);
+        assert_eq!(usage, (1200, 350, 800, 1550));
+    }
+
+    #[test]
+    fn test_resolve_token_usage_falls_back_to_estimate() {
+        let usage = resolve_token_usage(None, 200, 40);
+        assert_eq!(usage, (100, 10, 0, 110));
+
+        let usage_short = resolve_token_usage(None, 200, 2);
+        assert_eq!(usage_short, (100, 1, 0, 101));
+
+        let usage_zero = resolve_token_usage(None, 200, 0);
+        assert_eq!(usage_zero, (100, 0, 0, 100));
     }
 }

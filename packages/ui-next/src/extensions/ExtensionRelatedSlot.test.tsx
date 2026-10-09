@@ -1,0 +1,387 @@
+import { render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { beforeEach, expect, it, vi } from "vitest";
+vi.mock("@srelens/core", async original => ({ ...await original<typeof import("@srelens/core")>(), listContexts:vi.fn(), resolveExtensionLinks:vi.fn(), resolveExtensionReverseLinks:vi.fn() }));
+vi.mock("./inventoryStore", () => ({ useExtensions:vi.fn() }));
+vi.mock("./contextIds", () => ({ useContextLookup:vi.fn(), refreshContextIds:vi.fn() }));
+vi.mock("../lib/tabsStore", () => ({ openTab:vi.fn() }));
+vi.mock("../lib/clusters", () => ({ useContexts:vi.fn(), useActiveContext:vi.fn() }));
+import { describeError, extensionClusterResourceRoute, listContexts, resolveExtensionLinks, resolveExtensionReverseLinks,
+  type ExtensionResolvedLink, type ExtensionReverseLink, type InstalledExtension } from "@srelens/core";
+import { useExtensions } from "./inventoryStore";
+import { useContextLookup } from "./contextIds";
+import { openTab } from "../lib/tabsStore";
+import { useActiveContext, useContexts } from "../lib/clusters";
+import { detailRoute } from "../lib/detailRoute";
+import { ExtensionRelatedSlot } from "./ExtensionRelatedSlot";
+
+const plugin = {
+  manifest:{ id:"org.example.argocd", name:"Argo CD",
+    capabilities:[{name:"applications",title:"Applications",target:"k8s.listCustomResource",
+      arguments:{group:"argoproj.io",kind:"Application"},inputs:["context","namespace"]}],
+    contributions:{
+      pages:[{id:"applications",title:"Applications",capability:"applications"}],
+      detailTabs:[], detailLinks:[],
+      resourceLinks:[{id:"argocd-owner",from:"apps/Deployment",to:"argoproj.io/Application",
+        relation:"managedBy",match:{annotation:"argocd.argoproj.io/tracking-id",parse:"argocd-tracking-id"}}],
+    } }, enabled:true, revision:4,
+} as unknown as InstalledExtension;
+const resource = { apiVersion:"apps/v1", kind:"Deployment",
+  metadata:{ name:"api", namespace:"team", uid:"uid-1", resourceVersion:"9" } };
+const link = (overrides: Partial<ExtensionResolvedLink>): ExtensionResolvedLink => ({
+  id:"argocd-owner", relation:"managedBy", to:"argoproj.io/Application", capability:"applications",
+  targets:[], ...overrides,
+});
+const answer = (links: ExtensionResolvedLink[]) => ({ from:{ kind:"apps/Deployment", namespace:"team", name:"api" }, links });
+
+beforeEach(() => {
+  vi.resetAllMocks();
+  vi.mocked(useExtensions).mockReturnValue({ status:"ready", data:{ plugins:[plugin] }, reload:vi.fn() } as never);
+  vi.mocked(useContextLookup).mockReturnValue({ status:"found", id:"cluster-key" });
+  vi.mocked(useContexts).mockReturnValue([{ name:"prod", stableId:"file/prod", key:"cluster-key" }] as never);
+  vi.mocked(useActiveContext).mockReturnValue({ name:"prod", stableId:"file/prod", key:"cluster-key" } as never);
+});
+
+it("links each related resource to a route carrying its cluster and app kind", async () => {
+  vi.mocked(resolveExtensionLinks).mockResolvedValue(answer([link({ targets:[
+    { namespace:"argocd", name:"guestbook", exists:true },
+    { namespace:"apps", name:"guestbook", exists:true },
+  ] })]));
+  render(<ExtensionRelatedSlot context="prod" resource={resource}/>);
+  expect(screen.getByRole("heading", { name:"Related" })).toBeTruthy();
+  const first = await screen.findByRole("button", { name:/Managed by.*Application.*argocd\/guestbook/ });
+  await waitFor(() => expect(resolveExtensionLinks).toHaveBeenCalledWith(
+    "org.example.argocd", 4, "prod", "team", "apps/Deployment", resource));
+  await userEvent.click(first);
+  await userEvent.click(screen.getByRole("button", { name:/apps\/guestbook/ }));
+  const routes = vi.mocked(openTab).mock.calls.map(([route]) => route);
+  expect(routes).toEqual([
+    extensionClusterResourceRoute("cluster-key", "org.example.argocd", "applications", "argocd", "guestbook"),
+    extensionClusterResourceRoute("cluster-key", "org.example.argocd", "applications", "apps", "guestbook"),
+  ]);
+  // Two targets, two tabs: the routes differ.
+  expect(new Set(routes).size).toBe(2);
+  expect(vi.mocked(openTab).mock.calls[0][1]).toEqual({ clusterName:"prod" });
+});
+
+// `/kube/a` declaring `b#c` and `/kube/a#b` declaring `c` share the stable ID `/kube/a#b#c` (#623).
+const shared = [
+  { name:"b#c", stableId:"/kube/a#b#c", key:"/kube/a#b%23c", pinnedId:"srelens-context:/kube/a#b%23c" },
+  { name:"c", stableId:"/kube/a#b#c", key:"/kube/a%23b#c", pinnedId:"srelens-context:/kube/a%23b#c" },
+];
+
+it("opens a link from each of two contexts that share a stable ID in a tab of its own (#695)", async () => {
+  vi.mocked(useContexts).mockReturnValue(shared as never);
+  vi.mocked(resolveExtensionLinks).mockResolvedValue(answer([link({ targets:[{ namespace:"argocd", name:"guestbook", exists:true }] })]));
+  for (const context of shared) {
+    const view = render(<ExtensionRelatedSlot context={context.name} resource={resource}/>);
+    await userEvent.click(await screen.findByRole("button", { name:/argocd\/guestbook/ }));
+    expect(resolveExtensionLinks).toHaveBeenLastCalledWith("org.example.argocd", 4, context.name, "team", "apps/Deployment", resource);
+    view.unmount();
+  }
+  expect(vi.mocked(openTab).mock.calls).toEqual([
+    ["/extension-contexts/%2Fkube%2Fa%23b%2523c/org.example.argocd/applications/argocd/guestbook", { clusterName:"b#c" }],
+    ["/extension-contexts/%2Fkube%2Fa%2523b%23c/org.example.argocd/applications/argocd/guestbook", { clusterName:"c" }],
+  ]);
+});
+
+it("links from an app resource page, which names its cluster by the pinned ID it reads by", async () => {
+  vi.mocked(useContexts).mockReturnValue(shared as never);
+  vi.mocked(resolveExtensionLinks).mockResolvedValue(answer([link({ targets:[{ namespace:"argocd", name:"guestbook", exists:true }] })]));
+  render(<ExtensionRelatedSlot context="srelens-context:/kube/a%23b#c" resource={resource}/>);
+  await userEvent.click(await screen.findByRole("button", { name:/argocd\/guestbook/ }));
+  expect(vi.mocked(openTab).mock.calls[0]).toEqual([
+    "/extension-contexts/%2Fkube%2Fa%2523b%23c/org.example.argocd/applications/argocd/guestbook", { clusterName:"c" },
+  ]);
+});
+
+it("shows a cluster-limited app's links on its own resource page, which asks the host by pinned ID", async () => {
+  // The page's pinned ID goes through the real lookup: the Inspector's display name is not the only way in.
+  const { useContextLookup: lookup } = await vi.importActual<typeof import("./contextIds")>("./contextIds");
+  vi.mocked(useContextLookup).mockImplementation(lookup);
+  vi.mocked(listContexts).mockResolvedValue({ contexts:shared } as never);
+  vi.mocked(useContexts).mockReturnValue(shared as never);
+  vi.mocked(useExtensions).mockReturnValue({ status:"ready", data:{ plugins:[{ ...plugin, contexts:["/kube/a%23b#c"] }] }, reload:vi.fn() } as never);
+  vi.mocked(resolveExtensionLinks).mockResolvedValue(answer([link({ targets:[{ namespace:"argocd", name:"guestbook", exists:true }] })]));
+  render(<ExtensionRelatedSlot context="srelens-context:/kube/a%23b#c" resource={resource}/>);
+  await userEvent.click(await screen.findByRole("button", { name:/argocd\/guestbook/ }));
+  expect(resolveExtensionLinks).toHaveBeenCalledWith("org.example.argocd", 4, "srelens-context:/kube/a%23b#c", "team", "apps/Deployment", resource);
+  // The link's route carries the key, as every app route does.
+  expect(vi.mocked(openTab).mock.calls[0]).toEqual([
+    "/extension-contexts/%2Fkube%2Fa%2523b%23c/org.example.argocd/applications/argocd/guestbook", { clusterName:"c" },
+  ]);
+});
+
+it("says no related resources only when every link answered", async () => {
+  vi.mocked(resolveExtensionLinks).mockResolvedValue(answer([link({})]));
+  render(<ExtensionRelatedSlot context="prod" resource={resource}/>);
+  expect(await screen.findByText("No related resources.")).toBeTruthy();
+  expect(screen.queryByRole("alert")).toBeNull();
+});
+
+it("shows a failed link as a failure with a retry, never as no related resources", async () => {
+  // The host's raw reason goes through describeError, as every other failure
+  // in the app does, so a refused or unreachable cluster says what to do.
+  const raw = "handler error: list joined custom resources: Forbidden: applications.argoproj.io is forbidden";
+  const detail = describeError(raw).detail;
+  expect(detail).not.toBe(raw);
+  vi.mocked(resolveExtensionLinks).mockResolvedValue(answer([link({ error:raw })]));
+  render(<ExtensionRelatedSlot context="prod" resource={resource}/>);
+  const row = await screen.findByText(/Couldn’t read/);
+  expect(row.textContent).toContain(detail);
+  expect(screen.queryByText("No related resources.")).toBeNull();
+  vi.mocked(resolveExtensionLinks).mockResolvedValue(answer([link({})]));
+  await userEvent.click(screen.getByRole("button", { name:/Retry/ }));
+  expect(await screen.findByText("No related resources.")).toBeTruthy();
+});
+
+it("shows a failed resolver call as a failure too", async () => {
+  vi.mocked(resolveExtensionLinks).mockRejectedValue(new Error("Extension was disabled or updated; refresh the view"));
+  render(<ExtensionRelatedSlot context="prod" resource={resource}/>);
+  expect(await screen.findByText(/Couldn’t read related resources from Argo CD/)).toBeTruthy();
+  expect(screen.queryByText("No related resources.")).toBeNull();
+});
+
+it("names a target the cluster does not have without linking to it", async () => {
+  vi.mocked(resolveExtensionLinks).mockResolvedValue(answer([link({ targets:[
+    { namespace:null, name:"gone", exists:false },
+  ] })]));
+  render(<ExtensionRelatedSlot context="prod" resource={resource}/>);
+  expect(await screen.findByText(/gone.*not found on this cluster/)).toBeTruthy();
+  expect(screen.queryByRole("button", { name:/gone/ })).toBeNull();
+});
+
+it("names a target the host did not look up, with why, and does not call it missing", async () => {
+  vi.mocked(resolveExtensionLinks).mockResolvedValue(answer([link({ targets:[
+    { namespace:null, name:"guestbook", exists:false,
+      unverified:"namespace unknown: the app declares no defaultNamespace for a bare name" },
+  ] })]));
+  render(<ExtensionRelatedSlot context="prod" resource={resource}/>);
+  expect(await screen.findByText(/guestbook.*namespace unknown/)).toBeTruthy();
+  expect(screen.queryByText(/not found on this cluster/)).toBeNull();
+  expect(screen.queryByText("No related resources.")).toBeNull();
+  expect(screen.queryByRole("button", { name:/guestbook/ })).toBeNull();
+  expect(screen.queryByText(/Couldn’t read/)).toBeNull();
+});
+
+it("renders a live and a stale target of one name as two rows with distinct keys", async () => {
+  // Two owner references to team/web with different uids: one is the live
+  // owner, the other a deleted one the cluster no longer has.
+  const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+  vi.mocked(resolveExtensionLinks).mockResolvedValue(answer([link({ targets:[
+    { namespace:"team", name:"web", exists:true },
+    { namespace:"team", name:"web", exists:false },
+  ] })]));
+  render(<ExtensionRelatedSlot context="prod" resource={resource}/>);
+  expect(await screen.findByRole("button", { name:/team\/web/ })).toBeTruthy();
+  expect(screen.getByText(/team\/web.*not found on this cluster/)).toBeTruthy();
+  const duplicate = errors.mock.calls.some(call => call.some(arg => String(arg).includes("same key")));
+  errors.mockRestore();
+  expect(duplicate).toBe(false);
+});
+
+it("sends the resolver only the resource's identity and metadata, never its data or spec", async () => {
+  // The resolver reads apiVersion, kind and metadata. A large ConfigMap's data,
+  // a spec, or a Secret's values are nothing it needs, so none of it is sent.
+  const linked = (from: string) => ({ ...plugin, manifest:{ ...plugin.manifest, contributions:{
+    ...plugin.manifest.contributions, resourceLinks:[{ id:"owner", from, to:"argoproj.io/Application",
+      relation:"ownedBy", match:{ label:"example.io/app" } }] } } }) as unknown as InstalledExtension;
+  const metadata = { name:"cfg", namespace:"team", uid:"u-1", resourceVersion:"3", labels:{ "example.io/app":"guestbook" } };
+  const cases = [
+    { from:"/ConfigMap", resource:{ apiVersion:"v1", kind:"ConfigMap", metadata, data:{ big:"x".repeat(100_000) } } },
+    { from:"/Secret", resource:{ apiVersion:"v1", kind:"Secret", metadata, type:"Opaque", data:{ token:"c2VjcmV0" } } },
+    { from:"apps/Deployment", resource:{ apiVersion:"apps/v1", kind:"Deployment", metadata,
+      spec:{ replicas:3 }, status:{ readyReplicas:3 } } },
+  ];
+  for (const { from, resource: sent } of cases) {
+    vi.mocked(resolveExtensionLinks).mockReset().mockResolvedValue(answer([link({})]));
+    vi.mocked(useExtensions).mockReturnValue({ status:"ready", data:{ plugins:[linked(from)] }, reload:vi.fn() } as never);
+    const view = render(<ExtensionRelatedSlot context="prod" resource={sent}/>);
+    await waitFor(() => expect(resolveExtensionLinks).toHaveBeenCalledOnce());
+    const payload = vi.mocked(resolveExtensionLinks).mock.calls[0][5];
+    expect(payload).toEqual({ apiVersion:sent.apiVersion, kind:sent.kind, metadata });
+    expect(JSON.stringify(payload)).not.toMatch(/c2VjcmV0|xxxx|replicas/);
+    view.unmount();
+  }
+});
+
+it("says it is loading while the app inventory is, rather than showing nothing", () => {
+  // Nothing yet is not "no app offers links": that is only known once the
+  // inventory has answered.
+  vi.mocked(useExtensions).mockReturnValue({ status:"loading", reload:vi.fn() } as never);
+  render(<ExtensionRelatedSlot context="prod" resource={resource}/>);
+  const related = screen.getByRole("region", { name:"Related" });
+  expect(related.textContent).toMatch(/Loading Related resources/);
+  expect(resolveExtensionLinks).not.toHaveBeenCalled();
+});
+
+it("shows a failed app inventory as a failure with a retry, not as no links", async () => {
+  const reload = vi.fn();
+  vi.mocked(useExtensions).mockReturnValue({ status:"error", error:"inventory unreadable", reload } as never);
+  render(<ExtensionRelatedSlot context="prod" resource={resource}/>);
+  expect(screen.getByRole("region", { name:"Related" }).textContent).toContain("inventory unreadable");
+  await userEvent.click(screen.getByRole("button", { name:/Retry/ }));
+  expect(reload).toHaveBeenCalledOnce();
+});
+
+it("renders nothing for a kind no app links from", () => {
+  const { container } = render(<ExtensionRelatedSlot context="prod" resource={{ ...resource, kind:"StatefulSet" }}/>);
+  expect(container.textContent).toBe("");
+  expect(resolveExtensionLinks).not.toHaveBeenCalled();
+});
+
+it("does not resolve links for an app not enabled on this cluster", () => {
+  vi.mocked(useExtensions).mockReturnValue({ status:"ready", data:{ plugins:[{ ...plugin, contexts:["other"] }] }, reload:vi.fn() } as never);
+  render(<ExtensionRelatedSlot context="prod" resource={resource}/>);
+  expect(resolveExtensionLinks).not.toHaveBeenCalled();
+});
+
+it("reads a pinned ID as a pinned ID, even where another context is named after it", async () => {
+  // The host never reads the reserved form as a name, so neither does the link's route.
+  vi.mocked(useContexts).mockReturnValue([
+    { name:"srelens-context:/kube/a%23b#c", stableId:"/kube/impostor#srelens-context:/kube/a%23b#c", key:"/kube/impostor#impostor",
+      pinnedId:"srelens-context:/kube/impostor#impostor" },
+    ...shared,
+  ] as never);
+  vi.mocked(resolveExtensionLinks).mockResolvedValue(answer([link({ targets:[{ namespace:"argocd", name:"guestbook", exists:true }] })]));
+  render(<ExtensionRelatedSlot context="srelens-context:/kube/a%23b#c" resource={resource}/>);
+  await userEvent.click(await screen.findByRole("button", { name:/argocd\/guestbook/ }));
+  expect(vi.mocked(openTab).mock.calls[0]).toEqual([
+    "/extension-contexts/%2Fkube%2Fa%2523b%23c/org.example.argocd/applications/argocd/guestbook", { clusterName:"c" },
+  ]);
+});
+
+it("names a target as plain text when its cluster is not listed, rather than open a tab for no cluster", async () => {
+  vi.mocked(useContexts).mockReturnValue([] as never);
+  vi.mocked(resolveExtensionLinks).mockResolvedValue(answer([link({ targets:[{ namespace:"argocd", name:"guestbook", exists:true }] })]));
+  render(<ExtensionRelatedSlot context="prod" resource={resource}/>);
+  expect(await screen.findByText(/Managed by.*Application.*argocd\/guestbook/)).toBeTruthy();
+  expect(screen.queryByRole("button", { name:/argocd\/guestbook/ })).toBeNull();
+});
+
+// ---- Built-in targets and reverse views (#728) ----
+
+/** The Argo CD app, with a Flux-style link from a Kustomization to a Namespace too. */
+const withLinks = (resourceLinks: unknown[]) => ({ ...plugin, manifest:{ ...plugin.manifest,
+  capabilities:[...plugin.manifest.capabilities, { name:"kustomizations", title:"Kustomizations",
+    target:"k8s.listCustomResource", arguments:{ group:"kustomize.toolkit.fluxcd.io", kind:"Kustomization" },
+    inputs:["context","namespace"] }],
+  contributions:{ ...plugin.manifest.contributions,
+    pages:[...plugin.manifest.contributions.pages, { id:"kustomizations", title:"Kustomizations", capability:"kustomizations" }],
+    resourceLinks } } }) as unknown as InstalledExtension;
+const application = { apiVersion:"argoproj.io/v1alpha1", kind:"Application",
+  metadata:{ name:"guestbook", namespace:"argocd", uid:"u-app", resourceVersion:"4" } };
+const reverse = (overrides: Partial<ExtensionReverseLink>): ExtensionReverseLink => ({
+  id:"argocd-owner", relation:"managedBy", from:"apps/Deployment", capability:"", sources:[], truncated:false, ...overrides,
+});
+const reverseAnswer = (links: ExtensionReverseLink[]) =>
+  ({ to:{ kind:"argoproj.io/Application", namespace:"argocd", name:"guestbook" }, links });
+
+it("opens a built-in target in the host's own Inspector, on the cluster the Inspector shows", async () => {
+  vi.mocked(resolveExtensionLinks).mockResolvedValue(answer([link({ id:"account", relation:"references",
+    to:"/ServiceAccount", capability:"", targets:[{ namespace:"team", name:"deployer", exists:true }] })]));
+  render(<ExtensionRelatedSlot context="prod" resource={resource}/>);
+  await userEvent.click(await screen.findByRole("button", { name:/References ServiceAccount team\/deployer/ }));
+  expect(vi.mocked(openTab).mock.calls).toEqual([[detailRoute("ServiceAccount", "team", "deployer"), { clusterName:"prod" }]]);
+});
+
+it("names a built-in target on a cluster the rail is not showing without a link to the wrong one", async () => {
+  // The detail route follows the rail: from an app page pinned to another cluster it
+  // would open the rail's namesake, so the target is named, not linked.
+  vi.mocked(useActiveContext).mockReturnValue({ name:"staging", stableId:"file/staging", key:"staging-key" } as never);
+  vi.mocked(resolveExtensionLinks).mockResolvedValue(answer([link({ id:"account", relation:"references",
+    to:"/ServiceAccount", capability:"", targets:[{ namespace:"team", name:"deployer", exists:true }] })]));
+  render(<ExtensionRelatedSlot context="prod" resource={resource}/>);
+  expect(await screen.findByText(/References ServiceAccount team\/deployer/)).toBeTruthy();
+  expect(screen.queryByRole("button", { name:/deployer/ })).toBeNull();
+});
+
+it("shows what names this resource under the reverse relation, from the same declarations", async () => {
+  const app = withLinks([
+    { id:"argocd-owner", from:"apps/Deployment", to:"argoproj.io/Application", relation:"managedBy",
+      match:{ annotation:"argocd.argoproj.io/tracking-id", parse:"argocd-tracking-id" } },
+    { id:"parent", from:"kustomize.toolkit.fluxcd.io/Kustomization", to:"argoproj.io/Application",
+      relation:"references", match:{ path:".spec.application" } },
+  ]);
+  vi.mocked(useExtensions).mockReturnValue({ status:"ready", data:{ plugins:[app] }, reload:vi.fn() } as never);
+  vi.mocked(resolveExtensionReverseLinks).mockResolvedValue(reverseAnswer([
+    reverse({ sources:[{ namespace:"team", name:"api", exists:true }, { namespace:"web", name:"front", exists:true }] }),
+    reverse({ id:"parent", relation:"references", from:"kustomize.toolkit.fluxcd.io/Kustomization",
+      capability:"kustomizations", sources:[{ namespace:"flux-system", name:"apps", exists:true }] }),
+  ]));
+  render(<ExtensionRelatedSlot context="prod" resource={application}/>);
+  const manages = await screen.findByRole("group", { name:"Manages" });
+  const referenced = screen.getByRole("group", { name:"Referenced by" });
+  // Only the reverse resolver is asked: no link starts from an Application.
+  expect(resolveExtensionLinks).not.toHaveBeenCalled();
+  expect(resolveExtensionReverseLinks).toHaveBeenCalledWith("org.example.argocd", 4, "prod", "argocd",
+    "argoproj.io/Application", { apiVersion:application.apiVersion, kind:application.kind, metadata:application.metadata });
+  // A built-in source opens the host's Inspector; an app's kind its app page.
+  await userEvent.click(within(manages).getByRole("button", { name:"Deployment team/api" }));
+  await userEvent.click(within(referenced).getByRole("button", { name:"Kustomization flux-system/apps" }));
+  expect(vi.mocked(openTab).mock.calls).toEqual([
+    [detailRoute("Deployment", "team", "api"), { clusterName:"prod" }],
+    [extensionClusterResourceRoute("cluster-key", "org.example.argocd", "kustomizations", "flux-system", "apps"), { clusterName:"prod" }],
+  ]);
+  expect(within(manages).getByRole("button", { name:"Deployment web/front" })).toBeTruthy();
+  expect(screen.queryByText("No related resources.")).toBeNull();
+});
+
+it("says a reverse list may be incomplete, and which resources it could not read", async () => {
+  const app = withLinks([{ id:"argocd-owner", from:"apps/Deployment", to:"argoproj.io/Application",
+    relation:"managedBy", match:{ label:"argocd.argoproj.io/instance" } }]);
+  vi.mocked(useExtensions).mockReturnValue({ status:"ready", data:{ plugins:[app] }, reload:vi.fn() } as never);
+  vi.mocked(resolveExtensionReverseLinks).mockResolvedValue(reverseAnswer([reverse({ truncated:true,
+    unreadable:"1 resource could not be read for this link (team/half: label x is not set)",
+    sources:[{ namespace:"team", name:"api", exists:true },
+      { namespace:null, name:"cluster-wide", exists:true, unverified:"the reference names no namespace" }] })]));
+  render(<ExtensionRelatedSlot context="prod" resource={application}/>);
+  const manages = await screen.findByRole("group", { name:"Manages" });
+  expect(within(manages).getByText(/2,000 Deployment.*there may be more/)).toBeTruthy();
+  expect(within(manages).getByText(/team\/half: label x is not set/)).toBeTruthy();
+  expect(within(manages).getByText(/cluster-wide — the reference names no namespace/)).toBeTruthy();
+  expect(within(manages).queryByRole("button", { name:/cluster-wide/ })).toBeNull();
+});
+
+it("shows a reverse link that failed as a failure with a retry, never as nothing names it", async () => {
+  const app = withLinks([{ id:"argocd-owner", from:"apps/Deployment", to:"argoproj.io/Application",
+    relation:"managedBy", match:{ label:"argocd.argoproj.io/instance" } }]);
+  vi.mocked(useExtensions).mockReturnValue({ status:"ready", data:{ plugins:[app] }, reload:vi.fn() } as never);
+  vi.mocked(resolveExtensionReverseLinks).mockResolvedValue(reverseAnswer([reverse({ error:"connection refused" })]));
+  render(<ExtensionRelatedSlot context="prod" resource={application}/>);
+  const manages = await screen.findByRole("group", { name:"Manages" });
+  expect(within(manages).getByText(/^Deployment: Couldn’t read/)).toBeTruthy();
+  expect(screen.queryByText("No related resources.")).toBeNull();
+  vi.mocked(resolveExtensionReverseLinks).mockResolvedValue(reverseAnswer([reverse({})]));
+  await userEvent.click(screen.getByRole("button", { name:/Retry/ }));
+  expect(await screen.findByText("No related resources.")).toBeTruthy();
+});
+
+it("shows a failed reverse resolver call as its own failure", async () => {
+  const app = withLinks([{ id:"argocd-owner", from:"apps/Deployment", to:"argoproj.io/Application",
+    relation:"managedBy", match:{ label:"argocd.argoproj.io/instance" } }]);
+  vi.mocked(useExtensions).mockReturnValue({ status:"ready", data:{ plugins:[app] }, reload:vi.fn() } as never);
+  vi.mocked(resolveExtensionReverseLinks).mockRejectedValue(new Error("Extension was disabled or updated; refresh the view"));
+  render(<ExtensionRelatedSlot context="prod" resource={application}/>);
+  expect(await screen.findByText(/Couldn’t read related resources from Argo CD/)).toBeTruthy();
+  expect(screen.queryByText("No related resources.")).toBeNull();
+});
+
+it("reads both directions for a kind that is both a link's source and another's target", async () => {
+  const app = withLinks([
+    { id:"argocd-owner", from:"apps/Deployment", to:"argoproj.io/Application", relation:"managedBy",
+      match:{ label:"argocd.argoproj.io/instance" } },
+    { id:"project", from:"argoproj.io/Application", to:"/Namespace", relation:"references",
+      match:{ path:".spec.destination.namespace" } },
+  ]);
+  vi.mocked(useExtensions).mockReturnValue({ status:"ready", data:{ plugins:[app] }, reload:vi.fn() } as never);
+  vi.mocked(resolveExtensionLinks).mockResolvedValue(answer([link({ id:"project", relation:"references", to:"/Namespace",
+    capability:"", targets:[{ namespace:null, name:"team", exists:true }] })]));
+  vi.mocked(resolveExtensionReverseLinks).mockResolvedValue(reverseAnswer([reverse({
+    sources:[{ namespace:"team", name:"api", exists:true }] })]));
+  render(<ExtensionRelatedSlot context="prod" resource={application}/>);
+  // A cluster-scoped built-in target opens with the detail route's cluster-scoped segment.
+  await userEvent.click(await screen.findByRole("button", { name:/References Namespace team/ }));
+  expect(vi.mocked(openTab).mock.calls[0]).toEqual([detailRoute("Namespace", null, "team"), { clusterName:"prod" }]);
+  expect(within(screen.getByRole("group", { name:"Manages" })).getByRole("button", { name:"Deployment team/api" })).toBeTruthy();
+});

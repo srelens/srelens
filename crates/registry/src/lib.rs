@@ -15,12 +15,38 @@ mod catalog;
 mod durable;
 pub use catalog::{catalog_of, CatalogEntry};
 mod extensions;
+pub mod github;
 mod settings;
 /// The extension readers' fuzz entry points, for the targets in `fuzz/`. Not an API.
 #[cfg(feature = "fuzzing")]
 #[doc(hidden)]
 pub use extensions::fuzzing;
+pub use extensions::streams::{ExtensionStreams, OpenStreamOut, INVENTORY_CHANNEL};
+/// Installed apps' operations as MCP tools (#574), from [`ExtensionStreams::app_tools`],
+/// and what their sidecars' calls are answered with ([`AppTools::serve_sidecars`]).
+pub use extensions::sidecars::SidecarHost;
+pub use extensions::tools::AppTools;
+/// Who confirms a sidecar's gated call (#573): a host's own, or `NoConsent`.
+pub use srelens_plugin_host::sidecar::{
+    AppIdentity as SidecarApp, Consent as SidecarConsent, ConsentRequest as SidecarConsentRequest,
+    NoConsent,
+};
+pub use extensions::{
+    AppPolicy, Apps, InventoryKey, InventoryLock, InventoryStore, SharedCatalog, SharedPolicy,
+    TrustRoot, MAX_POLICY_BYTES,
+};
+/// Making `.srelens-extension` packages (#562): what a publisher runs before a release, and
+/// what `cargo run -p srelens-registry --example pack-extension` wraps.
+pub mod extension_package {
+    pub use crate::extensions::package::{digest_list, pack, MAX_PACKAGE_BYTES};
+}
 pub use settings::default_settings_path;
+/// The secret store a host supplies for apps' secret settings (#543), so a
+/// host implements it against this crate alone.
+pub use srelens_plugin_host::{NoSecretStore, SecretStore, SecretValue, SECRET_STORE_PERMISSION};
+/// The host's metadata for `extension.secretStore`, for a host that renders
+/// its confirmation from names it has vetted (#543).
+pub use extensions::{declares_secret_setting, SECRET_STORE_ANNOTATIONS};
 
 // Test-only: every consumer of this module — `render_catalog` (regenerated via
 // `UPDATE_CATALOG=1 cargo test`), the doc-scan tests below, and mcp_docs.rs's
@@ -217,13 +243,61 @@ pub fn build_registry() -> Registry {
 }
 
 /// Build the registry using a caller-provided client cache AND kubeconfig
-/// paths. The web server uses this with per-user paths; the desktop/MCP
-/// surfaces delegate with the host defaults.
+/// paths — for a host whose kubeconfigs are all one person's (the TUI, tests).
+/// A web user's registry is [`build_registry_for_user`].
 pub fn build_registry_with_paths(
     cache: Arc<ClientCache>,
     kubeconfig_paths: Vec<PathBuf>,
 ) -> Registry {
     build_registry_with_paths_and_settings(cache, kubeconfig_paths, None)
+}
+
+/// Build one web user's registry (#515): the host capabilities over their own
+/// kubeconfig files, and the apps capabilities over `apps` — their own inventory
+/// and the catalog the server shares between its users.
+///
+/// No desktop settings: web settings are per-user SQLite rows, served by the
+/// server's own settings API rather than by a capability. No secret store
+/// either: the web host has none per user yet (#522), so `extension.secretStore`
+/// is not registered, and `extensions.list` reports the store unavailable.
+///
+/// And `k8s.listContexts` over their own kubeconfigs only: every user's
+/// registry runs in one process as one UID, so a file a caller names could be
+/// another user's kubeconfig, and the managed kubeconfig folder is the server
+/// host's.
+///
+/// `network.http` only when `apps` are held to an administrator's policy whose
+/// ceiling names a host (#578): each request then leaves from the shared server,
+/// so it goes only where the policy lets it, over HTTPS.
+pub fn build_registry_for_user(
+    cache: Arc<ClientCache>,
+    kubeconfig_paths: Vec<PathBuf>,
+    apps: Apps,
+) -> Registry {
+    let network = if apps.has_network_ceiling() {
+        BrokeredNetwork::Ceiling
+    } else {
+        BrokeredNetwork::Off
+    };
+    build_with(
+        cache,
+        kubeconfig_paths,
+        Some(apps),
+        None,
+        network,
+        Kubeconfigs::OwnOnly,
+    )
+    .0
+}
+
+/// Which kubeconfig files a registry's `k8s.listContexts` may reach.
+#[derive(Clone, Copy)]
+enum Kubeconfigs {
+    /// The registry's own, the app's managed folder, and any file the caller
+    /// names: a desktop, TUI or MCP host, where all of them are the person's.
+    Local,
+    /// The registry's own and nothing else: a web user's.
+    OwnOnly,
 }
 
 /// Build a registry and optionally add the durable desktop settings surface.
@@ -234,6 +308,109 @@ pub fn build_registry_with_paths_and_settings(
     kubeconfig_paths: Vec<PathBuf>,
     settings_path: Option<PathBuf>,
 ) -> Registry {
+    build_registry_and_app_streams(cache, kubeconfig_paths, settings_path).0
+}
+
+/// [`build_registry_with_paths_and_settings`], with `secrets` keeping apps'
+/// secret settings (#543). The desktop passes its vault; a build with no
+/// store refuses to keep a secret, and says why.
+pub fn build_registry_with_paths_settings_and_secrets(
+    cache: Arc<ClientCache>,
+    kubeconfig_paths: Vec<PathBuf>,
+    settings_path: Option<PathBuf>,
+    secrets: Arc<dyn SecretStore>,
+) -> Registry {
+    build_registry_app_streams_and_secrets(cache, kubeconfig_paths, settings_path, secrets).0
+}
+
+/// The desktop build, plus the app streams (#565) its host opens streams
+/// through. `None` when there is no settings path, so no apps either.
+pub fn build_registry_and_app_streams(
+    cache: Arc<ClientCache>,
+    kubeconfig_paths: Vec<PathBuf>,
+    settings_path: Option<PathBuf>,
+) -> (Registry, Option<Arc<ExtensionStreams>>) {
+    build_registry_app_streams_and_secrets(
+        cache,
+        kubeconfig_paths,
+        settings_path,
+        Arc::new(srelens_plugin_host::NoSecretStore),
+    )
+}
+
+/// [`build_registry_and_app_streams`], with `secrets` keeping apps' secret
+/// settings (#543). A store the host does not have is
+/// [`srelens_plugin_host::NoSecretStore`], which stores and deletes nothing.
+pub fn build_registry_app_streams_and_secrets(
+    cache: Arc<ClientCache>,
+    kubeconfig_paths: Vec<PathBuf>,
+    settings_path: Option<PathBuf>,
+    secrets: Arc<dyn SecretStore>,
+) -> (Registry, Option<Arc<ExtensionStreams>>) {
+    build_desktop(
+        cache,
+        kubeconfig_paths,
+        settings_path,
+        secrets,
+        TrustRoot::pinned(),
+    )
+}
+
+/// [`build_registry_with_paths_and_settings`], with the apps' catalog and publisher
+/// signatures verified against `trust` rather than the root this build pins (#559): for
+/// the end-to-end suite, whose catalog a test root signs.
+pub fn build_registry_with_paths_settings_and_trust(
+    cache: Arc<ClientCache>,
+    kubeconfig_paths: Vec<PathBuf>,
+    settings_path: PathBuf,
+    trust: TrustRoot,
+) -> Registry {
+    build_desktop(
+        cache,
+        kubeconfig_paths,
+        Some(settings_path),
+        Arc::new(srelens_plugin_host::NoSecretStore),
+        trust,
+    )
+    .0
+}
+
+fn build_desktop(
+    cache: Arc<ClientCache>,
+    kubeconfig_paths: Vec<PathBuf>,
+    settings_path: Option<PathBuf>,
+    secrets: Arc<dyn SecretStore>,
+    trust: TrustRoot,
+) -> (Registry, Option<Arc<ExtensionStreams>>) {
+    // The desktop keeps its apps in one file beside its settings.
+    let apps = settings_path
+        .as_ref()
+        .map(|path| Apps::with_trust(path.with_extension("extensions.json"), trust));
+    let (mut reg, app_streams) = build_with(
+        cache,
+        kubeconfig_paths,
+        apps,
+        Some(secrets),
+        BrokeredNetwork::Desktop,
+        Kubeconfigs::Local,
+    );
+    if let Some(path) = settings_path {
+        settings::register(&mut reg, path);
+    }
+    (reg, app_streams)
+}
+
+/// Every host capability, and the apps capabilities over `apps` when there are
+/// any: with `secrets` keeping their secret settings, or with no way to keep
+/// one when there is no store at all (`None`, the web host).
+fn build_with(
+    cache: Arc<ClientCache>,
+    kubeconfig_paths: Vec<PathBuf>,
+    apps: Option<Apps>,
+    secrets: Option<Arc<dyn SecretStore>>,
+    network: BrokeredNetwork,
+    kubeconfigs: Kubeconfigs,
+) -> (Registry, Option<Arc<ExtensionStreams>>) {
     let mut reg = Registry::new();
 
     reg.register(Capability::read_only(
@@ -242,11 +419,17 @@ pub fn build_registry_with_paths_and_settings(
         |input| async move { Ok(json!({ "pong": input })) },
     ));
 
-    reg.register(srelens_kube::contexts::list_contexts_capability(
-        cache.clone(),
-        kubeconfig_paths.clone(),
-        srelens_kube::connect::default_kubeconfig_dir(),
-    ));
+    reg.register(match kubeconfigs {
+        Kubeconfigs::Local => srelens_kube::contexts::list_contexts_capability(
+            cache.clone(),
+            kubeconfig_paths.clone(),
+            srelens_kube::connect::default_kubeconfig_dir(),
+        ),
+        Kubeconfigs::OwnOnly => srelens_kube::contexts::list_own_contexts_capability(
+            cache.clone(),
+            kubeconfig_paths.clone(),
+        ),
+    });
     reg.register(srelens_kube::contexts::delete_context_capability(
         cache.clone(),
     ));
@@ -299,6 +482,7 @@ pub fn build_registry_with_paths_and_settings(
         cache.clone(),
     ));
     reg.register(srelens_kube::workloads::list_pods_capability(cache.clone()));
+    reg.register(srelens_kube::workload_images::list_workload_images_capability(cache.clone()));
     reg.register(srelens_kube::workloads::pods_for_selector_capability(
         cache.clone(),
     ));
@@ -347,6 +531,7 @@ pub fn build_registry_with_paths_and_settings(
     reg.register(srelens_kube::ingresses::list_ingresses_capability(
         cache.clone(),
     ));
+    reg.register(srelens_kube::endpoints::list_endpoints_capability(cache.clone()));
     reg.register(srelens_kube::endpointslices::list_endpointslices_capability(cache.clone()));
     reg.register(srelens_kube::networkpolicies::list_networkpolicies_capability(cache.clone()));
     reg.register(srelens_kube::pvcs::list_pvcs_capability(cache.clone()));
@@ -377,6 +562,9 @@ pub fn build_registry_with_paths_and_settings(
     reg.register(srelens_kube::actions::rollout_restart_capability(
         cache.clone(),
     ));
+    reg.register(srelens_kube::deployments::rollout_undo_capability(
+        cache.clone(),
+    ));
     reg.register(srelens_kube::actions::update_config_data_capability(
         cache.clone(),
     ));
@@ -387,6 +575,16 @@ pub fn build_registry_with_paths_and_settings(
         cache.clone(),
     ));
     reg.register(srelens_kube::events::list_events_capability(cache.clone()));
+    reg.register(srelens_kube::changed::list_changes_capability(
+        cache.clone(),
+    ));
+    // Why a `k8s.listChanges` rollout happened: its Argo sync's GitHub PRs.
+    // Desktop only, like `network.http` (#568): on the web host the request
+    // would leave from the shared server, with the server's GITHUB_TOKEN,
+    // for whichever user asked.
+    if network == BrokeredNetwork::Desktop {
+        reg.register(github::rollout_cause_capability());
+    }
     reg.register(srelens_kube::metrics::node_metrics_capability(
         cache.clone(),
     ));
@@ -442,7 +640,12 @@ pub fn build_registry_with_paths_and_settings(
         cache.clone(),
     ));
     reg.register(srelens_kube::gitops::resource_capability(cache.clone()));
-    reg.register(srelens_kube::gitops::action_capability(cache.clone()));
+    // The host action primitives an app's manifest binds as `actions` (#549).
+    // They are host capabilities like any other — one MCP tool and one catalog
+    // row each.
+    for primitive in srelens_kube::action_primitives::capabilities(cache.clone()) {
+        reg.register(primitive);
+    }
     reg.register(srelens_kube::crds::list_crds_capability(cache.clone()));
     reg.register(srelens_kube::crds::list_custom_resource_capability(
         cache.clone(),
@@ -484,21 +687,54 @@ pub fn build_registry_with_paths_and_settings(
         cache.clone(),
     ));
 
-    if let Some(path) = settings_path {
+    let mut app_streams = None;
+    if let Some(apps) = apps {
         let mut core = reg.clone();
-        // Broker-only: kept out of `reg`, so neither the catalog nor MCP offers it.
-        core.register(extensions::crd::check_capability(cache.clone()));
+        for capability in broker_only(cache.clone(), network) {
+            core.register(capability);
+        }
         let core = Arc::new(core);
-        extensions::register(
-            &mut reg,
-            path.with_extension("extensions.json"),
-            core,
-            cache,
-        );
-        settings::register(&mut reg, path);
+        app_streams = Some(match secrets {
+            Some(secrets) => {
+                extensions::register_with_secrets(&mut reg, apps, core, cache, secrets)
+            }
+            None => extensions::register_without_secrets(&mut reg, apps, core, cache),
+        });
     }
 
-    reg
+    (reg, app_streams)
+}
+
+/// Whether an apps registry's broker may send `network.http` requests (#568).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BrokeredNetwork {
+    /// The desktop: a request leaves from the person's own computer, as their browser's
+    /// would.
+    Desktop,
+    /// The web host: a request would leave from the shared server — from its network
+    /// position, and to its loopback — so there is none.
+    Off,
+    /// The web host whose administrator's policy names hosts `network.http` may reach
+    /// (#578): a request leaves from the shared server, but every request and redirect
+    /// is held to that ceiling, over HTTPS, on every call.
+    Ceiling,
+}
+
+/// The capabilities only the extension broker calls. Kept out of the registry the
+/// catalog and MCP are built from, so neither offers them: the CRD check an app read
+/// makes first, `network.http` (#568), which called directly would fetch any URL, and
+/// the pod capabilities (#567), which run only as app streams.
+fn broker_only(cache: Arc<ClientCache>, network: BrokeredNetwork) -> Vec<Capability> {
+    let mut capabilities = vec![extensions::crd::check_capability(cache)];
+    capabilities.push(extensions::jobs::capability());
+    if network != BrokeredNetwork::Off {
+        capabilities.push(extensions::network::capability());
+    }
+    // Logs, exec and port-forwards (#567) on both hosts, so an app that binds them
+    // installs on either: they run only as app streams, which the web host refuses
+    // until it runs them (#727), and each view says so.
+    capabilities.extend(extensions::pods::capabilities());
+    capabilities
 }
 
 /// Build the registry using a caller-provided client cache with the host's
@@ -550,6 +786,266 @@ mod tests {
         let server = McpServer::new(Arc::new(reg.clone()));
         assert_eq!(assert_every_capability_has_a_tool(&reg, &server), Ok(()));
         srelens_mcp::completeness::assert_mutating_capabilities_are_gated(&reg);
+    }
+
+    /// #574: every installed app's reader, declared action and sidecar operation is
+    /// an MCP tool — and a pod binding, a session a view opens, is not — and the app
+    /// tools meet every rule the host's own capabilities do: listed, gated when they
+    /// mutate, at an impact that agrees with the gate, and with a renderable host
+    /// sentence wherever they are gated.
+    #[tokio::test]
+    async fn every_installed_apps_operation_is_mcp_exposed() {
+        use base64::Engine as _;
+        let dir = tempfile::tempdir().unwrap();
+        let (reg, streams) = build_registry_and_app_streams(
+            ClientCache::new_many(vec![]),
+            vec![],
+            Some(dir.path().join("settings.json")),
+        );
+        let configure = |input: serde_json::Value| reg.invoke("extensions.configure", input);
+        configure(json!({"action": "unsignedApps", "allowUnsignedApps": true}))
+            .await
+            .unwrap();
+        let mut sources: Vec<serde_json::Value> = [
+            include_str!("../../../examples/extensions/argocd.json"),
+            include_str!("../../../examples/extensions/flux.json"),
+        ]
+        .iter()
+        .map(|source| {
+            let mut value: serde_json::Value = serde_json::from_str(source).unwrap();
+            let id = value["id"].as_str().unwrap().replace("org.srelens.", "org.example.");
+            value["id"] = json!(id);
+            value
+        })
+        .collect();
+        sources.push(json!({
+            "id": "org.example.releases", "name": "Releases", "version": "0.1.0",
+            "srelensApiVersion": "^0.5", "kind": "declarative",
+            "permissions": [{"capability": "network.http", "hosts": ["api.github.com"]},
+                "k8s.listDeployments", {"capability": "k8s.streamLogs", "namespaces": ["web"]}],
+            "capabilities": [
+                {"name": "latest", "title": "Latest release", "target": "network.http",
+                 "arguments": {"url": "https://api.github.com", "path": "/repos/srelens/srelens/releases/latest"},
+                 "inputs": []},
+                {"name": "deployments", "title": "Deployments", "target": "k8s.listDeployments",
+                 "arguments": {}, "inputs": ["context", "namespace"]},
+                {"name": "logs", "title": "Logs", "target": "k8s.streamLogs",
+                 "arguments": {}, "inputs": []}],
+            "contributions": {"pages": [], "detailTabs": [], "detailLinks": []}
+        }));
+        for source in &sources {
+            let grants: Vec<String> = source["permissions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|p| p.as_str().or(p["capability"].as_str()).unwrap().to_owned())
+                .collect();
+            configure(json!({"action": "install", "manifest": source.to_string(), "grants": grants}))
+                .await
+                .unwrap_or_else(|e| panic!("{}: {e}", source["id"]));
+        }
+        // An executable app, from a package carrying a binary for every platform.
+        let package = tempfile::tempdir().unwrap();
+        let binaries: serde_json::Map<String, serde_json::Value> =
+            srelens_plugin_host::SIDECAR_PLATFORMS
+                .iter()
+                .map(|platform| {
+                    let path = format!("bin/{platform}/scanner");
+                    let file = package.path().join(&path);
+                    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+                    std::fs::write(file, b"#!/bin/false\n").unwrap();
+                    (platform.to_string(), json!(path))
+                })
+                .collect();
+        let scanner = json!({
+            "id": "org.example.scanner", "name": "Scanner", "version": "1.0.0",
+            "srelensApiVersion": "^0.6", "kind": "executable", "permissions": [], "capabilities": [],
+            "sidecar": {"binaries": binaries, "operations": [
+                {"name": "scan", "title": "Scan an image",
+                 "inputs": [{"name": "image", "type": "string", "required": true}]}]},
+            "contributions": {"pages": [], "detailTabs": [], "detailLinks": []}
+        });
+        std::fs::write(package.path().join("extension.json"), scanner.to_string()).unwrap();
+        std::fs::write(
+            package.path().join("digests.json"),
+            extension_package::digest_list(package.path()).unwrap(),
+        )
+        .unwrap();
+        let archive = extension_package::pack(package.path()).unwrap();
+        configure(json!({"action": "installPackage", "grants": [],
+            "package": base64::engine::general_purpose::STANDARD.encode(archive)}))
+        .await
+        .unwrap();
+
+        let tools = streams.unwrap().app_tools();
+        let server = McpServer::new(Arc::new(reg.clone())).with_app_tools(tools.clone());
+        let snapshot = srelens_mcp::ToolSource::tools(&*tools).await;
+        let listed = reg.invoke("extensions.list", json!({})).await.unwrap();
+        let mut operations = Vec::new();
+        let mut sessions = Vec::new();
+        for app in listed["plugins"].as_array().unwrap() {
+            let manifest = &app["manifest"];
+            let id = manifest["id"].as_str().unwrap();
+            let named = |item: &serde_json::Value| format!("plugin/{id}/{}", item["name"].as_str().unwrap());
+            for binding in manifest["capabilities"].as_array().unwrap() {
+                if srelens_plugin_host::is_pod_target(binding["target"].as_str().unwrap()) {
+                    sessions.push(named(binding));
+                } else {
+                    operations.push(named(binding));
+                }
+            }
+            for item in manifest["actions"].as_array().into_iter().flatten() {
+                operations.push(named(item));
+            }
+            for item in manifest["sidecar"]["operations"].as_array().into_iter().flatten() {
+                operations.push(named(item));
+            }
+        }
+        assert_eq!(listed["plugins"].as_array().unwrap().len(), 4);
+        assert!(operations.len() > 40, "{operations:?}");
+        assert_eq!(sessions, ["plugin/org.example.releases/logs"]);
+        assert_eq!(
+            srelens_mcp::completeness::assert_every_app_operation_has_a_tool(&operations, &server),
+            Ok(())
+        );
+        let tool_names: Vec<String> = server.list_tools().into_iter().map(|t| t.name).collect();
+        assert!(sessions.iter().all(|session| !tool_names.contains(session)));
+        assert_eq!(assert_every_capability_has_a_tool(&snapshot, &server), Ok(()));
+        srelens_mcp::completeness::assert_mutating_capabilities_are_gated(&snapshot);
+        srelens_mcp::completeness::assert_impact_matches_the_gate(&snapshot);
+        srelens_mcp::completeness::assert_confirm_templates_are_renderable(&snapshot);
+        let silent: Vec<&str> = snapshot
+            .ids()
+            .into_iter()
+            .filter(|id| {
+                snapshot.get(id).is_some_and(|c| {
+                    c.annotations.requires_confirm && c.annotations.confirm.is_none()
+                })
+            })
+            .collect();
+        assert!(silent.is_empty(), "gated with no confirmation text: {silent:?}");
+    }
+
+    /// An app's logs and runtime metrics are local (#575): srelens's own UI
+    /// reads them, and nothing sends them anywhere. The one path out of the
+    /// registry to someone else is MCP, whose agent hands its context to an
+    /// LLM provider; so they are not tools. Exactly these two are UI-only: a
+    /// executable invocation also stays UI-only: MCP uses its existing per-app
+    /// operation tools, with their declared schemas and consent annotations.
+    #[tokio::test]
+    async fn app_logs_and_metrics_never_leave_through_mcp_or_the_audit_trail() {
+        let reg = build_registry();
+        let ui_only: Vec<&str> = reg
+            .entries()
+            .filter(|capability| capability.ui_only)
+            .map(|capability| capability.id.as_str())
+            .collect();
+        assert_eq!(ui_only, ["extensions.callOperation", "extensions.inspect", "extensions.logs"]);
+        for id in &ui_only {
+            assert!(reg.get(id).unwrap().annotations.read_only, "{id}");
+        }
+
+        let server = McpServer::new(Arc::new(reg.clone()));
+        let tools: Vec<String> = server.list_tools().into_iter().map(|t| t.name).collect();
+        for id in &ui_only {
+            assert!(!tools.iter().any(|tool| tool == id), "{id} is an MCP tool");
+            let args = serde_json::json!({"id": "org.example.argocd"});
+            for transport in [srelens_mcp::Transport::Stdio, srelens_mcp::Transport::Http] {
+                assert!(matches!(
+                    server.call_tool_audited(id, args.clone(), transport, "auto").await,
+                    Err(srelens_capability::CapabilityError::NotFound(_))
+                ));
+            }
+        }
+        let catalog = crate::mcp_docs::render_tools(&reg);
+        for id in &ui_only {
+            assert!(!catalog.contains(id), "{id} is in the MCP catalog");
+        }
+
+        // The UI's own reads of them are not recorded either.
+        #[derive(Default)]
+        struct Spy(std::sync::Mutex<usize>);
+        impl srelens_capability::audit::AuditSink for Spy {
+            fn record(&self, _: srelens_capability::audit::AuditRecord) {
+                *self.0.lock().unwrap() += 1;
+            }
+        }
+        let spy = Spy::default();
+        for id in ["extensions.inspect", "extensions.logs"] {
+            let _ = reg
+                .invoke_audited(
+                    id,
+                    serde_json::json!({"id": "org.example.argocd"}),
+                    &spy,
+                    srelens_capability::audit::Source::Ui,
+                    "auto",
+                )
+                .await;
+        }
+        assert_eq!(*spy.0.lock().unwrap(), 0);
+    }
+
+    /// A tripwire for the same rule: the code that keeps and reads an app's
+    /// log and metrics names no network client. A change that needs one is a
+    /// change to #575's "never transmitted", to make on purpose.
+    #[test]
+    fn the_code_that_holds_app_logs_and_metrics_opens_no_connection() {
+        let sources = [
+            include_str!("extensions/inspector.rs"),
+            include_str!("../../plugin-host/src/app_log.rs"),
+            include_str!("../../plugin-host/src/app_log/redact.rs"),
+            include_str!("../../plugin-host/src/sidecar/metrics.rs"),
+        ];
+        for source in sources {
+            for client in ["reqwest", "hyper", "ureq", "std::net", "tokio::net", "TcpStream", "UdpSocket"] {
+                assert!(!source.contains(client), "names {client}");
+            }
+        }
+    }
+
+    /// The host-owned metadata #548 adds, checked over the whole live registry
+    /// rather than over a preset: a capability that spells its own annotations
+    /// out is exactly the one that gets the level wrong, and a confirmation
+    /// template only proves itself against the arguments its capability
+    /// actually carries.
+    #[test]
+    fn every_capability_carries_coherent_v2_metadata() {
+        let reg = build_registry();
+        srelens_mcp::completeness::assert_impact_matches_the_gate(&reg);
+        srelens_mcp::completeness::assert_confirm_templates_are_renderable(&reg);
+    }
+
+    /// Every gated capability has the host's own words for it. A gate with no
+    /// sentence leaves a confirming surface to invent one, which is how the
+    /// wording ended up in UI constants (`ExtensionResourceDetails.tsx`) in the
+    /// first place.
+    #[test]
+    fn every_gated_capability_has_host_confirmation_text() {
+        let reg = build_registry();
+        let silent: Vec<&str> = reg
+            .ids()
+            .into_iter()
+            .filter(|id| {
+                reg.get(id).is_some_and(|c| {
+                    c.annotations.requires_confirm && c.annotations.confirm.is_none()
+                })
+            })
+            .collect();
+        assert!(
+            silent.is_empty(),
+            "gated with no confirmation text: {silent:?}"
+        );
+    }
+
+    #[test]
+    fn the_app_action_gate_carries_the_primitive_ceiling() {
+        let reg = build_registry();
+        let app = reg.get("extensions.action").unwrap().annotations;
+        assert!(app.requires_confirm);
+        assert_eq!(
+            app.impact,
+            reg.get("k8s.mergePatch").unwrap().annotations.impact
+        );
     }
 
     #[test]
@@ -623,8 +1119,10 @@ mod tests {
         assert_eq!(ids, default_ids, "same capabilities regardless of paths");
     }
 
+    /// `build_registry_with_paths` has no settings path, so neither the desktop
+    /// settings nor any app capability: apps need an inventory to act on.
     #[test]
-    fn web_registry_omits_host_desktop_settings() {
+    fn a_registry_without_a_settings_path_has_no_settings_or_apps() {
         let cache = ClientCache::new_many(vec![]);
         let reg = build_registry_with_paths(cache, vec![]);
         assert!(!reg.ids().contains(&"settings.get"));
@@ -636,9 +1134,381 @@ mod tests {
             "extensions.configure",
             "extensions.validate",
             "extensions.read",
+            "extensions.resolveColumns",
+            "extensions.resolveCards",
+            "extensions.streams",
+            // Web storage of app secrets is #522's; until then the web host
+            // has no secret store and registers no way to set one.
+            "extension.secretStore",
         ] {
             assert!(reg.get(id).is_none());
         }
+    }
+
+    /// The desktop e2e's catalog steps (`extensions_and_gitops` in
+    /// `apps/desktop/src-tauri/tests/e2e.rs`) with no cluster, on the builder it uses (#559):
+    /// the test root and its shipped delegations reserve `org.srelens.` before any catalog is
+    /// read, and a seeded signed catalog is read, checked and refused as the suite expects.
+    /// The e2e runs only on a kind cluster, where a trust root without its delegations once
+    /// let an unsigned `org.srelens.flux` through.
+    #[tokio::test]
+    async fn the_desktop_e2e_catalog_steps_hold_under_the_test_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = dir.path().join("settings.json");
+        let trust = TrustRoot::from_signed_documents(
+            include_bytes!("../tests/fixtures/trust/root.json"),
+            include_bytes!("../tests/fixtures/trust/publishers.json"),
+        )
+        .unwrap();
+        let reg = build_registry_with_paths_settings_and_trust(
+            ClientCache::new_many(vec![]),
+            vec![],
+            settings.clone(),
+            trust,
+        );
+        let flux = include_str!("../../../examples/extensions/flux.json");
+        let grants =
+            serde_json::from_str::<serde_json::Value>(flux).unwrap()["permissions"].clone();
+        let codes = |report: &serde_json::Value| -> Vec<String> {
+            report["errors"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|error| {
+                    format!(
+                        "{} {}",
+                        error["code"].as_str().unwrap(),
+                        error["path"].as_str().unwrap()
+                    )
+                })
+                .collect()
+        };
+        let out = reg
+            .invoke(
+                "extensions.validate",
+                json!({"manifest": flux, "grants": grants}),
+            )
+            .await
+            .unwrap();
+        assert!(
+            codes(&out).contains(&"EXTENSION_RESERVED_ID id".into()),
+            "{out}"
+        );
+        let local = flux.replacen("\"id\": \"org.srelens.", "\"id\": \"org.example.", 1);
+        let out = reg
+            .invoke(
+                "extensions.validate",
+                json!({"manifest": local, "grants": grants}),
+            )
+            .await
+            .unwrap();
+        assert!(
+            !codes(&out)
+                .iter()
+                .any(|code| code.starts_with("EXTENSION_RESERVED_ID")),
+            "{out}"
+        );
+
+        // The cache as the e2e seeds it: the signed fixture, fetched now.
+        let fetched_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let signed: serde_json::Value = serde_json::from_slice(include_bytes!(
+            "../tests/fixtures/extension-catalog.signed.json"
+        ))
+        .unwrap();
+        std::fs::write(
+            settings.with_extension("extensions.catalog.json"),
+            serde_json::to_vec(&json!({"signedCatalog": signed, "fetchedAt": fetched_at})).unwrap(),
+        )
+        .unwrap();
+        let catalog = reg
+            .invoke("extensions.catalog", json!({"refresh": false}))
+            .await
+            .unwrap();
+        assert_eq!(catalog["fetchedAt"], fetched_at, "{catalog}");
+        assert_eq!(catalog["stale"], false, "{catalog}");
+        let sha256 = catalog["catalog"]["extensions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["id"] == "org.srelens.argocd")
+            .unwrap()["release"]["sha256"]
+            .clone();
+        let argocd = include_str!("../tests/fixtures/argocd-manifest.json");
+        let argocd_grants =
+            serde_json::from_str::<serde_json::Value>(argocd).unwrap()["permissions"].clone();
+        let signature = include_bytes!("../tests/fixtures/argocd-manifest.sig").to_vec();
+        let old = reg
+            .invoke(
+                "extensions.validate",
+                json!({"manifest": argocd, "grants": argocd_grants, "signature": signature}),
+            )
+            .await
+            .unwrap();
+        let old_codes = codes(&old);
+        assert!(
+            old_codes
+                .iter()
+                .any(|code| code.starts_with("EXTENSION_API_INCOMPATIBLE")),
+            "{old}"
+        );
+        assert!(
+            !old_codes
+                .iter()
+                .any(|code| code.starts_with("EXTENSION_INVALID_SIGNATURE")),
+            "{old}"
+        );
+        let refused = reg
+            .invoke(
+                "extensions.catalogManifest",
+                json!({"id": "org.srelens.argocd", "sha256": sha256}),
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(refused.contains("different host API version"), "{refused}");
+    }
+
+    /// A web user's registry (#515) has every capability the desktop's has except the
+    /// desktop settings file's, which the web keeps as per-user SQLite rows.
+    /// `HOST_ONLY_CAPABILITY_IDS` in `packages/core/src/lib/capabilities.ts` is this
+    /// difference, so the two are held to each other here.
+    #[test]
+    fn a_web_users_registry_has_apps_but_no_desktop_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let apps = Apps::with_shared_catalog(
+            Arc::new(dir.path().join("inventory.json")),
+            SharedCatalog::new(dir.path().join("catalog.json")),
+        );
+        let reg = build_registry_for_user(ClientCache::new_many(vec![]), vec![], apps);
+        let web: std::collections::BTreeSet<&str> = reg.ids().into_iter().collect();
+        let desktop_reg = build_registry();
+        let desktop: std::collections::BTreeSet<&str> = desktop_reg.ids().into_iter().collect();
+        let host_only: Vec<&str> = desktop.difference(&web).copied().collect();
+        // No secret store on the web yet (#522), so no way to hand one a secret;
+        // no GitHub reads made from the shared server with its token.
+        assert_eq!(
+            host_only,
+            [
+                "extension.secretStore",
+                "github.rolloutCause",
+                "settings.get",
+                "settings.set"
+            ]
+        );
+        assert!(web.is_subset(&desktop));
+
+        let core = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../packages/core/src/lib/capabilities.ts"
+        ))
+        .unwrap();
+        let listed = core
+            .split("export const HOST_ONLY_CAPABILITY_IDS: readonly string[] = [")
+            .nth(1)
+            .and_then(|rest| rest.split("];").next())
+            .expect("capabilities.ts declares HOST_ONLY_CAPABILITY_IDS");
+        let listed: std::collections::BTreeSet<&str> = listed
+            .split(',')
+            .map(|id| id.trim().trim_matches('"'))
+            .filter(|id| !id.is_empty())
+            .collect();
+        assert_eq!(listed.into_iter().collect::<Vec<_>>(), host_only);
+    }
+
+    /// #568: on the web host a `network.http` request would leave from the shared
+    /// server, not from the person's own computer: from its network position, and to
+    /// its loopback. So a web user's registry has no `network.http`, and an app that
+    /// binds it is refused there as a target this host does not provide.
+    #[tokio::test]
+    async fn a_web_users_apps_cannot_send_network_requests() {
+        let dir = tempfile::tempdir().unwrap();
+        let apps = Apps::with_shared_catalog(
+            Arc::new(dir.path().join("inventory.json")),
+            SharedCatalog::new(dir.path().join("catalog.json")),
+        );
+        let reg = build_registry_for_user(ClientCache::new_many(vec![]), vec![], apps);
+        let manifest = json!({
+            "id": "org.example.releases", "name": "Releases", "version": "0.1.0",
+            "srelensApiVersion": "^0.4", "kind": "declarative",
+            "permissions": [{"capability": "network.http", "hosts": ["api.github.com"]}],
+            "capabilities": [{"name": "latest", "title": "Latest release", "target": "network.http",
+                "arguments": {"url": "https://api.github.com", "path": "/repos/srelens/srelens/releases/latest"},
+                "inputs": []}],
+            "contributions": {"pages": [], "detailTabs": [], "detailLinks": []}
+        })
+        .to_string();
+        let report = reg
+            .invoke(
+                "extensions.validate",
+                json!({"manifest": manifest, "grants": ["network.http"]}),
+            )
+            .await
+            .unwrap();
+        let refused = report["errors"].as_array().unwrap().iter().any(|error| {
+            error["code"] == "EXTENSION_UNSUPPORTED_TARGET"
+                && error["path"] == "capabilities[0].target"
+                && error["message"] == "This host does not provide network.http"
+        });
+        assert!(refused, "{report}");
+        let installed = reg
+            .invoke(
+                "extensions.configure",
+                json!({"action": "install", "manifest": manifest, "grants": ["network.http"]}),
+            )
+            .await;
+        assert!(installed.is_err(), "{installed:?}");
+        // The desktop's broker has it, and only the desktop's.
+        assert!(
+            broker_only(ClientCache::new_many(vec![]), BrokeredNetwork::Desktop)
+                .iter()
+                .any(|capability| capability.id == srelens_plugin_host::NETWORK_HTTP)
+        );
+        assert!(
+            !broker_only(ClientCache::new_many(vec![]), BrokeredNetwork::Off)
+                .iter()
+                .any(|capability| capability.id == srelens_plugin_host::NETWORK_HTTP)
+        );
+    }
+
+    /// #578: a web user's broker offers `network.http` only when their apps are held
+    /// to a policy whose ceiling names a host, and then only toward those hosts.
+    #[tokio::test]
+    async fn a_web_users_apps_reach_the_network_only_under_a_ceiling() {
+        let releases = json!({
+            "id": "org.example.releases", "name": "Releases", "version": "0.1.0",
+            "srelensApiVersion": "^0.4", "kind": "declarative",
+            "permissions": [{"capability": "network.http", "hosts": ["api.github.com"]}],
+            "capabilities": [{"name": "latest", "title": "Latest release", "target": "network.http",
+                "arguments": {"url": "https://api.github.com", "path": "/repos/srelens/srelens/releases/latest"},
+                "inputs": []}],
+            "contributions": {"pages": [], "detailTabs": [], "detailLinks": []}
+        })
+        .to_string();
+        let validate = json!({"manifest": releases, "grants": ["network.http"]});
+        for (policy, provided) in [
+            (json!({}), false),
+            (json!({"networkCeiling": []}), false),
+            (json!({"networkCeiling": ["api.github.com"]}), true),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let policy = AppPolicy::parse(&policy.to_string()).unwrap();
+            let apps = Apps::with_shared_catalog(
+                Arc::new(dir.path().join("inventory.json")),
+                SharedCatalog::new(dir.path().join("catalog.json")),
+            )
+            .governed_by(SharedPolicy::new(policy));
+            let reg = build_registry_for_user(ClientCache::new_many(vec![]), vec![], apps);
+            let report = reg
+                .invoke("extensions.validate", validate.clone())
+                .await
+                .unwrap();
+            let missing = report["errors"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|error| error["message"] == "This host does not provide network.http");
+            assert_eq!(!missing, provided, "{report}");
+            if provided {
+                assert_eq!(report["errors"], json!([]), "{report}");
+            }
+        }
+    }
+
+    /// #543, then #568: the one place the host may put an app's secret is the
+    /// `secretHeaders` of `network.http`, and that capability is the broker's
+    /// alone. Nothing the catalog or MCP offers declares a slot, and no
+    /// settable position anywhere takes a `secret-reference`. Another slot has
+    /// to change this test on purpose.
+    #[test]
+    fn only_the_brokers_network_http_takes_a_secret() {
+        let reg = build_registry();
+        let broker = broker_only(ClientCache::new_many(vec![]), BrokeredNetwork::Desktop);
+        for capability in reg.entries().chain(broker.iter()) {
+            let expected: &[&str] = if capability.id == srelens_plugin_host::NETWORK_HTTP {
+                &["secretHeaders"]
+            } else {
+                &[]
+            };
+            assert_eq!(
+                capability.secret_slots, expected,
+                "{} secret slots",
+                capability.id
+            );
+            for position in &capability.settable {
+                assert!(
+                    !position.accepts.contains(&srelens_capability::settings::SettingType::SecretReference),
+                    "{}.{} takes a secret",
+                    capability.id,
+                    position.argument
+                );
+            }
+        }
+        // Called directly, network.http would fetch any URL: neither the catalog
+        // nor MCP may offer it, on any build.
+        assert!(reg.get(srelens_plugin_host::NETWORK_HTTP).is_none());
+        assert!(capability_catalog()
+            .iter()
+            .all(|entry| entry.id != srelens_plugin_host::NETWORK_HTTP));
+        let dir = tempfile::tempdir().unwrap();
+        let desktop = build_registry_with_paths_and_settings(
+            ClientCache::new_many(vec![]),
+            vec![],
+            Some(dir.path().join("settings.json")),
+        );
+        assert!(desktop.get(srelens_plugin_host::NETWORK_HTTP).is_none());
+        let tools = srelens_mcp::McpServer::new(Arc::new(desktop)).list_tools();
+        assert!(tools
+            .iter()
+            .all(|tool| tool.name != srelens_plugin_host::NETWORK_HTTP));
+    }
+
+    /// The desktop hands its vault to the registry; every other build says
+    /// it has no store, and so refuses to keep a secret.
+    #[tokio::test]
+    async fn the_secret_store_a_host_supplies_is_the_one_the_apps_use() {
+        struct Open;
+        impl srelens_plugin_host::SecretStore for Open {
+            fn status(&self) -> Result<(), String> {
+                Ok(())
+            }
+            fn put(&self, _: &str, _: &srelens_plugin_host::SecretValue) -> Result<(), String> {
+                Ok(())
+            }
+            fn contains(&self, _: &str) -> Result<bool, String> {
+                Ok(false)
+            }
+            fn retain(&self, _: &std::collections::BTreeSet<String>) -> Result<(), String> {
+                Ok(())
+            }
+            fn reveal(
+                &self,
+                _: &str,
+            ) -> Result<Option<srelens_plugin_host::SecretValue>, String> {
+                Ok(None)
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let settings = dir.path().join("settings.json");
+        let with_store = build_registry_with_paths_settings_and_secrets(
+            ClientCache::new_many(vec![]),
+            vec![],
+            Some(settings.clone()),
+            Arc::new(Open),
+        );
+        let listed = with_store.invoke("extensions.list", json!({})).await.unwrap();
+        assert_eq!(listed["secretStore"], json!({"available": true}));
+
+        let without = build_registry_with_paths_and_settings(
+            ClientCache::new_many(vec![]),
+            vec![],
+            Some(settings),
+        );
+        let listed = without.invoke("extensions.list", json!({})).await.unwrap();
+        assert_eq!(listed["secretStore"]["available"], false);
+        assert!(without.get("extension.secretStore").is_some(), "its metadata is still the catalog's");
     }
 
     #[test]
@@ -675,7 +1545,10 @@ mod tests {
             std::fs::write(path, &want).unwrap();
             return;
         }
-        let got = std::fs::read_to_string(path).unwrap_or_default();
+        // LF in the index but CRLF in a `core.autocrlf=true` checkout; `want` is LF.
+        let got = std::fs::read_to_string(path)
+            .unwrap_or_default()
+            .replace("\r\n", "\n");
         assert_eq!(got, want, "capability-catalog.json is stale — run UPDATE_CATALOG=1 cargo test -p srelens-registry");
     }
 
@@ -690,7 +1563,10 @@ mod tests {
             std::fs::write(path, &want).unwrap();
             return;
         }
-        let got = std::fs::read_to_string(path).unwrap_or_default();
+        // LF in the index but CRLF in a `core.autocrlf=true` checkout; `want` is LF.
+        let got = std::fs::read_to_string(path)
+            .unwrap_or_default()
+            .replace("\r\n", "\n");
         assert_eq!(
             got, want,
             "docs/mcp-catalog.md is stale — run `UPDATE_CATALOG=1 cargo test -p srelens-registry`"
@@ -798,6 +1674,10 @@ mod tests {
         let mut out = String::new();
         walk(&root.join("crates"), &mut out);
         walk(&root.join("apps/desktop/src-tauri/src"), &mut out);
+        // The sidecar SDKs and their examples are workspace members too, and
+        // DEVELOPMENT.md documents the variables their tests read
+        // (`SRELENS_HELLO_WORLD_GO`).
+        walk(&root.join("sdk"), &mut out);
         assert!(!out.is_empty(), "found no Rust sources to scan");
         out
     }
@@ -907,6 +1787,57 @@ mod tests {
                 });
             }
         }
+    }
+
+    /// A `#fragment` that names no heading still renders as a link; it just
+    /// lands at the top of the page. `mcp-catalog.md#prompts` and `#resources`
+    /// did that from the day the catalog was generated, because its headings
+    /// carried counts and GitHub put the counts in the anchors.
+    #[test]
+    fn every_anchor_the_mcp_docs_link_to_exists() {
+        use crate::mcp_docs::tests_support::heading_anchors;
+        // The catalog as the generator renders it, not as committed:
+        // `mcp_catalog_md_is_in_sync` holds the two equal, and reading the
+        // file here would race that test rewriting it under `UPDATE_CATALOG=1`.
+        let page_of = |name: &str| {
+            if name == "mcp-catalog.md" {
+                crate::mcp_docs::render_catalog()
+            } else {
+                doc(name)
+            }
+        };
+        let mut checked = 0usize;
+        for name in ["MCP.md", "mcp-catalog.md"] {
+            let md = page_of(name);
+            let targets = md
+                .split("](")
+                .skip(1)
+                .filter_map(|rest| rest.split_once(')').map(|(target, _)| target));
+            for target in targets {
+                let Some((file, anchor)) = target.split_once('#') else {
+                    continue;
+                };
+                if file.contains("://") {
+                    continue;
+                }
+                let page = if file.is_empty() {
+                    md.clone()
+                } else {
+                    page_of(file)
+                };
+                let anchors = heading_anchors(&page);
+                assert!(
+                    anchors.contains(anchor),
+                    "docs/{name} links to `{target}`, but no heading there has that anchor; \
+                     it has {anchors:?}"
+                );
+                checked += 1;
+            }
+        }
+        assert!(
+            checked >= 3,
+            "expected MCP.md's links into the catalog to be checked, saw {checked}"
+        );
     }
 
     #[test]

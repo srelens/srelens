@@ -44,6 +44,37 @@ export async function listHelmReleases(
   }
 }
 
+/**
+ * {@link listHelmReleases} over a namespace selection (#688).
+ *
+ * `helm list --namespace` takes exactly one namespace, and an unscoped
+ * listing reads release Secrets across the cluster — which a credential
+ * scoped to a few namespaces is refused. So an empty selection is still one
+ * all-namespaces listing, and anything else is one listing per namespace,
+ * merged in selection order.
+ *
+ * A refused namespace is named in `failures` and the others' releases are
+ * kept; `error` is set only when nothing answered, which for one namespace is
+ * exactly the old contract.
+ *
+ * `list` is the one-namespace lister, injectable so a suite that mocks
+ * `listHelmReleases` can run this real fan-out over its mock.
+ */
+export async function listHelmReleasesIn(
+  context: string,
+  selection: string[],
+  list: (context: string, namespace: string | null) => Promise<{ releases?: HelmReleaseSummary[]; error?: string }> = listHelmReleases,
+): Promise<{ releases?: HelmReleaseSummary[]; error?: string; failures: Array<{ namespace: string; error: string }> }> {
+  const scopes = selection.length === 0 ? [""] : [...new Set(selection)];
+  const results = await Promise.all(scopes.map((ns) => list(context, ns || null)));
+  const failures = results.flatMap((r, i) => (r.error !== undefined ? [{ namespace: scopes[i], error: r.error }] : []));
+  if (failures.length === scopes.length) return { error: failures[0].error, failures: scopes.length > 1 ? failures : [] };
+  return {
+    releases: results.flatMap((r) => r.releases ?? []),
+    failures: scopes.length > 1 ? failures : [],
+  };
+}
+
 /** Fetch a Helm release's values, manifest, and history via `k8s.getHelmRelease`.
  * Omitting `revision` sends no `revision` key at all, so the wire is
  * byte-identical for every caller that never asked for a specific revision —

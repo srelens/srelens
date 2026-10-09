@@ -1,7 +1,7 @@
-import { describe, it, expect, vi } from "vitest";
+import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import type { K8sObject } from "@srelens/core";
+import type { ClusterContext, K8sObject } from "@srelens/core";
 import { KV } from "@srelens/ui-kit";
 
 // What §A.4's dialog reaches for once a container's port opens it. This file
@@ -19,6 +19,10 @@ vi.mock("@srelens/core", async (importOriginal) => ({
   ...forwardCore,
 }));
 
+import { resetContexts, setContexts } from "../../lib/clusters";
+import { detailRoute } from "../../lib/detailRoute";
+import { defaultState } from "../../lib/tabs";
+import * as store from "../../lib/tabsStore";
 import { Section } from "./Section";
 import { PodContainersBody, PodContainersTable, PodDetailsBody, podFacts } from "./PodBody";
 
@@ -341,6 +345,12 @@ function factLabels(container: HTMLElement, heading?: string): string[] {
   return [...(block?.querySelectorAll(".kv-k") ?? [])].map((el) => el.textContent ?? "");
 }
 
+/** The text of the fact labelled `label`, or `undefined` when there is none. */
+function factValue(container: HTMLElement, label: string): string | undefined {
+  const row = [...container.querySelectorAll("dl.kv")].find((dl) => dl.querySelector(".kv-k")?.textContent === label);
+  return row?.querySelector(".kv-v")?.textContent ?? undefined;
+}
+
 /**
  * A pod's facts, drawn.
  *
@@ -477,11 +487,34 @@ describe("PodDetailsBody", () => {
       expect(screen.queryByText("Running")).toBeNull();
     });
 
-    it("keeps the header's word off the phase between restarts, when there is no reason to show", () => {
-      // The same pod a moment later: the container is genuinely running, so
-      // there is no waiting reason on the object at all — only `ready: false`
-      // and a restart count. The header used to read a plain "Running" here
-      // while the pod was still failing every few seconds.
+    it("reads the exited moment between restarts as kubectl does: Error", () => {
+      // The same pod after its container exited, before the kubelet backs it
+      // off: no waiting reason on the object, and kubectl prints the
+      // container's reason.
+      renderFacts(
+        pod(
+          { containers: [APP_CONTAINER] },
+          {
+            phase: "Running",
+            containerStatuses: [
+              {
+                name: "app",
+                ready: false,
+                restartCount: 7,
+                state: { terminated: { exitCode: 1, reason: "Error", finishedAt: "2026-08-24T13:28:18Z" } },
+              },
+            ],
+          },
+        ),
+      );
+      expect(screen.getByText("Error")).toBeDefined();
+      expect(screen.queryByText("Running")).toBeNull();
+    });
+
+    it("reads the moment the container is up again as kubectl does: Running", () => {
+      // Up again for a moment, not ready, restarted 7 times. kubectl says
+      // `Running` here, and the header matches it. The earlier `NotReady`
+      // rule for this moment was dropped in favour of kubectl's word.
       renderFacts(
         pod(
           { containers: [APP_CONTAINER] },
@@ -499,8 +532,8 @@ describe("PodDetailsBody", () => {
           },
         ),
       );
-      expect(screen.getByText("NotReady")).toBeDefined();
-      expect(screen.queryByText("Running")).toBeNull();
+      expect(screen.getByText("Running")).toBeDefined();
+      expect(screen.queryByText("NotReady")).toBeNull();
     });
 
     it("still reads a pod that has simply not become ready yet as Running", () => {
@@ -534,7 +567,8 @@ describe("PodDetailsBody", () => {
       expect(screen.getByText("Burstable")).toBeDefined();
       // Namespace, Node, Service account, Priority class, Runtime class and
       // Controlled by are `ResourceLink`s in classic; nothing here can
-      // navigate (see the task report).
+      // navigate (see the task report) — bar the Node, which is a link once a
+      // cluster is resolved (#822). None is here, so it too is text.
       expect(screen.queryByRole("button", { name: /^Open / })).toBeNull();
     });
 
@@ -557,7 +591,10 @@ describe("PodDetailsBody", () => {
         ),
       );
       expect(factLabels(container).slice(0, 4)).toEqual(["Status", "Reason", "Message", "Node"]);
-      expect(screen.getByText("Evicted")).toBeDefined();
+      // kubectl's STATUS column and `kubectl describe`'s Reason line both say
+      // `Evicted`, and so do the two facts.
+      expect(factValue(container, "Status")).toContain("Evicted");
+      expect(factValue(container, "Reason")).toBe("Evicted");
       expect(screen.getByText(message)).toBeDefined();
     });
 
@@ -664,7 +701,59 @@ describe("PodDetailsBody", () => {
       expect(screen.getByText("ssd")).toBeDefined();
       expect(screen.getByText("Pod anti-affinity: 1 required")).toBeDefined();
       expect(screen.getByText("dedicated=gpu → NoSchedule")).toBeDefined();
+      // With no cluster resolved there is nowhere to open the node, and the
+      // name stays text — see `NodeLink`.
       expect(screen.queryByRole("button", { name: /^Open / })).toBeNull();
+    });
+
+    describe("on a resolved cluster (#822)", () => {
+      const PROD: ClusterContext = {
+        name: "prod-eu",
+        stableId: "prod",
+        key: "prod",
+        cluster: "prod",
+        server: "https://prod",
+        isCurrent: true,
+        sourceFile: "/home/dana/.kube/config",
+        authKind: "client certificate",
+      };
+      const scheduled = () => pod({ nodeName: "node-b" }, {}, { name: "web-2" });
+
+      beforeEach(() => {
+        resetContexts();
+        setContexts([PROD]);
+        store.setState(defaultState([PROD]));
+      });
+      afterEach(() => {
+        resetContexts();
+        store.setState(defaultState([]));
+      });
+
+      it("makes the node under Scheduling the way to that node", async () => {
+        render(<PodDetailsBody object={scheduled()} />);
+        await userEvent.click(screen.getByRole("button", { name: "Open node node-b" }));
+
+        const tab = store.currentWorkspace().tabs.find((t) => t.route === detailRoute("Node", null, "node-b"));
+        expect(tab).toBeDefined();
+        expect(tab!.sub).toBe("prod-eu");
+      });
+
+      it("makes the pod's own Node fact the same link", () => {
+        const fact = podFacts({ kind: "Pod", object: scheduled() }).find((f) => f.label === "Node")!;
+        render(<>{fact.value}</>);
+        expect(screen.getByRole("button", { name: "Open node node-b" }).textContent).toBe("node-b");
+      });
+
+      it("offers nothing to open for a pod that has not been scheduled", () => {
+        const pending = pod(
+          { tolerations: [{ key: "dedicated", operator: "Equal", value: "gpu", effect: "NoSchedule" }] },
+          {},
+          { name: "web-6" },
+        );
+        render(<PodDetailsBody object={pending} />);
+        expect(screen.getByText("Not scheduled")).toBeDefined();
+        expect(screen.queryByRole("button", { name: /^Open node/ })).toBeNull();
+      });
     });
 
     it("omits the Scheduling block when the pod has no placement info", () => {

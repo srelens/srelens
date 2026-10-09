@@ -19,6 +19,7 @@ import {
   validateExtension,
 } from "@srelens/core";
 import { ExtensionManager } from "./Extensions";
+import { ExtensionBindings } from "./ExtensionBindings";
 import { plainText } from "./displayText";
 
 // Written by code point, so the source itself holds no invisible character.
@@ -112,7 +113,7 @@ beforeEach(() => {
   vi.resetAllMocks();
   vi.mocked(listExtensions).mockResolvedValue({ schemaVersion: 1, nextRevision: 1, plugins: [] } as any);
   vi.mocked(configureExtensions).mockResolvedValue({} as any);
-  vi.mocked(validateExtension).mockResolvedValue({ errors: [] });
+  vi.mocked(validateExtension).mockResolvedValue({ errors: [], permissionDiff: { previousRevision: null, added: ["Grant k8s.listCustomResource", "Grant k8s.listEvents"], removed: [], unchanged: [] } });
   vi.mocked(listContexts).mockResolvedValue({ contexts: [] });
   vi.mocked(listExtensionCatalog).mockResolvedValue(catalog as any);
 });
@@ -198,6 +199,9 @@ it("summarizes a catalog app's bindings and opens its manifest before Install is
   const text = within(review).getByRole("textbox", { name: "Manifest under review" });
   await waitFor(() => expect(text.textContent).toContain('"plural": "kustomizations"'));
   expect(text.textContent).toContain('"group": "kustomize.toolkit.fluxcd.io"');
+  // Something a reader may well want out of the app before deciding, and the
+  // select-all chord alone is an affordance with nothing to see. (#656 review)
+  expect(within(review).getByRole("button", { name: "Copy" })).toBeTruthy();
   expect(configureExtensions).not.toHaveBeenCalled();
 
   fireEvent.click(screen.getByText("Install and grant permissions"));
@@ -275,6 +279,26 @@ it("lists another capability's fixed arguments and inputs generically", async ()
   );
 });
 
+it("reviews the secret store as a permission: what it keeps, and the host's own words for it (#543)", async () => {
+  const keeping = manifest() as ReturnType<typeof manifest> & { settings?: unknown };
+  keeping.permissions = [...keeping.permissions, "extension.secretStore"];
+  keeping.settings = [
+    { id: "token", type: "secret-reference", title: "API token" },
+    { id: "hook", type: "secret-reference", title: `Webhook ${RLO}terces` },
+    { id: "team", type: "string", title: "Team" },
+  ];
+  const review = await reviewPasted(JSON.stringify(keeping));
+  const store = within(review).getByRole("listitem", { name: "extension.secretStore bindings" });
+  expect(store.textContent).not.toContain("No binding uses this permission");
+  expect(store.textContent).toContain("Keeps these secret settings in srelens's encrypted secrets vault: API token, Webhook");
+  expect(store.textContent).not.toContain(RLO);
+  expect(store.textContent).not.toContain("Team");
+  expect(store.textContent).toContain("The app never reads them");
+  // #548's host metadata, from the catalog, never from the manifest.
+  expect(store.textContent).toContain("Sensitive");
+  expect(store.textContent).toContain("medium impact");
+  expect(store.textContent).toContain("Change a secret an app keeps in srelens's secrets vault");
+});
 it("draws inline manifest text with invisible and control characters escaped", () => {
   const zeroWidth = String.fromCodePoint(0x200b);
   const tag = String.fromCodePoint(0xe0001);
@@ -312,4 +336,199 @@ it("lists a custom-resource reader's other fixed arguments in their own column",
   expect(within(review).getByRole("columnheader", { name: "Other fixed arguments" })).toBeTruthy();
   expect(cells(reader(review, "providers")).at(-1)).toBe("labelSelector team=platform");
   expect(cells(reader(review, "kustomizations")).at(-1)).toBe("none");
+});
+
+it("reviews every version a reader may read, and each path it reads elsewhere there (#547)", () => {
+  const manifest = {
+    capabilities: [{
+      name: "helmreleases", title: "List Helm releases", target: "k8s.listCustomResource",
+      versions: ["v2", "v2beta2"],
+      jsonPathOverrides: { v2beta2: { ".status.lastAttemptedRevision": ".status.lastReleaseRevision" } },
+      arguments: { group: "helm.toolkit.fluxcd.io", plural: "helmreleases", kind: "HelmRelease", namespaced: true },
+      inputs: ["context", "namespace"],
+    }],
+  };
+  render(<ExtensionBindings manifest={manifest} permissions={["k8s.listCustomResource"]} />);
+  const row = screen.getByRole("row", { name: "Binding helmreleases" });
+  // The version cell names each, in the order the host tries them; nothing is "Not set".
+  expect(cells(row).slice(0, 5)).toEqual([
+    "helm.toolkit.fluxcd.io",
+    "v2, v2beta2 (first served)",
+    "HelmRelease",
+    "helmreleases",
+    "Namespaced",
+  ]);
+  const overrides = within(row).getByRole("list", { name: "helmreleases path overrides" });
+  expect(within(overrides).getAllByRole("listitem").map((item) => item.textContent)).toEqual([
+    "At v2beta2, .status.lastAttemptedRevision is read from .status.lastReleaseRevision",
+  ]);
+  // Neither field is shown again as an unexplained fixed argument.
+  expect(screen.queryByRole("columnheader", { name: "Other fixed arguments" })).toBeNull();
+});
+
+/** A metrics app: its Prometheus URL a setting, its token a secret sent as a header (#568). */
+const metrics = () => ({
+  id: "org.test.metrics",
+  name: "Metrics",
+  version: "0.1.0",
+  srelensApiVersion: "^0.4",
+  kind: "declarative",
+  permissions: [
+    { capability: "network.http", hosts: ["${settings.prometheusUrl}", "*.grafana.net"] },
+    "extension.secretStore",
+  ],
+  settings: [
+    { id: "prometheusUrl", type: "url", title: "Prometheus URL", required: true },
+    { id: "token", type: "secret-reference", title: "API token" },
+  ],
+  capabilities: [
+    {
+      name: "up",
+      title: "Targets up",
+      target: "network.http",
+      arguments: {
+        url: "${settings.prometheusUrl}",
+        path: "/api/v1/query",
+        query: { query: "up" },
+        headers: { Accept: "application/json" },
+        secretHeaders: { Authorization: { secret: "token", prefix: "Bearer " } },
+      },
+      inputs: [],
+    },
+  ],
+  contributions: { pages: [], detailTabs: [], detailLinks: [] },
+});
+
+it("reviews network.http as the hosts it may reach and each request it sends (#568)", async () => {
+  const source = JSON.stringify(metrics());
+  const review = await reviewPasted(source);
+  // A grant names the capability; the hosts are the manifest's, shown here and diffed by the host.
+  expect(validateExtension).toHaveBeenCalledWith(source, ["network.http", "extension.secretStore"], undefined, undefined, undefined);
+  const network = within(review).getByRole("listitem", { name: "network.http bindings" });
+  expect(network.textContent).not.toContain("No binding uses this permission");
+  const hosts = within(network).getByRole("list", { name: "Hosts network.http may reach" });
+  expect(within(hosts).getAllByRole("listitem").map((host) => host.textContent)).toEqual([
+    "The host of the URL saved in Prometheus URL",
+    "*.grafana.net (one subdomain label)",
+  ]);
+  expect(network.textContent).toContain("HTTPS only");
+  const up = within(network).getByRole("listitem", { name: "Binding up" });
+  expect(up.textContent).toBe(
+    'Targets up: GET the URL saved in Prometheus URL, path /api/v1/query, query query=up; header Accept: application/json; sends secret API token as the Authorization header, after "Bearer ".',
+  );
+  fireEvent.click(screen.getByText("Install and grant permissions"));
+  await waitFor(() =>
+    expect(configureExtensions).toHaveBeenCalledWith({
+      action: "install",
+      manifest: source,
+      grants: ["network.http", "extension.secretStore"],
+    }),
+  );
+});
+
+it("reviews each provider under the request it queries through, with its whole template (#569)", async () => {
+  const observed = metrics();
+  observed.srelensApiVersion = "^0.7";
+  observed.capabilities[0].arguments = { url: "${settings.prometheusUrl}", path: "/api/v1/query_range" } as never;
+  observed.contributions = {
+    pages: [], detailTabs: [], detailLinks: [],
+    metricProviders: [{ id: "cpu", title: "CPU", capability: "up", language: "promql", forKinds: ["apps/Deployment", "/Pod"],
+      unit: "cores", query: `sum(rate(x{namespace="\${namespace}",pod="\${pod}${RLO}"}[\${step}]))` }],
+    logProviders: [{ id: "loki", title: "Loki", capability: "up", language: "logql", forKinds: ["/Pod"], query: `{pod="\${pod}"}` }],
+  } as never;
+  const review = await reviewPasted(JSON.stringify(observed));
+  const up = within(review).getByRole("listitem", { name: "Binding up" });
+  const providers = within(up).getByRole("list", { name: "Providers that query through Targets up" });
+  const [cpu, loki] = within(providers).getAllByRole("listitem");
+  expect(cpu.textContent).toBe(
+    `Metric provider CPU, PromQL, for apps/Deployment, /Pod: sum(rate(x{namespace="\${namespace}",pod="\${pod}${escapes(0x202e)}"}[\${step}])). The host binds each \${…} for the view it is shown in, and sets query, start, end and step.`,
+  );
+  expect(loki.textContent).toBe(
+    `Log provider Loki, LogQL, for /Pod: {pod="\${pod}"}. The host binds each \${…} for the view it is shown in, and sets query, start, end, limit and direction; asked again every 5 s while a log view follows it.`,
+  );
+});
+
+it("draws a request's literal URL and headers as plain text", async () => {
+  const literal = metrics();
+  literal.permissions = [{ capability: "network.http", hosts: ["api.github.com"] }];
+  literal.settings = [];
+  literal.capabilities[0].arguments = { url: `https://api.github.com/${RLO}x`, headers: {} } as any;
+  const review = await reviewPasted(JSON.stringify(literal));
+  const up = within(review).getByRole("listitem", { name: "Binding up" });
+  expect(up.textContent).toContain("GET https://api.github.com/");
+  expect(up.textContent).not.toContain(RLO);
+  expect(within(review).getByRole("list", { name: "Hosts network.http may reach" }).textContent).toBe("api.github.com");
+});
+
+/** A cert-manager app with each pod binding (#567) and a namespace grant. */
+const podManifest = () => ({
+  id: "org.test.certmanager",
+  name: "cert-manager",
+  version: "0.1.0",
+  srelensApiVersion: "^0.5",
+  kind: "declarative",
+  permissions: [
+    "k8s.listDeployments",
+    "k8s.listCustomResource",
+    { capability: "k8s.streamLogs", namespaces: ["cert-manager", "kube-system"] },
+    "k8s.exec",
+    "k8s.portForward",
+  ],
+  capabilities: [
+    { name: "controllers", title: "Controllers", target: "k8s.listDeployments", arguments: {}, inputs: ["context", "namespace"] },
+    {
+      name: "rollouts", title: "Rollouts", target: "k8s.listCustomResource", inputs: ["context", "namespace"],
+      arguments: { group: "argoproj.io", version: "v1alpha1", plural: "rollouts", kind: "Rollout", namespaced: true },
+    },
+    { name: "controllerLogs", title: "Controller logs", target: "k8s.streamLogs", arguments: { resource: "controllers" }, inputs: [] },
+    {
+      name: "rolloutLogs", title: "Rollout logs", target: "k8s.streamLogs", inputs: [],
+      arguments: { resource: "rollouts", selector: ".spec.selector", container: "app" },
+    },
+    { name: "anyLogs", title: "Namespace logs", target: "k8s.streamLogs", arguments: {}, inputs: [] },
+    {
+      name: "status", title: "cmctl status", target: "k8s.exec", inputs: [],
+      arguments: { resource: "controllers", container: "controller", command: ["cmctl", "status", "two words", `x${RLO}y`] },
+    },
+    { name: "metrics", title: "Metrics", target: "k8s.portForward", arguments: { resource: "controllers", port: 9402 }, inputs: [] },
+    {
+      name: "webhook", title: "Webhook", target: "k8s.portForward", inputs: [],
+      arguments: { resource: "controllers", port: 443, service: true },
+    },
+  ],
+  contributions: { pages: [], detailTabs: [], detailLinks: [] },
+});
+
+// #567: the review says whose pods each binding reaches, the exact command an exec
+// binding runs, and the port a forward opens — before anything is granted.
+it("reviews each pod binding: whose pods, which command, which port", () => {
+  const permissions = ["k8s.listDeployments", "k8s.listCustomResource", "k8s.streamLogs", "k8s.exec", "k8s.portForward"];
+  render(<ExtensionBindings manifest={podManifest()} permissions={permissions} />);
+  const logs = screen.getByRole("listitem", { name: "k8s.streamLogs bindings" });
+  expect(within(logs).getByRole("list", { name: "Namespaces k8s.streamLogs may reach" }).textContent).toBe(
+    "cert-managerkube-system",
+  );
+  expect(within(logs).getByRole("listitem", { name: "Binding controllerLogs" }).textContent).toBe(
+    "Controller logs: streams the logs of pods selected by each Deployment Controllers lists.",
+  );
+  expect(within(logs).getByRole("listitem", { name: "Binding rolloutLogs" }).textContent).toBe(
+    "Rollout logs: streams the logs of container app of pods selected by each Rollout Rollouts lists, read at .spec.selector.",
+  );
+  expect(within(logs).getByRole("listitem", { name: "Binding anyLogs" }).textContent).toBe(
+    "Namespace logs: streams the logs of any pod in a namespace above.",
+  );
+  const exec = screen.getByRole("listitem", { name: "Binding status" });
+  expect(exec.textContent).toContain(
+    `cmctl status: runs cmctl status "two words" "x${escapes(0x202e)}y" in container controller of pods selected by each Deployment Controllers lists.`,
+  );
+  expect(exec.textContent).toContain("You confirm every run, with its pod, container and command.");
+  expect(screen.getByRole("listitem", { name: "k8s.exec bindings" }).textContent).toContain("Sensitive · high impact");
+  expect(exec.textContent).not.toContain(RLO);
+  const forward = screen.getByRole("listitem", { name: "k8s.portForward bindings" });
+  expect(within(forward).getByRole("listitem", { name: "Binding metrics" }).textContent).toBe(
+    "Metrics: forwards port 9402 of pods selected by each Deployment Controllers lists to a port on this computer the host picks, while the view that opened it is open.",
+  );
+  expect(within(forward).getByRole("listitem", { name: "Binding webhook" }).textContent).toContain(
+    "forwards port 443 through a Service to pods selected by each Deployment Controllers lists",
+  );
 });

@@ -2,7 +2,7 @@ use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders, Paragraph, Wrap},
     Frame,
 };
 use srelens_kube::lineage::{LineageNode, LineageRelation};
@@ -197,7 +197,10 @@ pub fn render_tree_view(f: &mut Frame, area: Rect, state: &TreeViewState) {
                 Style::default().fg(Theme::dim()),
             ),
         ]);
-        f.render_widget(Paragraph::new(loading_line), inner);
+        f.render_widget(
+            Paragraph::new(loading_line).wrap(Wrap { trim: true }),
+            inner,
+        );
         return;
     }
 
@@ -211,7 +214,7 @@ pub fn render_tree_view(f: &mut Frame, area: Rect, state: &TreeViewState) {
             ),
             Span::styled(err.as_str(), Style::default().fg(Theme::fg())),
         ]);
-        f.render_widget(Paragraph::new(err_line), inner);
+        f.render_widget(Paragraph::new(err_line).wrap(Wrap { trim: true }), inner);
         return;
     }
 
@@ -220,7 +223,7 @@ pub fn render_tree_view(f: &mut Frame, area: Rect, state: &TreeViewState) {
             "No relationships or lineage found for this resource.",
             Style::default().fg(Theme::dim()),
         )]);
-        f.render_widget(Paragraph::new(empty_line), inner);
+        f.render_widget(Paragraph::new(empty_line).wrap(Wrap { trim: true }), inner);
         return;
     }
 
