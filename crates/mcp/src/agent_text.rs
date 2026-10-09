@@ -23,8 +23,12 @@ pub(crate) fn trim(v: &mut Value) {
     match v {
         Value::Array(items) => items.iter_mut().for_each(trim),
         Value::Object(map) => {
-            // Only ever under `metadata`; elsewhere these keys are someone's data.
-            if let Some(Value::Object(meta)) = map.get_mut("metadata") {
+            // Only in a Kubernetes object's own `metadata`, which `apiVersion`
+            // and `kind` beside it mark. A `metadata` in its spec, or in a
+            // projection keyed by path, is someone's data.
+            let is_object = map.get("apiVersion").is_some_and(Value::is_string)
+                && map.get("kind").is_some_and(Value::is_string);
+            if let Some(Value::Object(meta)) = map.get_mut("metadata").filter(|_| is_object) {
                 meta.remove("managedFields");
                 if let Some(Value::String(applied)) = meta
                     .get_mut("annotations")
@@ -79,10 +83,13 @@ mod tests {
 
     const LAST_APPLIED: &str = "kubectl.kubernetes.io/last-applied-configuration";
 
+    /// The API server keeps `managedFields` on the object alone; one in a pod
+    /// template is whatever the template's author wrote there.
     #[test]
-    fn managed_fields_go_from_every_metadata_at_any_depth() {
+    fn managed_fields_go_from_a_listed_objects_metadata_and_stay_in_its_template() {
         let mut v = json!({
             "items": [{
+                "apiVersion": "apps/v1",
                 "kind": "Deployment",
                 "metadata": { "name": "web", "managedFields": [{ "manager": "kubectl" }] },
                 "spec": { "template": { "metadata": { "managedFields": [], "labels": { "app": "web" } } } }
@@ -92,8 +99,43 @@ mod tests {
         assert_eq!(v["items"][0]["metadata"], json!({ "name": "web" }));
         assert_eq!(
             v["items"][0]["spec"]["template"]["metadata"],
-            json!({ "labels": { "app": "web" } })
+            json!({ "managedFields": [], "labels": { "app": "web" } })
         );
+    }
+
+    /// A custom resource may keep a `metadata` of its own under `.spec`; its
+    /// `managedFields` and last-applied annotation are the owner's data, and
+    /// dropping them would answer with less than the resource holds (PR #855
+    /// review). A template naming a `kind` is still no object without an
+    /// `apiVersion`.
+    #[test]
+    fn metadata_inside_a_custom_resources_spec_stays() {
+        let nested = json!({
+            "managedFields": [{ "manager": "mine" }],
+            "annotations": { LAST_APPLIED: "mine" }
+        });
+        let mut v = json!({
+            "apiVersion": "example.com/v1",
+            "kind": "Widget",
+            "metadata": { "name": "w", "managedFields": [{ "manager": "kubectl" }] },
+            "spec": { "template": { "kind": "Pod", "metadata": nested.clone() } }
+        });
+        trim(&mut v);
+        assert_eq!(v["metadata"], json!({ "name": "w" }));
+        assert_eq!(v["spec"]["template"]["metadata"], nested);
+    }
+
+    /// `k8s.getObject` with `fields: [".spec"]` answers with the path as the
+    /// key: nothing in it is an object's own metadata (PR #855 review).
+    #[test]
+    fn a_projection_of_spec_comes_back_untouched() {
+        let original = json!({ "object": { ".spec": { "template": { "metadata": {
+            "managedFields": [{ "manager": "mine" }],
+            "annotations": { LAST_APPLIED: "mine" }
+        } } } } });
+        let mut v = original.clone();
+        trim(&mut v);
+        assert_eq!(v, original);
     }
 
     /// `managedFields` only ever lives in an object's `metadata`. Anywhere
@@ -110,6 +152,8 @@ mod tests {
     fn last_applied_becomes_a_marker_with_its_size_and_other_annotations_stay() {
         let applied = r#"{"apiVersion":"v1","kind":"ConfigMap"}"#;
         let mut v = json!({
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
             "metadata": { "annotations": { LAST_APPLIED: applied, "team": "sre" } }
         });
         trim(&mut v);
@@ -225,12 +269,14 @@ mod tests {
     #[test]
     fn render_trims_before_measuring() {
         let v = json!({
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
             "metadata": { "name": "big", "managedFields": [{ "fieldsV1": "x".repeat(MAX_RESULT_BYTES) }] }
         });
         let text = render(v, true).expect("trimmed under the limit");
         assert_eq!(
             serde_json::from_str::<Value>(&text).unwrap(),
-            json!({ "metadata": { "name": "big" } })
+            json!({ "apiVersion": "v1", "kind": "ConfigMap", "metadata": { "name": "big" } })
         );
     }
 }
