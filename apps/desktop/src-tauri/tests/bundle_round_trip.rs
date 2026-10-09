@@ -136,7 +136,8 @@ async fn a_setup_exported_on_one_machine_is_the_same_setup_on_another() {
     let opened = bundle::open("correct horse battery staple", &raw).unwrap();
 
     let groups = [Group::Settings, Group::Kubeconfigs, Group::Skills];
-    let report = bundle::apply_files(&machine_b, &opened, &groups, &[]).unwrap();
+    let report = bundle::apply_files(&machine_b, &opened, &groups, &[]);
+    assert_eq!(report.failure, None);
     registry_b
         .invoke(
             "settings.set",
@@ -180,7 +181,8 @@ async fn a_setup_exported_on_one_machine_is_the_same_setup_on_another() {
 
     // --- importing the same file again is a no-op ---------------------------
     let existing = srelens_kube::connect::kubeconfig_files_in(&managed);
-    let again = bundle::apply_files(&machine_b, &opened, &groups, &existing).unwrap();
+    let again = bundle::apply_files(&machine_b, &opened, &groups, &existing);
+    assert_eq!(again.failure, None);
     assert!(again.kubeconfigs_added.is_empty(), "{again:?}");
     assert_eq!(again.kubeconfigs_already_present.len(), 2);
     assert!(again.skills_added.is_empty());

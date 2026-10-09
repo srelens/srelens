@@ -28,6 +28,7 @@ const EMPTY_REPORT: ImportReport = {
   promptsAdded: [],
   promptsKeptLocal: [],
   secretsWritten: [],
+  failure: null,
 };
 
 describe("setupBundle", () => {

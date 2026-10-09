@@ -168,6 +168,10 @@ pub async fn bundle_preview(path: String, passphrase: String) -> Result<BundleSu
 /// Apply the selected groups. Files first, then settings, then secrets: each
 /// step's result is reported, and a later failure never un-writes an earlier
 /// one, so the report is the truth about what is now on this machine.
+///
+/// `Err` only for a failure before anything is written: reading the file, the
+/// passphrase, reading the settings. A failure after that comes back as the
+/// report's `failure`, with everything written before it still listed.
 #[tauri::command]
 pub async fn bundle_import<R: Runtime>(
     app: AppHandle<R>,
@@ -177,9 +181,19 @@ pub async fn bundle_import<R: Runtime>(
     passphrase: String,
     groups: Vec<Group>,
 ) -> Result<ImportReport, String> {
-    let base = config_dir(&app)?;
-    let raw = bundle::read_bundle_file(Path::new(&path))?;
-    let opened = bundle::open(&passphrase, &raw)?;
+    import_into(&config_dir(&app)?, &registry, &vault, Path::new(&path), &passphrase, &groups).await
+}
+
+async fn import_into(
+    base: &Path,
+    registry: &AppRegistry,
+    vault: &Vault,
+    path: &Path,
+    passphrase: &str,
+    groups: &[Group],
+) -> Result<ImportReport, String> {
+    let raw = bundle::read_bundle_file(path)?;
+    let opened = bundle::open(passphrase, &raw)?;
 
     // `?`, not `unwrap_or_default()`. An empty map here is not a harmless
     // fallback: `kubeconfig_paths` would then return only the discovered paths
@@ -188,14 +202,24 @@ pub async fn bundle_import<R: Runtime>(
     // against exactly this list — would write a second copy of each one. The
     // reader would get duplicated clusters and a report announcing them as
     // added, with nothing saying the settings read had failed.
-    let existing = kubeconfig_paths(&read_settings(&registry).await?);
-    let mut report = bundle::apply_files(&base, &opened, &groups, &existing)?;
+    let existing = kubeconfig_paths(&read_settings(registry).await?);
 
-    if groups.contains(&Group::Settings) {
-        report.settings_written = import_settings(&registry, &opened).await?;
+    // From here on something may already be written, so a failure goes in
+    // the report beside what landed instead of replacing it. The import stops
+    // at the first one: a re-import after the fix finishes the rest, and
+    // duplicates nothing, because every step skips what is already here.
+    let mut report = bundle::apply_files(base, &opened, groups, &existing);
+    if report.failure.is_none() && groups.contains(&Group::Settings) {
+        match import_settings(registry, &opened).await {
+            Ok(keys) => report.settings_written = keys,
+            Err(why) => report.failure = Some(why),
+        }
     }
-    if groups.contains(&Group::Secrets) {
-        report.secrets_written = import_secrets(&vault, &opened)?;
+    if report.failure.is_none() && groups.contains(&Group::Secrets) {
+        match import_secrets(vault, &opened) {
+            Ok(names) => report.secrets_written = names,
+            Err(why) => report.failure = Some(why),
+        }
     }
     Ok(report)
 }
@@ -514,6 +538,124 @@ mod tests {
         let vault = vault_with(&dir, Secrets::default());
         assert!(import_secrets(&vault, &bundle_with(None)).unwrap().is_empty());
         assert_eq!(vault.load(), Secrets::default());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    const PASSPHRASE: &str = "a test passphrase";
+    const ALL_STEPS: [Group; 3] = [Group::Kubeconfigs, Group::Settings, Group::Secrets];
+
+    /// The settings capability, answering every `settings.set` with a refusal
+    /// when `refuse_writes`.
+    fn settings_registry(refuse_writes: bool) -> AppRegistry {
+        use srelens_capability::{Capability, CapabilityError, Registry};
+        let mut registry = Registry::new();
+        registry.register(Capability::read_only("settings.get", "reads settings", |_| async {
+            Ok(json!({ "values": {} }))
+        }));
+        registry.register(Capability::read_only("settings.set", "writes settings", move |_| async move {
+            if refuse_writes {
+                return Err(CapabilityError::Handler("settings.json is read-only".into()));
+            }
+            Ok(json!({}))
+        }));
+        AppRegistry(registry)
+    }
+
+    /// A sealed bundle on disk with one step's worth of each: a cluster, a
+    /// preference and an API key.
+    fn bundle_file(dir: &Path) -> PathBuf {
+        let bundle = Bundle {
+            settings: BTreeMap::from([("srelens.defaultNamespace".into(), json!("kube-system"))]),
+            kubeconfigs: vec![bundle::BundledFile {
+                name: "config".into(),
+                content: bundle::tests::KUBECONFIG.into(),
+            }],
+            secrets: Some(Secrets {
+                llm_keys: BTreeMap::from([("anthropic".into(), "sk-ant-from-bundle".into())]),
+                ..Default::default()
+            }),
+            ..Bundle::default()
+        };
+        let path = dir.join("setup.srelens");
+        std::fs::write(&path, bundle::seal(PASSPHRASE, &bundle).unwrap()).unwrap();
+        path
+    }
+
+    #[tokio::test]
+    async fn a_failed_settings_write_keeps_the_clusters_written_and_imports_no_secrets() {
+        let dir = temp_dir("import-settings-refused");
+        let vault = vault_with(&dir.join("vault"), Secrets::default());
+        let path = bundle_file(&dir);
+
+        let report = import_into(
+            &dir.join("config"),
+            &settings_registry(true),
+            &vault,
+            &path,
+            PASSPHRASE,
+            &ALL_STEPS,
+        )
+        .await
+        .expect("files were written, so the report comes back");
+
+        assert_eq!(report.kubeconfigs_added, vec!["config".to_string()]);
+        assert!(report.settings_written.is_empty());
+        let failure = report.failure.as_deref().expect("the failure is reported");
+        assert!(failure.contains("could not write settings"), "{failure}");
+        assert!(report.secrets_written.is_empty());
+        assert!(vault.load().llm_keys.is_empty(), "nothing after the failed step is imported");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_failed_secrets_write_keeps_the_clusters_and_preferences_written() {
+        let dir = temp_dir("import-secrets-refused");
+        let vault_dir = dir.join("vault");
+        let vault = vault_with(&vault_dir, Secrets::default());
+        // Locked, so `Vault::update` refuses: the same steps as setup + lock.
+        let (meta, key) = crate::vault::build_meta("a master password").unwrap();
+        vault.rekey_from_current(key, "password").unwrap();
+        crate::vault::write_meta(&vault_dir, &meta).unwrap();
+        vault.discard_key().unwrap();
+        let path = bundle_file(&dir);
+
+        let report = import_into(
+            &dir.join("config"),
+            &settings_registry(false),
+            &vault,
+            &path,
+            PASSPHRASE,
+            &ALL_STEPS,
+        )
+        .await
+        .expect("files and settings were written, so the report comes back");
+
+        assert_eq!(report.kubeconfigs_added, vec!["config".to_string()]);
+        assert_eq!(report.settings_written, vec!["srelens.defaultNamespace".to_string()]);
+        let failure = report.failure.as_deref().expect("the failure is reported");
+        assert!(failure.contains("could not save the imported secrets"), "{failure}");
+        assert!(report.secrets_written.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_wrong_passphrase_is_still_an_error_because_nothing_was_written() {
+        let dir = temp_dir("import-wrong-passphrase");
+        let vault = vault_with(&dir.join("vault"), Secrets::default());
+        let path = bundle_file(&dir);
+
+        let result = import_into(
+            &dir.join("config"),
+            &settings_registry(false),
+            &vault,
+            &path,
+            "not the passphrase",
+            &ALL_STEPS,
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(!dir.join("config").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

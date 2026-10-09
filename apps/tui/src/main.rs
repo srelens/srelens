@@ -136,7 +136,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // from that name installs srectl beside it and continues as srectl,
         // so the next update can fetch srectl archives.
         if srectl::rebrand::should_rebrand(&exe) {
-            match srectl::rebrand::apply_rebrand(&exe) {
+            match srectl::rebrand::apply_rebrand(&exe, env!("CARGO_PKG_VERSION")) {
                 Ok(next) => {
                     use std::io::IsTerminal;
                     if std::io::stderr().is_terminal() {

@@ -169,6 +169,10 @@ pub struct ImportReport {
     pub prompts_added: Vec<String>,
     pub prompts_kept_local: Vec<String>,
     pub secrets_written: Vec<String>,
+    /// Why the import stopped, when a step failed after writing may have
+    /// begun. The lists above still say what was written before it, and no
+    /// later step was attempted. `None` when every selected step finished.
+    pub failure: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -411,14 +415,32 @@ fn read_extensions(path: &Path) -> Vec<BundledExtension> {
 /// `existing_kubeconfigs` is every kubeconfig path the app currently reads;
 /// a bundled config whose bytes are already among them is skipped, which is
 /// what makes a second import of the same bundle a no-op.
+///
+/// The first failure stops the import and is set as `failure`. The report
+/// still lists every file written before it, because those writes are not
+/// undone.
 pub fn apply_files(
     base: &Path,
     bundle: &Bundle,
     groups: &[Group],
     existing_kubeconfigs: &[PathBuf],
-) -> Result<ImportReport, String> {
+) -> ImportReport {
     let mut report = ImportReport::default();
+    if let Err(why) = write_files(base, bundle, groups, existing_kubeconfigs, &mut report) {
+        report.failure = Some(why);
+    }
+    report
+}
 
+/// Records each write in `report` as it lands, so an error leaves the report
+/// saying exactly what was written before it.
+fn write_files(
+    base: &Path,
+    bundle: &Bundle,
+    groups: &[Group],
+    existing_kubeconfigs: &[PathBuf],
+    report: &mut ImportReport,
+) -> Result<(), String> {
     if groups.contains(&Group::Kubeconfigs) && !bundle.kubeconfigs.is_empty() {
         let dir = kubeconfigs_dir(base);
         fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
@@ -442,29 +464,30 @@ pub fn apply_files(
     }
 
     if groups.contains(&Group::Skills) {
-        let (added, kept) = write_group(&skills_dir(base), &bundle.skills)?;
-        report.skills_added = added;
-        report.skills_kept_local = kept;
+        let (added, kept) = (&mut report.skills_added, &mut report.skills_kept_local);
+        write_group(&skills_dir(base), &bundle.skills, added, kept)?;
     }
 
     if groups.contains(&Group::Prompts) {
-        let (added, kept) = write_group(&prompts_dir(base), &bundle.prompts)?;
-        report.prompts_added = added;
-        report.prompts_kept_local = kept;
+        let (added, kept) = (&mut report.prompts_added, &mut report.prompts_kept_local);
+        write_group(&prompts_dir(base), &bundle.prompts, added, kept)?;
     }
 
-    Ok(report)
+    Ok(())
 }
 
-/// Write each file into `dir` unless a file of that name is already there.
-/// Returns `(written, kept_local)`.
-fn write_group(dir: &Path, files: &[BundledFile]) -> Result<(Vec<String>, Vec<String>), String> {
+/// Write each file into `dir` unless a file of that name is already there,
+/// pushing its name onto `added` or, when a local file is kept, `kept`.
+fn write_group(
+    dir: &Path,
+    files: &[BundledFile],
+    added: &mut Vec<String>,
+    kept: &mut Vec<String>,
+) -> Result<(), String> {
     if files.is_empty() {
-        return Ok((Vec::new(), Vec::new()));
+        return Ok(());
     }
     fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
-    let mut added = Vec::new();
-    let mut kept = Vec::new();
     for file in files.iter().take(MAX_MEMBERS) {
         let name = sanitize_name(&file.name);
         if name.is_empty() {
@@ -482,14 +505,37 @@ fn write_group(dir: &Path, files: &[BundledFile]) -> Result<(Vec<String>, Vec<St
         write_member(&path, &file.content)?;
         added.push(name);
     }
-    Ok((added, kept))
+    Ok(())
 }
 
 fn write_member(path: &Path, content: &str) -> Result<(), String> {
     if content.len() > MAX_MEMBER_BYTES {
         return Err(format!("{} is larger than the 1 MB limit", path.display()));
     }
-    fs::write(path, content).map_err(|e| format!("write {}: {e}", path.display()))
+    write_new(path, |file| std::io::Write::write_all(file, content.as_bytes()))
+}
+
+/// Create `path`, which must not exist yet, and fill it with `write`.
+///
+/// A write that fails takes the file away again. Left behind, a part-written
+/// skill reads as one the reader edited here, and the retry the report invites
+/// would keep it as theirs. Creating with `create_new` is what makes that
+/// removal safe: the file removed can only be the one this call made.
+fn write_new(
+    path: &Path,
+    write: impl FnOnce(&mut fs::File) -> std::io::Result<()>,
+) -> Result<(), String> {
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|e| format!("write {}: {e}", path.display()))?;
+    if let Err(e) = write(&mut file) {
+        drop(file);
+        let _ = fs::remove_file(path);
+        return Err(format!("write {}: {e}", path.display()));
+    }
+    Ok(())
 }
 
 /// The settings to write on import: the bundle's keys, minus the ones that
@@ -570,7 +616,7 @@ pub fn read_bundle_file(path: &Path) -> Result<Vec<u8>, String> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use serde_json::json;
 
@@ -585,7 +631,7 @@ mod tests {
         dir
     }
 
-    const KUBECONFIG: &str = "\
+    pub(crate) const KUBECONFIG: &str = "\
 apiVersion: v1
 kind: Config
 clusters:
@@ -866,7 +912,7 @@ current-context: other
     #[test]
     fn import_writes_kubeconfigs_where_the_app_already_looks_for_them() {
         let base = temp_dir("import");
-        let report = apply_files(&base, &sample(), &[Group::Kubeconfigs], &[]).unwrap();
+        let report = apply_files(&base, &sample(), &[Group::Kubeconfigs], &[]);
 
         assert_eq!(report.kubeconfigs_added, vec!["config".to_string()]);
         let written = kubeconfigs_dir(&base).join("config");
@@ -877,11 +923,11 @@ current-context: other
     #[test]
     fn importing_the_same_bundle_twice_changes_nothing_the_second_time() {
         let base = temp_dir("idempotent");
-        apply_files(&base, &sample(), &[Group::Kubeconfigs, Group::Skills], &[]).unwrap();
+        apply_files(&base, &sample(), &[Group::Kubeconfigs, Group::Skills], &[]);
         let existing = vec![kubeconfigs_dir(&base).join("config")];
 
         let second =
-            apply_files(&base, &sample(), &[Group::Kubeconfigs, Group::Skills], &existing).unwrap();
+            apply_files(&base, &sample(), &[Group::Kubeconfigs, Group::Skills], &existing);
 
         assert!(second.kubeconfigs_added.is_empty());
         assert_eq!(second.kubeconfigs_already_present, vec!["config".to_string()]);
@@ -901,7 +947,7 @@ current-context: other
         let home_config = home.join("config");
         fs::write(&home_config, KUBECONFIG).unwrap();
 
-        let report = apply_files(&base, &sample(), &[Group::Kubeconfigs], &[home_config]).unwrap();
+        let report = apply_files(&base, &sample(), &[Group::Kubeconfigs], &[home_config]);
 
         assert!(report.kubeconfigs_added.is_empty());
         assert_eq!(report.kubeconfigs_already_present, vec!["config".to_string()]);
@@ -915,7 +961,7 @@ current-context: other
         fs::create_dir_all(skills_dir(&base)).unwrap();
         fs::write(skills_dir(&base).join("triage.md"), "# my own version").unwrap();
 
-        let report = apply_files(&base, &sample(), &[Group::Skills], &[]).unwrap();
+        let report = apply_files(&base, &sample(), &[Group::Skills], &[]);
 
         assert_eq!(report.skills_kept_local, vec!["triage.md".to_string()]);
         assert!(report.skills_added.is_empty());
@@ -929,7 +975,7 @@ current-context: other
     #[test]
     fn an_unselected_group_is_not_written() {
         let base = temp_dir("selection");
-        let report = apply_files(&base, &sample(), &[Group::Skills], &[]).unwrap();
+        let report = apply_files(&base, &sample(), &[Group::Skills], &[]);
         assert!(report.kubeconfigs_added.is_empty());
         assert!(!kubeconfigs_dir(&base).exists());
         assert_eq!(report.skills_added, vec!["triage.md".to_string()]);
@@ -946,7 +992,7 @@ current-context: other
             BundledFile { name: "C:\\Windows\\evil.md".into(), content: "z".into() },
         ];
 
-        apply_files(&base, &bundle, &[Group::Skills], &[]).unwrap();
+        apply_files(&base, &bundle, &[Group::Skills], &[]);
 
         assert!(!base.join("escaped.md").exists());
         assert!(!base.parent().unwrap().join("escaped.md").exists());
@@ -964,7 +1010,7 @@ current-context: other
         bundle.kubeconfigs =
             vec![BundledFile { name: "notes.yaml".into(), content: "just: a mapping".into() }];
 
-        let report = apply_files(&base, &bundle, &[Group::Kubeconfigs], &[]).unwrap();
+        let report = apply_files(&base, &bundle, &[Group::Kubeconfigs], &[]);
 
         assert!(report.kubeconfigs_added.is_empty());
         assert_eq!(report.kubeconfigs_rejected, vec!["notes.yaml".to_string()]);
@@ -981,7 +1027,7 @@ current-context: other
         fs::create_dir_all(kubeconfigs_dir(&base)).unwrap();
         fs::write(kubeconfigs_dir(&base).join("config"), OTHER_KUBECONFIG).unwrap();
 
-        let report = apply_files(&base, &sample(), &[Group::Kubeconfigs], &[]).unwrap();
+        let report = apply_files(&base, &sample(), &[Group::Kubeconfigs], &[]);
 
         assert_eq!(report.kubeconfigs_added, vec!["config-2".to_string()]);
         assert_eq!(
@@ -989,6 +1035,89 @@ current-context: other
             OTHER_KUBECONFIG,
             "the existing file was replaced"
         );
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_failed_group_keeps_what_was_already_written_and_stops_there() {
+        let base = temp_dir("partial");
+        // A file where the skills directory goes, so creating it fails on
+        // every platform. A read-only directory does not stop writes on Windows.
+        fs::create_dir_all(skills_dir(&base).parent().unwrap()).unwrap();
+        fs::write(skills_dir(&base), "not a directory").unwrap();
+        let mut bundle = sample();
+        bundle.prompts = vec![BundledFile { name: "deploy.md".into(), content: "# deploy".into() }];
+
+        let report = apply_files(
+            &base,
+            &bundle,
+            &[Group::Kubeconfigs, Group::Skills, Group::Prompts],
+            &[],
+        );
+
+        assert_eq!(report.kubeconfigs_added, vec!["config".to_string()]);
+        assert!(kubeconfigs_dir(&base).join("config").exists());
+        let failure = report.failure.as_deref().expect("the failure is reported");
+        assert!(failure.contains(&skills_dir(&base).display().to_string()), "{failure}");
+        assert!(report.prompts_added.is_empty(), "nothing after the failed step is attempted");
+        assert!(!prompts_dir(&base).exists());
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_member_that_fails_keeps_the_ones_before_it_in_the_report() {
+        let base = temp_dir("partial-group");
+        let mut bundle = sample();
+        bundle.skills = vec![
+            BundledFile { name: "triage.md".into(), content: "# triage".into() },
+            BundledFile { name: "huge.md".into(), content: "x".repeat(MAX_MEMBER_BYTES + 1) },
+        ];
+
+        let report = apply_files(&base, &bundle, &[Group::Skills], &[]);
+
+        assert_eq!(report.skills_added, vec!["triage.md".to_string()]);
+        assert!(skills_dir(&base).join("triage.md").exists());
+        let failure = report.failure.as_deref().expect("the failure is reported");
+        assert!(failure.contains("huge.md"), "{failure}");
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_write_that_fails_part_way_leaves_no_file_for_a_retry_to_skip() {
+        // A full disk, say: the file exists and half of it is written. Left
+        // there, the retry the report invites would find the name taken, read
+        // the half as the reader's own edit, and keep it instead of the skill.
+        let base = temp_dir("half-written");
+        let path = base.join("triage.md");
+
+        let result = write_new(&path, |file| {
+            use std::io::Write;
+            file.write_all(b"# tri")?;
+            Err(std::io::Error::other("no space left on device"))
+        });
+
+        let error = result.expect_err("the failed write is reported");
+        assert!(error.contains("no space left"), "{error}");
+        assert!(!path.exists(), "the part-written file was left behind");
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_member_is_never_written_over_a_file_that_appeared_meanwhile() {
+        let base = temp_dir("no-clobber");
+        let path = base.join("triage.md");
+        fs::write(&path, "# my own version").unwrap();
+
+        assert!(write_member(&path, "# triage").is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "# my own version");
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_complete_import_reports_no_failure() {
+        let base = temp_dir("complete");
+        let report = apply_files(&base, &sample(), &[Group::Kubeconfigs, Group::Skills], &[]);
+        assert_eq!(report.failure, None);
         let _ = fs::remove_dir_all(&base);
     }
 
