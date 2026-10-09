@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach, onTestFinished } from "vitest";
 import { render, screen, fireEvent, act, waitFor } from "@testing-library/react";
 import React from "react";
 
@@ -1011,5 +1011,110 @@ describe("srelens:// deep links", () => {
     ]);
     expect(screen.queryByTestId("overview")).toBeNull();
     expect(screen.queryByTestId("browser")).toBeNull();
+  });
+
+  /**
+   * #855: a listing that failed has not said a context is missing. The links
+   * naming one it did not return wait, one notice says why, and the re-list
+   * that follows a fixed kubeconfig opens them.
+   */
+  it("holds links while the context listing has failed, says why once, and opens them when it recovers", async () => {
+    // Every listing until the fix, not just the next one: the landing page
+    // lists too, and its effect runs before App's.
+    listContextsMock.mockResolvedValue({
+      contexts: [context("kind-dev")],
+      error: "open /home/dana/.kube/prod: permission denied",
+    });
+    // kind-dev is in the partial list and opens now; prod's two links wait.
+    deepLinks.queue = [
+      "srelens://cluster/prod",
+      "srelens://cluster/kind-dev",
+      "srelens://resource/prod/default/Pod/web-1",
+    ];
+    render(<App />);
+    expect((await screen.findByTestId("overview")).textContent).toBe("kind-dev");
+    expect(vi.mocked(notify.error).mock.calls).toEqual([
+      [
+        "That link will be checked once the contexts load",
+        "The kube contexts could not be listed. open /home/dana/.kube/prod: permission denied",
+      ],
+    ]);
+    expect(screen.queryByRole("tab", { name: /· prod/ })).toBeNull();
+
+    // Another link while the listing is still failing joins the wait without a
+    // second notice: the reader has already been told why.
+    deepLinks.queue = ["srelens://resource/prod/default/Service/web"];
+    await act(async () => tauri.handlers.get("deep-link-pending")?.({ payload: null }));
+    await waitFor(() => expect(deepLinks.queue).toEqual([]));
+    await act(async () => {});
+    expect(notify.error).toHaveBeenCalledTimes(1);
+
+    // The kubeconfig is readable again: the backend's watcher says so, and the
+    // re-list answers cleanly with both contexts.
+    listContextsMock.mockResolvedValue({ contexts: [context("kind-dev"), context("prod")] });
+    await waitFor(() => expect(tauri.handlers.has("kubeconfig-changed")).toBe(true));
+    act(() => tauri.handlers.get("kubeconfig-changed")?.({ payload: null }));
+    expect(await screen.findByRole("tab", { name: /Overview · prod/ })).toBeDefined();
+    expect(screen.getByRole("tab", { name: /Pods · prod/ })).toBeDefined();
+    expect(screen.getByRole("tab", { name: /Services · prod/ })).toBeDefined();
+    expect(notify.error).toHaveBeenCalledTimes(1);
+
+    // A later failure is a new one, and is said again.
+    listContextsMock.mockResolvedValue({
+      contexts: [context("kind-dev")],
+      error: "open /home/dana/.kube/prod: permission denied",
+    });
+    const listings = listContextsMock.mock.calls.length;
+    act(() => tauri.handlers.get("kubeconfig-changed")?.({ payload: null }));
+    await waitFor(() => expect(listContextsMock.mock.calls.length).toBeGreaterThan(listings));
+    await act(async () => {});
+    // Nor has it said prod is gone, so prod's tabs stay open (#855 review).
+    expect(screen.getByRole("tab", { name: /Overview · prod/ })).toBeDefined();
+    deepLinks.queue = ["srelens://cluster/prod"];
+    await act(async () => tauri.handlers.get("deep-link-pending")?.({ payload: null }));
+    await waitFor(() => expect(notify.error).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(notify.error).mock.calls[1][0]).toBe("That link will be checked once the contexts load");
+  });
+
+  it("closes a restored tab only once a listing that answered lacks its context, and says so then", async () => {
+    vi.mocked(notify.info).mockClear();
+    onTestFinished(() => localStorage.removeItem("srelens.openTabs"));
+    localStorage.setItem(
+      "srelens.openTabs",
+      JSON.stringify({ tabs: [{ id: 1, cluster: "prod", kind: "overview", namespace: "default" }], activeTabId: 1 }),
+    );
+    listContextsMock.mockResolvedValue({
+      contexts: [context("kind-dev")],
+      error: "open /home/dana/.kube/prod: permission denied",
+    });
+    render(<App />);
+    await waitFor(() => expect(tauri.handlers.has("kubeconfig-changed")).toBe(true));
+    await act(async () => {});
+    expect(screen.getByRole("tab", { name: /Overview · prod/ })).toBeDefined();
+    expect(notify.info).not.toHaveBeenCalled();
+
+    listContextsMock.mockResolvedValue({ contexts: [context("kind-dev")] });
+    act(() => tauri.handlers.get("kubeconfig-changed")?.({ payload: null }));
+    await waitFor(() => expect(screen.queryByRole("tab", { name: /Overview · prod/ })).toBeNull());
+    expect(notify.info).toHaveBeenCalledWith("Closed 1 restored tab", "Their cluster context is no longer available.");
+  });
+
+  it("still refuses at once, while the listing has failed, what no listing can change", async () => {
+    listContextsMock.mockResolvedValue({
+      contexts: [context("kind-dev")],
+      error: "open /home/dana/.kube/prod: permission denied",
+    });
+    deepLinks.queue = [
+      "srelens://evil/prod",
+      "srelens://resource/prod/default/Event/web.17f",
+      "srelens://resource/prod/-/Pod/web-1",
+    ];
+    render(<App />);
+    await waitFor(() => expect(notify.error).toHaveBeenCalledTimes(3));
+    expect(vi.mocked(notify.error).mock.calls).toEqual([
+      ["Couldn't open that link", "It isn't a link srelens understands."],
+      ["Couldn't open that link", "srelens can't open a Event directly."],
+      ["Couldn't open that link", "Pod is namespaced, so the link needs a namespace."],
+    ]);
   });
 });

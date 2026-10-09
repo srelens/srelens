@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   cleanErrorMessage,
-  DEEP_LINK_REFUSED,
   describeError,
   isApplePlatform,
   isTauri,
@@ -229,7 +228,8 @@ export function Window({
   // What the desktop host reports after the page that would have heard it is
   // gone: a helm operation outlives the window that started it, and how it
   // ended reaches every window (#735). The web host sends none. A refused
-  // `srelens://` link joins the same queue (#370): one surface, oldest first.
+  // `srelens://` link joins the same queue (#370), and so do links held behind
+  // a failed context listing (#855): one surface, oldest first.
   const [notices, setNotices] = useState<HostNotice[]>([]);
   useEffect(
     () =>
@@ -241,8 +241,7 @@ export function Window({
   useDeepLinks({
     windowLabel,
     ready: booted,
-    onRefused: (reason) =>
-      setNotices((shown) => [...shown, { level: "error", title: DEEP_LINK_REFUSED, detail: reason }]),
+    onNotice: (notice) => setNotices((shown) => [...shown, { level: "error", ...notice }]),
   });
 
   useEffect(() => {

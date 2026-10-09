@@ -1986,4 +1986,88 @@ describe("Window — srelens:// deep links", () => {
     await waitFor(() => expect(store.activeRoute()).toBe("/overview"));
     expect(store.activeCluster()).toBe("stage");
   });
+
+  /** The notices the window is drawing, oldest first: only the first is shown. */
+  function shownNotice(): string | null {
+    return document.querySelector('[data-slot="toast-frame"]')?.textContent ?? null;
+  }
+
+  /** Drain a nudge's links and let every effect they wake run. */
+  async function deliver(...links: string[]) {
+    deepLinks.queue = links;
+    const before = takePendingDeepLinks.mock.calls.length;
+    nudge();
+    await waitFor(() => expect(takePendingDeepLinks.mock.calls.length).toBe(before + 1));
+    await act(async () => {
+      await takePendingDeepLinks.mock.results[before].value;
+    });
+  }
+
+  /**
+   * #855: boot finishes on a FAILED listing too — wholly, or partly with some
+   * contexts and a reason — and that listing has not said a context is
+   * missing. A link naming one it did not return waits; one notice says what
+   * the listing failed with; the reload that answers cleanly opens it.
+   */
+  it("holds links while the listing has failed, says why once, and opens them when the contexts reload", async () => {
+    listContexts.mockResolvedValue({
+      contexts: [ctx("prod")],
+      error: "open /home/dana/.kube/stage: permission denied",
+    });
+    await booted();
+    // prod was listed and opens now; stage's links wait.
+    await deliver(
+      "srelens://resource/stage/payments/Pod/web-7d4b",
+      "srelens://cluster/prod",
+      "srelens://cluster/stage",
+    );
+    expect(store.activeRoute()).toBe("/overview");
+    expect(store.activeCluster()).toBe("prod");
+    expect(tabFor("/k/Pod/payments/web-7d4b")).toBeUndefined();
+    const notice = shownNotice() ?? "";
+    expect(notice).toContain("That link will be checked once the contexts load");
+    expect(notice).toContain("The kube contexts could not be listed. open /home/dana/.kube/stage: permission denied");
+    expect(notice).not.toContain("No kube context named");
+
+    // Another link while the listing is still failing joins the wait, and the
+    // reader is not told twice.
+    await deliver("srelens://resource/stage/-/Node/worker-1");
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss notice" }));
+    expect(shownNotice()).toBeNull();
+
+    // A reload that answers cleanly — Connections' Refresh, Home's Retry —
+    // judges the held links again, in the order they came.
+    act(() => setContexts([ctx("prod"), ctx("stage")]));
+    await waitFor(() => expect(store.activeRoute()).toBe("/k/Node/-/worker-1"));
+    expect(store.activeCluster()).toBe("stage");
+    expect(tabFor("/k/Pod/payments/web-7d4b")?.sub).toBe("stage");
+    expect(shownNotice()).toBeNull();
+
+    // A later failure is a new one, and is said again.
+    act(() => setContexts([ctx("prod")], "open /home/dana/.kube/stage: permission denied"));
+    await deliver("srelens://cluster/stage");
+    expect(shownNotice() ?? "").toContain("That link will be checked once the contexts load");
+  });
+
+  it("still refuses at once, while the listing has failed, what no listing can change", async () => {
+    listContexts.mockResolvedValue({
+      contexts: [ctx("prod")],
+      error: "open /home/dana/.kube/stage: permission denied",
+    });
+    await booted();
+    await deliver(
+      "srelens://evil/stage",
+      "srelens://resource/stage/default/Event/web.17f",
+      "srelens://resource/stage/-/Pod/web",
+    );
+    for (const reason of [
+      "It isn't a link srelens understands.",
+      "srelens can't open a Event directly.",
+      "Pod is namespaced, so the link needs a namespace.",
+    ]) {
+      expect(shownNotice()).toBe(`Couldn't open that link${reason}`);
+      fireEvent.click(screen.getByRole("button", { name: "Dismiss notice" }));
+    }
+    expect(shownNotice()).toBeNull();
+  });
 });
