@@ -14,9 +14,27 @@ test('the installer size report never holds a release back', () => {
   // installers had grown past a 15% budget. The sizes are still reported, but
   // nothing in the job can fail on them.
   const sizes = job('size-baseline');
-  assert.doesNotMatch(sizes, /--check-regression|--max-growth/);
-  assert.doesNotMatch(sizes, /exit "\$status"/);
-  assert.match(sizes, /size-baseline\.mjs \\\n\s+--tag "srelens-v\$\{\{ needs\.version\.outputs\.version \}\}" \|\| true/);
+  assert.doesNotMatch(sizes, /--max-growth|exit "\$status"/);
+  // Every call into the script is guarded, so its exit status never ends the step.
+  const calls = sizes.split('\n').filter((line) => line.includes('size-baseline.mjs'));
+  assert.ok(calls.length >= 2, sizes);
+  for (const call of calls) assert.match(call, /\|\| (true|echo)/, call);
+});
+
+test('the size report keeps the growth against the previous release, and says when it has nothing', () => {
+  const sizes = job('size-baseline');
+  // Only --check-regression compares with the previous stable release; the
+  // plain table compares with the reference client.
+  assert.match(sizes, /size-baseline\.mjs --check-regression --tag/);
+  assert.match(sizes, /could not be produced/);
+});
+
+test('a release is published with this run\'s notes, not the ones its draft was made with', () => {
+  // A retry finds the failed run's draft, and tauri-action does not rewrite an
+  // existing draft's body.
+  const publish = job('publish-release');
+  assert.match(publish, /NOTES: \$\{\{ needs\.version\.outputs\.notes \}\}/);
+  assert.match(publish, /gh release edit [^\n]*\\\n[^\n]*--notes-file [^\n]* --draft=false|--notes-file[\s\S]*--draft=false/);
 });
 
 // The version step's own script, as the workflow runs it on `main`.
@@ -93,6 +111,23 @@ test('a published release is still followed by a bump', () => {
     assert.deepEqual(repo.run(), { version: '0.17.1', release: 'true' });
     assert.equal(repo.git('log', '-1', '--format=%s'), 'chore(release): srelens-v0.17.1 [skip ci]');
     assert.equal(repo.git('ls-remote', 'origin', 'main').split('\t')[0], repo.git('rev-parse', 'HEAD'));
+  } finally {
+    repo.cleanup();
+  }
+});
+
+test('a pending version too small for what landed since is bumped, not retried', () => {
+  // A patch release left main at an untagged 1.2.1; a breaking change landed
+  // after it. Retrying 1.2.1 would ship that breaking change as a patch.
+  const repo = repository([
+    ['feat: the last release', '1.2.0', 'srelens-v1.2.0'],
+    ['fix(ui): a fix', '1.2.0'],
+    ['chore(release): srelens-v1.2.1 [skip ci]', '1.2.1'],
+    ['feat(api)!: a breaking change', '1.2.1'],
+  ]);
+  try {
+    assert.deepEqual(repo.run(), { version: '2.0.0', release: 'true' });
+    assert.equal(repo.git('log', '-1', '--format=%s'), 'chore(release): srelens-v2.0.0 [skip ci]');
   } finally {
     repo.cleanup();
   }

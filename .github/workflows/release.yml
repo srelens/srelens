@@ -135,6 +135,21 @@ jobs:
             BUMP=none
           fi
           echo "Detected bump since ${LAST_TAG:-<start>}: $BUMP"
+          # Retried only when that version is at least the step the commits
+          # since the last release need: a breaking change that landed after a
+          # failed patch release must not ship as that patch.
+          if [ -n "$RETRY" ] && [ "$BUMP" != "none" ] && ! node -e '
+              const [last, cur, kind] = process.argv.slice(1);
+              const need = last.split(".").map(Number);
+              if (kind === "major") { need[0]++; need[1] = 0; need[2] = 0; }
+              else if (kind === "minor") { need[1]++; need[2] = 0; }
+              else { need[2]++; }
+              const have = cur.split(".").map(Number);
+              const i = [0, 1, 2].find((k) => have[k] !== need[k]);
+              process.exit(i === undefined || have[i] > need[i] ? 0 : 1);
+            ' "${LAST_TAG#srelens-v}" "$CUR" "$BUMP"; then
+            RETRY=""
+          fi
           if [ "$BUMP" = "none" ] && [ -z "$RETRY" ]; then
             echo "release=false" >> "$GITHUB_OUTPUT"
             echo "No releasable (feat/fix/perf/breaking) commits — skipping release."
@@ -1197,15 +1212,23 @@ jobs:
           # low enough for a runner pool to hit it).
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Reported, not enforced. --tag pins the table to the release just
-          # built: on main that release is still a DRAFT until publish-release
-          # flips it, and drafts are excluded from the stable list, so without
-          # it the table would describe the previous published release.
+          # Reported, not enforced. --tag pins both reports to the release just
+          # built: on main it is still a DRAFT until publish-release flips it,
+          # and drafts are excluded from the stable list, so without it they
+          # would describe the previous published release.
+          tag="srelens-v${{ needs.version.outputs.version }}"
+          # The growth against the previous stable release. Only stdout: the
+          # old budget's verdict (stderr, and the exit status) no longer
+          # decides anything. A report that cannot be made says so.
+          growth="$(node scripts/perf/size-baseline.mjs --check-regression --tag "$tag" 2>/dev/null || true)"
           {
             echo '### Installer sizes'
             echo
-            node scripts/perf/size-baseline.mjs \
-              --tag "srelens-v${{ needs.version.outputs.version }}" || true
+            echo '```'
+            printf '%s\n' "${growth:-The comparison with the previous stable release could not be produced.}"
+            echo '```'
+            echo
+            node scripts/perf/size-baseline.mjs --tag "$tag" || echo "The comparison with the reference client could not be produced."
           } >> "$GITHUB_STEP_SUMMARY"
 
   # Attach detached GPG signatures (.asc) to every release asset so users can
@@ -1387,11 +1410,11 @@ jobs:
   # run leaves an invisible draft to delete instead of a public, `latest`-
   # resolving release with no manifest behind it.
   publish-release:
-    # size-baseline included so an over-budget installer never goes public: a
-    # failed check leaves the release as an invisible draft to inspect, exactly
-    # like a failed build or a missing updater manifest. tui-publish likewise:
-    # a stable release missing a platform's TUI archive, or whose checksum
-    # file does not cover all six, stays a draft.
+    # A failed build, a missing updater manifest, failed signing, or a
+    # tui-publish that is missing a platform's archive (or whose checksum file
+    # does not cover all six) leaves the release as an invisible draft to
+    # inspect. size-baseline only reports installer sizes and cannot fail on
+    # them, so it holds a release back only if the job itself breaks.
     needs: [version, build, updater-manifest, sign-artifacts, size-baseline, tui-publish]
     if: ${{ always() && github.ref_name == 'main' && needs.build.result == 'success' && needs.updater-manifest.result == 'success' && needs.sign-artifacts.result == 'success' && needs.size-baseline.result == 'success' && needs.tui-publish.result == 'success' && needs.version.outputs.release == 'true' }}
     runs-on: ubuntu-22.04
@@ -1401,10 +1424,15 @@ jobs:
       - name: Publish the release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NOTES: ${{ needs.version.outputs.notes }}
         run: |
           set -euo pipefail
+          # This run's notes, set as the draft is published: a retry of a
+          # failed release finds that run's draft, and tauri-action leaves an
+          # existing draft's body as it was.
+          printf '%s\n' "$NOTES" > notes.md
           gh release edit "srelens-v${{ needs.version.outputs.version }}" \
-            --repo "${{ github.repository }}" --draft=false
+            --repo "${{ github.repository }}" --notes-file notes.md --draft=false
 
   # Arch / CachyOS / Manjaro install path. Deliberately STABLE-ONLY: AUR users
   # expect released versions, and an Arch `pkgver` cannot carry the `-<run>`
