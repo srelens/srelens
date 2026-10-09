@@ -17,6 +17,7 @@ import { Apps } from "./home/Apps";
 import { LiveNow } from "./home/LiveNow";
 import { NeedsAttention } from "./home/NeedsAttention";
 import { PickUp } from "./home/PickUp";
+import { WhatsNew } from "./home/WhatsNew";
 
 /**
  * App-wide entry point: what needs attention across the workspace, the
@@ -104,6 +105,7 @@ export function Home() {
           <aside className="home-start" aria-label="Workspace tools">
             <LiveNow />
             <Apps />
+            <WhatsNew />
             <h2 className="home-section-heading">Quick links</h2>
             <HomeAction title="Manage connections" icon={Icons.cluster} route="/connections" />
             <HomeAction title="Settings" icon={Icons.settings} route="/settings" />
