@@ -88,6 +88,23 @@ describe("GettingStarted", () => {
     }
   });
 
+  it("is still there after a remount when the backend refused the dismissal", async () => {
+    // The refused value must not linger in memory, or the next mount reads it
+    // back as dismissed: a failed write shown as a success.
+    core.flushSettingsWrites.mockRejectedValueOnce(new Error("settings.json is read-only"));
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const first = render(<GettingStarted />);
+      await userEvent.click(await screen.findByRole("button", { name: "Dismiss getting started" }));
+      await screen.findByText("Could not keep this dismissed");
+      first.unmount();
+      render(<GettingStarted />);
+      expect(await screen.findByRole("heading", { name: /^Getting started/ })).toBeTruthy();
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
   it("stays up, and says so, when the dismissal cannot be kept", async () => {
     const setItem = vi.spyOn(settingsStorage, "setItem").mockImplementation(() => { throw new Error("the settings file is read-only"); });
     vi.spyOn(console, "error").mockImplementation(() => {});

@@ -46,6 +46,13 @@ async function saveDismissed(): Promise<unknown> {
     await flushSettingsWrites({ throwOnError: true });
     return null;
   } catch (error) {
+    // Not kept, so not remembered either: left in memory, the next mount would
+    // read it back as dismissed.
+    try {
+      settingsStorage.removeItem(CHECKLIST_DISMISSED_KEY);
+    } catch {
+      // Nothing was held to undo.
+    }
     console.error("could not persist the dismissed getting-started list", error);
     return error;
   }
