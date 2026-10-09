@@ -143,13 +143,18 @@ export async function readClusterAttention(
   }
 }
 
+/** `namespace/name`, or the bare name for a cluster-scoped object such as a Node. */
+export function attentionPath(item: Pick<AttentionItem, "namespace" | "name">): string {
+  return item.namespace ? `${item.namespace}/${item.name}` : item.name;
+}
+
 /**
  * The question an item's Ask puts in the assistant's prompt. Names the object
  * by namespace and name and the cluster by its context name, which is what the
  * agent's tools take.
  */
 export function attentionQuestion(item: AttentionItem): string {
-  const path = `${item.namespace}/${item.name}`;
+  const path = attentionPath(item);
   switch (item.cause) {
     case "crash":
       return `Why is ${path} crash-looping on ${item.cluster}?`;

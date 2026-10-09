@@ -1,7 +1,11 @@
-import { act, render, screen } from "@testing-library/react";
+import type { ReactElement } from "react";
+import { act, render as rtlRender, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { saveContextOrder, type ClusterContext } from "@srelens/core";
+import { PortalScopeProvider } from "@srelens/ui-kit";
+import { ConsoleProvider } from "../console";
+import { lockWorkspace, resetLock } from "../shell/LockGate";
 import { screenFor } from "../lib/routes";
 import { Home } from "./Home";
 import { resetContexts, setContexts } from "../lib/clusters";
@@ -14,13 +18,25 @@ const ctx = (stableId: string, name: string): ClusterContext => ({
   stableId, key: stableId, name, cluster: name, server: `https://${stableId}.example`, isCurrent: false,
   sourceFile: "/mock/config", authKind: "client certificate",
 });
-const { listContexts } = vi.hoisted(() => ({ listContexts: vi.fn() }));
-vi.mock("@srelens/core", async original => ({ ...(await original<typeof import("@srelens/core")>()), listContexts }));
+const { listContexts, reads } = vi.hoisted(() => ({
+  listContexts: vi.fn(),
+  reads: {
+    podOverview: vi.fn(), listDeployments: vi.fn(), listStatefulSets: vi.fn(), listDaemonSets: vi.fn(), listEvents: vi.fn(),
+  },
+}));
+vi.mock("@srelens/core", async original => ({ ...(await original<typeof import("@srelens/core")>()), listContexts, ...reads }));
+/** Home hands questions to the console, so it renders inside the provider the window gives it. */
+const render = (ui: ReactElement) => rtlRender(ui, { wrapper: ConsoleProvider });
 const PROD = ctx("prod-id", "prod");
 const STAGE = ctx("stage-id", "staging");
 beforeEach(() => {
   listContexts.mockReset();
-  localStorage.clear(); loadMarks(); resetContexts(); resetView();
+  reads.podOverview.mockReset().mockResolvedValue({ pods: { total: 0, byNode: [], unsettled: [], truncated: false } });
+  reads.listDeployments.mockReset().mockResolvedValue({ deployments: [] });
+  reads.listStatefulSets.mockReset().mockResolvedValue({ statefulsets: [] });
+  reads.listDaemonSets.mockReset().mockResolvedValue({ daemonsets: [] });
+  reads.listEvents.mockReset().mockResolvedValue({ events: [] });
+  localStorage.clear(); loadMarks(); resetContexts(); resetView(); resetLock();
   setState(defaultState([]));
 });
 
@@ -95,6 +111,36 @@ describe("Home", () => {
     expect(screen.getByText("Could not load all clusters")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Open cluster prod — Unreachable" })).toBeTruthy();
     expect(screen.getByText("Unreachable")).toBeTruthy();
+  });
+
+  it("checks only the workspace's connected, unpaused clusters for what needs attention", async () => {
+    const OTHER = ctx("other-id", "other");
+    setContexts([PROD, STAGE, OTHER]);
+    setState(defaultState([PROD, STAGE, OTHER]));
+    setLink(PROD.stableId, "connected");
+    setLink(STAGE.stableId, "connected");
+    setLink(OTHER.stableId, "error", "connection refused");
+    setClusterPaused(currentWorkspace().id, STAGE.stableId, true);
+    reads.podOverview.mockResolvedValue({ pods: { total: 1, byNode: [], truncated: false, unsettled: [
+      { name: "web-7d4b", namespace: "checkout", phase: "Running", status: "CrashLoopBackOff", ready: "0/1", restarts: 9, node: "n1", age: "1h", image: "web" },
+    ] } });
+    render(<Home />);
+    expect(await screen.findByRole("button", { name: "Open Pod checkout/web-7d4b on prod" })).toBeTruthy();
+    expect(reads.podOverview.mock.calls.map(([context]) => context)).toEqual(["prod"]);
+  });
+
+  it.each([
+    ["the workspace is sealed", () => { lockWorkspace(); return <Home />; }],
+    ["Home is a tab behind another", () => (
+      <PortalScopeProvider scope={{ container: undefined, visible: false, hold: () => () => {} }}><Home /></PortalScopeProvider>
+    )],
+  ])("reads nothing while %s", async (_, ui) => {
+    setContexts([PROD]);
+    setState(defaultState([PROD]));
+    setLink(PROD.stableId, "connected");
+    render(ui());
+    await act(async () => { await Promise.resolve(); });
+    expect(reads.podOverview).not.toHaveBeenCalled();
   });
 
   it.each([["Manage connections", "/connections"], ["Settings", "/settings"], ["Release notes", "/notes"]])(

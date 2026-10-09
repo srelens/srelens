@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { describeError, listContexts, type ClusterContext } from "@srelens/core";
-import { Button, EmptyState, LoadingState, Mark, NavIcon, Screen, StatusPill, TextInput } from "@srelens/ui-kit";
+import { Button, EmptyState, LoadingState, Mark, NavIcon, Screen, StatusPill, TextInput, usePortalShowing } from "@srelens/ui-kit";
+import { useAttention } from "../lib/attention";
 import { getContexts, getKubeconfigFiles, setContexts, useContexts, useContextsError, useContextsStatus } from "../lib/clusters";
 import { useOrderedContexts } from "../lib/contextOrder";
 import { FailureAlert } from "../lib/errorCopy";
@@ -11,8 +12,14 @@ import { openCluster } from "../lib/openCluster";
 import { openTab } from "../lib/tabsStore";
 import { LINK_WORD, useWorkspaceView } from "../lib/workspace";
 import { useTabs } from "../lib/tabsStore";
+import { useWorkspaceSealed } from "../shell/LockGate";
+import { NeedsAttention } from "./home/NeedsAttention";
 
-/** App-wide entry point. Contexts and connection status come from the shell's shared stores. */
+/**
+ * App-wide entry point: what needs attention across the workspace, the
+ * clusters, and the way back into what the reader was doing. Contexts and
+ * connection status come from the shell's shared stores.
+ */
 export function Home() {
   const contexts = useContexts();
   const status = useContextsStatus();
@@ -22,6 +29,18 @@ export function Home() {
   useEditableMark("", "");
   const { links } = useWorkspaceView();
   const { workspace } = useTabs();
+  // Only what this workspace holds, is connected, and is not paused: a paused
+  // cluster is one the reader asked srelens to stop reading.
+  const targets = useMemo(
+    () => ordered.filter((c) => workspace.clusters.includes(c.stableId)
+      && links[c.stableId]?.state === "connected"
+      && workspace.pausedClusters?.includes(c.stableId) !== true),
+    [ordered, workspace, links],
+  );
+  // Hidden tabs stay mounted, so "not on screen" pauses the reads as well as the vault's cover.
+  const sealed = useWorkspaceSealed();
+  const showing = usePortalShowing();
+  const scans = useAttention(targets, sealed || !showing);
   const [query, setQuery] = useState("");
   const [retrying, setRetrying] = useState(false);
   const mounted = useRef(false);
@@ -58,6 +77,8 @@ export function Home() {
           </Button>
         </div>
         <div className="home-layout">
+          <div className="home-main">
+          <NeedsAttention targets={targets} scans={scans} />
           <section className="home-clusters" aria-labelledby="home-clusters-title">
             <div className="home-section-heading">
               <h2 id="home-clusters-title">Your clusters <span className="text-muted">{contexts.length}</span></h2>
@@ -70,11 +91,12 @@ export function Home() {
             {status === "loading" ? <LoadingState label="Loading clusters…" /> : contexts.length === 0 ? (
               status === "loaded" && <EmptyState title="No clusters configured" hint="Add a kubeconfig or connect to a cluster to start exploring. Your saved connections will appear here." />
             ) : filtered.length === 0 ? <EmptyState title="No matching clusters" hint="Search by display name, context, or API server." action={<Button variant="secondary" size="sm" onClick={() => setQuery("")}>Clear search</Button>} /> : (
-              <ul className="home-cluster-list scroll" aria-label="Saved clusters">
+              <ul className="home-cluster-list" aria-label="Saved clusters">
                 {filtered.map(ctx => <ClusterRow key={ctx.stableId} context={ctx} link={links[ctx.stableId]} paused={workspace.pausedClusters?.includes(ctx.stableId) === true} />)}
               </ul>
             )}
           </section>
+          </div>
           <aside className="home-start" aria-label="Workspace tools">
             <h2 className="home-section-heading">Quick links</h2>
             <HomeAction title="Manage connections" icon={Icons.cluster} route="/connections" />

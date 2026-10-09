@@ -124,6 +124,7 @@ describe("attentionQuestion", () => {
     [item({ problem: "ImagePullBackOff", cause: "image" }), "Why can't checkout/web-7d4b pull its image on prod?"],
     [item({ kind: "Deployment", name: "web", problem: "1/3 ready", cause: "replicas" }), "Why does Deployment checkout/web have unavailable replicas on prod?"],
     [item({ kind: "Service", name: "front", problem: "FailedToUpdateEndpoint", cause: "warning" }), "What is behind the FailedToUpdateEndpoint warning on Service checkout/front on prod?"],
+    [item({ kind: "Node", namespace: "", name: "n1", problem: "Rebooted", cause: "warning" }), "What is behind the Rebooted warning on Node n1 on prod?"],
   ])("asks about %#", (subject, question) => {
     expect(attentionQuestion(subject)).toBe(question);
   });
