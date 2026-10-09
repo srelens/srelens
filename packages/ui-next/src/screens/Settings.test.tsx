@@ -158,6 +158,24 @@ describe("Settings", () => {
     expect(within(rail).getByRole("tab", { name: "Appearance" }).getAttribute("aria-selected")).toBe("true");
   });
 
+  it("shows the installed apps for a later request that names no tab", async () => {
+    openSettings("extensions", "catalog");
+    paint();
+    expect((await screen.findByRole("tab", { name: "Catalog" })).getAttribute("aria-selected")).toBe("true");
+    act(() => openSettings("extensions"));
+    expect(screen.getByRole("tab", { name: "Catalog" }).getAttribute("aria-selected")).toBe("false");
+  });
+
+  it("does not carry a catalog request into a later visit through the rail", async () => {
+    openSettings("extensions", "catalog");
+    const { user } = paint();
+    const rail = screen.getByRole("complementary", { name: "Settings" });
+    expect((await screen.findByRole("tab", { name: "Catalog" })).getAttribute("aria-selected")).toBe("true");
+    await user.click(within(rail).getByRole("tab", { name: "Appearance" }));
+    await user.click(within(rail).getByRole("tab", { name: "Apps" }));
+    expect((await screen.findByRole("tab", { name: "Catalog" })).getAttribute("aria-selected")).toBe("false");
+  });
+
   it("moves an open Apps section to its catalog when asked", async () => {
     openSettings("extensions");
     paint();

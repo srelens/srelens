@@ -132,6 +132,9 @@ export function Settings({ ported, onSwitchToClassic, onLocked }: SettingsProps)
   function select(id: SectionId) {
     if (id === "updates") setUpdatesOpened(true);
     setActive(id);
+    // A section the reader picks is not the one a request asked for: Apps opens
+    // on its own list, not on the catalog a past request left behind.
+    setAppsTab(undefined);
   }
 
   // A section another screen asked for (`openSettings`): the one held for a
@@ -143,7 +146,9 @@ export function Settings({ ported, onSwitchToClassic, onLocked }: SettingsProps)
       const section = visible.find((s) => s.id === request?.section)?.id;
       if (!request || !section) return;
       select(section);
-      if (request.tab) setAppsTab({ tab: request.tab });
+      // Every request says which Apps tab it wants — the installed list unless
+      // it names one — so a catalog asked for earlier cannot linger into it.
+      setAppsTab({ tab: request.tab ?? "installed" });
     };
     apply();
     return onSettingsRequested(apply);
