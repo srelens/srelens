@@ -539,6 +539,9 @@ export function AppearancePane({ ported, onSwitchToClassic }: AppearancePaneProp
           screens are not there yet, and the ones that are may still change. Switching reloads the
           window, and the classic design has this same choice in the same place.
         </p>
+        <p className="mt-2 text-[0.75rem] text-muted">
+          The classic design is deprecated and will be removed in a future version.
+        </p>
         {ported.length > 0 && (
           <>
             <p className="mt-2 text-[0.75rem] text-muted">In the new design so far:</p>
@@ -553,7 +556,7 @@ export function AppearancePane({ ported, onSwitchToClassic }: AppearancePaneProp
         )}
         <div className="mt-3 flex flex-wrap items-center gap-2">
           <Button variant="secondary" onClick={onSwitchToClassic}>
-            Switch to the classic design
+            Switch to Classic (deprecated)
           </Button>
         </div>
       </Panel>

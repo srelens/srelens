@@ -109,11 +109,10 @@ ciclo de investigação em um único workspace local-first.
 ## Aplicativo desktop
 
 O aplicativo desktop é um workspace completo de Kubernetes em uma janela nativa.
-As capturas de tela abaixo mostram o **novo design**, que está sendo liberado tela
-por tela: ative-o em **Settings → Appearance → Design → New design**
-(Configurações → Aparência → Design → Novo design) e volte ao anterior pelo mesmo
-caminho quando quiser. São seis temas: Light, Paper, Dark, Midnight, Glass e
-High contrast.
+As capturas de tela abaixo mostram o **novo design**, que agora é o padrão. São
+seis temas: Light, Paper, Dark, Midnight, Glass e High contrast. O design clássico
+está obsoleto e será removido em uma versão futura; até lá, você pode mudar para
+ele em **Settings → Appearance → Design** (Configurações → Aparência → Design).
 
 <table>
   <tr>

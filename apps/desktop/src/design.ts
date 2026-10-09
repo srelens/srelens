@@ -20,14 +20,14 @@ export type Design = "classic" | "next";
 
 export function loadDesign(): Design {
   try {
-    // Anything unrecognised means classic. A preference written by a future
-    // version must never leave someone on a design that does not exist, since
-    // a blank window has no way back to Settings.
-    return settingsStorage.getItem(DESIGN_KEY) === "next" ? "next" : "classic";
+    // Classic is deprecated: only someone who explicitly chose it stays on it.
+    // Anything else — no preference, or one written by a future version —
+    // means the new design, so nobody lands on a design that does not exist.
+    return settingsStorage.getItem(DESIGN_KEY) === "classic" ? "classic" : "next";
   } catch {
     // Storage throws in some privacy modes; a preference is not worth failing
     // to boot over.
-    return "classic";
+    return "next";
   }
 }
 

@@ -111,10 +111,10 @@ d'investigation dans un seul espace de travail local-first.
 
 L'application de bureau est un espace de travail Kubernetes complet dans une
 fenêtre native. Les captures d'écran ci-dessous montrent le **nouveau design**,
-déployé écran par écran : activez-le dans **Settings → Appearance → Design → New
-design** (Paramètres → Apparence → Design → Nouveau design), et revenez en arrière
-de la même façon quand vous le souhaitez. Il propose six thèmes : Light, Paper,
-Dark, Midnight, Glass et High contrast.
+désormais celui par défaut. Il propose six thèmes : Light, Paper, Dark, Midnight,
+Glass et High contrast. Le design classique est obsolète et sera supprimé dans une
+version future ; d'ici là, vous pouvez y passer dans **Settings → Appearance →
+Design** (Paramètres → Apparence → Design).
 
 <table>
   <tr>

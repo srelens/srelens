@@ -332,6 +332,12 @@ describe("App", () => {
     delete (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__;
   });
 
+  it("says the classic design is deprecated, with the way to the new one", () => {
+    render(<App />);
+    expect(screen.getByText(/classic design is deprecated/i)).toBeDefined();
+    expect(screen.getByRole("button", { name: "Switch to the new design" })).toBeDefined();
+  });
+
   it("shows the welcome state until a cluster is opened", () => {
     render(<App />);
     expect(screen.getByText(/pure-Rust Kubernetes UI/)).toBeDefined();

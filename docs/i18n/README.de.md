@@ -106,11 +106,11 @@ diesen Untersuchungsablauf in einem einzigen Local-first-Workspace.
 ## Desktop-App
 
 Die Desktop-App ist ein vollständiger Kubernetes-Workspace in einem nativen
-Fenster. Die Screenshots unten zeigen das **neue Design**, das Bildschirm für
-Bildschirm eingeführt wird: Du schaltest es unter
-**Settings → Appearance → Design → New design** (Einstellungen → Darstellung →
-Design → Neues Design) ein und kannst jederzeit auf demselben Weg zurückwechseln.
-Es gibt sechs Themes: Light, Paper, Dark, Midnight, Glass und High contrast.
+Fenster. Die Screenshots unten zeigen das **neue Design**, das jetzt der Standard
+ist. Es gibt sechs Themes: Light, Paper, Dark, Midnight, Glass und High contrast.
+Das klassische Design ist veraltet und wird in einer künftigen Version entfernt;
+bis dahin kannst du unter **Settings → Appearance → Design** (Einstellungen →
+Darstellung → Design) zu ihm wechseln.
 
 <table>
   <tr>

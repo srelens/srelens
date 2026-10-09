@@ -8,10 +8,8 @@ import { PORTED_SCREENS, loadDesign, switchDesign, type Design } from "../design
  * Sits beside the theme controls rather than in a section of its own, because
  * from the user's side it is the same kind of decision — how the app looks.
  *
- * The copy is deliberately blunt about the new design being unfinished.
- * Shipping a half-built UI behind a toggle is only defensible if the toggle
- * says so; someone who opts in and finds empty screens should have been told,
- * not surprised.
+ * The new design is the default and classic is deprecated, so the copy says
+ * so plainly: someone staying on classic should know it is going away.
  */
 export function AppearanceSettingsSection() {
   // Read once: switching reloads the window, so this cannot go stale while
@@ -39,9 +37,8 @@ export function AppearanceSettingsSection() {
     <div className="fl-settings-field">
       <h3>Design</h3>
       <p className="fl-settings-hint">
-        srelens is being rebuilt in a new design. It is <strong>in progress</strong>: most
-        screens are not there yet, and the ones that are may still change. Switching reloads
-        the window, and you can switch back here at any time.
+        The new design is the default. The classic design is deprecated and will be removed in
+        a future version. Switching reloads the window.
       </p>
       <p className="fl-settings-hint">In the new design so far:</p>
       <ul className="fl-settings-hint">
@@ -61,7 +58,7 @@ export function AppearanceSettingsSection() {
           aria-pressed={current === "classic"}
           disabled={busy}
         >
-          Classic design
+          Classic (deprecated)
         </Button>
         <Button
           type="button"

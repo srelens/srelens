@@ -673,6 +673,14 @@ describe("AppearancePane", () => {
       expect(onSwitchToClassic).toHaveBeenCalledTimes(1);
     });
 
+    it("labels classic as deprecated, and says it is going away", () => {
+      paint();
+      expect(screen.getByRole("button", { name: "Switch to Classic (deprecated)" })).toBeDefined();
+      expect(
+        screen.getByText(/classic design is deprecated and will be removed in a future version/i),
+      ).toBeDefined();
+    });
+
     it("names the screens that have been ported", () => {
       paint();
       expect(screen.getAllByTestId("ported-screen").map((li) => li.textContent)).toEqual(

@@ -91,7 +91,7 @@ Kubernetes のトラブルシューティングでは、ターミナル、ダッ
 
 ## デスクトップアプリ
 
-デスクトップアプリは、ネイティブウィンドウで動く本格的な Kubernetes ワークスペースです。以下のスクリーンショットは**新デザイン**のもので、画面ごとに順次展開しています。**Settings → Appearance → Design → New design**（設定 → 外観 → デザイン → 新デザイン）で有効にでき、同じ手順でいつでも元に戻せます。テーマは Light、Paper、Dark、Midnight、Glass、High contrast の 6 種類です。
+デスクトップアプリは、ネイティブウィンドウで動く本格的な Kubernetes ワークスペースです。以下のスクリーンショットは、現在の既定である**新デザイン**のものです。テーマは Light、Paper、Dark、Midnight、Glass、High contrast の 6 種類です。クラシックデザインは非推奨となり、今後のバージョンで削除されます。それまでは **Settings → Appearance → Design**（設定 → 外観 → デザイン）でクラシックデザインに切り替えられます。
 
 <table>
   <tr>

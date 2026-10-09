@@ -106,10 +106,10 @@ Kubernetes 트러블슈팅을 하다 보면 보통 터미널, 대시보드, YAML
 ## 데스크톱 앱
 
 데스크톱 앱은 네이티브 창에서 동작하는 완전한 Kubernetes 워크스페이스입니다. 아래
-스크린샷은 화면 단위로 순차 적용 중인 **새 디자인**입니다.
-**Settings → Appearance → Design → New design**(설정 → 모양 → 디자인 → 새 디자인)에서
-켤 수 있으며, 언제든 같은 경로로 되돌릴 수 있습니다. 테마는 Light, Paper, Dark, Midnight,
-Glass, High contrast 여섯 가지입니다.
+스크린샷은 이제 기본값이 된 **새 디자인**입니다. 테마는 Light, Paper, Dark, Midnight,
+Glass, High contrast 여섯 가지입니다. 클래식 디자인은 더 이상 권장되지 않으며 향후 버전에서
+제거됩니다. 그때까지는 **Settings → Appearance → Design**(설정 → 모양 → 디자인)에서 클래식
+디자인으로 전환할 수 있습니다.
 
 <table>
   <tr>

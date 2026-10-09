@@ -26,6 +26,7 @@ import { Toaster } from "./components/ui/sonner";
 import { Dock, type DockSession, type DockKind } from "./components/Dock";
 import { StatusBar } from "./components/StatusBar";
 import { LandingPage } from "./components/LandingPage";
+import { ClassicDeprecationBanner } from "./components/ClassicDeprecationBanner";
 import { getInitialTheme, applyTheme, type Theme, type ThemeMode, type ThemeName } from "./ui";
 import { listCrds, type CrdRef } from "@srelens/core";
 import { targetNamespace, type ResourceTarget } from "@srelens/core";
@@ -1153,6 +1154,7 @@ export function App() {
         />
       )}
       <div className="fl-main">
+        <ClassicDeprecationBanner />
         {tabs.length > 0 ? (
           <>
             <ResourceTabs
