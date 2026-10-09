@@ -137,7 +137,10 @@ export function containersWord(containers: readonly PodContainer[]): string | nu
   let worstSeverity = SEVERITY.ready;
   for (const container of containers) {
     const severity = SEVERITY[containerVerdict(container).kind];
-    if (severity > worstSeverity) {
+    // Among equals, the one that says why: `OOMKilled` tells the reader more
+    // than `Exited 1` does, whichever container happens to come first.
+    const saysMore = severity === worstSeverity && worst !== undefined && !worst.reason && !!container.reason;
+    if (severity > worstSeverity || saysMore) {
       worst = container;
       worstSeverity = severity;
     }

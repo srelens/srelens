@@ -180,6 +180,18 @@ describe("containersWord", () => {
     expect(containersWord([c({ state: "unknown", ready: false })])).toBe("Not reported");
   });
 
+  it("prefers, among equally bad containers, the one that gives a reason", () => {
+    const bare = c({ name: "a", state: "terminated", exitCode: 1, reason: "", ready: false });
+    const told = c({ name: "b", state: "terminated", exitCode: 137, reason: "OOMKilled", ready: false });
+    expect(containersWord([bare, told])).toBe("OOMKilled");
+    expect(containersWord([told, bare])).toBe("OOMKilled");
+    // With a reason on both, the first stands.
+    const other = c({ name: "c", state: "terminated", exitCode: 2, reason: "Error", ready: false });
+    expect(containersWord([told, other])).toBe("OOMKilled");
+    // And a reason does not lift a lesser container over a worse one.
+    expect(containersWord([c({ ready: false, reason: "" }), bare])).toBe("Exited 1");
+  });
+
   it("speaks for a failing init container too", () => {
     expect(containersWord([c({ state: "waiting", reason: "PodInitializing", ready: false }), c({ kind: "init", state: "waiting", reason: "ImagePullBackOff", ready: false })])).toBe("ImagePullBackOff");
   });
