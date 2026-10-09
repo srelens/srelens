@@ -1,6 +1,14 @@
 import { useEffect, useRef, useState } from "react";
-import { checkDeepLink, invokeCommand, isTauri, subscribe, targetNamespace } from "@srelens/core";
-import { useContexts } from "../lib/clusters";
+import {
+  checkDeepLink,
+  deepLinkHeldNotice,
+  DEEP_LINK_REFUSED,
+  invokeCommand,
+  isTauri,
+  subscribe,
+  targetNamespace,
+} from "@srelens/core";
+import { useContexts, useContextsError, useContextsStatus } from "../lib/clusters";
 import { detailRoute } from "../lib/detailRoute";
 import { openCluster, openOnCluster } from "../lib/openCluster";
 import { useWorkspaceSealed } from "./LockGate";
@@ -24,10 +32,16 @@ import { useWorkspaceSealed } from "./LockGate";
  * outside it.
  *
  * Each link is judged by core's `checkDeepLink`, the same rules and sentences
- * as classic. A refusal goes to `onRefused`, because this design has no toast
+ * as classic. A refusal goes to `onNotice`, because this design has no toast
  * host. A link that passes opens on the cluster it NAMES, which becomes the one
  * in focus — see `openOnCluster` for why opening the route alone would show
  * the rail's cluster instead.
+ *
+ * Boot finishes on a FAILED listing as well (#855), and a failed listing has
+ * not said a context is missing. A link naming a context it did not return
+ * stays queued instead of being refused, one notice says what the listing
+ * failed with, and the next listing — Connections' Refresh, Home's Retry, any
+ * writer of the contexts store — judges it again.
  *
  * Not deduped the way classic dedupes: `openTab` already dedupes by route, and
  * classic's key (cluster and kind) would drop the first of two pod links in one
@@ -36,21 +50,26 @@ import { useWorkspaceSealed } from "./LockGate";
 export function useDeepLinks({
   windowLabel,
   ready,
-  onRefused,
+  onNotice,
 }: {
   /** Only `main` drains: every window hears the nudge, and one drain takes the queue. */
   windowLabel: string;
   /** True once boot has listed the contexts and restored the workspace. */
   ready: boolean;
-  onRefused: (reason: string) => void;
+  /** A refused link, or links held behind a failed listing. */
+  onNotice: (notice: { title: string; detail: string }) => void;
 }): void {
   const [pending, setPending] = useState<string[]>([]);
   const contexts = useContexts();
+  const status = useContextsStatus();
+  const listingError = useContextsError();
   const sealed = useWorkspaceSealed();
-  const refuse = useRef(onRefused);
+  const notice = useRef(onNotice);
   useEffect(() => {
-    refuse.current = onRefused;
+    notice.current = onNotice;
   });
+  // Said once per failed listing, not once per link or per drain.
+  const heldNoticeShown = useRef(false);
 
   useEffect(() => {
     if (!isTauri() || windowLabel !== "main") return;
@@ -80,15 +99,17 @@ export function useDeepLinks({
   }, [windowLabel]);
 
   useEffect(() => {
+    if (status !== "failed") heldNoticeShown.current = false;
     if (!ready || sealed || pending.length === 0) return;
     // The whole queue, in order, so the last link is the one left in front.
     const queued = pending;
-    setPending([]);
     const names = contexts.map((c) => c.name);
+    const held: string[] = [];
     for (const url of queued) {
-      const check = checkDeepLink(url, names);
+      const check = checkDeepLink(url, names, { listingFailed: status === "failed" });
       if (!check.ok) {
-        refuse.current(check.reason);
+        if (check.held) held.push(url);
+        else notice.current({ title: DEEP_LINK_REFUSED, detail: check.reason });
         continue;
       }
       const { target } = check;
@@ -102,5 +123,15 @@ export function useDeepLinks({
         openOnCluster(context, detailRoute(target.kind, namespace, target.name));
       }
     }
-  }, [ready, sealed, pending, contexts]);
+    if (held.length > 0 && !heldNoticeShown.current) {
+      heldNoticeShown.current = true;
+      notice.current(deepLinkHeldNotice(listingError));
+    }
+    // Only when something left the queue: re-queuing the held links unchanged
+    // would wake this effect again for nothing. What is taken off the front is
+    // exactly `queued`, so links a drain appended meanwhile are kept.
+    if (held.length < queued.length) {
+      setPending((current) => [...held, ...current.slice(queued.length)]);
+    }
+  }, [ready, sealed, pending, contexts, status, listingError]);
 }
