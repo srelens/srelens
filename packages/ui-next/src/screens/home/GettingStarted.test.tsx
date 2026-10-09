@@ -11,10 +11,10 @@ import { CHECKLIST_DISMISSED_KEY, GettingStarted } from "./GettingStarted";
 
 const core = vi.hoisted(() => ({ isTauri: vi.fn(() => true), listAgents: vi.fn() }));
 vi.mock("@srelens/core", async (original) => ({ ...(await original<typeof import("@srelens/core")>()), ...core }));
-const inventory = vi.hoisted(() => ({ snapshot: { status: "loading" } as Record<string, unknown> }));
+const inventory = vi.hoisted(() => ({ snapshot: { status: "loading" } as Record<string, unknown>, reload: vi.fn() }));
 vi.mock("../../extensions/inventoryStore", async (original) => ({
   ...(await original<typeof import("../../extensions/inventoryStore")>()),
-  useExtensions: () => ({ ...inventory.snapshot, reload: () => {} }),
+  useExtensions: () => ({ ...inventory.snapshot, reload: inventory.reload }),
 }));
 
 const PROD: ClusterContext = {
@@ -108,6 +108,36 @@ describe("GettingStarted", () => {
     render(<GettingStarted />);
     await screen.findByText("Install an app");
     expect(within(item("Install an app")).getByText("Could not check")).toBeTruthy();
+  });
+
+  it("names why the cluster listing failed, and retries it", async () => {
+    setContexts([PROD], "kubeconfig /home/dana/.kube/extra is unreadable");
+    const retryContexts = vi.fn();
+    render(<GettingStarted retryContexts={retryContexts} />);
+    await screen.findByText("Connect a cluster");
+    expect(within(item("Connect a cluster")).getByText(/extra is unreadable/)).toBeTruthy();
+    await userEvent.click(within(item("Connect a cluster")).getByRole("button", { name: "Retry checking Connect a cluster" }));
+    expect(retryContexts).toHaveBeenCalledTimes(1);
+  });
+
+  it("names why the agent check failed, and checks again", async () => {
+    core.listAgents.mockRejectedValueOnce(new Error("agent_list: no such command")).mockResolvedValue([CLAUDE]);
+    render(<GettingStarted />);
+    await screen.findByText("Set up the assistant");
+    expect(within(item("Set up the assistant")).getByText(/no such command/)).toBeTruthy();
+    await userEvent.click(within(item("Set up the assistant")).getByRole("button", { name: "Retry checking Set up the assistant" }));
+    expect(await within(item("Set up the assistant")).findByText("Done")).toBeTruthy();
+    expect(core.listAgents).toHaveBeenCalledTimes(2);
+  });
+
+  it("names why the apps could not be read, and reads them again", async () => {
+    inventory.snapshot = { status: "error", error: "connection refused" };
+    inventory.reload.mockReset();
+    render(<GettingStarted />);
+    await screen.findByText("Install an app");
+    expect(within(item("Install an app")).getByText(/connection refused/i)).toBeTruthy();
+    await userEvent.click(within(item("Install an app")).getByRole("button", { name: "Retry checking Install an app" }));
+    expect(inventory.reload).toHaveBeenCalledTimes(1);
   });
 
   it("leaves out the vault and the assistant on the web host", async () => {

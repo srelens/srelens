@@ -34,7 +34,12 @@ function DesktopWhatsNew() {
       {found.status === "loading" ? (
         <p className="home-note">Checking for updates…</p>
       ) : found.status === "error" ? (
-        <FailureAlert title="Could not check for updates" error={found.error} domain="http" className="home-section-alert" />
+        <>
+          <FailureAlert title="Could not check for updates" error={found.error} domain="http" className="home-section-alert" />
+          <div className="home-section-foot">
+            <Button variant="secondary" size="sm" aria-label="Retry the update check" onClick={found.reload}>Retry</Button>
+          </div>
+        </>
       ) : update ? (
         <div className="home-side-group">
           <p className="text-[0.8125rem] font-medium">srelens {update.version} is available</p>

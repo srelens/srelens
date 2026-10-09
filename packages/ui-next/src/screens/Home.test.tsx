@@ -176,6 +176,15 @@ describe("Home", () => {
   );
 });
 
+it("retries a failed discovery from the getting-started list too", async () => {
+  setContexts([PROD], "source unavailable");
+  listContexts.mockResolvedValue({ contexts: [PROD, STAGE] });
+  render(<Home />);
+  await userEvent.click(await screen.findByRole("button", { name: "Retry checking Connect a cluster" }));
+  expect(listContexts).toHaveBeenCalledTimes(1);
+  expect(await screen.findByRole("button", { name: "Open cluster staging — Not checked" })).toBeTruthy();
+});
+
 it("retries a failed discovery and retains readable clusters if retry fails", async () => {
   setContexts([PROD], "source unavailable");
   listContexts.mockRejectedValueOnce(Error("still unavailable")).mockResolvedValueOnce({ contexts: [PROD, STAGE] });

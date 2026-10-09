@@ -43,6 +43,14 @@ describe("WhatsNew", () => {
     expect(screen.queryByText(/is up to date/)).toBeNull();
   });
 
+  it("checks again when asked after a failed check", async () => {
+    core.checkForUpdate.mockRejectedValueOnce(new Error("error sending request")).mockResolvedValue(null);
+    render(<WhatsNew />);
+    await userEvent.click(await screen.findByRole("button", { name: "Retry the update check" }));
+    expect(await screen.findByText("srelens 0.16.0 is up to date")).toBeTruthy();
+    expect(core.checkForUpdate).toHaveBeenCalledTimes(2);
+  });
+
   it("is not drawn on the web host, where the server owns updates", () => {
     core.isTauri.mockReturnValue(false);
     const { container } = render(<WhatsNew />);

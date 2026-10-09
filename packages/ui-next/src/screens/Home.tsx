@@ -117,7 +117,7 @@ export function Home() {
             <Apps />
             <WhatsNew />
             <AskSrelens targets={targets} scans={scans} />
-            <GettingStarted />
+            <GettingStarted retryContexts={() => void retry()} />
             <h2 className="home-section-heading">Quick links</h2>
             <HomeAction title="Manage connections" icon={Icons.cluster} route="/connections" />
             <HomeAction title="Settings" icon={Icons.settings} route="/settings" />

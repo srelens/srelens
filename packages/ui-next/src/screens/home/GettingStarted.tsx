@@ -3,7 +3,8 @@ import { isTauri, listAgents, settingsStorage } from "@srelens/core";
 import { Button } from "@srelens/ui-kit";
 import { useExtensions } from "../../extensions/inventoryStore";
 import { useAgentInventoryVersion } from "../../lib/agentInventory";
-import { useContexts, useContextsStatus } from "../../lib/clusters";
+import { useContexts, useContextsError, useContextsStatus } from "../../lib/clusters";
+import { FailureLine } from "../../lib/errorCopy";
 import { openSettings } from "../../lib/settingsRequest";
 import { openTab } from "../../lib/tabsStore";
 import { useCanLockWorkspace } from "../../shell/LockGate";
@@ -18,6 +19,10 @@ interface Step {
   name: string;
   state: Known;
   action: { label: string; run: () => void };
+  /** Why the check refused, for an `unknown` step. */
+  cause?: unknown;
+  /** Asks again, for an `unknown` step. */
+  retry?: () => void;
 }
 
 // Guarded like every settings accessor here: a refusing storage costs the
@@ -47,29 +52,35 @@ function saveDismissed(): void {
  * that refused, because a step nobody could check is not done. Gone once every
  * step is done, or once dismissed — and the dismissal is kept.
  *
+ * A step that could not be checked says why and offers to check again;
+ * `retryContexts` is Home's own retry of the cluster listing.
+ *
  * The vault and the assistant are desktop things; the web host lists neither.
  */
-export function GettingStarted() {
+export function GettingStarted({ retryContexts }: { retryContexts?: () => void } = {}) {
   const desktop = isTauri();
   const contexts = useContexts();
   const contextsStatus = useContextsStatus();
+  const contextsError = useContextsError();
   const vaultOpen = useCanLockWorkspace();
   const inventory = useExtensions();
   const agentsVersion = useAgentInventoryVersion();
-  const [assistant, setAssistant] = useState<Known>("checking");
+  const [assistant, setAssistant] = useState<{ state: Known; error?: unknown }>({ state: "checking" });
+  // Bumped by Retry. The step keeps saying what it last knew until the new answer lands.
+  const [agentsAttempt, setAgentsAttempt] = useState(0);
   const [dismissed, setDismissed] = useState(readDismissed);
 
   useEffect(() => {
     if (!desktop || dismissed) return;
     let alive = true;
     listAgents().then(
-      (agents) => { if (alive) setAssistant(agents.some((a) => a.available && !a.gated) ? "done" : "todo"); },
-      () => { if (alive) setAssistant("unknown"); },
+      (agents) => { if (alive) setAssistant({ state: agents.some((a) => a.available && !a.gated) ? "done" : "todo" }); },
+      (error: unknown) => { if (alive) setAssistant({ state: "unknown", error }); },
     );
     return () => {
       alive = false;
     };
-  }, [desktop, dismissed, agentsVersion]);
+  }, [desktop, dismissed, agentsVersion, agentsAttempt]);
 
   if (dismissed) return null;
   const steps: Step[] = [
@@ -78,17 +89,27 @@ export function GettingStarted() {
       // A listing that failed — even one that found some contexts — is not a fact about what is set up.
       state: contextsStatus === "loading" ? "checking" : contextsStatus === "failed" ? "unknown" : contexts.length > 0 ? "done" : "todo",
       action: { label: "Connect", run: () => openTab("/connect") },
+      cause: contextsError,
+      retry: retryContexts,
     },
     ...(desktop
       ? [
           { name: "Protect the workspace", state: (vaultOpen ? "done" : "todo") as Known, action: { label: "Security", run: () => openSettings("security") } },
-          { name: "Set up the assistant", state: assistant, action: { label: "Set up", run: () => openSettings("agent") } },
+          {
+            name: "Set up the assistant",
+            state: assistant.state,
+            action: { label: "Set up", run: () => openSettings("agent") },
+            cause: assistant.error,
+            retry: () => setAgentsAttempt((n) => n + 1),
+          },
         ]
       : []),
     {
       name: "Install an app",
       state: inventory.status === "loading" ? "checking" : inventory.status === "error" ? "unknown" : (inventory.data?.plugins.length ?? 0) > 0 ? "done" : "todo",
       action: { label: "Browse apps", run: () => openSettings("extensions", "catalog") },
+      cause: inventory.error,
+      retry: inventory.reload,
     },
   ];
   if (steps.some((s) => s.state === "checking") || steps.every((s) => s.state === "done")) return null;
@@ -106,14 +127,25 @@ export function GettingStarted() {
         {steps.map((step) => (
           <li key={step.name} className="home-live-row">
             <span aria-hidden className={step.state === "done" ? "home-check home-check-done" : "home-check"}>{step.state === "done" ? "✓" : ""}</span>
-            <span className="min-w-0 flex-1 text-[0.8125rem]">{step.name}</span>
+            <span className="min-w-0 flex-1 text-[0.8125rem]">
+              {step.name}
+              {step.state === "unknown" && step.cause !== undefined && step.cause !== "" && (
+                <FailureLine error={step.cause} className="text-xs text-muted" />
+              )}
+            </span>
             {step.state === "done" ? (
               <span className="text-xs text-muted">Done</span>
-            ) : (
+            ) : step.state === "unknown" ? (
               <>
-                {step.state === "unknown" && <span className="text-xs text-muted">Could not check</span>}
-                <Button variant="secondary" size="sm" onClick={step.action.run}>{step.action.label}</Button>
+                <span className="text-xs text-muted">Could not check</span>
+                {step.retry ? (
+                  <Button variant="secondary" size="sm" aria-label={`Retry checking ${step.name}`} onClick={step.retry}>Retry</Button>
+                ) : (
+                  <Button variant="secondary" size="sm" onClick={step.action.run}>{step.action.label}</Button>
+                )}
               </>
+            ) : (
+              <Button variant="secondary" size="sm" onClick={step.action.run}>{step.action.label}</Button>
             )}
           </li>
         ))}
