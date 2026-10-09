@@ -513,6 +513,56 @@ describe("pod columns", () => {
     });
   });
 
+  /**
+   * #878: the Ready column printed `1/2` — how many containers are ready, and
+   * not which one is not, or why. The Containers column draws one square per
+   * container instead. How each square looks is `containerBlocks.test.tsx`'s
+   * to pin; this is the column around them.
+   */
+  describe("the Containers column", () => {
+    afterEach(cleanup);
+    const containers = podColumns.find((c) => c.key === "containers")!;
+    const one = (over: object = {}) => ({
+      name: "api", kind: "app" as const, state: "running" as const, reason: "", exitCode: null,
+      ready: true, restarts: 0, image: "acme/api:1", ...over,
+    });
+    const stuck = one({ name: "worker", state: "waiting", reason: "CrashLoopBackOff", ready: false, restarts: 14 });
+
+    it("stands where Ready stood, and there is no Ready column any more", () => {
+      expect(podColumns.some((c) => c.key === "ready")).toBe(false);
+      expect(containers.header).toBe("Containers");
+    });
+
+    it("draws a square for each container", () => {
+      render(containers.render!(pod({ containers: [one(), stuck] })) as ReactElement);
+      expect(screen.getAllByRole("img")).toHaveLength(2);
+    });
+
+    it("prints the ready count it always had for a row with no per-container state", () => {
+      // A summary from before the backend sent it: the figure, not a blank.
+      const view = render(containers.render!(pod({ ready: "1/2" })) as ReactElement).container;
+      expect(view.textContent).toBe("1/2");
+      expect(screen.queryByRole("img")).toBeNull();
+    });
+
+    it("sorts the pods with a container in trouble ahead of the healthy ones", () => {
+      const healthy = pod({ containers: [one(), one({ name: "b" })] });
+      const troubled = pod({ containers: [one(), stuck] });
+      expect(containers.getSortValue!(troubled)).toBeGreaterThan(containers.getSortValue!(healthy) as number);
+      expect(containers.getSortValue!(pod())).toBeLessThan(containers.getSortValue!(healthy) as number);
+    });
+
+    it("is searched by what the squares stand for, since a square holds no text", () => {
+      const rows = [pod({ name: "a", containers: [one(), stuck] }), pod({ name: "b", containers: [one()] })];
+      const found = (query: string) => filterTableData(rows, podColumns, query, "containers").map((r) => r.name);
+      expect(found("CrashLoopBackOff")).toEqual(["a"]);
+      expect(found("worker")).toEqual(["a"]);
+      expect(found("acme/api")).toEqual(["a", "b"]);
+      // And the old figure still finds a row that has only the figure.
+      expect(filterTableData([pod({ ready: "0/3" })], podColumns, "0/3", "containers")).toHaveLength(1);
+    });
+  });
+
   it("names the pod column Name, not the kind — the mock titles every list Name", () => {
     expect(podColumns[0].header).toBe("Name");
   });
@@ -640,7 +690,7 @@ describe("pod columns", () => {
 
   it("keeps Image last, matching the design mock's row order", () => {
     expect(podColumns.map((c) => c.key)).toEqual([
-      "name", "namespace", "node", "ready", "phase", "restarts", "cpu", "memory", "age", "image",
+      "name", "namespace", "node", "containers", "phase", "restarts", "cpu", "memory", "age", "image",
     ]);
   });
 
@@ -954,7 +1004,7 @@ describe("column alignment — a count or a measurement is end-aligned, everythi
    *  is the only thing this test needs to see. */
   const CASES: [{ key: string; align?: "start" | "end" }[], string[]][] = [
     // Not `cpu`/`memory`, for the reason given at `nodeColumns` below (#864).
-    [podColumns, ["ready", "restarts", "age"]],
+    [podColumns, ["restarts", "age"]],
     [deploymentColumns, ["ready", "upToDate", "available", "age"]],
     [statefulSetColumns, ["ready", "updated", "age"]],
     [daemonSetColumns, ["desired", "current", "ready", "upToDate", "available", "age"]],

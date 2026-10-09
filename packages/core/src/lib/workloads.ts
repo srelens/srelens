@@ -53,6 +53,29 @@ export interface PodSummary {
    */
   cpuLimAll?: boolean;
   memLimAll?: boolean;
+  /**
+   * Each container's own state: app containers in spec order, then init
+   * containers. `ready` says how many are ready and not which is not, or why.
+   * Read each through `containerVerdict`. Optional only for fixtures. (#878)
+   */
+  containers?: PodContainer[];
+}
+
+/** One container of a pod, as far as a list row needs it. */
+export interface PodContainer {
+  name: string;
+  /** `sidecar` is an init container that restarts always, and so runs for the
+   *  pod's whole life beside the app containers. */
+  kind: "app" | "init" | "sidecar";
+  /** `unknown` when the kubelet has reported nothing for it yet. */
+  state: "running" | "waiting" | "terminated" | "unknown";
+  /** The waiting or terminated reason, or `""`. */
+  reason: string;
+  /** The exit code of a terminated container. */
+  exitCode?: number | null;
+  ready: boolean;
+  restarts: number;
+  image: string;
 }
 
 export interface NamespacesOutcome {

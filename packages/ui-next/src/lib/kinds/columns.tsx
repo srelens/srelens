@@ -4,6 +4,8 @@ import {
   formatStorageSize,
   jobStatus,
   nodeStatus,
+  containersSortValue,
+  describeContainer,
   nodeUsage,
   podUsage,
   type PodResourceUsage,
@@ -43,6 +45,7 @@ import {
   taintTooltip,
 } from "@srelens/core";
 import { AgeCell } from "../ageCell";
+import { ContainerBlocks } from "./containerBlocks";
 import type { UsageSample } from "../usageHistory";
 import { Badge, loadTone, Meter, Sparkline, StatusPill, Tooltip, type Column, type Tone } from "@srelens/ui-kit";
 import { NodeLink } from "../nodeLink";
@@ -291,7 +294,19 @@ export const podColumns: Column<PodRow>[] = [
     // none, and a dash that opened nothing would be a link to nowhere.
     render: (p) => (p.node ? <NodeLink name={p.node} /> : "—"),
   },
-  { key: "ready", header: "Ready", align: "end" },
+  // One square per container, in place of the `1/2` the Ready column printed
+  // (#878): which container, in what state. Sorted worst first, so the pods
+  // with a container in trouble gather at one end; searched by the names,
+  // states and reasons the squares stand for, since a square holds no text.
+  {
+    key: "containers",
+    header: "Containers",
+    sortable: true,
+    render: (p) => <ContainerBlocks containers={p.containers} fallback={p.ready} />,
+    getSortValue: (p) => containersSortValue(p.containers ?? []),
+    getValue: (p) =>
+      p.containers && p.containers.length > 0 ? p.containers.map(describeContainer).join("; ") : p.ready,
+  },
   {
     key: "phase", header: "Status", sortable: true,
     render: (p) => {

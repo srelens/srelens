@@ -115,6 +115,37 @@ pub struct PodSummary {
     /// As `cpuLimAll`, for memory — where the ceiling is an OOM kill.
     #[serde(rename = "memLimAll", default)]
     pub mem_lim_all: bool,
+    /// Each container's own state, in the order a reader meets them: app
+    /// containers as the spec lists them, then init containers.
+    ///
+    /// `ready` above says how many are ready and not which one is not, or why.
+    /// A list that draws one mark per container needs each one's state
+    /// (srelens/srelens#878).
+    #[serde(default)]
+    pub containers: Vec<PodContainer>,
+}
+
+/// One container of a pod, as far as a list row needs it.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+pub struct PodContainer {
+    pub name: String,
+    /// `app`, `init`, or `sidecar` — an init container that restarts always,
+    /// and so runs for the pod's whole life beside the app containers.
+    pub kind: String,
+    /// `running`, `waiting`, `terminated`, or `unknown` when the kubelet has
+    /// reported nothing for it yet. What each *means* is `containerVerdict`'s
+    /// to say, in `@srelens/core`, not this struct's.
+    pub state: String,
+    /// The waiting or terminated reason (`CrashLoopBackOff`, `OOMKilled`,
+    /// `Completed`), or `""`.
+    pub reason: String,
+    /// The exit code of a terminated container.
+    #[serde(rename = "exitCode")]
+    pub exit_code: Option<i32>,
+    pub ready: bool,
+    pub restarts: i32,
+    /// The image the spec asks for.
+    pub image: String,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -443,6 +474,8 @@ pub fn summarise_pod(pod: Pod) -> PodSummary {
         }
     }
 
+    let containers = pod_containers(&pod);
+
     PodSummary {
         name,
         namespace,
@@ -463,7 +496,57 @@ pub fn summarise_pod(pod: Pod) -> PodSummary {
         mem_lim_mib: lim_mem,
         cpu_lim_all,
         mem_lim_all,
+        containers,
     }
+}
+
+/// Every container the spec names, each with what the kubelet last said of
+/// it. From the spec rather than the statuses, so a container the kubelet has
+/// not reported on yet is still listed — as `unknown` — instead of missing.
+fn pod_containers(pod: &Pod) -> Vec<PodContainer> {
+    let Some(spec) = pod.spec.as_ref() else {
+        return Vec::new();
+    };
+    let status = pod.status.as_ref();
+    let app_statuses = status
+        .and_then(|s| s.container_statuses.as_deref())
+        .unwrap_or_default();
+    let init_statuses = status
+        .and_then(|s| s.init_container_statuses.as_deref())
+        .unwrap_or_default();
+    let one = |c: &k8s_openapi::api::core::v1::Container,
+               kind: &str,
+               statuses: &[k8s_openapi::api::core::v1::ContainerStatus]| {
+        let reported = statuses.iter().find(|s| s.name == c.name);
+        let state = reported.and_then(|s| s.state.as_ref());
+        // Running first, then terminated, then waiting: the kubelet sets one
+        // of the three, and a state with none of them set says nothing.
+        let running = state.is_some_and(|s| s.running.is_some());
+        let terminated = state.and_then(|s| s.terminated.as_ref());
+        let waiting = state.and_then(|s| s.waiting.as_ref());
+        let (word, reason, exit_code) = match (running, terminated, waiting) {
+            (true, _, _) => ("running", String::new(), None),
+            (false, Some(t), _) => ("terminated", t.reason.clone().unwrap_or_default(), Some(t.exit_code)),
+            (false, None, Some(w)) => ("waiting", w.reason.clone().unwrap_or_default(), None),
+            (false, None, None) => ("unknown", String::new(), None),
+        };
+        PodContainer {
+            name: c.name.clone(),
+            kind: kind.to_string(),
+            state: word.to_string(),
+            reason,
+            exit_code,
+            ready: reported.is_some_and(|s| s.ready),
+            restarts: reported.map(|s| s.restart_count).unwrap_or(0),
+            image: c.image.clone().unwrap_or_default(),
+        }
+    };
+    let apps = spec.containers.iter().map(|c| one(c, "app", app_statuses));
+    let inits = spec.init_containers.iter().flatten().map(|c| {
+        let kind = if c.restart_policy.as_deref() == Some("Always") { "sidecar" } else { "init" };
+        one(c, kind, init_statuses)
+    });
+    apps.chain(inits).collect()
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -864,6 +947,94 @@ mod tests {
         assert!(!empty.cpu_lim_all && !empty.mem_lim_all);
         let no_spec = summarise_pod(Pod::default());
         assert!(!no_spec.cpu_lim_all && !no_spec.mem_lim_all);
+    }
+
+    /// A pod from JSON, as the API server would send it.
+    fn pod_json(value: serde_json::Value) -> Pod {
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn lists_each_container_with_its_own_state() {
+        let pod = pod_json(serde_json::json!({
+            "metadata": { "name": "p" },
+            "spec": {
+                "containers": [
+                    { "name": "api", "image": "acme/api:1" },
+                    { "name": "worker", "image": "acme/worker:1" },
+                    { "name": "report", "image": "acme/report:1" },
+                    { "name": "late", "image": "acme/late:1" }
+                ]
+            },
+            "status": {
+                "containerStatuses": [
+                    // Reported out of spec order, as the kubelet may.
+                    { "name": "worker", "image": "x", "imageID": "", "ready": false, "restartCount": 14,
+                      "state": { "waiting": { "reason": "CrashLoopBackOff" } } },
+                    { "name": "api", "image": "x", "imageID": "", "ready": true, "restartCount": 0,
+                      "state": { "running": {} } },
+                    { "name": "report", "image": "x", "imageID": "", "ready": false, "restartCount": 1,
+                      "state": { "terminated": { "exitCode": 137, "reason": "OOMKilled" } } }
+                ]
+            }
+        }));
+        let containers = summarise_pod(pod).containers;
+        let row = |c: &PodContainer| {
+            (c.name.clone(), c.state.clone(), c.reason.clone(), c.exit_code, c.ready, c.restarts)
+        };
+        assert_eq!(
+            containers.iter().map(row).collect::<Vec<_>>(),
+            vec![
+                ("api".into(), "running".into(), "".into(), None, true, 0),
+                ("worker".into(), "waiting".into(), "CrashLoopBackOff".into(), None, false, 14),
+                ("report".into(), "terminated".into(), "OOMKilled".into(), Some(137), false, 1),
+                // Named in the spec, not yet reported on: listed, not missing.
+                ("late".into(), "unknown".into(), "".into(), None, false, 0),
+            ]
+        );
+        assert!(containers.iter().all(|c| c.kind == "app"));
+        assert_eq!(containers[0].image, "acme/api:1");
+    }
+
+    #[test]
+    fn lists_init_containers_after_the_app_ones_and_tells_a_sidecar_from_an_init() {
+        let pod = pod_json(serde_json::json!({
+            "metadata": { "name": "p" },
+            "spec": {
+                "initContainers": [
+                    { "name": "migrate", "image": "acme/migrate:1" },
+                    { "name": "proxy", "image": "acme/proxy:1", "restartPolicy": "Always" }
+                ],
+                "containers": [{ "name": "api", "image": "acme/api:1" }]
+            },
+            "status": {
+                "initContainerStatuses": [
+                    { "name": "migrate", "image": "x", "imageID": "", "ready": true, "restartCount": 0,
+                      "state": { "terminated": { "exitCode": 0, "reason": "Completed" } } },
+                    { "name": "proxy", "image": "x", "imageID": "", "ready": true, "restartCount": 0,
+                      "state": { "running": {} } }
+                ],
+                "containerStatuses": [
+                    { "name": "api", "image": "x", "imageID": "", "ready": true, "restartCount": 0,
+                      "state": { "running": {} } }
+                ]
+            }
+        }));
+        let containers = summarise_pod(pod).containers;
+        assert_eq!(
+            containers.iter().map(|c| (c.name.as_str(), c.kind.as_str(), c.state.as_str())).collect::<Vec<_>>(),
+            vec![("api", "app", "running"), ("migrate", "init", "terminated"), ("proxy", "sidecar", "running")]
+        );
+        assert_eq!(containers[1].exit_code, Some(0));
+    }
+
+    #[test]
+    fn a_pod_with_no_spec_lists_no_containers_and_the_field_is_sent_by_name() {
+        assert!(summarise_pod(Pod::default()).containers.is_empty());
+        let json = serde_json::to_value(summarise_pod(pod_with_limits(&[(None, None)]))).unwrap();
+        assert_eq!(json["containers"][0]["name"], "c0");
+        assert_eq!(json["containers"][0]["state"], "unknown");
+        assert!(json["containers"][0]["exitCode"].is_null());
     }
 
     /// A pod with one app container and one init container, each given
