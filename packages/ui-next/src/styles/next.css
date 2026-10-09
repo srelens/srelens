@@ -101,6 +101,12 @@
 .home-cluster-row { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 56px; padding: 8px 20px; font-size: 13px; }
 .home-cluster-row:hover, .home-action:hover { background: var(--surface-sunk); }
 .home-start { overflow: auto; border-left: 1px solid var(--rule); }
+.home-side-section { border-bottom: 1px solid var(--rule); }
+.home-side-group { padding: 10px 20px; }
+.home-side-group + .home-side-group { padding-top: 0; }
+.home-live-row { display: flex; align-items: center; gap: 6px; min-height: 40px; }
+.home-live-go { flex: 1; min-width: 0; padding: 4px 0; font-size: 13px; text-align: left; }
+.home-live-go:hover { color: var(--accent); }
 .home-action { display: grid; grid-template-columns: 18px minmax(0, 1fr) 12px; align-items: center; gap: 12px; width: 100%; min-height: 52px; padding: 10px 20px; border-bottom: 1px solid var(--rule); font-size: 13px; }
 @container (max-width: 720px) {
   .home-intro { align-items: flex-start; flex-direction: column; padding: 24px 20px; gap: 18px; }
