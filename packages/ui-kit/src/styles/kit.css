@@ -687,6 +687,34 @@
     border-color: rgba(255, 255, 255, 0.14);
   }
 
+  /* A dialog is a card that FLOATS. `.card` paints with `--ground-surface`
+     because a card in the page is one more region of the sheet, and clears
+     with the rest of it when the window is see-through — which is right for a
+     panel in a screen and wrong for a dialog: the screen it was opened over
+     showed straight through it, its labels printed across the rows underneath.
+     A layer that floats has to hide what is under it.
+
+     So a dialog's card keeps a coat of its own. Solid on Dark and Midnight,
+     whose furniture stays solid by design. On Glass it is dark glass like the
+     popovers above, and a good deal less clear than they are: a popover is a
+     few short lines over whatever it was opened on, a dialog is a form to
+     read and fill in, and the reader has to be able to do that over any
+     desktop. */
+  [data-theme="dark"][data-opacity] .card[role="dialog"],
+  [data-theme="dark"][data-opacity] .card[role="alertdialog"],
+  [data-theme="midnight"][data-opacity] .card[role="dialog"],
+  [data-theme="midnight"][data-opacity] .card[role="alertdialog"] {
+    background: var(--surface);
+  }
+  [data-theme="glass"][data-opacity] .card[role="dialog"],
+  [data-theme="glass"][data-opacity] .card[role="alertdialog"] {
+    background: rgba(18, 18, 20, 0.94);
+    -webkit-backdrop-filter: blur(30px);
+    backdrop-filter: blur(30px);
+    border-color: rgba(255, 255, 255, 0.14);
+    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.65);
+  }
+
   .tip { position: relative; display: inline-flex; }
   .tip::after {
     content: attr(data-tip);
