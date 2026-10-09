@@ -36,6 +36,23 @@ export interface PodSummary {
    * Optional only for the sake of fixtures: `k8s.listPods` always sends it.
    */
   status?: string;
+  /**
+   * What the pod's containers ask for and may use, summed: CPU in millicores,
+   * memory in MiB — the units metrics-server reports usage in. `0` when no
+   * container sets one. Optional only for the sake of fixtures.
+   */
+  cpuReqMillicores?: number;
+  cpuLimMillicores?: number;
+  memReqMiB?: number;
+  memLimMiB?: number;
+  /**
+   * Whether EVERY container sets the limit, so the sum above is the pod's
+   * whole ceiling. With one unlimited container the pod has no ceiling, and
+   * the partial sum is a number it can pass with nothing wrong. Read these
+   * through `podUsage`, never the sums alone. (#864)
+   */
+  cpuLimAll?: boolean;
+  memLimAll?: boolean;
 }
 
 export interface NamespacesOutcome {

@@ -102,6 +102,19 @@ pub struct PodSummary {
     /// Memory limit in MiB across all containers
     #[serde(rename = "memLimMiB", default)]
     pub mem_lim_mib: i64,
+    /// Whether EVERY container sets a CPU limit, so `cpuLimMillicores` is the
+    /// pod's whole ceiling and not the sum of the containers that have one.
+    ///
+    /// A pod with one limited container and one unlimited one has no CPU
+    /// ceiling at all, and its partial sum is a number it can exceed without
+    /// anything being wrong. A reader measuring usage against a limit needs to
+    /// know which of the two it was handed (srelens/srelens#864). False for a
+    /// pod with no containers.
+    #[serde(rename = "cpuLimAll", default)]
+    pub cpu_lim_all: bool,
+    /// As `cpuLimAll`, for memory — where the ceiling is an OOM kill.
+    #[serde(rename = "memLimAll", default)]
+    pub mem_lim_all: bool,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -375,6 +388,18 @@ pub fn summarise_pod(pod: Pod) -> PodSummary {
         .unwrap_or_default();
 
     let (mut req_cpu, mut lim_cpu, mut req_mem, mut lim_mem) = (0i64, 0i64, 0i64, 0i64);
+    let limited = |resource: &str| {
+        pod.spec.as_ref().is_some_and(|spec| {
+            !spec.containers.is_empty()
+                && spec.containers.iter().all(|c| {
+                    c.resources
+                        .as_ref()
+                        .and_then(|r| r.limits.as_ref())
+                        .is_some_and(|limits| limits.contains_key(resource))
+                })
+        })
+    };
+    let (cpu_lim_all, mem_lim_all) = (limited("cpu"), limited("memory"));
     if let Some(spec) = pod.spec.as_ref() {
         for c in &spec.containers {
             if let Some(resources) = &c.resources {
@@ -416,6 +441,8 @@ pub fn summarise_pod(pod: Pod) -> PodSummary {
         cpu_lim_millicores: lim_cpu,
         mem_req_mib: req_mem,
         mem_lim_mib: lim_mem,
+        cpu_lim_all,
+        mem_lim_all,
     }
 }
 
@@ -761,6 +788,71 @@ mod tests {
         );
         assert!(pods_on_node_params("").is_err());
         assert!(pods_on_node_params("   ").is_err());
+    }
+
+    /// A pod whose containers set the given `(cpu, memory)` limits, each
+    /// `None` for a container that sets none. Built from JSON, as the API
+    /// server would send it.
+    fn pod_with_limits(containers: &[(Option<&str>, Option<&str>)]) -> Pod {
+        let containers: Vec<serde_json::Value> = containers
+            .iter()
+            .enumerate()
+            .map(|(i, (cpu, memory))| {
+                let mut limits = serde_json::Map::new();
+                if let Some(cpu) = cpu {
+                    limits.insert("cpu".into(), serde_json::json!(cpu));
+                }
+                if let Some(memory) = memory {
+                    limits.insert("memory".into(), serde_json::json!(memory));
+                }
+                serde_json::json!({ "name": format!("c{i}"), "image": "img", "resources": { "limits": limits } })
+            })
+            .collect();
+        serde_json::from_value(serde_json::json!({
+            "metadata": { "name": "p" },
+            "spec": { "containers": containers }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_limit_is_the_pods_ceiling_only_when_every_container_sets_one() {
+        let all = summarise_pod(pod_with_limits(&[
+            (Some("500m"), Some("256Mi")),
+            (Some("250m"), Some("128Mi")),
+        ]));
+        assert_eq!((all.cpu_lim_millicores, all.mem_lim_mib), (750, 384));
+        assert!(all.cpu_lim_all && all.mem_lim_all);
+
+        // One container with no CPU limit: the pod has no CPU ceiling, and
+        // the 500m the other one set is not it. Memory is still whole.
+        let partial = summarise_pod(pod_with_limits(&[
+            (Some("500m"), Some("256Mi")),
+            (None, Some("128Mi")),
+        ]));
+        assert_eq!(partial.cpu_lim_millicores, 500);
+        assert!(!partial.cpu_lim_all);
+        assert!(partial.mem_lim_all);
+    }
+
+    #[test]
+    fn a_pod_with_no_limits_or_no_containers_has_no_ceiling() {
+        let none = summarise_pod(pod_with_limits(&[(None, None)]));
+        assert!(!none.cpu_lim_all && !none.mem_lim_all);
+        // `all` over nothing is true; a pod with nothing in it has no ceiling.
+        let empty = summarise_pod(pod_with_limits(&[]));
+        assert!(!empty.cpu_lim_all && !empty.mem_lim_all);
+        let no_spec = summarise_pod(Pod::default());
+        assert!(!no_spec.cpu_lim_all && !no_spec.mem_lim_all);
+    }
+
+    #[test]
+    fn the_ceiling_flags_are_sent_under_the_names_the_frontend_reads() {
+        let json = serde_json::to_value(summarise_pod(pod_with_limits(&[(Some("1"), Some("1Gi"))]))).unwrap();
+        assert_eq!(json["cpuLimAll"], true);
+        assert_eq!(json["memLimAll"], true);
+        assert_eq!(json["cpuLimMillicores"], 1000);
+        assert_eq!(json["memLimMiB"], 1024);
     }
 
     #[test]

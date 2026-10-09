@@ -1430,6 +1430,8 @@ mod tests {
             cpu_lim_millicores: 0,
             mem_req_mib: 0,
             mem_lim_mib: 0,
+            cpu_lim_all: false,
+            mem_lim_all: false,
         }
     }
 

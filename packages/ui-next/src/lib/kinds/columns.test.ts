@@ -3,7 +3,7 @@ import { createElement, type ReactElement } from "react";
 import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Table, filterTableData } from "@srelens/ui-kit";
-import { cronJobStatus, jobStatus, nodeUsage, scaledStatus } from "@srelens/core";
+import { cronJobStatus, jobStatus, nodeUsage, podUsage, scaledStatus } from "@srelens/core";
 import {
   podColumns,
   deploymentColumns,
@@ -161,10 +161,18 @@ describe("pod columns", () => {
     expect(Number(older)).toBeGreaterThan(Number(newer));
   });
 
+  /** The amount a usage cell prints, whatever else is drawn beside it. */
+  const amount = (column: (typeof podColumns)[number], row: PodRow) => {
+    const view = render(column.render!(row) as ReactElement).container;
+    const text = view.querySelector(".num")?.textContent ?? view.textContent;
+    cleanup();
+    return text;
+  };
+
   it("shows an em dash where metrics-server left no reading, not a bare zero", () => {
     const cpu = podColumns.find((c) => c.key === "cpu")!;
-    expect(cpu.render!(pod())).toBe("—");
-    expect(cpu.render!(pod({ cpu: 12 }))).toBe("12m");
+    expect(amount(cpu, pod())).toBe("—");
+    expect(amount(cpu, pod({ cpu: 12, memory: 1 }))).toBe("12m");
   });
 
   it("sorts a missing reading below every real one", () => {
@@ -174,16 +182,16 @@ describe("pod columns", () => {
 
   it("groups a four-digit CPU reading with a thin space, not a bare run of digits", () => {
     const cpu = podColumns.find((c) => c.key === "cpu")!;
-    expect(cpu.render!(pod({ cpu: 2410 }))).toBe("2 410m");
-    expect(cpu.render!(pod({ cpu: 241 }))).toBe("241m");
+    expect(amount(cpu, pod({ cpu: 2410, memory: 1 }))).toBe("2 410m");
+    expect(amount(cpu, pod({ cpu: 241, memory: 1 }))).toBe("241m");
   });
 
   it("puts a space before Mi, and scales at or above 1024 Mi to one-decimal Gi", () => {
     const memory = podColumns.find((c) => c.key === "memory")!;
-    expect(memory.render!(pod({ memory: 988 }))).toBe("988 Mi");
-    expect(memory.render!(pod({ memory: 412 }))).toBe("412 Mi");
-    expect(memory.render!(pod({ memory: 3174 }))).toBe("3.1 Gi");
-    expect(memory.render!(pod({ memory: 2969 }))).toBe("2.9 Gi");
+    expect(amount(memory, pod({ cpu: 1, memory: 988 }))).toBe("988 Mi");
+    expect(amount(memory, pod({ cpu: 1, memory: 412 }))).toBe("412 Mi");
+    expect(amount(memory, pod({ cpu: 1, memory: 3174 }))).toBe("3.1 Gi");
+    expect(amount(memory, pod({ cpu: 1, memory: 2969 }))).toBe("2.9 Gi");
   });
 
   it("sorts memory on the raw Mi value, never the Gi-scaled display text", () => {
@@ -200,6 +208,111 @@ describe("pod columns", () => {
   it("sorts a missing memory reading below every real one", () => {
     const memory = podColumns.find((c) => c.key === "memory")!;
     expect(Number(memory.getSortValue!(pod()))).toBeLessThan(Number(memory.getSortValue!(pod({ memory: 0 }))));
+  });
+
+  /**
+   * #864: `241m` does not say whether a pod is idle or about to be throttled.
+   * The bar is the share of what the pod was given — its limit, or its request
+   * where it has no whole limit — drawn as the Nodes list draws a node's.
+   */
+  describe("the usage bar", () => {
+    afterEach(cleanup);
+    const cpu = podColumns.find((c) => c.key === "cpu")!;
+    const memory = podColumns.find((c) => c.key === "memory")!;
+    const draw = (column: typeof cpu, row: PodRow) => render(column.render!(row) as ReactElement).container;
+    const limited = pod({
+      cpu: 250, memory: 300,
+      cpuReqMillicores: 100, cpuLimMillicores: 500, cpuLimAll: true,
+      memReqMiB: 128, memLimMiB: 400, memLimAll: true,
+    });
+
+    it("draws the share of the pod's limit, named for the pod, the resource and the bound", () => {
+      draw(cpu, limited);
+      // 250m of 500m.
+      const bar = screen.getByRole("meter", { name: "web-0 CPU, of limit" });
+      expect(bar.getAttribute("aria-valuetext")).toBe("50%");
+      cleanup();
+      draw(memory, limited);
+      // 300 Mi of 400 Mi.
+      expect(screen.getByRole("meter", { name: "web-0 memory, of limit" }).getAttribute("aria-valuetext")).toBe("75%");
+    });
+
+    it("keeps the amount beside the bar, and says what it is a share of", () => {
+      const view = draw(cpu, limited);
+      expect(view.querySelector(".num")?.textContent).toBe("250m");
+      expect((view.firstElementChild as HTMLElement).title).toBe("250m of 500m limit");
+      cleanup();
+      expect((draw(memory, limited).firstElementChild as HTMLElement).title).toBe("300 Mi of 400 Mi limit");
+    });
+
+    it("measures against the request, and says so, when a container has no limit", () => {
+      const view = draw(cpu, { ...limited, cpuLimAll: false });
+      // 250m of the 100m requested: past a request is not past a ceiling, and
+      // the name is what tells the two apart.
+      const bar = screen.getByRole("meter", { name: "web-0 CPU, of request" });
+      expect(bar.getAttribute("aria-valuenow")).toBe("100");
+      expect(bar.getAttribute("aria-valuetext")).toBe("250%");
+      expect((view.firstElementChild as HTMLElement).title).toBe("250m of 100m request");
+    });
+
+    it("tints by load against a limit, and not at all against a request", () => {
+      const fill = (row: PodRow) => {
+        draw(cpu, row);
+        const colour = (screen.getByRole("meter").firstElementChild as HTMLElement).style.background;
+        cleanup();
+        return colour;
+      };
+      // Near its ceiling: a warning worth a colour.
+      const nearLimit = fill({ ...limited, cpu: 480 });
+      const idleLimit = fill({ ...limited, cpu: 10 });
+      expect(nearLimit).not.toBe(idleLimit);
+      // Past its request by any margin: one quiet tone, the same at 50% as at 900%.
+      const overRequest = fill({ ...limited, cpuLimAll: false, cpu: 900 });
+      const underRequest = fill({ ...limited, cpuLimAll: false, cpu: 50 });
+      expect(overRequest).toBe(underRequest);
+      expect(overRequest).not.toBe(nearLimit);
+    });
+
+    it("agrees with core: the percentage is podUsage's, unrounded and unclamped", () => {
+      const over = { ...limited, cpu: 700 };
+      draw(cpu, over);
+      expect(screen.getByRole("meter", { name: "web-0 CPU, of limit" }).getAttribute("aria-valuetext")).toBe("140%");
+      expect(podUsage(over, { cpuMillicores: 700, memoryMiB: 300 }).cpu?.percent).toBe(140);
+    });
+
+    it("draws a dash and no bar when there is no reading — an empty bar would say the pod is idle", () => {
+      const view = draw(cpu, { ...limited, cpu: undefined, memory: undefined });
+      expect(view.textContent).toBe("—");
+      expect(screen.queryByRole("meter")).toBeNull();
+    });
+
+    it("draws the amount and no bar for a pod with neither a limit nor a request, and says why", () => {
+      const view = draw(cpu, pod({ cpu: 250, memory: 300 }));
+      expect(view.querySelector(".num")?.textContent).toBe("250m");
+      expect(screen.queryByRole("meter")).toBeNull();
+      expect((view.firstElementChild as HTMLElement).title).toBe("250m, no request or limit set");
+    });
+
+    it("asks for the same room with or without a bar, as the Nodes list does", () => {
+      const withBar = (draw(cpu, limited).firstElementChild as HTMLElement).className;
+      cleanup();
+      const without = (draw(cpu, pod()).firstElementChild as HTMLElement).className;
+      expect(withBar).toBe(without);
+      expect(withBar).toMatch(/min-w-\[/);
+      // And cannot be dragged narrower than that room.
+      const nodeCpu = nodeColumns.find((c) => c.key === "cpu")!;
+      expect(cpu.minWidth).toBe(nodeCpu.minWidth);
+      expect(memory.minWidth).toBe(nodeCpu.minWidth);
+    });
+
+    it("still sorts by the amount in use, with no reading last", () => {
+      // A pod with no bound has no percentage to sort by; the amount is what
+      // every row has.
+      const big = pod({ cpu: 900, memory: 1 });
+      const tight = { ...limited, cpu: 450 };
+      expect(cpu.getSortValue!(big)).toBeGreaterThan(cpu.getSortValue!(tight) as number);
+      expect(cpu.getSortValue!(pod())).toBeLessThan(cpu.getSortValue!(pod({ cpu: 0 })) as number);
+    });
   });
 
   it("names the pod column Name, not the kind — the mock titles every list Name", () => {
@@ -642,7 +755,8 @@ describe("column alignment — a count or a measurement is end-aligned, everythi
    *  Typed on just `key`/`align`: the sets differ in row type, and alignment
    *  is the only thing this test needs to see. */
   const CASES: [{ key: string; align?: "start" | "end" }[], string[]][] = [
-    [podColumns, ["ready", "restarts", "cpu", "memory", "age"]],
+    // Not `cpu`/`memory`, for the reason given at `nodeColumns` below (#864).
+    [podColumns, ["ready", "restarts", "age"]],
     [deploymentColumns, ["ready", "upToDate", "available", "age"]],
     [statefulSetColumns, ["ready", "updated", "age"]],
     [daemonSetColumns, ["desired", "current", "ready", "upToDate", "available", "age"]],
