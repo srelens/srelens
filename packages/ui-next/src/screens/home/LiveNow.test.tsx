@@ -139,8 +139,10 @@ describe("LiveNow", () => {
     expect(currentWorkspace().tabs.map((t) => t.route)).toEqual(["/"]);
   });
 
-  // Last on purpose: the tests above mark streams, and none of them may leak into the next.
-  it("starts with no stream marked by an earlier test", () => {
+  it("clears every mark when reset, so no test inherits another's streams", () => {
+    markLogStream("tab-left-behind", true);
+    expect(liveLogStreams().size).toBe(1);
+    __resetLiveLogStreamsForTests();
     expect(liveLogStreams().size).toBe(0);
   });
 });

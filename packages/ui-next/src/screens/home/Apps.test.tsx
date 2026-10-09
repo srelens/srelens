@@ -82,11 +82,17 @@ describe("Apps", () => {
     expect(screen.queryByText("No apps installed")).toBeNull();
   });
 
-  it("offers to read the list again when it could not be read", async () => {
+  it("offers to read the list again when it could not be read, and shows the apps once it can", async () => {
     inventory.snapshot = { status: "error", error: "connection refused" };
-    inventory.reload.mockReset();
-    render(<Apps />);
+    inventory.reload.mockReset().mockImplementation(() => {
+      inventory.snapshot = ready(app("io.a", "Trivy", {}, [{ id: "reports", title: "Reports" }]));
+    });
+    const view = render(<Apps />);
     await userEvent.click(screen.getByRole("button", { name: "Retry reading your apps" }));
     expect(inventory.reload).toHaveBeenCalledTimes(1);
+    // The store's subscribers re-render on a reload; the mock stands in for it.
+    view.rerender(<Apps />);
+    expect(screen.getByText("Trivy")).toBeTruthy();
+    expect(screen.queryByText("Could not read your apps")).toBeNull();
   });
 });
