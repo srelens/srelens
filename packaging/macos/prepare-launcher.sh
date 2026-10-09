@@ -22,13 +22,20 @@ if [ -n "${APPLE_SIGNING_IDENTITY:-}" ]; then
         # the certificate was "1 identity imported" and then "no identity
         # found" (srelens-v0.16.0). So the keychain joins the list, as Tauri's
         # own signing keychain does, and the list is put back on exit.
-        original_keychains="$(security list-keychains -d user | tr -d '"')"
-        trap 'security list-keychains -d user -s $original_keychains >/dev/null 2>&1 || true; security delete-keychain "$keychain" >/dev/null 2>&1 || true; rm -rf "$signing_tmp"' EXIT
+        # Saved one path per line, unquoted: a keychain path may hold spaces,
+        # and each has to reach `security` as one argument.
+        security list-keychains -d user \
+            | sed -e 's/^[[:space:]]*"//' -e 's/"[[:space:]]*$//' > "$signing_tmp/keychains"
+        # Set the search list to the arguments given, then the saved list.
+        search_list() {
+            while IFS= read -r saved; do set -- "$@" "$saved"; done < "$signing_tmp/keychains"
+            security list-keychains -d user -s "$@"
+        }
+        trap 'search_list || echo "warning: could not restore the keychain search list" >&2; security delete-keychain "$keychain" >/dev/null 2>&1 || true; rm -rf "$signing_tmp"' EXIT
         security create-keychain -p "$password" "$keychain"
         security set-keychain-settings -lut 3600 "$keychain"
         security unlock-keychain -p "$password" "$keychain"
-        # shellcheck disable=SC2086 # one path per word, as the list prints them
-        security list-keychains -d user -s "$keychain" $original_keychains
+        search_list "$keychain"
         printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$signing_tmp/cert.p12"
         security import "$signing_tmp/cert.p12" -k "$keychain" -P "${APPLE_CERTIFICATE_PASSWORD:?missing certificate password}" -T /usr/bin/codesign
         security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$password" "$keychain" >/dev/null
