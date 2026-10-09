@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { isTauri, listAgents, settingsStorage } from "@srelens/core";
+import { flushSettingsWrites, isTauri, listAgents, settingsStorage } from "@srelens/core";
 import { Button } from "@srelens/ui-kit";
 import { useExtensions } from "../../extensions/inventoryStore";
 import { useAgentInventoryVersion } from "../../lib/agentInventory";
@@ -34,10 +34,16 @@ function readDismissed(): boolean {
     return false;
   }
 }
-/** Keep the dismissal; the failure when it could not be kept, `null` when it was. */
-function saveDismissed(): unknown {
+/**
+ * Keep the dismissal; the failure when it could not be kept, `null` when it was.
+ * After startup `setItem` only queues the write, so this waits for the backend
+ * to take it: a refusal there would otherwise come back as the list returning
+ * on the next launch.
+ */
+async function saveDismissed(): Promise<unknown> {
   try {
     settingsStorage.setItem(CHECKLIST_DISMISSED_KEY, "true");
+    await flushSettingsWrites({ throwOnError: true });
     return null;
   } catch (error) {
     console.error("could not persist the dismissed getting-started list", error);
@@ -128,8 +134,8 @@ export function GettingStarted({ retryContexts }: { retryContexts?: () => void }
           variant="ghost"
           size="sm"
           aria-label="Dismiss getting started"
-          onClick={() => {
-            const failure = saveDismissed();
+          onClick={async () => {
+            const failure = await saveDismissed();
             if (failure === null) setDismissed(true);
             else setDismissFailure(failure);
           }}

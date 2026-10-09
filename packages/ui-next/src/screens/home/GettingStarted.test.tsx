@@ -9,7 +9,11 @@ import { activeRoute, setState } from "../../lib/tabsStore";
 import { __setKnownVaultMode, resetLock } from "../../shell/LockGate";
 import { CHECKLIST_DISMISSED_KEY, GettingStarted } from "./GettingStarted";
 
-const core = vi.hoisted(() => ({ isTauri: vi.fn(() => true), listAgents: vi.fn() }));
+const core = vi.hoisted(() => ({
+  isTauri: vi.fn(() => true),
+  listAgents: vi.fn(),
+  flushSettingsWrites: vi.fn((_options?: { throwOnError?: boolean }) => Promise.resolve()),
+}));
 vi.mock("@srelens/core", async (original) => ({ ...(await original<typeof import("@srelens/core")>()), ...core }));
 const inventory = vi.hoisted(() => ({ snapshot: { status: "loading" } as Record<string, unknown>, reload: vi.fn() }));
 vi.mock("../../extensions/inventoryStore", async (original) => ({
@@ -65,6 +69,23 @@ describe("GettingStarted", () => {
     render(<GettingStarted />);
     await act(async () => { await Promise.resolve(); });
     expect(screen.queryByRole("heading", { name: /^Getting started/ })).toBeNull();
+  });
+
+  it("stays up, and says so, when the backend refuses the dismissal after it was queued", async () => {
+    // After startup `setItem` only updates memory and queues the write; a
+    // read-only settings file or a failed web request refuses it later.
+    core.flushSettingsWrites.mockRejectedValueOnce(new Error("settings.json is read-only"));
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      render(<GettingStarted />);
+      await userEvent.click(await screen.findByRole("button", { name: "Dismiss getting started" }));
+      expect(core.flushSettingsWrites).toHaveBeenCalledWith({ throwOnError: true });
+      expect(screen.getByRole("heading", { name: /^Getting started/ })).toBeTruthy();
+      expect(screen.getByText("Could not keep this dismissed")).toBeTruthy();
+      expect(screen.getByText(/settings\.json is read-only/)).toBeTruthy();
+    } finally {
+      vi.restoreAllMocks();
+    }
   });
 
   it("stays up, and says so, when the dismissal cannot be kept", async () => {
