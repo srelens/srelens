@@ -43,6 +43,27 @@ function StatefulEditResourceTab(
 }
 
 describe("EditResourceTab", () => {
+  it("reports the manifest it loaded as loaded, not as an edit", async () => {
+    // The parent counts a working copy that differs from what was loaded as
+    // unsaved work; reported as an edit, every freshly opened tab looked dirty.
+    loadEditableManifestMock.mockResolvedValue({ yaml: "kind: ConfigMap\nmetadata:\n  name: web\n" });
+    const onLoaded = vi.fn();
+    const onDraftChange = vi.fn();
+    render(
+      <EditResourceTab
+        context="kind-dev"
+        kind="ConfigMap"
+        namespace="default"
+        name="web"
+        draft={null}
+        onDraftChange={onDraftChange}
+        onLoaded={onLoaded}
+      />,
+    );
+    await waitFor(() => expect(onLoaded).toHaveBeenCalledWith("kind: ConfigMap\nmetadata:\n  name: web\n"));
+    expect(onDraftChange).not.toHaveBeenCalled();
+  });
+
   it("preloads the resource's manifest into the editor with an Apply action", async () => {
     loadEditableManifestMock.mockResolvedValue({ yaml: "kind: ConfigMap\nmetadata:\n  name: web\n" });
     render(

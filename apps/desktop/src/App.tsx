@@ -987,6 +987,15 @@ export function App() {
     );
   }
 
+  /** A fetched manifest: the working copy, and what it is compared against. */
+  function setEditResourceLoaded(tabId: number, yaml: string) {
+    setTabs((current) =>
+      current.map((tab) =>
+        tab.id === tabId && tab.edit ? { ...tab, edit: { ...tab.edit, draft: yaml, loaded: yaml } } : tab,
+      ),
+    );
+  }
+
   /** Open (or focus) a full-tab editor preloaded with a resource's manifest. */
   function openEditResource(kind: string, namespace: string | null, name: string) {
     if (!activeCluster) return;
@@ -1155,7 +1164,13 @@ export function App() {
       )}
       <div className="fl-main">
         <ClassicDeprecationBanner
-          unsavedDrafts={tabs.filter((tab) => tab.create?.draft !== undefined || tab.edit?.draft !== undefined).length}
+          unsavedDrafts={
+            tabs.filter(
+              (tab) =>
+                tab.create?.draft !== undefined ||
+                (tab.edit?.draft !== undefined && tab.edit.draft !== tab.edit.loaded),
+            ).length
+          }
         />
         {tabs.length > 0 ? (
           <>
@@ -1257,6 +1272,7 @@ export function App() {
                       name={activeTab.edit.name}
                       draft={activeTab.edit.draft ?? null}
                       onDraftChange={(yaml) => setEditResourceDraft(activeTab.id, yaml)}
+                      onLoaded={(yaml) => setEditResourceLoaded(activeTab.id, yaml)}
                       onEdited={() => setEditResourceDraft(activeTab.id, undefined)}
                     />
                   ) : activeCluster ? (
