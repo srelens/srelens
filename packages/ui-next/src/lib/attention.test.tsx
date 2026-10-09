@@ -214,7 +214,11 @@ describe("useAttention", () => {
     hidden = false;
     await act(async () => { document.dispatchEvent(new Event("visibilitychange")); await vi.advanceTimersByTimeAsync(0); });
     await answer("b", "c");
-    expect(asked().length).toBeGreaterThan(3);
+    // The restart is a whole new pass: the first three again, at once…
+    expect(asked()).toEqual(["a", "b", "c", "a", "b", "c"]);
+    // …then the two the hidden window skipped, in order, as those land.
+    await answer("a", "b", "c");
+    expect(asked()).toEqual(["a", "b", "c", "a", "b", "c", "d", "e"]);
   });
 
   it("does not start a second batch beside one still reading when the clusters change", async () => {
