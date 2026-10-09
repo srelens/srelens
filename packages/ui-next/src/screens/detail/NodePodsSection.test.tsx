@@ -80,7 +80,32 @@ describe("NodePodsSection", () => {
     fireEvent.click(screen.getByRole("button", { name: "Sort by Age" }));
     const rows = screen.getAllByRole("row").slice(1);
     expect(rows.map((row) => within(row).getAllByRole("cell")[0].textContent)).toEqual(["newer", "older"]);
-    expect(rows.map((row) => within(row).getAllByRole("cell")[2].textContent)).toEqual(["300d", "1y"]);
+    // The last cell: Containers now stands between Namespace and Age.
+    expect(rows.map((row) => within(row).getAllByRole("cell").at(-1)?.textContent)).toEqual(["300d", "1y"]);
+  });
+
+  it("draws each pod's containers as the Pods list does, a square for each", async () => {
+    podsOnNode.mockResolvedValue({
+      pods: [
+        {
+          ...pod(0),
+          name: "troubled",
+          containers: [
+            { name: "api", kind: "app", state: "running", reason: "", exitCode: null, ready: true, restarts: 0, image: "acme/api:1" },
+            { name: "worker", kind: "app", state: "waiting", reason: "CrashLoopBackOff", exitCode: null, ready: false, restarts: 9, image: "acme/worker:1" },
+          ],
+        },
+      ],
+    });
+    render(<NodePodsSection context="prod-eu" node="worker-2" />);
+    await act(async () => Promise.resolve());
+
+    expect(screen.getByRole("columnheader", { name: /Containers/ })).toBeDefined();
+    const row = screen.getAllByRole("row")[1];
+    expect(within(row).getAllByRole("img")).toHaveLength(2);
+    expect(within(row).getByRole("img", { name: /^worker: Waiting \(CrashLoopBackOff\), 9 restarts/ })).toBeDefined();
+    // And the word for it, beside the squares.
+    expect(within(row).getByText("CrashLoopBackOff")).toBeDefined();
   });
 
   it("opens a pod detail from a row and the node-filtered Pods list from View all", async () => {

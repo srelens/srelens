@@ -106,7 +106,12 @@ export function containersSortValue(containers: readonly PodContainer[]): number
   let worst = 0;
   let count = 0;
   for (const container of containers) {
-    const severity = SEVERITY[containerVerdict(container).kind];
+    const kind = containerVerdict(container).kind;
+    // An init container that has finished is not part of what the pod is
+    // doing: counted, it would sort a finished Job with two of them apart
+    // from the same Job with none.
+    if (container.kind === "init" && kind === "completed") continue;
+    const severity = SEVERITY[kind];
     if (severity > worst) {
       worst = severity;
       count = 1;
@@ -115,6 +120,41 @@ export function containersSortValue(containers: readonly PodContainer[]): number
     }
   }
   return worst * 1000 + Math.min(count, 999);
+}
+
+/**
+ * The one word a row prints beside a pod's squares, or `null` when every
+ * container is as it should be.
+ *
+ * A square's colour is not a signal on its own, so whatever is not ordinary
+ * is also said: the worst container's reason, or its state where it has no
+ * reason. A pod whose containers are all ready — or finished, for one that
+ * was meant to finish — needs no word; the squares and the Status column
+ * already say it.
+ */
+export function containersWord(containers: readonly PodContainer[]): string | null {
+  let worst: PodContainer | undefined;
+  let worstSeverity = SEVERITY.ready;
+  for (const container of containers) {
+    const severity = SEVERITY[containerVerdict(container).kind];
+    if (severity > worstSeverity) {
+      worst = container;
+      worstSeverity = severity;
+    }
+  }
+  if (!worst) return null;
+  const { kind } = containerVerdict(worst);
+  if (worst.reason) return worst.reason;
+  switch (kind) {
+    case "failed":
+      return worst.exitCode == null ? "Exited" : `Exited ${worst.exitCode}`;
+    case "unready":
+      return "Not ready";
+    case "starting":
+      return "Starting";
+    default:
+      return "Not reported";
+  }
 }
 
 /** `2 of 3 containers ready` — the figure the Ready column used to print. */

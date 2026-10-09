@@ -519,17 +519,16 @@ fn pod_containers(pod: &Pod) -> Vec<PodContainer> {
                statuses: &[k8s_openapi::api::core::v1::ContainerStatus]| {
         let reported = statuses.iter().find(|s| s.name == c.name);
         let state = reported.and_then(|s| s.state.as_ref());
-        let (word, reason, exit_code) = match state {
-            Some(s) if s.running.is_some() => ("running", String::new(), None),
-            Some(s) if s.terminated.is_some() => {
-                let t = s.terminated.as_ref().expect("checked");
-                ("terminated", t.reason.clone().unwrap_or_default(), Some(t.exit_code))
-            }
-            Some(s) if s.waiting.is_some() => {
-                let w = s.waiting.as_ref().expect("checked");
-                ("waiting", w.reason.clone().unwrap_or_default(), None)
-            }
-            _ => ("unknown", String::new(), None),
+        // Running first, then terminated, then waiting: the kubelet sets one
+        // of the three, and a state with none of them set says nothing.
+        let running = state.is_some_and(|s| s.running.is_some());
+        let terminated = state.and_then(|s| s.terminated.as_ref());
+        let waiting = state.and_then(|s| s.waiting.as_ref());
+        let (word, reason, exit_code) = match (running, terminated, waiting) {
+            (true, _, _) => ("running", String::new(), None),
+            (false, Some(t), _) => ("terminated", t.reason.clone().unwrap_or_default(), Some(t.exit_code)),
+            (false, None, Some(w)) => ("waiting", w.reason.clone().unwrap_or_default(), None),
+            (false, None, None) => ("unknown", String::new(), None),
         };
         PodContainer {
             name: c.name.clone(),

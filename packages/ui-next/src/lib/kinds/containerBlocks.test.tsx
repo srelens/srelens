@@ -107,6 +107,41 @@ describe("ContainerBlocks", () => {
     );
   });
 
+  /**
+   * "Colour is never the only signal." A filled green square and a filled
+   * orange one differ by colour, so whatever is not ordinary is said in a
+   * word beside the squares as well.
+   */
+  it("says the worst container's reason in a word beside the squares", () => {
+    const { container } = render(
+      <ContainerBlocks containers={[c(), c({ name: "worker", state: "waiting", reason: "CrashLoopBackOff", ready: false })]} />,
+    );
+    expect(container.querySelector(".ctr-word")?.textContent).toBe("CrashLoopBackOff");
+    cleanup();
+    expect(render(<ContainerBlocks containers={[c({ ready: false })]} />).container.querySelector(".ctr-word")?.textContent).toBe(
+      "Not ready",
+    );
+  });
+
+  it("prints no word for a pod with nothing to report", () => {
+    const done = c({ name: "migrate", kind: "init", state: "terminated", exitCode: 0, ready: false });
+    const { container } = render(<ContainerBlocks containers={[c(), done]} />);
+    expect(container.querySelector(".ctr-word")).toBeNull();
+    expect(container.textContent).toBe("");
+  });
+
+  it("lets a keyboard reach the containers it did not draw", () => {
+    const many = Array.from({ length: MAX_CONTAINER_BLOCKS + 2 }, (_, i) => c({ name: `c${i}` }));
+    const { container } = render(<ContainerBlocks containers={many} />);
+    const more = container.querySelector(".ctr-more") as HTMLElement;
+    expect(more.tabIndex).toBe(0);
+    more.focus();
+    expect(document.activeElement).toBe(more);
+    expect(more.getAttribute("aria-label")).toBe(
+      `2 more: c${MAX_CONTAINER_BLOCKS}: Running, acme/api:1; c${MAX_CONTAINER_BLOCKS + 1}: Running, acme/api:1`,
+    );
+  });
+
   it("prints the fallback, or a dash, for a row that carries no containers", () => {
     expect(render(<ContainerBlocks containers={undefined} fallback="1/2" />).container.textContent).toBe("1/2");
     cleanup();
@@ -149,6 +184,17 @@ describe("the container block styles", () => {
     expect(rule("failed")).toContain("var(--sev)");
     const all = css.slice(css.indexOf(".ctr-blocks"));
     expect(all).not.toMatch(/#[0-9a-fA-F]{3,8}\b/);
+  });
+
+  it("marks the two filled states that mean trouble, so they differ from ready by more than colour", () => {
+    expect(css).toMatch(/\.ctr-block\[data-state="stuck"\]::before\s*\{\s*content: "!"/);
+    expect(css).toMatch(/\.ctr-block\[data-state="failed"\]::before\s*\{\s*content: "×"/);
+    // And the ordinary one carries none.
+    expect(css).not.toMatch(/\.ctr-block\[data-state="ready"\]::before/);
+  });
+
+  it("shows where the keyboard is on the count of containers not drawn", () => {
+    expect(css).toMatch(/\.ctr-more:focus-visible\s*\{[^}]*outline/);
   });
 
   it("stills the one animation for a reader who asked for less motion", () => {

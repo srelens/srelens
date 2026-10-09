@@ -1,6 +1,7 @@
 import {
   containerVerdict,
   containersReadyText,
+  containersWord,
   describeContainer,
   type PodContainer,
 } from "@srelens/core";
@@ -36,6 +37,13 @@ export const MAX_CONTAINER_BLOCKS = 8;
  * sidecar is drawn with the app containers, since it runs beside them for the
  * pod's whole life.
  *
+ * **Whatever is not ordinary is also said in a word.** A filled green square
+ * and a filled orange one differ, to the eye, by colour — and colour is never
+ * the only signal in this app. So the two that mean trouble carry a mark of
+ * their own (`!` for stuck, `×` for failed, in the stylesheet), and beside the
+ * squares the row prints the worst container's reason: `CrashLoopBackOff`,
+ * `OOMKilled`, `Not ready`. A pod with nothing to report prints no word.
+ *
  * The count the old column printed is still here — as the group's name, for a
  * screen reader, and in its tooltip.
  */
@@ -54,6 +62,8 @@ export function ContainerBlocks({
   const main = shown.filter((c) => c.kind !== "init");
   const init = shown.filter((c) => c.kind === "init");
   const summary = containersReadyText(containers);
+  const word = containersWord(containers);
+  const more = hidden.map(describeContainer).join("\n");
   return (
     <span role="group" aria-label={summary} title={summary} className="ctr-blocks">
       {main.map((c) => (
@@ -67,10 +77,18 @@ export function ContainerBlocks({
         </span>
       )}
       {hidden.length > 0 && (
-        <span className="ctr-more" title={hidden.map(describeContainer).join("\n")}>
+        // Focusable, and named for what it stands for: the containers not
+        // drawn are otherwise out of a keyboard's reach altogether.
+        <span
+          className="ctr-more"
+          tabIndex={0}
+          title={more}
+          aria-label={`${hidden.length} more: ${hidden.map(describeContainer).join("; ")}`}
+        >
           +{hidden.length}
         </span>
       )}
+      {word !== null && <span className="ctr-word">{word}</span>}
     </span>
   );
 }

@@ -3,6 +3,7 @@ import {
   containerVerdict,
   containersReadyText,
   containersSortValue,
+  containersWord,
   describeContainer,
 } from "./containerVerdict";
 import type { PodContainer } from "./workloads";
@@ -134,8 +135,53 @@ describe("containersSortValue", () => {
     expect(containersSortValue([c(), done])).toBe(containersSortValue([c()]));
   });
 
+  it("sorts a finished Job the same with or without init containers", () => {
+    // Every container completed: the init ones must not add to the count.
+    const finished = c({ state: "terminated", exitCode: 0, ready: false });
+    expect(containersSortValue([finished, done, done])).toBe(containersSortValue([finished]));
+  });
+
+  it("still counts an init container that is in trouble", () => {
+    const failing = c({ kind: "init", state: "waiting", reason: "CrashLoopBackOff", ready: false });
+    expect(containersSortValue([c(), failing])).toBeGreaterThan(containersSortValue([c()]));
+  });
+
   it("is the lowest for a pod with no containers reported", () => {
     expect(containersSortValue([])).toBeLessThan(containersSortValue([c()]));
+  });
+});
+
+describe("containersWord", () => {
+  it("says nothing for a pod whose containers are all as they should be", () => {
+    expect(containersWord([c(), c({ name: "b" })])).toBeNull();
+    const done = c({ kind: "init", state: "terminated", exitCode: 0, ready: false });
+    expect(containersWord([c(), done])).toBeNull();
+    // A Job that ran to the end.
+    expect(containersWord([c({ state: "terminated", exitCode: 0, ready: false })])).toBeNull();
+    expect(containersWord([])).toBeNull();
+  });
+
+  it("gives the worst container's reason", () => {
+    expect(
+      containersWord([
+        c(),
+        c({ name: "slow", ready: false }),
+        c({ name: "worker", state: "waiting", reason: "CrashLoopBackOff", ready: false }),
+      ]),
+    ).toBe("CrashLoopBackOff");
+    expect(containersWord([c({ state: "terminated", exitCode: 137, reason: "OOMKilled" })])).toBe("OOMKilled");
+  });
+
+  it("gives the state in a word where there is no reason", () => {
+    expect(containersWord([c({ ready: false })])).toBe("Not ready");
+    expect(containersWord([c({ state: "waiting", reason: "", ready: false })])).toBe("Starting");
+    expect(containersWord([c({ state: "terminated", exitCode: 3, reason: "" })])).toBe("Exited 3");
+    expect(containersWord([c({ state: "terminated", exitCode: null, reason: "" })])).toBe("Exited");
+    expect(containersWord([c({ state: "unknown", ready: false })])).toBe("Not reported");
+  });
+
+  it("speaks for a failing init container too", () => {
+    expect(containersWord([c({ state: "waiting", reason: "PodInitializing", ready: false }), c({ kind: "init", state: "waiting", reason: "ImagePullBackOff", ready: false })])).toBe("ImagePullBackOff");
   });
 });
 
