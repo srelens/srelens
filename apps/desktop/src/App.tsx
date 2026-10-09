@@ -1154,7 +1154,9 @@ export function App() {
         />
       )}
       <div className="fl-main">
-        <ClassicDeprecationBanner />
+        <ClassicDeprecationBanner
+          unsavedDrafts={tabs.filter((tab) => tab.create?.draft !== undefined || tab.edit?.draft !== undefined).length}
+        />
         {tabs.length > 0 ? (
           <>
             <ResourceTabs

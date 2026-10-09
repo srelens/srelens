@@ -338,6 +338,18 @@ describe("App", () => {
     expect(screen.getByRole("button", { name: "Switch to the new design" })).toBeDefined();
   });
 
+  it("tells the deprecation banner about unsaved editor drafts before it switches", async () => {
+    render(<App />);
+    fireEvent.click(screen.getByText("open-kind-dev"));
+    fireEvent.click(screen.getByText("nav-services"));
+    fireEvent.click(screen.getByText("new-secret"));
+    fireEvent.change(screen.getByLabelText("mock new draft"), {
+      target: { value: "kind: Secret\nmetadata:\n  name: unsaved\n" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Switch to the new design" }));
+    expect(await screen.findByText(/discards 1 unsaved editor draft/i)).toBeDefined();
+  });
+
   it("shows the welcome state until a cluster is opened", () => {
     render(<App />);
     expect(screen.getByText(/pure-Rust Kubernetes UI/)).toBeDefined();
