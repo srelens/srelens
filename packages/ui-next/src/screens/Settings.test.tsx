@@ -44,6 +44,9 @@ vi.mock("@srelens/core", async (orig) => ({
 
 import type { VaultBiometricStatus } from "@srelens/core";
 import { openSettings } from "../lib/settingsRequest";
+import { defaultState } from "../lib/tabs";
+import { TabScope } from "../lib/tabScope";
+import { activateTab, currentWorkspace, duplicateTab, moveTab, openTab, setState } from "../lib/tabsStore";
 import { Settings } from "./Settings";
 
 const ROUTE = "/settings";
@@ -156,6 +159,30 @@ describe("Settings", () => {
     expect(screen.getByRole("region", { name: "App catalog" })).toBeTruthy();
     act(() => openSettings("appearance"));
     expect(within(rail).getByRole("tab", { name: "Appearance" }).getAttribute("aria-selected")).toBe("true");
+  });
+
+  it("hands a request to the Settings tab it brings to the front, not to another Settings tab", () => {
+    setState(defaultState([]));
+    openTab("/settings");
+    const original = currentWorkspace().activeId;
+    duplicateTab(original);
+    const copy = currentWorkspace().activeId;
+    // The copy moved ahead of the original: `openTab` now focuses the copy.
+    moveTab(copy, 1);
+    // And the request comes from Home, as Home's links do.
+    activateTab(currentWorkspace().tabs[0].id);
+    const props = { route: ROUTE, ported: PORTED, onSwitchToClassic: vi.fn(), onLocked: vi.fn() };
+    render(
+      <>
+        <TabScope.Provider value={original}><Settings {...props} /></TabScope.Provider>
+        <TabScope.Provider value={copy}><Settings {...props} /></TabScope.Provider>
+      </>,
+    );
+    act(() => openSettings("appearance"));
+    expect(currentWorkspace().activeId).toBe(copy);
+    const [originalRail, copyRail] = screen.getAllByRole("complementary", { name: "Settings" });
+    expect(within(copyRail).getByRole("tab", { name: "Appearance" }).getAttribute("aria-selected")).toBe("true");
+    expect(within(originalRail).getByRole("tab", { name: "Appearance" }).getAttribute("aria-selected")).toBe("false");
   });
 
   it("shows the installed apps for a later request that names no tab", async () => {

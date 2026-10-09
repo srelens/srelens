@@ -28,7 +28,7 @@ const ready = (...plugins: InstalledExtension[]) => ({ status: "ready", data: { 
 
 beforeEach(() => {
   inventory.snapshot = { status: "loading" };
-  takeSettingsRequest();
+  takeSettingsRequest(null);
   resetContexts();
   setContexts([PROD]);
   setState(defaultState([PROD]));
@@ -63,7 +63,7 @@ describe("Apps", () => {
     render(<Apps />);
     await userEvent.click(screen.getByRole("button", { name: "Kyverno in Settings › Apps" }));
     expect(activeRoute()).toBe("/settings");
-    expect(takeSettingsRequest()).toEqual({ section: "extensions" });
+    expect(takeSettingsRequest(null)).toEqual({ section: "extensions", tabId: expect.any(String) });
   });
 
   it("browses the catalog in Settings", async () => {
@@ -72,7 +72,7 @@ describe("Apps", () => {
     expect(screen.getByText("No apps installed")).toBeTruthy();
     await userEvent.click(screen.getByRole("button", { name: "Browse catalog" }));
     expect(activeRoute()).toBe("/settings");
-    expect(takeSettingsRequest()).toEqual({ section: "extensions", tab: "catalog" });
+    expect(takeSettingsRequest(null)).toEqual({ section: "extensions", tab: "catalog", tabId: expect.any(String) });
   });
 
   it("says the list could not be read, rather than that there are no apps", () => {

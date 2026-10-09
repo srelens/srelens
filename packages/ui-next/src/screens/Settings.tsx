@@ -1,6 +1,7 @@
 import { ExtensionManager } from "../extensions/Extensions";
 import { useContexts } from "../lib/clusters";
 import { onSettingsRequested, takeSettingsRequest } from "../lib/settingsRequest";
+import { useTabScope } from "../lib/tabScope";
 import { openTab } from "../lib/tabsStore";
 import { useId, useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { isTauri } from "@srelens/core";
@@ -124,6 +125,7 @@ export function Settings({ ported, onSwitchToClassic, onLocked }: SettingsProps)
   const [active, setActive] = useState<SectionId>(SECTIONS[0].id);
   /** The Apps tab another screen asked for; a new object per request, so asking twice still moves it. */
   const [appsTab, setAppsTab] = useState<{ tab: string }>();
+  const scope = useTabScope();
   const headId = useId();
   const tabBase = useId();
   const tabId = (id: SectionId) => `${tabBase}-${id}`;
@@ -142,7 +144,8 @@ export function Settings({ ported, onSwitchToClassic, onLocked }: SettingsProps)
   // effect, so a Settings opened on Apps never paints its first section first.
   useLayoutEffect(() => {
     const apply = () => {
-      const request = takeSettingsRequest();
+      // Only the request for THIS tab: another Settings tab may be open too.
+      const request = takeSettingsRequest(scope);
       const section = visible.find((s) => s.id === request?.section)?.id;
       if (!request || !section) return;
       select(section);

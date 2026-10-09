@@ -35,7 +35,7 @@ beforeEach(() => {
   resetContexts();
   setContexts([PROD]);
   setState(defaultState([PROD]));
-  takeSettingsRequest();
+  takeSettingsRequest(null);
 });
 
 describe("GettingStarted", () => {
@@ -47,9 +47,9 @@ describe("GettingStarted", () => {
     expect(within(item("Protect the workspace")).getByText("Done")).toBeTruthy();
     await userEvent.click(within(item("Set up the assistant")).getByRole("button", { name: "Set up" }));
     expect(activeRoute()).toBe("/settings");
-    expect(takeSettingsRequest()).toEqual({ section: "agent" });
+    expect(takeSettingsRequest(null)).toEqual({ section: "agent", tabId: expect.any(String) });
     await userEvent.click(within(item("Install an app")).getByRole("button", { name: "Browse apps" }));
-    expect(takeSettingsRequest()).toEqual({ section: "extensions", tab: "catalog" });
+    expect(takeSettingsRequest(null)).toEqual({ section: "extensions", tab: "catalog", tabId: expect.any(String) });
   });
 
   it("opens Connect for a reader with no cluster yet", async () => {
