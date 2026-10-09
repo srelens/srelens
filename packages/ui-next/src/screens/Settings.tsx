@@ -8,6 +8,7 @@ import { isTauri } from "@srelens/core";
 import { Screen } from "@srelens/ui-kit";
 import type { RoutedScreenProps } from "../lib/routes";
 import { ApplicationLogsPane, KubernetesPane, WorkspacePane } from "./settings/PreferencePanes";
+import { SkillsPane } from "./settings/SkillsPane";
 import { UpdatesPane } from "./settings/UpdatesPane";
 import { AgentAccess } from "./settings/AgentAccess";
 import { AgentPane } from "./settings/AgentPane";
@@ -22,7 +23,7 @@ import { AccessibilityPane, ClustersPane, DeepLinksPane, ShortcutsPane } from ".
 /** §23's rail width for this screen, and this screen's alone (§A.1's table). */
 const NAV_WIDTH = 196;
 
-type SectionId = "extensions" | "agent" | "security" | "backup" | "appearance" | "accessibility" | "shortcuts" | "deeplinks" | "workspace" | "kubernetes" | "logs" | "updates" | "clusters";
+type SectionId = "extensions" | "agent" | "skills" | "security" | "backup" | "appearance" | "accessibility" | "shortcuts" | "deeplinks" | "workspace" | "kubernetes" | "logs" | "updates" | "clusters";
 
 /**
  * §23's nav, in §23's order.
@@ -88,6 +89,9 @@ type SectionId = "extensions" | "agent" | "security" | "backup" | "appearance" |
  */
 const SECTIONS: ReadonlyArray<{ id: SectionId; label: string; desktopOnly?: true }> = [
   { id: "agent", label: "Agent & MCP" },
+  // Desktop-only: the skill store is a set of files on this machine, read
+  // through commands the web server does not have.
+  { id: "skills", label: "Skills", desktopOnly: true },
   { id: "security", label: "Security", desktopOnly: true },
   { id: "backup", label: "Backup", desktopOnly: true },
   { id: "appearance", label: "Appearance" },
@@ -232,6 +236,8 @@ export function Settings({ ported, onSwitchToClassic, onLocked }: SettingsProps)
             )}
           </div>
         );
+      case "skills":
+        return <SkillsPane />;
       case "security":
         return <SecurityPane onLocked={onLocked} />;
       case "backup":

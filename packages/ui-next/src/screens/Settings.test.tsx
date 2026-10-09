@@ -71,6 +71,8 @@ const PORTED = ["Aardvark ledger", "Basalt tally", "Cinnabar dial"];
 /** §23's nav, in §23's order, minus the entry decision 2 removed. */
 const DESKTOP_SECTIONS = [
   "Agent & MCP",
+  // #851. Desktop only: the skill store is files on this machine.
+  "Skills",
   "Security",
   "Backup",
   "Appearance",
@@ -91,7 +93,7 @@ const DESKTOP_SECTIONS = [
  * `srelens://` scheme, so in a browser no such link reaches srelens at all.
  */
 const WEB_SECTIONS = DESKTOP_SECTIONS.filter(
-  (s) => s !== "Security" && s !== "Backup" && s !== "Updates" && s !== "Deep links",
+  (s) => s !== "Skills" && s !== "Security" && s !== "Backup" && s !== "Updates" && s !== "Deep links",
 );
 
 function paint(props: { onLocked?: () => void } = {}) {
@@ -309,8 +311,8 @@ describe("Settings", () => {
     expect(tabs.map((t) => t.tabIndex)).toEqual(DESKTOP_SECTIONS.map((_, i) => i === 0 ? 0 : -1));
     tabs[0].focus();
     await user.keyboard("{ArrowDown}");
-    expect(sections()[1]).toBe("Security");
-    expect(document.activeElement?.textContent).toBe("Security");
+    expect(sections()[1]).toBe("Skills");
+    expect(document.activeElement?.textContent).toBe("Skills");
     await user.keyboard("{End}");
     expect(document.activeElement?.textContent).toBe("Apps");
     await user.keyboard("{ArrowDown}");

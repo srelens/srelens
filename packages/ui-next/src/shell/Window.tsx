@@ -93,6 +93,7 @@ function resetWorkspacesToHome(state: TabsState): void {
 }
 import { useConsole } from "../console";
 import { canOpenClusterTerminal, openClusterTerminal } from "../lib/clusterTerminal";
+import { applySkillDefaults } from "../lib/skillDefaults";
 import { countLaunch, useStarCountRefresh } from "../lib/starOnGitHub";
 import { hint, matchWindowKey, type WindowAction } from "../lib/shortcuts";
 import { AgentConsent } from "./AgentConsent";
@@ -223,6 +224,8 @@ export function Window({
   useEffect(() => {
     if (!booted) return;
     countLaunch();
+    // The skills the reader keeps on (#851), once settings are readable.
+    applySkillDefaults();
   }, [booted]);
   useStarCountRefresh(booted);
 
