@@ -1188,7 +1188,7 @@ jobs:
   # Download-size baseline (issue #31). Runs after the artifacts are published
   # so it measures exactly what users download, and writes how each installer
   # compares with the previous stable release into the run summary. It used to
-  # hold back any release whose installers grew more than 15%; v0.17.0 built
+  # hold back any release whose installers grew more than 15%; v0.16.0 built
   # and signed everything and then stayed a draft on that alone, so the sizes
   # are now reported and never gate publishing.
   size-baseline:

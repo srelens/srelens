@@ -60,7 +60,7 @@ Measured on 2026-08-16, srelens `v0.5.0` against Freelens `v1.10.3`:
 The release workflow runs this comparison against the **draft** release before
 it is published and writes the table into the run summary. It is a report, not
 a gate: it used to block publication when any installer grew more than 15%,
-and v0.17.0 (about 23% over v0.15.0, the extension platform's weight) then
+and v0.16.0 (about 23% over v0.15.0, the extension platform's weight) then
 built and signed everything and stayed a draft on that alone.
 
 To check a budget by hand, the script still takes one:
