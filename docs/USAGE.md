@@ -618,8 +618,12 @@ The top bar has a **Star** button that opens the srelens repository on GitHub; a
 star helps other people find the project. After you have used the app for a few
 days it asks once, in a small callout, whether you would like to star it, and
 never asks again whichever way you answer. It does not ask at all if you have
-already used one of the app's Star buttons. To show the star count, srelens makes
-one unauthenticated request a day to the public GitHub API; if that fails the
+already used one of the app's Star buttons. To show the star count, srelens asks
+the public GitHub API, unauthenticated: when it starts, about every half hour
+while it is open, when you come back to its window after a quarter of an hour
+away, and just after you have used a Star button — never more than once a
+minute, and not at all for up to an hour once GitHub says the hourly allowance
+for your address is spent. If a request fails the
 button keeps the last count it had, or shows no number if it never had one. The
 button is not shown while the workspace is locked. **Settings → Workspace → srelens on GitHub** hides
-the button, which also stops that request.
+the button, which also stops those requests.

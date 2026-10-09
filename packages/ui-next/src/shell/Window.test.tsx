@@ -155,11 +155,11 @@ vi.mock("../lib/clusterTerminal", () => ({
 }));
 
 // The star button's start-up acts reach GitHub; a test of the window must not.
-const starOnGitHub = vi.hoisted(() => ({ countLaunch: vi.fn(), refreshStarCount: vi.fn(async () => {}) }));
+const starOnGitHub = vi.hoisted(() => ({ countLaunch: vi.fn(), useStarCountRefresh: vi.fn() }));
 vi.mock("../lib/starOnGitHub", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../lib/starOnGitHub")>()),
   countLaunch: starOnGitHub.countLaunch,
-  refreshStarCount: starOnGitHub.refreshStarCount,
+  useStarCountRefresh: starOnGitHub.useStarCountRefresh,
 }));
 
 vi.mock("../lib/tabsPersist", () => ({ loadTabsState, scheduleSave, installFlushOnUnload, flushSave }));
@@ -948,10 +948,12 @@ describe("Window accelerators", () => {
 
   it("counts the launch and asks for the star count once, after boot", async () => {
     starOnGitHub.countLaunch.mockClear();
-    starOnGitHub.refreshStarCount.mockClear();
+    starOnGitHub.useStarCountRefresh.mockClear();
     await booted();
     expect(starOnGitHub.countLaunch).toHaveBeenCalledTimes(1);
-    expect(starOnGitHub.refreshStarCount).toHaveBeenCalledTimes(1);
+    // Kept current from boot on, and not before: settings are not readable yet.
+    expect(starOnGitHub.useStarCountRefresh).toHaveBeenLastCalledWith(true);
+    expect(starOnGitHub.useStarCountRefresh.mock.calls[0]).toEqual([false]);
   });
 
   it("leaves the browser's own zoom alone in web mode", async () => {
