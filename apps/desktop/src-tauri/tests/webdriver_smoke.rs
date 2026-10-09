@@ -188,6 +188,17 @@ async fn smoke_launch_to_logs_against_kind() {
     });
     let home = std::env::temp_dir().join(format!("srelens-smoke-home-{}", std::process::id()));
     std::fs::create_dir_all(&home).expect("smoke HOME");
+    // This flow drives classic's screens, and a fresh profile now opens the
+    // new design, so the sandbox starts with classic chosen, the way a user
+    // who kept it would. Where `default_settings_path` puts it under the
+    // XDG_CONFIG_HOME set below, in the document shape it reads.
+    let settings = home.join(".config/app.srelens.desktop/settings.json");
+    std::fs::create_dir_all(settings.parent().expect("settings dir")).expect("smoke settings dir");
+    std::fs::write(
+        &settings,
+        r#"{"schema_version":1,"local_storage_migrated":false,"values":{"srelens.design":"classic"}}"#,
+    )
+    .expect("smoke settings");
     // On a PANIC (setup failures like session creation — distinct from the
     // in-flow error path below), the guard still preserves the app's logs
     // into the artifacts dir before removing the sandbox.
