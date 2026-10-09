@@ -84,25 +84,25 @@ export function Home() {
         </div>
         <div className="home-layout">
           <div className="home-main">
-          <NeedsAttention targets={targets} scans={scans} />
-          <section className="home-clusters" aria-labelledby="home-clusters-title">
-            <div className="home-section-heading">
-              <h2 id="home-clusters-title">Your clusters <span className="text-muted">{contexts.length}</span></h2>
-              {contexts.length > 0 && <TextInput type="search" aria-label="Find a cluster" placeholder="Find a cluster…" value={query} onValueChange={setQuery} />}
-            </div>
-            {status === "failed" && <div className="border-b border-rule p-4">
-              <FailureAlert title="Could not load all clusters" error={error} />
-              <Button variant="secondary" size="sm" className="mt-2" disabled={retrying} onClick={() => void retry()}>{retrying ? "Retrying…" : "Retry"}</Button>
-            </div>}
-            {status === "loading" ? <LoadingState label="Loading clusters…" /> : contexts.length === 0 ? (
-              status === "loaded" && <EmptyState title="No clusters configured" hint="Add a kubeconfig or connect to a cluster to start exploring. Your saved connections will appear here." />
-            ) : filtered.length === 0 ? <EmptyState title="No matching clusters" hint="Search by display name, context, or API server." action={<Button variant="secondary" size="sm" onClick={() => setQuery("")}>Clear search</Button>} /> : (
-              <ul className="home-cluster-list" aria-label="Saved clusters">
-                {filtered.map(ctx => <ClusterRow key={ctx.stableId} context={ctx} link={links[ctx.stableId]} paused={workspace.pausedClusters?.includes(ctx.stableId) === true} scan={scans[ctx.stableId]} />)}
-              </ul>
-            )}
-          </section>
-          <PickUp targets={targets} />
+            <NeedsAttention targets={targets} scans={scans} />
+            <section className="home-clusters" aria-labelledby="home-clusters-title">
+              <div className="home-section-heading">
+                <h2 id="home-clusters-title">Your clusters <span className="text-muted">{contexts.length}</span></h2>
+                {contexts.length > 0 && <TextInput type="search" aria-label="Find a cluster" placeholder="Find a cluster…" value={query} onValueChange={setQuery} />}
+              </div>
+              {status === "failed" && <div className="border-b border-rule p-4">
+                <FailureAlert title="Could not load all clusters" error={error} />
+                <Button variant="secondary" size="sm" className="mt-2" disabled={retrying} onClick={() => void retry()}>{retrying ? "Retrying…" : "Retry"}</Button>
+              </div>}
+              {status === "loading" ? <LoadingState label="Loading clusters…" /> : contexts.length === 0 ? (
+                status === "loaded" && <EmptyState title="No clusters configured" hint="Add a kubeconfig or connect to a cluster to start exploring. Your saved connections will appear here." />
+              ) : filtered.length === 0 ? <EmptyState title="No matching clusters" hint="Search by display name, context, or API server." action={<Button variant="secondary" size="sm" onClick={() => setQuery("")}>Clear search</Button>} /> : (
+                <ul className="home-cluster-list" aria-label="Saved clusters">
+                  {filtered.map(ctx => <ClusterRow key={ctx.stableId} context={ctx} link={links[ctx.stableId]} paused={workspace.pausedClusters?.includes(ctx.stableId) === true} scan={scans[ctx.stableId]} />)}
+                </ul>
+              )}
+            </section>
+            <PickUp targets={targets} />
           </div>
           <aside className="home-start" aria-label="Workspace tools">
             <LiveNow />
