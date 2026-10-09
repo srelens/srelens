@@ -259,7 +259,7 @@ describe("Settings", () => {
     const { user, onSwitchToClassic } = paint();
     await user.click(screen.getByRole("tab", { name: "Appearance" }));
     expect(screen.getAllByTestId("ported-screen").map((n) => n.textContent)).toEqual(PORTED);
-    await user.click(screen.getByRole("button", { name: /switch to the classic design/i }));
+    await user.click(screen.getByRole("button", { name: "Switch to Classic (deprecated)" }));
     expect(onSwitchToClassic).toHaveBeenCalledTimes(1);
   });
 

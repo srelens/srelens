@@ -535,9 +535,12 @@ export function AppearancePane({ ported, onSwitchToClassic }: AppearancePaneProp
       */}
       <Panel title="Design">
         <p className="text-[0.75rem] leading-relaxed text-muted">
-          You are in the new design. It is <strong className="text-ink">in progress</strong>: some
-          screens are not there yet, and the ones that are may still change. Switching reloads the
-          window, and the classic design has this same choice in the same place.
+          You are in the new design, the default. A few classic features have not reached it yet.
+          Switching reloads the window, and the classic design has this same choice in the same
+          place.
+        </p>
+        <p className="mt-2 text-[0.75rem] text-muted">
+          The classic design is deprecated and will be removed in a future version.
         </p>
         {ported.length > 0 && (
           <>
@@ -553,7 +556,7 @@ export function AppearancePane({ ported, onSwitchToClassic }: AppearancePaneProp
         )}
         <div className="mt-3 flex flex-wrap items-center gap-2">
           <Button variant="secondary" onClick={onSwitchToClassic}>
-            Switch to the classic design
+            Switch to Classic (deprecated)
           </Button>
         </div>
       </Panel>

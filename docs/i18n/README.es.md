@@ -110,11 +110,11 @@ ciclo de investigación en un único espacio de trabajo local-first.
 ## Aplicación de escritorio
 
 La aplicación de escritorio es un espacio de trabajo de Kubernetes completo en una
-ventana nativa. Las capturas de abajo muestran el **nuevo diseño**, que se está
-desplegando pantalla a pantalla: actívalo en
-**Settings → Appearance → Design → New design** (Ajustes → Apariencia → Diseño →
-Nuevo diseño) y vuelve al anterior por el mismo camino cuando quieras. Incluye seis
-temas: Light, Paper, Dark, Midnight, Glass y High contrast.
+ventana nativa. Las capturas de abajo muestran el **nuevo diseño**, que ahora es el
+predeterminado. Incluye seis temas: Light, Paper, Dark, Midnight, Glass y High
+contrast. El diseño clásico está obsoleto y se eliminará en una versión futura;
+hasta entonces puedes cambiar a él en **Settings → Appearance → Design** (Ajustes →
+Apariencia → Diseño).
 
 <table>
   <tr>

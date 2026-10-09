@@ -16,6 +16,7 @@ export function EditResourceTab({
   name,
   draft,
   onDraftChange,
+  onLoaded,
   onEdited,
 }: {
   context: string;
@@ -25,12 +26,20 @@ export function EditResourceTab({
   /** The loaded/edited working copy owned by this tab; null means load it. */
   draft: string | null;
   onDraftChange: (yaml: string) => void;
+  /**
+   * The manifest as fetched, apart from the reader's edits, so the parent can
+   * tell an untouched copy from unsaved work. Without it a load is reported
+   * through `onDraftChange`.
+   */
+  onLoaded?: (yaml: string) => void;
   /** Called after a successful apply (so the parent can refresh views). */
   onEdited?: () => void;
 }) {
   const [error, setError] = useState("");
   const onDraftChangeRef = useRef(onDraftChange);
   onDraftChangeRef.current = onDraftChange;
+  const onLoadedRef = useRef(onLoaded);
+  onLoadedRef.current = onLoaded;
 
   useEffect(() => {
     // Returning to a tab with a working copy must neither show a loading flash
@@ -41,7 +50,7 @@ export function EditResourceTab({
     void loadEditableManifest(context, kind, namespace, name).then((out) => {
       if (!active) return;
       if (out.error) setError(out.error);
-      else onDraftChangeRef.current(out.yaml ?? "");
+      else (onLoadedRef.current ?? onDraftChangeRef.current)(out.yaml ?? "");
     });
     return () => {
       active = false;

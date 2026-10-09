@@ -96,9 +96,9 @@
 
 ## 桌面应用
 
-桌面应用是一个运行在原生窗口中的完整 Kubernetes 工作台。下方截图展示的是**新设计**，它正在逐个界面地推出：在
-**Settings → Appearance → Design → New design**（设置 → 外观 → 设计 → 新设计）中即可开启，也随时可以用同样的方式切换回来。它提供六种主题：Light、Paper、Dark、Midnight、Glass
-和 High contrast。
+桌面应用是一个运行在原生窗口中的完整 Kubernetes 工作台。下方截图展示的是**新设计**，它现在是默认设计。它提供六种主题：Light、Paper、Dark、Midnight、Glass
+和 High contrast。经典设计已弃用，将在未来的版本中移除；在此之前，你可以在
+**Settings → Appearance → Design**（设置 → 外观 → 设计）中切换到经典设计。
 
 <table>
   <tr>

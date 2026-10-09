@@ -9,26 +9,39 @@ vi.mock("../design", async (importOriginal) => ({
 }));
 
 import { AppearanceSettingsSection } from "./AppearanceSettingsSection";
+import { DESIGN_KEY } from "../design";
 
 beforeEach(() => {
   switchDesignMock.mockReset().mockResolvedValue({ ok: true });
   localStorage.clear();
+  // This section is classic's, and classic only runs for someone who chose it.
+  localStorage.setItem(DESIGN_KEY, "classic");
 });
 
 describe("AppearanceSettingsSection", () => {
-  it("says the new design is unfinished, before anyone opts in", () => {
-    // Shipping a half-built UI behind a toggle is only defensible if the
-    // toggle says so. Someone who opts in and finds empty screens should have
-    // been told, not surprised.
-    render(<AppearanceSettingsSection />);
+  it("says the classic design is deprecated and will be removed", () => {
     // Said in the description, not only in the button label — someone scanning
     // the setting should learn it without reading the options.
-    expect(screen.getByText(/most screens are not there yet/i)).toBeDefined();
+    render(<AppearanceSettingsSection />);
+    expect(
+      screen.getByText(/classic design is deprecated and will be removed in a future version/i),
+    ).toBeDefined();
+  });
+
+  it("labels classic as deprecated where it is picked", () => {
+    render(<AppearanceSettingsSection />);
+    expect(screen.getByRole("button", { name: "Classic (deprecated)" })).toBeDefined();
+  });
+
+  it("offers the new design as the default, not as work in progress", () => {
+    render(<AppearanceSettingsSection />);
+    expect(screen.getByRole("button", { name: "New design (default)" })).toBeDefined();
+    expect(screen.queryByText(/in progress/i)).toBeNull();
   });
 
   it("lists the screens that are already in the new design", () => {
-    // "Most screens are not there yet" is only actionable if it says which
-    // ones are. The list comes from PORTED_SCREENS, the same one the new
+    // Someone weighing the switch should see which screens are there. The
+    // list comes from PORTED_SCREENS, the same one the new
     // design's Placeholder reads, so the two cannot disagree.
     render(<AppearanceSettingsSection />);
     const items = screen.getAllByRole("listitem").map((li) => li.textContent);
@@ -152,14 +165,14 @@ describe("AppearanceSettingsSection", () => {
     render(<AppearanceSettingsSection />);
     // No jest-dom in this project, so read the attribute directly.
     expect(
-      screen.getByRole("button", { name: /classic design/i }).getAttribute("aria-pressed"),
+      screen.getByRole("button", { name: "Classic (deprecated)" }).getAttribute("aria-pressed"),
     ).toBe("true");
   });
 
   it("does not reload when the chosen design is already active", async () => {
     // Re-picking the current design should be inert, not a pointless reload.
     render(<AppearanceSettingsSection />);
-    await userEvent.click(screen.getByRole("button", { name: /classic design/i }));
+    await userEvent.click(screen.getByRole("button", { name: "Classic (deprecated)" }));
     expect(switchDesignMock).not.toHaveBeenCalled();
   });
 

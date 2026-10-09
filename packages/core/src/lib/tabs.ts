@@ -25,8 +25,12 @@ export interface ViewTab {
   focus?: { name: string; namespace: string | null; nonce: number };
   /** For a "new resource" tab: its starting kind and in-memory working copy. */
   create?: { initialKind?: string; draft?: NewResourceDraft };
-  /** For an "edit resource" tab: its target and loaded/in-memory working copy. */
-  edit?: { kind: string; namespace: string | null; name: string; draft?: string };
+  /**
+   * For an "edit resource" tab: its target, its in-memory working copy, and
+   * the manifest as loaded, so a working copy that still matches it is not
+   * mistaken for unsaved work.
+   */
+  edit?: { kind: string; namespace: string | null; name: string; draft?: string; loaded?: string };
   /** Identity of `cluster` (#265). The display name changes when another
    *  kubeconfig declares the same context name; this does not, so a rename
    *  never reads as a deleted context and never closes the tab. */

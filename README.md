@@ -103,10 +103,10 @@ into one local-first workspace.
 ## Desktop app
 
 The desktop app is a full Kubernetes workspace in a native window. The
-screenshots below are the **new design**, which is being rolled out screen by
-screen: turn it on in **Settings → Appearance → Design → New design**, and switch
-back the same way at any time. It has six themes: Light, Paper, Dark, Midnight,
-Glass and High contrast.
+screenshots below are the **new design**, which is the default. It has six
+themes: Light, Paper, Dark, Midnight, Glass and High contrast. The classic design
+is deprecated and will be removed in a future version; until then you can switch
+to it in **Settings → Appearance → Design**.
 
 <table>
   <tr>
