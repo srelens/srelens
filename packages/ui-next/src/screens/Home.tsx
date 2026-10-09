@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { describeError, listContexts, type ClusterContext } from "@srelens/core";
-import { Button, EmptyState, LoadingState, Mark, NavIcon, Screen, StatusPill, TextInput, usePortalShowing } from "@srelens/ui-kit";
-import { useAttention } from "../lib/attention";
+import { describeError, listContexts, plural, type ClusterContext } from "@srelens/core";
+import { Badge, Button, EmptyState, LoadingState, Mark, NavIcon, Screen, StatusPill, TextInput, usePortalShowing } from "@srelens/ui-kit";
+import { useAttention, type ClusterAttention } from "../lib/attention";
 import { getContexts, getKubeconfigFiles, setContexts, useContexts, useContextsError, useContextsStatus } from "../lib/clusters";
 import { useOrderedContexts } from "../lib/contextOrder";
 import { FailureAlert } from "../lib/errorCopy";
@@ -92,7 +92,7 @@ export function Home() {
               status === "loaded" && <EmptyState title="No clusters configured" hint="Add a kubeconfig or connect to a cluster to start exploring. Your saved connections will appear here." />
             ) : filtered.length === 0 ? <EmptyState title="No matching clusters" hint="Search by display name, context, or API server." action={<Button variant="secondary" size="sm" onClick={() => setQuery("")}>Clear search</Button>} /> : (
               <ul className="home-cluster-list" aria-label="Saved clusters">
-                {filtered.map(ctx => <ClusterRow key={ctx.stableId} context={ctx} link={links[ctx.stableId]} paused={workspace.pausedClusters?.includes(ctx.stableId) === true} />)}
+                {filtered.map(ctx => <ClusterRow key={ctx.stableId} context={ctx} link={links[ctx.stableId]} paused={workspace.pausedClusters?.includes(ctx.stableId) === true} scan={scans[ctx.stableId]} />)}
               </ul>
             )}
           </section>
@@ -109,22 +109,31 @@ export function Home() {
   );
 }
 
-function ClusterRow({ context, link, paused }: { context: ClusterContext; link?: ReturnType<typeof useWorkspaceView>["links"][string]; paused: boolean }) {
+/**
+ * One saved cluster. `scan` is this cluster's Needs-attention answer, present
+ * only for a cluster that was read: its count is the strip's count for it, and
+ * a check that refused says so here too rather than leaving the row looking
+ * clean.
+ */
+function ClusterRow({ context, link, paused, scan }: { context: ClusterContext; link?: ReturnType<typeof useWorkspaceView>["links"][string]; paused: boolean; scan?: ClusterAttention }) {
   const mark = getMark(context.stableId, context.name);
   const status = paused ? "Paused" : link ? LINK_WORD[link.state] : "Not checked";
+  const problems = scan?.items.length ?? 0;
+  const finding = problems > 0 ? plural(problems, "problem") : scan && scan.failures.length > 0 ? "check failed" : null;
   let secondary = context.name;
   if (mark.name === context.name) {
     try { secondary = new URL(context.server).host; }
     catch { secondary = context.cluster !== context.name ? context.cluster : context.sourceFile; }
   }
   return <li className="border-b border-rule">
-    <button type="button" className="home-cluster-row" aria-label={`Open cluster ${mark.name} — ${status}`} onClick={() => openCluster(context)}>
+    <button type="button" className="home-cluster-row" aria-label={`Open cluster ${mark.name} — ${status}${finding ? `, ${finding}` : ""}`} onClick={() => openCluster(context)}>
       <Mark decorative name={mark.name} short={mark.short} color={mark.color} size="sm" withBadge={mark.withText}
         icon={mark.mark === "icon" ? symbolFor(mark.icon) : undefined} imageSrc={mark.mark === "image" ? mark.imageSrc : undefined} />
       <span className="min-w-0 flex-1 text-left">
         <span className="block truncate font-medium">{mark.name}</span>
         <span className="block truncate text-xs text-muted" title={secondary}>{secondary}</span>
       </span>
+      {finding && <Badge tone={problems > 0 ? "sev" : "warn"}>{problems > 0 ? finding : "Check failed"}</Badge>}
       <StatusPill status={status} kind={paused ? "neutral" : link?.state === "connected" ? "success" : link?.state === "connecting" ? "info" : link?.state === "error" ? "danger" : "neutral"} />
       <span aria-hidden className="text-muted">→</span>
     </button>

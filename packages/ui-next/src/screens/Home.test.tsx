@@ -129,6 +129,21 @@ describe("Home", () => {
     expect(reads.podOverview.mock.calls.map(([context]) => context)).toEqual(["prod"]);
   });
 
+  it("badges each cluster with what needs attention on it, and says when its check failed", async () => {
+    setContexts([PROD, STAGE]);
+    setState(defaultState([PROD, STAGE]));
+    setLink(PROD.stableId, "connected");
+    setLink(STAGE.stableId, "connected");
+    const crashing = (name: string) => ({ name, namespace: "checkout", phase: "Running", status: "CrashLoopBackOff", ready: "0/1", restarts: 9, node: "n1", age: "1h", image: "web" });
+    reads.podOverview.mockImplementation(async (context: string) => context === "prod"
+      ? { pods: { total: 2, byNode: [], truncated: false, unsettled: [crashing("web-1"), crashing("web-2")] } }
+      : { error: "connection refused" });
+    render(<Home />);
+    expect(await screen.findByRole("button", { name: "Open cluster prod — Connected, 2 problems" })).toBeTruthy();
+    expect(screen.getByText("2 problems")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Open cluster staging — Connected, check failed" })).toBeTruthy();
+  });
+
   it.each([
     ["the workspace is sealed", () => { lockWorkspace(); return <Home />; }],
     ["Home is a tab behind another", () => (
