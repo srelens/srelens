@@ -43,10 +43,17 @@ import {
   taintTooltip,
 } from "@srelens/core";
 import { AgeCell } from "../ageCell";
-import { Badge, Meter, StatusPill, Tooltip, type Column, type Tone } from "@srelens/ui-kit";
+import { Badge, loadTone, Meter, Sparkline, StatusPill, Tooltip, type Column, type Tone } from "@srelens/ui-kit";
 import { NodeLink } from "../nodeLink";
 
-export type PodRow = PodSummary & { cpu?: number; memory?: number };
+export type PodRow = PodSummary & {
+  cpu?: number;
+  memory?: number;
+  /** The last ten minutes of each, oldest first, ending in the figure above —
+   *  what this window has itself been given, see `lib/usageHistory`. */
+  cpuHistory?: number[];
+  memoryHistory?: number[];
+};
 export type NodeRow = NodeSummary & { cpu?: number; memory?: number };
 
 /** A thin space (U+2009), not a locale comma — the design's CPU thousands separator. */
@@ -129,58 +136,74 @@ function podLoad(p: PodRow) {
 }
 
 /**
- * One pod's CPU or memory in the Pods list: the amount, and a bar (#864).
+ * One pod's CPU or memory in the Pods list: the amount, and a small graph of
+ * its last ten minutes (#864).
  *
- * `241m` does not say whether a pod is idle or about to be throttled; that
- * depends on what it was given, which the list did not show. The bar is the
- * share of the pod's limit in use — or of its request, where it has no whole
- * limit — tinted by load, with the percentage beside it. Which of the two it
- * is measured against is in the tooltip and the bar's own name, because the
- * same 120% is a pod past its ceiling in one case and an ordinary pod using
- * more than it asked for in the other.
+ * `241m` does not say whether a pod is idle, climbing, or about to be
+ * throttled. A graph says where the figure has been; what it is drawn against
+ * says how close it is to trouble. The box's top edge is the pod's limit — or
+ * its request, where it has no whole limit — so a pod idling under its limit
+ * is a low line and one pressed against it is a line along the top, and two
+ * rows can be compared at a glance.
  *
- * Three states, kept apart, as in the Nodes list:
- * - no metric: a dash, and no bar — an empty bar would read as an idle pod;
- * - a metric, but neither a limit nor a request: the amount, and no bar,
- *   since there is nothing to take a share of;
- * - both: the amount and the bar.
+ * Part of the row, not a widget in it: no frame, no axis, no background of
+ * its own. The line's colour carries the verdict the bar used to — by load
+ * against a limit, one quiet tone against a request (running past a request
+ * is ordinary), and muted for a pod with nothing to measure against. The
+ * percentage stays beside it as a figure, and the tooltip and the graph's
+ * name say what it is a share of.
+ *
+ * The past is only what this window has been given since the list was first
+ * opened: a graph that has just started is one reading, drawn flat. Four
+ * states, kept apart:
+ * - no metric: a dash, and no graph — an empty graph would read as an idle pod;
+ * - a metric, but neither a limit nor a request: the amount and a muted graph
+ *   scaled to its own peak, with no percentage;
+ * - a metric and a bound: the amount, the graph against the bound, the share.
  */
 function PodUsageCell({
   used,
+  history,
   usage,
   format,
   what,
 }: {
   used: number | undefined;
+  history: number[] | undefined;
   usage: PodResourceUsage | null;
   format: (value: number) => string;
   what: string;
 }) {
   if (used == null) return <div className={USAGE_CELL}>—</div>;
   const amount = format(used);
+  // The figure itself when nothing older is held, so the graph is never empty
+  // beside a reading.
+  const points = history && history.length > 0 ? history : [used];
+  const share = usage === null ? null : `${Math.round(usage.percent)}%`;
+  const against = usage === null ? "no request or limit set" : `${share} of ${format(usage.bound)} ${usage.of}`;
   return (
-    <div className={USAGE_CELL} title={usage === null ? `${amount}, no request or limit set` : `${amount} of ${format(usage.bound)} ${usage.of}`}>
+    <div className={USAGE_CELL} title={`${amount}, ${against}`}>
       <span className="num w-[4.75rem] shrink-0 text-right">{amount}</span>
-      {usage !== null && (
-        <span className="min-w-0 flex-1">
-          {/* Unrounded and unclamped: `Meter` clamps the bar and rounds what
-              it shows, and a pod past its bound must not be drawn the same as
-              one exactly at it. */}
-          <Meter
-            value={usage.percent}
-            // Against a limit the bar is tinted by load, as a node's is: near
-            // it is near being throttled or killed. Against a request it is
-            // not a verdict at all — a request is a floor for scheduling, and
-            // a healthy pod runs past it all day — so it keeps one quiet tone
-            // however far past it goes, rather than turning red at 241%.
-            tone={usage.of === "request" ? "info" : undefined}
-            ariaLabel={`${what}, of ${usage.of}`}
-          />
-        </span>
-      )}
+      <span className="min-w-0 flex-1">
+        <Sparkline
+          points={points}
+          height={USAGE_GRAPH_HEIGHT}
+          // The line alone. The wash under it fills the box whenever the line
+          // runs high, and a tinted block in a table cell reads as a frame.
+          fill={false}
+          ceiling={usage?.bound}
+          tone={usage === null ? "muted" : usage.of === "request" ? "info" : loadTone(usage.percent)}
+          ariaLabel={`${what} over the last 10 minutes, now ${amount}, ${against}`}
+        />
+      </span>
+      <span className="num w-9 shrink-0 text-right text-[0.6875rem] text-muted">{share}</span>
     </div>
   );
 }
+
+/** Short enough to sit inside a row at every density without growing it. */
+const USAGE_GRAPH_HEIGHT = 18;
+
 
 /**
  * The design's unhealthy dot for a pod, and the pill beside it: both read
@@ -220,7 +243,7 @@ export const podColumns: Column<PodRow>[] = [
     getSortValue: (p) => podStatus(p).status,
   },
   { key: "restarts", header: "Restarts", sortable: true, align: "end" },
-  // The amount and a bar (#864), as the Nodes list draws them. Sorted by the
+  // The amount and a ten-minute graph (#864). Sorted by the
   // amount, as before: "which pod is using the most" is the question the
   // column was already answering, and a pod with no bound has no percentage
   // to sort by.
@@ -229,7 +252,9 @@ export const podColumns: Column<PodRow>[] = [
     header: "CPU",
     sortable: true,
     minWidth: USAGE_COLUMN_MIN_WIDTH,
-    render: (p) => <PodUsageCell used={p.cpu} usage={podLoad(p).cpu} format={formatCpu} what={`${p.name} CPU`} />,
+    render: (p) => (
+      <PodUsageCell used={p.cpu} history={p.cpuHistory} usage={podLoad(p).cpu} format={formatCpu} what={`${p.name} CPU`} />
+    ),
     getSortValue: (p) => metricSort(p.cpu),
   },
   {
@@ -237,7 +262,9 @@ export const podColumns: Column<PodRow>[] = [
     header: "Memory",
     sortable: true,
     minWidth: USAGE_COLUMN_MIN_WIDTH,
-    render: (p) => <PodUsageCell used={p.memory} usage={podLoad(p).memory} format={formatMemory} what={`${p.name} memory`} />,
+    render: (p) => (
+      <PodUsageCell used={p.memory} history={p.memoryHistory} usage={podLoad(p).memory} format={formatMemory} what={`${p.name} memory`} />
+    ),
     getSortValue: (p) => metricSort(p.memory),
   },
   // #405: derived here against a ticking clock, from the summary's

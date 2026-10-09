@@ -211,94 +211,137 @@ describe("pod columns", () => {
   });
 
   /**
-   * #864: `241m` does not say whether a pod is idle or about to be throttled.
-   * The bar is the share of what the pod was given — its limit, or its request
-   * where it has no whole limit — drawn as the Nodes list draws a node's.
+   * #864: `241m` does not say whether a pod is idle, climbing, or about to be
+   * throttled. The cell draws the last ten minutes as a small graph, against
+   * what the pod was given — its limit, or its request where it has no whole
+   * limit.
    */
-  describe("the usage bar", () => {
+  describe("the usage graph", () => {
     afterEach(cleanup);
     const cpu = podColumns.find((c) => c.key === "cpu")!;
     const memory = podColumns.find((c) => c.key === "memory")!;
     const draw = (column: typeof cpu, row: PodRow) => render(column.render!(row) as ReactElement).container;
+    const graph = () => screen.getByRole("img");
+    /** The y of each point on the line, the top of the box being 0. */
+    const heights = () =>
+      [...(graph().querySelector("path[fill='none']")?.getAttribute("d") ?? "").matchAll(/[ML][\d.]+,([\d.]+)/g)].map(
+        (m) => Number(m[1]),
+      );
+    const colour = () => graph().querySelector("path[fill='none']")?.getAttribute("stroke");
     const limited = pod({
       cpu: 250, memory: 300,
+      cpuHistory: [100, 180, 250], memoryHistory: [280, 290, 300],
       cpuReqMillicores: 100, cpuLimMillicores: 500, cpuLimAll: true,
       memReqMiB: 128, memLimMiB: 400, memLimAll: true,
     });
 
-    it("draws the share of the pod's limit, named for the pod, the resource and the bound", () => {
+    it("draws the pod's readings as a line, one point for each", () => {
       draw(cpu, limited);
-      // 250m of 500m.
-      const bar = screen.getByRole("meter", { name: "web-0 CPU, of limit" });
-      expect(bar.getAttribute("aria-valuetext")).toBe("50%");
-      cleanup();
-      draw(memory, limited);
-      // 300 Mi of 400 Mi.
-      expect(screen.getByRole("meter", { name: "web-0 memory, of limit" }).getAttribute("aria-valuetext")).toBe("75%");
+      expect(heights()).toHaveLength(3);
+      // Climbing: each point higher in the box than the last.
+      const ys = heights();
+      expect(ys[1]).toBeLessThan(ys[0]);
+      expect(ys[2]).toBeLessThan(ys[1]);
     });
 
-    it("keeps the amount beside the bar, and says what it is a share of", () => {
-      const view = draw(cpu, limited);
-      expect(view.querySelector(".num")?.textContent).toBe("250m");
-      expect((view.firstElementChild as HTMLElement).title).toBe("250m of 500m limit");
+    it("names the graph for the pod, the resource, the window, and what it is a share of", () => {
+      draw(cpu, limited);
+      expect(graph().getAttribute("aria-label")).toBe(
+        "web-0 CPU over the last 10 minutes, now 250m, 50% of 500m limit",
+      );
       cleanup();
-      expect((draw(memory, limited).firstElementChild as HTMLElement).title).toBe("300 Mi of 400 Mi limit");
+      draw(memory, limited);
+      expect(graph().getAttribute("aria-label")).toBe(
+        "web-0 memory over the last 10 minutes, now 300 Mi, 75% of 400 Mi limit",
+      );
+    });
+
+    it("keeps the amount and the share beside the graph, and says the same in the tooltip", () => {
+      const view = draw(cpu, limited);
+      const figures = [...view.querySelectorAll(".num")].map((n) => n.textContent);
+      expect(figures).toEqual(["250m", "50%"]);
+      expect((view.firstElementChild as HTMLElement).title).toBe("250m, 50% of 500m limit");
+    });
+
+    it("draws against the limit, so a pod far under it is a low line and one near it a high one", () => {
+      draw(cpu, { ...limited, cpu: 40, cpuHistory: [30, 35, 40] });
+      // 8% of the limit: in the bottom quarter of the 18px box.
+      expect(Math.min(...heights())).toBeGreaterThan(18 * 0.75);
+      cleanup();
+      draw(cpu, { ...limited, cpu: 490, cpuHistory: [470, 480, 490] });
+      expect(Math.max(...heights())).toBeLessThan(18 * 0.25);
     });
 
     it("measures against the request, and says so, when a container has no limit", () => {
       const view = draw(cpu, { ...limited, cpuLimAll: false });
-      // 250m of the 100m requested: past a request is not past a ceiling, and
-      // the name is what tells the two apart.
-      const bar = screen.getByRole("meter", { name: "web-0 CPU, of request" });
-      expect(bar.getAttribute("aria-valuenow")).toBe("100");
-      expect(bar.getAttribute("aria-valuetext")).toBe("250%");
-      expect((view.firstElementChild as HTMLElement).title).toBe("250m of 100m request");
+      expect(graph().getAttribute("aria-label")).toContain("250% of 100m request");
+      expect((view.firstElementChild as HTMLElement).title).toBe("250m, 250% of 100m request");
     });
 
-    it("tints by load against a limit, and not at all against a request", () => {
-      const fill = (row: PodRow) => {
+    it("colours the line by load against a limit, and not at all against a request", () => {
+      const stroke = (row: PodRow) => {
         draw(cpu, row);
-        const colour = (screen.getByRole("meter").firstElementChild as HTMLElement).style.background;
+        const c = colour();
         cleanup();
-        return colour;
+        return c;
       };
-      // Near its ceiling: a warning worth a colour.
-      const nearLimit = fill({ ...limited, cpu: 480 });
-      const idleLimit = fill({ ...limited, cpu: 10 });
+      const nearLimit = stroke({ ...limited, cpu: 480 });
+      const idleLimit = stroke({ ...limited, cpu: 10 });
       expect(nearLimit).not.toBe(idleLimit);
       // Past its request by any margin: one quiet tone, the same at 50% as at 900%.
-      const overRequest = fill({ ...limited, cpuLimAll: false, cpu: 900 });
-      const underRequest = fill({ ...limited, cpuLimAll: false, cpu: 50 });
+      const overRequest = stroke({ ...limited, cpuLimAll: false, cpu: 900 });
+      const underRequest = stroke({ ...limited, cpuLimAll: false, cpu: 50 });
       expect(overRequest).toBe(underRequest);
       expect(overRequest).not.toBe(nearLimit);
     });
 
-    it("agrees with core: the percentage is podUsage's, unrounded and unclamped", () => {
+    it("agrees with core: the share is podUsage's", () => {
       const over = { ...limited, cpu: 700 };
-      draw(cpu, over);
-      expect(screen.getByRole("meter", { name: "web-0 CPU, of limit" }).getAttribute("aria-valuetext")).toBe("140%");
+      const view = draw(cpu, over);
+      expect([...view.querySelectorAll(".num")].map((n) => n.textContent)).toEqual(["700m", "140%"]);
       expect(podUsage(over, { cpuMillicores: 700, memoryMiB: 300 }).cpu?.percent).toBe(140);
     });
 
-    it("draws a dash and no bar when there is no reading — an empty bar would say the pod is idle", () => {
+    it("draws a dash and no graph when there is no reading — an empty graph would say the pod is idle", () => {
       const view = draw(cpu, { ...limited, cpu: undefined, memory: undefined });
       expect(view.textContent).toBe("—");
-      expect(screen.queryByRole("meter")).toBeNull();
+      expect(screen.queryByRole("img")).toBeNull();
     });
 
-    it("draws the amount and no bar for a pod with neither a limit nor a request, and says why", () => {
-      const view = draw(cpu, pod({ cpu: 250, memory: 300 }));
-      expect(view.querySelector(".num")?.textContent).toBe("250m");
-      expect(screen.queryByRole("meter")).toBeNull();
+    it("draws a pod with neither a limit nor a request to its own peak, with no share, and says why", () => {
+      const view = draw(cpu, pod({ cpu: 250, memory: 300, cpuHistory: [50, 250] }));
+      expect([...view.querySelectorAll(".num")].map((n) => n.textContent)).toEqual(["250m", ""]);
       expect((view.firstElementChild as HTMLElement).title).toBe("250m, no request or limit set");
+      expect(graph().getAttribute("aria-label")).toContain("no request or limit set");
+      // Its own peak is the top of the box.
+      expect(Math.min(...heights())).toBeLessThan(18 * 0.25);
     });
 
-    it("asks for the same room with or without a bar, as the Nodes list does", () => {
-      const withBar = (draw(cpu, limited).firstElementChild as HTMLElement).className;
+    it("draws the one reading it has as a flat line, when nothing older is held", () => {
+      // The list has just been opened: no past yet, and none invented.
+      draw(cpu, { ...limited, cpuHistory: undefined });
+      const d = graph().querySelector("path[fill='none']")?.getAttribute("d") ?? "";
+      const ys = [...d.matchAll(/[ML][\d.]+,([\d.]+)/g)].map((m) => Number(m[1]));
+      expect(new Set(ys).size).toBe(1);
+      expect(d).not.toContain("NaN");
+    });
+
+    it("has no frame of its own: it is part of the row", () => {
+      const view = draw(cpu, limited);
+      const svg = view.querySelector("svg")!;
+      for (const node of [svg, svg.parentElement!, view.firstElementChild as HTMLElement]) {
+        expect(node.getAttribute("class") ?? "").not.toMatch(/\b(border|ring|shadow|bg-)/);
+        expect((node as HTMLElement).style?.border ?? "").toBe("");
+      }
+      expect(svg.querySelector("rect")).toBeNull();
+    });
+
+    it("asks for the same room with or without a graph, as the Nodes list does", () => {
+      const withGraph = (draw(cpu, limited).firstElementChild as HTMLElement).className;
       cleanup();
       const without = (draw(cpu, pod()).firstElementChild as HTMLElement).className;
-      expect(withBar).toBe(without);
-      expect(withBar).toMatch(/min-w-\[/);
+      expect(withGraph).toBe(without);
+      expect(withGraph).toMatch(/min-w-\[/);
       // And cannot be dragged narrower than that room.
       const nodeCpu = nodeColumns.find((c) => c.key === "cpu")!;
       expect(cpu.minWidth).toBe(nodeCpu.minWidth);
@@ -306,8 +349,6 @@ describe("pod columns", () => {
     });
 
     it("still sorts by the amount in use, with no reading last", () => {
-      // A pod with no bound has no percentage to sort by; the amount is what
-      // every row has.
       const big = pod({ cpu: 900, memory: 1 });
       const tight = { ...limited, cpu: 450 };
       expect(cpu.getSortValue!(big)).toBeGreaterThan(cpu.getSortValue!(tight) as number);

@@ -50,6 +50,34 @@ describe("Sparkline", () => {
     expect(labelled.querySelector("svg")?.getAttribute("role")).toBe("img");
   });
 
+  /** The y of each point on the line, top of the box being 0. */
+  const heights = (ui: Parameters<typeof render>[0]) => {
+    const d = render(ui).container.querySelector("path")?.getAttribute("d") ?? "";
+    return [...d.matchAll(/[ML][\d.]+,([\d.]+)/g)].map((m) => Number(m[1]));
+  };
+
+  it("draws against a ceiling when given one, so a small series stays small", () => {
+    // 30 and 40 of a limit of 400: low in the box, not stretched to fill it.
+    const ys = heights(<Sparkline points={[30, 40]} fill={false} ceiling={400} />);
+    expect(Math.min(...ys)).toBeGreaterThan(34 * 0.75);
+    // The same series with no ceiling fills the box, as it always has.
+    const free = heights(<Sparkline points={[30, 40]} fill={false} />);
+    expect(Math.min(...free)).toBeLessThan(34 * 0.25);
+  });
+
+  it("grows past the ceiling rather than clipping a peak above it", () => {
+    const ys = heights(<Sparkline points={[100, 600]} fill={false} ceiling={400} />);
+    // Every point is inside the box: nothing drawn above its top edge.
+    expect(Math.min(...ys)).toBeGreaterThanOrEqual(0);
+    expect(ys[1]).toBeLessThan(ys[0]);
+  });
+
+  it("ignores a ceiling of nothing", () => {
+    expect(heights(<Sparkline points={[30, 40]} fill={false} ceiling={0} />)).toEqual(
+      heights(<Sparkline points={[30, 40]} fill={false} />),
+    );
+  });
+
   it("anchors to zero rather than to the samples' own range", () => {
     // Deliberate, and inherited from the mock: [90, 95] reads as high and
     // steady rather than as a climb, and two sparklines side by side share a

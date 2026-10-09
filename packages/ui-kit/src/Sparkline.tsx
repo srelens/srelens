@@ -21,12 +21,21 @@ export function Sparkline({
   tone = "sev",
   height = 34,
   fill = true,
+  ceiling,
   ariaLabel,
 }: {
   points: number[];
   tone?: Tone;
   height?: number;
   fill?: boolean;
+  /**
+   * The value the top of the box stands for, when the series has one that is
+   * not its own peak — a limit, a capacity. Without it a series is drawn to
+   * fill the box whatever its size, and a pod idling at 3% of its limit looks
+   * exactly like one pressed against it. A peak above the ceiling still fits:
+   * the box grows to hold it rather than clipping the line.
+   */
+  ceiling?: number;
   ariaLabel?: string;
 }) {
   const width = 100;
@@ -45,7 +54,7 @@ export function Sparkline({
     );
   }
 
-  const max = Math.max(...points, 1);
+  const max = Math.max(...points, ceiling !== undefined && ceiling > 0 ? ceiling : 1);
   const min = Math.min(...points, 0);
   const span = max - min || 1;
   // A lone sample has no span to divide across; draw it as a flat line rather
