@@ -15,6 +15,7 @@ import { useTabs } from "../lib/tabsStore";
 import { useWorkspaceSealed } from "../shell/LockGate";
 import { Apps } from "./home/Apps";
 import { AskSrelens } from "./home/AskSrelens";
+import { GettingStarted } from "./home/GettingStarted";
 import { LiveNow } from "./home/LiveNow";
 import { NeedsAttention } from "./home/NeedsAttention";
 import { PickUp } from "./home/PickUp";
@@ -108,6 +109,7 @@ export function Home() {
             <Apps />
             <WhatsNew />
             <AskSrelens targets={targets} scans={scans} />
+            <GettingStarted />
             <h2 className="home-section-heading">Quick links</h2>
             <HomeAction title="Manage connections" icon={Icons.cluster} route="/connections" />
             <HomeAction title="Settings" icon={Icons.settings} route="/settings" />
