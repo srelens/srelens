@@ -174,7 +174,9 @@ import { Logs, logsRoute, parseLogsRoute } from "./Logs";
 import { ConsoleProvider, useConsole } from "../console";
 import { resetContexts, setContexts, setKubeconfigFiles } from "../lib/clusters";
 import { loadRecentLogSubjects, recentLogSubjects, rememberLogSubject } from "../lib/logRecents";
+import { liveLogStreams } from "../lib/liveLogStreams";
 import { defaultState } from "../lib/tabs";
+import { TabScope } from "../lib/tabScope";
 import * as store from "../lib/tabsStore";
 
 /** Push the version forward and wake every mounted hook. */
@@ -2008,5 +2010,42 @@ describe("log sources (#569)", () => {
     expect(document.body.textContent).toContain("Loki · Observability sent no line in the last 7 days before its stream ended.");
     const follow = screen.getByRole("button", { name: /^Follow$/ }) as HTMLButtonElement;
     expect(follow.disabled).toBe(true);
+  });
+});
+
+/**
+ * What Home's "Live now" reads to know a logs tab is streaming: the route
+ * alone says a tab is open, not that a stream started or is still running.
+ */
+describe("the running-stream registry", () => {
+  function drawInTab(tabId: string) {
+    return render(
+      <ConsoleProvider>
+        <TabScope.Provider value={tabId}><Logs route={ROUTE} /></TabScope.Provider>
+      </ConsoleProvider>,
+    );
+  }
+
+  it("marks the tab while its stream runs, and unmarks it when the tab goes", async () => {
+    const view = drawInTab("tab-1");
+    await body();
+    expect(liveLogStreams().has("tab-1")).toBe(true);
+    view.unmount();
+    expect(liveLogStreams().has("tab-1")).toBe(false);
+  });
+
+  it.each(["error", "completed"])("unmarks a stream that ended as %s", async (ended) => {
+    drawInTab(`tab-${ended}`);
+    await body();
+    expect(liveLogStreams().has(`tab-${ended}`)).toBe(true);
+    act(() => { h.state.status = ended as typeof h.state.status; notify(); });
+    expect(liveLogStreams().has(`tab-${ended}`)).toBe(false);
+  });
+
+  it("never marks a tab whose subject left nothing to follow", async () => {
+    h.resolve.mockResolvedValue({ status: "empty", detail: "checkout-api has no containers." });
+    drawInTab("tab-3");
+    await screen.findByText("Nothing to follow");
+    expect(liveLogStreams().has("tab-3")).toBe(false);
   });
 });

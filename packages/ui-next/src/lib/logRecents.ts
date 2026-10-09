@@ -1,5 +1,5 @@
-import { useSyncExternalStore } from "react";
-import { settingsStorage } from "@srelens/core";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { listResource, settingsStorage } from "@srelens/core";
 import type { Storage } from "./tabsPersist";
 
 /**
@@ -196,6 +196,11 @@ export function recentLogSubjects(cluster: string): readonly RecentLogSubject[] 
   return answer;
 }
 
+/** Every cluster's recents, most recent first — the stored list itself, so its identity changes only with it. */
+export function useAllRecentLogSubjects(): readonly RecentLogSubject[] {
+  return useSyncExternalStore(subscribe, () => recents, () => recents);
+}
+
 /** The cluster's recents, re-rendering whoever reads them when they change. */
 export function useRecentLogSubjects(cluster: string): readonly RecentLogSubject[] {
   return useSyncExternalStore(
@@ -273,4 +278,74 @@ export function reviewRecents(
     else offered.push({ entry, presence: "gone" });
   }
   return { offered, forget };
+}
+
+/**
+ * One cluster's remembered subjects, each checked against the cluster before
+ * it is offered — the rule {@link reviewRecents} states, run.
+ *
+ * One `listResource` per kind and namespace answers for every remembered
+ * subject in it, so the check costs a call per pair rather than one per name.
+ * A pod the cluster has replaced is forgotten as the review says; nothing is
+ * forgotten on a list that failed.
+ *
+ * Shared by `/logs`' empty state and Home's "Pick up where you left off", so
+ * the two cannot disagree about which subjects are still there. `paused` holds
+ * the checks back — Home behind another tab, sealed, or in a hidden window —
+ * and they run when it clears.
+ */
+export function useOfferedRecents(context: string, clusterId: string, paused = false): OfferedRecent[] {
+  const entries = useRecentLogSubjects(clusterId);
+  const [scans, setScans] = useState<ReadonlyMap<string, SubjectScan>>(() => new Map());
+  /**
+   * Which lists have already been asked for. A ref, not state: it exists to
+   * stop the effect below asking twice, and putting it in `scans` would mean
+   * depending on `scans` in the effect that sets it — which is a fetch per
+   * answer, forever.
+   */
+  const asked = useRef(new Set<string>());
+
+  // A string, because the dependency is the SET of lists to fetch: `entries`
+  // changes identity whenever any subject is remembered or forgotten, and
+  // re-running on that would re-ask for lists already in hand.
+  const scanKeys = useMemo(() => [...new Set(entries.map(scanKey))].sort().join("\n"), [entries]);
+
+  useEffect(() => {
+    if (paused) return;
+    let alive = true;
+    const unanswered = new Set<string>();
+    for (const key of scanKeys === "" ? [] : scanKeys.split("\n")) {
+      if (asked.current.has(key)) continue;
+      asked.current.add(key);
+      unanswered.add(key);
+      const [kind, namespace] = key.split("\u0000");
+      // `listResource` reports failure by returning `{ error }` rather than
+      // throwing, so this reads the field — and keeps the failure AS a
+      // failure: see `SubjectScan` for why an empty list is not the same
+      // answer as an unanswered one.
+      void listResource(context, kind, namespace).then((out) => {
+        if (!alive) return;
+        unanswered.delete(key);
+        const scan: SubjectScan = out.error !== undefined ? { error: true } : { names: (out.items ?? []).map((item) => item.name) };
+        setScans((current) => new Map(current).set(key, scan));
+      });
+    }
+    return () => {
+      alive = false;
+      // An answer this run will now drop was never had: ask again next run.
+      for (const key of unanswered) asked.current.delete(key);
+    };
+  }, [context, scanKeys, paused]);
+
+  const { offered, forget } = useMemo(() => reviewRecents(entries, scans), [entries, scans]);
+
+  // A pod the cluster has replaced is not coming back under that name, and
+  // leaving it in would push a live workload off the end of the cap. Settles
+  // in one pass: the forgotten entries leave `entries`, and the next review
+  // has nothing left to forget.
+  useEffect(() => {
+    forgetLogSubjects(forget.map(recentKey));
+  }, [forget]);
+
+  return offered;
 }

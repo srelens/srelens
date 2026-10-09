@@ -1,10 +1,15 @@
-import { act, render, screen } from "@testing-library/react";
+import type { ReactElement } from "react";
+import { act, render as rtlRender, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { saveContextOrder, type ClusterContext } from "@srelens/core";
+import { PortalScopeProvider } from "@srelens/ui-kit";
+import { ConsoleProvider } from "../console";
+import { lockWorkspace, resetLock } from "../shell/LockGate";
 import { screenFor } from "../lib/routes";
 import { Home } from "./Home";
 import { resetContexts, setContexts } from "../lib/clusters";
+import { loadRecentLogSubjects, rememberLogSubject } from "../lib/logRecents";
 import { defaultMark, loadMarks, setMark } from "../lib/marks";
 import { activeCluster, activeRoute, currentWorkspace, setState, setClusterPaused } from "../lib/tabsStore";
 import { defaultState } from "../lib/tabs";
@@ -14,15 +19,30 @@ const ctx = (stableId: string, name: string): ClusterContext => ({
   stableId, key: stableId, name, cluster: name, server: `https://${stableId}.example`, isCurrent: false,
   sourceFile: "/mock/config", authKind: "client certificate",
 });
-const { listContexts } = vi.hoisted(() => ({ listContexts: vi.fn() }));
-vi.mock("@srelens/core", async original => ({ ...(await original<typeof import("@srelens/core")>()), listContexts }));
+const { listContexts, reads } = vi.hoisted(() => ({
+  listContexts: vi.fn(),
+  reads: {
+    podOverview: vi.fn(), listDeployments: vi.fn(), listStatefulSets: vi.fn(), listDaemonSets: vi.fn(), listEvents: vi.fn(),
+    listResource: vi.fn(),
+  },
+}));
+vi.mock("@srelens/core", async original => ({ ...(await original<typeof import("@srelens/core")>()), listContexts, ...reads }));
+/** Home hands questions to the console, so it renders inside the provider the window gives it. */
+const render = (ui: ReactElement) => rtlRender(ui, { wrapper: ConsoleProvider });
 const PROD = ctx("prod-id", "prod");
 const STAGE = ctx("stage-id", "staging");
 beforeEach(() => {
   listContexts.mockReset();
-  localStorage.clear(); loadMarks(); resetContexts(); resetView();
+  reads.podOverview.mockReset().mockResolvedValue({ pods: { total: 0, byNode: [], unsettled: [], truncated: false } });
+  reads.listDeployments.mockReset().mockResolvedValue({ deployments: [] });
+  reads.listStatefulSets.mockReset().mockResolvedValue({ statefulsets: [] });
+  reads.listDaemonSets.mockReset().mockResolvedValue({ daemonsets: [] });
+  reads.listEvents.mockReset().mockResolvedValue({ events: [] });
+  reads.listResource.mockReset().mockResolvedValue({ items: [] });
+  localStorage.clear(); loadMarks(); resetContexts(); resetView(); resetLock(); loadRecentLogSubjects();
   setState(defaultState([]));
 });
+afterEach(() => vi.restoreAllMocks());
 
 describe("Home", () => {
   it("uses a neutral status for a paused cluster with a retained successful probe", () => {
@@ -97,6 +117,54 @@ describe("Home", () => {
     expect(screen.getByText("Unreachable")).toBeTruthy();
   });
 
+  it("checks only the workspace's connected, unpaused clusters for what needs attention", async () => {
+    const OTHER = ctx("other-id", "other");
+    setContexts([PROD, STAGE, OTHER]);
+    setState(defaultState([PROD, STAGE, OTHER]));
+    setLink(PROD.stableId, "connected");
+    setLink(STAGE.stableId, "connected");
+    setLink(OTHER.stableId, "error", "connection refused");
+    setClusterPaused(currentWorkspace().id, STAGE.stableId, true);
+    reads.podOverview.mockResolvedValue({ pods: { total: 1, byNode: [], truncated: false, unsettled: [
+      { name: "web-7d4b", namespace: "checkout", phase: "Running", status: "CrashLoopBackOff", ready: "0/1", restarts: 9, node: "n1", age: "1h", image: "web" },
+    ] } });
+    render(<Home />);
+    expect(await screen.findByRole("button", { name: "Open Pod checkout/web-7d4b on prod" })).toBeTruthy();
+    expect(reads.podOverview.mock.calls.map(([context]) => context)).toEqual(["prod"]);
+  });
+
+  it("badges each cluster with what needs attention on it, and says when its check failed", async () => {
+    setContexts([PROD, STAGE]);
+    setState(defaultState([PROD, STAGE]));
+    setLink(PROD.stableId, "connected");
+    setLink(STAGE.stableId, "connected");
+    const crashing = (name: string) => ({ name, namespace: "checkout", phase: "Running", status: "CrashLoopBackOff", ready: "0/1", restarts: 9, node: "n1", age: "1h", image: "web" });
+    reads.podOverview.mockImplementation(async (context: string) => context === "prod"
+      ? { pods: { total: 2, byNode: [], truncated: false, unsettled: [crashing("web-1"), crashing("web-2")] } }
+      : { error: "connection refused" });
+    render(<Home />);
+    expect(await screen.findByRole("button", { name: "Open cluster prod — Connected, 2 problems" })).toBeTruthy();
+    expect(screen.getByText("2 problems")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Open cluster staging — Connected, check failed" })).toBeTruthy();
+  });
+
+  it.each([
+    ["the workspace is sealed", () => { lockWorkspace(); return <Home />; }],
+    ["Home is a tab behind another", () => (
+      <PortalScopeProvider scope={{ container: undefined, visible: false, hold: () => () => {} }}><Home /></PortalScopeProvider>
+    )],
+    ["the window is hidden", () => { vi.spyOn(document, "visibilityState", "get").mockReturnValue("hidden"); return <Home />; }],
+  ])("reads nothing while %s", async (_, ui) => {
+    setContexts([PROD]);
+    setState(defaultState([PROD]));
+    setLink(PROD.stableId, "connected");
+    rememberLogSubject({ cluster: PROD.stableId, kind: "Deployment", namespace: "checkout", name: "web" });
+    render(ui());
+    await act(async () => { await Promise.resolve(); });
+    expect(reads.podOverview).not.toHaveBeenCalled();
+    expect(reads.listResource).not.toHaveBeenCalled();
+  });
+
   it.each([["Manage connections", "/connections"], ["Settings", "/settings"], ["Release notes", "/notes"]])(
     "opens %s", async (name, route) => {
       setContexts([]);
@@ -106,6 +174,15 @@ describe("Home", () => {
       expect(screenFor(activeRoute())).not.toBeNull();
     },
   );
+});
+
+it("retries a failed discovery from the getting-started list too", async () => {
+  setContexts([PROD], "source unavailable");
+  listContexts.mockResolvedValue({ contexts: [PROD, STAGE] });
+  render(<Home />);
+  await userEvent.click(await screen.findByRole("button", { name: "Retry checking Connect a cluster" }));
+  expect(listContexts).toHaveBeenCalledTimes(1);
+  expect(await screen.findByRole("button", { name: "Open cluster staging — Not checked" })).toBeTruthy();
 });
 
 it("retries a failed discovery and retains readable clusters if retry fails", async () => {

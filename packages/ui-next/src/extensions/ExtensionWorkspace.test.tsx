@@ -656,7 +656,9 @@ it("shows app cards inside an overview and opens their filtered page in its name
   const onCard = vi.fn();
   render(<ExtensionWorkspace plugin={app} page={app.manifest.contributions.pages[0]} context="staging" namespace="team" onCard={onCard} />);
   const card = await screen.findByRole("region", { name: "Certificates expiring soon" });
-  expect(card.textContent).toContain("2");
+  // The region is drawn before its count resolves ("Loading…"); wait for the
+  // count rather than reading it the moment the card appears.
+  await waitFor(() => expect(card.textContent).toContain("2"));
   fireEvent.click(screen.getByRole("button", { name: "Open Certificates expiring soon" }));
   expect(onCard).toHaveBeenCalledWith("apps", "team", "expiring");
 });

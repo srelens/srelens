@@ -55,6 +55,16 @@ export function openCluster(context: ClusterContext): void {
  * it names its own cluster, whatever the rail shows.
  */
 export function openOnCluster(context: ClusterContext, route: string): void {
+  focusCluster(context);
+  openTab(route, { clusterName: context.name });
+}
+
+/**
+ * {@link openOnCluster} without the tab: put the cluster in this workspace,
+ * read it, and make it the one in focus — for a caller bringing back a tab of
+ * its own, such as Home's recently closed list, rather than opening a route.
+ */
+export function focusCluster(context: ClusterContext): void {
   const workspace = currentWorkspace();
   const id = context.stableId;
   if (!workspace.clusters.includes(id)) {
@@ -69,5 +79,4 @@ export function openOnCluster(context: ClusterContext, route: string): void {
   // tab it may be reusing. Both live in the store, at the point each decision
   // is made, rather than here — see their own notes.
   setActiveCluster(id, context.name);
-  openTab(route, { clusterName: context.name });
 }

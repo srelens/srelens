@@ -12,7 +12,6 @@ import {
   describeStreamEnd,
   logConnectionStatus,
   logLineHealth,
-  listResource,
   logLineLevel,
   podLogs,
   type HealthKind,
@@ -53,15 +52,9 @@ import {
   type LogSubjectResolution,
   type PreviousInstance,
 } from "../lib/logSubject";
-import {
-  forgetLogSubjects,
-  recentKey,
-  rememberLogSubject,
-  reviewRecents,
-  scanKey,
-  useRecentLogSubjects,
-  type SubjectScan,
-} from "../lib/logRecents";
+import { recentKey, rememberLogSubject, useOfferedRecents } from "../lib/logRecents";
+import { useMarkLogStream } from "../lib/liveLogStreams";
+import { useTabScope } from "../lib/tabScope";
 import { openTab } from "../lib/tabsStore";
 import {
   StreamRail,
@@ -521,65 +514,11 @@ export function Logs({ route }: { route: string }) {
  * remembered subject in it, so the check costs a call per pair rather than one
  * per name, and `reviewRecents` decides what each answer means — including the
  * asymmetry between a pod, whose exact name never comes back, and a workload,
- * whose name outlives its pods.
+ * whose name outlives its pods. The check is `useOfferedRecents`, which Home's
+ * "Pick up where you left off" runs too.
  */
 function RecentSubjects({ context, clusterId }: { context: string; clusterId: string }) {
-  const entries = useRecentLogSubjects(clusterId);
-  const [scans, setScans] = useState<ReadonlyMap<string, SubjectScan>>(
-    () => new Map(),
-  );
-  /**
-   * Which lists have already been asked for. A ref, not state: it exists to
-   * stop the effect below asking twice, and putting it in `scans` would mean
-   * depending on `scans` in the effect that sets it — which is a fetch per
-   * answer, forever.
-   */
-  const asked = useRef(new Set<string>());
-
-  // A string, because the dependency is the SET of lists to fetch: `entries`
-  // changes identity whenever any subject is remembered or forgotten, and
-  // re-running on that would re-ask for lists already in hand.
-  const scanKeys = useMemo(
-    () => [...new Set(entries.map(scanKey))].sort().join("\n"),
-    [entries],
-  );
-
-  useEffect(() => {
-    let alive = true;
-    for (const key of scanKeys === "" ? [] : scanKeys.split("\n")) {
-      if (asked.current.has(key)) continue;
-      asked.current.add(key);
-      const [kind, namespace] = key.split("\u0000");
-      // `listResource` reports failure by returning `{ error }` rather than
-      // throwing, so this reads the field — and keeps the failure AS a
-      // failure: see `SubjectScan` for why an empty list is not the same
-      // answer as an unanswered one.
-      void listResource(context, kind, namespace).then((out) => {
-        if (!alive) return;
-        const scan: SubjectScan =
-          out.error !== undefined
-            ? { error: true }
-            : { names: (out.items ?? []).map((item) => item.name) };
-        setScans((current) => new Map(current).set(key, scan));
-      });
-    }
-    return () => {
-      alive = false;
-    };
-  }, [context, scanKeys]);
-
-  const { offered, forget } = useMemo(
-    () => reviewRecents(entries, scans),
-    [entries, scans],
-  );
-
-  // A pod the cluster has replaced is not coming back under that name, and
-  // leaving it in would push a live workload off the end of the cap. Settles
-  // in one pass: the forgotten entries leave `entries`, and the next review
-  // has nothing left to forget.
-  useEffect(() => {
-    forgetLogSubjects(forget.map(recentKey));
-  }, [forget]);
+  const offered = useOfferedRecents(context, clusterId);
 
   if (offered.length === 0) return null;
 
@@ -836,6 +775,8 @@ function LogsStream({
     tailLines: TAIL_LINES,
     source: provider.source,
   });
+  // Home's "Live now" lists this tab only while the stream is actually running.
+  useMarkLogStream(useTabScope(), stream.status !== "error" && stream.status !== "completed");
   /**
    * The restarts the "Scrollback cleared" notice is not about. That notice says a
    * change of window reopened the stream and nothing already sent comes back. A change

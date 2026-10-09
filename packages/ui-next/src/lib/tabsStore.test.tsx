@@ -374,6 +374,20 @@ describe("reopenClosed", () => {
     store.reopenClosed();
     expect(routes()).toEqual(["/"]);
   });
+
+  it("brings back the closed tab it is named, leaving the others closed", () => {
+    store.openTab("/a");
+    const a = active().id;
+    store.openTab("/b");
+    const b = active().id;
+    store.closeTab(a);
+    store.closeTab(b);
+    store.reopenClosed(a);
+    expect(active().route).toBe("/a");
+    expect(store.currentWorkspace().closed.map((t) => t.route)).toEqual(["/b"]);
+    store.reopenClosed("no-such-tab");
+    expect(routes()).toEqual(["/", "/a"]);
+  });
 });
 
 describe("duplicateTab / togglePin", () => {

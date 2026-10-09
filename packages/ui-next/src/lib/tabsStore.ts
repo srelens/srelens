@@ -322,13 +322,18 @@ export function closeAll(): void {
   });
 }
 
-export function reopenClosed(): void {
+/**
+ * Bring a closed tab back as it was — its view and namespace selection with
+ * it — under a fresh id. The most recent by default, which is what the
+ * shortcut asks for; Home's list names the one the reader picked.
+ */
+export function reopenClosed(id?: string): void {
   const w = currentWorkspace();
-  const [last, ...rest] = w.closed;
-  if (!last) return;
+  const tab = id === undefined ? w.closed[0] : w.closed.find((t) => t.id === id);
+  if (!tab) return;
   patchCurrent((w) => {
-    const revived = { ...last, id: newId() };
-    return { ...w, tabs: [...w.tabs, revived], activeId: revived.id, closed: rest };
+    const revived = { ...tab, id: newId() };
+    return { ...w, tabs: [...w.tabs, revived], activeId: revived.id, closed: w.closed.filter((t) => t !== tab) };
   });
 }
 
