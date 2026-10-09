@@ -2025,7 +2025,7 @@ describe("Window — srelens:// deep links", () => {
     expect(store.activeCluster()).toBe("prod");
     expect(tabFor("/k/Pod/payments/web-7d4b")).toBeUndefined();
     const notice = shownNotice() ?? "";
-    expect(notice).toContain("That link will open once the contexts load");
+    expect(notice).toContain("That link will be checked once the contexts load");
     expect(notice).toContain("The kube contexts could not be listed. open /home/dana/.kube/stage: permission denied");
     expect(notice).not.toContain("No kube context named");
 
@@ -2046,7 +2046,7 @@ describe("Window — srelens:// deep links", () => {
     // A later failure is a new one, and is said again.
     act(() => setContexts([ctx("prod")], "open /home/dana/.kube/stage: permission denied"));
     await deliver("srelens://cluster/stage");
-    expect(shownNotice() ?? "").toContain("That link will open once the contexts load");
+    expect(shownNotice() ?? "").toContain("That link will be checked once the contexts load");
   });
 
   it("still refuses at once, while the listing has failed, what no listing can change", async () => {

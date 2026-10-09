@@ -99,7 +99,7 @@ export function parseDeepLink(url: string): DeepLinkTarget | null {
 export const DEEP_LINK_REFUSED = "Couldn't open that link";
 
 /** The title on a held link's notice, in both designs. */
-const DEEP_LINK_HELD = "That link will open once the contexts load";
+const DEEP_LINK_HELD = "That link will be checked once the contexts load";
 
 /**
  * A link that can be opened; the sentence that says why it cannot; or `held`,
@@ -165,7 +165,8 @@ export function checkDeepLink(
 /**
  * The one notice for links held behind a failed listing: what the listing
  * failed with, through `describeError` like every other failure, and that the
- * links will open once the contexts load.
+ * links will be checked once the contexts load. Checked, not opened: a listing
+ * that answers may still lack the context, and the link is refused then.
  */
 export function deepLinkHeldNotice(listingError: string): { title: string; detail: string } {
   return {

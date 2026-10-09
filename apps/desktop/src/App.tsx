@@ -235,7 +235,11 @@ export function App() {
         // Computed from the ref rather than inside the updater: the active id
         // has to be reconciled alongside, and state updaters must stay free
         // of side effects (React re-invokes them in development).
-        const { tabs: kept, dropped } = pruneMissingContexts(remapped, names);
+        // Pruned only on a listing that answered: one that failed, even with
+        // a partial list, has not said a missing context is gone (#855).
+        const { tabs: kept, dropped } = o.error
+          ? { tabs: remapped, dropped: 0 }
+          : pruneMissingContexts(remapped, names);
         const renamed = remapped.some((tab, i) => tab !== tabsRef.current[i]);
         if (renamed && dropped === 0) setTabs(remapped);
         if (dropped > 0) {
@@ -253,7 +257,9 @@ export function App() {
             );
           }
         }
-        sessionPruneReported.current = true;
+        // Not after a failed listing, which judged nothing: the restored
+        // session's tabs are still to be checked, and still owed the notice.
+        if (!o.error) sessionPruneReported.current = true;
       }
     });
   };

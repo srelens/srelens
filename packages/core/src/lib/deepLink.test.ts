@@ -254,7 +254,7 @@ describe("checkDeepLink, while the context listing has failed", () => {
 
   it("says, once, what the listing failed with and that the link will open when the contexts load", () => {
     expect(deepLinkHeldNotice("open /home/dana/.kube/stage: permission denied")).toEqual({
-      title: "That link will open once the contexts load",
+      title: "That link will be checked once the contexts load",
       detail: "The kube contexts could not be listed. open /home/dana/.kube/stage: permission denied",
     });
   });
