@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { useRef, type ReactNode } from "react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { useRef, useState, type ReactNode } from "react";
+import { ConfirmDialog, FilterBar, Popover, Tooltip } from "@srelens/ui-kit";
 import { useEscapeToClose } from "./escapeToClose";
 
 /**
@@ -43,6 +45,130 @@ const esc = (target: Element | Document = document.body, init: KeyboardEventInit
   fireEvent.keyDown(target, { key: "Escape", ...init });
 
 afterEach(cleanup);
+
+/**
+ * With the app's real floating layers, which are Radix's. Radix takes Escape
+ * in the capture phase, closes its top layer and marks the key handled — for
+ * a tooltip exactly as for a dialog — so a stand-in element that never
+ * handles the key proves nothing about how the two share one press.
+ */
+describe("useEscapeToClose, beside the real layers", () => {
+  const user = () => userEvent.setup();
+
+  it("closes a tooltip and the panel on one press: a tooltip is not a claim on the key", async () => {
+    const onClose = vi.fn();
+    render(
+      <Host onClose={onClose}>
+        <Tooltip label="scheduled on node-a">
+          <button type="button">cell</button>
+        </Tooltip>
+      </Host>,
+    );
+    // Focus shows a tooltip at once, as resting the pointer on a cell does.
+    screen.getByRole("button", { name: "cell" }).focus();
+    await screen.findByRole("tooltip");
+
+    await user().keyboard("{Escape}");
+
+    expect(onClose).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(screen.queryByRole("tooltip")).toBeNull());
+  });
+
+  it("closes only a popover on the first press, and the panel on the second", async () => {
+    const onClose = vi.fn();
+    render(
+      <Host onClose={onClose}>
+        <Popover trigger="Columns" label="Columns">
+          <button type="button">Name</button>
+        </Popover>
+      </Host>,
+    );
+    const u = user();
+    await u.click(screen.getByRole("button", { name: "Columns" }));
+    await screen.findByRole("dialog", { name: "Columns" });
+
+    await u.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Columns" })).toBeNull());
+    expect(onClose).not.toHaveBeenCalled();
+
+    await u.keyboard("{Escape}");
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("closes only a dialog on the first press, and the panel on the second", async () => {
+    const onClose = vi.fn();
+    function WithDialog() {
+      const [asking, setAsking] = useState(true);
+      return (
+        <Host onClose={onClose}>
+          {asking && (
+            <ConfirmDialog
+              title="Delete web-0?"
+              message="This cannot be undone."
+              confirmLabel="Delete"
+              onConfirm={() => setAsking(false)}
+              onCancel={() => setAsking(false)}
+            />
+          )}
+        </Host>
+      );
+    }
+    render(<WithDialog />);
+    await screen.findByRole("dialog", { name: "Delete web-0?" });
+    const u = user();
+
+    await u.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Delete web-0?" })).toBeNull());
+    expect(onClose).not.toHaveBeenCalled();
+
+    await u.keyboard("{Escape}");
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("leaves Escape to the real filter while it has text, and takes it once the filter is empty", async () => {
+    const onClose = vi.fn();
+    function WithFilter() {
+      const [value, setValue] = useState("");
+      return (
+        <Host onClose={onClose}>
+          <FilterBar value={value} onValueChange={setValue} label="Filter pods" />
+        </Host>
+      );
+    }
+    render(<WithFilter />);
+    const u = user();
+    const filter = screen.getByRole("searchbox", { name: "Filter pods" }) as HTMLInputElement;
+    await u.type(filter, "web");
+
+    await u.keyboard("{Escape}");
+    expect(filter.value).toBe("");
+    expect(onClose).not.toHaveBeenCalled();
+
+    // Empty now: the kit leaves the key to whatever the list is inside.
+    await u.keyboard("{Escape}");
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not let a tooltip excuse a filter that claimed the key", async () => {
+    // Both at once: a cell's tooltip is up while the reader types a filter.
+    const onClose = vi.fn();
+    function Both() {
+      const [value, setValue] = useState("web");
+      return (
+        <Host onClose={onClose}>
+          <FilterBar value={value} onValueChange={setValue} label="Filter pods" />
+          <div data-radix-popper-content-wrapper="">
+            <span role="tooltip">node-a</span>
+          </div>
+        </Host>
+      );
+    }
+    render(<Both />);
+    screen.getByRole("searchbox", { name: "Filter pods" }).focus();
+    await user().keyboard("{Escape}");
+    expect(onClose).not.toHaveBeenCalled();
+  });
+});
 
 describe("useEscapeToClose", () => {
   /**

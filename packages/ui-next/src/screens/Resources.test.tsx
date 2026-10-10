@@ -1678,12 +1678,23 @@ describe("the detail pane's two hosts", () => {
       await waitFor(() => expect(document.activeElement).toBe(tableRow("api-7")));
     });
 
-    it("leaves the peek open when Escape is the filter box's", async () => {
+    it("leaves the peek open when Escape is the filter box's: it has a filter to clear", async () => {
       await peeked();
-      const filter = screen.getByRole("searchbox", { name: "Filter pods" });
-      filter.focus();
-      fireEvent.keyDown(filter, { key: "Escape" });
+      const filter = screen.getByRole("searchbox", { name: "Filter pods" }) as HTMLInputElement;
+      await userEvent.type(filter, "web");
+      await userEvent.keyboard("{Escape}");
+      // The filter took the key and cleared itself; the panel is untouched.
+      expect(filter.value).toBe("");
       expect(peekPane()).not.toBeNull();
+    });
+
+    it("closes the peek from an empty filter box, which has no use for the key", async () => {
+      // The kit's own rule: a filter claims Escape only while it has
+      // something to drop, so the reader is not trapped one level down.
+      await peeked();
+      screen.getByRole("searchbox", { name: "Filter pods" }).focus();
+      await userEvent.keyboard("{Escape}");
+      await waitFor(() => expect(peekPane()).toBeNull());
     });
 
     it("opens the next row's detail after closing one, with nothing left over", async () => {
