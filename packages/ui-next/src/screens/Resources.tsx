@@ -30,6 +30,7 @@ import { useConsole } from "../console";
 import { getKubeconfigFiles, useActiveContext } from "../lib/clusters";
 import { useHiddenColumns } from "../lib/columnPrefs";
 import { detailRoute, newRoute, parseDetailRoute } from "../lib/detailRoute";
+import { useEscapeToClose } from "../lib/escapeToClose";
 import { customDescriptor } from "../lib/kinds/custom";
 import { descriptorFor } from "../lib/kinds/descriptors";
 import { addNamespace, useRowRefocus, withNamespaceSelect } from "../lib/kinds/namespaceCell";
@@ -347,6 +348,24 @@ function KindList({
   const listRow = usePeekBounds();
   const peekWidth = clampPeekWidth(usePeekWidth(), listRow.bounds);
 
+  /**
+   * Dismiss the peek, and leave the keyboard on the row it was opened from.
+   *
+   * One way out for both of the panel's closers — its own button and Escape
+   * inside it, and Escape pressed anywhere else on this screen (#883). When
+   * the press came from inside the panel, focus goes with the panel as it
+   * leaves the page; `refocus` puts it back on the row, so the arrow keys
+   * carry on from where the reader was and Enter opens the next one. When
+   * focus never left the row, there is nothing to put back.
+   */
+  function closePeek() {
+    if (peek) refocus.remember(rowKey({ name: peek.name, namespace: peek.namespace ?? undefined }));
+    setPeek(null);
+  }
+  // `refocus.scope` is the list itself: an element of this screen, which is
+  // all the hook needs to know whether this tab is the one being looked at.
+  useEscapeToClose(peek !== null, closePeek, refocus.scope);
+
   function peekAt(rowNamespace: string | null, rowName: string) {
     setPeek((prev) =>
       prev && prev.name === rowName && prev.namespace === rowNamespace
@@ -506,7 +525,7 @@ function KindList({
             // not dismiss: the reader asked for a tab, not for the list to
             // stop showing them what they were looking at.
             peek={{
-              onClose: () => setPeek(null),
+              onClose: closePeek,
               onOpenTab: () => openRowTab(peek.namespace, peek.name),
             }}
           />
