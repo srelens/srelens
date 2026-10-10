@@ -894,6 +894,17 @@ mod tests {
         let has_list_ns = tools.iter().any(|t| t.name.contains("listNamespaces"));
         assert!(has_list_pods, "should include listPods capability");
         assert!(has_list_ns, "should include listNamespaces capability");
+
+        // Verify every CORE_SRE_TOOLS entry is served by the registry (matching safe underscore alias)
+        let tool_names: std::collections::HashSet<String> =
+            tools.into_iter().map(|t| t.name).collect();
+        for &expected in srelens_llm::invoker::CORE_SRE_TOOLS {
+            let safe_alias = expected.replace('.', "_");
+            assert!(
+                tool_names.contains(expected) || tool_names.contains(&safe_alias),
+                "allowlisted tool '{expected}' (or alias '{safe_alias}') must exist in registry"
+            );
+        }
     }
 
     #[test]

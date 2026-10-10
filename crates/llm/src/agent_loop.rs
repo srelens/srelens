@@ -187,7 +187,9 @@ async fn invoke_one(
             }
         }
         Err(e) => {
-            let summary = srelens_agent::event::summarize_result(&e.to_string(), true);
+            let err_str = e.to_string();
+            let content = cap_tool_result_content(&call.name, &err_str);
+            let summary = srelens_agent::event::summarize_result(&content, true);
             on_event(AgentEvent::ToolResult {
                 id: call.id.clone(),
                 status: ToolStatus::Error,
@@ -196,7 +198,7 @@ async fn invoke_one(
             ToolOutcome {
                 id: call.id.clone(),
                 name: call.name.clone(),
-                content: e.to_string(),
+                content,
                 is_error: true,
             }
         }
@@ -727,6 +729,56 @@ mod tests {
             }),
             "events: {events:?}"
         );
+    }
+
+    struct LargeErrorInvoker;
+
+    #[async_trait]
+    impl ToolInvoker for LargeErrorInvoker {
+        async fn list_tools(&self) -> Result<Vec<ToolDef>, LlmError> {
+            Ok(vec![ToolDef {
+                name: "k8s_scale".into(),
+                description: "scale".into(),
+                input_schema: json!({ "type": "object" }),
+                read_only: false,
+            }])
+        }
+
+        async fn call_tool(&self, _name: &str, _args: &Value) -> Result<ToolCallResult, LlmError> {
+            Err(LlmError::Api(
+                "fatal error trace: ".to_string() + &"x".repeat(25 * 1024),
+            ))
+        }
+    }
+
+    #[test]
+    fn a_large_tool_error_is_capped_in_outcome_and_event() {
+        let provider = ScriptedProvider::new(vec![
+            vec![
+                StreamItem::ToolCall(ToolCall {
+                    id: "c1".into(),
+                    name: "k8s_scale".into(),
+                    arguments: json!({}),
+                    thought_signature: None,
+                }),
+                StreamItem::Done(StopReason::ToolUse),
+            ],
+            vec![
+                StreamItem::Text("done".into()),
+                StreamItem::Done(StopReason::EndTurn),
+            ],
+        ]);
+        let (_events, returned_history) =
+            drive_from(&provider, &LargeErrorInvoker, Vec::new(), "scale it");
+        if let Turn::ToolResults(outcomes) = &returned_history[2] {
+            assert!(outcomes[0].is_error);
+            assert!(outcomes[0].content.len() <= MAX_AGENT_TOOL_RESULT_BYTES);
+            assert!(outcomes[0]
+                .content
+                .contains("[Output truncated at 16KB for `k8s_scale`"));
+        } else {
+            panic!("Expected Turn::ToolResults at index 2");
+        }
     }
 
     #[test]
