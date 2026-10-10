@@ -1627,6 +1627,98 @@ describe("the detail pane's two hosts", () => {
     expect(rowNames()).toEqual(["web-1", "api-7"]);
   });
 
+  /**
+   * #883: the peek is opened by clicking a row, which leaves focus on the
+   * row. Escape pressed then was a key pressed outside the panel, and the
+   * panel only listened inside itself.
+   */
+  describe("Escape", () => {
+    const tableRow = (name: string) => row(name).closest("tr") as HTMLElement;
+    const peeked = async (name = "web-1") => {
+      open("/k/pods");
+      await waitFor(() => expect(rowNames()).toEqual(["web-1", "api-7"]));
+      fireEvent.click(row(name));
+      await waitFor(() => expect(paneName()).toBe(name));
+    };
+
+    it("closes the peek with focus still on the row that opened it, and leaves focus there", async () => {
+      await peeked();
+      tableRow("web-1").focus();
+
+      fireEvent.keyDown(tableRow("web-1"), { key: "Escape" });
+
+      await waitFor(() => expect(peekPane()).toBeNull());
+      expect(rowNames()).toEqual(["web-1", "api-7"]);
+      expect(document.activeElement).toBe(tableRow("web-1"));
+    });
+
+    it("closes the peek with focus nowhere in particular", async () => {
+      await peeked();
+      fireEvent.keyDown(document.body, { key: "Escape" });
+      await waitFor(() => expect(peekPane()).toBeNull());
+    });
+
+    it("closes it once from inside the panel, and hands the keyboard back to the row", async () => {
+      await peeked();
+      const close = screen.getByRole("button", { name: "Close inspector" });
+      close.focus();
+
+      fireEvent.keyDown(close, { key: "Escape" });
+
+      await waitFor(() => expect(peekPane()).toBeNull());
+      // Focus went with the panel as it left; it is put back on the row, so
+      // the arrow keys carry on from where the reader was.
+      await waitFor(() => expect(document.activeElement).toBe(tableRow("web-1")));
+    });
+
+    it("hands the keyboard back to the row when the panel is closed by its button, too", async () => {
+      await peeked("api-7");
+      await userEvent.click(screen.getByRole("button", { name: "Close inspector" }));
+      await waitFor(() => expect(peekPane()).toBeNull());
+      await waitFor(() => expect(document.activeElement).toBe(tableRow("api-7")));
+    });
+
+    it("leaves the peek open when Escape is the filter box's: it has a filter to clear", async () => {
+      await peeked();
+      const filter = screen.getByRole("searchbox", { name: "Filter pods" }) as HTMLInputElement;
+      await userEvent.type(filter, "web");
+      await userEvent.keyboard("{Escape}");
+      // The filter took the key and cleared itself; the panel is untouched —
+      // still there a moment later, so a close that was only deferred would
+      // not slip past this.
+      expect(filter.value).toBe("");
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      });
+      expect(peekPane()).not.toBeNull();
+    });
+
+    it("closes the peek from an empty filter box, which has no use for the key", async () => {
+      // The kit's own rule: a filter claims Escape only while it has
+      // something to drop, so the reader is not trapped one level down.
+      await peeked();
+      screen.getByRole("searchbox", { name: "Filter pods" }).focus();
+      await userEvent.keyboard("{Escape}");
+      await waitFor(() => expect(peekPane()).toBeNull());
+    });
+
+    it("opens the next row's detail after closing one, with nothing left over", async () => {
+      await peeked();
+      fireEvent.keyDown(document.body, { key: "Escape" });
+      await waitFor(() => expect(peekPane()).toBeNull());
+      fireEvent.click(row("api-7"));
+      await waitFor(() => expect(paneName()).toBe("api-7"));
+    });
+
+    it("does nothing with no peek open", async () => {
+      open("/k/pods");
+      await waitFor(() => expect(rowNames()).toEqual(["web-1", "api-7"]));
+      fireEvent.keyDown(document.body, { key: "Escape" });
+      expect(rowNames()).toEqual(["web-1", "api-7"]);
+      expect(peekPane()).toBeNull();
+    });
+  });
+
   it("does not refetch when the peek is already showing that row", async () => {
     open("/k/pods");
     await waitFor(() => expect(rowNames()).toEqual(["web-1", "api-7"]));

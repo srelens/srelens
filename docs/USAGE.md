@@ -378,7 +378,7 @@ each key applies. The ones worth knowing before you look:
 | **Cmd-W** (macOS only) | Close the tab — or the window, on the last one. It comes from the macOS app menu, so there is no Windows/Linux equivalent yet. |
 | **Cmd/Ctrl +** / **-** / **0** | Interface larger / smaller / reset |
 | **Cmd/Ctrl-F** | Search the terminal's scrollback, or find in the YAML editor |
-| **Esc** | Close the open dialog, drawer, or search bar |
+| **Esc** | Close the open dialog or menu, clear a search field, or close the detail panel beside a list (one thing per press, innermost first) |
 
 ## Deep links
 
