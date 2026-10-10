@@ -1683,8 +1683,13 @@ describe("the detail pane's two hosts", () => {
       const filter = screen.getByRole("searchbox", { name: "Filter pods" }) as HTMLInputElement;
       await userEvent.type(filter, "web");
       await userEvent.keyboard("{Escape}");
-      // The filter took the key and cleared itself; the panel is untouched.
+      // The filter took the key and cleared itself; the panel is untouched —
+      // still there a moment later, so a close that was only deferred would
+      // not slip past this.
       expect(filter.value).toBe("");
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      });
       expect(peekPane()).not.toBeNull();
     });
 

@@ -149,24 +149,36 @@ describe("useEscapeToClose, beside the real layers", () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
-  it("does not let a tooltip excuse a filter that claimed the key", async () => {
-    // Both at once: a cell's tooltip is up while the reader types a filter.
+  it("does not let a tooltip excuse a field that takes the key", async () => {
+    // Both at once: a cell's tooltip is up while the reader types in a field.
+    // Radix dismisses the tooltip and marks the key handled, which is exactly
+    // what the tooltip exception forgives — so the field has to be what holds
+    // the panel open, and it is read before anything acts.
     const onClose = vi.fn();
-    function Both() {
-      const [value, setValue] = useState("web");
-      return (
-        <Host onClose={onClose}>
-          <FilterBar value={value} onValueChange={setValue} label="Filter pods" />
-          <div data-radix-popper-content-wrapper="">
-            <span role="tooltip">node-a</span>
-          </div>
-        </Host>
-      );
+    render(
+      <Host onClose={onClose}>
+        <div data-radix-popper-content-wrapper="">
+          <span role="tooltip">node-a</span>
+        </div>
+      </Host>,
+    );
+    // What Radix does for its top layer: capture phase, on the document.
+    const radix = (event: KeyboardEvent) => {
+      if (event.key === "Escape") event.preventDefault();
+    };
+    document.addEventListener("keydown", radix, true);
+    try {
+      // A plain text field: it claims nothing and stops nothing itself.
+      screen.getByLabelText("filter").focus();
+      await user().keyboard("{Escape}");
+      expect(onClose).not.toHaveBeenCalled();
+      // Without the field, the same press with the same tooltip does close.
+      screen.getByRole("button", { name: "row" }).focus();
+      await user().keyboard("{Escape}");
+      expect(onClose).toHaveBeenCalledTimes(1);
+    } finally {
+      document.removeEventListener("keydown", radix, true);
     }
-    render(<Both />);
-    screen.getByRole("searchbox", { name: "Filter pods" }).focus();
-    await user().keyboard("{Escape}");
-    expect(onClose).not.toHaveBeenCalled();
   });
 });
 
