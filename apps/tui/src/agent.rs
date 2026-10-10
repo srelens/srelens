@@ -316,9 +316,13 @@ pub async fn run_native_agent_turn(
         }
     };
 
+    let filtered_invoker = srelens_llm::invoker::FilteredToolInvoker::new(
+        invoker.clone(),
+        srelens_llm::invoker::CORE_SRE_TOOLS,
+    );
     let run_fut = srelens_llm::agent_loop::run(
         &provider,
-        invoker.as_ref(),
+        &filtered_invoker,
         prior_turns,
         enriched_prompt,
         &mut on_event,
@@ -372,11 +376,7 @@ pub async fn run_native_agent_turn(
         Ok(updated_turns) => {
             {
                 let mut lock = history.lock().await;
-                *lock = updated_turns;
-                if lock.len() > 40 {
-                    let excess = lock.len() - 40;
-                    lock.drain(0..excess);
-                }
+                *lock = srelens_llm::history::distill_and_trim_history(updated_turns, 40);
             }
             let _ = event_tx.send(AppEvent::ActionResult {
                 title: format!("ai_done:{}", active_context),
@@ -894,6 +894,17 @@ mod tests {
         let has_list_ns = tools.iter().any(|t| t.name.contains("listNamespaces"));
         assert!(has_list_pods, "should include listPods capability");
         assert!(has_list_ns, "should include listNamespaces capability");
+
+        // Verify every CORE_SRE_TOOLS entry is served by the registry (matching safe underscore alias)
+        let tool_names: std::collections::HashSet<String> =
+            tools.into_iter().map(|t| t.name).collect();
+        for &expected in srelens_llm::invoker::CORE_SRE_TOOLS {
+            let safe_alias = expected.replace('.', "_");
+            assert!(
+                tool_names.contains(expected) || tool_names.contains(&safe_alias),
+                "allowlisted tool '{expected}' (or alias '{safe_alias}') must exist in registry"
+            );
+        }
     }
 
     #[test]

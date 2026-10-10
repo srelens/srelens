@@ -57,22 +57,12 @@ impl NativeHistory {
     }
 }
 
-/// Trim a conversation to at most `max` turns, dropping the oldest. A
-/// conversation must begin on a user turn (an assistant or tool-result turn with
-/// no preceding user message is invalid for every provider), so after removing
-/// the oldest turn we keep dropping any leading non-user turns.
+/// Distill and trim conversation history using the shared srelens_llm engine.
 fn trim_history(
-    mut turns: Vec<srelens_llm::types::Turn>,
+    turns: Vec<srelens_llm::types::Turn>,
     max: usize,
 ) -> Vec<srelens_llm::types::Turn> {
-    use srelens_llm::types::Turn;
-    while turns.len() > max {
-        turns.remove(0);
-        while turns.first().is_some_and(|t| !matches!(t, Turn::User(_))) {
-            turns.remove(0);
-        }
-    }
-    turns
+    srelens_llm::history::distill_and_trim_history(turns, max)
 }
 
 /// A `ToolInvoker` backed by an in-process `McpServer`. Each call is a JSON-RPC
@@ -289,6 +279,7 @@ pub async fn run_native_agent(
     let mcp = app.state::<crate::mcp::McpHttpManager>();
     let server = Arc::new(mcp.build_server(&app, pending.inner(), &audit.0, &prompts.0));
     let invoker = McpToolInvoker::new(server).with_caller(srelens_mcp::policy::Caller::Chat(session.clone()));
+    let filtered_invoker = srelens_llm::invoker::FilteredToolInvoker::new(invoker, srelens_llm::invoker::CORE_SRE_TOOLS);
     let provider = srelens_llm::HttpProvider::new(cfg);
 
     // Seed the turn with this session's prior conversation so follow-ups have
@@ -304,7 +295,7 @@ pub async fn run_native_agent(
     let handle = tokio::spawn(async move {
         let mut on_event =
             |ev: AgentEvent| task_sink.emit(&task_channel, serde_json::to_value(&ev).unwrap());
-        srelens_llm::agent_loop::run(&provider, &invoker, prior, prompt, &mut on_event).await
+        srelens_llm::agent_loop::run(&provider, &filtered_invoker, prior, prompt, &mut on_event).await
     });
 
     chats.register_native(session.clone(), handle.abort_handle());

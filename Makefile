@@ -1,4 +1,4 @@
-.PHONY: srectl help
+.PHONY: srectl srelens-tui help
 
 DEST_DIR ?= $(HOME)/.local/bin
 TARGET_BIN ?= $(DEST_DIR)/srectl
@@ -11,6 +11,9 @@ srectl:
 	@codesign -f -s - $(TARGET_BIN) 2>/dev/null || true
 	@echo "✓ Successfully built, signed, and installed srectl to $(TARGET_BIN)"
 
+srelens-tui: srectl
+
 help:
 	@echo "Available targets:"
-	@echo "  make srectl   Build release binary and install to $(DEST_DIR)/srectl"
+	@echo "  make srectl       Build release binary and install to $(DEST_DIR)/srectl"
+	@echo "  make srelens-tui  (compatibility alias for srectl)"
