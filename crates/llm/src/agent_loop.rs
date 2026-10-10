@@ -224,7 +224,13 @@ pub fn cap_tool_result_content(tool_name: &str, content: &str) -> String {
     }
 
     if is_log_tool(tool_name) {
-        let mut start = content.len().saturating_sub(MAX_AGENT_TOOL_RESULT_BYTES);
+        // Log streams: keep the newest lines at the tail where panics, errors, and crashes appear.
+        // Budget space for the notice header so total output never exceeds MAX_AGENT_TOOL_RESULT_BYTES.
+        let notice_prefix = format!(
+            "[Earlier log lines truncated (kept newest bytes for `{tool_name}`). Specify tail_lines or container if needed.]\n\n"
+        );
+        let max_tail = MAX_AGENT_TOOL_RESULT_BYTES.saturating_sub(notice_prefix.len() + 10);
+        let mut start = content.len().saturating_sub(max_tail);
         while start < content.len() && !content.is_char_boundary(start) {
             start += 1;
         }
@@ -240,16 +246,19 @@ pub fn cap_tool_result_content(tool_name: &str, content: &str) -> String {
             tail
         )
     } else {
+        // Structured objects/lists: keep head and reserve budget for notice suffix.
+        let notice = format!(
+            "\n\n[Output truncated at 16KB for `{tool_name}`. Output exceeded limit; specify more focused selectors, namespace, or fields.]"
+        );
+        let max_head = MAX_AGENT_TOOL_RESULT_BYTES.saturating_sub(notice.len());
         let boundary = content
             .char_indices()
-            .take_while(|(idx, _)| *idx <= MAX_AGENT_TOOL_RESULT_BYTES)
+            .take_while(|(idx, _)| *idx <= max_head)
             .last()
             .map(|(idx, _)| idx)
             .unwrap_or(0);
         let mut truncated = content[..boundary].to_string();
-        truncated.push_str(&format!(
-            "\n\n[Output truncated at 16KB for `{tool_name}`. Output exceeded limit; specify more focused selectors, namespace, or fields.]"
-        ));
+        truncated.push_str(&notice);
         truncated
     }
 }
@@ -853,7 +862,7 @@ mod tests {
     fn test_cap_tool_result_content_structured_tool_truncates_head_with_hint() {
         let large = "a".repeat(20 * 1024);
         let capped = cap_tool_result_content("k8s_listPods", &large);
-        assert!(capped.len() < large.len());
+        assert!(capped.len() <= MAX_AGENT_TOOL_RESULT_BYTES);
         assert!(capped.contains("[Output truncated at 16KB for `k8s_listPods`"));
         assert!(capped.contains("specify more focused selectors"));
     }
@@ -865,7 +874,7 @@ mod tests {
         large.push_str("\nCRITICAL_PANIC_AT_TAIL\n");
 
         let capped = cap_tool_result_content("k8s_podLogs", &large);
-        assert!(capped.len() < large.len());
+        assert!(capped.len() <= MAX_AGENT_TOOL_RESULT_BYTES);
         assert!(capped.contains("[Earlier log lines truncated (kept newest"));
         assert!(capped.contains("CRITICAL_PANIC_AT_TAIL"));
         assert!(!capped.contains("OLD_STARTUP_LOG"));

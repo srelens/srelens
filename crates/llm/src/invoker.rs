@@ -16,7 +16,7 @@ use crate::error::LlmError;
 use crate::provider::{ToolCallResult, ToolInvoker};
 use crate::types::ToolDef;
 
-/// Core 40 Kubernetes SRE tools essential for workload diagnosis, manifest inspection,
+/// Core 41 Kubernetes SRE tools essential for workload diagnosis, manifest inspection,
 /// event timeline triage, node health, networking, and safe remediation.
 pub const CORE_SRE_TOOLS: &[&str] = &[
     // Workloads & Pods
@@ -36,6 +36,7 @@ pub const CORE_SRE_TOOLS: &[&str] = &[
     "k8s.getObject",
     "k8s.diffManifest",
     "k8s.getCustomResource",
+    "k8s.listCustomResource",
     "k8s.listResource",
     // Diagnostics & Triage
     "k8s.listChanges",
@@ -196,8 +197,9 @@ mod tests {
 
     #[test]
     fn test_core_sre_tools_count_and_inclusions() {
-        assert_eq!(CORE_SRE_TOOLS.len(), 40);
+        assert_eq!(CORE_SRE_TOOLS.len(), 41);
         assert!(CORE_SRE_TOOLS.contains(&"k8s.listResource"));
+        assert!(CORE_SRE_TOOLS.contains(&"k8s.listCustomResource"));
         assert!(CORE_SRE_TOOLS.contains(&"k8s.listEndpoints"));
         assert!(CORE_SRE_TOOLS.contains(&"k8s.listEndpointSlices"));
         assert!(CORE_SRE_TOOLS.contains(&"k8s.podLogs"));
