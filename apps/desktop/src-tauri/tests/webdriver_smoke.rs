@@ -32,6 +32,11 @@
 //! The app runs under a throwaway `HOME` so the vault starts at first-launch
 //! setup and no real user state is touched; `KUBECONFIG` is pinned to the
 //! real one so the kind context stays visible from inside that sandbox.
+//!
+//! It drives the new design — the default every fresh profile opens on
+//! (`packages/ui-next`) — and finds what it clicks by role and accessible
+//! name, the way a reader using assistive technology would, rather than by
+//! the classes a restyle renames.
 
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -109,10 +114,10 @@ fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..").canonicalize().unwrap()
 }
 
-/// Wait until something on the page contains `needle`.
-async fn wait_text(driver: &WebDriver, needle: &str, secs: u64) -> WebDriverResult<WebElement> {
+/// Wait until an element matching `by` exists.
+async fn wait_for(driver: &WebDriver, by: By, secs: u64) -> WebDriverResult<WebElement> {
     driver
-        .query(By::XPath(format!("//*[contains(normalize-space(.), '{needle}')]")))
+        .query(by)
         .wait(Duration::from_secs(secs), Duration::from_millis(500))
         .first()
         .await
@@ -120,12 +125,10 @@ async fn wait_text(driver: &WebDriver, needle: &str, secs: u64) -> WebDriverResu
 
 /// Click the first element matching `by`, retrying until `secs` — on
 /// absence AND on click rejection. The retry-on-intercepted half matters as
-/// much as the wait: the app mounts views UNDER overlays (the vault gate,
-/// dialogs), so a target can exist and still be legitimately covered for
-/// seconds — e.g. the landing page behind the gate while a debug build's
-/// argon2id derivation finishes. One attempt would fail instantly with
-/// ElementClickIntercepted; retrying makes every click "when actually
-/// clickable, within the deadline".
+/// much as the wait: a target can exist and still be legitimately covered
+/// for a moment — by a dialog on its way out, or a popover's panel — and one
+/// attempt would fail instantly with ElementClickIntercepted; retrying makes
+/// every click "when actually clickable, within the deadline".
 async fn click(driver: &WebDriver, by: By, secs: u64) -> WebDriverResult<()> {
     let deadline = Instant::now() + Duration::from_secs(secs);
     loop {
@@ -141,10 +144,6 @@ async fn click(driver: &WebDriver, by: By, secs: u64) -> WebDriverResult<()> {
             Err(_) => tokio::time::sleep(Duration::from_millis(500)).await,
         }
     }
-}
-
-async fn button_by_text(driver: &WebDriver, text: &str, secs: u64) -> WebDriverResult<()> {
-    click(driver, By::XPath(format!("//button[normalize-space()='{text}']")), secs).await
 }
 
 #[tokio::test]
@@ -188,17 +187,6 @@ async fn smoke_launch_to_logs_against_kind() {
     });
     let home = std::env::temp_dir().join(format!("srelens-smoke-home-{}", std::process::id()));
     std::fs::create_dir_all(&home).expect("smoke HOME");
-    // This flow drives classic's screens, and a fresh profile now opens the
-    // new design, so the sandbox starts with classic chosen, the way a user
-    // who kept it would. Where `default_settings_path` puts it under the
-    // XDG_CONFIG_HOME set below, in the document shape it reads.
-    let settings = home.join(".config/app.srelens.desktop/settings.json");
-    std::fs::create_dir_all(settings.parent().expect("settings dir")).expect("smoke settings dir");
-    std::fs::write(
-        &settings,
-        r#"{"schema_version":1,"local_storage_migrated":false,"values":{"srelens.design":"classic"}}"#,
-    )
-    .expect("smoke settings");
     // On a PANIC (setup failures like session creation — distinct from the
     // in-flow error path below), the guard still preserves the app's logs
     // into the artifacts dir before removing the sandbox.
@@ -281,84 +269,135 @@ type FlowError = Box<dyn std::error::Error + Send + Sync>;
 /// app logs) and the fixture/HOME cleanup only run on a RETURNED error — a
 /// panic would unwind straight past the diagnostics meant to explain it.
 async fn run_flow(driver: &WebDriver, context: &str, full: bool) -> Result<(), FlowError> {
-    // ---- 1. First-launch vault gate: create the master password. The
-    // recovery checkbox is UNCHECKED first — CI has no OS keychain, and the
-    // setup must not depend on one.
-    driver
-        .query(By::Css("input[placeholder='At least 8 characters']"))
-        .wait(Duration::from_secs(60), Duration::from_millis(500))
-        .first()
-        .await?;
+    // ---- 1. First-launch vault gate: `LockGate`'s setup form, which covers
+    // the whole window until a master passphrase exists. The recovery
+    // checkbox is UNCHECKED first — CI has no OS keychain, and the setup must
+    // not depend on one.
+    wait_for(driver, By::Css("input[aria-label='Master passphrase']"), 60).await?;
     // The gate is driven by SCRIPT, not synthesized input: WebDriver-level
-    // interaction with this form proved environment-flaky in two different
-    // ways (CI intercepted the button click; the local container
-    // intercepted the label-nested checkbox and dropped keys mid-render).
-    // The gate is prerequisite plumbing — the WebView↔Rust bridge under
-    // test is exercised by everything AFTER it, which stays real
-    // interaction. React controlled inputs need the native value setter +
-    // an input event; requestSubmit fires the form's onSubmit exactly like
-    // a user submission.
+    // interaction with classic's version of this form proved
+    // environment-flaky in two different ways (CI intercepted the button
+    // click; the local container intercepted the label-nested checkbox and
+    // dropped keys mid-render). The gate is prerequisite plumbing — the
+    // WebView↔Rust bridge under test is exercised by everything AFTER it,
+    // which stays real interaction. React controlled inputs need the native
+    // value setter + an input event.
     driver
         .execute(
             r#"
             const set = Object.getOwnPropertyDescriptor(
                 window.HTMLInputElement.prototype, 'value').set;
-            for (const el of document.querySelectorAll("input[type='password']")) {
+            for (const name of ['Master passphrase', 'Repeat the passphrase']) {
+                const el = document.querySelector(`input[aria-label='${name}']`);
                 set.call(el, arguments[0]);
                 el.dispatchEvent(new Event('input', { bubbles: true }));
             }
-            const cb = document.querySelector("input[type='checkbox'].accent-primary");
-            if (cb && cb.checked) cb.click();
-            document.querySelector('form').requestSubmit();
+            for (const label of document.querySelectorAll('label')) {
+                const cb = label.querySelector("input[type='checkbox']");
+                if (cb && cb.checked && label.textContent.includes('recovery copy')) cb.click();
+            }
             "#,
             vec![serde_json::json!(MASTER_PASSWORD)],
         )
         .await?;
+    // The form has no `<form>` to submit: its button stays disabled until
+    // React has taken both entries, so the click waits for it to be enabled
+    // — a click on a disabled button "succeeds" and does nothing.
+    let create = wait_for(
+        driver,
+        By::XPath("//button[normalize-space()='Create passphrase' and not(@disabled)]".to_string()),
+        15,
+    )
+    .await?;
+    driver.execute("arguments[0].click();", vec![create.to_json()?]).await?;
 
-    // ---- 2. Land, and open the kind context from the landing page.
-    click(driver, By::Css(&format!("[aria-label='Open context {context}']")), 60).await?;
+    // ---- 2. The cover lifts onto the shell: the cluster rail and the tab
+    // strip. Sixty seconds, because the cover stays up for a debug build's
+    // argon2id derivation.
+    wait_for(driver, By::XPath("//nav[@aria-label='Clusters']".to_string()), 60).await?;
+    wait_for(
+        driver,
+        By::XPath("//*[@role='tablist' and @aria-label='Open tabs']".to_string()),
+        10,
+    )
+    .await?;
 
-    // ---- 3. Browse pods. Opening a context lands on Overview, so only the
-    // Cluster section starts expanded (`openByDefault` keys off the active
-    // kind in Sidebar.tsx) — the Workloads section must be DISCLOSED before
-    // its Pods entry exists in the DOM at all. Pods is still tried briefly
-    // first, so a future default-open change can't break this by turning
-    // the heading click into a collapse.
-    wait_text(driver, "Workloads", 30).await?;
-    if button_by_text(driver, "Pods", 3).await.is_err() {
-        click(
-            driver,
-            By::XPath("//button[contains(normalize-space(.), 'Workloads')]".to_string()),
-            15,
-        )
-        .await?;
-        button_by_text(driver, "Pods", 15).await?;
-    }
-
-    // ---- 4. The fixture pod is in the default namespace; open its detail.
+    // ---- 3. A fresh profile opens on Home; open the kind context from its
+    // cluster list. The row's name carries the link state after the em dash
+    // (`Open cluster <name> — Connected`), which changes as the probe lands.
     click(
         driver,
-        By::XPath(format!("//*[contains(normalize-space(text()), '{POD}')]")),
+        By::XPath(format!("//button[starts-with(@aria-label, 'Open cluster {context} \u{2014}')]")),
         60,
     )
     .await?;
 
+    // ---- 4. Browse pods through the sidebar's tree. Its groups start
+    // collapsed, so Workloads must be DISCLOSED before its Pods entry exists
+    // in the DOM at all. Clicked only while it says it is collapsed, so a
+    // future default-open change can't turn the click into a collapse.
+    let tree = "//*[@role='tree' and @aria-label='Cluster resources']";
+    let workloads = format!("{tree}//*[@role='treeitem' and normalize-space()='Workloads']");
+    let group = wait_for(driver, By::XPath(workloads.clone()), 30).await?;
+    if group.attr("aria-expanded").await?.as_deref() == Some("false") {
+        click(driver, By::XPath(format!("{workloads}[@aria-expanded='false']")), 15).await?;
+    }
+    click(
+        driver,
+        By::XPath(format!("{tree}//*[@role='treeitem' and normalize-space()='Pods']")),
+        15,
+    )
+    .await?;
+
+    // ---- 5. The fixture pod is in the default namespace, which a fresh
+    // profile's "all namespaces" includes. A single click on its row opens
+    // the peek beside the list. Rows the table renders aria-hidden — its
+    // row-height sample — are not the row a reader clicks.
+    click(
+        driver,
+        By::XPath(format!(
+            "//tbody//tr[not(@aria-hidden='true')]//*[normalize-space(text())='{POD}']"
+        )),
+        60,
+    )
+    .await?;
+    // The peek's action bar: Logs and Shell on it, the rest in its overflow.
+    let actions = "//*[@role='group' and @aria-label='Pod actions']";
+
     if full {
-        // ---- 5F. Port-forward: remote 8080 → explicit local 18080, then
-        // prove real bytes flow by fetching from OUTSIDE the app.
-        click(driver, By::Css("[aria-label='Forward']"), 30).await?;
-        let remote = driver
-            .query(By::Css("input[placeholder='e.g. 80']"))
-            .wait(Duration::from_secs(15), Duration::from_millis(400))
-            .first()
+        // ---- 5F. Port-forward: Forward is in the bar's overflow. The dialog
+        // arrives with the pod and its namespace filled in; remote 8080 →
+        // explicit local 18080 are typed (a blank local port would let the
+        // backend pick one this test could not know), then real bytes are
+        // fetched through it from OUTSIDE the app.
+        click(driver, By::XPath(format!("{actions}//button[normalize-space()='More actions']")), 30)
             .await?;
-        remote.send_keys("8080").await?;
-        // The local-port input is the next numeric text input in the dialog.
-        let inputs = driver.find_all(By::Css("div[role='dialog'] input")).await?;
-        if let Some(local) = inputs.get(1) {
-            local.send_keys("18080").await?;
+        click(
+            driver,
+            By::XPath(
+                "//*[@role='dialog' and @aria-label='More actions']//button[@aria-label='Forward']"
+                    .to_string(),
+            ),
+            15,
+        )
+        .await?;
+        let dialog = "//*[@role='dialog'][.//*[normalize-space()='New port forward']]";
+        for (label, port) in [("Local port", "18080"), ("Remote port", "8080")] {
+            let field = wait_for(
+                driver,
+                By::XPath(format!("{dialog}//label[normalize-space(span)='{label}']//input")),
+                15,
+            )
+            .await?;
+            field.clear().await?;
+            field.send_keys(port).await?;
         }
-        button_by_text(driver, "Start forward", 10).await.or(button_by_text(driver, "Forward", 10).await)?;
+        click(
+            driver,
+            By::XPath(format!("{dialog}//button[normalize-space()='Start forward' and not(@disabled)]")),
+            30,
+        )
+        .await?;
         let deadline = Instant::now() + Duration::from_secs(60);
         loop {
             if let Ok(mut s) = std::net::TcpStream::connect(("127.0.0.1", 18080)) {
@@ -382,71 +421,70 @@ async fn run_flow(driver: &WebDriver, context: &str, full: bool) -> Result<(), F
             tokio::time::sleep(Duration::from_secs(2)).await;
         }
 
-        // ---- 6F. Exec: open a shell, run a command whose OUTPUT differs
-        // from its typed form (so matching the output proves execution, not
-        // an echo of the keystrokes).
-        click(driver, By::Css("[aria-label='Shell']"), 30).await?;
-        let term = driver
-            .query(By::Css(".xterm"))
-            .wait(Duration::from_secs(30), Duration::from_millis(500))
-            .first()
-            .await?;
-        // xterm mounts BEFORE the exec handshake completes, and TerminalPane
-        // discards input while it still shows `connecting…` (`conn?.send`) —
-        // typing early is silently lost. The status strip renders `live`
-        // once the websocket is actually attached; only then are keys real.
-        // Scoped to the TERMINAL's own indicator (the emerald span inside
-        // the dark pane): ResourceBrowser's watch badge also says `live`
-        // and stays mounted behind the dock, so a global text wait would
-        // pass while the exec socket is still connecting.
-        driver
-            .query(By::XPath(
-                "//div[contains(@class,'bg-[#1b1f23]')]//span[contains(@class,'text-emerald-400') and contains(normalize-space(.),'live')]"
-                    .to_string(),
-            ))
-            .wait(Duration::from_secs(60), Duration::from_millis(500))
-            .first()
-            .await?;
-        term.click().await.ok();
+        // ---- 6F. Exec: Shell on the bar starts a session in the pod's one
+        // container and opens the Terminals tab on it. xterm's input is the
+        // textarea it names "Terminal input".
+        click(driver, By::XPath(format!("{actions}//button[normalize-space()='Shell']")), 30).await?;
+        let input = wait_for(driver, By::Css("textarea[aria-label='Terminal input']"), 30).await?;
         // Prove the keystrokes actually EXECUTE in the pod via a side effect
         // observed from OUTSIDE the app (kubectl), not from the terminal's
-        // rendering. Today that rendering would even be assertable — no
-        // canvas/webgl addon is loaded, so xterm 5 uses its DOM renderer and
-        // output text lands in real DOM nodes — but a renderer addon added
-        // later would break a DOM-text assertion only on stable-release full
-        // runs, the worst place to discover it. A file can also never be
-        // faked by keystroke echo, which no output-matching scheme fully
-        // rules out.
-        driver.action_chain().send_keys("touch /tmp/smoke-exec-done\n").perform().await?;
+        // rendering: a renderer addon added later would break a DOM-text
+        // assertion only on stable-release full runs, the worst place to
+        // discover it, and a file can never be faked by keystroke echo.
+        //
+        // Typed again until the marker lands, rather than once after a
+        // readiness signal: xterm mounts before the exec handshake completes,
+        // keys typed before the far end is wired are dropped (`lib/sessions`),
+        // and the session's `Attached` badge is drawn from the start, so
+        // nothing on screen says when keys become real. `touch` is idempotent,
+        // so a line that did land and is typed again changes nothing.
         let deadline = Instant::now() + Duration::from_secs(60);
-        loop {
-            if kubectl(&[
-                "--context", context, "exec", POD, "--", "test", "-f", "/tmp/smoke-exec-done",
-            ])
-            .is_ok()
-            {
-                break;
+        'typed: loop {
+            input.focus().await?;
+            driver.action_chain().send_keys("touch /tmp/smoke-exec-done\n").perform().await?;
+            for _ in 0..5 {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                if kubectl(&[
+                    "--context", context, "exec", POD, "--", "test", "-f", "/tmp/smoke-exec-done",
+                ])
+                .is_ok()
+                {
+                    break 'typed;
+                }
             }
             if Instant::now() >= deadline {
                 return Err("the exec'd command never left its marker in the pod".into());
             }
-            tokio::time::sleep(Duration::from_secs(2)).await;
         }
+
+        // Back to the Pods tab, where the peek is still open beside the list.
+        click(
+            driver,
+            By::XPath(
+                "//*[@role='tablist' and @aria-label='Open tabs']//*[@role='tab' and starts-with(@aria-label, 'Pods')]"
+                    .to_string(),
+            ),
+            15,
+        )
+        .await?;
     }
 
-    // ---- 7. Logs: the marker must appear INSIDE the log pane
-    // (`role="log"`, LogsView.tsx) — a global text match could be satisfied
-    // by the pod SPEC in the detail overview, which embeds the fixture's
-    // command (also why the command logs the marker via an expansion the
-    // spec doesn't contain). Only real log output can put it here.
-    click(driver, By::Css("[aria-label='Logs']"), 30).await?;
-    driver
-        .query(By::XPath(format!(
-            "//*[@role='log']//*[contains(normalize-space(.), '{LOG_MARKER}')]"
-        )))
-        .wait(Duration::from_secs(60), Duration::from_millis(500))
-        .first()
-        .await?;
+    // ---- 7. Logs: the bar's Logs opens the pod's log stream in a tab, and
+    // the marker must appear INSIDE that stream (`role="log"` named
+    // `<pod> logs`, screens/Logs.tsx) — a global text match could be
+    // satisfied by the pod SPEC in the peek's YAML, which embeds the
+    // fixture's command (also why the command logs the marker via an
+    // expansion the spec doesn't contain). Only real log output can put it
+    // here.
+    click(driver, By::XPath(format!("{actions}//button[normalize-space()='Logs']")), 30).await?;
+    wait_for(
+        driver,
+        By::XPath(format!(
+            "//*[@role='log' and @aria-label='{POD} logs']//*[contains(normalize-space(.), '{LOG_MARKER}')]"
+        )),
+        60,
+    )
+    .await?;
 
     Ok(())
 }
