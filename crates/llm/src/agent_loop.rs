@@ -1031,6 +1031,53 @@ mod tests {
     }
 
     #[test]
+    fn test_compact_request_turns_multibyte_prefix_bounded_by_bytes() {
+        // '日' is 3 bytes in UTF-8. 250 characters = 750 bytes (> 600 bytes guard).
+        let multibyte_content = "日".repeat(250);
+        let turns = vec![
+            Turn::User("earlier question".into()),
+            Turn::Assistant {
+                text: "".into(),
+                tool_calls: vec![ToolCall {
+                    id: "c1".into(),
+                    name: "k8s_listPods".into(),
+                    arguments: json!({}),
+                    thought_signature: None,
+                }],
+            },
+            Turn::ToolResults(vec![ToolOutcome {
+                id: "c1".into(),
+                name: "k8s_listPods".into(),
+                content: multibyte_content,
+                is_error: false,
+            }]),
+            Turn::Assistant {
+                text: "answer".into(),
+                tool_calls: vec![],
+            },
+            Turn::User("current question".into()),
+        ];
+
+        let compacted = compact_request_turns_for_round(&turns);
+        if let Turn::ToolResults(outcomes) = &compacted[2] {
+            let prefix = outcomes[0]
+                .content
+                .strip_suffix("... [Output condensed for subsequent round]")
+                .expect("has condensation suffix");
+            assert!(
+                prefix.len() <= 250,
+                "prefix byte length {} must be <= 250 bytes",
+                prefix.len()
+            );
+            // 83 chars * 3 bytes = 249 bytes. If it had taken 250 chars, prefix.len() would be 750 bytes.
+            assert_eq!(prefix.len(), 249);
+            assert_eq!(prefix.chars().count(), 83);
+        } else {
+            panic!("Expected Turn::ToolResults at index 2");
+        }
+    }
+
+    #[test]
     fn test_run_preserves_current_turn_tool_results_across_rounds_and_condenses_history() {
         let heavy_output_1 = "X".repeat(1000);
         let history = vec![
