@@ -1013,6 +1013,50 @@ describe("Window contexts", () => {
   });
 });
 
+/**
+ * #374 item 3: an edit made outside srelens — `kubectl config use-context`, a
+ * file dropped into the kubeconfig folder — reaches the window only as the
+ * host watcher's `kubeconfig-changed` (`lib.rs`). Classic re-lists on it; this
+ * window kept its boot listing until a reader pressed Refresh.
+ */
+describe("Window — an outside kubeconfig edit", () => {
+  function kubeconfigChanged() {
+    act(() => {
+      for (const handler of bus.get("kubeconfig-changed") ?? []) handler(null);
+    });
+  }
+
+  it("lists the contexts again, with the configured files, when the host says the kubeconfig changed", async () => {
+    await booted();
+    listContexts.mockClear().mockResolvedValue({ contexts: [ctx("prod"), ctx("dev")] });
+    kubeconfigChanged();
+    await waitFor(() => expect(contextFor("dev")?.name).toBe("dev"));
+    expect(listContexts).toHaveBeenCalledWith(["/home/u/.kube/config", "/home/u/.kube/other"]);
+  });
+
+  it("keeps the clusters it has when that listing fails, and says why", async () => {
+    await booted();
+    listContexts.mockResolvedValue({ error: "kubeconfig unreadable" });
+    kubeconfigChanged();
+    await waitFor(() => expect(getContextsStatus()).toBe("failed"));
+    expect(getContextsError()).toBe("kubeconfig unreadable");
+    expect(contextFor("prod")?.name).toBe("prod");
+  });
+
+  it("stops listening when the window goes", async () => {
+    await booted();
+    expect(bus.get("kubeconfig-changed")?.size).toBe(1);
+    cleanup();
+    expect(bus.get("kubeconfig-changed")?.size ?? 0).toBe(0);
+  });
+
+  it("does not listen in a browser, where no host watches a kubeconfig", async () => {
+    isTauri.mockReturnValue(false);
+    await booted();
+    expect(bus.get("kubeconfig-changed")?.size ?? 0).toBe(0);
+  });
+});
+
 describe("Window — the shell's own widths", () => {
   it("lets the screen column shrink, so the tab strip scrolls instead of overflowing", async () => {
     // `TabStrip`'s tablist is `overflow-x-auto` and is meant to scroll under
@@ -2178,6 +2222,25 @@ describe("Window — srelens:// deep links", () => {
     act(() => setContexts([ctx("prod")], "open /home/dana/.kube/stage: permission denied"));
     await deliver("srelens://cluster/stage");
     expect(shownNotice() ?? "").toContain("That link will be checked once the contexts load");
+  });
+
+  it("opens a link held behind a failed listing once an outside edit fixes the kubeconfig", async () => {
+    listContexts.mockResolvedValue({
+      contexts: [ctx("prod")],
+      error: "open /home/dana/.kube/stage: permission denied",
+    });
+    await booted();
+    await deliver("srelens://cluster/stage");
+    expect(store.activeCluster()).not.toBe("stage");
+
+    // The reader fixes the file in a terminal; the host's watcher says so, and
+    // nobody has to find a Refresh button for the link they already clicked.
+    listContexts.mockResolvedValue({ contexts: [ctx("prod"), ctx("stage")] });
+    act(() => {
+      for (const handler of bus.get("kubeconfig-changed") ?? []) handler(null);
+    });
+    await waitFor(() => expect(store.activeCluster()).toBe("stage"));
+    expect(store.activeRoute()).toBe("/overview");
   });
 
   it("still refuses at once, while the listing has failed, what no listing can change", async () => {

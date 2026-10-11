@@ -8,6 +8,7 @@ import {
   loadKubeconfigFiles,
   listenForHostNotices,
   loadMcpSettings,
+  on,
   rehydrateForwards,
   setNotifier,
   startMcpHttp,
@@ -31,6 +32,8 @@ import {
 } from "@srelens/ui-kit";
 import { contextLabelFor } from "../lib/agentSuggestions";
 import {
+  getContexts,
+  getKubeconfigFiles,
   pinContextKey,
   resolveContext,
   setContexts,
@@ -530,6 +533,21 @@ export function Window({
       pendingCtxQuery.current = null;
     }
   }, [booted, contexts, contextsStatus]);
+
+  // #374 item 3: an edit made outside srelens (`kubectl config use-context`, a
+  // file dropped into the kubeconfig folder) reaches this window only as the
+  // host watcher's `kubeconfig-changed` (`watch_kubeconfig_files`, lib.rs).
+  // Classic re-lists on it. Written the way every Refresh here writes, so a
+  // failed listing keeps the clusters on screen and says why, and whatever
+  // waits on the store — a held deep link, a `?context=` — is judged again.
+  useEffect(() => {
+    if (!isTauri()) return;
+    return on("kubeconfig-changed", () => {
+      void listContexts(getKubeconfigFiles()).then((outcome) =>
+        setContexts(outcome.contexts ?? getContexts(), outcome.error ?? ""),
+      );
+    });
+  }, []);
 
 
   /**
