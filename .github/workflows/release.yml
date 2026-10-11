@@ -840,11 +840,8 @@ jobs:
         env:
           CC_x86_64_unknown_linux_musl: musl-gcc
           CC_aarch64_unknown_linux_musl: musl-gcc
-          # Debug symbols are most of an unstripped Linux/macOS binary and
-          # nothing here symbolicates a user crash dump, so they are pure
-          # download weight. No-op on Windows, where MSVC keeps debug info in a
-          # separate .pdb that is never packaged.
-          RUSTFLAGS: "-C strip=symbols"
+        # [profile.release] in the root Cargo.toml strips the binary.
+        #
         # --locked because the version stamp above rewrites Cargo.toml AND the
         # matching Cargo.lock entries together; if it ever stops doing that,
         # failing here is better than resolving a different dependency set into

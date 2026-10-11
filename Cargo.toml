@@ -14,3 +14,14 @@ license = "MIT"
 inherits = "dev"
 debug = 0
 strip = "debuginfo"
+
+# Release binaries ship without a symbol table. Nothing symbolicates a user's
+# crash dump, so on Linux and macOS the table is only download weight; on
+# Windows it changes nothing, because MSVC keeps symbols in a .pdb that no
+# bundle ships. Set here rather than in a workflow's RUSTFLAGS so that every
+# release build gets it: the desktop app tauri-action bundles, the sandbox
+# launcher macOS builds in a step of its own, srectl and the server image.
+# For a symbolized backtrace or a profile, build with
+# CARGO_PROFILE_RELEASE_STRIP=false.
+[profile.release]
+strip = true

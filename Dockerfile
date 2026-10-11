@@ -56,8 +56,8 @@ COPY sdk/rust sdk/rust
 COPY sdk/examples/hello-world/rust sdk/examples/hello-world/rust
 # rust-embed reads apps/desktop/dist at compile time; copy the built bundle in.
 COPY --from=frontend /src/apps/desktop/dist apps/desktop/dist
+# Stripped by [profile.release] in the root Cargo.toml.
 RUN cargo build --release -p srelens-server --bin srelens-server
-RUN strip target/release/srelens-server
 
 # ---- Stage 3: slim runtime --------------------------------------------------
 FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251 AS runtime
