@@ -173,7 +173,7 @@ describe("NextApp", () => {
     await screen.findByRole("heading", { name: /design system/i });
     expect(windowHost.hidden).toBe(true);
     expect(within(windowHost).queryByRole("tablist", { hidden: true })).toBeNull();
-    expect(windowHost.textContent).toContain("Choose a cluster to open its overview.");
+    expect(windowHost.textContent).toContain("What needs you, what is running, and where you left off.");
 
     window.location.hash = "";
     window.dispatchEvent(new HashChangeEvent("hashchange"));

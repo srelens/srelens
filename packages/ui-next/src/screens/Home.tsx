@@ -84,7 +84,7 @@ export function Home() {
           <div>
             <span className="home-eyebrow">Workspace</span>
             <h2>Clusters</h2>
-            <p>Choose a cluster to open its overview.</p>
+            <p>What needs you, what is running, and where you left off.</p>
           </div>
           <Button variant="primary" onClick={() => openTab("/connect")}>
             <NavIcon icon={Icons.add} /> Connect a cluster
