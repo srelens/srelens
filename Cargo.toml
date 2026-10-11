@@ -25,3 +25,27 @@ strip = "debuginfo"
 # CARGO_PROFILE_RELEASE_STRIP=false.
 [profile.release]
 strip = true
+# Optimize for size. On the Windows desktop binary "s" took 76.2 MiB to 50.1
+# (15.1 to 11.1 MiB under xz -9), and the build got faster. It also makes code
+# slower, so the crates whose speed someone waits on stay at 3, below.
+opt-level = "s"
+
+# The crates kept at opt-level 3. Generic code, serde above all, is compiled in
+# the crate that instantiates it, so these are where the hot paths end up:
+# - srelens-registry and srelens-plugin-host: every broker call re-reads and
+#   re-validates the app inventory. At "s" the extension budgets in
+#   crates/registry/src/extensions/budget_tests.rs ran 11-38% slower; with
+#   these two at 3, within 10%.
+# - srelens-kube: every Kubernetes list and watch is decoded here. At "s" a
+#   2,000-pod list decoded 28% slower into k8s-openapi types and 85% slower
+#   into serde_json::Value.
+# The three give back 8.4 MiB of the 26 that "s" saves (1.6 of 4.0 under
+# xz -9). Before moving a crate in or out, run those budgets at both settings.
+[profile.release.package.srelens-registry]
+opt-level = 3
+
+[profile.release.package.srelens-plugin-host]
+opt-level = 3
+
+[profile.release.package.srelens-kube]
+opt-level = 3
