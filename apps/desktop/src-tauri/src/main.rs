@@ -354,9 +354,12 @@ fn run_serve(addr: &str, data_flag: Option<&str>) {
             Arc::new(srelens_desktop_lib::build_registry_for_user);
         eprintln!("srelens web server listening on http://{addr}");
         eprintln!("srelens data directory: {}", data_dir.display());
-        if let Err(e) =
-            srelens_server::serve(factory, srelens_server::ServerConfig { addr, data_dir }).await
-        {
+        let config = srelens_server::ServerConfig {
+            addr,
+            data_dir,
+            assets: srelens_desktop_lib::web_frontend::assets(),
+        };
+        if let Err(e) = srelens_server::serve(factory, config).await {
             eprintln!("web server error: {e}");
         }
     });

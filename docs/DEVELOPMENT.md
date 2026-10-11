@@ -209,8 +209,10 @@ cargo run -p srelens-server --bin srelens-server -- serve 127.0.0.1:8080 --data 
 docker compose up --build
 ```
 
-The frontend is embedded into the binary with `rust-embed`, so `pnpm build` must
-run before the server crate is compiled for release.
+The `srelens-server` binary embeds the frontend with `rust-embed`, so `pnpm build`
+must run before it is compiled for release. The library embeds none: each binary
+hands `ServerConfig` the copy it carries, and the desktop app's `serve` mode hands
+it the one Tauri embedded, so the desktop does not ship the frontend twice.
 
 Things worth knowing before you touch this crate:
 

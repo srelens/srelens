@@ -78,6 +78,8 @@ pub struct AppState {
     pub pending_cluster: Arc<auth::cluster_routes::PendingClusterLogins>,
     pub ws_hub: Arc<ws::hub::WsHub>,
     pub pf_client: pf_proxy::HttpProxyClient,
+    /// The frontend served to the browser.
+    pub assets: assets::AssetSource,
 }
 
 impl AppState {
@@ -127,15 +129,19 @@ impl AppState {
             pending_cluster: Arc::new(auth::cluster_routes::PendingClusterLogins::default()),
             ws_hub: Arc::new(ws::hub::WsHub::new()),
             pf_client: pf_proxy::client(),
+            assets: Arc::new(|_| None),
         }
     }
 }
 
 /// Server launch configuration.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ServerConfig {
     pub addr: SocketAddr,
     pub data_dir: std::path::PathBuf,
+    /// The frontend to serve. This crate embeds none: each binary hands in the
+    /// copy it already carries, so the desktop app does not carry two.
+    pub assets: assets::AssetSource,
 }
 
 /// Build the full application router. `/api/*` requires a session + CSRF
@@ -271,6 +277,7 @@ pub async fn serve(factory: RegistryFactory, config: ServerConfig) -> Result<(),
         pending_cluster: Arc::new(auth::cluster_routes::PendingClusterLogins::default()),
         ws_hub: Arc::new(ws::hub::WsHub::new()),
         pf_client: pf_proxy::client(),
+        assets: config.assets,
     };
     {
         let db = state.db.clone();
@@ -385,6 +392,61 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let bytes = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
         assert_eq!(&bytes[..], b"ok");
+    }
+
+    /// GET `uri`: the status, the content type and the body.
+    async fn get(state: AppState, uri: &str) -> (StatusCode, Option<String>, Vec<u8>) {
+        let resp = router(state)
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = resp.status();
+        let mime = resp
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .map(|v| v.to_str().unwrap().to_owned());
+        let body = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        (status, mime, body.to_vec())
+    }
+
+    #[tokio::test]
+    async fn the_library_embeds_no_frontend_of_its_own() {
+        // The test state is given no frontend. A library that served a copy of its
+        // own here (`apps/desktop/dist`, once built) would carry that copy into every
+        // binary that links it, the desktop app beside Tauri's included.
+        let (status, _, _) = get(state().await, "/").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn the_frontend_is_the_one_the_binary_hands_in() {
+        let mut state = state().await;
+        state.assets = Arc::new(|path| match path {
+            "index.html" => Some(b"<p>shell</p>".as_slice().into()),
+            "assets/app.js" => Some(b"app();".as_slice().into()),
+            _ => None,
+        });
+        let html = Some("text/html".to_owned());
+        let js = Some("text/javascript".to_owned());
+        assert_eq!(
+            get(state.clone(), "/").await,
+            (StatusCode::OK, html.clone(), b"<p>shell</p>".to_vec())
+        );
+        assert_eq!(
+            get(state.clone(), "/assets/app.js").await,
+            (StatusCode::OK, js, b"app();".to_vec())
+        );
+        // A client-side route gets the app shell; a missing file does not.
+        assert_eq!(
+            get(state.clone(), "/settings/clusters").await,
+            (StatusCode::OK, html, b"<p>shell</p>".to_vec())
+        );
+        assert_eq!(
+            get(state, "/assets/missing.js").await.0,
+            StatusCode::NOT_FOUND
+        );
     }
 
     #[tokio::test]

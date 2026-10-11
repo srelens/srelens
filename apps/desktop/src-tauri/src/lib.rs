@@ -37,6 +37,7 @@ mod vault_password;
 mod toolbox;
 mod updater;
 mod watch;
+pub mod web_frontend;
 mod window;
 mod window_blur;
 mod window_streams;
@@ -582,7 +583,7 @@ pub fn run() {
             window::open_context_window,
             window_blur::set_window_blur,
         ])
-        .build(tauri::generate_context!())
+        .build(web_frontend::context())
         .expect("error while running tauri application")
         .run(|app, event| {
             // srelens is quitting: the last chance to delete the node debug
