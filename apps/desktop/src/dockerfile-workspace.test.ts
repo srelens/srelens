@@ -85,3 +85,18 @@ describe("the release Dockerfile's backend stage", () => {
     expect(copied, `the backend stage never copies ${member}`).toBe(true);
   });
 });
+
+/**
+ * The release image and srectl's release step no longer strip their binaries
+ * themselves: the root manifest's release profile does it for every release
+ * build. Dropping it would put the symbol tables back in every Linux and macOS
+ * download, and no build would fail.
+ */
+describe("the release profile", () => {
+  it("strips symbols from release builds", () => {
+    const manifest = readFileSync(join(root, "Cargo.toml"), "utf8");
+    const profile = manifest.match(/^\[profile\.release\]\r?\n([\s\S]*?)(?=^\[|(?![\s\S]))/m);
+    expect(profile, "the root Cargo.toml has no [profile.release]").not.toBeNull();
+    expect(profile![1]).toMatch(/^strip\s*=\s*(true|"symbols")\s*$/m);
+  });
+});
