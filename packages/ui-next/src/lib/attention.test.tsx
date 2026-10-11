@@ -268,6 +268,10 @@ describe("useAttention", () => {
     view.rerender({ targets: five });
     await act(async () => { await vi.advanceTimersByTimeAsync(0); });
     expect(asked()).toEqual(["a", "b", "c"]);
+    // A second batch started too soon would share the first one's pod reads
+    // through the cache, so the pod count alone cannot see it. Events are not
+    // cached: only the first batch's three may be out.
+    expect(core.listEvents).toHaveBeenCalledTimes(3);
     // The new batch starts once those land. The three just read come from the
     // result cache, so only the two new clusters are asked for.
     await answer("a", "b", "c");
