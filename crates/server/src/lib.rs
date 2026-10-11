@@ -450,6 +450,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_missing_file_is_not_found_and_says_nothing_about_the_build() {
+        // The source cannot tell a missing file from an unbuilt bundle, nor a
+        // desktop built without `custom-protocol` from either, so the 404 only
+        // says what it knows.
+        let mut state = state().await;
+        state.assets =
+            Arc::new(|path| (path == "index.html").then(|| b"<p>shell</p>".as_slice().into()));
+        let not_found = (StatusCode::NOT_FOUND, b"not found".to_vec());
+        let (status, _, body) = get(state.clone(), "/assets/missing.js").await;
+        assert_eq!((status, body), not_found);
+        state.assets = Arc::new(|_| None);
+        let (status, _, body) = get(state, "/").await;
+        assert_eq!((status, body), not_found);
+    }
+
+    #[tokio::test]
     async fn api_requires_csrf_and_session() {
         let state = state().await;
         // No CSRF header → 403.

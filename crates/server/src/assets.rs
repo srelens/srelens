@@ -49,11 +49,9 @@ pub async fn serve_asset(State(state): State<AppState>, uri: Uri) -> Response {
             )
                 .into_response()
         }
-        None => (
-            StatusCode::NOT_FOUND,
-            "frontend not built — run `pnpm --filter @srelens/desktop build`",
-        )
-            .into_response(),
+        // A missing file, an unbuilt bundle and a desktop built without
+        // `custom-protocol` all look the same from here, so no build advice.
+        None => (StatusCode::NOT_FOUND, "not found").into_response(),
     }
 }
 
