@@ -3,7 +3,7 @@ import { cleanup, render, screen, waitFor, act, within } from "@testing-library/
 import userEvent from "@testing-library/user-event";
 import { fireEvent } from "@testing-library/react";
 import type { HostNotice } from "@srelens/core";
-import { notify, setNotifier } from "@srelens/core";
+import { notify, saveUpdateChannel, setNotifier } from "@srelens/core";
 
 // `vi.hoisted` because `vi.mock` is hoisted above every declaration in the
 // file, and the tabsPersist factory reads these the moment `./Window` imports
@@ -37,6 +37,7 @@ const {
   takePendingDeepLinks,
   subscribeGates,
   getObjectSpy,
+  updateCheck,
   bus,
 } = vi.hoisted(() => ({
   listContexts: vi.fn(),
@@ -78,6 +79,9 @@ const {
   subscribeGates: new Map<string, Promise<void>>(),
   // A spy on the detail screen's read, passed through to the real one.
   getObjectSpy: vi.fn(),
+  // The `update_check` round trip under core's automatic check: the boundary,
+  // so the window's cadence and the core helper's dedupe both run for real.
+  updateCheck: vi.fn<(channel: string) => Promise<{ version: string } | null>>(),
   // The backend event bus, captured per channel so a test can emit exactly
   // what `mcp_confirm.rs` emits.
   //
@@ -111,6 +115,11 @@ vi.mock("@srelens/core", async (importOriginal) => {
     startMcpHttp: (port: number) => startMcpHttp(port),
     respondToConfirm: (id: string, approved: boolean) => respondToConfirm(id, approved),
     pendingConfirms: () => pendingConfirms(),
+    checkForUpdateAndNotify: (...a: Parameters<typeof real.checkForUpdateAndNotify>) =>
+      real.checkForUpdateAndNotify(a[0], a[1], {
+        ...a[2],
+        check: (channel) => updateCheck(channel) as ReturnType<typeof real.checkForUpdate>,
+      }),
     invokeCommand: <T,>(command: string, args?: Record<string, unknown>): Promise<T> =>
       command === "take_pending_deep_links"
         ? (takePendingDeepLinks() as Promise<T>)
@@ -301,6 +310,9 @@ beforeEach(() => {
   });
   subscribeGates.clear();
   getObjectSpy.mockReset();
+  // Up to date unless a test says otherwise: an update toast would otherwise
+  // sit in front of every notice another test asserts on.
+  updateCheck.mockReset().mockResolvedValue(null);
   bus.clear();
   resetLock();
   resetMcpAutoStart();
@@ -1305,6 +1317,68 @@ describe("Window — notify toasts (#374)", () => {
     await user.click(screen.getByRole("button", { name: "View update" }));
     expect(onView).toHaveBeenCalledTimes(1);
     expect(screen.queryByText("Update available")).toBeNull();
+  });
+});
+
+/**
+ * #374 item 6: classic checks for an update at launch and every six hours
+ * (`App.tsx`) and offers it in a toast that opens Settings on Updates. This
+ * window checked only when a reader opened Release notes and asked.
+ */
+describe("Window — the automatic update check", () => {
+  const SIX_HOURS = 6 * 60 * 60 * 1000;
+  const UPDATE = { version: "0.99.0", currentVersion: "0.98.0", notes: "", external: false, elevates: false };
+
+  it("checks the saved channel at launch, and offers what it finds on Settings' Updates", async () => {
+    saveUpdateChannel("dev");
+    updateCheck.mockResolvedValue(UPDATE);
+    const user = userEvent.setup();
+    await booted();
+    expect(await screen.findByText(/srelens 0\.99\.0 is ready to install/)).toBeDefined();
+    expect(updateCheck).toHaveBeenCalledWith("dev");
+    await user.click(screen.getByRole("button", { name: "View update" }));
+    expect(store.activeRoute()).toBe("/settings");
+    expect(await screen.findByRole("tab", { name: "Updates", selected: true })).toBeDefined();
+  });
+
+  it("checks again every six hours, and does not offer a version it already offered", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      updateCheck.mockResolvedValue(UPDATE);
+      await booted();
+      await screen.findByText("Update available");
+      fireEvent.click(screen.getByRole("button", { name: "Dismiss notice" }));
+
+      await act(async () => vi.advanceTimersByTime(SIX_HOURS - 60_000));
+      expect(updateCheck).toHaveBeenCalledTimes(1);
+      await act(async () => vi.advanceTimersByTime(60_000));
+      expect(updateCheck).toHaveBeenCalledTimes(2);
+      await act(async () => {
+        await updateCheck.mock.results[1].value;
+      });
+      expect(screen.queryByText("Update available")).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("stops checking when the window goes", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      await booted();
+      await waitFor(() => expect(updateCheck).toHaveBeenCalledTimes(1));
+      cleanup();
+      act(() => vi.advanceTimersByTime(SIX_HOURS));
+      expect(updateCheck).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not check in a browser, which has no updater", async () => {
+    isTauri.mockReturnValue(false);
+    await booted();
+    expect(updateCheck).not.toHaveBeenCalled();
   });
 });
 

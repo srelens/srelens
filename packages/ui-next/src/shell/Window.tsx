@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  checkForUpdateAndNotify,
   cleanErrorMessage,
   describeError,
   isApplePlatform,
@@ -8,6 +9,8 @@ import {
   loadKubeconfigFiles,
   listenForHostNotices,
   loadMcpSettings,
+  loadUpdateChannel,
+  notify,
   on,
   rehydrateForwards,
   setNotifier,
@@ -48,6 +51,7 @@ import { getMark, getContextLabel, loadMarks, useMark } from "../lib/marks";
 import { useContextLabel } from "../lib/contextLabel";
 import { mcpAutoStartSettled, mcpAutoStartStarting } from "../lib/mcpAutoStart";
 import { openCluster } from "../lib/openCluster";
+import { openSettings } from "../lib/settingsRequest";
 import { loadPeekWidth } from "../lib/peekWidth";
 import { loadSectionFolds } from "../lib/sectionFolds";
 import { loadExpanded } from "../lib/workspace";
@@ -122,6 +126,9 @@ type Notice = Omit<HostNotice, "level"> & {
 
 /** How long a confirmation stays up: sonner's default, which classic used. */
 const TRANSIENT_NOTICE_MS = 4_000;
+
+/** How often the automatic update check runs after the one at launch: classic's. */
+const UPDATE_CHECK_EVERY_MS = 6 * 60 * 60 * 1000;
 
 export interface WindowProps {
   /** Display names of the screens that exist in the new design. */
@@ -280,6 +287,27 @@ export function Window({
       clusterSignIn: (title, detail, onSignIn) =>
         push({ level: "info", title, detail, action: { label: "Sign in", run: onSignIn } }),
     });
+  }, []);
+  // #374 item 6: classic checks for an update at launch and every six hours
+  // (`App.tsx`), on the channel the reader chose, and offers it in a toast that
+  // opens Settings on Updates. Core's helper swallows a failed check, because a
+  // background poll must not nag, and a version already offered is not offered
+  // again.
+  const offeredVersion = useRef<string | null>(null);
+  useEffect(() => {
+    if (!isTauri()) return;
+    const check = () =>
+      void checkForUpdateAndNotify(
+        loadUpdateChannel(),
+        (update) => {
+          offeredVersion.current = update.version;
+          notify.updateAvailable(update.version, () => openSettings("updates"));
+        },
+        { alreadyNotified: (version) => offeredVersion.current === version },
+      );
+    check();
+    const timer = setInterval(check, UPDATE_CHECK_EVERY_MS);
+    return () => clearInterval(timer);
   }, []);
   const notice = notices[0];
   const dismissNotice = () => setNotices((shown) => shown.slice(1));
