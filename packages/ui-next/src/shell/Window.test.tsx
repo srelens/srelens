@@ -1098,6 +1098,47 @@ describe("Window — an outside kubeconfig edit", () => {
     expect(contextFor("prod")?.name).toBe("prod");
   });
 
+  it("keeps the newer listing when an older one answers after it", async () => {
+    await booted();
+    // Each listing answers only when told to, with the file as it stood when
+    // that listing began.
+    const file = { contexts: [ctx("prod"), ctx("dev")] };
+    const answers: Array<() => void> = [];
+    listContexts.mockImplementation(() => {
+      const seen = file.contexts;
+      return new Promise((resolve) => answers.push(() => resolve({ contexts: seen })));
+    });
+    kubeconfigChanged();
+    await waitFor(() => expect(answers).toHaveLength(1));
+    file.contexts = [ctx("prod"), ctx("dev"), ctx("stage")];
+    kubeconfigChanged();
+    await waitFor(() => expect(answers).toHaveLength(2));
+    await act(async () => answers[1]());
+    await act(async () => answers[0]());
+    expect(contextFor("stage")?.name).toBe("stage");
+  });
+
+  it("lists again once boot is done when the kubeconfig changed while boot was listing", async () => {
+    let answerBoot!: () => void;
+    listContexts.mockImplementationOnce(
+      () => new Promise((resolve) => (answerBoot = () => resolve({ contexts: [ctx("prod")] }))),
+    );
+    // The file after the edit.
+    listContexts.mockResolvedValue({ contexts: [ctx("prod"), ctx("dev")] });
+    render(
+      <ConsoleProvider>
+        <Window ported={[]} onOpenInClassic={() => {}} />
+      </ConsoleProvider>,
+    );
+    await waitFor(() => expect(listContexts).toHaveBeenCalledTimes(1));
+    kubeconfigChanged();
+    await act(async () => answerBoot());
+    await waitFor(() => expect(screen.getByRole("tablist", { name: "Open tabs" })).toBeDefined());
+    await waitFor(() => expect(contextFor("dev")?.name).toBe("dev"));
+    // Boot's listing and one for the edit: none started under boot's feet.
+    expect(listContexts).toHaveBeenCalledTimes(2);
+  });
+
   it("stops listening when the window goes", async () => {
     await booted();
     expect(bus.get("kubeconfig-changed")?.size).toBe(1);
@@ -1372,6 +1413,28 @@ describe("Window — the automatic update check", () => {
       expect(updateCheck).toHaveBeenCalledTimes(1);
     } finally {
       vi.useRealTimers();
+    }
+  });
+
+  it("offers nothing once the window has gone, when the check answers late", async () => {
+    let answer!: (update: typeof UPDATE) => void;
+    updateCheck.mockReturnValue(new Promise((resolve) => (answer = resolve)));
+    const replaced = {
+      success: vi.fn(),
+      info: vi.fn(),
+      error: vi.fn(),
+      updateAvailable: vi.fn(),
+      clusterSignIn: vi.fn(),
+    };
+    const restore = setNotifier(replaced);
+    try {
+      await booted();
+      await waitFor(() => expect(updateCheck).toHaveBeenCalledTimes(1));
+      cleanup();
+      await act(async () => answer(UPDATE));
+      expect(replaced.updateAvailable).not.toHaveBeenCalled();
+    } finally {
+      restore();
     }
   });
 

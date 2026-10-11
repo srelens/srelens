@@ -296,10 +296,14 @@ export function Window({
   const offeredVersion = useRef<string | null>(null);
   useEffect(() => {
     if (!isTauri()) return;
+    // A check still out when the window goes would answer into whatever sink
+    // `setNotifier` handed back, so its answer is dropped.
+    let live = true;
     const check = () =>
       void checkForUpdateAndNotify(
         loadUpdateChannel(),
         (update) => {
+          if (!live) return;
           offeredVersion.current = update.version;
           notify.updateAvailable(update.version, () => openSettings("updates"));
         },
@@ -307,7 +311,10 @@ export function Window({
       );
     check();
     const timer = setInterval(check, UPDATE_CHECK_EVERY_MS);
-    return () => clearInterval(timer);
+    return () => {
+      live = false;
+      clearInterval(timer);
+    };
   }, []);
   const notice = notices[0];
   const dismissNotice = () => setNotices((shown) => shown.slice(1));
@@ -568,14 +575,25 @@ export function Window({
   // Classic re-lists on it. Written the way every Refresh here writes, so a
   // failed listing keeps the clusters on screen and says why, and whatever
   // waits on the store — a held deep link, a `?context=` — is judged again.
+  //
+  // Counted, not listed on the spot, so an older listing can never land last.
+  // An edit while boot is still listing waits for boot to install its list,
+  // and each edit drops the reply of the listing before it.
+  const [kubeconfigEdits, setKubeconfigEdits] = useState(0);
   useEffect(() => {
     if (!isTauri()) return;
-    return on("kubeconfig-changed", () => {
-      void listContexts(getKubeconfigFiles()).then((outcome) =>
-        setContexts(outcome.contexts ?? getContexts(), outcome.error ?? ""),
-      );
-    });
+    return on("kubeconfig-changed", () => setKubeconfigEdits((n) => n + 1));
   }, []);
+  useEffect(() => {
+    if (!booted || kubeconfigEdits === 0) return;
+    let current = true;
+    void listContexts(getKubeconfigFiles()).then((outcome) => {
+      if (current) setContexts(outcome.contexts ?? getContexts(), outcome.error ?? "");
+    });
+    return () => {
+      current = false;
+    };
+  }, [booted, kubeconfigEdits]);
 
 
   /**
