@@ -134,6 +134,17 @@ function request<T>(key: string, load: () => Promise<T>, force: boolean): Promis
   return running;
 }
 
+/**
+ * The same cache read without the hook, for a reader that is not one screen's
+ * component — Home's attention strip, which reads the overview's own keys on
+ * its own clock. A fresh-enough answer or one already in flight is shared with
+ * every {@link useCachedResource} of the key; anything else is loaded and
+ * cached for them. A rejection is not cached, here or there.
+ */
+export function readCached<T>(key: string, load: () => Promise<T>): Promise<T> {
+  return request(key, load, false).then((entry) => entry.data);
+}
+
 export interface CachedResource<T> extends Resource<T> {
   /**
    * The data on screen is the last good answer AND the refresh behind it

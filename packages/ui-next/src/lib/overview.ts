@@ -22,7 +22,7 @@ import {
   type ResourceKind,
   type StatefulSetSummary,
 } from "@srelens/core";
-import { useCachedResource } from "./cachedResource";
+import { readCached, useCachedResource } from "./cachedResource";
 import type { ResourceStatus } from "./useResource";
 
 /**
@@ -197,6 +197,15 @@ export interface OverviewPods {
   reload(): void;
 }
 
+const loadPods = (context: string) => podOverview(context).then((o) => unwrap(o.pods, o.error, "podOverview"));
+
+/**
+ * {@link useOverviewPods}'s read outside a component, through the same cache
+ * key and loader: Home's attention strip reads the same pods, and an open
+ * overview and Home share the request rather than making it twice.
+ */
+export const readOverviewPods = (context: string) => readCached(key("pods", context), () => loadPods(context));
+
 /**
  * The cluster's pod facts, from one call that never lists its pods.
  *
@@ -212,7 +221,7 @@ export interface OverviewPods {
 export function useOverviewPods(context: string): OverviewPods {
   const pods = useCachedResource(
     key("pods", context),
-    () => podOverview(context).then((o) => unwrap(o.pods, o.error, "podOverview")),
+    () => loadPods(context),
     // A cluster with no pods at all has answered; it is not an empty section.
     () => false,
   );
@@ -408,6 +417,29 @@ export interface OverviewWorkloads {
   reload(): void;
 }
 
+const loadWorkloads = (context: string) =>
+  Promise.all([
+    // The empty namespace is every namespace: the overview is a whole
+    // cluster's view, and so is the list beneath it.
+    listDeployments(context, ""),
+    listStatefulSets(context, ""),
+    listDaemonSets(context, ""),
+  ]).then(([deployments, statefulSets, daemonSets]) => {
+    const refusals: Partial<Record<ResourceKind, string>> = {};
+    if (deployments.error) refusals.deployments = deployments.error;
+    if (statefulSets.error) refusals.statefulsets = statefulSets.error;
+    if (daemonSets.error) refusals.daemonsets = daemonSets.error;
+    return {
+      deployments: deployments.deployments,
+      statefulSets: statefulSets.statefulsets,
+      daemonSets: daemonSets.daemonsets,
+      refusals,
+    };
+  });
+
+/** {@link useOverviewWorkloads}'s read outside a component — see {@link readOverviewPods}. */
+export const readOverviewWorkloads = (context: string) => readCached(key("workloads", context), () => loadWorkloads(context));
+
 /**
  * The three scaling kinds the `Not ready` list draws its workload rows from.
  *
@@ -422,26 +454,7 @@ export interface OverviewWorkloads {
  * classic's `Promise.all` was not: no branch can cancel the others.
  */
 export function useOverviewWorkloads(context: string): OverviewWorkloads {
-  const loaded = useCachedResource(key("workloads", context), () =>
-    Promise.all([
-      // The empty namespace is every namespace: the overview is a whole
-      // cluster's view, and so is the list beneath it.
-      listDeployments(context, ""),
-      listStatefulSets(context, ""),
-      listDaemonSets(context, ""),
-    ]).then(([deployments, statefulSets, daemonSets]) => {
-      const refusals: Partial<Record<ResourceKind, string>> = {};
-      if (deployments.error) refusals.deployments = deployments.error;
-      if (statefulSets.error) refusals.statefulsets = statefulSets.error;
-      if (daemonSets.error) refusals.daemonsets = daemonSets.error;
-      return {
-        deployments: deployments.deployments,
-        statefulSets: statefulSets.statefulsets,
-        daemonSets: daemonSets.daemonsets,
-        refusals,
-      };
-    }),
-  );
+  const loaded = useCachedResource(key("workloads", context), () => loadWorkloads(context));
 
   return {
     status: loaded.status,

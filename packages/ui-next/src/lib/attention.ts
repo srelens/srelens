@@ -1,16 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import {
-  listDaemonSets,
-  listDeployments,
-  listEvents,
-  listStatefulSets,
-  podOverview,
-  podStatus,
-  type ClusterContext,
-  type StatusVerdict,
-} from "@srelens/core";
+import { listEvents, podStatus, type ClusterContext, type StatusVerdict } from "@srelens/core";
 import { daemonSetVerdict, deploymentVerdict, statefulSetVerdict } from "./kinds/columns";
 import { involvedObject } from "./kinds/events";
+import { readOverviewPods, readOverviewWorkloads } from "./overview";
 
 /**
  * Home's "Needs attention": what is wrong right now across the workspace's
@@ -20,7 +12,11 @@ import { involvedObject } from "./kinds/events";
  * `k8s.podOverview` and the three scaling-kind lists, judged by core's
  * `podStatus` and `scaledStatus`; this is the same five calls per cluster
  * (`listEvents` the fifth) and the same verdicts, so an item here and the
- * overview a click away cannot disagree about the same object. The
+ * overview a click away cannot disagree about the same object. The pods and
+ * workloads go through the overview's own loaders and result cache
+ * (`readOverviewPods`, `readOverviewWorkloads`), so an open overview and Home
+ * share a read that is out or under thirty seconds old instead of making it
+ * twice. The overview reads no events, so those are read here. The
  * `/incidents` route still has no screen behind it, so there was no incident
  * feed to reuse.
  *
@@ -101,15 +97,18 @@ export async function readClusterAttention(
 ): Promise<ClusterAttention> {
   const name = context.name;
   try {
-    const [pods, deployments, statefulSets, daemonSets, events] = await Promise.all([
-      podOverview(name),
-      // The empty namespace is every namespace, as on the overview.
-      listDeployments(name, ""),
-      listStatefulSets(name, ""),
-      listDaemonSets(name, ""),
+    // The overview's pod read rejects with its reason; caught here so the
+    // other reads still count.
+    let podError: string | undefined;
+    const [pods, scaled, events] = await Promise.all([
+      readOverviewPods(name).catch((cause: unknown) => {
+        podError = cause instanceof Error ? cause.message : String(cause);
+        return undefined;
+      }),
+      readOverviewWorkloads(name),
       listEvents(name, null),
     ]);
-    const failures = [pods.error, deployments.error, statefulSets.error, daemonSets.error, events.error]
+    const failures = [podError, ...Object.values(scaled.refusals), events.error]
       .filter((reason): reason is string => reason !== undefined && reason !== "");
     const items: AttentionItem[] = [];
     const seen = new Set<string>();
@@ -122,15 +121,15 @@ export async function readClusterAttention(
       items.push({ clusterId: context.stableId, cluster: name, ...item });
     };
 
-    for (const pod of pods.pods?.unsettled ?? []) {
+    for (const pod of pods?.unsettled ?? []) {
       const verdict = podStatus(pod);
       const cause = podCause(verdict);
       if (cause) add({ kind: "Pod", namespace: pod.namespace, name: pod.name, problem: String(verdict.status), cause });
     }
     const workloads = [
-      ...(deployments.deployments ?? []).map((row) => ({ kind: "Deployment", row, verdict: deploymentVerdict(row), ready: row.ready })),
-      ...(statefulSets.statefulsets ?? []).map((row) => ({ kind: "StatefulSet", row, verdict: statefulSetVerdict(row), ready: row.ready })),
-      ...(daemonSets.daemonsets ?? []).map((row) => ({ kind: "DaemonSet", row, verdict: daemonSetVerdict(row), ready: `${row.ready}/${row.desired}` })),
+      ...(scaled.deployments ?? []).map((row) => ({ kind: "Deployment", row, verdict: deploymentVerdict(row), ready: row.ready })),
+      ...(scaled.statefulSets ?? []).map((row) => ({ kind: "StatefulSet", row, verdict: statefulSetVerdict(row), ready: row.ready })),
+      ...(scaled.daemonSets ?? []).map((row) => ({ kind: "DaemonSet", row, verdict: daemonSetVerdict(row), ready: `${row.ready}/${row.desired}` })),
     ];
     for (const { kind, row, verdict, ready } of workloads) {
       if (verdict.flagged) add({ kind, namespace: row.namespace, name: row.name, problem: `${ready} ready`, cause: "replicas" });
@@ -143,7 +142,7 @@ export async function readClusterAttention(
       if (!object.kind || !object.name) continue;
       add({ kind: object.kind, namespace: event.namespace, name: object.name, problem: event.reason, cause: "warning" });
     }
-    return { items, failures, truncated: pods.pods?.truncated ?? false, eventsTruncated: events.truncated ?? false };
+    return { items, failures, truncated: pods?.truncated ?? false, eventsTruncated: events.truncated ?? false };
   } catch (cause) {
     return { items: [], failures: [String(cause)], truncated: false, eventsTruncated: false };
   }

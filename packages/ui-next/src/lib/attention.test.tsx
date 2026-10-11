@@ -1,4 +1,4 @@
-import { act, renderHook } from "@testing-library/react";
+import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ClusterContext, DaemonSetSummary, DeploymentSummary, EventSummary, PodSummary, StatefulSetSummary } from "@srelens/core";
 
@@ -19,6 +19,8 @@ import {
   useAttention,
   type AttentionItem,
 } from "./attention";
+import { clearResourceCache } from "./cachedResource";
+import { useOverviewPods, useOverviewWorkloads } from "./overview";
 
 const NOW = Date.parse("2026-10-09T12:00:00Z");
 const ctx = (stableId: string, name = stableId): ClusterContext => ({
@@ -46,6 +48,7 @@ function answerEmpty() {
 beforeEach(() => {
   for (const fn of Object.values(core)) fn.mockReset();
   answerEmpty();
+  clearResourceCache();
 });
 
 const brief = (items: AttentionItem[]) => items.map((i) => `${i.kind} ${i.namespace}/${i.name}: ${i.problem}`);
@@ -119,6 +122,43 @@ describe("readClusterAttention", () => {
     const scan = await readClusterAttention(ctx("prod-id"), NOW);
     expect(scan.eventsTruncated).toBe(true);
     expect(scan.truncated).toBe(false);
+  });
+});
+
+describe("readClusterAttention beside an open overview of the same cluster", () => {
+  const crashing = { pods: { total: 1, byNode: [], truncated: false, unsettled: [pod("web-7d4b", "CrashLoopBackOff")] } };
+  const shared = [core.podOverview, core.listDeployments, core.listStatefulSets, core.listDaemonSets];
+  const openOverview = () => renderHook(() => ({ pods: useOverviewPods("prod"), workloads: useOverviewWorkloads("prod") }));
+
+  it("takes the pods and workloads the overview read moments ago, rather than reading them again", async () => {
+    core.podOverview.mockResolvedValue(crashing);
+    core.listDeployments.mockResolvedValue({ deployments: [deployment("api", "1/3")] });
+    const overview = openOverview();
+    await waitFor(() => expect([overview.result.current.pods.status, overview.result.current.workloads.status]).toEqual(["ready", "ready"]));
+    const scan = await readClusterAttention(ctx("prod-id", "prod"), NOW);
+    expect(brief(scan.items)).toEqual(["Pod checkout/web-7d4b: CrashLoopBackOff", "Deployment checkout/api: 1/3 ready"]);
+    for (const read of shared) expect(read).toHaveBeenCalledTimes(1);
+    // The overview reads no events, so there is nothing to share there.
+    expect(core.listEvents).toHaveBeenCalledTimes(1);
+  });
+
+  it("waits for the overview's pod and workload reads still out, rather than racing them", async () => {
+    let answer!: () => void;
+    core.podOverview.mockImplementation(() => new Promise((done) => { answer = () => done(crashing); }));
+    openOverview();
+    const scanning = readClusterAttention(ctx("prod-id", "prod"), NOW);
+    const scan = await act(async () => { answer(); return scanning; });
+    expect(brief(scan.items)).toEqual(["Pod checkout/web-7d4b: CrashLoopBackOff"]);
+    for (const read of shared) expect(read).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a refused pod read as the failure it was, beside the workloads that answered", async () => {
+    core.podOverview.mockResolvedValue({ error: "connection refused" });
+    core.listDeployments.mockResolvedValue({ deployments: [deployment("web", "1/3")] });
+    core.listStatefulSets.mockResolvedValue({ error: "statefulsets is forbidden" });
+    const scan = await readClusterAttention(ctx("prod-id", "prod"), NOW);
+    expect(brief(scan.items)).toEqual(["Deployment checkout/web: 1/3 ready"]);
+    expect(scan.failures).toEqual(["connection refused", "statefulsets is forbidden"]);
   });
 });
 
@@ -214,11 +254,10 @@ describe("useAttention", () => {
     hidden = false;
     await act(async () => { document.dispatchEvent(new Event("visibilitychange")); await vi.advanceTimersByTimeAsync(0); });
     await answer("b", "c");
-    // The restart is a whole new pass: the first three again, at once…
-    expect(asked()).toEqual(["a", "b", "c", "a", "b", "c"]);
-    // …then the two the hidden window skipped, in order, as those land.
-    await answer("a", "b", "c");
-    expect(asked()).toEqual(["a", "b", "c", "a", "b", "c", "d", "e"]);
+    // The restart is a whole new pass. The first three were read moments ago,
+    // so the result cache answers them, and the two the hidden window skipped
+    // are asked for straight away, in order.
+    expect(asked()).toEqual(["a", "b", "c", "d", "e"]);
   });
 
   it("does not start a second batch beside one still reading when the clusters change", async () => {
@@ -229,8 +268,10 @@ describe("useAttention", () => {
     view.rerender({ targets: five });
     await act(async () => { await vi.advanceTimersByTimeAsync(0); });
     expect(asked()).toEqual(["a", "b", "c"]);
+    // The new batch starts once those land. The three just read come from the
+    // result cache, so only the two new clusters are asked for.
     await answer("a", "b", "c");
-    expect(asked()).toEqual(["a", "b", "c", "a", "b", "c"]);
+    expect(asked()).toEqual(["a", "b", "c", "d", "e"]);
   });
 
   it("refreshes on its interval, not before", async () => {
