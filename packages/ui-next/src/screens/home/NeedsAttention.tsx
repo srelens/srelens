@@ -53,7 +53,7 @@ export function NeedsAttention({ targets, scans }: NeedsAttentionProps) {
       {targets.length === 0 ? (
         <EmptyState
           compact
-          title="No connected clusters to check"
+          title="No connected clusters in this workspace to check"
           hint="This reads the clusters in this workspace that are connected and not paused. Open a cluster to connect it."
         />
       ) : pending === targets.length ? (

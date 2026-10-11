@@ -109,7 +109,7 @@ describe("NeedsAttention", () => {
 
   it("says when there is no connected cluster to check", () => {
     show([], {});
-    expect(screen.getByText("No connected clusters to check")).toBeTruthy();
+    expect(screen.getByText("No connected clusters in this workspace to check")).toBeTruthy();
     expect(screen.queryByText("Nothing needs attention")).toBeNull();
   });
 
