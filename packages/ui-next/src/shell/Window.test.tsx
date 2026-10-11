@@ -317,6 +317,13 @@ beforeEach(() => {
   resetContexts();
 });
 
+/** What `install_macos_menu` (lib.rs) emits when the menu's Close takes ⌘W. */
+function closeFromMenu() {
+  act(() => {
+    for (const handler of bus.get("close-active-tab") ?? []) handler(null);
+  });
+}
+
 async function booted() {
   render(
     <ConsoleProvider>
@@ -842,6 +849,42 @@ describe("Window accelerators", () => {
     act(() => store.openTab("/k/pods"));
     fireEvent.keyDown(window, { key: "w", ctrlKey: true });
     expect(store.currentWorkspace().tabs).toHaveLength(2);
+  });
+
+  /**
+   * #374 item 4: on macOS the menu's own Close item owns ⌘W
+   * (`install_macos_menu`, lib.rs), so the webview never sees the keydown; the
+   * host says `close-active-tab` instead, as classic listens for.
+   */
+  it("closes the active tab when the macOS menu's Close says so, as ⌘W does", async () => {
+    await booted();
+    act(() => store.openTab("/k/pods"));
+    closeFromMenu();
+    expect(store.currentWorkspace().tabs.map((t) => t.route)).toEqual(["/"]);
+    expect(store.currentWorkspace().closed).toHaveLength(1);
+  });
+
+  it("stops hearing the menu's Close when the window goes", async () => {
+    await booted();
+    expect(bus.get("close-active-tab")?.size).toBe(1);
+    cleanup();
+    expect(bus.get("close-active-tab")?.size ?? 0).toBe(0);
+  });
+
+  it("does not hear the menu's Close while inactive, as ⌘W is not heard", async () => {
+    render(
+      <ConsoleProvider>
+        <Window ported={[]} onOpenInClassic={() => {}} active={false} />
+      </ConsoleProvider>,
+    );
+    await screen.findByRole("heading", { level: 1, name: "Home" });
+    expect(bus.get("close-active-tab")?.size ?? 0).toBe(0);
+  });
+
+  it("does not listen for the menu's Close in a browser, which has no such menu", async () => {
+    isTauri.mockReturnValue(false);
+    await booted();
+    expect(bus.get("close-active-tab")?.size ?? 0).toBe(0);
   });
 
   it("binds nothing while inactive, and takes the chrome down but not the bodies", async () => {
@@ -1384,6 +1427,16 @@ describe("Window — what the cover has to take with it", () => {
     fireEvent.keyDown(window, { key: "]", metaKey: true, shiftKey: true });
     fireEvent.keyDown(window, { key: "1", metaKey: true });
     expect(store.currentWorkspace().activeId).toBe(activeBefore);
+  });
+
+  it("closes no tab from the macOS menu's Close while the cover is up", async () => {
+    await sealed();
+    // Positive control: the menu's Close is heard here, or its doing nothing
+    // below would prove nothing.
+    expect(bus.get("close-active-tab")?.size).toBe(1);
+    closeFromMenu();
+    closeFromMenu();
+    expect(store.currentWorkspace().tabs).toHaveLength(2);
   });
 
   /**

@@ -687,7 +687,17 @@ export function Window({
       runRef.current(action);
     }
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    // #374 item 4: on macOS the menu's own Close item takes ⌘W before the
+    // webview sees a keydown (`install_macos_menu`, lib.rs) and says
+    // `close-active-tab` instead, which classic listens for. Here it is the
+    // chord's own action, so the sealed rule in `run` covers it too.
+    const offMenuClose = desktop
+      ? on("close-active-tab", () => runRef.current({ type: "close-tab" }))
+      : undefined;
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      offMenuClose?.();
+    };
   }, [active, apple, desktop]);
 
   /**
