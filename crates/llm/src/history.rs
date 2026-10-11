@@ -151,4 +151,14 @@ mod tests {
         assert!(trimmed.len() <= 6);
         assert!(matches!(&trimmed[0], Turn::User(_)));
     }
+
+    #[test]
+    fn test_distill_and_trim_history_returns_empty_when_no_user_turn_remains() {
+        let turns = vec![Turn::Assistant {
+            text: "Only an assistant reply".into(),
+            tool_calls: vec![],
+        }];
+        let trimmed = distill_and_trim_history(turns, 10);
+        assert!(trimmed.is_empty());
+    }
 }

@@ -289,7 +289,12 @@ pub fn compact_request_turns_for_round(turns: &[Turn]) -> Vec<Turn> {
                         .map(|o| {
                             let mut copy = o.clone();
                             if copy.content.len() > 600 {
-                                let snippet: String = copy.content.chars().take(250).collect();
+                                let snippet: String = copy
+                                    .content
+                                    .char_indices()
+                                    .take_while(|(byte_idx, ch)| *byte_idx + ch.len_utf8() <= 250)
+                                    .map(|(_, ch)| ch)
+                                    .collect();
                                 copy.content = format!(
                                     "{}... [Output condensed for subsequent round]",
                                     snippet.trim_end()

@@ -485,11 +485,30 @@ async fn a_native_turn_streams_text_thinking_usage_and_done_in_order() {
         .as_str()
         .unwrap()
         .starts_with("[Active Kubernetes Context: \"kind-dev\""));
-    assert!(requests[0]["tools"]
+    let advertised_tools: Vec<String> = requests[0]["tools"]
         .as_array()
         .unwrap()
         .iter()
-        .any(|t| t["function"]["name"] == "ping"));
+        .map(|t| t["function"]["name"].as_str().unwrap().to_string())
+        .collect();
+
+    // Must include core tools
+    assert!(advertised_tools.iter().any(|t| t == "k8s_listPods"));
+    assert!(advertised_tools.iter().any(|t| t == "ping"));
+
+    // Every advertised tool must be in CORE_SRE_TOOLS
+    for tool in &advertised_tools {
+        assert!(
+            srelens_llm::invoker::CORE_SRE_TOOLS
+                .iter()
+                .any(|&c| c == tool || c.replace('.', "_") == *tool),
+            "tool '{tool}' should be in CORE_SRE_TOOLS allowlist"
+        );
+    }
+
+    // Must NOT contain excluded non-core tools from registry
+    assert!(!advertised_tools.iter().any(|t| t.contains("drainNode")));
+    assert!(!advertised_tools.iter().any(|t| t.contains("helmInstall")));
 }
 
 #[tokio::test]
