@@ -18,12 +18,14 @@
   <a href="docs/USAGE.md">User guide</a> ·
   <a href="#mcp-server">MCP server</a> ·
   <a href="docs/DEVELOPMENT.md">Developer guide</a> ·
-  <a href="CONTRIBUTING.md">Contributing</a>
+  <a href="CONTRIBUTING.md">Contributing</a> ·
+  <a href="https://join.slack.com/t/srelens/shared_invite/zt-4cu0tzuzo-Ktei1KsVlqPi2XY~irTDAg">Slack</a>
 </p>
 
 <p align="center">
   <a href="https://github.com/srelens/srelens/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/srelens/srelens?logo=github&color=eab308"></a>
   <a href="https://www.reddit.com/r/srelens/"><img alt="Reddit: r/srelens" src="https://img.shields.io/reddit/subreddit-subscribers/srelens?label=r%2Fsrelens&logo=reddit&logoColor=white&color=FF4500"></a>
+  <a href="https://join.slack.com/t/srelens/shared_invite/zt-4cu0tzuzo-Ktei1KsVlqPi2XY~irTDAg"><img alt="Slack: join the community" src="https://img.shields.io/badge/Slack-join%20the%20community-4A154B?logo=slack&logoColor=white"></a>
   <a href="https://deepwiki.com/srelens/srelens"><img alt="Ask DeepWiki" src="https://deepwiki.com/badge.svg"></a>
 </p>
 
@@ -260,6 +262,8 @@ and reproducible troubleshooting details are welcome.
 
 ## Community
 
+- [Slack community](https://join.slack.com/t/srelens/shared_invite/zt-4cu0tzuzo-Ktei1KsVlqPi2XY~irTDAg) — join the
+  conversation, ask questions, and chat with other users
 - [r/srelens on Reddit](https://www.reddit.com/r/srelens/) — announcements,
   questions, and feedback
 - [Issues](https://github.com/srelens/srelens/issues) — bugs and feature requests
