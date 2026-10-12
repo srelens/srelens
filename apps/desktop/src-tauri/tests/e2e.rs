@@ -4537,6 +4537,285 @@ async fn teardown() {
 }
 
 // ---------------------------------------------------------------------------
+// Port-forward recovery, issue #172 (#21's acceptance)
+// ---------------------------------------------------------------------------
+/// Its own namespace, so the suite's teardown and this test's never delete
+/// each other's fixtures.
+const FWD_NS: &str = "srelens-e2e-forward";
+const FWD_APP: &str = "e2e-fwd";
+
+/// One pod behind a Service, serving its own name, so a request through the
+/// tunnel says which pod it reached.
+fn forward_fixture_yaml() -> String {
+    format!(
+        r#"apiVersion: v1
+kind: Namespace
+metadata:
+  name: {FWD_NS}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {FWD_APP}
+  namespace: {FWD_NS}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {FWD_APP}
+  template:
+    metadata:
+      labels:
+        app: {FWD_APP}
+    spec:
+      containers:
+      - name: app
+        image: busybox:1.36
+        command: ["sh", "-c", "mkdir -p /www && hostname > /www/index.html && exec httpd -f -p 8080 -h /www"]
+        ports:
+        - name: http
+          containerPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {FWD_APP}
+  namespace: {FWD_NS}
+spec:
+  selector:
+    app: {FWD_APP}
+  ports:
+  - port: 80
+    targetPort: http
+"#
+    )
+}
+
+async fn kubectl_ok(ctx: &str, args: &[&str], stdin: Option<&str>) -> String {
+    use tokio::io::AsyncWriteExt;
+    let mut child = tokio::process::Command::new("kubectl")
+        .arg("--context")
+        .arg(ctx)
+        .args(args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        // The timeout below drops the wait; without this the kubectl it gave up
+        // on would keep running past the test.
+        .kill_on_drop(true)
+        .spawn()
+        .expect("run kubectl");
+    let mut input = child.stdin.take().expect("kubectl stdin");
+    if let Some(text) = stdin {
+        input
+            .write_all(text.as_bytes())
+            .await
+            .expect("write kubectl stdin");
+    }
+    drop(input);
+    let out = tokio::time::timeout(Duration::from_secs(150), child.wait_with_output())
+        .await
+        .unwrap_or_else(|_| panic!("kubectl {args:?} timed out"))
+        .expect("kubectl output");
+    assert!(
+        out.status.success(),
+        "kubectl {args:?} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// The body of `GET /` through the forward's local port, or None when the
+/// tunnel does not answer within a few seconds.
+async fn get_through(port: u16) -> Option<String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let exchange = async {
+        let mut socket = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .ok()?;
+        socket
+            .write_all(b"GET /index.html HTTP/1.0\r\nHost: e2e\r\n\r\n")
+            .await
+            .ok()?;
+        let mut response = String::new();
+        socket.read_to_string(&mut response).await.ok()?;
+        let (head, body) = response.split_once("\r\n\r\n")?;
+        head.starts_with("HTTP/1.").then(|| body.trim().to_owned())
+    };
+    tokio::time::timeout(Duration::from_secs(10), exchange)
+        .await
+        .ok()
+        .flatten()
+}
+
+/// The pod the tunnel reaches, asked until it answers or 30 seconds pass.
+async fn pod_behind(port: u16) -> String {
+    let dl = deadline(30);
+    loop {
+        if let Some(body) = get_through(port).await.filter(|b| !b.is_empty()) {
+            return body;
+        }
+        assert!(Instant::now() < dl, "the forward on {port} never answered");
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+}
+
+/// Every `state` `forward:status:<id>` has reported, in order.
+fn forward_states(sink: &srelens_streams::test_util::TestSink, channel: &str) -> Vec<String> {
+    sink.payloads_for(channel)
+        .iter()
+        .map(|p| p["state"].as_str().unwrap_or_default().to_owned())
+        .collect()
+}
+
+/// #21's acceptance, end to end: deleting the target pod of an active Service
+/// forward recovers without user action once a replacement pod is ready. The
+/// forward must report `reconnecting`, then `active` again, and carry traffic
+/// to the replacement on the same local port.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs a live cluster and kubectl on PATH"]
+async fn service_forward_recovers_after_its_pod_is_deleted() {
+    let result = std::panic::AssertUnwindSafe(forward_recovery())
+        .catch_unwind()
+        .await;
+    // `--timeout` bounds only Kubernetes's wait for the deletion; a stuck
+    // credential helper or request would hold the process, and every live
+    // test after this one, with it. So the whole call has a deadline, and a
+    // kubectl it gives up on is killed rather than left running.
+    let ns = tokio::time::timeout(
+        Duration::from_secs(150),
+        tokio::process::Command::new("kubectl")
+            .args(["--context", &context(), "delete", "namespace", FWD_NS])
+            .args(["--ignore-not-found", "--wait=true", "--timeout=120s"])
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await;
+    match ns {
+        Ok(Ok(o)) if o.status.success() => println!("teardown: namespace {FWD_NS} deleted"),
+        Ok(Ok(o)) => println!(
+            "teardown: namespace {FWD_NS} delete failed: {}",
+            String::from_utf8_lossy(&o.stderr)
+        ),
+        Ok(Err(e)) => println!("teardown: could not run kubectl: {e}"),
+        Err(_) => println!("teardown: deleting namespace {FWD_NS} did not finish within 150s"),
+    }
+    if let Err(e) = result {
+        std::panic::resume_unwind(e);
+    }
+}
+
+async fn forward_recovery() {
+    let ctx = context();
+    kubectl_ok(&ctx, &["apply", "-f", "-"], Some(&forward_fixture_yaml())).await;
+    let selector = format!("app={FWD_APP}");
+    kubectl_ok(
+        &ctx,
+        &[
+            "-n",
+            FWD_NS,
+            "rollout",
+            "status",
+            "deployment",
+            FWD_APP,
+            "--timeout=120s",
+        ],
+        None,
+    )
+    .await;
+    kubectl_ok(
+        &ctx,
+        &[
+            "-n",
+            FWD_NS,
+            "wait",
+            "--for=condition=Ready",
+            "pod",
+            "-l",
+            &selector,
+            "--timeout=120s",
+        ],
+        None,
+    )
+    .await;
+
+    let manager = srelens_streams::forward::ForwardManager::new(cache());
+    let sink = Arc::new(srelens_streams::test_util::TestSink::default());
+    let info = manager
+        .start(
+            sink.clone(),
+            ctx.clone(),
+            FWD_NS.into(),
+            "Service".into(),
+            FWD_APP.into(),
+            80,
+            None,
+        )
+        .await
+        .expect("the forward binds");
+    let status = format!("forward:status:{}", info.id);
+
+    let dl = deadline(60);
+    while !forward_states(&sink, &status).iter().any(|s| s == "active") {
+        let states = forward_states(&sink, &status);
+        assert!(
+            Instant::now() < dl && !states.iter().any(|s| s == "failed"),
+            "the forward never became active: {states:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let first = pod_behind(info.local_port).await;
+    assert!(
+        first.starts_with(&format!("{FWD_APP}-")),
+        "the tunnel reaches the Service's pod: {first:?}"
+    );
+    println!(
+        "forward {} active on :{} -> {first}",
+        info.id, info.local_port
+    );
+
+    let before = forward_states(&sink, &status).len();
+    kubectl_ok(
+        &ctx,
+        &["-n", FWD_NS, "delete", "pod", &first, "--wait=false"],
+        None,
+    )
+    .await;
+    println!("deleted {first}");
+
+    // `reconnecting`, then `active` again, among what was reported after the
+    // delete. A `failed` means it gave up before the replacement was ready.
+    let dl = deadline(120);
+    loop {
+        let states = forward_states(&sink, &status);
+        let after = &states[before..];
+        let reconnected = after
+            .iter()
+            .position(|s| s == "reconnecting")
+            .is_some_and(|r| after[r..].iter().any(|s| s == "active"));
+        if reconnected {
+            break;
+        }
+        assert!(
+            Instant::now() < dl && !after.iter().any(|s| s == "failed"),
+            "the forward did not recover after {first} was deleted: {:?}",
+            sink.payloads_for(&status)
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    let second = pod_behind(info.local_port).await;
+    assert!(
+        second.starts_with(&format!("{FWD_APP}-")) && second != first,
+        "after recovery the same local port reaches the replacement pod, not {first}: {second:?}"
+    );
+    println!(
+        "forward {} recovered on :{} -> {second}",
+        info.id, info.local_port
+    );
+    manager.stop(info.id);
+}
+// ---------------------------------------------------------------------------
 // MCP prompts, issue #25
 // ---------------------------------------------------------------------------
 
