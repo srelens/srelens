@@ -99,6 +99,57 @@ describe("the design system", () => {
 });
 
 /**
+ * The matcher on its own. The scan above runs over a kit that is already
+ * clean, so it would stay green with any branch of `RAW_COLOUR` deleted; these
+ * cases are what keep each form caught, and each near-miss allowed.
+ */
+describe("the raw-colour matcher", () => {
+  it.each([
+    "#fff",
+    "#1a2b3c80",
+    "rgb(0 0 0)",
+    "rgba(20, 18, 25, 0.5)",
+    "hsl(250 60% 50%)",
+    "hsla(0, 0%, 0%, .2)",
+    "oklch(0.6 0.2 250)",
+    "color(display-p3 1 0 0)",
+    "text-red-500",
+    "bg-emerald-100",
+    "hover:border-sky-300/50",
+    "!ring-zinc-900",
+    "dark:text-white",
+    "bg-black",
+    "bg-[#fff]",
+    "text-[rgb(0_0_0)]",
+  ])("catches %s", (raw) => {
+    expect(raw).toMatch(RAW_COLOUR);
+  });
+
+  it.each([
+    "color-mix(in srgb, var(--accent) 20%, transparent)",
+    "text-muted",
+    "bg-sev-wash",
+    "accent-ink",
+    "hover:bg-accent/40",
+    "bg-mark-red",
+    "toneColor(x)",
+    "label(x)",
+    "bg-[var(--field)]",
+    "text-[0.75rem]",
+    "bg-transparent",
+    "text-current",
+    "theme-blue-500",
+    "subtext-red-500",
+    "nav-bg-red-500",
+    "bg-red",
+    "red-500",
+    "bg-red-5000",
+  ])("lets %s through", (allowed) => {
+    expect(allowed).not.toMatch(RAW_COLOUR);
+  });
+});
+
+/**
  * The toolbar grows rather than clipping.
  *
  * `.toolbar` is worn by both `Screen`'s title bar and a standalone `Toolbar`.
