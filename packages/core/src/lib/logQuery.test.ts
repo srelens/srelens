@@ -837,10 +837,41 @@ describe("highlightRanges", () => {
   });
 
   it("merges overlaps, and marks nothing for a negation or the level", () => {
-    expect(highlightRanges("abcdef", clauses("abc bcd -ef level:info"))).toEqual([[0, 4]]);
+    expect(highlightRanges("abcdef level=info", clauses("abc bcd -ef level:info"))).toEqual([[0, 4]]);
   });
 
   it("survives a regex that matches the empty string", () => {
     expect(highlightRanges("abc", clauses("/x*/"))).toEqual([]);
+  });
+
+  it("marks a field only as a whole key, never inside a longer key", () => {
+    expect(highlightRanges("id=5 request_id=5", clauses("id:5"))).toEqual([[0, 4]]);
+  });
+
+  it("marks a field only as a whole value, never a prefix of a longer one", () => {
+    expect(highlightRanges("system=camlogger system=camlog", clauses("system:camlog"))).toEqual([[17, 30]]);
+  });
+
+  it("marks a value shown JSON-quoted, as inlineFields writes it", () => {
+    const row = inlineFields({ path: "C:\\a b" });
+    expect(row).toBe('path="C:\\\\a b"');
+    expect(highlightRanges(row, clauses('path:"C:\\a b"'))).toEqual([[0, row.length]]);
+  });
+
+  it("marks an empty value only where it is shown as a bare key=", () => {
+    expect(highlightRanges("key=abc", clauses('key:""'))).toEqual([]);
+    expect(highlightRanges("key= n=1", clauses('key:""'))).toEqual([[0, 4]]);
+  });
+
+  it("marks a phrase as the term tally reads it, when its words are not literal", () => {
+    expect(highlightRanges("Success: Wrote batch now", clauses('"success wrote batch"'))).toEqual([[0, 20]]);
+  });
+
+  it("does not mark a phrase inside a longer word", () => {
+    expect(highlightRanges("wrote batches", clauses('"wrote batch"'))).toEqual([]);
+  });
+
+  it("marks a phrase whose words the writer quoted, as tokenize reads them", () => {
+    expect(highlightRanges('say "wrote" batch', clauses('"wrote batch"'))).toEqual([[4, 17]]);
   });
 });

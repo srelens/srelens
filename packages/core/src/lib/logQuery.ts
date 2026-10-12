@@ -1,5 +1,5 @@
 import type { HealthKind } from "./k8sHealth";
-import { logObject, tokenize } from "./logTerms";
+import { logObject, QUOTE_CHARS, TRAILING_CHARS, tokenize } from "./logTerms";
 
 /**
  * A log line read as structured data — the message the row should lead with,
@@ -636,7 +636,10 @@ export function inRange(line: QueryLine, range: TimeRange): boolean {
  * pairs, sorted and merged. Built from the original text, not a lowercased
  * copy, because lowercasing can change a string's length and shift every
  * index after it. A negation matched nothing on a line still in view, and
- * `level` has a column of its own, so neither is marked.
+ * `level` has a column of its own, so neither is marked. Field-regex clauses
+ * (`f:/re/`, and the exact-regex form a quote-containing facet value is written
+ * in) are not marked either: their regex tests the value, not the text a row
+ * shows. A field clause marks its whole `key=value` token.
  */
 export function highlightRanges(text: string, clauses: readonly QueryClause[]): [number, number][] {
   const found: [number, number][] = [];
@@ -664,8 +667,35 @@ export function highlightRanges(text: string, clauses: readonly QueryClause[]): 
 }
 
 function highlightPattern(clause: QueryClause): string | undefined {
-  if (clause.field === undefined) return clause.match === "regex" ? clause.regex.source : escapeRegex(clause.value);
+  if (clause.field === undefined) {
+    if (clause.match === "regex") return clause.regex.source;
+    if (clause.match === "phrase") return phrasePattern(clause.value, clause.words);
+    return escapeRegex(clause.value);
+  }
   if (clause.match !== "equals" || clause.field.toLowerCase() === "level") return undefined;
-  // Inline fields read `key=value`, or `key="value"` when the value has a space.
-  return `${escapeRegex(clause.field)}=("?)${escapeRegex(clause.value)}\\1`;
+  // Written as `inlineFields` writes it: a value with a space is JSON-quoted, else raw.
+  // The key may not continue an earlier key name, and the value must end its token.
+  const shown = /\s/.test(clause.value) ? JSON.stringify(clause.value) : clause.value;
+  return `(?<![\\w.@/-])${escapeRegex(clause.field)}=${escapeRegex(shown)}(?=\\s|$)`;
+}
+
+/** A character class of `chars`, each one escaped so none of them is read as syntax. */
+function charClass(chars: string): string {
+  return `[${[...chars].map((c) => c.replace(/[\\\]\[^-]/g, "\\$&")).join("")}]`;
+}
+
+const QUOTE = charClass(QUOTE_CHARS);
+const TRAILING = charClass(TRAILING_CHARS);
+
+/**
+ * A phrase as `matchLine` accepts it: its literal text, or its words in order
+ * as `tokenize` reads them. The mark starts at a token's first word, or at the
+ * quote the writer put before it, and stops before the punctuation that ends
+ * the token: `timeout:` marks `timeout`, and `wrote batch` does not mark the
+ * front of `wrote batches`.
+ */
+function phrasePattern(value: string, words: string): string {
+  const alternatives = [escapeRegex(value)];
+  if (words !== "") alternatives.push(words.split(" ").map(escapeRegex).join(`${TRAILING}*\\s+${QUOTE}*`));
+  return `(?<!\\S)${QUOTE}*(?:${alternatives.join("|")})(?=${TRAILING}*(?:\\s|$))`;
 }

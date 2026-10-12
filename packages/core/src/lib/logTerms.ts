@@ -277,9 +277,9 @@ export interface Token {
 }
 
 /** The characters a writer's own quoting puts around a word. */
-const QUOTE_CHARS = "\"'`";
+export const QUOTE_CHARS = "\"'`";
 /** Those, plus the punctuation that ends a word rather than belonging to it. */
-const TRAILING_CHARS = "\"'`.,;:!?";
+export const TRAILING_CHARS = "\"'`.,;:!?";
 /** The punctuation that closes a clause. No colon — see {@link Token}. */
 const CLAUSE_END_CHARS = ",;.!?";
 
