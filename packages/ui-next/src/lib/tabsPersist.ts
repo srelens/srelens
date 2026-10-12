@@ -85,6 +85,7 @@ function parseTab(v: unknown): Tab | null {
   if (view !== undefined) tab.view = view;
   const namespaces = parseNamespaces(v.namespaces);
   if (namespaces !== undefined) tab.namespaces = namespaces;
+  if (typeof v.closedAt === "number" && Number.isFinite(v.closedAt)) tab.closedAt = v.closedAt;
   return tab;
 }
 

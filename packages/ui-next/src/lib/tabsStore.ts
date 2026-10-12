@@ -163,7 +163,10 @@ function patchCurrent(patch: (w: Workspace) => Workspace) {
 }
 
 function remember(w: Workspace, dropped: Tab[]): Tab[] {
-  return [...dropped, ...w.closed].slice(0, CLOSED_CAP);
+  // Stamped, so lists kept per cluster can be put back in order: see
+  // `Tab.closedAt`.
+  const closedAt = Date.now();
+  return [...dropped.map((tab) => ({ ...tab, closedAt })), ...w.closed].slice(0, CLOSED_CAP);
 }
 
 export function useTabs() {
@@ -364,7 +367,8 @@ export function reopenClosed(id?: string): void {
   const tab = id === undefined ? w.closed[0] : w.closed.find((t) => t.id === id);
   if (!tab) return;
   patchCurrent((w) => {
-    const revived = { ...tab, id: newId() };
+    const revived: Tab = { ...tab, id: newId() };
+    delete revived.closedAt;
     return { ...w, tabs: [...w.tabs, revived], activeId: revived.id, closed: w.closed.filter((t) => t !== tab) };
   });
 }

@@ -173,6 +173,15 @@ describe("parseStoredState", () => {
       return s;
     };
 
+    it("keeps when a closed tab was closed, and drops a time that is not a number", () => {
+      const s = shelving();
+      s.workspaces[0].shelved!.b.closed[0].closedAt = 1_700_000_000_000;
+      const doc = JSON.parse(JSON.stringify({ version: 1, ...s }));
+      expect(parseStoredState(JSON.stringify(doc))!.workspaces[0].shelved!.b.closed[0].closedAt).toBe(1_700_000_000_000);
+      doc.workspaces[0].shelved.b.closed[0].closedAt = "yesterday";
+      expect(parseStoredState(JSON.stringify(doc))!.workspaces[0].shelved!.b.closed[0].closedAt).toBeUndefined();
+    });
+
     it("round-trips them: tabs, order, active tab and recently closed", () => {
       const s = shelving();
       expect(parseStoredState(JSON.stringify({ version: 1, ...s }))).toEqual(s);

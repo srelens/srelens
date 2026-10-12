@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { renderHook, act } from "@testing-library/react";
 import type { ClusterContext } from "@srelens/core";
-import { defaultState, type TabsState } from "./tabs";
+import { CLOSED_CAP, defaultState, type TabsState } from "./tabs";
 import { detailRoute } from "./detailRoute";
 import * as store from "./tabsStore";
 
@@ -669,6 +669,38 @@ describe("activeCluster", () => {
       expect(routes()).toEqual(["/", "/overview", "/settings"]);
       toProd();
       expect(store.currentWorkspace().closed.map((t) => t.route)).toEqual(["/k/services"]);
+    });
+
+    /**
+     * A cluster's own closed tabs come back beside the app-wide ones that
+     * stayed, and the two are capped together. With the cluster's own put
+     * first, a cluster that had a full list of its own pushed every app-wide
+     * closed tab off the end, including one closed a moment ago.
+     */
+    it("keeps a tab just closed when a cluster with a full closed list of its own comes back", () => {
+      vi.useFakeTimers();
+      try {
+        vi.setSystemTime(1_000);
+        for (let i = 0; i < CLOSED_CAP; i++) {
+          store.newTab("/k/pods", "prod-eu");
+          vi.advanceTimersByTime(10);
+          store.closeTab(active().id);
+        }
+        toStage();
+        vi.advanceTimersByTime(10);
+        store.openTab("/settings");
+        store.closeTab(active().id);
+
+        toProd();
+        const closed = store.currentWorkspace().closed;
+        expect(closed).toHaveLength(CLOSED_CAP);
+        expect(closed[0].route).toBe("/settings");
+        store.reopenClosed();
+        expect(active().route).toBe("/settings");
+        expect(active().closedAt).toBeUndefined();
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     /** Home offers closed tabs across clusters, and focuses a tab's cluster to bring it back. */

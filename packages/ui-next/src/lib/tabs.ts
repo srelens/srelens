@@ -31,6 +31,13 @@ export interface Tab {
    * default-namespace preference.
    */
   namespaces?: Record<string, string[]>;
+  /**
+   * When the tab was closed, on a tab in a recently closed list only. It is
+   * what orders that list when a cluster's own closed tabs are brought back
+   * beside the app-wide ones that stayed (#908): without it one kind had to
+   * go first, and the cap then dropped the other however recent it was.
+   */
+  closedAt?: number;
 }
 
 /**
@@ -249,15 +256,25 @@ export function focusStrip(w: Workspace, to: string | undefined, clusterName?: s
     ...w,
     tabs,
     activeId,
-    // The cluster's own first. Which of the two was closed more recently is
-    // not recorded, and "reopen closed" on a cluster most often means its own.
-    closed: incoming?.closed.length ? [...incoming.closed, ...closedStaying].slice(0, CLOSED_CAP) : closedStaying,
+    closed: incoming?.closed.length ? mostRecentlyClosed(incoming.closed, closedStaying) : closedStaying,
   };
   if (to === undefined) delete next.activeCluster;
   else next.activeCluster = to;
   if (Object.keys(shelved).length > 0) next.shelved = shelved;
   else delete next.shelved;
   return next;
+}
+
+/**
+ * Two recently closed lists as one, most recent first, capped.
+ *
+ * By when each tab was closed, so the cap drops the oldest of either list and
+ * never a tab closed a moment ago because of which list it was in. A tab
+ * closed before that was recorded counts as oldest and keeps its place among
+ * its own: the sort is stable, and each list is already most recent first.
+ */
+function mostRecentlyClosed(own: Tab[], shared: Tab[]): Tab[] {
+  return [...own, ...shared].sort((a, b) => (b.closedAt ?? 0) - (a.closedAt ?? 0)).slice(0, CLOSED_CAP);
 }
 
 /**
