@@ -56,7 +56,7 @@ export function parseLogFields(text: string): LogFields {
     return { message: messageField(fields) ?? "", fields, structured: true };
   }
   const fields = logfmtTail(text);
-  if (fields === null) return { message: text, fields: {}, structured: false };
+  if (fields === null) return { message: text, fields: emptyFields(), structured: false };
   const message = messageField(fields);
   return message === undefined
     ? { message: text, fields, structured: false }
@@ -218,9 +218,10 @@ type Term =
 
 /**
  * Whitespace-separated clauses: `word`, `"phrase"`, `/regex/`, `field:value`,
- * `field:"value"`, `field:/regex/`, each optionally `-`-negated. Everything
- * that compares is lowercased here once, so matching 5,000 lines does no
- * case folding of the query.
+ * `field:"value"`, `field:/regex/`, each optionally `-`-negated. Values are
+ * lowercased here once (a regex is made case-insensitive instead), so matching
+ * 5,000 lines does no case folding of the query. Field names keep their
+ * spelling and compare case-insensitively at match time.
  */
 export function parseLogQuery(query: string): ParsedQuery {
   const clauses: QueryClause[] = [];
@@ -397,15 +398,27 @@ function spell(t: ClauseTarget): string {
   return `${t.field}:${spellValue(t.value)}`;
 }
 
-/** A value spelled so it parses back to itself: a quote cannot be quoted, so it becomes an exact regex. */
+/**
+ * A value spelled so it parses back to itself. A quote cannot be quoted, and a
+ * control character cannot be typed into the `<input type=search>` the query
+ * lives in (it strips newlines), so each becomes an exact regex in which the
+ * control character is escaped.
+ */
 function spellValue(value: string): string {
-  if (value.includes('"')) return `/^${escapeRegex(value)}$/`;
+  if (value.includes('"') || CONTROL.test(value)) return `/^${escapeRegex(value)}$/`;
   if (value === "" || /[\s:]/.test(value) || value.startsWith("/")) return `"${value}"`;
   return value;
 }
 
+const CONTROL = /[\u0000-\u001f]/;
+
+/** A regex source that matches `text` literally. A control character is written escaped, so no source holds a raw newline. */
 function escapeRegex(text: string): string {
-  return text.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
+  return text
+    .replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")
+    .replace(/[\u0000-\u001f]/g, (c) =>
+      c === "\n" ? "\\n" : c === "\r" ? "\\r" : `\\x${c.charCodeAt(0).toString(16).padStart(2, "0")}`,
+    );
 }
 
 function append(query: string, clause: string): string {
@@ -523,7 +536,8 @@ const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
 /** The widest instant a Date can hold (ECMAScript's limit, ±8.64e15 ms). */
 const MAX_TIME = 8.64e15;
-const STEPS = [
+/** The round bar widths, narrowest first. A time axis cuts its ticks on the same ones. */
+export const VOLUME_STEPS: readonly number[] = [
   ...[1, 2, 5, 10, 15, 30].map((n) => n * SECOND),
   ...[1, 2, 5, 10, 15, 30].map((n) => n * MINUTE),
   ...[1, 2, 3, 6, 12].map((n) => n * HOUR),
@@ -601,7 +615,7 @@ export function volumeBuckets(lines: readonly QueryLine[], maxBars = 60): Volume
     while (days < cap && !fits(days * DAY)) days += 1;
     return days * DAY;
   };
-  const step = STEPS.find(fits) ?? wholeDays();
+  const step = VOLUME_STEPS.find(fits) ?? wholeDays();
   const bucketOf = (at: number): number => Math.floor((step < HOUR ? at - origin : wallClock(at)) / step);
   const edgeAt = (k: number): number => (step < HOUR ? k * step + origin : instantOf(k * step));
   const first = Math.floor(lo(step) / step);

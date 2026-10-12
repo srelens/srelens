@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { clauseState, discoverFields, facetCounts, highlightRanges, inlineFields, inRange, isQueryableKey, logLineWords, matchLine, parseLogFields, parseLogQuery, removeClause, toggleClause, volumeBuckets, type QueryClause, type QueryLine } from "./logQuery";
+import { clauseState, discoverFields, facetCounts, highlightRanges, inlineFields, inRange, isQueryableKey, logLineWords, matchLine, parseLogFields, parseLogQuery, removeClause, toggleClause, VOLUME_STEPS, volumeBuckets, type QueryClause, type QueryLine } from "./logQuery";
 import { healthRank, logLineHealth, logLineLevel } from "./logTerms";
 
 describe("parseLogFields", () => {
@@ -105,6 +105,15 @@ describe("parseLogFields", () => {
 
   it("keeps a logfmt __proto__ key as a field", () => {
     expect(parseLogFields("__proto__=x a=1").fields["__proto__"]).toBe("x");
+  });
+
+  it("gives plain text the same prototype-free fields as a line that has some", () => {
+    // `fields["constructor"]` on a `{}` is Object's function. Every reader is
+    // guarded, but the guard is the only thing standing between a line's
+    // `constructor:x` query and a TypeError, and not every line has fields.
+    expect(Object.getPrototypeOf(parseLogFields("GET /healthz 200 1ms").fields)).toBeNull();
+    expect(Object.getPrototypeOf(parseLogFields("starting api build=4f2a").fields)).toBeNull();
+    expect(Object.getPrototypeOf(parseLogFields('{"level":"info"').fields)).toBeNull();
   });
 
   it("takes the first non-blank message key", () => {
@@ -282,6 +291,15 @@ describe("matchLine", () => {
   it("never reads a field off the object prototype", () => {
     expect(matches("constructor:x", A)).toEqual([]);
   });
+
+  it("never reads a field off the object prototype of a plain-text line either", () => {
+    expect(matches("constructor:x", D)).toEqual([]);
+    expect(matches("toString:x", D)).toEqual([]);
+  });
+
+  it("matches a free-text regex without regard to case, as the rest of the query does", () => {
+    expect(matches("/WROTE/", A, B)).toEqual([A]);
+  });
 });
 
 describe("isQueryableKey", () => {
@@ -323,6 +341,25 @@ describe("toggleClause", () => {
     const once = toggleClause("", target, "include");
     expect(once).toBe('q:/^say "hi"$/');
     expect(matches(once, '{"q":"say \\"hi\\""}', '{"q":"say hi"}')).toHaveLength(1);
+    expect(toggleClause(once, target, "include")).toBe("");
+  });
+
+  it.each([
+    ["a newline", "line one\nline two"],
+    ["a carriage return", "line one\rline two"],
+    ["another control character", "bell\u0007here"],
+    ["a tab", "col one\tcol two"],
+  ])("writes a value holding %s as an escaped exact regex, which finds it again and takes it back", (_, value) => {
+    // An <input type=search> strips newlines from what is written into it, so a
+    // quoted value holding one would come back as a different query.
+    const target = { field: "msg", value };
+    const once = toggleClause("", target, "include");
+    expect(once).toMatch(/^msg:\/\^.*\$\/$/);
+    expect(once).not.toMatch(/[\u0000-\u001f]/);
+    expect(clauseState(clauses(once), target)).toBe("include");
+    expect(matches(once, JSON.stringify({ msg: value }), JSON.stringify({ msg: "line one" }))).toEqual([
+      JSON.stringify({ msg: value }),
+    ]);
     expect(toggleClause(once, target, "include")).toBe("");
   });
 
@@ -465,6 +502,15 @@ describe("facetCounts", () => {
 
 describe("volumeBuckets", () => {
   const timed = (text: string, iso: string) => ql(text, Date.parse(iso));
+
+  it("offers the round steps it picks from, so a time axis can cut on the same ones", () => {
+    expect(VOLUME_STEPS[0]).toBe(1000);
+    expect(VOLUME_STEPS[VOLUME_STEPS.length - 1]).toBe(86_400_000);
+    expect([...VOLUME_STEPS].sort((a, b) => a - b)).toEqual([...VOLUME_STEPS]);
+    // Every step a chart ever draws is one of them, or whole days past the last.
+    const v = volumeBuckets([timed("info a", "2026-10-12T10:00:00Z"), timed("info b", "2026-10-12T10:10:00Z")]);
+    expect(VOLUME_STEPS).toContain(v.step);
+  });
 
   it("picks the smallest round step that fits the span in sixty bars", () => {
     // Ten minutes: 10s bars would be 61, 15s bars are 41.

@@ -531,23 +531,41 @@ export interface LogTerm {
 }
 
 /**
+ * A line as the tally reads it: the stream's line, and optionally a caller's
+ * own reading of it. A caller that has already parsed the line (the Logs
+ * screen reads a logfmt `msg` that this file's JSON-only `messageOf` cannot)
+ * hands that reading over rather than have it derived again, and wrongly.
+ */
+export interface TermLine extends LogLine {
+  /** The line's message, to tally in place of the one read off `text`. */
+  readonly message?: string;
+  /** The line's severity, to tone its term in place of the one read off `text`. */
+  readonly health?: HealthKind;
+}
+
+/**
  * Tally the recurring terms across a buffer's lines, most frequent first,
  * dropping anything that only occurred once and capping the result so the
  * rail never has to scroll through dozens of rows.
  *
  * Tallies over `line.text` only — `line.source` (the pod/container tag) plays
  * no part, so the same message from three different pods still counts as one
- * term.
+ * term. A line's own `message` and `health`, where it carries them, are used
+ * instead of reading those off `text`; the message still has its framing
+ * skipped, since a prose line's message is its whole text.
  */
 export function tallyLogTerms(
-  lines: readonly LogLine[],
+  lines: readonly TermLine[],
   options?: { readonly cap?: number },
 ): LogTerm[] {
   const cap = options?.cap ?? DEFAULT_CAP;
   // Parsed once per line, not once per question: `logObject` is the only
   // expensive step here and three passes below want the same answer from it.
-  const parsed = lines.map((l) => logObject(l.text));
-  const tokenized = lines.map((l, i) => tokenize(messageOf(l.text, parsed[i])));
+  // Not at all for a line that brings both of its answers.
+  const parsed = lines.map((l) => (l.message !== undefined && l.health !== undefined ? null : logObject(l.text)));
+  const tokenized = lines.map((l, i) =>
+    tokenize(l.message === undefined ? messageOf(l.text, parsed[i]) : skipStructure(l.message)),
+  );
 
   // Pass 1: how many times has each literal key=value token recurred, over
   // the WHOLE buffer? This is the cardinality signal the rule is built on.
@@ -579,7 +597,7 @@ export function tallyLogTerms(
     const term = candidate.trusted ?? termOf(candidate.clause, clauseFrequency);
     if (term === null) continue;
     counts.set(term, (counts.get(term) ?? 0) + 1);
-    const health = healthOf(levelOf(lines[i].text, parsed[i]));
+    const health = lines[i].health ?? healthOf(levelOf(lines[i].text, parsed[i]));
     const worst = tones.get(term);
     if (worst === undefined || HEALTH_RANK[health] > HEALTH_RANK[worst]) {
       tones.set(term, health);
