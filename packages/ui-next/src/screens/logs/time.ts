@@ -13,16 +13,32 @@ const dateOf = (ms: number) => {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 };
 
-/** `10:33:00 – 10:34:30`, dated only when the window crosses midnight. */
+export const DAY = 86_400_000;
+
+/** `2026-10-12 10:33`, local: a stamp that names its day, to the second only when asked. */
+export function dateTime(ms: number, seconds = false): string {
+  const clock = clockTime(ms);
+  return `${dateOf(ms)} ${seconds ? clock : clock.slice(0, 5)}`;
+}
+
+/**
+ * Whether a clock reading alone would be ambiguous for `[from, to)`: it covers
+ * a day or more, or crosses a midnight. `to` is exclusive, so a span ending
+ * exactly at midnight stays on its day unless it is a whole day long.
+ */
+export function spansDays(from: number, to: number): boolean {
+  return to - from >= DAY || dateOf(from) !== dateOf(to - 1);
+}
+
+/** `10:33:00 – 10:34:30`, dated when the window covers a day or crosses midnight. */
 export function rangeLabel(range: TimeRange): string {
-  // `to` is exclusive, so a window ending exactly at midnight stays on its day.
-  if (dateOf(range.from) === dateOf(range.to - 1)) return `${clockTime(range.from)} – ${clockTime(range.to)}`;
+  if (!spansDays(range.from, range.to)) return `${clockTime(range.from)} – ${clockTime(range.to)}`;
   return `${dateOf(range.from)} ${clockTime(range.from)} – ${dateOf(range.to)} ${clockTime(range.to)}`;
 }
 
 /** `30s`, `5m`, `1h`, `1d`. */
 export function stepLabel(step: number): string {
-  if (step % 86_400_000 === 0) return `${step / 86_400_000}d`;
+  if (step % DAY === 0) return `${step / DAY}d`;
   if (step % 3_600_000 === 0) return `${step / 3_600_000}h`;
   if (step % 60_000 === 0) return `${step / 60_000}m`;
   return `${step / 1000}s`;

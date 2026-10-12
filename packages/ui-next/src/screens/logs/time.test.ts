@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { clockTime, rangeLabel, stepLabel } from "./time";
+import { clockTime, dateTime, rangeLabel, spansDays, stepLabel } from "./time";
 
 // Local-time constructors, so these hold in every zone.
 const at = (day: number, h = 0, m = 0, s = 0) => new Date(2026, 9, day, h, m, s).getTime();
@@ -24,6 +24,27 @@ describe("rangeLabel", () => {
   it("keeps a window that ends exactly at midnight on its own day", () => {
     // `to` is exclusive: the last instant inside is 23:59:59.999.
     expect(rangeLabel({ from: at(12, 23), to: at(13) })).toBe("23:00:00 – 00:00:00");
+  });
+});
+
+describe("a window of a whole day", () => {
+  it("is dated, even though it ends on its own day's midnight", () => {
+    expect(rangeLabel({ from: at(12), to: at(12) + 86_400_000 })).toBe("2026-10-12 00:00:00 – 2026-10-13 00:00:00");
+  });
+
+  it("is a span of days, and one second short of that is not", () => {
+    expect(spansDays(at(12), at(12) + 86_400_000)).toBe(true);
+    expect(spansDays(at(12), at(12) + 86_400_000 - 1000)).toBe(false);
+  });
+});
+
+describe("dateTime", () => {
+  it("names the day and the minute", () => {
+    expect(dateTime(at(12, 10, 33, 45))).toBe("2026-10-12 10:33");
+  });
+
+  it("keeps the seconds when asked", () => {
+    expect(dateTime(at(12, 10, 33, 45), true)).toBe("2026-10-12 10:33:45");
   });
 });
 
