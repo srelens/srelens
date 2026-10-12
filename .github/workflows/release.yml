@@ -291,8 +291,9 @@ jobs:
           SRELENS_SMOKE_FULL: "1"
           SRELENS_SMOKE_APP: ${{ github.workspace }}/target/ci-smoke/srelens
           SRELENS_SMOKE_ARTIFACTS: ${{ runner.temp }}/smoke-artifacts
+        # A screen the 1440x900 window fits on; see the same step in ci.yml.
         run: |
-          xvfb-run --auto-servernum \
+          xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" \
             cargo test -p srelens-desktop --features custom-protocol --profile ci-smoke --test webdriver_smoke -- --ignored --nocapture
       - name: Upload failure artifacts (screenshot + app logs)
         if: failure()

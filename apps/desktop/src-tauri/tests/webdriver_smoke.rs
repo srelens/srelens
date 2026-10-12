@@ -146,17 +146,17 @@ async fn click(driver: &WebDriver, by: By, secs: u64) -> WebDriverResult<()> {
     }
 }
 
-/// Click `by` until `proof` appears, within `secs`. For targets on a screen
-/// still settling: Home's sections and the pods table land at different
-/// times, so a row can move between WebDriver locating it and its click
-/// arriving, and the click then lands on whatever took the row's place —
-/// accepted, with no error to retry on (seen in CI: the cluster row's click
-/// left the window on Home). Proof of the click's effect is what is waited on.
-async fn click_until(driver: &WebDriver, by: By, proof: By, secs: u64) -> WebDriverResult<()> {
+/// Click the element at `target` (an XPath) until `proof` appears, within
+/// `secs`. A WebDriver click can be accepted and still change nothing — on a
+/// screen still settling, where the target moves between being located and
+/// being clicked, and in CI, where the cluster row's clicks left the window
+/// on Home with no error to retry on. So the click's effect is what is waited
+/// on, and each miss logs what the click was aimed at.
+async fn click_until(driver: &WebDriver, target: &str, proof: By, secs: u64) -> WebDriverResult<()> {
     let deadline = Instant::now() + Duration::from_secs(secs);
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now()).as_secs().max(1);
-        click(driver, by.clone(), remaining).await?;
+        click(driver, By::XPath(target.to_string()), remaining).await?;
         let landed = driver
             .query(proof.clone())
             .wait(Duration::from_secs(5), Duration::from_millis(250))
@@ -165,6 +165,32 @@ async fn click_until(driver: &WebDriver, by: By, proof: By, secs: u64) -> WebDri
         if landed {
             return Ok(());
         }
+        // A miss with no error is otherwise invisible: where the target is,
+        // the viewport, and what the point the click aimed at actually holds.
+        let aimed = driver
+            .execute(
+                r#"
+                const xpath = arguments[0];
+                const found = document.evaluate(xpath, document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
+                const el = found.snapshotLength ? found.snapshotItem(0) : null;
+                if (!el) return JSON.stringify({ matches: 0 });
+                const r = el.getBoundingClientRect();
+                const x = r.x + r.width / 2, y = r.y + r.height / 2;
+                const top = document.elementFromPoint(x, y);
+                return JSON.stringify({
+                    matches: found.snapshotLength,
+                    rect: [r.x, r.y, r.width, r.height],
+                    viewport: [innerWidth, innerHeight, devicePixelRatio, screen.width, screen.height],
+                    topIsTarget: !!top && el.contains(top),
+                    top: top ? top.outerHTML.slice(0, 160) : null,
+                });
+                "#,
+                vec![serde_json::Value::String(target.to_string())],
+            )
+            .await
+            .map(|ret| ret.json().to_string())
+            .unwrap_or_else(|e| format!("(could not describe it: {e})"));
+        println!("click on {target} changed nothing; aimed at {aimed}");
         if Instant::now() >= deadline {
             return driver.query(proof).nowait().first().await.map(|_| ());
         }
@@ -353,7 +379,7 @@ async fn run_flow(driver: &WebDriver, context: &str, full: bool) -> Result<(), F
     // Opening it always opens the cluster's overview tab, which is the proof.
     click_until(
         driver,
-        By::XPath(format!("//button[starts-with(@aria-label, 'Open cluster {context} \u{2014}')]")),
+        &format!("//button[starts-with(@aria-label, 'Open cluster {context} \u{2014}')]"),
         By::XPath(format!(
             "//*[@role='tablist' and @aria-label='Open tabs']//*[@role='tab' and starts-with(@aria-label, 'Cluster overview')]"
         )),
@@ -386,9 +412,7 @@ async fn run_flow(driver: &WebDriver, context: &str, full: bool) -> Result<(), F
     let actions = "//*[@role='group' and @aria-label='Pod actions']";
     click_until(
         driver,
-        By::XPath(format!(
-            "//tbody//tr[not(@aria-hidden='true')]//*[normalize-space(text())='{POD}']"
-        )),
+        &format!("//tbody//tr[not(@aria-hidden='true')]//*[normalize-space(text())='{POD}']"),
         By::XPath(actions.to_string()),
         60,
     )
