@@ -1,4 +1,7 @@
 import { describe, it, expect } from "vitest";
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { clauseState, discoverFields, facetCounts, highlightRanges, inlineFields, inRange, isQueryableKey, logLineWords, matchLine, parseLogFields, parseLogQuery, removeClause, toggleClause, volumeBuckets, type QueryClause, type QueryLine } from "./logQuery";
 import { healthRank, logLineHealth, logLineLevel } from "./logTerms";
 
@@ -873,5 +876,25 @@ describe("highlightRanges", () => {
 
   it("marks a phrase whose words the writer quoted, as tokenize reads them", () => {
     expect(highlightRanges('say "wrote" batch', clauses('"wrote batch"'))).toEqual([[4, 17]]);
+  });
+
+  it("marks a whitespace-free value in its quoted form too, as klog writes it", () => {
+    // klog quotes every string value, so a facet click on the bare value has to mark the quoted token.
+    expect(highlightRanges('Starting err="" x=1', clauses('err:""'))).toEqual([[9, 15]]);
+    expect(highlightRanges('GET url="a=b" 200', clauses("url:a=b"))).toEqual([[4, 13]]);
+    expect(highlightRanges('Wrote batch system="camlog" n=1', clauses("system:camlog"))).toEqual([[12, 27]]);
+  });
+
+  it("marks a field and a phrase that sit twice in a row, separated by one space", () => {
+    expect(highlightRanges("id=5 id=5", clauses("id:5"))).toEqual([[0, 4], [5, 9]]);
+    expect(highlightRanges("wrote batch wrote batch", clauses('"wrote batch"'))).toEqual([[0, 11], [12, 23]]);
+  });
+
+  it("keeps regex lookbehind out of this module, which older WKWebView throws on", () => {
+    // Safari before 16.4 (macOS before 13.3) throws a SyntaxError when a RegExp with a lookbehind is built.
+    // The Logs screen builds these patterns while it renders, so the screen would crash on such a machine.
+    const source = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), "logQuery.ts"), "utf8");
+    expect(source).not.toContain("(?<!");
+    expect(source).not.toContain("(?<=");
   });
 });

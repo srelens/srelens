@@ -645,15 +645,17 @@ export function highlightRanges(text: string, clauses: readonly QueryClause[]): 
   const found: [number, number][] = [];
   for (const clause of clauses) {
     if (clause.negated) continue;
-    const pattern = highlightPattern(clause);
-    if (pattern === undefined) continue;
-    const re = new RegExp(pattern, "gi");
+    const mark = highlightPattern(clause);
+    if (mark === undefined) continue;
+    const re = new RegExp(mark.pattern, "gi");
     for (let m = re.exec(text); m !== null; m = re.exec(text)) {
       if (m[0] === "") {
         re.lastIndex += 1;
         continue;
       }
-      found.push([m.index, m.index + m[0].length]);
+      // A prefixed mark's group 1 is the character before the word; the mark leaves it out.
+      const start = mark.prefixed ? m.index + m[1].length : m.index;
+      found.push([start, m.index + m[0].length]);
     }
   }
   found.sort((a, b) => a[0] - b[0]);
@@ -666,17 +668,31 @@ export function highlightRanges(text: string, clauses: readonly QueryClause[]): 
   return merged;
 }
 
-function highlightPattern(clause: QueryClause): string | undefined {
+/**
+ * What marks a clause: its pattern, and whether group 1 is a one-character
+ * prefix the mark leaves out. The prefix does the work of a lookbehind, which
+ * older WKWebView (Safari before 16.4) throws on when a RegExp is built, and the
+ * Logs screen builds these while it renders.
+ */
+interface Mark {
+  readonly pattern: string;
+  readonly prefixed: boolean;
+}
+
+function highlightPattern(clause: QueryClause): Mark | undefined {
   if (clause.field === undefined) {
-    if (clause.match === "regex") return clause.regex.source;
+    if (clause.match === "regex") return { pattern: clause.regex.source, prefixed: false };
     if (clause.match === "phrase") return phrasePattern(clause.value, clause.words);
-    return escapeRegex(clause.value);
+    return { pattern: escapeRegex(clause.value), prefixed: false };
   }
   if (clause.match !== "equals" || clause.field.toLowerCase() === "level") return undefined;
-  // Written as `inlineFields` writes it: a value with a space is JSON-quoted, else raw.
-  // The key may not continue an earlier key name, and the value must end its token.
-  const shown = /\s/.test(clause.value) ? JSON.stringify(clause.value) : clause.value;
-  return `(?<![\\w.@/-])${escapeRegex(clause.field)}=${escapeRegex(shown)}(?=\\s|$)`;
+  // klog and prose rows keep the writer's quoting, so a value with no space is
+  // marked raw or quoted. A value with a space is only ever quoted: raw
+  // `key=a b` is text inlineFields never writes. The key may not continue an
+  // earlier key name, and the value must end its token.
+  const quoted = escapeRegex(JSON.stringify(clause.value));
+  const shown = /\s/.test(clause.value) ? quoted : `(?:${escapeRegex(clause.value)}|${quoted})`;
+  return { pattern: `(^|[^\\w.@/-])${escapeRegex(clause.field)}=${shown}(?=\\s|$)`, prefixed: true };
 }
 
 /** A character class of `chars`, each one escaped so none of them is read as syntax. */
@@ -694,8 +710,12 @@ const TRAILING = charClass(TRAILING_CHARS);
  * the token: `timeout:` marks `timeout`, and `wrote batch` does not mark the
  * front of `wrote batches`.
  */
-function phrasePattern(value: string, words: string): string {
+function phrasePattern(value: string, words: string): Mark {
   const alternatives = [escapeRegex(value)];
   if (words !== "") alternatives.push(words.split(" ").map(escapeRegex).join(`${TRAILING}*\\s+${QUOTE}*`));
-  return `(?<!\\S)${QUOTE}*(?:${alternatives.join("|")})(?=${TRAILING}*(?:\\s|$))`;
+  // The trailing lookahead consumes nothing, so a phrase right after this one can use the space as its prefix.
+  return {
+    pattern: `(^|\\s)${QUOTE}*(?:${alternatives.join("|")})(?=${TRAILING}*(?:\\s|$))`,
+    prefixed: true,
+  };
 }
