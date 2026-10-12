@@ -505,7 +505,7 @@ export interface VolumeBucket {
   readonly warning: number;
   /** Lines core reads as info (`info`, `notice`): the common case, kept apart so `other` is only what has no severity. */
   readonly info: number;
-  /** Neutral lines: no level word, or one core doesn't tone (`debug`, `trace`). */
+  /** Neutral and success lines: no level word, or one core doesn't tone (`debug`, `trace`). */
   readonly other: number;
 }
 

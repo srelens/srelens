@@ -1,17 +1,13 @@
 import { useEffect, useMemo, useState, type KeyboardEvent } from "react";
-import {
-  clauseState,
-  inRange,
-  volumeBuckets,
-  type QueryClause,
-  type QueryLine,
-  type TimeRange,
-  type VolumeBucket,
-} from "@srelens/core";
-import { statusTone, toneColor, toneWash, type StatusKind } from "@srelens/ui-kit";
+import { inRange, volumeBuckets, type QueryClause, type QueryLine, type TimeRange, type VolumeBucket } from "@srelens/core";
+import { statusTone, toneColor, toneWash } from "@srelens/ui-kit";
 import { groupNumber } from "../../lib/numbers";
 import { setSectionOpen, useSectionOpen } from "../../lib/sectionFolds";
 import { clockTime, dateTime, DAY, niceCeil, spansDays, stepLabel, tickLabels, timeTicks } from "./time";
+import { TimeAxis } from "./TimeAxis";
+import { GROUPS, OTHER_OPACITY, type BarGroup } from "./volumeGroups";
+import { tallyLegend, VolumeLegend } from "./VolumeLegend";
+import { VolumeTooltip } from "./VolumeTooltip";
 
 const BAR = 10;
 const GAP = 2;
@@ -19,43 +15,20 @@ const HEIGHT = 96;
 /** The least a non-empty segment is drawn, in viewBox units (about a pixel): a lone error beside a spike must not vanish. */
 const MIN_SEGMENT = 1;
 const MINUTE = 60_000;
-
-/**
- * A bar's segments, bottom to top, and the legend's entries in the same order.
- * Errors sit on the baseline, so a spike of them compares across bars; what has
- * no severity goes last and is drawn faint. The colour is core's health tone
- * for `kind`, never a local one; `word` is only what the legend calls it.
- */
-const GROUPS = [
-  { key: "danger", kind: "danger", word: "error" },
-  { key: "warning", kind: "warning", word: "warn" },
-  { key: "info", kind: "info", word: "info" },
-  { key: "other", kind: "neutral", word: "other" },
-] as const satisfies readonly { key: keyof VolumeBucket; kind: StatusKind; word: string }[];
-/** How much of its colour the unlevelled lines keep. */
-const OTHER_OPACITY = 0.4;
 /** The brush over a drag: enough to see the bars through. */
 const BRUSH_OPACITY = 0.18;
 
 const lineCount = (n: number) => `${groupNumber(n)} ${n === 1 ? "line" : "lines"}`;
 
-/**
- * Per group, in `GROUPS` order: how many lines, and the level words they carry,
- * which is what a click on the entry puts in the query. Core decides which
- * group a line is in (`health`) and what its word is (`level`); a line whose
- * health is none of the three coloured ones, `success` included, is "other".
- */
-function tally(lines: readonly QueryLine[]): { count: number; levels: string[] }[] {
-  const groups = GROUPS.map(() => ({ count: 0, levels: new Set<string>() }));
-  for (const line of lines) {
-    const found = GROUPS.findIndex(({ kind }) => kind === line.health);
-    const group = groups[found === -1 ? GROUPS.length - 1 : found];
-    group.count += 1;
-    if (line.level !== "") group.levels.add(line.level.toLowerCase());
-  }
-  // Sorted, so the query a click writes does not depend on which line arrived first.
-  return groups.map(({ count, levels }) => ({ count, levels: [...levels].sort() }));
+/** A bar in words: for the tooltip, and flattened here for the live region. */
+interface BarText {
+  range: string;
+  total: string;
+  groups: BarGroup[];
 }
+
+const announce = (d: BarText) =>
+  [d.range, d.total, ...d.groups.map(({ word, n }) => `${word} ${groupNumber(n)}`)].join(" · ");
 
 function stack(b: VolumeBucket, max: number): number[] {
   const heights = GROUPS.map(({ key }) => (b[key] > 0 ? Math.max(MIN_SEGMENT, (b[key] / max) * HEIGHT) : 0));
@@ -63,15 +36,6 @@ function stack(b: VolumeBucket, max: number): number[] {
   const over = heights.reduce((a, h) => a + h, 0) - HEIGHT;
   if (over > 0) heights[heights.indexOf(Math.max(...heights))] -= over;
   return heights;
-}
-
-/** A group's colour as a dot: the legend's and the tooltip's, filled as the bars are. */
-function Dot({ kind, faint }: { kind: StatusKind; faint: boolean }) {
-  return (
-    <svg data-slot="dot" aria-hidden="true" width={8} height={8} viewBox="0 0 8 8" className="shrink-0">
-      <circle cx={4} cy={4} r={4} fill={toneColor(statusTone(kind))} fillOpacity={faint ? OTHER_OPACITY : undefined} />
-    </svg>
-  );
 }
 
 /**
@@ -89,12 +53,19 @@ function Dot({ kind, faint }: { kind: StatusKind; faint: boolean }) {
  */
 export function VolumeHistogram({
   lines,
+  legendLines = lines,
   range,
   onRangeChange,
   clauses,
   onToggleLevels,
 }: {
   lines: readonly QueryLine[];
+  /**
+   * What the legend counts and offers, when that is wider than the bars: the
+   * lines the query would keep with its level clauses off, as the rail's Level
+   * facet counts them, so picking a level leaves the others to click.
+   */
+  legendLines?: readonly QueryLine[];
   range: TimeRange | undefined;
   onRangeChange: (range: TimeRange | undefined) => void;
   /** The query as typed, for which legend entries are on. */
@@ -110,7 +81,7 @@ export function VolumeHistogram({
     () => niceCeil(Math.max(1, ...buckets.map((b) => b.danger + b.warning + b.info + b.other))),
     [buckets],
   );
-  const groups = useMemo(() => tally(lines), [lines]);
+  const groups = useMemo(() => tallyLegend(legendLines), [legendLines]);
   // Timed lines minus those inside, so a line whose time can't be placed (it is
   // in `untimed`) is never also counted as outside. Memoised: a pointer move or
   // an arrow re-renders this, and the pass is over every line.
@@ -118,6 +89,24 @@ export function VolumeHistogram({
     () => (range === undefined ? 0 : timed - lines.reduce((n, l) => (inRange(l, range) ? n + 1 : n), 0)),
     [lines, range, timed],
   );
+  // Everything the chart says about its buckets. A pointer move or an arrow re-renders this
+  // component and changes none of it, so it is made once per set of buckets.
+  const view = useMemo(() => {
+    if (buckets.length === 0) return null;
+    const from = buckets[0].start;
+    const to = buckets[buckets.length - 1].end;
+    // A clock reading is ambiguous across days, so the edges name their date then,
+    // and their seconds only when a bar is narrower than a minute.
+    const dated = volume.step >= DAY || spansDays(from, to);
+    const edge = (ms: number) => (dated ? dateTime(ms, volume.step < MINUTE) : clockTime(ms));
+    const ticks = timeTicks(from, to);
+    const bars: BarText[] = buckets.map((b) => ({
+      range: `${edge(b.start)}–${edge(b.end)}`,
+      total: lineCount(b.danger + b.warning + b.info + b.other),
+      groups: GROUPS.filter(({ key }) => b[key] > 0).map((g) => ({ ...g, n: b[g.key] })),
+    }));
+    return { from, to, edge, ticks, labels: tickLabels(ticks), bars };
+  }, [buckets, volume.step]);
   const open = useSectionOpen("logs", "volume", true);
   const [drag, setDrag] = useState<{ from: number; to: number } | null>(null);
   const [focus, setFocus] = useState<number | null>(null);
@@ -133,7 +122,8 @@ export function VolumeHistogram({
     window.addEventListener("blur", drop);
     return () => window.removeEventListener("blur", drop);
   }, [dragging]);
-  if (buckets.length === 0) return null;
+  if (view === null) return null;
+  const { from, to, edge, ticks, labels, bars } = view;
 
   const last = buckets.length - 1;
   const focused = focus === null ? null : Math.min(focus, last);
@@ -141,24 +131,6 @@ export function VolumeHistogram({
   const bucket = (i: number) => buckets[Math.min(i, last)];
   const select = (a: number, b: number) =>
     onRangeChange({ from: bucket(Math.min(a, b)).start, to: bucket(Math.max(a, b)).end });
-  // A clock reading is ambiguous across days, so the edges name their date then,
-  // and their seconds only when a bar is narrower than a minute.
-  const from = buckets[0].start;
-  const to = buckets[last].end;
-  const dated = volume.step >= DAY || spansDays(from, to);
-  const edge = (ms: number) => (dated ? dateTime(ms, volume.step < MINUTE) : clockTime(ms));
-  /** A bar in words, for the tooltip and, flattened, for the live region. */
-  const describe = (b: VolumeBucket) => ({
-    range: `${edge(b.start)}–${edge(b.end)}`,
-    total: lineCount(b.danger + b.warning + b.info + b.other),
-    groups: GROUPS.filter(({ key }) => b[key] > 0).map((g) => ({ ...g, n: b[g.key] })),
-  });
-  const announce = (b: VolumeBucket) => {
-    const d = describe(b);
-    return [d.range, d.total, ...d.groups.map(({ word, n }) => `${word} ${groupNumber(n)}`)].join(" · ");
-  };
-  const ticks = timeTicks(from, to);
-  const tickText = tickLabels(ticks);
   const caption = [
     lineCount(timed),
     `${edge(from)}–${edge(to)}`,
@@ -169,7 +141,7 @@ export function VolumeHistogram({
   const slot = BAR + GAP;
   // The pointer's bar wins over the keyboard's while the pointer is over the chart.
   const shown = hover !== null ? Math.min(hover, last) : focused;
-  const tip = shown === null ? null : describe(buckets[shown]);
+  const tip = shown === null ? null : bars[shown];
   const tipAt = shown === null ? 0 : ((shown * slot + BAR / 2) / (buckets.length * slot)) * 100;
 
   function onKeyDown(e: KeyboardEvent) {
@@ -177,7 +149,7 @@ export function VolumeHistogram({
     if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
     const move = (next: number) => {
       setFocus(next);
-      setSaid(announce(buckets[next]));
+      setSaid(announce(bars[next]));
       // The pointer may still be resting on another bar: the last one to move is the one to follow.
       setHover(null);
     };
@@ -215,16 +187,19 @@ export function VolumeHistogram({
           <div className="flex gap-1">
             {/* HTML, not SVG text: the viewBox is stretched to the pane, and would stretch the digits with it. */}
             <div aria-hidden="true" className="path relative w-9 shrink-0 text-right" style={{ height: HEIGHT }}>
-              {[axisMax, axisMax / 2].map((n, i) => (
-                <span
-                  key={i}
-                  data-slot="y-label"
-                  className="absolute right-1 -translate-y-1/2 text-[0.6875rem] leading-none"
-                  style={{ top: i === 0 ? 0 : "50%" }}
-                >
-                  {groupNumber(n)}
-                </span>
-              ))}
+              {/* The half only when it is a whole number of lines: no axis counts half a line. */}
+              {[axisMax, axisMax / 2].map((n, i) =>
+                Number.isInteger(n) ? (
+                  <span
+                    key={i}
+                    data-slot="y-label"
+                    className="absolute right-1 -translate-y-1/2 text-[0.6875rem] leading-none"
+                    style={{ top: i === 0 ? 0 : "50%" }}
+                  >
+                    {groupNumber(n)}
+                  </span>
+                ) : null,
+              )}
             </div>
             <div className="relative min-w-0 flex-1">
               <div
@@ -355,85 +330,11 @@ export function VolumeHistogram({
                   )}
                 </svg>
               </div>
-              <div aria-hidden="true" className="path relative h-4">
-                {ticks.map((t, i) => {
-                  const at = ((t - from) * 100) / (to - from);
-                  return (
-                    <span
-                      key={t}
-                      data-slot="x-tick"
-                      className="absolute top-0.5 whitespace-nowrap text-[0.6875rem] leading-none"
-                      // Centred on its tick, but kept inside the plot at either end.
-                      style={{ left: `${at}%`, transform: `translateX(${at < 5 ? "0" : at > 95 ? "-100%" : "-50%"})` }}
-                    >
-                      {tickText[i]}
-                    </span>
-                  );
-                })}
-              </div>
-              {tip !== null && (
-                <div
-                  role="tooltip"
-                  data-slot="volume-tooltip"
-                  // Over the pointer's own events: it sits where the bar is, and must not take the hover from it.
-                  className="pointer-events-none absolute bottom-full z-10 mb-1 w-max rounded border border-rule bg-raised px-2 py-1 text-[0.6875rem] leading-snug shadow-md"
-                  style={{
-                    left: `${tipAt}%`,
-                    transform: `translateX(${tipAt < 15 ? "0" : tipAt > 85 ? "-100%" : "-50%"})`,
-                  }}
-                >
-                  <div data-slot="tooltip-range" className="text-ink">
-                    {tip.range}
-                  </div>
-                  <div data-slot="tooltip-total" className="text-muted">
-                    {tip.total}
-                  </div>
-                  {tip.groups.map(({ key, kind, word, n }) => (
-                    <div key={key} data-slot="tooltip-group" className="flex items-center gap-1.5 text-muted">
-                      <Dot kind={kind} faint={key === "other"} />
-                      {word} <span className="tabular-nums text-ink">{groupNumber(n)}</span>
-                    </div>
-                  ))}
-                </div>
-              )}
+              <TimeAxis ticks={ticks} labels={labels} from={from} to={to} />
+              {tip !== null && <VolumeTooltip {...tip} at={tipAt} />}
             </div>
           </div>
-          <div data-slot="volume-legend" className="mt-0.5 flex flex-wrap items-center gap-x-1 gap-y-0.5">
-            {GROUPS.map(({ key, kind, word }, g) => {
-              const { count, levels } = groups[g];
-              if (count === 0) return null;
-              const label = (
-                <>
-                  <Dot kind={kind} faint={key === "other"} />
-                  {word} <span className="tabular-nums text-faint">{groupNumber(count)}</span>
-                </>
-              );
-              const cls = "inline-flex items-center gap-1.5 rounded px-1.5 py-0.5 text-[0.6875rem] text-muted";
-              if (key === "other") {
-                // A line with no level can't be named in the query, so there is nothing to click.
-                return (
-                  <span key={key} data-slot="legend-item" className={cls}>
-                    {label}
-                  </span>
-                );
-              }
-              const pressed =
-                levels.length > 0 &&
-                levels.every((w) => clauseState(clauses, { field: "level", value: w }) === "include");
-              return (
-                <button
-                  key={key}
-                  type="button"
-                  data-slot="legend-item"
-                  aria-pressed={pressed}
-                  onClick={() => onToggleLevels(levels, !pressed)}
-                  className={`${cls} hover:bg-[var(--field)] aria-pressed:bg-[var(--field)] aria-pressed:text-ink`}
-                >
-                  {label}
-                </button>
-              );
-            })}
-          </div>
+          <VolumeLegend groups={groups} clauses={clauses} onToggleLevels={onToggleLevels} />
           <div aria-live="polite" aria-atomic="true" data-slot="volume-live" className="sr-only">
             {said}
           </div>
@@ -445,7 +346,8 @@ export function VolumeHistogram({
         </div>
         <button
           type="button"
-          className="text-btn shrink-0"
+          // The caption's size (.path is 0.75rem): a bare button would take the page's larger one.
+          className="text-btn shrink-0 text-[0.75rem]"
           aria-expanded={open}
           aria-label={open ? "Hide the volume chart" : "Show the volume chart"}
           onClick={toggleOpen}

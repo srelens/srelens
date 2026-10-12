@@ -52,16 +52,20 @@ export function stepLabel(step: number): string {
   return `${step / 1000}s`;
 }
 
-/** The smallest of 1, 2, 5 times a power of ten that is at least `n`: a round top for a count axis. Never under 1, as a count is not. */
+/** The mantissas a count axis may top out at: fine enough that a peak of 110 reads 120, not 200. */
+const NICE = [1, 1.2, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10];
+
+/** The smallest of 1, 1.2, 1.5, 2, 2.5, 3, 4, 5, 6, 8 times a power of ten that is at least `n`: a round top for a count axis. Never under 1, as a count is not. */
 export function niceCeil(n: number): number {
   if (!(n > 1)) return 1;
   const power = 10 ** Math.floor(Math.log10(n));
-  return [1, 2, 5, 10].map((m) => m * power).find((c) => c >= n) ?? 10 * power;
+  return NICE.map((m) => m * power).find((c) => c >= n) ?? 10 * power;
 }
 
 const SECOND = 1000;
 const MINUTE = 60_000;
 const HOUR = 3_600_000;
+const DEFAULT_TICKS = 6;
 const TICK_STEPS = [
   ...[1, 2, 5, 10, 15, 30].map((n) => n * SECOND),
   ...[1, 2, 5, 10, 15, 30].map((n) => n * MINUTE),
@@ -88,9 +92,10 @@ function ticksEvery(from: number, to: number, step: number, cap: number): number
  * on the READER'S clock (so +05:45 gets :00 and :30, not :15 and :45). A span
  * of weeks that even a day overfills is given whole days, as few as fit.
  */
-export function timeTicks(from: number, to: number, maxTicks = 6): number[] {
+export function timeTicks(from: number, to: number, maxTicks = DEFAULT_TICKS): number[] {
   if (!Number.isFinite(from) || !Number.isFinite(to) || !(to > from)) return [];
-  const cap = Math.max(1, Math.floor(maxTicks));
+  // A cap that is NaN or infinite would never stop a fine interval from filling the axis.
+  const cap = Number.isFinite(maxTicks) ? Math.max(1, Math.floor(maxTicks)) : DEFAULT_TICKS;
   for (const step of TICK_STEPS) {
     const ticks = ticksEvery(from, to, step, cap);
     if (ticks !== undefined) return ticks;

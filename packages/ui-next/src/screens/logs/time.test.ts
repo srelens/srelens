@@ -98,18 +98,25 @@ describe("stepLabel", () => {
 });
 
 describe("niceCeil", () => {
+  // The smallest of 1, 1.2, 1.5, 2, 2.5, 3, 4, 5, 6, 8 times a power of ten that is at least n.
   it.each([
     [0, 1],
     [1, 1],
     [2, 2],
-    [3, 5],
+    [3, 3],
+    [4, 4],
     [5, 5],
-    [7, 10],
-    [12, 20],
-    [21, 50],
+    [7, 8],
+    [9, 10],
+    [11, 12],
+    [13, 15],
+    [16, 20],
+    [21, 25],
+    [110, 120],
     [450, 500],
     [1000, 1000],
-    [1001, 2000],
+    [1001, 1200],
+    [1_300_000, 1_500_000],
   ])("rounds %d up to %d", (n, nice) => {
     expect(niceCeil(n)).toBe(nice);
   });
@@ -151,6 +158,22 @@ describe("timeTicks", () => {
     expect(ticks.length).toBeGreaterThan(1);
     expect(ticks.length).toBeLessThanOrEqual(6);
     for (const t of ticks) expect(clockTime(t)).toBe("00:00:00");
+  });
+
+  it("reads a maxTicks that is not a finite number as the default six", () => {
+    const from = at(12, 10, 0);
+    const to = at(12, 10, 10);
+    for (const bad of [Number.NaN, Infinity, -Infinity]) {
+      expect(timeTicks(from, to, bad), `maxTicks ${bad}`).toEqual(timeTicks(from, to));
+    }
+  });
+
+  it("keeps a span as wide as a Date can hold to a handful of ticks, and returns", () => {
+    const ticks = timeTicks(-8.64e15, 8.64e15);
+    expect(ticks.length).toBeGreaterThan(1);
+    expect(ticks.length).toBeLessThanOrEqual(6);
+    expect(ticks.every((t) => Number.isFinite(t))).toBe(true);
+    expect([...ticks].sort((a, b) => a - b)).toEqual(ticks);
   });
 
   it("returns nothing for an empty or backwards span", () => {

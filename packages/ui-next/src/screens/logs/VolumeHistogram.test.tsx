@@ -21,7 +21,7 @@ import { clockTime } from "./time";
 // Real bars come from the reader's time zone, and a bar with no width needs a
 // DST change in it. A test that must pass in every zone hands the component one.
 // `inRangeCalls` counts the passes over the lines that ask whether one is in the window.
-const stub = vi.hoisted(() => ({ volume: undefined as Volume | undefined, inRangeCalls: 0 }));
+const stub = vi.hoisted(() => ({ volume: undefined as Volume | undefined, inRangeCalls: 0, tickCalls: 0 }));
 vi.mock("@srelens/core", async (importOriginal) => {
   const core = await importOriginal<typeof import("@srelens/core")>();
   return {
@@ -33,9 +33,21 @@ vi.mock("@srelens/core", async (importOriginal) => {
     },
   };
 });
+// `tickCalls` counts the times the time axis is worked out.
+vi.mock("./time", async (importOriginal) => {
+  const time = await importOriginal<typeof import("./time")>();
+  return {
+    ...time,
+    timeTicks: (...args: Parameters<typeof time.timeTicks>) => {
+      stub.tickCalls += 1;
+      return time.timeTicks(...args);
+    },
+  };
+});
 afterEach(() => {
   stub.volume = undefined;
   stub.inRangeCalls = 0;
+  stub.tickCalls = 0;
 });
 // The fold is remembered between launches, so a test that shuts the chart must not leave it shut.
 beforeEach(() => loadSectionFolds(emptyStorage()));
@@ -261,6 +273,17 @@ describe("VolumeHistogram", () => {
       expect(live(container)).toBe("");
     });
 
+    it("doesn't work the time axis out again when only the pointer or the focus moves", async () => {
+      const { bars } = draw();
+      const worked = stub.tickCalls;
+      expect(worked).toBeGreaterThan(0);
+      fireEvent.pointerEnter(bars()[1]);
+      fireEvent.pointerEnter(bars()[2]);
+      group().focus();
+      await userEvent.keyboard("{ArrowRight}{ArrowRight}");
+      expect(stub.tickCalls).toBe(worked);
+    });
+
     it("doesn't rescan the lines when only the focus moves", async () => {
       draw({ from: T0, to: T0 + 1000 });
       const scans = stub.inRangeCalls;
@@ -336,20 +359,27 @@ describe("VolumeHistogram", () => {
     });
 
     it("scales the bars to a round top rather than to the tallest bar", () => {
-      const { container } = one("error a", "error b", "error c");
-      // Three lines under a top of five.
-      expect(num(segments(container)[0], "height")).toBeCloseTo((3 / 5) * 96);
+      const { container } = one(...Array.from({ length: 7 }, (_, i) => `error ${i}`));
+      // Seven lines under a top of eight.
+      expect(num(segments(container)[0], "height")).toBeCloseTo((7 / 8) * 96);
     });
 
     it("labels the round top and its half", () => {
       const { container } = one("info a", "info b", "info c", "info d", "info e", "info f");
-      expect(texts(container, "y-label")).toEqual(["10", "5"]);
+      expect(texts(container, "y-label")).toEqual(["6", "3"]);
+    });
+
+    it("leaves out a half that isn't a whole number of lines", () => {
+      // A top of 1 has half a line, and a top of 5 two and a half: neither is a count.
+      expect(texts(one("info a").container, "y-label")).toEqual(["1"]);
+      const five = one("info a", "info b", "info c", "info d", "info e");
+      expect(texts(five.container, "y-label")).toEqual(["5"]);
     });
 
     it("groups the digits of a long label like every other count", () => {
-      stub.volume = hundreds(1200);
+      stub.volume = hundreds(2400);
       const { container } = one("info a");
-      expect(texts(container, "y-label")).toEqual(["2 000", "1 000"]);
+      expect(texts(container, "y-label")).toEqual(["2 500", "1 250"]);
     });
 
     it("draws gridlines at zero, half and the top, at a constant width", () => {
@@ -420,6 +450,28 @@ describe("VolumeHistogram", () => {
     it("counts each group's lines, and offers only the groups that are there", () => {
       const { container } = draw();
       // The line with no time is still a line of the query, so it is counted.
+      expect(entries(container)).toEqual(["error 1", "info 2", "other 1"]);
+    });
+
+    it("counts the legend's own lines, so the bars can be narrower than what it offers", () => {
+      // The bars show what the query keeps; the legend what it would keep with the level clauses off.
+      const kept = [ql("error a", T0)];
+      const offered = [ql("error a", T0), ql("warn b", T0), ql("warn c", T0), ql("info d", T0)];
+      const { container } = render(
+        <VolumeHistogram
+          {...QUIET}
+          lines={kept}
+          legendLines={offered}
+          range={undefined}
+          onRangeChange={vi.fn()}
+        />,
+      );
+      expect(entries(container)).toEqual(["error 1", "warn 2", "info 1"]);
+      expect(container.querySelectorAll('[data-slot="bucket"]')).toHaveLength(1);
+    });
+
+    it("counts the bars' lines when it is given none of its own", () => {
+      const { container } = draw();
       expect(entries(container)).toEqual(["error 1", "info 2", "other 1"]);
     });
 
@@ -579,6 +631,12 @@ describe("VolumeHistogram", () => {
 
   describe("the fold", () => {
     const toggle = (name: string) => screen.getByRole("button", { name });
+
+    it("sets its toggle in the caption's small size rather than the page's", () => {
+      draw();
+      // The caption is .path, 0.75rem; a bare button would inherit the page's larger size.
+      expect(toggle("Hide the volume chart").classList.contains("text-[0.75rem]")).toBe(true);
+    });
 
     it("is open to start with, and offers to hide the chart", () => {
       draw();

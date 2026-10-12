@@ -2255,6 +2255,45 @@ describe("the volume histogram (#898)", () => {
       await userEvent.click(screen.getByRole("button", { name: "error 2" }));
       expect(filterField()).toHaveProperty("value", "");
     });
+
+    const errorAndFatal = () =>
+      push(
+        line("api-7/api", "14:07:41.208000000", "error a"),
+        line("api-7/api", "14:07:42.208000000", "fatal b"),
+        line("api-7/api", "14:07:43.208000000", "info c"),
+      );
+
+    it("adds the words a group is missing when one is typed, and then takes them all out", async () => {
+      await (draw(), body());
+      errorAndFatal();
+      await userEvent.type(filterField(), "level:error");
+      // Not pressed: the group is error AND fatal, and only one is in the query.
+      expect(screen.getByRole("button", { name: "error 2" }).getAttribute("aria-pressed")).toBe("false");
+      await userEvent.click(screen.getByRole("button", { name: "error 2" }));
+      expect(filterField()).toHaveProperty("value", "level:error level:fatal");
+      expect(screen.getByRole("button", { name: "error 2" }).getAttribute("aria-pressed")).toBe("true");
+      await userEvent.click(screen.getByRole("button", { name: "error 2" }));
+      expect(filterField()).toHaveProperty("value", "");
+    });
+
+    it("turns an excluded word of the group into an included one", async () => {
+      await (draw(), body());
+      errorAndFatal();
+      await userEvent.type(filterField(), "-level:fatal");
+      await userEvent.click(screen.getByRole("button", { name: "error 2" }));
+      expect(filterField()).toHaveProperty("value", "level:fatal level:error");
+    });
+
+    it("keeps the other levels on offer once one is picked, while the bars follow the query", async () => {
+      await (draw(), body());
+      push(...LINES);
+      await userEvent.type(filterField(), "level:error");
+      expect(screen.getByRole("button", { name: "warn 1" })).toBeTruthy();
+      expect(screen.getByRole("button", { name: "info 1" })).toBeTruthy();
+      expect(screen.getByRole("button", { name: "error 1" }).getAttribute("aria-pressed")).toBe("true");
+      // The bars and the caption count only the line the query keeps.
+      expect(document.querySelector('[data-slot="volume-caption"]')?.textContent).toMatch(/^1 line · /);
+    });
   });
 });
 

@@ -12,6 +12,7 @@ import {
 import {
   absoluteTimestamp,
   describeStreamEnd,
+  clauseState,
   discoverFields,
   inRange,
   logConnectionStatus,
@@ -995,19 +996,43 @@ function LogsStream({
   const facetLines = useDeferredValue(windowed);
   /** The histogram counts the queried lines, not the windowed ones, and recounts a beat behind too. */
   const volumeLines = useDeferredValue(queried);
+  /**
+   * What the legend offers: the query minus its level clauses, as the rail's
+   * Level facet counts, so picking a level leaves the others on offer. Not the
+   * window, for the legend describes the chart. With no level clause that is
+   * `queried` itself, and the pass over the buffer is not made twice.
+   */
+  const legendRows = useMemo(
+    () =>
+      clauses.some((c) => c.field?.toLowerCase() === "level")
+        ? scoped.filter((row) => matchLine(row, clauses, "level"))
+        : queried,
+    [scoped, clauses, queried],
+  );
+  const legendLines = useDeferredValue(legendRows);
   /** A facet click: rewrites the search box, the one place filters live. */
   const toggleFilter = useCallback(
     (target: ClauseTarget, mode: ClauseMode) => setText((q) => toggleClause(q, target, mode)),
     [],
   );
   /**
-   * A legend click: every level word of a group in or out, in one update. The
-   * legend only offers words of lines the query keeps, so a group's words are
-   * all in the text or all out of it, and flipping each one is the whole job.
+   * A legend click: every level word of a group in (`include`) or out, in one
+   * update. `toggleClause` flips what is there, so only the words that are not
+   * already where the click wants them are flipped: with `level:error` typed,
+   * "put the group in" adds `fatal` and leaves `error` be. Each word is read
+   * off the text being edited, not off what the legend was drawn from, and a
+   * word that is excluded is not included, so it flips in place.
    */
   const toggleLevels = useCallback(
-    (words: string[]) =>
-      setText((q) => words.reduce((query, value) => toggleClause(query, { field: "level", value }, "include"), q)),
+    (words: string[], include: boolean) =>
+      setText((q) => {
+        const parsed = parseLogQuery(q);
+        const included = (value: string) =>
+          parsed.ok && clauseState(parsed.clauses, { field: "level", value }) === "include";
+        return words
+          .filter((value) => included(value) !== include)
+          .reduce((query, value) => toggleClause(query, { field: "level", value }, "include"), q);
+      }),
     [],
   );
 
@@ -1488,6 +1513,7 @@ function LogsStream({
         />
         <VolumeHistogram
           lines={volumeLines}
+          legendLines={legendLines}
           range={range}
           onRangeChange={setRange}
           clauses={typed.ok ? typed.clauses : NO_CLAUSES}
