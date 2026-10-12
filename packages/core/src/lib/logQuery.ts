@@ -507,7 +507,7 @@ export interface VolumeBucket {
 }
 
 export interface Volume {
-  /** Nominal width in wall-clock ms; 0 when no line had a time. */
+  /** Bar width in ms; 0 when no line had a time. A local-calendar bar can be longer or shorter across DST. */
   readonly step: number;
   /** Contiguous, empty ones included, so a quiet minute is drawn as a gap. */
   readonly buckets: readonly VolumeBucket[];
@@ -557,13 +557,17 @@ const instantOf = (local: number): number => {
 
 /**
  * The lines' volume over time, stacked by core's severity, in the smallest round
- * step that fits the span in `maxBars`. When none does, the step is the fewest
- * whole days that fit, so the bucket count never exceeds `maxBars`, except for
- * `maxBars` of 1 with a span that straddles local 1970-01-01: an aligned grid
- * cannot give one bucket there. Bars are local wall-clock: an hour bar starts at
- * :00 where the reader is, and a day bar at local midnight, across DST.
+ * step that fits the span in `maxBars`. Steps under an hour cut bars on absolute
+ * time from the earliest line's offset: one fixed grid, so a bar never inverts and
+ * every line sits inside its bar. Steps of an hour or more cut bars on the local
+ * calendar, so an hour bar starts at :00 where the reader is and a day bar at local
+ * midnight, across DST. When no round step fits, the step is the fewest whole days
+ * that fit, so the bucket count stays at or below `maxBars`, except for `maxBars`
+ * of 1 with a span straddling local 1970-01-01.
  */
 export function volumeBuckets(lines: readonly QueryLine[], maxBars = 60): Volume {
+  let minAt = Infinity;
+  let maxAt = -Infinity;
   let min = Infinity;
   let max = -Infinity;
   let untimed = 0;
@@ -572,38 +576,44 @@ export function volumeBuckets(lines: readonly QueryLine[], maxBars = 60): Volume
       untimed += 1;
       continue;
     }
+    if (line.at < minAt) minAt = line.at;
+    if (line.at > maxAt) maxAt = line.at;
     const local = wallClock(line.at);
     if (local < min) min = local;
     if (local > max) max = local;
   }
-  if (min === Infinity) return { step: 0, buckets: [], untimed };
+  if (minAt === Infinity) return { step: 0, buckets: [], untimed };
 
   const bars = Number.isFinite(maxBars) ? Math.max(1, Math.floor(maxBars)) : 1;
-  // A bucket is floor(wall / step), so this is the exact bucket count for a step.
-  const fits = (s: number) => Math.floor(max / s) - Math.floor(min / s) + 1 <= bars;
-  let step = STEPS.find(fits);
-  if (step === undefined) {
-    // A count of `bars` or fewer needs a step wider than span / bars, so the search
-    // starts at span / (bars * DAY) days. Past `cap` the count no longer changes with the step.
+  // A sub-hour step counts absolute time from one origin; a longer step counts the wall clock.
+  const origin = offsetAt(minAt);
+  const lo = (s: number) => (s < HOUR ? minAt - origin : min);
+  const hi = (s: number) => (s < HOUR ? maxAt - origin : max);
+  const fits = (s: number) => Math.floor(hi(s) / s) - Math.floor(lo(s) / s) + 1 <= bars;
+  const wholeDays = (): number => {
+    // Fewer than span / (bars * DAY) days cannot fit, so the search starts there.
+    // Past `cap` the count no longer changes with the step.
     const cap = Math.ceil((Math.abs(min) + Math.abs(max)) / DAY) + 1;
     let days = Math.max(1, Math.floor((max - min) / (bars * DAY)));
     while (days < cap && !fits(days * DAY)) days += 1;
-    step = days * DAY;
-  }
-  const first = Math.floor(min / step);
-  const last = Math.floor(max / step);
-  const starts = Array.from({ length: last - first + 2 }, (_, i) => instantOf((first + i) * step));
+    return days * DAY;
+  };
+  const step = STEPS.find(fits) ?? wholeDays();
+  const bucketOf = (at: number): number => Math.floor((step < HOUR ? at - origin : wallClock(at)) / step);
+  const edgeAt = (k: number): number => (step < HOUR ? k * step + origin : instantOf(k * step));
+  const first = Math.floor(lo(step) / step);
+  const last = Math.floor(hi(step) / step);
+  const edges = Array.from({ length: last - first + 2 }, (_, i) => edgeAt(first + i));
   const buckets = Array.from({ length: last - first + 1 }, (_, i) => ({
-    start: starts[i],
-    end: starts[i + 1],
+    start: edges[i],
+    end: edges[i + 1],
     danger: 0,
     warning: 0,
     other: 0,
   }));
   for (const line of lines) {
     if (!isTimed(line.at)) continue;
-    // Each line uses its own offset: one offset for the whole span drifts by an hour past a DST change.
-    const bucket = buckets[Math.floor(wallClock(line.at) / step) - first];
+    const bucket = buckets[bucketOf(line.at) - first];
     if (line.health === "danger") bucket.danger += 1;
     else if (line.health === "warning") bucket.warning += 1;
     else bucket.other += 1;

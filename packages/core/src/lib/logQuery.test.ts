@@ -709,3 +709,94 @@ describe("volumeBuckets, a repeated hour and a skipped hour", () => {
     });
   });
 });
+
+describe("volumeBuckets, sub-hour bars on absolute time", () => {
+  /** Pins the zone for one body; the restore deletes TZ when it was unset. */
+  function inZone(zone: string, body: () => void): void {
+    const saved = process.env.TZ;
+    process.env.TZ = zone;
+    try {
+      body();
+    } finally {
+      if (saved === undefined) delete process.env.TZ;
+      else process.env.TZ = saved;
+    }
+  }
+  const at = (iso: string) => Date.parse(iso);
+  const MINUTE_MS = 60_000;
+
+  /** `count` lines, one every 25 minutes from `fromIso`, with a mix of severities. */
+  function lineEvery25Min(fromIso: string, count: number): QueryLine[] {
+    const start = at(fromIso);
+    return Array.from({ length: count }, (_, i) => {
+      const word = i % 5 === 0 ? "error" : i % 3 === 0 ? "warn" : "info";
+      return ql(`${word} line ${i}`, start + i * 25 * MINUTE_MS);
+    });
+  }
+
+  /** Bars are well formed and contiguous, and each bar holds exactly the lines inside it. */
+  function expectBarsHoldTheirLines(v: ReturnType<typeof volumeBuckets>, lines: readonly QueryLine[]): void {
+    for (const b of v.buckets) expect(b.start).toBeLessThan(b.end);
+    for (let i = 0; i + 1 < v.buckets.length; i += 1) expect(v.buckets[i].end).toBe(v.buckets[i + 1].start);
+    for (const b of v.buckets) {
+      const inside = lines.filter((l) => inRange(l, { from: b.start, to: b.end })).length;
+      expect(inside).toBe(b.danger + b.warning + b.other);
+    }
+    for (const line of lines) {
+      expect(v.buckets.filter((b) => inRange(line, { from: b.start, to: b.end }))).toHaveLength(1);
+    }
+  }
+
+  it("keeps a 20-hour span across a fall-back in 30-minute bars that each hold their own lines", () => {
+    inZone("Europe/Berlin", () => {
+      // Guard: 00:30Z and 01:30Z are the two copies of 02:30 local on 25 October.
+      expect(new Date(at("2026-10-25T00:30:00Z")).getTimezoneOffset()).toBe(-120);
+      expect(new Date(at("2026-10-25T01:30:00Z")).getTimezoneOffset()).toBe(-60);
+      const lines = lineEvery25Min("2026-10-24T16:00:00Z", 49); // 16:00Z to 12:00Z, 20 hours
+      const v = volumeBuckets(lines);
+      expect(v.step).toBe(30 * MINUTE_MS);
+      expectBarsHoldTheirLines(v, lines);
+    });
+  });
+
+  it("keeps a 20-hour span across a spring-forward in 30-minute bars that each hold their own lines", () => {
+    inZone("Europe/Berlin", () => {
+      // Guard: the clocks jump from 02:00 CET to 03:00 CEST at 01:00Z on 29 March.
+      expect(new Date(at("2026-03-29T00:30:00Z")).getTimezoneOffset()).toBe(-60);
+      expect(new Date(at("2026-03-29T01:30:00Z")).getTimezoneOffset()).toBe(-120);
+      const lines = lineEvery25Min("2026-03-28T16:00:00Z", 49);
+      const v = volumeBuckets(lines);
+      expect(v.step).toBe(30 * MINUTE_MS);
+      expectBarsHoldTheirLines(v, lines);
+    });
+  });
+
+  it("starts every 30-minute bar on :00 or :30 local time in a half-hour zone", () => {
+    inZone("Asia/Kolkata", () => {
+      expect(new Date(at("2026-10-12T00:10:00Z")).getTimezoneOffset()).toBe(-330);
+      const lines = lineEvery25Min("2026-10-12T00:10:00Z", 49);
+      const v = volumeBuckets(lines);
+      expect(v.step).toBe(30 * MINUTE_MS);
+      for (const b of v.buckets) expect([0, 30]).toContain(new Date(b.start).getMinutes());
+    });
+  });
+});
+
+describe("volumeBuckets, a zone whose offset is not a multiple of the step", () => {
+  it("still starts every 30-minute bar on :00 or :30 local time at +05:45", () => {
+    const saved = process.env.TZ;
+    process.env.TZ = "Asia/Kathmandu";
+    try {
+      // +05:45 is not a multiple of 30 minutes, so a UTC grid would start bars on :15 and :45 local.
+      expect(new Date(Date.parse("2026-10-12T00:10:00Z")).getTimezoneOffset()).toBe(-345);
+      const start = Date.parse("2026-10-12T00:10:00Z");
+      const lines = Array.from({ length: 49 }, (_, i) => ql(`info line ${i}`, start + i * 25 * 60_000));
+      const v = volumeBuckets(lines);
+      expect(v.step).toBe(30 * 60_000);
+      for (const b of v.buckets) expect([0, 30]).toContain(new Date(b.start).getMinutes());
+    } finally {
+      if (saved === undefined) delete process.env.TZ;
+      else process.env.TZ = saved;
+    }
+  });
+});
