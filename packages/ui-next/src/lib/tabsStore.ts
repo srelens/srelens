@@ -531,9 +531,11 @@ export function forgetClusterNamespaces(clusterId: string): void {
  * refused rather than stored, so the field is always an id in `clusters`.
  *
  * **Every cluster-scoped tab is relabelled for the cluster named here**, and
- * that is not a flourish either. No tab is about a cluster of its own: every
- * cluster-scoped screen reads `useActiveContext()`, so the instant this field
- * moves, the mounted screen is rendering the new cluster. A tab whose `sub`
+ * that is not a flourish either. Almost no tab is about a cluster of its own:
+ * every cluster-scoped screen but a detail tab reads `useActiveContext()`, so
+ * the instant this field moves, the mounted screen is rendering the new
+ * cluster. (A detail tab pins the cluster in its route, #834, and `describe`
+ * keeps labelling it with that one, so the relabel passes it by.) A tab whose `sub`
  * still names the old one labels that screen with a cluster it is not showing,
  * and an action started from it runs against one cluster under a tab reading
  * another. The rail's own `onSelect` was exactly that: `setActiveCluster` bare.

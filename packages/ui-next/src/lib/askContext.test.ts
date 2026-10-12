@@ -19,7 +19,7 @@ describe("what a question asked from a route is about", () => {
   });
 
   it("carries the resource off a detail route, with no logs claim", () => {
-    const route = detailRoute("Deployment", "checkout", "api");
+    const route = detailRoute("Deployment", "checkout", "api", { cluster: "prod-eu" });
     expect(askContextFor(route, "prod-eu")).toEqual({
       cluster: "prod-eu",
       namespace: "checkout",
@@ -29,7 +29,7 @@ describe("what a question asked from a route is about", () => {
   });
 
   it("omits the namespace for a cluster-scoped resource rather than sending null", () => {
-    const route = detailRoute("Node", null, "worker-3");
+    const route = detailRoute("Node", null, "worker-3", { cluster: "prod-eu" });
     const about = askContextFor(route, "prod-eu");
     expect(about.namespace).toBeUndefined();
     expect(about).toEqual({ cluster: "prod-eu", kind: "Node", name: "worker-3" });

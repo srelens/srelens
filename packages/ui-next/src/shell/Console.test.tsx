@@ -1180,8 +1180,8 @@ describe("Console — debt 2's real navigation", () => {
     tabsStore.openTab("/k/Deployment/checkout/api");
     setup();
     await user.type(screen.getByRole("textbox", { name: "Console prompt" }), "/restart{Enter}");
-    expect(tabsStore.activeRoute()).toBe("/k/Deployment/checkout/api");
-    const tab = tabsStore.currentWorkspace().tabs.find((t) => t.route === "/k/Deployment/checkout/api");
+    expect(tabsStore.activeRoute()).toBe("/k/prod-eu/Deployment/checkout/api");
+    const tab = tabsStore.currentWorkspace().tabs.find((t) => t.route === "/k/prod-eu/Deployment/checkout/api");
     expect(tab?.sub).toBe("prod-eu");
   });
 });

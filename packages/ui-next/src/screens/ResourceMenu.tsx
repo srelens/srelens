@@ -483,7 +483,7 @@ export function useRowMenu({ context, kind, actions, group, onChanged }: UseRowM
     const list: ContextMenuItem[] = [
       {
         label: ROW_ACTION_LABEL.openTab,
-        onPick: () => openTab(detailRoute(kind, row.namespace ?? null, row.name), { clusterName: context }),
+        onPick: () => openTab(detailRoute(kind, row.namespace ?? null, row.name, { cluster: context }), { clusterName: context }),
       },
     ];
     if (actions.logs) {

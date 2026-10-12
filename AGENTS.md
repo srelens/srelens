@@ -59,6 +59,10 @@ silently focuses the first:
 - `/edit/<cluster>/<kind>/<namespace>/<name>` — the cluster is in it because
   the editor pins the cluster it opened on. Without it, Edit on staging's
   `default/web` focused prod's draft and staging's could not be opened at all.
+- `/k/<cluster>/<kind>/<namespace>/<name>` — a detail tab pins its cluster the
+  same way (#834), and reads it from the route, not the rail. Without it, prod's
+  and staging's `worker-1` were one tab that followed the rail. Anything drawn
+  inside it that would read the rail reads `useScreenContext()` instead.
 - A custom kind carries its group (`acme.io%2FDeployment`), because a CRD may
   legally reuse a built-in kind's name and resolving by name alone lands on
   the built-in — including for delete.

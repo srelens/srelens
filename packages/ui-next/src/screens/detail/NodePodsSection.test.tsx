@@ -113,7 +113,7 @@ describe("NodePodsSection", () => {
     await act(async () => Promise.resolve());
 
     fireEvent.click(screen.getByText("pod-00"));
-    expect(store.activeRoute()).toBe("/k/Pod/default/pod-00");
+    expect(store.activeRoute()).toBe("/k/prod-eu/Pod/default/pod-00");
 
     fireEvent.click(screen.getByRole("button", { name: "View all 14 pods on worker-2" }));
     expect(store.activeRoute()).toBe("/k/pods");

@@ -78,6 +78,37 @@ describe("parseStoredState", () => {
     expect(parseStoredState(storage.getItem(BASE_STORAGE_KEY))).toEqual(state);
   });
 
+  /**
+   * #834. An earlier build's detail route had no cluster in it, and the tab
+   * showed whichever cluster the rail was on — the cluster its label was last
+   * relabelled for, which is what was saved as `sub`. Pinning it to that
+   * cluster restores the tab showing what it showed, and makes it the same
+   * tab a fresh open of that resource on that cluster focuses.
+   */
+  it("pins an earlier build's detail tab to the cluster it was labelled with", () => {
+    const state = valid();
+    state.workspaces[0].tabs.push({ ...makeTab("/k/Node/-/worker-1"), sub: "prod" });
+    state.workspaces[0].closed.push({ ...makeTab("/k/Pod/default/web"), sub: "staging" });
+    const parsed = parseStoredState(JSON.stringify({ version: STORAGE_VERSION, ...state }))!;
+    expect(parsed.workspaces[0].tabs[2]).toMatchObject({ route: "/k/prod/Node/-/worker-1", sub: "prod" });
+    expect(parsed.workspaces[0].closed[0]).toMatchObject({ route: "/k/staging/Pod/default/web", sub: "staging" });
+  });
+
+  it("keeps an earlier build's detail tab with no label as it was, following the rail", () => {
+    const state = valid();
+    state.workspaces[0].tabs.push(makeTab("/k/Node/-/worker-1"));
+    const parsed = parseStoredState(JSON.stringify({ version: STORAGE_VERSION, ...state }))!;
+    expect(parsed.workspaces[0].tabs[2].route).toBe("/k/Node/-/worker-1");
+  });
+
+  it("never re-pins a detail tab that already names its cluster, whatever its label says", () => {
+    // The route is the tab's identity; a stale label is the thing to fix, not it.
+    const state = valid();
+    state.workspaces[0].tabs.push({ ...makeTab("/k/prod/Node/-/worker-1"), sub: "staging" });
+    const parsed = parseStoredState(JSON.stringify({ version: STORAGE_VERSION, ...state }))!;
+    expect(parsed.workspaces[0].tabs[2].route).toBe("/k/prod/Node/-/worker-1");
+  });
+
   it("returns null for nothing, for garbage, and for the wrong shape", () => {
     expect(parseStoredState(null)).toBeNull();
     expect(parseStoredState("not json")).toBeNull();

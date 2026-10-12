@@ -46,13 +46,10 @@ export function openCluster(context: ClusterContext): void {
 /**
  * {@link openCluster}, landing on `route` rather than on the overview.
  *
- * For a route about ONE cluster's object, a resource's detail above all: no tab
- * carries a cluster of its own, and every cluster-scoped screen reads the one
- * in focus (see `setActiveCluster`). So opening the route is not enough. The
- * cluster it is about has to be the one in focus as well, or the screen reads
- * whichever cluster the rail was already on, and a detail route shows that
- * cluster's object of the same name. A `srelens://` link is exactly that case:
- * it names its own cluster, whatever the rail shows.
+ * For a route about ONE cluster's object, opened from somewhere that names its
+ * cluster — a `srelens://` link, Home's attention list. A detail route pins its
+ * cluster itself (#834), but the reader followed the link to look at that
+ * cluster, so it is put in this workspace, read, and brought into focus too.
  */
 export function openOnCluster(context: ClusterContext, route: string): void {
   focusCluster(context);

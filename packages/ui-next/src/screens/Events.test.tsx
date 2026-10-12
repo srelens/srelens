@@ -332,7 +332,7 @@ describe("Events", () => {
     await user.click(row("BackOff"));
     // The event's own key is `billing/api-7.17a`; what the reader wants is the
     // pod it is about, in the namespace the key carried.
-    expect(routes()).toContain("/k/Pod/billing/api-7");
+    expect(routes()).toContain("/k/prod-eu/Pod/billing/api-7");
     expect(routes().some((r) => r.includes("17a"))).toBe(false);
   });
 
@@ -342,7 +342,7 @@ describe("Events", () => {
     await waitFor(() => expect(cells().length).toBe(4));
 
     await user.click(row("NodeReady"));
-    expect(routes()).toContain("/k/Node/-/node-3");
+    expect(routes()).toContain("/k/prod-eu/Node/-/node-3");
   });
 
   it("reads its own tab's namespace selection", async () => {

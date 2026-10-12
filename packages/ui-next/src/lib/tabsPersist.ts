@@ -1,4 +1,5 @@
 import { describe } from "./routes";
+import { detailRoute, parseDetailRoute } from "./detailRoute";
 import { loadRestoreSession, scopedSettingsKey, settingsStorage } from "@srelens/core";
 import type { TableSort } from "@srelens/ui-kit";
 import type { Tab, TabsState, Workspace } from "./tabs";
@@ -63,6 +64,13 @@ function parseTab(v: unknown): Tab | null {
   if (!isRecord(v) || !isString(v.id) || !isString(v.route) || !isString(v.title) || !isString(v.kind)) return null;
   const tab: Tab = { id: v.id, route: v.route, title: v.title, kind: v.kind as Tab["kind"] };
   if (isString(v.sub)) tab.sub = v.sub;
+  // An earlier build's detail route had no cluster and showed the rail's — the
+  // cluster its `sub` was last relabelled for. Pin it there (#834), so it comes
+  // back showing what it showed; with no `sub` it follows the rail as before.
+  const detail = parseDetailRoute(tab.route);
+  if (detail && !detail.cluster && tab.sub) {
+    tab.route = detailRoute(detail.kind, detail.namespace, detail.name, { cluster: tab.sub });
+  }
   // The former Control room route is now app-wide; retain the tab's identity
   // and pin preference while dropping its obsolete cluster label.
   if (tab.route === "/") {

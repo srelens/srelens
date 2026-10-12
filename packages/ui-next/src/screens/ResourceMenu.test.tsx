@@ -247,7 +247,7 @@ describe("useRowMenu", () => {
   it("opens the resource in a tab, at its /k/<kind>/<namespace>/<name> route", async () => {
     render(<Harness args={POD_ARGS} row={POD_ROW} />);
     await userEvent.click(screen.getByRole("button", { name: "Open in new tab" }));
-    expect(store.currentWorkspace().tabs.some((t) => t.route === "/k/Pod/kube-system/web-0")).toBe(true);
+    expect(store.currentWorkspace().tabs.some((t) => t.route === "/k/prod/Pod/kube-system/web-0")).toBe(true);
   });
 
   /**
@@ -442,7 +442,7 @@ describe("useRowMenu", () => {
   it("opens a cluster-scoped resource with the placeholder namespace segment", async () => {
     render(<Harness args={NODE_ARGS} row={NODE_ROW} />);
     await userEvent.click(screen.getByRole("button", { name: "Open in new tab" }));
-    expect(store.currentWorkspace().tabs.some((t) => t.route === "/k/Node/-/worker-1")).toBe(true);
+    expect(store.currentWorkspace().tabs.some((t) => t.route === "/k/prod/Node/-/worker-1")).toBe(true);
   });
 
   it("asks before deleting, and calls nothing until the confirm is taken", async () => {

@@ -461,7 +461,7 @@ export function NodePodsSection({ context, node }: { context: string; node: stri
   const all = state.data ?? [];
   const rows = all.slice(0, NODE_POD_LIMIT);
   const openPod = (pod: PodSummary) =>
-    openTab(detailRoute("Pod", pod.namespace, pod.name), { clusterName: context });
+    openTab(detailRoute("Pod", pod.namespace, pod.name, { cluster: context }), { clusterName: context });
   const viewAll = () => {
     openTab("/k/pods", { clusterName: context });
     setTabView(currentWorkspace().activeId, { filter: node, filterKey: "node" });

@@ -372,6 +372,33 @@ describe("Window boot", () => {
     await waitFor(() => expect(connectCluster).toHaveBeenCalledWith("prod"));
   });
 
+  it("probes a pinned detail tab's own cluster, not the rail's (#834)", async () => {
+    listContexts.mockResolvedValue({ contexts: [ctx("prod"), ctx("stage")] });
+    loadTabsState.mockReturnValue(defaultState([ctx("prod"), ctx("stage")]));
+    await booted();
+    expect(store.activeCluster()).toBe("prod");
+    act(() => { store.openTab("/k/stage/Node/-/worker-1", { clusterName: "stage" }); });
+    await waitFor(() => expect(connectCluster).toHaveBeenCalledWith("stage"));
+    expect(connectCluster).not.toHaveBeenCalledWith("prod");
+  });
+
+  it("pauses a pinned detail tab with its own cluster, not with the rail's (#834)", async () => {
+    listContexts.mockResolvedValue({ contexts: [ctx("prod"), ctx("stage")] });
+    loadTabsState.mockReturnValue(defaultState([ctx("prod"), ctx("stage")]));
+    await booted();
+    act(() => { store.openTab("/k/stage/Node/-/worker-1", { clusterName: "stage" }); });
+    // What the rail does on a pick: relabel the whole strip for its cluster.
+    act(() => { store.setActiveCluster("prod", "prod"); });
+    const workspace = store.currentWorkspace().id;
+
+    act(() => { store.setClusterPaused(workspace, "prod", true); });
+    expect(screen.queryByText("stage is paused")).toBeNull();
+    expect(screen.queryByText("prod is paused")).toBeNull();
+
+    act(() => { store.setClusterPaused(workspace, "stage", true); });
+    expect(screen.getByText("stage is paused")).toBeDefined();
+  });
+
   it("keeps the agent console mounted when its explicitly scoped cluster is paused", async () => {
     await booted();
     act(() => { store.openTab("/agent", { clusterName: "prod" }); });
@@ -2359,9 +2386,9 @@ describe("Window — srelens:// deep links", () => {
     expect(store.activeCluster()).toBe("prod");
     deepLinks.queue = ["srelens://resource/stage/payments/Pod/web-7d4b"];
     nudge();
-    await waitFor(() => expect(store.activeRoute()).toBe("/k/Pod/payments/web-7d4b"));
-    expect(tabFor("/k/Pod/payments/web-7d4b")?.sub).toBe("stage");
-    // The detail reads whichever cluster is in focus, so this is what the tab
+    await waitFor(() => expect(store.activeRoute()).toBe("/k/stage/Pod/payments/web-7d4b"));
+    expect(tabFor("/k/stage/Pod/payments/web-7d4b")?.sub).toBe("stage");
+    // The detail reads the cluster in its route, so this is what the tab
     // actually shows: stage's pod, and never prod's pod of the same name.
     await waitFor(() =>
       expect(getObjectSpy).toHaveBeenCalledWith("stage", "Pod", "payments", "web-7d4b"),
@@ -2374,7 +2401,7 @@ describe("Window — srelens:// deep links", () => {
     await booted();
     deepLinks.queue = ["srelens://resource/stage/-/Node/worker-1"];
     nudge();
-    await waitFor(() => expect(store.activeRoute()).toBe("/k/Node/-/worker-1"));
+    await waitFor(() => expect(store.activeRoute()).toBe("/k/stage/Node/-/worker-1"));
     expect(store.activeCluster()).toBe("stage");
   });
 
@@ -2478,7 +2505,7 @@ describe("Window — srelens:// deep links", () => {
     );
     expect(store.activeRoute()).toBe("/overview");
     expect(store.activeCluster()).toBe("prod");
-    expect(tabFor("/k/Pod/payments/web-7d4b")).toBeUndefined();
+    expect(tabFor("/k/stage/Pod/payments/web-7d4b")).toBeUndefined();
     const notice = shownNotice() ?? "";
     expect(notice).toContain("That link will be checked once the contexts load");
     expect(notice).toContain("The kube contexts could not be listed. open /home/dana/.kube/stage: permission denied");
@@ -2493,9 +2520,9 @@ describe("Window — srelens:// deep links", () => {
     // A reload that answers cleanly — Connections' Refresh, Home's Retry —
     // judges the held links again, in the order they came.
     act(() => setContexts([ctx("prod"), ctx("stage")]));
-    await waitFor(() => expect(store.activeRoute()).toBe("/k/Node/-/worker-1"));
+    await waitFor(() => expect(store.activeRoute()).toBe("/k/stage/Node/-/worker-1"));
     expect(store.activeCluster()).toBe("stage");
-    expect(tabFor("/k/Pod/payments/web-7d4b")?.sub).toBe("stage");
+    expect(tabFor("/k/stage/Pod/payments/web-7d4b")?.sub).toBe("stage");
     expect(shownNotice()).toBeNull();
 
     // A later failure is a new one, and is said again.

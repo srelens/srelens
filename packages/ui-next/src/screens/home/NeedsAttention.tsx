@@ -91,7 +91,7 @@ export function NeedsAttention({ targets, scans }: NeedsAttentionProps) {
                       type="button"
                       className="home-attention-open"
                       aria-label={`Open ${item.kind} ${path} on ${where}`}
-                      onClick={() => openOnCluster(context, detailRoute(item.kind, item.namespace || null, item.name))}
+                      onClick={() => openOnCluster(context, detailRoute(item.kind, item.namespace || null, item.name, { cluster: context.name }))}
                     >
                       <StatusPill status={item.problem} kind={item.cause === "crash" || item.cause === "image" ? "danger" : "warning"} tinted />
                       <span className="min-w-0 flex-1 truncate font-medium" title={path}>{path}</span>

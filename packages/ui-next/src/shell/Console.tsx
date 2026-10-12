@@ -352,7 +352,7 @@ export function Console({ fullView }: { fullView?: boolean }) {
         // command named, which would need a way to carry that intent across
         // a tab open that nothing here builds (see `openResource` below for
         // the same limit on `shell`/`forward`).
-        openTab(detailRoute(a.kind, a.namespace || null, a.name), { clusterName: a.context });
+        openTab(detailRoute(a.kind, a.namespace || null, a.name, { cluster: a.context }), { clusterName: a.context });
       },
       openResource: (r) => {
         if (r.as === "logs") {
