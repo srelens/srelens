@@ -66,10 +66,16 @@ impl Drop for EnvGuard {
     }
 }
 
+/// The `$BROWSER` a settings guard installs: a program that cannot exist.
+pub const NO_BROWSER: &str = "srelens-no-such-browser-0x380";
+
 /// Keep both configuration files private for the full lifetime of a test's App.
 /// Construct this before the App so it is dropped after settings-sensitive work.
+/// It also points `$BROWSER` at [`NO_BROWSER`], so a key that opens a link
+/// never launches a real browser (#896).
 pub fn isolate_settings() -> SettingsGuard {
     let mut env = lock();
+    env.set("BROWSER", NO_BROWSER);
     let dir = tempfile::tempdir().expect("scratch configuration directory");
     env.set(
         "SRELENS_AI_SETTINGS_PATH",
