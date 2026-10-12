@@ -102,9 +102,10 @@ export function askContextFor(route: string, cluster: string, namespaces: string
   if (detail) {
     // `namespace` is `null` for a cluster-scoped kind — a Node, a
     // PersistentVolume. Left absent rather than sent as the literal "null",
-    // which would be a namespace no cluster has.
+    // which would be a namespace no cluster has. The cluster is the tab's own
+    // when its route pins one (#834): the object on screen is that cluster's.
     return {
-      cluster,
+      cluster: detail.cluster ?? cluster,
       namespace: detail.namespace ?? undefined,
       kind: detail.kind,
       name: detail.name,
