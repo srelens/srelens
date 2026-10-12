@@ -357,6 +357,12 @@ describe("the facets (#898)", () => {
     expect(facetLabels()).toEqual(["s1", "s2", "s3", "s4", "s5"]);
   });
 
+  it("keeps the levels worst first when one is filtered on, since that list is never cut", () => {
+    facetRail("level:info");
+    const levels = Array.from(document.querySelectorAll('[data-slot="level"] .status')).map((e) => e.textContent);
+    expect(levels).toEqual(["warn", "info"]);
+  });
+
   it("tints the rows the query filters in, and only those", () => {
     facetRail("level:info");
     const row = (level: string) =>

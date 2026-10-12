@@ -197,12 +197,11 @@ function FacetRow({
 }
 
 /**
- * The counts, with the values the query filters on first so the cut to the
- * top few cannot hide a filter that is on. A value the query names that no
- * line in scope has comes in at 0, once however many clauses name it —
- * otherwise a filter that emptied its own facet could not be clicked off.
+ * The counts plus any value the query names that no line in scope has, at 0,
+ * once however many clauses name it — otherwise a filter that emptied its own
+ * facet could not be clicked off.
  */
-function withActive(values: FacetValue[], clauses: readonly QueryClause[], field: string): FacetValue[] {
+function withNamed(values: FacetValue[], clauses: readonly QueryClause[], field: string): FacetValue[] {
   const known = new Set(values.map((v) => v.value.toLowerCase()));
   const all = [...values];
   for (const c of clauses) {
@@ -210,8 +209,17 @@ function withActive(values: FacetValue[], clauses: readonly QueryClause[], field
     known.add(c.value);
     all.push({ value: c.value, count: 0 });
   }
+  return all;
+}
+
+/**
+ * The values the query filters on first, so the cut to the top few cannot hide
+ * a filter that is on. Not for Level, which is never cut and keeps its
+ * worst-first order whatever is clicked.
+ */
+function activeFirst(values: FacetValue[], clauses: readonly QueryClause[], field: string): FacetValue[] {
   const active = (v: FacetValue) => clauseState(clauses, { field, value: v.value }) !== undefined;
-  return [...all.filter(active), ...all.filter((v) => !active(v))];
+  return [...values.filter(active), ...values.filter((v) => !active(v))];
 }
 
 /**
@@ -277,19 +285,18 @@ export function StreamRail({ pods, lines, onTogglePod, query }: StreamRailProps)
   );
   const levels = useMemo(
     () =>
-      withActive(
-        facetCounts(query.lines, query.clauses, "level").sort(
-          (a, b) => healthRank(logLineHealth(b.value)) - healthRank(logLineHealth(a.value)) || b.count - a.count,
-        ),
-        query.clauses,
-        "level",
+      withNamed(facetCounts(query.lines, query.clauses, "level"), query.clauses, "level").sort(
+        (a, b) => healthRank(logLineHealth(b.value)) - healthRank(logLineHealth(a.value)) || b.count - a.count,
       ),
     [query.lines, query.clauses],
   );
   const facets = useMemo(
     () =>
       query.fields
-        .map((field) => ({ field, values: withActive(facetCounts(query.lines, query.clauses, field), query.clauses, field) }))
+        .map((field) => ({
+          field,
+          values: activeFirst(withNamed(facetCounts(query.lines, query.clauses, field), query.clauses, field), query.clauses, field),
+        }))
         .filter((f) => f.values.length > 0),
     [query.lines, query.clauses, query.fields],
   );
