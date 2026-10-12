@@ -379,6 +379,56 @@ describe("discoverFields", () => {
     const lines = Array.from({ length: 10 }, (_, i) => json(Object.fromEntries(keys.map((k) => [k, `${k}${i % 2}`]))));
     expect(discoverFields(lines)).toEqual(["a", "b", "c", "d", "e", "f"]);
   });
+
+  it("folds a field's spellings into one, offered under the first one seen", () => {
+    const lines = Array.from({ length: 10 }, (_, i) =>
+      json(i < 5 ? { System: i % 2 ? "a" : "b" } : { system: i % 2 ? "a" : "b" }),
+    );
+    expect(discoverFields(lines)).toEqual(["System"]);
+  });
+
+  it("counts a field's spellings together toward the coverage cutoff", () => {
+    const lines = Array.from({ length: 25 }, (_, i) =>
+      json({
+        pad: "p",
+        ...(i < 3 ? { System: i % 2 ? "a" : "b" } : i < 6 ? { system: i % 2 ? "b" : "a" } : {}),
+      }),
+    );
+    expect(discoverFields(lines)).toEqual(["System"]);
+  });
+
+  it("counts a row that carries both spellings once toward coverage", () => {
+    const lines = [json({ pad: "p", Zone: "a", zone: "b" }), ...Array.from({ length: 9 }, () => json({ pad: "p" }))];
+    expect(discoverFields(lines)).toEqual([]);
+  });
+
+  it("needs a fifth of the structured rows, not a tenth", () => {
+    const rows = (withK: number) =>
+      Array.from({ length: 20 }, (_, i) => json({ pad: "p", ...(i < withK ? { k: i % 2 ? "b" : "a" } : {}) }));
+    expect(discoverFields(rows(2))).toEqual([]);
+    expect(discoverFields(rows(4))).toEqual(["k"]);
+  });
+
+  it("measures coverage against the rows that have fields, not every line", () => {
+    const lines = [
+      json({ pad: "p", k: "a" }),
+      json({ pad: "p", k: "b" }),
+      ...Array.from({ length: 8 }, () => json({ pad: "p" })),
+      ...Array.from({ length: 10 }, (_, i) => ql(`plain line ${i}`)),
+    ];
+    expect(discoverFields(lines)).toEqual(["k"]);
+  });
+
+  it("offers a field with exactly fifty values, and not one with fifty-one", () => {
+    const withValues = (n: number) => Array.from({ length: n }, (_, i) => json({ v: `x${i}` }));
+    expect(discoverFields(withValues(50))).toEqual(["v"]);
+    expect(discoverFields(withValues(51))).toEqual([]);
+  });
+
+  it("counts case-only differences in a value as one value", () => {
+    const lines = Array.from({ length: 10 }, (_, i) => json({ k: i % 2 ? "a" : "A" }));
+    expect(discoverFields(lines)).toEqual([]);
+  });
 });
 
 describe("facetCounts", () => {
@@ -399,5 +449,13 @@ describe("facetCounts", () => {
 
   it("counts another field with every clause applied", () => {
     expect(facetCounts(lines, clauses("level:warn"), "system")).toEqual([{ value: "schwarz", count: 1 }]);
+  });
+
+  it("orders equal counts alphabetically, whichever spelling arrived first", () => {
+    const tied = ['{"k":"Beta"}', '{"k":"alpha"}'].map((t) => ql(t));
+    expect(facetCounts(tied, clauses(""), "k")).toEqual([
+      { value: "alpha", count: 1 },
+      { value: "Beta", count: 1 },
+    ]);
   });
 });

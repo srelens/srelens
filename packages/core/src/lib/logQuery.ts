@@ -438,19 +438,26 @@ const MAX_FIELDS = 6;
  */
 export function discoverFields(lines: readonly QueryLine[]): string[] {
   let structured = 0;
-  const seen = new Map<string, { lines: number; values: Set<string> }>();
+  // Keyed by lowercase, as the query matches field names. The first spelling seen is the one offered.
+  const seen = new Map<string, { spelling: string; lines: number; values: Set<string> }>();
   for (const line of lines) {
     const keys = Object.keys(line.fields);
     if (keys.length === 0) continue;
     structured += 1;
+    // A row carrying both `System` and `system` is still one row of coverage.
+    const counted = new Set<string>();
     for (const key of keys) {
       if (HIDDEN_KEYS.has(key.toLowerCase()) || !isQueryableKey(key)) continue;
-      let entry = seen.get(key);
+      const lower = key.toLowerCase();
+      let entry = seen.get(lower);
       if (entry === undefined) {
-        entry = { lines: 0, values: new Set() };
-        seen.set(key, entry);
+        entry = { spelling: key, lines: 0, values: new Set() };
+        seen.set(lower, entry);
       }
-      entry.lines += 1;
+      if (!counted.has(lower)) {
+        counted.add(lower);
+        entry.lines += 1;
+      }
       // Past the cap the key is out anyway, so the set stops growing.
       if (entry.values.size <= MAX_DISTINCT) entry.values.add(line.fields[key].toLowerCase());
     }
@@ -462,13 +469,14 @@ export function discoverFields(lines: readonly QueryLine[]): string[] {
     )
     .sort((a, b) => b[1].lines - a[1].lines || compare(a[0], b[0]))
     .slice(0, MAX_FIELDS)
-    .map(([key]) => key);
+    .map(([, e]) => e.spelling);
 }
 
 /**
  * A field's values among the lines every OTHER clause keeps, most frequent
  * first. Grouped case-insensitively, because that is how they match, and
- * named by the first spelling seen.
+ * named by the first spelling seen. Ties sort on the lowercased value, so the
+ * order does not depend on which spelling arrived first.
  */
 export function facetCounts(lines: readonly QueryLine[], clauses: readonly QueryClause[], field: string): FacetValue[] {
   const counts = new Map<string, { value: string; count: number }>();
@@ -480,7 +488,9 @@ export function facetCounts(lines: readonly QueryLine[], clauses: readonly Query
     if (entry === undefined) counts.set(key, { value, count: 1 });
     else entry.count += 1;
   }
-  return [...counts.values()].sort((a, b) => b.count - a.count || compare(a.value, b.value));
+  return [...counts.values()].sort(
+    (a, b) => b.count - a.count || compare(a.value.toLowerCase(), b.value.toLowerCase()),
+  );
 }
 
 function compare(a: string, b: string): number {
