@@ -4600,6 +4600,9 @@ async fn kubectl_ok(ctx: &str, args: &[&str], stdin: Option<&str>) -> String {
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
+        // The timeout below drops the wait; without this the kubectl it gave up
+        // on would keep running past the test.
+        .kill_on_drop(true)
         .spawn()
         .expect("run kubectl");
     let mut input = child.stdin.take().expect("kubectl stdin");
@@ -4675,18 +4678,27 @@ async fn service_forward_recovers_after_its_pod_is_deleted() {
     let result = std::panic::AssertUnwindSafe(forward_recovery())
         .catch_unwind()
         .await;
-    let ns = tokio::process::Command::new("kubectl")
-        .args(["--context", &context(), "delete", "namespace", FWD_NS])
-        .args(["--ignore-not-found", "--wait=true", "--timeout=120s"])
-        .output()
-        .await;
+    // `--timeout` bounds only Kubernetes's wait for the deletion; a stuck
+    // credential helper or request would hold the process, and every live
+    // test after this one, with it. So the whole call has a deadline, and a
+    // kubectl it gives up on is killed rather than left running.
+    let ns = tokio::time::timeout(
+        Duration::from_secs(150),
+        tokio::process::Command::new("kubectl")
+            .args(["--context", &context(), "delete", "namespace", FWD_NS])
+            .args(["--ignore-not-found", "--wait=true", "--timeout=120s"])
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await;
     match ns {
-        Ok(o) if o.status.success() => println!("teardown: namespace {FWD_NS} deleted"),
-        Ok(o) => println!(
+        Ok(Ok(o)) if o.status.success() => println!("teardown: namespace {FWD_NS} deleted"),
+        Ok(Ok(o)) => println!(
             "teardown: namespace {FWD_NS} delete failed: {}",
             String::from_utf8_lossy(&o.stderr)
         ),
-        Err(e) => println!("teardown: could not run kubectl: {e}"),
+        Ok(Err(e)) => println!("teardown: could not run kubectl: {e}"),
+        Err(_) => println!("teardown: deleting namespace {FWD_NS} did not finish within 150s"),
     }
     if let Err(e) = result {
         std::panic::resume_unwind(e);
