@@ -953,11 +953,23 @@ function LogsStream({
     () => (clauses.length === 0 ? scoped : scoped.filter((row) => matchLine(row, clauses))),
     [scoped, clauses],
   );
-  /** The buffer's facet fields, from every row: sections must not come and go as the reader filters. */
-  const fields = useMemo(() => discoverFields(rows), [rows]);
+  /**
+   * The buffer's facet fields, from every row: sections must not come and go as
+   * the reader filters. Found over the deferred rows and handed on as the SAME
+   * array while the names are unchanged — a new array on every batch would
+   * recount every facet in the urgent render, ahead of the deferral below.
+   */
+  const deferredRows = useDeferredValue(rows);
+  const fieldsRef = useRef<string[]>([]);
+  const fields = useMemo(() => {
+    const next = discoverFields(deferredRows);
+    const last = fieldsRef.current;
+    if (next.length === last.length && next.every((f, i) => f === last[i])) return last;
+    return (fieldsRef.current = next);
+  }, [deferredRows]);
   /** The facets recount a beat behind, like the query, so a busy stream never starves the box. */
   const facetLines = useDeferredValue(scoped);
-  /** A facet or detail click: rewrites the search box, the one place filters live. */
+  /** A facet click: rewrites the search box, the one place filters live. */
   const toggleFilter = useCallback(
     (target: ClauseTarget, mode: ClauseMode) => setText((q) => toggleClause(q, target, mode)),
     [],

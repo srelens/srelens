@@ -13,7 +13,7 @@ import {
   type QueryClause,
   type QueryLine,
 } from "@srelens/core";
-import { Badge, Checkbox, Section, StatusPill } from "@srelens/ui-kit";
+import { Badge, Checkbox, Section, StatusPill, toneWash } from "@srelens/ui-kit";
 import { groupNumber } from "../../lib/numbers";
 
 /**
@@ -141,7 +141,9 @@ const MAX_VALUES = 50;
  * A value the reader can filter on: the row filters it IN, the trailing
  * button filters it OUT, and each says which it is through `aria-pressed`.
  * The figure keeps `.path` and the pill keeps `.status`, the same anatomy as
- * `ToneRow`, so a row reads the same whether or not it can be clicked.
+ * `ToneRow`, so a row reads the same whether or not it can be clicked. A value
+ * filtered in gets the accent wash and one filtered out is struck through, so
+ * the state is on the row and not only in `aria-pressed`.
  */
 function FacetRow({
   slot,
@@ -163,7 +165,12 @@ function FacetRow({
 }) {
   const lines = `${groupNumber(count)} ${count === 1 ? "line" : "lines"}`;
   return (
-    <div data-slot={slot} data-state={state} className="group flex items-center gap-1 px-3 py-[3px]">
+    <div
+      data-slot={slot}
+      data-state={state}
+      style={state === "include" ? { background: toneWash("accent") } : undefined}
+      className="group flex items-center gap-1 px-3 py-[3px]"
+    >
       <button
         type="button"
         aria-pressed={state === "include"}
@@ -181,7 +188,7 @@ function FacetRow({
         aria-pressed={state === "exclude"}
         aria-label={`Exclude ${name}`}
         onClick={() => onToggle("exclude")}
-        className="icon-btn shrink-0 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 aria-pressed:opacity-100"
+        className="icon-btn shrink-0 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 aria-pressed:opacity-100"
       >
         <span aria-hidden="true">−</span>
       </button>
@@ -189,13 +196,22 @@ function FacetRow({
   );
 }
 
-/** The counts plus any value the query names that no line in scope has, at 0 — otherwise a filter that emptied its own facet could not be clicked off. */
+/**
+ * The counts, with the values the query filters on first so the cut to the
+ * top few cannot hide a filter that is on. A value the query names that no
+ * line in scope has comes in at 0, once however many clauses name it —
+ * otherwise a filter that emptied its own facet could not be clicked off.
+ */
 function withActive(values: FacetValue[], clauses: readonly QueryClause[], field: string): FacetValue[] {
-  const named = clauses
-    .filter((c) => c.field?.toLowerCase() === field.toLowerCase() && c.match === "equals")
-    .filter((c) => !values.some((v) => v.value.toLowerCase() === c.value))
-    .map((c) => ({ value: c.value, count: 0 }));
-  return [...values, ...named];
+  const known = new Set(values.map((v) => v.value.toLowerCase()));
+  const all = [...values];
+  for (const c of clauses) {
+    if (c.field?.toLowerCase() !== field.toLowerCase() || c.match !== "equals" || known.has(c.value)) continue;
+    known.add(c.value);
+    all.push({ value: c.value, count: 0 });
+  }
+  const active = (v: FacetValue) => clauseState(clauses, { field, value: v.value }) !== undefined;
+  return [...all.filter(active), ...all.filter((v) => !active(v))];
 }
 
 /**
@@ -245,7 +261,8 @@ function withActive(values: FacetValue[], clauses: readonly QueryClause[], field
  * the reader has to look at and dismiss. The one exception is a Sources
  * section whose view is empty *because a box was ticked off* — hiding it then
  * would take away the only control that can undo it, and the reader would be
- * stuck looking at a blank stream with no way back.
+ * stuck looking at a blank stream with no way back. A value the query names
+ * keeps its section drawn on an empty view for the same reason.
  *
  * It renders its `Section`s and nothing around them: `SideRail` drops what it
  * is handed straight into one box and `.section + .section` is what rules
@@ -260,8 +277,12 @@ export function StreamRail({ pods, lines, onTogglePod, query }: StreamRailProps)
   );
   const levels = useMemo(
     () =>
-      withActive(facetCounts(query.lines, query.clauses, "level"), query.clauses, "level").sort(
-        (a, b) => healthRank(logLineHealth(b.value)) - healthRank(logLineHealth(a.value)) || b.count - a.count,
+      withActive(
+        facetCounts(query.lines, query.clauses, "level").sort(
+          (a, b) => healthRank(logLineHealth(b.value)) - healthRank(logLineHealth(a.value)) || b.count - a.count,
+        ),
+        query.clauses,
+        "level",
       ),
     [query.lines, query.clauses],
   );
@@ -363,6 +384,9 @@ export function StreamRail({ pods, lines, onTogglePod, query }: StreamRailProps)
               <button
                 type="button"
                 aria-expanded={open}
+                // Named by its field: every section with more than five values
+                // says the same two visible words.
+                aria-label={open ? `Show fewer ${field} values` : `Show all ${Math.min(values.length, MAX_VALUES)} ${field} values`}
                 className="px-3 py-[3px] text-left text-[0.75rem] text-muted hover:text-soft"
                 onClick={() =>
                   setExpanded((s) => {

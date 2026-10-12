@@ -10,6 +10,7 @@ import {
   type LogLine,
   type QueryLine,
 } from "@srelens/core";
+import { toneWash } from "@srelens/ui-kit";
 import { StreamRail, STREAM_RAIL_WIDTH, type StreamPod } from "./StreamRail";
 
 /**
@@ -275,7 +276,7 @@ describe("StreamRail", () => {
 });
 
 describe("the facets (#898)", () => {
-  const facetRail = (clauses = "") => {
+  const facetRail = (clauses = "", lines: readonly QueryLine[] = FACET_LINES) => {
     const parsed = parseLogQuery(clauses);
     const onToggle = vi.fn();
     const view = render(
@@ -283,11 +284,17 @@ describe("the facets (#898)", () => {
         pods={PODS}
         lines={BUFFER}
         onTogglePod={vi.fn()}
-        query={{ lines: FACET_LINES, clauses: parsed.ok ? parsed.clauses : [], fields: ["system"], onToggle }}
+        query={{ lines, clauses: parsed.ok ? parsed.clauses : [], fields: ["system"], onToggle }}
       />,
     );
     return { ...view, onToggle };
   };
+
+  /** Six systems, `s1` the busiest and `s6` the quietest, so `s6` ranks past the collapsed five. */
+  const SIX_SYSTEMS = ["s1", "s1", "s1", "s1", "s1", "s1", "s2", "s2", "s2", "s2", "s2", "s3", "s3", "s3", "s3", "s4", "s4", "s4", "s5", "s5", "s6"].map(
+    (system) => ql(`{"level":"info","msg":"m","system":"${system}"}`),
+  );
+  const facetLabels = () => Array.from(document.querySelectorAll('[data-slot="facet"] .status')).map((e) => e.textContent);
 
   it("lists the levels worst first, and each discovered field's values, with counts", () => {
     facetRail();
@@ -316,5 +323,47 @@ describe("the facets (#898)", () => {
     const { onToggle } = rail();
     await userEvent.click(screen.getByRole("button", { name: /^pool timeout, 3 lines$/ }));
     expect(onToggle).toHaveBeenLastCalledWith({ phrase: "pool timeout" }, "include");
+  });
+
+  it("draws a value the query names twice, and no line has, as one row", () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      facetRail("system:zzz -system:zzz system:ZZZ");
+      expect(error.mock.calls.some((call) => String(call[0]).includes("same key"))).toBe(false);
+      expect(screen.getAllByRole("button", { name: "system = zzz, 0 lines" })).toHaveLength(1);
+    } finally {
+      error.mockRestore();
+    }
+  });
+
+  it("keeps a value the query names at zero lines in the collapsed list", () => {
+    facetRail("system:zzz", SIX_SYSTEMS);
+    expect(facetLabels()).toEqual(["zzz", "s1", "s2", "s3", "s4"]);
+    expect(screen.getByRole("button", { name: "system = zzz, 0 lines" })).toBeTruthy();
+  });
+
+  it("keeps an included value that ranks past the collapsed five in the list", () => {
+    facetRail("system:s6", SIX_SYSTEMS);
+    expect(facetLabels()).toEqual(["s6", "s1", "s2", "s3", "s4"]);
+    expect(screen.getByRole("button", { name: "system = s6, 1 line" }).getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("names the field on Show all, and shows the rest when it is pressed", async () => {
+    facetRail("", SIX_SYSTEMS);
+    expect(facetLabels()).toEqual(["s1", "s2", "s3", "s4", "s5"]);
+    await userEvent.click(screen.getByRole("button", { name: "Show all 6 system values" }));
+    expect(facetLabels()).toEqual(["s1", "s2", "s3", "s4", "s5", "s6"]);
+    await userEvent.click(screen.getByRole("button", { name: "Show fewer system values" }));
+    expect(facetLabels()).toEqual(["s1", "s2", "s3", "s4", "s5"]);
+  });
+
+  it("tints the rows the query filters in, and only those", () => {
+    facetRail("level:info");
+    const row = (level: string) =>
+      Array.from(document.querySelectorAll<HTMLElement>('[data-slot="level"]')).find(
+        (r) => r.querySelector(".status")?.textContent === level,
+      )!;
+    expect(row("info").style.background).toBe(toneWash("accent"));
+    expect(row("warn").getAttribute("style")).toBeNull();
   });
 });

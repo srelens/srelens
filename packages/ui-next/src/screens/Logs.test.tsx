@@ -44,6 +44,8 @@ const h = vi.hoisted(() => {
     fetched: vi.fn(),
     /** Every `listResource` the bare route's recents have been checked with. */
     listed: vi.fn(),
+    /** The field of every `facetCounts` pass the rail has run: one entry per recount. */
+    facetPasses: [] as string[],
     /** Every call the screen has made into the hook, in order. */
     seen: [] as {
       context: string;
@@ -124,31 +126,39 @@ vi.mock("../lib/logStream", async () => {
  * decision the screen makes from `isTauri()` and that decision is the thing
  * under test.
  */
-vi.mock("@srelens/core", async (orig) => ({
-  ...(await orig<typeof import("@srelens/core")>()),
-  isTauri: () => h.tauri,
-  saveTextFile: (...a: unknown[]) => h.saved(...a),
-  podLogs: (...a: unknown[]) => h.fetched(...a),
-  // The bare route's only backend call: one list per kind and namespace, to
-  // find out which remembered subjects the cluster still has.
-  listResource: (...a: unknown[]) => h.listed(...a),
-  // A log provider's source (#569): the app view it opens its stream on, and the
-  // kubeconfig listing that says which cluster an app is enabled for.
-  listContexts: async () => ({ contexts: [{ name: "prod-eu", key: "prod" }] }),
-  openExtensionView: (app: string, label: string) => {
-    const opened: { request: unknown; handlers: { onEnd?: (end: unknown) => void } }[] = [];
-    const view = { app, label, close: vi.fn(async () => {}), opened };
-    h.views.push(view);
-    return {
-      view: `${app}/${label}`,
-      close: view.close,
-      open: async (request: unknown, handlers: { onEnd?: (end: unknown) => void }) => {
-        opened.push({ request, handlers });
-        return { stream: "s-1", cancel: vi.fn(async () => {}) };
-      },
+vi.mock("@srelens/core", async (orig) => {
+  const real = await orig<typeof import("@srelens/core")>();
+  return {
+    ...real,
+    // Calls through; only records which facet each pass recounted.
+    facetCounts: (...a: Parameters<typeof real.facetCounts>) => {
+      h.facetPasses.push(a[2]);
+      return real.facetCounts(...a);
+    },
+    isTauri: () => h.tauri,
+    saveTextFile: (...a: unknown[]) => h.saved(...a),
+    podLogs: (...a: unknown[]) => h.fetched(...a),
+    // The bare route's only backend call: one list per kind and namespace, to
+    // find out which remembered subjects the cluster still has.
+    listResource: (...a: unknown[]) => h.listed(...a),
+    // A log provider's source (#569): the app view it opens its stream on, and the
+    // kubeconfig listing that says which cluster an app is enabled for.
+    listContexts: async () => ({ contexts: [{ name: "prod-eu", key: "prod" }] }),
+    openExtensionView: (app: string, label: string) => {
+      const opened: { request: unknown; handlers: { onEnd?: (end: unknown) => void } }[] = [];
+      const view = { app, label, close: vi.fn(async () => {}), opened };
+      h.views.push(view);
+      return {
+        view: `${app}/${label}`,
+        close: view.close,
+        open: async (request: unknown, handlers: { onEnd?: (end: unknown) => void }) => {
+          opened.push({ request, handlers });
+          return { stream: "s-1", cancel: vi.fn(async () => {}) };
+        },
+      };
+    },
     };
-  },
-}));
+});
 
 vi.mock("../extensions/inventoryStore", async (orig) => ({
   ...(await orig<typeof import("../extensions/inventoryStore")>()),
@@ -2156,5 +2166,18 @@ describe("structured lines and the query (#898)", () => {
     expect(messages(region)).toEqual(["Skipping checkpoint  system=schwarz"]);
     await userEvent.click(screen.getByRole("button", { name: "Exclude system = camlog" }));
     expect(filterField()).toHaveProperty("value", "");
+  });
+
+  it("recounts each facet once for a streamed line, not again for the field list", async () => {
+    await (draw(), body());
+    push(...JSON_LINES);
+    h.facetPasses.length = 0;
+    // No new field and no new value: the same three facets, one line heavier.
+    push(line("api-9/api", "14:07:44.010000000", '{"level":"info","msg":"Wrote again","system":"camlog"}'));
+    expect(screen.getByRole("button", { name: "level = info, 2 lines" })).toBeTruthy();
+    // The Level facet and the one discovered field, once each: the deferred
+    // pass. The urgent render must not rerun the field's count because the
+    // list of fields came back as a new array of the same names.
+    expect([...h.facetPasses].sort()).toEqual(["level", "system"]);
   });
 });
