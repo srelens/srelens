@@ -1,7 +1,15 @@
 import { describe, it, expect, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import type { LogLine } from "@srelens/core";
+import {
+  logLineHealth,
+  logLineLevel,
+  logLineWords,
+  parseLogFields,
+  parseLogQuery,
+  type LogLine,
+  type QueryLine,
+} from "@srelens/core";
 import { StreamRail, STREAM_RAIL_WIDTH, type StreamPod } from "./StreamRail";
 
 /**
@@ -33,12 +41,32 @@ const BUFFER: LogLine[] = [
   line("mk3wl", "info liveness deadline extended for the shutdown"),
 ];
 
+/** A QueryLine as the Logs screen builds one. */
+function ql(text: string): QueryLine {
+  const { message, fields } = parseLogFields(text);
+  const health = logLineHealth(text);
+  return { text, haystack: `${text} ${health}`.toLowerCase(), words: logLineWords(message), fields, level: logLineLevel(text) ?? "", health };
+}
+
+const FACET_LINES = [
+  '{"level":"info","msg":"a","system":"camlog"}',
+  '{"level":"info","msg":"b","system":"camlog"}',
+  '{"level":"warn","msg":"c","system":"schwarz"}',
+].map(ql);
+
 function rail(props: Partial<Parameters<typeof StreamRail>[0]> = {}) {
   const onTogglePod = vi.fn();
+  const onToggle = vi.fn();
   const { container } = render(
-    <StreamRail pods={PODS} lines={BUFFER} onTogglePod={onTogglePod} {...props} />,
+    <StreamRail
+      pods={PODS}
+      lines={BUFFER}
+      onTogglePod={onTogglePod}
+      query={{ lines: [], clauses: [], fields: [], onToggle }}
+      {...props}
+    />,
   );
-  return { container, onTogglePod };
+  return { container, onTogglePod, onToggle };
 }
 
 /** Every Sources row, as `[pod name, revision]`. */
@@ -243,5 +271,50 @@ describe("StreamRail", () => {
     const { container } = rail();
 
     expect(container.querySelectorAll("[title]")).toHaveLength(0);
+  });
+});
+
+describe("the facets (#898)", () => {
+  const facetRail = (clauses = "") => {
+    const parsed = parseLogQuery(clauses);
+    const onToggle = vi.fn();
+    const view = render(
+      <StreamRail
+        pods={PODS}
+        lines={BUFFER}
+        onTogglePod={vi.fn()}
+        query={{ lines: FACET_LINES, clauses: parsed.ok ? parsed.clauses : [], fields: ["system"], onToggle }}
+      />,
+    );
+    return { ...view, onToggle };
+  };
+
+  it("lists the levels worst first, and each discovered field's values, with counts", () => {
+    facetRail();
+    expect(screen.getByRole("button", { name: "level = warn, 1 line" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "level = info, 2 lines" })).toBeTruthy();
+    const levels = Array.from(document.querySelectorAll('[data-slot="level"] .status')).map((e) => e.textContent);
+    expect(levels).toEqual(["warn", "info"]);
+    expect(screen.getByRole("button", { name: "system = camlog, 2 lines" })).toBeTruthy();
+  });
+
+  it("filters a value in with a click and out with its exclude button", async () => {
+    const { onToggle } = facetRail();
+    await userEvent.click(screen.getByRole("button", { name: "system = camlog, 2 lines" }));
+    expect(onToggle).toHaveBeenLastCalledWith({ field: "system", value: "camlog" }, "include");
+    await userEvent.click(screen.getByRole("button", { name: "Exclude system = camlog" }));
+    expect(onToggle).toHaveBeenLastCalledWith({ field: "system", value: "camlog" }, "exclude");
+  });
+
+  it("presses what the query already filters on, and keeps an excluded value reachable at zero", () => {
+    facetRail("level:info -system:schwarz");
+    expect(screen.getByRole("button", { name: "level = info, 2 lines" }).getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByRole("button", { name: "Exclude system = schwarz" }).getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("filters on a Top term as a phrase", async () => {
+    const { onToggle } = rail();
+    await userEvent.click(screen.getByRole("button", { name: /^pool timeout, 3 lines$/ }));
+    expect(onToggle).toHaveBeenLastCalledWith({ phrase: "pool timeout" }, "include");
   });
 });

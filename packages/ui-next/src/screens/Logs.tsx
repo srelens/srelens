@@ -11,6 +11,7 @@ import {
 import {
   absoluteTimestamp,
   describeStreamEnd,
+  discoverFields,
   logConnectionStatus,
   logLineHealth,
   logLineLevel,
@@ -19,6 +20,9 @@ import {
   parseLogFields,
   parseLogQuery,
   podLogs,
+  toggleClause,
+  type ClauseMode,
+  type ClauseTarget,
   type LogConnectionVerdict,
   type LogLine as StreamLine,
   type LogTarget,
@@ -949,6 +953,15 @@ function LogsStream({
     () => (clauses.length === 0 ? scoped : scoped.filter((row) => matchLine(row, clauses))),
     [scoped, clauses],
   );
+  /** The buffer's facet fields, from every row: sections must not come and go as the reader filters. */
+  const fields = useMemo(() => discoverFields(rows), [rows]);
+  /** The facets recount a beat behind, like the query, so a busy stream never starves the box. */
+  const facetLines = useDeferredValue(scoped);
+  /** A facet or detail click: rewrites the search box, the one place filters live. */
+  const toggleFilter = useCallback(
+    (target: ClauseTarget, mode: ClauseMode) => setText((q) => toggleClause(q, target, mode)),
+    [],
+  );
 
   const togglePod = useCallback((pod: string, checked: boolean) => {
     setHidden((current) =>
@@ -1225,6 +1238,7 @@ function LogsStream({
             pods={railPods}
             lines={railLines}
             onTogglePod={togglePod}
+            query={{ lines: facetLines, clauses, fields, onToggle: toggleFilter }}
           />
         }
       >

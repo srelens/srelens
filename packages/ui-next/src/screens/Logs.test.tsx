@@ -2139,4 +2139,22 @@ describe("structured lines and the query (#898)", () => {
     expect(document.activeElement).toBe(filterField());
     expect(filterField()).toHaveProperty("value", "");
   });
+
+  it("filters on a level clicked in the rail, writing it into the search box", async () => {
+    const region = await (draw(), body());
+    push(...JSON_LINES);
+    await userEvent.click(screen.getByRole("button", { name: "level = warn, 1 line" }));
+    expect(filterField()).toHaveProperty("value", "level:warn");
+    expect(messages(region)).toEqual(["Skipping checkpoint  system=schwarz"]);
+  });
+
+  it("excludes a field value from the rail, and the same button takes it back", async () => {
+    const region = await (draw(), body());
+    push(...JSON_LINES);
+    await userEvent.click(screen.getByRole("button", { name: "Exclude system = camlog" }));
+    expect(filterField()).toHaveProperty("value", "-system:camlog");
+    expect(messages(region)).toEqual(["Skipping checkpoint  system=schwarz"]);
+    await userEvent.click(screen.getByRole("button", { name: "Exclude system = camlog" }));
+    expect(filterField()).toHaveProperty("value", "");
+  });
 });
