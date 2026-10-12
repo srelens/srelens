@@ -79,6 +79,42 @@ describe("parseLogFields", () => {
   it("keeps a __proto__ key as a field instead of losing it to the prototype", () => {
     expect(parseLogFields('{"msg":"m","__proto__":"x"}').fields["__proto__"]).toBe("x");
   });
+
+  it("does not throw on a JSON object nested 5000 deep, and still structures it", () => {
+    const text = '{"a":'.repeat(5000) + "1" + "}".repeat(5000);
+    expect(parseLogFields(text).structured).toBe(true);
+  });
+
+  it("does not throw on a JSON array nested 5000 deep", () => {
+    const text = '{"a":' + "[".repeat(5000) + "]".repeat(5000) + "}";
+    expect(parseLogFields(text).structured).toBe(true);
+  });
+
+  it("stores an object past the depth cap as its JSON text", () => {
+    expect(parseLogFields('{"a":{"b":{"c":{"d":{"e":{"f":{"g":{"h":{"i":{"j":1}}}}}}}}}}').fields).toEqual({
+      "a.b.c.d.e.f.g.h": '{"i":{"j":1}}',
+    });
+  });
+
+  it("reads the pairs before an unterminated quote without rescanning the line", () => {
+    expect(parseLogFields('a=1 b="' + '\\"'.repeat(20000)).fields.a).toBe("1");
+  });
+
+  it("keeps a logfmt __proto__ key as a field", () => {
+    expect(parseLogFields("__proto__=x a=1").fields["__proto__"]).toBe("x");
+  });
+
+  it("takes the first non-blank message key", () => {
+    expect(parseLogFields('{"msg":"  ","message":"hi"}').message).toBe("hi");
+  });
+
+  it("reads only the trailing run of pairs, so a pair before a word is not a field", () => {
+    expect(parseLogFields("a=1 foo b=2")).toEqual({
+      message: "a=1 foo b=2",
+      fields: {},
+      structured: false,
+    });
+  });
 });
 
 describe("logLineWords", () => {
@@ -108,5 +144,10 @@ describe("healthRank", () => {
     expect(healthRank("danger")).toBeGreaterThan(healthRank("warning"));
     expect(healthRank("warning")).toBeGreaterThan(healthRank("info"));
     expect(healthRank("info")).toBeGreaterThan(healthRank("neutral"));
+  });
+
+  it("ranks success between info and neutral", () => {
+    expect(healthRank("info")).toBeGreaterThan(healthRank("success"));
+    expect(healthRank("success")).toBeGreaterThan(healthRank("neutral"));
   });
 });

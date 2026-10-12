@@ -34,19 +34,24 @@ export const HIDDEN_KEYS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * One logfmt token. A quoted run may hold spaces. Each alternative eats one
- * character or one whole quoted string, so a failed match has nothing to
- * backtrack into: these lines are streamed from the cluster, the least
- * controlled input the app reads (see `tokenize` on #380).
+ * One logfmt token. A quoted run may hold spaces, and an unterminated one runs
+ * to the end of the line. The quoted alternative therefore never fails once it
+ * starts, so no start position is rescanned and the match is linear in the
+ * line. These lines are streamed from the cluster, the least controlled input
+ * the app reads (see `tokenize` on #380).
  */
-const LOGFMT_TOKEN = /(?:[^\s"]|"(?:[^"\\]|\\.)*")+/g;
+const LOGFMT_TOKEN = /(?:[^\s"]|"(?:[^"\\]|\\.)*"?)+/g;
 const LOGFMT_PAIR = /^([A-Za-z_][\w.@/-]*)=(.*)$/s;
 
+/**
+ * Reads a line as structured data. A streamed line is untrusted input, so this
+ * never throws: a line it cannot read comes back as plain text.
+ */
 export function parseLogFields(text: string): LogFields {
   const obj = logObject(text);
   if (obj !== null) {
     const fields = emptyFields();
-    flatten(obj, "", fields);
+    flatten(obj, "", fields, 0);
     return { message: messageField(fields) ?? "", fields, structured: true };
   }
   const fields = logfmtTail(text);
@@ -65,14 +70,42 @@ function emptyFields(): Record<string, string> {
   return Object.create(null) as Record<string, string>;
 }
 
-function flatten(obj: Readonly<Record<string, unknown>>, prefix: string, out: Record<string, string>): void {
+/**
+ * A nested object whose path would reach this many keys is stored as its JSON
+ * text rather than flattened further: the facets need a few levels, and
+ * recursing without a cap is what overflowed the stack on a hostile line.
+ */
+const MAX_DEPTH = 8;
+
+/**
+ * A dotted key and a nested key can collide (`{"a.b":1,"a":{"b":2}}`); the
+ * last one wins, accepted.
+ */
+function flatten(
+  obj: Readonly<Record<string, unknown>>,
+  prefix: string,
+  out: Record<string, string>,
+  depth: number,
+): void {
   for (const [key, value] of Object.entries(obj)) {
     const path = prefix === "" ? key : `${prefix}.${key}`;
-    if (value !== null && typeof value === "object" && !Array.isArray(value)) {
-      flatten(value as Record<string, unknown>, path, out);
+    if (value !== null && typeof value === "object" && !Array.isArray(value) && depth + 1 < MAX_DEPTH) {
+      flatten(value as Record<string, unknown>, path, out, depth + 1);
     } else {
-      out[path] = typeof value === "string" ? value : JSON.stringify(value);
+      out[path] = typeof value === "string" ? value : stringifyValue(value);
     }
+  }
+}
+
+/**
+ * JSON.stringify recurses too, so a deeply nested value can throw where the
+ * line parsed fine. An unreadable value becomes an ellipsis instead.
+ */
+function stringifyValue(value: unknown): string {
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return "…";
   }
 }
 
@@ -95,11 +128,11 @@ function logfmtTail(text: string): Record<string, string> | null {
   for (let i = tokens.length - 1; i >= 0; i -= 1) {
     const pair = LOGFMT_PAIR.exec(tokens[i]);
     if (pair === null) break;
-    pairs.unshift([pair[1], unquote(pair[2])]);
+    pairs.push([pair[1], unquote(pair[2])]);
   }
   if (pairs.length < 2) return null;
   const fields = emptyFields();
-  for (const [key, value] of pairs) fields[key] = value;
+  for (const [key, value] of pairs.reverse()) fields[key] = value;
   return fields;
 }
 
