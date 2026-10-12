@@ -1,6 +1,13 @@
-import { useState, type KeyboardEvent } from "react";
-import { clauseState, isQueryableKey, type ClauseMode, type ClauseTarget, type QueryClause } from "@srelens/core";
-import { Button } from "@srelens/ui-kit";
+import { useMemo, useState, type KeyboardEvent } from "react";
+import {
+  clauseState,
+  isQueryableKey,
+  type ClauseMode,
+  type ClauseTarget,
+  type HealthKind,
+  type QueryClause,
+} from "@srelens/core";
+import { Button, StatusPill } from "@srelens/ui-kit";
 import { FailureAlert } from "../../lib/errorCopy";
 import { Icons } from "../../lib/icons";
 
@@ -11,6 +18,8 @@ export interface DetailLine {
   readonly pod: string;
   readonly container: string;
   readonly level: string;
+  /** What core made of the level: the tone the header's pill takes. */
+  readonly health: HealthKind;
   readonly fields: Readonly<Record<string, string>>;
 }
 
@@ -36,7 +45,9 @@ export function LineDetail({
   onToggle: (target: ClauseTarget, mode: ClauseMode) => void;
   onClose: () => void;
 }) {
-  const [copyError, setCopyError] = useState<unknown>(undefined);
+  // Kept with the line it failed for, so a failed copy does not follow the selection to the next line.
+  const [copyFailure, setCopyFailure] = useState<{ line: DetailLine; error: unknown } | undefined>(undefined);
+  const copyError = copyFailure?.line === line ? copyFailure : undefined;
   const stamp = line.raw.slice(0, line.raw.length - line.text.length).trim();
   // The level as a row of its own only when no field already carries it.
   const levelRow = line.level !== "" && !Object.keys(line.fields).some((k) => k.toLowerCase() === "level");
@@ -48,7 +59,7 @@ export function LineDetail({
       ...(isQueryableKey(key) ? { target: { field: key, value } } : {}),
     })),
   ];
-  const pretty = prettyJson(line.text);
+  const pretty = useMemo(() => prettyJson(line.text), [line.text]);
 
   function onKeyDown(e: KeyboardEvent) {
     if (e.key !== "Escape") return;
@@ -58,11 +69,11 @@ export function LineDetail({
   }
 
   function copy() {
-    setCopyError(undefined);
+    setCopyFailure(undefined);
     // Through a promise, so a webview with no clipboard API fails here, said, rather than throwing out of a click handler.
     void Promise.resolve()
       .then(() => navigator.clipboard.writeText(line.raw))
-      .catch((e: unknown) => setCopyError(e));
+      .catch((e: unknown) => setCopyFailure({ line, error: e }));
   }
 
   return (
@@ -76,6 +87,7 @@ export function LineDetail({
       <header className="rule-b flex items-center gap-3 px-3 py-1.5 font-mono text-[0.75rem]">
         <span className="text-soft">{stamp === "" ? "no timestamp" : stamp}</span>
         <span className="text-muted">{line.container === "" ? line.pod : `${line.pod} · ${line.container}`}</span>
+        {line.level !== "" && <StatusPill status={line.level} kind={line.health} />}
         {!inView && <span className="text-faint">No longer in view</span>}
         <span className="flex-1" />
         <Button variant="secondary" size="xs" onClick={copy}>
@@ -86,7 +98,9 @@ export function LineDetail({
           <Icons.close size={13} aria-hidden="true" />
         </button>
       </header>
-      {copyError !== undefined && <FailureAlert title="Could not copy the line" error={copyError} className="mx-3 mt-2" />}
+      {copyError !== undefined && (
+        <FailureAlert title="Could not copy the line" error={copyError.error} className="mx-3 mt-2" />
+      )}
       <div className="scroll min-h-0 flex-1 px-3 py-1.5 font-mono text-[0.75rem]">
         <table className="w-full border-collapse">
           <tbody>

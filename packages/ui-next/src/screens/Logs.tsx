@@ -764,6 +764,8 @@ function LogsStream({
   const [snapshot, setSnapshot] = useState<Snapshot>({ status: "idle" });
   /** Why the last export did not land, if it did not. */
   const [saveError, setSaveError] = useState<unknown>(undefined);
+  /** The line the detail panel is open on. The Row itself, so the panel outlives the line leaving the view. */
+  const [selected, setSelected] = useState<Row | null>(null);
 
   const viewportRef = useRef<HTMLDivElement>(null);
   const rowsRef = useRef<HTMLDivElement>(null);
@@ -774,6 +776,8 @@ function LogsStream({
    * scroll that just happened, not from the render before it.
    */
   const stickRef = useRef(true);
+  /** An arrow key moved the selection and its row is still to be scrolled into view; see {@link revealSelected}. */
+  const revealRef = useRef(false);
 
   /**
    * Where the lines come from (#569): the cluster, or one of the installed apps'
@@ -793,6 +797,7 @@ function LogsStream({
   if (picked && !chosen && offered.status === "ready") {
     setPicked(null);
     setLost(picked.label);
+    setSelected(null);
   }
   const provider = useLogProviderSource(chosen, { context, namespace, resourceKind: resourceKind ?? "", name });
   const chooseSource = useCallback(
@@ -800,6 +805,8 @@ function LogsStream({
       const next = providers.find((p) => p.key === key);
       setPicked(next ? { key: next.key, label: next.label } : null);
       setLost(null);
+      // A different source is a different buffer: the line the panel holds is not in it.
+      setSelected(null);
       // A previous instance is the cluster's to hand back, never a provider's.
       if (next) setPrevious(false);
     },
@@ -994,38 +1001,7 @@ function LogsStream({
     [],
   );
 
-  /** The line the detail panel is open on. The Row itself, so the panel outlives the line leaving the view. */
-  const [selected, setSelected] = useState<Row | null>(null);
   const selectedIndex = selected === null ? -1 : filtered.indexOf(selected);
-
-  function moveSelection(step: 1 | -1) {
-    if (filtered.length === 0) return;
-    const next =
-      selectedIndex < 0
-        ? step > 0
-          ? 0
-          : filtered.length - 1
-        : Math.min(filtered.length - 1, Math.max(0, selectedIndex + step));
-    setSelected(filtered[next]);
-    // Reading, not following: a new line must not yank the view off the selection.
-    stickRef.current = false;
-    const viewport = viewportRef.current;
-    if (viewport === null || metrics.rowHeight <= 0) return;
-    const top = next * metrics.rowHeight;
-    if (top < viewport.scrollTop) viewport.scrollTop = top;
-    else if (top + metrics.rowHeight > viewport.scrollTop + viewport.clientHeight) {
-      viewport.scrollTop = top + metrics.rowHeight - viewport.clientHeight;
-    }
-  }
-
-  function onLogKeyDown(e: KeyboardEvent) {
-    if (e.key === "ArrowDown") moveSelection(1);
-    else if (e.key === "ArrowUp") moveSelection(-1);
-    else if (e.key === "Escape" && selected !== null) setSelected(null);
-    else return;
-    e.preventDefault();
-    e.stopPropagation();
-  }
 
   const togglePod = useCallback((pod: string, checked: boolean) => {
     setHidden((current) =>
@@ -1191,6 +1167,64 @@ function LogsStream({
   const drawn = window_.virtualized
     ? filtered.slice(window_.start, window_.end)
     : filtered;
+
+  function moveSelection(step: 1 | -1) {
+    if (filtered.length === 0) return;
+    const next =
+      selectedIndex < 0
+        ? step > 0
+          ? 0
+          : filtered.length - 1
+        : Math.min(filtered.length - 1, Math.max(0, selectedIndex + step));
+    setSelected(filtered[next]);
+    // Reading, not following: a new line must not yank the view off the selection.
+    stickRef.current = false;
+    revealRef.current = true;
+    // A row outside the drawn slice has no element to scroll to. Fixed-height arithmetic gets the view near
+    // enough to draw it; it leaves out the scroller's padding and the dropped-lines banner, so it is only
+    // that close, and the reveal below settles the pixels.
+    const viewport = viewportRef.current;
+    if (viewport !== null && window_.virtualized && (next < window_.start || next >= window_.end)) {
+      viewport.scrollTop = next * metrics.rowHeight;
+    }
+    // Same row again (an arrow at the end of the buffer): no render is coming to reveal it.
+    if (next === selectedIndex) revealSelected();
+  }
+
+  /**
+   * Scroll the row an arrow key selected into view, once it has an element.
+   * The browser does the pixels: rows do not start at the top of the scroller
+   * (its padding, the dropped-lines banner), and wrapped rows differ in height,
+   * so no sum over a row height can say where one is. A row outside the slice
+   * is not there yet; the scroll that draws it comes back here through the effect.
+   * Only a key asks for it, so a reader who scrolls away is left where they are.
+   */
+  function revealSelected() {
+    if (!revealRef.current) return;
+    const row = rowsRef.current?.querySelector<HTMLElement>('[aria-current="true"]');
+    if (row === null || row === undefined) return;
+    revealRef.current = false;
+    row.scrollIntoView({ block: "nearest" });
+  }
+  useLayoutEffect(revealSelected, [selected, window_.start, window_.end]);
+
+  function closeDetail() {
+    setSelected(null);
+    // The × and Esc in the panel unmount the control that had focus; the log is where the reader was.
+    viewportRef.current?.focus();
+  }
+
+  function onLogKeyDown(e: KeyboardEvent) {
+    // A modified arrow is the browser's or the OS's (selection, word jumps, history).
+    if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+    if (e.key === "ArrowDown") moveSelection(1);
+    else if (e.key === "ArrowUp") moveSelection(-1);
+    else if (e.key === "Escape" && selected !== null) closeDetail();
+    else return;
+    e.preventDefault();
+    e.stopPropagation();
+  }
+
   const windowLabel = since !== "all" ? ` in the last ${since}` : chosen ? " in the last 7 days" : "";
 
   /** A corpse that refused, while others answered — a banner over lines that
@@ -1650,7 +1684,7 @@ function LogsStream({
             inView={selectedIndex >= 0}
             clauses={clauses}
             onToggle={toggleFilter}
-            onClose={() => setSelected(null)}
+            onClose={closeDetail}
           />
         )}
       </SideRail>

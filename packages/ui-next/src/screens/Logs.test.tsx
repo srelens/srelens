@@ -439,6 +439,9 @@ function measurableRows() {
   };
 }
 
+// jsdom has no scrollIntoView; keyboard selection reveals the row through it.
+HTMLElement.prototype.scrollIntoView ??= () => {};
+
 describe("the logs route", () => {
   it("round-trips a subject through the route it mints", () => {
     expect(parseLogsRoute(logsRoute("Deployment", "checkout", "checkout-api"))).toEqual({
@@ -2311,7 +2314,77 @@ describe("the line detail (#898)", () => {
     expect(screen.queryByRole("region", { name: "Line detail" })).toBeNull();
   });
 
-  describe("on a scrolled viewport", () => {
+  it("returns focus to the log when Escape closes the panel from inside it", async () => {
+    await (draw(), body());
+    push(...JSON_LINES);
+    await userEvent.click(rows()[0]);
+    screen.getByRole("button", { name: /copy line/i }).focus();
+    await userEvent.keyboard("{Escape}");
+    expect(screen.queryByRole("region", { name: "Line detail" })).toBeNull();
+    expect(document.activeElement).toBe(logRegion());
+  });
+
+  it("returns focus to the log when the close button closes the panel", async () => {
+    await (draw(), body());
+    push(...JSON_LINES);
+    await userEvent.click(rows()[0]);
+    await userEvent.click(screen.getByRole("button", { name: "Close the line detail" }));
+    expect(screen.queryByRole("region", { name: "Line detail" })).toBeNull();
+    expect(document.activeElement).toBe(logRegion());
+  });
+
+  it("leaves a modified arrow to the browser", async () => {
+    await (draw(), body());
+    push(...JSON_LINES);
+    logRegion().focus();
+    await userEvent.keyboard("{Control>}{ArrowDown}{/Control}{Alt>}{ArrowDown}{/Alt}{Meta>}{ArrowUp}{/Meta}{Shift>}{ArrowUp}{/Shift}");
+    expect(screen.queryByRole("region", { name: "Line detail" })).toBeNull();
+  });
+
+  it("does not open for a click that ended a text selection", async () => {
+    await (draw(), body());
+    push(...JSON_LINES);
+    const selection = vi.spyOn(window, "getSelection").mockReturnValue({ toString: () => "camlog" } as unknown as Selection);
+    try {
+      await userEvent.click(rows()[0]);
+      expect(screen.queryByRole("region", { name: "Line detail" })).toBeNull();
+    } finally {
+      selection.mockRestore();
+    }
+  });
+
+  it("closes when the source is switched, which is a different buffer", async () => {
+    h.plugins = [observability()];
+    await (draw(), body());
+    push(...JSON_LINES);
+    await userEvent.click(rows()[0]);
+    expect(panel()).toBeTruthy();
+    fireEvent.change(await screen.findByRole("combobox", { name: "Logs from" }), {
+      target: { value: "org.example.observability/loki" },
+    });
+    expect(screen.queryByRole("region", { name: "Line detail" })).toBeNull();
+  });
+
+  it("closes when the followed provider stops being offered", async () => {
+    h.plugins = [observability()];
+    await (draw(), body());
+    push(...JSON_LINES);
+    fireEvent.change(await screen.findByRole("combobox", { name: "Logs from" }), {
+      target: { value: "org.example.observability/loki" },
+    });
+    await waitFor(() => expect(h.seen.at(-1)?.options.source).toBeDefined());
+    await userEvent.click(rows()[0]);
+    expect(panel()).toBeTruthy();
+    act(() => {
+      h.plugins = [];
+      h.inventoryError = undefined;
+      notify();
+    });
+    await waitFor(() => expect(h.seen.at(-1)?.options.source).toBeUndefined());
+    expect(screen.queryByRole("region", { name: "Line detail" })).toBeNull();
+  });
+
+  describe("keeping the selected line in view", () => {
     /** jsdom does no layout: declare the viewport's geometry, and clamp a write to scrollTop the way a browser does. */
     function scrollable(el: HTMLElement) {
       let top = 0;
@@ -2338,20 +2411,83 @@ describe("the line detail (#898)", () => {
     const many = (n: number, from = 0) =>
       Array.from({ length: n }, (_, i) => line("api-7/api", "14:07:41.208000000", `line ${from + i}`));
 
-    it("scrolls the selected line into view, in both directions", async () => {
+    /** What the pane reveals through: the browser does the pixels, so the test sees only which row it was asked about. */
+    function revealed() {
+      const spy = vi.spyOn(HTMLElement.prototype, "scrollIntoView");
+      return {
+        spy,
+        /** The element of the latest reveal. */
+        get last() {
+          return spy.mock.contexts.at(-1) as HTMLElement | undefined;
+        },
+      };
+    }
+
+    it("reveals the newly selected row, with the earlier-lines banner above the rows", async () => {
       const restore = measurableRows();
+      const reveal = revealed();
+      try {
+        const region = await (draw(), body());
+        h.state.dropped = 5;
+        push(...JSON_LINES);
+        expect(screen.getByText(/earlier lines dropped/)).toBeTruthy();
+        region.focus();
+        await userEvent.keyboard("{ArrowDown}{ArrowDown}");
+        expect(reveal.last).toBe(rows()[1].closest("[aria-current]"));
+        expect(reveal.spy).toHaveBeenLastCalledWith({ block: "nearest" });
+        // An arrow at the end of the buffer selects the same row again, and still brings it back into view.
+        await userEvent.keyboard("{ArrowDown}");
+        reveal.spy.mockClear();
+        await userEvent.keyboard("{ArrowDown}");
+        expect(reveal.spy).toHaveBeenCalledTimes(1);
+        expect(reveal.last).toBe(rows()[2].closest("[aria-current]"));
+      } finally {
+        reveal.spy.mockRestore();
+        restore();
+      }
+    });
+
+    it("reveals the newly selected row when lines wrap, because their heights differ", async () => {
+      const restore = measurableRows();
+      const reveal = revealed();
+      try {
+        const region = await (draw(), body());
+        push(...JSON_LINES);
+        await userEvent.click(screen.getByRole("button", { name: "Wrap" }));
+        region.focus();
+        await userEvent.keyboard("{ArrowDown}{ArrowDown}");
+        expect(reveal.last).toBe(rows()[1].closest("[aria-current]"));
+        expect(reveal.spy).toHaveBeenLastCalledWith({ block: "nearest" });
+      } finally {
+        reveal.spy.mockRestore();
+        restore();
+      }
+    });
+
+    it("brings a windowed-out row into the drawn slice, then reveals it", async () => {
+      const restore = measurableRows();
+      const reveal = revealed();
       try {
         const region = await (draw(), body());
         const view = scrollable(region);
-        push(...many(20));
+        push(...many(300));
         view.to(0);
+        expect(rows().some((r) => r.textContent?.includes("line 299"))).toBe(false);
         region.focus();
-        // Row 5 is the first whose bottom edge (120) is past the viewport's (100).
-        await userEvent.keyboard("{ArrowDown}".repeat(6));
-        expect(view.top).toBe(20);
-        await userEvent.keyboard("{ArrowUp}".repeat(5));
-        expect(view.top).toBe(0);
+        // ArrowUp from nothing selected goes to the last line, 6,000px down and not drawn.
+        await userEvent.keyboard("{ArrowUp}");
+        expect(view.top).toBeGreaterThan(0);
+        // The browser reports the scroll; the slice follows it and the row now has an element.
+        view.to(view.top);
+        expect(reveal.last?.textContent).toContain("line 299");
+        expect(reveal.last?.getAttribute("aria-current")).toBe("true");
+        // Once revealed, the reader's own scrolling is theirs: a few rows up moves the slice, the selected row
+        // is still drawn, and the view is not pulled back to it.
+        reveal.spy.mockClear();
+        view.to(view.top - 100);
+        expect(reveal.spy).not.toHaveBeenCalled();
       } finally {
+        reveal.spy.mockRestore();
         restore();
       }
     });
