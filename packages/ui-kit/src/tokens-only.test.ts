@@ -12,8 +12,37 @@ import { join, relative, sep } from "node:path";
  *
  * Kit-wide rather than per-component: the rule is about the design system, and
  * a rule asserted in one file is a rule the next file forgets.
+ *
+ * Hex was the only form checked, so two of the three ways to name a colour
+ * passed (#362). All three now:
+ *
+ * - hex;
+ * - a CSS colour function. `color-mix()` over `var()`s is how the kit derives a
+ *   shade from a token and is not one: its `color` is followed by `-`, not `(`.
+ *   An arbitrary value — `bg-[#fff]`, `text-[rgb(0_0_0)]` — is one of these two
+ *   in brackets, so it is caught as well;
+ * - a Tailwind palette class: a colour utility, after any variant, then a hue
+ *   at a shade (`hover:border-sky-300/50`) or black/white. The hues are Tailwind
+ *   4's own list. The kit's theme colours — `text-muted`, `bg-sev-wash`,
+ *   `accent-ink` — never pair a hue with a shade, so none of them matches.
+ *
+ * Not caught: CSS named colours (`color: "tomato"`, `bg-[white]`). That needs
+ * the 148-name list, and the kit has never written one.
  */
-const HEX = /#[0-9a-fA-F]{3,8}\b/;
+const HUE =
+  "red|orange|amber|yellow|lime|green|emerald|teal|cyan|sky|blue|indigo|violet|purple|fuchsia|pink|rose|" +
+  "slate|gray|zinc|neutral|stone|mauve|olive|mist|taupe";
+const UTILITY =
+  "bg|text|decoration|border(?:-[xysetrbl])?|outline|divide|(?:inset-)?ring(?:-offset)?|" +
+  "(?:inset-|drop-|text-)?shadow|accent|caret|fill|stroke|placeholder|from|via|to";
+const RAW_COLOUR = new RegExp(
+  [
+    /#[0-9a-fA-F]{3,8}\b/.source,
+    /\b(?:rgba?|hsla?|hwb|lab|lch|oklab|oklch|color)\(/.source,
+    `(?<![\\w-])(?:${UTILITY})-(?:(?:${HUE})-(?:50|[1-9]00|950)|black|white)(?![\\w-])`,
+  ].join("|"),
+  "i",
+);
 
 /**
  * Every source under `src`, at any depth, as a path relative to it.
@@ -54,7 +83,10 @@ describe("the design system", () => {
   });
 
   it("names no colour outside the tokens", () => {
-    const offenders = files.filter((f) => HEX.test(read(f)));
+    const offenders = files.flatMap((f) => {
+      const hit = read(f).match(RAW_COLOUR);
+      return hit ? [`${f}: ${hit[0]}`] : [];
+    });
     expect(offenders, `raw colour values in: ${offenders.join(", ")}`).toEqual([]);
   });
 
