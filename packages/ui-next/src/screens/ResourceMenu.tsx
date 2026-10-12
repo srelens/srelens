@@ -30,6 +30,7 @@ import { ROW_ACTION_LABEL } from "../lib/kinds/rowActions";
 import type { KindActions, ListRow } from "../lib/kinds/types";
 import { onSessionSettled, startLocalSession, startPodSession } from "../lib/sessions";
 import { openTab } from "../lib/tabsStore";
+import { openOnNamedCluster } from "../lib/openCluster";
 import { isContextPaused, useDismissOnPause } from "../lib/pausedContext";
 import { NewForwardDialog } from "./forwards/NewForwardDialog";
 import { logsRoute } from "./Logs";
@@ -483,14 +484,16 @@ export function useRowMenu({ context, kind, actions, group, onChanged }: UseRowM
     const list: ContextMenuItem[] = [
       {
         label: ROW_ACTION_LABEL.openTab,
-        onPick: () => openTab(detailRoute(kind, row.namespace ?? null, row.name), { clusterName: context }),
+        onPick: () => openTab(detailRoute(kind, row.namespace ?? null, row.name, { cluster: context }), { clusterName: context }),
       },
     ];
     if (actions.logs) {
       list.push({
         label: ROW_ACTION_LABEL.logs,
         icon: Icons.logs,
-        onPick: () => openTab(logsRoute(kind, ns, row.name), { clusterName: context }),
+        // The Logs screen follows the rail: from a detail tab pinned to
+        // another cluster, that cluster comes into focus first (#834).
+        onPick: () => openOnNamedCluster(context, logsRoute(kind, ns, row.name)),
       });
     }
     if (actions.shell) {

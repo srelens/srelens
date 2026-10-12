@@ -224,7 +224,8 @@ export function Rail({ contexts, onConnect, error }: RailProps) {
                 // `?context=` query move to the key, and neither is persisted.
                 const contextId = byId(item.id)?.key;
                 if (!contextId) return;
-                void invokeCommand("open_context_window", { contextId }).catch((e) => {
+                // Titles the window, in the rail's words: a mark can rename it.
+                void invokeCommand("open_context_window", { contextId, name: item.name }).catch((e) => {
                   notify.error(`Couldn't open window for ${item.name}`, describeError(e).detail);
                 });
               },

@@ -27,7 +27,7 @@ import {
   type Column,
 } from "@srelens/ui-kit";
 import { useConsole } from "../console";
-import { getKubeconfigFiles, useActiveContext } from "../lib/clusters";
+import { getKubeconfigFiles, ScreenCluster, useActiveContext, useContexts, useContextsStatus } from "../lib/clusters";
 import { useHiddenColumns } from "../lib/columnPrefs";
 import { detailRoute, newRoute, parseDetailRoute } from "../lib/detailRoute";
 import { useEscapeToClose } from "../lib/escapeToClose";
@@ -424,7 +424,7 @@ function KindList({
    * to stop.
    */
   function openRowTab(rowNamespace: string | null, rowName: string) {
-    openTab(detailRoute(k8sKind, rowNamespace, rowName), { clusterName: name });
+    openTab(detailRoute(k8sKind, rowNamespace, rowName, { cluster: name }), { clusterName: name });
   }
 
   // Loading and error each replace the table with their own state below; the
@@ -693,7 +693,7 @@ function KindList({
  * per-kind blocks, the same actions.
  *
  * Everything it shows comes out of the route string:
- * `/k/<kind>/<namespace>/<name>` already carries the Kubernetes kind — not
+ * `/k/<cluster>/<kind>/<namespace>/<name>` already carries the Kubernetes kind — not
  * the list screen's slug, and not for built-in kinds only, since
  * `customDescriptor` mints a CRD's route from `crd.kind` too — so there is
  * nothing to look up and nothing to keep in step with the list.
@@ -704,11 +704,29 @@ function KindList({
  * everything twice and cost the page a strip's worth of height.
  */
 export function ResourceDetailScreen({ route }: { route: string }) {
-  const context = useActiveContext();
+  const active = useActiveContext();
+  const contexts = useContexts();
+  const contextsStatus = useContextsStatus();
   const parts = parseDetailRoute(route);
+  // The cluster in the route, which this tab is pinned to whatever the rail
+  // does (#834); only a route an earlier build persisted follows the rail.
+  const context = parts?.cluster ? contexts.find((c) => c.name === parts.cluster) : active;
   // The strip's own title for this route — the resource's name — so the
   // guard below names the same thing the tab does.
   const title = parts?.name ?? describe(route).title;
+
+  if (!context && parts?.cluster && contextsStatus === "loaded") {
+    // Not `NoClusterScreen`: picking a cluster in the rail is no remedy for a
+    // tab pinned to one the kubeconfig has since lost.
+    return (
+      <Screen title={title} fill>
+        <ErrorState
+          title={`${parts.cluster} is no longer in your kubeconfig files`}
+          detail="This tab was opened on that cluster. Close it, or add the cluster back in Settings → Contexts."
+        />
+      </Screen>
+    );
+  }
 
   if (!context) {
     return <NoClusterScreen title={title} noun="resources" />;
@@ -723,20 +741,22 @@ export function ResourceDetailScreen({ route }: { route: string }) {
       <Screen title={title} eyebrow={<ContextLabel context={context} />} fill>
         <ErrorState
           title={`${route} does not name a resource`}
-          detail="A resource tab's route is /k/<kind>/<namespace>/<name>. Close this tab and open the resource from its list."
+          detail="A resource tab's route is /k/<cluster>/<kind>/<namespace>/<name>. Close this tab and open the resource from its list."
         />
       </Screen>
     );
   }
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
-      <ResourceTabView
-        context={context.name}
-        kind={parts.kind}
-        namespace={parts.namespace}
-        name={parts.name}
-      />
-    </div>
+    <ScreenCluster.Provider value={context}>
+      <div className="flex min-h-0 flex-1 flex-col">
+        <ResourceTabView
+          context={context.name}
+          kind={parts.kind}
+          namespace={parts.namespace}
+          name={parts.name}
+        />
+      </div>
+    </ScreenCluster.Provider>
   );
 }

@@ -55,7 +55,7 @@ describe("NeedsAttention", () => {
     expect(screen.getByRole("heading", { name: /Needs attention/, level: 2 })).toBeTruthy();
     await userEvent.click(screen.getByRole("button", { name: "Open Deployment checkout/api on staging" }));
     expect(activeCluster()).toBe(STAGE.stableId);
-    expect(activeRoute()).toBe(detailRoute("Deployment", "checkout", "api"));
+    expect(activeRoute()).toBe(detailRoute("Deployment", "checkout", "api", { cluster: "staging" }));
   });
 
   it("opens the assistant on the item's cluster with its question filled in", async () => {
@@ -70,7 +70,7 @@ describe("NeedsAttention", () => {
   it("opens a cluster-scoped object by its name alone", async () => {
     show([PROD], { [PROD.stableId]: answered([item(PROD, { kind: "Node", namespace: "", name: "n1", problem: "Rebooted", cause: "warning" })]) });
     await userEvent.click(screen.getByRole("button", { name: "Open Node n1 on prod" }));
-    expect(activeRoute()).toBe(detailRoute("Node", null, "n1"));
+    expect(activeRoute()).toBe(detailRoute("Node", null, "n1", { cluster: "prod" }));
   });
 
   it("offers no Ask on the web host, where the assistant cannot run", () => {

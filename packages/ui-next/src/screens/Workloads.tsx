@@ -689,7 +689,7 @@ function WorkloadList({
               activeFilterKey={filterKey}
               onActiveFilterKeyChange={setFilterKey}
               onRowActivate={(row) =>
-                openTab(detailRoute(row.kind, row.namespace ?? null, row.name), { clusterName: name })
+                openTab(detailRoute(row.kind, row.namespace ?? null, row.name, { cluster: name }), { clusterName: name })
               }
               rowMenu={rowMenuItems}
               rowMenuLabel={`${title} actions`}

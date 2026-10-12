@@ -198,7 +198,9 @@ export function Sidebar({
                     // `?context=` can never match after a later successful
                     // listing.
                     if (!contextId) return;
-                    void invokeCommand("open_context_window", { contextId }).catch((err) => {
+                    // Titles the window with the name this row shows.
+                    const name = contextDisplayName(cluster, contextProfiles[cluster]);
+                    void invokeCommand("open_context_window", { contextId, name }).catch((err) => {
                       notify.error(`Couldn't open window for ${cluster}`, describeError(err).detail);
                     });
                   }}

@@ -23,7 +23,8 @@ const PROD = context("prod-eu", "prod");
 const STAGE = context("stage-eu", "stage");
 
 const tabs = () => store.currentWorkspace().tabs;
-const nodeTab = (name: string) => tabs().find((t) => t.route === detailRoute("Node", null, name));
+const nodeTab = (name: string, cluster = PROD.name) =>
+  tabs().find((t) => t.route === detailRoute("Node", null, name, { cluster }));
 
 beforeEach(() => {
   resetContexts();
@@ -65,7 +66,7 @@ describe("NodeLink", () => {
     store.setActiveCluster(STAGE.stableId);
     render(<NodeLink name="worker-2" />);
     await userEvent.click(screen.getByRole("button", { name: "Open node worker-2" }));
-    expect(nodeTab("worker-2")!.sub).toBe("stage-eu");
+    expect(nodeTab("worker-2", STAGE.name)!.sub).toBe("stage-eu");
   });
 
   it("focuses the node's tab rather than opening a second one", async () => {

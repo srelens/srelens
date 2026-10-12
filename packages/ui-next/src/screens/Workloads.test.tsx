@@ -328,8 +328,8 @@ describe("Workloads", () => {
     // "/resources" route this list is itself opened at.
     fireEvent.doubleClick(screen.getByText("web-1").closest("tr")!);
 
-    await waitFor(() => expect(tabFor("/k/Pod/default/web-1")).toBeTruthy());
-    expect(store.currentWorkspace().activeId).toBe(tabFor("/k/Pod/default/web-1").id);
+    await waitFor(() => expect(tabFor("/k/prod-eu/Pod/default/web-1")).toBeTruthy());
+    expect(store.currentWorkspace().activeId).toBe(tabFor("/k/prod-eu/Pod/default/web-1").id);
   });
 
   it("keeps listing the kinds that answered when one of the five fails", async () => {

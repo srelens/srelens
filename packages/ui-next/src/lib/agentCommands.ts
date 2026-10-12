@@ -165,8 +165,9 @@ function resourceCommands(deps: CommandDeps): Command[] {
   // for Delete on a custom resource: offering an action that cannot say what
   // it would run against is worse than not offering it.
   const actions = slug ? (descriptorFor(slug)?.actions ?? {}) : {};
-  // Read once, into every command's closure below — see the module doc.
-  const context = deps.context;
+  // Read once, into every command's closure below — see the module doc. A
+  // detail tab pinned to its own cluster (#834) is about that cluster's object.
+  const context = detail.cluster ?? deps.context;
 
   const commands: Command[] = [];
 

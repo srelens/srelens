@@ -1,4 +1,5 @@
 import type { ClusterContext } from "@srelens/core";
+import { getContexts } from "./clusters";
 import { currentWorkspace, openTab, setActiveCluster, setClusterPaused, setWorkspaceClusters } from "./tabsStore";
 import { invalidateProbe, probeCluster } from "./probe";
 import { followsFocus } from "./tabs";
@@ -58,17 +59,29 @@ export function openCluster(context: ClusterContext): void {
 /**
  * {@link openCluster}, landing on `route` rather than on the overview.
  *
- * For a route about ONE cluster's object, a resource's detail above all: no tab
- * carries a cluster of its own, and every cluster-scoped screen reads the one
- * in focus (see `setActiveCluster`). So opening the route is not enough. The
- * cluster it is about has to be the one in focus as well, or the screen reads
- * whichever cluster the rail was already on, and a detail route shows that
- * cluster's object of the same name. A `srelens://` link is exactly that case:
- * it names its own cluster, whatever the rail shows.
+ * For a route about ONE cluster's object, opened from somewhere that names its
+ * cluster — a `srelens://` link, Home's attention list. A detail route pins its
+ * cluster itself (#834), but the reader followed the link to look at that
+ * cluster, so it is put in this workspace, read, and brought into focus too.
  */
 export function openOnCluster(context: ClusterContext, route: string): void {
   focusCluster(context);
   openTab(route, { clusterName: context.name });
+}
+
+/**
+ * Open a route that follows the rail — a pod's logs, a list filtered to one
+ * node — about the cluster named `cluster`. A detail tab keeps its own cluster
+ * (#834) while the rail moves on, and a route opened from it that read the
+ * rail would show the rail's cluster under this one's label. So that cluster
+ * is brought into focus first, but only when the rail shows another: one
+ * already in focus is not read again or unpaused for a click that changes
+ * nothing about it.
+ */
+export function openOnNamedCluster(cluster: string | undefined, route: string): void {
+  const context = cluster ? getContexts().find((c) => c.name === cluster) : undefined;
+  if (context && currentWorkspace().activeCluster !== context.stableId) focusCluster(context);
+  openTab(route, { clusterName: cluster });
 }
 
 /**

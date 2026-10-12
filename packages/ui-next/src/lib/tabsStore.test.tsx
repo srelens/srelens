@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 import { renderHook, act } from "@testing-library/react";
 import type { ClusterContext } from "@srelens/core";
 import { defaultState, type TabsState } from "./tabs";
+import { detailRoute } from "./detailRoute";
 import * as store from "./tabsStore";
 
 const ctx = (id: string): ClusterContext => ({
@@ -121,6 +122,33 @@ describe("openTab", () => {
     store.openTab("/connections");
     store.openTab("/connections", { clusterName: "staging-eu" });
     expect(active().sub).toBeUndefined();
+  });
+
+  /**
+   * **#834: one resource, two clusters, two tabs.** A node name, a system pod,
+   * anything deployed from one manifest to staging and prod collides on kind,
+   * namespace and name. With no cluster in the detail route the second open
+   * focused the first tab and relabelled it, and the first cluster's object
+   * was not open anywhere any more.
+   */
+  it("opens a second detail tab for the same resource on another cluster, each labelled with its own", () => {
+    const prod = detailRoute("Node", null, "worker-1", { cluster: "prod" });
+    const staging = detailRoute("Node", null, "worker-1", { cluster: "staging" });
+    store.openTab(prod, { clusterName: "prod" });
+    store.openTab(staging, { clusterName: "staging" });
+    expect(routes()).toEqual(["/", prod, staging]);
+    expect(subFor(prod)).toBe("prod");
+    expect(subFor(staging)).toBe("staging");
+  });
+
+  it("still focuses the open detail tab for the same resource on the same cluster", () => {
+    const prod = detailRoute("Node", null, "worker-1", { cluster: "prod" });
+    store.openTab(prod, { clusterName: "prod" });
+    const first = active().id;
+    store.openTab("/");
+    store.openTab(prod, { clusterName: "prod" });
+    expect(routes()).toEqual(["/", prod]);
+    expect(active().id).toBe(first);
   });
 
   it("promotes a preview and relabels it in one go", () => {
@@ -692,6 +720,22 @@ describe("activeCluster", () => {
       expect(subs()).toEqual([undefined, "prod-eu", "prod-eu", "staging-eu"]);
     });
 
+    /**
+     * A detail tab is pinned to its cluster in the route (#834) so that one
+     * cluster's object can stay open beside another's. It shows that cluster
+     * under that cluster's name whatever the rail does, so it is not put away.
+     */
+    it("leaves a detail tab on screen, under its own cluster's name, when the focus moves", () => {
+      store.openTab("/k/prod-eu/Node/_/worker-1", { clusterName: "prod-eu" });
+      toStage();
+      store.openTab("/k/staging-eu/Node/_/worker-1", { clusterName: "staging-eu" });
+      expect(routes()).toEqual(["/", "/k/prod-eu/Node/_/worker-1", "/overview", "/k/staging-eu/Node/_/worker-1"]);
+      expect(subs()).toEqual([undefined, "prod-eu", "staging-eu", "staging-eu"]);
+      toProd();
+      expect(routes()).toContain("/k/staging-eu/Node/_/worker-1");
+      expect(subFor("/k/staging-eu/Node/_/worker-1")).toBe("staging-eu");
+    });
+
     it("puts a cluster's tabs away when no cluster is in focus, and brings them back", () => {
       store.setActiveCluster(null);
       expect(routes()).toEqual(["/"]);
@@ -762,6 +806,22 @@ describe("activeCluster", () => {
       toProd();
       expect(store.currentWorkspace().tabs[1].namespaces).toEqual({ "id-prod": ["payments"] });
     });
+  });
+
+  it("leaves a detail tab labelled with the cluster it is pinned to (#834)", () => {
+    // The tab keeps showing prod's worker-1 when the rail moves to staging, so
+    // its label must keep saying prod; the list beside it is prod's own and is
+    // put away with it (#908), where it used to follow the rail.
+    store.setState(defaultState([named("id-prod", "prod-eu"), named("id-stage", "staging-eu")]));
+    const node = detailRoute("Node", null, "worker-1", { cluster: "prod-eu" });
+    store.openTab(node, { clusterName: "prod-eu" });
+    store.openTab("/k/pods", { clusterName: "prod-eu" });
+
+    store.setActiveCluster("id-stage", "staging-eu");
+
+    expect(subFor(node)).toBe("prod-eu");
+    expect(routes()).toEqual(["/", node, "/overview"]);
+    expect(subFor("/overview")).toBe("staging-eu");
   });
 
   it("relabels a stale tab even when the cluster is already the active one", () => {

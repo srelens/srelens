@@ -571,9 +571,10 @@ export function forgetClusterNamespaces(clusterId: string): void {
  * `null` for "no cluster in focus"; anything the workspace does not have is
  * refused rather than stored, so the field is always an id in `clusters`.
  *
- * **The strip changes with the cluster (#908).** No tab names a cluster of
- * its own: every cluster-scoped screen reads `useActiveContext()`, so the
- * instant this field moves, a mounted screen is rendering the new cluster.
+ * **The strip changes with the cluster (#908).** Almost no tab names a
+ * cluster of its own: every cluster-scoped screen but a detail tab and the
+ * editor reads `useActiveContext()`, so the instant this field moves, a
+ * mounted screen is rendering the new cluster.
  * For a long while the answer to that was to relabel every tab for the
  * cluster switched to — one strip that followed the rail — which kept the
  * labels true and meant that Pods, ConfigMaps and Services opened on one
@@ -581,8 +582,9 @@ export function forgetClusterNamespaces(clusterId: string): void {
  * Each cluster now has its own strip: the outgoing cluster's tabs are put
  * away with their order, their active tab and their recently-closed list,
  * and the incoming cluster's come back as they were left. See `focusStrip`
- * for what stays on screen throughout — the app-wide tabs, and the editor,
- * which names its own cluster.
+ * for what stays on screen throughout — the app-wide tabs, and the tabs that
+ * name a cluster of their own in the route: the editor, and a detail tab
+ * (#834).
  *
  * **A cluster with nothing remembered opens on its overview**, since the
  * reader asked to look at it and its strip would otherwise have nothing of

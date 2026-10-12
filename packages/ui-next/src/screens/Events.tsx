@@ -251,7 +251,7 @@ function EventList({
   function openInvolved(row: EventRow) {
     const { kind, name: objectName } = involvedObject(row);
     if (!kind || !objectName) return;
-    openTab(detailRoute(kind, eventNamespace(row) || null, objectName), { clusterName: name });
+    openTab(detailRoute(kind, eventNamespace(row) || null, objectName, { cluster: name }), { clusterName: name });
   }
 
   // Loading and error each replace the table with their own state; the

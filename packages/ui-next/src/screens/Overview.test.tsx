@@ -635,6 +635,17 @@ describe("Overview — the node actions", () => {
     // Still open, so nothing reads as having succeeded.
     expect(dialog()).toBeTruthy();
   });
+
+  it("opens the node in a tab pinned to this cluster (#834)", async () => {
+    open();
+    await waitFor(() => expect(rowFor("n1")).toBeTruthy());
+
+    // Past the bar's two visible actions, in its overflow menu.
+    await userEvent.click(within(rowFor("n1")).getByRole("button", { name: "More actions" }));
+    await userEvent.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Open in new tab" }));
+
+    expect(store.activeRoute()).toBe("/k/prod-eu/Node/-/n1");
+  });
 });
 
 /* --------------------------------------------------------------- not ready */
@@ -893,10 +904,10 @@ describe("Overview — the not-ready list", () => {
     await waitFor(() => expect(notReadyNames()).toHaveLength(6));
 
     await userEvent.click(within(notReady()).getByRole("button", { name: /zz-checkout-api/ }));
-    expect(store.activeRoute()).toBe("/k/Deployment/checkout/zz-checkout-api");
+    expect(store.activeRoute()).toBe("/k/prod-eu/Deployment/checkout/zz-checkout-api");
 
     await userEvent.click(within(notReady()).getByRole("button", { name: /aa-worker-0/ }));
-    expect(store.activeRoute()).toBe("/k/Pod/checkout/aa-worker-0");
+    expect(store.activeRoute()).toBe("/k/prod-eu/Pod/checkout/aa-worker-0");
   });
 
   it("says that nothing is unhealthy rather than leaving a blank", async () => {

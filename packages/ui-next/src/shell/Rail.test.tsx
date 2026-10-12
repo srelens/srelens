@@ -345,13 +345,37 @@ describe("Rail draws a symbol mark", () => {
       setup();
       await pick("prod-eu", "Open in new window");
 
-      expect(coreMock.invokeCommand).toHaveBeenCalledWith("open_context_window", { contextId: "prod-eu" });
+      expect(coreMock.invokeCommand).toHaveBeenCalledWith("open_context_window", {
+        contextId: "prod-eu",
+        name: "prod-eu",
+      });
       await waitFor(() => {
         expect(errorSpy).toHaveBeenCalledWith("Couldn't open window for prod-eu", "OS refused window");
       });
     } finally {
       delete (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
       errorSpy.mockRestore();
+    }
+  });
+
+  // The window is titled with the name the rail shows (#150): a mark can
+  // rename a cluster, and only the page knows it.
+  it("names a renamed cluster's window the way the rail does", async () => {
+    (window as unknown as { __TAURI_INTERNALS__: unknown }).__TAURI_INTERNALS__ = {};
+    getMark("prod-eu", "prod-eu");
+    setMark("prod-eu", { ...defaultMark("prod-eu"), name: "Production EU" });
+    coreMock.invokeCommand.mockResolvedValueOnce(undefined);
+
+    try {
+      setup();
+      await pick("Production EU", "Open in new window");
+
+      expect(coreMock.invokeCommand).toHaveBeenCalledWith("open_context_window", {
+        contextId: "prod-eu",
+        name: "Production EU",
+      });
+    } finally {
+      delete (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
     }
   });
 
@@ -383,6 +407,7 @@ describe("Rail draws a symbol mark", () => {
 
       expect(coreMock.invokeCommand).toHaveBeenCalledWith("open_context_window", {
         contextId: "/k/a#b%23c",
+        name: "prod-eu",
       });
     } finally {
       delete (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
@@ -415,6 +440,7 @@ describe("Rail draws a symbol mark", () => {
 
       expect(coreMock.invokeCommand).toHaveBeenCalledWith("open_context_window", {
         contextId: "/k/a%23b#c",
+        name: "prod-eu",
       });
     } finally {
       pinContextKey(null);

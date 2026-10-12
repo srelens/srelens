@@ -1065,7 +1065,7 @@ function nodeActions(context: string, row: NodeRow, open: (pending: Pending) => 
     {
       id: "open",
       label: ROW_ACTION_LABEL.openTab,
-      onSelect: () => openTab(detailRoute("Node", null, row.name), { clusterName: context }),
+      onSelect: () => openTab(detailRoute("Node", null, row.name, { cluster: context }), { clusterName: context }),
     },
     {
       id: "copy",
@@ -1286,7 +1286,7 @@ function NotReady({ context, overview }: { context: string; overview: OverviewDa
                   name={row.name}
                   facts={facts(row)}
                   onActivate={() =>
-                    openTab(detailRoute(row.kind, row.namespace, row.name), { clusterName: context })
+                    openTab(detailRoute(row.kind, row.namespace, row.name, { cluster: context }), { clusterName: context })
                   }
                 />
               ))}

@@ -733,7 +733,7 @@ describe("PodDetailsBody", () => {
         render(<PodDetailsBody object={scheduled()} />);
         await userEvent.click(screen.getByRole("button", { name: "Open node node-b" }));
 
-        const tab = store.currentWorkspace().tabs.find((t) => t.route === detailRoute("Node", null, "node-b"));
+        const tab = store.currentWorkspace().tabs.find((t) => t.route === detailRoute("Node", null, "node-b", { cluster: "prod-eu" }));
         expect(tab).toBeDefined();
         expect(tab!.sub).toBe("prod-eu");
       });

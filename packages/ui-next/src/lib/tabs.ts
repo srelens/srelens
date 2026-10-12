@@ -1,7 +1,7 @@
 import { parseExtensionRoute, type ClusterContext } from "@srelens/core";
 import type { TableSort } from "@srelens/ui-kit";
 import { describe, isClusterScopedRoute, type TabKind } from "./routes";
-import { parseEditRoute, parseNewRoute } from "./detailRoute";
+import { parseDetailRoute, parseEditRoute, parseNewRoute } from "./detailRoute";
 
 export interface Tab {
   id: string;
@@ -162,13 +162,17 @@ function homeTab(): Tab {
  *
  * Not an app-wide tab: Home, Settings and Connections are the same screen
  * whichever cluster is in focus, and stay where they are. And not a tab whose
- * route names a cluster of its own — the editor and "New resource" — for two
- * reasons: it already shows that cluster whatever the rail says (see "The
- * route is the identity" in `AGENTS.md`), and putting a tab away unmounts its
- * screen, which for an editor is somebody's unsaved changes.
+ * route names a cluster of its own — the editor, "New resource", and a detail
+ * tab (#834) — for two reasons. It already shows that cluster whatever the
+ * rail says (see "The route is the identity" in `AGENTS.md`), under that
+ * cluster's name, so it is never the mislabelled tab #908 is about; a detail
+ * tab is pinned precisely so one cluster's object can stay open beside
+ * another's. And putting a tab away unmounts its screen, which for an editor
+ * is somebody's unsaved changes.
  */
 export function followsFocus(tab: Tab): boolean {
   if (parseEditRoute(tab.route)?.cluster || parseNewRoute(tab.route)?.cluster) return false;
+  if (parseDetailRoute(tab.route)?.cluster) return false;
   return isClusterScopedRoute(tab.route);
 }
 

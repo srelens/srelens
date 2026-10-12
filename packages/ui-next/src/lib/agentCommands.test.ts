@@ -139,6 +139,16 @@ describe("the / palette", () => {
     expect(openAction).toHaveBeenCalledWith(expect.objectContaining({ context: "prod-eu" }));
   });
 
+  it("runs a resource command on a pinned detail tab's own cluster, not the rail's (#834)", () => {
+    // The tab shows stage-eu's api while the rail is on prod-eu: Restart must
+    // land on the Deployment the reader is looking at.
+    const openAction = vi.fn();
+    const openResource = vi.fn();
+    const all = commandsFor({ ...base, route: "/k/stage-eu/Deployment/checkout/api", openAction, openResource });
+    all.find((c) => c.id === "restart")?.run();
+    expect(openAction).toHaveBeenCalledWith(expect.objectContaining({ name: "api", context: "stage-eu" }));
+  });
+
   it("still offers Cluster, Workspace and Toggle theme with no resource in view", () => {
     const onSettings = commandsFor({ ...base, route: "/settings" });
     expect(onSettings.some((c) => c.group === "Cluster")).toBe(true);
