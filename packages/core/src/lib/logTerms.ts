@@ -211,7 +211,7 @@ const MESSAGE_FIELDS = ["msg", "message"] as const;
  * A stamped line is tried a second time with its framing off, so a JSON
  * logger behind a k8s timestamp is still read as JSON.
  */
-function logObject(text: string): LogObject | null {
+export function logObject(text: string): LogObject | null {
   return parseObject(text) ?? parseObject(skipStructure(text));
 }
 
@@ -517,6 +517,11 @@ const HEALTH_RANK: Record<HealthKind, number> = {
   success: 1,
   neutral: 0,
 };
+
+/** How bad a health is, as a number to sort by: danger highest, neutral lowest. */
+export function healthRank(kind: HealthKind): number {
+  return HEALTH_RANK[kind];
+}
 
 /** One recurring term the rail can show: its count, and its worst tone. */
 export interface LogTerm {

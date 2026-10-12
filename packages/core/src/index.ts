@@ -52,6 +52,7 @@ export * from "./lib/logBuffer";
 export * from "./lib/logConnectionStatus";
 export * from "./lib/logsStream";
 export * from "./lib/logTerms";
+export * from "./lib/logQuery";
 export * from "./lib/manifest";
 export * from "./lib/manifestEdit";
 export * from "./lib/mcp";
