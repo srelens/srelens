@@ -1,4 +1,4 @@
-import { afterEach, describe, it, expect, vi } from "vitest";
+import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fireEvent, render, screen } from "@testing-library/react";
@@ -14,7 +14,9 @@ import {
   type Volume,
 } from "@srelens/core";
 import { statusTone, toneColor } from "@srelens/ui-kit";
+import { isSectionOpen, loadSectionFolds, SECTION_FOLDS_KEY } from "../../lib/sectionFolds";
 import { VolumeHistogram } from "./VolumeHistogram";
+import { clockTime } from "./time";
 
 // Real bars come from the reader's time zone, and a bar with no width needs a
 // DST change in it. A test that must pass in every zone hands the component one.
@@ -35,6 +37,17 @@ afterEach(() => {
   stub.volume = undefined;
   stub.inRangeCalls = 0;
 });
+// The fold is remembered between launches, so a test that shuts the chart must not leave it shut.
+beforeEach(() => loadSectionFolds(emptyStorage()));
+
+function emptyStorage() {
+  const m = new Map<string, string>();
+  return {
+    getItem: (k: string) => m.get(k) ?? null,
+    setItem: (k: string, v: string) => void m.set(k, v),
+    removeItem: (k: string) => void m.delete(k),
+  };
+}
 
 const T0 = Date.parse("2026-10-12T10:00:00Z");
 
@@ -213,14 +226,39 @@ describe("VolumeHistogram", () => {
       expect(fireEvent.keyDown(group(), { key: "ArrowRight" })).toBe(false);
     });
 
+    const live = (container: HTMLElement) => container.querySelector('[aria-live="polite"]')?.textContent;
+
     it("announces the bar the arrows land on, in the words of its tooltip", async () => {
       const { container } = draw();
       group().focus();
       await userEvent.keyboard("{ArrowRight}");
-      const live = container.querySelector('[aria-live="polite"]');
-      const title = container.querySelector('[data-slot="bucket"] title')?.textContent;
-      expect(title).toMatch(/ · 1 line · 1 error$/);
-      expect(live?.textContent).toBe(title);
+      expect(live(container)).toBe(`${clockTime(T0)}–${clockTime(T0 + 1000)} · 1 line · error 1`);
+    });
+
+    it("says nothing when the stream adds lines to the bar the arrows are on", async () => {
+      const { container, rerender } = draw();
+      group().focus();
+      await userEvent.keyboard("{ArrowRight}");
+      const said = live(container);
+      expect(said).toContain("1 line");
+      rerender(
+        <VolumeHistogram
+          {...QUIET}
+          lines={[...LINES, ql("error again", T0 + 100), ql("warn too", T0 + 200)]}
+          range={undefined}
+          onRangeChange={vi.fn()}
+        />,
+      );
+      // The bar now holds three lines, and the announcement still describes the bar the reader moved onto.
+      expect(live(container)).toBe(said);
+    });
+
+    it("says nothing once focus has left", async () => {
+      const { container } = draw();
+      group().focus();
+      await userEvent.keyboard("{ArrowRight}");
+      fireEvent.blur(group());
+      expect(live(container)).toBe("");
     });
 
     it("doesn't rescan the lines when only the focus moves", async () => {
@@ -387,7 +425,7 @@ describe("VolumeHistogram", () => {
 
     it("colours each entry's dot as its bars are coloured", () => {
       const { container } = draw();
-      const dots = Array.from(container.querySelectorAll('[data-slot="legend-dot"] circle'));
+      const dots = Array.from(container.querySelectorAll('[data-slot="legend-item"] [data-slot="dot"] circle'));
       expect(dots.map((d) => d.getAttribute("fill"))).toEqual([
         toneColor(statusTone("danger")),
         toneColor(statusTone("info")),
@@ -431,6 +469,164 @@ describe("VolumeHistogram", () => {
     });
   });
 
+  describe("the tooltip", () => {
+    const tooltip = () => screen.queryByRole("tooltip");
+
+    it("is not there until a bar is pointed at", () => {
+      draw();
+      expect(tooltip()).toBeNull();
+    });
+
+    it("names the bar's time, its lines and each group's count, as soon as the pointer enters it", () => {
+      const { bars } = draw();
+      fireEvent.pointerEnter(bars()[0]);
+      const tip = tooltip() as HTMLElement;
+      expect(tip.querySelector('[data-slot="tooltip-range"]')?.textContent).toBe(
+        `${clockTime(T0)}–${clockTime(T0 + 1000)}`,
+      );
+      expect(tip.querySelector('[data-slot="tooltip-total"]')?.textContent).toBe("1 line");
+      const groups = Array.from(tip.querySelectorAll('[data-slot="tooltip-group"]'));
+      expect(groups.map((g) => g.textContent)).toEqual(["error 1"]);
+      expect(groups[0].querySelector("circle")?.getAttribute("fill")).toBe(toneColor(statusTone("danger")));
+    });
+
+    it("counts a bar with several groups in the legend's order, and pluralises", () => {
+      const lines = [ql("info a", T0), ql("warn b", T0), ql("debug c", T0), ql("error d", T0), ql("error e", T0)];
+      const { container } = render(<VolumeHistogram {...QUIET} lines={lines} range={undefined} onRangeChange={vi.fn()} />);
+      fireEvent.pointerEnter(container.querySelector('[data-slot="bucket"]') as Element);
+      expect(texts(container, "tooltip-total")).toEqual(["5 lines"]);
+      expect(texts(container, "tooltip-group")).toEqual(["error 2", "warn 1", "info 1", "other 1"]);
+    });
+
+    it("follows the pointer from bar to bar, and goes when it leaves the chart", () => {
+      const { bars, container } = draw();
+      fireEvent.pointerEnter(bars()[0]);
+      const first = (tooltip() as HTMLElement).style.left;
+      fireEvent.pointerEnter(bars()[3]);
+      expect(Number.parseFloat((tooltip() as HTMLElement).style.left)).toBeGreaterThan(Number.parseFloat(first));
+      fireEvent.pointerLeave(container.querySelector("svg") as SVGElement);
+      expect(tooltip()).toBeNull();
+    });
+
+    it("covers the gap between bars with the bar before it, so crossing one doesn't flicker", () => {
+      const { container } = draw();
+      const hit = container.querySelector('[data-slot="bucket"] rect[fill="transparent"]');
+      // BAR is 10 and GAP 2 in the viewBox.
+      expect(hit?.getAttribute("width")).toBe("12");
+    });
+
+    it("shows for the bar the keyboard is on, and goes with the focus", async () => {
+      draw();
+      screen.getByRole("group", { name: /log volume over time/i }).focus();
+      await userEvent.keyboard("{ArrowRight}");
+      expect(tooltip()?.querySelector('[data-slot="tooltip-total"]')?.textContent).toBe("1 line");
+      fireEvent.blur(screen.getByRole("group", { name: /log volume over time/i }));
+      expect(tooltip()).toBeNull();
+    });
+
+    it("hands the tooltip to the arrow keys, though the pointer is still resting on a bar", async () => {
+      const { bars } = draw();
+      fireEvent.pointerEnter(bars()[3]);
+      expect(tooltip()?.querySelector('[data-slot="tooltip-range"]')?.textContent).toBe(
+        `${clockTime(T0 + 3000)}–${clockTime(T0 + 4000)}`,
+      );
+      screen.getByRole("group", { name: /log volume over time/i }).focus();
+      await userEvent.keyboard("{ArrowRight}");
+      expect(tooltip()?.querySelector('[data-slot="tooltip-range"]')?.textContent).toBe(
+        `${clockTime(T0)}–${clockTime(T0 + 1000)}`,
+      );
+    });
+
+    it("replaces the slow native tooltip rather than doubling it", () => {
+      const { container } = draw();
+      expect(container.querySelector("title")).toBeNull();
+      expect(container.querySelector("[title]")).toBeNull();
+    });
+  });
+
+  describe("the brush", () => {
+    const brush = (container: HTMLElement) => container.querySelector('[data-slot="brush"]');
+
+    it("is only there while a drag is in progress", () => {
+      const { bars, container } = draw();
+      expect(brush(container)).toBeNull();
+      fireEvent.pointerDown(bars()[1]);
+      expect(brush(container)).not.toBeNull();
+      fireEvent.pointerUp(bars()[1]);
+      expect(brush(container)).toBeNull();
+    });
+
+    it("spans the dragged bars, whichever way the drag went, in a translucent accent", () => {
+      const { bars, container } = draw();
+      fireEvent.pointerDown(bars()[3]);
+      fireEvent.pointerEnter(bars()[1]);
+      const rect = brush(container) as Element;
+      // From the left edge of bar 1 to the right edge of bar 3, at 12 units a slot.
+      expect(rect.getAttribute("x")).toBe("12");
+      expect(rect.getAttribute("width")).toBe("34");
+      expect(rect.getAttribute("fill")).toBe(toneColor("accent"));
+      expect(Number(rect.getAttribute("fill-opacity"))).toBeGreaterThan(0);
+      expect(Number(rect.getAttribute("fill-opacity"))).toBeLessThan(0.5);
+    });
+
+    it("goes when the system cancels the drag", () => {
+      const { bars, container } = draw();
+      fireEvent.pointerDown(bars()[1]);
+      fireEvent.pointerCancel(bars()[1]);
+      expect(brush(container)).toBeNull();
+    });
+  });
+
+  describe("the fold", () => {
+    const toggle = (name: string) => screen.getByRole("button", { name });
+
+    it("is open to start with, and offers to hide the chart", () => {
+      draw();
+      expect(toggle("Hide the volume chart").getAttribute("aria-expanded")).toBe("true");
+      expect(screen.getByRole("group", { name: /log volume over time/i })).toBeTruthy();
+    });
+
+    it("hides everything but the caption row, remembers that, and offers to show it again", async () => {
+      const { container, caption } = draw();
+      await userEvent.click(toggle("Hide the volume chart"));
+      expect(screen.queryByRole("group", { name: /log volume over time/i })).toBeNull();
+      expect(container.querySelector("svg")).toBeNull();
+      expect(screen.queryByRole("button", { name: "error 1" })).toBeNull();
+      expect(container.querySelector('[data-slot="y-label"]')).toBeNull();
+      // The caption row stays, with the toggle at its end.
+      expect(caption()).toMatch(/^3 lines · /);
+      expect(toggle("Show the volume chart").getAttribute("aria-expanded")).toBe("false");
+      expect(isSectionOpen("logs", "volume", true)).toBe(false);
+      await userEvent.click(toggle("Show the volume chart"));
+      expect(container.querySelector("svg")).not.toBeNull();
+      expect(isSectionOpen("logs", "volume", true)).toBe(true);
+    });
+
+    it("starts shut for a reader who shut it last time", () => {
+      const storage = emptyStorage();
+      storage.setItem(SECTION_FOLDS_KEY, JSON.stringify({ logs: ["!volume"] }));
+      loadSectionFolds(storage);
+      const { container } = draw();
+      expect(container.querySelector("svg")).toBeNull();
+      expect(toggle("Show the volume chart")).toBeTruthy();
+    });
+
+    it("lets go of the bar the arrows were on, so opening it again shows no stale ring", async () => {
+      const { container } = draw();
+      screen.getByRole("group", { name: /log volume over time/i }).focus();
+      await userEvent.keyboard("{ArrowRight}");
+      await userEvent.click(toggle("Hide the volume chart"));
+      await userEvent.click(toggle("Show the volume chart"));
+      expect(container.querySelector('[data-slot="bucket-focus"]')).toBeNull();
+      expect(container.querySelector('[aria-live="polite"]')?.textContent).toBe("");
+    });
+
+    it("draws nothing at all, toggle included, when no line has a time", () => {
+      const { container } = render(<VolumeHistogram {...QUIET} lines={[ql("no time")]} range={undefined} onRangeChange={vi.fn()} />);
+      expect(container.innerHTML).toBe("");
+    });
+  });
+
   it("keeps a lone error visible beside a spike in the same bar", () => {
     const spike = [...Array.from({ length: 500 }, () => ql("info x", T0)), ql("error y", T0)];
     const { container } = render(<VolumeHistogram {...QUIET} lines={spike} range={undefined} onRangeChange={vi.fn()} />);
@@ -446,8 +642,12 @@ describe("VolumeHistogram", () => {
     const day = (n: number) => new Date(2026, 9, n).getTime();
     const caption = (container: HTMLElement) =>
       container.querySelector('[data-slot="volume-caption"]')?.textContent ?? "";
-    const titles = (container: HTMLElement) =>
-      Array.from(container.querySelectorAll('[data-slot="bucket"] title')).map((t) => t.textContent);
+    /** What the tooltip says of the first bar. */
+    const tip = (container: HTMLElement) => {
+      fireEvent.pointerEnter(container.querySelector('[data-slot="bucket"]') as Element);
+      const text = (slot: string) => container.querySelector(`[data-slot="${slot}"]`)?.textContent;
+      return [text("tooltip-range"), text("tooltip-total")];
+    };
 
     it("names a bar of a day or more by its date as well as its time", () => {
       const bar = (start: number, end: number) => ({ start, end, danger: 0, warning: 0, info: 0, other: 1 });
@@ -458,14 +658,16 @@ describe("VolumeHistogram", () => {
       };
       const { container } = render(<VolumeHistogram {...QUIET} lines={LINES} range={undefined} onRangeChange={vi.fn()} />);
       expect(caption(container)).toContain("2026-10-10 00:00–2026-10-13 00:00");
-      expect(titles(container)[0]).toBe("2026-10-10 00:00–2026-10-11 00:00 · 1 line");
+      expect(tip(container)).toEqual(["2026-10-10 00:00–2026-10-11 00:00", "1 line"]);
     });
 
     it("dates the bars once the span crosses a day, whatever the bar width", () => {
       const lines = [ql("info a", day(10) + 9 * 3_600_000), ql("info b", day(13) + 9 * 3_600_000)];
       const { container } = render(<VolumeHistogram {...QUIET} lines={lines} range={undefined} onRangeChange={vi.fn()} />);
       expect(caption(container)).toMatch(/ · 2026-10-10 \d\d:\d\d–2026-10-1\d \d\d:\d\d · /);
-      expect(titles(container)[0]).toMatch(/^2026-10-10 \d\d:\d\d–2026-10-10 \d\d:\d\d · 1 line$/);
+      const [range, total] = tip(container);
+      expect(range).toMatch(/^2026-10-10 [0-9]{2}:[0-9]{2}–2026-10-10 [0-9]{2}:[0-9]{2}$/);
+      expect(total).toBe("1 line");
     });
 
     it("keeps the seconds of bars narrower than a minute when it dates them", () => {
