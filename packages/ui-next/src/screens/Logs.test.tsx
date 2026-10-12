@@ -234,6 +234,13 @@ const LINES = [
   line("api-9/api", "14:07:44.010000000", "GET /healthz 200 1ms"),
 ];
 
+/** Three JSON lines like the issue's screenshot: a logger's level, msg and fields. */
+const JSON_LINES = [
+  line("api-7/api", "14:07:41.208000000", '{"level":"info","msg":"Wrote batch","system":"camlog","internal_use":true}'),
+  line("api-8/api", "14:07:42.100000000", '{"level":"warn","msg":"Skipping checkpoint","system":"schwarz"}'),
+  line("api-9/api", "14:07:43.900000000", '{"level":"error","msg":"Success: Write failed","system":"camlog"}'),
+];
+
 /**
  * The corpse: one container of one pod has died and been restarted, and
  * `resolveLogSubject` reports it off the pod object it already fetched.
@@ -1120,6 +1127,9 @@ const railTerms = (container: HTMLElement) =>
 
 const filterField = () =>
   within(screen.getByRole("search", { name: /filter lines/i })).getByRole("searchbox");
+
+const messages = (region?: HTMLElement) => rendered(region).map((r) => r.split("|")[3]);
+const logRegion = () => screen.getByRole("log", { name: /logs/i });
 
 describe("what the stream is doing, in a word AND a denominator", () => {
   /**
@@ -2047,5 +2057,58 @@ describe("the running-stream registry", () => {
     drawInTab("tab-3");
     await screen.findByText("Nothing to follow");
     expect(liveLogStreams().has("tab-3")).toBe(false);
+  });
+});
+
+describe("structured lines and the query (#898)", () => {
+  it("shows a JSON line as its msg with the other fields after it, not as the raw object", async () => {
+    const region = await (draw(), body());
+    push(...JSON_LINES);
+    expect(rendered(region)[0]).toBe("14:07:41.208|api-7 · api|info|Wrote batch  system=camlog internal_use=true");
+  });
+
+  it("filters on a field, and ORs two values of one field", async () => {
+    const region = await (draw(), body());
+    push(...JSON_LINES);
+    await userEvent.type(filterField(), "system:camlog");
+    expect(messages(region)).toEqual([
+      "Wrote batch  system=camlog internal_use=true",
+      "Success: Write failed  system=camlog",
+    ]);
+    await userEvent.clear(filterField());
+    await userEvent.type(filterField(), "level:warn level:error");
+    expect(messages(region)).toEqual(["Skipping checkpoint  system=schwarz", "Success: Write failed  system=camlog"]);
+  });
+
+  it("excludes with a leading '-'", async () => {
+    const region = await (draw(), body());
+    push(...LINES);
+    await userEvent.type(filterField(), "-pool");
+    expect(messages(region)).toHaveLength(3);
+    expect(messages(region)).not.toContain("error pool timeout waited=30.0s in_use=5");
+  });
+
+  it("finds a phrase across the punctuation the term tally strips", async () => {
+    const region = await (draw(), body());
+    push(...JSON_LINES);
+    await userEvent.type(filterField(), '"success write failed"');
+    expect(messages(region)).toEqual(["Success: Write failed  system=camlog"]);
+  });
+
+  it("says why a query can't be applied, and leaves the body unfiltered", async () => {
+    const region = await (draw(), body());
+    push(...LINES);
+    await userEvent.type(filterField(), "/(/");
+    const error = screen.getByText(/invalid regex/i);
+    expect(error.closest('[role="alert"]')).not.toBeNull();
+    expect(rendered(region)).toHaveLength(4);
+  });
+
+  it("marks what the query matched inside the message", async () => {
+    await (draw(), body());
+    push(...LINES);
+    await userEvent.type(filterField(), "pool");
+    const marks = Array.from(logRegion().querySelectorAll("[data-slot=message] mark")).map((m) => m.textContent);
+    expect(marks).toEqual(["pool"]);
   });
 });

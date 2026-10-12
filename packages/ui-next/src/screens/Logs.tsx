@@ -1,5 +1,6 @@
 import {
   useCallback,
+  useDeferredValue,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -13,11 +14,16 @@ import {
   logConnectionStatus,
   logLineHealth,
   logLineLevel,
+  logLineWords,
+  matchLine,
+  parseLogFields,
+  parseLogQuery,
   podLogs,
-  type HealthKind,
   type LogConnectionVerdict,
   type LogLine as StreamLine,
   type LogTarget,
+  type QueryClause,
+  type QueryLine,
 } from "@srelens/core";
 import {
   Alert,
@@ -56,6 +62,7 @@ import { recentKey, rememberLogSubject, useOfferedRecents } from "../lib/logRece
 import { useMarkLogStream } from "../lib/liveLogStreams";
 import { useTabScope } from "../lib/tabScope";
 import { openTab } from "../lib/tabsStore";
+import { renderMessage } from "./logs/LogMessage";
 import {
   StreamRail,
   STREAM_RAIL_WIDTH,
@@ -233,10 +240,26 @@ function connectionLabel(
  * when a stream is opened with `timestamps: true`, which this screen always is
  * because the design gives the time its own column.
  */
-const RFC3339 = /^\d{4}-\d{2}-\d{2}T(\d{2}:\d{2}:\d{2})(\.\d+)?(?:Z|[+-]\d{2}:?\d{2})? ?/;
+const RFC3339 = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})(\.\d+)?(Z|[+-]\d{2}:?\d{2})? ?/;
+
+/**
+ * The stamp as epoch ms, for the histogram and the time window. Rebuilt at
+ * millisecond precision rather than handed to `Date.parse` whole, because
+ * the parse is only specified for three fraction digits and the backend
+ * sends nine.
+ */
+function stampTime(stamp: RegExpMatchArray): number | undefined {
+  const [, date, time, fraction = "", zone] = stamp;
+  const offset = zone === undefined ? "" : zone.length === 5 ? `${zone.slice(0, 3)}:${zone.slice(3)}` : zone;
+  const ms = Date.parse(`${date}T${time}${fraction.slice(0, 4)}${offset}`);
+  return Number.isNaN(ms) ? undefined : ms;
+}
+
+/** No clauses: the query is empty, or it does not parse and so is not applied. */
+const NO_CLAUSES: readonly QueryClause[] = [];
 
 /** One line as the body draws it: the four columns, plus what a filter reads. */
-interface Row {
+interface Row extends QueryLine {
   /** `14:07:41.208`, or `""` for a line that arrived without a stamp. */
   ts: string;
   /** Which pod wrote the line. DATA — read off the target, not the label. */
@@ -274,15 +297,13 @@ interface Row {
    * it: a call site that maps "error" to red itself is how the same word ends
    * up red on one screen and grey on the next.
    */
-  level: string;
-  /**
-   * Core's severity for the line, from {@link logLineHealth} — a text-scan
-   * heuristic over the same one rule the level word comes from. Not drawn;
-   * it is here so the filter can match `danger` and `warning` as well as the
-   * literal word the line used.
-   */
-  health: HealthKind;
+  readonly level: string;
+  /** The line with its stamp off — what the term tally and an export's grep read. */
+  readonly text: string;
+  /** What the message column leads with: a JSON or logfmt `msg`, else `text`. */
   message: string;
+  /** Whether `message` came out of a field, so the row appends the rest inline. */
+  structured: boolean;
   /** The line exactly as it arrived, stamp and all — what an export writes. */
   raw: string;
   /**
@@ -291,8 +312,6 @@ interface Row {
    * what the container wrote.
    */
   truncated: boolean;
-  /** Lower-cased message + severity word, which is what the filter matches. */
-  haystack: string;
 }
 
 /** The line's origin as one string: `api-7 · api` on screen, `api-7/api` in a
@@ -329,8 +348,8 @@ function indexTargets(targets: readonly LogTarget[]): ReadonlyMap<string, LogTar
  */
 function toRow(line: StreamLine, byLabel: ReadonlyMap<string, LogTarget>): Row {
   const stamp = line.text.match(RFC3339);
-  const ts = stamp ? `${stamp[1]}${(stamp[2] ?? "").slice(0, 4)}` : "";
-  const message = stamp ? line.text.slice(stamp[0].length) : line.text;
+  const ts = stamp ? `${stamp[2]}${(stamp[3] ?? "").slice(0, 4)}` : "";
+  const text = stamp ? line.text.slice(stamp[0].length) : line.text;
   const slash = line.source.indexOf("/");
   const target = byLabel.get(line.source);
   const pod =
@@ -345,7 +364,9 @@ function toRow(line: StreamLine, byLabel: ReadonlyMap<string, LogTarget>): Row {
       : slash < 0
         ? ""
         : line.source.slice(slash + 1);
-  const health = logLineHealth(message);
+  const health = logLineHealth(text);
+  const parsed = parseLogFields(text);
+  const at = stamp ? stampTime(stamp) : undefined;
   return {
     ts,
     pod,
@@ -354,12 +375,17 @@ function toRow(line: StreamLine, byLabel: ReadonlyMap<string, LogTarget>): Row {
     // otherwise be blank; a labelled one shows the container exactly when its
     // label carried it.
     namesContainer: line.source === "" || slash >= 0,
-    level: logLineLevel(message) ?? "",
+    level: logLineLevel(text) ?? "",
     health,
-    message,
+    text,
+    message: parsed.message,
+    structured: parsed.structured,
+    fields: parsed.fields,
+    words: logLineWords(parsed.message),
+    ...(at === undefined ? {} : { at }),
     raw: line.text,
     truncated: line.truncated === true,
-    haystack: `${message} ${health}`.toLowerCase(),
+    haystack: `${text} ${health}`.toLowerCase(),
   };
 }
 
@@ -791,10 +817,26 @@ function LogsStream({
   }
 
   const byLabel = useMemo(() => indexTargets(targets), [targets]);
-  const liveRows = useMemo(
-    () => stream.lines.map((l) => toRow(l, byLabel)),
-    [stream.lines, byLabel],
-  );
+  /**
+   * Each line made into a row ONCE. The ring hands back the same line objects
+   * on every commit (`appendLogLines` concatenates), so a cache keyed on the
+   * object turns "re-split every buffered line per arriving line" into one
+   * parse per line. That matters now that a row is a JSON parse and a logfmt
+   * scan, not one regex. Rebuilt with `byLabel`, which a row's pod and
+   * container are read through.
+   */
+  const rowOf = useMemo(() => {
+    const cache = new WeakMap<StreamLine, Row>();
+    return (line: StreamLine): Row => {
+      let row = cache.get(line);
+      if (row === undefined) {
+        row = toRow(line, byLabel);
+        cache.set(line, row);
+      }
+      return row;
+    };
+  }, [byLabel]);
+  const liveRows = useMemo(() => stream.lines.map((l) => rowOf(l)), [stream.lines, rowOf]);
 
   /**
    * Fetch the terminated containers' buffers.
@@ -864,8 +906,8 @@ function LogsStream({
   }, [previous, terminated, context, namespace, targets]);
 
   const previousRows = useMemo(
-    () => (snapshot.status === "ready" ? snapshot.lines.map((l) => toRow(l, byLabel)) : []),
-    [snapshot, byLabel],
+    () => (snapshot.status === "ready" ? snapshot.lines.map((l) => rowOf(l)) : []),
+    [snapshot, rowOf],
   );
 
   /**
@@ -885,17 +927,24 @@ function LogsStream({
     [targets],
   );
 
-  const query = text.trim().toLowerCase();
+  /** The query as typed: the pills and facet toggles edit this text by the spans it reports. */
+  const typed = useMemo(() => parseLogQuery(text), [text]);
+  /**
+   * The query as applied, a beat behind the keystroke: React renders the box
+   * first and the pass over the buffer after, so typing never waits on it.
+   */
+  const deferredText = useDeferredValue(text);
+  const applied = useMemo(() => parseLogQuery(deferredText), [deferredText]);
+  const clauses = applied.ok ? applied.clauses : NO_CLAUSES;
+
+  /** The pod boxes and the container select: the scope every view starts from. */
+  const scoped = useMemo(
+    () => rows.filter((row) => !hidden.includes(row.pod) && (container === ALL_CONTAINERS || row.container === container)),
+    [rows, hidden, container],
+  );
   const filtered = useMemo(
-    () =>
-      rows.filter((row) => {
-        if (hidden.includes(row.pod)) return false;
-        if (container !== ALL_CONTAINERS && row.container !== container)
-          return false;
-        if (query !== "" && !row.haystack.includes(query)) return false;
-        return true;
-      }),
-    [rows, hidden, container, query],
+    () => (clauses.length === 0 ? scoped : scoped.filter((row) => matchLine(row, clauses))),
+    [scoped, clauses],
   );
 
   const togglePod = useCallback((pod: string, checked: boolean) => {
@@ -941,11 +990,11 @@ function LogsStream({
    * The stamp is the trap. A stamped line opens with a digit, `tallyLogTerms`
    * reads a leading digit as a value and ends the term run there, so a stamped
    * buffer tallies to NOTHING — no error, no warning, just an empty rail that
-   * looks exactly like a quiet log. `row.message` is the stripped text; the
+   * looks exactly like a quiet log. `row.text` is the stripped text; the
    * raw line never goes near this.
    */
   const railLines = useMemo<StreamLine[]>(
-    () => filtered.map((row) => ({ source: row.pod, text: row.message })),
+    () => filtered.map((row) => ({ source: row.pod, text: row.text })),
     [filtered],
   );
 
@@ -1291,6 +1340,13 @@ function LogsStream({
             />
           )}
         </FilterBar>
+        {!typed.ok && (
+          // Not FilterBar's `invalid`, whose screen-reader text calls every
+          // problem an invalid regular expression. An unclosed quote is not one.
+          <div role="alert" className="mx-3 mt-2 text-[0.75rem]" style={{ color: toneColor("sev") }}>
+            {typed.error}
+          </div>
+        )}
 
         {offered.status === "error" && (
           // The list the picker is drawn from could not be read again: what it
@@ -1467,19 +1523,7 @@ function LogsStream({
                   // screen; an override belongs to a line singled out for some
                   // reason OTHER than its level, and none is.
                   level={row.level}
-                  // A cut line says so at its end, in the message's own flow: the
-                  // trailing slot sits beside the message box, and with Wrap off a
-                  // long message runs past that box and under it.
-                  message={
-                    row.truncated ? (
-                      <>
-                        {row.message}
-                        <span className="text-faint"> [line cut: too long]</span>
-                      </>
-                    ) : (
-                      row.message
-                    )
-                  }
+                  message={renderMessage(row, clauses)}
                 />
               ))}
               {window_.bottomPad > 0 && (
