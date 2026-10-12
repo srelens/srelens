@@ -273,7 +273,7 @@ const NO_CLAUSES: readonly QueryClause[] = [];
 /** One line as the body draws it: the four columns, plus what a filter reads. */
 interface Row extends QueryLine {
   /**
-   * `16:07:41.208`: the stamp's instant on the reader's clock, or `""` for a
+   * The line's instant on the reader's clock, `HH:MM:SS.mmm`, or `""` for a
    * line without a parseable stamp. Derived from `at`, so the two cannot
    * disagree about when the line happened.
    */
