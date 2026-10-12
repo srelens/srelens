@@ -344,15 +344,11 @@ fn container_port_by_name(pod: &Pod, name: &str) -> Option<u16> {
     None
 }
 
-/// First `Running` pod in the list, falling back to the first pod overall.
+/// First pod that is `Running` and not being deleted (the check
+/// `pod_is_ready` applies after this), falling back to the first pod overall.
 pub fn pick_ready_pod(pods: &[Pod]) -> Option<&Pod> {
     pods.iter()
-        .find(|p| {
-            p.status
-                .as_ref()
-                .and_then(|s| s.phase.as_deref())
-                == Some("Running")
-        })
+        .find(|p| !pod_is_gone(p))
         .or_else(|| pods.first())
 }
 
@@ -574,6 +570,25 @@ mod tests {
             Some("pending")
         );
         assert!(pick_ready_pod(&[]).is_none());
+    }
+
+    #[test]
+    fn pick_ready_pod_skips_a_running_pod_that_is_being_deleted() {
+        // A deleted pod stays `Running` for its whole grace period. Picking it
+        // sent every reconnect of a Service forward back to the pod that had
+        // just gone, and the forward gave up beside a live replacement (#172).
+        let mut dying = pod_with(Some("Running"), true);
+        dying.metadata.name = Some("dying".into());
+        let mut replacement = pod_with(Some("Running"), false);
+        replacement.metadata.name = Some("replacement".into());
+        assert_eq!(
+            pick_ready_pod(&[dying, replacement])
+                .unwrap()
+                .metadata
+                .name
+                .as_deref(),
+            Some("replacement")
+        );
     }
 
     fn pod_with(phase: Option<&str>, deleted: bool) -> Pod {
