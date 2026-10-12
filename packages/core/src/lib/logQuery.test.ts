@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { clauseState, discoverFields, facetCounts, inlineFields, isQueryableKey, logLineWords, matchLine, parseLogFields, parseLogQuery, removeClause, toggleClause, type QueryClause, type QueryLine } from "./logQuery";
+import { clauseState, discoverFields, facetCounts, inlineFields, inRange, isQueryableKey, logLineWords, matchLine, parseLogFields, parseLogQuery, removeClause, toggleClause, volumeBuckets, type QueryClause, type QueryLine } from "./logQuery";
 import { healthRank, logLineHealth, logLineLevel } from "./logTerms";
 
 describe("parseLogFields", () => {
@@ -456,6 +456,64 @@ describe("facetCounts", () => {
     expect(facetCounts(tied, clauses(""), "k")).toEqual([
       { value: "alpha", count: 1 },
       { value: "Beta", count: 1 },
+    ]);
+  });
+});
+
+describe("volumeBuckets", () => {
+  const timed = (text: string, iso: string) => ql(text, Date.parse(iso));
+
+  it("picks the smallest round step that fits the span in sixty bars", () => {
+    // Ten minutes: 10s bars would be 61, 15s bars are 41.
+    const v = volumeBuckets([timed("info a", "2026-10-12T10:00:00Z"), timed("info b", "2026-10-12T10:10:00Z")]);
+    expect(v.step).toBe(15_000);
+    expect(v.buckets).toHaveLength(41);
+  });
+
+  it("stacks each bucket by core's severity and counts the lines with no time", () => {
+    const v = volumeBuckets([
+      timed("error a", "2026-10-12T10:00:01Z"),
+      timed("warn b", "2026-10-12T10:00:02Z"),
+      timed("info c", "2026-10-12T10:00:03Z"),
+      timed("info d", "2026-10-12T10:00:03.500Z"),
+      ql("untimed line"),
+    ]);
+    expect(v.step).toBe(1000);
+    expect(v.untimed).toBe(1);
+    expect(v.buckets.map((b) => [b.danger, b.warning, b.other])).toEqual([
+      [1, 0, 0],
+      [0, 1, 0],
+      [0, 0, 2],
+    ]);
+    expect(v.buckets[0].end - v.buckets[0].start).toBe(1000);
+  });
+
+  it("keeps the empty buckets in between, so a gap is drawn as a gap", () => {
+    const v = volumeBuckets([timed("info a", "2026-10-12T10:00:00Z"), timed("info b", "2026-10-12T10:00:05Z")]);
+    expect(v.buckets.map((b) => b.other)).toEqual([1, 0, 0, 0, 0, 1]);
+  });
+
+  it("starts an hour bar on the hour where the reader is, not in UTC", () => {
+    const v = volumeBuckets([timed("info a", "2026-10-12T00:10:00Z"), timed("info b", "2026-10-13T12:00:00Z")]);
+    expect(v.step).toBe(3_600_000);
+    for (const b of v.buckets) expect(new Date(b.start).getMinutes()).toBe(0);
+  });
+
+  it("draws one bucket for lines all at one instant, and none when nothing is timed", () => {
+    expect(volumeBuckets([timed("info a", "2026-10-12T10:00:00Z")]).buckets).toHaveLength(1);
+    expect(volumeBuckets([ql("untimed")])).toEqual({ step: 0, buckets: [], untimed: 1 });
+  });
+});
+
+describe("inRange", () => {
+  it("keeps a timed line inside [from, to) and never an untimed one", () => {
+    const r = { from: 1000, to: 2000 };
+    expect([ql("a", 999), ql("b", 1000), ql("c", 1999), ql("d", 2000), ql("e")].map((l) => inRange(l, r))).toEqual([
+      false,
+      true,
+      true,
+      false,
+      false,
     ]);
   });
 });

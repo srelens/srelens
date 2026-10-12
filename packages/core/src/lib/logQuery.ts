@@ -496,3 +496,78 @@ export function facetCounts(lines: readonly QueryLine[], clauses: readonly Query
 function compare(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }
+
+export interface VolumeBucket {
+  readonly start: number;
+  readonly end: number;
+  readonly danger: number;
+  readonly warning: number;
+  readonly other: number;
+}
+
+export interface Volume {
+  /** Bucket width in ms; 0 when no line had a time. */
+  readonly step: number;
+  /** Contiguous, empty ones included, so a quiet minute is drawn as a gap. */
+  readonly buckets: readonly VolumeBucket[];
+  readonly untimed: number;
+}
+
+const SECOND = 1000;
+const MINUTE = 60 * SECOND;
+const HOUR = 60 * MINUTE;
+const STEPS = [
+  ...[1, 2, 5, 10, 15, 30].map((n) => n * SECOND),
+  ...[1, 2, 5, 10, 15, 30].map((n) => n * MINUTE),
+  ...[1, 2, 3, 6, 12].map((n) => n * HOUR),
+  24 * HOUR,
+];
+
+/**
+ * The lines' volume over time, in the smallest round step that fits the span in
+ * `maxBars`, stacked by core's severity. Boundaries are local wall-clock
+ * time: an hour bar starts at :00 where the reader is, which in a half-hour
+ * zone is not :00 UTC.
+ */
+export function volumeBuckets(lines: readonly QueryLine[], maxBars = 60): Volume {
+  let min = Infinity;
+  let max = -Infinity;
+  let untimed = 0;
+  for (const line of lines) {
+    if (line.at === undefined) {
+      untimed += 1;
+      continue;
+    }
+    if (line.at < min) min = line.at;
+    if (line.at > max) max = line.at;
+  }
+  if (min === Infinity) return { step: 0, buckets: [], untimed };
+
+  const offset = new Date(min).getTimezoneOffset() * MINUTE;
+  const index = (at: number, step: number) => Math.floor((at - offset) / step);
+  const step = STEPS.find((s) => index(max, s) - index(min, s) + 1 <= maxBars) ?? STEPS[STEPS.length - 1];
+  const first = index(min, step);
+  const buckets = Array.from({ length: index(max, step) - first + 1 }, (_, i) => {
+    const start = (first + i) * step + offset;
+    return { start, end: start + step, danger: 0, warning: 0, other: 0 };
+  });
+  for (const line of lines) {
+    if (line.at === undefined) continue;
+    const bucket = buckets[index(line.at, step) - first];
+    if (line.health === "danger") bucket.danger += 1;
+    else if (line.health === "warning") bucket.warning += 1;
+    else bucket.other += 1;
+  }
+  return { step, buckets, untimed };
+}
+
+/** A window picked off the histogram: `[from, to)`, epoch ms. */
+export interface TimeRange {
+  readonly from: number;
+  readonly to: number;
+}
+
+/** A line with no time can't be placed in a window, so it is never inside one. */
+export function inRange(line: QueryLine, range: TimeRange): boolean {
+  return line.at !== undefined && line.at >= range.from && line.at < range.to;
+}
