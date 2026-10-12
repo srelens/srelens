@@ -2230,3 +2230,146 @@ describe("the volume histogram (#898)", () => {
     expect(screen.queryByRole("button", { name: "Remove the time window" })).toBeNull();
   });
 });
+
+describe("the line detail (#898)", () => {
+  const rows = () => Array.from(logRegion().querySelectorAll(".logline"));
+
+  it("opens on a click, follows the arrow keys, and closes on Escape", async () => {
+    await (draw(), body());
+    push(...JSON_LINES);
+    await userEvent.click(rows()[0]);
+    const panel = () => screen.getByRole("region", { name: "Line detail" });
+    expect(within(panel()).getByText("camlog")).toBeTruthy();
+    expect(rows()[0].closest("[aria-current]")?.getAttribute("aria-current")).toBe("true");
+    await userEvent.keyboard("{ArrowDown}");
+    expect(within(panel()).getByText("schwarz")).toBeTruthy();
+    await userEvent.keyboard("{Escape}");
+    expect(screen.queryByRole("region", { name: "Line detail" })).toBeNull();
+  });
+
+  it("filters from the panel through the search box", async () => {
+    await (draw(), body());
+    push(...JSON_LINES);
+    await userEvent.click(rows()[0]);
+    await userEvent.click(screen.getByRole("button", { name: "Filter out system = camlog" }));
+    expect(filterField()).toHaveProperty("value", "-system:camlog");
+  });
+
+  const panel = () => screen.getByRole("region", { name: "Line detail" });
+
+  it("makes the log a tab stop, and lets Escape through while no line is open", async () => {
+    await (draw(), body());
+    push(...JSON_LINES);
+    expect(logRegion().getAttribute("tabindex")).toBe("0");
+    const outer = vi.fn();
+    document.addEventListener("keydown", outer);
+    try {
+      logRegion().focus();
+      await userEvent.keyboard("{Escape}");
+      expect(outer).toHaveBeenCalledTimes(1);
+      // With a line open the same key closes the panel and goes no further.
+      await userEvent.click(rows()[0]);
+      await userEvent.keyboard("{Escape}");
+      expect(screen.queryByRole("region", { name: "Line detail" })).toBeNull();
+      expect(outer).toHaveBeenCalledTimes(1);
+    } finally {
+      document.removeEventListener("keydown", outer);
+    }
+  });
+
+  it("starts from the end the key points to, and stops at the ends", async () => {
+    await (draw(), body());
+    push(...JSON_LINES);
+    logRegion().focus();
+    await userEvent.keyboard("{ArrowDown}");
+    expect(within(panel()).getByText("Wrote batch")).toBeTruthy();
+    await userEvent.keyboard("{ArrowUp}");
+    expect(within(panel()).getByText("Wrote batch")).toBeTruthy();
+    await userEvent.keyboard("{Escape}{ArrowUp}");
+    expect(within(panel()).getByText("Success: Write failed")).toBeTruthy();
+    await userEvent.keyboard("{ArrowDown}");
+    expect(within(panel()).getByText("Success: Write failed")).toBeTruthy();
+  });
+
+  it("holds the line a filter has hidden, and says so", async () => {
+    await (draw(), body());
+    push(...JSON_LINES);
+    await userEvent.click(rows()[0]);
+    await userEvent.click(screen.getByRole("button", { name: "Filter out system = camlog" }));
+    await waitFor(() => expect(rows()).toHaveLength(1));
+    expect(within(panel()).getByText("Wrote batch")).toBeTruthy();
+    expect(within(panel()).getByText("No longer in view")).toBeTruthy();
+  });
+
+  it("closes when the pane swaps to the previous instance's buffer", async () => {
+    h.resolve.mockResolvedValue({ status: "resolved", targets: TARGETS, pods: PODS, previous: TERMINATED });
+    await (draw(), body());
+    push(...JSON_LINES);
+    await userEvent.click(rows()[0]);
+    await userEvent.click(screen.getByRole("button", { name: /previous instance/i }));
+    await waitFor(() => expect(rows()).toHaveLength(4));
+    expect(screen.queryByRole("region", { name: "Line detail" })).toBeNull();
+  });
+
+  describe("on a scrolled viewport", () => {
+    /** jsdom does no layout: declare the viewport's geometry, and clamp a write to scrollTop the way a browser does. */
+    function scrollable(el: HTMLElement) {
+      let top = 0;
+      const max = () => h.state.lines.length * 20 - 100;
+      Object.defineProperty(el, "clientHeight", { configurable: true, get: () => 100 });
+      Object.defineProperty(el, "scrollHeight", { configurable: true, get: () => h.state.lines.length * 20 });
+      Object.defineProperty(el, "scrollTop", {
+        configurable: true,
+        get: () => top,
+        set: (v: number) => {
+          top = Math.max(0, Math.min(v, max()));
+        },
+      });
+      return {
+        get top() {
+          return top;
+        },
+        to(v: number) {
+          top = v;
+          fireEvent.scroll(el);
+        },
+      };
+    }
+    const many = (n: number, from = 0) =>
+      Array.from({ length: n }, (_, i) => line("api-7/api", "14:07:41.208000000", `line ${from + i}`));
+
+    it("scrolls the selected line into view, in both directions", async () => {
+      const restore = measurableRows();
+      try {
+        const region = await (draw(), body());
+        const view = scrollable(region);
+        push(...many(20));
+        view.to(0);
+        region.focus();
+        // Row 5 is the first whose bottom edge (120) is past the viewport's (100).
+        await userEvent.keyboard("{ArrowDown}".repeat(6));
+        expect(view.top).toBe(20);
+        await userEvent.keyboard("{ArrowUp}".repeat(5));
+        expect(view.top).toBe(0);
+      } finally {
+        restore();
+      }
+    });
+
+    it("stops following the end once a line is selected", async () => {
+      const restore = measurableRows();
+      try {
+        const region = await (draw(), body());
+        const view = scrollable(region);
+        push(...many(20));
+        expect(view.top).toBe(300);
+        region.focus();
+        await userEvent.keyboard("{ArrowUp}");
+        push(...many(5, 20));
+        expect(view.top).toBe(300);
+      } finally {
+        restore();
+      }
+    });
+  });
+});

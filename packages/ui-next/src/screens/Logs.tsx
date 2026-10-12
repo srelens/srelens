@@ -6,6 +6,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type KeyboardEvent,
   type ReactNode,
 } from "react";
 import {
@@ -69,6 +70,7 @@ import { useMarkLogStream } from "../lib/liveLogStreams";
 import { useTabScope } from "../lib/tabScope";
 import { openTab } from "../lib/tabsStore";
 import { FilterPills } from "./logs/FilterPills";
+import { LineDetail } from "./logs/LineDetail";
 import { renderMessage } from "./logs/LogMessage";
 import {
   StreamRail,
@@ -992,6 +994,39 @@ function LogsStream({
     [],
   );
 
+  /** The line the detail panel is open on. The Row itself, so the panel outlives the line leaving the view. */
+  const [selected, setSelected] = useState<Row | null>(null);
+  const selectedIndex = selected === null ? -1 : filtered.indexOf(selected);
+
+  function moveSelection(step: 1 | -1) {
+    if (filtered.length === 0) return;
+    const next =
+      selectedIndex < 0
+        ? step > 0
+          ? 0
+          : filtered.length - 1
+        : Math.min(filtered.length - 1, Math.max(0, selectedIndex + step));
+    setSelected(filtered[next]);
+    // Reading, not following: a new line must not yank the view off the selection.
+    stickRef.current = false;
+    const viewport = viewportRef.current;
+    if (viewport === null || metrics.rowHeight <= 0) return;
+    const top = next * metrics.rowHeight;
+    if (top < viewport.scrollTop) viewport.scrollTop = top;
+    else if (top + metrics.rowHeight > viewport.scrollTop + viewport.clientHeight) {
+      viewport.scrollTop = top + metrics.rowHeight - viewport.clientHeight;
+    }
+  }
+
+  function onLogKeyDown(e: KeyboardEvent) {
+    if (e.key === "ArrowDown") moveSelection(1);
+    else if (e.key === "ArrowUp") moveSelection(-1);
+    else if (e.key === "Escape" && selected !== null) setSelected(null);
+    else return;
+    e.preventDefault();
+    e.stopPropagation();
+  }
+
   const togglePod = useCallback((pod: string, checked: boolean) => {
     setHidden((current) =>
       checked
@@ -1337,7 +1372,11 @@ function LogsStream({
               variant="secondary"
               size="xs"
               aria-pressed={previous}
-              onClick={() => setPrevious((p) => !p)}
+              onClick={() => {
+                setPrevious((p) => !p);
+                // A different buffer: the line the panel holds is not in it.
+                setSelected(null);
+              }}
               style={
                 previous
                   ? {
@@ -1503,6 +1542,9 @@ function LogsStream({
         <div
           ref={viewportRef}
           onScroll={trackScroll}
+          // A tab stop: the arrow keys move the selection, so the log has to be reachable without a pointer.
+          tabIndex={0}
+          onKeyDown={onLogKeyDown}
           role="log"
           aria-label={`${name} logs`}
           className={`scroll min-h-0 flex-1 py-1 font-mono text-[0.75rem] leading-[1.85] ${
@@ -1567,21 +1609,34 @@ function LogsStream({
               {drawn.map((row, i) => (
                 // The index is the key: two identical lines a second apart are
                 // ordinary in a log, so nothing in a line is a stable identity.
-                <LogLine
+                // It sits on the wrapper, which is the click target and carries
+                // the selection; `.logline` inside it is what `measure` reads.
+                <div
                   key={window_.start + i}
-                  ts={row.ts}
-                  source={sourceOf(row, " · ")}
-                  // The word the LINE used, from core's one level scan — never
-                  // the severity vocabulary's name for it, which appears nowhere
-                  // in the log the reader is grepping against.
-                  //
-                  // And no `tone` beside it. The kit owns level→tone precisely
-                  // so the same word is not red here and grey on the next
-                  // screen; an override belongs to a line singled out for some
-                  // reason OTHER than its level, and none is.
-                  level={row.level}
-                  message={renderMessage(row, clauses)}
-                />
+                  aria-current={row === selected ? "true" : undefined}
+                  onClick={() => {
+                    // A drag that selected text to copy is not a request for the panel.
+                    if (window.getSelection()?.toString()) return;
+                    setSelected(row);
+                  }}
+                  className="cursor-pointer"
+                  style={row === selected ? { background: toneWash("accent") } : undefined}
+                >
+                  <LogLine
+                    ts={row.ts}
+                    source={sourceOf(row, " · ")}
+                    // The word the LINE used, from core's one level scan — never
+                    // the severity vocabulary's name for it, which appears nowhere
+                    // in the log the reader is grepping against.
+                    //
+                    // And no `tone` beside it. The kit owns level→tone precisely
+                    // so the same word is not red here and grey on the next
+                    // screen; an override belongs to a line singled out for some
+                    // reason OTHER than its level, and none is.
+                    level={row.level}
+                    message={renderMessage(row, clauses)}
+                  />
+                </div>
               ))}
               {window_.bottomPad > 0 && (
                 <div style={{ height: window_.bottomPad }} aria-hidden="true" />
@@ -1589,6 +1644,15 @@ function LogsStream({
             </div>
           )}
         </div>
+        {selected !== null && (
+          <LineDetail
+            line={selected}
+            inView={selectedIndex >= 0}
+            clauses={clauses}
+            onToggle={toggleFilter}
+            onClose={() => setSelected(null)}
+          />
+        )}
       </SideRail>
     </LogsScreen>
   );
