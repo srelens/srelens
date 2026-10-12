@@ -1,10 +1,23 @@
 use k8s_openapi::api::core::v1::{Node, Pod};
 use kube::{api::ListParams, Api, Client};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use srelens_capability::{Annotations, Capability, CapabilityError};
+use std::sync::Arc;
 use std::time::Duration;
 
+use crate::client_cache::ClientCache;
+
+/// Input payload for `k8s.nodeInspect`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NodeInspectIn {
+    pub context: String,
+    pub node: String,
+}
+
 /// Comprehensive inspection details for a single Kubernetes Node.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, Default)]
 pub struct NodeInspectorDetails {
     pub name: String,
     pub status: String,
@@ -62,22 +75,23 @@ pub struct NodeInspectorDetails {
     pub pods: Vec<NodePodItem>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct NodeConditionInfo {
+    #[serde(rename = "type")]
     pub type_: String,
     pub status: String,
     pub reason: Option<String>,
     pub message: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct NodeTaintInfo {
     pub key: String,
     pub value: Option<String>,
     pub effect: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct NodePodItem {
     pub name: String,
     pub namespace: String,
@@ -90,6 +104,27 @@ pub struct NodePodItem {
     pub gpu_requests: i64,
     pub gpu_mem_requests_mib: i64,
     pub pod_ip: String,
+}
+
+/// `k8s.nodeInspect` — comprehensive inspection of node allocatable, requests, GPU, taints, conditions, and pods.
+pub fn node_inspect_capability(cache: Arc<ClientCache>) -> Capability {
+    Capability::typed::<NodeInspectIn, NodeInspectorDetails, _, _>(
+        "k8s.nodeInspect",
+        "comprehensive inspection of a node allocatable, requests, GPU, taints, conditions, and pods",
+        Annotations::READ_ONLY,
+        move |input: NodeInspectIn| {
+            let cache = cache.clone();
+            async move {
+                let client = cache
+                    .get(&input.context)
+                    .await
+                    .map_err(CapabilityError::Handler)?;
+                inspect_node(client, &input.node)
+                    .await
+                    .map_err(CapabilityError::Handler)
+            }
+        },
+    )
 }
 
 /// Query and inspect a live node and all pods scheduled on it.
@@ -912,5 +947,46 @@ mod tests {
         assert_eq!(details.pods.len(), 1);
         assert_eq!(details.pods[0].gpu_requests, 1);
         assert_eq!(details.pods[0].gpu_mem_requests_mib, 5120);
+    }
+
+    #[test]
+    fn capability_has_expected_id() {
+        let cap = node_inspect_capability(ClientCache::new(std::path::PathBuf::from("/x")));
+        assert_eq!(cap.id, "k8s.nodeInspect");
+    }
+
+    #[test]
+    fn deserializes_caller_payload_and_denies_unknown_fields() {
+        // Valid payload
+        let valid = serde_json::json!({
+            "context": "kind-srelens",
+            "node": "worker-1"
+        });
+        let parsed: Result<NodeInspectIn, _> = serde_json::from_value(valid);
+        assert!(parsed.is_ok());
+        let input = parsed.unwrap();
+        assert_eq!(input.context, "kind-srelens");
+        assert_eq!(input.node, "worker-1");
+
+        // Missing required field 'node'
+        let missing_node = serde_json::json!({
+            "context": "kind-srelens"
+        });
+        assert!(serde_json::from_value::<NodeInspectIn>(missing_node).is_err());
+
+        // Wrong field name 'nodeName' rejected by deny_unknown_fields
+        let wrong_field = serde_json::json!({
+            "context": "kind-srelens",
+            "nodeName": "worker-1"
+        });
+        assert!(serde_json::from_value::<NodeInspectIn>(wrong_field).is_err());
+
+        // Extra unexpected fields rejected by deny_unknown_fields
+        let extra = serde_json::json!({
+            "context": "kind-srelens",
+            "node": "worker-1",
+            "extra": true
+        });
+        assert!(serde_json::from_value::<NodeInspectIn>(extra).is_err());
     }
 }

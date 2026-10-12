@@ -7,11 +7,11 @@ Everything this server exposes over MCP, generated from the live registry so it 
 
 ## Tools
 
-130 tools, grouped by area and then by how a call is gated. Argument schemas are not reproduced here — call `tools/list` for those, which cannot go stale.
+132 tools, grouped by area and then by how a call is gated. Argument schemas are not reproduced here — call `tools/list` for those, which cannot go stale.
 
 **Impact** is how much a successful call disturbs — `low`, `medium` or `high` — and is a different question from the section heading, which is how the call is gated. A capability that accepts several named operations carries the highest level any of them reaches; the per-operation level travels with the resource.
 
-### Kubernetes — read-only (58)
+### Kubernetes — read-only (60)
 
 | Tool | Impact | Summary |
 | --- | --- | --- |
@@ -23,6 +23,7 @@ Everything this server exposes over MCP, generated from the live registry so it 
 | `k8s.getCustomResource` | low | Inspect one custom resource and its events |
 | `k8s.getManifest` | low | fetch a resource's manifest as YAML (any supported kind) |
 | `k8s.getObject` | low | fetch one resource as a structured JSON object (any supported kind). Pass `fields` (kubectl-style JSONPath such as .status.allocatable) to get only those paths, keyed by path, with null where the object has none. To read a field across many objects, use k8s.listResource with `fields` instead of calling this once per object. |
+| `k8s.gpuInventory` | low | cluster-wide physical and virtual GPU inventory, VRAM allocations, and GPU pods |
 | `k8s.listCRDs` | low | list installed CustomResourceDefinitions (group, kind, plural, scope) |
 | `k8s.listChanges` | low | holistic deployment and change incident triage: evaluates recent rollouts, GitOps release info, pod crash loops, compute/storage blockers, and error log snippets |
 | `k8s.listClusterRoleBindings` | low | list ClusterRoleBindings of a connected kube context (cluster-scoped) |
@@ -56,6 +57,7 @@ Everything this server exposes over MCP, generated from the live registry so it 
 | `k8s.listStatefulSets` | low | list StatefulSets in a namespace of a connected kube context |
 | `k8s.listStorageClasses` | low | list StorageClasses of a connected kube context (cluster-scoped) |
 | `k8s.listWorkloadImages` | low | List regular and init-container images from a fixed workload kind |
+| `k8s.nodeInspect` | low | comprehensive inspection of a node allocatable, requests, GPU, taints, conditions, and pods |
 | `k8s.nodeMetrics` | low | node CPU/memory usage (requires metrics-server) |
 | `k8s.openApiSchema` | low | fetch the OpenAPI schema for a resource kind (for field autocomplete) |
 | `k8s.podCount` | low | running vs total pod counts for a cluster, counted without listing pod bodies |

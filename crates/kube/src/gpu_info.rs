@@ -1,11 +1,25 @@
 use k8s_openapi::api::core::v1::{Node, Pod};
 use kube::api::ListParams;
 use kube::{Api, Client};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use srelens_capability::{Annotations, Capability, CapabilityError};
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+use crate::client_cache::ClientCache;
+
+/// Input payload for `k8s.gpuInventory`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GpuInventoryIn {
+    pub context: String,
+    #[serde(default)]
+    pub node: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
 pub struct GpuPodItem {
     pub name: String,
     pub namespace: String,
@@ -18,7 +32,7 @@ pub struct GpuPodItem {
     pub containers: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
 pub struct GpuNodeInfo {
     pub name: String,
     pub status: String,
@@ -43,7 +57,7 @@ pub struct GpuNodeInfo {
     pub physical_vram_total_mib: Option<i64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct GpuClusterInfo {
     pub nodes: Vec<GpuNodeInfo>,
     pub total_gpu_nodes: usize,
@@ -52,6 +66,42 @@ pub struct GpuClusterInfo {
     pub total_vram_mib: i64,
     pub total_allocated_vram_mib: i64,
     pub total_gpu_pods: usize,
+}
+
+/// `k8s.gpuInventory` — cluster-wide physical and virtual GPU inventory, VRAM allocations, and GPU pods.
+pub fn gpu_inventory_capability(cache: Arc<ClientCache>) -> Capability {
+    Capability::typed::<GpuInventoryIn, GpuClusterInfo, _, _>(
+        "k8s.gpuInventory",
+        "cluster-wide physical and virtual GPU inventory, VRAM allocations, and GPU pods",
+        Annotations::READ_ONLY,
+        move |input: GpuInventoryIn| {
+            let cache = cache.clone();
+            async move {
+                let client = cache
+                    .get(&input.context)
+                    .await
+                    .map_err(CapabilityError::Handler)?;
+                let mut info = fetch_gpu_info(client)
+                    .await
+                    .map_err(CapabilityError::Handler)?;
+                if let Some(target_node) = &input.node {
+                    info.nodes.retain(|n| n.name == *target_node);
+                    info.total_gpu_nodes = info.nodes.len();
+                    info.total_gpus = info.nodes.iter().map(|n| n.gpu_capacity).sum();
+                    info.total_allocated_gpus = info.nodes.iter().map(|n| n.gpu_requests).sum();
+                    info.total_vram_mib = info
+                        .nodes
+                        .iter()
+                        .filter_map(|n| n.vram_capacity_total_mib)
+                        .sum();
+                    info.total_allocated_vram_mib =
+                        info.nodes.iter().map(|n| n.vram_requests_total_mib).sum();
+                    info.total_gpu_pods = info.nodes.iter().map(|n| n.pods.len()).sum();
+                }
+                Ok(info)
+            }
+        },
+    )
 }
 
 /// Fetch cluster nodes and pods to compile comprehensive GPU and VRAM allocation info.
@@ -1102,5 +1152,55 @@ mod tests {
         assert_eq!(cluster.nodes[0].gpu_requests, 2);
         assert_eq!(cluster.nodes[0].pods.len(), 1);
         assert_eq!(cluster.nodes[0].pods[0].gpu_requests, 2);
+    }
+
+    #[test]
+    fn capability_has_expected_id() {
+        let cap = gpu_inventory_capability(ClientCache::new(std::path::PathBuf::from("/x")));
+        assert_eq!(cap.id, "k8s.gpuInventory");
+    }
+
+    #[test]
+    fn deserializes_caller_payload_and_denies_unknown_fields() {
+        // Valid payload without node
+        let valid_all = serde_json::json!({
+            "context": "kind-srelens"
+        });
+        let parsed: Result<GpuInventoryIn, _> = serde_json::from_value(valid_all);
+        assert!(parsed.is_ok());
+        let input = parsed.unwrap();
+        assert_eq!(input.context, "kind-srelens");
+        assert_eq!(input.node, None);
+
+        // Valid payload with node filter
+        let valid_node = serde_json::json!({
+            "context": "kind-srelens",
+            "node": "gpu-worker-1"
+        });
+        let parsed: Result<GpuInventoryIn, _> = serde_json::from_value(valid_node);
+        assert!(parsed.is_ok());
+        let input = parsed.unwrap();
+        assert_eq!(input.context, "kind-srelens");
+        assert_eq!(input.node.as_deref(), Some("gpu-worker-1"));
+
+        // Missing required field 'context'
+        let missing_context = serde_json::json!({
+            "node": "gpu-worker-1"
+        });
+        assert!(serde_json::from_value::<GpuInventoryIn>(missing_context).is_err());
+
+        // Wrong field name 'nodeName' rejected by deny_unknown_fields
+        let wrong_field = serde_json::json!({
+            "context": "kind-srelens",
+            "nodeName": "gpu-worker-1"
+        });
+        assert!(serde_json::from_value::<GpuInventoryIn>(wrong_field).is_err());
+
+        // Extra unexpected fields rejected by deny_unknown_fields
+        let extra = serde_json::json!({
+            "context": "kind-srelens",
+            "extra": true
+        });
+        assert!(serde_json::from_value::<GpuInventoryIn>(extra).is_err());
     }
 }
