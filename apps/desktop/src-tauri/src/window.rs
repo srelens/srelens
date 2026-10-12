@@ -69,14 +69,31 @@ fn encoded_context(context_id: &str) -> String {
         .collect()
 }
 
+/// The OS title of a context's window: the cluster first, since a taskbar or
+/// window switcher shortens a long title from the end.
+fn window_title(name: &str) -> String {
+    match name.trim() {
+        "" => "srelens".into(),
+        name => format!("{name} — srelens"),
+    }
+}
+
 /// Open the context's window, or bring it forward if it is already open.
 ///
 /// `context_id` is the context's `key` — see [`window_label`] for why it is
 /// not the `stableId`. Both frontends send `ClusterContext.key`.
+///
+/// `name` is what the frontend calls the context — a mark or profile can
+/// rename it, and only the page knows — and titles a window this call
+/// creates. An open window keeps the title it was built with: on macOS the
+/// new design clears the native title at boot (`applyNextDesignChrome`) so
+/// it does not paint over the page's own titlebar, and re-titling here would
+/// put it back.
 #[tauri::command]
 pub async fn open_context_window<R: Runtime>(
     app: AppHandle<R>,
     context_id: String,
+    name: String,
 ) -> Result<(), String> {
     let label = window_label(&context_id);
 
@@ -97,7 +114,7 @@ pub async fn open_context_window<R: Runtime>(
     let url = WebviewUrl::App(format!("index.html?context={}", encoded_context(&context_id)).into());
 
     see_through(WebviewWindowBuilder::new(&app, &label, url))
-        .title("srelens")
+        .title(window_title(&name))
         .inner_size(1024.0, 768.0)
         .min_inner_size(640.0, 480.0)
         .center()
@@ -193,6 +210,19 @@ mod tests {
         assert_eq!(encoded_context("kind-dev_1.2~x"), "kind-dev_1.2~x");
     }
 
+    /// A context window is named for its cluster, in the words the reader
+    /// sees for it, so the OS window switcher can tell two of them apart
+    /// (#150). The cluster comes first: a taskbar or switcher shortens a long
+    /// title from the end, and "srelens" is the same in every window.
+    #[test]
+    fn a_context_window_is_titled_after_its_context() {
+        assert_eq!(window_title("prod-eu"), "prod-eu — srelens");
+        assert_eq!(window_title("  kube_prod/default "), "kube_prod/default — srelens");
+        // Nothing to name it after: the app's own name, not a dangling dash.
+        assert_eq!(window_title(""), "srelens");
+        assert_eq!(window_title("   "), "srelens");
+    }
+
     /// The command against a MockRuntime app: the first call creates the window
     /// under the derived label with the encoded context in its URL, and the
     /// second finds that window and focuses it instead of creating another.
@@ -203,9 +233,13 @@ mod tests {
         let app = tauri::test::mock_app();
         let handle = app.handle().clone();
 
-        open_context_window(handle.clone(), "/home/sre/.kube/config#kind-dev".into())
-            .await
-            .unwrap();
+        open_context_window(
+            handle.clone(),
+            "/home/sre/.kube/config#kind-dev".into(),
+            "kind-dev".into(),
+        )
+        .await
+        .unwrap();
 
         let label = window_label("/home/sre/.kube/config#kind-dev");
         let win = handle.get_webview_window(&label).expect("the window was just created");
@@ -215,9 +249,13 @@ mod tests {
             "unexpected url: {url}"
         );
 
-        open_context_window(handle.clone(), "/home/sre/.kube/config#kind-dev".into())
-            .await
-            .unwrap();
+        open_context_window(
+            handle.clone(),
+            "/home/sre/.kube/config#kind-dev".into(),
+            "kind-dev".into(),
+        )
+        .await
+        .unwrap();
         let ours = handle.webview_windows().keys().filter(|l| l.starts_with("ctx-")).count();
         assert_eq!(ours, 1, "a second open must focus the existing window, not add one");
     }
