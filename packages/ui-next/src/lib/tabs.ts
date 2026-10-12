@@ -266,15 +266,22 @@ export function focusStrip(w: Workspace, to: string | undefined, clusterName?: s
 }
 
 /**
- * Two recently closed lists as one, most recent first, capped.
+ * Two recently closed lists as one, most recent first.
  *
- * By when each tab was closed, so the cap drops the oldest of either list and
- * never a tab closed a moment ago because of which list it was in. A tab
- * closed before that was recorded counts as oldest and keeps its place among
- * its own: the sort is stable, and each list is already most recent first.
+ * By when each tab was closed, so that the next close — which is what applies
+ * the cap — drops the oldest of either list and never a tab closed a moment
+ * ago because of which list it was in. A tab closed before that was recorded
+ * counts as oldest and keeps its place among its own: the sort is stable, and
+ * each list is already most recent first.
+ *
+ * **Not capped here.** Each list was capped when it was written, and bringing
+ * a cluster back must not cost it a closed tab: Home offers every cluster's,
+ * and reopens one by focusing its cluster and then asking for it by id. A cap
+ * applied in between dropped the very tab the reader had just picked whenever
+ * the shared list was the newer and full.
  */
 function mostRecentlyClosed(own: Tab[], shared: Tab[]): Tab[] {
-  return [...own, ...shared].sort((a, b) => (b.closedAt ?? 0) - (a.closedAt ?? 0)).slice(0, CLOSED_CAP);
+  return [...own, ...shared].sort((a, b) => (b.closedAt ?? 0) - (a.closedAt ?? 0));
 }
 
 /**

@@ -693,11 +693,40 @@ describe("activeCluster", () => {
 
         toProd();
         const closed = store.currentWorkspace().closed;
-        expect(closed).toHaveLength(CLOSED_CAP);
         expect(closed[0].route).toBe("/settings");
         store.reopenClosed();
         expect(active().route).toBe("/settings");
         expect(active().closedAt).toBeUndefined();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    /**
+     * Home offers a closed tab from any cluster and reopens it by focusing
+     * its cluster, then asking for it by id. Capping the list as the cluster
+     * came back dropped that very tab whenever the shared list was the newer
+     * and full, and the click did nothing.
+     */
+    it("can still reopen a cluster's closed tab after a full list of shared ones was closed elsewhere", () => {
+      vi.useFakeTimers();
+      try {
+        vi.setSystemTime(1_000);
+        const services = store.currentWorkspace().tabs.find((t) => t.route === "/k/services")!;
+        store.setTabView(services.id, { filter: "api" });
+        store.closeTab(services.id);
+        toStage();
+        for (let i = 0; i < CLOSED_CAP; i++) {
+          vi.advanceTimersByTime(10);
+          store.newTab("/settings");
+          store.closeTab(active().id);
+        }
+        const offered = store.currentWorkspace().shelved!["id-prod"].closed[0];
+
+        toProd();
+        store.reopenClosed(offered.id);
+        expect(active().route).toBe("/k/services");
+        expect(active().view).toEqual({ filter: "api" });
       } finally {
         vi.useRealTimers();
       }
