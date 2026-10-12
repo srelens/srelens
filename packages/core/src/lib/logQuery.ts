@@ -498,7 +498,7 @@ function compare(a: string, b: string): number {
 }
 
 export interface VolumeBucket {
-  /** Epoch ms of the bucket's wall-clock start. Across a DST change `end - start` is not `step`. */
+  /** Epoch ms of the bucket's start. A sub-hour bar is exactly `step` long; a bar of an hour or more can differ from `step` across a DST change. */
   readonly start: number;
   readonly end: number;
   readonly danger: number;
@@ -538,19 +538,18 @@ const isTimed = (at: number | undefined): at is number =>
 /** A stamp's wall-clock reading. Taken per line, because the offset changes across DST. */
 const wallClock = (at: number): number => at - offsetAt(at);
 
-/** Half a day either side of a boundary: far enough to read the offset before and after a change. */
-const HALF_DAY = DAY / 2;
-
 /**
  * The instant whose wall clock reads `local`. Of the two candidates (the offset
  * before, the offset after), keep those that really read `local`. In a repeated
  * hour both do, and the earlier is taken, so the bar starts at the first copy
  * and spans both. In a skipped hour neither does, and the later candidate is the
- * transition itself, so the bar is empty and never overlaps its neighbour.
+ * transition itself, so the bar is empty and never overlaps its neighbour. Each
+ * offset is read a day either side: a real instant can sit 14 hours from its wall
+ * reading (UTC+14), so half a day reads the wrong side of a change above UTC+12.
  */
 const instantOf = (local: number): number => {
-  const before = local + offsetAt(local - HALF_DAY);
-  const after = local + offsetAt(local + HALF_DAY);
+  const before = local + offsetAt(local - DAY);
+  const after = local + offsetAt(local + DAY);
   const reads = [before, after].filter((c) => wallClock(c) === local);
   return reads.length > 0 ? Math.min(...reads) : Math.max(before, after);
 };
