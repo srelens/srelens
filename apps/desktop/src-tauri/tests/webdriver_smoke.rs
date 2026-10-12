@@ -184,8 +184,12 @@ async fn click_until(driver: &WebDriver, target: &str, proof: By, secs: u64) -> 
                 .exists()
                 .await
                 .unwrap_or(false);
-            println!("a script click on {target} ({scripted}) {} the proof", if opened { "DID bring" } else { "did not bring" });
-            return driver.query(proof).nowait().first().await.map(|_| ());
+            // An error whatever the script click did: a smoke that passed on
+            // it would pass with real clicks broken.
+            return Err(WebDriverError::Timeout(format!(
+                "clicking {target} never showed its effect; a script click ({scripted}) {} show it",
+                if opened { "DID" } else { "did not" }
+            )));
         }
     }
 }
