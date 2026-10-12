@@ -369,16 +369,27 @@ export function reconcile(state: TabsState, contexts: ClusterContext[]): TabsSta
     if (!tabs.some((t) => t.id === next.activeId)) next = { ...next, activeId: tabs[0].id };
 
     if (next.closed.length > CLOSED_CAP) next = { ...next, closed: next.closed.slice(0, CLOSED_CAP) };
-    if (next.shelved && Object.values(next.shelved).some((strip) => strip.closed.length > CLOSED_CAP)) {
-      next = {
-        ...next,
-        shelved: Object.fromEntries(
-          Object.entries(next.shelved).map(([id, strip]) => [
-            id,
-            strip.closed.length > CLOSED_CAP ? { ...strip, closed: strip.closed.slice(0, CLOSED_CAP) } : strip,
-          ]),
-        ),
-      };
+    // The strips put away are kept true as well: capped, and labelled for
+    // their cluster's name as it is now. A context renamed while its tabs are
+    // away would otherwise come back under the old name whenever the focus
+    // reaches it without a name in hand — a cluster removed from the sidebar,
+    // say — and the window finds a tab's context by that label.
+    if (next.shelved) {
+      let shelved = next.shelved;
+      for (const [id, strip] of Object.entries(next.shelved)) {
+        const name = contextNames.get(id);
+        const label = (list: Tab[]) => {
+          const out = list.map((tab) => relabel(tab, name));
+          return out.some((tab, index) => tab !== list[index]) ? out : list;
+        };
+        const stripTabs = label(strip.tabs);
+        let stripClosed = label(strip.closed);
+        if (stripClosed.length > CLOSED_CAP) stripClosed = stripClosed.slice(0, CLOSED_CAP);
+        if (stripTabs !== strip.tabs || stripClosed !== strip.closed) {
+          shelved = { ...shelved, [id]: { ...strip, tabs: stripTabs, closed: stripClosed } };
+        }
+      }
+      if (shelved !== next.shelved) next = { ...next, shelved };
     }
 
     if (next !== w) changed = true;

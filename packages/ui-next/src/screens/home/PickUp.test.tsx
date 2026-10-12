@@ -72,6 +72,17 @@ describe("PickUp", () => {
     expect(currentWorkspace().closed.map((t) => t.route)).toEqual(["/events", "/settings"]);
   });
 
+  it("offers the same route closed on two clusters as two tabs, each reopened on its own", async () => {
+    closeOn("/events", PROD);
+    closeOn("/events", STAGE);
+    render(<PickUp targets={[PROD, STAGE]} />);
+    expect(screen.getAllByRole("button", { name: /^Reopen / }).map((b) => b.getAttribute("aria-label")))
+      .toEqual(["Reopen Events on staging", "Reopen Events on prod"]);
+    await userEvent.click(screen.getByRole("button", { name: "Reopen Events on prod" }));
+    expect(activeCluster()).toBe(PROD.stableId);
+    expect(activeRoute()).toBe("/events");
+  });
+
   it("offers logs followed on any connected cluster, checked first, and follows each on its own cluster", async () => {
     const storage = memory();
     rememberLogSubject({ cluster: STAGE.stableId, kind: "Deployment", namespace: "checkout", name: "web" }, storage);

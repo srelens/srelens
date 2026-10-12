@@ -33,8 +33,10 @@ export function PickUp({ targets, paused = false }: { targets: readonly ClusterC
   const contexts = useContexts();
   const recents = useAllRecentLogSubjects();
   const tabs = closed
-    // One row per route: the stack is most recent first, so the first is the one to bring back.
-    .filter((tab, at) => closed.findIndex((t) => t.route === tab.route) === at)
+    // One row per route on a cluster: the stack is most recent first, so the
+    // first is the one to bring back. Per cluster, because Pods closed on two
+    // clusters are two tabs, each with its own filter and namespaces.
+    .filter((tab, at) => closed.findIndex((t) => t.route === tab.route && t.sub === tab.sub) === at)
     .map((tab) => ({ tab, context: tab.sub ? contexts.find((c) => c.name === tab.sub) : undefined }))
     .filter(({ tab, context }) => !tab.sub || context)
     .slice(0, CLOSED_SHOWN);

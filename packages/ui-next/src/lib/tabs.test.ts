@@ -199,6 +199,28 @@ describe("reconcile", () => {
     expect(out.shelved).toBeUndefined();
   });
 
+  /**
+   * A context can be renamed while its tabs are put away. The focus can then
+   * reach it with no name in hand — the cluster in focus removed from the
+   * sidebar — and its tabs came back under the old name, which is also how
+   * the window finds a tab's context.
+   */
+  it("labels the tabs put away for their cluster's name as it is now, open and recently closed", () => {
+    const s = defaultState([ctx("a", "prod"), ctx("b", "staging")]);
+    const w = s.workspaces[0];
+    const services = makeTab("/k/services", { clusterName: "staging" });
+    const closed = makeTab("/k/pods", { clusterName: "staging" });
+    w.shelved = { b: { tabs: [services], order: [services.id], activeId: services.id, closed: [closed] } };
+
+    const out = reconcile(s, [ctx("a", "prod"), ctx("b", "staging-renamed")]).workspaces[0];
+    expect(out.shelved?.b.tabs.map((t) => t.sub)).toEqual(["staging-renamed"]);
+    expect(out.shelved?.b.closed.map((t) => t.sub)).toEqual(["staging-renamed"]);
+
+    // And nothing moves when the names already hold.
+    const again = reconcile({ ...s, workspaces: [out] }, [ctx("a", "prod"), ctx("b", "staging-renamed")]);
+    expect(again.workspaces[0]).toBe(out);
+  });
+
   it("caps a shelved strip's recently closed list as it caps the one on screen", () => {
     const s = defaultState([ctx("a", "prod"), ctx("b", "staging")]);
     const w = s.workspaces[0];
