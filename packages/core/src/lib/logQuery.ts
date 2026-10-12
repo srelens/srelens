@@ -538,12 +538,22 @@ const isTimed = (at: number | undefined): at is number =>
 /** A stamp's wall-clock reading. Taken per line, because the offset changes across DST. */
 const wallClock = (at: number): number => at - offsetAt(at);
 
+/** Half a day either side of a boundary: far enough to read the offset before and after a change. */
+const HALF_DAY = DAY / 2;
+
 /**
- * The instant whose wall clock reads `local`. The offset is read at a guess and
- * then at the guess, so a boundary that sits either side of a DST change lands
- * on the right side of it.
+ * The instant whose wall clock reads `local`. Of the two candidates (the offset
+ * before, the offset after), keep those that really read `local`. In a repeated
+ * hour both do, and the earlier is taken, so the bar starts at the first copy
+ * and spans both. In a skipped hour neither does, and the later candidate is the
+ * transition itself, so the bar is empty and never overlaps its neighbour.
  */
-const instantOf = (local: number): number => local + offsetAt(local + offsetAt(local));
+const instantOf = (local: number): number => {
+  const before = local + offsetAt(local - HALF_DAY);
+  const after = local + offsetAt(local + HALF_DAY);
+  const reads = [before, after].filter((c) => wallClock(c) === local);
+  return reads.length > 0 ? Math.min(...reads) : Math.max(before, after);
+};
 
 /**
  * The lines' volume over time, stacked by core's severity, in the smallest round

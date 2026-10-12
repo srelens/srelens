@@ -650,3 +650,62 @@ describe("volumeBuckets, the hour the clocks go back", () => {
     }
   });
 });
+
+describe("volumeBuckets, a repeated hour and a skipped hour", () => {
+  /** Pins the zone for one body; the restore deletes TZ when it was unset. */
+  function inBerlin(body: () => void): void {
+    const saved = process.env.TZ;
+    process.env.TZ = "Europe/Berlin";
+    try {
+      body();
+    } finally {
+      if (saved === undefined) delete process.env.TZ;
+      else process.env.TZ = saved;
+    }
+  }
+  const at = (iso: string) => Date.parse(iso);
+
+  it("keeps a repeated hour's bar over both copies, so a line in either copy is inside it", () => {
+    inBerlin(() => {
+      // Guard: 00:30Z is the first 02:30 (CEST), 01:30Z the second (CET).
+      expect(new Date(at("2026-10-25T00:30:00Z")).getTimezoneOffset()).toBe(-120);
+      expect(new Date(at("2026-10-25T01:30:00Z")).getTimezoneOffset()).toBe(-60);
+      const firstCopy = ql("info first copy", at("2026-10-25T00:30:00Z"));
+      const secondCopy = ql("info second copy", at("2026-10-25T01:30:00Z"));
+      const v = volumeBuckets([
+        ql("info a", at("2026-10-24T12:00:00Z")),
+        firstCopy,
+        secondCopy,
+        ql("info b", at("2026-10-26T12:00:00Z")),
+      ]);
+      expect(v.step).toBe(HOUR_MS);
+      const bar = v.buckets.find((b) => b.other === 2);
+      expect(bar?.other).toBe(2);
+      expect(inRange(firstCopy, { from: bar!.start, to: bar!.end })).toBe(true);
+      expect(inRange(secondCopy, { from: bar!.start, to: bar!.end })).toBe(true);
+    });
+  });
+
+  it("leaves a skipped hour as an empty bar, so bars stay contiguous and a line sits in the bar that counts it", () => {
+    inBerlin(() => {
+      // Guard: the clocks jump from 02:00 CET to 03:00 CEST at 01:00Z on 29 March.
+      expect(new Date(at("2026-03-29T00:30:00Z")).getTimezoneOffset()).toBe(-60);
+      expect(new Date(at("2026-03-29T01:30:00Z")).getTimezoneOffset()).toBe(-120);
+      // Distinct severities, so the bar that counts each line can be found by its count.
+      const lineB = ql("warn b", at("2026-03-29T00:30:00Z")); // 01:30 CET, just before the gap
+      const lineC = ql("error c", at("2026-03-29T01:30:00Z")); // 03:30 CEST, just after the gap
+      const v = volumeBuckets([ql("info a", at("2026-03-28T12:00:00Z")), lineB, lineC, ql("info d", at("2026-03-30T12:00:00Z"))]);
+      expect(v.step).toBe(HOUR_MS);
+      for (let i = 0; i + 1 < v.buckets.length; i += 1) {
+        expect(v.buckets[i].start).toBeLessThanOrEqual(v.buckets[i].end);
+        expect(v.buckets[i].end).toBe(v.buckets[i + 1].start);
+      }
+      const warned = v.buckets.find((b) => b.warning === 1);
+      const errored = v.buckets.find((b) => b.danger === 1);
+      expect(warned).toBeDefined();
+      expect(errored).toBeDefined();
+      expect(inRange(lineB, { from: warned!.start, to: warned!.end })).toBe(true);
+      expect(inRange(lineC, { from: errored!.start, to: errored!.end })).toBe(true);
+    });
+  });
+});
