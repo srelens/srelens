@@ -4,7 +4,7 @@ import { useContexts } from "../../lib/clusters";
 import { recentKey, useAllRecentLogSubjects, useOfferedRecents } from "../../lib/logRecents";
 import { getMark } from "../../lib/marks";
 import { focusCluster, openOnCluster } from "../../lib/openCluster";
-import { reopenClosed, useTabs } from "../../lib/tabsStore";
+import { reopenClosed, useClosedEverywhere } from "../../lib/tabsStore";
 import { logsRoute } from "../Logs";
 
 /** How many recently closed tabs are offered — the most recent, not the whole stack. */
@@ -27,7 +27,9 @@ const label = (context: ClusterContext) => getMark(context.stableId, context.nam
  * is checked while `paused`: Home sealed, behind another tab, or hidden.
  */
 export function PickUp({ targets, paused = false }: { targets: readonly ClusterContext[]; paused?: boolean }) {
-  const { closed } = useTabs();
+  // Across clusters: a tab closed on one is put away with that cluster's tabs
+  // when another takes the focus (#908), and is still something to pick up.
+  const closed = useClosedEverywhere();
   const contexts = useContexts();
   const recents = useAllRecentLogSubjects();
   const tabs = closed

@@ -425,6 +425,22 @@ no longer resets them and a search typed in one list never carries into another.
 These are restored along with the tabs themselves. Column show/hide choices
 remain shared by every tab of the same kind.
 
+In the new design **each cluster keeps its own tabs**. Switching cluster in the
+sidebar puts the tabs of the cluster you leave away and brings back the ones
+the cluster you switch to last had, with the tab that was active there active
+again; a cluster you look at for the first time opens on its overview. Each
+cluster's tabs are remembered across disconnects and restarts.
+
+- App-wide tabs (Home, Settings, Connections) stay on screen whichever cluster
+  is in focus.
+- An **Edit** or **New resource** tab also stays: it names its own cluster and
+  goes on showing it, so unsaved changes are not lost to a switch.
+- **Reopen closed tab** brings back tabs closed on the cluster in focus, or
+  app-wide ones. Home's *Pick up where you left off* lists closed tabs from
+  every cluster and reopens each on its own.
+- Removing a cluster from a workspace, or from the kubeconfig, forgets its
+  tabs.
+
 ## Application logs
 
 srelens keeps its own rotating log file so you can diagnose problems after they

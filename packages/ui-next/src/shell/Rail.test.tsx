@@ -148,21 +148,18 @@ describe("Rail", () => {
   });
 
   /**
-   * **Switching cluster in the rail relabels the strip.**
+   * **Switching cluster in the rail switches the strip (#908).**
    *
-   * Nothing pins a tab to a cluster: every cluster-scoped screen reads
-   * `useActiveContext()`, so the moment the rail switches, the mounted screen
-   * is showing the new cluster. `makeTab` spent `clusterName` on the tab's
-   * `sub` when the tab was created, so the strip went on naming the old one —
-   * an action run from that tab ran against one cluster under a tab labelled
-   * another, which is the same hole `openTab`'s relabel closed for the tab it
-   * activates.
+   * Each cluster keeps its own tabs. The strip used to follow the rail, every
+   * tab relabelled for the cluster switched to, so the tabs opened on one
+   * cluster were still open on the next. Now the cluster left takes its tabs
+   * with it, and one looked at for the first time opens on its overview.
    *
    * STAGING's stableId is deliberately not its name: the workspace holds
    * stableIds (#265) and the strip shows names, so the last assertion is what
-   * tells a relabel from an id written onto the tab.
+   * tells a label from an id written onto the tab.
    */
-  it("leaves no tab labelled with the cluster it switched away from", async () => {
+  it("leaves no tab of the cluster it switched away from, and brings them back with it", async () => {
     const STAGING = { ...ctx("staging-eu"), stableId: "id-stage", key: "id-stage" };
     const contexts = [ctx("prod-eu"), STAGING];
     setState(defaultState(contexts));
@@ -173,9 +170,16 @@ describe("Rail", () => {
     await userEvent.click(screen.getByRole("button", { name: "staging-eu" }));
 
     expect(activeCluster()).toBe("id-stage");
+    expect(currentWorkspace().tabs.map((t) => t.route)).toEqual(["/", "/overview"]);
     const subs = currentWorkspace().tabs.map((t) => t.sub);
-    expect(subs).toEqual([undefined, "staging-eu", "staging-eu"]);
+    expect(subs).toEqual([undefined, "staging-eu"]);
     expect(subs).not.toContain("id-stage");
+
+    await userEvent.click(screen.getByRole("button", { name: "prod-eu" }));
+    expect(currentWorkspace().tabs.map((t) => t.route)).toEqual(["/", "/overview", "/k/pods"]);
+    expect(currentWorkspace().tabs.map((t) => t.sub)).toEqual([undefined, "prod-eu", "prod-eu"]);
+    // The tab the reader left it on, not its overview again.
+    expect(currentWorkspace().tabs.find((t) => t.id === currentWorkspace().activeId)?.route).toBe("/k/pods");
   });
 
   /** The menu's `Open` is the same gesture by another route, and had the same

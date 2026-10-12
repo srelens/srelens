@@ -1,7 +1,7 @@
 import { describe } from "./routes";
 import { loadRestoreSession, scopedSettingsKey, settingsStorage } from "@srelens/core";
 import type { TableSort } from "@srelens/ui-kit";
-import type { Tab, TabsState, Workspace } from "./tabs";
+import type { ClusterStrip, Tab, TabsState, Workspace } from "./tabs";
 
 /**
  * Where the shell's tabs live between launches.
@@ -80,6 +80,29 @@ function parseTab(v: unknown): Tab | null {
   return tab;
 }
 
+/**
+ * The tabs of the clusters not in focus (#908). One cluster's entry that
+ * cannot be read costs that cluster's tabs, not the workspace; an entry for a
+ * cluster the workspace does not have is dropped, as `reconcile` would.
+ */
+function parseShelved(v: unknown, clusters: readonly string[]): Workspace["shelved"] | undefined {
+  if (!isRecord(v)) return undefined;
+  const shelved: Record<string, ClusterStrip> = {};
+  for (const [id, raw] of Object.entries(v)) {
+    if (!clusters.includes(id) || !isRecord(raw) || !Array.isArray(raw.tabs)) continue;
+    const tabs = raw.tabs.map(parseTab).filter((t): t is Tab => t !== null);
+    const closed = Array.isArray(raw.closed) ? raw.closed.map(parseTab).filter((t): t is Tab => t !== null) : [];
+    if (tabs.length === 0 && closed.length === 0) continue;
+    shelved[id] = {
+      tabs,
+      order: Array.isArray(raw.order) ? raw.order.filter(isString) : tabs.map((t) => t.id),
+      activeId: isString(raw.activeId) ? raw.activeId : (tabs[0]?.id ?? ""),
+      closed,
+    };
+  }
+  return Object.keys(shelved).length > 0 ? shelved : undefined;
+}
+
 function parseWorkspace(v: unknown): Workspace | null {
   if (!isRecord(v) || !isString(v.id) || !isString(v.name) || !isString(v.activeId)) return null;
   if (!Array.isArray(v.clusters) || !Array.isArray(v.tabs)) return null;
@@ -98,6 +121,9 @@ function parseWorkspace(v: unknown): Workspace | null {
   // Only a cluster the workspace actually has: the field is an index into
   // `clusters`, and `reconcile` would drop a dangling one anyway.
   if (isString(v.activeCluster) && clusters.includes(v.activeCluster)) ws.activeCluster = v.activeCluster;
+  // Not the cluster in focus: its tabs are the strip itself.
+  const shelved = parseShelved(v.shelved, clusters.filter((id) => id !== ws.activeCluster));
+  if (shelved) ws.shelved = shelved;
   return ws;
 }
 

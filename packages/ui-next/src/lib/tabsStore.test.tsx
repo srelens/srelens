@@ -507,7 +507,7 @@ describe("setState", () => {
     expect(store.activeCluster()).toBe("b");
     // Cmd+T did nothing.
     store.openTab("/k/pods");
-    expect(routes()).toEqual(["/", "/k/pods"]);
+    expect(routes()).toEqual(["/", "/overview", "/k/pods"]);
   });
 
   it("hands a sound document straight through, so an identical write wakes no subscriber", () => {
@@ -546,38 +546,222 @@ describe("activeCluster", () => {
   });
 
   /**
-   * **The rail switches cluster; the strip has to follow.** Every cluster-scoped
-   * tab is about whichever cluster is active — nothing pins a tab to one, and
-   * `useActiveContext()` is the single answer every screen reads — so a tab
-   * whose `sub` still names the cluster before the switch labels the screen
-   * with a cluster it is not showing, and an action run from that tab runs
-   * against one cluster under a tab reading another.
-   *
-   * Through `relabel`, so the route table stays the one place that decides
-   * whether a route carries a cluster at all: `/settings` is app-scoped and
-   * keeps no `sub`.
+   * **Each cluster keeps its own tabs (#908).** The strip used to follow the
+   * rail: every cluster-scoped tab was relabelled for the cluster switched to,
+   * so Pods, ConfigMaps and Services opened while working on one cluster were
+   * still open on the next, showing its objects, where nobody had opened them.
    *
    * The fixtures' stableIds are deliberately not their names, so these
-   * assertions can tell a relabel from a stableId written onto the strip.
+   * assertions can tell a label from a stableId written onto the strip.
    */
-  it("relabels every cluster-scoped tab for the cluster it switches to", () => {
-    store.setState(defaultState([named("id-prod", "prod-eu"), named("id-stage", "staging-eu")]));
-    store.openTab("/overview", { clusterName: "prod-eu" });
-    store.openTab("/k/pods", { clusterName: "prod-eu" });
-    store.openTab("/settings");
+  describe("each cluster keeps its own tabs", () => {
+    const PROD = named("id-prod", "prod-eu");
+    const STAGE = named("id-stage", "staging-eu");
+    const toProd = () => store.setActiveCluster("id-prod", "prod-eu");
+    const toStage = () => store.setActiveCluster("id-stage", "staging-eu");
+    const subs = () => store.currentWorkspace().tabs.map((t) => t.sub);
 
-    store.setActiveCluster("id-stage", "staging-eu");
+    beforeEach(() => {
+      store.setState(defaultState([PROD, STAGE]));
+      store.openTab("/k/pods", { clusterName: "prod-eu" });
+      store.openTab("/k/configmaps", { clusterName: "prod-eu" });
+      store.openTab("/k/services", { clusterName: "prod-eu" });
+    });
 
-    const tabs = store.currentWorkspace().tabs;
-    expect(tabs.filter((t) => t.sub === "prod-eu")).toEqual([]);
-    expect(subFor("/overview")).toBe("staging-eu");
-    expect(subFor("/k/pods")).toBe("staging-eu");
-    expect(subFor("/")).toBeUndefined();
-    // A stableId on the strip would satisfy "no longer prod-eu" and be the
-    // same bug wearing the other name.
-    expect(tabs.filter((t) => t.sub === "id-stage")).toEqual([]);
-    // App-scoped: `/settings` is not about a cluster and gains no sub.
-    expect(subFor("/settings")).toBeUndefined();
+    it("does not carry one cluster's tabs to the next: a cluster seen for the first time opens on its overview", () => {
+      toStage();
+      expect(routes()).toEqual(["/", "/overview"]);
+      expect(active().route).toBe("/overview");
+      expect(subs()).toEqual([undefined, "staging-eu"]);
+    });
+
+    it("brings a cluster's tabs back as they were left, with the tab that was active there", () => {
+      store.activateTab(store.currentWorkspace().tabs[2].id);
+      toStage();
+      store.openTab("/k/nodes", { clusterName: "staging-eu" });
+
+      toProd();
+      expect(routes()).toEqual(["/", "/k/pods", "/k/configmaps", "/k/services"]);
+      expect(active().route).toBe("/k/configmaps");
+      expect(subs()).toEqual([undefined, "prod-eu", "prod-eu", "prod-eu"]);
+
+      toStage();
+      expect(routes()).toEqual(["/", "/overview", "/k/nodes"]);
+      expect(active().route).toBe("/k/nodes");
+    });
+
+    it("keeps each tab's namespaces, sort and filter with it", () => {
+      const pods = store.currentWorkspace().tabs[1].id;
+      store.setTabNamespaces(pods, "id-prod", ["payments", "checkout"]);
+      store.setTabView(pods, { filter: "api" });
+      toStage();
+      toProd();
+      expect(store.tabNamespaces(pods, "id-prod")).toEqual(["payments", "checkout"]);
+      expect(store.currentWorkspace().tabs[1].view).toEqual({ filter: "api" });
+    });
+
+    it("does not let what is opened, closed or moved on one cluster touch another's", () => {
+      toStage();
+      store.openTab("/k/pods", { clusterName: "staging-eu" });
+      store.closeTab(store.currentWorkspace().tabs.find((t) => t.route === "/overview")!.id);
+      toProd();
+      expect(routes()).toEqual(["/", "/k/pods", "/k/configmaps", "/k/services"]);
+      store.closeTab(store.currentWorkspace().tabs[1].id);
+      store.moveTab(store.currentWorkspace().tabs[2].id, 1);
+      toStage();
+      expect(routes()).toEqual(["/", "/k/pods"]);
+      expect(subs()).toEqual([undefined, "staging-eu"]);
+      toProd();
+      expect(routes()).toEqual(["/", "/k/services", "/k/configmaps"]);
+    });
+
+    it("reopens a tab closed on the cluster in focus, not one closed on another", () => {
+      store.closeTab(store.currentWorkspace().tabs.find((t) => t.route === "/k/services")!.id);
+      toStage();
+      expect(store.currentWorkspace().closed).toEqual([]);
+      store.reopenClosed();
+      expect(routes()).toEqual(["/", "/overview"]);
+      toProd();
+      store.reopenClosed();
+      expect(routes()).toEqual(["/", "/k/pods", "/k/configmaps", "/k/services"]);
+    });
+
+    /**
+     * Home, Settings and Connections are the same screen whichever cluster is
+     * in focus, so they stay — where they were in the strip, not swept to one
+     * end each time the cluster changes.
+     */
+    it("lets an app-wide tab closed on one cluster be reopened on another", () => {
+      store.openTab("/settings");
+      store.closeTab(store.currentWorkspace().tabs.find((t) => t.route === "/settings")!.id);
+      store.closeTab(store.currentWorkspace().tabs.find((t) => t.route === "/k/services")!.id);
+      toStage();
+      expect(store.currentWorkspace().closed.map((t) => t.route)).toEqual(["/settings"]);
+      store.reopenClosed();
+      expect(routes()).toEqual(["/", "/overview", "/settings"]);
+      toProd();
+      expect(store.currentWorkspace().closed.map((t) => t.route)).toEqual(["/k/services"]);
+    });
+
+    /** Home offers closed tabs across clusters, and focuses a tab's cluster to bring it back. */
+    it("lists every cluster's recently closed tabs for a surface that offers them all", () => {
+      store.closeTab(store.currentWorkspace().tabs.find((t) => t.route === "/k/services")!.id);
+      toStage();
+      store.openTab("/k/nodes", { clusterName: "staging-eu" });
+      store.closeTab(active().id);
+      const { result } = renderHook(() => store.useClosedEverywhere());
+      expect(result.current.map((t) => [t.route, t.sub])).toEqual([
+        ["/k/nodes", "staging-eu"],
+        ["/k/services", "prod-eu"],
+      ]);
+      const before = result.current;
+      act(() => toStage());
+      expect(result.current).toBe(before);
+    });
+
+    it("keeps the app-wide tabs on screen, in their places, whichever cluster is in focus", () => {
+      store.openTab("/settings");
+      store.moveTab(store.currentWorkspace().tabs.find((t) => t.route === "/settings")!.id, 2);
+      expect(routes()).toEqual(["/", "/k/pods", "/settings", "/k/configmaps", "/k/services"]);
+
+      toStage();
+      expect(routes()).toEqual(["/", "/settings", "/overview"]);
+      expect(subFor("/settings")).toBeUndefined();
+
+      toProd();
+      expect(routes()).toEqual(["/", "/k/pods", "/settings", "/k/configmaps", "/k/services"]);
+    });
+
+    it("keeps an app-wide tab opened on another cluster when the first comes back", () => {
+      toStage();
+      store.openTab("/connections");
+      toProd();
+      expect(routes()).toEqual(["/", "/k/pods", "/k/configmaps", "/k/services", "/connections"]);
+    });
+
+    /**
+     * The editor names its own cluster in its route and shows it whatever the
+     * rail says. Putting a tab away unmounts its screen, which for an editor
+     * is somebody's unsaved changes.
+     */
+    it("leaves an editor on screen, under its own cluster's name, when the focus moves", () => {
+      store.openTab("/edit/prod-eu/ConfigMap/default/settings", { clusterName: "prod-eu" });
+      store.openTab("/new/prod-eu", { clusterName: "prod-eu" });
+      toStage();
+      expect(routes()).toEqual(["/", "/edit/prod-eu/ConfigMap/default/settings", "/new/prod-eu", "/overview"]);
+      expect(subs()).toEqual([undefined, "prod-eu", "prod-eu", "staging-eu"]);
+    });
+
+    it("puts a cluster's tabs away when no cluster is in focus, and brings them back", () => {
+      store.setActiveCluster(null);
+      expect(routes()).toEqual(["/"]);
+      toProd();
+      expect(routes()).toEqual(["/", "/k/pods", "/k/configmaps", "/k/services"]);
+    });
+
+    it("gives tabs opened with no cluster in focus to the cluster that takes it", () => {
+      store.setState(defaultState([]));
+      store.setWorkspaceClusters(store.currentWorkspace().id, []);
+      store.openTab("/k/pods");
+      const w = store.currentWorkspace();
+      store.setState({ ...store.getState(), workspaces: [{ ...w, clusters: ["id-prod", "id-stage"] }] });
+      toStage();
+      expect(routes()).toEqual(["/", "/k/pods"]);
+      expect(subFor("/k/pods")).toBe("staging-eu");
+    });
+
+    it("labels the tabs that come back for the cluster's name now, since a context can be renamed while they are away", () => {
+      toStage();
+      store.setActiveCluster("id-prod", "prod-renamed");
+      expect(subs()).toEqual([undefined, "prod-renamed", "prod-renamed", "prod-renamed"]);
+    });
+
+    it("never writes a stableId onto the strip", () => {
+      toStage();
+      toProd();
+      expect(store.currentWorkspace().tabs.filter((t) => t.sub === "id-prod" || t.sub === "id-stage")).toEqual([]);
+    });
+
+    it("changes nothing, and wakes nobody, when the cluster in focus is chosen again", () => {
+      const listener = vi.fn();
+      const stop = store.subscribe(listener);
+      toProd();
+      stop();
+      expect(listener).not.toHaveBeenCalled();
+    });
+
+    it("drops the tabs of a cluster taken out of the workspace, in focus or not", () => {
+      toStage();
+      store.openTab("/k/nodes", { clusterName: "staging-eu" });
+      const id = store.currentWorkspace().id;
+      // Not in focus: its shelved tabs go.
+      store.setWorkspaceClusters(id, ["id-stage"]);
+      expect(store.currentWorkspace().shelved).toBeUndefined();
+      expect(routes()).toEqual(["/", "/overview", "/k/nodes"]);
+      // In focus: its tabs on screen go, and nothing of it is shelved.
+      store.setWorkspaceClusters(id, []);
+      expect(routes()).toEqual(["/"]);
+      expect(store.currentWorkspace().shelved).toBeUndefined();
+    });
+
+    it("keeps each workspace's clusters' tabs apart from another workspace's", () => {
+      const first = store.currentWorkspace().id;
+      store.createWorkspace("Other", ["id-prod", "id-stage"]);
+      expect(routes()).toEqual(["/"]);
+      toStage();
+      store.switchWorkspace(first);
+      expect(routes()).toEqual(["/", "/k/pods", "/k/configmaps", "/k/services"]);
+    });
+
+    it("forgets a removed cluster's namespaces in tabs that are put away, too", () => {
+      const pods = store.currentWorkspace().tabs[1].id;
+      store.setTabNamespaces(pods, "id-prod", ["payments"]);
+      store.setTabNamespaces(pods, "id-gone", ["old"]);
+      toStage();
+      store.forgetClusterNamespaces("id-gone");
+      toProd();
+      expect(store.currentWorkspace().tabs[1].namespaces).toEqual({ "id-prod": ["payments"] });
+    });
   });
 
   it("relabels a stale tab even when the cluster is already the active one", () => {
