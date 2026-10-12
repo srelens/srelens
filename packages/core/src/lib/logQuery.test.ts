@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { clauseState, discoverFields, facetCounts, inlineFields, inRange, isQueryableKey, logLineWords, matchLine, parseLogFields, parseLogQuery, removeClause, toggleClause, volumeBuckets, type QueryClause, type QueryLine } from "./logQuery";
+import { clauseState, discoverFields, facetCounts, highlightRanges, inlineFields, inRange, isQueryableKey, logLineWords, matchLine, parseLogFields, parseLogQuery, removeClause, toggleClause, volumeBuckets, type QueryClause, type QueryLine } from "./logQuery";
 import { healthRank, logLineHealth, logLineLevel } from "./logTerms";
 
 describe("parseLogFields", () => {
@@ -814,5 +814,33 @@ describe("volumeBuckets, zone pinning", () => {
     });
     expect(new Date(at("2026-10-12T10:00:00Z")).getTimezoneOffset()).toBe(offsetBefore);
     expect(Intl.DateTimeFormat().resolvedOptions().timeZone).toBe(found);
+  });
+});
+
+describe("highlightRanges", () => {
+  it("marks free text, phrases and regex matches, case-insensitively", () => {
+    expect(highlightRanges("Pool timeout: pool saturated", clauses('pool "TIMEOUT" /sat\\w+/'))).toEqual([
+      [0, 4],
+      [5, 12],
+      [14, 18],
+      [19, 28],
+    ]);
+  });
+
+  it("marks a field clause where a row shows it inline", () => {
+    expect(
+      highlightRanges('Wrote batch  system=camlog note="a b"', clauses('system:camlog note:"a b"')),
+    ).toEqual([
+      [13, 26],
+      [27, 37],
+    ]);
+  });
+
+  it("merges overlaps, and marks nothing for a negation or the level", () => {
+    expect(highlightRanges("abcdef", clauses("abc bcd -ef level:info"))).toEqual([[0, 4]]);
+  });
+
+  it("survives a regex that matches the empty string", () => {
+    expect(highlightRanges("abc", clauses("/x*/"))).toEqual([]);
   });
 });

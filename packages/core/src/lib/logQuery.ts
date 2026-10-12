@@ -630,3 +630,42 @@ export interface TimeRange {
 export function inRange(line: QueryLine, range: TimeRange): boolean {
   return isTimed(line.at) && line.at >= range.from && line.at < range.to;
 }
+
+/**
+ * Where a drawn row should mark what the query matched: `[start, end)`
+ * pairs, sorted and merged. Built from the original text, not a lowercased
+ * copy, because lowercasing can change a string's length and shift every
+ * index after it. A negation matched nothing on a line still in view, and
+ * `level` has a column of its own, so neither is marked.
+ */
+export function highlightRanges(text: string, clauses: readonly QueryClause[]): [number, number][] {
+  const found: [number, number][] = [];
+  for (const clause of clauses) {
+    if (clause.negated) continue;
+    const pattern = highlightPattern(clause);
+    if (pattern === undefined) continue;
+    const re = new RegExp(pattern, "gi");
+    for (let m = re.exec(text); m !== null; m = re.exec(text)) {
+      if (m[0] === "") {
+        re.lastIndex += 1;
+        continue;
+      }
+      found.push([m.index, m.index + m[0].length]);
+    }
+  }
+  found.sort((a, b) => a[0] - b[0]);
+  const merged: [number, number][] = [];
+  for (const [start, end] of found) {
+    const last = merged[merged.length - 1];
+    if (last !== undefined && start <= last[1]) last[1] = Math.max(last[1], end);
+    else merged.push([start, end]);
+  }
+  return merged;
+}
+
+function highlightPattern(clause: QueryClause): string | undefined {
+  if (clause.field === undefined) return clause.match === "regex" ? clause.regex.source : escapeRegex(clause.value);
+  if (clause.match !== "equals" || clause.field.toLowerCase() === "level") return undefined;
+  // Inline fields read `key=value`, or `key="value"` when the value has a space.
+  return `${escapeRegex(clause.field)}=("?)${escapeRegex(clause.value)}\\1`;
+}
