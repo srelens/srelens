@@ -2111,4 +2111,12 @@ describe("structured lines and the query (#898)", () => {
     const marks = Array.from(logRegion().querySelectorAll("[data-slot=message] mark")).map((m) => m.textContent);
     expect(marks).toEqual(["pool"]);
   });
+
+  it("shows each clause as a pill whose × takes it out of the box", async () => {
+    await (draw(), body());
+    push(...LINES);
+    await userEvent.type(filterField(), "level:error pool");
+    await userEvent.click(screen.getByRole("button", { name: "Remove filter level:error" }));
+    expect(filterField()).toHaveProperty("value", "pool");
+  });
 });

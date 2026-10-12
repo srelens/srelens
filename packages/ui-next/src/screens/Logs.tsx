@@ -62,6 +62,7 @@ import { recentKey, rememberLogSubject, useOfferedRecents } from "../lib/logRece
 import { useMarkLogStream } from "../lib/liveLogStreams";
 import { useTabScope } from "../lib/tabScope";
 import { openTab } from "../lib/tabsStore";
+import { FilterPills } from "./logs/FilterPills";
 import { renderMessage } from "./logs/LogMessage";
 import {
   StreamRail,
@@ -1347,6 +1348,7 @@ function LogsStream({
             {typed.error}
           </div>
         )}
+        <FilterPills query={text} clauses={typed.ok ? typed.clauses : NO_CLAUSES} onQueryChange={setText} />
 
         {offered.status === "error" && (
           // The list the picker is drawn from could not be read again: what it
