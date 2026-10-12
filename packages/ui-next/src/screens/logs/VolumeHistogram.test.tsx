@@ -128,7 +128,7 @@ describe("VolumeHistogram", () => {
   it("draws a slot for a bar with no width, such as a skipped hour, without repeating a key", () => {
     // Spring forward: the skipped hour's bar starts where the next one does.
     const hour = 3_600_000;
-    const bar = (start: number, end: number, other: number) => ({ start, end, danger: 0, warning: 0, other });
+    const bar = (start: number, end: number, other: number) => ({ start, end, danger: 0, warning: 0, info: 0, other });
     stub.volume = { step: hour, untimed: 0, buckets: [bar(0, hour, 1), bar(hour, hour, 0), bar(hour, 2 * hour, 1)] };
     const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const { bars } = draw();
@@ -218,6 +218,44 @@ describe("VolumeHistogram", () => {
     });
   });
 
+  describe("the bars", () => {
+    const one = (...texts: string[]) =>
+      render(<VolumeHistogram lines={texts.map((t) => ql(t, T0))} range={undefined} onRangeChange={vi.fn()} />);
+    const segments = (container: HTMLElement) =>
+      Array.from(container.querySelectorAll<SVGRectElement>('[data-slot="bucket"] rect[data-slot="segment"]'));
+    const num = (el: Element, attr: string) => Number(el.getAttribute(attr));
+
+    it("is 96 pixels tall", () => {
+      const { container } = one("info a");
+      expect(container.querySelector("svg")?.style.height).toBe("96px");
+      expect(container.querySelector("svg")?.getAttribute("viewBox")).toMatch(/ 96$/);
+    });
+
+    it("stacks a bar up from the baseline: error, warn, info, then the rest", () => {
+      const { container } = one("debug d", "info c", "warn b", "error a");
+      const bottomUp = segments(container).sort((a, b) => num(b, "y") - num(a, "y"));
+      expect(bottomUp.map((r) => r.getAttribute("data-group"))).toEqual(["danger", "warning", "info", "other"]);
+      // The errors sit on the baseline, and each segment starts where the one below ends.
+      expect(num(bottomUp[0], "y") + num(bottomUp[0], "height")).toBeCloseTo(96);
+      for (let i = 1; i < bottomUp.length; i += 1) {
+        expect(num(bottomUp[i], "y") + num(bottomUp[i], "height")).toBeCloseTo(num(bottomUp[i - 1], "y"));
+      }
+    });
+
+    it("colours error, warn and info from core's health tones, and mutes the rest", () => {
+      const { container } = one("debug d", "info c", "warn b", "error a");
+      const fill = (group: string) => segments(container).find((r) => r.getAttribute("data-group") === group);
+      expect(fill("danger")?.getAttribute("fill")).toBe(toneColor(statusTone("danger")));
+      expect(fill("warning")?.getAttribute("fill")).toBe(toneColor(statusTone("warning")));
+      expect(fill("info")?.getAttribute("fill")).toBe(toneColor(statusTone("info")));
+      expect(fill("other")?.getAttribute("fill")).toBe(toneColor(statusTone("neutral")));
+      // Translucent, so a stream of unlevelled lines doesn't drown the ones that have a level.
+      expect(num(fill("other") as Element, "fill-opacity")).toBeGreaterThan(0);
+      expect(num(fill("other") as Element, "fill-opacity")).toBeLessThan(1);
+      expect(fill("info")?.getAttribute("fill-opacity")).toBeNull();
+    });
+  });
+
   it("keeps a lone error visible beside a spike in the same bar", () => {
     const spike = [...Array.from({ length: 500 }, () => ql("info x", T0)), ql("error y", T0)];
     const { container } = render(<VolumeHistogram lines={spike} range={undefined} onRangeChange={vi.fn()} />);
@@ -237,7 +275,7 @@ describe("VolumeHistogram", () => {
       Array.from(container.querySelectorAll('[data-slot="bucket"] title')).map((t) => t.textContent);
 
     it("names a bar of a day or more by its date as well as its time", () => {
-      const bar = (start: number, end: number) => ({ start, end, danger: 0, warning: 0, other: 1 });
+      const bar = (start: number, end: number) => ({ start, end, danger: 0, warning: 0, info: 0, other: 1 });
       stub.volume = {
         step: 86_400_000,
         untimed: 0,

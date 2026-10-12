@@ -483,17 +483,29 @@ describe("volumeBuckets", () => {
     ]);
     expect(v.step).toBe(1000);
     expect(v.untimed).toBe(1);
-    expect(v.buckets.map((b) => [b.danger, b.warning, b.other])).toEqual([
-      [1, 0, 0],
-      [0, 1, 0],
-      [0, 0, 2],
+    expect(v.buckets.map((b) => [b.danger, b.warning, b.info, b.other])).toEqual([
+      [1, 0, 0, 0],
+      [0, 1, 0, 0],
+      [0, 0, 2, 0],
     ]);
     expect(v.buckets[0].end - v.buckets[0].start).toBe(1000);
   });
 
+  it("keeps info apart from the lines with no level or one the histogram doesn't colour", () => {
+    const v = volumeBuckets([
+      timed("info a", "2026-10-12T10:00:00Z"),
+      timed("no level here", "2026-10-12T10:00:00.100Z"),
+      timed("debug b", "2026-10-12T10:00:00.200Z"),
+      timed('{"level":"notice","msg":"c"}', "2026-10-12T10:00:00.300Z"),
+    ]);
+    expect(v.buckets).toHaveLength(1);
+    // `notice` is info in core's table; `debug` and a bare line read neutral.
+    expect([v.buckets[0].info, v.buckets[0].other]).toEqual([2, 2]);
+  });
+
   it("keeps the empty buckets in between, so a gap is drawn as a gap", () => {
     const v = volumeBuckets([timed("info a", "2026-10-12T10:00:00Z"), timed("info b", "2026-10-12T10:00:05Z")]);
-    expect(v.buckets.map((b) => b.other)).toEqual([1, 0, 0, 0, 0, 1]);
+    expect(v.buckets.map((b) => b.info)).toEqual([1, 0, 0, 0, 0, 1]);
   });
 
   it("starts an hour bar on the hour where the reader is, not in UTC", () => {
@@ -529,7 +541,7 @@ describe("volumeBuckets, untrusted stamps", () => {
     const junk = [Number.NaN, Infinity, -Infinity, 1e300].map((at) => ql("info junk", at));
     const v = volumeBuckets([ql("info a", Date.parse("2026-10-12T10:00:00Z")), ...junk]);
     expect(v.untimed).toBe(4);
-    expect(v.buckets.map((b) => b.other)).toEqual([1]);
+    expect(v.buckets.map((b) => b.info)).toEqual([1]);
   });
 
   it("keeps the bucket count within sixty when the span is wider than the widest round step", () => {
@@ -592,7 +604,7 @@ function expectBarsHoldTheirLines(v: ReturnType<typeof volumeBuckets>, lines: re
   for (let i = 0; i + 1 < v.buckets.length; i += 1) expect(v.buckets[i].end).toBe(v.buckets[i + 1].start);
   for (const b of v.buckets) {
     const inside = lines.filter((l) => inRange(l, { from: b.start, to: b.end })).length;
-    expect(inside).toBe(b.danger + b.warning + b.other);
+    expect(inside).toBe(b.danger + b.warning + b.info + b.other);
   }
   for (const line of lines) {
     expect(v.buckets.filter((b) => inRange(line, { from: b.start, to: b.end }))).toHaveLength(1);
@@ -686,8 +698,8 @@ describe("volumeBuckets, a repeated hour and a skipped hour", () => {
         ql("info b", at("2026-10-26T12:00:00Z")),
       ]);
       expect(v.step).toBe(HOUR_MS);
-      const bar = v.buckets.find((b) => b.other === 2);
-      expect(bar?.other).toBe(2);
+      const bar = v.buckets.find((b) => b.info === 2);
+      expect(bar?.info).toBe(2);
       expect(inRange(firstCopy, { from: bar!.start, to: bar!.end })).toBe(true);
       expect(inRange(secondCopy, { from: bar!.start, to: bar!.end })).toBe(true);
     });

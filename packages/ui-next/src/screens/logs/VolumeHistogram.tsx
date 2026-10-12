@@ -1,22 +1,34 @@
 import { useEffect, useMemo, useState, type KeyboardEvent } from "react";
 import { inRange, volumeBuckets, type QueryLine, type TimeRange, type VolumeBucket } from "@srelens/core";
-import { statusTone, toneColor, toneWash } from "@srelens/ui-kit";
+import { statusTone, toneColor, toneWash, type StatusKind } from "@srelens/ui-kit";
 import { groupNumber } from "../../lib/numbers";
 import { clockTime, dateTime, DAY, spansDays, stepLabel } from "./time";
 
 const BAR = 10;
 const GAP = 2;
-const HEIGHT = 40;
+const HEIGHT = 96;
 /** The least a non-empty segment is drawn, in viewBox units (about a pixel): a lone error beside a spike must not vanish. */
 const MIN_SEGMENT = 1;
 const MINUTE = 60_000;
 
-/** A bar's segments, bottom to top: neutral, warning, danger. */
-function stack(b: VolumeBucket, peak: number): [number, number, number] {
-  const lift = (n: number) => (n > 0 ? Math.max(MIN_SEGMENT, (n / peak) * HEIGHT) : 0);
-  const heights: [number, number, number] = [lift(b.other), lift(b.warning), lift(b.danger)];
+/**
+ * A bar's segments, bottom to top. Errors sit on the baseline, so a spike of
+ * them compares across bars; what has no severity goes last and is drawn faint.
+ * The colour is core's health tone, never a local one.
+ */
+const GROUPS = [
+  { key: "danger", kind: "danger" },
+  { key: "warning", kind: "warning" },
+  { key: "info", kind: "info" },
+  { key: "other", kind: "neutral" },
+] as const satisfies readonly { key: keyof VolumeBucket; kind: StatusKind }[];
+/** How much of its colour the unlevelled lines keep. */
+const OTHER_OPACITY = 0.4;
+
+function stack(b: VolumeBucket, max: number): number[] {
+  const heights = GROUPS.map(({ key }) => (b[key] > 0 ? Math.max(MIN_SEGMENT, (b[key] / max) * HEIGHT) : 0));
   // A segment lifted to the floor can push the stack past the top: the tallest gives up the difference.
-  const over = heights[0] + heights[1] + heights[2] - HEIGHT;
+  const over = heights.reduce((a, h) => a + h, 0) - HEIGHT;
   if (over > 0) heights[heights.indexOf(Math.max(...heights))] -= over;
   return heights;
 }
@@ -43,7 +55,7 @@ export function VolumeHistogram({
   const volume = useMemo(() => volumeBuckets(lines), [lines]);
   const { buckets } = volume;
   const timed = lines.length - volume.untimed;
-  const peak = useMemo(() => Math.max(1, ...buckets.map((b) => b.danger + b.warning + b.other)), [buckets]);
+  const peak = useMemo(() => Math.max(1, ...buckets.map((b) => b.danger + b.warning + b.info + b.other)), [buckets]);
   // Timed lines minus those inside, so a line whose time can't be placed (it is
   // in `untimed`) is never also counted as outside. Memoised: a pointer move or
   // an arrow re-renders this, and the pass is over every line.
@@ -73,7 +85,7 @@ export function VolumeHistogram({
   const dated = volume.step >= DAY || spansDays(buckets[0].start, buckets[buckets.length - 1].end);
   const edge = (ms: number) => (dated ? dateTime(ms, volume.step < MINUTE) : clockTime(ms));
   const titleOf = (b: VolumeBucket) => {
-    const total = b.danger + b.warning + b.other;
+    const total = b.danger + b.warning + b.info + b.other;
     return `${edge(b.start)}–${edge(b.end)} · ${groupNumber(total)} ${total === 1 ? "line" : "lines"}${
       b.danger > 0 ? ` · ${groupNumber(b.danger)} ${b.danger === 1 ? "error" : "errors"}` : ""
     }`;
@@ -117,7 +129,8 @@ export function VolumeHistogram({
         <svg
           viewBox={`0 0 ${buckets.length * (BAR + GAP)} ${HEIGHT}`}
           preserveAspectRatio="none"
-          className="block h-10 w-full select-none"
+          className="block w-full select-none"
+          style={{ height: HEIGHT }}
           onPointerUp={finishDrag}
           onPointerLeave={finishDrag}
           onPointerCancel={() => setDrag(null)}
@@ -128,12 +141,8 @@ export function VolumeHistogram({
               drag !== null
                 ? i >= Math.min(drag.from, drag.to) && i <= Math.max(drag.from, drag.to)
                 : range === undefined || (b.start < range.to && b.end > range.from);
+            const heights = stack(b, peak);
             let y = HEIGHT;
-            const segment = (h: number, color: string) => {
-              y -= h;
-              return h > 0 ? <rect x={x} y={y} width={BAR} height={h} fill={color} /> : null;
-            };
-            const [other, warning, danger] = stack(b, peak);
             return (
               <g
                 // The slot, not the time: a skipped hour's bar has no width and
@@ -150,9 +159,22 @@ export function VolumeHistogram({
               >
                 <title>{titleOf(b)}</title>
                 <rect x={x} y={0} width={BAR} height={HEIGHT} fill="transparent" />
-                {segment(other, toneColor(statusTone("neutral")))}
-                {segment(warning, toneColor(statusTone("warning")))}
-                {segment(danger, toneColor(statusTone("danger")))}
+                {GROUPS.map(({ key, kind }, g) => {
+                  y -= heights[g];
+                  return heights[g] > 0 ? (
+                    <rect
+                      key={key}
+                      data-slot="segment"
+                      data-group={key}
+                      x={x}
+                      y={y}
+                      width={BAR}
+                      height={heights[g]}
+                      fill={toneColor(statusTone(kind))}
+                      fillOpacity={key === "other" ? OTHER_OPACITY : undefined}
+                    />
+                  ) : null;
+                })}
               </g>
             );
           })}

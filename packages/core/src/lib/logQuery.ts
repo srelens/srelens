@@ -503,6 +503,9 @@ export interface VolumeBucket {
   readonly end: number;
   readonly danger: number;
   readonly warning: number;
+  /** Lines core reads as info (`info`, `notice`): the common case, kept apart so `other` is only what has no severity. */
+  readonly info: number;
+  /** Neutral lines: no level word, or one core doesn't tone (`debug`, `trace`). */
   readonly other: number;
 }
 
@@ -536,7 +539,7 @@ const isTimed = (at: number | undefined): at is number =>
   at !== undefined && Number.isFinite(at) && Math.abs(at) <= MAX_TIME;
 
 /** A stamp's wall-clock reading. Taken per line, because the offset changes across DST. */
-const wallClock = (at: number): number => at - offsetAt(at);
+export const wallClock = (at: number): number => at - offsetAt(at);
 
 /**
  * The instant whose wall clock reads `local`. Of the two candidates (the offset
@@ -546,8 +549,9 @@ const wallClock = (at: number): number => at - offsetAt(at);
  * transition itself, so the bar is empty and never overlaps its neighbour. Each
  * offset is read a day either side: a real instant can sit 14 hours from its wall
  * reading (UTC+14), so half a day reads the wrong side of a change above UTC+12.
+ * Exported for the time axis, which cuts its ticks on the same local clock.
  */
-const instantOf = (local: number): number => {
+export const instantOf = (local: number): number => {
   const before = local + offsetAt(local - DAY);
   const after = local + offsetAt(local + DAY);
   const reads = [before, after].filter((c) => wallClock(c) === local);
@@ -608,6 +612,7 @@ export function volumeBuckets(lines: readonly QueryLine[], maxBars = 60): Volume
     end: edges[i + 1],
     danger: 0,
     warning: 0,
+    info: 0,
     other: 0,
   }));
   for (const line of lines) {
@@ -615,6 +620,7 @@ export function volumeBuckets(lines: readonly QueryLine[], maxBars = 60): Volume
     const bucket = buckets[bucketOf(line.at) - first];
     if (line.health === "danger") bucket.danger += 1;
     else if (line.health === "warning") bucket.warning += 1;
+    else if (line.health === "info") bucket.info += 1;
     else bucket.other += 1;
   }
   return { step, buckets, untimed };
