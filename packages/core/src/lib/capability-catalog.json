@@ -1020,6 +1020,15 @@
     "confirm": "Change the replica count[ of {resource}][ in cluster {cluster}]?"
   },
   {
+    "id": "k8s.serviceHealthProbe",
+    "readOnly": true,
+    "destructive": false,
+    "requiresConfirm": false,
+    "sensitive": false,
+    "impact": "low",
+    "confirm": null
+  },
+  {
     "id": "k8s.setFields",
     "readOnly": false,
     "destructive": false,
@@ -1084,6 +1093,24 @@
   },
   {
     "id": "k8s.validateManifest",
+    "readOnly": true,
+    "destructive": false,
+    "requiresConfirm": false,
+    "sensitive": false,
+    "impact": "low",
+    "confirm": null
+  },
+  {
+    "id": "k8s.whyNotReady",
+    "readOnly": true,
+    "destructive": false,
+    "requiresConfirm": false,
+    "sensitive": false,
+    "impact": "low",
+    "confirm": null
+  },
+  {
+    "id": "k8s.whyPending",
     "readOnly": true,
     "destructive": false,
     "requiresConfirm": false,

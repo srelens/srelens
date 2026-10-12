@@ -1059,6 +1059,26 @@ async fn run_suite() {
         "debug container name: {dbg}",
     );
 
+    let wnr = h
+        .ok(
+            "k8s.whyNotReady",
+            json!({ "context": ctx, "namespace": NS, "pod": debug_pod }),
+        )
+        .await;
+    assert_eq!(wnr["pod"].as_str().unwrap(), debug_pod);
+    assert_eq!(wnr["namespace"].as_str().unwrap(), NS);
+    assert!(wnr["appContainers"].as_array().is_some());
+
+    let wp = h
+        .ok(
+            "k8s.whyPending",
+            json!({ "context": ctx, "namespace": NS, "pod": debug_pod }),
+        )
+        .await;
+    assert_eq!(wp["pod"].as_str().unwrap(), debug_pod);
+    assert_eq!(wp["namespace"].as_str().unwrap(), NS);
+    assert!(wp["podResourceRequests"].as_object().is_some());
+
     let out = h
         .ok(
             "k8s.listDeployments",
@@ -1071,11 +1091,26 @@ async fn run_suite() {
         .iter()
         .any(|d| d["name"] == DEPLOY));
 
-    let images = h.ok("k8s.listWorkloadImages", json!({"context":ctx,"namespace":NS,"kind":"Deployment"})).await;
-    let workload = images["items"].as_array().unwrap().iter().find(|row| row["name"] == DEPLOY).expect("deployment image identity");
+    let images = h
+        .ok(
+            "k8s.listWorkloadImages",
+            json!({"context":ctx,"namespace":NS,"kind":"Deployment"}),
+        )
+        .await;
+    let workload = images["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["name"] == DEPLOY)
+        .expect("deployment image identity");
     assert_eq!(workload["namespace"], NS);
     assert!(workload["uid"].as_str().is_some_and(|uid| !uid.is_empty()));
-    assert!(workload["containers"].as_array().unwrap().iter().any(|row| row["type"] == "regular" && row["image"].as_str().is_some_and(|image| !image.is_empty())));
+    assert!(workload["containers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["type"] == "regular"
+            && row["image"].as_str().is_some_and(|image| !image.is_empty())));
 
     let out = h
         .ok(
@@ -1207,6 +1242,16 @@ async fn run_suite() {
             .any(|e| e["name"] == SVC),
         "expected an Endpoint for {SVC}: {out}"
     );
+
+    let shp = h
+        .ok(
+            "k8s.serviceHealthProbe",
+            json!({ "context": ctx, "namespace": NS, "service": SVC }),
+        )
+        .await;
+    assert_eq!(shp["service"].as_str().unwrap(), SVC);
+    assert_eq!(shp["namespace"].as_str().unwrap(), NS);
+    assert!(shp["portMappings"].as_array().is_some());
 
     let out = h
         .ok(
@@ -1436,9 +1481,18 @@ async fn run_suite() {
         )
         .await;
     let pods = out["items"].as_array().unwrap();
-    assert!(!pods.is_empty(), "the Deployment's pods are Running by now: {out}");
+    assert!(
+        !pods.is_empty(),
+        "the Deployment's pods are Running by now: {out}"
+    );
     for pod in pods {
-        assert!(pod["name"].as_str().unwrap().starts_with(&format!("{DEPLOY}-")), "{out}");
+        assert!(
+            pod["name"]
+                .as_str()
+                .unwrap()
+                .starts_with(&format!("{DEPLOY}-")),
+            "{out}"
+        );
         assert!(pod["fields"][".spec.nodeName"].is_string(), "{out}");
         assert_eq!(pod["fields"][".spec.nonexistent"], Value::Null, "{out}");
     }
@@ -1483,7 +1537,10 @@ async fn run_suite() {
         .await;
     let text = out.to_string();
     assert!(text.contains("password"), "{text}");
-    assert!(!text.contains("aHVudGVyMg==") && !text.contains("hunter2"), "{text}");
+    assert!(
+        !text.contains("aHVudGVyMg==") && !text.contains("hunter2"),
+        "{text}"
+    );
     // A JSON Pointer would come back null on every item; refused instead.
     let err = h
         .err(
@@ -3680,8 +3737,15 @@ async fn extensions_and_gitops(h: &mut Harness, ctx: &str, settings: &TempSettin
     let answer = h.ok("extensions.queryProvider", query).await;
     assert_eq!(answer["kind"], "metrics", "{answer}");
     assert_eq!(answer["chart"]["unit"], "cores", "{answer}");
-    assert_eq!(answer["chart"]["series"][0]["name"], "pod=\"web-1\"", "{answer}");
-    assert_eq!(answer["chart"]["series"][0]["values"][0], json!(0.5), "{answer}");
+    assert_eq!(
+        answer["chart"]["series"][0]["name"], "pod=\"web-1\"",
+        "{answer}"
+    );
+    assert_eq!(
+        answer["chart"]["series"][0]["values"][0],
+        json!(0.5),
+        "{answer}"
+    );
     let request_line = served.join().expect("the server thread");
     assert!(
         request_line.starts_with("GET /api/v1/query_range?query=sum%28rate%28container_cpu_usage_seconds_total%7Bnamespace%3D%22"),
